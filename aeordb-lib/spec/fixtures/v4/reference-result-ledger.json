@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-gc-controls-v1",
+  "tool_revision": "p0b2-gc-state-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -1312,6 +1312,18 @@
       "result": "pass"
     },
     {
+      "fixture_id": "agca-blake3-256-root-lifecycle-control-a",
+      "expected": "gc:control:root-lifecycle:slot-a:sequence=1:generation=10006",
+      "observed": "gc:control:root-lifecycle:slot-a:sequence=1:generation=10006",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-lifecycle-control-b",
+      "expected": "gc:control:root-lifecycle:slot-b:sequence=18446744073709551615:generation=10006",
+      "observed": "gc:control:root-lifecycle:slot-b:sequence=18446744073709551615:generation=10006",
+      "result": "pass"
+    },
+    {
       "fixture_id": "agca-sha512-quarantine-control-a",
       "expected": "gc:control:quarantine:slot-a:sequence=1:generation=10001",
       "observed": "gc:control:quarantine:slot-a:sequence=1:generation=10001",
@@ -1369,6 +1381,258 @@
       "fixture_id": "agca-sha512-void-catalog-control-b",
       "expected": "gc:control:void-catalog:slot-b:sequence=18446744073709551615:generation=10005",
       "observed": "gc:control:void-catalog:slot-b:sequence=18446744073709551615:generation=10005",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-lifecycle-control-a",
+      "expected": "gc:control:root-lifecycle:slot-a:sequence=1:generation=10006",
+      "observed": "gc:control:root-lifecycle:slot-a:sequence=1:generation=10006",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-lifecycle-control-b",
+      "expected": "gc:control:root-lifecycle:slot-b:sequence=18446744073709551615:generation=10006",
+      "observed": "gc:control:root-lifecycle:slot-b:sequence=18446744073709551615:generation=10006",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-candidate-page-valid",
+      "expected": "gc:page:candidate:page=11:records=2",
+      "observed": "gc:page:candidate:page=11:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-candidates-directory-valid",
+      "expected": "gc:directory:candidates:level=0:records=2",
+      "observed": "gc:directory:candidates:level=0:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-candidate-delta-valid",
+      "expected": "gc:delta:candidate:records=2",
+      "observed": "gc:delta:candidate:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-expiry-page-valid",
+      "expected": "gc:page:root-expiry:page=21:records=2",
+      "observed": "gc:page:root-expiry:page=21:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-expiry-directory-valid",
+      "expected": "gc:directory:root-expiry:level=0:records=2",
+      "observed": "gc:directory:root-expiry:level=0:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-expiry-catalog-manifest-empty",
+      "expected": "gc:manifest:root-expiry:empty:records=0",
+      "observed": "gc:manifest:root-expiry:empty:records=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-expiry-catalog-manifest-populated",
+      "expected": "gc:manifest:root-expiry:populated:records=2",
+      "observed": "gc:manifest:root-expiry:populated:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-candidate-page-valid",
+      "expected": "gc:page:root-candidate:page=41:records=1",
+      "observed": "gc:page:root-candidate:page=41:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-candidates-directory-valid",
+      "expected": "gc:directory:root-candidates:level=0:records=1",
+      "observed": "gc:directory:root-candidates:level=0:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-lifecycle-manifest-empty",
+      "expected": "gc:manifest:root-lifecycle:empty:candidates=0:retired=0",
+      "observed": "gc:manifest:root-lifecycle:empty:candidates=0:retired=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-lifecycle-manifest-populated",
+      "expected": "gc:manifest:root-lifecycle:populated:candidates=1:retired=2",
+      "observed": "gc:manifest:root-lifecycle:populated:candidates=1:retired=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-retirement-commit-valid",
+      "expected": "gc:commit:root-retirement:mark=501",
+      "observed": "gc:commit:root-retirement:mark=501",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-root-object-reclaim-proof-valid",
+      "expected": "gc:proof:root-object-reclaim:incarnations=1:receipts=1",
+      "observed": "gc:proof:root-object-reclaim:incarnations=1:receipts=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-physical-inventory-page-valid",
+      "expected": "gc:page:physical-inventory:page=31:records=5",
+      "observed": "gc:page:physical-inventory:page=31:records=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-physical-inventory-directory-valid",
+      "expected": "gc:directory:physical-inventory:level=0:records=5",
+      "observed": "gc:directory:physical-inventory:level=0:records=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-physical-inventory-manifest-empty",
+      "expected": "gc:manifest:physical-inventory:empty:records=0",
+      "observed": "gc:manifest:physical-inventory:empty:records=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-physical-inventory-manifest-populated",
+      "expected": "gc:manifest:physical-inventory:populated:records=5",
+      "observed": "gc:manifest:physical-inventory:populated:records=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-quarantine-manifest-empty",
+      "expected": "gc:manifest:quarantine:empty:candidates=0",
+      "observed": "gc:manifest:quarantine:empty:candidates=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-quarantine-manifest-populated",
+      "expected": "gc:manifest:quarantine:populated:candidates=2",
+      "observed": "gc:manifest:quarantine:populated:candidates=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-retirement-journal-segment-valid",
+      "expected": "gc:journal:retirement:records=1",
+      "observed": "gc:journal:retirement:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-candidate-page-valid",
+      "expected": "gc:page:candidate:page=11:records=2",
+      "observed": "gc:page:candidate:page=11:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-candidates-directory-valid",
+      "expected": "gc:directory:candidates:level=0:records=2",
+      "observed": "gc:directory:candidates:level=0:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-candidate-delta-valid",
+      "expected": "gc:delta:candidate:records=2",
+      "observed": "gc:delta:candidate:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-expiry-page-valid",
+      "expected": "gc:page:root-expiry:page=21:records=2",
+      "observed": "gc:page:root-expiry:page=21:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-expiry-directory-valid",
+      "expected": "gc:directory:root-expiry:level=0:records=2",
+      "observed": "gc:directory:root-expiry:level=0:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-expiry-catalog-manifest-empty",
+      "expected": "gc:manifest:root-expiry:empty:records=0",
+      "observed": "gc:manifest:root-expiry:empty:records=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-expiry-catalog-manifest-populated",
+      "expected": "gc:manifest:root-expiry:populated:records=2",
+      "observed": "gc:manifest:root-expiry:populated:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-candidate-page-valid",
+      "expected": "gc:page:root-candidate:page=41:records=1",
+      "observed": "gc:page:root-candidate:page=41:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-candidates-directory-valid",
+      "expected": "gc:directory:root-candidates:level=0:records=1",
+      "observed": "gc:directory:root-candidates:level=0:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-lifecycle-manifest-empty",
+      "expected": "gc:manifest:root-lifecycle:empty:candidates=0:retired=0",
+      "observed": "gc:manifest:root-lifecycle:empty:candidates=0:retired=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-lifecycle-manifest-populated",
+      "expected": "gc:manifest:root-lifecycle:populated:candidates=1:retired=2",
+      "observed": "gc:manifest:root-lifecycle:populated:candidates=1:retired=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-retirement-commit-valid",
+      "expected": "gc:commit:root-retirement:mark=501",
+      "observed": "gc:commit:root-retirement:mark=501",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-root-object-reclaim-proof-valid",
+      "expected": "gc:proof:root-object-reclaim:incarnations=1:receipts=1",
+      "observed": "gc:proof:root-object-reclaim:incarnations=1:receipts=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-physical-inventory-page-valid",
+      "expected": "gc:page:physical-inventory:page=31:records=5",
+      "observed": "gc:page:physical-inventory:page=31:records=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-physical-inventory-directory-valid",
+      "expected": "gc:directory:physical-inventory:level=0:records=5",
+      "observed": "gc:directory:physical-inventory:level=0:records=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-physical-inventory-manifest-empty",
+      "expected": "gc:manifest:physical-inventory:empty:records=0",
+      "observed": "gc:manifest:physical-inventory:empty:records=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-physical-inventory-manifest-populated",
+      "expected": "gc:manifest:physical-inventory:populated:records=5",
+      "observed": "gc:manifest:physical-inventory:populated:records=5",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-quarantine-manifest-empty",
+      "expected": "gc:manifest:quarantine:empty:candidates=0",
+      "observed": "gc:manifest:quarantine:empty:candidates=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-quarantine-manifest-populated",
+      "expected": "gc:manifest:quarantine:populated:candidates=2",
+      "observed": "gc:manifest:quarantine:populated:candidates=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-retirement-journal-segment-valid",
+      "expected": "gc:journal:retirement:records=1",
+      "observed": "gc:journal:retirement:records=1",
       "result": "pass"
     },
     {

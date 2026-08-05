@@ -36,6 +36,7 @@ pub(crate) enum GcKind {
   PhysicalInventoryActiveControl = 0x0003,
   AuditCatalogActiveControl = 0x0004,
   VoidCatalogActiveControl = 0x0005,
+  RootLifecycleActiveControl = 0x0006,
   QuarantineManifest = 0x0010,
   RootExpiryCatalogManifest = 0x0011,
   PhysicalInventoryManifest = 0x0012,
@@ -43,6 +44,7 @@ pub(crate) enum GcKind {
   AuditCatalogManifest = 0x0014,
   GcRunSummary = 0x0015,
   VoidCatalogManifest = 0x0016,
+  RootLifecycleManifest = 0x0017,
   GcArtifactDirectoryNode = 0x001f,
   CandidatePage = 0x0020,
   CandidateDelta = 0x0021,
@@ -52,6 +54,7 @@ pub(crate) enum GcKind {
   MarkMutationJournalSegment = 0x0025,
   VoidExtentPage = 0x0026,
   VoidClaim = 0x0027,
+  RootCandidatePage = 0x0028,
   SweepProposal = 0x0030,
   SweepCommitReceipt = 0x0031,
   RecoveredSweepReceipt = 0x0032,
@@ -59,15 +62,19 @@ pub(crate) enum GcKind {
   AuditDetailPage = 0x0034,
   AuditSummaryPage = 0x0035,
   AuditPin = 0x0036,
+  RootRetirementCommit = 0x0037,
+  VoidClaimSettlementReceipt = 0x0038,
+  RootObjectReclaimProof = 0x0039,
 }
 
 impl GcKind {
-  pub(crate) const ALL: [Self; 28] = [
+  pub(crate) const ALL: [Self; 34] = [
     Self::QuarantineActiveControl,
     Self::MarkRunActiveControl,
     Self::PhysicalInventoryActiveControl,
     Self::AuditCatalogActiveControl,
     Self::VoidCatalogActiveControl,
+    Self::RootLifecycleActiveControl,
     Self::QuarantineManifest,
     Self::RootExpiryCatalogManifest,
     Self::PhysicalInventoryManifest,
@@ -75,6 +82,7 @@ impl GcKind {
     Self::AuditCatalogManifest,
     Self::GcRunSummary,
     Self::VoidCatalogManifest,
+    Self::RootLifecycleManifest,
     Self::GcArtifactDirectoryNode,
     Self::CandidatePage,
     Self::CandidateDelta,
@@ -84,6 +92,7 @@ impl GcKind {
     Self::MarkMutationJournalSegment,
     Self::VoidExtentPage,
     Self::VoidClaim,
+    Self::RootCandidatePage,
     Self::SweepProposal,
     Self::SweepCommitReceipt,
     Self::RecoveredSweepReceipt,
@@ -91,6 +100,9 @@ impl GcKind {
     Self::AuditDetailPage,
     Self::AuditSummaryPage,
     Self::AuditPin,
+    Self::RootRetirementCommit,
+    Self::VoidClaimSettlementReceipt,
+    Self::RootObjectReclaimProof,
   ];
 
   pub(crate) fn from_id(id: u16) -> Option<Self> {
@@ -101,13 +113,14 @@ impl GcKind {
     self as u16
   }
 
-  fn name(self) -> &'static str {
+  pub(crate) fn name(self) -> &'static str {
     match self {
       Self::QuarantineActiveControl => "quarantine",
       Self::MarkRunActiveControl => "mark-run",
       Self::PhysicalInventoryActiveControl => "physical-inventory",
       Self::AuditCatalogActiveControl => "audit-catalog",
       Self::VoidCatalogActiveControl => "void-catalog",
+      Self::RootLifecycleActiveControl => "root-lifecycle",
       Self::QuarantineManifest => "quarantine-manifest",
       Self::RootExpiryCatalogManifest => "root-expiry-catalog-manifest",
       Self::PhysicalInventoryManifest => "physical-inventory-manifest",
@@ -115,6 +128,7 @@ impl GcKind {
       Self::AuditCatalogManifest => "audit-catalog-manifest",
       Self::GcRunSummary => "gc-run-summary",
       Self::VoidCatalogManifest => "void-catalog-manifest",
+      Self::RootLifecycleManifest => "root-lifecycle-manifest",
       Self::GcArtifactDirectoryNode => "gc-artifact-directory-node",
       Self::CandidatePage => "candidate-page",
       Self::CandidateDelta => "candidate-delta",
@@ -124,6 +138,7 @@ impl GcKind {
       Self::MarkMutationJournalSegment => "mark-mutation-journal-segment",
       Self::VoidExtentPage => "void-extent-page",
       Self::VoidClaim => "void-claim",
+      Self::RootCandidatePage => "root-candidate-page",
       Self::SweepProposal => "sweep-proposal",
       Self::SweepCommitReceipt => "sweep-commit-receipt",
       Self::RecoveredSweepReceipt => "recovered-sweep-receipt",
@@ -131,6 +146,9 @@ impl GcKind {
       Self::AuditDetailPage => "audit-detail-page",
       Self::AuditSummaryPage => "audit-summary-page",
       Self::AuditPin => "audit-pin",
+      Self::RootRetirementCommit => "root-retirement-commit",
+      Self::VoidClaimSettlementReceipt => "void-claim-settlement-receipt",
+      Self::RootObjectReclaimProof => "root-object-reclaim-proof",
     }
   }
 
@@ -142,6 +160,7 @@ impl GcKind {
         | Self::PhysicalInventoryActiveControl
         | Self::AuditCatalogActiveControl
         | Self::VoidCatalogActiveControl
+        | Self::RootLifecycleActiveControl
     )
   }
 
@@ -152,6 +171,7 @@ impl GcKind {
       Self::PhysicalInventoryActiveControl => Some(Self::PhysicalInventoryManifest),
       Self::AuditCatalogActiveControl => Some(Self::AuditCatalogManifest),
       Self::VoidCatalogActiveControl => Some(Self::VoidCatalogManifest),
+      Self::RootLifecycleActiveControl => Some(Self::RootLifecycleManifest),
       _ => None,
     }
   }
@@ -178,7 +198,6 @@ struct DecodedControl {
   key: Vec<u8>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PhysicalIncarnationId {
   pub logical_key: Vec<u8>,
@@ -191,7 +210,13 @@ pub(crate) struct PhysicalIncarnationId {
 }
 
 pub fn fixture_cases() -> Vec<GcFixtureCase> {
-  let mut cases = Vec::with_capacity(20);
+  let mut cases = control_fixture_cases();
+  cases.extend(crate::gc_state::fixture_cases());
+  cases
+}
+
+fn control_fixture_cases() -> Vec<GcFixtureCase> {
+  let mut cases = Vec::with_capacity(24);
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
     for kind in [
       GcKind::QuarantineActiveControl,
@@ -199,6 +224,7 @@ pub fn fixture_cases() -> Vec<GcFixtureCase> {
       GcKind::PhysicalInventoryActiveControl,
       GcKind::AuditCatalogActiveControl,
       GcKind::VoidCatalogActiveControl,
+      GcKind::RootLifecycleActiveControl,
     ] {
       for slot in [0u8, 1u8] {
         let sequence = if slot == 0 { 1 } else { u64::MAX };
@@ -225,6 +251,9 @@ pub fn fixture_cases() -> Vec<GcFixtureCase> {
 }
 
 pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
+  if read_u16(bytes, 6).ok().and_then(GcKind::from_id).is_some_and(|kind| !kind.is_control()) {
+    return crate::gc_state::observe(profile, bytes);
+  }
   match decode_control(profile, bytes) {
     Ok(control) => (
       format!(
@@ -243,6 +272,9 @@ pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
 pub fn annotation_lines(profile: HashProfile, bytes: &[u8]) -> Vec<String> {
   let h = profile.width();
   let kind = read_u16(bytes, 6).ok().and_then(GcKind::from_id);
+  if kind.is_some_and(|kind| !kind.is_control()) {
+    return crate::gc_state::annotation_lines(profile, bytes);
+  }
   vec![
     "envelope +0x000 len 32: AGCA common envelope".to_string(),
     format!("envelope artifact_kind: {}", kind.map_or("invalid", GcKind::name)),
@@ -357,7 +389,14 @@ fn control_key(profile: HashProfile, kind: GcKind, identity: &[u8]) -> Vec<u8> {
   profile.digest(&preimage)
 }
 
-#[cfg(test)]
+pub(crate) fn immutable_key(profile: HashProfile, kind: GcKind, value: &[u8]) -> Vec<u8> {
+  let mut preimage = Vec::with_capacity(40 + value.len());
+  preimage.extend_from_slice(b"aeordb.gc-artifact.immutable.v1\0");
+  preimage.extend_from_slice(&kind.id().to_le_bytes());
+  preimage.extend_from_slice(value);
+  profile.digest(&preimage)
+}
+
 pub(crate) fn encode_physical_incarnation(profile: HashProfile, incarnation: &PhysicalIncarnationId) -> Vec<u8> {
   let h = profile.width();
   assert_eq!(incarnation.logical_key.len(), h);
@@ -373,7 +412,6 @@ pub(crate) fn encode_physical_incarnation(profile: HashProfile, incarnation: &Ph
   bytes
 }
 
-#[cfg(test)]
 pub(crate) fn decode_physical_incarnation(profile: HashProfile, bytes: &[u8]) -> Result<PhysicalIncarnationId, &'static str> {
   let h = profile.width();
   if bytes.len() != 24 + 2 * h {
@@ -433,15 +471,15 @@ fn verify_trailing_crc(bytes: &[u8]) -> Result<(), &'static str> {
   Ok(())
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, &'static str> {
+pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, &'static str> {
   Ok(u16::from_le_bytes(bytes.get(offset..offset + 2).ok_or("gc_artifact_truncated")?.try_into().map_err(|_| "gc_artifact_truncated")?))
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
+pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
   Ok(u32::from_le_bytes(bytes.get(offset..offset + 4).ok_or("gc_artifact_truncated")?.try_into().map_err(|_| "gc_artifact_truncated")?))
 }
 
-fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, &'static str> {
+pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, &'static str> {
   Ok(u64::from_le_bytes(bytes.get(offset..offset + 8).ok_or("gc_artifact_truncated")?.try_into().map_err(|_| "gc_artifact_truncated")?))
 }
 
@@ -487,7 +525,7 @@ mod tests {
 
   #[test]
   fn permanent_kind_registry_is_complete_unique_and_closed() {
-    assert_eq!(GcKind::ALL.len(), 28);
+    assert_eq!(GcKind::ALL.len(), 34);
     let mut ids = GcKind::ALL.map(GcKind::id).to_vec();
     ids.sort_unstable();
     ids.dedup();
@@ -496,14 +534,16 @@ mod tests {
       assert_eq!(GcKind::from_id(kind.id()), Some(kind));
       assert!(!kind.name().is_empty());
     }
-    for unknown in [0, 0x0006, 0x0017, 0x001e, 0x0028, 0x002f, 0x0037, u16::MAX] {
+    for unknown in [0, 0x0007, 0x0018, 0x001e, 0x0029, 0x002f, 0x003a, u16::MAX] {
       assert_eq!(GcKind::from_id(unknown), None);
     }
   }
 
   #[test]
   fn control_fixtures_round_trip_with_stable_keys_and_targets() {
-    for case in fixture_cases() {
+    let cases = control_fixture_cases();
+    assert_eq!(cases.len(), 24);
+    for case in cases {
       let (observed, key) = observe(case.profile, &case.bytes);
       assert_eq!(observed, case.expected, "fixture {}", case.id);
       assert_eq!(key, case.canonical_key, "fixture {} key", case.id);
@@ -514,7 +554,7 @@ mod tests {
 
   #[test]
   fn every_control_fixture_byte_is_crc_or_structure_protected() {
-    for case in fixture_cases() {
+    for case in control_fixture_cases() {
       for index in 0..case.bytes.len() {
         let mut changed = case.bytes.clone();
         changed[index] ^= 1;

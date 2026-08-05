@@ -23,9 +23,10 @@
       - [x] Freeze NvtTileV1 sparse-hint semantics and corruption fallback contract.
       - [x] Freeze MutationJournalSegmentV1 and IndexTaskCheckpointV1.
       - [x] Freeze APOS v1 canonical position tokens and malformed-input behavior.
-      - [ ] Freeze the complete Round 13 `GcArtifactV1` family.
-        - [x] Freeze the AGCA envelope, permanent kind registry, five A/B controls, and physical-incarnation identity.
-        - [ ] Freeze quarantine, root-expiry, physical-inventory, and retirement artifacts.
+      - [ ] Freeze the complete Round 13 `GcArtifactV1` family with the normative Round 15 lifecycle corrections.
+        - [x] Correct the pre-writer registry to 34 kinds and six A/B controls, including logical-root lifecycle authority.
+        - [x] Freeze the AGCA envelope and physical-incarnation identity.
+        - [x] Freeze quarantine, corrected logical root-lifecycle/expiry, physical-inventory, and retirement artifacts.
         - [ ] Freeze bounded mark checkpoints, workspace files, and mutation journals.
         - [ ] Freeze sweep proposals/receipts and receipt-backed Void catalogs/claims.
         - [ ] Freeze audit catalogs/details/summaries, run summaries, corruption evidence, and pins.

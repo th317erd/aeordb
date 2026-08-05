@@ -1,0 +1,22 @@
+# fixture: agca-sha512-root-lifecycle-control-a
+# contract: GcArtifactV1
+# hash: sha512 (64 bytes)
+# expected: gc:control:root-lifecycle:slot-a:sequence=1:generation=10006
+# canonical key: 5301e3ac84f893f6e3ae5b2556491ff930046c596b6e9140c64b199449c133c26a0c812ebdba49274e0429bd0ad7e2fb1295661d0334e93d85a43f33960d5020
+# relation: targets:root-lifecycle-manifest
+# hex offsets are absolute within this fixture
+# envelope +0x000 len 32: AGCA common envelope
+# envelope artifact_kind: root-lifecycle
+# identity +0x000 len 16: database_id
+# identity +0x010 len 1: A/B slot
+# body +0x000 len 8: control_sequence
+# body +0x008 len 64: target_manifest_hash
+# value +0x079 len 4: artifact_crc32
+00000000: 4147434101000600200000007d000000
+00000010: 11000000480000001627000000000000
+00000020: 3132333435363738393a3b3c3d3e3f40
+00000030: 000100000000000000868788898a8b8c
+00000040: 8d8e8f909192939495969798999a9b9c
+00000050: 9d9e9fa0a1a2a3a4a5a6a7a8a9aaabac
+00000060: adaeafb0b1b2b3b4b5b6b7b8b9babbbc
+00000070: bdbebfc0c1c2c3c4c58ffcf548

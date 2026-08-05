@@ -1,0 +1,31 @@
+# fixture: agca-blake3-256-root-retirement-commit-valid
+# contract: GcArtifactV1
+# hash: blake3-256 (32 bytes)
+# expected: gc:commit:root-retirement:mark=501
+# canonical key: d4a74ab87c58ee4f3bf8dba8dfe0a4a718a735a5bbc1eeae059b70e393e7e951
+# relation: logical-retirement-linearization-evidence
+# hex offsets are absolute within this fixture
+# envelope +0x000 len 32: AGCA common envelope
+# envelope artifact_kind: root-retirement-commit
+# identity +0x000 len 64: exact kind identity (H=32)
+# body +0x000 len 200: exact bounded state body
+# value +0x128 len 4: artifact_crc32
+00000000: 4147434101003700200000002c010000
+00000010: 40000000c8000000f501000000000000
+00000020: 3132333435363738393a3b3c3d3e3f40
+00000030: 6162636465666768696a6b6c6d6e6f70
+00000040: 7172737475767778797a7b7c7d7e7f80
+00000050: b1b2b3b4b5b6b7b8b9babbbcbdbebfc0
+00000060: 3132333435363738393a3b3c3d3e3f40
+00000070: 6162636465666768696a6b6c6d6e6f70
+00000080: 7172737475767778797a7b7c7d7e7f80
+00000090: b1b2b3b4b5b6b7b8b9babbbcbdbebfc0
+000000a0: 80a0e6cf8b0100006052e6cf8b010000
+000000b0: 1027000000000000f501000000000000
+000000c0: 0200000000000000a2b06ed8ae559d54
+000000d0: 8f6b2aca0cc773f7123ede8330aaaba7
+000000e0: 484fd740dd63653ee1e2e3e4e5e6e7e8
+000000f0: e9eaebecedeeeff0f1f2f3f4f5f6f7f8
+00000100: f9fafbfcfdfeff00d1d2d3d4d5d6d7d8
+00000110: d9dadbdcdddedfe0e1e2e3e4e5e6e7e8
+00000120: e9eaebecedeeeff052c46ac8

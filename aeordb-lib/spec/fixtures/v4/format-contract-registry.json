@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-gc-controls",
+  "coverage_stage": "p0b-2-gc-state",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -2597,6 +2597,7 @@
         "0x0003": "PhysicalInventoryActiveControl",
         "0x0004": "AuditCatalogActiveControl",
         "0x0005": "VoidCatalogActiveControl",
+        "0x0006": "RootLifecycleActiveControl",
         "0x0010": "QuarantineManifest",
         "0x0011": "RootExpiryCatalogManifest",
         "0x0012": "PhysicalInventoryManifest",
@@ -2604,6 +2605,7 @@
         "0x0014": "AuditCatalogManifest",
         "0x0015": "GcRunSummary",
         "0x0016": "VoidCatalogManifest",
+        "0x0017": "RootLifecycleManifest",
         "0x001f": "GcArtifactDirectoryNode",
         "0x0020": "CandidatePage",
         "0x0021": "CandidateDelta",
@@ -2613,19 +2615,28 @@
         "0x0025": "MarkMutationJournalSegment",
         "0x0026": "VoidExtentPage",
         "0x0027": "VoidClaim",
+        "0x0028": "RootCandidatePage",
         "0x0030": "SweepProposal",
         "0x0031": "SweepCommitReceipt",
         "0x0032": "RecoveredSweepReceipt",
         "0x0033": "CorruptGcEvidence",
         "0x0034": "AuditDetailPage",
         "0x0035": "AuditSummaryPage",
-        "0x0036": "AuditPin"
+        "0x0036": "AuditPin",
+        "0x0037": "RootRetirementCommit",
+        "0x0038": "VoidClaimSettlementReceipt",
+        "0x0039": "RootObjectReclaimProof"
       },
-      "frozen_body_kinds": ["0x0001", "0x0002", "0x0003", "0x0004", "0x0005"],
+      "frozen_body_kinds": [
+        "0x0001", "0x0002", "0x0003", "0x0004", "0x0005", "0x0006",
+        "0x0010", "0x0011", "0x0012", "0x0017", "0x001f",
+        "0x0020", "0x0021", "0x0022", "0x0023", "0x0024", "0x0028",
+        "0x0037", "0x0039"
+      ],
       "pending_body_fixture_kinds": [
-        "0x0010", "0x0011", "0x0012", "0x0013", "0x0014", "0x0015", "0x0016", "0x001f",
-        "0x0020", "0x0021", "0x0022", "0x0023", "0x0024", "0x0025", "0x0026", "0x0027",
-        "0x0030", "0x0031", "0x0032", "0x0033", "0x0034", "0x0035", "0x0036"
+        "0x0013", "0x0014", "0x0015", "0x0016",
+        "0x0025", "0x0026", "0x0027",
+        "0x0030", "0x0031", "0x0032", "0x0033", "0x0034", "0x0035", "0x0036", "0x0038"
       ],
       "layout": [
         { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII AGCA" },
@@ -2651,7 +2662,8 @@
           "0x0002": "0x0013",
           "0x0003": "0x0012",
           "0x0004": "0x0014",
-          "0x0005": "0x0016"
+          "0x0005": "0x0016",
+          "0x0006": "0x0017"
         },
         "selection": "greatest closure-valid sequence; equal sequence and identical target chooses A; equal sequence with different target is ambiguous"
       },
@@ -2660,6 +2672,61 @@
         "length_formula": "24 + 2H",
         "legacy_digest_domain": "H('aeordb.legacy-physical-incarnation.v1\\0' || exact complete v0 entity bytes)",
         "rules": "all fields identify one exact incarnation; write sequence is zero only for v0; range is nonzero, in-bounds, overflow checked, and never chronological by offset"
+      },
+      "directory_roles": {
+        "1": "candidates: PhysicalIncarnationIdV1 order",
+        "2": "root_expiry: NamespaceRoot hash order",
+        "3": "physical_inventory: WAL offset then PhysicalIncarnationIdV1 order",
+        "8": "root_candidates: NamespaceRoot hash order"
+      },
+      "paged_state": {
+        "page_identity": "database_id[16] || catalog_id[16] || directory_role u16 LE || page_id u64 LE",
+        "page_body": "flags u32 || record_codec u16 || key_codec u16 || lower_len u32 || upper_len u32 || record_count u32 || live_count u32 || records_len u64 || logical_live_bytes u64 || zero[24] || lower || upper || records",
+        "page_body_formula": "64 + L + U + R",
+        "page_target": 1048576,
+        "page_cap": 16777216,
+        "directory_identity": "database_id[16] || catalog_id[16] || directory_role u16 LE",
+        "directory_body": "exact ArtifactDirectoryNodeV1 80-byte body and leaf/internal descriptors",
+        "directory_cap": 4194304,
+        "page_id_rule": "nonzero, never reused within the owning manifest"
+      },
+      "quarantine_state": {
+        "candidate_row": "PhysicalIncarnationIdV1 || candidate_class u16 || zero flags u16 || pending_since_ms u64 || first_unreachable_generation u64 || grace_at_pending_ms u64",
+        "candidate_row_length": "52 + 2H",
+        "delta_identity": "database_id[16] || mark_generation u64 || delta_ordinal u32",
+        "delta_body": "zero flags u32 || codec 1 u16 || zero u16 || count u32 || records_len u32 || previous_delta_hash H-or-zero || sorted unique operation+candidate rows",
+        "delta_limits": "at most 256 deltas and 64 MiB total delta bytes before base compaction",
+        "manifest_identity": "database_id[16] || mark_generation u64",
+        "manifest_body": "zero flags u32 || capabilities[32] || generation u64 || completed_at_ms u64 || authority_digest H || semantic_digest H || kv_layout_fingerprint H || mark_result_digest H || candidate_directory H-or-zero || captured_root_lifecycle_manifest H-or-zero || delta_count u32 || zero u32 || candidate_count u64 || candidate_bytes u64 || eligible_count_hint u64 || eligible_bytes_hint u64 || next_page_id u64 || ordered delta hashes",
+        "manifest_body_formula": "100 + 6H + D*H",
+        "manifest_cap": 1048576,
+        "eligibility": "later complete generation plus frozen grace boundary plus exact extant unreachable unpinned identity; hints are nonauthoritative"
+      },
+      "root_lifecycle_state": {
+        "manifest_identity": "database_id[16] || lifecycle_generation u64",
+        "manifest_body": "zero flags u32 || capabilities[32] || generation u64 || published_at_ms i64 || source_complete_mark_generation u64 || authority_digest H || candidate_directory H-or-zero || root_expiry_manifest H-or-zero || next_page_id u64 || candidate_count u64 || pending_count u64 || retired_evidence_count u64 || candidate_bytes u64 || expiry_bytes u64",
+        "manifest_body_formula": "108 + 3H",
+        "candidate_row": "namespace_root H || state=1 u8 || zero flags u8 || reason u16 || pending_since_ms i64 || first_generation u64 || last_confirmed_generation u64 || grace_at_pending_ms u64 || authority_digest H || admission_commit_payload_hash H",
+        "candidate_row_length": "36 + 3H",
+        "expiry_manifest_body": "zero flags u32 || capabilities[32] || retention_ms u64 || optional_byte_budget u64 || directory_root H-or-zero || next_page_id u64 || totals count/bytes u64 || mandatory count/bytes u64 || optional count/bytes u64 || oldest/newest retired_at_ms i64",
+        "expiry_manifest_body_formula": "124 + H",
+        "expiry_row": "namespace_root H || retired_at_ms i64 || last_pending_since_ms i64 || final_mark_generation u64 || reason u16 || state u8 || proof flag u8 || zero u32 || retirement_commit H || reclaim_proof H-or-zero || evidence_expires_at_ms i64",
+        "expiry_row_length": "40 + 3H",
+        "retirement_identity": "database_id[16] || namespace_root H || retirement_id[16]",
+        "retirement_body_formula": "72 + 4H",
+        "reclaim_proof_identity": "database_id[16] || namespace_root H || proof_id[16]",
+        "reclaim_proof_body_formula": "40 + 6H",
+        "crash_direction": "control publication retires logically before any physical omission; uncertainty retains roots or leaks bytes"
+      },
+      "physical_inventory_state": {
+        "manifest_identity": "database_id[16] || inventory_generation u64",
+        "manifest_body_formula": "132 + 2H",
+        "row_formula": "PhysicalIncarnationIdV1 || state/reason/flags[4] || replacement PhysicalIncarnationIdV1-or-zero || discovered_at_ms u64 || retirement_sequence u64 || receipt_hash H-or-zero",
+        "row_length": "68 + 5H",
+        "retirement_segment_identity": "database_id[16] || segment_ordinal u64",
+        "retirement_record_length": "72 + 4H",
+        "ordering": "inventory by WAL offset then complete identity; retirement records by publication sequence then old identity",
+        "authority": "inventory and journal are evidence; they never free space without complete quarantine and durable receipts"
       },
       "identity": "controls: database_id and slot; immutable kinds: complete kind-specific identity, generation, and body",
       "key_domain": "controls: H('aeordb.gc-artifact.control.v1\\0' || kind u16 LE || database_id[16] || slot u8); immutable: H('aeordb.gc-artifact.immutable.v1\\0' || kind u16 LE || complete AGCA value)",
@@ -2687,7 +2754,15 @@
         { "field": "logical KV/entity key in PhysicalIncarnationIdV1", "role": "identity" },
         { "field": "integrity hash or legacy full-entity digest", "role": "identity" },
         { "field": "target_manifest_hash", "role": "graph-edge-authority" },
-        { "field": "immutable artifact key", "role": "identity" }
+        { "field": "immutable artifact key", "role": "identity" },
+        { "field": "paged-directory child hash", "role": "graph-edge-authority" },
+        { "field": "quarantine candidate directory and delta hashes", "role": "graph-edge-authority" },
+        { "field": "quarantine captured lifecycle manifest", "role": "graph-edge-basis" },
+        { "field": "root-lifecycle candidate directory and expiry manifest", "role": "graph-edge-authority" },
+        { "field": "root-expiry retirement commit and reclaim proof", "role": "graph-edge-evidence" },
+        { "field": "retirement body prior lifecycle, authority, and admission hashes", "role": "non-traversed-evidence" },
+        { "field": "reclaim-proof inventory/incarnation/receipt/absence hashes", "role": "non-traversed-evidence" },
+        { "field": "inventory replacement and receipt hashes", "role": "identity-or-evidence" }
       ],
       "fixture_ids_32": [
         "agca-blake3-256-quarantine-control-a",
@@ -2699,7 +2774,29 @@
         "agca-blake3-256-audit-catalog-control-a",
         "agca-blake3-256-audit-catalog-control-b",
         "agca-blake3-256-void-catalog-control-a",
-        "agca-blake3-256-void-catalog-control-b"
+        "agca-blake3-256-void-catalog-control-b",
+        "agca-blake3-256-root-lifecycle-control-a",
+        "agca-blake3-256-root-lifecycle-control-b",
+        "agca-blake3-256-candidate-page-valid",
+        "agca-blake3-256-candidates-directory-valid",
+        "agca-blake3-256-candidate-delta-valid",
+        "agca-blake3-256-root-expiry-page-valid",
+        "agca-blake3-256-root-expiry-directory-valid",
+        "agca-blake3-256-root-expiry-catalog-manifest-empty",
+        "agca-blake3-256-root-expiry-catalog-manifest-populated",
+        "agca-blake3-256-root-candidate-page-valid",
+        "agca-blake3-256-root-candidates-directory-valid",
+        "agca-blake3-256-root-lifecycle-manifest-empty",
+        "agca-blake3-256-root-lifecycle-manifest-populated",
+        "agca-blake3-256-root-retirement-commit-valid",
+        "agca-blake3-256-root-object-reclaim-proof-valid",
+        "agca-blake3-256-physical-inventory-page-valid",
+        "agca-blake3-256-physical-inventory-directory-valid",
+        "agca-blake3-256-physical-inventory-manifest-empty",
+        "agca-blake3-256-physical-inventory-manifest-populated",
+        "agca-blake3-256-quarantine-manifest-empty",
+        "agca-blake3-256-quarantine-manifest-populated",
+        "agca-blake3-256-retirement-journal-segment-valid"
       ],
       "fixture_ids_64": [
         "agca-sha512-quarantine-control-a",
@@ -2711,7 +2808,29 @@
         "agca-sha512-audit-catalog-control-a",
         "agca-sha512-audit-catalog-control-b",
         "agca-sha512-void-catalog-control-a",
-        "agca-sha512-void-catalog-control-b"
+        "agca-sha512-void-catalog-control-b",
+        "agca-sha512-root-lifecycle-control-a",
+        "agca-sha512-root-lifecycle-control-b",
+        "agca-sha512-candidate-page-valid",
+        "agca-sha512-candidates-directory-valid",
+        "agca-sha512-candidate-delta-valid",
+        "agca-sha512-root-expiry-page-valid",
+        "agca-sha512-root-expiry-directory-valid",
+        "agca-sha512-root-expiry-catalog-manifest-empty",
+        "agca-sha512-root-expiry-catalog-manifest-populated",
+        "agca-sha512-root-candidate-page-valid",
+        "agca-sha512-root-candidates-directory-valid",
+        "agca-sha512-root-lifecycle-manifest-empty",
+        "agca-sha512-root-lifecycle-manifest-populated",
+        "agca-sha512-root-retirement-commit-valid",
+        "agca-sha512-root-object-reclaim-proof-valid",
+        "agca-sha512-physical-inventory-page-valid",
+        "agca-sha512-physical-inventory-directory-valid",
+        "agca-sha512-physical-inventory-manifest-empty",
+        "agca-sha512-physical-inventory-manifest-populated",
+        "agca-sha512-quarantine-manifest-empty",
+        "agca-sha512-quarantine-manifest-populated",
+        "agca-sha512-retirement-journal-segment-valid"
       ]
     },
     {
@@ -2817,9 +2936,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 16,
-    "fixture_count": 280,
+    "fixture_count": 324,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope/kind registry, all five GC A/B controls, and PhysicalIncarnationIdV1",
-    "remaining_p0b_2_scope": "remaining GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope and corrected 34-kind registry, all six GC A/B controls, PhysicalIncarnationIdV1, physical quarantine/inventory/retirement state, and the separate logical-root lifecycle authority/evidence graph",
+    "remaining_p0b_2_scope": "bounded mark/workspace/mutation, sweep/Void/settlement, audit/run/corruption/pin GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

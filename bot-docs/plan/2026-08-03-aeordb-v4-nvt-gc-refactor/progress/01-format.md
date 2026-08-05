@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2d-1 GC envelope, controls, and physical-incarnation identity
+- **Current landing unit:** P0b-2d-2 quarantine, expiry, retirement, and physical inventory
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2c-4 APOS logical position tokens `675d292af972a49b0a45d00425a068e6e8bc4952`
+- **Last green commit:** P0b-2d-1 GC controls and identities `bb704754d2f4879542ff59e159efc4dc37f8e52b`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -163,9 +163,19 @@
 ## P0b-2d-1 GC Envelope, Controls, and Physical Identity
 
 - **Red proof:** after the 260-case APOS gate passed, the campaign gate failed with `P0b-2 GC format is absent from the contract registry: gc-artifact-v1` before the AGCA module or fixtures existed.
-- **Territory:** stable-locator replacement and WAL inventory produce exact physical incarnations; mark, quarantine, sweep, allocator, startup, recovery, verify, repair, diagnostics, backup, and compatible physical transfer consume them. The entire permanent 28-kind registry is recognized now, while only the five active-control bodies are writer-fixtured in this landing unit.
-- **Frozen contracts:** exact 32-byte `AGCA` envelope, EntryType `0x0a`, KV tag `0x0b`, 64 MiB family cap, immutable/stable key domains, all five control-to-manifest target kinds, A/B identity/body/selection rules, and exact `PhysicalIncarnationIdV1` framing including legacy digest domain and v0/v1 sequence rules.
+- **Territory:** stable-locator replacement and WAL inventory produce exact physical incarnations; mark, quarantine, sweep, allocator, startup, recovery, verify, repair, diagnostics, backup, and compatible physical transfer consume them. This initial slice followed the Round 13 registry; P0b-2d-2 corrected it to the superseding Round 15 registry before any production reader or writer consumed it.
+- **Frozen contracts:** exact 32-byte `AGCA` envelope, EntryType `0x0a`, KV tag `0x0b`, 64 MiB family cap, immutable/stable key domains, the initially fixtured five Round 13 control pairs, A/B identity/body/selection rules, and exact `PhysicalIncarnationIdV1` framing including legacy digest domain and v0/v1 sequence rules.
 - **Independent corpus:** A and B controls for quarantine, mark-run, physical-inventory, audit-catalog, and Void-catalog under both hash profiles add 20 fixtures, bringing the corpus to 280.
 - **Failure proof:** every control byte is CRC or structure protected; repaired-CRC tests cover envelope lengths, kinds, reserves, slots, zero identities/sequences/targets, and exact body size. Pair selection rejects equal-sequence disagreement before closure choice, falls back from a higher closure-invalid target, and yields no authority when neither closure verifies. Physical-incarnation tests cover both hash widths, v0/v1 sequences, exact legacy digest sensitivity, zero identities/ranges, unknown entry types, reserves, and overflow.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 100 tests in 5.29 seconds (51,724 KiB maximum RSS); strict standalone Clippy passed; fresh generation/verification passed all 280 fixtures; and the campaign gate passed with 93 routes and 36 docs.
-- **Boundary:** no production `EntryType`, KV tag, reader, writer, GC traversal, quarantine, sweep, allocator, startup, repair, or database changed. The remaining 23 AGCA bodies stay explicitly pending and writer-disabled.
+- **Boundary:** no production `EntryType`, KV tag, reader, writer, GC traversal, quarantine, sweep, allocator, startup, repair, or database changed. Round 15 correction remained mandatory before this oracle could be considered complete.
+
+## P0b-2d-2 Physical GC State and Corrected Root Lifecycle
+
+- **Red proof:** the campaign gate first failed on the absent quarantine-state fixtures. The full decision-precedence review then showed that the prior control slice had followed Round 13 instead of the normative Round 15 correction; a new registry test expected 34 kinds and six controls and failed before the lifecycle IDs/control existed. The expanded gate subsequently failed on the missing `root-lifecycle` control fixture before generation.
+- **Corrected registry:** all 34 permanent kinds are now recognized, including `RootLifecycleActiveControl`, `RootLifecycleManifest`, `RootCandidatePage`, `RootRetirementCommit`, `VoidClaimSettlementReceipt`, and `RootObjectReclaimProof`. Six A/B control pairs are fixtured, with root lifecycle targeting its immutable manifest. Nineteen kind bodies are frozen and the remaining fifteen stay explicitly pending and writer-disabled.
+- **Frozen state:** exact candidate pages/deltas, quarantine manifests, corrected root lifecycle candidate/manifest/retirement graph, corrected mandatory/optional root-expiry manifest and both expiry-row states, root-object reclaim proof, physical inventory page/manifest, stable-key retirement journal, and shared GC page/directory framing. Logical retirement hard-publishes before physical omission; uncertainty retains roots or leaks space.
+- **Independent graph proof:** retirement commits reference only the prior lifecycle manifest; expiry rows retain exact retirement/proof artifacts; reclaim proofs carry non-traversed inventory/set/receipt/absence evidence; lifecycle manifests independently reference candidate and expiry catalogs; quarantine captures the exact lifecycle basis. Tests also prove independent optional catalogs, delta reconstruction, checked grace overflow, exact capabilities, orphan sequence handling, and repaired-CRC semantic rejection.
+- **Independent corpus:** 44 new fixtures, including the four Round 15 control fixtures and forty GC/lifecycle state fixtures across both hash profiles, bring the corpus from 280 to 324 cases.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 110 tests in 5.33 seconds with 53,248 KiB maximum RSS and no swap; strict standalone Clippy passed; fresh generation/verification passed all 324 fixtures; and the campaign gate passed with 93 routes and 36 docs using the home-volume target override because `/tmp` remained full.
+- **Boundary:** all bytes remain independent reference fixtures and validation oracles. No production format reader/writer, lifecycle authority, GC runtime, allocator, startup, repair, route, or database changed. Bounded mark/workspace/mutation formats are next.

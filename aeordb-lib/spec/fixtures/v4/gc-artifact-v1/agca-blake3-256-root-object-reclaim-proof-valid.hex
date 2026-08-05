@@ -1,0 +1,33 @@
+# fixture: agca-blake3-256-root-object-reclaim-proof-valid
+# contract: GcArtifactV1
+# hash: blake3-256 (32 bytes)
+# expected: gc:proof:root-object-reclaim:incarnations=1:receipts=1
+# canonical key: 461ec14893efa595d3b41212dae48afedeb1fb3bb8c545591e4468da070783e0
+# relation: root-object-physical-absence-evidence
+# hex offsets are absolute within this fixture
+# envelope +0x000 len 32: AGCA common envelope
+# envelope artifact_kind: root-object-reclaim-proof
+# identity +0x000 len 64: exact kind identity (H=32)
+# body +0x000 len 232: exact bounded state body
+# value +0x148 len 4: artifact_crc32
+00000000: 4147434101003900200000004c010000
+00000010: 40000000e80000002e01000000000000
+00000020: 3132333435363738393a3b3c3d3e3f40
+00000030: 6162636465666768696a6b6c6d6e6f70
+00000040: 7172737475767778797a7b7c7d7e7f80
+00000050: c1c2c3c4c5c6c7c8c9cacbcccdcecfd0
+00000060: 3132333435363738393a3b3c3d3e3f40
+00000070: 6162636465666768696a6b6c6d6e6f70
+00000080: 7172737475767778797a7b7c7d7e7f80
+00000090: d4a74ab87c58ee4f3bf8dba8dfe0a4a7
+000000a0: 18a735a5bbc1eeae059b70e393e7e951
+000000b0: 90c7e6cf8b010000f196007644bd5de8
+000000c0: e8abfcd73d26cc76c989f66457d286c3
+000000d0: 5d7a03210a102726a1a2a3a4a5a6a7a8
+000000e0: a9aaabacadaeafb0b1b2b3b4b5b6b7b8
+000000f0: b9babbbcbdbebfc00100000000000000
+00000100: b1b2b3b4b5b6b7b8b9babbbcbdbebfc0
+00000110: c1c2c3c4c5c6c7c8c9cacbcccdcecfd0
+00000120: 0100000000000000c1c2c3c4c5c6c7c8
+00000130: c9cacbcccdcecfd0d1d2d3d4d5d6d7d8
+00000140: d9dadbdcdddedfe0a867f836

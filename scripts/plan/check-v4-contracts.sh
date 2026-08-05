@@ -141,7 +141,7 @@ expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contra
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-gc-controls" and
+  .coverage_stage == "p0b-2-gc-state" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
@@ -181,7 +181,7 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-gc-controls" and
+  .stage == "p0b-2-gc-state" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -317,12 +317,36 @@ done
 
 jq -e 'any(.formats[]; .id == "gc-artifact-v1")' "$contract_registry" >/dev/null \
   || fail "P0b-2 GC format is absent from the contract registry: gc-artifact-v1"
+jq -e '
+  .formats[] | select(.id == "gc-artifact-v1") |
+  (.kind_registry | length) == 34 and
+  .kind_registry["0x0006"] == "RootLifecycleActiveControl" and
+  .kind_registry["0x0017"] == "RootLifecycleManifest" and
+  .kind_registry["0x0028"] == "RootCandidatePage" and
+  .kind_registry["0x0037"] == "RootRetirementCommit" and
+  .kind_registry["0x0038"] == "VoidClaimSettlementReceipt" and
+  .kind_registry["0x0039"] == "RootObjectReclaimProof" and
+  (.active_control.target_kinds | length) == 6 and
+  .active_control.target_kinds["0x0006"] == "0x0017" and
+  ((.frozen_body_kinds + .pending_body_fixture_kinds) | length) == 34 and
+  ((.frozen_body_kinds + .pending_body_fixture_kinds) | unique | length) == 34 and
+  .quarantine_state.manifest_body_formula == "100 + 6H + D*H" and
+  .root_lifecycle_state.manifest_body_formula == "108 + 3H" and
+  .root_lifecycle_state.expiry_manifest_body_formula == "124 + H" and
+  .root_lifecycle_state.expiry_row_length == "40 + 3H" and
+  .root_lifecycle_state.retirement_body_formula == "72 + 4H" and
+  .root_lifecycle_state.reclaim_proof_body_formula == "40 + 6H" and
+  .physical_inventory_state.manifest_body_formula == "132 + 2H" and
+  .physical_inventory_state.retirement_record_length == "72 + 4H"
+' "$contract_registry" >/dev/null \
+  || fail "P0b-2 corrected GC registry/state contract is incomplete"
 required_p0b2_gc_control_results=(
   'gc:control:quarantine:'
   'gc:control:mark-run:'
   'gc:control:physical-inventory:'
   'gc:control:audit-catalog:'
   'gc:control:void-catalog:'
+  'gc:control:root-lifecycle:'
 )
 for result_prefix in "${required_p0b2_gc_control_results[@]}"; do
   jq -e --arg result_prefix "$result_prefix" '
@@ -330,6 +354,35 @@ for result_prefix in "${required_p0b2_gc_control_results[@]}"; do
     any(.fixtures[]; .format_id == "gc-artifact-v1" and .hash_width == 64 and (.expected | startswith($result_prefix)))
   ' "$fixture_manifest" >/dev/null \
     || fail "P0b-2 GC active control lacks both hash-width fixtures: $result_prefix"
+done
+required_p0b2_gc_state_results=(
+  'gc:manifest:quarantine:empty:'
+  'gc:manifest:quarantine:populated:'
+  'gc:page:candidate:'
+  'gc:delta:candidate:'
+  'gc:manifest:root-expiry:empty:'
+  'gc:manifest:root-expiry:populated:'
+  'gc:page:root-expiry:'
+  'gc:journal:retirement:'
+  'gc:manifest:physical-inventory:empty:'
+  'gc:manifest:physical-inventory:populated:'
+  'gc:page:physical-inventory:'
+  'gc:directory:candidates:'
+  'gc:directory:root-expiry:'
+  'gc:directory:physical-inventory:'
+  'gc:manifest:root-lifecycle:empty:'
+  'gc:manifest:root-lifecycle:populated:'
+  'gc:page:root-candidate:'
+  'gc:directory:root-candidates:'
+  'gc:commit:root-retirement:'
+  'gc:proof:root-object-reclaim:'
+)
+for result_prefix in "${required_p0b2_gc_state_results[@]}"; do
+  jq -e --arg result_prefix "$result_prefix" '
+    any(.fixtures[]; .format_id == "gc-artifact-v1" and .hash_width == 32 and (.expected | startswith($result_prefix))) and
+    any(.fixtures[]; .format_id == "gc-artifact-v1" and .hash_width == 64 and (.expected | startswith($result_prefix)))
+  ' "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 GC state artifact lacks both hash-width fixtures: $result_prefix"
 done
 
 required_p0b2_definition_formats=(
