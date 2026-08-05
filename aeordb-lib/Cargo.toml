@@ -751,6 +751,10 @@ path = "spec/engine/header_repair_spec.rs"
 name = "v4_reader_hardening_spec"
 path = "spec/engine/v4_reader_hardening_spec.rs"
 
+[[test]]
+name = "v4_admission_spec"
+path = "spec/engine/v4_admission_spec.rs"
+
 
 [lints]
 workspace = true

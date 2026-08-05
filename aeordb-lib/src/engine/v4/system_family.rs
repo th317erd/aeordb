@@ -119,6 +119,241 @@ impl<'a> SystemFamilyRegistryV1<'a> {
   }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemFamilySubjectV1<'a> {
+  Path(&'a str),
+  EntryType(u16),
+  KvKey(&'a [u8]),
+  ControlTag(u16),
+  ExternalWorkspaceKind(u16),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnownSystemFamilyV1 {
+  pub family_id: u16,
+  pub policy: SystemFamilyPolicyV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemFamilyClassificationV1 {
+  Ordinary,
+  Known(KnownSystemFamilyV1),
+  UnknownProtected,
+}
+
+impl SystemFamilyClassificationV1 {
+  pub const fn family_id(self) -> Option<u16> {
+    match self {
+      Self::Known(family) => Some(family.family_id),
+      Self::Ordinary | Self::UnknownProtected => None,
+    }
+  }
+}
+
+/// Classify one storage subject through the exact selected registry.
+///
+/// Unrecognized `.aeordb-*` paths, `aeordb.*` KV domains, control tags, and
+/// external-workspace kinds remain protected when no descriptor wins. Callers
+/// must not reinterpret that result as ordinary user data.
+pub fn classify_system_family(
+  registry: &SystemFamilyRegistryV1<'_>,
+  subject: SystemFamilySubjectV1<'_>,
+) -> FormatResult<SystemFamilyClassificationV1> {
+  match subject {
+    SystemFamilySubjectV1::Path(path) => classify_path(registry, path),
+    SystemFamilySubjectV1::EntryType(value) => classify_scalar(registry, StorageDomainV1::EntryType, value),
+    SystemFamilySubjectV1::KvKey(key) => classify_kv_key(registry, key),
+    SystemFamilySubjectV1::ControlTag(value) => classify_scalar(registry, StorageDomainV1::ControlRegion, value).map(protect_unmatched),
+    SystemFamilySubjectV1::ExternalWorkspaceKind(value) => {
+      classify_scalar(registry, StorageDomainV1::ExternalWorkspace, value).map(protect_unmatched)
+    }
+  }
+}
+
+pub fn require_complete_system_family(
+  classification: SystemFamilyClassificationV1,
+  operation: &'static str,
+) -> FormatResult<Option<KnownSystemFamilyV1>> {
+  match classification {
+    SystemFamilyClassificationV1::Ordinary => Ok(None),
+    SystemFamilyClassificationV1::Known(family) => Ok(Some(family)),
+    SystemFamilyClassificationV1::UnknownProtected => {
+      Err(closure_error("unknown_protected_system_family", format!("{operation} cannot safely process unrecognized protected state")))
+    }
+  }
+}
+
+fn classify_path(registry: &SystemFamilyRegistryV1<'_>, path: &str) -> FormatResult<SystemFamilyClassificationV1> {
+  validate_absolute_path(path)?;
+  if path.len() > 1 && path.ends_with('/') {
+    return Err(path_error("system_family_matcher_exact_shape", "classified path has a trailing slash"));
+  }
+
+  let mut winner: Option<(u8, usize, KnownSystemFamilyV1)> = None;
+  for descriptor in registry.iter() {
+    let descriptor = descriptor?;
+    if descriptor.domain != StorageDomainV1::Path {
+      continue;
+    }
+    let Some((priority, specificity)) = path_match_score(path, descriptor.match_kind, descriptor.matcher)? else {
+      continue;
+    };
+    let candidate = KnownSystemFamilyV1 { family_id: descriptor.family_id, policy: descriptor.policy };
+    match winner {
+      None => winner = Some((priority, specificity, candidate)),
+      Some((winner_priority, winner_specificity, winner_family)) => {
+        if (priority, specificity) > (winner_priority, winner_specificity) {
+          winner = Some((priority, specificity, candidate));
+        } else if (priority, specificity) == (winner_priority, winner_specificity) && winner_family.family_id != candidate.family_id {
+          return Err(closure_error(
+            "system_family_cross_family_overlap",
+            format!("path {path} resolves equally to families 0x{:04x} and 0x{:04x}", winner_family.family_id, candidate.family_id),
+          ));
+        }
+      }
+    }
+  }
+
+  if let Some((_, _, family)) = winner {
+    Ok(SystemFamilyClassificationV1::Known(family))
+  } else if path.split('/').skip(1).any(|segment| segment.starts_with(".aeordb-")) {
+    Ok(SystemFamilyClassificationV1::UnknownProtected)
+  } else {
+    Ok(SystemFamilyClassificationV1::Ordinary)
+  }
+}
+
+fn path_match_score(path: &str, kind: SystemFamilyMatchKindV1, matcher: &[u8]) -> FormatResult<Option<(u8, usize)>> {
+  match kind {
+    SystemFamilyMatchKindV1::AbsolutePathExact => Ok((path.as_bytes() == matcher).then_some((5, matcher.len()))),
+    SystemFamilyMatchKindV1::AbsolutePathPrefix => Ok(path.as_bytes().starts_with(matcher).then_some((2, matcher.len()))),
+    SystemFamilyMatchKindV1::DescendantReservedFile => {
+      let (segment, suffix) = decode_descendant_file_matcher(matcher)?;
+      let matched_index = deepest_segment_match(path, segment, |remaining| remaining == suffix, true)?;
+      matched_index.map(|index| path_specificity(index, matcher.len())).transpose().map(|value| value.map(|specificity| (4, specificity)))
+    }
+    SystemFamilyMatchKindV1::DescendantReservedSubtree => {
+      let segment = decode_segment_matcher(matcher)?;
+      let matched_index = deepest_segment_match(path, segment, |remaining| !remaining.is_empty(), true)?;
+      matched_index.map(|index| path_specificity(index, matcher.len())).transpose().map(|value| value.map(|specificity| (3, specificity)))
+    }
+    SystemFamilyMatchKindV1::ReservedPathSegment => {
+      let segment = decode_segment_matcher(matcher)?;
+      let matched_index = deepest_segment_match(path, segment, |_| true, false)?;
+      matched_index.map(|index| path_specificity(index, matcher.len())).transpose().map(|value| value.map(|specificity| (1, specificity)))
+    }
+    SystemFamilyMatchKindV1::EntryTypeExact
+    | SystemFamilyMatchKindV1::KvKeyPrefix
+    | SystemFamilyMatchKindV1::ControlTagExact
+    | SystemFamilyMatchKindV1::WorkspaceKindExact => Ok(None),
+  }
+}
+
+fn deepest_segment_match(
+  path: &str,
+  wanted: &str,
+  accepts_remaining: impl Fn(&str) -> bool,
+  requires_ordinary_ancestor: bool,
+) -> FormatResult<Option<usize>> {
+  let relative = path.strip_prefix('/').expect("validated absolute path");
+  let mut start = 0usize;
+  let mut matched = None;
+  for (index, segment) in relative.split('/').enumerate() {
+    let end = checked_add(start, segment.len(), "classified path segment")?;
+    let remaining = if end < relative.len() { &relative[end + 1..] } else { "" };
+    if (!requires_ordinary_ancestor || index > 0) && segment == wanted && accepts_remaining(remaining) {
+      matched = Some(index);
+    }
+    start = checked_add(end, 1, "classified path separator")?;
+  }
+  Ok(matched)
+}
+
+fn path_specificity(index: usize, matcher_length: usize) -> FormatResult<usize> {
+  index
+    .checked_mul(usize::from(u16::MAX))
+    .and_then(|value| value.checked_add(matcher_length))
+    .ok_or_else(|| overflow_error("system family path specificity"))
+}
+
+fn decode_descendant_file_matcher(bytes: &[u8]) -> FormatResult<(&str, &str)> {
+  let segment_length = usize::from(u16_at(bytes, 0)?);
+  let suffix_offset = checked_add(2, segment_length, "descendant segment")?;
+  let suffix_length = usize::from(u16_at(bytes, suffix_offset)?);
+  let suffix_start = checked_add(suffix_offset, 2, "descendant suffix length")?;
+  let suffix_end = checked_add(suffix_start, suffix_length, "descendant suffix")?;
+  let segment = std::str::from_utf8(
+    bytes.get(2..suffix_offset).ok_or_else(|| trailing_error("system_family_descendant_file_length", "segment is truncated"))?,
+  )
+  .map_err(|_| path_error("system_family_segment_utf8", "matcher segment is not UTF-8"))?;
+  let suffix = std::str::from_utf8(
+    bytes.get(suffix_start..suffix_end).ok_or_else(|| trailing_error("system_family_descendant_file_length", "suffix is truncated"))?,
+  )
+  .map_err(|_| path_error("system_family_relative_path_utf8", "relative matcher path is not UTF-8"))?;
+  Ok((segment, suffix))
+}
+
+fn decode_segment_matcher(bytes: &[u8]) -> FormatResult<&str> {
+  let length = usize::from(u16_at(bytes, 0)?);
+  let end = checked_add(2, length, "segment matcher")?;
+  std::str::from_utf8(bytes.get(2..end).ok_or_else(|| trailing_error("system_family_matcher_segment_length", "segment is truncated"))?)
+    .map_err(|_| path_error("system_family_segment_utf8", "matcher segment is not UTF-8"))
+}
+
+fn classify_scalar(
+  registry: &SystemFamilyRegistryV1<'_>,
+  domain: StorageDomainV1,
+  value: u16,
+) -> FormatResult<SystemFamilyClassificationV1> {
+  let matcher = value.to_le_bytes();
+  let mut winner = None;
+  for descriptor in registry.iter() {
+    let descriptor = descriptor?;
+    if descriptor.domain != domain || descriptor.matcher != matcher {
+      continue;
+    }
+    let candidate = KnownSystemFamilyV1 { family_id: descriptor.family_id, policy: descriptor.policy };
+    if winner.is_some_and(|family: KnownSystemFamilyV1| family.family_id != candidate.family_id) {
+      return Err(closure_error("system_family_cross_family_overlap", format!("scalar {value} resolves to multiple families")));
+    }
+    winner = Some(candidate);
+  }
+  Ok(winner.map(SystemFamilyClassificationV1::Known).unwrap_or(SystemFamilyClassificationV1::Ordinary))
+}
+
+fn classify_kv_key(registry: &SystemFamilyRegistryV1<'_>, key: &[u8]) -> FormatResult<SystemFamilyClassificationV1> {
+  let mut winner: Option<(usize, KnownSystemFamilyV1)> = None;
+  for descriptor in registry.iter() {
+    let descriptor = descriptor?;
+    if descriptor.domain != StorageDomainV1::KvKeyPrefix || !key.starts_with(descriptor.matcher) {
+      continue;
+    }
+    let candidate = KnownSystemFamilyV1 { family_id: descriptor.family_id, policy: descriptor.policy };
+    match winner {
+      None => winner = Some((descriptor.matcher.len(), candidate)),
+      Some((length, _)) if descriptor.matcher.len() > length => winner = Some((descriptor.matcher.len(), candidate)),
+      Some((length, family)) if descriptor.matcher.len() == length && family.family_id != candidate.family_id => {
+        return Err(closure_error("system_family_cross_family_overlap", "KV key resolves equally to multiple families"));
+      }
+      Some(_) => {}
+    }
+  }
+  Ok(winner.map(|(_, family)| SystemFamilyClassificationV1::Known(family)).unwrap_or_else(|| {
+    if key.starts_with(b"aeordb.") {
+      SystemFamilyClassificationV1::UnknownProtected
+    } else {
+      SystemFamilyClassificationV1::Ordinary
+    }
+  }))
+}
+
+fn protect_unmatched(classification: SystemFamilyClassificationV1) -> SystemFamilyClassificationV1 {
+  match classification {
+    SystemFamilyClassificationV1::Ordinary => SystemFamilyClassificationV1::UnknownProtected,
+    other => other,
+  }
+}
+
 pub struct SystemFamilyDescriptorIterV1<'a> {
   bytes: &'a [u8],
   offset: usize,

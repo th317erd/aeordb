@@ -72,6 +72,13 @@
     - [x] Add mutation/fuzz corpus watchdogs and allocation ceilings.
       - [x] Exercise deterministic truncation, trailing-byte, bit-flip, and length/count mutation dimensions.
       - [x] Enforce a per-case wall-clock watchdog and a thread-local allocation ceiling.
+  - [x] P1b: enforce capability and SystemFamily admission before v4 activation.
+    - [x] Add pure read-only/diagnostic/writable capability-floor admission with exact embedded registry selection.
+    - [x] Classify every protected path, EntryType, KV prefix, control tag, and workspace kind through the registry.
+    - [x] Reject unknown protected state with typed, operation-safe diagnostics.
+    - [x] Gate clone adoption on a new physical identity and a strictly advanced writer fence.
+    - [x] Gate peer transfer on database, hash, registry, capability, and physical-instance compatibility.
+    - [x] Prove all refusal paths occur before mutation authority is exposed and run the full P1b gate.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

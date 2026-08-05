@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
-- **Status:** P0b and P0c complete; P1a next
-- **Current landing unit:** P1a bounded common readers and malformed fixture decoding
-- **Entry commit:** `7a39204a493fae890058e27bf61e0ab7a8e616cc`
-- **Last green commit:** P0b final persistent registry closure `7a39204a493fae890058e27bf61e0ab7a8e616cc`
+- **Status:** P0b, P0c, P1a, and P1b complete; P1c next
+- **Current landing unit:** P1c native platform probes and read-only control selection
+- **Entry commit:** `628fd87`
+- **Last green commit:** P1a reader hardening closure `628fd87`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** implement v3/v4 header dispatch and bounded common production readers against the independent fixture corpus
+- **Next action:** implement Linux, macOS, and Windows durability probes plus read-only ControlStore selection
 
 ## P0c Machine Contract Registry
 
@@ -505,3 +505,14 @@
 - **Implementation:** added one manifest-closed test router that assigns every row to exactly one intended production decoder and checks every persisted malformed fixture's exact frozen error code. Added a deterministic truncation, trailing-byte, sampled bit-flip, saturated-u32, and saturated-u64 corpus executed through one isolated worker thread. Every case has a real one-second response watchdog, panic capture, route-closure assertion, required rejection for truncation/trailing bytes, and a thread-local Rust allocation ceiling of 512 KiB fixed overhead plus twice input length. The fixed allowance includes measured one-time regex initialization without allowing persisted lengths to amplify allocation.
 - **Green proof:** the production hardening target passes both aggregate tests and 21,364 mutation cases; the production fixture target passes 71 tests. The independent reference passes 145 tests and freshly verifies all 436 binaries. `check-v4-contracts.sh` passes with 93 routes and 36 docs, locked workspace `cargo check` passes, and strict Clippy retains the exact historical 72-error baseline with no diagnostic in the new target.
 - **P1a exit:** all hand-authored valid and malformed fixtures decode through bounded production readers; v0/v3 compatibility and byte-preserving reopen are proven; deterministic malformed mutation execution is watchdog- and allocation-bounded. No v4 writer, startup admission, repair, migration, or database byte is active.
+
+## P1b Capability, Registry, Protected-Family, Clone, and Peer Admission
+
+- **Entry:** `628fd87`; branch matched `origin/development`, with unrelated user paths excluded.
+- **Territory:** the selected v4 header and immutable binary-owned SystemFamily bytes feed future startup, repair, migration, task, plugin, GC, and peer activation. This landing exposes only pure compatibility results; no live v3 open path or v4 writer consumes them yet.
+- **Red proof:** the explicit `v4_admission_spec` target first failed to compile because capability admission and runtime SystemFamily classification did not exist. A later baseline-floor test correctly exposed an invalid test header that had replaced, rather than extended, the required writer floor.
+- **Implementation:** added checked 256-bit capability sets with generated names, exact mandatory v4 baseline validation, per-hash-profile cached decoding of the canonical embedded registry, semantic read-only and diagnostic-only results, writer prerequisite evaluation against the union of stored reader/writer floors, and typed errors. The current binary advertises all 24 reader capabilities and zero writer capabilities, so it cannot admit v4 writes.
+- **SystemFamily proof:** the production classifier implements exact/descendant/subtree/prefix/segment specificity without path-segment allocation, longest KV-prefix and scalar matching, checked specificity arithmetic, and runtime-only unknown-protected handling for unregistered `.aeordb-*` paths, `aeordb.*` KV domains, controls, and external workspaces. `require_complete_system_family` fails affected operations closed.
+- **Identity/peer proof:** copied databases remain non-writable until both physical-instance identity and writer fence advance. The capability view of an authenticated peer transcript validates nonzero identities/sequences, logical database and distinct physical identities, hash profile, each peer's exact embedded registry, both peers' reader support, destination stored reader/writer floors, and destination binary writer support. The type is explicitly not a wire/authentication contract.
+- **Green proof:** `v4_admission_spec` passes 9 tests covering both fixture widths, all five hash algorithms, diagnostic and malformed floors, registry drift, current-binary refusal, existing/copy identity permutations, every matcher domain, malformed paths, unknown protected state, and peer incompatibilities. `v4_format_fixture_spec` passes 71 tests; `v4_reader_hardening_spec` passes 21,364 mutation cases; the independent reference passes 145 tests; the contract gate verifies 436 fixtures, 93 routes, and 36 docs; and workspace all-target `cargo check` passes. Focused Clippy reports only the exact pre-existing 71-warning plus `range_extract.rs` fatal baseline, with no diagnostic in the new code.
+- **Boundary:** no peer transcript codec/authentication, startup writer token, fence publication, ControlStore, route, migration, or database byte changed. Those remain owned by later child phases.
