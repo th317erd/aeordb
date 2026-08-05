@@ -41,6 +41,7 @@ use aeordb::engine::v4::source_selector::{SourceSelectorKind, decode_source_sele
 use aeordb::engine::v4::system_control::{
   SystemControlKindV1, SystemControlSlotV1, decode_system_control, select_cutover_journal, select_system_control_pair,
 };
+use aeordb::engine::v4::system_family::decode_system_family_registry;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 use aeordb::engine::HashAlgorithm;
 use serde::Deserialize;
@@ -2530,6 +2531,123 @@ fn every_system_control_fixture_matches_the_independent_oracle() {
 }
 
 #[test]
+fn every_system_family_registry_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let independent: serde_json::Value =
+    serde_json::from_slice(&fs::read(root.parent().unwrap().join("system-family-registry-v1.manifest.json")).unwrap()).unwrap();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "system-family-registry-v1").collect();
+  assert_eq!(rows.len(), 2);
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let registry = decode_system_family_registry(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    assert_eq!(registry.summary(), row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(&registry.operational_fingerprint), row.canonical_key.as_deref().unwrap(), "fixture {}", row.id);
+    let descriptors: Vec<_> = registry.iter().collect::<Result<_, _>>().unwrap();
+    assert_eq!(descriptors.len(), 61);
+    assert_eq!(descriptors.iter().map(|descriptor| descriptor.family_id).collect::<std::collections::BTreeSet<_>>().len(), 46);
+    let fingerprint_name = if row.hash_algorithm == "blake3-256" { "blake3_256" } else { "sha512" };
+    assert_eq!(
+      hex::encode(registry.semantic_projection_fingerprint),
+      independent["semantic_projection_fingerprints"][fingerprint_name].as_str().unwrap()
+    );
+  }
+}
+
+#[test]
+fn every_system_family_registry_byte_is_integrity_protected() {
+  let root = fixture_root();
+  for row in manifest().fixtures.into_iter().filter(|row| row.format_id == "system-family-registry-v1") {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    for offset in 0..bytes.len() {
+      let mut changed = bytes.clone();
+      changed[offset] ^= 1;
+      assert!(decode_system_family_registry(&changed, algorithm).is_err(), "fixture {} accepted mutation at byte {offset}", row.id);
+    }
+  }
+}
+
+#[test]
+fn system_family_registry_rejects_bounds_reserves_enums_paths_order_and_policy_drift() {
+  let root = fixture_root();
+  let baseline = fs::read(root.join("system-family-registry-v1/asfr-blake3-256-registry-v1-valid.bin")).unwrap();
+
+  let mut amplified = baseline.clone();
+  amplified[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+  repair_trailing_crc(&mut amplified);
+  assert_eq!(
+    decode_system_family_registry(&amplified, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut reserved = baseline.clone();
+  reserved[20] = 1;
+  repair_trailing_crc(&mut reserved);
+  assert_eq!(
+    decode_system_family_registry(&reserved, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut unknown_domain = baseline.clone();
+  unknown_domain[34] = 0xff;
+  repair_trailing_crc(&mut unknown_domain);
+  assert_eq!(
+    decode_system_family_registry(&unknown_domain, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut incompatible = baseline.clone();
+  incompatible[34] = 2;
+  repair_trailing_crc(&mut incompatible);
+  assert_eq!(
+    decode_system_family_registry(&incompatible, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut unknown_policy = baseline.clone();
+  unknown_policy[36] = 0xff;
+  repair_trailing_crc(&mut unknown_policy);
+  assert_eq!(
+    decode_system_family_registry(&unknown_policy, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut invalid_path = baseline.clone();
+  invalid_path[64] = b'x';
+  repair_trailing_crc(&mut invalid_path);
+  assert_eq!(
+    decode_system_family_registry(&invalid_path, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let descriptor_offsets = system_family_descriptor_offsets(&baseline);
+  assert_eq!(descriptor_offsets.len(), 61);
+  let mut out_of_order = baseline.clone();
+  let last = *descriptor_offsets.last().unwrap();
+  out_of_order[last..last + 2].copy_from_slice(&1u16.to_le_bytes());
+  repair_trailing_crc(&mut out_of_order);
+  assert_eq!(
+    decode_system_family_registry(&out_of_order, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let mut policy_drift = baseline.clone();
+  let second = descriptor_offsets[1];
+  policy_drift[second..second + 2].copy_from_slice(&1u16.to_le_bytes());
+  repair_trailing_crc(&mut policy_drift);
+  assert_eq!(
+    decode_system_family_registry(&policy_drift, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let oversized = vec![0u8; 1_048_577];
+  assert_eq!(
+    decode_system_family_registry(&oversized, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+}
+
+#[test]
 fn system_control_integrity_covers_every_byte_and_journal_slot() {
   let root = fixture_root();
   for row in manifest().fixtures.into_iter().filter(is_system_control_fixture) {
@@ -3233,6 +3351,18 @@ fn repair_cutover_slot_crc(slot: &mut [u8]) {
   assert_eq!(slot.len(), 1024);
   let crc = crc32fast::hash(&slot[..1020]);
   slot[1020..].copy_from_slice(&crc.to_le_bytes());
+}
+
+fn system_family_descriptor_offsets(bytes: &[u8]) -> Vec<usize> {
+  let count = test_u32(bytes, 12) as usize;
+  let mut offsets = Vec::with_capacity(count);
+  let mut offset = 32usize;
+  for _ in 0..count {
+    offsets.push(offset);
+    offset += 32 + test_u16(bytes, offset + 28) as usize;
+  }
+  assert_eq!(offset, bytes.len() - 4);
+  offsets
 }
 
 fn repair_position_crc_and_encode(decoded: &mut [u8]) -> Vec<u8> {

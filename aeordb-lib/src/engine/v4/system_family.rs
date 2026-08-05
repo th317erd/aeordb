@@ -1,0 +1,510 @@
+use std::cmp::Ordering;
+
+use super::contract_generated::SYSTEM_FAMILIES;
+use super::hash::digest_parts;
+use super::reader::{FormatError, FormatResult, MalformedInputClass};
+use crate::engine::HashAlgorithm;
+
+const MAGIC: &[u8; 4] = b"ASFR";
+const VERSION: u16 = 1;
+const HEADER_LENGTH: usize = 32;
+const DESCRIPTOR_FIXED_LENGTH: usize = 32;
+const CRC_LENGTH: usize = 4;
+const MAX_REGISTRY_LENGTH: usize = 1_048_576;
+const FROZEN_DESCRIPTOR_COUNT: usize = 61;
+const UNKNOWN_PROTECTED_FAMILY_ID: u16 = 0xfffe;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum StorageDomainV1 {
+  Path = 1,
+  EntryType = 2,
+  KvKeyPrefix = 3,
+  ControlRegion = 4,
+  ExternalWorkspace = 5,
+}
+
+impl StorageDomainV1 {
+  fn from_u8(value: u8) -> Option<Self> {
+    match value {
+      1 => Some(Self::Path),
+      2 => Some(Self::EntryType),
+      3 => Some(Self::KvKeyPrefix),
+      4 => Some(Self::ControlRegion),
+      5 => Some(Self::ExternalWorkspace),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum SystemFamilyMatchKindV1 {
+  AbsolutePathExact = 1,
+  AbsolutePathPrefix = 2,
+  DescendantReservedFile = 3,
+  DescendantReservedSubtree = 4,
+  ReservedPathSegment = 5,
+  EntryTypeExact = 6,
+  KvKeyPrefix = 7,
+  ControlTagExact = 8,
+  WorkspaceKindExact = 9,
+}
+
+impl SystemFamilyMatchKindV1 {
+  fn from_u8(value: u8) -> Option<Self> {
+    match value {
+      1 => Some(Self::AbsolutePathExact),
+      2 => Some(Self::AbsolutePathPrefix),
+      3 => Some(Self::DescendantReservedFile),
+      4 => Some(Self::DescendantReservedSubtree),
+      5 => Some(Self::ReservedPathSegment),
+      6 => Some(Self::EntryTypeExact),
+      7 => Some(Self::KvKeyPrefix),
+      8 => Some(Self::ControlTagExact),
+      9 => Some(Self::WorkspaceKindExact),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemFamilyPolicyV1 {
+  pub semantic_role: u8,
+  pub gc_policy: u8,
+  pub physical_copy_policy: u8,
+  pub logical_backup_policy: u8,
+  pub data_export_policy: u8,
+  pub peer_replication_policy: u8,
+  pub cluster_join_policy: u8,
+  pub client_sync_policy: u8,
+  pub import_policy: u8,
+  pub verify_policy: u8,
+  pub repair_policy: u8,
+  pub migration_policy: u8,
+  pub spill_policy: u8,
+  pub sensitivity: u8,
+  pub event_policy: u8,
+  pub absence_policy: u8,
+  pub unknown_child_policy: u8,
+  pub index_policy: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemFamilyDescriptorV1<'a> {
+  pub family_id: u16,
+  pub domain: StorageDomainV1,
+  pub match_kind: SystemFamilyMatchKindV1,
+  pub policy: SystemFamilyPolicyV1,
+  pub matcher: &'a [u8],
+}
+
+#[derive(Clone, Debug)]
+pub struct SystemFamilyRegistryV1<'a> {
+  pub bytes: &'a [u8],
+  pub descriptor_count: u32,
+  pub family_count: u16,
+  pub operational_fingerprint: Vec<u8>,
+  pub semantic_projection_fingerprint: Vec<u8>,
+  descriptors: &'a [u8],
+}
+
+impl<'a> SystemFamilyRegistryV1<'a> {
+  pub fn summary(&self) -> String {
+    format!("system-family:registry:descriptors={}:families={}", self.descriptor_count, self.family_count)
+  }
+
+  pub fn iter(&self) -> SystemFamilyDescriptorIterV1<'a> {
+    SystemFamilyDescriptorIterV1 { bytes: self.descriptors, offset: 0, remaining: self.descriptor_count }
+  }
+}
+
+pub struct SystemFamilyDescriptorIterV1<'a> {
+  bytes: &'a [u8],
+  offset: usize,
+  remaining: u32,
+}
+
+impl<'a> Iterator for SystemFamilyDescriptorIterV1<'a> {
+  type Item = FormatResult<SystemFamilyDescriptorV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.remaining == 0 {
+      return None;
+    }
+    let result = decode_descriptor(self.bytes, self.offset).map(|(descriptor, next)| {
+      self.offset = next;
+      self.remaining -= 1;
+      descriptor
+    });
+    if result.is_err() {
+      self.remaining = 0;
+    }
+    Some(result)
+  }
+}
+
+pub fn decode_system_family_registry(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<SystemFamilyRegistryV1<'_>> {
+  if bytes.len() < HEADER_LENGTH + CRC_LENGTH {
+    return Err(trailing_error("system_family_registry_length", "registry is shorter than its framing"));
+  }
+  if bytes.len() > MAX_REGISTRY_LENGTH {
+    return Err(amplification_error("system_family_registry_length", bytes.len(), MAX_REGISTRY_LENGTH));
+  }
+  if bytes.get(..4) != Some(MAGIC) || u16_at(bytes, 4)? != VERSION || usize::from(u16_at(bytes, 6)?) != HEADER_LENGTH {
+    return Err(magic_error("system_family_registry_header", "registry magic, version, or header length is invalid"));
+  }
+  let total_length = usize::try_from(u32_at(bytes, 8)?).map_err(|_| overflow_error("registry total length"))?;
+  if total_length != bytes.len() {
+    return Err(trailing_error("system_family_registry_total_length", "registry total length does not match input"));
+  }
+  let descriptor_count = usize::try_from(u32_at(bytes, 12)?).map_err(|_| overflow_error("registry descriptor count"))?;
+  let descriptors_length = usize::try_from(u32_at(bytes, 16)?).map_err(|_| overflow_error("registry descriptors length"))?;
+  let expected_descriptors_length = bytes.len() - HEADER_LENGTH - CRC_LENGTH;
+  if descriptors_length != expected_descriptors_length {
+    return Err(trailing_error("system_family_registry_descriptors_length", "descriptor bytes do not close registry"));
+  }
+  let maximum_count = descriptors_length / DESCRIPTOR_FIXED_LENGTH;
+  if descriptor_count > maximum_count {
+    return Err(amplification_error("system_family_registry_descriptor_count", descriptor_count, maximum_count));
+  }
+  if descriptor_count != FROZEN_DESCRIPTOR_COUNT {
+    return Err(closure_error(
+      "system_family_registry_descriptor_count",
+      format!("expected {FROZEN_DESCRIPTOR_COUNT} descriptors, found {descriptor_count}"),
+    ));
+  }
+  if u32_at(bytes, 20)? != 0 || bytes[24..32].iter().any(|byte| *byte != 0) {
+    return Err(reserved_error("system_family_registry_reserved", "registry flags and reserve must be zero"));
+  }
+  let crc_offset = bytes.len() - CRC_LENGTH;
+  if u32_at(bytes, crc_offset)? != crc32fast::hash(&bytes[..crc_offset]) {
+    return Err(integrity_error("system_family_registry_crc", "registry CRC does not match"));
+  }
+
+  let descriptors = &bytes[HEADER_LENGTH..crc_offset];
+  let mut offset = 0usize;
+  let mut previous = None;
+  let mut active_family = None;
+  let mut active_policy = None;
+  let mut expected_families = SYSTEM_FAMILIES.iter();
+  let mut family_count = 0usize;
+  let mut semantic_projection = Vec::with_capacity(descriptors.len().min(MAX_REGISTRY_LENGTH));
+  for _ in 0..descriptor_count {
+    let (descriptor, next) = decode_descriptor(descriptors, offset)?;
+    if previous.as_ref().is_some_and(|prior| descriptor_key_cmp(prior, &descriptor) != Ordering::Less) {
+      return Err(order_error("system_family_descriptor_order", "descriptors are duplicate or out of canonical order"));
+    }
+    if active_family != Some(descriptor.family_id) {
+      let expected = expected_families
+        .next()
+        .ok_or_else(|| closure_error("system_family_registry_family_count", "registry contains an extra family"))?;
+      if expected.id != descriptor.family_id {
+        return Err(closure_error(
+          "system_family_registry_family_coverage",
+          format!("expected family 0x{:04x}, found 0x{:04x}", expected.id, descriptor.family_id),
+        ));
+      }
+      active_family = Some(descriptor.family_id);
+      active_policy = Some(descriptor.policy);
+      family_count += 1;
+    } else if active_policy != Some(descriptor.policy) {
+      return Err(closure_error("system_family_registry_policy_drift", "one family has multiple policies"));
+    }
+    if descriptor.policy.semantic_role != 0 {
+      append_semantic_projection(&mut semantic_projection, &descriptor)?;
+    }
+    previous = Some(descriptor);
+    offset = next;
+  }
+  if offset != descriptors.len() {
+    return Err(trailing_error("system_family_registry_trailing_bytes", "descriptor count leaves trailing bytes"));
+  }
+  if expected_families.next().is_some() || family_count != SYSTEM_FAMILIES.len() {
+    return Err(closure_error("system_family_registry_family_count", "registry omits one or more frozen families"));
+  }
+
+  Ok(SystemFamilyRegistryV1 {
+    bytes,
+    descriptor_count: descriptor_count as u32,
+    family_count: family_count as u16,
+    operational_fingerprint: digest_parts(algorithm, &[b"aeordb.system-family-registry.v1\0", bytes]),
+    semantic_projection_fingerprint: digest_parts(algorithm, &[b"aeordb.system-family-semantic-projection.v1\0", &semantic_projection]),
+    descriptors,
+  })
+}
+
+fn decode_descriptor(bytes: &[u8], offset: usize) -> FormatResult<(SystemFamilyDescriptorV1<'_>, usize)> {
+  let fixed_end = checked_add(offset, DESCRIPTOR_FIXED_LENGTH, "system family descriptor fixed body")?;
+  if fixed_end > bytes.len() {
+    return Err(trailing_error("system_family_descriptor_truncated", "descriptor fixed body exceeds registry"));
+  }
+  let family_id = u16_at(bytes, offset)?;
+  if family_id == 0 || family_id == UNKNOWN_PROTECTED_FAMILY_ID {
+    return Err(identity_error("system_family_descriptor_identity", "family ID is zero or runtime-only unknown-protected"));
+  }
+  let domain = StorageDomainV1::from_u8(bytes[offset + 2])
+    .ok_or_else(|| kind_error("system_family_storage_domain", "storage domain is outside the frozen enum"))?;
+  let match_kind = SystemFamilyMatchKindV1::from_u8(bytes[offset + 3])
+    .ok_or_else(|| kind_error("system_family_match_kind", "match kind is outside the frozen enum"))?;
+  let policy = SystemFamilyPolicyV1 {
+    semantic_role: bytes[offset + 4],
+    gc_policy: bytes[offset + 5],
+    physical_copy_policy: bytes[offset + 6],
+    logical_backup_policy: bytes[offset + 7],
+    data_export_policy: bytes[offset + 8],
+    peer_replication_policy: bytes[offset + 9],
+    cluster_join_policy: bytes[offset + 10],
+    client_sync_policy: bytes[offset + 11],
+    import_policy: bytes[offset + 12],
+    verify_policy: bytes[offset + 13],
+    repair_policy: bytes[offset + 14],
+    migration_policy: bytes[offset + 15],
+    spill_policy: bytes[offset + 16],
+    sensitivity: bytes[offset + 17],
+    event_policy: bytes[offset + 18],
+    absence_policy: bytes[offset + 19],
+    unknown_child_policy: bytes[offset + 20],
+    index_policy: bytes[offset + 21],
+  };
+  validate_policy(policy)?;
+  if bytes[offset + 22..offset + 24].iter().any(|byte| *byte != 0) || u32_at(bytes, offset + 24)? != 0 || u16_at(bytes, offset + 30)? != 0 {
+    return Err(reserved_error("system_family_descriptor_reserved", "descriptor flags and reserves must be zero"));
+  }
+  let matcher_length = usize::from(u16_at(bytes, offset + 28)?);
+  let matcher_end = checked_add(fixed_end, matcher_length, "system family matcher")?;
+  if matcher_end > bytes.len() {
+    return Err(trailing_error("system_family_matcher_truncated", "matcher exceeds descriptor bytes"));
+  }
+  let matcher = &bytes[fixed_end..matcher_end];
+  validate_matcher(domain, match_kind, matcher)?;
+  Ok((SystemFamilyDescriptorV1 { family_id, domain, match_kind, policy, matcher }, matcher_end))
+}
+
+fn validate_policy(policy: SystemFamilyPolicyV1) -> FormatResult<()> {
+  let valid = policy.semantic_role <= 4
+    && policy.gc_policy != 0
+    && policy.gc_policy & !0x3f == 0
+    && in_range(policy.physical_copy_policy, 1, 7)
+    && in_range(policy.logical_backup_policy, 1, 7)
+    && in_range(policy.data_export_policy, 1, 7)
+    && in_range(policy.peer_replication_policy, 1, 7)
+    && in_range(policy.cluster_join_policy, 1, 7)
+    && in_range(policy.client_sync_policy, 1, 7)
+    && in_range(policy.import_policy, 1, 7)
+    && in_range(policy.verify_policy, 1, 4)
+    && in_range(policy.repair_policy, 1, 5)
+    && in_range(policy.migration_policy, 1, 6)
+    && in_range(policy.spill_policy, 1, 4)
+    && policy.sensitivity <= 4
+    && policy.event_policy <= 4
+    && in_range(policy.absence_policy, 1, 7)
+    && policy.unknown_child_policy <= 3
+    && policy.index_policy <= 3;
+  if !valid {
+    return Err(kind_error("system_family_descriptor_policy", "descriptor policy contains an unknown enum or bit"));
+  }
+  Ok(())
+}
+
+fn validate_matcher(domain: StorageDomainV1, kind: SystemFamilyMatchKindV1, bytes: &[u8]) -> FormatResult<()> {
+  let compatible = matches!(
+    (domain, kind),
+    (
+      StorageDomainV1::Path,
+      SystemFamilyMatchKindV1::AbsolutePathExact
+        | SystemFamilyMatchKindV1::AbsolutePathPrefix
+        | SystemFamilyMatchKindV1::DescendantReservedFile
+        | SystemFamilyMatchKindV1::DescendantReservedSubtree
+        | SystemFamilyMatchKindV1::ReservedPathSegment
+    ) | (StorageDomainV1::EntryType, SystemFamilyMatchKindV1::EntryTypeExact)
+      | (StorageDomainV1::KvKeyPrefix, SystemFamilyMatchKindV1::KvKeyPrefix)
+      | (StorageDomainV1::ControlRegion, SystemFamilyMatchKindV1::ControlTagExact)
+      | (StorageDomainV1::ExternalWorkspace, SystemFamilyMatchKindV1::WorkspaceKindExact)
+  );
+  if !compatible {
+    return Err(kind_error("system_family_matcher_domain", "matcher kind is incompatible with storage domain"));
+  }
+  match kind {
+    SystemFamilyMatchKindV1::AbsolutePathExact | SystemFamilyMatchKindV1::AbsolutePathPrefix => {
+      let path =
+        std::str::from_utf8(bytes).map_err(|_| path_error("system_family_matcher_path_utf8", "absolute matcher path is not UTF-8"))?;
+      validate_absolute_path(path)?;
+      if kind == SystemFamilyMatchKindV1::AbsolutePathExact && path.len() > 1 && path.ends_with('/') {
+        return Err(path_error("system_family_matcher_exact_shape", "exact path has a trailing slash"));
+      }
+      if kind == SystemFamilyMatchKindV1::AbsolutePathPrefix && (path == "/" || !path.ends_with('/')) {
+        return Err(path_error("system_family_matcher_prefix_shape", "prefix path must end in a slash and cannot be root"));
+      }
+    }
+    SystemFamilyMatchKindV1::DescendantReservedFile => validate_descendant_file(bytes)?,
+    SystemFamilyMatchKindV1::DescendantReservedSubtree | SystemFamilyMatchKindV1::ReservedPathSegment => {
+      if bytes.len() < 3 {
+        return Err(trailing_error("system_family_matcher_segment_length", "segment matcher is too short"));
+      }
+      let segment_length = usize::from(u16_at(bytes, 0)?);
+      if checked_add(segment_length, 2, "segment matcher")? != bytes.len() {
+        return Err(trailing_error("system_family_matcher_segment_length", "segment length does not close matcher"));
+      }
+      validate_segment(&bytes[2..])?;
+    }
+    SystemFamilyMatchKindV1::EntryTypeExact | SystemFamilyMatchKindV1::ControlTagExact | SystemFamilyMatchKindV1::WorkspaceKindExact => {
+      if bytes.len() != 2 {
+        return Err(trailing_error("system_family_matcher_scalar", "scalar matcher must be two bytes"));
+      }
+      if u16_at(bytes, 0)? == 0 {
+        return Err(identity_error("system_family_matcher_scalar", "scalar matcher must be nonzero"));
+      }
+    }
+    SystemFamilyMatchKindV1::KvKeyPrefix if bytes.is_empty() => {
+      return Err(identity_error("system_family_matcher_kv_prefix", "KV prefix matcher must be nonempty"));
+    }
+    SystemFamilyMatchKindV1::KvKeyPrefix => {}
+  }
+  Ok(())
+}
+
+fn validate_descendant_file(bytes: &[u8]) -> FormatResult<()> {
+  if bytes.len() < 4 {
+    return Err(trailing_error("system_family_descendant_file_length", "descendant-file matcher is too short"));
+  }
+  let segment_length = usize::from(u16_at(bytes, 0)?);
+  let suffix_length_offset = checked_add(2, segment_length, "descendant segment")?;
+  let suffix_field_end = checked_add(suffix_length_offset, 2, "descendant suffix length")?;
+  if suffix_field_end > bytes.len() {
+    return Err(trailing_error("system_family_descendant_file_length", "descendant segment exceeds matcher"));
+  }
+  let suffix_length = usize::from(u16_at(bytes, suffix_length_offset)?);
+  if checked_add(suffix_field_end, suffix_length, "descendant suffix")? != bytes.len() {
+    return Err(trailing_error("system_family_descendant_file_length", "descendant suffix does not close matcher"));
+  }
+  validate_segment(&bytes[2..suffix_length_offset])?;
+  if suffix_length > 0 {
+    validate_relative_path(&bytes[suffix_field_end..])?;
+  }
+  Ok(())
+}
+
+fn validate_absolute_path(path: &str) -> FormatResult<()> {
+  if !path.starts_with('/') || path.as_bytes().contains(&0) || path.contains("//") {
+    return Err(path_error("system_family_absolute_path", "absolute path has invalid root, NUL, or separator"));
+  }
+  let core = path.strip_suffix('/').unwrap_or(path);
+  if core.split('/').skip(1).any(|segment| segment.is_empty() || matches!(segment, "." | "..")) {
+    return Err(path_error("system_family_absolute_path_segment", "absolute path has an invalid segment"));
+  }
+  Ok(())
+}
+
+fn validate_relative_path(bytes: &[u8]) -> FormatResult<()> {
+  let path =
+    std::str::from_utf8(bytes).map_err(|_| path_error("system_family_relative_path_utf8", "relative matcher path is not UTF-8"))?;
+  if path.is_empty() || path.starts_with('/') || path.ends_with('/') || path.contains("//") || path.as_bytes().contains(&0) {
+    return Err(path_error("system_family_relative_path", "relative matcher path has invalid shape"));
+  }
+  if path.split('/').any(|segment| segment.is_empty() || matches!(segment, "." | "..")) {
+    return Err(path_error("system_family_relative_path_segment", "relative matcher path has an invalid segment"));
+  }
+  Ok(())
+}
+
+fn validate_segment(bytes: &[u8]) -> FormatResult<()> {
+  let segment = std::str::from_utf8(bytes).map_err(|_| path_error("system_family_segment_utf8", "matcher segment is not UTF-8"))?;
+  if segment.is_empty() || segment.contains('/') || segment.as_bytes().contains(&0) || matches!(segment, "." | "..") {
+    return Err(path_error("system_family_segment", "matcher segment has invalid shape"));
+  }
+  Ok(())
+}
+
+fn append_semantic_projection(output: &mut Vec<u8>, descriptor: &SystemFamilyDescriptorV1<'_>) -> FormatResult<()> {
+  let matcher_length = u16::try_from(descriptor.matcher.len())
+    .map_err(|_| amplification_error("system_family_matcher_length", descriptor.matcher.len(), usize::from(u16::MAX)))?;
+  let additional = checked_add(8, descriptor.matcher.len(), "semantic projection descriptor")?;
+  let new_length = checked_add(output.len(), additional, "semantic projection")?;
+  if new_length > MAX_REGISTRY_LENGTH {
+    return Err(amplification_error("system_family_semantic_projection", new_length, MAX_REGISTRY_LENGTH));
+  }
+  output.extend_from_slice(&descriptor.family_id.to_le_bytes());
+  output.push(descriptor.domain as u8);
+  output.push(descriptor.match_kind as u8);
+  output.extend_from_slice(&matcher_length.to_le_bytes());
+  output.extend_from_slice(descriptor.matcher);
+  output.push(descriptor.policy.semantic_role);
+  output.push(descriptor.policy.index_policy);
+  Ok(())
+}
+
+fn descriptor_key_cmp(left: &SystemFamilyDescriptorV1<'_>, right: &SystemFamilyDescriptorV1<'_>) -> Ordering {
+  (left.family_id, left.domain as u8, left.match_kind as u8, left.matcher).cmp(&(
+    right.family_id,
+    right.domain as u8,
+    right.match_kind as u8,
+    right.matcher,
+  ))
+}
+
+fn in_range(value: u8, minimum: u8, maximum: u8) -> bool {
+  (minimum..=maximum).contains(&value)
+}
+
+fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
+  let raw = bytes.get(offset..offset + 2).ok_or_else(|| trailing_error("system_family_truncated", format!("u16 at offset {offset}")))?;
+  Ok(u16::from_le_bytes(raw.try_into().expect("checked system-family u16 width")))
+}
+
+fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
+  let raw = bytes.get(offset..offset + 4).ok_or_else(|| trailing_error("system_family_truncated", format!("u32 at offset {offset}")))?;
+  Ok(u32::from_le_bytes(raw.try_into().expect("checked system-family u32 width")))
+}
+
+fn checked_add(left: usize, right: usize, context: &'static str) -> FormatResult<usize> {
+  left.checked_add(right).ok_or_else(|| overflow_error(context))
+}
+
+fn amplification_error(code: &'static str, actual: usize, cap: usize) -> FormatError {
+  error(MalformedInputClass::AllocationAmplification, code, format!("{actual} exceeds cap {cap}"))
+}
+
+fn overflow_error(context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::LengthCountOrArithmeticOverflow, "system_family_overflow", context)
+}
+
+fn trailing_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::TruncationOrTrailingBytes, code, context)
+}
+
+fn magic_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::UnknownMagicOrVersion, code, context)
+}
+
+fn reserved_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::NonzeroReservedOrPadding, code, context)
+}
+
+fn integrity_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::ChecksumOrIntegrityMismatch, code, context)
+}
+
+fn identity_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::IdentityKeyOrGenerationMismatch, code, context)
+}
+
+fn kind_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::UnknownTypeKindOrEnum, code, context)
+}
+
+fn order_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::NoncanonicalOrderOrDuplicate, code, context)
+}
+
+fn path_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::InvalidUtf8PathGlobOrNativePath, code, context)
+}
+
+fn closure_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::CrossRecordClosureMismatch, code, context)
+}
+
+fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
+  FormatError::new(class, code, context)
+}
