@@ -26,6 +26,7 @@ pub mod position;
 pub mod reader;
 pub mod scope;
 pub mod source_selector;
+pub mod system_control;
 pub mod value_store;
 
 #[cfg(test)]

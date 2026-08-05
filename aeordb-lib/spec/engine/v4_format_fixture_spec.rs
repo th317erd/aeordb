@@ -38,6 +38,9 @@ use aeordb::engine::v4::position::{PositionContextV1, PositionRouteV1, decode_lo
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
 use aeordb::engine::v4::scope::{ScopeMatchingMode, decode_scope_definition};
 use aeordb::engine::v4::source_selector::{SourceSelectorKind, decode_source_selector};
+use aeordb::engine::v4::system_control::{
+  SystemControlKindV1, SystemControlSlotV1, decode_system_control, select_cutover_journal, select_system_control_pair,
+};
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 use aeordb::engine::HashAlgorithm;
 use serde::Deserialize;
@@ -2506,6 +2509,294 @@ fn gc_audit_closure_rejects_detached_and_cross_database_artifacts() {
 }
 
 #[test]
+fn every_system_control_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(is_system_control_fixture).collect();
+  assert_eq!(rows.len(), 42);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    if row.format_id == "system-control-v1" {
+      let control = decode_system_control(&bytes, algorithm).unwrap();
+      assert_eq!(control.summary(), row.expected, "fixture {}", row.id);
+      assert_eq!(control.canonical_path(), row.canonical_key.as_deref().unwrap(), "fixture {}", row.id);
+    } else {
+      let selected = select_cutover_journal(&bytes, algorithm).unwrap();
+      assert_eq!(selected.summary(), row.expected, "fixture {}", row.id);
+      assert!(row.canonical_key.is_none());
+    }
+  }
+}
+
+#[test]
+fn system_control_integrity_covers_every_byte_and_journal_slot() {
+  let root = fixture_root();
+  for row in manifest().fixtures.into_iter().filter(is_system_control_fixture) {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    for offset in 0..bytes.len() {
+      let mut changed = bytes.clone();
+      changed[offset] ^= 1;
+      if row.format_id == "system-control-v1" {
+        assert!(decode_system_control(&changed, algorithm).is_err(), "fixture {} accepted mutation at byte {offset}", row.id);
+      } else {
+        let selected = select_cutover_journal(&changed, algorithm)
+          .unwrap_or_else(|error| panic!("fixture {} lost both journal slots after one-byte mutation at {offset}: {error}", row.id));
+        assert!(selected.redundancy_degraded, "fixture {} did not report degraded redundancy at byte {offset}", row.id);
+      }
+    }
+  }
+}
+
+#[test]
+fn every_system_control_kind_rejects_repaired_crc_zero_database_identity() {
+  let root = fixture_root();
+  let rows: Vec<_> =
+    manifest().fixtures.into_iter().filter(|row| row.format_id == "system-control-v1" && row.hash_algorithm == "blake3-256").collect();
+  assert_eq!(rows.len(), SystemControlKindV1::ALL.len());
+  for row in rows {
+    let mut bytes = fs::read(root.join(row.binary)).unwrap();
+    bytes[32..48].fill(0);
+    repair_trailing_crc(&mut bytes);
+    assert_eq!(
+      decode_system_control(&bytes, HashAlgorithm::Blake3_256).unwrap_err().class(),
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "fixture {}",
+      row.id
+    );
+  }
+}
+
+#[test]
+fn every_system_control_body_validator_rejects_a_kind_specific_semantic_mutation() {
+  let root = fixture_root();
+  let hash_width = 32;
+  let cases = [
+    ("index-registry", 16),
+    ("index-operation", 32 + hash_width),
+    ("index-degraded", 34 + hash_width),
+    ("lifecycle-lkg", 16),
+    ("lifecycle-diagnostics", 18),
+    ("runtime-lkg", 16),
+    ("runtime-diagnostics", 18),
+    ("repair-ticket", 48),
+    ("path-write-latch", 26 + hash_width),
+    ("migration-lease", 120),
+    ("migration-progress", 76),
+    ("legacy-root-map", 80),
+    ("legacy-root-map-page", 96 + 4 * hash_width),
+    ("task-pin", 32),
+    ("semantic-mutation-segment", 48 + hash_width + 10 + hash_width),
+    ("root-publication-prepare", 40 + 3 * hash_width),
+    ("root-admission-commit", 40 + hash_width),
+    ("durability-latch", 42),
+    ("emergency-spill-catalog", 32),
+    ("side-by-side-cutover", 88),
+  ];
+  assert_eq!(cases.len(), SystemControlKindV1::ALL.len());
+  for (slug, body_offset) in cases {
+    let path = root.join(format!("system-control-v1/control-blake3-256-{slug}-valid.bin"));
+    let mut bytes = fs::read(path).unwrap();
+    bytes[32 + body_offset..32 + body_offset + 2].fill(0);
+    repair_trailing_crc(&mut bytes);
+    assert!(decode_system_control(&bytes, HashAlgorithm::Blake3_256).is_err(), "validator {slug} accepted its semantic mutation");
+  }
+}
+
+#[test]
+fn system_control_registry_paths_and_immutable_sequences_are_closed() {
+  use std::collections::BTreeSet;
+
+  assert_eq!(SystemControlKindV1::ALL.len(), 20);
+  assert_eq!(SystemControlKindV1::ALL.iter().map(|kind| *kind as u16).collect::<BTreeSet<_>>().len(), 20);
+  assert_eq!(SystemControlKindV1::ALL.iter().map(|kind| *kind.magic()).collect::<BTreeSet<_>>().len(), 20);
+  for kind in SystemControlKindV1::ALL {
+    assert_eq!(SystemControlKindV1::from_u16(kind as u16), Some(kind));
+    assert_eq!(SystemControlKindV1::from_magic(kind.magic()), Some(kind));
+  }
+
+  let root = fixture_root();
+  let mut immutable = fs::read(root.join("system-control-v1/control-blake3-256-root-admission-commit-valid.bin")).unwrap();
+  immutable[16..24].copy_from_slice(&2u64.to_le_bytes());
+  repair_trailing_crc(&mut immutable);
+  assert_eq!(
+    decode_system_control(&immutable, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mutable = fs::read(root.join("system-control-v1/control-blake3-256-index-degraded-valid.bin")).unwrap();
+  let mutable = decode_system_control(&mutable, HashAlgorithm::Blake3_256).unwrap();
+  assert!(mutable.canonical_path_for_slot(SystemControlSlotV1::A).unwrap().ends_with("/a.ctrl"));
+  assert!(mutable.canonical_path_for_slot(SystemControlSlotV1::B).unwrap().ends_with("/b.ctrl"));
+  assert_eq!(
+    mutable.canonical_path_for_slot(SystemControlSlotV1::Immutable).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+}
+
+#[test]
+fn system_control_bounds_reserves_enums_presence_paths_and_order_fail_closed() {
+  let root = fixture_root();
+
+  let mut oversized = fs::read(root.join("system-control-v1/control-blake3-256-index-registry-valid.bin")).unwrap();
+  oversized[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+  repair_trailing_crc(&mut oversized);
+  assert_eq!(
+    decode_system_control(&oversized, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut reserved = fs::read(root.join("system-control-v1/control-blake3-256-index-registry-valid.bin")).unwrap();
+  reserved[28] = 1;
+  repair_trailing_crc(&mut reserved);
+  assert_eq!(
+    decode_system_control(&reserved, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let mut unknown_state = fs::read(root.join("system-control-v1/control-blake3-256-index-degraded-valid.bin")).unwrap();
+  let degraded_fallback = 32 + 32 + 34;
+  unknown_state[degraded_fallback..degraded_fallback + 2].copy_from_slice(&0u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_state);
+  assert_eq!(
+    decode_system_control(&unknown_state, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut bad_presence = fs::read(root.join("system-control-v1/control-blake3-256-repair-ticket-valid.bin")).unwrap();
+  let repair_flags = 32 + 54;
+  let flags = test_u16(&bad_presence, repair_flags) ^ 1;
+  bad_presence[repair_flags..repair_flags + 2].copy_from_slice(&flags.to_le_bytes());
+  repair_trailing_crc(&mut bad_presence);
+  assert_eq!(
+    decode_system_control(&bad_presence, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalBooleanOrOptionalPresence
+  );
+
+  let mut amplified = fs::read(root.join("system-control-v1/control-blake3-256-legacy-root-map-page-valid.bin")).unwrap();
+  let root_map_count = 32 + 88 + 2 * 32;
+  amplified[root_map_count..root_map_count + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+  repair_trailing_crc(&mut amplified);
+  assert_eq!(
+    decode_system_control(&amplified, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut duplicate = fs::read(root.join("system-control-v1/control-blake3-256-path-write-latch-valid.bin")).unwrap();
+  let latch_rows = 32 + 32 + 32;
+  duplicate.copy_within(latch_rows..latch_rows + 16, latch_rows + 16);
+  repair_trailing_crc(&mut duplicate);
+  assert_eq!(
+    decode_system_control(&duplicate, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let mut invalid_path = fs::read(root.join("system-control-v1/control-blake3-256-emergency-spill-catalog-valid.bin")).unwrap();
+  let spill_body = 32;
+  let spill_fixed = 44 + 32;
+  let path_encoding = spill_body + spill_fixed + 4;
+  invalid_path[path_encoding..path_encoding + 2].copy_from_slice(&1u16.to_le_bytes());
+  let path_start = spill_body + spill_fixed + 72;
+  invalid_path[path_start] = 0xff;
+  repair_trailing_crc(&mut invalid_path);
+  assert_eq!(
+    decode_system_control(&invalid_path, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+}
+
+#[test]
+fn system_control_pair_selection_is_deterministic_under_torn_and_ambiguous_slots() {
+  let root = fixture_root();
+  let bytes = fs::read(root.join("system-control-v1/control-blake3-256-index-degraded-valid.bin")).unwrap();
+
+  let mut newer = bytes.clone();
+  newer[16..24].copy_from_slice(&8u64.to_le_bytes());
+  repair_trailing_crc(&mut newer);
+  let selected = select_system_control_pair(HashAlgorithm::Blake3_256, &bytes, &newer).unwrap();
+  assert_eq!(selected.selected_slot, SystemControlSlotV1::B);
+  assert_eq!(selected.control.sequence, 8);
+  assert!(!selected.redundancy_degraded);
+
+  let equal = select_system_control_pair(HashAlgorithm::Blake3_256, &bytes, &bytes).unwrap();
+  assert_eq!(equal.selected_slot, SystemControlSlotV1::A);
+
+  let mut torn = newer.clone();
+  torn[40] ^= 1;
+  let selected = select_system_control_pair(HashAlgorithm::Blake3_256, &bytes, &torn).unwrap();
+  assert_eq!(selected.selected_slot, SystemControlSlotV1::A);
+  assert!(selected.redundancy_degraded);
+
+  let mut disagreement = bytes.clone();
+  let degraded_at = 32 + 24 + 32;
+  let changed_time = test_i64(&disagreement, degraded_at) + 1;
+  disagreement[degraded_at..degraded_at + 8].copy_from_slice(&changed_time.to_le_bytes());
+  repair_trailing_crc(&mut disagreement);
+  assert_eq!(
+    select_system_control_pair(HashAlgorithm::Blake3_256, &bytes, &disagreement).unwrap_err().class(),
+    MalformedInputClass::AmbiguousEqualSequenceSelector
+  );
+
+  let mut other_identity = bytes.clone();
+  other_identity[32 + 16] ^= 1;
+  repair_trailing_crc(&mut other_identity);
+  assert_eq!(
+    select_system_control_pair(HashAlgorithm::Blake3_256, &bytes, &other_identity).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  assert!(select_system_control_pair(HashAlgorithm::Blake3_256, &torn, &torn).is_err());
+
+  let immutable = fs::read(root.join("system-control-v1/control-blake3-256-root-admission-commit-valid.bin")).unwrap();
+  assert_eq!(
+    select_system_control_pair(HashAlgorithm::Blake3_256, &immutable, &immutable).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+}
+
+#[test]
+fn external_cutover_journal_selects_equal_newer_torn_and_ambiguous_slots() {
+  let root = fixture_root();
+  let journal = fs::read(root.join("cutover-journal-v1/cutover-blake3-256-external-journal-valid.bin")).unwrap();
+  let selected = select_cutover_journal(&journal, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(selected.selected_slot, SystemControlSlotV1::B);
+  assert_eq!(selected.sequence, 12);
+  assert!(!selected.redundancy_degraded);
+
+  let mut equal = journal.clone();
+  let a_slot = equal[..1024].to_vec();
+  equal[1024..].copy_from_slice(&a_slot);
+  let selected = select_cutover_journal(&equal, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(selected.selected_slot, SystemControlSlotV1::A);
+  assert_eq!(selected.sequence, 11);
+
+  let mut torn = journal.clone();
+  torn[1024 + 80] ^= 1;
+  let selected = select_cutover_journal(&torn, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(selected.selected_slot, SystemControlSlotV1::A);
+  assert!(selected.redundancy_degraded);
+
+  let mut ambiguous = journal.clone();
+  ambiguous[1024 + 8..1024 + 16].copy_from_slice(&11u64.to_le_bytes());
+  let cutover_state = 1024 + 32 + 88;
+  ambiguous[cutover_state..cutover_state + 2].copy_from_slice(&4u16.to_le_bytes());
+  repair_cutover_slot_crc(&mut ambiguous[1024..]);
+  assert_eq!(
+    select_cutover_journal(&ambiguous, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AmbiguousEqualSequenceSelector
+  );
+
+  let mut both_torn = journal.clone();
+  both_torn[80] ^= 1;
+  both_torn[1024 + 80] ^= 1;
+  assert_eq!(
+    select_cutover_journal(&both_torn, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::ChecksumOrIntegrityMismatch
+  );
+}
+
+#[test]
 fn value_store_definition_rejects_identity_child_semantic_and_dependency_corruption() {
   let root = fixture_root();
   let metadata = fs::read(root.join("value-store-definition-v1/avst-blake3-256-metadata-hash-corrected-valid.bin")).unwrap();
@@ -2891,6 +3182,10 @@ fn is_gc_audit_fixture(row: &FixtureRow) -> bool {
       || row.expected.starts_with("gc:pin:audit:"))
 }
 
+fn is_system_control_fixture(row: &FixtureRow) -> bool {
+  matches!(row.format_id.as_str(), "system-control-v1" | "cutover-journal-v1")
+}
+
 fn test_u32(bytes: &[u8], offset: usize) -> u32 {
   u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
@@ -2901,6 +3196,10 @@ fn test_u16(bytes: &[u8], offset: usize) -> u16 {
 
 fn test_u64(bytes: &[u8], offset: usize) -> u64 {
   u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn test_i64(bytes: &[u8], offset: usize) -> i64 {
+  i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
 fn gc_artifact_body_offset(bytes: &[u8]) -> usize {
@@ -2928,6 +3227,12 @@ fn repair_trailing_crc(value: &mut [u8]) {
   let crc_offset = value.len() - 4;
   let crc = crc32fast::hash(&value[..crc_offset]);
   value[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+}
+
+fn repair_cutover_slot_crc(slot: &mut [u8]) {
+  assert_eq!(slot.len(), 1024);
+  let crc = crc32fast::hash(&slot[..1020]);
+  slot[1020..].copy_from_slice(&crc.to_le_bytes());
 }
 
 fn repair_position_crc_and_encode(decoded: &mut [u8]) -> Vec<u8> {

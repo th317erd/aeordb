@@ -64,7 +64,7 @@
       - [x] Decode bounded mark checkpoints, mutation journals, and external workspace files.
       - [x] Decode sweep proposals/receipts and receipt-backed Void catalogs/claims.
       - [x] Decode audit catalogs, detail/summary pages, run summaries, evidence, and pins.
-      - [ ] Decode all SystemControlV1 kinds and the external cutover journal.
+      - [x] Decode all SystemControlV1 kinds and the external cutover journal.
       - [ ] Decode and validate the expanded SystemFamilyRegistryV1.
     - [ ] Dispatch v3 and v4 database headers without rewriting either format on open.
     - [ ] Decode every hand-authored v4 fixture and reject every malformed fixture with its frozen error class.
