@@ -1,0 +1,21 @@
+# fixture: ascp-blake3-256-normalized-glob-valid
+# contract: ScopeDefinitionV1
+# hash: blake3-256 (32 bytes)
+# expected: scope:relative-glob:owner=/workspace/docs:glob=guides/**/*.md
+# canonical key: 5f2ca51e8587288f4cfed341fb45537782a7319b7880162bbfca429940b1f334
+# relation: semantic-id:ScopeId
+# hex offsets are absolute within this fixture
+# definition +0x000 len 32: canonical definition envelope
+# definition magic: ASCP
+# body +0x020 len 4: owner_path_length
+# body +0x024 len 4: glob_length
+# body +0x028 len 16: membership and semantic-version enums
+# body +0x038 len 8: reserved zero
+# body +0x040 len 15: canonical owner_path
+# body +0x04f len 14: canonical glob
+00000000: 41534350010020005d00000000000000
+00000010: 00000000000000000000000000000000
+00000020: 0f0000000e0000000100020001000100
+00000030: 01000100010001000000000000000000
+00000040: 2f776f726b73706163652f646f637367
+00000050: 75696465732f2a2a2f2a2e6d64

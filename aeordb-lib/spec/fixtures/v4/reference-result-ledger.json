@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-index-pointer-v1",
+  "tool_revision": "p0b2-scope-definition-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -145,6 +145,42 @@
       "fixture_id": "asem-sha512-state-content-only",
       "expected": "semantic:state:content-only:reason=1",
       "observed": "semantic:state:content-only:reason=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "ascp-blake3-256-root-direct-valid",
+      "expected": "scope:direct:owner=/",
+      "observed": "scope:direct:owner=/",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "ascp-blake3-256-normalized-glob-valid",
+      "expected": "scope:relative-glob:owner=/workspace/docs:glob=guides/**/*.md",
+      "observed": "scope:relative-glob:owner=/workspace/docs:glob=guides/**/*.md",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "ascp-blake3-256-maximum-length-valid",
+      "expected": "scope:relative-glob:maximum-length",
+      "observed": "scope:relative-glob:maximum-length",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "ascp-sha512-root-direct-valid",
+      "expected": "scope:direct:owner=/",
+      "observed": "scope:direct:owner=/",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "ascp-sha512-normalized-glob-valid",
+      "expected": "scope:relative-glob:owner=/workspace/docs:glob=guides/**/*.md",
+      "observed": "scope:relative-glob:owner=/workspace/docs:glob=guides/**/*.md",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "ascp-sha512-maximum-length-valid",
+      "expected": "scope:relative-glob:maximum-length",
+      "observed": "scope:relative-glob:maximum-length",
       "result": "pass"
     },
     {

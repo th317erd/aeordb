@@ -1,0 +1,20 @@
+# fixture: ascp-blake3-256-root-direct-valid
+# contract: ScopeDefinitionV1
+# hash: blake3-256 (32 bytes)
+# expected: scope:direct:owner=/
+# canonical key: a3fe30aa76038cbe920926d1710f648a6317c36c0f56a7ff97bf42b79571ec10
+# relation: semantic-id:ScopeId
+# hex offsets are absolute within this fixture
+# definition +0x000 len 32: canonical definition envelope
+# definition magic: ASCP
+# body +0x020 len 4: owner_path_length
+# body +0x024 len 4: glob_length
+# body +0x028 len 16: membership and semantic-version enums
+# body +0x038 len 8: reserved zero
+# body +0x040 len 1: canonical owner_path
+# body +0x041 len 0: canonical glob
+00000000: 41534350010020004100000000000000
+00000010: 00000000000000000000000000000000
+00000020: 01000000000000000100010001000100
+00000030: 01000100010001000000000000000000
+00000040: 2f

@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-index-pointer",
+  "coverage_stage": "p0b-2-scope-definition",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
-    "rounds": [10, 11, 12, 13, 14, 15],
+    "rounds": [7, 10, 11, 12, 13, 14, 15],
     "round_15_precedence": true
   },
   "byte_order": "little-endian",
@@ -289,6 +289,69 @@
       ]
     },
     {
+      "id": "scope-definition-v1",
+      "family": "index-semantic-definition",
+      "magic_ascii": "ASCP",
+      "version": 1,
+      "layout": [
+        { "offset": 0, "length": 4, "field": "definition_magic", "rule": "ASCII ASCP" },
+        { "offset": 4, "length": 2, "field": "definition_schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "definition_header_length", "rule": "exactly 32" },
+        { "offset": 8, "length": 4, "field": "definition_total_length", "rule": "exactly 64 + P + G" },
+        { "offset": 12, "length": 4, "field": "definition_flags", "rule": "zero" },
+        { "offset": 16, "length": 16, "field": "definition_reserved", "rule": "zero" },
+        { "offset": 32, "length": 4, "field": "owner_path_length", "rule": "P, nonzero" },
+        { "offset": 36, "length": 4, "field": "glob_length", "rule": "G, zero only for direct mode" },
+        { "offset": 40, "length": 2, "field": "membership_entity_class", "rule": "1 regular_files" },
+        { "offset": 42, "length": 2, "field": "matching_mode", "rule": "1 direct_children or 2 relative_path_glob" },
+        { "offset": 44, "length": 2, "field": "path_normalization_semantics", "rule": "exactly 1" },
+        { "offset": 46, "length": 2, "field": "path_case_semantics", "rule": "exactly 1" },
+        { "offset": 48, "length": 2, "field": "glob_matcher_semantics", "rule": "exactly 1" },
+        { "offset": 50, "length": 2, "field": "config_resolver_semantics", "rule": "exactly 1" },
+        { "offset": 52, "length": 2, "field": "file_key_derivation_semantics", "rule": "exactly 1" },
+        { "offset": 54, "length": 2, "field": "internal_path_policy", "rule": "exactly 1" },
+        { "offset": 56, "length": 8, "field": "scope_reserved", "rule": "zero" },
+        { "offset": 64, "length_formula": "P", "field": "owner_path", "rule": "canonical absolute UTF-8 path" },
+        { "offset_formula": "64 + P", "length_formula": "G", "field": "glob", "rule": "canonical relative UTF-8 glob or absent" }
+      ],
+      "identity": ["ScopeId derived from complete canonical definition"],
+      "key_domain": "H('aeordb.index.scope-definition.v1\\0' || complete canonical ScopeDefinitionV1)",
+      "checksum": "no independent checksum; enclosing IndexArtifact CRC, immutable artifact hash, and ScopeId recomputation protect these bytes",
+      "body_formula": "64 + P + G, where P > 0 and P + G <= 65472",
+      "hard_cap": 65536,
+      "canonical_order": "32-byte definition envelope, fixed scope fields, canonical owner path, canonical glob",
+      "reserve_zero_ranges": [
+        { "start": 16, "length": 16 },
+        { "start": 56, "length": 8 }
+      ],
+      "malformed_behavior": "reject wrong magic/version/header/total length, flags/reserve, unknown enum or semantic version, invalid UTF-8, noncanonical path/glob, mode-length disagreement, overflow, truncation, and oversize input",
+      "trailing_behavior": "definition_total_length consumes the complete definition; no terminator or trailing bytes",
+      "bounded_decode": "require 64..65536 bytes, validate fixed framing and checked P + G formula before slicing either variable field",
+      "producer_owner": "Child 05 semantic definition compiler through Child 01 codec",
+      "consumer_owners": [
+        "Child 01 fixture/readers",
+        "Child 03 semantic state",
+        "Child 05 scope catalog/index runtime",
+        "Child 06 query planner",
+        "Child 07 migration"
+      ],
+      "capability": "IndexDefinitionV1 bit 8",
+      "typed_hash_roles": [
+        { "field": "ScopeId/canonical key", "role": "identity" },
+        { "field": "FileKey derived under semantics ID 1", "role": "identity" }
+      ],
+      "fixture_ids_32": [
+        "ascp-blake3-256-root-direct-valid",
+        "ascp-blake3-256-normalized-glob-valid",
+        "ascp-blake3-256-maximum-length-valid"
+      ],
+      "fixture_ids_64": [
+        "ascp-sha512-root-direct-valid",
+        "ascp-sha512-normalized-glob-valid",
+        "ascp-sha512-maximum-length-valid"
+      ]
+    },
+    {
       "id": "index-artifact-v1",
       "family": "derived-index",
       "magic_ascii": "AIDX",
@@ -371,10 +434,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 5,
-    "fixture_count": 36,
+    "fixture_family_count": 6,
+    "fixture_count": 42,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, and all three A/B active pointer kinds",
-    "remaining_p0b_2_scope": "Index definitions/manifests/pages/directory/journals/checkpoints, GcArtifact, controls, canonical values/config/path/glob/file-key/APOS, SystemFamily, maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, and ScopeDefinitionV1",
+    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, canonical config values/APOS, SystemFamily, maxima, and complete malformed mutation corpus"
   }
 }
