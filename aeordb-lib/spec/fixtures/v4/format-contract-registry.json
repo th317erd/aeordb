@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-canonical-config",
+  "coverage_stage": "p0b-2-invocation-policy",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [7, 10, 11, 12, 13, 14, 15],
@@ -289,6 +289,69 @@
       ]
     },
     {
+      "id": "invocation-policy-v1",
+      "family": "index-execution-policy",
+      "magic_ascii": "AIVP",
+      "version": 1,
+      "layout": [
+        { "offset": 0, "length": 4, "field": "policy_magic", "rule": "ASCII AIVP" },
+        { "offset": 4, "length": 2, "field": "policy_schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "policy_header_length", "rule": "exactly 128" },
+        { "offset": 8, "length": 4, "field": "policy_total_length", "rule": "exactly 128" },
+        { "offset": 12, "length": 4, "field": "policy_flags", "rule": "zero" },
+        { "offset": 16, "length": 2, "field": "execution_backend", "rule": "1 native or 2 WASM32" },
+        { "offset": 18, "length": 2, "field": "host_profile", "rule": "0 native, 1 pure v1, or 2 migration legacy stubs" },
+        { "offset": 20, "length": 2, "field": "limit_semantics", "rule": "exactly 1" },
+        { "offset": 22, "length": 2, "field": "structure_semantics", "rule": "exactly 1" },
+        { "offset": 24, "length": 8, "field": "max_request_bytes", "rule": "complete request or zero for native" },
+        { "offset": 32, "length": 8, "field": "max_response_bytes", "rule": "finite corrected limit" },
+        { "offset": 40, "length": 8, "field": "max_linear_memory_bytes", "rule": "WASM page multiple or zero" },
+        { "offset": 48, "length": 8, "field": "max_fuel", "rule": "finite WASM limit or zero" },
+        { "offset": 56, "length": 8, "field": "max_table_elements", "rule": "finite WASM limit or zero" },
+        { "offset": 64, "length": 8, "field": "max_structure_nodes", "rule": "finite decoded-tree limit" },
+        { "offset": 72, "length": 8, "field": "max_scalar_bytes", "rule": "finite scalar limit" },
+        { "offset": 80, "length": 4, "field": "max_structure_depth", "rule": "finite decoded-tree limit" },
+        { "offset": 84, "length": 4, "field": "max_container_members", "rule": "finite container limit" },
+        { "offset": 88, "length": 4, "field": "max_wasm_instances", "rule": "WASM limiter or zero" },
+        { "offset": 92, "length": 4, "field": "max_wasm_memories", "rule": "WASM limiter or zero" },
+        { "offset": 96, "length": 4, "field": "max_wasm_tables", "rule": "WASM limiter or zero" },
+        { "offset": 100, "length": 4, "field": "max_value_stack_height", "rule": "finite profile units" },
+        { "offset": 104, "length": 4, "field": "max_recursion_depth", "rule": "finite profile units" },
+        { "offset": 108, "length": 20, "field": "reserved", "rule": "zero" }
+      ],
+      "identity": ["complete policy bytes embedded at one concrete parser or mapper call site"],
+      "key_domain": "no standalone key; exact bytes participate in the enclosing ValueStoreId",
+      "checksum": "no independent checksum; enclosing ValueStoreDefinition identity plus IndexArtifact CRC/hash protect these bytes",
+      "body_formula": "exactly 128 bytes",
+      "hard_cap": 128,
+      "canonical_order": "fixed little-endian fields; backend and host profile determine which resource fields are finite or zero",
+      "reserve_zero_ranges": [
+        { "start": 108, "length": 20 }
+      ],
+      "malformed_behavior": "reject framing/flags/reserve errors, unknown semantic/backend/host IDs, native/WASM context mismatches, zero or sentinel corrected limits, unaligned/oversize WASM memory, and unrepresentable executor limits",
+      "trailing_behavior": "policy_total_length is fixed at 128; every extra or missing byte is rejected",
+      "bounded_decode": "one fixed 128-byte buffer; no length-controlled allocation",
+      "producer_owner": "Child 05 ValueStore definition compiler through Child 01 codec",
+      "consumer_owners": [
+        "Child 01 fixture/readers",
+        "Child 05 parser/mapper executors",
+        "Child 06 authoritative fallback",
+        "Child 07 migration"
+      ],
+      "capability": "IndexDefinitionV1 bit 8 through the enclosing ValueStore definition",
+      "typed_hash_roles": [
+        { "field": "complete policy bytes in enclosing ValueStoreId preimage", "role": "identity" }
+      ],
+      "fixture_ids_32": [
+        "aivp-blake3-256-native-valid",
+        "aivp-blake3-256-pure-wasm-valid"
+      ],
+      "fixture_ids_64": [
+        "aivp-sha512-native-valid",
+        "aivp-sha512-pure-wasm-valid"
+      ]
+    },
+    {
       "id": "canonical-config-value-v1",
       "family": "index-semantic-primitive",
       "version": 1,
@@ -490,10 +553,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 7,
-    "fixture_count": 48,
+    "fixture_family_count": 8,
+    "fixture_count": 52,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, and ScopeDefinitionV1",
-    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, and InvocationPolicyV1",
+    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, parser/dependency/selector records, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

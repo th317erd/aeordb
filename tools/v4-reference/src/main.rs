@@ -2,6 +2,7 @@ mod config;
 mod core;
 mod definitions;
 mod index;
+mod policy;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -17,9 +18,10 @@ use config::ConfigFormat;
 use core::{CoreFormat, HashProfile};
 use definitions::DefinitionFormat;
 use index::IndexFormat;
+use policy::PolicyFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-canonical-config-v1";
+const TOOL_REVISION: &str = "p0b2-invocation-policy-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -37,6 +39,7 @@ enum FixtureFormat {
   Core(CoreFormat),
   Definition(DefinitionFormat),
   Index(IndexFormat),
+  Policy(PolicyFormat),
 }
 
 impl FixtureFormat {
@@ -47,6 +50,7 @@ impl FixtureFormat {
       Self::Core(format) => format.id(),
       Self::Definition(format) => format.id(),
       Self::Index(format) => format.id(),
+      Self::Policy(format) => format.id(),
     }
   }
 
@@ -57,6 +61,7 @@ impl FixtureFormat {
       Self::Core(format) => format.family(),
       Self::Definition(format) => format.family(),
       Self::Index(format) => format.family(),
+      Self::Policy(format) => format.family(),
     }
   }
 }
@@ -214,7 +219,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-canonical-config".to_string(),
+    stage: "p0b-2-invocation-policy".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -236,7 +241,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 fn verify(fixture_root: &Path) -> DynResult<()> {
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-canonical-config" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-invocation-policy" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -426,6 +431,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(policy::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Policy(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases
 }
 
@@ -584,6 +598,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Core(format) => core::observe(format, case.profile, bytes),
     FixtureFormat::Definition(_) => definitions::observe(case.profile, bytes),
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
+    FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
   }
 }
 
@@ -592,7 +607,11 @@ fn annotated_hex(case: &FixtureCase) -> String {
   output.push_str(&format!("# fixture: {}\n", case.id));
   match case.format {
     FixtureFormat::DatabaseHeaderV4 => output.push_str("# contract: DatabaseHeaderV4, two 1024-byte slots, data offset 2048\n"),
-    FixtureFormat::Config(_) | FixtureFormat::Core(_) | FixtureFormat::Definition(_) | FixtureFormat::Index(_) => {
+    FixtureFormat::Config(_)
+    | FixtureFormat::Core(_)
+    | FixtureFormat::Definition(_)
+    | FixtureFormat::Index(_)
+    | FixtureFormat::Policy(_) => {
       output.push_str(&format!("# contract: {}\n", case.format.family()));
     }
   }
@@ -633,6 +652,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Index(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in index::annotation_lines(case.profile, &case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::Policy(_) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in policy::annotation_lines() {
         output.push_str(&format!("# {line}\n"));
       }
     }

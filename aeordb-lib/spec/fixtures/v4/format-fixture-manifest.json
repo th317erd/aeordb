@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p0b-2-canonical-config",
+  "stage": "p0b-2-invocation-policy",
   "reference_tool": {
     "name": "aeordb-v4-reference",
-    "revision": "p0b2-canonical-config-v1",
+    "revision": "p0b2-invocation-policy-v1",
     "production_dependencies": [],
     "provenance": "Independent implementation of ratified decision-log Round 7 and Rounds 10-15; no AeorDB crate dependency",
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 48,
+  "fixture_count": 52,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -731,6 +731,66 @@
       "canonical_key": "8dccdd2dee41a2402cbc411c98ea16b2826879417dcece9f955d9ec261a0a2bb6fe6cc99a13e2df4763b81b317f279b384b5f77131d0ea937b57c347371d7cf0",
       "expected": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
       "relation": "targets:ScopeCatalogManifestV1"
+    },
+    {
+      "id": "aivp-blake3-256-native-valid",
+      "format_id": "invocation-policy-v1",
+      "family": "InvocationPolicyV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "invocation-policy-v1/aivp-blake3-256-native-valid.bin",
+      "annotated_hex": "invocation-policy-v1/aivp-blake3-256-native-valid.hex",
+      "byte_length": 128,
+      "sha256": "57576d6695c4657dc78fb0e38a4da528d143e1fbe7ffe6218e07b83f57836ce8",
+      "blake3": "5b87d9f36a515b2809242870cb0a0f74fc9616c6a72b7b7dad4ebd17564c9004",
+      "canonical_key": null,
+      "expected": "policy:native",
+      "relation": "executor-profile:aeordb-native-deterministic-v1"
+    },
+    {
+      "id": "aivp-blake3-256-pure-wasm-valid",
+      "format_id": "invocation-policy-v1",
+      "family": "InvocationPolicyV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "invocation-policy-v1/aivp-blake3-256-pure-wasm-valid.bin",
+      "annotated_hex": "invocation-policy-v1/aivp-blake3-256-pure-wasm-valid.hex",
+      "byte_length": 128,
+      "sha256": "26e437e914ec2dcf8652edc38cbf004adb0d5d0bd242e8c6f3cc6d7309c01ff3",
+      "blake3": "9c8b5cd62be32f7c047bdce91671d9ff26ad566ce68e12ef3b41a8b305c1d688",
+      "canonical_key": null,
+      "expected": "policy:pure-wasm32",
+      "relation": "executor-profile:wasmi-0.42.1-aeordb-pure-v1"
+    },
+    {
+      "id": "aivp-sha512-native-valid",
+      "format_id": "invocation-policy-v1",
+      "family": "InvocationPolicyV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "invocation-policy-v1/aivp-sha512-native-valid.bin",
+      "annotated_hex": "invocation-policy-v1/aivp-sha512-native-valid.hex",
+      "byte_length": 128,
+      "sha256": "57576d6695c4657dc78fb0e38a4da528d143e1fbe7ffe6218e07b83f57836ce8",
+      "blake3": "5b87d9f36a515b2809242870cb0a0f74fc9616c6a72b7b7dad4ebd17564c9004",
+      "canonical_key": null,
+      "expected": "policy:native",
+      "relation": "executor-profile:aeordb-native-deterministic-v1"
+    },
+    {
+      "id": "aivp-sha512-pure-wasm-valid",
+      "format_id": "invocation-policy-v1",
+      "family": "InvocationPolicyV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "invocation-policy-v1/aivp-sha512-pure-wasm-valid.bin",
+      "annotated_hex": "invocation-policy-v1/aivp-sha512-pure-wasm-valid.hex",
+      "byte_length": 128,
+      "sha256": "26e437e914ec2dcf8652edc38cbf004adb0d5d0bd242e8c6f3cc6d7309c01ff3",
+      "blake3": "9c8b5cd62be32f7c047bdce91671d9ff26ad566ce68e12ef3b41a8b305c1d688",
+      "canonical_key": null,
+      "expected": "policy:pure-wasm32",
+      "relation": "executor-profile:wasmi-0.42.1-aeordb-pure-v1"
     }
   ]
 }

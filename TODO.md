@@ -7,6 +7,7 @@
     - [x] Freeze the common IndexArtifactV1 envelope and all three A/B active-pointer kinds.
     - [x] Freeze the canonical definition envelope, ScopeDefinitionV1, ScopeId, path/glob, FileKey, and internal-path semantics.
     - [x] Freeze CanonicalConfigValueV1 tags, JSON normalization, duplicate-key handling, and binary bounds.
+    - [x] Freeze InvocationPolicyV1 native/WASM call-site resource semantics and fixed framing.
     - [ ] Freeze ValueStoreDefinitionV1, source selectors, and dependency framing.
     - [ ] Freeze ConverterDefinitionV1, FieldIndexDefinitionV1, and immutable index manifests.
     - [ ] Freeze index pages, NVT tiles, journals, checkpoints, and remaining persistent families.

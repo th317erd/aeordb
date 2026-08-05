@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-canonical-config-v1",
+  "tool_revision": "p0b2-invocation-policy-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -289,6 +289,30 @@
       "fixture_id": "aidx-sha512-scope-catalog-pointer-b-max-sequence",
       "expected": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
       "observed": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aivp-blake3-256-native-valid",
+      "expected": "policy:native",
+      "observed": "policy:native",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aivp-blake3-256-pure-wasm-valid",
+      "expected": "policy:pure-wasm32",
+      "observed": "policy:pure-wasm32",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aivp-sha512-native-valid",
+      "expected": "policy:native",
+      "observed": "policy:native",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aivp-sha512-pure-wasm-valid",
+      "expected": "policy:pure-wasm32",
+      "observed": "policy:pure-wasm32",
       "result": "pass"
     }
   ]
