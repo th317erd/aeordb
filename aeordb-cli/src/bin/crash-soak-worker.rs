@@ -175,16 +175,16 @@ fn main() {
 fn checkpoint_committed(checkpoint_file: &mut File, path: &str, body: &str) -> Result<(), String> {
   writeln!(checkpoint_file, "{}\t{}", path, body).map_err(|error| format!("checkpoint write failed: {}", error))?;
   checkpoint_file.flush().map_err(|error| format!("checkpoint flush failed: {}", error))?;
-  // Best-effort sync; if the kernel ignores us mid-test that's not a worker
-  // bug. The parent verifies what the engine actually persisted.
-  let _ = checkpoint_file.sync_data();
+  aeordb::engine::native_durability::sync_file_data_native(checkpoint_file)
+    .map_err(|error| format!("checkpoint durability barrier failed: {error}"))?;
   Ok(())
 }
 
 fn checkpoint_deleted(checkpoint_file: &mut File, path: &str) -> Result<(), String> {
   writeln!(checkpoint_file, "-\t{}", path).map_err(|error| format!("checkpoint delete write failed: {}", error))?;
   checkpoint_file.flush().map_err(|error| format!("checkpoint delete flush failed: {}", error))?;
-  let _ = checkpoint_file.sync_data();
+  aeordb::engine::native_durability::sync_file_data_native(checkpoint_file)
+    .map_err(|error| format!("checkpoint delete durability barrier failed: {error}"))?;
   Ok(())
 }
 

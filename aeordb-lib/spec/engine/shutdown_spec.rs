@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::durability_coordinator::DurabilityOperation;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 use aeordb::engine::EventBus;
@@ -59,6 +60,22 @@ fn test_engine_shutdown_after_writes() {
 
   let result = engine.shutdown();
   assert!(result.is_ok(), "shutdown after writes should succeed");
+}
+
+#[test]
+fn shutdown_finishes_on_hard_authority_readback_without_a_trailing_soft_barrier() {
+  let temp_dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&temp_dir);
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&RequestContext::system(), "/final.txt", b"final", Some("text/plain")).unwrap();
+
+  engine.shutdown().unwrap();
+
+  let snapshot = engine.durability_snapshot().unwrap();
+  assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::AuthorityReadback);
+  assert_eq!(snapshot.admitted, 0);
+  assert_eq!(snapshot.executing, 0);
+  assert_eq!(snapshot.pending_hard, 0);
 }
 
 #[test]

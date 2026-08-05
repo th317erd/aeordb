@@ -40,7 +40,7 @@ use crate::engine::durability_coordinator::{
   DurabilityCoordinator, DurabilityCoordinatorError, DurabilityCoordinatorSnapshot, NativeFileBarrierKind,
 };
 use crate::engine::file_header::{
-  FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_coordinated, write_initial_header_coordinated,
+  FileHeader, HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_with_dependency, write_initial_header_coordinated,
 };
 use crate::engine::hash_algorithm::HashAlgorithm;
 
@@ -129,13 +129,30 @@ impl AppendWriter {
   /// partially-flushed header; on next read its CRC fails or its sequence is
   /// behind the active slot, so the OLD slot wins. State rolls back cleanly.
   pub fn update_header(&mut self, header: &FileHeader) -> EngineResult<()> {
+    self.update_header_with_dependency(header, 0, || Ok(()))
+  }
+
+  pub(crate) fn update_header_with_dependency<F>(
+    &mut self,
+    header: &FileHeader,
+    estimated_dependency_bytes: u64,
+    dependency: F,
+  ) -> EngineResult<()>
+  where
+    F: FnMut() -> std::io::Result<()>,
+  {
     let mut new_header = header.clone();
-    // Carry the current sequence forward — write_header_to_inactive_slot
-    // increments it for us.
     new_header.sequence = self.file_header.sequence;
     new_header.updated_at = new_header.updated_at.max(self.file_header.updated_at);
 
-    write_header_to_inactive_slot_coordinated(&mut self.file, &mut new_header, self.active_slot, &self.durability_coordinator)?;
+    write_header_to_inactive_slot_with_dependency(
+      &mut self.file,
+      &mut new_header,
+      self.active_slot,
+      &self.durability_coordinator,
+      estimated_dependency_bytes,
+      dependency,
+    )?;
 
     self.file_header = new_header;
     self.active_slot = 1 - self.active_slot;
@@ -228,10 +245,10 @@ impl AppendWriter {
 
   /// Write an entry at a specific file offset (in-place overwrite).
   /// Does NOT update current_offset or entry_count — this overwrites existing space.
-  /// Calls sync_all after writing. For batch operations, use `write_entry_at_nosync`.
+  /// Applies a full durability barrier after writing. For batch operations, use `write_entry_at_nosync`.
   pub fn write_entry_at(&mut self, offset: u64, entry_type: EntryType, key: &[u8], value: &[u8]) -> EngineResult<u32> {
     let total_length = self.write_entry_at_nosync(offset, entry_type, key, value)?;
-    self.sync_all()?;
+    self.full_durability_barrier()?;
     Ok(total_length)
   }
 
@@ -324,8 +341,8 @@ impl AppendWriter {
       .map_err(|error| EngineError::DurabilityFailure(error.to_string()))
   }
 
-  /// Full sync including metadata. Use for shutdown.
-  pub fn sync_all(&mut self) -> EngineResult<()> {
+  /// Full durability barrier including required file metadata.
+  pub fn full_durability_barrier(&mut self) -> EngineResult<()> {
     self
       .durability_coordinator
       .execute_recoverable_file_barrier(&self.file, NativeFileBarrierKind::Full, 0)
@@ -397,7 +414,7 @@ impl AppendWriter {
   /// The void fills exactly `size` bytes starting at `offset`.
   pub fn write_void_at(&mut self, offset: u64, size: u32) -> EngineResult<()> {
     self.write_void_at_nosync(offset, size)?;
-    self.sync_all()
+    self.full_durability_barrier()
   }
 
   /// Write a void at a specific offset WITHOUT syncing.
@@ -629,12 +646,51 @@ impl AppendWriter {
   /// metadata is already established. Kept as a separate method for callers
   /// who semantically want "fully durable header update".
   pub fn update_file_header(&mut self, header: &FileHeader) -> EngineResult<()> {
-    let mut new_header = header.clone();
-    new_header.sequence = self.file_header.sequence;
-    new_header.updated_at = new_header.updated_at.max(self.file_header.updated_at);
-    write_header_to_inactive_slot_coordinated(&mut self.file, &mut new_header, self.active_slot, &self.durability_coordinator)?;
-    self.file_header = new_header;
-    self.active_slot = 1 - self.active_slot;
-    Ok(())
+    self.update_header(header)
+  }
+}
+
+#[cfg(test)]
+mod durability_tests {
+  use std::io::{Read, Seek, SeekFrom};
+
+  use super::*;
+  use crate::engine::durability_coordinator::DurabilityOperation;
+  use crate::engine::file_header::{read_active_header, FILE_HEADER_SIZE};
+
+  #[test]
+  fn dependency_failure_prevents_header_publication_and_preserves_active_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("dependency-failure.aeordb");
+    let mut writer = AppendWriter::create(&path).unwrap();
+    let initial = writer.file_header().clone();
+    let mut replacement = initial.clone();
+    replacement.entry_count = 99;
+    let mut calls = 0;
+
+    let result = writer.update_header_with_dependency(&replacement, 4096, || {
+      calls += 1;
+      Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    });
+
+    assert!(result.is_err());
+    assert_eq!(calls, 1);
+    assert_eq!(writer.file_header().sequence, initial.sequence);
+    assert_eq!(writer.file_header().entry_count, initial.entry_count);
+    let snapshot = writer.durability_snapshot().unwrap();
+    assert_eq!(snapshot.hard_frontier, 1);
+    assert_eq!(snapshot.failed, 1);
+    assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::DependencyAppend);
+    assert!(!snapshot.ledger.last().unwrap().succeeded);
+
+    drop(writer);
+    let mut file = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
+    let (active, slot) = read_active_header(&mut file).unwrap();
+    assert_eq!(slot, 0);
+    assert_eq!(active.sequence, initial.sequence);
+    let mut inactive = vec![0u8; FILE_HEADER_SIZE];
+    file.seek(SeekFrom::Start(FILE_HEADER_SIZE as u64)).unwrap();
+    file.read_exact(&mut inactive).unwrap();
+    assert!(inactive.iter().all(|byte| *byte == 0));
   }
 }

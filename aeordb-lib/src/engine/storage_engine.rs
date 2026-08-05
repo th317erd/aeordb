@@ -23,6 +23,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail::VoidRecord;
 use crate::engine::index_store::{IndexManager, SharedIndexWriteBuffer};
 use crate::engine::kv_snapshot::ReadSnapshot;
+use crate::engine::native_durability::sync_file_all_native;
 use serde::Serialize;
 
 use crate::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_FLAG_DELETED};
@@ -737,7 +738,7 @@ impl StorageEngine {
   fn write_durable_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
     file.write_all(bytes).map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
+    sync_file_all_native(&file).map_err(|error| error.to_string())?;
     crate::engine::durability::sync_parent_dir(path).map_err(|error| error.to_string())
   }
 
@@ -765,7 +766,7 @@ impl StorageEngine {
       copied += read_len as u64;
       remaining -= read_len as u64;
     }
-    output.sync_all().map_err(|error| error.to_string())?;
+    sync_file_all_native(&output).map_err(|error| error.to_string())?;
     crate::engine::durability::sync_parent_dir(destination).map_err(|error| error.to_string())?;
     Ok((copy_start, copied, truncated))
   }
@@ -1413,39 +1414,33 @@ impl StorageEngine {
   /// threshold trigger.
   pub(crate) fn force_hot_tail_flush(&self) -> EngineResult<()> {
     self.ensure_writable()?;
-    let sync_result = {
+    let commit_result = {
       let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      writer.sync()
-    };
-    if let Err(error) = sync_result {
-      return Err(self.record_durability_failure("Forced hot-tail WAL sync failed", error));
-    }
-
-    let flush_result = {
       let mut kv = self.kv_writer.lock().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      kv.force_flush_hot_buffer().map(|_| (kv.hot_tail_offset(), kv.len() as u64, kv.transaction_depth > 0))
+      Self::publish_hot_tail_authority(&mut writer, &mut kv, true)
     };
-    let (hot_tail_offset, entry_count, in_transaction) = match flush_result {
-      Ok(result) => result,
-      Err(error) => return Err(self.record_durability_failure("Forced hot-tail flush failed", error)),
-    };
-
-    if in_transaction {
-      return Ok(());
+    match commit_result {
+      Ok(Some((hot_tail_offset, _))) => self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release),
+      Ok(None) => {}
+      Err(error) => return Err(self.record_durability_failure("Forced hot-tail hard commit failed", error)),
     }
-
-    let header_result = {
-      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      let mut header = writer.file_header().clone();
-      header.hot_tail_offset = hot_tail_offset;
-      header.entry_count = entry_count;
-      writer.update_header(&header)
-    };
-    if let Err(error) = header_result {
-      return Err(self.record_durability_failure("Forced hot-tail header update failed", error));
-    }
-    self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
     Ok(())
+  }
+
+  fn publish_hot_tail_authority(writer: &mut AppendWriter, kv: &mut DiskKVStore, force: bool) -> EngineResult<Option<(u64, u64)>> {
+    if kv.transaction_depth != 0 || (!force && kv.hot_buffer_len() == 0) {
+      return Ok(None);
+    }
+
+    let hot_tail_offset = kv.hot_tail_offset();
+    let entry_count = kv.len() as u64;
+    let estimated_dependency_bytes = kv.pending_hot_tail_bytes();
+    let mut header = writer.file_header().clone();
+    header.hot_tail_offset = hot_tail_offset;
+    header.entry_count = entry_count;
+    writer.update_header_with_dependency(&header, estimated_dependency_bytes, || kv.prepare_hot_tail_dependency(force).map(|_| ()))?;
+    kv.complete_hot_tail_dependency();
+    Ok(Some((hot_tail_offset, entry_count)))
   }
 
   /// Flush buffered index mutations if their shared write-count/time policy
@@ -3253,13 +3248,6 @@ impl StorageEngine {
       return Ok(());
     }
 
-    {
-      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      if let Err(e) = writer.sync() {
-        return Err(self.record_durability_failure("Transaction WAL sync failed", e));
-      }
-    }
-
     if self.void_snapshot_dirty.swap(false, Ordering::AcqRel) {
       if let Err(error) = self.try_sync_voids_to_kv_writer() {
         self.void_snapshot_dirty.store(true, Ordering::Release);
@@ -3267,34 +3255,19 @@ impl StorageEngine {
       }
     }
 
-    let header_update = match self.kv_writer.lock() {
-      Ok(mut kv) => {
-        if kv.transaction_depth != 0 {
-          Ok(None)
-        } else {
-          kv.force_flush_hot_buffer().map(|_| Some((kv.hot_tail_offset(), kv.len() as u64)))
-        }
-      }
-      Err(e) => {
-        return Err(EngineError::IoError(std::io::Error::other(format!("Failed to flush transaction hot tail: {}", e))));
-      }
-    };
-    let header_update = match header_update {
-      Ok(header_update) => header_update,
-      Err(e) => return Err(self.record_durability_failure("Failed to flush hot buffer after transaction", e)),
+    let commit_result = {
+      let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let mut kv = self
+        .kv_writer
+        .lock()
+        .map_err(|e| EngineError::IoError(std::io::Error::other(format!("Failed to flush transaction hot tail: {}", e))))?;
+      Self::publish_hot_tail_authority(&mut writer, &mut kv, true)
     };
 
-    if let Some((hot_tail_offset, entry_count)) = header_update {
-      let header_result = {
-        let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-        let mut header = writer.file_header().clone();
-        header.hot_tail_offset = hot_tail_offset;
-        header.entry_count = entry_count;
-        writer.update_header(&header)
-      };
-      if let Err(e) = header_result {
-        return Err(self.record_durability_failure("Failed to update header after transaction hot-tail flush", e));
-      }
+    if let Some((hot_tail_offset, _entry_count)) = match commit_result {
+      Ok(update) => update,
+      Err(error) => return Err(self.record_durability_failure("Transaction hard commit failed", error)),
+    } {
       self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
     }
 
@@ -3338,58 +3311,31 @@ impl StorageEngine {
       return;
     }
 
-    // 2. Sync WAL data to disk first — entries written since last sync are
-    //    in the OS page cache. This must happen BEFORE writing the hot tail,
-    //    so that any offsets referenced by the hot tail point to durable data.
-    let wal_sync_error = match self.writer.try_write() {
-      Ok(mut writer) => writer.sync().err().map(|error| error.to_string()),
-      Err(_) => return,
-    };
-    if let Some(error) = wal_sync_error {
-      self.record_durability_failure("Timer WAL sync failed", error);
-      return;
-    }
-
-    // 3. Flush the hot buffer (re-takes the kv lock; the cheap probe above
-    //    has already been released by here). Re-check hot_buffer_len in case
-    //    another path flushed between the probe and here.
-    let mut flush_error = None;
-    let header_update = if let Ok(mut kv) = self.kv_writer.try_lock() {
-      if kv.hot_buffer_len() > 0 {
-        if let Err(e) = kv.flush_hot_buffer() {
-          flush_error = Some(e.to_string());
-          None
-        } else if kv.transaction_depth == 0 {
-          Some((kv.hot_tail_offset(), kv.len() as u64))
-        } else {
-          None
-        }
-      } else {
-        None
+    // Acquire in the engine's canonical writer -> KV order and execute the
+    // hot-tail write as the dependency step of the same hard plan that
+    // publishes the header. A transaction owner performs this work when its
+    // outermost guard exits, so the timer leaves active transactions alone.
+    let commit_result = {
+      let mut writer = match self.writer.try_write() {
+        Ok(writer) => writer,
+        Err(_) => return,
+      };
+      let mut kv = match self.kv_writer.try_lock() {
+        Ok(kv) => kv,
+        Err(_) => return,
+      };
+      if kv.hot_buffer_len() == 0 || kv.transaction_depth != 0 {
+        return;
       }
-    } else {
-      None
-    };
-    if let Some(error) = flush_error {
-      self.record_durability_failure("Timer hot-tail flush failed", error);
-      return;
-    }
 
-    // Now persist the header with writer lock (kv lock already released)
-    if let Some((hot_tail_offset, entry_count)) = header_update {
-      let mut header_error = None;
-      if let Ok(mut writer) = self.writer.try_write() {
-        let mut header = writer.file_header().clone();
-        header.hot_tail_offset = hot_tail_offset;
-        header.entry_count = entry_count;
-        if let Err(e) = writer.update_header(&header) {
-          header_error = Some(e.to_string());
-        } else {
-          self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
-        }
-      }
-      if let Some(error) = header_error {
-        self.record_durability_failure("Timer header update failed", error);
+      Self::publish_hot_tail_authority(&mut writer, &mut kv, false).map(|commit| commit.map(|(hot_tail_offset, _)| hot_tail_offset))
+    };
+
+    match commit_result {
+      Ok(Some(hot_tail_offset)) => self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release),
+      Ok(None) => {}
+      Err(error) => {
+        self.record_durability_failure("Timer hard commit failed", error);
       }
     }
   }
@@ -3494,9 +3440,6 @@ impl StorageEngine {
           writer_failures.push(("Header update failed during shutdown", e.to_string()));
         } else {
           self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release);
-        }
-        if let Err(e) = writer.sync_all() {
-          writer_failures.push(("WAL sync failed during shutdown", e.to_string()));
         }
       }
       Err(e) => {

@@ -19,8 +19,9 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBarrierKind};
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_header::{write_initial_header, FileHeader, FILE_HEADER_SIZE, FILE_MAGIC, SUPPORTED_HEADER_VERSION};
+use crate::engine::file_header::{write_initial_header_coordinated, FileHeader, FILE_HEADER_SIZE, FILE_MAGIC, SUPPORTED_HEADER_VERSION};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 /// What the inspection found wrong with the header.
@@ -186,6 +187,7 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
   let mut nvt_offset = nvt_offset;
   let mut buffer_kvs_offset = buffer_kvs_offset;
   let mut buffer_nvt_offset = buffer_nvt_offset;
+  let durability_coordinator = DurabilityCoordinator::new();
   if needs_data_shift {
     kv_block_offset = if kv_block_offset > 0 { kv_block_offset + FILE_HEADER_SIZE as u64 } else { 0 };
     if hot_tail_offset > 0 {
@@ -253,12 +255,12 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
       source_version,
       FILE_HEADER_SIZE,
     );
-    shift_data_region_forward(&mut file, file_size, FILE_HEADER_SIZE as u64)?;
+    shift_data_region_forward(&mut file, file_size, FILE_HEADER_SIZE as u64, &durability_coordinator)?;
   }
 
   // Write the new v3 header to slot A and zero slot B. The barrier inside
   // write_initial_header fsyncs both writes.
-  write_initial_header(&mut file, &mut new_header)?;
+  write_initial_header_coordinated(&mut file, &mut new_header, &durability_coordinator)?;
 
   report.repaired = true;
   Ok(report)
@@ -267,7 +269,12 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
 /// Shift `[FILE_HEADER_SIZE..file_size]` forward by `shift` bytes. The file
 /// grows by `shift`. Copy chunks back-to-front to avoid corrupting bytes we
 /// haven't read yet. fsyncs at the end.
-fn shift_data_region_forward(file: &mut std::fs::File, file_size: u64, shift: u64) -> EngineResult<()> {
+fn shift_data_region_forward(
+  file: &mut std::fs::File,
+  file_size: u64,
+  shift: u64,
+  durability_coordinator: &DurabilityCoordinator,
+) -> EngineResult<()> {
   if file_size <= FILE_HEADER_SIZE as u64 {
     return Ok(()); // nothing to shift
   }
@@ -288,6 +295,8 @@ fn shift_data_region_forward(file: &mut std::fs::File, file_size: u64, shift: u6
     file.write_all(&buf[..chunk_len])?;
     remaining -= chunk_len as u64;
   }
-  file.sync_all()?;
+  durability_coordinator
+    .execute_recoverable_file_barrier(file, NativeFileBarrierKind::Full, data_size)
+    .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
   Ok(())
 }

@@ -32,6 +32,10 @@ fn write_record_size(hash_length: usize) -> usize {
 /// Per-void-record size: version(1) + offset(8) + size(4) = 13 bytes.
 const VOID_RECORD_SIZE: usize = 1 + 8 + 4;
 
+pub fn serialized_size(write_count: usize, void_count: usize, hash_length: usize) -> usize {
+  HOT_TAIL_HEADER_SIZE + write_count * write_record_size(hash_length) + void_count * VOID_RECORD_SIZE
+}
+
 /// A descriptive void record carried in the hot tail. Pure data — its
 /// existence in the hot tail tells the runtime that the bytes at
 /// `(offset, offset + size)` are reclaimable.
@@ -51,8 +55,7 @@ pub struct HotTailPayload {
 
 /// Serialize the hot tail payload (writes + voids) into a single byte buffer.
 pub fn serialize_hot_tail(payload: &HotTailPayload, hash_length: usize) -> Vec<u8> {
-  let wsize = write_record_size(hash_length);
-  let total = HOT_TAIL_HEADER_SIZE + payload.writes.len() * wsize + payload.voids.len() * VOID_RECORD_SIZE;
+  let total = serialized_size(payload.writes.len(), payload.voids.len(), hash_length);
 
   let mut buf = Vec::with_capacity(total);
   buf.extend_from_slice(&HOT_TAIL_MAGIC);

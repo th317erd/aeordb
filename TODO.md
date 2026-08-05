@@ -98,8 +98,9 @@
       - [x] Route v3 A/B header publication and read-back through the coordinator/platform adapter.
       - [x] Give initial-header publication, AppendWriter, DiskKVStore, and KV expansion one shared database coordinator sequence space.
       - [x] Remove the competing database-header publication from DiskKVStore expansion finalization.
-      - [ ] Converge transaction, timer, KV flush/resize, direct in-place writes, and shutdown barriers without changing v3 bytes.
-      - [ ] Add architecture gates that prohibit raw durability operations outside the coordinator/platform adapter allowlist.
+      - [x] Converge transaction, timer, KV flush/resize, direct in-place writes, and shutdown barriers without changing v3 bytes.
+      - [x] Add architecture gates that prohibit raw durability operations outside the coordinator/platform adapter allowlist.
+      - [ ] Activate bounded multi-waiter grouping in the live authority owner; facade-level grouping alone is not production group commit.
     - [ ] P2a-3: persist latch/spill/repair authority and converge startup, repair, shutdown, and downgrade gates.
   - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.

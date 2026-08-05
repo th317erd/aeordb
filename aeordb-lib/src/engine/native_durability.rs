@@ -82,7 +82,7 @@ impl NativeDurabilityError {
     Self { operation, class: NativeDurabilityErrorClass::Io, message: source.to_string(), source: Some(source) }
   }
 
-  fn operation_io(operation: NativeDurabilityOperation, source: io::Error) -> Self {
+  pub(crate) fn operation_io(operation: NativeDurabilityOperation, source: io::Error) -> Self {
     if is_unsupported_io(&source) {
       Self { operation, class: NativeDurabilityErrorClass::Unsupported, message: source.to_string(), source: Some(source) }
     } else {

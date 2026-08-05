@@ -1076,42 +1076,50 @@ impl DiskKVStore {
   /// the engine after operations that change void state but don't touch
   /// the KV write_buffer (e.g., GC sweep that only registers voids).
   pub fn force_flush_hot_buffer(&mut self) -> EngineResult<()> {
-    if !self.hot_tail_enabled {
-      return Ok(());
+    if self.prepare_hot_tail_dependency(true)? {
+      self.sync_data_barrier(self.pending_hot_tail_bytes())?;
+      self.complete_hot_tail_dependency();
     }
-    let hash_length = self.hash_algo.hash_length();
-    let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
-    self.sanitize_pending_voids("force hot-tail flush");
-    let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
-    let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
-    self.db_file.set_len(end)?;
-    self.sync_data_barrier(0)?;
     Ok(())
   }
 
   /// Flush the hot buffer to the hot tail at the end of the database file.
   pub fn flush_hot_buffer(&mut self) -> EngineResult<()> {
-    if self.hot_buffer.is_empty() || !self.hot_tail_enabled {
-      return Ok(());
+    if self.prepare_hot_tail_dependency(false)? {
+      self.sync_data_barrier(self.pending_hot_tail_bytes())?;
+      self.complete_hot_tail_dependency();
     }
 
-    let hash_length = self.hash_algo.hash_length();
-
-    // Collect ALL entries that need to be in the hot tail:
-    // everything in the write buffer (these haven't been flushed to pages yet)
-    let all_hot: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
-
-    // Include the current void snapshot — the engine keeps `pending_voids`
-    // in sync with VoidManager state via `set_pending_voids` whenever the
-    // void set changes (GC sweep, void consumption, etc.).
-    self.sanitize_pending_voids("hot-buffer flush");
-    let payload = hot_tail::HotTailPayload { writes: all_hot, voids: self.pending_voids.clone() };
-    let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
-    self.db_file.set_len(end)?; // Truncate stale trailing data
-    self.sync_data_barrier(0)?;
-    self.hot_buffer.clear();
-
     Ok(())
+  }
+
+  pub(crate) fn pending_hot_tail_bytes(&self) -> u64 {
+    if !self.hot_tail_enabled {
+      return 0;
+    }
+    hot_tail::serialized_size(self.write_buffer.len(), self.pending_voids.len(), self.hash_algo.hash_length()) as u64
+  }
+
+  pub(crate) fn prepare_hot_tail_dependency(&mut self, force: bool) -> std::io::Result<bool> {
+    if !self.hot_tail_enabled || (!force && self.hot_buffer.is_empty()) {
+      return Ok(false);
+    }
+
+    self.sanitize_pending_voids(if force { "force hot-tail dependency" } else { "hot-buffer dependency" });
+    let payload = hot_tail::HotTailPayload { writes: self.write_buffer.values().cloned().collect(), voids: self.pending_voids.clone() };
+    let bytes = hot_tail::serialize_hot_tail(&payload, self.hash_algo.hash_length());
+    let end = self
+      .hot_tail_offset
+      .checked_add(bytes.len() as u64)
+      .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "hot-tail end offset overflowed"))?;
+    self.db_file.seek(SeekFrom::Start(self.hot_tail_offset))?;
+    self.db_file.write_all(&bytes)?;
+    self.db_file.set_len(end)?;
+    Ok(true)
+  }
+
+  pub(crate) fn complete_hot_tail_dependency(&mut self) {
+    self.hot_buffer.clear();
   }
 
   /// Number of entries in the hot buffer.

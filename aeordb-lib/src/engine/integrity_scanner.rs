@@ -174,7 +174,7 @@ mod tests {
       file.seek(SeekFrom::Start(file_size / 2)).unwrap();
       let garbage: Vec<u8> = (0..64).map(|i: u8| i.wrapping_mul(0x37)).collect();
       file.write_all(&garbage).unwrap();
-      file.sync_all().unwrap();
+      crate::engine::native_durability::sync_file_all_native(&file).unwrap();
     }
 
     // Delete KV to force rebuild from the now-corrupt file

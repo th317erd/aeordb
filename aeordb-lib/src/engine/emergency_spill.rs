@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::durability::sync_parent_dir;
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::native_durability::sync_file_all_native;
 
 pub const EMERGENCY_SPILL_FORMAT: &str = "aeordb-emergency-spill-v1";
 pub const EMERGENCY_SPILL_APPLIED_FORMAT: &str = "aeordb-emergency-spill-applied-v1";
@@ -210,7 +211,7 @@ fn apply_one_wal_tail(db_path: &Path, wal_tail_path: &Path, copy_start: u64) -> 
     db_file.seek(SeekFrom::Start(copy_start + existing_overlap as u64))?;
     db_file.write_all(remaining)?;
   }
-  db_file.sync_all()?;
+  sync_file_all_native(&db_file).map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
   sync_parent_dir(db_path)?;
 
   Ok((existing_overlap as u64, remaining.len() as u64))
@@ -219,7 +220,7 @@ fn apply_one_wal_tail(db_path: &Path, wal_tail_path: &Path, copy_start: u64) -> 
 fn write_durable_file(path: &Path, bytes: &[u8]) -> EngineResult<()> {
   let mut file = fs::File::create(path)?;
   file.write_all(bytes)?;
-  file.sync_all()?;
+  sync_file_all_native(&file).map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
   sync_parent_dir(path)?;
   Ok(())
 }

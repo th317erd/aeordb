@@ -437,14 +437,42 @@ pub fn write_header_to_inactive_slot_coordinated(
   let bytes = header.serialize();
   let target_slot = 1 - active_slot;
   let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
-  publish_v3_header_slot(file, slot_offset, &bytes, None, coordinator)
+  publish_v3_header_slot(file, slot_offset, &bytes, V3HeaderDependency::None, coordinator)
 }
 
-fn publish_v3_header_slot(
-  file: &File,
+pub(crate) fn write_header_to_inactive_slot_with_dependency<F>(
+  file: &mut File,
+  header: &mut FileHeader,
+  active_slot: usize,
+  coordinator: &DurabilityCoordinator,
+  estimated_dependency_bytes: u64,
+  mut dependency: F,
+) -> EngineResult<()>
+where
+  F: FnMut() -> std::io::Result<()>,
+{
+  if active_slot > 1 {
+    return Err(EngineError::InvalidInput(format!("v3 active header slot must be 0 or 1, got {active_slot}")));
+  }
+  header.sequence = header.sequence.wrapping_add(1);
+
+  let bytes = header.serialize();
+  let target_slot = 1 - active_slot;
+  let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
+  publish_v3_header_slot(
+    file,
+    slot_offset,
+    &bytes,
+    V3HeaderDependency::Callback { estimated_bytes: estimated_dependency_bytes, action: &mut dependency },
+    coordinator,
+  )
+}
+
+fn publish_v3_header_slot<'a>(
+  file: &'a File,
   slot_offset: u64,
-  bytes: &[u8; FILE_HEADER_SIZE],
-  dependency: Option<(u64, &[u8])>,
+  bytes: &'a [u8; FILE_HEADER_SIZE],
+  dependency: V3HeaderDependency<'a>,
   coordinator: &DurabilityCoordinator,
 ) -> EngineResult<()> {
   let plan = DurabilityCommitPlan::new(
@@ -459,7 +487,7 @@ fn publish_v3_header_slot(
     ],
   )
   .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
-  let estimated_bytes = FILE_HEADER_SIZE as u64 + dependency.map(|(_, bytes)| bytes.len() as u64).unwrap_or(0);
+  let estimated_bytes = FILE_HEADER_SIZE as u64 + dependency.estimated_bytes();
   let ticket = coordinator.admit_sized(plan, estimated_bytes).map_err(coordinator_error)?;
   let mut executor = V3HeaderPublicationExecutor { file, slot_offset, bytes, dependency };
   coordinator.execute_group(&[ticket], &mut executor).map_err(coordinator_error)?;
@@ -472,6 +500,22 @@ fn publish_v3_header_slot(
   }
 }
 
+enum V3HeaderDependency<'a> {
+  None,
+  Positional { offset: u64, bytes: &'a [u8] },
+  Callback { estimated_bytes: u64, action: &'a mut dyn FnMut() -> std::io::Result<()> },
+}
+
+impl V3HeaderDependency<'_> {
+  fn estimated_bytes(&self) -> u64 {
+    match self {
+      Self::None => 0,
+      Self::Positional { bytes, .. } => bytes.len() as u64,
+      Self::Callback { estimated_bytes, .. } => *estimated_bytes,
+    }
+  }
+}
+
 fn coordinator_error(error: crate::engine::durability_coordinator::DurabilityCoordinatorError) -> EngineError {
   EngineError::DurabilityFailure(error.to_string())
 }
@@ -480,7 +524,7 @@ struct V3HeaderPublicationExecutor<'a> {
   file: &'a File,
   slot_offset: u64,
   bytes: &'a [u8; FILE_HEADER_SIZE],
-  dependency: Option<(u64, &'a [u8])>,
+  dependency: V3HeaderDependency<'a>,
 }
 
 impl DurabilityGroupExecutor for V3HeaderPublicationExecutor<'_> {
@@ -488,9 +532,12 @@ impl DurabilityGroupExecutor for V3HeaderPublicationExecutor<'_> {
 
   fn execute_group(&mut self, _sequences: &[u64], operation: DurabilityOperation) -> Result<(), Self::Error> {
     match operation {
-      DurabilityOperation::DependencyAppend => match self.dependency {
-        Some((offset, bytes)) => write_file_at_native(self.file, offset, bytes),
-        None => Ok(()),
+      DurabilityOperation::DependencyAppend => match &mut self.dependency {
+        V3HeaderDependency::None => Ok(()),
+        V3HeaderDependency::Positional { offset, bytes } => write_file_at_native(self.file, *offset, bytes),
+        V3HeaderDependency::Callback { action, .. } => {
+          action().map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::WriteAt, error))
+        }
       },
       DurabilityOperation::HeaderAb => Ok(()),
       DurabilityOperation::DataBarrier | DurabilityOperation::AuthorityBarrier => sync_file_data_native(self.file),
@@ -520,5 +567,5 @@ pub fn write_initial_header_coordinated(file: &mut File, header: &mut FileHeader
   let zero = [0u8; FILE_HEADER_SIZE];
   header.sequence = 1; // start at 1 so any "all zeros" slot reads as older
   let bytes = header.serialize();
-  publish_v3_header_slot(file, 0, &bytes, Some((FILE_HEADER_SIZE as u64, &zero)), coordinator)
+  publish_v3_header_slot(file, 0, &bytes, V3HeaderDependency::Positional { offset: FILE_HEADER_SIZE as u64, bytes: &zero }, coordinator)
 }

@@ -4,7 +4,10 @@ use aeordb::engine::durability_coordinator::{
   NativeFileBarrierKind, OsErrorClass, RetryClass, classify_io_error, classify_native_durability_error,
 };
 use aeordb::engine::native_durability::{platform_file_identity, preallocate_file};
+use aeordb::engine::entry_type::EntryType;
+use aeordb::engine::kv_store::KV_TYPE_CHUNK;
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::{DirectoryOps, RequestContext};
 
 #[derive(Default)]
 struct RecordingExecutor {
@@ -519,6 +522,72 @@ fn storage_engine_uses_one_sequence_space_for_kv_dependencies_and_header_authori
   assert!(snapshot.hard_frontier >= 3, "KV and header work did not share one sequence space: {snapshot:?}");
   assert!(snapshot.ledger.iter().any(|entry| entry.operation == DurabilityOperation::DataBarrier));
   assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::AuthorityReadback);
+}
+
+#[test]
+fn acknowledged_transaction_is_one_hard_commit_instead_of_separate_soft_barriers() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("one-transaction-commit.aeordb");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+  let before = engine.durability_snapshot().unwrap();
+
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/one.txt", b"one transaction", Some("text/plain")).unwrap();
+
+  let after = engine.durability_snapshot().unwrap();
+  assert_eq!(after.next_sequence, before.next_sequence + 1, "one acknowledged transaction must consume exactly one durability ticket");
+  let delta = &after.ledger[before.ledger.len()..];
+  assert_eq!(
+    delta.iter().map(|entry| entry.operation).collect::<Vec<_>>(),
+    header_commit_plan().operations(),
+    "the transaction must execute dependency durability and header authority as one hard plan"
+  );
+  assert!(delta.iter().all(|entry| entry.succeeded));
+}
+
+#[test]
+fn timer_flush_is_one_hard_commit_and_not_two_soft_barriers_plus_authority() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("one-timer-commit.aeordb");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+  let value = b"timer dependency";
+  let key = engine.compute_hash(value).unwrap();
+  engine.store_entry_typed(EntryType::Chunk, &key, value, KV_TYPE_CHUNK).unwrap();
+  let before = engine.durability_snapshot().unwrap();
+
+  engine.try_flush_hot_buffer();
+
+  let after = engine.durability_snapshot().unwrap();
+  assert_eq!(after.next_sequence, before.next_sequence + 1, "one timer flush must consume exactly one durability ticket");
+  let delta = &after.ledger[before.ledger.len()..];
+  assert_eq!(delta.iter().map(|entry| entry.operation).collect::<Vec<_>>(), header_commit_plan().operations());
+  assert!(delta.iter().all(|entry| entry.succeeded));
+}
+
+#[test]
+fn production_code_cannot_call_raw_file_barriers_outside_the_native_adapter() {
+  fn visit(directory: &std::path::Path, violations: &mut Vec<String>) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        visit(&path, violations);
+      } else if path.extension().and_then(|value| value.to_str()) == Some("rs")
+        && path.file_name().and_then(|value| value.to_str()) != Some("native_durability.rs")
+      {
+        for (line_number, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
+          let trimmed = line.trim_start();
+          if !trimmed.starts_with("//") && (line.contains(".sync_data()") || line.contains(".sync_all()")) {
+            violations.push(format!("{}:{}:{trimmed}", path.display(), line_number + 1));
+          }
+        }
+      }
+    }
+  }
+
+  let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let mut violations = Vec::new();
+  visit(&package.join("src/engine"), &mut violations);
+  visit(&package.join("../aeordb-cli/src"), &mut violations);
+  assert!(violations.is_empty(), "raw file barriers bypass the native durability adapter:\n{}", violations.join("\n"));
 }
 
 #[test]

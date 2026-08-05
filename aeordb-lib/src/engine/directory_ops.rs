@@ -3409,7 +3409,7 @@ mod engine_file_stream_tests {
       let target = header.kv_block_offset + header.kv_block_length;
       header.hot_tail_offset = target;
       crate::engine::file_header::write_header_to_inactive_slot(&mut f, &mut header, active).unwrap();
-      f.sync_data().unwrap();
+      crate::engine::native_durability::sync_file_data_native(&f).unwrap();
       target
     };
     assert!(
