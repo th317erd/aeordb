@@ -80,6 +80,7 @@ impl NativeDurabilityError {
     }
   }
 
+  #[cfg(unix)]
   fn unsupported(operation: NativeDurabilityOperation, message: impl Into<String>) -> Self {
     Self { operation, class: NativeDurabilityErrorClass::Unsupported, message: message.into(), source: None }
   }
