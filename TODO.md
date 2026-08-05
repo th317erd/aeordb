@@ -47,7 +47,7 @@
     - [x] Decode ScopeDefinitionV1 and prove canonical owner/glob semantics and bounds.
     - [x] Decode ParserResolutionPlanV1 and prove candidate/context/MIME semantics and bounds.
     - [x] Decode SourceSelectorV1 and prove metadata/path/regex/mapper semantics and bounds.
-    - [ ] Decode ValueStoreDefinitionV1 and close child/dependency ordinal invariants.
+    - [x] Decode ValueStoreDefinitionV1 and close child/dependency ordinal invariants.
     - [ ] Decode ConverterDefinitionV1 and FieldIndexDefinitionV1.
     - [ ] Decode immutable index manifests, ordered pages, NVT, journal, checkpoint, and APOS artifacts.
     - [ ] Decode the complete GC artifact, workspace, Void, audit, control, cutover, and SystemFamily families.

@@ -15,6 +15,7 @@ pub mod parser_plan;
 pub mod reader;
 pub mod scope;
 pub mod source_selector;
+pub mod value_store;
 
 #[cfg(test)]
 mod tests {

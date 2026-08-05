@@ -336,3 +336,13 @@
 - **Malformed proof:** focused mutations reject count amplification, unknown metadata IDs, malformed regex, item-count disagreement, zero mapper ordinals, mapper-policy host mismatch, malformed canonical arguments, and one-byte-over-cap input with frozen classes.
 - **Green proof:** all fourteen independent selector fixtures pass; the complete v4 target passes 20 tests, the locked library check passes, and `git diff --check` is clean.
 - **Boundary:** no selector evaluation, regex search, plugin invocation, writer, migration, route, or database behavior changed.
+
+## P1a-8 ValueStore Definition Reader
+
+- **Entry:** `17e8367`; branch and remote matched, with unrelated user paths excluded.
+- **Territory:** fourteen independent parent fixtures combine ScopeId, field name, source selector, parser plan, dependency table, semantic-family IDs, and resource limits. Semantic state, value-store/index runtime, fallback, planning, and migration are downstream consumers, none activated here.
+- **Red proof:** the focused fixture target failed to compile on the absent `engine::v4::value_store` module before production behavior existed.
+- **Implementation:** added a borrowed 512 KiB-bounded parent decoder. It validates all child caps and checked offsets before slicing, invokes each nested decoder, recomputes ValueStoreId, closes metadata and ordinary field semantics, finite corrected versus migration sentinel limits, and every parser/MIME/regex/mapper dependency ordinal, role, ABI, executor, artifact, policy family, and usage bit.
+- **Malformed proof:** focused mutations reject zero ScopeId, oversized child declarations, metadata-name disagreement, mixed semantic families, unbounded corrected limits, unresolved nested ordinals, and one-byte-over-cap input with frozen classes.
+- **Green proof:** all fourteen independent ValueStore fixtures pass; the complete v4 target passes 22 tests, locked library `cargo check` passes, and `git diff --check` is clean.
+- **Boundary:** no definition writer/compiler, dependency execution, semantic publication, index runtime, migration, route, or database behavior changed.

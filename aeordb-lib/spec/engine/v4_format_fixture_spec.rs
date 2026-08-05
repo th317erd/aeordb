@@ -11,6 +11,7 @@ use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_p
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
 use aeordb::engine::v4::scope::{ScopeMatchingMode, decode_scope_definition};
 use aeordb::engine::v4::source_selector::{SourceSelectorKind, decode_source_selector};
+use aeordb::engine::v4::value_store::decode_value_store_definition;
 use aeordb::engine::HashAlgorithm;
 use serde::Deserialize;
 
@@ -189,6 +190,94 @@ fn every_source_selector_fixture_matches_the_independent_oracle() {
     };
     assert_eq!(format!("selector:{kind}:items={}", selector.item_count), row.expected, "fixture {}", row.id);
   }
+}
+
+#[test]
+fn every_value_store_definition_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "value-store-definition-v1").collect();
+  assert_eq!(rows.len(), 14);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let definition = decode_value_store_definition(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    let selector_kind = match definition.selector.kind {
+      SourceSelectorKind::Metadata => 1,
+      SourceSelectorKind::JsonPath => 2,
+      SourceSelectorKind::PluginMapper => 3,
+      SourceSelectorKind::AlwaysMissingV0 => 4,
+    };
+    assert_eq!(
+      format!(
+        "value-store:field={}:selector={selector_kind}:dependencies={}",
+        definition.field_name,
+        definition.dependencies.records.len()
+      ),
+      row.expected,
+      "fixture {}",
+      row.id
+    );
+    assert_eq!(hex::encode(definition.value_store_id), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn value_store_definition_rejects_identity_child_semantic_and_dependency_corruption() {
+  let root = fixture_root();
+  let metadata = fs::read(root.join("value-store-definition-v1/avst-blake3-256-metadata-hash-corrected-valid.bin")).unwrap();
+
+  let mut zero_scope = metadata.clone();
+  zero_scope[32..64].fill(0);
+  assert_eq!(
+    decode_value_store_definition(&zero_scope, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let mut oversized_field = metadata.clone();
+  oversized_field[64..68].copy_from_slice(&4_097u32.to_le_bytes());
+  assert_eq!(
+    decode_value_store_definition(&oversized_field, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut wrong_metadata_name = metadata.clone();
+  wrong_metadata_name[144..149].copy_from_slice(b"@size");
+  assert_eq!(
+    decode_value_store_definition(&wrong_metadata_name, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut mixed_family = metadata.clone();
+  mixed_family[90..92].copy_from_slice(&2u16.to_le_bytes());
+  assert_eq!(
+    decode_value_store_definition(&mixed_family, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut unbounded_corrected = metadata;
+  unbounded_corrected[112..120].copy_from_slice(&u64::MAX.to_le_bytes());
+  assert_eq!(
+    decode_value_store_definition(&unbounded_corrected, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mapper = fs::read(root.join("value-store-definition-v1/avst-blake3-256-mapper-corrected-valid.bin")).unwrap();
+  let fixed_start = 64;
+  let field_start = 144;
+  let field_length = test_u32(&mapper, fixed_start) as usize;
+  let selector_length = test_u32(&mapper, fixed_start + 4) as usize;
+  let parser_start = field_start + field_length + selector_length;
+  let mut unresolved_ordinal = mapper;
+  unresolved_ordinal[parser_start + 56..parser_start + 60].copy_from_slice(&99u32.to_le_bytes());
+  assert_eq!(
+    decode_value_store_definition(&unresolved_ordinal, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  assert_eq!(
+    decode_value_store_definition(&vec![0; 512 * 1_024 + 1], HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
 }
 
 #[test]
@@ -495,6 +584,10 @@ fn hash_algorithm(name: &str) -> HashAlgorithm {
     "sha512" => HashAlgorithm::Sha512,
     other => panic!("unsupported fixture hash algorithm {other}"),
   }
+}
+
+fn test_u32(bytes: &[u8], offset: usize) -> u32 {
+  u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
 fn repair_entity_header_crc(entity: &mut [u8], hash_width: usize) {
