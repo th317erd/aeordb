@@ -18,12 +18,12 @@
       - [x] Freeze ConverterDefinitionV1 and every corrected/migration registry row.
       - [x] Freeze FieldIndexDefinitionV1 strategy/operation combinations and cross-record invariants.
       - [x] Freeze ScopeCatalog, ValueStore, FieldIndex, and FieldNvt immutable manifest bodies.
-    - [ ] Freeze index pages, NVT tiles, journals, checkpoints, and remaining persistent families.
+    - [x] Freeze index pages, NVT tiles, journals, checkpoints, and remaining persistent families.
       - [x] Freeze ArtifactDirectoryNodeV1 and every ordered page/record role.
       - [x] Freeze NvtTileV1 sparse-hint semantics and corruption fallback contract.
       - [x] Freeze MutationJournalSegmentV1 and IndexTaskCheckpointV1.
       - [x] Freeze APOS v1 canonical position tokens and malformed-input behavior.
-      - [ ] Freeze the complete Round 13 `GcArtifactV1` family with the normative Round 15 lifecycle corrections.
+      - [x] Freeze the complete Round 13 `GcArtifactV1` family with the normative Round 15 lifecycle corrections.
         - [x] Correct the pre-writer registry to 34 kinds and six A/B controls, including logical-root lifecycle authority.
         - [x] Freeze the AGCA envelope and physical-incarnation identity.
         - [x] Freeze quarantine, corrected logical root-lifecycle/expiry, physical-inventory, and retirement artifacts.
@@ -36,6 +36,11 @@
         - [x] Freeze migration, durability, spill, and side-by-side cutover controls.
       - [x] Freeze the corrected expanded `SystemFamilyRegistryV1` fixture and fingerprints.
       - [x] Freeze shared persistent enum/capability registries, remaining maxima, and complete malformed mutation coverage.
+  - [x] P0c: generate machine contract constants and collision/architecture gates from the frozen registry.
+    - [x] Add deterministic Rust generation and stale-output checking.
+    - [x] Generate capability, EntryType/KV, shared-enum, format-cap, and SystemFamily constants.
+    - [x] Freeze route-class, configuration-property, dynamic-record, hard-transition, and cleanup-result ownership registries.
+    - [x] Compile and test the generated contract module without activating v4 writers.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

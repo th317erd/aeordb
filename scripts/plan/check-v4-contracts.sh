@@ -126,10 +126,14 @@ fi
 
 reference_root="$repo_root/tools/v4-reference"
 fixture_root="$repo_root/aeordb-lib/spec/fixtures/v4"
+generated_contract="$repo_root/aeordb-lib/src/engine/v4/contract_generated.rs"
+architecture_registry="$fixture_root/architecture-contract-registry.json"
 [[ -f "$reference_root/Cargo.toml" ]] || fail "missing independent v4 reference Cargo manifest"
 [[ -f "$reference_root/src/main.rs" ]] || fail "missing independent v4 reference implementation"
 [[ -f "$fixture_root/format-contract-registry.json" ]] || fail "missing v4 format contract registry"
 [[ -f "$fixture_root/format-fixture-manifest.json" ]] || fail "missing v4 format fixture manifest"
+[[ -f "$architecture_registry" ]] || fail "missing v4 architecture contract registry"
+[[ -f "$generated_contract" ]] || fail "missing generated v4 Rust contract constants"
 
 contract_registry="$fixture_root/format-contract-registry.json"
 fixture_manifest="$fixture_root/format-fixture-manifest.json"
@@ -223,6 +227,32 @@ jq -e --arg source_sha "$(sha256sum "$contract_registry" | awk '{print $1}')" \
   .reference_tool.production_dependencies == [] and
   .reference_tool.tests_passed >= 142
 ' "$registry_report" >/dev/null || fail "P0b collision/ID/capability registry report is stale or incomplete"
+
+p0c_report="$evidence_dir/p0c-machine-contract-report.json"
+[[ -f "$p0c_report" ]] || fail "missing P0c machine contract report"
+jq -e \
+  --arg architecture_sha "$(sha256sum "$architecture_registry" | awk '{print $1}')" \
+  --arg generated_sha "$(sha256sum "$generated_contract" | awk '{print $1}')" \
+  --argjson generated_bytes "$(stat -c %s "$generated_contract")" '
+  .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
+  .landing_unit == "P0c" and
+  .architecture_registry_sha256 == $architecture_sha and
+  .generated_rust_sha256 == $generated_sha and
+  .generated_rust_bytes == $generated_bytes and
+  .counts == {
+    "route_classes":7,"configuration_properties":41,"dynamic_records":8,
+    "hard_transitions":12,"cleanup_result_classes":4
+  } and
+  .proof.reference_tests_passed >= 144 and
+  .proof.production_tests_passed >= 3 and
+  .proof.strict_reference_clippy == "pass" and
+  .proof.rustfmt_check == "pass" and
+  .proof.fixture_cases_verified == 436 and
+  .proof.route_registrations_inventoried == 93 and
+  .proof.documentation_pages_inventoried == 36 and
+  .proof.v4_writers_activated == false and
+  (.failure_cases | length) >= 7
+' "$p0c_report" >/dev/null || fail "P0c machine contract report is stale or incomplete"
 
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
@@ -692,6 +722,10 @@ reference_target=${AEORDB_V4_REFERENCE_TARGET_DIR:-/tmp/codex/aeordb-v4-referenc
 CARGO_TARGET_DIR="$reference_target" cargo run -j "$reference_jobs" --locked --quiet \
   --manifest-path "$reference_root/Cargo.toml" -- verify "$fixture_root" \
   || fail "independent v4 reference verification failed"
+CARGO_TARGET_DIR="$reference_target" cargo run -j "$reference_jobs" --locked --quiet \
+  --manifest-path "$reference_root/Cargo.toml" -- check-contracts \
+  "$contract_registry" "$system_family_manifest" "$architecture_registry" "$generated_contract" \
+  || fail "generated v4 Rust contract constants are stale"
 
 printf 'v4 P0 contract evidence: PASS (%s routes, %s docs, entry %s)\n' \
   "$manifest_route_count" "$(wc -l <"$docs_manifest")" "$entry_commit"

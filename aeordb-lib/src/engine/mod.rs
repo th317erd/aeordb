@@ -88,6 +88,7 @@ pub mod task_queue;
 pub mod task_worker;
 pub mod tree_walker;
 pub mod user;
+pub mod v4;
 pub mod verify;
 pub mod version_access;
 pub mod version_manager;

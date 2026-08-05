@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
-- **Status:** P0b complete; P0c in progress
-- **Current landing unit:** P0c machine contract registry and generated constants
-- **Entry commit:** `877a270ca69b5b45a9617a3e7cb7ba9bc4bb6e31`
-- **Last green commit:** P0b-2f SystemFamily registry `877a270ca69b5b45a9617a3e7cb7ba9bc4bb6e31`
+- **Status:** P0b and P0c complete; P1a next
+- **Current landing unit:** P1a bounded common readers and malformed fixture decoding
+- **Entry commit:** `7a39204a493fae890058e27bf61e0ab7a8e616cc`
+- **Last green commit:** P0b final persistent registry closure `7a39204a493fae890058e27bf61e0ab7a8e616cc`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,16 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** generate production-facing Rust constants and architecture assertions from the independently frozen registry, with digest-based stale-output failure
+- **Next action:** implement v3/v4 header dispatch and bounded common production readers against the independent fixture corpus
+
+## P0c Machine Contract Registry
+
+- **Red proof:** the campaign gate failed with `missing v4 architecture contract registry` after generated persistent constants were introduced but before route/config/dynamic/transition/cleanup contracts existed.
+- **Frozen architecture:** seven route classes, 41 runtime/lifecycle properties, eight dynamic-record families, twelve hard transitions, and four cleanup-result classes now have unique IDs and exact ownership/failure metadata.
+- **Generation:** the independent tool emits production Rust constants, mechanical environment/CLI names, source fingerprints, and a stale-output check from the hand-authored persistent, SystemFamily, and architecture sources.
+- **Failure proof:** independent tests reject collisions, missing dynamic retention ownership, and absent hard-transition crash behavior. Production tests verify checked-in source digests, permanent-ID uniqueness, frozen counts, and mechanical configuration names.
+- **Green commands:** independent `cargo test -j 4 --locked` passed 144 tests; strict Clippy passed; production `engine::v4::tests` passed 3 tests; `cargo fmt --all -- --check` passed; and the campaign gate verified all 436 fixtures, 93 current routes, and 36 docs.
+- **Boundary:** generated identities are available to later production readers, but this landing activates no v4 reader, writer, route, migration, GC, index, or database behavior.
 
 ## P0b-2a Core Framing and Semantic Authority
 

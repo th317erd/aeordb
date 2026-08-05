@@ -1,4 +1,5 @@
 mod config;
+mod contract_gen;
 mod core;
 mod definitions;
 mod dependency;
@@ -219,15 +220,33 @@ struct SelectedSlot {
 
 fn main() -> DynResult<()> {
   let mut args = env::args().skip(1);
-  let command = args.next().ok_or("usage: aeordb-v4-reference <generate|verify> <fixture-root>")?;
-  let fixture_root = PathBuf::from(args.next().ok_or("missing fixture root")?);
-  if args.next().is_some() {
-    return Err("unexpected extra argument".into());
-  }
-
+  let command = args.next().ok_or("usage: aeordb-v4-reference <generate|verify|generate-contracts|check-contracts> <paths...>")?;
   match command.as_str() {
-    "generate" => generate(&fixture_root),
-    "verify" => verify(&fixture_root),
+    "generate" | "verify" => {
+      let fixture_root = PathBuf::from(args.next().ok_or("missing fixture root")?);
+      if args.next().is_some() {
+        return Err("unexpected extra argument".into());
+      }
+      if command == "generate" {
+        generate(&fixture_root)
+      } else {
+        verify(&fixture_root)
+      }
+    }
+    "generate-contracts" | "check-contracts" => {
+      let registry = PathBuf::from(args.next().ok_or("missing contract registry path")?);
+      let system_family = PathBuf::from(args.next().ok_or("missing SystemFamily manifest path")?);
+      let architecture = PathBuf::from(args.next().ok_or("missing architecture registry path")?);
+      let output = PathBuf::from(args.next().ok_or("missing generated Rust output path")?);
+      if args.next().is_some() {
+        return Err("unexpected extra argument".into());
+      }
+      if command == "generate-contracts" {
+        contract_gen::generate(&registry, &system_family, &architecture, &output)
+      } else {
+        contract_gen::check(&registry, &system_family, &architecture, &output)
+      }
+    }
     _ => Err(format!("unknown command: {command}").into()),
   }
 }
