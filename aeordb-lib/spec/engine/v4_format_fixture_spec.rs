@@ -8,13 +8,17 @@ use aeordb::engine::v4::entity::decode_whole_entity;
 use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_field_index_definition};
 use aeordb::engine::v4::gc::{
   GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_active_control, decode_gc_artifact_envelope, decode_physical_incarnation,
-  select_gc_active_control,
+  immutable_gc_artifact_key, select_gc_active_control,
 };
 use aeordb::engine::v4::gc_mark::{
   GcMarkArtifactV1, decode_gc_mark_artifact, decode_mark_workspace_manifest, decode_mark_workspace_object,
   validate_mark_checkpoint_workspace, validate_mark_mutation_journal_chain, validate_mark_workspace_object,
 };
 use aeordb::engine::v4::gc_state::{GcStateArtifactV1, decode_gc_state_artifact, validate_gc_directory_page};
+use aeordb::engine::v4::gc_void::{
+  SweepVoidArtifactV1, decode_sweep_void_artifact, validate_sweep_receipt_closure, validate_void_claim_source,
+  validate_void_directory_child, validate_void_manifest_root, validate_void_settlement_closure,
+};
 use aeordb::engine::v4::index_artifact::{
   IndexControlOrManifestV1, decode_active_pointer, decode_index_control_or_manifest, select_active_pointer,
 };
@@ -1783,6 +1787,334 @@ fn gc_mark_workspace_rejects_semantic_corruption_and_wrong_closure() {
 }
 
 #[test]
+fn every_sweep_and_void_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(is_sweep_void_fixture).collect();
+  assert_eq!(rows.len(), 28);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let artifact = decode_sweep_void_artifact(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    assert_eq!(artifact.summary(), row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(artifact.key()), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn sweep_and_void_closure_rejects_detached_or_corrupt_authority() {
+  let root = fixture_root();
+  let read = |name: &str| fs::read(root.join(format!("gc-artifact-v1/agca-blake3-256-{name}.bin"))).unwrap();
+
+  let proposal = read("sweep-proposal");
+  let receipt = read("sweep-commit-receipt");
+  let recovered = read("sweep-recovered-receipt");
+  let source_page = read("void-extent-page-source");
+  let source_directory = read("void-free-directory-source");
+  let source_manifest = read("void-catalog-source");
+  let claim = read("void-claim");
+  let claim_directory = read("void-claims-directory");
+  let outstanding_manifest = read("void-catalog-outstanding");
+  let remaining_page = read("void-extent-page-remaining");
+  let remaining_directory = read("void-free-directory-remaining");
+  let settled_manifest = read("void-catalog-settled");
+  let settlement = read("void-claim-settlement");
+
+  let proposal = decode_sweep_void_artifact(&proposal, HashAlgorithm::Blake3_256).unwrap();
+  let receipt = decode_sweep_void_artifact(&receipt, HashAlgorithm::Blake3_256).unwrap();
+  let recovered = decode_sweep_void_artifact(&recovered, HashAlgorithm::Blake3_256).unwrap();
+  let source_page = decode_sweep_void_artifact(&source_page, HashAlgorithm::Blake3_256).unwrap();
+  let source_directory = decode_sweep_void_artifact(&source_directory, HashAlgorithm::Blake3_256).unwrap();
+  let source_manifest = decode_sweep_void_artifact(&source_manifest, HashAlgorithm::Blake3_256).unwrap();
+  let claim = decode_sweep_void_artifact(&claim, HashAlgorithm::Blake3_256).unwrap();
+  let claim_directory = decode_sweep_void_artifact(&claim_directory, HashAlgorithm::Blake3_256).unwrap();
+  let outstanding_manifest = decode_sweep_void_artifact(&outstanding_manifest, HashAlgorithm::Blake3_256).unwrap();
+  let remaining_page = decode_sweep_void_artifact(&remaining_page, HashAlgorithm::Blake3_256).unwrap();
+  let remaining_directory = decode_sweep_void_artifact(&remaining_directory, HashAlgorithm::Blake3_256).unwrap();
+  let settled_manifest = decode_sweep_void_artifact(&settled_manifest, HashAlgorithm::Blake3_256).unwrap();
+  let settlement = decode_sweep_void_artifact(&settlement, HashAlgorithm::Blake3_256).unwrap();
+
+  validate_void_directory_child(&source_directory, &source_page).unwrap();
+  validate_void_manifest_root(&source_manifest, &source_directory).unwrap();
+  validate_void_claim_source(&claim, &source_manifest, &source_page).unwrap();
+  validate_void_directory_child(&claim_directory, &claim).unwrap();
+  validate_void_directory_child(&remaining_directory, &remaining_page).unwrap();
+  validate_void_manifest_root(&outstanding_manifest, &remaining_directory).unwrap();
+  validate_void_manifest_root(&outstanding_manifest, &claim_directory).unwrap();
+  validate_sweep_receipt_closure(&proposal, &receipt, &outstanding_manifest).unwrap();
+  validate_sweep_receipt_closure(&proposal, &recovered, &outstanding_manifest).unwrap();
+  validate_void_settlement_closure(&settlement, &claim, &outstanding_manifest, &settled_manifest).unwrap();
+
+  assert_eq!(
+    validate_void_manifest_root(&settled_manifest, &source_directory).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    validate_sweep_receipt_closure(&proposal, &receipt, &settled_manifest).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut detached_directory_bytes = read("void-free-directory-source");
+  let body = gc_artifact_body_offset(&detached_directory_bytes);
+  let lower_length = test_u32(&detached_directory_bytes, body + 16) as usize;
+  let upper_length = test_u32(&detached_directory_bytes, body + 20) as usize;
+  detached_directory_bytes[body + 80 + lower_length + upper_length + 16] ^= 1;
+  repair_trailing_crc(&mut detached_directory_bytes);
+  let detached_directory = decode_sweep_void_artifact(&detached_directory_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_void_directory_child(&detached_directory, &source_page).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let SweepVoidArtifactV1::VoidExtentPage(page) = source_page else {
+    panic!("expected Void extent page");
+  };
+  assert_eq!(page.total_bytes, 8_195);
+}
+
+#[test]
+fn every_sweep_and_void_fixture_byte_is_integrity_protected() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(is_sweep_void_fixture).collect();
+  assert_eq!(rows.len(), 28);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let algorithm = hash_algorithm(&row.hash_algorithm);
+    for offset in 0..bytes.len() {
+      let mut changed = bytes.clone();
+      changed[offset] ^= 1;
+      assert!(decode_sweep_void_artifact(&changed, algorithm).is_err(), "fixture {} accepted mutation at byte {offset}", row.id);
+    }
+  }
+}
+
+#[test]
+fn sweep_and_void_readers_reject_semantic_corruption_and_amplification() {
+  let root = fixture_root();
+  let read = |name: &str| fs::read(root.join(format!("gc-artifact-v1/agca-blake3-256-{name}.bin"))).unwrap();
+  let hash_width = HashAlgorithm::Blake3_256.hash_length();
+
+  let proposal = read("sweep-proposal");
+  let body = gc_artifact_body_offset(&proposal);
+  let mut wrong_digest = proposal.clone();
+  wrong_digest[body + 32 + hash_width] ^= 1;
+  repair_trailing_crc(&mut wrong_digest);
+  assert_eq!(
+    decode_sweep_void_artifact(&wrong_digest, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::ChecksumOrIntegrityMismatch
+  );
+
+  let mut amplified_proposal = proposal.clone();
+  amplified_proposal[body + 24 + hash_width..body + 28 + hash_width].copy_from_slice(&4_097u32.to_le_bytes());
+  repair_trailing_crc(&mut amplified_proposal);
+  assert_eq!(
+    decode_sweep_void_artifact(&amplified_proposal, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let record_length = 24 + 2 * hash_width;
+  let records = body + 32 + 2 * hash_width;
+  let mut duplicate_candidate = proposal;
+  duplicate_candidate.copy_within(records..records + record_length, records + record_length);
+  repair_blake3_sweep_proposal_digest(&mut duplicate_candidate);
+  repair_trailing_crc(&mut duplicate_candidate);
+  assert_eq!(
+    decode_sweep_void_artifact(&duplicate_candidate, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let mut numeric_order = read("sweep-proposal");
+  let body = gc_artifact_body_offset(&numeric_order);
+  let records = body + 32 + 2 * hash_width;
+  numeric_order.copy_within(records..records + 2 * hash_width, records + record_length);
+  numeric_order[records + 2 * hash_width..records + 2 * hash_width + 8].copy_from_slice(&255u64.to_le_bytes());
+  numeric_order[records + record_length + 2 * hash_width..records + record_length + 2 * hash_width + 8]
+    .copy_from_slice(&256u64.to_le_bytes());
+  repair_blake3_sweep_proposal_digest(&mut numeric_order);
+  repair_trailing_crc(&mut numeric_order);
+  decode_sweep_void_artifact(&numeric_order, HashAlgorithm::Blake3_256).unwrap();
+
+  numeric_order[records + 2 * hash_width..records + 2 * hash_width + 8].copy_from_slice(&256u64.to_le_bytes());
+  numeric_order[records + record_length + 2 * hash_width..records + record_length + 2 * hash_width + 8]
+    .copy_from_slice(&255u64.to_le_bytes());
+  repair_blake3_sweep_proposal_digest(&mut numeric_order);
+  repair_trailing_crc(&mut numeric_order);
+  assert_eq!(
+    decode_sweep_void_artifact(&numeric_order, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let receipt = read("sweep-commit-receipt");
+  let body = gc_artifact_body_offset(&receipt);
+  let mut wrong_totals = receipt.clone();
+  wrong_totals[body + 32 + 2 * hash_width..body + 40 + 2 * hash_width].copy_from_slice(&2u64.to_le_bytes());
+  repair_trailing_crc(&mut wrong_totals);
+  assert_eq!(
+    decode_sweep_void_artifact(&wrong_totals, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut unknown_outcome = receipt;
+  let first_outcome = body + 64 + 2 * hash_width + 24 + 2 * hash_width;
+  unknown_outcome[first_outcome..first_outcome + 2].copy_from_slice(&9u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_outcome);
+  assert_eq!(
+    decode_sweep_void_artifact(&unknown_outcome, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let page = read("void-extent-page-source");
+  let body = gc_artifact_body_offset(&page);
+  let row_length = 32 + 3 * hash_width;
+  let first_offset = test_u64(&page, body + 80);
+  let mut overlap = page.clone();
+  overlap[body + 80 + row_length..body + 88 + row_length].copy_from_slice(&(first_offset + 1).to_le_bytes());
+  repair_trailing_crc(&mut overlap);
+  assert_eq!(
+    decode_sweep_void_artifact(&overlap, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let mut reserved_extent = page;
+  reserved_extent[body + 92..body + 96].copy_from_slice(&1u32.to_le_bytes());
+  repair_trailing_crc(&mut reserved_extent);
+  assert_eq!(
+    decode_sweep_void_artifact(&reserved_extent, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NonzeroReservedOrPadding
+  );
+
+  let catalog = read("void-catalog-source");
+  let body = gc_artifact_body_offset(&catalog);
+  let mut unknown_capability = catalog.clone();
+  unknown_capability[body + 4] ^= 1;
+  repair_trailing_crc(&mut unknown_capability);
+  assert_eq!(
+    decode_sweep_void_artifact(&unknown_capability, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownRequiredCapability
+  );
+
+  let mut count_root_mismatch = catalog;
+  count_root_mismatch[body + 52 + 2 * hash_width..body + 60 + 2 * hash_width].fill(0);
+  repair_trailing_crc(&mut count_root_mismatch);
+  assert_eq!(
+    decode_sweep_void_artifact(&count_root_mismatch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let claim = read("void-claim");
+  let body = gc_artifact_body_offset(&claim);
+  let mut amplified_claim = claim.clone();
+  amplified_claim[body + 48 + hash_width..body + 52 + hash_width].copy_from_slice(&4_097u32.to_le_bytes());
+  repair_trailing_crc(&mut amplified_claim);
+  assert_eq!(
+    decode_sweep_void_artifact(&amplified_claim, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut zero_claim_source = claim.clone();
+  zero_claim_source[body + 48..body + 48 + hash_width].fill(0);
+  repair_trailing_crc(&mut zero_claim_source);
+  assert_eq!(
+    decode_sweep_void_artifact(&zero_claim_source, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let settlement = read("void-claim-settlement");
+  let body = gc_artifact_body_offset(&settlement);
+  let mut invalid_settlement = settlement;
+  invalid_settlement[body + 4..body + 6].copy_from_slice(&2u16.to_le_bytes());
+  repair_trailing_crc(&mut invalid_settlement);
+  assert_eq!(
+    decode_sweep_void_artifact(&invalid_settlement, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let settlement = read("void-claim-settlement");
+  let body = gc_artifact_body_offset(&settlement);
+  let mut count_byte_mismatch = settlement;
+  count_byte_mismatch[body + 16 + 2 * hash_width..body + 20 + 2 * hash_width].fill(0);
+  repair_trailing_crc(&mut count_byte_mismatch);
+  assert_eq!(
+    decode_sweep_void_artifact(&count_byte_mismatch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  for (kind, cap) in [
+    (GcArtifactKindV1::VoidCatalogManifest, 1024 * 1024),
+    (GcArtifactKindV1::GcArtifactDirectoryNode, 4 * 1024 * 1024),
+    (GcArtifactKindV1::VoidExtentPage, 16 * 1024 * 1024),
+    (GcArtifactKindV1::SweepProposal, 16 * 1024 * 1024),
+  ] {
+    let mut over_cap = vec![0; cap + 1];
+    over_cap[6..8].copy_from_slice(&(kind as u16).to_le_bytes());
+    assert_eq!(
+      decode_sweep_void_artifact(&over_cap, HashAlgorithm::Blake3_256).unwrap_err().class(),
+      MalformedInputClass::AllocationAmplification,
+      "kind {}",
+      kind.name()
+    );
+  }
+}
+
+#[test]
+fn void_claim_and_settlement_closure_reconcile_generations_counts_and_bytes() {
+  let root = fixture_root();
+  let read = |name: &str| fs::read(root.join(format!("gc-artifact-v1/agca-blake3-256-{name}.bin"))).unwrap();
+  let source_page_bytes = read("void-extent-page-source");
+  let source_manifest_bytes = read("void-catalog-source");
+  let claim_bytes = read("void-claim");
+  let outstanding_bytes = read("void-catalog-outstanding");
+  let settled_bytes = read("void-catalog-settled");
+  let settlement_bytes = read("void-claim-settlement");
+
+  let source_page = decode_sweep_void_artifact(&source_page_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let source_manifest = decode_sweep_void_artifact(&source_manifest_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let claim = decode_sweep_void_artifact(&claim_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let outstanding = decode_sweep_void_artifact(&outstanding_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let settled = decode_sweep_void_artifact(&settled_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let settlement = decode_sweep_void_artifact(&settlement_bytes, HashAlgorithm::Blake3_256).unwrap();
+  validate_void_claim_source(&claim, &source_manifest, &source_page).unwrap();
+  validate_void_settlement_closure(&settlement, &claim, &outstanding, &settled).unwrap();
+
+  let mut wrong_claim_generation = claim_bytes.clone();
+  wrong_claim_generation[24..32].copy_from_slice(&1u64.to_le_bytes());
+  repair_trailing_crc(&mut wrong_claim_generation);
+  let wrong_claim_generation = decode_sweep_void_artifact(&wrong_claim_generation, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_void_claim_source(&wrong_claim_generation, &source_manifest, &source_page).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut detached_claim_bytes = claim_bytes.clone();
+  let claim_body = gc_artifact_body_offset(&detached_claim_bytes);
+  detached_claim_bytes[claim_body + 56 + 32..claim_body + 64 + 32].copy_from_slice(&999_999u64.to_le_bytes());
+  repair_trailing_crc(&mut detached_claim_bytes);
+  let detached_claim = decode_sweep_void_artifact(&detached_claim_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_void_claim_source(&detached_claim, &source_manifest, &source_page).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut wrong_result_bytes = settled_bytes;
+  let result_body = gc_artifact_body_offset(&wrong_result_bytes);
+  let free_bytes = test_u64(&wrong_result_bytes, result_body + 60 + 2 * 32);
+  wrong_result_bytes[result_body + 60 + 2 * 32..result_body + 68 + 2 * 32].copy_from_slice(&(free_bytes + 1).to_le_bytes());
+  repair_trailing_crc(&mut wrong_result_bytes);
+  let wrong_result_key = immutable_gc_artifact_key(HashAlgorithm::Blake3_256, GcArtifactKindV1::VoidCatalogManifest, &wrong_result_bytes);
+  let wrong_result = decode_sweep_void_artifact(&wrong_result_bytes, HashAlgorithm::Blake3_256).unwrap();
+
+  let mut wrong_settlement_bytes = settlement_bytes;
+  let body = gc_artifact_body_offset(&wrong_settlement_bytes);
+  wrong_settlement_bytes[body + 16 + 32..body + 16 + 2 * 32].copy_from_slice(&wrong_result_key);
+  repair_trailing_crc(&mut wrong_settlement_bytes);
+  let wrong_settlement = decode_sweep_void_artifact(&wrong_settlement_bytes, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_void_settlement_closure(&wrong_settlement, &claim, &outstanding, &wrong_result).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
 fn value_store_definition_rejects_identity_child_semantic_and_dependency_corruption() {
   let root = fixture_root();
   let metadata = fs::read(root.join("value-store-definition-v1/avst-blake3-256-metadata-hash-corrected-valid.bin")).unwrap();
@@ -2147,12 +2479,41 @@ fn hash_algorithm(name: &str) -> HashAlgorithm {
   }
 }
 
+fn is_sweep_void_fixture(row: &FixtureRow) -> bool {
+  row.format_id == "gc-artifact-v1"
+    && (row.expected.starts_with("gc:proposal:sweep:")
+      || row.expected.starts_with("gc:receipt:sweep-")
+      || row.expected.starts_with("gc:page:void-free-extents:")
+      || row.expected.starts_with("gc:directory:void-")
+      || row.expected.starts_with("gc:manifest:void-catalog:")
+      || row.expected.starts_with("gc:claim:void:")
+      || row.expected.starts_with("gc:receipt:void-claim-settlement:"))
+}
+
 fn test_u32(bytes: &[u8], offset: usize) -> u32 {
   u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
 fn test_u16(bytes: &[u8], offset: usize) -> u16 {
   u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn test_u64(bytes: &[u8], offset: usize) -> u64 {
+  u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn gc_artifact_body_offset(bytes: &[u8]) -> usize {
+  32 + test_u16(bytes, 16) as usize
+}
+
+fn repair_blake3_sweep_proposal_digest(bytes: &mut [u8]) {
+  let hash_width = 32;
+  let body = gc_artifact_body_offset(bytes);
+  let records = body + 32 + 2 * hash_width;
+  let mut hasher = blake3::Hasher::new();
+  hasher.update(b"aeordb.sweep-proposal.v1\0");
+  hasher.update(&bytes[records..bytes.len() - 4]);
+  bytes[body + 32 + hash_width..body + 32 + 2 * hash_width].copy_from_slice(hasher.finalize().as_bytes());
 }
 
 fn repair_entity_header_crc(entity: &mut [u8], hash_width: usize) {
