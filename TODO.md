@@ -41,7 +41,7 @@
     - [x] Generate capability, EntryType/KV, shared-enum, format-cap, and SystemFamily constants.
     - [x] Freeze route-class, configuration-property, dynamic-record, hard-transition, and cleanup-result ownership registries.
     - [x] Compile and test the generated contract module without activating v4 writers.
-  - [ ] P1a: implement bounded v4 readers before any v4 writer is enabled.
+  - [x] P1a: implement bounded v4 readers before any v4 writer is enabled.
     - [x] Characterize v3 header/entity open and byte-preservation behavior.
     - [x] Add checked bounded-reader primitives with allocation-before-validation guards.
     - [x] Decode ScopeDefinitionV1 and prove canonical owner/glob semantics and bounds.
@@ -67,8 +67,11 @@
       - [x] Decode all SystemControlV1 kinds and the external cutover journal.
       - [x] Decode and validate the expanded SystemFamilyRegistryV1.
     - [x] Dispatch v3 and v4 database headers without rewriting either format on open.
-    - [ ] Decode every hand-authored v4 fixture and reject every malformed fixture with its frozen error class.
-    - [ ] Add mutation/fuzz corpus watchdogs and allocation ceilings.
+    - [x] Decode every hand-authored v4 fixture and reject every malformed fixture with its frozen error class.
+      - [x] Prove every manifest row maps to exactly one production decoder and no format family is omitted.
+    - [x] Add mutation/fuzz corpus watchdogs and allocation ceilings.
+      - [x] Exercise deterministic truncation, trailing-byte, bit-flip, and length/count mutation dimensions.
+      - [x] Enforce a per-case wall-clock watchdog and a thread-local allocation ceiling.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

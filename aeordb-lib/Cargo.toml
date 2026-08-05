@@ -747,6 +747,10 @@ path = "spec/engine/cache_and_hardlinks_spec.rs"
 name = "header_repair_spec"
 path = "spec/engine/header_repair_spec.rs"
 
+[[test]]
+name = "v4_reader_hardening_spec"
+path = "spec/engine/v4_reader_hardening_spec.rs"
+
 
 [lints]
 workspace = true
