@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "stage": "p0b-complete-independent-contract-freeze",
+  "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
+  "source_sha256": "58a18bedee5816ec90f64b9f316b9571a31b6cbce818d174f83bad9e06102300",
+  "fixture_manifest_sha256": "4670361d1657120f96b94a944db2d951f8bfe79aee812f61d2556278a9398a58",
+  "system_family_registry_sha256": "46bff1cbd780b55533dce05612143e6882098b305c3e88454b67d3945a532f83",
+  "counts": {
+    "formats": 21,
+    "fixtures": 436,
+    "capability_bits": 24,
+    "entry_types": 10,
+    "kv_tags": 12,
+    "shared_enum_scopes": 13,
+    "shared_enum_values": 134,
+    "system_families": 46,
+    "system_family_descriptors": 61,
+    "malformed_input_classes": 16
+  },
+  "collision_results": {
+    "format_ids": 0,
+    "fixture_ids": 0,
+    "capability_bits": 0,
+    "entry_type_ids": 0,
+    "kv_tag_ids": 0,
+    "shared_enum_ids_within_scope": 0,
+    "shared_enum_names_within_scope": 0,
+    "system_family_ids": 0,
+    "system_family_descriptor_keys": 0
+  },
+  "coverage": {
+    "both_hash_widths_per_format": true,
+    "identity_owner_and_consumers_per_format": true,
+    "hard_cap_and_bounded_decode_per_format": true,
+    "checksum_and_reserve_rules_per_format": true,
+    "canonical_order_and_trailing_rules_per_format": true,
+    "typed_hash_roles_per_format": true,
+    "all_fixture_results_green": true,
+    "all_system_families_have_one_policy": true,
+    "all_shared_enum_values_named": true,
+    "future_entry_types_reserved": "0x0b-0xff",
+    "future_kv_tags_reserved": "0x0c-0x0f"
+  },
+  "malformed_proof_dimensions": [
+    "field",
+    "bit",
+    "length",
+    "checksum",
+    "enum",
+    "reserve",
+    "identity",
+    "ordering",
+    "trailing"
+  ],
+  "reference_tool": {
+    "production_dependencies": [],
+    "tests_passed": 142,
+    "reviewer_status": "pending-owner-review-before-production-writer"
+  }
+}

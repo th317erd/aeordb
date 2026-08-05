@@ -2,7 +2,7 @@
 
 - [ ] Execute the ratified AeorDB v4 NVT/GC refactor and migration campaign.
   - [x] P0a: freeze and stabilize baseline evidence, routes, recent fixes, and persisted producer/consumer inventory.
-  - [ ] P0b: freeze independent persistent-format contracts and both-width golden fixtures before production writers.
+  - [x] P0b: freeze independent persistent-format contracts and both-width golden fixtures before production writers.
     - [x] Freeze DatabaseHeaderV4, core entity/namespace/semantic formats, and their malformed corpus.
     - [x] Freeze the common IndexArtifactV1 envelope and all three A/B active-pointer kinds.
     - [x] Freeze the canonical definition envelope, ScopeDefinitionV1, ScopeId, path/glob, FileKey, and internal-path semantics.
@@ -35,7 +35,7 @@
         - [x] Freeze index, configuration, repair, task, mutation, and root-publication controls.
         - [x] Freeze migration, durability, spill, and side-by-side cutover controls.
       - [x] Freeze the corrected expanded `SystemFamilyRegistryV1` fixture and fingerprints.
-      - [ ] Freeze shared persistent enum/capability registries, remaining maxima, and complete malformed mutation coverage.
+      - [x] Freeze shared persistent enum/capability registries, remaining maxima, and complete malformed mutation coverage.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

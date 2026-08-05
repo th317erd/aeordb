@@ -178,6 +178,52 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
   (.formats[0].fixture_ids_64 | length) > 0
 ' "$contract_registry" >/dev/null || fail "P0b-2 core format contract registry is incomplete"
 
+jq -e '
+  (.persistent_registries.entry_type_v1 | length) == 10 and
+  ([.persistent_registries.entry_type_v1[].id] | unique | length) == 10 and
+  ([.persistent_registries.entry_type_v1[].name] | unique | length) == 10 and
+  (.persistent_registries.entry_type_v1 | map([.id, .kv_tag])) ==
+    [[1,0],[2,1],[3,2],[4,3],[5,4],[6,5],[7,7],[8,9],[9,10],[10,11]] and
+  (.persistent_registries.kv_tag_v1 | length) == 12 and
+  ([.persistent_registries.kv_tag_v1[].id] | sort) == [0,1,2,3,4,5,6,7,8,9,10,11] and
+  ([.persistent_registries.kv_tag_v1[].name] | unique | length) == 12 and
+  (.persistent_registries.shared_enums | keys | sort) == [
+    "audit_pin_reason_v1", "durability_operation_v1", "gc_audit_event_kind_v1",
+    "gc_error_class_v1", "gc_outcome_v1", "gc_run_kind_v1", "mutation_operation_v1",
+    "os_error_class_v1", "repair_corruption_class_v1", "retry_class_v1",
+    "root_retirement_reason_v1", "stable_reason_v1", "task_kind_v1"
+  ] and
+  all(.persistent_registries.shared_enums[];
+    length > 0 and
+    ([.[].id] | length) == ([.[].id] | unique | length) and
+    ([.[].name] | length) == ([.[].name] | unique | length) and
+    all(.[]; (.name | length) > 0)) and
+  (.malformed_input_classes | length) == 16 and
+  (.malformed_input_classes | unique | length) == 16 and
+  (.registry_invariants.mutation_dimensions | sort) ==
+    ["bit","checksum","enum","field","identity","length","ordering","reserve","trailing"] and
+  .registry_invariants.future_entry_types == "0x0b through 0xff reserved" and
+  .registry_invariants.future_kv_tags == "0x0c through 0x0f reserved"
+' "$contract_registry" >/dev/null || fail "P0b-2 persistent enum/capability registry closure is incomplete"
+
+registry_report="$evidence_dir/p0b-contract-registry-report.json"
+[[ -f "$registry_report" ]] || fail "missing P0b collision/ID/capability registry report"
+jq -e --arg source_sha "$(sha256sum "$contract_registry" | awk '{print $1}')" \
+  --arg fixture_sha "$(sha256sum "$fixture_manifest" | awk '{print $1}')" '
+  .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
+  .source_sha256 == $source_sha and .fixture_manifest_sha256 == $fixture_sha and
+  .counts == {
+    "formats":21,"fixtures":436,"capability_bits":24,"entry_types":10,"kv_tags":12,
+    "shared_enum_scopes":13,"shared_enum_values":134,"system_families":46,
+    "system_family_descriptors":61,"malformed_input_classes":16
+  } and
+  all(.collision_results[]; . == 0) and
+  all(.coverage[]; . == true or type == "string") and
+  (.malformed_proof_dimensions | length) == 9 and
+  .reference_tool.production_dependencies == [] and
+  .reference_tool.tests_passed >= 142
+' "$registry_report" >/dev/null || fail "P0b collision/ID/capability registry report is stale or incomplete"
+
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and

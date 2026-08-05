@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
-- **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2g shared registries, maxima, and malformed-corpus closure
-- **Entry commit:** `0a36c3c695486e6120d77386cf28f7606b11553f`
-- **Last green commit:** P0b-2e system controls and cutover journal `0a36c3c695486e6120d77386cf28f7606b11553f`
+- **Status:** P0b complete; P0c in progress
+- **Current landing unit:** P0c machine contract registry and generated constants
+- **Entry commit:** `877a270ca69b5b45a9617a3e7cb7ba9bc4bb6e31`
+- **Last green commit:** P0b-2f SystemFamily registry `877a270ca69b5b45a9617a3e7cb7ba9bc4bb6e31`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze the remaining shared enum/capability/maxima registries, mechanically prove format coverage and malformed mutation closure, then enter P0c generated contract constants
+- **Next action:** generate production-facing Rust constants and architecture assertions from the independently frozen registry, with digest-based stale-output failure
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -244,3 +244,13 @@
 - **Failure proof:** every registry byte is CRC- or structure-protected. Repaired-CRC tests reject unknown/incompatible enums, reserved bytes, malformed paths/matchers, truncation, trailing bytes, count amplification, noncanonical order, duplicates, and per-family policy drift.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 142 tests; strict standalone Clippy passed; independent verification passed all 436 fixtures across 21 families; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
 - **Boundary:** no production registry reader, writer, classifier, GC walker, transfer path, route, or database changed. P0b now has only shared registry/maxima/malformed-corpus closure before generated production constants.
+
+## P0b-2g Shared Registries, Bounds, and Malformed Closure
+
+- **Entry:** `877a270`; `development` matched `origin/development`, with only the three acknowledged untracked user paths present.
+- **Frozen global registries:** all ten EntryType values including approved IndexArtifact/GcArtifact assignments; all twelve occupied KV tags including HEAD/VERSION and the two approved artifact tags; all 24 capability bits; and all 134 permanent values across the thirteen Round 15 shared enum scopes.
+- **Bounds closure:** every one of the 21 format rows has a nonzero hard cap, checked bounded-decoder rule, exact checksum, reserve-zero policy, canonical order, malformed/trailing behavior, ownership, typed hash roles, and both-width fixtures. Nested maxima remain owned by each exact body/formula contract rather than a conflicting global table.
+- **Malformed closure:** the registry freezes sixteen malformed-input classes and nine required mutation dimensions. The independent modules cover all-byte integrity where applicable plus repaired-checksum semantic corruption, count/length amplification, unknown enums, ordering/duplicates, identity/closure mismatch, and strict trailing behavior.
+- **Collision report:** `evidence/p0b-contract-registry-report.json` binds the exact registry, fixture manifest, and ASFR SHA-256 digests; records 21 formats, 436 fixtures, 46/61 SystemFamily rows/descriptors, and zero collisions in every scoped permanent registry.
+- **Green command:** `timeout 2m ./scripts/plan/check-v4-contracts.sh` independently reverified all 436 fixtures and passed the complete P0 contract gate with 93 routes and 36 docs.
+- **Boundary:** P0b remains reference/spec/evidence only and emits no production reader, writer, capability, or database byte. P0c may now generate constants from this frozen source but may not reinterpret it.

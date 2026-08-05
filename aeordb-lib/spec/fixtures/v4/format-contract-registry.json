@@ -154,6 +154,223 @@
       "name": "DurableTaskPinV1"
     }
   ],
+  "persistent_registries": {
+    "entry_type_v1": [
+      { "id": 1, "name": "Chunk", "kv_tag": 0 },
+      { "id": 2, "name": "FileRecord", "kv_tag": 1 },
+      { "id": 3, "name": "DirectoryIndex", "kv_tag": 2 },
+      { "id": 4, "name": "DeletionRecord", "kv_tag": 3 },
+      { "id": 5, "name": "Snapshot", "kv_tag": 4 },
+      { "id": 6, "name": "Void", "kv_tag": 5 },
+      { "id": 7, "name": "Fork", "kv_tag": 7 },
+      { "id": 8, "name": "Symlink", "kv_tag": 9 },
+      { "id": 9, "name": "IndexArtifact", "kv_tag": 10 },
+      { "id": 10, "name": "GcArtifact", "kv_tag": 11 }
+    ],
+    "kv_tag_v1": [
+      { "id": 0, "name": "chunk", "entry_type": 1 },
+      { "id": 1, "name": "file_record", "entry_type": 2 },
+      { "id": 2, "name": "directory", "entry_type": 3 },
+      { "id": 3, "name": "deletion", "entry_type": 4 },
+      { "id": 4, "name": "snapshot", "entry_type": 5 },
+      { "id": 5, "name": "void", "entry_type": 6 },
+      { "id": 6, "name": "head", "entry_type": null },
+      { "id": 7, "name": "fork", "entry_type": 7 },
+      { "id": 8, "name": "version", "entry_type": null },
+      { "id": 9, "name": "symlink", "entry_type": 8 },
+      { "id": 10, "name": "index_artifact", "entry_type": 9 },
+      { "id": 11, "name": "gc_artifact", "entry_type": 10 }
+    ],
+    "shared_enums": {
+      "stable_reason_v1": [
+        { "id": 0, "name": "none_or_success" },
+        { "id": 1, "name": "requested" },
+        { "id": 2, "name": "source_changed" },
+        { "id": 3, "name": "incomplete_coverage" },
+        { "id": 4, "name": "dependency_unavailable" },
+        { "id": 5, "name": "unsupported_definition_or_format" },
+        { "id": 6, "name": "corrupt_derived_artifact" },
+        { "id": 7, "name": "corrupt_authority" },
+        { "id": 8, "name": "resource_admission" },
+        { "id": 9, "name": "canceled" },
+        { "id": 10, "name": "shutdown" },
+        { "id": 11, "name": "retryable_io" },
+        { "id": 12, "name": "permanent_io" },
+        { "id": 13, "name": "stale_fence" },
+        { "id": 14, "name": "invalid_configuration" },
+        { "id": 15, "name": "root_unavailable" },
+        { "id": 16, "name": "rebuild_required" },
+        { "id": 17, "name": "repair_required" },
+        { "id": 18, "name": "migration_reset" },
+        { "id": 19, "name": "capture_gap" },
+        { "id": 20, "name": "policy_disabled" },
+        { "id": 21, "name": "integrity_mismatch" },
+        { "id": 22, "name": "uncertain_completion" },
+        { "id": 23, "name": "collision_alarm" },
+        { "id": 24, "name": "unknown_protected_family" }
+      ],
+      "retry_class_v1": [
+        { "id": 0, "name": "none" },
+        { "id": 1, "name": "immediate" },
+        { "id": 2, "name": "bounded_backoff" },
+        { "id": 3, "name": "after_dependency" },
+        { "id": 4, "name": "after_repair" },
+        { "id": 5, "name": "never" }
+      ],
+      "root_retirement_reason_v1": [
+        { "id": 1, "name": "ordinary_gc_unreachable" },
+        { "id": 2, "name": "explicit_operator_retirement" }
+      ],
+      "repair_corruption_class_v1": [
+        { "id": 1, "name": "entity_framing" },
+        { "id": 2, "name": "entity_integrity" },
+        { "id": 3, "name": "locator_missing" },
+        { "id": 4, "name": "locator_identity_mismatch" },
+        { "id": 5, "name": "btree_missing_node" },
+        { "id": 6, "name": "btree_malformed_node" },
+        { "id": 7, "name": "btree_cycle_or_order" },
+        { "id": 8, "name": "authority_missing_or_ambiguous" },
+        { "id": 9, "name": "semantic_closure" },
+        { "id": 10, "name": "system_family_incomplete" },
+        { "id": 11, "name": "physical_overlap_or_bounds" },
+        { "id": 12, "name": "control_ambiguous_or_corrupt" },
+        { "id": 13, "name": "unsupported_required_format" }
+      ],
+      "gc_audit_event_kind_v1": [
+        { "id": 1, "name": "mark_started" },
+        { "id": 2, "name": "mark_completed" },
+        { "id": 3, "name": "mark_canceled" },
+        { "id": 4, "name": "root_pending" },
+        { "id": 5, "name": "root_retired" },
+        { "id": 6, "name": "sweep_proposed" },
+        { "id": 7, "name": "sweep_committed" },
+        { "id": 8, "name": "sweep_recovered" },
+        { "id": 9, "name": "void_claimed" },
+        { "id": 10, "name": "void_claim_settled" },
+        { "id": 11, "name": "void_claim_recovered" },
+        { "id": 12, "name": "corrupt_evidence" },
+        { "id": 13, "name": "retention_compacted" },
+        { "id": 14, "name": "gc_disabled" }
+      ],
+      "gc_run_kind_v1": [
+        { "id": 1, "name": "mark" },
+        { "id": 2, "name": "sweep" },
+        { "id": 3, "name": "physical_inventory" },
+        { "id": 4, "name": "audit_compaction" },
+        { "id": 5, "name": "void_reconcile" },
+        { "id": 6, "name": "root_lifecycle_reconcile" }
+      ],
+      "gc_outcome_v1": [
+        { "id": 1, "name": "complete" },
+        { "id": 2, "name": "canceled" },
+        { "id": 3, "name": "failed" },
+        { "id": 4, "name": "skipped" },
+        { "id": 5, "name": "recovered" }
+      ],
+      "gc_error_class_v1": [
+        { "id": 1, "name": "framing" },
+        { "id": 2, "name": "checksum" },
+        { "id": 3, "name": "bounds_or_overlap" },
+        { "id": 4, "name": "missing_edge" },
+        { "id": 5, "name": "wrong_identity" },
+        { "id": 6, "name": "ambiguous_control" },
+        { "id": 7, "name": "incomplete_authority_walk" },
+        { "id": 8, "name": "workspace_tamper_or_loss" },
+        { "id": 9, "name": "policy_unavailable" },
+        { "id": 10, "name": "unsupported_codec" }
+      ],
+      "audit_pin_reason_v1": [
+        { "id": 1, "name": "operator_investigation" },
+        { "id": 2, "name": "repair_evidence" },
+        { "id": 3, "name": "migration_verification" },
+        { "id": 4, "name": "support_bundle" }
+      ],
+      "task_kind_v1": [
+        { "id": 1, "name": "index_build" },
+        { "id": 2, "name": "reindex" },
+        { "id": 3, "name": "gc_mark" },
+        { "id": 4, "name": "gc_sweep" },
+        { "id": 5, "name": "physical_inventory" },
+        { "id": 6, "name": "backup_export" },
+        { "id": 7, "name": "backup_import" },
+        { "id": 8, "name": "format_migration" },
+        { "id": 9, "name": "repair" },
+        { "id": 10, "name": "compaction" },
+        { "id": 11, "name": "peer_sync" }
+      ],
+      "mutation_operation_v1": [
+        { "id": 1, "name": "create" },
+        { "id": 2, "name": "replace" },
+        { "id": 3, "name": "delete" },
+        { "id": 4, "name": "activate" },
+        { "id": 5, "name": "deactivate" },
+        { "id": 6, "name": "promote" },
+        { "id": 7, "name": "restore" },
+        { "id": 8, "name": "reconcile" },
+        { "id": 9, "name": "retire" },
+        { "id": 10, "name": "repair" }
+      ],
+      "durability_operation_v1": [
+        { "id": 1, "name": "dependency_append" },
+        { "id": 2, "name": "data_barrier" },
+        { "id": 3, "name": "authority_write" },
+        { "id": 4, "name": "authority_barrier" },
+        { "id": 5, "name": "authority_readback" },
+        { "id": 6, "name": "header_ab" },
+        { "id": 7, "name": "control_ab" },
+        { "id": 8, "name": "parent_directory_sync" },
+        { "id": 9, "name": "durable_replace" },
+        { "id": 10, "name": "preallocation" },
+        { "id": 11, "name": "void_claim" },
+        { "id": 12, "name": "emergency_spill" },
+        { "id": 13, "name": "cutover_journal" },
+        { "id": 14, "name": "cutover_rename" },
+        { "id": 15, "name": "shutdown_flush" }
+      ],
+      "os_error_class_v1": [
+        { "id": 1, "name": "interrupted_no_progress" },
+        { "id": 2, "name": "no_space" },
+        { "id": 3, "name": "quota" },
+        { "id": 4, "name": "read_only" },
+        { "id": 5, "name": "permission" },
+        { "id": 6, "name": "media_io" },
+        { "id": 7, "name": "device_lost" },
+        { "id": 8, "name": "invalid_handle" },
+        { "id": 9, "name": "unsupported_durability" },
+        { "id": 10, "name": "checksum_readback" },
+        { "id": 11, "name": "short_write" },
+        { "id": 12, "name": "timeout_unknown" },
+        { "id": 13, "name": "other_persistent_io" }
+      ]
+    }
+  },
+  "malformed_input_classes": [
+    "unknown_magic_or_version",
+    "unknown_required_capability",
+    "unknown_type_kind_or_enum",
+    "truncation_or_trailing_bytes",
+    "length_count_or_arithmetic_overflow",
+    "allocation_amplification",
+    "noncanonical_boolean_or_optional_presence",
+    "nonzero_reserved_or_padding",
+    "checksum_or_integrity_mismatch",
+    "identity_key_or_generation_mismatch",
+    "noncanonical_order_or_duplicate",
+    "invalid_utf8_path_glob_or_native_path",
+    "invalid_graph_edge_or_cycle",
+    "ambiguous_equal_sequence_selector",
+    "unsupported_platform_durability",
+    "cross_record_closure_mismatch"
+  ],
+  "registry_invariants": {
+    "id_uniqueness_scope": "IDs and names are unique within each named registry; numeric reuse across explicitly different registries is permitted",
+    "unassigned_values": "reserved and never guessed, skipped, or reused",
+    "zero_values": "invalid unless the named registry explicitly assigns none or success",
+    "format_limits": "every format row owns a nonzero hard_cap and bounded_decode rule; nested maxima are part of its body/formula contract",
+    "mutation_dimensions": ["field", "bit", "length", "checksum", "enum", "reserve", "identity", "ordering", "trailing"],
+    "future_entry_types": "0x0b through 0xff reserved",
+    "future_kv_tags": "0x0c through 0x0f reserved"
+  },
   "formats": [
     {
       "id": "database-header-v4",
@@ -3339,6 +3556,6 @@
     "fixture_count": 436,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, and the complete 46-family SystemFamilyRegistryV1",
-    "remaining_p0b_2_scope": "remaining maxima, shared registry closure, and complete malformed mutation corpus"
+    "remaining_p0b_2_scope": "none; P0b is frozen and P0c generation/staleness work is next"
   }
 }
