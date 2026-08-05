@@ -1,7 +1,7 @@
 use crate::core::HashProfile;
-use crate::{definitions, field_index, value_store};
+use crate::{definitions, field_index, index_pages, value_store};
 
-const AIDX_HEADER_LENGTH: usize = 32;
+pub(crate) const AIDX_HEADER_LENGTH: usize = 32;
 const MAX_MANIFEST_LENGTH: usize = 1_048_576;
 
 #[derive(Clone, Copy)]
@@ -102,7 +102,7 @@ impl PointerKind {
 }
 
 pub fn fixture_cases() -> Vec<IndexFixtureCase> {
-  let mut cases = Vec::with_capacity(28);
+  let mut cases = Vec::with_capacity(56);
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
     for kind in [PointerKind::FieldIndex, PointerKind::FieldNvt, PointerKind::ScopeCatalog] {
       for slot in [0u8, 1u8] {
@@ -134,6 +134,7 @@ pub fn fixture_cases() -> Vec<IndexFixtureCase> {
       });
     }
   }
+  cases.extend(index_pages::fixture_cases());
   cases
 }
 
@@ -158,6 +159,7 @@ pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
       ),
       Err(error) => (format!("error:{error}"), None),
     },
+    Ok(0x0020 | 0x0030 | 0x0031 | 0x0033 | 0x0034) => index_pages::observe(profile, bytes),
     Ok(_) => ("error:index_artifact_kind".to_string(), None),
     Err(error) => (format!("error:{error}"), None),
   }
@@ -166,6 +168,9 @@ pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
 pub fn annotation_lines(profile: HashProfile, bytes: &[u8]) -> Vec<String> {
   let kind = read_u16(bytes, 6).unwrap_or(0);
   let h = profile.width();
+  if matches!(kind, 0x0020 | 0x0030 | 0x0031 | 0x0033 | 0x0034) {
+    return index_pages::annotation_lines(profile, bytes);
+  }
   if ManifestKind::from_id(kind).is_some() {
     return vec![
       "envelope +0x000 len 32: AIDX common envelope".to_string(),
@@ -400,30 +405,88 @@ fn write_capabilities(bytes: &mut [u8], bits: &[usize]) {
 fn build_immutable_artifact(profile: HashProfile, kind: ManifestKind, owner: &[u8], generation: u64, body: &[u8]) -> Vec<u8> {
   let h = profile.width();
   assert_eq!(owner.len(), h);
-  let identity_length = h + 8;
-  let total_length = AIDX_HEADER_LENGTH + identity_length + body.len() + 4;
+  let mut identity = Vec::with_capacity(h + 8);
+  identity.extend_from_slice(owner);
+  identity.extend_from_slice(&generation.to_le_bytes());
+  build_immutable_value(kind.id(), generation, &identity, body)
+}
+
+pub(crate) fn build_immutable_value(kind: u16, generation: u64, identity: &[u8], body: &[u8]) -> Vec<u8> {
+  assert_ne!(kind, 0);
+  assert_ne!(generation, 0);
+  assert!(identity.len() <= u16::MAX as usize);
+  assert!(body.len() <= u32::MAX as usize);
+  let total_length = AIDX_HEADER_LENGTH + identity.len() + body.len() + 4;
+  assert!(total_length <= u32::MAX as usize);
   let mut value = vec![0u8; total_length];
   value[0..4].copy_from_slice(b"AIDX");
   put_u16(&mut value, 4, 1);
-  put_u16(&mut value, 6, kind.id());
+  put_u16(&mut value, 6, kind);
   put_u16(&mut value, 8, AIDX_HEADER_LENGTH as u16);
   put_u32(&mut value, 12, total_length as u32);
-  put_u16(&mut value, 16, identity_length as u16);
+  put_u16(&mut value, 16, identity.len() as u16);
   put_u32(&mut value, 20, body.len() as u32);
   put_u64(&mut value, 24, generation);
-  value[32..32 + h].copy_from_slice(owner);
-  put_u64(&mut value, 32 + h, generation);
-  value[40 + h..40 + h + body.len()].copy_from_slice(body);
+  value[32..32 + identity.len()].copy_from_slice(identity);
+  value[32 + identity.len()..32 + identity.len() + body.len()].copy_from_slice(body);
   write_trailing_crc(&mut value);
   value
 }
 
-fn immutable_key(profile: HashProfile, kind: u16, value: &[u8]) -> Vec<u8> {
+pub(crate) fn immutable_key(profile: HashProfile, kind: u16, value: &[u8]) -> Vec<u8> {
   let mut preimage = Vec::with_capacity(44 + value.len());
   preimage.extend_from_slice(b"aeordb.index-artifact.immutable.v1\0");
   preimage.extend_from_slice(&kind.to_le_bytes());
   preimage.extend_from_slice(value);
   profile.digest(&preimage)
+}
+
+pub(crate) struct DecodedImmutable<'a> {
+  pub kind: u16,
+  pub generation: u64,
+  pub identity: &'a [u8],
+  pub body: &'a [u8],
+  pub key: Vec<u8>,
+}
+
+pub(crate) fn decode_immutable_value(
+  profile: HashProfile,
+  value: &[u8],
+  maximum_length: usize,
+) -> Result<DecodedImmutable<'_>, &'static str> {
+  if value.len() > maximum_length || value.len() < AIDX_HEADER_LENGTH + 1 + 4 {
+    return Err("index_immutable_length");
+  }
+  if &value[0..4] != b"AIDX" || read_u16(value, 4)? != 1 || read_u16(value, 8)? != AIDX_HEADER_LENGTH as u16 {
+    return Err("index_envelope");
+  }
+  let kind = read_u16(value, 6)?;
+  let identity_length = read_u16(value, 16)? as usize;
+  let body_length = read_u32(value, 20)? as usize;
+  let generation = read_u64(value, 24)?;
+  if kind == 0
+    || read_u16(value, 10)? != 0
+    || read_u32(value, 12)? as usize != value.len()
+    || identity_length == 0
+    || read_u16(value, 18)? != 0
+    || generation == 0
+    || AIDX_HEADER_LENGTH
+      .checked_add(identity_length)
+      .and_then(|length| length.checked_add(body_length))
+      .and_then(|length| length.checked_add(4))
+      != Some(value.len())
+  {
+    return Err("index_envelope_metadata");
+  }
+  verify_trailing_crc(value)?;
+  let identity_end = AIDX_HEADER_LENGTH + identity_length;
+  Ok(DecodedImmutable {
+    kind,
+    generation,
+    identity: &value[AIDX_HEADER_LENGTH..identity_end],
+    body: &value[identity_end..value.len() - 4],
+    key: immutable_key(profile, kind, value),
+  })
 }
 
 #[derive(Debug)]
@@ -435,42 +498,27 @@ struct DecodedManifest {
 }
 
 fn decode_manifest(profile: HashProfile, value: &[u8]) -> Result<DecodedManifest, &'static str> {
-  if value.len() > MAX_MANIFEST_LENGTH {
-    return Err("index_manifest_length");
-  }
   let h = profile.width();
   if value.len() < 44 + h {
     return Err("index_manifest_length");
   }
-  if &value[0..4] != b"AIDX" || read_u16(value, 4)? != 1 || read_u16(value, 8)? != AIDX_HEADER_LENGTH as u16 {
-    return Err("index_envelope");
+  let decoded = decode_immutable_value(profile, value, MAX_MANIFEST_LENGTH)?;
+  let kind = ManifestKind::from_id(decoded.kind).ok_or("index_manifest_kind")?;
+  if decoded.identity.len() != h + 8 {
+    return Err("index_manifest_identity_length");
   }
-  let kind = ManifestKind::from_id(read_u16(value, 6)?).ok_or("index_manifest_kind")?;
-  let identity_length = read_u16(value, 16)? as usize;
-  let body_length = read_u32(value, 20)? as usize;
-  if read_u16(value, 10)? != 0
-    || read_u32(value, 12)? as usize != value.len()
-    || identity_length != h + 8
-    || read_u16(value, 18)? != 0
-    || 32usize.checked_add(identity_length).and_then(|length| length.checked_add(body_length)).and_then(|length| length.checked_add(4))
-      != Some(value.len())
-  {
-    return Err("index_envelope_metadata");
-  }
-  verify_trailing_crc(value)?;
-  let generation = read_u64(value, 24)?;
-  let owner = &value[32..32 + h];
-  if generation == 0 || read_u64(value, 32 + h)? != generation || owner.iter().all(|byte| *byte == 0) {
+  let owner = &decoded.identity[..h];
+  if read_u64(decoded.identity, h)? != decoded.generation || owner.iter().all(|byte| *byte == 0) {
     return Err("index_manifest_identity");
   }
-  let body = &value[40 + h..value.len() - 4];
+  let body = decoded.body;
   let populated = match kind {
     ManifestKind::ScopeCatalog => decode_scope_manifest_body(profile, owner, body)?,
     ManifestKind::ValueStore => decode_value_manifest_body(profile, owner, body)?,
     ManifestKind::FieldIndex => decode_field_manifest_body(profile, owner, body)?,
     ManifestKind::FieldNvt => decode_nvt_manifest_body(profile, body)?,
   };
-  Ok(DecodedManifest { kind, generation, populated, key: immutable_key(profile, kind.id(), value) })
+  Ok(DecodedManifest { kind, generation: decoded.generation, populated, key: decoded.key })
 }
 
 fn validate_capabilities(bytes: &[u8]) -> Result<(), &'static str> {
@@ -775,48 +823,48 @@ fn select_pointer_pair(left: &DecodedPointer, right: &DecodedPointer) -> Result<
   }
 }
 
-fn fill_sequence(bytes: &mut [u8], start: u8) {
+pub(crate) fn fill_sequence(bytes: &mut [u8], start: u8) {
   for (index, byte) in bytes.iter_mut().enumerate() {
     *byte = start.wrapping_add(index as u8);
   }
 }
 
-fn write_trailing_crc(bytes: &mut [u8]) {
+pub(crate) fn write_trailing_crc(bytes: &mut [u8]) {
   let crc_offset = bytes.len() - 4;
   let crc = crc32fast::hash(&bytes[..crc_offset]);
   put_u32(bytes, crc_offset, crc);
 }
 
-fn verify_trailing_crc(bytes: &[u8]) -> Result<(), &'static str> {
+pub(crate) fn verify_trailing_crc(bytes: &[u8]) -> Result<(), &'static str> {
   if bytes.len() < 4 || read_u32(bytes, bytes.len() - 4)? != crc32fast::hash(&bytes[..bytes.len() - 4]) {
     return Err("crc_mismatch");
   }
   Ok(())
 }
 
-fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+pub(crate) fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
   bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+pub(crate) fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
   bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+pub(crate) fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
   bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, &'static str> {
+pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, &'static str> {
   let raw = bytes.get(offset..offset + 2).ok_or("truncated")?;
   Ok(u16::from_le_bytes(raw.try_into().map_err(|_| "truncated")?))
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
+pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
   let raw = bytes.get(offset..offset + 4).ok_or("truncated")?;
   Ok(u32::from_le_bytes(raw.try_into().map_err(|_| "truncated")?))
 }
 
-fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, &'static str> {
+pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, &'static str> {
   let raw = bytes.get(offset..offset + 8).ok_or("truncated")?;
   Ok(u64::from_le_bytes(raw.try_into().map_err(|_| "truncated")?))
 }

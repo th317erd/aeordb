@@ -419,10 +419,37 @@ fn frame(tag: u8, payload: &[u8]) -> Result<Vec<u8>, &'static str> {
 }
 
 fn decode(bytes: &[u8]) -> Result<DecodedConfig, &'static str> {
-  if bytes.len() > MAX_VALUE_LENGTH {
+  decode_with_bounds(bytes, ValidationBounds::CONFIG)
+}
+
+#[derive(Clone, Copy)]
+struct ValidationBounds {
+  maximum_value_length: usize,
+  maximum_scalar_length: usize,
+  maximum_key_length: usize,
+  allow_small_u64: bool,
+}
+
+impl ValidationBounds {
+  const CONFIG: Self = Self {
+    maximum_value_length: MAX_VALUE_LENGTH,
+    maximum_scalar_length: MAX_SCALAR_LENGTH,
+    maximum_key_length: MAX_SCALAR_LENGTH,
+    allow_small_u64: false,
+  };
+  const SOURCE_VALUE: Self = Self {
+    maximum_value_length: 1_048_576,
+    maximum_scalar_length: 1_048_576 - FRAME_LENGTH,
+    maximum_key_length: MAX_SCALAR_LENGTH,
+    allow_small_u64: true,
+  };
+}
+
+fn decode_with_bounds(bytes: &[u8], bounds: ValidationBounds) -> Result<DecodedConfig, &'static str> {
+  if bytes.len() > bounds.maximum_value_length {
     return Err("config_value_oversize");
   }
-  let (decoded, end) = validate_at(bytes, 0, bytes.len(), 0)?;
+  let (decoded, end) = validate_at(bytes, 0, bytes.len(), 0, bounds)?;
   if end != bytes.len() {
     return Err("config_value_trailing");
   }
@@ -433,14 +460,24 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
   decode(bytes).map(|_| ())
 }
 
-fn validate_at(bytes: &[u8], start: usize, limit: usize, depth: usize) -> Result<(DecodedConfig, usize), &'static str> {
+pub(crate) fn validate_source_value(bytes: &[u8]) -> Result<(), &'static str> {
+  decode_with_bounds(bytes, ValidationBounds::SOURCE_VALUE).map(|_| ())
+}
+
+fn validate_at(
+  bytes: &[u8],
+  start: usize,
+  limit: usize,
+  depth: usize,
+  bounds: ValidationBounds,
+) -> Result<(DecodedConfig, usize), &'static str> {
   let header_end = start.checked_add(FRAME_LENGTH).ok_or("config_value_overflow")?;
   if header_end > limit {
     return Err("config_value_truncated");
   }
   let payload_length = read_u32(bytes, start + 1)? as usize;
   let payload_end = header_end.checked_add(payload_length).ok_or("config_value_overflow")?;
-  if payload_end > limit || payload_end > bytes.len() || payload_end - start > MAX_VALUE_LENGTH {
+  if payload_end > limit || payload_end > bytes.len() || payload_end - start > bounds.maximum_value_length {
     return Err("config_value_length");
   }
   let payload = &bytes[header_end..payload_end];
@@ -449,7 +486,7 @@ fn validate_at(bytes: &[u8], start: usize, limit: usize, depth: usize) -> Result
     0x02 if payload.is_empty() => ("false", "bytes", 0),
     0x03 if payload.is_empty() => ("true", "bytes", 0),
     0x04 if payload.len() == 8 => ("i64", "bytes", 8),
-    0x05 if payload.len() == 8 && read_u64(payload, 0)? > i64::MAX as u64 => ("u64", "bytes", 8),
+    0x05 if payload.len() == 8 && (bounds.allow_small_u64 || read_u64(payload, 0)? > i64::MAX as u64) => ("u64", "bytes", 8),
     0x06 if payload.len() == 8 => {
       let value = f64::from_bits(read_u64(payload, 0)?);
       if !value.is_finite() || value.to_bits() == (-0.0f64).to_bits() {
@@ -457,17 +494,17 @@ fn validate_at(bytes: &[u8], start: usize, limit: usize, depth: usize) -> Result
       }
       ("f64", "bytes", 8)
     }
-    0x07 if payload.len() <= MAX_SCALAR_LENGTH => {
+    0x07 if payload.len() <= bounds.maximum_scalar_length => {
       std::str::from_utf8(payload).map_err(|_| "config_utf8")?;
       ("utf8", "bytes", payload.len())
     }
-    0x08 if payload.len() <= MAX_SCALAR_LENGTH => ("bytes", "bytes", payload.len()),
+    0x08 if payload.len() <= bounds.maximum_scalar_length => ("bytes", "bytes", payload.len()),
     0x09 => {
-      let count = validate_array(bytes, header_end, payload_end, depth)?;
+      let count = validate_array(bytes, header_end, payload_end, depth, bounds)?;
       ("array", "members", count)
     }
     0x0a => {
-      let count = validate_map(bytes, header_end, payload_end, depth)?;
+      let count = validate_map(bytes, header_end, payload_end, depth, bounds)?;
       ("map", "members", count)
     }
     0x01..=0x08 => return Err("config_scalar_payload"),
@@ -476,7 +513,7 @@ fn validate_at(bytes: &[u8], start: usize, limit: usize, depth: usize) -> Result
   Ok((DecodedConfig { tag_name, detail_name, detail }, payload_end))
 }
 
-fn validate_array(bytes: &[u8], start: usize, end: usize, depth: usize) -> Result<usize, &'static str> {
+fn validate_array(bytes: &[u8], start: usize, end: usize, depth: usize, bounds: ValidationBounds) -> Result<usize, &'static str> {
   if depth >= MAX_CONTAINER_DEPTH || start.checked_add(4).ok_or("config_value_overflow")? > end {
     return Err("config_array_header");
   }
@@ -486,7 +523,7 @@ fn validate_array(bytes: &[u8], start: usize, end: usize, depth: usize) -> Resul
   }
   let mut cursor = start + 4;
   for _ in 0..count {
-    let (_, next) = validate_at(bytes, cursor, end, depth + 1)?;
+    let (_, next) = validate_at(bytes, cursor, end, depth + 1, bounds)?;
     cursor = next;
   }
   if cursor != end {
@@ -495,7 +532,7 @@ fn validate_array(bytes: &[u8], start: usize, end: usize, depth: usize) -> Resul
   Ok(count)
 }
 
-fn validate_map(bytes: &[u8], start: usize, end: usize, depth: usize) -> Result<usize, &'static str> {
+fn validate_map(bytes: &[u8], start: usize, end: usize, depth: usize, bounds: ValidationBounds) -> Result<usize, &'static str> {
   if depth >= MAX_CONTAINER_DEPTH || start.checked_add(4).ok_or("config_value_overflow")? > end {
     return Err("config_map_header");
   }
@@ -511,7 +548,7 @@ fn validate_map(bytes: &[u8], start: usize, end: usize, depth: usize) -> Result<
       return Err("config_map_key_truncated");
     }
     let key_length = read_u32(bytes, cursor)? as usize;
-    if key_length > MAX_SCALAR_LENGTH {
+    if key_length > bounds.maximum_key_length {
       return Err("config_map_key_oversize");
     }
     let key_end = key_header_end.checked_add(key_length).ok_or("config_value_overflow")?;
@@ -524,7 +561,7 @@ fn validate_map(bytes: &[u8], start: usize, end: usize, depth: usize) -> Result<
       return Err("config_map_key_order");
     }
     previous_key = Some(key);
-    let (_, next) = validate_at(bytes, key_end, end, depth + 1)?;
+    let (_, next) = validate_at(bytes, key_end, end, depth + 1, bounds)?;
     cursor = next;
   }
   if cursor != end {

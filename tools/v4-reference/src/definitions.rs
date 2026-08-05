@@ -244,13 +244,16 @@ pub(crate) fn sample_scope_definition() -> Vec<u8> {
   build_scope("/workspace/docs", Some("**/*.md")).expect("sample scope definition")
 }
 
-#[cfg(test)]
-fn file_key(profile: HashProfile, path: &str) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn file_key(profile: HashProfile, path: &str) -> Result<Vec<u8>, &'static str> {
   let path = normalize_path(path)?;
   let mut preimage = Vec::with_capacity(5 + path.len());
   preimage.extend_from_slice(b"file:");
   preimage.extend_from_slice(path.as_bytes());
   Ok(profile.digest(&preimage))
+}
+
+pub(crate) fn is_canonical_absolute_path(path: &str) -> bool {
+  path.starts_with('/') && normalize_path(path).is_ok_and(|canonical| canonical == path)
 }
 
 fn normalize_path(path: &str) -> Result<String, &'static str> {

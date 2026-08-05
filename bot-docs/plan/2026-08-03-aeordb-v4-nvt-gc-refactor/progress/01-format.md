@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2b-5 immutable index manifests
+- **Current landing unit:** P0b-2c-1 artifact directories and ordered pages
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2b-4 IndexId domain correction `88a4572aade5e6c4727b6550f6d8b46c0ebcef51`
+- **Last green commit:** P0b-2b-5 immutable manifests `91be6f764b3fe3a4c9db5799a2eee4f4760f24e9`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze all four immutable index manifest bodies, keys, coverage fields, references, presence/count implications, and both hash widths
+- **Next action:** freeze ArtifactDirectoryNodeV1 plus PostingPage, ValuePage, both ScopeCatalogPage roles, and both DocumentStatePage owner classes at both hash widths
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -116,3 +116,14 @@
 - **Failure proof:** full-byte CRC mutation, envelope/identity generation disagreement, unknown capabilities, root/presence/count mismatch, owner/definition disagreement, codec/reserve/definition length failures, high-water/first/last rules, NVT power-of-two/divisibility/count bounds, and exact prior-closure references are covered.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 65 tests; strict standalone Clippy passed; fresh generation and verification passed all 212 fixtures; and the campaign gate passed with 93 routes and 36 docs.
 - **Boundary:** manifests remain independent reference bytes only. No production artifact reader/writer, pointer selector, index cache, GC traversal, query path, migration, route, or database changed. Directory/page/journal/checkpoint bodies remain writer-disabled and are next.
+
+## P0b-2c-1 Artifact Directories and Ordered Pages
+
+- **Red proof:** with the manifest corpus green at 212 fixtures, the campaign gate now fails at `index:directory:scope-ordinal:` and requires all six correctness-bearing ordered directory roles plus all six ordered page/owner-role combinations under both hash widths. The seventh NVT-hint role is deliberately paired with the next NvtTile slice.
+- **Frozen contracts:** the exact 80-byte ArtifactDirectory body and leaf/internal descriptors; all six correctness-bearing directory roles; the shared 96-byte ordered-page prefix; PostingPage, ValuePage, both ScopeCatalog directions, and both DocumentState owner classes; role-aware little-endian comparators; stable state stages/reasons; and immutable keys/birth generations.
+- **Independent corpus:** 26 hand-constructed artifacts across 32- and 64-byte hashes add one page and leaf directory for every ordered role plus an internal posting directory, bringing the corpus to 238 fixtures. Every fixture byte is CRC protected and included in the immutable artifact key.
+- **Cross-record proof:** leaf descriptors name the exact child artifact key and birth generation; internal posting descriptors name the exact child directory; owner/role/key-codec/page-kind combinations are fixed; and scope ordinal/reverse rows must form an exact live FileKey/document-ordinal bijection.
+- **Failure and bounds proof:** repaired-CRC corruption tests reject wrong owner class, role codec, future child generation, fences, ranks, counts, record order, path/FileKey identity, state owner/stage/reason, and malformed typed values. Physical WAL locators are correctly treated as optional hints: partial/stale hints decode but fail the exact coalescing predicate.
+- **Shared-codec correction:** `CanonicalSourceValueV1` now reuses the canonical structural decoder with its own 1 MiB typed-value bounds and permits typed `u64` across the full domain; it no longer inherits the 256 KiB config cap or JSON number canonicalization rule.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 72 tests; strict standalone Clippy passed; fresh generation and verification passed all 238 fixtures; and the campaign gate passed with 93 routes and 36 docs.
+- **Boundary:** these remain independent reference bytes and validation oracles. No production page reader/writer, cache, planner, query, index mutation, migration, GC path, route, or database changed. NVT tiles and role 7 remain writer-disabled and are next.

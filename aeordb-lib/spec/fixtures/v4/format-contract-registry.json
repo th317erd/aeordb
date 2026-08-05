@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-index-manifests",
+  "coverage_stage": "p0b-2-ordered-pages",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -1978,9 +1978,7 @@
       "frozen_body_kinds": [
         "0x0001",
         "0x0002",
-        "0x0003"
-      ],
-      "pending_body_fixture_kinds": [
+        "0x0003",
         "0x0010",
         "0x0011",
         "0x0012",
@@ -1988,9 +1986,11 @@
         "0x0020",
         "0x0030",
         "0x0031",
-        "0x0032",
         "0x0033",
-        "0x0034",
+        "0x0034"
+      ],
+      "pending_body_fixture_kinds": [
+        "0x0032",
         "0x0040",
         "0x0041"
       ],
@@ -2094,9 +2094,9 @@
           "length": 2
         }
       ],
-      "malformed_behavior": "degrade only the affected index; reject unknown kind/version, flags/reserve, zero generation/sequence/IDs, noncanonical slot, formula/cap/trailing/CRC/key mismatch, and equal-sequence pointers with different targets",
+      "malformed_behavior": "degrade only the affected index; reject unknown kind/version, flags/reserve, zero generation/sequence/IDs, noncanonical slot/role/owner, formula/cap/trailing/CRC/key mismatch, invalid fences/ranks/counts/record order, and equal-sequence pointers with different targets; stale physical hints only disable coalescing",
       "trailing_behavior": "artifact_value_length and kind body consume exact bytes",
-      "bounded_decode": "validate the 32-byte envelope, 1..4096 identity, 64 MiB family cap, and kind cap before allocation; page bodies remain lazy",
+      "bounded_decode": "validate the 32-byte envelope and kind cap before allocation; manifests are at most 1 MiB; directory and ordered-page artifacts are at most 4 MiB; record/fence lengths and counts are checked before traversal",
       "producer_owner": "Child 05 index store through Child 01 codec",
       "consumer_owners": [
         "Child 05 index runtime",
@@ -2117,6 +2117,10 @@
         {
           "field": "target_manifest_hash",
           "role": "graph-edge-authority"
+        },
+        {
+          "field": "directory child_artifact_hash",
+          "role": "graph-edge-authority"
         }
       ],
       "fixture_ids_32": [
@@ -2133,7 +2137,20 @@
         "aidx-blake3-256-field-index-manifest-empty",
         "aidx-blake3-256-field-index-manifest-populated",
         "aidx-blake3-256-field-nvt-manifest-empty",
-        "aidx-blake3-256-field-nvt-manifest-populated"
+        "aidx-blake3-256-field-nvt-manifest-populated",
+        "aidx-blake3-256-scope-ordinal-page-valid",
+        "aidx-blake3-256-scope-ordinal-directory-leaf-valid",
+        "aidx-blake3-256-scope-reverse-page-valid",
+        "aidx-blake3-256-scope-reverse-directory-leaf-valid",
+        "aidx-blake3-256-value-page-valid",
+        "aidx-blake3-256-value-directory-leaf-valid",
+        "aidx-blake3-256-value-document-state-page-valid",
+        "aidx-blake3-256-value-document-state-directory-leaf-valid",
+        "aidx-blake3-256-posting-page-valid",
+        "aidx-blake3-256-posting-directory-leaf-valid",
+        "aidx-blake3-256-posting-directory-internal-valid",
+        "aidx-blake3-256-index-document-state-page-valid",
+        "aidx-blake3-256-index-document-state-directory-leaf-valid"
       ],
       "fixture_ids_64": [
         "aidx-sha512-field-index-pointer-a",
@@ -2149,7 +2166,20 @@
         "aidx-sha512-field-index-manifest-empty",
         "aidx-sha512-field-index-manifest-populated",
         "aidx-sha512-field-nvt-manifest-empty",
-        "aidx-sha512-field-nvt-manifest-populated"
+        "aidx-sha512-field-nvt-manifest-populated",
+        "aidx-sha512-scope-ordinal-page-valid",
+        "aidx-sha512-scope-ordinal-directory-leaf-valid",
+        "aidx-sha512-scope-reverse-page-valid",
+        "aidx-sha512-scope-reverse-directory-leaf-valid",
+        "aidx-sha512-value-page-valid",
+        "aidx-sha512-value-directory-leaf-valid",
+        "aidx-sha512-value-document-state-page-valid",
+        "aidx-sha512-value-document-state-directory-leaf-valid",
+        "aidx-sha512-posting-page-valid",
+        "aidx-sha512-posting-directory-leaf-valid",
+        "aidx-sha512-posting-directory-internal-valid",
+        "aidx-sha512-index-document-state-page-valid",
+        "aidx-sha512-index-document-state-directory-leaf-valid"
       ],
       "immutable_manifest_kinds": {
         "0x0010": {
@@ -2179,6 +2209,92 @@
           "body_formula": "144 + 4H + D",
           "complete_formula": "188 + 5H + D",
           "definition_cap": 524288
+        }
+      },
+      "ordered_artifact_kinds": {
+        "0x0020": {
+          "name": "ArtifactDirectoryNodeV1",
+          "identity": "owner_id H || owner_class u8 || directory_role u8",
+          "body_formula": "80 + lower_fence L + upper_fence U + entries E",
+          "complete_cap": 4194304,
+          "roles": {
+            "1": "scope_ordinal/document_ordinal_u64_v1",
+            "2": "scope_reverse/file_key_v1",
+            "3": "value/value_position_v1",
+            "4": "value_document_state/document_ordinal_u64_v1",
+            "5": "posting/posting_position_v1",
+            "6": "index_document_state/document_ordinal_u64_v1",
+            "7": "nvt_tile/nvt_cell_u64_v1"
+          }
+        },
+        "0x0030": {
+          "name": "PostingPageV1",
+          "identity": "IndexId H || page_id u64 LE",
+          "body_formula": "96 + L + U + R",
+          "record_formula": "32 + posting_key_length K",
+          "complete_cap": 4194304
+        },
+        "0x0031": {
+          "name": "ValuePageV1",
+          "identity": "ValueStoreId H || page_id u64 LE",
+          "body_formula": "96 + L + U + R",
+          "record_formula": "24 + H + canonical_value_length V",
+          "complete_cap": 4194304,
+          "source_value_codec": "CanonicalSourceValueV1 structural framing with 1 MiB complete-value/scalar cap, 64 KiB map-key cap, depth 32, 65,535 members, and typed u64 across its full domain"
+        },
+        "0x0033": {
+          "name": "ScopeCatalogPageV1",
+          "identity": "ScopeId H || role u8 || canonical lower fence",
+          "body_formula": "96 + L + U + R",
+          "record_formulas": [
+            "ordinal: 16 + 2H + path length",
+            "reverse: 12 + H"
+          ],
+          "complete_cap": 4194304
+        },
+        "0x0034": {
+          "name": "DocumentStatePageV1",
+          "identity": "owner_id H || owner_class u8 || zero[7] || page_id u64 LE",
+          "body_formula": "96 + L + U + R",
+          "record_formula": "48 + H + evidence length E",
+          "complete_cap": 4194304,
+          "owner_stage_classes": {
+            "ValueStoreId": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "IndexId": [
+              5,
+              6
+            ]
+          },
+          "stage_ids": {
+            "1": "parser",
+            "2": "selector",
+            "3": "mapper",
+            "4": "canonical_value",
+            "5": "converter",
+            "6": "expansion"
+          },
+          "reason_ids": {
+            "0x0001": "malformed_document",
+            "0x0002": "deterministic_plugin_rejection",
+            "0x0003": "parser_output_contract",
+            "0x0004": "mapper_output_contract",
+            "0x0005": "selector_work_limit",
+            "0x0006": "selector_examined_bytes_limit",
+            "0x0007": "source_value_count_limit",
+            "0x0008": "source_value_bytes_limit",
+            "0x0009": "unsupported_source_type",
+            "0x000a": "invalid_numeric_or_temporal_value",
+            "0x000b": "nonfinite_float",
+            "0x000c": "converter_input_limit",
+            "0x000d": "expansion_count_limit",
+            "0x000e": "posting_count_limit",
+            "0x000f": "posting_bytes_limit"
+          }
         }
       }
     },
@@ -2393,9 +2509,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 14,
-    "fixture_count": 212,
+    "fixture_count": 238,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, canonical semantic definitions through FieldIndexDefinitionV1, and all converter/strategy bundles",
-    "remaining_p0b_2_scope": "Index pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, and all ordered page/record roles",
+    "remaining_p0b_2_scope": "NVT tiles, journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

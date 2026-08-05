@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-index-manifests-v1",
+  "tool_revision": "p0b2-ordered-pages-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -421,6 +421,162 @@
       "fixture_id": "aidx-sha512-field-nvt-manifest-populated",
       "expected": "index:manifest:field-nvt:generation=4354:roots=populated",
       "observed": "index:manifest:field-nvt:generation=4354:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-scope-ordinal-page-valid",
+      "expected": "index:page:scope-catalog:ordinal:records=2",
+      "observed": "index:page:scope-catalog:ordinal:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-scope-ordinal-directory-leaf-valid",
+      "expected": "index:directory:scope-ordinal:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:scope-ordinal:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-scope-reverse-page-valid",
+      "expected": "index:page:scope-catalog:reverse:records=2",
+      "observed": "index:page:scope-catalog:reverse:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-scope-reverse-directory-leaf-valid",
+      "expected": "index:directory:scope-reverse:level=0:entries=1:live=2:pages=1:fences=32/32",
+      "observed": "index:directory:scope-reverse:level=0:entries=1:live=2:pages=1:fences=32/32",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-value-page-valid",
+      "expected": "index:page:value:page-id=201:records=2",
+      "observed": "index:page:value:page-id=201:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-value-directory-leaf-valid",
+      "expected": "index:directory:value:level=0:entries=1:live=2:pages=1:fences=12/12",
+      "observed": "index:directory:value:level=0:entries=1:live=2:pages=1:fences=12/12",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-value-document-state-page-valid",
+      "expected": "index:page:document-state:value-store:page-id=405:records=2",
+      "observed": "index:page:document-state:value-store:page-id=405:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-value-document-state-directory-leaf-valid",
+      "expected": "index:directory:value-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:value-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-posting-page-valid",
+      "expected": "index:page:posting:page-id=301:records=2",
+      "observed": "index:page:posting:page-id=301:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-posting-directory-leaf-valid",
+      "expected": "index:directory:posting:level=0:entries=1:live=2:pages=1:fences=57/57",
+      "observed": "index:directory:posting:level=0:entries=1:live=2:pages=1:fences=57/57",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-posting-directory-internal-valid",
+      "expected": "index:directory:posting:level=1:entries=1:live=2:pages=1:fences=57/57",
+      "observed": "index:directory:posting:level=1:entries=1:live=2:pages=1:fences=57/57",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-index-document-state-page-valid",
+      "expected": "index:page:document-state:index:page-id=407:records=2",
+      "observed": "index:page:document-state:index:page-id=407:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-index-document-state-directory-leaf-valid",
+      "expected": "index:directory:index-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:index-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-ordinal-page-valid",
+      "expected": "index:page:scope-catalog:ordinal:records=2",
+      "observed": "index:page:scope-catalog:ordinal:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-ordinal-directory-leaf-valid",
+      "expected": "index:directory:scope-ordinal:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:scope-ordinal:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-reverse-page-valid",
+      "expected": "index:page:scope-catalog:reverse:records=2",
+      "observed": "index:page:scope-catalog:reverse:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-scope-reverse-directory-leaf-valid",
+      "expected": "index:directory:scope-reverse:level=0:entries=1:live=2:pages=1:fences=64/64",
+      "observed": "index:directory:scope-reverse:level=0:entries=1:live=2:pages=1:fences=64/64",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-value-page-valid",
+      "expected": "index:page:value:page-id=201:records=2",
+      "observed": "index:page:value:page-id=201:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-value-directory-leaf-valid",
+      "expected": "index:directory:value:level=0:entries=1:live=2:pages=1:fences=12/12",
+      "observed": "index:directory:value:level=0:entries=1:live=2:pages=1:fences=12/12",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-value-document-state-page-valid",
+      "expected": "index:page:document-state:value-store:page-id=405:records=2",
+      "observed": "index:page:document-state:value-store:page-id=405:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-value-document-state-directory-leaf-valid",
+      "expected": "index:directory:value-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:value-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-posting-page-valid",
+      "expected": "index:page:posting:page-id=301:records=2",
+      "observed": "index:page:posting:page-id=301:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-posting-directory-leaf-valid",
+      "expected": "index:directory:posting:level=0:entries=1:live=2:pages=1:fences=57/57",
+      "observed": "index:directory:posting:level=0:entries=1:live=2:pages=1:fences=57/57",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-posting-directory-internal-valid",
+      "expected": "index:directory:posting:level=1:entries=1:live=2:pages=1:fences=57/57",
+      "observed": "index:directory:posting:level=1:entries=1:live=2:pages=1:fences=57/57",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-index-document-state-page-valid",
+      "expected": "index:page:document-state:index:page-id=407:records=2",
+      "observed": "index:page:document-state:index:page-id=407:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-index-document-state-directory-leaf-valid",
+      "expected": "index:directory:index-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:index-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
       "result": "pass"
     },
     {
