@@ -9,7 +9,7 @@ use crate::engine::HashAlgorithm;
 const HEADER_LENGTH: usize = 32;
 const CRC_LENGTH: usize = 4;
 const CONTROL_ROOT: &str = "/.aeordb-system/controls/v1";
-const IDENTITY_LENGTH_CAP: usize = 4_096;
+pub const SYSTEM_CONTROL_IDENTITY_LENGTH_CAP: usize = 4_096;
 const ONE_MIB: usize = 1_048_576;
 const FOUR_KIB: usize = 4_096;
 const MAX_SEGMENT_LENGTH: usize = 64 * ONE_MIB;
@@ -145,7 +145,7 @@ pub enum SystemControlSlotV1 {
 }
 
 impl SystemControlSlotV1 {
-  fn file_name(self) -> &'static str {
+  pub fn file_name(self) -> &'static str {
     match self {
       Self::A => "a.ctrl",
       Self::B => "b.ctrl",
@@ -174,10 +174,7 @@ impl SystemControlV1<'_> {
   }
 
   pub fn canonical_path_for_slot(&self, slot: SystemControlSlotV1) -> FormatResult<String> {
-    if self.kind.is_immutable() != (slot == SystemControlSlotV1::Immutable) {
-      return Err(identity_error("system_control_slot_kind", "slot does not match control mutability"));
-    }
-    Ok(control_path(self.kind, &self.identity, slot))
+    system_control_path(self.kind, &self.identity, slot)
   }
 }
 
@@ -234,8 +231,8 @@ pub fn decode_system_control(bytes: &[u8], algorithm: HashAlgorithm) -> FormatRe
   verify_crc(bytes, "system_control_crc")?;
   let body = &bytes[HEADER_LENGTH..HEADER_LENGTH + body_length];
   let identity = validate_body(kind, body, algorithm)?;
-  if identity.len() > IDENTITY_LENGTH_CAP {
-    return Err(amplification_error("system_control_identity_length", identity.len(), IDENTITY_LENGTH_CAP));
+  if identity.len() > SYSTEM_CONTROL_IDENTITY_LENGTH_CAP {
+    return Err(amplification_error("system_control_identity_length", identity.len(), SYSTEM_CONTROL_IDENTITY_LENGTH_CAP));
   }
   if kind.is_immutable() && sequence != 1 {
     return Err(identity_error("system_control_immutable_sequence", "immutable controls require sequence one"));
@@ -369,6 +366,16 @@ fn decode_cutover_slot(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<C
   let body = &bytes[32..body_end];
   validate_cutover(body, algorithm)?;
   Ok(CutoverSlotV1 { sequence, body })
+}
+
+pub fn system_control_path(kind: SystemControlKindV1, identity: &[u8], slot: SystemControlSlotV1) -> FormatResult<String> {
+  if identity.len() > SYSTEM_CONTROL_IDENTITY_LENGTH_CAP {
+    return Err(amplification_error("system_control_identity_length", identity.len(), SYSTEM_CONTROL_IDENTITY_LENGTH_CAP));
+  }
+  if kind.is_immutable() != (slot == SystemControlSlotV1::Immutable) {
+    return Err(identity_error("system_control_slot_kind", "slot does not match control mutability"));
+  }
+  Ok(control_path(kind, identity, slot))
 }
 
 fn control_path(kind: SystemControlKindV1, identity: &[u8], slot: SystemControlSlotV1) -> String {
@@ -877,8 +884,8 @@ fn validate_root_prepare(body: &[u8], algorithm: HashAlgorithm) -> FormatResult<
     return Err(identity_error("root_prepare_identity", "root publication operation ID is zero"));
   }
   let authority_length = usize::from(u16_at(body, 44 + 3 * hash_width)?);
-  if authority_length == 0 || authority_length > IDENTITY_LENGTH_CAP {
-    return Err(amplification_error("root_prepare_authority_length", authority_length, IDENTITY_LENGTH_CAP));
+  if authority_length == 0 || authority_length > SYSTEM_CONTROL_IDENTITY_LENGTH_CAP {
+    return Err(amplification_error("root_prepare_authority_length", authority_length, SYSTEM_CONTROL_IDENTITY_LENGTH_CAP));
   }
   if body.len() != checked_add(fixed, authority_length, "root prepare authority")? {
     return Err(trailing_error("root_prepare_length", "authority identity does not close prepare body"));

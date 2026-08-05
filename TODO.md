@@ -79,6 +79,13 @@
     - [x] Gate clone adoption on a new physical identity and a strictly advanced writer fence.
     - [x] Gate peer transfer on database, hash, registry, capability, and physical-instance compatibility.
     - [x] Prove all refusal paths occur before mutation authority is exposed and run the full P1b gate.
+  - [ ] P1c: prove native durability primitives and deterministic read-only ControlStore selection.
+    - [x] Add failing platform/control-store specs covering success, unsupported, malformed, and torn-state paths.
+    - [x] Replace the Windows parent-directory-sync no-op with a real native flush or a typed unsupported result.
+    - [x] Implement native file/data barriers, durable replace, preallocation, read-back, filesystem reporting, and stable file identity.
+    - [x] Implement bounded A/B/I ControlStore read selection with expected kind/database/identity verification.
+    - [ ] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
+    - [ ] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

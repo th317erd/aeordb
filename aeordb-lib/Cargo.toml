@@ -102,6 +102,9 @@ tracing-subscriber = { workspace = true }
 tempfile = "3"
 thiserror = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 futures-util = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -754,6 +757,10 @@ path = "spec/engine/v4_reader_hardening_spec.rs"
 [[test]]
 name = "v4_admission_spec"
 path = "spec/engine/v4_admission_spec.rs"
+
+[[test]]
+name = "v4_platform_probe_spec"
+path = "spec/engine/v4_platform_probe_spec.rs"
 
 
 [lints]

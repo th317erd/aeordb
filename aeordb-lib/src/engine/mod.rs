@@ -60,6 +60,7 @@ pub mod lost_found;
 pub mod merge;
 pub mod merge_patch;
 pub mod metrics_pulse;
+pub mod native_durability;
 pub mod native_parsers;
 pub mod nvt;
 pub mod nvt_ops;
