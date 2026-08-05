@@ -14,6 +14,7 @@ pub mod hash;
 pub mod index_artifact;
 pub mod index_nvt;
 pub mod index_page;
+pub mod index_task;
 pub mod namespace;
 pub mod parser_plan;
 pub mod reader;

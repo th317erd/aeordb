@@ -12,6 +12,7 @@ use aeordb::engine::v4::index_artifact::{
 use aeordb::engine::v4::index_page::{
   OrderedIndexArtifactV1, OrderedIndexRoleV1, compare_order_keys, decode_ordered_index_artifact, validate_scope_catalog_pair,
 };
+use aeordb::engine::v4::index_task::{IndexTaskArtifactV1, IndexTaskKindV1, decode_index_task_artifact, validate_journal_chain};
 use aeordb::engine::v4::index_nvt::{coordinate_cell, decode_nvt_tile, verified_page_hint, verified_predecessor_or_fallback};
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
@@ -792,6 +793,249 @@ fn sparse_nvt_rejects_malformed_tiles_and_treats_stale_hints_as_misses() {
   corrupt[64] ^= 1;
   let corrupt = decode_nvt_tile(&corrupt, HashAlgorithm::Blake3_256).ok();
   assert_eq!(verified_predecessor_or_fallback(corrupt.as_ref(), 100, 300, 400, &[301, 302, 350], 399), 399);
+}
+
+#[test]
+fn every_index_journal_and_checkpoint_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest()
+    .fixtures
+    .into_iter()
+    .filter(|row| {
+      row.format_id == "index-artifact-v1" && (row.expected.starts_with("index:journal:") || row.expected.starts_with("index:checkpoint:"))
+    })
+    .collect();
+  assert_eq!(rows.len(), 8);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let decoded = decode_index_task_artifact(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    let (observed, key) = match decoded {
+      IndexTaskArtifactV1::Journal(journal) => (
+        format!(
+          "index:journal:{}:generation={}:segment={}:reset={}:records={}:sequences={}/{}",
+          journal.owner_kind.name(),
+          journal.generation,
+          journal.segment_ordinal,
+          journal.chain_reset,
+          journal.records.len(),
+          journal.first_sequence,
+          journal.last_sequence
+        ),
+        journal.key,
+      ),
+      IndexTaskArtifactV1::Checkpoint(checkpoint) => {
+        assert_eq!(
+          checkpoint.attachments.iter().map(|attachment| attachment.unwrap()).count(),
+          checkpoint.attachments.len(),
+          "fixture {} attachment iterator",
+          row.id
+        );
+        (
+          format!(
+            "index:checkpoint:{}:task={}:state={}:phase={}:sequence={}:attachments={}",
+            if checkpoint.external.is_some() { "external" } else { "embedded" },
+            checkpoint.task_kind.name(),
+            checkpoint.state.name(),
+            checkpoint.phase_name,
+            checkpoint.checkpoint_sequence,
+            checkpoint.attachments.len()
+          ),
+          checkpoint.key,
+        )
+      }
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(key), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn index_journals_and_checkpoints_reject_broken_chains_batches_bounds_and_external_state() {
+  let root = fixture_root();
+  let task = fs::read(root.join("index-artifact-v1/aidx-blake3-256-task-mutation-journal-valid.bin")).unwrap();
+  let body = 32 + 24;
+  let record = body + 56 + 4 * 32;
+
+  let mut excessive_records = task.clone();
+  excessive_records[body + 32..body + 36].copy_from_slice(&10_001u32.to_le_bytes());
+  repair_trailing_crc(&mut excessive_records);
+  assert_eq!(
+    decode_index_task_artifact(&excessive_records, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut broken_batch = task.clone();
+  broken_batch[record + 20..record + 24].copy_from_slice(&3u32.to_le_bytes());
+  repair_trailing_crc(&mut broken_batch);
+  assert_eq!(
+    decode_index_task_artifact(&broken_batch, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut invalid_path_key = task.clone();
+  invalid_path_key[record + 24 + 5 * 32] ^= 1;
+  repair_trailing_crc(&mut invalid_path_key);
+  assert_eq!(
+    decode_index_task_artifact(&invalid_path_key, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let second_record = record + test_u32(&task, record) as usize;
+  for kind in [5u16, 6, 7] {
+    let mut compatible_presence = task.clone();
+    compatible_presence[record + 4..record + 6].copy_from_slice(&kind.to_le_bytes());
+    compatible_presence[second_record + 4..second_record + 6].copy_from_slice(&kind.to_le_bytes());
+    repair_trailing_crc(&mut compatible_presence);
+    decode_index_task_artifact(&compatible_presence, HashAlgorithm::Blake3_256).unwrap();
+  }
+  let mut unknown_mutation = task.clone();
+  unknown_mutation[record + 4..record + 6].copy_from_slice(&8u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_mutation);
+  assert_eq!(
+    decode_index_task_artifact(&unknown_mutation, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut missing_reset = task.clone();
+  missing_reset[body..body + 4].fill(0);
+  repair_trailing_crc(&mut missing_reset);
+  assert_eq!(
+    decode_index_task_artifact(&missing_reset, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let system = fs::read(root.join("index-artifact-v1/aidx-blake3-256-system-mutation-journal-valid.bin")).unwrap();
+  let system_record = body + 56 + 4 * 32;
+  for kind in [3u16, 4] {
+    let mut invalid_presence = system.clone();
+    invalid_presence[system_record + 4..system_record + 6].copy_from_slice(&kind.to_le_bytes());
+    repair_trailing_crc(&mut invalid_presence);
+    assert_eq!(
+      decode_index_task_artifact(&invalid_presence, HashAlgorithm::Blake3_256).unwrap_err().class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+  }
+  let mut wrong_system_owner = system;
+  wrong_system_owner[32] ^= 1;
+  repair_trailing_crc(&mut wrong_system_owner);
+  assert_eq!(
+    decode_index_task_artifact(&wrong_system_owner, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let IndexTaskArtifactV1::Journal(journal) = decode_index_task_artifact(&task, HashAlgorithm::Blake3_256).unwrap() else {
+    panic!("expected journal");
+  };
+  assert_eq!(journal.records.iter().map(|record| record.unwrap()).count(), journal.records.len());
+  assert_eq!(validate_journal_chain(&journal, &journal).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let checkpoint = fs::read(root.join("index-artifact-v1/aidx-blake3-256-index-task-checkpoint-embedded-valid.bin")).unwrap();
+  let fixed = 120 + 4 * 32;
+
+  let mut unknown_phase = checkpoint.clone();
+  unknown_phase[body + 10..body + 12].copy_from_slice(&99u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_phase);
+  assert_eq!(
+    decode_index_task_artifact(&unknown_phase, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut unknown_capability = checkpoint.clone();
+  unknown_capability[body + 12 + 3] = 1;
+  repair_trailing_crc(&mut unknown_capability);
+  assert_eq!(
+    decode_index_task_artifact(&unknown_capability, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownRequiredCapability
+  );
+
+  let mut unknown_state = checkpoint.clone();
+  unknown_state[body + 8..body + 10].copy_from_slice(&8u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_state);
+  assert_eq!(
+    decode_index_task_artifact(&unknown_state, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let mut reversed_time = checkpoint.clone();
+  reversed_time[body + 52..body + 60].fill(0);
+  repair_trailing_crc(&mut reversed_time);
+  assert_eq!(
+    decode_index_task_artifact(&reversed_time, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let mut oversized_resume = checkpoint.clone();
+  oversized_resume[body + 100 + 4 * 32..body + 104 + 4 * 32].copy_from_slice(&1_048_577u32.to_le_bytes());
+  repair_trailing_crc(&mut oversized_resume);
+  assert_eq!(
+    decode_index_task_artifact(&oversized_resume, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut excessive_attachments = checkpoint.clone();
+  excessive_attachments[body + 104 + 4 * 32..body + 108 + 4 * 32].copy_from_slice(&4_097u32.to_le_bytes());
+  repair_trailing_crc(&mut excessive_attachments);
+  assert_eq!(
+    decode_index_task_artifact(&excessive_attachments, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let resume_length = test_u32(&checkpoint, body + 100 + 4 * 32) as usize;
+  let first_attachment = body + fixed + resume_length;
+  let mut unknown_attachment = checkpoint;
+  unknown_attachment[first_attachment..first_attachment + 2].copy_from_slice(&13u16.to_le_bytes());
+  repair_trailing_crc(&mut unknown_attachment);
+  assert_eq!(
+    decode_index_task_artifact(&unknown_attachment, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+
+  let external = fs::read(root.join("index-artifact-v1/aidx-blake3-256-index-task-checkpoint-external-valid.bin")).unwrap();
+  let external_length = test_u32(&external, body + 112 + 4 * 32) as usize;
+  let external_start = external.len() - 4 - external_length;
+  let mut oversized_external = external.clone();
+  oversized_external[body + 112 + 4 * 32..body + 116 + 4 * 32].copy_from_slice(&65_537u32.to_le_bytes());
+  repair_trailing_crc(&mut oversized_external);
+  assert_eq!(
+    decode_index_task_artifact(&oversized_external, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut relative_path = external;
+  relative_path[external_start + 68] = b'x';
+  repair_trailing_crc(&mut relative_path);
+  assert_eq!(
+    decode_index_task_artifact(&relative_path, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let mut oversized_checkpoint = vec![0u8; 4 * 1_024 * 1_024 + 1];
+  oversized_checkpoint[6..8].copy_from_slice(&0x0041u16.to_le_bytes());
+  assert_eq!(
+    decode_index_task_artifact(&oversized_checkpoint, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+}
+
+#[test]
+fn every_index_task_kind_has_a_closed_phase_registry() {
+  let tasks = [
+    (IndexTaskKindV1::ScopeBuild, 6u16),
+    (IndexTaskKindV1::ValueBuild, 6),
+    (IndexTaskKindV1::FieldBuild, 6),
+    (IndexTaskKindV1::NvtBuild, 5),
+    (IndexTaskKindV1::Reconcile, 6),
+    (IndexTaskKindV1::V0Migration, 6),
+    (IndexTaskKindV1::Compaction, 5),
+    (IndexTaskKindV1::IndexRepair, 5),
+  ];
+  for (task, maximum_phase) in tasks {
+    assert!(task.phase_name(1).is_some());
+    assert!(task.phase_name(maximum_phase).is_some());
+    assert!(task.phase_name(0).is_none());
+    assert!(task.phase_name(maximum_phase + 1).is_none());
+  }
 }
 
 #[test]
