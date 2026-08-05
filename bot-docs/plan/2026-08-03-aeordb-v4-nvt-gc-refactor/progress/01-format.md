@@ -306,3 +306,13 @@
 - **Malformed proof:** focused cases reject native policies carrying WASM limits, unaligned wasm32 memory, dependency count amplification, and trailing table bytes with distinct frozen error classes.
 - **Green proof:** all twelve both-width invocation/dependency fixtures match their independent summaries; the complete v4 target passed 14 tests and locked library `cargo check` passed.
 - **Boundary:** execution remains disabled; no native function, WASM module, parser, mapper, or writer is invoked by these readers.
+
+## P1a-5 Scope Definition Reader
+
+- **Entry:** `b6e4ed6`; `development` matched `origin/development`, and the three acknowledged untracked user paths remained excluded.
+- **Territory:** the independent `ScopeDefinitionV1` reference codec and six both-width fixtures are the only current producer. Value-store/field-index definitions and later scope catalogs, index planners, migration, and query paths are downstream consumers; none are activated by this landing.
+- **Red proof:** the focused fixture target failed to compile on the absent `engine::v4::scope` module before the production reader existed.
+- **Implementation:** added a borrowed 64 KiB-bounded reader with checked owner/glob length arithmetic, exact definition framing and semantic versions, direct-versus-relative-glob closure, allocation-free canonical absolute-path/glob validation, and selected-width ScopeId recomputation over the complete bytes.
+- **Malformed proof:** focused mutations reject noncanonical and invalid-UTF-8 owners, mode/glob disagreement, and one-byte-over-cap input with their frozen malformed classes.
+- **Green proof:** all six independent scope fixtures and two focused scope tests pass; the complete v4 target passes 16 tests, and locked library `cargo check` passes. Repository `cargo fmt --check` initially reported only the two expected formatting diffs in the new file; `cargo fmt --all` applied them.
+- **Boundary:** this is read-only contract validation. No scope evaluator, writer, index runtime, migration, route, or database behavior changed.

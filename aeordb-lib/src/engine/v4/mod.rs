@@ -12,6 +12,7 @@ pub mod entity;
 pub mod hash;
 pub mod namespace;
 pub mod reader;
+pub mod scope;
 
 #[cfg(test)]
 mod tests {

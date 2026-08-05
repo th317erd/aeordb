@@ -44,6 +44,13 @@
   - [ ] P1a: implement bounded v4 readers before any v4 writer is enabled.
     - [ ] Characterize v3 header/entity open and byte-preservation behavior.
     - [x] Add checked bounded-reader primitives with allocation-before-validation guards.
+    - [x] Decode ScopeDefinitionV1 and prove canonical owner/glob semantics and bounds.
+    - [ ] Decode ParserResolutionPlanV1 and prove candidate/context/MIME semantics and bounds.
+    - [ ] Decode SourceSelectorV1 and prove metadata/path/regex/mapper semantics and bounds.
+    - [ ] Decode ValueStoreDefinitionV1 and close child/dependency ordinal invariants.
+    - [ ] Decode ConverterDefinitionV1 and FieldIndexDefinitionV1.
+    - [ ] Decode immutable index manifests, ordered pages, NVT, journal, checkpoint, and APOS artifacts.
+    - [ ] Decode the complete GC artifact, workspace, Void, audit, control, cutover, and SystemFamily families.
     - [ ] Dispatch v3 and v4 database headers without rewriting either format on open.
     - [ ] Decode every hand-authored v4 fixture and reject every malformed fixture with its frozen error class.
     - [ ] Add mutation/fuzz corpus watchdogs and allocation ceilings.

@@ -8,6 +8,7 @@ use aeordb::engine::v4::entity::decode_whole_entity;
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
+use aeordb::engine::v4::scope::{ScopeMatchingMode, decode_scope_definition};
 use aeordb::engine::HashAlgorithm;
 use serde::Deserialize;
 
@@ -125,6 +126,64 @@ fn every_invocation_and_dependency_fixture_matches_the_independent_oracle() {
     };
     assert_eq!(observed, row.expected, "fixture {}", row.id);
   }
+}
+
+#[test]
+fn every_scope_definition_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "scope-definition-v1").collect();
+  assert_eq!(rows.len(), 6);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let scope = decode_scope_definition(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
+    let observed = if bytes.len() == 65_536 {
+      "scope:relative-glob:maximum-length".to_string()
+    } else {
+      match scope.mode {
+        ScopeMatchingMode::DirectChildren => format!("scope:direct:owner={}", scope.owner_path),
+        ScopeMatchingMode::RelativePathGlob => {
+          format!("scope:relative-glob:owner={}:glob={}", scope.owner_path, scope.glob.unwrap())
+        }
+      }
+    };
+    assert_eq!(observed, row.expected, "fixture {}", row.id);
+    assert_eq!(hex::encode(scope.scope_id), row.canonical_key.unwrap(), "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn scope_definition_rejects_noncanonical_context_and_amplification() {
+  let root = fixture_root();
+  let direct = fs::read(root.join("scope-definition-v1/ascp-blake3-256-root-direct-valid.bin")).unwrap();
+
+  let mut noncanonical_owner = direct.clone();
+  noncanonical_owner[64] = b'.';
+  assert_eq!(
+    decode_scope_definition(&noncanonical_owner, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let mut invalid_utf8 = direct;
+  invalid_utf8[64] = 0xff;
+  assert_eq!(
+    decode_scope_definition(&invalid_utf8, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::InvalidUtf8PathGlobOrNativePath
+  );
+
+  let glob = fs::read(root.join("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin")).unwrap();
+  let mut mismatched_mode = glob;
+  mismatched_mode[42..44].copy_from_slice(&1u16.to_le_bytes());
+  assert_eq!(
+    decode_scope_definition(&mismatched_mode, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let oversized = vec![0u8; 65_537];
+  assert_eq!(
+    decode_scope_definition(&oversized, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
 }
 
 #[test]
