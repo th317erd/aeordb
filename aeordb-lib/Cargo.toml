@@ -50,6 +50,7 @@ argon2 = "0.5"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 rand = "0.8"
 sha2 = "0.10"
+sha3 = "0.10"
 
 # Plugins
 wasmi = "0.42"

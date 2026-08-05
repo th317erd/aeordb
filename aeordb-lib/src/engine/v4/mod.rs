@@ -6,6 +6,9 @@
 #[rustfmt::skip]
 pub mod contract_generated;
 pub mod database_header;
+pub mod entity;
+pub mod hash;
+pub mod namespace;
 pub mod reader;
 
 #[cfg(test)]

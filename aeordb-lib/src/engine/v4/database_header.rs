@@ -259,7 +259,7 @@ fn decode_slot(slot: &[u8]) -> FormatResult<DatabaseHeaderV4> {
   })
 }
 
-fn validate_capabilities(capabilities: &[u8; 32], role: &str) -> FormatResult<()> {
+pub(crate) fn validate_capabilities(capabilities: &[u8; 32], role: &str) -> FormatResult<()> {
   if capabilities[KNOWN_CAPABILITY_BYTES..].iter().any(|byte| *byte != 0) {
     return Err(error(
       MalformedInputClass::UnknownRequiredCapability,
