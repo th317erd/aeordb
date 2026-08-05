@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-gc-audit-v1",
+  "tool_revision": "p0b2-system-control-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -2269,6 +2269,258 @@
       "fixture_id": "asel-sha512-maximum-length-valid",
       "expected": "selector:plugin-mapper:items=0",
       "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-index-registry-valid",
+      "expected": "control:index-registry:sequence=7:body=288",
+      "observed": "control:index-registry:sequence=7:body=288",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-index-operation-valid",
+      "expected": "control:index-operation:sequence=7:body=312",
+      "observed": "control:index-operation:sequence=7:body=312",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-index-degraded-valid",
+      "expected": "control:index-degraded:sequence=7:body=172",
+      "observed": "control:index-degraded:sequence=7:body=172",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-lifecycle-lkg-valid",
+      "expected": "control:lifecycle-lkg:sequence=7:body=188",
+      "observed": "control:lifecycle-lkg:sequence=7:body=188",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-lifecycle-diagnostics-valid",
+      "expected": "control:lifecycle-diagnostics:sequence=7:body=225",
+      "observed": "control:lifecycle-diagnostics:sequence=7:body=225",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-runtime-lkg-valid",
+      "expected": "control:runtime-lkg:sequence=7:body=190",
+      "observed": "control:runtime-lkg:sequence=7:body=190",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-runtime-diagnostics-valid",
+      "expected": "control:runtime-diagnostics:sequence=7:body=225",
+      "observed": "control:runtime-diagnostics:sequence=7:body=225",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-repair-ticket-valid",
+      "expected": "control:repair-ticket:sequence=7:body=368",
+      "observed": "control:repair-ticket:sequence=7:body=368",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-path-write-latch-valid",
+      "expected": "control:path-write-latch:sequence=7:body=96",
+      "observed": "control:path-write-latch:sequence=7:body=96",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-migration-lease-valid",
+      "expected": "control:migration-lease:sequence=7:body=132",
+      "observed": "control:migration-lease:sequence=7:body=132",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-migration-progress-valid",
+      "expected": "control:migration-progress:sequence=7:body=348",
+      "observed": "control:migration-progress:sequence=7:body=348",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-legacy-root-map-valid",
+      "expected": "control:legacy-root-map:sequence=7:body=200",
+      "observed": "control:legacy-root-map:sequence=7:body=200",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-legacy-root-map-page-valid",
+      "expected": "control:legacy-root-map-page:sequence=1:body=236",
+      "observed": "control:legacy-root-map-page:sequence=1:body=236",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-task-pin-valid",
+      "expected": "control:task-pin:sequence=7:body=204",
+      "observed": "control:task-pin:sequence=7:body=204",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-semantic-mutation-segment-valid",
+      "expected": "control:semantic-mutation-segment:sequence=1:body=336",
+      "observed": "control:semantic-mutation-segment:sequence=1:body=336",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-root-publication-prepare-valid",
+      "expected": "control:root-publication-prepare:sequence=1:body=228",
+      "observed": "control:root-publication-prepare:sequence=1:body=228",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-root-admission-commit-valid",
+      "expected": "control:root-admission-commit:sequence=1:body=192",
+      "observed": "control:root-admission-commit:sequence=1:body=192",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-durability-latch-valid",
+      "expected": "control:durability-latch:sequence=7:body=227",
+      "observed": "control:durability-latch:sequence=7:body=227",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-emergency-spill-catalog-valid",
+      "expected": "control:emergency-spill-catalog:sequence=7:body=187",
+      "observed": "control:emergency-spill-catalog:sequence=7:body=187",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-side-by-side-cutover-valid",
+      "expected": "control:side-by-side-cutover:sequence=7:body=300",
+      "observed": "control:side-by-side-cutover:sequence=7:body=300",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "cutover-blake3-256-external-journal-valid",
+      "expected": "cutover:external-journal:selected=12",
+      "observed": "cutover:external-journal:selected=12",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-index-registry-valid",
+      "expected": "control:index-registry:sequence=7:body=512",
+      "observed": "control:index-registry:sequence=7:body=512",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-index-operation-valid",
+      "expected": "control:index-operation:sequence=7:body=536",
+      "observed": "control:index-operation:sequence=7:body=536",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-index-degraded-valid",
+      "expected": "control:index-degraded:sequence=7:body=300",
+      "observed": "control:index-degraded:sequence=7:body=300",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-lifecycle-lkg-valid",
+      "expected": "control:lifecycle-lkg:sequence=7:body=252",
+      "observed": "control:lifecycle-lkg:sequence=7:body=252",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-lifecycle-diagnostics-valid",
+      "expected": "control:lifecycle-diagnostics:sequence=7:body=289",
+      "observed": "control:lifecycle-diagnostics:sequence=7:body=289",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-runtime-lkg-valid",
+      "expected": "control:runtime-lkg:sequence=7:body=254",
+      "observed": "control:runtime-lkg:sequence=7:body=254",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-runtime-diagnostics-valid",
+      "expected": "control:runtime-diagnostics:sequence=7:body=289",
+      "observed": "control:runtime-diagnostics:sequence=7:body=289",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-repair-ticket-valid",
+      "expected": "control:repair-ticket:sequence=7:body=560",
+      "observed": "control:repair-ticket:sequence=7:body=560",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-path-write-latch-valid",
+      "expected": "control:path-write-latch:sequence=7:body=128",
+      "observed": "control:path-write-latch:sequence=7:body=128",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-migration-lease-valid",
+      "expected": "control:migration-lease:sequence=7:body=132",
+      "observed": "control:migration-lease:sequence=7:body=132",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-migration-progress-valid",
+      "expected": "control:migration-progress:sequence=7:body=540",
+      "observed": "control:migration-progress:sequence=7:body=540",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-legacy-root-map-valid",
+      "expected": "control:legacy-root-map:sequence=7:body=296",
+      "observed": "control:legacy-root-map:sequence=7:body=296",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-legacy-root-map-page-valid",
+      "expected": "control:legacy-root-map-page:sequence=1:body=364",
+      "observed": "control:legacy-root-map-page:sequence=1:body=364",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-task-pin-valid",
+      "expected": "control:task-pin:sequence=7:body=332",
+      "observed": "control:task-pin:sequence=7:body=332",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-semantic-mutation-segment-valid",
+      "expected": "control:semantic-mutation-segment:sequence=1:body=592",
+      "observed": "control:semantic-mutation-segment:sequence=1:body=592",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-root-publication-prepare-valid",
+      "expected": "control:root-publication-prepare:sequence=1:body=388",
+      "observed": "control:root-publication-prepare:sequence=1:body=388",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-root-admission-commit-valid",
+      "expected": "control:root-admission-commit:sequence=1:body=320",
+      "observed": "control:root-admission-commit:sequence=1:body=320",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-durability-latch-valid",
+      "expected": "control:durability-latch:sequence=7:body=291",
+      "observed": "control:durability-latch:sequence=7:body=291",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-emergency-spill-catalog-valid",
+      "expected": "control:emergency-spill-catalog:sequence=7:body=219",
+      "observed": "control:emergency-spill-catalog:sequence=7:body=219",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-side-by-side-cutover-valid",
+      "expected": "control:side-by-side-cutover:sequence=7:body=460",
+      "observed": "control:side-by-side-cutover:sequence=7:body=460",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "cutover-sha512-external-journal-valid",
+      "expected": "cutover:external-journal:selected=12",
+      "observed": "cutover:external-journal:selected=12",
       "result": "pass"
     },
     {

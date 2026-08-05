@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-gc-audit",
+  "coverage_stage": "p0b-2-system-control",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -3034,6 +3034,137 @@
       ]
     },
     {
+      "id": "system-control-v1",
+      "family": "low-volume-system-control",
+      "version": 1,
+      "header_length": 32,
+      "identity": "kind-specific permanent identity repeated in the canonical body and bound to one protected FileRecord path",
+      "layout": [
+        { "offset": 0, "length": 4, "field": "kind_magic", "rule": "exact permanent magic" },
+        { "offset": 4, "length": 2, "field": "schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "header_length", "rule": "exactly 32" },
+        { "offset": 8, "length": 4, "field": "total_length", "rule": "36 + body_length, checked" },
+        { "offset": 12, "length": 4, "field": "flags", "rule": "kind-specific known bits only; zero for v1 envelope" },
+        { "offset": 16, "length": 8, "field": "control_sequence", "rule": "nonzero; immutable controls require 1" },
+        { "offset": 24, "length": 4, "field": "body_length", "rule": "exact checked kind body at or below cap" },
+        { "offset": 28, "length": 4, "field": "reserved", "rule": "zero" },
+        { "offset": 32, "length": "B", "field": "body", "rule": "database_id then repeated non-singleton identity and exact kind body" },
+        { "offset": "32 + B", "length": 4, "field": "crc32", "rule": "CRC-32/ISO-HDLC over all prior bytes" }
+      ],
+      "magic_registry": {
+        "0x0001": "AIRG", "0x0002": "AIOP", "0x0003": "AIDG",
+        "0x0010": "ALLG", "0x0011": "ALDG", "0x0012": "ARLG", "0x0013": "ARDG",
+        "0x0020": "ARTK", "0x0021": "APWL",
+        "0x0030": "AMLE", "0x0031": "AMPR", "0x0032": "ALRM", "0x0033": "ALRP",
+        "0x0040": "ATPN", "0x0041": "ASMJ", "0x0042": "ARTX", "0x0043": "ARAC",
+        "0x0050": "ADLT", "0x0051": "ASPC", "0x0052": "ACUT"
+      },
+      "kind_registry": {
+        "0x0001": "IndexRegistryControl", "0x0002": "IndexOperationControl", "0x0003": "IndexDegradedControl",
+        "0x0010": "LifecycleLastKnownGood", "0x0011": "LifecycleDiagnostics", "0x0012": "RuntimeLastKnownGood", "0x0013": "RuntimeDiagnostics",
+        "0x0020": "RepairTicket", "0x0021": "PathWriteLatch",
+        "0x0030": "MigrationLease", "0x0031": "MigrationProgress", "0x0032": "LegacyRootMapControl", "0x0033": "LegacyRootMapPage",
+        "0x0040": "TaskPin", "0x0041": "SemanticMutationSegment", "0x0042": "RootPublicationPrepare", "0x0043": "RootAdmissionCommit",
+        "0x0050": "DurabilityLatch", "0x0051": "EmergencySpillCatalog", "0x0052": "SideBySideCutoverControl"
+      },
+      "body_contracts": {
+        "0x0001": { "identity": "singleton", "formula": "32 + 3H + N*(32 + 4H)", "cap": 1048576 },
+        "0x0002": { "identity": "IndexId H || operation_id[16]", "formula": "88 + 7H", "cap": 1048576 },
+        "0x0003": { "identity": "IndexId H", "formula": "44 + 4H", "cap": 1048576 },
+        "0x0010": { "identity": "singleton", "formula": "68 + 2H + canonical_config_length", "cap": 1048576 },
+        "0x0011": { "identity": "singleton", "formula": "68 + 2H + detail_length", "cap": 1048576 },
+        "0x0012": { "identity": "singleton", "formula": "68 + 2H + canonical_config_length", "cap": 1048576 },
+        "0x0013": { "identity": "singleton", "formula": "68 + 2H + detail_length", "cap": 1048576 },
+        "0x0020": { "identity": "ticket_id[16]", "formula": "104 + 4H + evidence_count*H + diagnostic_length", "cap": 1048576 },
+        "0x0021": { "identity": "canonical_path_digest H", "formula": "32 + H + ticket_count*16", "cap": 1048576 },
+        "0x0030": { "identity": "migration_id[16]", "formula": "132", "cap": 1048576 },
+        "0x0031": { "identity": "migration_id[16]", "formula": "156 + 6H", "cap": 4096 },
+        "0x0032": { "identity": "migration_id[16]", "formula": "104 + 3H", "cap": 1048576 },
+        "0x0033": { "identity": "migration_id[16] || page_ordinal u64", "formula": "96 + 2H + N*(12 + 2H)", "cap": 1048576 },
+        "0x0040": { "identity": "task_id[16]", "formula": "76 + root_count*H + artifact_count*H", "cap": 1048576 },
+        "0x0041": { "identity": "segment_ordinal u64", "formula": "48 + H + N*(32 + 7H)", "cap": 67108864 },
+        "0x0042": { "identity": "transaction_id[16]", "formula": "64 + 5H + authority_identity_length", "cap": 1048576 },
+        "0x0043": { "identity": "NamespaceRoot hash H", "formula": "64 + 4H", "cap": 1048576 },
+        "0x0050": { "identity": "singleton", "formula": "88 + 2H + diagnostic_length", "cap": 1048576 },
+        "0x0051": { "identity": "singleton", "formula": "44 + H + sum(72 + path_length)", "cap": 1048576 },
+        "0x0052": { "identity": "migration_id[16]", "formula": "140 + 5H", "cap": 1048576 }
+      },
+      "immutable_kinds": ["0x0033", "0x0041", "0x0042", "0x0043"],
+      "pending_body_fixture_kinds": [],
+      "identity_length_cap": 4096,
+      "body_formula": "36 + kind-specific body B",
+      "hard_cap": 67108900,
+      "physical_representation": {
+        "root": "/.aeordb-system/controls/v1/",
+        "path": "<kind-4-lowercase-hex>/<blake3(identity-domain)-64-lowercase-hex>/<slot>",
+        "identity_digest_domain": "BLAKE3('aeordb.system-control-identity.v1\\0' || kind u16 LE || identity_length u16 LE || identity)",
+        "mutable_slots": ["a.ctrl", "b.ctrl"],
+        "immutable_slot": "i.ctrl",
+        "entry_type": "ordinary FileRecordV1 with FLAG_SYSTEM",
+        "content_type": "application/vnd.aeordb.system-control",
+        "writer_owner": "ControlStore only"
+      },
+      "selection": "validate both complete mutable payloads and body identity; highest sequence wins; equal byte-identical accepted; equal disagreement is AMBIGUOUS_CONTROL; immutable controls use only i.ctrl at sequence 1",
+      "checksum": "CRC-32/ISO-HDLC over complete header and body before final CRC",
+      "canonical_order": "per-kind sorted unique rows and permanent enum order; identity/path derives from exact body identity",
+      "reserve_zero_ranges": ["common header 28..31", "every named kind/body reserve and unknown flag bit"],
+      "malformed_behavior": "reject before allocation on unknown magic/kind/schema/enum, bad identity/path binding, illegal slot/sequence, body cap/count/length/overflow/trailing/order/presence error, noncanonical config/path, nonzero reserve, or CRC failure; never reinterpret corruption as absence",
+      "trailing_behavior": "total_length and body_length consume the exact payload and final CRC",
+      "bounded_decode": "validate 32-byte common header, checked total/body cap, and kind fixed/count-derived lengths before slicing or allocating vectors",
+      "producer_owner": "Child 01 codec; later ControlStore through durability and namespace coordinators",
+      "consumer_owners": ["Child 01 fixture/reader", "capability admission", "ControlStore", "GC", "migration", "repair", "verify", "backup/replication policy"],
+      "capability": "SystemControlV1 bit 4 plus kind-specific capability",
+      "typed_hash_roles": [
+        { "field": "identity", "role": "stable-control-identity" },
+        { "field": "authority/root/artifact fields", "role": "kind-specific graph edge, fingerprint, evidence, or hint as declared by body contract" },
+        { "field": "path identity digest", "role": "collision-checked physical locator hint" }
+      ],
+      "fixture_ids_32": [
+        "control-blake3-256-index-registry-valid", "control-blake3-256-index-operation-valid", "control-blake3-256-index-degraded-valid",
+        "control-blake3-256-lifecycle-lkg-valid", "control-blake3-256-lifecycle-diagnostics-valid", "control-blake3-256-runtime-lkg-valid", "control-blake3-256-runtime-diagnostics-valid",
+        "control-blake3-256-repair-ticket-valid", "control-blake3-256-path-write-latch-valid",
+        "control-blake3-256-migration-lease-valid", "control-blake3-256-migration-progress-valid", "control-blake3-256-legacy-root-map-valid", "control-blake3-256-legacy-root-map-page-valid",
+        "control-blake3-256-task-pin-valid", "control-blake3-256-semantic-mutation-segment-valid", "control-blake3-256-root-publication-prepare-valid", "control-blake3-256-root-admission-commit-valid",
+        "control-blake3-256-durability-latch-valid", "control-blake3-256-emergency-spill-catalog-valid", "control-blake3-256-side-by-side-cutover-valid"
+      ],
+      "fixture_ids_64": [
+        "control-sha512-index-registry-valid", "control-sha512-index-operation-valid", "control-sha512-index-degraded-valid",
+        "control-sha512-lifecycle-lkg-valid", "control-sha512-lifecycle-diagnostics-valid", "control-sha512-runtime-lkg-valid", "control-sha512-runtime-diagnostics-valid",
+        "control-sha512-repair-ticket-valid", "control-sha512-path-write-latch-valid",
+        "control-sha512-migration-lease-valid", "control-sha512-migration-progress-valid", "control-sha512-legacy-root-map-valid", "control-sha512-legacy-root-map-page-valid",
+        "control-sha512-task-pin-valid", "control-sha512-semantic-mutation-segment-valid", "control-sha512-root-publication-prepare-valid", "control-sha512-root-admission-commit-valid",
+        "control-sha512-durability-latch-valid", "control-sha512-emergency-spill-catalog-valid", "control-sha512-side-by-side-cutover-valid"
+      ]
+    },
+    {
+      "id": "cutover-journal-v1",
+      "family": "node-local-cutover-journal",
+      "magic_ascii": "ACUT",
+      "version": 1,
+      "identity": "same exact SideBySideCutoverControl body in two independent node-local slots",
+      "total_length": 2048,
+      "slot_length": 1024,
+      "slot_layout": "magic[4] || schema u16=1 || slot_length u16=1024 || slot_sequence u64 || body_length u32=140+5H || flags u32=0 || reserved[8]=0 || body || zero padding through 1019 || CRC32",
+      "body_formula": "140 + 5H",
+      "hard_cap": 2048,
+      "selection": "highest valid sequence; equal identical accepted; equal disagreement is ambiguous; one torn slot falls back; no valid slot fails recovery",
+      "checksum": "per-slot CRC-32/ISO-HDLC over bytes 0..1019",
+      "canonical_order": "A slot then B slot; each contains the exact canonical cutover body and zero tail padding",
+      "reserve_zero_ranges": ["slot 24..31", "all padding after body through 1019"],
+      "malformed_behavior": "fail cutover recovery on wrong magic/schema/slot/body length, zero sequence, flags/reserve/padding, malformed cutover body, CRC, or equal-sequence disagreement",
+      "trailing_behavior": "exactly two 1024-byte slots and zero per-slot tail padding",
+      "bounded_decode": "fixed 2048-byte read; validate body_length against hash width before slicing",
+      "producer_owner": "Child 05 migration cutover through Child 01 codec and Child 02 durability",
+      "consumer_owners": ["Child 01 fixture/reader", "migration startup/cutover/rollback", "verify/repair"],
+      "capability": "SideBySideMigrationV1 bit 21",
+      "typed_hash_roles": [
+        { "field": "file/path identities", "role": "same-host cutover evidence" },
+        { "field": "last error evidence", "role": "non-traversed evidence" }
+      ],
+      "fixture_ids_32": ["cutover-blake3-256-external-journal-valid"],
+      "fixture_ids_64": ["cutover-sha512-external-journal-valid"]
+    },
+    {
       "id": "logical-position-v1",
       "family": "public-wire-position",
       "magic_ascii": "APOS",
@@ -3135,10 +3266,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 18,
-    "fixture_count": 392,
+    "fixture_family_count": 20,
+    "fixture_count": 434,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, and the complete 34-kind GcArtifactV1 family including controls, physical/root lifecycle, bounded mark workspaces, sweep/Void claims, audit catalogs/pages, run summaries, corruption evidence, and pins",
-    "remaining_p0b_2_scope": "low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, and the external side-by-side cutover journal",
+    "remaining_p0b_2_scope": "SystemFamily, remaining maxima, shared registry closure, and complete malformed mutation corpus"
   }
 }

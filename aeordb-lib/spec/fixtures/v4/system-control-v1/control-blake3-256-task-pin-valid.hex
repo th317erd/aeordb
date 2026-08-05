@@ -1,0 +1,32 @@
+# fixture: control-blake3-256-task-pin-valid
+# contract: SystemControlV1
+# hash: blake3-256 (32 bytes)
+# expected: control:task-pin:sequence=7:body=204
+# canonical key: /.aeordb-system/controls/v1/0040/fd64412e28992922ebf93a41e496a528615bd1b89fb9e238ae644d4d1775cf2a/a.ctrl
+# relation: slot:mutable-a
+# hex offsets are absolute within this fixture
+# control +0x000 len 4: kind-specific magic
+# control +0x004 len 2: schema_version=1
+# control +0x006 len 2: header_length=32
+# control +0x008 len 4: total_length
+# control +0x00c len 4: kind-specific flags
+# control +0x010 len 8: control_sequence
+# control +0x018 len 4: body_length
+# control +0x01c len 4: reserved zero
+# control +0x020 len 204: canonical kind body
+# control final len 4: CRC-32/ISO-HDLC
+00000000: 4154504e01002000f000000000000000
+00000010: 0700000000000000cc00000000000000
+00000020: 101112131415161718191a1b1c1d1e1f
+00000030: 202122232425262728292a2b2c2d2e2f
+00000040: 08000100f892e5cf8b010000e096e5cf
+00000050: 8b0100004081e6cf8b01000009000000
+00000060: 00000000020000000200000030313233
+00000070: 3435363738393a3b3c3d3e3f40414243
+00000080: 4445464748494a4b4c4d4e4f40414243
+00000090: 4445464748494a4b4c4d4e4f50515253
+000000a0: 5455565758595a5b5c5d5e5f50515253
+000000b0: 5455565758595a5b5c5d5e5f60616263
+000000c0: 6465666768696a6b6c6d6e6f60616263
+000000d0: 6465666768696a6b6c6d6e6f70717273
+000000e0: 7475767778797a7b7c7d7e7fffc2c907

@@ -1,0 +1,31 @@
+# fixture: control-blake3-256-emergency-spill-catalog-valid
+# contract: SystemControlV1
+# hash: blake3-256 (32 bytes)
+# expected: control:emergency-spill-catalog:sequence=7:body=187
+# canonical key: /.aeordb-system/controls/v1/0051/7f9ac9547f43eb1bd38ff3c9b5b5b985a8dba8b2b1c87bc6e5d40e52eb37cf2f/a.ctrl
+# relation: slot:mutable-a
+# hex offsets are absolute within this fixture
+# control +0x000 len 4: kind-specific magic
+# control +0x004 len 2: schema_version=1
+# control +0x006 len 2: header_length=32
+# control +0x008 len 4: total_length
+# control +0x00c len 4: kind-specific flags
+# control +0x010 len 8: control_sequence
+# control +0x018 len 4: body_length
+# control +0x01c len 4: reserved zero
+# control +0x020 len 187: canonical kind body
+# control final len 4: CRC-32/ISO-HDLC
+00000000: 4153504301002000df00000000000000
+00000010: 0700000000000000bb00000000000000
+00000020: 101112131415161718191a1b1c1d1e1f
+00000030: 010000000000000050aee5cf8b010000
+00000040: 01000000010000006f00000000000000
+00000050: 00000000000000000000000000000000
+00000060: 00000000000000000000000001000100
+00000070: 0100000068aae5cf8b01000065000000
+00000080: 00000000001000000000000020212223
+00000090: 2425262728292a2b2c2d2e2f30313233
+000000a0: 3435363738393a3b3c3d3e3f27000000
+000000b0: 000000002f7661722f6c69622f61656f
+000000c0: 7264622f7370696c6c2f686f742d7461
+000000d0: 696c2d303030312e62696e82ec1dbc

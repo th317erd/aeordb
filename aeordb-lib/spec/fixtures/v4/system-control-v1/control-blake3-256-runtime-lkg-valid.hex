@@ -1,0 +1,32 @@
+# fixture: control-blake3-256-runtime-lkg-valid
+# contract: SystemControlV1
+# hash: blake3-256 (32 bytes)
+# expected: control:runtime-lkg:sequence=7:body=190
+# canonical key: /.aeordb-system/controls/v1/0012/bc1979318db9501c2965fb75149ca62f439478d7bcb026cb174b9e51d8e3ea04/a.ctrl
+# relation: slot:mutable-a
+# hex offsets are absolute within this fixture
+# control +0x000 len 4: kind-specific magic
+# control +0x004 len 2: schema_version=1
+# control +0x006 len 2: header_length=32
+# control +0x008 len 4: total_length
+# control +0x00c len 4: kind-specific flags
+# control +0x010 len 8: control_sequence
+# control +0x018 len 4: body_length
+# control +0x01c len 4: reserved zero
+# control +0x020 len 190: canonical kind body
+# control final len 4: CRC-32/ISO-HDLC
+00000000: 41524c4701002000e200000000000000
+00000010: 0700000000000000be00000000000000
+00000020: 101112131415161718191a1b1c1d1e1f
+00000030: 02000100b873e5cf8b01000020212223
+00000040: 2425262728292a2b2c2d2e2f30313233
+00000050: 3435363738393a3b3c3d3e3f30313233
+00000060: 3435363738393a3b3c3d3e3f40414243
+00000070: 4445464748494a4b4c4d4e4f3a000000
+00000080: 00000000404142434445464748494a4b
+00000090: 4c4d4e4f505152535455565758595a5b
+000000a0: 5c5d5e5f0a3500000001000000060000
+000000b0: 006d656d6f72790a2200000001000000
+000000c0: 0d0000006d6178696d756d5f62797465
+000000d0: 7304080000000000000002000000d770
+000000e0: 5f28

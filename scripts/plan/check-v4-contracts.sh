@@ -141,7 +141,7 @@ expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contra
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-gc-audit" and
+  .coverage_stage == "p0b-2-system-control" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
@@ -181,7 +181,7 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-gc-audit" and
+  .stage == "p0b-2-system-control" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -505,6 +505,57 @@ for result_prefix in "${required_p0b2_gc_audit_results[@]}"; do
     any(.fixtures[]; .format_id == "gc-artifact-v1" and .hash_width == 64 and (.expected | startswith($result_prefix)))
   ' "$fixture_manifest" >/dev/null \
     || fail "P0b-2 GC audit/evidence artifact lacks both hash-width fixtures: $result_prefix"
+done
+
+jq -e '
+  .formats[] | select(.id == "system-control-v1") |
+  .magic_registry == {
+    "0x0001":"AIRG", "0x0002":"AIOP", "0x0003":"AIDG",
+    "0x0010":"ALLG", "0x0011":"ALDG", "0x0012":"ARLG", "0x0013":"ARDG",
+    "0x0020":"ARTK", "0x0021":"APWL",
+    "0x0030":"AMLE", "0x0031":"AMPR", "0x0032":"ALRM", "0x0033":"ALRP",
+    "0x0040":"ATPN", "0x0041":"ASMJ", "0x0042":"ARTX", "0x0043":"ARAC",
+    "0x0050":"ADLT", "0x0051":"ASPC", "0x0052":"ACUT"
+  } and
+  .version == 1 and .header_length == 32 and .identity_length_cap == 4096 and
+  .physical_representation.root == "/.aeordb-system/controls/v1/" and
+  .physical_representation.mutable_slots == ["a.ctrl", "b.ctrl"] and
+  .physical_representation.immutable_slot == "i.ctrl" and
+  .physical_representation.content_type == "application/vnd.aeordb.system-control" and
+  (.body_contracts | length) == 20 and
+  (.pending_body_fixture_kinds | length) == 0
+' "$contract_registry" >/dev/null \
+  || fail "P0b-2 SystemControl registry/framing is incomplete"
+
+required_p0b2_system_control_results=(
+  'control:index-registry:'
+  'control:index-operation:'
+  'control:index-degraded:'
+  'control:lifecycle-lkg:'
+  'control:lifecycle-diagnostics:'
+  'control:runtime-lkg:'
+  'control:runtime-diagnostics:'
+  'control:repair-ticket:'
+  'control:path-write-latch:'
+  'control:migration-lease:'
+  'control:migration-progress:'
+  'control:legacy-root-map:'
+  'control:legacy-root-map-page:'
+  'control:task-pin:'
+  'control:semantic-mutation-segment:'
+  'control:root-publication-prepare:'
+  'control:root-admission-commit:'
+  'control:durability-latch:'
+  'control:emergency-spill-catalog:'
+  'control:side-by-side-cutover:'
+  'cutover:external-journal:'
+)
+for result_prefix in "${required_p0b2_system_control_results[@]}"; do
+  jq -e --arg result_prefix "$result_prefix" '
+    any(.fixtures[]; (.format_id == "system-control-v1" or .format_id == "cutover-journal-v1") and .hash_width == 32 and (.expected | startswith($result_prefix))) and
+    any(.fixtures[]; (.format_id == "system-control-v1" or .format_id == "cutover-journal-v1") and .hash_width == 64 and (.expected | startswith($result_prefix)))
+  ' "$fixture_manifest" >/dev/null \
+    || fail "P0b-2 system control/cutover artifact lacks both hash-width fixtures: $result_prefix"
 done
 
 required_p0b2_definition_formats=(

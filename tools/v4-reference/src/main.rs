@@ -17,6 +17,7 @@ mod policy;
 mod position;
 mod selector;
 mod semantics;
+mod system_control;
 mod value_store;
 
 use std::collections::BTreeMap;
@@ -40,11 +41,12 @@ use parser::ParserFormat;
 use policy::PolicyFormat;
 use position::PositionFormat;
 use selector::SelectorFormat;
+use system_control::SystemControlFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-gc-audit-v1";
-const FIXTURE_STAGE: &str = "p0b-2-gc-audit";
+const TOOL_REVISION: &str = "p0b2-system-control-v1";
+const FIXTURE_STAGE: &str = "p0b-2-system-control";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -69,6 +71,7 @@ enum FixtureFormat {
   Policy(PolicyFormat),
   Position(PositionFormat),
   Selector(SelectorFormat),
+  SystemControl(SystemControlFormat),
   ValueStore(ValueStoreFormat),
 }
 
@@ -87,6 +90,7 @@ impl FixtureFormat {
       Self::Policy(format) => format.id(),
       Self::Position(format) => format.id(),
       Self::Selector(format) => format.id(),
+      Self::SystemControl(format) => format.id(),
       Self::ValueStore(format) => format.id(),
     }
   }
@@ -105,6 +109,7 @@ impl FixtureFormat {
       Self::Policy(format) => format.family(),
       Self::Position(format) => format.family(),
       Self::Selector(format) => format.family(),
+      Self::SystemControl(format) => format.family(),
       Self::ValueStore(format) => format.family(),
     }
   }
@@ -542,6 +547,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(system_control::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::SystemControl(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases.extend(value_store::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::ValueStore(case.format),
@@ -716,6 +730,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
     FixtureFormat::Position(_) => position::observe(case.profile, bytes),
     FixtureFormat::Selector(_) => selector::observe(case.profile, bytes),
+    FixtureFormat::SystemControl(format) => system_control::observe(case.profile, format, bytes),
     FixtureFormat::ValueStore(_) => value_store::observe(case.profile, bytes),
   }
 }
@@ -736,6 +751,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::Policy(_)
     | FixtureFormat::Position(_)
     | FixtureFormat::Selector(_)
+    | FixtureFormat::SystemControl(_)
     | FixtureFormat::ValueStore(_) => {
       output.push_str(&format!("# contract: {}\n", case.format.family()));
     }
@@ -819,6 +835,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Selector(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in selector::annotation_lines(&case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::SystemControl(format) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in system_control::annotation_lines(format, &case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

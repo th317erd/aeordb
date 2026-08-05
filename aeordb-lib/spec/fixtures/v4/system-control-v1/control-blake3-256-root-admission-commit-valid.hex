@@ -1,0 +1,32 @@
+# fixture: control-blake3-256-root-admission-commit-valid
+# contract: SystemControlV1
+# hash: blake3-256 (32 bytes)
+# expected: control:root-admission-commit:sequence=1:body=192
+# canonical key: /.aeordb-system/controls/v1/0043/3fbb2830380f27ee342bf70a4728c304e8a4e37a64fbf706a7150f875f196102/i.ctrl
+# relation: slot:immutable-i
+# hex offsets are absolute within this fixture
+# control +0x000 len 4: kind-specific magic
+# control +0x004 len 2: schema_version=1
+# control +0x006 len 2: header_length=32
+# control +0x008 len 4: total_length
+# control +0x00c len 4: kind-specific flags
+# control +0x010 len 8: control_sequence
+# control +0x018 len 4: body_length
+# control +0x01c len 4: reserved zero
+# control +0x020 len 192: canonical kind body
+# control final len 4: CRC-32/ISO-HDLC
+00000000: 4152414301002000e400000000000000
+00000010: 0100000000000000c000000000000000
+00000020: 101112131415161718191a1b1c1d1e1f
+00000030: 202122232425262728292a2b2c2d2e2f
+00000040: 303132333435363738393a3b3c3d3e3f
+00000050: 303132333435363738393a3b3c3d3e3f
+00000060: b09ee5cf8b0100000100010000000000
+00000070: 404142434445464748494a4b4c4d4e4f
+00000080: 505152535455565758595a5b5c5d5e5f
+00000090: 505152535455565758595a5b5c5d5e5f
+000000a0: 606162636465666768696a6b6c6d6e6f
+000000b0: 0e000000000000006400000000000000
+000000c0: 606162636465666768696a6b6c6d6e6f
+000000d0: 707172737475767778797a7b7c7d7e7f
+000000e0: 3e647251
