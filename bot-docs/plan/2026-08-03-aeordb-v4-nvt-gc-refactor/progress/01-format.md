@@ -263,3 +263,20 @@
 - **Collision report:** `evidence/p0b-contract-registry-report.json` binds the exact registry, fixture manifest, and ASFR SHA-256 digests; records 21 formats, 436 fixtures, 46/61 SystemFamily rows/descriptors, and zero collisions in every scoped permanent registry.
 - **Green command:** `timeout 2m ./scripts/plan/check-v4-contracts.sh` independently reverified all 436 fixtures and passed the complete P0 contract gate with 93 routes and 36 docs.
 - **Boundary:** P0b remains reference/spec/evidence only and emits no production reader, writer, capability, or database byte. P0c may now generate constants from this frozen source but may not reinterpret it.
+
+## P0c Machine Contract Registry
+
+- **Entry:** `877a270`; production v4 readers and writers remained disabled.
+- **Generated authority:** `tools/v4-reference/src/contract_gen.rs` deterministically generates `engine/v4/contract_generated.rs` from the frozen persistent and architecture registries. The checked module exposes capability, EntryType/KV, shared-enum, format-cap, SystemFamily, route-class, configuration, dynamic-record, hard-transition, and cleanup ownership constants plus source digests.
+- **Evidence:** `evidence/p0c-machine-contract-report.json` records the generated contract closure. The independent reference suite passed 144 tests, the production generated module passed 3 tests, all 436 fixtures reverified, and the campaign gate found 93 routes and 36 documentation pages. A clean-clone replay passed.
+- **Known baseline:** strict root Clippy remains red on the pre-existing crate warning/error inventory recorded by P0a; P0c introduced no additional diagnostic.
+- **Boundary:** generated constants compile, but no reader, writer, startup admission, migration, or database behavior was activated.
+
+## P1a-1 Bounded Reader and DatabaseHeaderV4 Decoder
+
+- **Entry:** `97ae1d2`; branch matched `origin/development`. The acknowledged untracked `.codex/DETAILS.md`, `.codex/wip.md`, and `downloads/` paths remained forbidden.
+- **Territory:** existing v3 header producers/consumers are `file_header`, `AppendWriter`, entry scanning, KV expansion/store, verify, repair, backup, and startup. This landing adds a separate read-only v4 probe/decoder and does not route those mutating v3 consumers through it yet.
+- **Red proof:** `v4_format_fixture_spec` failed to compile because `engine::v4::database_header` and `engine::v4::reader` did not exist.
+- **Implementation:** added the complete sixteen-class malformed-input taxonomy, a checked allocation-bounded reader that validates lengths and multiplication before allocation, and fixed-buffer DatabaseHeaderV4 probing/decoding. Header validation performs CRC first, checks exact magic/version/slot size, capabilities, canonical booleans, IDs, versions/enums, offsets, reserved bytes, hash padding, A/B sequence selection, ambiguity, and degraded redundancy without writing.
+- **Green proof:** all 10 independent header fixtures and 6 focused bounded-reader/header tests pass. The adjacent `entry_format_spec`, `append_writer_spec`, and `backup_header_spec` suites passed 87 tests total; `cargo check -p aeordb --lib` passed. The generated v4 module's 3 tests pass. The broad Clippy attempt remains blocked by the pre-existing denied `clippy::never_loop` in `range_extract.rs` and 70 existing warnings; no new v4 diagnostic appeared.
+- **Boundary:** no v4 writer or startup admission is enabled. Remaining P1a work includes v3 byte-preservation characterization, whole-entity and all family readers, full malformed-corpus mutation/fuzz watchdogs, and read-only open dispatch.
