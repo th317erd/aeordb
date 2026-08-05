@@ -7,6 +7,7 @@ use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_
 use aeordb::engine::v4::entity::decode_whole_entity;
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
+use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
 use aeordb::engine::v4::scope::{ScopeMatchingMode, decode_scope_definition};
 use aeordb::engine::HashAlgorithm;
@@ -150,6 +151,54 @@ fn every_scope_definition_fixture_matches_the_independent_oracle() {
     assert_eq!(observed, row.expected, "fixture {}", row.id);
     assert_eq!(hex::encode(scope.scope_id), row.canonical_key.unwrap(), "fixture {}", row.id);
   }
+}
+
+#[test]
+fn every_parser_resolution_plan_fixture_matches_the_independent_oracle() {
+  let root = fixture_root();
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "parser-resolution-plan-v1").collect();
+  assert_eq!(rows.len(), 8);
+
+  for row in rows {
+    let bytes = fs::read(root.join(row.binary)).unwrap();
+    let plan = decode_parser_resolution_plan(&bytes).unwrap();
+    let kind = match plan.kind {
+      ParserPlanKind::None => "none",
+      ParserPlanKind::ExplicitPlugin => "explicit-plugin",
+      ParserPlanKind::Automatic => "automatic",
+    };
+    assert_eq!(format!("parser-plan:{kind}:candidates={}", plan.candidates.len()), row.expected, "fixture {}", row.id);
+  }
+}
+
+#[test]
+fn parser_resolution_plan_rejects_amplification_order_and_context_corruption() {
+  let root = fixture_root();
+  let none = fs::read(root.join("parser-resolution-plan-v1/aprp-blake3-256-none-valid.bin")).unwrap();
+  let mut amplified = none.clone();
+  amplified[24..28].copy_from_slice(&515u32.to_le_bytes());
+  assert_eq!(decode_parser_resolution_plan(&amplified).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+
+  let automatic = fs::read(root.join("parser-resolution-plan-v1/aprp-blake3-256-automatic-valid.bin")).unwrap();
+  let mut unordered = automatic.clone();
+  unordered[80..95].copy_from_slice(b"text/zzzzzzzzzz");
+  assert_eq!(decode_parser_resolution_plan(&unordered).unwrap_err().class(), MalformedInputClass::NoncanonicalOrderOrDuplicate);
+
+  let mut invalid_mime = automatic.clone();
+  invalid_mime[80] = b'A';
+  assert_eq!(decode_parser_resolution_plan(&invalid_mime).unwrap_err().class(), MalformedInputClass::InvalidUtf8PathGlobOrNativePath);
+
+  let mut zero_ordinal = automatic.clone();
+  zero_ordinal[56..60].fill(0);
+  assert_eq!(decode_parser_resolution_plan(&zero_ordinal).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let mut mixed_semantics = automatic;
+  mixed_semantics[20..22].copy_from_slice(&2u16.to_le_bytes());
+  assert_eq!(decode_parser_resolution_plan(&mixed_semantics).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let mut trailing = none;
+  trailing.push(0);
+  assert_eq!(decode_parser_resolution_plan(&trailing).unwrap_err().class(), MalformedInputClass::TruncationOrTrailingBytes);
 }
 
 #[test]

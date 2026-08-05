@@ -11,6 +11,7 @@ pub mod dependency;
 pub mod entity;
 pub mod hash;
 pub mod namespace;
+pub mod parser_plan;
 pub mod reader;
 pub mod scope;
 

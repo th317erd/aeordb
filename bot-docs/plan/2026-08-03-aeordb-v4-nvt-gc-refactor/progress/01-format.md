@@ -316,3 +316,13 @@
 - **Malformed proof:** focused mutations reject noncanonical and invalid-UTF-8 owners, mode/glob disagreement, and one-byte-over-cap input with their frozen malformed classes.
 - **Green proof:** all six independent scope fixtures and two focused scope tests pass; the complete v4 target passes 16 tests, and locked library `cargo check` passes. Repository `cargo fmt --check` initially reported only the two expected formatting diffs in the new file; `cargo fmt --all` applied them.
 - **Boundary:** this is read-only contract validation. No scope evaluator, writer, index runtime, migration, route, or database behavior changed.
+
+## P1a-6 Parser Resolution Plan Reader
+
+- **Entry:** `a02f2fc`; branch and remote matched, with unrelated user paths excluded.
+- **Territory:** the independent parser-plan fixtures produce the contract. Enclosing value-store definitions and later parser execution, authoritative fallback, migration, and query paths consume it; this landing does not invoke any dependency.
+- **Red proof:** the focused fixture target failed to compile on the absent `engine::v4::parser_plan` module before production behavior existed.
+- **Implementation:** added a borrowed 128 KiB-bounded decoder for all three plan modes and four candidate kinds. It caps candidate counts before allocation, checks every candidate frame before slicing, validates nested invocation policies, corrected and migration-only MIME semantics, exact automatic tier ordering, strict registry-match order, and all dependency ordinals and context fields.
+- **Malformed proof:** focused mutations reject 515 candidates before allocation, unsorted registry MIME matches, uppercase corrected MIME, zero dependency ordinals, mixed corrected/legacy semantic families, and trailing bytes with their frozen malformed classes.
+- **Green proof:** all eight independent plan fixtures pass; the complete v4 target passes 18 tests, locked library `cargo check` passes, and `git diff --check` is clean.
+- **Boundary:** the parser plan remains passive data. No plugin/native execution, dependency resolution, writer, migration, route, or database behavior changed.
