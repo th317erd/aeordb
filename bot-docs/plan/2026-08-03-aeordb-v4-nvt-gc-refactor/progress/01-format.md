@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2b-3e SourceSelectorV1 and ValueStoreDefinitionV1
+- **Current landing unit:** P0b-2b-3f ValueStoreDefinitionV1
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2b-3c DependencyTableV1 `69f06e2b8e1f26e0fedd932cc9ffacfe6adc4627`
+- **Last green commit:** P0b-2b-3d ParserResolutionPlanV1 `2aa3be77c681f2e3ed0e96f2e0602faad18f3ef0`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze SourceSelectorV1, then the parent `ValueStoreDefinitionV1` with dependency-role/ordinal and semantic-combination validation
+- **Next action:** freeze the parent `ValueStoreDefinitionV1` with field/selector/parser agreement, semantic-family validation, and exact dependency role/ABI/executor/artifact ordinal resolution
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -78,3 +78,12 @@
 - **Failure proof:** plan/candidate framing, checked lengths/counts, reserves, kind/semantic applicability, zero ordinals, nested policy/backend mismatches, corrected-versus-legacy mixing, malformed/uppercase/reserved `application/json` MIME matches, registry duplicate/order failures, exact 512-entry acceptance and 513-entry rejection, and all fixture-byte integrity/identity effects are covered.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 40 tests in 0.18 seconds; strict standalone Clippy passed; fresh generation/verification passed all 68 fixtures; and the campaign gate passed with 93 routes and 36 docs.
 - **Boundary:** candidate ordinals are structurally validated here. Their exact dependency role/ABI/executor/artifact compatibility is validated only when the enclosing ValueStore definition supplies its dependency table. No production parser registry, executor, reader/writer, or persistent database path changed.
+
+## P0b-2b-3e Source Selectors
+
+- **Red proof:** the 68-fixture campaign gate first failed with `P0b-2 definition format is absent from the contract registry: source-selector-v1` before the selector module or fixtures existed.
+- **Frozen contracts:** exact 32-byte `SourceSelectorV1` header; metadata IDs, JSON path segment framing, canonical migration-only always-missing form, corrected and legacy plugin-mapper payloads, nested canonical arguments/policies, and 4 KiB/1,024-segment limits from corrected Round 8A.
+- **Independent corpus:** fourteen fixtures cover metadata `@hash`, root JSON, every JSON segment tag, corrected/legacy mapper contracts, always-missing migration, and the exact 4,096-byte boundary under both hash profiles; the complete corpus now contains 82 fixtures.
+- **Failure proof:** selector/segment framing, checked lengths/counts, reserves, unknown/inapplicable kinds and semantics, metadata IDs, empty/invalid UTF-8 keys, segment flags/tags, malformed regex, nested config/policy failures, zero mapper ordinals, mapper-policy host mismatch, exact-cap acceptance, oversize rejection, and all fixture-byte integrity/identity effects are covered. AeorRegexV1 is pinned to `regex 1.12.3` with default Unicode features and has search, case-folding, Unicode-class, malformed-pattern, and unsupported-lookaround conformance tests.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 47 tests in 1.49 seconds; strict standalone Clippy passed; fresh generation/verification passed all 82 fixtures; and the campaign gate passed with 93 routes and 36 docs.
+- **Boundary:** selector-local structure and nested config/policy bytes are authoritative here. Field/plan agreement and exact mapper dependency role/ABI/executor/artifact compatibility remain the enclosing ValueStore definition's responsibility. No production selector evaluator, mapper executor, reader/writer, or persistent database path changed.

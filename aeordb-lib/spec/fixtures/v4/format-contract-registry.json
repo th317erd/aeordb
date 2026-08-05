@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-parser-resolution-plan",
+  "coverage_stage": "p0b-2-source-selector",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [7, 10, 11, 12, 13, 14, 15],
@@ -468,6 +468,85 @@
       ]
     },
     {
+      "id": "source-selector-v1",
+      "family": "index-semantic-primitive",
+      "version": 1,
+      "regex_capability": {
+        "semantic_id": 1,
+        "engine": "regex 1.12.3",
+        "features": "default Rust regex features including Unicode tables",
+        "matching": "substring/search; bit 0 enables case-insensitive matching",
+        "compiled_size_limit": 1048576,
+        "dfa_size_limit": 1048576
+      },
+      "layout": [
+        { "offset": 0, "length": 2, "field": "selector_schema_version", "rule": "exactly 1" },
+        { "offset": 2, "length": 2, "field": "selector_kind", "rule": "1 metadata, 2 json_path, 3 plugin_mapper, or 4 always_missing_v0" },
+        { "offset": 4, "length": 4, "field": "selector_total_length", "rule": "complete selector bytes, at most 4096" },
+        { "offset": 8, "length": 4, "field": "selector_flags", "rule": "zero" },
+        { "offset": 12, "length": 4, "field": "item_count", "rule": "JSON segment count or zero; at most 1024" },
+        { "offset": 16, "length": 2, "field": "regex_semantics", "rule": "1 for JSON path; otherwise zero" },
+        { "offset": 18, "length": 2, "field": "mapper_contract", "rule": "1 migration legacy or 2 corrected typed plural; otherwise zero" },
+        { "offset": 20, "length": 12, "field": "reserved", "rule": "zero" },
+        { "offset": 32, "length_formula": "kind-specific", "field": "payload", "rule": "must consume selector_total_length exactly" }
+      ],
+      "metadata_payload": "metadata_id u16 LE in 1..8 || reserved u16 zero || reserved u32 zero; selector length exactly 40",
+      "segment_layout": [
+        { "offset": 0, "length": 1, "field": "segment_tag", "rule": "1 object_key, 2 numeric_index, 3 fan_out, or 4 regex" },
+        { "offset": 1, "length": 1, "field": "segment_flags", "rule": "zero except regex bit 0 case-insensitive" },
+        { "offset": 2, "length": 2, "field": "reserved", "rule": "zero" },
+        { "offset": 4, "length": 4, "field": "segment_payload_length", "rule": "exact payload bytes" },
+        { "offset": 8, "length_formula": "segment_payload_length", "field": "payload", "rule": "nonempty UTF-8 key, u64 LE, empty fan-out, or valid AeorRegexV1 pattern" }
+      ],
+      "mapper_payload": [
+        { "offset": 0, "length": 4, "field": "dependency_ordinal", "rule": "nonzero one-based mapper dependency" },
+        { "offset": 4, "length": 4, "field": "arguments_length", "rule": "A; complete CanonicalConfigValueV1" },
+        { "offset": 8, "length": 4, "field": "invocation_policy_length", "rule": "I; exactly 128" },
+        { "offset": 12, "length": 4, "field": "reserved", "rule": "zero" },
+        { "offset": 16, "length_formula": "A", "field": "arguments", "rule": "canonical null when omitted" },
+        { "offset_formula": "16 + A", "length": 128, "field": "invocation_policy", "rule": "legacy-stub WASM for contract 1 or pure WASM for contract 2" }
+      ],
+      "identity": ["complete selector bytes embedded in the enclosing ValueStoreDefinitionV1"],
+      "key_domain": "no standalone key; exact bytes participate in the enclosing ValueStoreId",
+      "checksum": "no independent checksum; enclosing ValueStoreDefinition identity plus IndexArtifact CRC/hash protect these bytes",
+      "body_formula": "metadata 40; json_path 32 + sum(8 + payload); mapper 48 + A + 128; always_missing_v0 32",
+      "hard_cap": 4096,
+      "canonical_order": "JSON segments retain path order; plugin payload is fixed arguments then policy; always_missing_v0 is one canonical empty form",
+      "reserve_zero_ranges": [
+        { "start": 20, "length": 12 },
+        { "start_formula": "segment + 2", "length": 2 },
+        { "start_formula": "mapper payload + 12", "length": 4 }
+      ],
+      "malformed_behavior": "reject framing/flags/reserve, unknown/inapplicable kind semantics, wrong metadata ID, segment count/length/tag/flags/UTF-8/regex errors, empty object keys, malformed canonical arguments, zero mapper ordinal, policy length/decoding failure, mapper-policy host-profile mismatch, truncation, and oversize input",
+      "trailing_behavior": "selector_total_length and item_count consume the complete payload; nested segment, config, and policy records consume exact bytes",
+      "bounded_decode": "validate the 32-byte header, 4 KiB cap, and 1024-item cap before traversal; validate each checked child length before slicing; nested config is independently bounded, regex compilation has fixed 1 MiB program and DFA limits, and the total selector cap dominates",
+      "producer_owner": "Child 05 ValueStore definition compiler and Child 07 migration through Child 01 codec",
+      "consumer_owners": ["Child 01 fixture/readers", "Child 05 selector/mapper executor", "Child 06 authoritative fallback", "Child 07 migration"],
+      "capability": "IndexDefinitionV1 bit 8 through the enclosing ValueStore definition; regex semantics also require AeorRegexV1",
+      "typed_hash_roles": [
+        { "field": "complete selector bytes in enclosing ValueStoreId preimage", "role": "identity" },
+        { "field": "mapper dependency ordinal", "role": "graph-edge-authority through enclosing dependency table" }
+      ],
+      "fixture_ids_32": [
+        "asel-blake3-256-metadata-hash-valid",
+        "asel-blake3-256-json-root-valid",
+        "asel-blake3-256-json-mixed-valid",
+        "asel-blake3-256-mapper-corrected-valid",
+        "asel-blake3-256-mapper-legacy-valid",
+        "asel-blake3-256-always-missing-valid",
+        "asel-blake3-256-maximum-length-valid"
+      ],
+      "fixture_ids_64": [
+        "asel-sha512-metadata-hash-valid",
+        "asel-sha512-json-root-valid",
+        "asel-sha512-json-mixed-valid",
+        "asel-sha512-mapper-corrected-valid",
+        "asel-sha512-mapper-legacy-valid",
+        "asel-sha512-always-missing-valid",
+        "asel-sha512-maximum-length-valid"
+      ]
+    },
+    {
       "id": "canonical-config-value-v1",
       "family": "index-semantic-primitive",
       "version": 1,
@@ -669,10 +748,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 10,
-    "fixture_count": 68,
+    "fixture_family_count": 11,
+    "fixture_count": 82,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, InvocationPolicyV1, DependencyTableV1, and ParserResolutionPlanV1",
-    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, source selector records, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B active pointer kinds, CanonicalConfigValueV1, ScopeDefinitionV1, InvocationPolicyV1, DependencyTableV1, ParserResolutionPlanV1, and SourceSelectorV1",
+    "remaining_p0b_2_scope": "ValueStore/Converter/FieldIndex definitions, index manifests/pages/directory/journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

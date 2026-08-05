@@ -5,6 +5,7 @@ mod dependency;
 mod index;
 mod parser;
 mod policy;
+mod selector;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -23,9 +24,10 @@ use definitions::DefinitionFormat;
 use index::IndexFormat;
 use parser::ParserFormat;
 use policy::PolicyFormat;
+use selector::SelectorFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-parser-resolution-plan-v1";
+const TOOL_REVISION: &str = "p0b2-source-selector-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -46,6 +48,7 @@ enum FixtureFormat {
   Index(IndexFormat),
   Parser(ParserFormat),
   Policy(PolicyFormat),
+  Selector(SelectorFormat),
 }
 
 impl FixtureFormat {
@@ -59,6 +62,7 @@ impl FixtureFormat {
       Self::Index(format) => format.id(),
       Self::Parser(format) => format.id(),
       Self::Policy(format) => format.id(),
+      Self::Selector(format) => format.id(),
     }
   }
 
@@ -72,6 +76,7 @@ impl FixtureFormat {
       Self::Index(format) => format.family(),
       Self::Parser(format) => format.family(),
       Self::Policy(format) => format.family(),
+      Self::Selector(format) => format.family(),
     }
   }
 }
@@ -229,7 +234,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-parser-resolution-plan".to_string(),
+    stage: "p0b-2-source-selector".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -251,7 +256,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 fn verify(fixture_root: &Path) -> DynResult<()> {
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-parser-resolution-plan" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-source-selector" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -468,6 +473,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(selector::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::Selector(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases
 }
 
@@ -629,6 +643,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
     FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
+    FixtureFormat::Selector(_) => selector::observe(case.profile, bytes),
   }
 }
 
@@ -643,7 +658,8 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::Definition(_)
     | FixtureFormat::Index(_)
     | FixtureFormat::Parser(_)
-    | FixtureFormat::Policy(_) => {
+    | FixtureFormat::Policy(_)
+    | FixtureFormat::Selector(_) => {
       output.push_str(&format!("# contract: {}\n", case.format.family()));
     }
   }
@@ -702,6 +718,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Parser(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in parser::annotation_lines(&case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::Selector(_) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in selector::annotation_lines(&case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

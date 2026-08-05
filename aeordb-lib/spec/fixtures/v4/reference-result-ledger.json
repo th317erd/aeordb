@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-parser-resolution-plan-v1",
+  "tool_revision": "p0b2-source-selector-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -409,6 +409,90 @@
       "fixture_id": "aprp-sha512-automatic-legacy-valid",
       "expected": "parser-plan:automatic:candidates=3",
       "observed": "parser-plan:automatic:candidates=3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-metadata-hash-valid",
+      "expected": "selector:metadata:items=0",
+      "observed": "selector:metadata:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-json-root-valid",
+      "expected": "selector:json-path:items=0",
+      "observed": "selector:json-path:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-json-mixed-valid",
+      "expected": "selector:json-path:items=4",
+      "observed": "selector:json-path:items=4",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-mapper-corrected-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-mapper-legacy-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-always-missing-valid",
+      "expected": "selector:always-missing-v0:items=0",
+      "observed": "selector:always-missing-v0:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-maximum-length-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-metadata-hash-valid",
+      "expected": "selector:metadata:items=0",
+      "observed": "selector:metadata:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-json-root-valid",
+      "expected": "selector:json-path:items=0",
+      "observed": "selector:json-path:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-json-mixed-valid",
+      "expected": "selector:json-path:items=4",
+      "observed": "selector:json-path:items=4",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-mapper-corrected-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-mapper-legacy-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-always-missing-valid",
+      "expected": "selector:always-missing-v0:items=0",
+      "observed": "selector:always-missing-v0:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-maximum-length-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
       "result": "pass"
     }
   ]

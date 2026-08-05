@@ -1,0 +1,12 @@
+# fixture: asel-sha512-metadata-hash-valid
+# contract: SourceSelectorV1
+# hash: sha512 (64 bytes)
+# expected: selector:metadata:items=0
+# relation: metadata-id:hash
+# hex offsets are absolute within this fixture
+# selector +0x000 len 32: schema, kind, length, semantics, and reserve
+# selector kind: 1; item_count: 0
+# selector +0x020 len 8: kind-specific payload
+00000000: 01000100280000000000000000000000
+00000010: 00000000000000000000000000000000
+00000020: 0800000000000000

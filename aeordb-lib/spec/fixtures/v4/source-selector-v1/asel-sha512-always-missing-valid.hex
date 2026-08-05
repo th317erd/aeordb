@@ -1,0 +1,11 @@
+# fixture: asel-sha512-always-missing-valid
+# contract: SourceSelectorV1
+# hash: sha512 (64 bytes)
+# expected: selector:always-missing-v0:items=0
+# relation: migration:canonical-always-missing
+# hex offsets are absolute within this fixture
+# selector +0x000 len 32: schema, kind, length, semantics, and reserve
+# selector kind: 4; item_count: 0
+# selector +0x020 len 0: kind-specific payload
+00000000: 01000400200000000000000000000000
+00000010: 00000000000000000000000000000000

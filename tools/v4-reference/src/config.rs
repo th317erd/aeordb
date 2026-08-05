@@ -429,6 +429,10 @@ fn decode(bytes: &[u8]) -> Result<DecodedConfig, &'static str> {
   Ok(decoded)
 }
 
+pub(crate) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
+  decode(bytes).map(|_| ())
+}
+
 fn validate_at(bytes: &[u8], start: usize, limit: usize, depth: usize) -> Result<(DecodedConfig, usize), &'static str> {
   let header_end = start.checked_add(FRAME_LENGTH).ok_or("config_value_overflow")?;
   if header_end > limit {

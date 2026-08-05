@@ -1,0 +1,11 @@
+# fixture: asel-sha512-json-root-valid
+# contract: SourceSelectorV1
+# hash: sha512 (64 bytes)
+# expected: selector:json-path:items=0
+# relation: json-path:root
+# hex offsets are absolute within this fixture
+# selector +0x000 len 32: schema, kind, length, semantics, and reserve
+# selector kind: 2; item_count: 0
+# selector +0x020 len 0: kind-specific payload
+00000000: 01000200200000000000000000000000
+00000010: 01000000000000000000000000000000
