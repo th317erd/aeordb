@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-nvt-tiles-v1",
+  "tool_revision": "p0b2-index-tasks-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -601,6 +601,54 @@
       "fixture_id": "aidx-sha512-nvt-tile-directory-leaf-valid",
       "expected": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
       "observed": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-task-mutation-journal-valid",
+      "expected": "index:journal:task:generation=40:segment=0:reset=true:records=2:sequences=900/900",
+      "observed": "index:journal:task:generation=40:segment=0:reset=true:records=2:sequences=900/900",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-system-mutation-journal-valid",
+      "expected": "index:journal:system:generation=41:segment=8:reset=false:records=1:sequences=901/901",
+      "observed": "index:journal:system:generation=41:segment=8:reset=false:records=1:sequences=901/901",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-index-task-checkpoint-embedded-valid",
+      "expected": "index:checkpoint:embedded:task=scope-build:state=complete-unpublished:phase=publish:sequence=17:attachments=2",
+      "observed": "index:checkpoint:embedded:task=scope-build:state=complete-unpublished:phase=publish:sequence=17:attachments=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-index-task-checkpoint-external-valid",
+      "expected": "index:checkpoint:external:task=v0-migration:state=running:phase=convert:sequence=18:attachments=1",
+      "observed": "index:checkpoint:external:task=v0-migration:state=running:phase=convert:sequence=18:attachments=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-task-mutation-journal-valid",
+      "expected": "index:journal:task:generation=40:segment=0:reset=true:records=2:sequences=900/900",
+      "observed": "index:journal:task:generation=40:segment=0:reset=true:records=2:sequences=900/900",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-system-mutation-journal-valid",
+      "expected": "index:journal:system:generation=41:segment=8:reset=false:records=1:sequences=901/901",
+      "observed": "index:journal:system:generation=41:segment=8:reset=false:records=1:sequences=901/901",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-index-task-checkpoint-embedded-valid",
+      "expected": "index:checkpoint:embedded:task=scope-build:state=complete-unpublished:phase=publish:sequence=17:attachments=2",
+      "observed": "index:checkpoint:embedded:task=scope-build:state=complete-unpublished:phase=publish:sequence=17:attachments=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-index-task-checkpoint-external-valid",
+      "expected": "index:checkpoint:external:task=v0-migration:state=running:phase=convert:sequence=18:attachments=1",
+      "observed": "index:checkpoint:external:task=v0-migration:state=running:phase=convert:sequence=18:attachments=1",
       "result": "pass"
     },
     {

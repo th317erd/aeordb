@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2c-2 NVT tiles and hint directory
+- **Current landing unit:** P0b-2c-3 mutation journals and index task checkpoints
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2c-1 ordered pages `c23d31b068a73449ec8e615548a3f4866276a745`
+- **Last green commit:** P0b-2c-2 NVT tiles `2038794b8e8207d8c983bd4858deb5a3a15effb7`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze NvtTileV1, sparse-cell mapping, non-authoritative hint fallback, and ArtifactDirectory role 7 at both hash widths
+- **Next action:** freeze MutationJournalSegmentV1 and IndexTaskCheckpointV1, including chain/batch invariants, task phase registries, typed attachments, and external spill descriptors at both hash widths
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -137,3 +137,14 @@
 - **Failure proof:** repaired-CRC mutations reject misaligned spans, bad resolution/count formulas, empty tiles, invalid flags/presence, unsorted/out-of-range cells, sample coordinates mapped to another cell, approximate-count disagreement, reserves, and identity/body start mismatch. Full-byte fixture mutation remains covered by the common immutable-artifact test.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 77 tests; strict standalone Clippy passed; fresh generation and verification passed all 242 fixtures; and the campaign gate passed with 93 routes and 36 docs.
 - **Boundary:** NVT remains explicitly disposable acceleration state. No production query, cache, index builder, fallback scanner, migration, route, or database changed. Mutation journals and task checkpoints are next.
+
+## P0b-2c-3 Mutation Journals and Index Task Checkpoints
+
+- **Red proof:** after all 242 NVT fixtures pass, the campaign gate fails with `P0b-2 index task artifact lacks both hash-width fixtures: index:journal:task:` before a journal or checkpoint constructor/decoder exists.
+- **Territory:** planned journal producers are async index mutation capture, reconciliation, migration, repair, and compaction; planned consumers are resumable task recovery, control publication, GC reachability, backup/replication, verify, and diagnostics. The current JSON `TaskQueue` checkpoint remains legacy runtime state and is not a v4 format implementation.
+- **Frozen contracts:** exact `MutationJournalSegmentV1` identity/body/record framing, fixed system stream ID, reset and linked-chain rules, canonical mutation ordering, complete namespace-batch semantics, path/FileKey/revision presence coupling, and exact `IndexTaskCheckpointV1` task/state/phase registries, bounds, journal coverage, typed attachments, and node-local external descriptor.
+- **Mechanical registry resolution:** Round 12 described validation reports and spill-run metadata as attachment roles but assigned no immutable artifact kinds to them. The permanent role registry therefore contains only typed edges to registered IndexArtifact kinds; validation status remains role-specific checkpoint resume state and spill-run metadata uses the explicit external descriptor. This avoids converting arbitrary hashes into GC roots.
+- **Independent corpus:** task-owned and fixed-system mutation journals plus embedded and external task checkpoints under both hash profiles add eight fixtures, bringing the complete corpus to 250.
+- **Failure proof:** repaired-CRC tests reject bad owner/codec/flags/identity boundaries, broken record lengths/order/batches/presence/path identities, unknown task/state/phase/capability/attachment roles, unsorted attachments, incoherent journal coverage/progress/lengths, and malformed external workspace/digest/path framing. Linked-journal tests require exact owner, generation, predecessor artifact, ordinal, root, and sequence continuity.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 86 tests in 5.33 seconds; standalone strict Clippy passed; fresh generation and verification passed all 250 fixtures; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
+- **Boundary:** these are independent reference bytes and validation oracles only. No production journal/checkpoint reader, writer, task queue, index coordinator, GC traversal, migration path, route, or database changed. APOS is next.

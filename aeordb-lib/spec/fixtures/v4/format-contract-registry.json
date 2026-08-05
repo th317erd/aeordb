@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-nvt-tiles",
+  "coverage_stage": "p0b-2-index-tasks",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -1988,12 +1988,68 @@
         "0x0031",
         "0x0032",
         "0x0033",
-        "0x0034"
-      ],
-      "pending_body_fixture_kinds": [
+        "0x0034",
         "0x0040",
         "0x0041"
       ],
+      "pending_body_fixture_kinds": [],
+      "mutation_journal_v1": {
+        "identity": "journal_owner_id[16] || segment_ordinal u64 LE",
+        "fixed_system_stream_id_ascii": "AEORIDXJOURNALV1",
+        "owner_kinds": {
+          "1": "task",
+          "2": "system-index-stream"
+        },
+        "body_formula": "56 + 4H + records_length",
+        "record_formula": "40 + 7H + before_path_length + after_path_length",
+        "maximum_artifact_bytes": 16777216,
+        "maximum_records": 10000,
+        "canonical_order": "strict (mutation_sequence, MutationId, batch_ordinal); complete contiguous ordinal set per batch",
+        "chain_rule": "non-reset predecessor hash, owner, generation, ordinal, source-root boundary, and increasing sequence must agree; reset requires zero predecessor"
+      },
+      "index_task_checkpoint_v1": {
+        "identity": "TaskId[16] || checkpoint_sequence u64 LE",
+        "body_formula": "120 + 4H + resume_key_length + attachment_bytes + external_descriptor_length",
+        "maximum_artifact_bytes": 4194304,
+        "maximum_resume_key_bytes": 1048576,
+        "maximum_attachments": 4096,
+        "maximum_external_descriptor_bytes": 65536,
+        "task_phase_registry": {
+          "1_scope_build": ["capture-source", "scan-scope", "build-ordinal", "build-reverse", "validate", "publish"],
+          "2_value_build": ["capture-source", "scan-documents", "parse-select", "build-values", "validate", "publish"],
+          "3_field_build": ["capture-source", "scan-values", "convert-expand", "build-postings", "validate", "publish"],
+          "4_nvt_build": ["pin-posting-manifest", "scan-postings", "build-tiles", "validate", "publish"],
+          "5_reconcile": ["capture-heads", "replay-journal", "diff-roots", "apply", "validate", "publish"],
+          "6_v0_migration": ["capture-source", "scan-legacy", "convert", "replay-mutations", "validate", "publish"],
+          "7_compaction": ["select-generation", "rewrite-pages", "rebuild-directory", "validate", "publish"],
+          "8_index_repair": ["diagnose", "select-salvage", "rebuild", "validate", "publish"]
+        },
+        "task_state_registry": {
+          "1": "running",
+          "2": "cancel_requested",
+          "3": "canceled",
+          "4": "failed_retryable",
+          "5": "failed_terminal",
+          "6": "complete_unpublished",
+          "7": "published"
+        },
+        "attachment_role_registry": {
+          "1": { "name": "scope-ordinal-directory-root", "artifact_kind": "0x0020", "owner": "ScopeId", "directory_role": 1 },
+          "2": { "name": "scope-reverse-directory-root", "artifact_kind": "0x0020", "owner": "ScopeId", "directory_role": 2 },
+          "3": { "name": "value-directory-root", "artifact_kind": "0x0020", "owner": "ValueStoreId", "directory_role": 3 },
+          "4": { "name": "value-state-directory-root", "artifact_kind": "0x0020", "owner": "ValueStoreId", "directory_role": 4 },
+          "5": { "name": "posting-directory-root", "artifact_kind": "0x0020", "owner": "IndexId", "directory_role": 5 },
+          "6": { "name": "index-state-directory-root", "artifact_kind": "0x0020", "owner": "IndexId", "directory_role": 6 },
+          "7": { "name": "nvt-tile-directory-root", "artifact_kind": "0x0020", "owner": "IndexId", "directory_role": 7 },
+          "8": { "name": "candidate-scope-manifest", "artifact_kind": "0x0012", "owner": "ScopeId" },
+          "9": { "name": "candidate-value-manifest", "artifact_kind": "0x0013", "owner": "ValueStoreId" },
+          "10": { "name": "candidate-field-manifest", "artifact_kind": "0x0010", "owner": "IndexId" },
+          "11": { "name": "candidate-nvt-manifest", "artifact_kind": "0x0011", "owner": "IndexId" },
+          "12": { "name": "mutation-journal-head", "artifact_kind": "0x0040", "owner": "TaskId-or-fixed-system-stream" }
+        },
+        "attachment_closure_rule": "roles name only registered immutable IndexArtifact kinds; validation state stays in the resume key and spill-run metadata stays in the external descriptor",
+        "external_descriptor_formula": "68 + canonical_absolute_path_length; node-local resume evidence only"
+      },
       "layout": [
         {
           "offset": 0,
@@ -2152,7 +2208,11 @@
         "aidx-blake3-256-index-document-state-page-valid",
         "aidx-blake3-256-index-document-state-directory-leaf-valid",
         "aidx-blake3-256-nvt-tile-valid",
-        "aidx-blake3-256-nvt-tile-directory-leaf-valid"
+        "aidx-blake3-256-nvt-tile-directory-leaf-valid",
+        "aidx-blake3-256-task-mutation-journal-valid",
+        "aidx-blake3-256-system-mutation-journal-valid",
+        "aidx-blake3-256-index-task-checkpoint-embedded-valid",
+        "aidx-blake3-256-index-task-checkpoint-external-valid"
       ],
       "fixture_ids_64": [
         "aidx-sha512-field-index-pointer-a",
@@ -2183,7 +2243,11 @@
         "aidx-sha512-index-document-state-page-valid",
         "aidx-sha512-index-document-state-directory-leaf-valid",
         "aidx-sha512-nvt-tile-valid",
-        "aidx-sha512-nvt-tile-directory-leaf-valid"
+        "aidx-sha512-nvt-tile-directory-leaf-valid",
+        "aidx-sha512-task-mutation-journal-valid",
+        "aidx-sha512-system-mutation-journal-valid",
+        "aidx-sha512-index-task-checkpoint-embedded-valid",
+        "aidx-sha512-index-task-checkpoint-external-valid"
       ],
       "immutable_manifest_kinds": {
         "0x0010": {
@@ -2523,9 +2587,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 14,
-    "fixture_count": 242,
+    "fixture_count": 250,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, and NvtTileV1",
-    "remaining_p0b_2_scope": "Index journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, and IndexTaskCheckpointV1",
+    "remaining_p0b_2_scope": "GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }
