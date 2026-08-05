@@ -1,0 +1,4 @@
+AEOR-SEMANTICS-VECTORS-V1
+name=u64_order_v1
+in_u64=0;key=0000000000000000;coordinate=0000000000000000
+in_u64=18446744073709551615;key=ffffffffffffffff;coordinate=ffffffffffffffff

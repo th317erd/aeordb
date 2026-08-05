@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=utf8_binary_order_v1
+reject=invalid-utf8|resource-bound|fingerprint-mismatch

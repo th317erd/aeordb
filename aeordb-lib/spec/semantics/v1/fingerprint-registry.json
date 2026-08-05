@@ -1,0 +1,271 @@
+{
+  "schema_version": 1,
+  "domain": "aeordb.builtin-semantics.v1\u0000",
+  "file_order": [
+    "SPEC.md",
+    "invalid.bin",
+    "properties.json",
+    "vectors.bin"
+  ],
+  "bundles": [
+    {
+      "kind": "converter",
+      "id": 1,
+      "name": "typed_exact_blake3_v1",
+      "corrected": true,
+      "fingerprint_blake3": "f18a6a1ca1d5baadea691a84b3bb6c1fa13112d03308289ff88a914f005627b5"
+    },
+    {
+      "kind": "converter",
+      "id": 2,
+      "name": "bytes_binary_order_v1",
+      "corrected": true,
+      "fingerprint_blake3": "55d59012289e6c3c7c82f6d700db4e3cde527ea0e7efd386765451bd0c0c9c96"
+    },
+    {
+      "kind": "converter",
+      "id": 3,
+      "name": "utf8_binary_order_v1",
+      "corrected": true,
+      "fingerprint_blake3": "4ab44a710fc2b79b30c631f979fdf2de99b72175c61840bc93ff4326e52f2195"
+    },
+    {
+      "kind": "converter",
+      "id": 4,
+      "name": "u64_order_v1",
+      "corrected": true,
+      "fingerprint_blake3": "7a4404d925f4bf2c282dba7bc25ecd073709e85f19ca39e28764d5fac8d71c51"
+    },
+    {
+      "kind": "converter",
+      "id": 5,
+      "name": "i64_order_v1",
+      "corrected": true,
+      "fingerprint_blake3": "308746af96fc0eb6256534419cf774c285a932e244b97af11d98b1c94afc46ef"
+    },
+    {
+      "kind": "converter",
+      "id": 6,
+      "name": "f64_finite_order_v1",
+      "corrected": true,
+      "fingerprint_blake3": "317685a75f80390e0ee5e7f6a1da764d2d3725bc9453e3b5cc9a97c105eeee29"
+    },
+    {
+      "kind": "converter",
+      "id": 7,
+      "name": "timestamp_ms_order_v1",
+      "corrected": true,
+      "fingerprint_blake3": "1f080ae8d584d361cce6acb7bdd2ac8080cae6a864d68d5ca5a858e1684380b9"
+    },
+    {
+      "kind": "converter",
+      "id": 8,
+      "name": "bool_order_v1",
+      "corrected": true,
+      "fingerprint_blake3": "8485f6b9d3a8f0291b64015422e9544084e4f1b8867ff4d561599584ccea345c"
+    },
+    {
+      "kind": "converter",
+      "id": 9,
+      "name": "unicode_trigram_v1",
+      "corrected": true,
+      "fingerprint_blake3": "73b5a657c326e75e2efe888e739aa895b163eb5efd0031a44326d57f9ec70986"
+    },
+    {
+      "kind": "converter",
+      "id": 10,
+      "name": "soundex_ascii_v1",
+      "corrected": true,
+      "fingerprint_blake3": "63238ebac150beade6da179d6177ddb8ce37fb11e92c27d66544bf0d285a9509"
+    },
+    {
+      "kind": "converter",
+      "id": 11,
+      "name": "double_metaphone_primary_ascii_v1",
+      "corrected": true,
+      "fingerprint_blake3": "97ec34fb7371ee29eb0d0098d7199f8f7db9c90d79cd622d22af3738d1d2cdab"
+    },
+    {
+      "kind": "converter",
+      "id": 12,
+      "name": "double_metaphone_alt_ascii_v1",
+      "corrected": true,
+      "fingerprint_blake3": "c7f89014ae455dbb8a96a37d6228d96d842f4c0af9bc098d936d9253f77fe0ad"
+    },
+    {
+      "kind": "converter",
+      "id": 32769,
+      "name": "hash_v0",
+      "corrected": false,
+      "fingerprint_blake3": "caaa7d9f566071d46145427005f4fd0b7e9a238e865026faec82bc54b38797b0"
+    },
+    {
+      "kind": "converter",
+      "id": 32770,
+      "name": "u8_v0",
+      "corrected": false,
+      "fingerprint_blake3": "29a656ea077831c261b4a6ca8c7d1a1b0693a90fc975ca2c5d5aa64906539e46"
+    },
+    {
+      "kind": "converter",
+      "id": 32771,
+      "name": "u16_v0",
+      "corrected": false,
+      "fingerprint_blake3": "36e7c63b1f20027099304b1c370b92480a17358b2b27f97c66ff501e8ca560c0"
+    },
+    {
+      "kind": "converter",
+      "id": 32772,
+      "name": "u32_v0",
+      "corrected": false,
+      "fingerprint_blake3": "b6dca785dea23630e88adbef7d3b289e845b43f2941dda0200bc53138a2ea2a3"
+    },
+    {
+      "kind": "converter",
+      "id": 32773,
+      "name": "u64_v0",
+      "corrected": false,
+      "fingerprint_blake3": "a126ded1e9203b3f4a6fbfa5b82ca10f64d1f1495e1ef695a2ae0bdf315e3a35"
+    },
+    {
+      "kind": "converter",
+      "id": 32774,
+      "name": "i64_v0",
+      "corrected": false,
+      "fingerprint_blake3": "3519369b2fbde8669043737b58d573a3a2eb961c86070ff4a91637d4cac51670"
+    },
+    {
+      "kind": "converter",
+      "id": 32775,
+      "name": "f64_v0",
+      "corrected": false,
+      "fingerprint_blake3": "b19ed38c5a463d7b794f7c52146eb3c6d803d0e56cfde68caf838c18050c8dde"
+    },
+    {
+      "kind": "converter",
+      "id": 32776,
+      "name": "string_v0",
+      "corrected": false,
+      "fingerprint_blake3": "929100edf27232e802f362ea578a00c240d35804416b71517cc744bdefa31f6b"
+    },
+    {
+      "kind": "converter",
+      "id": 32777,
+      "name": "timestamp_v0",
+      "corrected": false,
+      "fingerprint_blake3": "03595fa861b7755963e2d8765783da559c111b8462c0d0313c97ed980918be18"
+    },
+    {
+      "kind": "converter",
+      "id": 32778,
+      "name": "trigram_v0",
+      "corrected": false,
+      "fingerprint_blake3": "ed24f08a2201711a1c07d1ef615affa1aac76604a67656d90c3b51efc196e874"
+    },
+    {
+      "kind": "converter",
+      "id": 32779,
+      "name": "soundex_v0",
+      "corrected": false,
+      "fingerprint_blake3": "0edfdb982a26c161a9536c41339213e3fb418c42b53c18286828a28224830c3c"
+    },
+    {
+      "kind": "converter",
+      "id": 32780,
+      "name": "dmetaphone_primary_v0",
+      "corrected": false,
+      "fingerprint_blake3": "57a924fb5ceb7e6266a0dbee51333df5515bfd4e227f4b33f2d7e81056fd35dc"
+    },
+    {
+      "kind": "converter",
+      "id": 32781,
+      "name": "dmetaphone_alt_v0",
+      "corrected": false,
+      "fingerprint_blake3": "378c7655d1b1ac86001b15887cffe0d4f71f30a7dbe0c6d94ee2564e1ca38381"
+    },
+    {
+      "kind": "strategy",
+      "id": 1,
+      "name": "exact",
+      "corrected": true,
+      "fingerprint_blake3": "8dbf3a283525493412d312b9eb84ca3510c777882033ff3627eb4307dc6fbeaa"
+    },
+    {
+      "kind": "strategy",
+      "id": 2,
+      "name": "ordered",
+      "corrected": true,
+      "fingerprint_blake3": "b1188bb0d6c029cea022ad0e0ed079de6132d31c16e3647cb6c97b672fb8cb24"
+    },
+    {
+      "kind": "strategy",
+      "id": 3,
+      "name": "trigram",
+      "corrected": true,
+      "fingerprint_blake3": "6b716daf3780c7dff4216ed34ce5267cfb749387bbf19208c21a1cbaf021d505"
+    },
+    {
+      "kind": "strategy",
+      "id": 4,
+      "name": "soundex",
+      "corrected": true,
+      "fingerprint_blake3": "0e3e9eebe4e1943434edfa6d2b8733a8a018df2f2272f522e47c522c2e9b011d"
+    },
+    {
+      "kind": "strategy",
+      "id": 5,
+      "name": "dmetaphone",
+      "corrected": true,
+      "fingerprint_blake3": "4b90156642cb405b31a10e7e5e510663b8d542c450f8ec3b67bba1293240c41c"
+    },
+    {
+      "kind": "strategy",
+      "id": 6,
+      "name": "dmetaphone_alt",
+      "corrected": true,
+      "fingerprint_blake3": "e153435ae438bb57d2c79a0634780eb2a9e47e852293c58573f39dad22fbce24"
+    },
+    {
+      "kind": "strategy",
+      "id": 1,
+      "name": "exact_v0",
+      "corrected": false,
+      "fingerprint_blake3": "f7521091e5733e8a25370e7e2bc60c9b5d7b2b5a49f465dd994f94a44d04daef"
+    },
+    {
+      "kind": "strategy",
+      "id": 2,
+      "name": "ordered_v0",
+      "corrected": false,
+      "fingerprint_blake3": "1edbd2b0e1f228abe1bb20dd90cd9a5622423729130a243f87ec399b0d3e686c"
+    },
+    {
+      "kind": "strategy",
+      "id": 3,
+      "name": "trigram_v0_strategy",
+      "corrected": false,
+      "fingerprint_blake3": "5c6764b53f0fa7de211c9d631e3e8e2c8480778da974a60bc2f42c1ae0b299cd"
+    },
+    {
+      "kind": "strategy",
+      "id": 4,
+      "name": "soundex_v0_strategy",
+      "corrected": false,
+      "fingerprint_blake3": "dd98eefddefdbc309329e1a0ccdc590c64d73f6aa3d100f6500d2935f60067a5"
+    },
+    {
+      "kind": "strategy",
+      "id": 5,
+      "name": "dmetaphone_v0_strategy",
+      "corrected": false,
+      "fingerprint_blake3": "8225f9b61c0e41c5e5df313e2627b755a1f1f36f6b30a9634c07ffadf51a1145"
+    },
+    {
+      "kind": "strategy",
+      "id": 6,
+      "name": "dmetaphone_alt_v0_strategy",
+      "corrected": false,
+      "fingerprint_blake3": "db650a7465cbb3589e59d24ddcb80faf0305d957c071e85ae87fc22f7789b518"
+    }
+  ]
+}

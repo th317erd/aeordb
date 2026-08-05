@@ -1,0 +1,21 @@
+# fixture: acnv-blake3-256-u64_v0-valid
+# contract: ConverterDefinitionV1
+# hash: blake3-256 (32 bytes)
+# expected: converter:u64_v0:semantics=32773
+# canonical key: 3330346079643affa8dd6c305eff4d836166c5799e8f4988c28465fbda209549
+# relation: semantic-family:migration-v0
+# hex offsets are absolute within this fixture
+# definition +0x000 len 32: ACNV canonical-definition envelope
+# definition +0x020 len 24: converter IDs, source mask, and semantic IDs
+# definition +0x038 len 32: parameter length, bounds, and flags
+# definition +0x058 len 32: behavior-bundle fingerprint
+# definition +0x078 len 16: canonical parameters
+00000000: 41434e56010020008800000000000000
+00000010: 00000000000000000000000000000000
+00000020: 05800580400000000580058005800000
+00000030: 00000580058001001000000000000000
+00000040: 00001000000000000100000000001000
+00000050: 0000100000000000a126ded1e9203b3f
+00000060: 4a6fbfa5b82ca10f64d1f1495e1ef695
+00000070: a2ae0bdf315e3a350000000000000000
+00000080: ffffffffffffffff

@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=ordered_v0
+reject=unsupported-operation|wrong-converter|incomplete-closure-without-fallback|resource-bound|fingerprint-mismatch

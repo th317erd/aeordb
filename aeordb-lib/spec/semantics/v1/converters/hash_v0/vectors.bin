@@ -1,0 +1,4 @@
+AEOR-SEMANTICS-VECTORS-V1
+name=hash_v0
+in=;scalar_bits=0000000000000000
+in=ffffffffffffffff;scalar_bits=000000000000f03f

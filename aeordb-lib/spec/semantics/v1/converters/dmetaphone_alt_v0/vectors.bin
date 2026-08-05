@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-VECTORS-V1
+name=dmetaphone_alt_v0
+capture=production-v0-tokenizer-and-little-endian-digest-scalar;empty=no_tokens;duplicates=sorted_unique

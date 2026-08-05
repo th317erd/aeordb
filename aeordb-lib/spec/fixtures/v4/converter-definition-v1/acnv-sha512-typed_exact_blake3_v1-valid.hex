@@ -1,0 +1,20 @@
+# fixture: acnv-sha512-typed_exact_blake3_v1-valid
+# contract: ConverterDefinitionV1
+# hash: sha512 (64 bytes)
+# expected: converter:typed_exact_blake3_v1:semantics=1
+# canonical key: 41c4b49b95a56a9527c97f3ddb93955dddd5303529c41efa38b823ff2d5ec0001f16da0a5fd4ca4b87d66f438999ad501cfa8c4484e8e490d8746603a95c4766
+# relation: semantic-family:corrected
+# hex offsets are absolute within this fixture
+# definition +0x000 len 32: ACNV canonical-definition envelope
+# definition +0x020 len 24: converter IDs, source mask, and semantic IDs
+# definition +0x038 len 32: parameter length, bounds, and flags
+# definition +0x058 len 32: behavior-bundle fingerprint
+# definition +0x078 len 0: canonical parameters
+00000000: 41434e56010020007800000000000000
+00000010: 00000000000000000000000000000000
+00000020: 010001007f0000000100010001000000
+00000030: 00000100010001000000000000000000
+00000040: 00001000000000000100000000001000
+00000050: 0000100000000000f18a6a1ca1d5baad
+00000060: ea691a84b3bb6c1fa13112d03308289f
+00000070: f88a914f005627b5

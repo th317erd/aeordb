@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=unicode_trigram_v1
+reject=invalid-utf8|resource-bound|fingerprint-mismatch

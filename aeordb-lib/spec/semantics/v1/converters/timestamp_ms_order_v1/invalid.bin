@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=timestamp_ms_order_v1
+reject=wrong-type|malformed-width|overflow|precision-loss|nonfinite|ambiguous-time|resource-bound|fingerprint-mismatch

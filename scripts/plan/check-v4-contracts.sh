@@ -141,7 +141,7 @@ expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contra
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .coverage_stage == "p0b-2-value-store-definition" and
+  .coverage_stage == "p0b-2-field-index-definition" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
   ([.capability_bits[].bit] | length) == 24 and
   ([.capability_bits[].bit] | unique | length) == 24 and
@@ -181,7 +181,7 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-value-store-definition" and
+  .stage == "p0b-2-field-index-definition" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -241,7 +241,9 @@ jq -e '
 
 required_p0b2_definition_formats=(
   canonical-config-value-v1
+  converter-definition-v1
   dependency-table-v1
+  field-index-definition-v1
   invocation-policy-v1
   parser-resolution-plan-v1
   scope-definition-v1
@@ -258,6 +260,30 @@ for format_id in "${required_p0b2_definition_formats[@]}"; do
     "$fixture_manifest" >/dev/null \
     || fail "P0b-2 definition format lacks both hash-width fixtures: $format_id"
 done
+
+semantics_root="$repo_root/aeordb-lib/spec/semantics/v1"
+semantics_registry="$semantics_root/fingerprint-registry.json"
+[[ -f "$semantics_registry" ]] || fail "missing built-in semantics fingerprint registry"
+jq -e '
+  .schema_version == 1 and
+  .domain == "aeordb.builtin-semantics.v1\u0000" and
+  .file_order == ["SPEC.md", "invalid.bin", "properties.json", "vectors.bin"] and
+  (.bundles | length) == 37 and
+  ([.bundles[] | [.kind, .id, .corrected]] | length) == ([.bundles[] | [.kind, .id, .corrected]] | unique | length) and
+  ([.bundles[].name] | length) == ([.bundles[].name] | unique | length) and
+  all(.bundles[]; (.fingerprint_blake3 | test("^[0-9a-f]{64}$")))
+' "$semantics_registry" >/dev/null || fail "built-in semantics fingerprint registry is incomplete"
+while IFS=$'\t' read -r kind name; do
+  case "$kind" in
+    converter) bundle_family=converters ;;
+    strategy) bundle_family=strategies ;;
+    *) fail "unknown semantic bundle kind: $kind" ;;
+  esac
+  bundle_dir="$semantics_root/$bundle_family/$name"
+  for bundle_file in SPEC.md invalid.bin properties.json vectors.bin; do
+    [[ -s "$bundle_dir/$bundle_file" ]] || fail "missing semantic bundle file: ${kind}s/$name/$bundle_file"
+  done
+done < <(jq -r '.bundles[] | [.kind, .name] | @tsv' "$semantics_registry")
 
 reference_jobs=${CARGO_BUILD_JOBS:-4}
 if ((reference_jobs > 6)); then

@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=u8_v0
+reject=unknown-adapter|malformed-parameter-framing|resource-bound|fingerprint-mismatch;legacy-data-fallbacks-remain-valid

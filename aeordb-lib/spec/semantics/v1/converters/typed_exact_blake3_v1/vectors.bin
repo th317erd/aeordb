@@ -1,0 +1,5 @@
+AEOR-SEMANTICS-VECTORS-V1
+name=typed_exact_blake3_v1
+empty=defined
+boundary=min|max
+duplicate=preserve-source-ordinal

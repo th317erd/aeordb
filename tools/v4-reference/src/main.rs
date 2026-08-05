@@ -2,10 +2,12 @@ mod config;
 mod core;
 mod definitions;
 mod dependency;
+mod field_index;
 mod index;
 mod parser;
 mod policy;
 mod selector;
+mod semantics;
 mod value_store;
 
 use std::collections::BTreeMap;
@@ -21,6 +23,7 @@ use sha2::{Digest, Sha256};
 use config::ConfigFormat;
 use core::{CoreFormat, HashProfile};
 use dependency::DependencyFormat;
+use field_index::FieldIndexFormat;
 use definitions::DefinitionFormat;
 use index::IndexFormat;
 use parser::ParserFormat;
@@ -29,7 +32,7 @@ use selector::SelectorFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-value-store-definition-v1";
+const TOOL_REVISION: &str = "p0b2-field-index-definition-v1";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -47,6 +50,7 @@ enum FixtureFormat {
   Core(CoreFormat),
   Dependency(DependencyFormat),
   Definition(DefinitionFormat),
+  FieldIndex(FieldIndexFormat),
   Index(IndexFormat),
   Parser(ParserFormat),
   Policy(PolicyFormat),
@@ -62,6 +66,7 @@ impl FixtureFormat {
       Self::Core(format) => format.id(),
       Self::Dependency(format) => format.id(),
       Self::Definition(format) => format.id(),
+      Self::FieldIndex(format) => format.id(),
       Self::Index(format) => format.id(),
       Self::Parser(format) => format.id(),
       Self::Policy(format) => format.id(),
@@ -77,6 +82,7 @@ impl FixtureFormat {
       Self::Core(format) => format.family(),
       Self::Dependency(format) => format.family(),
       Self::Definition(format) => format.family(),
+      Self::FieldIndex(format) => format.family(),
       Self::Index(format) => format.family(),
       Self::Parser(format) => format.family(),
       Self::Policy(format) => format.family(),
@@ -199,6 +205,8 @@ fn main() -> DynResult<()> {
 }
 
 fn generate(fixture_root: &Path) -> DynResult<()> {
+  let spec_root = fixture_root.parent().and_then(Path::parent).ok_or("fixture root must be below spec/fixtures")?;
+  semantics::generate(spec_root)?;
   let cases = fixture_cases();
 
   let mut entries = Vec::with_capacity(cases.len());
@@ -239,7 +247,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
   let manifest = FixtureManifest {
     schema_version: 1,
     campaign_id: CAMPAIGN_ID.to_string(),
-    stage: "p0b-2-value-store-definition".to_string(),
+    stage: "p0b-2-field-index-definition".to_string(),
     reference_tool: ReferenceTool {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
@@ -259,9 +267,11 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
 }
 
 fn verify(fixture_root: &Path) -> DynResult<()> {
+  let spec_root = fixture_root.parent().and_then(Path::parent).ok_or("fixture root must be below spec/fixtures")?;
+  semantics::verify(spec_root)?;
   let manifest_path = fixture_root.join("format-fixture-manifest.json");
   let manifest: FixtureManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-value-store-definition" {
+  if manifest.schema_version != 1 || manifest.campaign_id != CAMPAIGN_ID || manifest.stage != "p0b-2-field-index-definition" {
     return Err("fixture manifest identity mismatch".into());
   }
   if manifest.reference_tool.revision != TOOL_REVISION || !manifest.reference_tool.production_dependencies.is_empty() {
@@ -454,6 +464,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
   cases.extend(index::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::Index(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
+  cases.extend(field_index::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::FieldIndex(case.format),
     profile: case.profile,
     expected: case.expected,
     relation: case.relation,
@@ -654,6 +673,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::Core(format) => core::observe(format, case.profile, bytes),
     FixtureFormat::Dependency(_) => dependency::observe(case.profile, bytes),
     FixtureFormat::Definition(_) => definitions::observe(case.profile, bytes),
+    FixtureFormat::FieldIndex(format) => field_index::observe(format, case.profile, bytes),
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
     FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
@@ -671,6 +691,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::Core(_)
     | FixtureFormat::Dependency(_)
     | FixtureFormat::Definition(_)
+    | FixtureFormat::FieldIndex(_)
     | FixtureFormat::Index(_)
     | FixtureFormat::Parser(_)
     | FixtureFormat::Policy(_)
@@ -710,6 +731,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Definition(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in definitions::annotation_lines(&case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::FieldIndex(format) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in field_index::annotation_lines(format, case.profile, &case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

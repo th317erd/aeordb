@@ -3,7 +3,7 @@
 - **Status:** P0b in progress; P0b-1 complete
 - **Current landing unit:** P0b-2b-4 ConverterDefinitionV1 and FieldIndexDefinitionV1
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2b-3e SourceSelectorV1 `3c9e67189293ce3b72ea6fd0d4edc3be5af5b383`
+- **Last green commit:** P0b-2b-3f ValueStoreDefinitionV1 `1fd3a47f846e493e366a7cdd008b1a13a4934061`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze ConverterDefinitionV1 and FieldIndexDefinitionV1, then their immutable manifest families in dependency order
+- **Next action:** freeze built-in semantic bundles, ConverterDefinitionV1, and FieldIndexDefinitionV1, then their immutable manifest families in dependency order
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -96,3 +96,13 @@
 - **Failure proof:** envelope/formula/cap/reserve/scope/field failures, child allocation amplification, nested decoder errors, corrected/legacy semantic mixing, inapplicable/unbounded limits, field-selector-parser disagreement, out-of-range and cross-role ordinals, corrected/legacy policy mismatch, duplicate selector capabilities, unused dependencies, and all fixture-byte integrity/identity effects are covered.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 54 tests in 5.36 seconds; strict standalone Clippy passed; fresh generation/verification passed all 96 fixtures; and the campaign gate passed with 93 routes and 36 docs.
 - **Boundary:** this completes the independent ValueStore semantic closure only. No production codec, parser/selector executor, index runtime, writer, migration, route, or database path changed.
+
+## P0b-2b-4 Converter and Field-Index Definitions
+
+- **Red proof:** after the 96-fixture ValueStore gate passed, the campaign gate failed with `P0b-2 definition format is absent from the contract registry: converter-definition-v1` before the semantic bundles or codecs existed.
+- **Frozen contracts:** exact `ConverterDefinitionV1` and hash-width-dependent `FieldIndexDefinitionV1` framing; every corrected and migration-only converter ID; all six corrected and migration strategy families; permanent operation bits; accepted source masks; fixed-point-coordinate/recheck authority; semantic limits; and exact converter/strategy bundle fingerprints from Round 11.
+- **Behavior bundles:** 37 checked-in bundles contain canonical specs, valid and invalid vectors, and named properties for 25 converters/adapters and 12 strategy semantics. The independent verifier recomputes all BLAKE3 fingerprints and rejects changed or missing bundle files. Legacy numeric, timestamp, floating-point, and string definitions preserve their captured range/max-length parameters rather than collapsing distinct v0 behavior.
+- **Independent corpus:** 100 new fixtures cover every converter definition and its legal strategy binding under both 32- and 64-byte hash profiles, bringing the complete corpus to 196 fixtures.
+- **Failure proof:** exact envelope/length/reserve checks, unknown IDs and type masks, corrected/migration semantic mixing, malformed fingerprints, wrong converter/strategy/operation/name combinations, zero/excess limits, corrected parameter injection, legacy parameter framing, and all-byte structural-or-identity mutation are covered. Reversed legacy ranges remain readable by design while corrected definitions cannot encode them.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 61 tests; strict standalone Clippy passed; fresh generation and verification passed all 196 fixtures; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
+- **Boundary:** this freezes identities and semantic closure only. No production converter, query compiler, index builder, persistent reader/writer, migration path, route, or database changed. Immutable index manifests remain the next dependency.

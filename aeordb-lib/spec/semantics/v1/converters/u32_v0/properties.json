@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "name": "u32_v0",
+  "properties": ["deterministic", "bounded", "locale_independent", "total_posting_order", "collision_safe_recheck", "no_coordinate_false_negative"]
+}

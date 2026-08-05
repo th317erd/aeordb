@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=bool_order_v1
+reject=unknown-type|malformed-width|resource-bound|fingerprint-mismatch

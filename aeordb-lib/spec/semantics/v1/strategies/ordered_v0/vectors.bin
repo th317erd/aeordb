@@ -1,0 +1,5 @@
+AEOR-SEMANTICS-VECTORS-V1
+name=ordered_v0
+empty=defined
+duplicate_documents=deduplicated_after_boolean_composition
+coordinate_collision=complete-key-and-value-recheck

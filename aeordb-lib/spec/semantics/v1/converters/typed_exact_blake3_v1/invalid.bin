@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=typed_exact_blake3_v1
+reject=unknown-type|malformed-width|resource-bound|fingerprint-mismatch

@@ -1,0 +1,5 @@
+AEOR-SEMANTICS-VECTORS-V1
+name=trigram
+empty=defined
+duplicate_documents=deduplicated_after_boolean_composition
+coordinate_collision=complete-key-and-value-recheck

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-value-store-definition-v1",
+  "tool_revision": "p0b2-field-index-definition-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -325,6 +325,606 @@
       "fixture_id": "aidx-sha512-scope-catalog-pointer-b-max-sequence",
       "expected": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
       "observed": "index:pointer:scope-catalog:slot-b:sequence=18446744073709551615",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-typed_exact_blake3_v1-valid",
+      "expected": "converter:typed_exact_blake3_v1:semantics=1",
+      "observed": "converter:typed_exact_blake3_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-typed_exact_blake3_v1-valid",
+      "expected": "field-index:exact:converter=typed_exact_blake3_v1:operations=0x3",
+      "observed": "field-index:exact:converter=typed_exact_blake3_v1:operations=0x3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-bytes_binary_order_v1-valid",
+      "expected": "converter:bytes_binary_order_v1:semantics=1",
+      "observed": "converter:bytes_binary_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-bytes_binary_order_v1-valid",
+      "expected": "field-index:ordered:converter=bytes_binary_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=bytes_binary_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-utf8_binary_order_v1-valid",
+      "expected": "converter:utf8_binary_order_v1:semantics=1",
+      "observed": "converter:utf8_binary_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-utf8_binary_order_v1-valid",
+      "expected": "field-index:ordered:converter=utf8_binary_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=utf8_binary_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-u64_order_v1-valid",
+      "expected": "converter:u64_order_v1:semantics=1",
+      "observed": "converter:u64_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-u64_order_v1-valid",
+      "expected": "field-index:ordered:converter=u64_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=u64_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-i64_order_v1-valid",
+      "expected": "converter:i64_order_v1:semantics=1",
+      "observed": "converter:i64_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-i64_order_v1-valid",
+      "expected": "field-index:ordered:converter=i64_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=i64_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-f64_finite_order_v1-valid",
+      "expected": "converter:f64_finite_order_v1:semantics=1",
+      "observed": "converter:f64_finite_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-f64_finite_order_v1-valid",
+      "expected": "field-index:ordered:converter=f64_finite_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=f64_finite_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-timestamp_ms_order_v1-valid",
+      "expected": "converter:timestamp_ms_order_v1:semantics=1",
+      "observed": "converter:timestamp_ms_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-timestamp_ms_order_v1-valid",
+      "expected": "field-index:ordered:converter=timestamp_ms_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=timestamp_ms_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-bool_order_v1-valid",
+      "expected": "converter:bool_order_v1:semantics=1",
+      "observed": "converter:bool_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-bool_order_v1-valid",
+      "expected": "field-index:ordered:converter=bool_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=bool_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-unicode_trigram_v1-valid",
+      "expected": "converter:unicode_trigram_v1:semantics=1",
+      "observed": "converter:unicode_trigram_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-unicode_trigram_v1-valid",
+      "expected": "field-index:trigram:converter=unicode_trigram_v1:operations=0x360",
+      "observed": "field-index:trigram:converter=unicode_trigram_v1:operations=0x360",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-soundex_ascii_v1-valid",
+      "expected": "converter:soundex_ascii_v1:semantics=1",
+      "observed": "converter:soundex_ascii_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-soundex_ascii_v1-valid",
+      "expected": "field-index:soundex:converter=soundex_ascii_v1:operations=0x280",
+      "observed": "field-index:soundex:converter=soundex_ascii_v1:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-double_metaphone_primary_ascii_v1-valid",
+      "expected": "converter:double_metaphone_primary_ascii_v1:semantics=1",
+      "observed": "converter:double_metaphone_primary_ascii_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-double_metaphone_primary_ascii_v1-valid",
+      "expected": "field-index:dmetaphone:converter=double_metaphone_primary_ascii_v1:operations=0x280",
+      "observed": "field-index:dmetaphone:converter=double_metaphone_primary_ascii_v1:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-double_metaphone_alt_ascii_v1-valid",
+      "expected": "converter:double_metaphone_alt_ascii_v1:semantics=1",
+      "observed": "converter:double_metaphone_alt_ascii_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-double_metaphone_alt_ascii_v1-valid",
+      "expected": "field-index:dmetaphone_alt:converter=double_metaphone_alt_ascii_v1:operations=0x280",
+      "observed": "field-index:dmetaphone_alt:converter=double_metaphone_alt_ascii_v1:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-hash_v0-valid",
+      "expected": "converter:hash_v0:semantics=32769",
+      "observed": "converter:hash_v0:semantics=32769",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-hash_v0-valid",
+      "expected": "field-index:exact_v0:converter=hash_v0:operations=0x3",
+      "observed": "field-index:exact_v0:converter=hash_v0:operations=0x3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-u8_v0-valid",
+      "expected": "converter:u8_v0:semantics=32770",
+      "observed": "converter:u8_v0:semantics=32770",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-u8_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u8_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u8_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-u16_v0-valid",
+      "expected": "converter:u16_v0:semantics=32771",
+      "observed": "converter:u16_v0:semantics=32771",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-u16_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u16_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u16_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-u32_v0-valid",
+      "expected": "converter:u32_v0:semantics=32772",
+      "observed": "converter:u32_v0:semantics=32772",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-u32_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u32_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u32_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-u64_v0-valid",
+      "expected": "converter:u64_v0:semantics=32773",
+      "observed": "converter:u64_v0:semantics=32773",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-u64_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u64_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u64_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-i64_v0-valid",
+      "expected": "converter:i64_v0:semantics=32774",
+      "observed": "converter:i64_v0:semantics=32774",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-i64_v0-valid",
+      "expected": "field-index:ordered_v0:converter=i64_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=i64_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-f64_v0-valid",
+      "expected": "converter:f64_v0:semantics=32775",
+      "observed": "converter:f64_v0:semantics=32775",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-f64_v0-valid",
+      "expected": "field-index:ordered_v0:converter=f64_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=f64_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-string_v0-valid",
+      "expected": "converter:string_v0:semantics=32776",
+      "observed": "converter:string_v0:semantics=32776",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-string_v0-valid",
+      "expected": "field-index:ordered_v0:converter=string_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=string_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-timestamp_v0-valid",
+      "expected": "converter:timestamp_v0:semantics=32777",
+      "observed": "converter:timestamp_v0:semantics=32777",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-timestamp_v0-valid",
+      "expected": "field-index:ordered_v0:converter=timestamp_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=timestamp_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-trigram_v0-valid",
+      "expected": "converter:trigram_v0:semantics=32778",
+      "observed": "converter:trigram_v0:semantics=32778",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-trigram_v0-valid",
+      "expected": "field-index:trigram_v0_strategy:converter=trigram_v0:operations=0x360",
+      "observed": "field-index:trigram_v0_strategy:converter=trigram_v0:operations=0x360",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-soundex_v0-valid",
+      "expected": "converter:soundex_v0:semantics=32779",
+      "observed": "converter:soundex_v0:semantics=32779",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-soundex_v0-valid",
+      "expected": "field-index:soundex_v0_strategy:converter=soundex_v0:operations=0x280",
+      "observed": "field-index:soundex_v0_strategy:converter=soundex_v0:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-dmetaphone_primary_v0-valid",
+      "expected": "converter:dmetaphone_primary_v0:semantics=32780",
+      "observed": "converter:dmetaphone_primary_v0:semantics=32780",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-dmetaphone_primary_v0-valid",
+      "expected": "field-index:dmetaphone_v0_strategy:converter=dmetaphone_primary_v0:operations=0x280",
+      "observed": "field-index:dmetaphone_v0_strategy:converter=dmetaphone_primary_v0:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-blake3-256-dmetaphone_alt_v0-valid",
+      "expected": "converter:dmetaphone_alt_v0:semantics=32781",
+      "observed": "converter:dmetaphone_alt_v0:semantics=32781",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-blake3-256-dmetaphone_alt_v0-valid",
+      "expected": "field-index:dmetaphone_alt_v0_strategy:converter=dmetaphone_alt_v0:operations=0x280",
+      "observed": "field-index:dmetaphone_alt_v0_strategy:converter=dmetaphone_alt_v0:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-typed_exact_blake3_v1-valid",
+      "expected": "converter:typed_exact_blake3_v1:semantics=1",
+      "observed": "converter:typed_exact_blake3_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-typed_exact_blake3_v1-valid",
+      "expected": "field-index:exact:converter=typed_exact_blake3_v1:operations=0x3",
+      "observed": "field-index:exact:converter=typed_exact_blake3_v1:operations=0x3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-bytes_binary_order_v1-valid",
+      "expected": "converter:bytes_binary_order_v1:semantics=1",
+      "observed": "converter:bytes_binary_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-bytes_binary_order_v1-valid",
+      "expected": "field-index:ordered:converter=bytes_binary_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=bytes_binary_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-utf8_binary_order_v1-valid",
+      "expected": "converter:utf8_binary_order_v1:semantics=1",
+      "observed": "converter:utf8_binary_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-utf8_binary_order_v1-valid",
+      "expected": "field-index:ordered:converter=utf8_binary_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=utf8_binary_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-u64_order_v1-valid",
+      "expected": "converter:u64_order_v1:semantics=1",
+      "observed": "converter:u64_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-u64_order_v1-valid",
+      "expected": "field-index:ordered:converter=u64_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=u64_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-i64_order_v1-valid",
+      "expected": "converter:i64_order_v1:semantics=1",
+      "observed": "converter:i64_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-i64_order_v1-valid",
+      "expected": "field-index:ordered:converter=i64_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=i64_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-f64_finite_order_v1-valid",
+      "expected": "converter:f64_finite_order_v1:semantics=1",
+      "observed": "converter:f64_finite_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-f64_finite_order_v1-valid",
+      "expected": "field-index:ordered:converter=f64_finite_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=f64_finite_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-timestamp_ms_order_v1-valid",
+      "expected": "converter:timestamp_ms_order_v1:semantics=1",
+      "observed": "converter:timestamp_ms_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-timestamp_ms_order_v1-valid",
+      "expected": "field-index:ordered:converter=timestamp_ms_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=timestamp_ms_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-bool_order_v1-valid",
+      "expected": "converter:bool_order_v1:semantics=1",
+      "observed": "converter:bool_order_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-bool_order_v1-valid",
+      "expected": "field-index:ordered:converter=bool_order_v1:operations=0xc1f",
+      "observed": "field-index:ordered:converter=bool_order_v1:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-unicode_trigram_v1-valid",
+      "expected": "converter:unicode_trigram_v1:semantics=1",
+      "observed": "converter:unicode_trigram_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-unicode_trigram_v1-valid",
+      "expected": "field-index:trigram:converter=unicode_trigram_v1:operations=0x360",
+      "observed": "field-index:trigram:converter=unicode_trigram_v1:operations=0x360",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-soundex_ascii_v1-valid",
+      "expected": "converter:soundex_ascii_v1:semantics=1",
+      "observed": "converter:soundex_ascii_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-soundex_ascii_v1-valid",
+      "expected": "field-index:soundex:converter=soundex_ascii_v1:operations=0x280",
+      "observed": "field-index:soundex:converter=soundex_ascii_v1:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-double_metaphone_primary_ascii_v1-valid",
+      "expected": "converter:double_metaphone_primary_ascii_v1:semantics=1",
+      "observed": "converter:double_metaphone_primary_ascii_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-double_metaphone_primary_ascii_v1-valid",
+      "expected": "field-index:dmetaphone:converter=double_metaphone_primary_ascii_v1:operations=0x280",
+      "observed": "field-index:dmetaphone:converter=double_metaphone_primary_ascii_v1:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-double_metaphone_alt_ascii_v1-valid",
+      "expected": "converter:double_metaphone_alt_ascii_v1:semantics=1",
+      "observed": "converter:double_metaphone_alt_ascii_v1:semantics=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-double_metaphone_alt_ascii_v1-valid",
+      "expected": "field-index:dmetaphone_alt:converter=double_metaphone_alt_ascii_v1:operations=0x280",
+      "observed": "field-index:dmetaphone_alt:converter=double_metaphone_alt_ascii_v1:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-hash_v0-valid",
+      "expected": "converter:hash_v0:semantics=32769",
+      "observed": "converter:hash_v0:semantics=32769",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-hash_v0-valid",
+      "expected": "field-index:exact_v0:converter=hash_v0:operations=0x3",
+      "observed": "field-index:exact_v0:converter=hash_v0:operations=0x3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-u8_v0-valid",
+      "expected": "converter:u8_v0:semantics=32770",
+      "observed": "converter:u8_v0:semantics=32770",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-u8_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u8_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u8_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-u16_v0-valid",
+      "expected": "converter:u16_v0:semantics=32771",
+      "observed": "converter:u16_v0:semantics=32771",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-u16_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u16_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u16_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-u32_v0-valid",
+      "expected": "converter:u32_v0:semantics=32772",
+      "observed": "converter:u32_v0:semantics=32772",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-u32_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u32_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u32_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-u64_v0-valid",
+      "expected": "converter:u64_v0:semantics=32773",
+      "observed": "converter:u64_v0:semantics=32773",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-u64_v0-valid",
+      "expected": "field-index:ordered_v0:converter=u64_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=u64_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-i64_v0-valid",
+      "expected": "converter:i64_v0:semantics=32774",
+      "observed": "converter:i64_v0:semantics=32774",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-i64_v0-valid",
+      "expected": "field-index:ordered_v0:converter=i64_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=i64_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-f64_v0-valid",
+      "expected": "converter:f64_v0:semantics=32775",
+      "observed": "converter:f64_v0:semantics=32775",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-f64_v0-valid",
+      "expected": "field-index:ordered_v0:converter=f64_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=f64_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-string_v0-valid",
+      "expected": "converter:string_v0:semantics=32776",
+      "observed": "converter:string_v0:semantics=32776",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-string_v0-valid",
+      "expected": "field-index:ordered_v0:converter=string_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=string_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-timestamp_v0-valid",
+      "expected": "converter:timestamp_v0:semantics=32777",
+      "observed": "converter:timestamp_v0:semantics=32777",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-timestamp_v0-valid",
+      "expected": "field-index:ordered_v0:converter=timestamp_v0:operations=0xc1f",
+      "observed": "field-index:ordered_v0:converter=timestamp_v0:operations=0xc1f",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-trigram_v0-valid",
+      "expected": "converter:trigram_v0:semantics=32778",
+      "observed": "converter:trigram_v0:semantics=32778",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-trigram_v0-valid",
+      "expected": "field-index:trigram_v0_strategy:converter=trigram_v0:operations=0x360",
+      "observed": "field-index:trigram_v0_strategy:converter=trigram_v0:operations=0x360",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-soundex_v0-valid",
+      "expected": "converter:soundex_v0:semantics=32779",
+      "observed": "converter:soundex_v0:semantics=32779",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-soundex_v0-valid",
+      "expected": "field-index:soundex_v0_strategy:converter=soundex_v0:operations=0x280",
+      "observed": "field-index:soundex_v0_strategy:converter=soundex_v0:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-dmetaphone_primary_v0-valid",
+      "expected": "converter:dmetaphone_primary_v0:semantics=32780",
+      "observed": "converter:dmetaphone_primary_v0:semantics=32780",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-dmetaphone_primary_v0-valid",
+      "expected": "field-index:dmetaphone_v0_strategy:converter=dmetaphone_primary_v0:operations=0x280",
+      "observed": "field-index:dmetaphone_v0_strategy:converter=dmetaphone_primary_v0:operations=0x280",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "acnv-sha512-dmetaphone_alt_v0-valid",
+      "expected": "converter:dmetaphone_alt_v0:semantics=32781",
+      "observed": "converter:dmetaphone_alt_v0:semantics=32781",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "afix-sha512-dmetaphone_alt_v0-valid",
+      "expected": "field-index:dmetaphone_alt_v0_strategy:converter=dmetaphone_alt_v0:operations=0x280",
+      "observed": "field-index:dmetaphone_alt_v0_strategy:converter=dmetaphone_alt_v0:operations=0x280",
       "result": "pass"
     },
     {

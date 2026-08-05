@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "name": "bytes_binary_order_v1",
+  "properties": ["deterministic", "bounded", "locale_independent", "total_posting_order", "collision_safe_recheck", "no_coordinate_false_negative"]
+}

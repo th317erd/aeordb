@@ -1,0 +1,20 @@
+# fixture: acnv-sha512-u8_v0-valid
+# contract: ConverterDefinitionV1
+# hash: sha512 (64 bytes)
+# expected: converter:u8_v0:semantics=32770
+# canonical key: 07bf5f3a71c59c4fb7750589714e6eb46cc495b51429e575c5483fa211423128c9c51d7aa969b444b9e8fb8b9fe60539b7a0ff64b3e578b673099409acbfd9bc
+# relation: semantic-family:migration-v0
+# hex offsets are absolute within this fixture
+# definition +0x000 len 32: ACNV canonical-definition envelope
+# definition +0x020 len 24: converter IDs, source mask, and semantic IDs
+# definition +0x038 len 32: parameter length, bounds, and flags
+# definition +0x058 len 32: behavior-bundle fingerprint
+# definition +0x078 len 2: canonical parameters
+00000000: 41434e56010020007a00000000000000
+00000010: 00000000000000000000000000000000
+00000020: 02800280400000000280028002800000
+00000030: 00000280028001000200000000000000
+00000040: 00001000000000000100000000001000
+00000050: 000010000000000029a656ea077831c2
+00000060: 61b4a6ca8c7d1a1b0693a90fc975ca2c
+00000070: 5d5aa64906539e4600ff

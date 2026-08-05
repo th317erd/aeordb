@@ -1,0 +1,20 @@
+# fixture: acnv-blake3-256-timestamp_ms_order_v1-valid
+# contract: ConverterDefinitionV1
+# hash: blake3-256 (32 bytes)
+# expected: converter:timestamp_ms_order_v1:semantics=1
+# canonical key: b2c3c68d11c65c556c5af770c593abe149b110f3860781366a6bda432e79a08d
+# relation: semantic-family:corrected
+# hex offsets are absolute within this fixture
+# definition +0x000 len 32: ACNV canonical-definition envelope
+# definition +0x020 len 24: converter IDs, source mask, and semantic IDs
+# definition +0x038 len 32: parameter length, bounds, and flags
+# definition +0x058 len 32: behavior-bundle fingerprint
+# definition +0x078 len 0: canonical parameters
+00000000: 41434e56010020007800000000000000
+00000010: 00000000000000000000000000000000
+00000020: 070001002c0000000700070007000000
+00000030: 00000700070001000000000000000000
+00000040: 00001000000000000100000000001000
+00000050: 00001000000000001f080ae8d584d361
+00000060: cce6acb7bdd2ac8080cae6a864d68d5c
+00000070: a5a858e1684380b9

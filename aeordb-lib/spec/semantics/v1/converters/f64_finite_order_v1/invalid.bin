@@ -1,0 +1,3 @@
+AEOR-SEMANTICS-INVALID-V1
+name=f64_finite_order_v1
+reject=wrong-type|malformed-width|overflow|precision-loss|nonfinite|ambiguous-time|resource-bound|fingerprint-mismatch
