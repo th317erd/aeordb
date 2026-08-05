@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-gc-mark-v1",
+  "tool_revision": "p0b2-gc-void-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -1765,6 +1765,174 @@
       "fixture_id": "agwo-sha512-diagnostic-valid",
       "expected": "gc:workspace-object:diagnostic:ordinal=6:records=1",
       "observed": "gc:workspace-object:diagnostic:ordinal=6:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-sweep-proposal",
+      "expected": "gc:proposal:sweep:candidates=2:mark=501",
+      "observed": "gc:proposal:sweep:candidates=2:mark=501",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-extent-page-source",
+      "expected": "gc:page:void-free-extents:records=2",
+      "observed": "gc:page:void-free-extents:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-free-directory-source",
+      "expected": "gc:directory:void-free-extents:records=2",
+      "observed": "gc:directory:void-free-extents:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-extent-page-remaining",
+      "expected": "gc:page:void-free-extents:records=1",
+      "observed": "gc:page:void-free-extents:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-free-directory-remaining",
+      "expected": "gc:directory:void-free-extents:records=1",
+      "observed": "gc:directory:void-free-extents:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-catalog-empty",
+      "expected": "gc:manifest:void-catalog:empty:free=0:claims=0:generation=4",
+      "observed": "gc:manifest:void-catalog:empty:free=0:claims=0:generation=4",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-catalog-source",
+      "expected": "gc:manifest:void-catalog:populated:free=2:claims=0:generation=1",
+      "observed": "gc:manifest:void-catalog:populated:free=2:claims=0:generation=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-claim",
+      "expected": "gc:claim:void:extents=1:bytes=4097",
+      "observed": "gc:claim:void:extents=1:bytes=4097",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-claims-directory",
+      "expected": "gc:directory:void-claims:records=1",
+      "observed": "gc:directory:void-claims:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-catalog-outstanding",
+      "expected": "gc:manifest:void-catalog:populated:free=1:claims=1:generation=2",
+      "observed": "gc:manifest:void-catalog:populated:free=1:claims=1:generation=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-catalog-settled",
+      "expected": "gc:manifest:void-catalog:populated:free=1:claims=0:generation=3",
+      "observed": "gc:manifest:void-catalog:populated:free=1:claims=0:generation=3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-sweep-commit-receipt",
+      "expected": "gc:receipt:sweep-commit:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "observed": "gc:receipt:sweep-commit:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-sweep-recovered-receipt",
+      "expected": "gc:receipt:sweep-recovered:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "observed": "gc:receipt:sweep-recovered:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-void-claim-settlement",
+      "expected": "gc:receipt:void-claim-settlement:settled:used=1:unused=0",
+      "observed": "gc:receipt:void-claim-settlement:settled:used=1:unused=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-sweep-proposal",
+      "expected": "gc:proposal:sweep:candidates=2:mark=501",
+      "observed": "gc:proposal:sweep:candidates=2:mark=501",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-extent-page-source",
+      "expected": "gc:page:void-free-extents:records=2",
+      "observed": "gc:page:void-free-extents:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-free-directory-source",
+      "expected": "gc:directory:void-free-extents:records=2",
+      "observed": "gc:directory:void-free-extents:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-extent-page-remaining",
+      "expected": "gc:page:void-free-extents:records=1",
+      "observed": "gc:page:void-free-extents:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-free-directory-remaining",
+      "expected": "gc:directory:void-free-extents:records=1",
+      "observed": "gc:directory:void-free-extents:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-catalog-empty",
+      "expected": "gc:manifest:void-catalog:empty:free=0:claims=0:generation=4",
+      "observed": "gc:manifest:void-catalog:empty:free=0:claims=0:generation=4",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-catalog-source",
+      "expected": "gc:manifest:void-catalog:populated:free=2:claims=0:generation=1",
+      "observed": "gc:manifest:void-catalog:populated:free=2:claims=0:generation=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-claim",
+      "expected": "gc:claim:void:extents=1:bytes=4097",
+      "observed": "gc:claim:void:extents=1:bytes=4097",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-claims-directory",
+      "expected": "gc:directory:void-claims:records=1",
+      "observed": "gc:directory:void-claims:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-catalog-outstanding",
+      "expected": "gc:manifest:void-catalog:populated:free=1:claims=1:generation=2",
+      "observed": "gc:manifest:void-catalog:populated:free=1:claims=1:generation=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-catalog-settled",
+      "expected": "gc:manifest:void-catalog:populated:free=1:claims=0:generation=3",
+      "observed": "gc:manifest:void-catalog:populated:free=1:claims=0:generation=3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-sweep-commit-receipt",
+      "expected": "gc:receipt:sweep-commit:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "observed": "gc:receipt:sweep-commit:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-sweep-recovered-receipt",
+      "expected": "gc:receipt:sweep-recovered:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "observed": "gc:receipt:sweep-recovered:outcomes=2:reclaimed=1:skipped=1:failed=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-void-claim-settlement",
+      "expected": "gc:receipt:void-claim-settlement:settled:used=1:unused=0",
+      "observed": "gc:receipt:void-claim-settlement:settled:used=1:unused=0",
       "result": "pass"
     },
     {

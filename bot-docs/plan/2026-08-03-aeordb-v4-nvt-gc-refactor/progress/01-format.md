@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2d-3 bounded mark checkpoints, workspace files, and mutation journals
+- **Current landing unit:** P0b-2d-4 sweep, receipts, and receipt-backed Void authority
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2d-2 corrected GC lifecycle state `7dd14edb3af07d32b8c155dda81a185b2ecc3a21`
+- **Last green commit:** P0b-2d-3 bounded mark/workspace formats `b3f402f94e3ee8db1101cd012f19172415d57cfc`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** make the mark/workspace contract gate fail, freeze the exact in-DB checkpoint and journal plus external AGCW/AGWO formats at both hash widths, and prove malformed/closure rejection independently
+- **Next action:** make the sweep/Void contract gate fail, freeze corrected proposals/receipts, authoritative Void catalogs/extents, immutable claims/directories, and settlement receipts at both hash widths
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -192,3 +192,17 @@
 - **Failure proof:** all bytes are CRC/structure protected; repaired CRC tests reject invalid checkpoint state, mutation operation, manifest flags, and bitmap padding; closure tests reject altered objects; path/name traversal, descriptor order, formula, fixed-width, and unused-bit tests fail closed. Empty initial workspace closure is accepted without weakening populated closure checks.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 116 tests; strict standalone Clippy passed; fresh generation and verification passed all 346 fixtures; and the campaign gate passed with 93 routes and 36 docs. A fresh Git clone with the landing applied passed the same gate; its timed test run finished in 5.32 seconds with 390,848 KiB maximum process-tree RSS and zero swaps.
 - **Boundary:** no production crate, reader, writer, GC runtime, workspace, database, allocator, startup, route, or repair behavior changed. Sweep/Void/settlement formats are next.
+
+## P0b-2d-4 Sweep, Receipts, and Receipt-Backed Void
+
+- **Entry:** `b3f402f94e3ee8db1101cd012f19172415d57cfc`; branch matched `origin/development`, and only the three acknowledged untracked user paths were present.
+- **Territory:** quarantine output and final guards produce proposals; locator retirement, Void publication, startup recovery, allocator claims, settlement, audit, verify, repair, backup, and migration-reset paths consume them. GC directory roles 4 and 5 index free extents and immutable outstanding claims.
+- **Normative precedence:** Round 15 corrects `SweepProposal` to `32 + 2H + N*(24 + 2H)` and removes mutable claim state. Selected Void catalog authority, claim omission, and immutable settlement evidence supersede conflicting older prose.
+- **Test plan:** fail the campaign gate first; independently prove corrected formulas, proposal/receipt/catalog/claim/settlement closure, exact outcome accounting, immutable claim omission, extent sorting/nonoverlap, both directory roles, all-byte CRC coverage, repaired-CRC semantic rejection, and both hash widths.
+- **Red proof:** with all 346 prior fixtures green, the expanded campaign gate failed on the absent corrected sweep/Void registry formulas and fixture prefixes before the new reference module existed.
+- **Frozen contracts:** exact corrected SweepProposal formula/digest and 4,096-candidate cap; complete proposal-ordered sweep outcomes and exact counters; receipt-backed Void catalogs; strict nonoverlapping origin-bound extent pages; directory roles 4 and 5; immutable outstanding claims; and immutable settlement/recovery receipts with non-traversed evidence hashes.
+- **Independent closure:** fixture validation recomputes every proposal/manifest/claim/page/directory key, requires each receipt outcome to cover the exact proposal candidate in proposal order, and reconciles exact free/claimed counts and bytes through source, outstanding, and settled catalog generations.
+- **Independent corpus:** fourteen objects per hash width add 28 fixtures, bringing the corpus to 374 cases across 18 families. Source, outstanding, settled, and empty allocator states exercise claim removal-before-overwrite and claim omission-after-settlement.
+- **Failure proof:** all artifact bytes are CRC or structure protected. Repaired-CRC tests reject malformed proposal records, mutable claim-state bytes, settlement flag/outcome mismatch, overlapping extents, malformed outcome accounting, invalid origin/presence fields, reserves, ordering, and closure disagreement. Unknown or uncertain ranges remain unavailable.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 121 tests in 5.33 seconds; strict standalone Clippy passed; fresh generation/verification passed all 374 fixtures; and the campaign gate passed with 93 routes and 36 docs. A clean shared clone with the complete staged binary patch applied passed the same gate in 4.62 seconds at 367,212 KiB maximum RSS with zero swaps.
+- **Boundary:** no production crate, reader, writer, sweep, allocator, Void manager, startup, recovery, repair, route, or database changed. Audit catalogs/pages, run summaries, corruption evidence, and pins are next.

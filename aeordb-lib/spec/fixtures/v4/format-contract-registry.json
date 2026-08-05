@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-gc-mark",
+  "coverage_stage": "p0b-2-gc-void",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -2629,14 +2629,12 @@
       },
       "frozen_body_kinds": [
         "0x0001", "0x0002", "0x0003", "0x0004", "0x0005", "0x0006",
-        "0x0010", "0x0011", "0x0012", "0x0013", "0x0017", "0x001f",
-        "0x0020", "0x0021", "0x0022", "0x0023", "0x0024", "0x0028",
-        "0x0025", "0x0037", "0x0039"
+        "0x0010", "0x0011", "0x0012", "0x0013", "0x0016", "0x0017", "0x001f",
+        "0x0020", "0x0021", "0x0022", "0x0023", "0x0024", "0x0025", "0x0026", "0x0027", "0x0028",
+        "0x0030", "0x0031", "0x0032", "0x0037", "0x0038", "0x0039"
       ],
       "pending_body_fixture_kinds": [
-        "0x0014", "0x0015", "0x0016",
-        "0x0026", "0x0027",
-        "0x0030", "0x0031", "0x0032", "0x0033", "0x0034", "0x0035", "0x0036", "0x0038"
+        "0x0014", "0x0015", "0x0033", "0x0034", "0x0035", "0x0036"
       ],
       "layout": [
         { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII AGCA" },
@@ -2677,6 +2675,8 @@
         "1": "candidates: PhysicalIncarnationIdV1 order",
         "2": "root_expiry: NamespaceRoot hash order",
         "3": "physical_inventory: WAL offset then PhysicalIncarnationIdV1 order",
+        "4": "void_free_extents: WAL offset order",
+        "5": "void_claims: claim ID order with role-defined zero page ID",
         "8": "root_candidates: NamespaceRoot hash order"
       },
       "paged_state": {
@@ -2744,6 +2744,25 @@
         "ordering": "unique ascending publication_sequence then MutationId; gaps require durable sequence/inventory reconciliation",
         "completion": "verified checkpoint/workspace, complete authority walk, reconciled inventory, final guarded empty mutation drain, and validated candidate output are all required before quarantine publication"
       },
+      "sweep_void_state": {
+        "sweep_proposal_identity": "database_id[16] || batch_id[16]",
+        "sweep_proposal_body": "zero flags u32 || codec=1 u16 || zero u16 || created_at_ms i64 || quarantine_manifest_hash H || mark_generation u64 || candidate_count u32 || records_length u32 || proposal_digest H || sorted PhysicalIncarnationIdV1 records",
+        "sweep_proposal_body_formula": "32 + 2H + N*(24 + 2H)",
+        "sweep_proposal_digest": "H('aeordb.sweep-proposal.v1\\0' || exact sorted candidate records)",
+        "sweep_receipt_body_formula": "64 + 2H + N*(48 + 2H)",
+        "sweep_outcome_record_length": "48 + 2H",
+        "sweep_outcome_coverage": "exactly one canonically ordered outcome for every proposal candidate; counters and reclaimed bytes are exact",
+        "void_manifest_identity": "database_id[16] || generation u64",
+        "void_manifest_body_formula": "92 + 2H",
+        "void_extent_row_length": "32 + 3H",
+        "void_extent_order": "strict WAL-offset order without overlap; origin proposal, quarantine, and incarnation digest remain bound through splits",
+        "void_claim_identity": "database_id[16] || claim_id[16]",
+        "void_claim_fixed_length": "56 + H",
+        "void_claim_state": "immutable reservation evidence; presence in the selected Void catalog means outstanding and omission from a later catalog means settled",
+        "settlement_body_length": "40 + 3H",
+        "settlement_authority": "selected Void catalog is allocator authority; settlement receipt source/result/evidence hashes are non-traversed audit evidence",
+        "failure_direction": "ambiguous, corrupt, overlapping, unaccounted, or closure-invalid ranges stay unavailable and leak rather than becoming reusable"
+      },
       "identity": "controls: database_id and slot; immutable kinds: complete kind-specific identity, generation, and body",
       "key_domain": "controls: H('aeordb.gc-artifact.control.v1\\0' || kind u16 LE || database_id[16] || slot u8); immutable: H('aeordb.gc-artifact.immutable.v1\\0' || kind u16 LE || complete AGCA value)",
       "checksum": "CRC-32/ISO-HDLC over the complete artifact value except its final 4 bytes",
@@ -2780,7 +2799,12 @@
         { "field": "reclaim-proof inventory/incarnation/receipt/absence hashes", "role": "non-traversed-evidence" },
         { "field": "inventory replacement and receipt hashes", "role": "identity-or-evidence" },
         { "field": "mark checkpoint authority, semantic, layout, workspace, and journal hashes", "role": "graph-edge-basis" },
-        { "field": "mark mutation IDs, roots, logical keys, and physical incarnation hashes", "role": "identity-or-reconciliation-evidence" }
+        { "field": "mark mutation IDs, roots, logical keys, and physical incarnation hashes", "role": "identity-or-reconciliation-evidence" },
+        { "field": "sweep proposal quarantine hash and receipt proposal/Void hashes", "role": "graph-edge-basis-and-post-publication-audit" },
+        { "field": "Void manifest free-extent and outstanding-claim directory roots", "role": "graph-edge-authority" },
+        { "field": "Void extent proposal, quarantine, and incarnation hashes", "role": "non-traversed-origin-identity" },
+        { "field": "Void claim source manifest and extent origin proposal hashes", "role": "non-traversed-reservation-evidence" },
+        { "field": "Void settlement source/result/evidence hashes", "role": "non-traversed-audit-evidence" }
       ],
       "fixture_ids_32": [
         "agca-blake3-256-quarantine-control-a",
@@ -2817,7 +2841,21 @@
         "agca-blake3-256-retirement-journal-segment-valid",
         "agca-blake3-256-mark-run-checkpoint-embedded",
         "agca-blake3-256-mark-run-checkpoint-external-canceled",
-        "agca-blake3-256-mark-mutation-journal-reset"
+        "agca-blake3-256-mark-mutation-journal-reset",
+        "agca-blake3-256-sweep-proposal",
+        "agca-blake3-256-void-extent-page-source",
+        "agca-blake3-256-void-free-directory-source",
+        "agca-blake3-256-void-extent-page-remaining",
+        "agca-blake3-256-void-free-directory-remaining",
+        "agca-blake3-256-void-catalog-empty",
+        "agca-blake3-256-void-catalog-source",
+        "agca-blake3-256-void-claim",
+        "agca-blake3-256-void-claims-directory",
+        "agca-blake3-256-void-catalog-outstanding",
+        "agca-blake3-256-void-catalog-settled",
+        "agca-blake3-256-sweep-commit-receipt",
+        "agca-blake3-256-sweep-recovered-receipt",
+        "agca-blake3-256-void-claim-settlement"
       ],
       "fixture_ids_64": [
         "agca-sha512-quarantine-control-a",
@@ -2854,7 +2892,21 @@
         "agca-sha512-retirement-journal-segment-valid",
         "agca-sha512-mark-run-checkpoint-embedded",
         "agca-sha512-mark-run-checkpoint-external-canceled",
-        "agca-sha512-mark-mutation-journal-reset"
+        "agca-sha512-mark-mutation-journal-reset",
+        "agca-sha512-sweep-proposal",
+        "agca-sha512-void-extent-page-source",
+        "agca-sha512-void-free-directory-source",
+        "agca-sha512-void-extent-page-remaining",
+        "agca-sha512-void-free-directory-remaining",
+        "agca-sha512-void-catalog-empty",
+        "agca-sha512-void-catalog-source",
+        "agca-sha512-void-claim",
+        "agca-sha512-void-claims-directory",
+        "agca-sha512-void-catalog-outstanding",
+        "agca-sha512-void-catalog-settled",
+        "agca-sha512-sweep-commit-receipt",
+        "agca-sha512-sweep-recovered-receipt",
+        "agca-sha512-void-claim-settlement"
       ]
     },
     {
@@ -3038,9 +3090,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 18,
-    "fixture_count": 346,
+    "fixture_count": 374,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope and corrected 34-kind registry, all six GC A/B controls, PhysicalIncarnationIdV1, physical quarantine/inventory/retirement state, the separate logical-root lifecycle authority/evidence graph, and bounded mark checkpoints/mutation journals plus AGCW/AGWO workspace closure",
-    "remaining_p0b_2_scope": "sweep/Void/settlement, audit/run/corruption/pin GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope and corrected 34-kind registry, all six GC A/B controls, PhysicalIncarnationIdV1, physical quarantine/inventory/retirement state, the separate logical-root lifecycle authority/evidence graph, bounded mark checkpoints/mutation journals plus AGCW/AGWO workspace closure, and receipt-backed sweep/Void/claim/settlement state",
+    "remaining_p0b_2_scope": "audit/run/corruption/pin GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

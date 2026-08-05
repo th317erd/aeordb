@@ -223,6 +223,7 @@ pub fn fixture_cases() -> Vec<GcFixtureCase> {
   let mut cases = control_fixture_cases();
   cases.extend(crate::gc_state::fixture_cases());
   cases.extend(crate::gc_mark::fixture_cases());
+  cases.extend(crate::gc_void::fixture_cases());
   cases
 }
 
@@ -268,6 +269,23 @@ pub fn observe(format: GcFormat, profile: HashProfile, bytes: &[u8]) -> (String,
   if matches!(read_u16(bytes, 6).ok().and_then(GcKind::from_id), Some(GcKind::MarkRunCheckpoint | GcKind::MarkMutationJournalSegment)) {
     return crate::gc_mark::observe(format, profile, bytes);
   }
+  if matches!(
+    read_u16(bytes, 6).ok().and_then(GcKind::from_id),
+    Some(
+      GcKind::VoidCatalogManifest
+        | GcKind::VoidExtentPage
+        | GcKind::VoidClaim
+        | GcKind::SweepProposal
+        | GcKind::SweepCommitReceipt
+        | GcKind::RecoveredSweepReceipt
+        | GcKind::VoidClaimSettlementReceipt
+    )
+  ) {
+    return crate::gc_void::observe(profile, bytes);
+  }
+  if crate::gc_void::is_void_directory(bytes) {
+    return crate::gc_void::observe(profile, bytes);
+  }
   if read_u16(bytes, 6).ok().and_then(GcKind::from_id).is_some_and(|kind| !kind.is_control()) {
     return crate::gc_state::observe(profile, bytes);
   }
@@ -294,6 +312,23 @@ pub fn annotation_lines(format: GcFormat, profile: HashProfile, bytes: &[u8]) ->
   let kind = read_u16(bytes, 6).ok().and_then(GcKind::from_id);
   if matches!(kind, Some(GcKind::MarkRunCheckpoint | GcKind::MarkMutationJournalSegment)) {
     return crate::gc_mark::annotation_lines(format, profile, bytes);
+  }
+  if matches!(
+    kind,
+    Some(
+      GcKind::VoidCatalogManifest
+        | GcKind::VoidExtentPage
+        | GcKind::VoidClaim
+        | GcKind::SweepProposal
+        | GcKind::SweepCommitReceipt
+        | GcKind::RecoveredSweepReceipt
+        | GcKind::VoidClaimSettlementReceipt
+    )
+  ) {
+    return crate::gc_void::annotation_lines(profile, bytes);
+  }
+  if crate::gc_void::is_void_directory(bytes) {
+    return crate::gc_void::annotation_lines(profile, bytes);
   }
   if kind.is_some_and(|kind| !kind.is_control()) {
     return crate::gc_state::annotation_lines(profile, bytes);

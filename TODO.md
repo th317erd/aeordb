@@ -28,7 +28,7 @@
         - [x] Freeze the AGCA envelope and physical-incarnation identity.
         - [x] Freeze quarantine, corrected logical root-lifecycle/expiry, physical-inventory, and retirement artifacts.
         - [x] Freeze bounded mark checkpoints, workspace files, and mutation journals.
-        - [ ] Freeze sweep proposals/receipts and receipt-backed Void catalogs/claims.
+        - [x] Freeze sweep proposals/receipts and receipt-backed Void catalogs/claims.
         - [ ] Freeze audit catalogs/details/summaries, run summaries, corruption evidence, and pins.
   - [ ] Execute P0c through P9 in the dependency and landing order frozen by the campaign.
 
