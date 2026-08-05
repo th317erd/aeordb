@@ -33,6 +33,9 @@ mod tests {
 
     let architecture = include_bytes!("../../../spec/fixtures/v4/architecture-contract-registry.json");
     assert_eq!(hex::encode(Sha256::digest(architecture)), contract::ARCHITECTURE_REGISTRY_SHA256);
+
+    let semantics = include_bytes!("../../../spec/semantics/v1/fingerprint-registry.json");
+    assert_eq!(hex::encode(Sha256::digest(semantics)), contract::SEMANTICS_REGISTRY_SHA256);
   }
 
   #[test]
@@ -48,6 +51,10 @@ mod tests {
     assert_eq!(contract::DYNAMIC_RECORDS.len(), 8);
     assert_eq!(contract::HARD_TRANSITIONS.len(), 12);
     assert_eq!(contract::CLEANUP_RESULT_CLASSES.len(), 4);
+    assert_eq!(contract::SEMANTIC_BUNDLES.len(), 37);
+    assert_eq!(contract::SEMANTIC_BUNDLES.iter().filter(|row| row.kind == contract::SemanticBundleKind::Converter).count(), 25);
+    assert_eq!(contract::SEMANTIC_BUNDLES.iter().filter(|row| row.kind == contract::SemanticBundleKind::Strategy).count(), 12);
+    assert!(contract::SEMANTIC_BUNDLES.iter().all(|row| row.fingerprint_blake3 != [0; 32]));
   }
 
   #[test]

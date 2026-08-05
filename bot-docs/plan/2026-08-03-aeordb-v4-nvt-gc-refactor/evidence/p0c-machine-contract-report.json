@@ -4,17 +4,18 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d69c6a0f154ceeffac0bbbe632d994bd982ca82265f2f149cd771590f65b01c9",
-  "generated_rust_sha256": "5c01b4856396a835b64b8fd8c22dc370b740a1ceca6d45c634d9a9900ddca8fd",
-  "generated_rust_bytes": 46567,
+  "generated_rust_sha256": "b3696626877a310d31fd8cc35c8ee07f0312189f8ef3d55f3fac57d6d3bc64bf",
+  "generated_rust_bytes": 59236,
   "counts": {
     "route_classes": 7,
     "configuration_properties": 41,
     "dynamic_records": 8,
     "hard_transitions": 12,
-    "cleanup_result_classes": 4
+    "cleanup_result_classes": 4,
+    "semantic_bundles": 37
   },
   "proof": {
-    "reference_tests_passed": 144,
+    "reference_tests_passed": 145,
     "production_tests_passed": 3,
     "strict_reference_clippy": "pass",
     "rustfmt_check": "pass",
@@ -30,6 +31,7 @@
     "configuration activation outside the frozen registry",
     "dynamic record without discoverability or retention owner",
     "hard transition without selector or crash direction",
-    "cleanup result without behavior or debt owner"
+    "cleanup result without behavior or debt owner",
+    "semantic bundle collision, noncanonical order, or malformed fingerprint"
   ]
 }

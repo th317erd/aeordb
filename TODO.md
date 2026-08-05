@@ -49,6 +49,9 @@
     - [x] Decode SourceSelectorV1 and prove metadata/path/regex/mapper semantics and bounds.
     - [x] Decode ValueStoreDefinitionV1 and close child/dependency ordinal invariants.
     - [ ] Decode ConverterDefinitionV1 and FieldIndexDefinitionV1.
+      - [x] Extend the generated machine contract with the frozen 37-row semantic bundle registry.
+      - [ ] Decode all converter definitions and validate semantic fingerprints/parameters.
+      - [ ] Decode all field-index definitions and validate exact strategy/converter/operation closure.
     - [ ] Decode immutable index manifests, ordered pages, NVT, journal, checkpoint, and APOS artifacts.
     - [ ] Decode the complete GC artifact, workspace, Void, audit, control, cutover, and SystemFamily families.
     - [ ] Dispatch v3 and v4 database headers without rewriting either format on open.

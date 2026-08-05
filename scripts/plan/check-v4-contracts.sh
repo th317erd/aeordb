@@ -241,7 +241,7 @@ jq -e \
   .generated_rust_bytes == $generated_bytes and
   .counts == {
     "route_classes":7,"configuration_properties":41,"dynamic_records":8,
-    "hard_transitions":12,"cleanup_result_classes":4
+    "hard_transitions":12,"cleanup_result_classes":4,"semantic_bundles":37
   } and
   .proof.reference_tests_passed >= 144 and
   .proof.production_tests_passed >= 3 and

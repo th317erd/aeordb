@@ -346,3 +346,13 @@
 - **Malformed proof:** focused mutations reject zero ScopeId, oversized child declarations, metadata-name disagreement, mixed semantic families, unbounded corrected limits, unresolved nested ordinals, and one-byte-over-cap input with frozen classes.
 - **Green proof:** all fourteen independent ValueStore fixtures pass; the complete v4 target passes 22 tests, locked library `cargo check` passes, and `git diff --check` is clean.
 - **Boundary:** no definition writer/compiler, dependency execution, semantic publication, index runtime, migration, route, or database behavior changed.
+
+## P1a-9 Generated Semantic Bundle Authority
+
+- **Entry:** `3bc33e2`; branch matched `origin/development`, and unrelated user paths remained excluded.
+- **Territory:** the independent semantic bundle registry is produced from the frozen converter/strategy bundles. The deterministic contract generator consumes it; converter and field-index readers consume the generated 37-row table. No runtime registry or writer is activated.
+- **Red proof:** the reference generator test failed to compile on the absent semantic-registry validator, while the generated-module test named the absent `SEMANTIC_BUNDLES` authority.
+- **Implementation:** contract generation now discovers the semantic registry from the frozen spec root, validates exact identity/file order, canonical 25-converter and 12-strategy order, globally unique names and scoped identities, and nonzero 32-byte fingerprints. It emits the registry digest plus typed bundle rows; no second handwritten fingerprint table exists.
+- **Malformed proof:** focused tests reject duplicate names and malformed fingerprints. Generation also rejects wrong row count/order/kind/ID/correction family, empty names, identity collisions, all-zero fingerprints, and noncanonical bundle file order.
+- **Green proof:** the independent reference suite passed 145 tests, strict reference Clippy passed, generated-module tests passed 3 tests, and the production v4 fixture target passed all 22 existing tests. The full contract gate reverified all 436 fixtures and passed with 93 routes and 36 docs.
+- **Boundary:** this is a machine-contract amendment only. Converter/field-index decoding remains the next landing; no writer, index runtime, migration, route, or database byte changed.
