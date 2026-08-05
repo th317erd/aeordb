@@ -1,4 +1,5 @@
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::emergency_spill::{EmergencySpillArtifact, native_path_bytes};
 use crate::engine::storage_engine::{DurabilityRepairAuthorityGuard, StorageEngine};
 
 use super::control_store::{LoadedMutableControlV1, V3TransitionControlStore};
@@ -10,6 +11,8 @@ use super::system_control::{
 
 const LATCH_REPAIR_VERIFYING: u16 = 2;
 const LATCH_CLEARED: u16 = 3;
+const LATCH_READ_ONLY: u16 = 1;
+const CATALOG_DISCOVERED: u16 = 1;
 const CATALOG_REPLAYING: u16 = 2;
 const CATALOG_COMPLETE: u16 = 3;
 const SPILL_CATALOG_PRESENT: u32 = 1;
@@ -34,6 +37,12 @@ pub struct DurabilityRepairReceipt {
   pub repair_receipt_hash: Vec<u8>,
   pub selected_header_sequence: u64,
   pub durable_sequence: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurabilityRecoverySeed {
+  pub database_id: [u8; 16],
+  pub requires_repair: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,7 +146,7 @@ pub fn inspect_persistent_durability_recovery(engine: &StorageEngine) -> EngineR
         let expected = digest_parts(engine.hash_algo(), &[SPILL_CATALOG_PAYLOAD_DOMAIN, catalog_control.body]);
         if latch_body.emergency_spill_catalog_payload_hash != expected {
           catalog_reference_consistent = false;
-          if latch_body.state == LATCH_CLEARED {
+          if latch_body.state == LATCH_CLEARED && catalog_body.as_ref().is_none_or(|body| body.state == CATALOG_COMPLETE) {
             return Err(EngineError::InvalidInput(
               "cleared persistent durability latch references a different emergency spill catalog payload".to_string(),
             ));
@@ -181,6 +190,281 @@ pub fn inspect_persistent_durability_recovery(engine: &StorageEngine) -> EngineR
       || catalog.as_ref().is_some_and(|selected| selected.redundancy_degraded),
     reason,
   }))
+}
+
+pub fn seed_from_external_spills(engine: &StorageEngine, artifacts: &[EmergencySpillArtifact]) -> EngineResult<DurabilityRecoverySeed> {
+  if artifacts.is_empty() {
+    return Err(EngineError::InvalidInput("cannot seed durability recovery without external spill artifacts".to_string()));
+  }
+  let store = V3TransitionControlStore::new(engine);
+  let existing_latch = store.discover_mutable(SystemControlKindV1::DurabilityLatch, &[])?;
+  let existing_catalog = store.discover_mutable(SystemControlKindV1::EmergencySpillCatalog, &[])?;
+  let existing_database_id = match (existing_latch.as_ref(), existing_catalog.as_ref()) {
+    (Some(latch), Some(catalog)) if latch.database_id != catalog.database_id => {
+      return Err(EngineError::InvalidInput(
+        "persistent durability latch and emergency spill catalog have different database identities".to_string(),
+      ));
+    }
+    (Some(latch), _) => Some(latch.database_id),
+    (_, Some(catalog)) => Some(catalog.database_id),
+    (None, None) => None,
+  };
+  let artifact_database_id = artifacts.iter().filter_map(|artifact| artifact.database_id).try_fold(None, |selected, candidate| {
+    if candidate == [0; 16] {
+      return Err(EngineError::InvalidInput("external spill artifact contains a zero database identity".to_string()));
+    }
+    match selected {
+      Some(selected) if selected != candidate => {
+        Err(EngineError::InvalidInput("external spill artifacts have different database identities".to_string()))
+      }
+      _ => Ok(Some(candidate)),
+    }
+  })?;
+  if matches!((existing_database_id, artifact_database_id), (Some(existing), Some(artifact)) if existing != artifact) {
+    return Err(EngineError::InvalidInput(
+      "external spill artifacts and persistent recovery controls have different database identities".to_string(),
+    ));
+  }
+  let database_id = existing_database_id.or(artifact_database_id).unwrap_or_else(|| uuid::Uuid::new_v4().into_bytes());
+  if database_id == [0; 16] {
+    return Err(EngineError::InvalidInput("durability recovery database identity is zero".to_string()));
+  }
+  let ordered_artifacts = validate_and_order_spill_artifacts(artifacts)?;
+  let rows = spill_catalog_rows(&ordered_artifacts)?;
+
+  let existing_catalog_body = existing_catalog.as_ref().map(|selected| decode_catalog(engine, selected)).transpose()?;
+  if let Some(catalog) = existing_catalog_body.as_ref() {
+    if catalog.database_id != database_id {
+      return Err(EngineError::InvalidInput("spill catalog body has a different database identity".to_string()));
+    }
+    if catalog.state == CATALOG_COMPLETE && same_spill_rows(&catalog.rows, &rows) {
+      let state = inspect_persistent_durability_recovery(engine)?;
+      if state.as_ref().is_some_and(|state| !state.blocks_writes) {
+        return Ok(DurabilityRecoverySeed { database_id, requires_repair: false });
+      }
+    } else if catalog.state != CATALOG_COMPLETE && !same_spill_rows(&catalog.rows, &rows) {
+      return Err(EngineError::InvalidInput("active persistent spill catalog does not match the validated external spill set".to_string()));
+    }
+  }
+
+  let _authority = engine.acquire_durability_repair_authority()?;
+  let catalog = if existing_catalog_body
+    .as_ref()
+    .is_some_and(|catalog| catalog.state != CATALOG_COMPLETE && same_spill_rows(&catalog.rows, &rows))
+  {
+    existing_catalog.expect("decoded existing catalog")
+  } else {
+    let sequence = existing_catalog.as_ref().map(|selected| next_sequence(selected.sequence)).transpose()?.unwrap_or(1);
+    let generation =
+      existing_catalog_body.as_ref().map(|catalog| next_generation(catalog.catalog_generation, "spill catalog")).transpose()?.unwrap_or(1);
+    let catalog_body = EmergencySpillCatalogBodyV1 {
+      database_id,
+      catalog_generation: generation,
+      discovered_at_ms: chrono::Utc::now().timestamp_millis().max(0),
+      state: CATALOG_DISCOVERED,
+      flags: 0,
+      repair_receipt_hash: vec![0; engine.hash_algo().hash_length()],
+      rows,
+    };
+    let bytes = encode_emergency_spill_catalog_control(sequence, &catalog_body, engine.hash_algo()).map_err(format_error)?;
+    store.publish_mutable(SystemControlKindV1::EmergencySpillCatalog, database_id, &[], &bytes)?
+  };
+  // The catalog is published before the latch so a crash cannot lose spill
+  // discovery. Refresh immediately: any later error must leave this process
+  // read-only, not merely the next process after reopen.
+  engine.refresh_persistent_durability_recovery()?;
+  let selected_catalog = decode_catalog(engine, &catalog)?;
+  let catalog_hash = catalog_payload_hash(engine, &catalog.bytes)?;
+  let existing_latch_body = existing_latch.as_ref().map(|selected| decode_latch(engine, selected)).transpose()?;
+  let latch_already_matches = existing_latch_body.as_ref().is_some_and(|latch| {
+    latch.state != LATCH_CLEARED && latch.emergency_spill_catalog_payload_hash == catalog_hash && latch.database_id == database_id
+  });
+  if !latch_already_matches {
+    let sequence = existing_latch.as_ref().map(|selected| next_sequence(selected.sequence)).transpose()?.unwrap_or(1);
+    let generation =
+      existing_latch_body.as_ref().map(|latch| next_generation(latch.latch_generation, "durability latch")).transpose()?.unwrap_or(1);
+    let fallback_sequence = engine.writer_read_lock()?.file_header().sequence.max(1);
+    let first = ordered_artifacts[0];
+    let latest_failure_at_ms = artifacts.iter().map(|artifact| artifact.latest_failure_at_ms).max().unwrap_or(first.latest_failure_at_ms);
+    let failed_operation =
+      first.failed_operation.unwrap_or(crate::engine::durability_coordinator::DurabilityOperation::EmergencySpill.stable_id());
+    let os_error_class = first.os_error_class.unwrap_or(crate::engine::durability_coordinator::OsErrorClass::OtherPersistentIo.stable_id());
+    let os_error_code = first.os_error_code.filter(|code| *code != 0).unwrap_or(-1);
+    let catalog_control = decode_system_control(&catalog.bytes, engine.hash_algo()).map_err(format_error)?;
+    let evidence_digest = digest_parts(
+      engine.hash_algo(),
+      &[
+        b"aeordb.durability-latch-evidence.v1\0",
+        &database_id,
+        catalog_control.body,
+        &first.first_failure_at_ms.to_le_bytes(),
+        &latest_failure_at_ms.to_le_bytes(),
+      ],
+    );
+    let latch = DurabilityLatchBodyV1 {
+      database_id,
+      latch_generation: generation,
+      first_failure_at_ms: first.first_failure_at_ms.max(0),
+      latest_failure_at_ms: latest_failure_at_ms.max(first.first_failure_at_ms).max(0),
+      severity: 1,
+      state: LATCH_READ_ONLY,
+      failed_operation,
+      os_error_class,
+      os_error_code,
+      flags: SPILL_CATALOG_PRESENT,
+      last_selected_header_sequence: first.last_selected_header_sequence.unwrap_or(fallback_sequence).max(1),
+      last_durable_write_sequence: first.last_durable_write_sequence.unwrap_or(fallback_sequence).max(1),
+      last_durable_publication_sequence: first.last_durable_publication_sequence.unwrap_or(fallback_sequence).max(1),
+      emergency_spill_catalog_payload_hash: catalog_hash,
+      evidence_digest,
+      diagnostic: canonical_utf8("external emergency spill requires explicit repair")?,
+    };
+    let bytes = encode_durability_latch_control(sequence, &latch, engine.hash_algo()).map_err(format_error)?;
+    store.publish_mutable(SystemControlKindV1::DurabilityLatch, database_id, &[], &bytes)?;
+  } else if selected_catalog.state == CATALOG_COMPLETE {
+    return Err(EngineError::InvalidInput("active durability latch cannot reference a completed replacement catalog".to_string()));
+  }
+  engine.refresh_persistent_durability_recovery()?;
+  let state = engine
+    .persistent_durability_recovery()
+    .ok_or_else(|| EngineError::DurabilityFailure("spill seeding did not establish persistent recovery authority".to_string()))?;
+  if !state.blocks_writes || state.database_id != database_id {
+    return Err(EngineError::DurabilityFailure("spill seeding did not establish the expected read-only authority".to_string()));
+  }
+  Ok(DurabilityRecoverySeed { database_id, requires_repair: true })
+}
+
+fn validate_and_order_spill_artifacts(artifacts: &[EmergencySpillArtifact]) -> EngineResult<Vec<&EmergencySpillArtifact>> {
+  let mut ordered: Vec<_> = artifacts.iter().collect();
+  ordered.sort_by(|left, right| {
+    left
+      .first_failure_at_ms
+      .cmp(&right.first_failure_at_ms)
+      .then_with(|| left.creation_sequence.cmp(&right.creation_sequence))
+      .then_with(|| left.manifest_digest.cmp(&right.manifest_digest))
+      .then_with(|| native_path_bytes(&left.manifest_path).cmp(&native_path_bytes(&right.manifest_path)))
+  });
+  for artifact in &ordered {
+    let typed_fields = [
+      artifact.failed_operation.is_some(),
+      artifact.os_error_class.is_some(),
+      artifact.os_error_code.is_some(),
+      artifact.last_selected_header_sequence.is_some(),
+      artifact.last_durable_write_sequence.is_some(),
+      artifact.last_durable_publication_sequence.is_some(),
+    ];
+    let typed_count = typed_fields.iter().filter(|present| **present).count();
+    if typed_count != 0 && typed_count != typed_fields.len() {
+      return Err(EngineError::InvalidInput("external spill typed failure evidence must be complete when present".to_string()));
+    }
+    if artifact
+      .failed_operation
+      .is_some_and(|operation| !crate::engine::durability_coordinator::DurabilityOperation::is_stable_id(operation))
+    {
+      return Err(EngineError::InvalidInput("external spill failed operation is invalid".to_string()));
+    }
+    if artifact.os_error_class.is_some_and(|error_class| !crate::engine::durability_coordinator::OsErrorClass::is_stable_id(error_class)) {
+      return Err(EngineError::InvalidInput("external spill OS error class is invalid".to_string()));
+    }
+    if artifact.os_error_code == Some(0) {
+      return Err(EngineError::InvalidInput("external spill OS error code must be nonzero".to_string()));
+    }
+    if [artifact.last_selected_header_sequence, artifact.last_durable_write_sequence, artifact.last_durable_publication_sequence]
+      .into_iter()
+      .flatten()
+      .any(|sequence| sequence == 0)
+    {
+      return Err(EngineError::InvalidInput("external spill durability sequence must be nonzero".to_string()));
+    }
+    if artifact.latest_failure_at_ms < artifact.first_failure_at_ms {
+      return Err(EngineError::InvalidInput("external spill latest failure precedes first failure".to_string()));
+    }
+    match artifact.format_version {
+      crate::engine::emergency_spill::EmergencySpillFormatVersion::V1 => {}
+      crate::engine::emergency_spill::EmergencySpillFormatVersion::V2 => {
+        if artifact.database_id.is_none_or(|database_id| database_id == [0; 16])
+          || artifact.incident_id.is_none_or(|incident_id| incident_id == [0; 16])
+          || artifact.creation_sequence == 0
+        {
+          return Err(EngineError::InvalidInput("external v2 spill identity or creation sequence is invalid".to_string()));
+        }
+      }
+    }
+    let path = native_path_bytes(&artifact.manifest_path);
+    if artifact.manifest_length == 0 || artifact.manifest_digest == [0; 32] || path.is_empty() {
+      return Err(EngineError::InvalidInput("external spill manifest has incomplete catalog evidence".to_string()));
+    }
+  }
+  Ok(ordered)
+}
+
+fn spill_catalog_rows(
+  ordered_artifacts: &[&EmergencySpillArtifact],
+) -> EngineResult<Vec<super::system_control::EmergencySpillCatalogRowV1>> {
+  let mut rows = Vec::with_capacity(ordered_artifacts.len());
+  for (index, artifact) in ordered_artifacts.iter().enumerate() {
+    let path = native_path_bytes(&artifact.manifest_path);
+    rows.push(super::system_control::EmergencySpillCatalogRowV1 {
+      source_location_class: artifact.source_location_class as u16,
+      replay_state: 1,
+      path_encoding: artifact.path_encoding,
+      flags: 0,
+      created_at_ms: artifact.first_failure_at_ms.max(0),
+      creation_sequence: artifact.creation_sequence.max(index as u64 + 1),
+      file_length: artifact.manifest_length,
+      complete_file_digest: artifact.manifest_digest.to_vec(),
+      native_path: path,
+    });
+  }
+  rows.sort_by(|left, right| {
+    left
+      .created_at_ms
+      .cmp(&right.created_at_ms)
+      .then_with(|| left.creation_sequence.cmp(&right.creation_sequence))
+      .then_with(|| left.complete_file_digest.cmp(&right.complete_file_digest))
+      .then_with(|| left.native_path.cmp(&right.native_path))
+  });
+  if rows.windows(2).any(|pair| pair[0] == pair[1]) {
+    return Err(EngineError::InvalidInput("external spill set contains duplicate catalog rows".to_string()));
+  }
+  Ok(rows)
+}
+
+fn same_spill_rows(
+  left: &[super::system_control::EmergencySpillCatalogRowV1],
+  right: &[super::system_control::EmergencySpillCatalogRowV1],
+) -> bool {
+  left.len() == right.len()
+    && left.iter().zip(right).all(|(left, right)| {
+      left.source_location_class == right.source_location_class
+        && left.path_encoding == right.path_encoding
+        && left.flags == right.flags
+        && left.created_at_ms == right.created_at_ms
+        && left.creation_sequence == right.creation_sequence
+        && left.file_length == right.file_length
+        && left.complete_file_digest == right.complete_file_digest
+        && left.native_path == right.native_path
+    })
+}
+
+fn canonical_utf8(value: &str) -> EngineResult<Vec<u8>> {
+  let bytes = value.as_bytes();
+  let length = u32::try_from(bytes.len()).map_err(|_| EngineError::InvalidInput("durability diagnostic is too large".to_string()))?;
+  let mut encoded = Vec::with_capacity(5 + bytes.len());
+  encoded.push(0x07);
+  encoded.extend_from_slice(&length.to_le_bytes());
+  encoded.extend_from_slice(bytes);
+  Ok(encoded)
+}
+
+fn decode_catalog(engine: &StorageEngine, selected: &LoadedMutableControlV1) -> EngineResult<EmergencySpillCatalogBodyV1> {
+  let control = decode_system_control(&selected.bytes, engine.hash_algo()).map_err(format_error)?;
+  decode_emergency_spill_catalog_body(control.body, engine.hash_algo()).map_err(format_error)
+}
+
+fn decode_latch(engine: &StorageEngine, selected: &LoadedMutableControlV1) -> EngineResult<DurabilityLatchBodyV1> {
+  let control = decode_system_control(&selected.bytes, engine.hash_algo()).map_err(format_error)?;
+  decode_durability_latch_body(control.body, engine.hash_algo()).map_err(format_error)
 }
 
 fn transition_to_repairing(engine: &StorageEngine, database_id: [u8; 16]) -> EngineResult<()> {

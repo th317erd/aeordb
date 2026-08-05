@@ -89,6 +89,10 @@ impl DurabilityOperation {
       Self::ShutdownFlush => durability_operation_v1::SHUTDOWN_FLUSH,
     }
   }
+
+  pub fn is_stable_id(value: u16) -> bool {
+    Self::ALL.iter().any(|operation| operation.stable_id() == value)
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +145,10 @@ impl OsErrorClass {
       Self::TimeoutUnknown => os_error_class_v1::TIMEOUT_UNKNOWN,
       Self::OtherPersistentIo => os_error_class_v1::OTHER_PERSISTENT_IO,
     }
+  }
+
+  pub fn is_stable_id(value: u16) -> bool {
+    Self::ALL.iter().any(|error_class| error_class.stable_id() == value)
   }
 }
 
@@ -907,6 +915,11 @@ impl DurabilityCoordinator {
       pending_hard: state.pending_hard.len(),
       ledger: state.ledger.iter().cloned().collect(),
     })
+  }
+
+  pub fn hard_failure(&self) -> Result<Option<DurabilityFailure>, DurabilityCoordinatorError> {
+    let state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    Ok(state.hard_failure.clone())
   }
 
   fn validate_ticket(&self, ticket: DurabilityTicket) -> Result<(), DurabilityCoordinatorError> {

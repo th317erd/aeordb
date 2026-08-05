@@ -110,9 +110,9 @@
       - [x] Upgrade external spill evidence with stable incident/database identity, complete digests, ordering, and no-follow validation.
       - [x] Restore selected persistent latch/catalog authority on open and reject ordinary writes while preserving reads and health visibility.
       - [x] Add thread-scoped explicit-repair authority with crash-resumable control transitions and opaque clean-verification proof.
-      - [ ] Preserve first/latest serious-failure evidence and reject every later write while keeping reads/status/repair available.
-      - [ ] Persist recovery latch/catalog state, replay oldest-first idempotently, verify/probe, and clear only after hard proof.
-      - [ ] Make startup scan every approved spill root and refuse unresolved external or in-database repair authority.
+      - [x] Preserve first/latest serious-failure evidence and reject every later write while keeping reads/status/repair available.
+      - [x] Persist recovery latch/catalog state, replay oldest-first idempotently, verify/probe, and clear only after hard proof.
+      - [x] Make startup scan every approved spill root and refuse unresolved external or in-database repair authority.
       - [ ] Drain durability waiters during shutdown and keep status available while shutdown or repair is blocked.
       - [ ] Add checked install/deploy downgrade refusal while latch/spill/repair state is active.
       - [ ] Run fault, restart, repair, broad regression, and real-world v3 evidence gates; commit and push each green slice.

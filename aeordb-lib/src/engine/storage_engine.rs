@@ -80,6 +80,12 @@ pub struct EmergencySpillReport {
   pub creation_sequence: u64,
   pub first_failure_at_ms: i64,
   pub latest_failure_at_ms: i64,
+  pub failed_operation: u16,
+  pub os_error_class: u16,
+  pub os_error_code: i32,
+  pub last_selected_header_sequence: u64,
+  pub last_durable_write_sequence: u64,
+  pub last_durable_publication_sequence: u64,
   pub attempted_at: String,
   pub context: String,
   pub failure: String,
@@ -110,6 +116,12 @@ pub struct DurabilityFailureState {
   pub creation_sequence: u64,
   pub first_failure_at_ms: i64,
   pub latest_failure_at_ms: i64,
+  pub failed_operation: u16,
+  pub os_error_class: u16,
+  pub os_error_code: i32,
+  pub last_selected_header_sequence: u64,
+  pub last_durable_write_sequence: u64,
+  pub last_durable_publication_sequence: u64,
   pub first_failure: String,
   pub latest_failure: String,
   pub occurrence_count: u64,
@@ -532,6 +544,13 @@ impl StorageEngine {
     crate::engine::v4::durability_recovery::ExplicitDurabilityRepair::begin(self)
   }
 
+  pub fn seed_durability_recovery_from_spills(
+    &self,
+    artifacts: &[crate::engine::emergency_spill::EmergencySpillArtifact],
+  ) -> EngineResult<crate::engine::v4::durability_recovery::DurabilityRecoverySeed> {
+    crate::engine::v4::durability_recovery::seed_from_external_spills(self, artifacts)
+  }
+
   pub(crate) fn refresh_persistent_durability_recovery(&self) -> EngineResult<()> {
     let recovery = crate::engine::v4::durability_recovery::inspect_persistent_durability_recovery(self)?;
     *self.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = recovery;
@@ -577,10 +596,18 @@ impl StorageEngine {
     Ok(())
   }
 
-  fn record_durability_failure(&self, context: &str, error: impl std::fmt::Display) -> EngineError {
+  fn record_durability_failure(&self, operation: DurabilityOperation, context: &str, error: impl std::fmt::Display) -> EngineError {
     let message = format!("{}: {}", context, error);
     let failure_at_ms = chrono::Utc::now().timestamp_millis();
-    let creation_sequence = self.durability_coordinator.snapshot().map(|snapshot| snapshot.next_sequence.max(1)).unwrap_or(1);
+    let coordinator_snapshot = self.durability_coordinator.snapshot().ok();
+    let hard_failure = self.durability_coordinator.hard_failure().ok().flatten();
+    let creation_sequence = coordinator_snapshot.as_ref().map(|snapshot| snapshot.next_sequence.max(1)).unwrap_or(1);
+    let failed_operation = hard_failure.as_ref().map(|failure| failure.operation).unwrap_or(operation).stable_id();
+    let os_error_class =
+      hard_failure.as_ref().and_then(|failure| failure.os_error_class).unwrap_or(OsErrorClass::OtherPersistentIo).stable_id();
+    let os_error_code = -1;
+    let last_selected_header_sequence = self.writer.try_read().map(|writer| writer.file_header().sequence.max(1)).unwrap_or(1);
+    let durable_sequence = coordinator_snapshot.as_ref().map(|snapshot| snapshot.hard_frontier.max(1)).unwrap_or(1);
     let candidate_database_id = uuid::Uuid::new_v4().into_bytes();
     let candidate_incident_id = uuid::Uuid::new_v4().into_bytes();
     let (first_failure, failure_state) = {
@@ -599,6 +626,12 @@ impl StorageEngine {
             creation_sequence,
             first_failure_at_ms: failure_at_ms,
             latest_failure_at_ms: failure_at_ms,
+            failed_operation,
+            os_error_class,
+            os_error_code,
+            last_selected_header_sequence,
+            last_durable_write_sequence: durable_sequence,
+            last_durable_publication_sequence: durable_sequence,
             first_failure: message.clone(),
             latest_failure: message.clone(),
             occurrence_count: 1,
@@ -617,6 +650,12 @@ impl StorageEngine {
         failure_state.creation_sequence,
         failure_state.first_failure_at_ms,
         failure_state.latest_failure_at_ms,
+        failure_state.failed_operation,
+        failure_state.os_error_class,
+        failure_state.os_error_code,
+        failure_state.last_selected_header_sequence,
+        failure_state.last_durable_write_sequence,
+        failure_state.last_durable_publication_sequence,
       );
       *self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spill.clone());
       if spill.succeeded {
@@ -671,6 +710,12 @@ impl StorageEngine {
           failure_state.creation_sequence,
           failure_state.first_failure_at_ms,
           failure_state.latest_failure_at_ms,
+          failure_state.failed_operation,
+          failure_state.os_error_class,
+          failure_state.os_error_code,
+          failure_state.last_selected_header_sequence,
+          failure_state.last_durable_write_sequence,
+          failure_state.last_durable_publication_sequence,
         );
         *self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(retry);
       }
@@ -688,6 +733,12 @@ impl StorageEngine {
     creation_sequence: u64,
     first_failure_at_ms: i64,
     latest_failure_at_ms: i64,
+    failed_operation: u16,
+    os_error_class: u16,
+    os_error_code: i32,
+    last_selected_header_sequence: u64,
+    last_durable_write_sequence: u64,
+    last_durable_publication_sequence: u64,
   ) -> EmergencySpillReport {
     let attempted_at = chrono::Utc::now().to_rfc3339();
     let mut errors = Vec::new();
@@ -759,6 +810,12 @@ impl StorageEngine {
       creation_sequence,
       first_failure_at_ms,
       latest_failure_at_ms,
+      failed_operation,
+      os_error_class,
+      os_error_code,
+      last_selected_header_sequence,
+      last_durable_write_sequence,
+      last_durable_publication_sequence,
       attempted_at,
       context: context.to_string(),
       failure: failure.to_string(),
@@ -945,6 +1002,12 @@ impl StorageEngine {
       "creation_sequence": report.creation_sequence,
       "first_failure_at_ms": report.first_failure_at_ms,
       "latest_failure_at_ms": report.latest_failure_at_ms,
+      "failed_operation": report.failed_operation,
+      "os_error_class": report.os_error_class,
+      "os_error_code": report.os_error_code,
+      "last_selected_header_sequence": report.last_selected_header_sequence,
+      "last_durable_write_sequence": report.last_durable_write_sequence,
+      "last_durable_publication_sequence": report.last_durable_publication_sequence,
       "attempted_at": &report.attempted_at,
       "pid": std::process::id(),
       "context": &report.context,
@@ -1681,7 +1744,7 @@ impl StorageEngine {
     match commit_result {
       Ok(Some((hot_tail_offset, _))) => self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release),
       Ok(None) => {}
-      Err(error) => return Err(self.record_durability_failure("Forced hot-tail hard commit failed", error)),
+      Err(error) => return Err(self.record_durability_failure(DurabilityOperation::HeaderAb, "Forced hot-tail hard commit failed", error)),
     }
     Ok(())
   }
@@ -3104,7 +3167,7 @@ impl StorageEngine {
       writer.sync()
     };
     if let Err(error) = sync_result {
-      return Err(self.record_durability_failure("Explicit WAL sync failed", error));
+      return Err(self.record_durability_failure(DurabilityOperation::DataBarrier, "Explicit WAL sync failed", error));
     }
     Ok(())
   }
@@ -3641,7 +3704,7 @@ impl StorageEngine {
     };
     match result {
       Ok(()) => Ok(()),
-      Err(error) => Err(self.record_durability_failure("Transaction hard completion failed", error)),
+      Err(error) => Err(self.record_durability_failure(DurabilityOperation::DependencyAppend, "Transaction hard completion failed", error)),
     }
   }
 
@@ -3706,7 +3769,7 @@ impl StorageEngine {
       Ok(Some(hot_tail_offset)) => self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release),
       Ok(None) => {}
       Err(error) => {
-        self.record_durability_failure("Timer hard commit failed", error);
+        self.record_durability_failure(DurabilityOperation::HeaderAb, "Timer hard commit failed", error);
       }
     }
   }
@@ -3758,7 +3821,7 @@ impl StorageEngine {
 
     let mut first_failure: Option<String> = None;
     let mut record_failure = |context: &str, error: String| {
-      let error = self.record_durability_failure(context, error);
+      let error = self.record_durability_failure(DurabilityOperation::ShutdownFlush, context, error);
       if first_failure.is_none() {
         first_failure = Some(error.to_string());
       }
@@ -3918,18 +3981,24 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     engine.store_entry(EntryType::Chunk, b"chunk-1", b"hello").unwrap();
 
-    let error = engine.record_durability_failure("test forced durability failure", "synthetic EIO");
+    let error = engine.record_durability_failure(DurabilityOperation::AuthorityBarrier, "test forced durability failure", "synthetic EIO");
     assert!(matches!(error, EngineError::DurabilityFailure(_)));
     assert!(engine.durability_failure().is_some());
     let first_state = engine.durability_failure_state().expect("failure state");
     assert_eq!(first_state.occurrence_count, 1);
 
-    let later = engine.record_durability_failure("later durability failure", "synthetic ENOSPC");
+    let later = engine.record_durability_failure(DurabilityOperation::DataBarrier, "later durability failure", "synthetic ENOSPC");
     assert!(matches!(later, EngineError::DurabilityFailure(_)));
     let latest_state = engine.durability_failure_state().expect("updated failure state");
     assert_eq!(latest_state.database_id, first_state.database_id);
     assert_eq!(latest_state.incident_id, first_state.incident_id);
     assert_eq!(latest_state.first_failure, first_state.first_failure);
+    assert_eq!(latest_state.failed_operation, first_state.failed_operation);
+    assert_eq!(latest_state.os_error_class, first_state.os_error_class);
+    assert_eq!(latest_state.os_error_code, first_state.os_error_code);
+    assert_eq!(latest_state.last_selected_header_sequence, first_state.last_selected_header_sequence);
+    assert_eq!(latest_state.last_durable_write_sequence, first_state.last_durable_write_sequence);
+    assert_eq!(latest_state.last_durable_publication_sequence, first_state.last_durable_publication_sequence);
     assert!(latest_state.latest_failure.contains("later durability failure"));
     assert!(latest_state.latest_failure_at_ms >= latest_state.first_failure_at_ms);
     assert_eq!(latest_state.occurrence_count, 2);
@@ -3957,6 +4026,13 @@ mod tests {
     assert!(manifest.get("creation_sequence").and_then(|value| value.as_u64()).is_some_and(|value| value > 0));
     assert_eq!(manifest.get("first_failure_at_ms").and_then(|value| value.as_i64()), Some(latest_state.first_failure_at_ms));
     assert_eq!(manifest.get("latest_failure_at_ms").and_then(|value| value.as_i64()), Some(latest_state.latest_failure_at_ms));
+    assert_eq!(manifest.get("failed_operation").and_then(|value| value.as_u64()), Some(latest_state.failed_operation as u64));
+    assert_eq!(manifest.get("os_error_class").and_then(|value| value.as_u64()), Some(latest_state.os_error_class as u64));
+    assert_eq!(manifest.get("os_error_code").and_then(|value| value.as_i64()), Some(latest_state.os_error_code as i64));
+    assert_eq!(
+      manifest.get("last_selected_header_sequence").and_then(|value| value.as_u64()),
+      Some(latest_state.last_selected_header_sequence)
+    );
     assert_eq!(manifest.get("latest_failure").and_then(|value| value.as_str()), Some(latest_state.latest_failure.as_str()));
     assert!(manifest.get("components").and_then(|value| value.as_array()).is_some_and(|components| components
       .iter()
@@ -3983,7 +4059,7 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let _authority = engine.acquire_durability_repair_authority().unwrap();
 
-    engine.record_durability_failure("failure during explicit repair", "synthetic EIO");
+    engine.record_durability_failure(DurabilityOperation::AuthorityBarrier, "failure during explicit repair", "synthetic EIO");
 
     let error = engine.ensure_writable().unwrap_err();
     assert!(error.to_string().contains("failure during explicit repair"), "{error}");
@@ -4000,13 +4076,13 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     engine.store_entry(EntryType::Chunk, b"chunk-1", b"hello").unwrap();
 
-    engine.record_durability_failure("first durability failure", "synthetic EIO");
+    engine.record_durability_failure(DurabilityOperation::AuthorityBarrier, "first durability failure", "synthetic EIO");
     let first_state = engine.durability_failure_state().unwrap();
     assert!(!engine.emergency_spill_report().unwrap().succeeded);
 
     let recovered_root = temp_dir.path().join("recovered-root");
     restore.set_spill_dir(&recovered_root);
-    engine.record_durability_failure("second durability failure", "synthetic ENOSPC");
+    engine.record_durability_failure(DurabilityOperation::DataBarrier, "second durability failure", "synthetic ENOSPC");
     let latest_state = engine.durability_failure_state().unwrap();
     let report = engine.emergency_spill_report().unwrap();
     assert!(report.succeeded, "retry failed: {:?}", report.errors);
@@ -4064,7 +4140,7 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
 
     let writer = engine.writer.write().unwrap();
-    engine.record_durability_failure("writer unavailable", "synthetic EIO");
+    engine.record_durability_failure(DurabilityOperation::AuthorityWrite, "writer unavailable", "synthetic EIO");
     drop(writer);
 
     let report = engine.emergency_spill_report().unwrap();
@@ -4207,7 +4283,11 @@ impl<'a> TransactionGuard<'a> {
     };
     match result {
       Ok(()) => Ok(()),
-      Err(error) => Err(self.engine.record_durability_failure("Namespace transaction hard completion failed", error)),
+      Err(error) => Err(self.engine.record_durability_failure(
+        DurabilityOperation::DependencyAppend,
+        "Namespace transaction hard completion failed",
+        error,
+      )),
     }
   }
 

@@ -5,6 +5,7 @@ use aeordb::engine::emergency_spill::{
   EMERGENCY_SPILL_FORMAT, EMERGENCY_SPILL_FORMAT_V2, EmergencySpillApplyReport, EmergencySpillFormatVersion, EmergencySpillLocation,
   SpillLocationClass, apply_wal_tails_to_database, mark_artifacts_applied, scan_for_database_with_dirs, scan_for_database_with_locations,
 };
+use aeordb::engine::durability_coordinator::{DurabilityOperation, OsErrorClass};
 
 const DATABASE_ID: [u8; 16] = [0x21; 16];
 
@@ -46,6 +47,12 @@ fn write_v2_artifact(
     "creation_sequence": creation_sequence,
     "first_failure_at_ms": created_at_ms,
     "latest_failure_at_ms": created_at_ms,
+    "failed_operation": DurabilityOperation::AuthorityBarrier.stable_id(),
+    "os_error_class": OsErrorClass::MediaIo.stable_id(),
+    "os_error_code": 5,
+    "last_selected_header_sequence": 7,
+    "last_durable_write_sequence": 8,
+    "last_durable_publication_sequence": 8,
     "attempted_at": chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap().to_rfc3339(),
     "db_path": database.display().to_string(),
     "db_path_bytes": hex::encode(native_path_bytes(database)),
@@ -126,6 +133,9 @@ fn v2_scan_validates_identity_components_and_deterministic_order() {
   assert_eq!(artifacts[0].database_id, Some(DATABASE_ID));
   assert_eq!(artifacts[0].incident_id, Some([0x31; 16]));
   assert_eq!(artifacts[0].creation_sequence, 11);
+  assert_eq!(artifacts[0].failed_operation, Some(DurabilityOperation::AuthorityBarrier.stable_id()));
+  assert_eq!(artifacts[0].os_error_class, Some(OsErrorClass::MediaIo.stable_id()));
+  assert_eq!(artifacts[0].os_error_code, Some(5));
   assert_eq!(artifacts[1].creation_sequence, 12);
   assert_eq!(artifacts[0].source_location_class, SpillLocationClass::ConfiguredFallback);
   assert_eq!(artifacts[0].components.len(), 1);
@@ -133,6 +143,24 @@ fn v2_scan_validates_identity_components_and_deterministic_order() {
   assert_eq!(artifacts[0].components[0].digest, *blake3::hash(b"def").as_bytes());
   assert!(artifacts[0].manifest_length > 0);
   assert_ne!(artifacts[0].manifest_digest, [0u8; 32]);
+}
+
+#[test]
+fn v2_scan_rejects_partial_typed_failure_evidence() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let directory = write_v2_artifact(&base, "artifact", &database, [0x39; 16], 1_700_000_000_000, 1, b"def");
+  let manifest_path = directory.join("manifest.json");
+  let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+  manifest.as_object_mut().unwrap().remove("os_error_code");
+  fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+  let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
+
+  assert!(error.to_string().contains("typed failure evidence must be complete"), "{error}");
 }
 
 #[test]

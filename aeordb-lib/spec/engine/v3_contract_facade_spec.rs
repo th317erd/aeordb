@@ -450,6 +450,9 @@ fn bounded_group_failure_halts_and_retires_every_pending_hard_waiter() {
   };
   assert!(coordinator.execute_group(&[tickets[0]], &mut executor).is_err());
 
+  let hard_failure = coordinator.hard_failure().unwrap().expect("hard failure evidence");
+  assert_eq!(hard_failure.operation, DurabilityOperation::AuthorityBarrier);
+  assert_eq!(hard_failure.os_error_class, Some(OsErrorClass::MediaIo));
   let snapshot = coordinator.snapshot().unwrap();
   assert_eq!(snapshot.hard_frontier, 0);
   assert_eq!(snapshot.pending_hard, 0);

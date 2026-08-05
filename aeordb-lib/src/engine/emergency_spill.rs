@@ -64,6 +64,12 @@ pub struct EmergencySpillArtifact {
   pub creation_sequence: u64,
   pub first_failure_at_ms: i64,
   pub latest_failure_at_ms: i64,
+  pub failed_operation: Option<u16>,
+  pub os_error_class: Option<u16>,
+  pub os_error_code: Option<i32>,
+  pub last_selected_header_sequence: Option<u64>,
+  pub last_durable_write_sequence: Option<u64>,
+  pub last_durable_publication_sequence: Option<u64>,
   pub directory: PathBuf,
   pub manifest_path: PathBuf,
   pub manifest_length: u64,
@@ -513,50 +519,73 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
   let manifest_digest = *blake3::hash(&bytes).as_bytes();
   let manifest_length = bytes.len() as u64;
 
-  let (database_id, incident_id, path_encoding, creation_sequence, first_failure_at_ms, latest_failure_at_ms, db_path_native, components) =
-    match format_version {
-      EmergencySpillFormatVersion::V1 => (None, None, native_path_encoding(), 0, sort_millis, sort_millis, None, Vec::new()),
-      EmergencySpillFormatVersion::V2 => {
-        let database_id = required_hex_array::<16>(&manifest, "database_id")?;
-        let incident_id = required_hex_array::<16>(&manifest, "incident_id")?;
-        if database_id == [0u8; 16] || incident_id == [0u8; 16] {
-          return Err(EngineError::InvalidInput(format!("emergency spill manifest {} contains a zero identity", manifest_path.display())));
-        }
-        let declared_class = SpillLocationClass::from_u64(required_u64(&manifest, "source_location_class")?)?;
-        if declared_class != source_location_class {
-          return Err(EngineError::InvalidInput(format!(
-            "emergency spill manifest {} location class does not match the scanned root",
-            manifest_path.display()
-          )));
-        }
-        let path_encoding = required_u64(&manifest, "path_encoding")?;
-        if !matches!(path_encoding, 1 | 2) {
-          return Err(EngineError::InvalidInput(format!("invalid emergency spill path encoding {path_encoding}")));
-        }
-        let db_path_native = required_hex_bytes(&manifest, "db_path_bytes")?;
-        path_from_native_bytes(path_encoding as u16, &db_path_native)?;
-        let creation_sequence = required_u64(&manifest, "creation_sequence")?;
-        if creation_sequence == 0 {
-          return Err(EngineError::InvalidInput("emergency spill creation sequence must be nonzero".to_string()));
-        }
-        let first_failure_at_ms = required_i64(&manifest, "first_failure_at_ms")?;
-        let latest_failure_at_ms = required_i64(&manifest, "latest_failure_at_ms")?;
-        if latest_failure_at_ms < first_failure_at_ms {
-          return Err(EngineError::InvalidInput("emergency spill latest failure precedes first failure".to_string()));
-        }
-        let components = parse_v2_components(&manifest, &directory)?;
-        (
-          Some(database_id),
-          Some(incident_id),
-          path_encoding as u16,
-          creation_sequence,
-          first_failure_at_ms,
-          latest_failure_at_ms,
-          Some(db_path_native),
-          components,
-        )
+  let (
+    database_id,
+    incident_id,
+    path_encoding,
+    creation_sequence,
+    first_failure_at_ms,
+    latest_failure_at_ms,
+    failed_operation,
+    os_error_class,
+    os_error_code,
+    last_selected_header_sequence,
+    last_durable_write_sequence,
+    last_durable_publication_sequence,
+    db_path_native,
+    components,
+  ) = match format_version {
+    EmergencySpillFormatVersion::V1 => {
+      (None, None, native_path_encoding(), 0, sort_millis, sort_millis, None, None, None, None, None, None, None, Vec::new())
+    }
+    EmergencySpillFormatVersion::V2 => {
+      let database_id = required_hex_array::<16>(&manifest, "database_id")?;
+      let incident_id = required_hex_array::<16>(&manifest, "incident_id")?;
+      if database_id == [0u8; 16] || incident_id == [0u8; 16] {
+        return Err(EngineError::InvalidInput(format!("emergency spill manifest {} contains a zero identity", manifest_path.display())));
       }
-    };
+      let declared_class = SpillLocationClass::from_u64(required_u64(&manifest, "source_location_class")?)?;
+      if declared_class != source_location_class {
+        return Err(EngineError::InvalidInput(format!(
+          "emergency spill manifest {} location class does not match the scanned root",
+          manifest_path.display()
+        )));
+      }
+      let path_encoding = required_u64(&manifest, "path_encoding")?;
+      if !matches!(path_encoding, 1 | 2) {
+        return Err(EngineError::InvalidInput(format!("invalid emergency spill path encoding {path_encoding}")));
+      }
+      let db_path_native = required_hex_bytes(&manifest, "db_path_bytes")?;
+      path_from_native_bytes(path_encoding as u16, &db_path_native)?;
+      let creation_sequence = required_u64(&manifest, "creation_sequence")?;
+      if creation_sequence == 0 {
+        return Err(EngineError::InvalidInput("emergency spill creation sequence must be nonzero".to_string()));
+      }
+      let first_failure_at_ms = required_i64(&manifest, "first_failure_at_ms")?;
+      let latest_failure_at_ms = required_i64(&manifest, "latest_failure_at_ms")?;
+      if latest_failure_at_ms < first_failure_at_ms {
+        return Err(EngineError::InvalidInput("emergency spill latest failure precedes first failure".to_string()));
+      }
+      let typed_evidence = parse_optional_typed_failure_evidence(&manifest)?;
+      let components = parse_v2_components(&manifest, &directory)?;
+      (
+        Some(database_id),
+        Some(incident_id),
+        path_encoding as u16,
+        creation_sequence,
+        first_failure_at_ms,
+        latest_failure_at_ms,
+        typed_evidence.map(|evidence| evidence.0),
+        typed_evidence.map(|evidence| evidence.1),
+        typed_evidence.map(|evidence| evidence.2),
+        typed_evidence.map(|evidence| evidence.3),
+        typed_evidence.map(|evidence| evidence.4),
+        typed_evidence.map(|evidence| evidence.5),
+        Some(db_path_native),
+        components,
+      )
+    }
+  };
 
   let hot_tail_path = match format_version {
     EmergencySpillFormatVersion::V1 => path_from_manifest_or_default(&manifest, "hot_tail_path", &directory, "hot-tail.bin")?,
@@ -590,6 +619,12 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
     creation_sequence,
     first_failure_at_ms,
     latest_failure_at_ms,
+    failed_operation,
+    os_error_class,
+    os_error_code,
+    last_selected_header_sequence,
+    last_durable_write_sequence,
+    last_durable_publication_sequence,
     directory,
     manifest_path: manifest_path.to_path_buf(),
     manifest_length,
@@ -612,6 +647,43 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
     wal_tail_bytes,
     wal_tail_truncated: manifest.get("wal_tail_truncated").and_then(|value| value.as_bool()).unwrap_or(false),
   }))
+}
+
+fn parse_optional_typed_failure_evidence(manifest: &serde_json::Value) -> EngineResult<Option<(u16, u16, i32, u64, u64, u64)>> {
+  const FIELDS: [&str; 6] = [
+    "failed_operation",
+    "os_error_class",
+    "os_error_code",
+    "last_selected_header_sequence",
+    "last_durable_write_sequence",
+    "last_durable_publication_sequence",
+  ];
+  let present = FIELDS.iter().filter(|field| manifest.get(**field).is_some()).count();
+  if present == 0 {
+    return Ok(None);
+  }
+  if present != FIELDS.len() {
+    return Err(EngineError::InvalidInput("emergency spill typed failure evidence must be complete when present".to_string()));
+  }
+  let operation = u16::try_from(required_u64(manifest, FIELDS[0])?)
+    .map_err(|_| EngineError::InvalidInput("emergency spill failed operation overflows u16".to_string()))?;
+  let error_class = u16::try_from(required_u64(manifest, FIELDS[1])?)
+    .map_err(|_| EngineError::InvalidInput("emergency spill OS error class overflows u16".to_string()))?;
+  let error_code = i32::try_from(required_i64(manifest, FIELDS[2])?)
+    .map_err(|_| EngineError::InvalidInput("emergency spill OS error code overflows i32".to_string()))?;
+  let selected = required_u64(manifest, FIELDS[3])?;
+  let durable_write = required_u64(manifest, FIELDS[4])?;
+  let durable_publication = required_u64(manifest, FIELDS[5])?;
+  if !crate::engine::durability_coordinator::DurabilityOperation::is_stable_id(operation)
+    || !crate::engine::durability_coordinator::OsErrorClass::is_stable_id(error_class)
+    || error_code == 0
+    || selected == 0
+    || durable_write == 0
+    || durable_publication == 0
+  {
+    return Err(EngineError::InvalidInput("emergency spill typed failure evidence contains an invalid zero or enum value".to_string()));
+  }
+  Ok(Some((operation, error_class, error_code, selected, durable_write, durable_publication)))
 }
 
 fn path_from_manifest_or_default(
@@ -1055,6 +1127,12 @@ mod tests {
       creation_sequence: 0,
       first_failure_at_ms: 0,
       latest_failure_at_ms: 0,
+      failed_operation: None,
+      os_error_class: None,
+      os_error_code: None,
+      last_selected_header_sequence: None,
+      last_durable_write_sequence: None,
+      last_durable_publication_sequence: None,
       directory: temp_dir.path().to_path_buf(),
       manifest_path: temp_dir.path().join("manifest.json"),
       manifest_length: 0,

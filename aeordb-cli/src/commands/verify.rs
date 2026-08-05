@@ -3,6 +3,7 @@ use std::io::{self, Write};
 
 use aeordb::engine::emergency_spill::{self, EmergencySpillApplyReport, EmergencySpillArtifact};
 use aeordb::engine::StorageEngine;
+use aeordb::engine::v4::durability_recovery::ExplicitDurabilityRepair;
 use aeordb::engine::verify;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use crate::utils::format_bytes;
@@ -177,14 +178,11 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     }
   };
 
-  if spill_apply_report.is_some() {
-    println!("Forcing WAL rebuild and reusable-gap recovery after emergency spill replay...");
-    if let Err(error) = engine.recover_after_emergency_spill_replay() {
-      eprintln!("Emergency spill post-replay recovery failed: {}", error);
-      process::exit(1);
-    }
-    println!("  WAL rebuild and hot-tail republish complete.");
-    println!();
+  if !repair && engine.persistent_durability_recovery().is_some_and(|recovery| recovery.blocks_writes) {
+    eprintln!("Fatal: this database has unresolved persistent durability recovery state.");
+    eprintln!("Run:");
+    eprintln!("  aeordb verify --repair --force-fix-in-place -D {}", database);
+    process::exit(2);
   }
 
   let mut report = if repair {
@@ -195,21 +193,10 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     }
     println!();
 
-    // Phase 1: Verify to determine what's needed
-    let initial = verify::verify(&engine, &work_path);
-
-    if initial.missing_kv_entries > 0 || initial.stale_kv_entries > 0 {
-      // Check if KV expansion is needed
-      let hash_length = engine.hash_algo().hash_length();
-      let psize = aeordb::engine::kv_pages::page_size(hash_length);
-      let needed_stage = aeordb::engine::kv_pages::stage_for_count(initial.valid_entries as usize, hash_length);
-      let (needed_size, _) = aeordb::engine::kv_stages::stage_params(needed_stage, psize);
-      let current_size = engine.writer_read_lock().map(|w| w.file_header().kv_block_length).unwrap_or(0);
-
-      if needed_size > current_size && current_size > 0 {
-        // Phase 2: Expand KV block (requires dropping the engine)
+    match run_repair_pass(&engine, &work_path, &emergency_spills, spill_apply_report.as_ref(), true) {
+      RepairPass::Complete(report) => report,
+      RepairPass::Expand { needed_stage, hash_length, current_size, needed_size } => {
         println!("Expanding KV block: {} → {} bytes (stage {})", current_size, needed_size, needed_stage);
-        engine.shutdown().ok();
         drop(engine);
 
         match aeordb::engine::kv_expand::expand_kv_block(&work_path, needed_stage, hash_length) {
@@ -231,14 +218,11 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
           }
         };
 
-        verify::verify_and_repair(&engine2, &work_path)
-      } else {
-        // No expansion needed — repair in place
-        verify::verify_and_repair(&engine, &work_path)
+        match run_repair_pass(&engine2, &work_path, &[], None, false) {
+          RepairPass::Complete(report) => report,
+          RepairPass::Expand { .. } => unreachable!("KV expansion is disabled on the second repair pass"),
+        }
       }
-    } else {
-      // No KV issues — just run repair for other issues
-      verify::verify_and_repair(&engine, &work_path)
     }
   } else {
     verify::verify(&engine, database)
@@ -418,6 +402,116 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
       println!("Repaired copy: {}", format!("{}.repaired", database));
       println!("To use it, replace the original:");
       println!("  mv {}.repaired {}", database, database);
+    }
+  }
+}
+
+enum RepairPass {
+  Complete(verify::VerifyReport),
+  Expand { needed_stage: usize, hash_length: usize, current_size: u64, needed_size: u64 },
+}
+
+fn run_repair_pass(
+  engine: &StorageEngine,
+  database: &str,
+  emergency_spills: &[EmergencySpillArtifact],
+  spill_apply_report: Option<&EmergencySpillApplyReport>,
+  allow_kv_expansion: bool,
+) -> RepairPass {
+  let seed = if emergency_spills.is_empty() {
+    None
+  } else {
+    match engine.seed_durability_recovery_from_spills(emergency_spills) {
+      Ok(seed) => Some(seed),
+      Err(error) => {
+        eprintln!("Failed to persist emergency spill recovery authority: {}", error);
+        process::exit(1);
+      }
+    }
+  };
+  let durability_repair = if seed.as_ref().is_some_and(|seed| seed.requires_repair)
+    || engine.persistent_durability_recovery().is_some_and(|recovery| recovery.blocks_writes)
+  {
+    Some(begin_durability_repair(engine))
+  } else {
+    None
+  };
+
+  let recovery_was_already_complete = seed.as_ref().is_some_and(|seed| !seed.requires_repair);
+  if recovery_was_already_complete && spill_apply_report.is_some_and(|report| report.wal_tail_bytes_written > 0) {
+    eprintln!("Persistent recovery is recorded complete, but replay found missing WAL bytes; refusing to retire contradictory evidence.");
+    process::exit(1);
+  }
+  if spill_apply_report.is_some() && !recovery_was_already_complete {
+    println!("Forcing WAL rebuild and reusable-gap recovery after emergency spill replay...");
+    if let Err(error) = engine.recover_after_emergency_spill_replay() {
+      eprintln!("Emergency spill post-replay recovery failed: {}", error);
+      process::exit(1);
+    }
+    println!("  WAL rebuild and hot-tail republish complete.");
+    println!();
+  }
+
+  let initial = verify::verify(engine, database);
+  if allow_kv_expansion && (initial.missing_kv_entries > 0 || initial.stale_kv_entries > 0) {
+    let hash_length = engine.hash_algo().hash_length();
+    let psize = aeordb::engine::kv_pages::page_size(hash_length);
+    let needed_stage = aeordb::engine::kv_pages::stage_for_count(initial.valid_entries as usize, hash_length);
+    let (needed_size, _) = aeordb::engine::kv_stages::stage_params(needed_stage, psize);
+    let current_size = engine.writer_read_lock().map(|writer| writer.file_header().kv_block_length).unwrap_or(0);
+    if needed_size > current_size && current_size > 0 {
+      if let Err(error) = engine.shutdown() {
+        eprintln!("Failed to durably close the database before KV expansion: {}", error);
+        process::exit(1);
+      }
+      return RepairPass::Expand { needed_stage, hash_length, current_size, needed_size };
+    }
+  }
+
+  let report = verify::verify_and_repair(engine, database);
+  complete_durability_repair(engine, database, durability_repair, &report);
+  RepairPass::Complete(report)
+}
+
+fn begin_durability_repair(engine: &StorageEngine) -> ExplicitDurabilityRepair<'_> {
+  match engine.begin_explicit_durability_repair() {
+    Ok(repair) => repair,
+    Err(error) => {
+      eprintln!("Failed to enter explicit durability repair mode: {}", error);
+      process::exit(1);
+    }
+  }
+}
+
+fn complete_durability_repair(
+  engine: &StorageEngine,
+  database: &str,
+  repair: Option<ExplicitDurabilityRepair<'_>>,
+  report: &verify::VerifyReport,
+) {
+  let Some(repair) = repair else {
+    return;
+  };
+  if report.has_issues() {
+    eprintln!("Persistent durability recovery remains active because verification still reports issues.");
+    return;
+  }
+  let verification = match verify::verify_durability_repair(engine, database) {
+    Ok((_, verification)) => verification,
+    Err(error) => {
+      eprintln!("Final durability repair verification failed: {}", error);
+      process::exit(1);
+    }
+  };
+  match repair.complete(verification) {
+    Ok(receipt) => println!(
+      "  Persistent durability recovery cleared with receipt {} at header sequence {}.",
+      hex::encode(receipt.repair_receipt_hash),
+      receipt.selected_header_sequence
+    ),
+    Err(error) => {
+      eprintln!("Failed to hard-publish durability repair completion: {}", error);
+      process::exit(1);
     }
   }
 }

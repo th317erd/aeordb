@@ -536,6 +536,13 @@ async fn initialize_server_runtime(
     Some(cancel.clone()),
     Some(engine_progress),
   );
+  if let Some(recovery) = engine.persistent_durability_recovery().filter(|recovery| recovery.blocks_writes) {
+    cancel.cancel();
+    return Err(format!(
+      "database has unresolved persistent durability recovery state; refusing writable startup\nreason: {}\nrun:\n  aeordb verify --repair --force-fix-in-place -D {}\nfor unattended repair after reviewing the evidence, add --yes",
+      recovery.reason, database
+    ));
+  }
 
   // For SelfContained mode, bootstrap the root key using the already-open engine.
   if auth_mode == AuthMode::SelfContained {
