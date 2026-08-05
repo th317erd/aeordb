@@ -162,7 +162,7 @@ impl GcKind {
     }
   }
 
-  fn is_control(self) -> bool {
+  pub(crate) fn is_control(self) -> bool {
     matches!(
       self,
       Self::QuarantineActiveControl
@@ -224,6 +224,7 @@ pub fn fixture_cases() -> Vec<GcFixtureCase> {
   cases.extend(crate::gc_state::fixture_cases());
   cases.extend(crate::gc_mark::fixture_cases());
   cases.extend(crate::gc_void::fixture_cases());
+  cases.extend(crate::gc_audit::fixture_cases());
   cases
 }
 
@@ -286,6 +287,20 @@ pub fn observe(format: GcFormat, profile: HashProfile, bytes: &[u8]) -> (String,
   if crate::gc_void::is_void_directory(bytes) {
     return crate::gc_void::observe(profile, bytes);
   }
+  if matches!(
+    read_u16(bytes, 6).ok().and_then(GcKind::from_id),
+    Some(
+      GcKind::AuditCatalogManifest
+        | GcKind::GcRunSummary
+        | GcKind::CorruptGcEvidence
+        | GcKind::AuditDetailPage
+        | GcKind::AuditSummaryPage
+        | GcKind::AuditPin
+    )
+  ) || crate::gc_audit::is_audit_directory(bytes)
+  {
+    return crate::gc_audit::observe(profile, bytes);
+  }
   if read_u16(bytes, 6).ok().and_then(GcKind::from_id).is_some_and(|kind| !kind.is_control()) {
     return crate::gc_state::observe(profile, bytes);
   }
@@ -329,6 +344,20 @@ pub fn annotation_lines(format: GcFormat, profile: HashProfile, bytes: &[u8]) ->
   }
   if crate::gc_void::is_void_directory(bytes) {
     return crate::gc_void::annotation_lines(profile, bytes);
+  }
+  if matches!(
+    kind,
+    Some(
+      GcKind::AuditCatalogManifest
+        | GcKind::GcRunSummary
+        | GcKind::CorruptGcEvidence
+        | GcKind::AuditDetailPage
+        | GcKind::AuditSummaryPage
+        | GcKind::AuditPin
+    )
+  ) || crate::gc_audit::is_audit_directory(bytes)
+  {
+    return crate::gc_audit::annotation_lines(profile, bytes);
   }
   if kind.is_some_and(|kind| !kind.is_control()) {
     return crate::gc_state::annotation_lines(profile, bytes);

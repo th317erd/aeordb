@@ -443,6 +443,12 @@ impl ValidationBounds {
     maximum_key_length: MAX_SCALAR_LENGTH,
     allow_small_u64: true,
   };
+  const AUDIT_VALUE: Self = Self {
+    maximum_value_length: 1_048_576,
+    maximum_scalar_length: MAX_SCALAR_LENGTH,
+    maximum_key_length: MAX_SCALAR_LENGTH,
+    allow_small_u64: false,
+  };
 }
 
 fn decode_with_bounds(bytes: &[u8], bounds: ValidationBounds) -> Result<DecodedConfig, &'static str> {
@@ -462,6 +468,10 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
 
 pub(crate) fn validate_source_value(bytes: &[u8]) -> Result<(), &'static str> {
   decode_with_bounds(bytes, ValidationBounds::SOURCE_VALUE).map(|_| ())
+}
+
+pub(crate) fn validate_audit_value(bytes: &[u8]) -> Result<(), &'static str> {
+  decode_with_bounds(bytes, ValidationBounds::AUDIT_VALUE).map(|_| ())
 }
 
 pub(crate) fn canonicalize_json(input: &str) -> Result<Vec<u8>, String> {

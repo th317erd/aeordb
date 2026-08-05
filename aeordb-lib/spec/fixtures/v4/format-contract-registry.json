@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-gc-void",
+  "coverage_stage": "p0b-2-gc-audit",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -2629,13 +2629,11 @@
       },
       "frozen_body_kinds": [
         "0x0001", "0x0002", "0x0003", "0x0004", "0x0005", "0x0006",
-        "0x0010", "0x0011", "0x0012", "0x0013", "0x0016", "0x0017", "0x001f",
+        "0x0010", "0x0011", "0x0012", "0x0013", "0x0014", "0x0015", "0x0016", "0x0017", "0x001f",
         "0x0020", "0x0021", "0x0022", "0x0023", "0x0024", "0x0025", "0x0026", "0x0027", "0x0028",
-        "0x0030", "0x0031", "0x0032", "0x0037", "0x0038", "0x0039"
+        "0x0030", "0x0031", "0x0032", "0x0033", "0x0034", "0x0035", "0x0036", "0x0037", "0x0038", "0x0039"
       ],
-      "pending_body_fixture_kinds": [
-        "0x0014", "0x0015", "0x0033", "0x0034", "0x0035", "0x0036"
-      ],
+      "pending_body_fixture_kinds": [],
       "layout": [
         { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII AGCA" },
         { "offset": 4, "length": 2, "field": "artifact_schema_version", "rule": "exactly 1" },
@@ -2677,6 +2675,8 @@
         "3": "physical_inventory: WAL offset then PhysicalIncarnationIdV1 order",
         "4": "void_free_extents: WAL offset order",
         "5": "void_claims: claim ID order with role-defined zero page ID",
+        "6": "audit_detail: occurred_at_ms then event_id order",
+        "7": "audit_summary: completed_at_ms then run_id order",
         "8": "root_candidates: NamespaceRoot hash order"
       },
       "paged_state": {
@@ -2763,6 +2763,30 @@
         "settlement_authority": "selected Void catalog is allocator authority; settlement receipt source/result/evidence hashes are non-traversed audit evidence",
         "failure_direction": "ambiguous, corrupt, overlapping, unaccounted, or closure-invalid ranges stay unavailable and leak rather than becoming reusable"
       },
+      "audit_state": {
+        "catalog_identity": "database_id[16] || generation u64",
+        "catalog_fixed_body_formula": "148 + 2H + P*H",
+        "catalog_body_cap": 1048576,
+        "detail_record_fixed_length": "52 + H",
+        "detail_record_formula": "52 + H + CanonicalConfigValueV1 payload length",
+        "detail_order": "occurred_at_ms then event_id; unique and strictly ascending",
+        "detail_payload_contract": "bounded canonical map with permanent event-specific keys and value tags; P0c machine rows must exist before a production writer is enabled",
+        "summary_record_length": "76 + H",
+        "summary_order": "completed_at_ms then run_id; unique and strictly ascending",
+        "run_summary_identity": "database_id[16] || run_id[16]; body byte-identical to one AuditSummaryPage record",
+        "corrupt_evidence_fixed_body_formula": "68 + 3H",
+        "corrupt_evidence_formula": "68 + 3H + context_length + evidence_count*H",
+        "corrupt_optional_flags": "bits 0..7 respectively bind observed EntryType, artifact kind, physical range, write sequence, expected hash, observed hash, run ID, and control kind+identity digest",
+        "audit_pin_fixed_body_formula": "32 + H",
+        "audit_pin_formula": "32 + H + artifact_count*H",
+        "retention": "detail seven days/4 GiB/latest two; summary 90 days; pins and corrupt evidence remain mandatory while rooted",
+        "event_kind_registry": {"1":"mark_started","2":"mark_completed","3":"mark_canceled","4":"root_pending","5":"root_retired","6":"sweep_proposed","7":"sweep_committed","8":"sweep_recovered","9":"void_claimed","10":"void_claim_settled","11":"void_claim_recovered","12":"corrupt_evidence","13":"retention_compacted","14":"gc_disabled"},
+        "run_kind_registry": {"1":"mark","2":"sweep","3":"physical_inventory","4":"audit_compaction","5":"void_reconcile","6":"root_lifecycle_reconcile"},
+        "outcome_registry": {"1":"complete","2":"canceled","3":"failed","4":"skipped","5":"recovered"},
+        "error_class_registry": {"1":"framing","2":"checksum","3":"bounds_or_overlap","4":"missing_edge","5":"wrong_identity","6":"ambiguous_control","7":"incomplete_authority_walk","8":"workspace_tamper_or_loss","9":"policy_unavailable","10":"unsupported_codec"},
+        "pin_reason_registry": {"1":"operator_investigation","2":"repair_evidence","3":"migration_verification","4":"support_bundle"},
+        "failure_direction": "malformed or incomplete audit closure cannot be selected; mandatory evidence remains rooted and uncertainty retains evidence rather than pruning it"
+      },
       "identity": "controls: database_id and slot; immutable kinds: complete kind-specific identity, generation, and body",
       "key_domain": "controls: H('aeordb.gc-artifact.control.v1\\0' || kind u16 LE || database_id[16] || slot u8); immutable: H('aeordb.gc-artifact.immutable.v1\\0' || kind u16 LE || complete AGCA value)",
       "checksum": "CRC-32/ISO-HDLC over the complete artifact value except its final 4 bytes",
@@ -2804,7 +2828,11 @@
         { "field": "Void manifest free-extent and outstanding-claim directory roots", "role": "graph-edge-authority" },
         { "field": "Void extent proposal, quarantine, and incarnation hashes", "role": "non-traversed-origin-identity" },
         { "field": "Void claim source manifest and extent origin proposal hashes", "role": "non-traversed-reservation-evidence" },
-        { "field": "Void settlement source/result/evidence hashes", "role": "non-traversed-audit-evidence" }
+        { "field": "Void settlement source/result/evidence hashes", "role": "non-traversed-audit-evidence" },
+        { "field": "Audit catalog detail/summary directory roots and pin hashes", "role": "graph-edge-authority" },
+        { "field": "audit event IDs and summary evidence digests", "role": "identity-or-evidence" },
+        { "field": "corrupt evidence expected/observed/control/evidence hashes", "role": "non-traversed-diagnostic-evidence" },
+        { "field": "AuditPin creator digest and exact artifact hashes", "role": "identity-and-graph-edge-retention" }
       ],
       "fixture_ids_32": [
         "agca-blake3-256-quarantine-control-a",
@@ -2855,7 +2883,16 @@
         "agca-blake3-256-void-catalog-settled",
         "agca-blake3-256-sweep-commit-receipt",
         "agca-blake3-256-sweep-recovered-receipt",
-        "agca-blake3-256-void-claim-settlement"
+        "agca-blake3-256-void-claim-settlement",
+        "agca-blake3-256-audit-catalog-empty",
+        "agca-blake3-256-audit-catalog-populated",
+        "agca-blake3-256-audit-detail-page",
+        "agca-blake3-256-audit-detail-directory",
+        "agca-blake3-256-audit-summary-page",
+        "agca-blake3-256-audit-summary-directory",
+        "agca-blake3-256-gc-run-summary",
+        "agca-blake3-256-corrupt-gc-evidence",
+        "agca-blake3-256-audit-pin"
       ],
       "fixture_ids_64": [
         "agca-sha512-quarantine-control-a",
@@ -2906,7 +2943,16 @@
         "agca-sha512-void-catalog-settled",
         "agca-sha512-sweep-commit-receipt",
         "agca-sha512-sweep-recovered-receipt",
-        "agca-sha512-void-claim-settlement"
+        "agca-sha512-void-claim-settlement",
+        "agca-sha512-audit-catalog-empty",
+        "agca-sha512-audit-catalog-populated",
+        "agca-sha512-audit-detail-page",
+        "agca-sha512-audit-detail-directory",
+        "agca-sha512-audit-summary-page",
+        "agca-sha512-audit-summary-directory",
+        "agca-sha512-gc-run-summary",
+        "agca-sha512-corrupt-gc-evidence",
+        "agca-sha512-audit-pin"
       ]
     },
     {
@@ -3090,9 +3136,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 18,
-    "fixture_count": 374,
+    "fixture_count": 392,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, common GcArtifactV1 envelope and corrected 34-kind registry, all six GC A/B controls, PhysicalIncarnationIdV1, physical quarantine/inventory/retirement state, the separate logical-root lifecycle authority/evidence graph, bounded mark checkpoints/mutation journals plus AGCW/AGWO workspace closure, and receipt-backed sweep/Void/claim/settlement state",
-    "remaining_p0b_2_scope": "audit/run/corruption/pin GcArtifact bodies, low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, and the complete 34-kind GcArtifactV1 family including controls, physical/root lifecycle, bounded mark workspaces, sweep/Void claims, audit catalogs/pages, run summaries, corruption evidence, and pins",
+    "remaining_p0b_2_scope": "low-volume controls, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

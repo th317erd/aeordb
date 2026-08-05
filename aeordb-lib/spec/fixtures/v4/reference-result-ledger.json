@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-gc-void-v1",
+  "tool_revision": "p0b2-gc-audit-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -1933,6 +1933,114 @@
       "fixture_id": "agca-sha512-void-claim-settlement",
       "expected": "gc:receipt:void-claim-settlement:settled:used=1:unused=0",
       "observed": "gc:receipt:void-claim-settlement:settled:used=1:unused=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-catalog-empty",
+      "expected": "gc:manifest:audit-catalog:empty:details=0:summaries=0:pins=0:generation=2",
+      "observed": "gc:manifest:audit-catalog:empty:details=0:summaries=0:pins=0:generation=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-catalog-populated",
+      "expected": "gc:manifest:audit-catalog:populated:details=2:summaries=2:pins=1:generation=1",
+      "observed": "gc:manifest:audit-catalog:populated:details=2:summaries=2:pins=1:generation=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-detail-page",
+      "expected": "gc:page:audit-detail:records=2",
+      "observed": "gc:page:audit-detail:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-detail-directory",
+      "expected": "gc:directory:audit-detail:records=2",
+      "observed": "gc:directory:audit-detail:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-summary-page",
+      "expected": "gc:page:audit-summary:records=2",
+      "observed": "gc:page:audit-summary:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-summary-directory",
+      "expected": "gc:directory:audit-summary:records=2",
+      "observed": "gc:directory:audit-summary:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-gc-run-summary",
+      "expected": "gc:summary:run:kind=2:outcome=1:reclaimed=1",
+      "observed": "gc:summary:run:kind=2:outcome=1:reclaimed=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-corrupt-gc-evidence",
+      "expected": "gc:evidence:corrupt:class=6:items=2:context=65",
+      "observed": "gc:evidence:corrupt:class=6:items=2:context=65",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-blake3-256-audit-pin",
+      "expected": "gc:pin:audit:reason=2:artifacts=2",
+      "observed": "gc:pin:audit:reason=2:artifacts=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-catalog-empty",
+      "expected": "gc:manifest:audit-catalog:empty:details=0:summaries=0:pins=0:generation=2",
+      "observed": "gc:manifest:audit-catalog:empty:details=0:summaries=0:pins=0:generation=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-catalog-populated",
+      "expected": "gc:manifest:audit-catalog:populated:details=2:summaries=2:pins=1:generation=1",
+      "observed": "gc:manifest:audit-catalog:populated:details=2:summaries=2:pins=1:generation=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-detail-page",
+      "expected": "gc:page:audit-detail:records=2",
+      "observed": "gc:page:audit-detail:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-detail-directory",
+      "expected": "gc:directory:audit-detail:records=2",
+      "observed": "gc:directory:audit-detail:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-summary-page",
+      "expected": "gc:page:audit-summary:records=2",
+      "observed": "gc:page:audit-summary:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-summary-directory",
+      "expected": "gc:directory:audit-summary:records=2",
+      "observed": "gc:directory:audit-summary:records=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-gc-run-summary",
+      "expected": "gc:summary:run:kind=2:outcome=1:reclaimed=1",
+      "observed": "gc:summary:run:kind=2:outcome=1:reclaimed=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-corrupt-gc-evidence",
+      "expected": "gc:evidence:corrupt:class=6:items=2:context=65",
+      "observed": "gc:evidence:corrupt:class=6:items=2:context=65",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "agca-sha512-audit-pin",
+      "expected": "gc:pin:audit:reason=2:artifacts=2",
+      "observed": "gc:pin:audit:reason=2:artifacts=2",
       "result": "pass"
     },
     {

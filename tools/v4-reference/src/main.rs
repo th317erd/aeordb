@@ -4,6 +4,7 @@ mod definitions;
 mod dependency;
 mod field_index;
 mod gc;
+mod gc_audit;
 mod gc_mark;
 mod gc_state;
 mod gc_void;
@@ -42,8 +43,8 @@ use selector::SelectorFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-gc-void-v1";
-const FIXTURE_STAGE: &str = "p0b-2-gc-void";
+const TOOL_REVISION: &str = "p0b2-gc-audit-v1";
+const FIXTURE_STAGE: &str = "p0b-2-gc-audit";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
