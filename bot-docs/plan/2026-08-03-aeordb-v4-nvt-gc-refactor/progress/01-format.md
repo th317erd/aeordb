@@ -1,9 +1,9 @@
 # Child 01 Progress: Format
 
 - **Status:** P0b in progress; P0b-1 complete
-- **Current landing unit:** P0b-2c-1 artifact directories and ordered pages
+- **Current landing unit:** P0b-2c-2 NVT tiles and hint directory
 - **Entry commit:** `9eb503b1d8dbee62e2d90493ecf7010075bc2792`
-- **Last green commit:** P0b-2b-5 immutable manifests `91be6f764b3fe3a4c9db5799a2eee4f4760f24e9`
+- **Last green commit:** P0b-2c-1 ordered pages `c23d31b068a73449ec8e615548a3f4866276a745`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** freeze ArtifactDirectoryNodeV1 plus PostingPage, ValuePage, both ScopeCatalogPage roles, and both DocumentStatePage owner classes at both hash widths
+- **Next action:** freeze NvtTileV1, sparse-cell mapping, non-authoritative hint fallback, and ArtifactDirectory role 7 at both hash widths
 
 ## P0b-2a Core Framing and Semantic Authority
 
@@ -127,3 +127,13 @@
 - **Shared-codec correction:** `CanonicalSourceValueV1` now reuses the canonical structural decoder with its own 1 MiB typed-value bounds and permits typed `u64` across the full domain; it no longer inherits the 256 KiB config cap or JSON number canonicalization rule.
 - **Green commands:** standalone `cargo test -j 4 --locked` passed 72 tests; strict standalone Clippy passed; fresh generation and verification passed all 238 fixtures; and the campaign gate passed with 93 routes and 36 docs.
 - **Boundary:** these remain independent reference bytes and validation oracles. No production page reader/writer, cache, planner, query, index mutation, migration, GC path, route, or database changed. NVT tiles and role 7 remain writer-disabled and are next.
+
+## P0b-2c-2 NVT Tiles and Hint Directory
+
+- **Red proof:** the 238-fixture ordered-page gate passes, then the campaign gate fails at the absent `index:nvt-tile:` fixture before any NVT tile constructor or decoder exists.
+- **Frozen contracts:** exact IndexId/tile-start identity, 64-byte tile body, 40-byte sparse entries, fixed-point cell mapping, aligned power-of-two tile spans, basis generation, approximate-count sum, strict relative-cell order, and presence/zero PageId flags.
+- **Independent corpus:** one populated sparse tile plus its exact role-7 ArtifactDirectory leaf under each hash width adds four fixtures, bringing the corpus to 242.
+- **Hint-only proof:** lookup scans backward within the tile; no prior cell falls back to a predecessor tile or first posting page; and a missing, corrupt, out-of-range, or absent PageId always falls back to the pinned posting directory. Basis generations, PageIds, samples within the same cell, and approximate counts may change as identity-protected hint metadata without becoming corruption merely for changing.
+- **Failure proof:** repaired-CRC mutations reject misaligned spans, bad resolution/count formulas, empty tiles, invalid flags/presence, unsorted/out-of-range cells, sample coordinates mapped to another cell, approximate-count disagreement, reserves, and identity/body start mismatch. Full-byte fixture mutation remains covered by the common immutable-artifact test.
+- **Green commands:** standalone `cargo test -j 4 --locked` passed 77 tests; strict standalone Clippy passed; fresh generation and verification passed all 242 fixtures; and the campaign gate passed with 93 routes and 36 docs.
+- **Boundary:** NVT remains explicitly disposable acceleration state. No production query, cache, index builder, fallback scanner, migration, route, or database changed. Mutation journals and task checkpoints are next.

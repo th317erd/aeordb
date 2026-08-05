@@ -25,6 +25,7 @@ enum DirectoryRole {
   ValueDocumentState,
   Posting,
   IndexDocumentState,
+  NvtTile,
 }
 
 impl DirectoryRole {
@@ -36,6 +37,7 @@ impl DirectoryRole {
       Self::ValueDocumentState => 4,
       Self::Posting => 5,
       Self::IndexDocumentState => 6,
+      Self::NvtTile => 7,
     }
   }
 
@@ -47,6 +49,7 @@ impl DirectoryRole {
       4 => Some(Self::ValueDocumentState),
       5 => Some(Self::Posting),
       6 => Some(Self::IndexDocumentState),
+      7 => Some(Self::NvtTile),
       _ => None,
     }
   }
@@ -59,6 +62,7 @@ impl DirectoryRole {
       Self::ValueDocumentState => "value-document-state",
       Self::Posting => "posting",
       Self::IndexDocumentState => "index-document-state",
+      Self::NvtTile => "nvt-tile",
     }
   }
 
@@ -66,7 +70,7 @@ impl DirectoryRole {
     match self {
       Self::ScopeOrdinal | Self::ScopeReverse => 1,
       Self::Value | Self::ValueDocumentState => 2,
-      Self::Posting | Self::IndexDocumentState => 3,
+      Self::Posting | Self::IndexDocumentState | Self::NvtTile => 3,
     }
   }
 
@@ -76,6 +80,7 @@ impl DirectoryRole {
       Self::ScopeReverse => 2,
       Self::Value => 3,
       Self::Posting => 4,
+      Self::NvtTile => 5,
     }
   }
 
@@ -85,11 +90,12 @@ impl DirectoryRole {
       Self::Value => VALUE_PAGE_KIND,
       Self::ValueDocumentState | Self::IndexDocumentState => STATE_PAGE_KIND,
       Self::Posting => POSTING_PAGE_KIND,
+      Self::NvtTile => 0x0032,
     }
   }
 
   fn uses_page_id(self) -> bool {
-    !matches!(self, Self::ScopeOrdinal | Self::ScopeReverse)
+    !matches!(self, Self::ScopeOrdinal | Self::ScopeReverse | Self::NvtTile)
   }
 }
 
@@ -168,6 +174,51 @@ pub(crate) fn fixture_cases() -> Vec<IndexFixtureCase> {
     }
   }
   cases
+}
+
+pub(crate) fn nvt_directory_fixture(
+  profile: HashProfile,
+  owner: &[u8],
+  tile_start_cell: u64,
+  generation: u64,
+  populated_entries: u32,
+  logical_bytes: u64,
+  tile_bytes: &[u8],
+) -> IndexFixtureCase {
+  assert_ne!(populated_entries, 0);
+  let fence = tile_start_cell.to_le_bytes().to_vec();
+  let page = SamplePage {
+    role: DirectoryRole::NvtTile,
+    owner: owner.to_vec(),
+    owner_class: 3,
+    page_id: 0,
+    generation,
+    lower: fence.clone(),
+    upper: fence,
+    live: u64::from(populated_entries),
+    tombstones: 0,
+    logical_bytes,
+    bytes: tile_bytes.to_vec(),
+  };
+  let bytes = build_leaf_directory(profile, &page);
+  let decoded = decode_directory(profile, &bytes).expect("sample NVT directory must decode");
+  IndexFixtureCase {
+    id: leak(format!("aidx-{}-nvt-tile-directory-leaf-valid", profile.label())),
+    format: IndexFormat::IndexArtifactV1,
+    profile,
+    expected: directory_expected(
+      page.role,
+      decoded.level,
+      decoded.entry_count,
+      decoded.live,
+      decoded.pages,
+      decoded.lower.len(),
+      decoded.upper.len(),
+    ),
+    relation: Some("directory:NvtTileV1:sparse-hint-only"),
+    canonical_key: Some(hex::encode(decoded.key)),
+    bytes,
+  }
 }
 
 pub(crate) fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
@@ -959,6 +1010,7 @@ fn decode_records(profile: HashProfile, role: DirectoryRole, bytes: &[u8], count
       DirectoryRole::ScopeOrdinal => decode_scope_ordinal_record(profile, bytes, &mut cursor)?,
       DirectoryRole::ScopeReverse => decode_scope_reverse_record(profile, bytes, &mut cursor)?,
       DirectoryRole::ValueDocumentState | DirectoryRole::IndexDocumentState => decode_state_record(profile, role, bytes, &mut cursor)?,
+      DirectoryRole::NvtTile => return Err("nvt_tile_is_not_an_ordered_page"),
     };
     records.push(record);
   }
@@ -1141,6 +1193,7 @@ fn validate_key(profile: HashProfile, role: DirectoryRole, key: &[u8]) -> Result
     DirectoryRole::ScopeReverse => key.len() == profile.width(),
     DirectoryRole::Value => key.len() == 12,
     DirectoryRole::Posting => key.len() >= 25,
+    DirectoryRole::NvtTile => key.len() == 8,
   };
   if !valid {
     return Err("artifact_key_codec_length");
@@ -1152,7 +1205,7 @@ fn compare_keys(profile: HashProfile, role: DirectoryRole, left: &[u8], right: &
   validate_key(profile, role, left)?;
   validate_key(profile, role, right)?;
   Ok(match role {
-    DirectoryRole::ScopeOrdinal | DirectoryRole::ValueDocumentState | DirectoryRole::IndexDocumentState => {
+    DirectoryRole::ScopeOrdinal | DirectoryRole::ValueDocumentState | DirectoryRole::IndexDocumentState | DirectoryRole::NvtTile => {
       read_u64(left, 0)?.cmp(&read_u64(right, 0)?)
     }
     DirectoryRole::ScopeReverse => left.cmp(right),
@@ -1203,6 +1256,7 @@ fn page_expected(role: DirectoryRole, page_id: u64, records: u32) -> &'static st
     DirectoryRole::ValueDocumentState => format!("index:page:document-state:value-store:page-id={page_id}:records={records}"),
     DirectoryRole::Posting => format!("index:page:posting:page-id={page_id}:records={records}"),
     DirectoryRole::IndexDocumentState => format!("index:page:document-state:index:page-id={page_id}:records={records}"),
+    DirectoryRole::NvtTile => unreachable!("NVT tiles use their own body"),
   };
   leak(value)
 }
@@ -1215,6 +1269,7 @@ fn page_relation(role: DirectoryRole) -> &'static str {
     DirectoryRole::ValueDocumentState => "page:DocumentStatePageV1:ValueStoreId",
     DirectoryRole::Posting => "page:PostingPageV1",
     DirectoryRole::IndexDocumentState => "page:DocumentStatePageV1:IndexId",
+    DirectoryRole::NvtTile => unreachable!("NVT tiles use their own body"),
   }
 }
 

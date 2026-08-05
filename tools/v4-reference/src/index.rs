@@ -1,5 +1,5 @@
 use crate::core::HashProfile;
-use crate::{definitions, field_index, index_pages, value_store};
+use crate::{definitions, field_index, index_nvt, index_pages, value_store};
 
 pub(crate) const AIDX_HEADER_LENGTH: usize = 32;
 const MAX_MANIFEST_LENGTH: usize = 1_048_576;
@@ -135,6 +135,7 @@ pub fn fixture_cases() -> Vec<IndexFixtureCase> {
     }
   }
   cases.extend(index_pages::fixture_cases());
+  cases.extend(index_nvt::fixture_cases());
   cases
 }
 
@@ -160,6 +161,7 @@ pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
       Err(error) => (format!("error:{error}"), None),
     },
     Ok(0x0020 | 0x0030 | 0x0031 | 0x0033 | 0x0034) => index_pages::observe(profile, bytes),
+    Ok(0x0032) => index_nvt::observe(profile, bytes),
     Ok(_) => ("error:index_artifact_kind".to_string(), None),
     Err(error) => (format!("error:{error}"), None),
   }
@@ -170,6 +172,9 @@ pub fn annotation_lines(profile: HashProfile, bytes: &[u8]) -> Vec<String> {
   let h = profile.width();
   if matches!(kind, 0x0020 | 0x0030 | 0x0031 | 0x0033 | 0x0034) {
     return index_pages::annotation_lines(profile, bytes);
+  }
+  if kind == 0x0032 {
+    return index_nvt::annotation_lines(profile, bytes);
   }
   if ManifestKind::from_id(kind).is_some() {
     return vec![

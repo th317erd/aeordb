@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "coverage_stage": "p0b-2-ordered-pages",
+  "coverage_stage": "p0b-2-nvt-tiles",
   "normative_source": {
     "decision_log": ".codex/conversation.md",
     "rounds": [
@@ -1986,11 +1986,11 @@
         "0x0020",
         "0x0030",
         "0x0031",
+        "0x0032",
         "0x0033",
         "0x0034"
       ],
       "pending_body_fixture_kinds": [
-        "0x0032",
         "0x0040",
         "0x0041"
       ],
@@ -2094,9 +2094,9 @@
           "length": 2
         }
       ],
-      "malformed_behavior": "degrade only the affected index; reject unknown kind/version, flags/reserve, zero generation/sequence/IDs, noncanonical slot/role/owner, formula/cap/trailing/CRC/key mismatch, invalid fences/ranks/counts/record order, and equal-sequence pointers with different targets; stale physical hints only disable coalescing",
+      "malformed_behavior": "degrade only the affected index; reject unknown kind/version, flags/reserve, zero generation/sequence/IDs, noncanonical slot/role/owner, formula/cap/trailing/CRC/key mismatch, invalid fences/ranks/counts/record order, invalid sparse cells or sample mappings, and equal-sequence pointers with different targets; stale physical and NVT hints only disable the optimization",
       "trailing_behavior": "artifact_value_length and kind body consume exact bytes",
-      "bounded_decode": "validate the 32-byte envelope and kind cap before allocation; manifests are at most 1 MiB; directory and ordered-page artifacts are at most 4 MiB; record/fence lengths and counts are checked before traversal",
+      "bounded_decode": "validate the 32-byte envelope and kind cap before allocation; manifests are at most 1 MiB; directory, ordered-page, and NVT tile artifacts are at most 4 MiB; record/fence/entry lengths and counts are checked before traversal",
       "producer_owner": "Child 05 index store through Child 01 codec",
       "consumer_owners": [
         "Child 05 index runtime",
@@ -2150,7 +2150,9 @@
         "aidx-blake3-256-posting-directory-leaf-valid",
         "aidx-blake3-256-posting-directory-internal-valid",
         "aidx-blake3-256-index-document-state-page-valid",
-        "aidx-blake3-256-index-document-state-directory-leaf-valid"
+        "aidx-blake3-256-index-document-state-directory-leaf-valid",
+        "aidx-blake3-256-nvt-tile-valid",
+        "aidx-blake3-256-nvt-tile-directory-leaf-valid"
       ],
       "fixture_ids_64": [
         "aidx-sha512-field-index-pointer-a",
@@ -2179,7 +2181,9 @@
         "aidx-sha512-posting-directory-leaf-valid",
         "aidx-sha512-posting-directory-internal-valid",
         "aidx-sha512-index-document-state-page-valid",
-        "aidx-sha512-index-document-state-directory-leaf-valid"
+        "aidx-sha512-index-document-state-directory-leaf-valid",
+        "aidx-sha512-nvt-tile-valid",
+        "aidx-sha512-nvt-tile-directory-leaf-valid"
       ],
       "immutable_manifest_kinds": {
         "0x0010": {
@@ -2295,6 +2299,16 @@
             "0x000e": "posting_count_limit",
             "0x000f": "posting_bytes_limit"
           }
+        },
+        "0x0032": {
+          "name": "NvtTileV1",
+          "identity": "IndexId H || tile_start_cell u64 LE",
+          "body_formula": "64 + populated_entry_count * 40",
+          "entry_formula": "relative_cell u32 || flags u32 || predecessor_page_id u64 || successor_page_id u64 || approximate_live_postings u64 || sample_coordinate u64",
+          "complete_cap": 4194304,
+          "authority": "hint-only; missing, stale, sparse, or corrupt state falls back to the pinned posting ArtifactDirectory",
+          "coordinate_formula": "min(resolution - 1, (u128(coordinate) * resolution) >> 64)",
+          "directory_role": "7 nvt_tile/nvt_cell_u64_v1"
         }
       }
     },
@@ -2509,9 +2523,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 14,
-    "fixture_count": 238,
+    "fixture_count": 242,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, and all ordered page/record roles",
-    "remaining_p0b_2_scope": "NVT tiles, journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven directory roles, all ordered page/record roles, and NvtTileV1",
+    "remaining_p0b_2_scope": "Index journals/checkpoints, GcArtifact, controls, APOS, SystemFamily, remaining maxima, and complete malformed mutation corpus"
   }
 }

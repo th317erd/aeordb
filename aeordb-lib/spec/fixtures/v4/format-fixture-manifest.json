@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p0b-2-ordered-pages",
+  "stage": "p0b-2-nvt-tiles",
   "reference_tool": {
     "name": "aeordb-v4-reference",
-    "revision": "p0b2-ordered-pages-v1",
+    "revision": "p0b2-nvt-tiles-v1",
     "production_dependencies": [],
     "provenance": "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency",
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 238,
+  "fixture_count": 242,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -1451,6 +1451,66 @@
       "canonical_key": "49b3b60ae4fce286eb5fd1ced2be36d4c83509b8671c51f4923d3f5d1515bcfd896a10ba7c4c744c34ae102e0887c8bf560c0024403205628d54b0e3d59e5173",
       "expected": "index:directory:index-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
       "relation": "directory:index-document-state:leaf"
+    },
+    {
+      "id": "aidx-blake3-256-nvt-tile-valid",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "index-artifact-v1/aidx-blake3-256-nvt-tile-valid.bin",
+      "annotated_hex": "index-artifact-v1/aidx-blake3-256-nvt-tile-valid.hex",
+      "byte_length": 220,
+      "sha256": "47837fb0ffc26d6fbeaa1aec4892b64651af8e508a48d76c14acd88dd5f3f6eb",
+      "blake3": "eeba8e0b546d5605a9e2d954216f77f4217bd93d8280484649146bcf2f7c8579",
+      "canonical_key": "48b49e3db00e8bfd182aebc5c1871e86f8973e80e061e6ec16d39ece21c7bfec",
+      "expected": "index:nvt-tile:resolution=65536:start=8192:cells=4096:entries=2:span=3/2048:basis=77:approx=30",
+      "relation": "hint-only:NvtTileV1:never-correctness-authority"
+    },
+    {
+      "id": "aidx-blake3-256-nvt-tile-directory-leaf-valid",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "index-artifact-v1/aidx-blake3-256-nvt-tile-directory-leaf-valid.bin",
+      "annotated_hex": "index-artifact-v1/aidx-blake3-256-nvt-tile-directory-leaf-valid.hex",
+      "byte_length": 286,
+      "sha256": "e79a9415d18490469c4370de2cecf5f4ede55d6094535995173810fe9c4ff514",
+      "blake3": "864a90ef9a7505a16870832daee900df408bbbca006bf7ffe76264fc958eeb65",
+      "canonical_key": "2460de7bbb4169a14730e7433cff5aa478a1cffc61bc9d146bdc7e5ba401672c",
+      "expected": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "relation": "directory:NvtTileV1:sparse-hint-only"
+    },
+    {
+      "id": "aidx-sha512-nvt-tile-valid",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "index-artifact-v1/aidx-sha512-nvt-tile-valid.bin",
+      "annotated_hex": "index-artifact-v1/aidx-sha512-nvt-tile-valid.hex",
+      "byte_length": 252,
+      "sha256": "1bad961de7b8eb4a01d83e77d27a08183bb9d178f0a095fa5864f4978a014208",
+      "blake3": "ddfaf8b6a9a69bde551e8703ff6f9adb985c90b78ffe1308dfe53b1950c94119",
+      "canonical_key": "59ffe79143c22c3418054be664358c3bf53289cc534d3e8aa860c259ea35d7c172d80f463a09ddc2570bf96d2d33f898576ad72eff32f721a5351b7df5aef028",
+      "expected": "index:nvt-tile:resolution=65536:start=8192:cells=4096:entries=2:span=3/2048:basis=77:approx=30",
+      "relation": "hint-only:NvtTileV1:never-correctness-authority"
+    },
+    {
+      "id": "aidx-sha512-nvt-tile-directory-leaf-valid",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "index-artifact-v1/aidx-sha512-nvt-tile-directory-leaf-valid.bin",
+      "annotated_hex": "index-artifact-v1/aidx-sha512-nvt-tile-directory-leaf-valid.hex",
+      "byte_length": 350,
+      "sha256": "ec63423de611dda14ab4919faf6c7ac41372dc63bc55f699b792c8d273da0eef",
+      "blake3": "cddd4721a7e13fc981fc3f2bd595b785a950c6c6d2e2018973ee633257a7aa69",
+      "canonical_key": "6b46a9aee9396fb83e9a4d5c61e17d5697d214a76ae4b16aa0fb76b543da2103d8857d77effbea134761ac0e899ea6d763a4cdac03eb963a91cd8077c863feef",
+      "expected": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "relation": "directory:NvtTileV1:sparse-hint-only"
     },
     {
       "id": "acnv-blake3-256-typed_exact_blake3_v1-valid",

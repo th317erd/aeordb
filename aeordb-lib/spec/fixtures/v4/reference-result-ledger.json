@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-ordered-pages-v1",
+  "tool_revision": "p0b2-nvt-tiles-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -577,6 +577,30 @@
       "fixture_id": "aidx-sha512-index-document-state-directory-leaf-valid",
       "expected": "index:directory:index-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
       "observed": "index:directory:index-document-state:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-nvt-tile-valid",
+      "expected": "index:nvt-tile:resolution=65536:start=8192:cells=4096:entries=2:span=3/2048:basis=77:approx=30",
+      "observed": "index:nvt-tile:resolution=65536:start=8192:cells=4096:entries=2:span=3/2048:basis=77:approx=30",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-nvt-tile-directory-leaf-valid",
+      "expected": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-nvt-tile-valid",
+      "expected": "index:nvt-tile:resolution=65536:start=8192:cells=4096:entries=2:span=3/2048:basis=77:approx=30",
+      "observed": "index:nvt-tile:resolution=65536:start=8192:cells=4096:entries=2:span=3/2048:basis=77:approx=30",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-nvt-tile-directory-leaf-valid",
+      "expected": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
+      "observed": "index:directory:nvt-tile:level=0:entries=1:live=2:pages=1:fences=8/8",
       "result": "pass"
     },
     {
