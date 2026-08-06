@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+use aeordb::engine::memory_coordinator::MemoryOwner;
 use aeordb::engine::query_engine::{
   AggregateQuery, QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, bytes_to_f64, bytes_to_json_value, is_numeric_type,
   ExplainMode,
@@ -106,6 +107,24 @@ fn test_count() {
 
   assert_eq!(result.count, Some(20));
   assert!(!result.has_more);
+}
+
+#[test]
+fn aggregate_results_retain_and_release_their_query_memory_reservation() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_people_engine(&dir);
+  let qe = QueryEngine::new(&engine);
+  let query = make_all_people_query(AggregateQuery { count: true, group_by: vec!["department".to_string()], ..Default::default() }, None);
+
+  let result = qe.execute_aggregate(&query).unwrap();
+  let retained = engine.memory_coordinator_snapshot().unwrap();
+  assert!(retained.owner(MemoryOwner::Query).unwrap().reserved_bytes > 0);
+  assert_eq!(retained.owner(MemoryOwner::Query).unwrap().active_reservations, 1);
+
+  drop(result);
+  let released = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(released.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(released.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
 }
 
 // ============================================================================
@@ -822,20 +841,20 @@ fn test_count_only_no_fields() {
 fn test_aggregate_result_serialization() {
   use serde_json;
 
-  let result = aeordb::engine::query_engine::AggregateResult {
-    count: Some(10),
-    sum: {
+  let result = aeordb::engine::query_engine::AggregateResult::new(
+    Some(10),
+    {
       let mut m = std::collections::HashMap::new();
       m.insert("salary".to_string(), 500000.0);
       m
     },
-    avg: std::collections::HashMap::new(),
-    min: std::collections::HashMap::new(),
-    max: std::collections::HashMap::new(),
-    groups: None,
-    has_more: false,
-    default_limit_hit: false,
-  };
+    std::collections::HashMap::new(),
+    std::collections::HashMap::new(),
+    std::collections::HashMap::new(),
+    None,
+    false,
+    false,
+  );
 
   let json = serde_json::to_value(&result).unwrap();
   assert_eq!(json["count"], serde_json::json!(10));

@@ -1,8 +1,11 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::query_engine::{
   QueryBuilder, QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, should_use_bitmap_compositing, ExplainMode,
 };
+use aeordb::engine::errors::EngineError;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -76,6 +79,87 @@ fn test_query_exact_match() {
 
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].file_record.path, "/users/alice.json");
+}
+
+#[test]
+fn query_results_retain_and_release_their_memory_reservation() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+
+  let baseline = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(baseline.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let results = QueryBuilder::new(&engine, "/users").field("age").gt(&0u64.to_be_bytes()).all().unwrap();
+  assert_eq!(results.len(), 4);
+
+  let retained = engine.memory_coordinator_snapshot().unwrap();
+  let query = retained.owner(MemoryOwner::Query).unwrap();
+  assert!(query.reserved_bytes > 0, "returned query results must retain their reservation");
+  assert_eq!(query.active_reservations, 1);
+
+  drop(results);
+  let released = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(released.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(released.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
+}
+
+#[test]
+fn query_hard_limit_refusal_is_retryable_and_leaks_no_reservation() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let ordinary_limit = before.policy.unwrap().ordinary_limit_bytes();
+  let available = ordinary_limit.saturating_sub(before.accounted_bytes);
+  assert!(available > 1);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - 1, AdmissionClass::Workload).unwrap();
+
+  let error = QueryBuilder::new(&engine, "/users").field("age").gt(&0u64.to_be_bytes()).all().unwrap_err();
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected query error: {error}");
+
+  let refused = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(refused.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(refused.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
+  drop(pressure);
+
+  let retried = QueryBuilder::new(&engine, "/users").field("age").gt(&0u64.to_be_bytes()).all().unwrap();
+  assert_eq!(retried.len(), 4);
+}
+
+#[test]
+fn query_reserves_index_clone_before_exact_lookup_materialization() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let ordinary_limit = before.policy.unwrap().ordinary_limit_bytes();
+  let available = ordinary_limit.saturating_sub(before.accounted_bytes);
+  assert!(available > 8 * 1024);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - (8 * 1024), AdmissionClass::Workload).unwrap();
+
+  let error = QueryBuilder::new(&engine, "/users").field("age").eq(&30u64.to_be_bytes()).all().unwrap_err();
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "index clone was allocated without admission: {error}");
+  let refused = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(refused.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  drop(pressure);
+
+  let retried = QueryBuilder::new(&engine, "/users").field("age").eq(&30u64.to_be_bytes()).all().unwrap();
+  assert_eq!(retried.len(), 1);
+  assert_eq!(retried[0].file_record.path, "/users/alice.json");
+}
+
+#[test]
+fn query_rejects_new_work_after_shutdown_without_leaking_memory() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+  engine.begin_shutdown();
+
+  let error = QueryBuilder::new(&engine, "/users").field("age").gt(&0u64.to_be_bytes()).all().unwrap_err();
+  assert!(matches!(error, EngineError::ShuttingDown), "unexpected query error: {error}");
+
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(snapshot.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(snapshot.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
 }
 
 #[test]
@@ -935,6 +1019,83 @@ fn test_contains_returns_all_substring_matches() {
   assert!(!paths.contains(&"/data/item1.json"), "should not contain Item 1");
   assert!(!paths.contains(&"/data/item3.json"), "should not contain Item 3");
   assert!(!paths.contains(&"/data/item10.json"), "should not contain Item 10");
+}
+
+#[test]
+fn legacy_fuzzy_recheck_reserves_file_and_json_amplification_before_buffering() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/legacy", &config);
+  let padding = "x".repeat(4 * 1024 * 1024);
+  let document = format!(r#"{{"name":"Needle","padding":"{padding}"}}"#);
+  ops.store_file_with_indexing(&ctx, "/legacy/large.json", document.as_bytes(), Some("application/json")).unwrap();
+
+  // Simulate an old index that predates persisted raw values. The fuzzy
+  // recheck must read and parse the source JSON to recover the field value.
+  let manager = IndexManager::new(&engine);
+  let mut index = manager.load_index_by_strategy("/legacy", "name", "trigram").unwrap().unwrap();
+  index.values.clear();
+  manager.save_index("/legacy", &index).unwrap();
+
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let available = before.policy.unwrap().ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  let remaining = 12 * 1024 * 1024;
+  assert!(available > remaining);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let error = QueryBuilder::new(&engine, "/legacy").field("name").contains("Needle").all().unwrap_err();
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "buffered JSON read bypassed admission: {error}");
+  assert_eq!(engine.memory_coordinator_snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  drop(pressure);
+
+  let retried = QueryBuilder::new(&engine, "/legacy").field("name").contains("Needle").all().unwrap();
+  assert_eq!(retried.len(), 1);
+  assert_eq!(retried[0].file_record.path, "/legacy/large.json");
+}
+
+#[test]
+fn fuzzy_recheck_reserves_scoring_scratch_before_string_amplification() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/score-memory", &config);
+  let name = format!("Needle {}", "x".repeat(512 * 1024));
+  let document = serde_json::to_vec(&serde_json::json!({"name": name})).unwrap();
+  ops.store_file_with_indexing(&ctx, "/score-memory/large.json", &document, Some("application/json")).unwrap();
+
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let available = before.policy.unwrap().ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  let remaining = 32 * 1024 * 1024;
+  assert!(available > remaining);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let error = QueryBuilder::new(&engine, "/score-memory").field("name").contains("Needle").all().unwrap_err();
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "fuzzy scorer bypassed memory admission: {error}");
+  assert_eq!(engine.memory_coordinator_snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  drop(pressure);
+
+  let retried = QueryBuilder::new(&engine, "/score-memory").field("name").contains("Needle").all().unwrap();
+  assert_eq!(retried.len(), 1);
+  assert_eq!(retried[0].file_record.path, "/score-memory/large.json");
 }
 
 /// Contains with a single word query should still work.

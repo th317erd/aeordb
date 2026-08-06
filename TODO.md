@@ -179,6 +179,13 @@
         - [x] Prove clean eviction preserves results, dirty indexes never disappear, reservation failures do not change semantics, and migrated owners are not double-counted.
         - [x] Preserve true singleflight result handoff when clean-cache retention is deliberately skipped under pressure.
       - [ ] Reserve query candidates/results/sorts and parser/plugin amplification before growth, with bounded rejection and cancellation paths.
+        - [x] Add one query-work budget that reserves before index clones, lookup scratch, boolean candidate sets, FileRecord results, sort state, aggregate/group state, buffered JSON fallback, and fuzzy scoring scratch.
+        - [x] Retain the final query reservation for the lifetime of embedded/paginated/aggregate results, then release it exactly on drop.
+        - [x] Reject query amplification with retryable `ResourceExhausted` before material allocation; prove failed admission leaves no reservation or semantic state behind.
+        - [ ] Reserve parser envelopes, WASM guest memory, host response copies, mapper input/output, and parsed JSON through `parser_plugin` ownership.
+        - [ ] Bound plugin host reads by guest response capacity before buffering source files, and preserve range extraction as the large-file path.
+        - [ ] Add cancellation checks at bounded query/parser work quanta without changing result correctness.
+        - [ ] Prove exact accounting/release, tiny-budget rejection, malformed plugin output, traps/fuel exhaustion, oversized host reads, and concurrent query/plugin pressure.
       - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.

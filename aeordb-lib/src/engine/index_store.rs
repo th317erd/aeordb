@@ -29,6 +29,8 @@ pub const DEFAULT_INDEX_CACHE_CLEAN_TTL: Duration = Duration::from_secs(5 * 60);
 /// Bounded headroom for NVT rebuild and nested converter/NVT serialization
 /// allocations that coexist with the final publication buffer.
 const INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES: u64 = 64 * 1024;
+const INDEX_LOAD_FIXED_OVERHEAD_BYTES: u64 = 8 * 1024 * 1024;
+const INDEX_LOAD_SERIALIZED_AMPLIFICATION: u64 = 8;
 
 /// A single entry in a field index: maps a scalar to a file's hash.
 #[derive(Debug, Clone)]
@@ -459,6 +461,13 @@ impl SharedIndexWriteBuffer {
       }
       None => Ok(None),
     }
+  }
+
+  fn index_clone_estimate(&self, key: &BufferedIndexKey) -> Option<u64> {
+    if self.deleted_keys.contains(key) {
+      return None;
+    }
+    self.indexes.get(key).map(FieldIndex::estimated_memory_bytes)
   }
 
   fn list_index_names(&self, parent: &str) -> Vec<String> {
@@ -1695,6 +1704,81 @@ impl<'a> IndexManager<'a> {
     self.engine.index_flush_guard.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))
   }
 
+  fn grow_accounted_load(reservation: &mut MemoryReservation, bytes: u64, context: &str) -> EngineResult<()> {
+    reservation.grow(bytes).map_err(|error| SharedIndexWriteBuffer::memory_error(context, error))
+  }
+
+  fn shrink_accounted_load(reservation: &mut MemoryReservation, bytes: u64, context: &str) -> EngineResult<()> {
+    reservation.shrink(bytes).map_err(|error| SharedIndexWriteBuffer::memory_error(context, error))
+  }
+
+  fn buffered_index_clone_accounted(
+    &self,
+    key: &BufferedIndexKey,
+    hash_length: usize,
+    reservation: &mut MemoryReservation,
+  ) -> EngineResult<Option<FieldIndex>> {
+    let mut reserved_for_clone = 0u64;
+    loop {
+      let required = {
+        let buffer = self.lock_buffer()?;
+        buffer.index_clone_estimate(key)
+      };
+      let Some(required) = required else {
+        if reserved_for_clone > 0 {
+          Self::shrink_accounted_load(reservation, reserved_for_clone, "index clone accounting failed")?;
+        }
+        return Ok(None);
+      };
+
+      if required > reserved_for_clone {
+        Self::grow_accounted_load(reservation, required - reserved_for_clone, "index clone admission failed")?;
+        reserved_for_clone = required;
+      }
+
+      let mut buffer = self.lock_buffer()?;
+      let Some(current_required) = buffer.index_clone_estimate(key) else {
+        drop(buffer);
+        Self::shrink_accounted_load(reservation, reserved_for_clone, "index clone accounting failed")?;
+        return Ok(None);
+      };
+      if current_required > reserved_for_clone {
+        continue;
+      }
+      return buffer.get_index_clone(key, hash_length);
+    }
+  }
+
+  fn disk_index_clone_accounted(&self, index_path: &str, reservation: &mut MemoryReservation) -> EngineResult<Option<FieldIndex>> {
+    let ops = DirectoryOps::new(self.engine);
+    let Some(record) = ops.get_metadata(index_path)? else {
+      return Ok(None);
+    };
+    let temporary_bytes = record
+      .total_size
+      .checked_mul(INDEX_LOAD_SERIALIZED_AMPLIFICATION)
+      .and_then(|bytes| bytes.checked_add(INDEX_LOAD_FIXED_OVERHEAD_BYTES))
+      .ok_or_else(|| EngineError::ResourceExhausted("index load memory estimate overflow".to_string()))?;
+    Self::grow_accounted_load(reservation, temporary_bytes, "index disk load admission failed")?;
+
+    let result = match ops.read_file_buffered(index_path) {
+      Ok(data) => {
+        let hash_length = self.engine.hash_algo().hash_length();
+        Some(FieldIndex::deserialize(&data, hash_length)?)
+      }
+      Err(EngineError::NotFound(_)) => None,
+      Err(error) => return Err(error),
+    };
+
+    let retained_bytes = result.as_ref().map_or(0, FieldIndex::estimated_memory_bytes);
+    if retained_bytes > temporary_bytes {
+      Self::grow_accounted_load(reservation, retained_bytes - temporary_bytes, "index retained memory admission failed")?;
+    } else if retained_bytes < temporary_bytes {
+      Self::shrink_accounted_load(reservation, temporary_bytes - retained_bytes, "index load accounting failed")?;
+    }
+    Ok(result)
+  }
+
   fn load_index_legacy_from_disk(&self, path: &str, field_name: &str) -> EngineResult<Option<FieldIndex>> {
     let old_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
@@ -1787,6 +1871,28 @@ impl<'a> IndexManager<'a> {
     Ok(None)
   }
 
+  /// Load an index while charging every retained clone to an existing workload reservation.
+  pub fn load_index_accounted(
+    &self,
+    path: &str,
+    field_name: &str,
+    reservation: &mut MemoryReservation,
+  ) -> EngineResult<Option<FieldIndex>> {
+    let legacy_path = Self::index_file_path_legacy(path, field_name);
+    if let Some(index) = self.disk_index_clone_accounted(&legacy_path, reservation)? {
+      return Ok(Some(index));
+    }
+
+    let indexes = self.list_indexes(path)?;
+    for index_name in &indexes {
+      if index_name.starts_with(&format!("{}.", field_name)) {
+        let strategy = index_name.rsplit_once('.').map(|pair| pair.1).unwrap_or("string");
+        return self.load_index_by_strategy_accounted(path, field_name, strategy, reservation);
+      }
+    }
+    Ok(None)
+  }
+
   /// Load an index by field name and strategy.
   pub fn load_index_by_strategy(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<Option<FieldIndex>> {
     let key = Self::buffer_key(path, field_name, strategy);
@@ -1801,6 +1907,30 @@ impl<'a> IndexManager<'a> {
       }
     }
     self.load_index_by_strategy_from_disk(&key.parent, field_name, strategy)
+  }
+
+  /// Load a strategy index while reserving before either an in-memory deep clone
+  /// or the buffered read/deserialization amplification of an on-disk index.
+  pub fn load_index_by_strategy_accounted(
+    &self,
+    path: &str,
+    field_name: &str,
+    strategy: &str,
+    reservation: &mut MemoryReservation,
+  ) -> EngineResult<Option<FieldIndex>> {
+    let key = Self::buffer_key(path, field_name, strategy);
+    let hash_length = self.engine.hash_algo().hash_length();
+    if let Some(index) = self.buffered_index_clone_accounted(&key, hash_length, reservation)? {
+      return Ok(Some(index));
+    }
+    {
+      let buffer = self.lock_buffer()?;
+      if buffer.deleted_keys.contains(&key) {
+        return Ok(None);
+      }
+    }
+    let index_path = Self::index_file_path(&key.parent, field_name, strategy);
+    self.disk_index_clone_accounted(&index_path, reservation)
   }
 
   /// Buffer an index save to `.indexes/{field_name}.{strategy}.idx` at the given path.
@@ -2197,6 +2327,34 @@ impl<'a> IndexManager<'a> {
       }
     }
 
+    Ok(result)
+  }
+
+  /// Load all strategies for one field while charging each materialized index
+  /// to an existing workload reservation before allocation.
+  pub fn load_indexes_for_field_accounted(
+    &self,
+    path: &str,
+    field_name: &str,
+    reservation: &mut MemoryReservation,
+  ) -> EngineResult<Vec<FieldIndex>> {
+    let indexes = self.list_indexes(path)?;
+    let mut result = Vec::new();
+
+    for index_name in &indexes {
+      let is_match = index_name == field_name || index_name.starts_with(&format!("{}.", field_name));
+      if !is_match {
+        continue;
+      }
+      let strategy = if index_name.contains('.') { index_name.split_once('.').map(|pair| pair.1).unwrap_or("string") } else { "string" };
+      if let Some(index) = self.load_index_by_strategy_accounted(path, field_name, strategy, reservation)? {
+        result.push(index);
+      } else if strategy == "string" {
+        if let Some(index) = self.load_index_accounted(path, field_name, reservation)? {
+          result.push(index);
+        }
+      }
+    }
     Ok(result)
   }
 }

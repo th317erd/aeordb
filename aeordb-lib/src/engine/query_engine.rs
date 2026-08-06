@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use serde::Serialize;
@@ -10,6 +11,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::index_store::{FieldIndex, IndexManager};
 use crate::engine::json_parser::parse_json_fields;
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::nvt_ops::NVTMask;
 use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::scalar_converter::{
@@ -386,6 +388,21 @@ pub struct ExplainResult {
   pub execution: Option<serde_json::Value>,
   #[serde(skip_serializing_if = "Option::is_none", rename = "items")]
   pub results: Option<serde_json::Value>,
+  #[serde(skip)]
+  memory_lease: Option<Arc<QueryMemoryLease>>,
+}
+
+impl ExplainResult {
+  pub fn new(plan: serde_json::Value, execution: Option<serde_json::Value>, results: Option<serde_json::Value>) -> Self {
+    Self { plan, execution, results, memory_lease: None }
+  }
+
+  fn estimated_memory_bytes(&self) -> u64 {
+    std::mem::size_of::<Self>()
+      .saturating_add(estimate_json_value(&self.plan))
+      .saturating_add(self.execution.as_ref().map_or(0, estimate_json_value))
+      .saturating_add(self.results.as_ref().map_or(0, estimate_json_value)) as u64
+  }
 }
 
 /// A complete query against files stored under a given path.
@@ -463,6 +480,74 @@ pub struct AggregateResult {
   /// True if the default limit was applied (no explicit limit provided).
   #[serde(skip_serializing_if = "std::ops::Not::not")]
   pub default_limit_hit: bool,
+  #[serde(skip)]
+  memory_lease: Option<Arc<QueryMemoryLease>>,
+}
+
+impl AggregateResult {
+  pub fn new(
+    count: Option<u64>,
+    sum: HashMap<String, f64>,
+    avg: HashMap<String, f64>,
+    min: HashMap<String, serde_json::Value>,
+    max: HashMap<String, serde_json::Value>,
+    groups: Option<Vec<GroupResult>>,
+    has_more: bool,
+    default_limit_hit: bool,
+  ) -> Self {
+    Self { count, sum, avg, min, max, groups, has_more, default_limit_hit, memory_lease: None }
+  }
+
+  fn estimated_memory_bytes(&self) -> u64 {
+    let mut bytes = std::mem::size_of::<Self>();
+    bytes = bytes.saturating_add(estimate_f64_map(&self.sum));
+    bytes = bytes.saturating_add(estimate_f64_map(&self.avg));
+    bytes = bytes.saturating_add(estimate_json_map(&self.min));
+    bytes = bytes.saturating_add(estimate_json_map(&self.max));
+    if let Some(groups) = &self.groups {
+      bytes = bytes.saturating_add(groups.capacity().saturating_mul(std::mem::size_of::<GroupResult>()));
+      for group in groups {
+        bytes = bytes
+          .saturating_add(estimate_json_map(&group.key))
+          .saturating_add(estimate_f64_map(&group.sum))
+          .saturating_add(estimate_f64_map(&group.avg))
+          .saturating_add(estimate_json_map(&group.min))
+          .saturating_add(estimate_json_map(&group.max));
+      }
+    }
+    bytes as u64
+  }
+}
+
+fn estimate_f64_map(values: &HashMap<String, f64>) -> usize {
+  values
+    .capacity()
+    .saturating_mul(std::mem::size_of::<(String, f64)>().saturating_add(2 * std::mem::size_of::<usize>()))
+    .saturating_add(values.keys().fold(0usize, |total, key| total.saturating_add(key.capacity())))
+}
+
+fn estimate_json_map(values: &HashMap<String, serde_json::Value>) -> usize {
+  values
+    .capacity()
+    .saturating_mul(std::mem::size_of::<(String, serde_json::Value)>().saturating_add(2 * std::mem::size_of::<usize>()))
+    .saturating_add(
+      values.iter().fold(0usize, |total, (key, value)| total.saturating_add(key.capacity()).saturating_add(estimate_json_value(value))),
+    )
+}
+
+fn estimate_json_value(value: &serde_json::Value) -> usize {
+  match value {
+    serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => std::mem::size_of::<serde_json::Value>(),
+    serde_json::Value::String(value) => std::mem::size_of::<serde_json::Value>().saturating_add(value.capacity()),
+    serde_json::Value::Array(values) => values
+      .capacity()
+      .saturating_mul(std::mem::size_of::<serde_json::Value>())
+      .saturating_add(values.iter().fold(0usize, |total, value| total.saturating_add(estimate_json_value(value)))),
+    serde_json::Value::Object(values) => values.iter().fold(
+      values.len().saturating_mul(std::mem::size_of::<(String, serde_json::Value)>().saturating_add(2 * std::mem::size_of::<usize>())),
+      |total, (key, value)| total.saturating_add(key.capacity()).saturating_add(estimate_json_value(value)),
+    ),
+  }
 }
 
 /// A single group in a GROUP BY aggregation result.
@@ -497,6 +582,268 @@ pub struct QueryResult {
   pub score: f64,
   /// Names of the indexes or operations that produced this match.
   pub matched_by: Vec<String>,
+  memory_lease: Option<Arc<QueryMemoryLease>>,
+}
+
+impl QueryResult {
+  pub fn new(file_hash: Vec<u8>, file_record: FileRecord, score: f64, matched_by: Vec<String>) -> Self {
+    Self { file_hash, file_record, score, matched_by, memory_lease: None }
+  }
+
+  fn estimated_memory_bytes(&self) -> u64 {
+    let record = &self.file_record;
+    let chunk_bytes = record.chunk_hashes.iter().fold(0usize, |total, hash| total.saturating_add(hash.capacity()));
+    let chunk_slots = record.chunk_hashes.capacity().saturating_mul(std::mem::size_of::<Vec<u8>>());
+    let matched_bytes = self.matched_by.iter().fold(0usize, |total, value| total.saturating_add(value.capacity()));
+    let matched_slots = self.matched_by.capacity().saturating_mul(std::mem::size_of::<String>());
+    std::mem::size_of::<Self>()
+      .saturating_add(self.file_hash.capacity())
+      .saturating_add(record.path.capacity())
+      .saturating_add(record.content_type.as_ref().map_or(0, String::capacity))
+      .saturating_add(record.metadata.capacity())
+      .saturating_add(record.content_hash.capacity())
+      .saturating_add(chunk_slots)
+      .saturating_add(chunk_bytes)
+      .saturating_add(matched_slots)
+      .saturating_add(matched_bytes) as u64
+  }
+}
+
+struct QueryMemoryLease {
+  reservation: MemoryReservation,
+}
+
+impl std::fmt::Debug for QueryMemoryLease {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.debug_struct("QueryMemoryLease").field("bytes", &self.reservation.bytes()).finish()
+  }
+}
+
+struct QueryMemoryBudget {
+  coordinator: Arc<MemoryCoordinator>,
+  reservation: Option<MemoryReservation>,
+}
+
+impl QueryMemoryBudget {
+  const MINIMUM_WORKSPACE_BYTES: u64 = 4 * 1024;
+
+  fn new(engine: &StorageEngine) -> EngineResult<Self> {
+    let coordinator = engine.memory_coordinator();
+    let reservation = coordinator
+      .reserve(MemoryOwner::Query, Self::MINIMUM_WORKSPACE_BYTES, AdmissionClass::Workload)
+      .map_err(|error| query_memory_error("query workspace admission failed", error))?;
+    Ok(Self { coordinator, reservation: Some(reservation) })
+  }
+
+  fn retain_results(mut self, results: &mut [QueryResult]) -> EngineResult<()> {
+    if results.is_empty() {
+      return Ok(());
+    }
+    let required = results.iter().fold(0u64, |total, result| total.saturating_add(result.estimated_memory_bytes()));
+    let reservation =
+      self.reservation.as_mut().ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its reservation")))?;
+    if required > reservation.bytes() {
+      reservation.grow(required - reservation.bytes()).map_err(|error| query_memory_error("query result admission failed", error))?;
+    } else if required < reservation.bytes() {
+      reservation.shrink(reservation.bytes() - required).map_err(|error| query_memory_error("query result accounting failed", error))?;
+    }
+    let lease = Arc::new(QueryMemoryLease {
+      reservation: self
+        .reservation
+        .take()
+        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final reservation")))?,
+    });
+    for result in results {
+      result.memory_lease = Some(Arc::clone(&lease));
+    }
+    Ok(())
+  }
+
+  fn retain_aggregate(mut self, result: &mut AggregateResult) -> EngineResult<()> {
+    let required = result.estimated_memory_bytes().max(1);
+    let reservation =
+      self.reservation.as_mut().ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its reservation")))?;
+    if required > reservation.bytes() {
+      reservation.grow(required - reservation.bytes()).map_err(|error| query_memory_error("aggregate result admission failed", error))?;
+    } else if required < reservation.bytes() {
+      reservation
+        .shrink(reservation.bytes() - required)
+        .map_err(|error| query_memory_error("aggregate result accounting failed", error))?;
+    }
+    result.memory_lease = Some(Arc::new(QueryMemoryLease {
+      reservation: self
+        .reservation
+        .take()
+        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final reservation")))?,
+    }));
+    Ok(())
+  }
+
+  fn retain_explain(mut self, result: &mut ExplainResult) -> EngineResult<()> {
+    let required = result.estimated_memory_bytes().max(1);
+    let reservation =
+      self.reservation.as_mut().ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its reservation")))?;
+    if required > reservation.bytes() {
+      reservation.grow(required - reservation.bytes()).map_err(|error| query_memory_error("explain result admission failed", error))?;
+    } else if required < reservation.bytes() {
+      reservation.shrink(reservation.bytes() - required).map_err(|error| query_memory_error("explain result accounting failed", error))?;
+    }
+    result.memory_lease = Some(Arc::new(QueryMemoryLease {
+      reservation: self
+        .reservation
+        .take()
+        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final reservation")))?,
+    }));
+    Ok(())
+  }
+
+  fn reservation_mut(&mut self) -> EngineResult<&mut MemoryReservation> {
+    self.reservation.as_mut().ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its reservation")))
+  }
+
+  fn reserve_growth(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    self.reservation_mut()?.grow(bytes).map_err(|error| query_memory_error(context, error))
+  }
+
+  fn reserve_hash_work(&mut self, entries: usize, hash_length: usize, include_lookup_refs: bool) -> EngineResult<()> {
+    let per_hash = std::mem::size_of::<Vec<u8>>()
+      .checked_add(hash_length)
+      .and_then(|bytes| bytes.checked_add(64))
+      .ok_or_else(|| EngineError::ResourceExhausted("query hash work estimate overflow".to_string()))?;
+    let per_entry = if include_lookup_refs {
+      per_hash
+        .checked_add(std::mem::size_of::<&crate::engine::index_store::IndexEntry>())
+        .ok_or_else(|| EngineError::ResourceExhausted("query lookup estimate overflow".to_string()))?
+    } else {
+      per_hash
+    };
+    let bytes = entries
+      .checked_mul(per_entry)
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("query candidate estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "query candidate admission failed")
+  }
+
+  fn reserve_result_slots(&mut self, entries: usize) -> EngineResult<()> {
+    let bytes = entries
+      .checked_mul(std::mem::size_of::<QueryResult>())
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("query result slot estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "query result slot admission failed")
+  }
+
+  fn reserve_file_record_load(&mut self, value_length: u32) -> EngineResult<()> {
+    let bytes = u64::from(value_length)
+      .checked_mul(3)
+      .and_then(|bytes| bytes.checked_add(512))
+      .ok_or_else(|| EngineError::ResourceExhausted("query FileRecord estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "query FileRecord admission failed")
+  }
+
+  fn reserve_listing(&mut self, entries: u64) -> EngineResult<()> {
+    let bytes = entries.checked_mul(512).ok_or_else(|| EngineError::ResourceExhausted("query listing estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "query listing admission failed")
+  }
+
+  fn reserve_stable_sort<T>(&mut self, entries: usize) -> EngineResult<()> {
+    let bytes = entries
+      .checked_add(1)
+      .and_then(|entries| entries.checked_div(2))
+      .and_then(|entries| entries.checked_mul(std::mem::size_of::<T>()))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("query sort estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "query sort admission failed")
+  }
+
+  fn reserve_field_values(&mut self, values: &FieldValueBytes) -> EngineResult<()> {
+    let bytes = values.iter().try_fold(0u64, |total, (hash, value)| {
+      let entry = std::mem::size_of::<(Vec<u8>, Vec<u8>)>()
+        .checked_add(2 * std::mem::size_of::<usize>())
+        .and_then(|bytes| bytes.checked_add(hash.len()))
+        .and_then(|bytes| bytes.checked_add(value.len()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| EngineError::ResourceExhausted("query field-value estimate overflow".to_string()))?;
+      total.checked_add(entry).ok_or_else(|| EngineError::ResourceExhausted("query field-value estimate overflow".to_string()))
+    })?;
+    self.reserve_growth(bytes, "query field-value admission failed")
+  }
+
+  fn reserve_aggregate_groups(&mut self, entries: usize, group_fields: usize, hash_length: usize) -> EngineResult<()> {
+    let key_bytes = group_fields
+      .checked_mul(256)
+      .and_then(|bytes| bytes.checked_add(256))
+      .ok_or_else(|| EngineError::ResourceExhausted("aggregate group estimate overflow".to_string()))?;
+    let per_entry = key_bytes
+      .checked_add(std::mem::size_of::<Vec<u8>>())
+      .and_then(|bytes| bytes.checked_add(hash_length))
+      .and_then(|bytes| bytes.checked_add(64))
+      .ok_or_else(|| EngineError::ResourceExhausted("aggregate group estimate overflow".to_string()))?;
+    let bytes = entries
+      .checked_mul(per_entry)
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("aggregate group estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "aggregate group admission failed")
+  }
+
+  fn reserve_group_results(&mut self, groups: usize, aggregate_fields: usize, group_fields: usize) -> EngineResult<()> {
+    let dynamic_bytes = aggregate_fields
+      .checked_add(group_fields)
+      .and_then(|fields| fields.checked_mul(256))
+      .ok_or_else(|| EngineError::ResourceExhausted("aggregate result estimate overflow".to_string()))?;
+    let per_group = std::mem::size_of::<GroupResult>()
+      .checked_add(dynamic_bytes)
+      .and_then(|bytes| bytes.checked_add(256))
+      .ok_or_else(|| EngineError::ResourceExhausted("aggregate result estimate overflow".to_string()))?;
+    let bytes = groups
+      .checked_mul(per_group)
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("aggregate result estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "aggregate result admission failed")
+  }
+
+  fn buffered_json_amplification_bytes(file_bytes: u64, record_bytes: u32) -> EngineResult<u64> {
+    file_bytes
+      .checked_mul(6)
+      .and_then(|bytes| bytes.checked_add(u64::from(record_bytes).saturating_mul(2)))
+      .and_then(|bytes| bytes.checked_add(1024 * 1024))
+      .ok_or_else(|| EngineError::ResourceExhausted("query buffered JSON estimate overflow".to_string()))
+  }
+
+  fn reserve_temporary(&self, bytes: u64, context: &str) -> EngineResult<MemoryReservation> {
+    self.coordinator.reserve(MemoryOwner::Query, bytes.max(1), AdmissionClass::Workload).map_err(|error| query_memory_error(context, error))
+  }
+
+  fn reserve_fuzzy_score_scratch(&self, operation: &QueryOp, field_value_bytes: usize) -> EngineResult<MemoryReservation> {
+    let query_bytes = match operation {
+      QueryOp::Contains(value)
+      | QueryOp::Similar(value, _)
+      | QueryOp::Phonetic(value)
+      | QueryOp::Fuzzy(value, _)
+      | QueryOp::Match(value) => value.len(),
+      _ => 0,
+    };
+    // Scoring can simultaneously hold Unicode-normalized strings, trigram
+    // hash sets, token vectors, phonetic codes, and the three OSA rows. The
+    // deliberately conservative multiplier admits that transient work before
+    // any of those algorithm-specific allocations begin.
+    let bytes = query_bytes
+      .checked_add(field_value_bytes)
+      .and_then(|bytes| bytes.checked_mul(128))
+      .and_then(|bytes| bytes.checked_add(64 * 1024))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("fuzzy score scratch estimate overflow".to_string()))?;
+    self.reserve_temporary(bytes, "fuzzy score scratch admission failed")
+  }
+}
+
+fn query_memory_error(context: &str, error: MemoryCoordinatorError) -> EngineError {
+  match error {
+    MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. }
+    | MemoryCoordinatorError::PolicyUnavailable => EngineError::ResourceExhausted(format!("{context}: {error}")),
+    _ => EngineError::IoError(std::io::Error::other(format!("{context}: {error}"))),
+  }
 }
 
 /// Determine if a QueryNode tree requires bitmap compositing (Tier 2).
@@ -666,12 +1013,15 @@ impl<'a> QueryEngine<'a> {
   /// Fuzzy queries (Contains, Similar, Phonetic, Fuzzy) use index-based candidate
   /// generation followed by a recheck phase.
   pub fn execute(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
+    let _operation = self.engine.query_operation_guard()?;
     let timer_start = std::time::Instant::now();
-    let mut results = self.execute_internal(query)?;
+    let mut budget = QueryMemoryBudget::new(self.engine)?;
+    let mut results = self.execute_internal(query, &mut budget)?;
 
     // Apply limit (use DEFAULT_QUERY_LIMIT when no explicit limit).
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
     results.truncate(effective_limit);
+    budget.retain_results(&mut results)?;
 
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::QUERY_DURATION).record(elapsed);
@@ -690,15 +1040,17 @@ impl<'a> QueryEngine<'a> {
   /// using a streaming/lazy iterator would avoid this, but requires significant refactoring
   /// of the index evaluation pipeline.
   pub fn execute_paginated(&self, query: &Query) -> EngineResult<PaginatedResult> {
+    let _operation = self.engine.query_operation_guard()?;
     let explicit_limit = query.limit.is_some();
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
+    let mut budget = QueryMemoryBudget::new(self.engine)?;
 
     // Get all results (without limit)
-    let mut all_results = self.execute_internal(query)?;
+    let mut all_results = self.execute_internal(query, &mut budget)?;
 
     // Sort if order_by specified
     if !query.order_by.is_empty() {
-      self.sort_results(&mut all_results, &query.order_by, &query.path)?;
+      self.sort_results(&mut all_results, &query.order_by, &query.path, &mut budget)?;
     }
 
     // Count total before pagination
@@ -712,7 +1064,7 @@ impl<'a> QueryEngine<'a> {
       let cursor_hash_bytes = hex::decode(cursor_hash).map_err(|e| EngineError::JsonParseError(format!("Invalid cursor hash: {}", e)))?;
 
       if let Some(pos) = all_results.iter().position(|r| r.file_hash == cursor_hash_bytes) {
-        all_results = all_results.into_iter().skip(pos + 1).collect();
+        all_results.drain(..=pos);
       }
     }
 
@@ -731,7 +1083,7 @@ impl<'a> QueryEngine<'a> {
     let offset = query.offset.unwrap_or(0);
     if offset > 0 {
       if offset < all_results.len() {
-        all_results = all_results.into_iter().skip(offset).collect();
+        all_results.drain(..offset);
       } else {
         all_results.clear();
       }
@@ -746,7 +1098,7 @@ impl<'a> QueryEngine<'a> {
     let default_limit_hit = !explicit_limit && has_more;
 
     // Build cursors
-    let version_hash = self.engine.head_hash().unwrap_or_default();
+    let version_hash = self.engine.head_hash()?;
 
     let next_cursor = if has_more { all_results.last().map(|last| encode_cursor(last, &query.order_by, &version_hash)) } else { None };
 
@@ -756,18 +1108,24 @@ impl<'a> QueryEngine<'a> {
       None
     };
 
+    budget.retain_results(&mut all_results)?;
+
     Ok(PaginatedResult { results: all_results, total_count, has_more, next_cursor, prev_cursor, default_limit_hit, meta: None })
   }
 
   /// Execute an EXPLAIN query, returning plan info and optionally execution metrics + results.
   pub fn execute_explain(&self, query: &Query) -> EngineResult<ExplainResult> {
+    let _operation = self.engine.query_operation_guard()?;
+    let mut budget = QueryMemoryBudget::new(self.engine)?;
     let index_manager = IndexManager::new(self.engine);
 
     // Build the plan by analyzing the query structure
-    let plan = self.build_plan(query, &index_manager)?;
+    let plan = self.build_plan(query, &index_manager, &mut budget)?;
 
     if query.explain == ExplainMode::Plan {
-      return Ok(ExplainResult { plan, execution: None, results: None });
+      let mut result = ExplainResult::new(plan, None, None);
+      budget.retain_explain(&mut result)?;
+      return Ok(result);
     }
 
     // Analyze mode: execute and time it
@@ -801,16 +1159,18 @@ impl<'a> QueryEngine<'a> {
       "results_returned": result_count,
     });
 
-    Ok(ExplainResult { plan, execution: Some(execution), results: results_json })
+    let mut result = ExplainResult::new(plan, Some(execution), results_json);
+    budget.retain_explain(&mut result)?;
+    Ok(result)
   }
 
   /// Build a query execution plan without running the query.
-  fn build_plan(&self, query: &Query, index_manager: &IndexManager) -> EngineResult<serde_json::Value> {
+  fn build_plan(&self, query: &Query, index_manager: &IndexManager, budget: &mut QueryMemoryBudget) -> EngineResult<serde_json::Value> {
     let mut plan = serde_json::Map::new();
 
     // Analyze the query node tree
     if let Some(ref node) = query.node {
-      plan.insert("query_tree".to_string(), self.explain_node(node, &query.path, index_manager)?);
+      plan.insert("query_tree".to_string(), self.explain_node(node, &query.path, index_manager, budget)?);
       plan.insert("bitmap_compositing".to_string(), serde_json::json!(should_use_bitmap_compositing(node)));
     }
 
@@ -851,7 +1211,13 @@ impl<'a> QueryEngine<'a> {
   }
 
   /// Explain a single query node, showing field info, operation, and index details.
-  fn explain_node(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> EngineResult<serde_json::Value> {
+  fn explain_node(
+    &self,
+    node: &QueryNode,
+    path: &str,
+    index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<serde_json::Value> {
     match node {
       QueryNode::Field(fq) => {
         let op_name = match &fq.operation {
@@ -869,10 +1235,11 @@ impl<'a> QueryEngine<'a> {
 
         let index_field_name = canonical_virtual_field_name(&fq.field_name).unwrap_or(fq.field_name.as_str());
         let mut index_source = path.to_string();
-        let mut indexes = index_manager.load_indexes_for_field(path, index_field_name).unwrap_or_default();
+        let mut indexes = index_manager.load_indexes_for_field_accounted(path, index_field_name, budget.reservation_mut()?)?;
         if indexes.is_empty() && canonical_virtual_field_name(&fq.field_name).is_some() {
           for ancestor in virtual_index_ancestor_paths(path) {
-            let ancestor_indexes = index_manager.load_indexes_for_field(&ancestor, index_field_name).unwrap_or_default();
+            let ancestor_indexes =
+              index_manager.load_indexes_for_field_accounted(&ancestor, index_field_name, budget.reservation_mut()?)?;
             if !ancestor_indexes.is_empty() {
               index_source = ancestor;
               indexes = ancestor_indexes;
@@ -910,16 +1277,16 @@ impl<'a> QueryEngine<'a> {
       }
       QueryNode::And(children) => {
         let child_plans: Vec<serde_json::Value> =
-          children.iter().map(|c| self.explain_node(c, path, index_manager)).collect::<EngineResult<Vec<_>>>()?;
+          children.iter().map(|c| self.explain_node(c, path, index_manager, budget)).collect::<EngineResult<Vec<_>>>()?;
         Ok(serde_json::json!({"type": "and", "children": child_plans}))
       }
       QueryNode::Or(children) => {
         let child_plans: Vec<serde_json::Value> =
-          children.iter().map(|c| self.explain_node(c, path, index_manager)).collect::<EngineResult<Vec<_>>>()?;
+          children.iter().map(|c| self.explain_node(c, path, index_manager, budget)).collect::<EngineResult<Vec<_>>>()?;
         Ok(serde_json::json!({"type": "or", "children": child_plans}))
       }
       QueryNode::Not(child) => {
-        let child_plan = self.explain_node(child, path, index_manager)?;
+        let child_plan = self.explain_node(child, path, index_manager, budget)?;
         Ok(serde_json::json!({"type": "not", "child": child_plan}))
       }
     }
@@ -927,7 +1294,7 @@ impl<'a> QueryEngine<'a> {
 
   /// Internal query execution that returns all matching results without applying limit.
   /// Both `execute()` and `execute_paginated()` delegate to this.
-  fn execute_internal(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
+  fn execute_internal(&self, query: &Query, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<QueryResult>> {
     // Determine which node tree to evaluate.
     let effective_node = if let Some(ref node) = query.node {
       node.clone()
@@ -947,25 +1314,30 @@ impl<'a> QueryEngine<'a> {
 
     // Check for fuzzy operations that can use indexed recheck. Virtual fields
     // without an index keep their scan fallback for backwards compatibility.
-    if self.should_use_recheck_path(&effective_node, &query.path, &index_manager) {
-      return self.execute_with_recheck_internal(query, &effective_node);
+    if self.should_use_recheck_path(&effective_node, &query.path, &index_manager, budget)? {
+      return self.execute_with_recheck_internal(query, &effective_node, budget);
     }
 
     let result_hashes = if should_use_bitmap_compositing(&effective_node) {
-      self.execute_tier2(&effective_node, &query.path, &index_manager)?
+      self.execute_tier2(&effective_node, &query.path, &index_manager, budget)?
     } else {
-      self.evaluate_node(&effective_node, &query.path, &index_manager)?
+      self.evaluate_node(&effective_node, &query.path, &index_manager, budget)?
     };
 
     // Load FileRecords for candidates.
     let hash_length = self.engine.hash_algo().hash_length();
-    let mut results = Vec::new();
+    budget.reserve_result_slots(result_hashes.len())?;
+    let mut results = Vec::with_capacity(result_hashes.len());
 
     for file_hash in result_hashes {
+      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+        continue;
+      };
+      budget.reserve_file_record_load(preflight_header.value_length)?;
       match self.engine.get_entry(&file_hash) {
         Ok(Some((header, _key, value))) => {
           let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-          results.push(QueryResult { file_hash, file_record, score: 1.0, matched_by: vec![] });
+          results.push(QueryResult::new(file_hash, file_record, 1.0, vec![]));
         }
         Ok(None) => continue, // stale index entry, skip
         Err(error) => return Err(error),
@@ -978,7 +1350,13 @@ impl<'a> QueryEngine<'a> {
   /// Sort results by the specified order_by fields.
   /// Supports virtual @fields (score, path, size, created_at, updated_at) and
   /// indexed fields with order-preserving converters.
-  fn sort_results(&self, results: &mut Vec<QueryResult>, order_by: &[SortField], path: &str) -> EngineResult<()> {
+  fn sort_results(
+    &self,
+    results: &mut Vec<QueryResult>,
+    order_by: &[SortField],
+    path: &str,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<()> {
     if order_by.is_empty() || results.is_empty() {
       return Ok(());
     }
@@ -999,7 +1377,7 @@ impl<'a> QueryEngine<'a> {
       if sf.field.starts_with('@') {
         sort_fields.push(SortData { values: HashMap::new(), is_virtual: true, field: sf.field.clone(), direction: sf.direction.clone() });
       } else {
-        let indexes = index_manager.load_indexes_for_field(path, &sf.field)?;
+        let indexes = index_manager.load_indexes_for_field_accounted(path, &sf.field, budget.reservation_mut()?)?;
         let index = indexes.into_iter().find(|idx| idx.converter.is_order_preserving()).ok_or_else(|| {
           EngineError::NotFound(format!(
             "Cannot sort by field '{}' — no order-preserving index found. \
@@ -1011,6 +1389,8 @@ impl<'a> QueryEngine<'a> {
         sort_fields.push(SortData { values: index.values, is_virtual: false, field: sf.field.clone(), direction: sf.direction.clone() });
       }
     }
+
+    budget.reserve_stable_sort::<QueryResult>(results.len())?;
 
     results.sort_by(|a, b| {
       for sd in &sort_fields {
@@ -1025,8 +1405,8 @@ impl<'a> QueryEngine<'a> {
             _ => std::cmp::Ordering::Equal,
           }
         } else {
-          let va = sd.values.get(&a.file_hash).cloned().unwrap_or_default();
-          let vb = sd.values.get(&b.file_hash).cloned().unwrap_or_default();
+          let va = sd.values.get(&a.file_hash).map(Vec::as_slice).unwrap_or_default();
+          let vb = sd.values.get(&b.file_hash).map(Vec::as_slice).unwrap_or_default();
           va.cmp(&vb)
         };
 
@@ -1050,22 +1430,35 @@ impl<'a> QueryEngine<'a> {
   /// NOT, which requires the full universe). The bitmap mask computation was
   /// removed as it was unused -- when bitmap pruning is needed for large
   /// datasets, re-introduce evaluate_node_as_mask here as a pre-filter.
-  fn execute_tier2(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
-    self.evaluate_node(node, path, index_manager)
+  fn execute_tier2(
+    &self,
+    node: &QueryNode,
+    path: &str,
+    index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    self.evaluate_node(node, path, index_manager, budget)
   }
 
   /// Tier 1: Recursively evaluate a QueryNode tree using direct scalar lookups,
   /// returning matching file hashes.
-  fn evaluate_node(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
+  fn evaluate_node(
+    &self,
+    node: &QueryNode,
+    path: &str,
+    index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
     match node {
-      QueryNode::Field(field_query) => self.evaluate_field_query(field_query, path, index_manager),
+      QueryNode::Field(field_query) => self.evaluate_field_query(field_query, path, index_manager, budget),
       QueryNode::And(children) => {
         if children.is_empty() {
           return Ok(HashSet::new());
         }
-        let mut result = self.evaluate_node(&children[0], path, index_manager)?;
+        let mut result = self.evaluate_node(&children[0], path, index_manager, budget)?;
         for child in &children[1..] {
-          let child_set = self.evaluate_node(child, path, index_manager)?;
+          let child_set = self.evaluate_node(child, path, index_manager, budget)?;
+          budget.reserve_hash_work(result.len().min(child_set.len()), self.engine.hash_algo().hash_length(), false)?;
           result = result.intersection(&child_set).cloned().collect();
         }
         Ok(result)
@@ -1073,7 +1466,8 @@ impl<'a> QueryEngine<'a> {
       QueryNode::Or(children) => {
         let mut result = HashSet::new();
         for child in children {
-          let child_set = self.evaluate_node(child, path, index_manager)?;
+          let child_set = self.evaluate_node(child, path, index_manager, budget)?;
+          budget.reserve_hash_work(result.len().saturating_add(child_set.len()), self.engine.hash_algo().hash_length(), false)?;
           result = result.union(&child_set).cloned().collect();
         }
         Ok(result)
@@ -1087,22 +1481,29 @@ impl<'a> QueryEngine<'a> {
         // in the Tier 2 mask compositing path) avoids this allocation. The bitmap path
         // handles NOT via bitwise negation — this fallback is only hit for Tier 3
         // (non-indexed field queries).
-        let child_set = self.evaluate_node(child, path, index_manager)?;
-        let all_hashes = self.collect_all_hashes(path, index_manager)?;
+        let child_set = self.evaluate_node(child, path, index_manager, budget)?;
+        let all_hashes = self.collect_all_hashes(path, index_manager, budget)?;
+        budget.reserve_hash_work(all_hashes.len(), self.engine.hash_algo().hash_length(), false)?;
         Ok(all_hashes.difference(&child_set).cloned().collect())
       }
     }
   }
 
   /// Evaluate a single FieldQuery leaf against the index (or virtual field scan).
-  fn evaluate_field_query(&self, field_query: &FieldQuery, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
+  fn evaluate_field_query(
+    &self,
+    field_query: &FieldQuery,
+    path: &str,
+    index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
     // Virtual fields first try their configured indexes. If no matching index
     // exists, they fall back to scanning FileRecord metadata for compatibility.
     if canonical_virtual_field_name(&field_query.field_name).is_some() {
-      return self.evaluate_virtual_field_query(field_query, path, index_manager);
+      return self.evaluate_virtual_field_query(field_query, path, index_manager, budget);
     }
 
-    self.evaluate_indexed_field_query(field_query, path, index_manager)
+    self.evaluate_indexed_field_query(field_query, path, index_manager, budget)
   }
 
   fn evaluate_indexed_field_query(
@@ -1110,22 +1511,25 @@ impl<'a> QueryEngine<'a> {
     field_query: &FieldQuery,
     path: &str,
     index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     match &field_query.operation {
       QueryOp::Eq(value) => {
-        return self.evaluate_exact_field_values(&field_query.field_name, path, std::slice::from_ref(value), index_manager)
+        return self.evaluate_exact_field_values(&field_query.field_name, path, std::slice::from_ref(value), index_manager, budget)
       }
-      QueryOp::In(values) => return self.evaluate_exact_field_values(&field_query.field_name, path, values, index_manager),
+      QueryOp::In(values) => return self.evaluate_exact_field_values(&field_query.field_name, path, values, index_manager, budget),
       _ => {}
     }
 
-    let index = index_manager.load_index(path, &field_query.field_name)?;
+    let index = index_manager.load_index_accounted(path, &field_query.field_name, budget.reservation_mut()?)?;
     let mut index = match index {
       Some(index) => index,
       None => {
         return Err(EngineError::NotFound(format!("Index not found for field '{}' at path '{}'", field_query.field_name, path,)));
       }
     };
+
+    budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), true)?;
 
     let matching_entries = match &field_query.operation {
       QueryOp::Eq(value) => index.lookup_exact(value).into_iter().map(|entry| entry.file_hash.clone()).collect::<HashSet<Vec<u8>>>(),
@@ -1154,13 +1558,19 @@ impl<'a> QueryEngine<'a> {
     path: &str,
     values: &[Vec<u8>],
     index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
-    let mut indexes = index_manager.load_indexes_for_field(path, field_name)?;
+    let mut indexes = index_manager.load_indexes_for_field_accounted(path, field_name, budget.reservation_mut()?)?;
     if indexes.is_empty() {
       return Err(EngineError::NotFound(format!("Index not found for field '{}' at path '{}'", field_name, path,)));
     }
 
     let mut result = HashSet::new();
+    let total_entries = indexes
+      .iter()
+      .try_fold(0usize, |total, index| total.checked_add(index.entries.len()))
+      .ok_or_else(|| EngineError::ResourceExhausted("query exact candidate count overflow".to_string()))?;
+    budget.reserve_hash_work(total_entries, self.engine.hash_algo().hash_length(), true)?;
     let has_exact_capable_index = indexes.iter().any(|index| index.supports_scalar_exact_lookup());
 
     if has_exact_capable_index {
@@ -1189,16 +1599,17 @@ impl<'a> QueryEngine<'a> {
 
   /// Collect all file hashes from all indexed fields at a path.
   /// Used as the "universe" for NOT operations.
-  fn collect_all_hashes(&self, path: &str, index_manager: &IndexManager) -> EngineResult<HashSet<Vec<u8>>> {
+  fn collect_all_hashes(&self, path: &str, index_manager: &IndexManager, budget: &mut QueryMemoryBudget) -> EngineResult<HashSet<Vec<u8>>> {
     let field_names = index_manager.list_indexes(path)?;
     let mut all_hashes = HashSet::new();
     for index_name in &field_names {
       let loaded = if let Some((field_name, strategy)) = index_name.rsplit_once('.') {
-        index_manager.load_index_by_strategy(path, field_name, strategy)?
+        index_manager.load_index_by_strategy_accounted(path, field_name, strategy, budget.reservation_mut()?)?
       } else {
-        index_manager.load_index(path, index_name)?
+        index_manager.load_index_accounted(path, index_name, budget.reservation_mut()?)?
       };
       if let Some(index) = loaded {
+        budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), false)?;
         for entry in &index.entries {
           all_hashes.insert(entry.file_hash.clone());
         }
@@ -1218,6 +1629,7 @@ impl<'a> QueryEngine<'a> {
     field_query: &FieldQuery,
     path: &str,
     index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     let Some(field_name) = canonical_virtual_field_name(&field_query.field_name) else {
       return Err(EngineError::InvalidInput(format!(
@@ -1228,7 +1640,7 @@ impl<'a> QueryEngine<'a> {
     };
 
     if matches!(field_query.operation, QueryOp::Eq(_) | QueryOp::In(_) | QueryOp::Gt(_) | QueryOp::Lt(_) | QueryOp::Between(_, _)) {
-      match self.evaluate_indexed_virtual_field_query(field_query, field_name, path, index_manager) {
+      match self.evaluate_indexed_virtual_field_query(field_query, field_name, path, index_manager, budget) {
         Ok(result) => return Ok(result),
         Err(EngineError::NotFound(_)) => {}
         Err(error) => return Err(error),
@@ -1236,7 +1648,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     if is_recheck_operation(&field_query.operation) {
-      match self.evaluate_virtual_recheck_field_query(field_query, field_name, path, index_manager) {
+      match self.evaluate_virtual_recheck_field_query(field_query, field_name, path, index_manager, budget) {
         Ok(result) => return Ok(result),
         Err(EngineError::NotFound(_)) => {}
         Err(error) => return Err(error),
@@ -1244,6 +1656,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     // Collect all files under the query path via recursive directory listing.
+    budget.reserve_listing(self.engine.counters().snapshot().files)?;
     let listing = match list_directory_recursive(self.engine, path, -1, None, None) {
       Ok(entries) => entries,
       Err(EngineError::NotFound(_)) => return Ok(HashSet::new()),
@@ -1251,6 +1664,7 @@ impl<'a> QueryEngine<'a> {
     };
 
     let hash_length = self.engine.hash_algo().hash_length();
+    budget.reserve_hash_work(listing.len(), hash_length, false)?;
     let mut matching_hashes = HashSet::new();
 
     for entry in &listing {
@@ -1260,10 +1674,14 @@ impl<'a> QueryEngine<'a> {
       }
 
       // Load the full FileRecord from the entry hash.
+      let Some(preflight_header) = self.engine.get_entry_header(&entry.hash)? else {
+        continue;
+      };
+      budget.reserve_file_record_load(preflight_header.value_length)?;
       let file_record = match self.engine.get_entry(&entry.hash) {
         Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
         Ok(None) => continue,
-        Err(_) => continue,
+        Err(error) => return Err(error),
       };
 
       let matches = self.virtual_field_matches(field_name, &file_record, &field_query.operation)?;
@@ -1281,9 +1699,10 @@ impl<'a> QueryEngine<'a> {
     field_name: &str,
     path: &str,
     index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     let indexed_query = FieldQuery { field_name: field_name.to_string(), operation: field_query.operation.clone() };
-    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(&indexed_query, path, index_manager)?;
+    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(&indexed_query, path, index_manager, budget)?;
     if candidates.is_empty() && candidate_values.is_empty() {
       return Err(EngineError::NotFound(format!("No recheck index found for virtual field '{}' at '{}'", field_name, path)));
     }
@@ -1292,6 +1711,10 @@ impl<'a> QueryEngine<'a> {
     let mut matching_hashes = HashSet::new();
 
     for file_hash in candidates {
+      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+        continue;
+      };
+      budget.reserve_file_record_load(preflight_header.value_length)?;
       let Some((header, _key, value)) = self.engine.get_entry(&file_hash)? else {
         continue;
       };
@@ -1305,6 +1728,7 @@ impl<'a> QueryEngine<'a> {
         continue;
       };
 
+      let _score_memory = budget.reserve_fuzzy_score_scratch(&field_query.operation, field_value.len())?;
       let (score, _strategy) = self.compute_score(&field_query.operation, &field_value)?;
       if score > 0.0 {
         matching_hashes.insert(file_hash);
@@ -1320,22 +1744,23 @@ impl<'a> QueryEngine<'a> {
     field_name: &str,
     path: &str,
     index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     let indexed_query = FieldQuery { field_name: field_name.to_string(), operation: field_query.operation.clone() };
 
-    match self.evaluate_indexed_field_query(&indexed_query, path, index_manager) {
+    match self.evaluate_indexed_field_query(&indexed_query, path, index_manager, budget) {
       Ok(result) => return Ok(result),
       Err(EngineError::NotFound(_)) => {}
       Err(error) => return Err(error),
     }
 
     for ancestor in virtual_index_ancestor_paths(path) {
-      if !self.field_has_index(&ancestor, field_name, index_manager) {
+      if !self.field_has_index(&ancestor, field_name, index_manager, budget)? {
         continue;
       }
 
-      match self.evaluate_indexed_field_query(&indexed_query, &ancestor, index_manager) {
-        Ok(result) => return self.filter_hashes_to_query_path(result, path),
+      match self.evaluate_indexed_field_query(&indexed_query, &ancestor, index_manager, budget) {
+        Ok(result) => return self.filter_hashes_to_query_path(result, path, budget),
         Err(EngineError::NotFound(_)) => continue,
         Err(error) => return Err(error),
       }
@@ -1344,15 +1769,25 @@ impl<'a> QueryEngine<'a> {
     Err(EngineError::NotFound(format!("Index not found for virtual field '{}' at path '{}' or its ancestors", field_name, path)))
   }
 
-  fn filter_hashes_to_query_path(&self, hashes: HashSet<Vec<u8>>, query_path: &str) -> EngineResult<HashSet<Vec<u8>>> {
+  fn filter_hashes_to_query_path(
+    &self,
+    hashes: HashSet<Vec<u8>>,
+    query_path: &str,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
     let normalized_query_path = normalize_path(query_path);
     if normalized_query_path == "/" {
       return Ok(hashes);
     }
 
     let hash_length = self.engine.hash_algo().hash_length();
+    budget.reserve_hash_work(hashes.len(), hash_length, false)?;
     let mut filtered = HashSet::new();
     for file_hash in hashes {
+      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+        continue;
+      };
+      budget.reserve_file_record_load(preflight_header.value_length)?;
       let Some((header, _key, value)) = self.engine.get_entry(&file_hash)? else {
         continue;
       };
@@ -1559,22 +1994,28 @@ impl<'a> QueryEngine<'a> {
     }
   }
 
-  fn should_use_recheck_path(&self, node: &QueryNode, path: &str, index_manager: &IndexManager) -> bool {
+  fn should_use_recheck_path(
+    &self,
+    node: &QueryNode,
+    path: &str,
+    index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<bool> {
     match node {
       QueryNode::Field(fq) => {
         if !is_recheck_operation(&fq.operation) {
-          return false;
+          return Ok(false);
         }
         match canonical_virtual_field_name(&fq.field_name) {
-          Some(field_name) => self.field_has_index_at_path_or_ancestors(path, field_name, index_manager),
-          None => true,
+          Some(field_name) => self.field_has_index_at_path_or_ancestors(path, field_name, index_manager, budget),
+          None => Ok(true),
         }
       }
       // Non-virtual fuzzy queries already require the recheck path. Virtual
       // fuzzy filters inside complex boolean nodes keep their scan fallback so
       // existing virtual-field boolean queries do not become single-field-only.
-      QueryNode::And(children) | QueryNode::Or(children) => children.iter().any(|child| self.node_has_non_virtual_recheck_ops(child)),
-      QueryNode::Not(child) => self.node_has_non_virtual_recheck_ops(child),
+      QueryNode::And(children) | QueryNode::Or(children) => Ok(children.iter().any(|child| self.node_has_non_virtual_recheck_ops(child))),
+      QueryNode::Not(child) => Ok(self.node_has_non_virtual_recheck_ops(child)),
     }
   }
 
@@ -1591,16 +2032,33 @@ impl<'a> QueryEngine<'a> {
     }
   }
 
-  fn field_has_index(&self, path: &str, field_name: &str, index_manager: &IndexManager) -> bool {
-    index_manager.load_indexes_for_field(path, field_name).map(|indexes| !indexes.is_empty()).unwrap_or(false)
+  fn field_has_index(
+    &self,
+    path: &str,
+    field_name: &str,
+    index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<bool> {
+    index_manager.load_indexes_for_field_accounted(path, field_name, budget.reservation_mut()?).map(|indexes| !indexes.is_empty())
   }
 
-  fn field_has_index_at_path_or_ancestors(&self, path: &str, field_name: &str, index_manager: &IndexManager) -> bool {
-    if self.field_has_index(path, field_name, index_manager) {
-      return true;
+  fn field_has_index_at_path_or_ancestors(
+    &self,
+    path: &str,
+    field_name: &str,
+    index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<bool> {
+    if self.field_has_index(path, field_name, index_manager, budget)? {
+      return Ok(true);
     }
 
-    virtual_index_ancestor_paths(path).iter().any(|ancestor| self.field_has_index(ancestor, field_name, index_manager))
+    for ancestor in virtual_index_ancestor_paths(path) {
+      if self.field_has_index(&ancestor, field_name, index_manager, budget)? {
+        return Ok(true);
+      }
+    }
+    Ok(false)
   }
 
   fn load_index_by_strategy_for_query(
@@ -1610,14 +2068,15 @@ impl<'a> QueryEngine<'a> {
     strategy: &str,
     index_manager: &IndexManager,
     include_ancestors: bool,
+    budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Option<FieldIndex>> {
-    if let Some(index) = index_manager.load_index_by_strategy(path, field_name, strategy)? {
+    if let Some(index) = index_manager.load_index_by_strategy_accounted(path, field_name, strategy, budget.reservation_mut()?)? {
       return Ok(Some(index));
     }
 
     if include_ancestors {
       for ancestor in virtual_index_ancestor_paths(path) {
-        if let Some(index) = index_manager.load_index_by_strategy(&ancestor, field_name, strategy)? {
+        if let Some(index) = index_manager.load_index_by_strategy_accounted(&ancestor, field_name, strategy, budget.reservation_mut()?)? {
           return Ok(Some(index));
         }
       }
@@ -1629,7 +2088,12 @@ impl<'a> QueryEngine<'a> {
   /// Execute a query containing fuzzy operations with a recheck phase.
   /// Currently supports single-field fuzzy queries (the common case).
   /// Values are loaded from the index's values map instead of re-reading files.
-  fn execute_with_recheck_internal(&self, query: &Query, effective_node: &QueryNode) -> EngineResult<Vec<QueryResult>> {
+  fn execute_with_recheck_internal(
+    &self,
+    query: &Query,
+    effective_node: &QueryNode,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<Vec<QueryResult>> {
     let index_manager = IndexManager::new(self.engine);
     let hash_length = self.engine.hash_algo().hash_length();
     let ops = DirectoryOps::new(self.engine);
@@ -1643,21 +2107,28 @@ impl<'a> QueryEngine<'a> {
     };
 
     // Get candidates AND values from the appropriate index
-    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(field_query, &query.path, &index_manager)?;
+    let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(field_query, &query.path, &index_manager, budget)?;
 
     // Recheck phase: get field value from index, compute score
-    let mut results = Vec::new();
+    budget.reserve_result_slots(candidates.len())?;
+    let mut results = Vec::with_capacity(candidates.len());
 
     for file_hash in candidates {
       // Load the FileRecord for the result
+      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+        continue;
+      };
+      budget.reserve_file_record_load(preflight_header.value_length)?;
       let file_record = match self.engine.get_entry(&file_hash) {
         Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
-        _ => continue,
+        Ok(None) => continue,
+        Err(error) => return Err(error),
       };
 
       // Try to get value from index first. Virtual fields can derive their
       // fallback directly from FileRecord metadata; normal fields fall back to
       // loading/parsing the file body when an old index has no values map.
+      let mut fallback_memory = None;
       let field_value = if let Some(value_bytes) = candidate_values.get(&file_hash) {
         String::from_utf8_lossy(value_bytes).to_string()
       } else if let Some(field_name) = canonical_virtual_field_name(&field_query.field_name) {
@@ -1667,10 +2138,11 @@ impl<'a> QueryEngine<'a> {
         }
       } else {
         // Fallback: load file and parse as JSON (for native JSON files without values in index)
-        let (_file_record, file_data) = match self.load_file_with_data(&file_hash, hash_length, &ops)? {
-          Some(pair) => pair,
+        let (_file_record, file_data, memory) = match self.load_file_with_data(&file_hash, hash_length, &ops, budget)? {
+          Some(parts) => parts,
           None => continue,
         };
+        fallback_memory = Some(memory);
         match self.extract_field_value(&file_data, &field_query.field_name) {
           Some(v) => v,
           None => continue,
@@ -1678,19 +2150,22 @@ impl<'a> QueryEngine<'a> {
       };
 
       // Compute score based on operation
+      let _score_memory = budget.reserve_fuzzy_score_scratch(&field_query.operation, field_value.len())?;
       let (score, strategy) = self.compute_score(&field_query.operation, &field_value)?;
+      drop(fallback_memory);
 
       if score > 0.0 {
-        results.push(QueryResult {
+        results.push(QueryResult::new(
           file_hash,
           file_record,
           score,
-          matched_by: strategy.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
-        });
+          strategy.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
+        ));
       }
     }
 
     // Sort by score descending
+    budget.reserve_stable_sort::<QueryResult>(results.len())?;
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(results)
@@ -1702,6 +2177,7 @@ impl<'a> QueryEngine<'a> {
     field_query: &FieldQuery,
     path: &str,
     index_manager: &IndexManager,
+    budget: &mut QueryMemoryBudget,
   ) -> EngineResult<FuzzyCandidates> {
     let mut all_values: FieldValueBytes = HashMap::new();
     let index_field_name = canonical_virtual_field_name(&field_query.field_name).unwrap_or(field_query.field_name.as_str());
@@ -1710,15 +2186,19 @@ impl<'a> QueryEngine<'a> {
     match &field_query.operation {
       QueryOp::Contains(query_str) | QueryOp::Similar(query_str, _) | QueryOp::Fuzzy(query_str, _) => {
         // Use trigram index for candidates
-        let mut index = match self.load_index_by_strategy_for_query(path, index_field_name, "trigram", index_manager, is_virtual_field)? {
-          Some(idx) => idx,
-          None => {
-            return Err(EngineError::NotFound(format!("Trigram index not found for field '{}' at '{}'", field_query.field_name, path,)));
-          }
-        };
+        let mut index =
+          match self.load_index_by_strategy_for_query(path, index_field_name, "trigram", index_manager, is_virtual_field, budget)? {
+            Some(idx) => idx,
+            None => {
+              return Err(EngineError::NotFound(format!("Trigram index not found for field '{}' at '{}'", field_query.field_name, path,)));
+            }
+          };
 
         let converter = TrigramConverter;
         let mut candidates = HashSet::new();
+        budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), true)?;
+        budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), false)?;
+        budget.reserve_field_values(&index.values)?;
 
         if matches!(&field_query.operation, QueryOp::Contains(_)) {
           // For Contains (substring) queries, we need trigrams that will match
@@ -1785,7 +2265,7 @@ impl<'a> QueryEngine<'a> {
         // Collect values from this index
         all_values.extend(index.values.drain());
         if is_virtual_field {
-          candidates = self.filter_hashes_to_query_path(candidates, path)?;
+          candidates = self.filter_hashes_to_query_path(candidates, path, budget)?;
         }
 
         Ok((candidates, all_values))
@@ -1801,9 +2281,11 @@ impl<'a> QueryEngine<'a> {
 
         for strategy in &strategies {
           if let Some(mut index) =
-            self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field)?
+            self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field, budget)?
           {
             found_any_index = true;
+            budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), true)?;
+            budget.reserve_field_values(&index.values)?;
 
             for word in &query_words {
               let code = match *strategy {
@@ -1835,7 +2317,7 @@ impl<'a> QueryEngine<'a> {
           return Err(EngineError::NotFound(format!("No phonetic index found for field '{}' at '{}'", field_query.field_name, path,)));
         }
         if is_virtual_field {
-          candidates = self.filter_hashes_to_query_path(candidates, path)?;
+          candidates = self.filter_hashes_to_query_path(candidates, path, budget)?;
         }
 
         Ok((candidates, all_values))
@@ -1845,8 +2327,10 @@ impl<'a> QueryEngine<'a> {
 
         // Try trigram index
         if let Some(mut index) =
-          self.load_index_by_strategy_for_query(path, index_field_name, "trigram", index_manager, is_virtual_field)?
+          self.load_index_by_strategy_for_query(path, index_field_name, "trigram", index_manager, is_virtual_field, budget)?
         {
+          budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), true)?;
+          budget.reserve_field_values(&index.values)?;
           let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
           let converter = TrigramConverter;
           for trigram in &trigrams {
@@ -1864,8 +2348,10 @@ impl<'a> QueryEngine<'a> {
         let phonetic_strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
         for strategy in &phonetic_strategies {
           if let Some(mut index) =
-            self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field)?
+            self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field, budget)?
           {
+            budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), true)?;
+            budget.reserve_field_values(&index.values)?;
             for word in &query_words {
               let code = match *strategy {
                 "soundex" => crate::engine::phonetic::soundex(word),
@@ -1889,7 +2375,11 @@ impl<'a> QueryEngine<'a> {
         }
 
         // Try exact match via string index
-        if let Some(mut index) = self.load_index_by_strategy_for_query(path, index_field_name, "string", index_manager, is_virtual_field)? {
+        if let Some(mut index) =
+          self.load_index_by_strategy_for_query(path, index_field_name, "string", index_manager, is_virtual_field, budget)?
+        {
+          budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), true)?;
+          budget.reserve_field_values(&index.values)?;
           let entries = index.lookup_exact(query_str.as_bytes());
           for entry in entries {
             candidates.insert(entry.file_hash.clone());
@@ -1897,7 +2387,7 @@ impl<'a> QueryEngine<'a> {
           all_values.extend(index.values.drain());
         }
         if is_virtual_field {
-          candidates = self.filter_hashes_to_query_path(candidates, path)?;
+          candidates = self.filter_hashes_to_query_path(candidates, path, budget)?;
         }
 
         Ok((candidates, all_values))
@@ -1908,13 +2398,24 @@ impl<'a> QueryEngine<'a> {
 
   /// Load a file's FileRecord and raw data from its hash.
   /// Used as a fallback for native JSON files whose values are not in the index.
-  fn load_file_with_data(&self, file_hash: &[u8], hash_length: usize, ops: &DirectoryOps) -> EngineResult<Option<(FileRecord, Vec<u8>)>> {
+  fn load_file_with_data(
+    &self,
+    file_hash: &[u8],
+    hash_length: usize,
+    ops: &DirectoryOps,
+    budget: &QueryMemoryBudget,
+  ) -> EngineResult<Option<(FileRecord, Vec<u8>, MemoryReservation)>> {
+    let Some(preflight_header) = self.engine.get_entry_header(file_hash)? else {
+      return Ok(None);
+    };
     match self.engine.get_entry(file_hash) {
       Ok(Some((header, _key, value))) => {
         let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+        let temporary_bytes = QueryMemoryBudget::buffered_json_amplification_bytes(file_record.total_size, preflight_header.value_length)?;
+        let memory = budget.reserve_temporary(temporary_bytes, "query buffered JSON admission failed")?;
 
         match ops.read_file_buffered(&file_record.path) {
-          Ok(data) => Ok(Some((file_record, data))),
+          Ok(data) => Ok(Some((file_record, data, memory))),
           Err(EngineError::NotFound(_)) => Ok(None), // file may have been deleted
           Err(e) => Err(e),
         }
@@ -2101,10 +2602,13 @@ impl<'a> QueryEngine<'a> {
   /// Execute an aggregation query, computing statistics (count, sum, avg, min, max)
   /// over the matching result set, optionally grouped by one or more fields.
   pub fn execute_aggregate(&self, query: &Query) -> EngineResult<AggregateResult> {
+    let _operation = self.engine.query_operation_guard()?;
     let agg = query.aggregate.as_ref().ok_or_else(|| EngineError::NotFound("No aggregate query specified".to_string()))?;
+    let mut budget = QueryMemoryBudget::new(self.engine)?;
 
     // Run the filter to get matching file hashes
-    let result_hashes = self.execute_internal(query)?;
+    let result_hashes = self.execute_internal(query, &mut budget)?;
+    budget.reserve_hash_work(result_hashes.len(), self.engine.hash_algo().hash_length(), false)?;
     let result_hash_set: HashSet<Vec<u8>> = result_hashes.iter().map(|r| r.file_hash.clone()).collect();
 
     let index_manager = IndexManager::new(self.engine);
@@ -2132,7 +2636,7 @@ impl<'a> QueryEngine<'a> {
     // Load indexes for aggregate fields
     let mut field_indexes: FieldIndexMap = HashMap::new();
     for field_name in &agg_fields {
-      let indexes = index_manager.load_indexes_for_field(&query.path, field_name)?;
+      let indexes = index_manager.load_indexes_for_field_accounted(&query.path, field_name, budget.reservation_mut()?)?;
       let index =
         indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for aggregate field '{}'", field_name)))?;
       let type_tag = index.converter.type_tag();
@@ -2158,20 +2662,25 @@ impl<'a> QueryEngine<'a> {
     // If no GROUP BY, compute flat aggregates
     if agg.group_by.is_empty() {
       let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&result_hash_set, agg, &field_indexes);
-
-      return Ok(AggregateResult { count, sum, avg, min, max, groups: None, has_more: false, default_limit_hit: false });
+      let mut result = AggregateResult::new(count, sum, avg, min, max, None, false, false);
+      drop(field_indexes);
+      drop(result_hash_set);
+      drop(result_hashes);
+      budget.retain_aggregate(&mut result)?;
+      return Ok(result);
     }
 
     // GROUP BY: load group field indexes
     let mut group_field_data: GroupFieldEntries = Vec::new();
     for gf in &agg.group_by {
-      let indexes = index_manager.load_indexes_for_field(&query.path, gf)?;
+      let indexes = index_manager.load_indexes_for_field_accounted(&query.path, gf, budget.reservation_mut()?)?;
       let index = indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for group_by field '{}'", gf)))?;
       let type_tag = index.converter.type_tag();
       group_field_data.push((gf.clone(), index.values, type_tag));
     }
 
     // Bucket results by group key
+    budget.reserve_aggregate_groups(result_hash_set.len(), agg.group_by.len(), self.engine.hash_algo().hash_length())?;
     let mut groups: GroupBuckets = HashMap::new();
 
     for file_hash in &result_hash_set {
@@ -2190,9 +2699,12 @@ impl<'a> QueryEngine<'a> {
     }
 
     // Compute aggregates per group
-    let mut group_results: Vec<GroupResult> = Vec::new();
+    let aggregate_field_count = agg.sum.len().saturating_add(agg.avg.len()).saturating_add(agg.min.len()).saturating_add(agg.max.len());
+    budget.reserve_group_results(groups.len(), aggregate_field_count, agg.group_by.len())?;
+    let mut group_results: Vec<GroupResult> = Vec::with_capacity(groups.len());
 
     for (key_map, group_hashes) in groups.values() {
+      budget.reserve_hash_work(group_hashes.len(), self.engine.hash_algo().hash_length(), false)?;
       let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
       let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&group_hash_set, agg, &field_indexes);
 
@@ -2200,6 +2712,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     // Sort groups by count descending (most populated first)
+    budget.reserve_stable_sort::<GroupResult>(group_results.len())?;
     group_results.sort_by(|a, b| b.count.cmp(&a.count));
 
     // Apply limit to groups
@@ -2207,16 +2720,23 @@ impl<'a> QueryEngine<'a> {
     group_results.truncate(effective_limit);
     let default_limit_hit = !explicit_limit && has_more;
 
-    Ok(AggregateResult {
+    let mut result = AggregateResult::new(
       count,
-      sum: HashMap::new(),
-      avg: HashMap::new(),
-      min: HashMap::new(),
-      max: HashMap::new(),
-      groups: Some(group_results),
+      HashMap::new(),
+      HashMap::new(),
+      HashMap::new(),
+      HashMap::new(),
+      Some(group_results),
       has_more,
       default_limit_hit,
-    })
+    );
+    drop(groups);
+    drop(group_field_data);
+    drop(field_indexes);
+    drop(result_hash_set);
+    drop(result_hashes);
+    budget.retain_aggregate(&mut result)?;
+    Ok(result)
   }
 }
 

@@ -126,6 +126,51 @@ fn test_damerau_levenshtein_transpose_vs_two_subs() {
   assert_eq!(damerau_levenshtein("abcd", "badc"), 2);
 }
 
+fn reference_osa_distance(a: &str, b: &str) -> usize {
+  let a: Vec<char> = a.chars().collect();
+  let b: Vec<char> = b.chars().collect();
+  let mut matrix = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+  for (index, row) in matrix.iter_mut().enumerate() {
+    row[0] = index;
+  }
+  for index in 0..=b.len() {
+    matrix[0][index] = index;
+  }
+  for i in 1..=a.len() {
+    for j in 1..=b.len() {
+      let substitution = usize::from(a[i - 1] != b[j - 1]);
+      matrix[i][j] = (matrix[i - 1][j] + 1).min(matrix[i][j - 1] + 1).min(matrix[i - 1][j - 1] + substitution);
+      if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+        matrix[i][j] = matrix[i][j].min(matrix[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  matrix[a.len()][b.len()]
+}
+
+#[test]
+fn damerau_levenshtein_matches_independent_matrix_reference() {
+  let alphabet = ['a', 'b', 'c'];
+  let mut values = vec![String::new(), "xeno".to_string(), "xéno".to_string(), "東京".to_string()];
+  for length in 1..=4usize {
+    let combinations = alphabet.len().pow(length as u32);
+    for mut ordinal in 0..combinations {
+      let mut value = String::with_capacity(length);
+      for _ in 0..length {
+        value.push(alphabet[ordinal % alphabet.len()]);
+        ordinal /= alphabet.len();
+      }
+      values.push(value);
+    }
+  }
+
+  for left in &values {
+    for right in &values {
+      assert_eq!(damerau_levenshtein(left, right), reference_osa_distance(left, right), "OSA mismatch for {left:?} -> {right:?}",);
+    }
+  }
+}
+
 // =============================================================================
 // Jaro-Winkler algorithm tests
 // =============================================================================

@@ -232,7 +232,7 @@ struct EngineOperationState {
   operations: HashMap<&'static str, usize>,
 }
 
-struct EngineOperationGuard<'a> {
+pub(crate) struct EngineOperationGuard<'a> {
   tracker: &'a EngineOperationTracker,
   operation: &'static str,
   engine_id: usize,
@@ -926,6 +926,10 @@ impl StorageEngine {
   fn operation_guard(&self, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
     let engine_id = self as *const StorageEngine as usize;
     self.operation_tracker.begin(engine_id, operation)
+  }
+
+  pub(crate) fn query_operation_guard(&self) -> EngineResult<EngineOperationGuard<'_>> {
+    self.operation_guard("query")
   }
 
   fn internal_operation_scope(&self, operation: &'static str) -> EngineOperationGuard<'_> {

@@ -307,8 +307,7 @@ fn test_load_indexes_for_field_only_matches_correct_field() {
 fn test_query_result_has_score_and_matched_by() {
   let file_record = FileRecord::new("/test/file.json".to_string(), Some("application/json".to_string()), 42, vec![]);
 
-  let result =
-    QueryResult { file_hash: vec![0xAA; 32], file_record, score: 0.85, matched_by: vec!["trigram".to_string(), "phonetic".to_string()] };
+  let result = QueryResult::new(vec![0xAA; 32], file_record, 0.85, vec!["trigram".to_string(), "phonetic".to_string()]);
 
   assert_eq!(result.score, 0.85);
   assert_eq!(result.matched_by.len(), 2);
@@ -321,7 +320,7 @@ fn test_query_result_default_score_is_one() {
   // When constructed with default score (as the query engine does)
   let file_record = FileRecord::new("/test/file.json".to_string(), None, 0, vec![]);
 
-  let result = QueryResult { file_hash: vec![0x00; 32], file_record, score: 1.0, matched_by: vec![] };
+  let result = QueryResult::new(vec![0x00; 32], file_record, 1.0, vec![]);
 
   assert_eq!(result.score, 1.0);
   assert!(result.matched_by.is_empty());
@@ -330,19 +329,15 @@ fn test_query_result_default_score_is_one() {
 #[test]
 fn test_query_result_score_zero() {
   let file_record = FileRecord::new("/t".to_string(), None, 0, vec![]);
-  let result = QueryResult { file_hash: vec![0x00; 32], file_record, score: 0.0, matched_by: vec![] };
+  let result = QueryResult::new(vec![0x00; 32], file_record, 0.0, vec![]);
   assert_eq!(result.score, 0.0);
 }
 
 #[test]
 fn test_query_result_matched_by_multiple_entries() {
   let file_record = FileRecord::new("/t".to_string(), None, 0, vec![]);
-  let result = QueryResult {
-    file_hash: vec![0x00; 32],
-    file_record,
-    score: 0.95,
-    matched_by: vec!["exact".to_string(), "trigram".to_string(), "dmetaphone".to_string()],
-  };
+  let result =
+    QueryResult::new(vec![0x00; 32], file_record, 0.95, vec!["exact".to_string(), "trigram".to_string(), "dmetaphone".to_string()]);
   assert_eq!(result.matched_by.len(), 3);
 }
 

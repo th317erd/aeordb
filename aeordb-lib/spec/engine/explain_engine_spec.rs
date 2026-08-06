@@ -1,6 +1,8 @@
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::query_engine::{QueryEngine, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, ExplainMode, ExplainResult};
+use aeordb::engine::errors::EngineError;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -91,6 +93,72 @@ fn test_execute_explain_plan_mode() {
 }
 
 #[test]
+fn explain_results_retain_and_release_their_query_memory_reservation() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+  let qe = QueryEngine::new(&engine);
+  let query = Query {
+    path: "/users/".to_string(),
+    field_queries: vec![],
+    node: Some(QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Gt(25u64.to_be_bytes().to_vec()) })),
+    limit: Some(10),
+    offset: None,
+    order_by: vec![],
+    after: None,
+    before: None,
+    include_total: false,
+    strategy: QueryStrategy::Full,
+    aggregate: None,
+    explain: ExplainMode::Plan,
+  };
+
+  let result = qe.execute_explain(&query).unwrap();
+  let retained = engine.memory_coordinator_snapshot().unwrap();
+  assert!(retained.owner(MemoryOwner::Query).unwrap().reserved_bytes > 0);
+  assert_eq!(retained.owner(MemoryOwner::Query).unwrap().active_reservations, 1);
+
+  drop(result);
+  let released = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(released.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(released.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
+}
+
+#[test]
+fn explain_hard_limit_refusal_is_retryable_and_leaks_no_reservation() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+  let qe = QueryEngine::new(&engine);
+  let query = Query {
+    path: "/users/".to_string(),
+    field_queries: vec![],
+    node: Some(QueryNode::Field(FieldQuery { field_name: "age".to_string(), operation: QueryOp::Gt(25u64.to_be_bytes().to_vec()) })),
+    limit: Some(10),
+    offset: None,
+    order_by: vec![],
+    after: None,
+    before: None,
+    include_total: false,
+    strategy: QueryStrategy::Full,
+    aggregate: None,
+    explain: ExplainMode::Plan,
+  };
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let available = before.policy.unwrap().ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  assert!(available > 1);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - 1, AdmissionClass::Workload).unwrap();
+
+  let error = qe.execute_explain(&query).unwrap_err();
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected explain error: {error}");
+  let refused = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(refused.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(refused.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
+  drop(pressure);
+
+  assert!(qe.execute_explain(&query).is_ok());
+}
+
+#[test]
 fn test_execute_explain_analyze_mode() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_users_engine(&dir);
@@ -126,11 +194,11 @@ fn test_execute_explain_analyze_mode() {
 
 #[test]
 fn test_explain_result_serializes() {
-  let result = ExplainResult {
-    plan: serde_json::json!({"type": "test"}),
-    execution: Some(serde_json::json!({"total_duration_ms": 1.5})),
-    results: Some(serde_json::json!({"items": []})),
-  };
+  let result = ExplainResult::new(
+    serde_json::json!({"type": "test"}),
+    Some(serde_json::json!({"total_duration_ms": 1.5})),
+    Some(serde_json::json!({"items": []})),
+  );
 
   let json = serde_json::to_value(&result).unwrap();
   assert!(json.is_object());
@@ -141,7 +209,7 @@ fn test_explain_result_serializes() {
 
 #[test]
 fn test_explain_result_serializes_without_optional_fields() {
-  let result = ExplainResult { plan: serde_json::json!({"type": "test"}), execution: None, results: None };
+  let result = ExplainResult::new(serde_json::json!({"type": "test"}), None, None);
 
   let json = serde_json::to_value(&result).unwrap();
   assert!(json.is_object());

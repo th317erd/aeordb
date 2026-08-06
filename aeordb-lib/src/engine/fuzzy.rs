@@ -118,8 +118,9 @@ pub fn auto_fuzziness(len: usize) -> usize {
 pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
   let a_chars: Vec<char> = a.chars().collect();
   let b_chars: Vec<char> = b.chars().collect();
-  let m = a_chars.len();
-  let n = b_chars.len();
+  let (rows, columns) = if b_chars.len() <= a_chars.len() { (&a_chars, &b_chars) } else { (&b_chars, &a_chars) };
+  let m = rows.len();
+  let n = columns.len();
 
   if m == 0 {
     return n;
@@ -128,32 +129,31 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
     return m;
   }
 
-  // dp[i][j] = edit distance between a[0..i] and b[0..j]
-  let mut dp = vec![vec![0usize; n + 1]; m + 1];
-
-  for i in 0..=m {
-    dp[i][0] = i;
-  }
-  for j in 0..=n {
-    dp[0][j] = j;
-  }
+  // OSA only references rows i, i-1, and i-2. Retaining the full matrix
+  // turned two long indexed strings into quadratic resident memory.
+  let mut previous_previous = vec![0usize; n + 1];
+  let mut previous: Vec<usize> = (0..=n).collect();
+  let mut current = vec![0usize; n + 1];
 
   for i in 1..=m {
+    current[0] = i;
     for j in 1..=n {
-      let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+      let cost = usize::from(rows[i - 1] != columns[j - 1]);
 
-      dp[i][j] = (dp[i - 1][j] + 1) // deletion
-        .min(dp[i][j - 1] + 1) // insertion
-        .min(dp[i - 1][j - 1] + cost); // substitution
+      current[j] = (previous[j] + 1) // deletion
+        .min(current[j - 1] + 1) // insertion
+        .min(previous[j - 1] + cost); // substitution
 
       // Transposition
-      if i > 1 && j > 1 && a_chars[i - 1] == b_chars[j - 2] && a_chars[i - 2] == b_chars[j - 1] {
-        dp[i][j] = dp[i][j].min(dp[i - 2][j - 2] + 1);
+      if i > 1 && j > 1 && rows[i - 1] == columns[j - 2] && rows[i - 2] == columns[j - 1] {
+        current[j] = current[j].min(previous_previous[j - 2] + 1);
       }
     }
+    std::mem::swap(&mut previous_previous, &mut previous);
+    std::mem::swap(&mut previous, &mut current);
   }
 
-  dp[m][n]
+  previous[n]
 }
 
 /// Compute Jaro-Winkler similarity between two strings.
