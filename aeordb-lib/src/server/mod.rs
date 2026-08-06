@@ -561,10 +561,10 @@ fn create_app_with_all_and_task_queue_inner(
     .route_layer(from_fn_with_state(app_state.clone(), permission_middleware))
     .route_layer(from_fn_with_state(app_state.clone(), auth_middleware));
 
-  // Routes with medium body limits (backup import: 10 MB)
+  // Backup imports are streamed to disk; the limit bounds transfer size, not RAM.
   let medium_upload_routes = Router::new()
     .route("/versions/import", post(backup_routes::import_backup))
-    .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB
+    .layer(axum::extract::DefaultBodyLimit::max(backup_routes::BACKUP_UPLOAD_LIMIT_BYTES));
 
   // Routes with bounded manifest payloads. These bodies are control-plane
   // JSON hash/path manifests, not raw file bytes, so they should be larger

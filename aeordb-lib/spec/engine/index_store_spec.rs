@@ -665,14 +665,24 @@ fn deletion_during_flush_remains_dirty_until_the_delete_is_durable() {
 fn disk_write_failure_after_flush_snapshot_restores_dirty_state_and_reservations() {
   const CHILD_MARKER: &str = "AEORDB_INDEX_DISK_FAILURE_CHILD";
   if std::env::var_os(CHILD_MARKER).is_none() {
-    let status = Command::new(std::env::current_exe().unwrap())
+    // Use pipes rather than inherited regular files: this child deliberately
+    // lowers RLIMIT_FSIZE, which must constrain the database write without
+    // preventing the test harness from reporting its result to a redirected
+    // parent log.
+    let output = Command::new(std::env::current_exe().unwrap())
       .arg("--exact")
       .arg("disk_write_failure_after_flush_snapshot_restores_dirty_state_and_reservations")
       .arg("--nocapture")
       .env(CHILD_MARKER, "1")
-      .status()
+      .output()
       .unwrap();
-    assert!(status.success(), "isolated index disk-failure child failed: {status}");
+    assert!(
+      output.status.success(),
+      "isolated index disk-failure child failed: {}\nstdout:\n{}\nstderr:\n{}",
+      output.status,
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
     return;
   }
 

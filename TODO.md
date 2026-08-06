@@ -190,6 +190,15 @@
       - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
         - [x] Gate task-worker dequeue on a coordinator-owned maintenance reservation so deferred work remains pending and restartable.
         - [x] Gate every GC entry point before side effects, add cooperative cancellation, and account retained v3 mark/sweep work until v4 replaces it.
+        - [x] Bound backup/restore traversal, diff, import inventories, HTTP transfer, and task cancellation under `backup_restore` admission.
+          - [x] Add reservation-owning/cancellable version-tree and diff construction used by every export/patch entry point.
+          - [x] Reserve import inventories and transient entry payloads before materialization; retain authority until completion.
+          - [x] Stream HTTP patch responses and import request bodies instead of buffering complete backup files.
+          - [x] Remove temporary backup data and lock sidecars on success, failure, response drop, and panic unwind.
+          - [x] Enforce the documented 10 GiB import cap for raw and chunked streamed request bodies.
+          - [x] Fail closed on system-subtree/read errors and preserve retryable resource-exhaustion responses.
+          - [x] Prove embedded, task, HTTP, cancellation, malformed, pressure, cleanup, restart, and round-trip behavior.
+        - [ ] Normalize historical snapshot roots that retain stale system-child relationships during user-only export, with an explicit v3 compatibility fixture and no dangling restored relation.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
       - [ ] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.

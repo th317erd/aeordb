@@ -169,6 +169,12 @@ curl -X POST http://localhost:6830/versions/import \
   --data-binary @backup.aeordb
 ```
 
+HTTP export, diff, and import transfer their artifacts as streams. Their
+temporary files live beside the database instead of in the operating system's
+temporary directory. Import accepts up to 10 GiB, verifies every inventoried
+entry body and checksum, memory-admits the complete inventory, and only then
+begins target mutations.
+
 Import does NOT automatically change HEAD. The imported version exists in the database and can be promoted explicitly when ready.
 
 ## Diff and Patch

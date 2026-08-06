@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
-use aeordb::engine::backup::{create_patch, create_patch_from_snapshots, PatchResult};
+use aeordb::engine::backup::{create_patch, create_patch_from_references, create_patch_from_snapshots, PatchResult};
 use aeordb::engine::deletion_record::DeletionRecord;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::errors::EngineError;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::tree_walker::{walk_version_tree, diff_trees};
 use aeordb::engine::version_manager::VersionManager;
@@ -13,6 +14,19 @@ use tempfile::TempDir;
 
 fn db_path(dir: &TempDir, name: &str) -> String {
   dir.path().join(name).to_str().unwrap().to_string()
+}
+
+fn assert_no_partial_artifacts(output: &str) {
+  let output = std::path::Path::new(output);
+  let parent = output.parent().unwrap();
+  let prefix = format!("{}.part-", output.file_name().unwrap().to_string_lossy());
+  let artifacts = std::fs::read_dir(parent)
+    .unwrap()
+    .filter_map(Result::ok)
+    .map(|entry| entry.file_name())
+    .filter(|name| name.to_string_lossy().starts_with(&prefix))
+    .collect::<Vec<_>>();
+  assert!(artifacts.is_empty(), "partial patch artifacts remain: {artifacts:?}");
 }
 
 /// AeorDB uses mutable path-based hashing for directories and files.
@@ -44,6 +58,7 @@ fn test_patch_added_files() {
   let output = db_path(&temp, "patch_added.aeordb");
 
   let result = create_patch(&engine, &bogus, &head, &output).unwrap();
+  assert_no_partial_artifacts(&output);
   assert_eq!(result.files_added, 2, "should have 2 added files");
   assert_eq!(result.files_deleted, 0);
   assert_eq!(result.files_modified, 0);
@@ -51,6 +66,28 @@ fn test_patch_added_files() {
   // Verify the patch file exists and has correct HEAD
   let patch = StorageEngine::open_for_import(&output).unwrap();
   assert_eq!(patch.head_hash().unwrap(), head);
+}
+
+#[test]
+fn test_patch_memory_pressure_leaves_no_destination_or_partial_file() {
+  let ctx = RequestContext::system();
+  let (engine, temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/data/file.txt", b"content", Some("text/plain")).unwrap();
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let remaining = policy.ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Task, remaining.saturating_sub(4 * 1024), AdmissionClass::Workload).unwrap();
+  let output = db_path(&temp, "pressure-patch.aeordb");
+
+  let error = create_patch(&engine, &[0xDE; 32], &engine.head_hash().unwrap(), &output).unwrap_err();
+
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&output).exists());
+  assert_no_partial_artifacts(&output);
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::BackupRestore).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
 }
 
 // ============================================================
@@ -496,4 +533,36 @@ fn test_patch_snapshot_to_head() {
 
   // Same root hash -> no changes -> error
   assert!(result.is_err(), "snapshot to HEAD with no changes should error");
+}
+
+#[test]
+fn test_patch_reference_resolver_accepts_mixed_hash_and_snapshot() {
+  let ctx = RequestContext::system();
+  let (engine, temp) = create_temp_engine_for_tests();
+  let operations = DirectoryOps::new(&engine);
+  let versions = VersionManager::new(&engine);
+
+  operations.store_file_buffered(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
+  versions.create_snapshot(&ctx, "current", HashMap::new()).unwrap();
+  let empty_hash = vec![0xA7; engine.hash_algo().hash_length()];
+  let output = db_path(&temp, "patch_mixed_references.aeordb");
+
+  let result = create_patch_from_references(&engine, &hex::encode(&empty_hash), Some("current"), &output).unwrap();
+
+  assert_eq!(result.from_hash, empty_hash);
+  assert_eq!(result.to_hash, engine.head_hash().unwrap());
+  assert_eq!(result.files_added, 1);
+  assert!(std::path::Path::new(&output).is_file());
+}
+
+#[test]
+fn test_patch_reference_resolver_rejects_short_hash_without_artifact() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let output = db_path(&temp, "patch_short_reference.aeordb");
+
+  let error = create_patch_from_references(&engine, "abcd", None, &output).unwrap_err();
+
+  assert!(matches!(error, EngineError::InvalidInput(_)), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&output).exists());
+  assert_no_partial_artifacts(&output);
 }

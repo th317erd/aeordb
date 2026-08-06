@@ -482,6 +482,14 @@ Export the database (or a specific version) as an `.aeordb` archive file.
 - **Content-Disposition:** `attachment; filename="export-{hash_prefix}.aeordb"`
 - **Body:** binary archive data
 
+The archive is generated on a blocking engine worker and streamed from a
+temporary file beside the database, on the same data filesystem. AeorDB does
+not buffer the complete archive in RAM or stage it in the operating system's
+temporary directory. The temporary file and its memory reservation are
+released when the transfer finishes or the client disconnects. The database
+filesystem therefore needs enough free space for the generated archive while
+the response is active.
+
 **Example:**
 
 ```bash
@@ -520,6 +528,10 @@ Create a patch file representing the difference between two versions.
 - **Content-Disposition:** `attachment; filename="patch-{hash_prefix}.aeordb"`
 - **Body:** binary patch data
 
+Patch files use the same disk-backed response streaming as full exports. Each
+reference is resolved as an exact snapshot name first and otherwise must be a
+complete hex hash for the database's configured hash algorithm.
+
 **Example:**
 
 ```bash
@@ -532,7 +544,12 @@ curl -X POST "http://localhost:6830/versions/diff?from=v1.0&to=v2.0" \
 
 ### POST /versions/import
 
-Import a backup or patch file. Body limit: **10 MB**.
+Import a backup or patch file. The request is streamed to a temporary file
+beside the target database and is not buffered as one in-memory body or staged
+in the operating system's temporary directory. The transfer limit is **10
+GiB**, and the target filesystem needs enough free space for the upload while
+the operation is active. The limit is enforced against both a declared
+`Content-Length` and the actual number of bytes received from the stream.
 
 **Query Parameters:**
 
@@ -540,6 +557,7 @@ Import a backup or patch file. Body limit: **10 MB**.
 |-----------|------|---------|-------------|
 | `force` | boolean | `false` | Force import even if conflicts exist |
 | `promote` | boolean | `false` | Promote the imported version to HEAD |
+| `mode` | string | `merge` | `merge` overlays the backup; `restore` requires an empty target unless `force=true` |
 
 **Request:**
 
@@ -575,8 +593,10 @@ curl -X POST "http://localhost:6830/versions/import?promote=true" \
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Invalid or corrupt backup file |
+| 400 | Empty, invalid, corrupt, unsupported, or malformed backup file |
 | 403 | Non-root user |
+| 413 | Upload exceeds 10 GiB |
+| 503 | Backup/restore memory admission or cancellation prevents the operation |
 
 ---
 

@@ -655,18 +655,26 @@ impl StorageEngine {
     Arc::clone(self.configuration_shadow.get().expect("StorageEngine constructors initialize configuration shadow"))
   }
 
-  fn initialize_memory_coordinator(&self) -> EngineResult<()> {
-    let report = self.configuration_shadow();
-    let coordinator = match memory_policy_from_config_shadow(&report) {
-      Ok(policy) => MemoryCoordinator::new(policy),
-      Err(reason) => {
-        tracing::warn!(%reason, "Memory coordinator started in observation-only mode");
-        MemoryCoordinator::without_policy_reason(reason)
+  fn initialize_memory_coordinator(&self, inherited: Option<Arc<MemoryCoordinator>>) -> EngineResult<()> {
+    let coordinator = match inherited {
+      Some(coordinator) => {
+        tracing::debug!("Storage engine inherited the process memory coordinator");
+        coordinator
+      }
+      None => {
+        let report = self.configuration_shadow();
+        Arc::new(match memory_policy_from_config_shadow(&report) {
+          Ok(policy) => MemoryCoordinator::new(policy),
+          Err(reason) => {
+            tracing::warn!(%reason, "Memory coordinator started in observation-only mode");
+            MemoryCoordinator::without_policy_reason(reason)
+          }
+        })
       }
     };
     self
       .memory_coordinator
-      .set(Arc::new(coordinator))
+      .set(coordinator)
       .map_err(|_| EngineError::InvalidInput("memory coordinator was initialized more than once".to_string()))?;
     Ok(())
   }
@@ -760,6 +768,10 @@ impl StorageEngine {
 
   pub fn memory_coordinator(&self) -> Arc<MemoryCoordinator> {
     Arc::clone(self.memory_coordinator.get().expect("StorageEngine constructors initialize the memory coordinator"))
+  }
+
+  pub(crate) fn database_path(&self) -> &Path {
+    &self.database_path
   }
 
   pub fn kv_page_provider_stats(&self) -> EngineResult<Option<crate::engine::kv_page_provider::KvPageProviderStats>> {
@@ -1851,12 +1863,20 @@ impl StorageEngine {
     Self::create_with_hot_dir(path, None)
   }
 
+  pub(crate) fn create_with_memory_coordinator(path: &str, coordinator: Arc<MemoryCoordinator>) -> EngineResult<Self> {
+    Self::create_internal(path, None, Some(coordinator))
+  }
+
   /// Create a new database file at the given path with an optional hot directory
   /// for crash-recovery write-ahead logging.
   ///
   /// NOTE: `hot_dir` is ignored — hot data is stored in the hot tail at the end
   /// of the main .aeordb file. The parameter is kept for API backward compat.
   pub fn create_with_hot_dir(path: &str, _hot_dir: Option<&Path>) -> EngineResult<Self> {
+    Self::create_internal(path, _hot_dir, None)
+  }
+
+  fn create_internal(path: &str, _hot_dir: Option<&Path>, inherited_memory: Option<Arc<MemoryCoordinator>>) -> EngineResult<Self> {
     let lock_path = format!("{}.lock", path);
     let lock_file = Self::acquire_file_lock(&lock_path)?;
 
@@ -1943,7 +1963,7 @@ impl StorageEngine {
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
     engine.counters.store(initialized);
     engine.initialize_configuration_shadow()?;
-    engine.initialize_memory_coordinator()?;
+    engine.initialize_memory_coordinator(inherited_memory)?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
     Ok(engine)
@@ -1958,7 +1978,12 @@ impl StorageEngine {
   /// 4. Scan WAL for void entries (in-memory optimization)
   ///
   /// If the hot tail is corrupt, falls back to a full WAL scan rebuild.
-  fn open_internal(path: &str, _hot_dir: Option<&Path>, progress_callback: Option<EngineStartupProgressCallback>) -> EngineResult<Self> {
+  fn open_internal(
+    path: &str,
+    _hot_dir: Option<&Path>,
+    progress_callback: Option<EngineStartupProgressCallback>,
+    inherited_memory: Option<Arc<MemoryCoordinator>>,
+  ) -> EngineResult<Self> {
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {
@@ -2227,7 +2252,7 @@ impl StorageEngine {
     engine.sync_voids_to_kv_writer()?;
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_shadow()?;
-    engine.initialize_memory_coordinator()?;
+    engine.initialize_memory_coordinator(inherited_memory)?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
     Self::report_startup_progress(
@@ -2431,7 +2456,7 @@ impl StorageEngine {
   /// missing or stale. Does not use a hot directory. Refuses to open patch
   /// databases (`backup_type > 1`).
   pub fn open(path: &str) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, None, None)?;
+    let engine = Self::open_internal(path, None, None, None)?;
 
     // Guard: refuse to open patch databases as normal databases
     let header = engine
@@ -2470,7 +2495,7 @@ impl StorageEngine {
     hot_dir: Option<&Path>,
     progress_callback: Option<EngineStartupProgressCallback>,
   ) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, hot_dir, progress_callback)?;
+    let engine = Self::open_internal(path, hot_dir, progress_callback, None)?;
 
     // Guard: refuse to open patch databases as normal databases
     let header = engine
@@ -2497,7 +2522,11 @@ impl StorageEngine {
 
   /// Open a database file for import purposes, allowing patch databases.
   pub fn open_for_import(path: &str) -> EngineResult<Self> {
-    Self::open_internal(path, None, None)
+    Self::open_internal(path, None, None, None)
+  }
+
+  pub(crate) fn open_for_import_with_memory_coordinator(path: &str, coordinator: Arc<MemoryCoordinator>) -> EngineResult<Self> {
+    Self::open_internal(path, None, None, Some(coordinator))
   }
 
   /// Store an entry: append to file, register in KV store.
@@ -2825,6 +2854,22 @@ impl StorageEngine {
     writer.read_entry_header_at_shared(kv_entry.offset).map(Some)
   }
 
+  /// Retrieve only an entry header by key, including entries marked deleted.
+  /// Maintenance readers use the encoded lengths to reserve before loading a
+  /// historical value.
+  pub fn get_entry_header_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryHeader>> {
+    let _operation = self.operation_guard("get_entry_header_including_deleted")?;
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get_raw(hash)? {
+      Some(entry) => entry,
+      None => return Ok(None),
+    };
+
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_header_including_deleted")?;
+    writer.read_entry_header_at_shared(kv_entry.offset).map(Some)
+  }
+
   /// Retrieve an entry by hash, including deleted entries.
   /// Used for version history where we need to read files that were
   /// deleted after a snapshot was taken.
@@ -2840,6 +2885,56 @@ impl StorageEngine {
     Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_including_deleted")?;
     let result = writer.read_entry_at_shared(kv_entry.offset);
     result.map(Some)
+  }
+
+  /// Read a live or deleted historical entry only when its value still fits a
+  /// caller-owned allocation reservation. A concurrent mutable-key update can
+  /// therefore invalidate the first header probe without causing unaccounted
+  /// growth.
+  pub fn get_entry_including_deleted_bounded(&self, hash: &[u8], maximum_value_length: u32) -> EngineResult<Option<EntryData>> {
+    let _operation = self.operation_guard("get_entry_including_deleted_bounded")?;
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get_raw(hash)? {
+      Some(entry) => entry,
+      None => return Ok(None),
+    };
+
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_including_deleted_bounded")?;
+    let header = writer.read_entry_header_at_shared(kv_entry.offset)?;
+    if header.value_length > maximum_value_length {
+      return Err(EngineError::ResourceExhausted(format!(
+        "historical entry value length {} exceeds reserved bound {}",
+        header.value_length, maximum_value_length
+      )));
+    }
+    writer.read_entry_at_shared(kv_entry.offset).map(Some)
+  }
+
+  /// Read and verify a live or deleted historical entry only when its value
+  /// fits a caller-owned allocation reservation.
+  pub(crate) fn get_entry_including_deleted_verified_bounded(
+    &self,
+    hash: &[u8],
+    maximum_value_length: u32,
+  ) -> EngineResult<Option<EntryData>> {
+    let _operation = self.operation_guard("get_entry_including_deleted_verified_bounded")?;
+    let snapshot = self.kv_snapshot.load();
+    let kv_entry = match snapshot.get_raw(hash)? {
+      Some(entry) => entry,
+      None => return Ok(None),
+    };
+
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_entry_including_deleted_verified_bounded")?;
+    let header = writer.read_entry_header_at_shared(kv_entry.offset)?;
+    if header.value_length > maximum_value_length {
+      return Err(EngineError::ResourceExhausted(format!(
+        "historical entry value length {} exceeds reserved bound {}",
+        header.value_length, maximum_value_length
+      )));
+    }
+    writer.read_entry_at_shared_verified(kv_entry.offset).map(Some)
   }
 
   /// Retrieve an entry by hash with BLAKE3 hash verification.
@@ -3974,6 +4069,17 @@ impl StorageEngine {
   pub fn kv_entry_count(&self) -> EngineResult<usize> {
     let _operation = self.operation_guard("kv_entry_count")?;
     Ok(self.kv_snapshot.load().len())
+  }
+
+  pub(crate) fn kv_entries_by_type_admitted<F>(&self, target_type: u8, admit: F) -> EngineResult<Vec<KVEntry>>
+  where
+    F: FnOnce(usize) -> EngineResult<()>,
+  {
+    let _operation = self.operation_guard("kv_entries_by_type_admitted")?;
+    let snapshot = self.kv_snapshot.load();
+    let count = snapshot.count_by_type(target_type)?;
+    admit(count)?;
+    snapshot.iter_by_type(target_type)
   }
 
   /// Lightweight single-hash lookup in the KV snapshot.

@@ -13,12 +13,65 @@ fn is_credential_path(path: &str) -> bool {
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::symlink_path_hash;
-use crate::engine::tree_walker::{walk_version_tree, diff_trees, VersionTree};
+use crate::engine::tree_walker::{diff_trees_with_budget, walk_subtree_with_budget, walk_version_tree_with_budget, VersionTree};
 use crate::engine::entry_type::EntryType;
-use crate::engine::version_manager::VersionManager;
+use crate::engine::version_manager::SnapshotInfo;
+use tokio_util::sync::CancellationToken;
+use std::path::Path;
+
+const BACKUP_MINIMUM_WORKSPACE_BYTES: u64 = 4 * 1024;
+const KV_INVENTORY_ENTRY_BYTES: u64 = std::mem::size_of::<crate::engine::kv_store::KVEntry>() as u64 + 96;
+
+struct PartialBackupArtifact {
+  path: String,
+}
+
+impl PartialBackupArtifact {
+  fn new(output_path: &str) -> Self {
+    Self { path: format!("{output_path}.part-{}", uuid::Uuid::new_v4()) }
+  }
+
+  fn path(&self) -> &str {
+    &self.path
+  }
+}
+
+impl Drop for PartialBackupArtifact {
+  fn drop(&mut self) {
+    cleanup_backup_artifact(Path::new(&self.path));
+  }
+}
+
+pub(crate) fn cleanup_backup_artifact(path: &Path) {
+  remove_backup_artifact_file(path);
+  let mut lock_path = path.as_os_str().to_os_string();
+  lock_path.push(".lock");
+  remove_backup_artifact_file(Path::new(&lock_path));
+}
+
+fn remove_backup_artifact_file(path: &Path) {
+  if let Err(error) = std::fs::remove_file(path) {
+    if error.kind() != std::io::ErrorKind::NotFound {
+      tracing::warn!(path = %path.display(), %error, "failed to remove temporary backup artifact");
+    }
+  }
+}
+
+fn backup_budget(source: &StorageEngine, cancellation: Option<&CancellationToken>) -> EngineResult<OperationMemoryBudget> {
+  OperationMemoryBudget::new(
+    source,
+    "backup/restore",
+    MemoryOwner::BackupRestore,
+    AdmissionClass::Maintenance,
+    BACKUP_MINIMUM_WORKSPACE_BYTES,
+    cancellation,
+  )
+}
 
 fn store_file_record_entry_preserving_version(
   engine: &StorageEngine,
@@ -44,11 +97,45 @@ fn store_file_record_entry_preserving_version(
 /// If `include_system` is true, all `/.aeordb-system/` entries (users,
 /// groups, API keys, etc.) are included. Otherwise they are filtered out.
 pub fn export_version(source: &StorageEngine, version_hash: &[u8], output_path: &str, include_system: bool) -> EngineResult<ExportResult> {
+  export_version_controlled(source, version_hash, output_path, include_system, None)
+}
+
+pub fn export_version_with_cancellation(
+  source: &StorageEngine,
+  version_hash: &[u8],
+  output_path: &str,
+  include_system: bool,
+  cancellation: &CancellationToken,
+) -> EngineResult<ExportResult> {
+  export_version_controlled(source, version_hash, output_path, include_system, Some(cancellation))
+}
+
+fn export_version_controlled(
+  source: &StorageEngine,
+  version_hash: &[u8],
+  output_path: &str,
+  include_system: bool,
+  cancellation: Option<&CancellationToken>,
+) -> EngineResult<ExportResult> {
+  let mut budget = backup_budget(source, cancellation)?;
+  export_version_with_budget(source, version_hash, output_path, include_system, &mut budget)
+}
+
+fn export_version_with_budget(
+  source: &StorageEngine,
+  version_hash: &[u8],
+  output_path: &str,
+  include_system: bool,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<ExportResult> {
   export_atomic(output_path, |part_path| {
-    let tree = walk_version_tree(source, version_hash)?;
-    let output = StorageEngine::create(part_path)?;
+    budget.check_cancellation()?;
+    let tree = walk_version_tree_with_budget(source, version_hash, budget)?;
+    budget.check_cancellation()?;
+    let output = StorageEngine::create_with_memory_coordinator(part_path, source.memory_coordinator())?;
     output.set_backup_info(1, version_hash, version_hash)?;
-    let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
+    let stats = write_tree_to_engine(&tree, source, &output, include_system, budget)?;
+    budget.check_cancellation()?;
     output.update_head(version_hash)?;
 
     Ok(ExportResult {
@@ -61,7 +148,7 @@ pub fn export_version(source: &StorageEngine, version_hash: &[u8], output_path: 
   })
 }
 
-/// Wrap an export operation so it writes to `<output_path>.part` first, then
+/// Wrap an export operation so it writes to a unique same-filesystem sibling first, then
 /// renames atomically once the StorageEngine is dropped (which fsyncs). If
 /// the operation fails or the process is killed mid-write, the destination
 /// is never partially populated. The parent directory is also fsynced so the
@@ -76,22 +163,18 @@ where
   if std::path::Path::new(output_path).exists() {
     return Err(EngineError::AlreadyExists(format!("export destination '{}' already exists", output_path)));
   }
-  let part_path = format!("{}.part", output_path);
-  let _ = std::fs::remove_file(&part_path);
+  let part = PartialBackupArtifact::new(output_path);
 
-  let result = work(&part_path);
+  let result = work(part.path());
   // `output` is dropped at the end of `work`, which fsyncs the file (see
-  // StorageEngine::drop → shutdown → sync_all). The .part file is now durable.
+  // StorageEngine::drop → shutdown → sync_all). The partial file is now durable.
 
   match result {
     Ok(stats) => {
-      crate::engine::durability::rename_durable(&part_path, output_path)?;
+      crate::engine::durability::rename_durable(part.path(), output_path)?;
       Ok(stats)
     }
-    Err(error) => {
-      let _ = std::fs::remove_file(&part_path);
-      Err(error)
-    }
+    Err(error) => Err(error),
   }
 }
 
@@ -102,18 +185,40 @@ pub fn export_snapshot(
   output_path: &str,
   include_system: bool,
 ) -> EngineResult<ExportResult> {
+  export_snapshot_controlled(source, snapshot_name, output_path, include_system, None)
+}
+
+pub fn export_snapshot_with_cancellation(
+  source: &StorageEngine,
+  snapshot_name: Option<&str>,
+  output_path: &str,
+  include_system: bool,
+  cancellation: &CancellationToken,
+) -> EngineResult<ExportResult> {
+  export_snapshot_controlled(source, snapshot_name, output_path, include_system, Some(cancellation))
+}
+
+fn export_snapshot_controlled(
+  source: &StorageEngine,
+  snapshot_name: Option<&str>,
+  output_path: &str,
+  include_system: bool,
+  cancellation: Option<&CancellationToken>,
+) -> EngineResult<ExportResult> {
+  let mut budget = backup_budget(source, cancellation)?;
+  let snapshot_checkpoint = budget.checkpoint();
   let version_hash = match snapshot_name {
     Some(name) => {
-      let vm = VersionManager::new(source);
-      let snapshots = vm.list_snapshots()?;
+      let snapshots = load_snapshot_infos(source, &mut budget)?;
       let snap =
         snapshots.iter().find(|s| s.name == name).ok_or_else(|| EngineError::NotFound(format!("Snapshot '{}' not found", name)))?;
       snap.root_hash.clone()
     }
     None => source.head_hash()?,
   };
+  budget.release_to(snapshot_checkpoint, "snapshot resolution release failed")?;
 
-  export_version(source, &version_hash, output_path, include_system)
+  export_version_with_budget(source, &version_hash, output_path, include_system, &mut budget)
 }
 
 /// Export the FULL database: HEAD + every named snapshot + (optionally) system data.
@@ -126,8 +231,10 @@ pub fn export_snapshot(
 /// API keys) are included. Callers should validate root key authority before
 /// passing `include_system = true`.
 pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bool) -> EngineResult<ExportResult> {
+  let mut budget = backup_budget(source, None)?;
   export_atomic(output_path, |part_path| {
-    let output = StorageEngine::create(part_path)?;
+    budget.check_cancellation()?;
+    let output = StorageEngine::create_with_memory_coordinator(part_path, source.memory_coordinator())?;
 
     let head_hash = source.head_hash()?;
     output.set_backup_info(1, &head_hash, &head_hash)?;
@@ -138,22 +245,32 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
 
     let mut walked: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
-    let head_tree = walk_version_tree(source, &head_hash)?;
-    let stats = write_tree_to_engine(&head_tree, source, &output, include_system)?;
+    let head_checkpoint = budget.checkpoint();
+    let stats = {
+      let head_tree = walk_version_tree_with_budget(source, &head_hash, &mut budget)?;
+      write_tree_to_engine(&head_tree, source, &output, include_system, &mut budget)?
+    };
+    budget.release_to(head_checkpoint, "HEAD tree release failed")?;
     total_chunks += stats.0;
     total_files += stats.1;
     total_dirs += stats.2;
+    budget.reserve(KV_INVENTORY_ENTRY_BYTES, "walked-version set admission failed")?;
     walked.insert(head_hash.clone());
 
-    let vm = VersionManager::new(source);
-    let snapshots = vm.list_snapshots()?;
+    let snapshots = load_snapshot_infos(source, &mut budget)?;
     let snapshot_count = snapshots.len() as u64;
     for snap in &snapshots {
+      budget.record_work(1)?;
       if walked.contains(&snap.root_hash) {
         continue;
       }
-      let tree = walk_version_tree(source, &snap.root_hash)?;
-      let stats = write_tree_to_engine(&tree, source, &output, include_system)?;
+      budget.reserve(KV_INVENTORY_ENTRY_BYTES, "walked-version set admission failed")?;
+      let tree_checkpoint = budget.checkpoint();
+      let stats = {
+        let tree = walk_version_tree_with_budget(source, &snap.root_hash, &mut budget)?;
+        write_tree_to_engine(&tree, source, &output, include_system, &mut budget)?
+      };
+      budget.release_to(tree_checkpoint, "snapshot tree release failed")?;
       total_chunks += stats.0;
       total_files += stats.1;
       total_dirs += stats.2;
@@ -161,10 +278,12 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
     }
 
     if include_system {
-      let system_stats = export_system_subtree(source, &output)?;
+      let system_checkpoint = budget.checkpoint();
+      let system_stats = export_system_subtree(source, &output, &mut budget)?;
       total_files += system_stats.0;
       total_dirs += system_stats.1;
-      copy_snapshot_entries(source, &output)?;
+      budget.release_to(system_checkpoint, "system tree release failed")?;
+      copy_snapshot_entries(source, &output, &mut budget)?;
     }
 
     output.update_head(&head_hash)?;
@@ -190,35 +309,36 @@ fn write_tree_to_engine(
   source: &StorageEngine,
   output: &StorageEngine,
   include_system: bool,
+  budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(u64, u64, u64)> {
   let mut chunks_written = 0u64;
   let mut files_written = 0u64;
   let mut dirs_written = 0u64;
 
-  // Collect chunk hashes. If include_system is false, exclude chunks
-  // that belong exclusively to /.aeordb-system/ files. If true, include all
-  // EXCEPT credentials (which are never backed up).
-  let mut chunk_hashes_to_write = std::collections::HashSet::new();
+  // Walk file-owned hashes directly. The destination KV de-duplicates shared
+  // chunks, avoiding a second unbounded in-memory set alongside VersionTree.
   for (path, (_file_hash, record)) in &tree.files {
+    budget.record_work(1)?;
     if is_credential_path(path) {
       continue;
     }
     if include_system || !is_system_path(path) {
       for chunk_hash in &record.chunk_hashes {
-        chunk_hashes_to_write.insert(chunk_hash.clone());
+        budget.record_work(1)?;
+        if output.has_entry(chunk_hash)? {
+          continue;
+        }
+        let ((header, key, value), charge) = required_backup_entry(source, chunk_hash, "chunk", budget)?;
+        if header.entry_type != EntryType::Chunk {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("backup chunk {} resolved to {:?}", hex::encode(chunk_hash), header.entry_type),
+          });
+        }
+        output.store_entry(EntryType::Chunk, &key, &value)?;
+        budget.release(charge, "chunk copy buffer release failed")?;
+        chunks_written += 1;
       }
-    }
-  }
-
-  // Write the chunks
-  for chunk_hash in &chunk_hashes_to_write {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(chunk_hash)? {
-      // Skip if already written (idempotent for repeat exports)
-      if output.has_entry(&key)? {
-        continue;
-      }
-      output.store_entry(EntryType::Chunk, &key, &value)?;
-      chunks_written += 1;
     }
   }
 
@@ -227,13 +347,18 @@ fn write_tree_to_engine(
   // looks up by path hash, so both must be present in the exported database.
   let file_algo = output.hash_algo();
   for (path, (file_hash, _record)) in &tree.files {
+    budget.record_work(1)?;
     if is_credential_path(path) {
       continue;
     }
     if !include_system && is_system_path(path) {
       continue;
     }
-    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
+    {
+      let ((header, key, value), charge) = required_backup_entry(source, file_hash, "FileRecord", budget)?;
+      if header.entry_type != EntryType::FileRecord {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: format!("backup file '{}' resolved to {:?}", path, header.entry_type) });
+      }
       if !output.has_entry(&key)? {
         if is_system_path(path) {
           // System entries need the FLAG_SYSTEM bit set
@@ -264,19 +389,29 @@ fn write_tree_to_engine(
         }
       }
       files_written += 1;
+      budget.release(charge, "FileRecord copy buffer release failed")?;
     }
   }
 
   // Write DirectoryIndexes at both content-hash and path-hash keys.
   let algo = output.hash_algo();
+  write_btree_nodes(tree, source, output, budget, 0)?;
   for (path, (dir_hash, _data)) in &tree.directories {
+    budget.record_work(1)?;
     if is_credential_path(path) {
       continue;
     }
     if !include_system && is_system_path(path) {
       continue;
     }
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(dir_hash)? {
+    {
+      let ((header, key, value), charge) = required_backup_entry(source, dir_hash, "DirectoryIndex", budget)?;
+      if header.entry_type != EntryType::DirectoryIndex {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("backup directory '{}' resolved to {:?}", path, header.entry_type),
+        });
+      }
       if !output.has_entry(&key)? {
         output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
       }
@@ -285,19 +420,28 @@ fn write_tree_to_engine(
         output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
       }
       dirs_written += 1;
+      budget.release(charge, "DirectoryIndex copy buffer release failed")?;
     }
   }
 
   // Write symlink entries at both content-hash and path-hash keys.
   let symlink_algo = output.hash_algo();
   for (path, (symlink_hash, _record)) in &tree.symlinks {
+    budget.record_work(1)?;
     if is_credential_path(path) {
       continue;
     }
     if !include_system && is_system_path(path) {
       continue;
     }
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(symlink_hash)? {
+    {
+      let ((header, key, value), charge) = required_backup_entry(source, symlink_hash, "Symlink", budget)?;
+      if header.entry_type != EntryType::Symlink {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("backup symlink '{}' resolved to {:?}", path, header.entry_type),
+        });
+      }
       if !output.has_entry(&key)? {
         output.store_entry(EntryType::Symlink, &key, &value)?;
       }
@@ -305,6 +449,7 @@ fn write_tree_to_engine(
       if path_key != key && !output.has_entry(&path_key)? {
         output.store_entry(EntryType::Symlink, &path_key, &value)?;
       }
+      budget.release(charge, "Symlink copy buffer release failed")?;
     }
   }
 
@@ -321,7 +466,7 @@ fn write_tree_to_engine(
 /// individually to ensure we capture everything.
 ///
 /// Returns (file_records_copied, directories_copied).
-fn export_system_subtree(source: &StorageEngine, output: &StorageEngine) -> EngineResult<(u64, u64)> {
+fn export_system_subtree(source: &StorageEngine, output: &StorageEngine, budget: &mut OperationMemoryBudget) -> EngineResult<(u64, u64)> {
   let algo = source.hash_algo();
   let hash_length = algo.hash_length();
 
@@ -359,9 +504,10 @@ fn export_system_subtree(source: &StorageEngine, output: &StorageEngine) -> Engi
   let mut sys_tree = crate::engine::tree_walker::VersionTree::new();
 
   for sys_path in &system_paths {
+    budget.record_work(1)?;
     let sys_dir_key = directory_path_hash(sys_path, &algo)?;
-    let raw_value = match source.get_entry_including_deleted(&sys_dir_key)? {
-      Some((_header, _key, value)) => value,
+    let (raw_value, path_charge) = match load_backup_entry(source, &sys_dir_key, budget)? {
+      Some(((_header, _key, value), charge)) => (value, charge),
       None => continue, // subdirectory doesn't exist in this source
     };
 
@@ -372,13 +518,13 @@ fn export_system_subtree(source: &StorageEngine, output: &StorageEngine) -> Engi
       // Inline data — compute content hash to walk it
       algo.compute_hash(&raw_value)?
     };
+    budget.release(path_charge, "system directory path-entry buffer release failed")?;
 
     // Also record the path-hash → content-hash mapping in the tree
+    budget.reserve((sys_path.len() + sys_dir_hash.len() + 128) as u64, "system directory tree admission failed")?;
     sys_tree.directories.insert(sys_path.to_string(), (sys_dir_hash.clone(), Vec::new()));
 
-    if let Err(e) = crate::engine::tree_walker::walk_subtree(source, sys_path, &sys_dir_hash, &mut sys_tree) {
-      tracing::warn!("export: failed to walk {}: {}", sys_path, e);
-    }
+    walk_subtree_with_budget(source, sys_path, &sys_dir_hash, &mut sys_tree, budget)?;
   }
 
   // Single files under /.aeordb-system/. Each is keyed by path-hash;
@@ -386,20 +532,26 @@ fn export_system_subtree(source: &StorageEngine, output: &StorageEngine) -> Engi
   // the tree key is recomputed from the serialized FileRecord — that's
   // what the chunk-domain entries use elsewhere in the engine.
   for file_path in system_single_files {
+    budget.record_work(1)?;
     let key = crate::engine::directory_ops::file_path_hash(file_path, &algo)?;
-    let (record, content_hash) = match source.get_entry_including_deleted(&key)? {
-      Some((header, _key, raw)) => match FileRecord::deserialize(&raw, hash_length, header.entry_version) {
-        Ok(record) => {
-          let h = file_content_hash(&raw, &algo)?;
-          (record, h)
+    let (record, content_hash) = match load_backup_entry(source, &key, budget)? {
+      Some(((header, _key, raw), _charge)) => {
+        if header.entry_type != EntryType::FileRecord {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("system file '{}' resolved to {:?} instead of FileRecord", file_path, header.entry_type),
+          });
         }
-        Err(e) => {
-          tracing::warn!("export: failed to deserialize {} as FileRecord: {}", file_path, e);
-          continue;
-        }
-      },
+        let record = FileRecord::deserialize(&raw, hash_length, header.entry_version).map_err(|error| EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("system FileRecord '{}' is malformed: {}", file_path, error),
+        })?;
+        let h = file_content_hash(&raw, &algo)?;
+        (record, h)
+      }
       None => continue, // file doesn't exist in source — fine
     };
+    budget.reserve((file_path.len() + content_hash.len() + 128) as u64, "system file tree admission failed")?;
     sys_tree.files.insert(file_path.to_string(), (content_hash, record));
   }
 
@@ -408,7 +560,7 @@ fn export_system_subtree(source: &StorageEngine, output: &StorageEngine) -> Engi
   // that stops system path propagation to root), so a snapshot walk
   // could have written stale system directory data. We need to overwrite
   // those with the current state.
-  write_system_tree(&sys_tree, source, output)
+  write_system_tree(&sys_tree, source, output, budget)
 }
 
 /// Like write_tree_to_engine but unconditionally writes system entries
@@ -418,6 +570,7 @@ fn write_system_tree(
   tree: &crate::engine::tree_walker::VersionTree,
   source: &StorageEngine,
   output: &StorageEngine,
+  budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(u64, u64)> {
   use crate::engine::entry_header::FLAG_SYSTEM;
   let mut files_written = 0u64;
@@ -425,73 +578,241 @@ fn write_system_tree(
 
   let algo = output.hash_algo();
 
-  // Chunks for system files (system files rarely have chunks, but include them)
-  let mut chunk_hashes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+  write_btree_nodes(tree, source, output, budget, FLAG_SYSTEM)?;
+
+  // Chunks for system files (system files rarely have chunks, but include them).
+  // Destination lookups de-duplicate without retaining a second hash set.
   for (_file_hash, record) in tree.files.values() {
     for ch in &record.chunk_hashes {
-      chunk_hashes.insert(ch.clone());
-    }
-  }
-  for ch in &chunk_hashes {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(ch)? {
-      if !output.has_entry(&key)? {
+      budget.record_work(1)?;
+      if !output.has_entry(ch)? {
+        let ((header, key, value), charge) = required_backup_entry(source, ch, "system chunk", budget)?;
+        if header.entry_type != EntryType::Chunk {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("system chunk {} resolved to {:?}", hex::encode(ch), header.entry_type),
+          });
+        }
         output.store_entry(EntryType::Chunk, &key, &value)?;
+        budget.release(charge, "system chunk buffer release failed")?;
       }
     }
   }
 
   // FileRecords (overwrite to ensure latest system state)
   for (path, (file_hash, _record)) in &tree.files {
-    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
+    budget.record_work(1)?;
+    {
+      let ((header, key, value), charge) = required_backup_entry(source, file_hash, "system FileRecord", budget)?;
+      if header.entry_type != EntryType::FileRecord {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: format!("system file '{}' resolved to {:?}", path, header.entry_type) });
+      }
       store_file_record_entry_preserving_version(&output, &key, &value, FLAG_SYSTEM, header.entry_version)?;
       let path_key = file_path_hash(path, &algo)?;
       if path_key != key {
         store_file_record_entry_preserving_version(&output, &path_key, &value, FLAG_SYSTEM, header.entry_version)?;
       }
       files_written += 1;
+      budget.release(charge, "system FileRecord buffer release failed")?;
     }
   }
 
   // DirectoryIndex (overwrite — this is the critical fix for the api-keys bug)
   for (path, (dir_hash, _data)) in &tree.directories {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(dir_hash)? {
+    budget.record_work(1)?;
+    {
+      let ((header, key, value), charge) = required_backup_entry(source, dir_hash, "system DirectoryIndex", budget)?;
+      if header.entry_type != EntryType::DirectoryIndex {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("system directory '{}' resolved to {:?}", path, header.entry_type),
+        });
+      }
       output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
       let path_key = directory_path_hash(path, &algo)?;
       if path_key != key {
         output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
       }
       dirs_written += 1;
+      budget.release(charge, "system DirectoryIndex buffer release failed")?;
     }
   }
 
   // Symlinks
   for (path, (sym_hash, _record)) in &tree.symlinks {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(sym_hash)? {
+    budget.record_work(1)?;
+    {
+      let ((header, key, value), charge) = required_backup_entry(source, sym_hash, "system Symlink", budget)?;
+      if header.entry_type != EntryType::Symlink {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("system symlink '{}' resolved to {:?}", path, header.entry_type),
+        });
+      }
       output.store_entry_with_flags(EntryType::Symlink, &key, &value, FLAG_SYSTEM)?;
       let path_key = symlink_path_hash(path, &algo)?;
       if path_key != key {
         output.store_entry_with_flags(EntryType::Symlink, &path_key, &value, FLAG_SYSTEM)?;
       }
+      budget.release(charge, "system Symlink buffer release failed")?;
     }
   }
 
   Ok((files_written, dirs_written))
 }
 
+fn write_btree_nodes(
+  tree: &VersionTree,
+  source: &StorageEngine,
+  output: &StorageEngine,
+  budget: &mut OperationMemoryBudget,
+  flags: u8,
+) -> EngineResult<()> {
+  for node_hash in tree.btree_nodes.keys() {
+    budget.record_work(1)?;
+    if output.has_entry(node_hash)? {
+      continue;
+    }
+    let ((header, key, value), charge) = required_backup_entry(source, node_hash, "B-tree DirectoryIndex", budget)?;
+    if header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("B-tree node {} resolved to {:?}", hex::encode(node_hash), header.entry_type),
+      });
+    }
+    if flags == 0 {
+      output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+    } else {
+      output.store_entry_with_flags(EntryType::DirectoryIndex, &key, &value, flags)?;
+    }
+    budget.release(charge, "B-tree node buffer release failed")?;
+  }
+  Ok(())
+}
+
 /// Copy all Snapshot-type entries from source to output. These represent
 /// the version history chain — without them, the imported database has
 /// no snapshot list even if the per-snapshot data is present.
-fn copy_snapshot_entries(source: &StorageEngine, output: &StorageEngine) -> EngineResult<u64> {
+fn copy_snapshot_entries(source: &StorageEngine, output: &StorageEngine, budget: &mut OperationMemoryBudget) -> EngineResult<u64> {
   use crate::engine::kv_store::KV_TYPE_SNAPSHOT;
   let mut copied = 0u64;
-  let snapshot_entries = source.entries_by_type(KV_TYPE_SNAPSHOT)?;
-  for (hash, value) in snapshot_entries {
-    if !output.has_entry(&hash)? {
-      output.store_entry(EntryType::Snapshot, &hash, &value)?;
+  let (snapshot_entries, inventory_charge) = load_type_inventory(source, KV_TYPE_SNAPSHOT, budget, "snapshot inventory admission failed")?;
+  for entry in snapshot_entries {
+    budget.record_work(1)?;
+    if !output.has_entry(&entry.hash)? {
+      let ((header, key, value), charge) = required_backup_entry(source, &entry.hash, "Snapshot", budget)?;
+      if header.entry_type != EntryType::Snapshot {
+        return Err(EngineError::CorruptEntry {
+          offset: entry.offset,
+          reason: format!("snapshot inventory key resolved to {:?}", header.entry_type),
+        });
+      }
+      output.store_entry(EntryType::Snapshot, &key, &value)?;
+      budget.release(charge, "snapshot copy buffer release failed")?;
       copied += 1;
     }
   }
+  budget.release(inventory_charge, "snapshot inventory release failed")?;
   Ok(copied)
+}
+
+type BackupEntry = (crate::engine::entry_header::EntryHeader, Vec<u8>, Vec<u8>);
+
+fn load_backup_entry(source: &StorageEngine, hash: &[u8], budget: &mut OperationMemoryBudget) -> EngineResult<Option<(BackupEntry, u64)>> {
+  let Some(header) = source.get_entry_header_including_deleted(hash)? else {
+    return Ok(None);
+  };
+  let charge = u64::from(header.key_length)
+    .checked_add(u64::from(header.value_length))
+    .and_then(|bytes| bytes.checked_add(header.header_size() as u64))
+    .and_then(|bytes| bytes.checked_add(96))
+    .ok_or_else(|| EngineError::ResourceExhausted("backup entry buffer estimate overflow".to_string()))?;
+  budget.reserve(charge, "entry buffer admission failed")?;
+  match source.get_entry_including_deleted_verified_bounded(hash, header.value_length) {
+    Ok(Some(entry)) => Ok(Some((entry, charge))),
+    Ok(None) => {
+      budget.release(charge, "missing entry buffer release failed")?;
+      Ok(None)
+    }
+    Err(error) => {
+      budget.release(charge, "failed entry buffer release failed")?;
+      Err(error)
+    }
+  }
+}
+
+fn required_backup_entry(
+  source: &StorageEngine,
+  hash: &[u8],
+  kind: &str,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<(BackupEntry, u64)> {
+  load_backup_entry(source, hash, budget)?
+    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("backup references missing {kind} entry {}", hex::encode(hash)) })
+}
+
+fn load_type_inventory(
+  engine: &StorageEngine,
+  entry_type: u8,
+  budget: &mut OperationMemoryBudget,
+  context: &'static str,
+) -> EngineResult<(Vec<crate::engine::kv_store::KVEntry>, u64)> {
+  let mut charge = 0u64;
+  let entries = engine.kv_entries_by_type_admitted(entry_type, |count| {
+    let count = u64::try_from(count)
+      .map_err(|_| EngineError::ResourceExhausted("backup inventory count does not fit memory accounting".to_string()))?;
+    charge = count
+      .checked_mul(KV_INVENTORY_ENTRY_BYTES)
+      .ok_or_else(|| EngineError::ResourceExhausted("backup inventory estimate overflow".to_string()))?;
+    budget.reserve(charge, context)
+  })?;
+  let required = u64::try_from(entries.len())
+    .ok()
+    .and_then(|count| count.checked_mul(KV_INVENTORY_ENTRY_BYTES))
+    .ok_or_else(|| EngineError::ResourceExhausted("backup inventory allocation estimate overflow".to_string()))?;
+  if required != charge {
+    return Err(EngineError::IoError(std::io::Error::other(format!(
+      "backup inventory count changed within one immutable KV snapshot: admitted {} bytes, materialized {} bytes",
+      charge, required
+    ))));
+  }
+  Ok((entries, charge))
+}
+
+fn load_snapshot_infos(source: &StorageEngine, budget: &mut OperationMemoryBudget) -> EngineResult<Vec<SnapshotInfo>> {
+  const SNAPSHOT_DECODE_AMPLIFICATION: u64 = 8;
+
+  let (entries, inventory_charge) =
+    load_type_inventory(source, crate::engine::kv_store::KV_TYPE_SNAPSHOT, budget, "snapshot inventory admission failed")?;
+  let vector_charge = u64::try_from(entries.len())
+    .ok()
+    .and_then(|count| count.checked_mul((std::mem::size_of::<SnapshotInfo>() + 32) as u64))
+    .ok_or_else(|| EngineError::ResourceExhausted("snapshot list allocation estimate overflow".to_string()))?;
+  budget.reserve(vector_charge, "snapshot list admission failed")?;
+  let mut snapshots = Vec::with_capacity(entries.len());
+  let hash_length = source.hash_algo().hash_length();
+
+  for entry in entries {
+    budget.record_work(1)?;
+    let ((header, _key, value), raw_charge) = required_backup_entry(source, &entry.hash, "Snapshot", budget)?;
+    if header.entry_type != EntryType::Snapshot {
+      return Err(EngineError::CorruptEntry {
+        offset: entry.offset,
+        reason: format!("snapshot inventory key resolved to {:?}", header.entry_type),
+      });
+    }
+    let retained_charge = raw_charge
+      .checked_mul(SNAPSHOT_DECODE_AMPLIFICATION)
+      .ok_or_else(|| EngineError::ResourceExhausted("snapshot decode allocation estimate overflow".to_string()))?;
+    budget.reserve(retained_charge, "snapshot decode admission failed")?;
+    let snapshot = SnapshotInfo::deserialize(&value, hash_length, header.entry_version)?;
+    budget.release(raw_charge, "snapshot serialized buffer release failed")?;
+    snapshots.push(snapshot);
+  }
+
+  budget.release(inventory_charge, "snapshot inventory release failed")?;
+  snapshots.sort_by_key(|snapshot| snapshot.created_at);
+  Ok(snapshots)
 }
 
 /// Result of an export operation.
@@ -537,42 +858,67 @@ impl std::fmt::Display for ExportResult {
 ///
 /// Only chunks that don't exist in the base version are included.
 pub fn create_patch(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], output_path: &str) -> EngineResult<PatchResult> {
-  if std::path::Path::new(output_path).exists() {
-    return Err(EngineError::AlreadyExists(format!("patch destination '{}' already exists", output_path)));
-  }
-
-  let part_path = format!("{}.part", output_path);
-  let _ = std::fs::remove_file(&part_path);
-
-  match create_patch_inner(source, from_hash, to_hash, &part_path) {
-    Ok(stats) => {
-      crate::engine::durability::rename_durable(&part_path, output_path)?;
-      Ok(stats)
-    }
-    Err(error) => {
-      let _ = std::fs::remove_file(&part_path);
-      Err(error)
-    }
-  }
+  create_patch_controlled(source, from_hash, to_hash, output_path, None)
 }
 
-fn create_patch_inner(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], output_path: &str) -> EngineResult<PatchResult> {
-  // Walk both trees
-  let base_tree = walk_version_tree(source, from_hash)?;
-  let target_tree = walk_version_tree(source, to_hash)?;
+pub fn create_patch_with_cancellation(
+  source: &StorageEngine,
+  from_hash: &[u8],
+  to_hash: &[u8],
+  output_path: &str,
+  cancellation: &CancellationToken,
+) -> EngineResult<PatchResult> {
+  create_patch_controlled(source, from_hash, to_hash, output_path, Some(cancellation))
+}
 
-  // Compute diff
-  let diff = diff_trees(&base_tree, &target_tree);
+fn create_patch_controlled(
+  source: &StorageEngine,
+  from_hash: &[u8],
+  to_hash: &[u8],
+  output_path: &str,
+  cancellation: Option<&CancellationToken>,
+) -> EngineResult<PatchResult> {
+  let mut budget = backup_budget(source, cancellation)?;
+  create_patch_with_budget(source, from_hash, to_hash, output_path, &mut budget)
+}
+
+fn create_patch_inner(
+  source: &StorageEngine,
+  from_hash: &[u8],
+  to_hash: &[u8],
+  output_path: &str,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<PatchResult> {
+  budget.check_cancellation()?;
+  let base_tree = walk_version_tree_with_budget(source, from_hash, budget)?;
+  let target_tree = walk_version_tree_with_budget(source, to_hash, budget)?;
+  let diff = diff_trees_with_budget(&base_tree, &target_tree, budget)?;
 
   if diff.is_empty() {
     return Err(EngineError::NotFound("No changes between the two versions".to_string()));
   }
 
-  // Create output database
-  let output = StorageEngine::create(output_path)?;
+  budget.check_cancellation()?;
+  let output = StorageEngine::create_with_memory_coordinator(output_path, source.memory_coordinator())?;
 
   // Set backup metadata
   output.set_backup_info(2, from_hash, to_hash)?;
+
+  for node_hash in target_tree.btree_nodes.keys() {
+    if base_tree.btree_nodes.contains_key(node_hash) {
+      continue;
+    }
+    budget.record_work(1)?;
+    let ((header, key, value), charge) = required_backup_entry(source, node_hash, "patch B-tree DirectoryIndex", budget)?;
+    if header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("patch B-tree node {} resolved to {:?}", hex::encode(node_hash), header.entry_type),
+      });
+    }
+    output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+    budget.release(charge, "patch B-tree node buffer release failed")?;
+  }
 
   let mut chunks_written = 0u64;
   let mut files_added = 0u64;
@@ -582,93 +928,144 @@ fn create_patch_inner(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], 
 
   // Write only NEW chunks (chunks in target but not in base)
   for chunk_hash in &diff.new_chunks {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(chunk_hash)? {
-      output.store_entry(EntryType::Chunk, &key, &value)?;
-      chunks_written += 1;
+    budget.record_work(1)?;
+    let ((header, key, value), charge) = required_backup_entry(source, chunk_hash, "patch chunk", budget)?;
+    if header.entry_type != EntryType::Chunk {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("patch chunk {} resolved to {:?}", hex::encode(chunk_hash), header.entry_type),
+      });
     }
+    output.store_entry(EntryType::Chunk, &key, &value)?;
+    budget.release(charge, "patch chunk buffer release failed")?;
+    chunks_written += 1;
   }
 
   // Write added FileRecords at both content-hash and path-hash keys
   let patch_algo = output.hash_algo();
   for (path, (file_hash, _record)) in &diff.added {
-    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
-      store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
-      let path_key = file_path_hash(path, &patch_algo)?;
-      if path_key != key {
-        store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
-      }
-      files_added += 1;
+    budget.record_work(1)?;
+    let ((header, key, value), charge) = required_backup_entry(source, file_hash, "added patch FileRecord", budget)?;
+    if header.entry_type != EntryType::FileRecord {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("added patch file '{}' resolved to {:?}", path, header.entry_type),
+      });
     }
+    store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
+    let path_key = file_path_hash(path, &patch_algo)?;
+    if path_key != key {
+      store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
+    }
+    budget.release(charge, "added patch FileRecord buffer release failed")?;
+    files_added += 1;
   }
 
   // Write modified FileRecords at both content-hash and path-hash keys
   for (path, (file_hash, _record)) in &diff.modified {
-    if let Some((header, key, value)) = source.get_entry_including_deleted(file_hash)? {
-      store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
-      let path_key = file_path_hash(path, &patch_algo)?;
-      if path_key != key {
-        store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
-      }
-      files_modified += 1;
+    budget.record_work(1)?;
+    let ((header, key, value), charge) = required_backup_entry(source, file_hash, "modified patch FileRecord", budget)?;
+    if header.entry_type != EntryType::FileRecord {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("modified patch file '{}' resolved to {:?}", path, header.entry_type),
+      });
     }
+    store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
+    let path_key = file_path_hash(path, &patch_algo)?;
+    if path_key != key {
+      store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
+    }
+    budget.release(charge, "modified patch FileRecord buffer release failed")?;
+    files_modified += 1;
   }
 
   // Write DeletionRecords for deleted files
   for path in &diff.deleted {
+    budget.record_work(1)?;
+    let charge = patch_deletion_charge(path)?;
+    budget.reserve(charge, "patch file deletion buffer admission failed")?;
     let algo = source.hash_algo();
     let deletion_record = DeletionRecord::new(path.clone(), Some("patch-deletion".to_string()));
     let deletion_data = deletion_record.serialize();
     let deletion_key = file_path_hash(path, &algo)?;
     output.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_data)?;
+    budget.release(charge, "patch file deletion buffer release failed")?;
     files_deleted += 1;
   }
 
   // Write added symlinks at both content-hash and path-hash keys
   let symlink_algo = output.hash_algo();
   for (path, (symlink_hash, _record)) in &diff.symlinks_added {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(symlink_hash)? {
-      output.store_entry(EntryType::Symlink, &key, &value)?;
-      let path_key = symlink_path_hash(path, &symlink_algo)?;
-      if path_key != key {
-        output.store_entry(EntryType::Symlink, &path_key, &value)?;
-      }
+    budget.record_work(1)?;
+    let ((header, key, value), charge) = required_backup_entry(source, symlink_hash, "added patch Symlink", budget)?;
+    if header.entry_type != EntryType::Symlink {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("added patch symlink '{}' resolved to {:?}", path, header.entry_type),
+      });
     }
+    output.store_entry(EntryType::Symlink, &key, &value)?;
+    let path_key = symlink_path_hash(path, &symlink_algo)?;
+    if path_key != key {
+      output.store_entry(EntryType::Symlink, &path_key, &value)?;
+    }
+    budget.release(charge, "added patch Symlink buffer release failed")?;
   }
 
   // Write modified symlinks at both content-hash and path-hash keys
   for (path, (symlink_hash, _record)) in &diff.symlinks_modified {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(symlink_hash)? {
-      output.store_entry(EntryType::Symlink, &key, &value)?;
-      let path_key = symlink_path_hash(path, &symlink_algo)?;
-      if path_key != key {
-        output.store_entry(EntryType::Symlink, &path_key, &value)?;
-      }
+    budget.record_work(1)?;
+    let ((header, key, value), charge) = required_backup_entry(source, symlink_hash, "modified patch Symlink", budget)?;
+    if header.entry_type != EntryType::Symlink {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("modified patch symlink '{}' resolved to {:?}", path, header.entry_type),
+      });
     }
+    output.store_entry(EntryType::Symlink, &key, &value)?;
+    let path_key = symlink_path_hash(path, &symlink_algo)?;
+    if path_key != key {
+      output.store_entry(EntryType::Symlink, &path_key, &value)?;
+    }
+    budget.release(charge, "modified patch Symlink buffer release failed")?;
   }
 
   // Write DeletionRecords for deleted symlinks
   for path in &diff.symlinks_deleted {
+    budget.record_work(1)?;
+    let charge = patch_deletion_charge(path)?;
+    budget.reserve(charge, "patch symlink deletion buffer admission failed")?;
     let algo = source.hash_algo();
     let deletion_record = DeletionRecord::new(path.clone(), Some("patch-deletion".to_string()));
     let deletion_data = deletion_record.serialize();
     let deletion_key = symlink_path_hash(path, &algo)?;
     output.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_data)?;
+    budget.release(charge, "patch symlink deletion buffer release failed")?;
   }
 
   // Write changed DirectoryIndexes at both content-hash and path-hash keys
   let algo = output.hash_algo();
   for (path, (dir_hash, _data)) in &diff.changed_directories {
-    if let Some((_header, key, value)) = source.get_entry_including_deleted(dir_hash)? {
-      output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
-      let path_key = directory_path_hash(path, &algo)?;
-      if path_key != key {
-        output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
-      }
-      dirs_written += 1;
+    budget.record_work(1)?;
+    let ((header, key, value), charge) = required_backup_entry(source, dir_hash, "changed patch DirectoryIndex", budget)?;
+    if header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("changed patch directory '{}' resolved to {:?}", path, header.entry_type),
+      });
     }
+    output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
+    let path_key = directory_path_hash(path, &algo)?;
+    if path_key != key {
+      output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
+    }
+    budget.release(charge, "changed patch DirectoryIndex buffer release failed")?;
+    dirs_written += 1;
   }
 
   // Set HEAD to the target hash
+  budget.check_cancellation()?;
   output.update_head(to_hash)?;
 
   Ok(PatchResult {
@@ -682,6 +1079,14 @@ fn create_patch_inner(source: &StorageEngine, from_hash: &[u8], to_hash: &[u8], 
   })
 }
 
+fn patch_deletion_charge(path: &str) -> EngineResult<u64> {
+  u64::try_from(path.len())
+    .ok()
+    .and_then(|bytes| bytes.checked_mul(2))
+    .and_then(|bytes| bytes.checked_add(256))
+    .ok_or_else(|| EngineError::ResourceExhausted("patch deletion allocation estimate overflow".to_string()))
+}
+
 /// Create a patch from a named snapshot (or HEAD) to another.
 pub fn create_patch_from_snapshots(
   source: &StorageEngine,
@@ -689,8 +1094,19 @@ pub fn create_patch_from_snapshots(
   to_snapshot: Option<&str>,
   output_path: &str,
 ) -> EngineResult<PatchResult> {
-  let vm = VersionManager::new(source);
-  let snapshots = vm.list_snapshots()?;
+  let mut budget = backup_budget(source, None)?;
+  create_patch_from_snapshots_with_budget(source, from_snapshot, to_snapshot, output_path, &mut budget)
+}
+
+fn create_patch_from_snapshots_with_budget(
+  source: &StorageEngine,
+  from_snapshot: &str,
+  to_snapshot: Option<&str>,
+  output_path: &str,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<PatchResult> {
+  let snapshot_checkpoint = budget.checkpoint();
+  let snapshots = load_snapshot_infos(source, budget)?;
 
   let from_hash = snapshots
     .iter()
@@ -706,8 +1122,70 @@ pub fn create_patch_from_snapshots(
       .ok_or_else(|| EngineError::NotFound(format!("Snapshot '{}' not found", name)))?,
     None => source.head_hash()?,
   };
+  drop(snapshots);
+  budget.release_to(snapshot_checkpoint, "snapshot reference release failed")?;
 
-  create_patch(source, &from_hash, &to_hash, output_path)
+  create_patch_with_budget(source, &from_hash, &to_hash, output_path, budget)
+}
+
+/// Resolve each reference as an exact snapshot name first, then as a complete
+/// hexadecimal version hash. Snapshot read failures are never converted into
+/// hash fallbacks.
+pub fn create_patch_from_references(
+  source: &StorageEngine,
+  from_reference: &str,
+  to_reference: Option<&str>,
+  output_path: &str,
+) -> EngineResult<PatchResult> {
+  let mut budget = backup_budget(source, None)?;
+  let snapshot_checkpoint = budget.checkpoint();
+  let snapshots = load_snapshot_infos(source, &mut budget)?;
+  let expected_hash_length = source.hash_algo().hash_length();
+  let resolve = |reference: &str| -> EngineResult<Vec<u8>> {
+    if let Some(snapshot) = snapshots.iter().find(|snapshot| snapshot.name == reference) {
+      return Ok(snapshot.root_hash.clone());
+    }
+    let hash = hex::decode(reference).map_err(|error| {
+      EngineError::InvalidInput(format!("version reference '{}' is neither a snapshot name nor hexadecimal hash: {}", reference, error))
+    })?;
+    if hash.len() != expected_hash_length {
+      return Err(EngineError::InvalidInput(format!(
+        "version reference '{}' decodes to {} bytes; expected {}",
+        reference,
+        hash.len(),
+        expected_hash_length
+      )));
+    }
+    Ok(hash)
+  };
+  let from_hash = resolve(from_reference)?;
+  let to_hash = match to_reference {
+    Some(reference) => resolve(reference)?,
+    None => source.head_hash()?,
+  };
+  drop(snapshots);
+  budget.release_to(snapshot_checkpoint, "version reference release failed")?;
+  create_patch_with_budget(source, &from_hash, &to_hash, output_path, &mut budget)
+}
+
+fn create_patch_with_budget(
+  source: &StorageEngine,
+  from_hash: &[u8],
+  to_hash: &[u8],
+  output_path: &str,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<PatchResult> {
+  if std::path::Path::new(output_path).exists() {
+    return Err(EngineError::AlreadyExists(format!("patch destination '{}' already exists", output_path)));
+  }
+  let part = PartialBackupArtifact::new(output_path);
+  match create_patch_inner(source, from_hash, to_hash, part.path(), budget) {
+    Ok(result) => {
+      crate::engine::durability::rename_durable(part.path(), output_path)?;
+      Ok(result)
+    }
+    Err(error) => Err(error),
+  }
 }
 
 /// Result of a patch/diff operation.
@@ -742,15 +1220,14 @@ impl std::fmt::Display for PatchResult {
 /// Used to determine whether root-key authority is required for import.
 pub fn backup_contains_system_data(backup: &StorageEngine) -> EngineResult<bool> {
   use crate::engine::entry_header::FLAG_SYSTEM;
-  // Scan FileRecords — system data is stored as FileRecords with FLAG_SYSTEM
-  let snapshot = backup.kv_snapshot.load();
-  let entries = snapshot.iter_by_type(KV_TYPE_FILE_RECORD)?;
+  let mut budget = backup_budget(backup, None)?;
+  let (entries, _inventory_charge) =
+    load_type_inventory(backup, KV_TYPE_FILE_RECORD, &mut budget, "system-data inventory admission failed")?;
   for entry in entries {
-    // Read the entry's flags from its header
-    if let Ok(Some((header, _key, _value))) = backup.get_entry_including_deleted(&entry.hash) {
-      if header.flags & FLAG_SYSTEM != 0 {
-        return Ok(true);
-      }
+    budget.record_work(1)?;
+    let header = required_backup_header(backup, &entry.hash, EntryType::FileRecord, "system-data inspection")?;
+    if header.flags & FLAG_SYSTEM != 0 {
+      return Ok(true);
     }
   }
   Ok(false)
@@ -826,9 +1303,12 @@ pub fn import_backup_with_mode(
   include_system: bool,
   mode: ImportMode,
 ) -> EngineResult<ImportResult> {
-  // Open backup for import (allows patches)
-  let backup = StorageEngine::open_for_import(backup_path)?;
+  let mut budget = backup_budget(target, None)?;
+  let backup = StorageEngine::open_for_import_with_memory_coordinator(backup_path, target.memory_coordinator())?;
   let (backup_type, base_hash, target_hash) = backup.backup_info()?;
+  if !matches!(backup_type, 1 | 2) {
+    return Err(EngineError::InvalidInput(format!("import requires backup type 1 (export) or 2 (patch), found {}", backup_type)));
+  }
 
   // Restore-mode safety: refuse to clobber live data unless explicitly forced.
   if mode == ImportMode::Restore && !force && !is_target_empty(target)? {
@@ -860,94 +1340,102 @@ pub fn import_backup_with_mode(
 
   use crate::engine::entry_header::FLAG_SYSTEM;
 
-  // Helper: read entry with header so we can inspect FLAG_SYSTEM and preserve
-  // payload schema version when importing FileRecord entries.
-  let read_entry = |hash: &[u8]| -> EngineResult<Option<(u8, u8, Vec<u8>)>> {
-    match backup.get_entry_including_deleted(hash)? {
-      Some((header, _key, value)) => Ok(Some((header.flags, header.entry_version, value))),
-      None => Ok(None),
-    }
+  // Admit every inventory and the largest source-entry buffer before the
+  // first target mutation. A memory-pressure or malformed-backup failure must
+  // not turn an import into an avoidable partial write.
+  let (chunk_kv_entries, _) = load_type_inventory(&backup, KV_TYPE_CHUNK, &mut budget, "chunk import inventory admission failed")?;
+  let (file_kv_entries, _) =
+    load_type_inventory(&backup, KV_TYPE_FILE_RECORD, &mut budget, "FileRecord import inventory admission failed")?;
+  let (dir_kv_entries, _) =
+    load_type_inventory(&backup, KV_TYPE_DIRECTORY, &mut budget, "DirectoryIndex import inventory admission failed")?;
+  let (sym_kv_entries, _) = load_type_inventory(&backup, KV_TYPE_SYMLINK, &mut budget, "Symlink import inventory admission failed")?;
+  let (snapshot_kv_entries, _) = if include_system {
+    load_type_inventory(&backup, crate::engine::kv_store::KV_TYPE_SNAPSHOT, &mut budget, "Snapshot import inventory admission failed")?
+  } else {
+    (Vec::new(), 0)
   };
+  let (deletion_kv_entries, _) = if backup_type == 2 {
+    load_type_inventory(&backup, KV_TYPE_DELETION, &mut budget, "deletion import inventory admission failed")?
+  } else {
+    (Vec::new(), 0)
+  };
+
+  let inventories: &[(&[crate::engine::kv_store::KVEntry], EntryType, &str)] = &[
+    (&chunk_kv_entries, EntryType::Chunk, "chunk"),
+    (&file_kv_entries, EntryType::FileRecord, "FileRecord"),
+    (&dir_kv_entries, EntryType::DirectoryIndex, "DirectoryIndex"),
+    (&sym_kv_entries, EntryType::Symlink, "Symlink"),
+    (&snapshot_kv_entries, EntryType::Snapshot, "Snapshot"),
+    (&deletion_kv_entries, EntryType::DeletionRecord, "DeletionRecord"),
+  ];
+  let (maximum_entry_charge, maximum_value_length) = preflight_import_inventories(&backup, inventories, &mut budget)?;
+  budget.reserve(maximum_entry_charge, "largest import entry buffer admission failed")?;
+  validate_import_inventories(&backup, inventories, maximum_value_length, &mut budget)?;
 
   // Import chunks (chunks themselves don't carry FLAG_SYSTEM — they're
   // shared between user and system files. Filtering happens at the file/dir level.)
-  let chunk_kv_entries = {
-    let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_CHUNK)?
-  };
   for entry in chunk_kv_entries {
+    budget.record_work(1)?;
     if !target.has_entry(&entry.hash)? {
-      if let Some((_flags, _entry_version, value)) = read_entry(&entry.hash)? {
-        target.store_entry(EntryType::Chunk, &entry.hash, &value)?;
-        target.counters().record_chunk_stored(value.len() as u64);
-        target.counters().record_write(value.len() as u64);
-        chunks_imported += 1;
-        entries_imported += 1;
-      }
+      let (_header, _key, value) = required_import_entry(&backup, &entry.hash, EntryType::Chunk, maximum_value_length, "chunk")?;
+      target.store_entry(EntryType::Chunk, &entry.hash, &value)?;
+      target.counters().record_chunk_stored(value.len() as u64);
+      target.counters().record_write(value.len() as u64);
+      chunks_imported += 1;
+      entries_imported += 1;
     }
   }
 
   // Import FileRecords (skip system entries when include_system = false)
-  let file_kv_entries = {
-    let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_FILE_RECORD)?
-  };
   for entry in file_kv_entries {
-    if let Some((flags, entry_version, value)) = read_entry(&entry.hash)? {
-      let is_system = flags & FLAG_SYSTEM != 0;
-      if is_system && !include_system {
-        continue;
-      }
-      store_file_record_entry_preserving_version(&target, &entry.hash, &value, if is_system { FLAG_SYSTEM } else { 0 }, entry_version)?;
-      target.counters().record_write(value.len() as u64);
-      files_imported += 1;
-      entries_imported += 1;
+    budget.record_work(1)?;
+    let (header, _key, value) = required_import_entry(&backup, &entry.hash, EntryType::FileRecord, maximum_value_length, "FileRecord")?;
+    let is_system = header.flags & FLAG_SYSTEM != 0;
+    if is_system && !include_system {
+      continue;
     }
+    store_file_record_entry_preserving_version(target, &entry.hash, &value, if is_system { FLAG_SYSTEM } else { 0 }, header.entry_version)?;
+    target.counters().record_write(value.len() as u64);
+    files_imported += 1;
+    entries_imported += 1;
   }
 
   // Import DirectoryIndexes (skip system dirs when include_system = false)
-  let dir_kv_entries = {
-    let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_DIRECTORY)?
-  };
   for entry in dir_kv_entries {
-    if let Some((flags, _entry_version, value)) = read_entry(&entry.hash)? {
-      let is_system = flags & FLAG_SYSTEM != 0;
-      if is_system && !include_system {
-        continue;
-      }
-      target.store_entry(EntryType::DirectoryIndex, &entry.hash, &value)?;
-      target.counters().record_write(value.len() as u64);
-      dirs_imported += 1;
-      entries_imported += 1;
+    budget.record_work(1)?;
+    let (header, _key, value) =
+      required_import_entry(&backup, &entry.hash, EntryType::DirectoryIndex, maximum_value_length, "DirectoryIndex")?;
+    let is_system = header.flags & FLAG_SYSTEM != 0;
+    if is_system && !include_system {
+      continue;
     }
+    target.store_entry(EntryType::DirectoryIndex, &entry.hash, &value)?;
+    target.counters().record_write(value.len() as u64);
+    dirs_imported += 1;
+    entries_imported += 1;
   }
 
   // Import Symlinks (skip system symlinks when include_system = false)
-  let sym_kv_entries = {
-    let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_SYMLINK)?
-  };
   for entry in sym_kv_entries {
-    if let Some((flags, _entry_version, value)) = read_entry(&entry.hash)? {
-      let is_system = flags & FLAG_SYSTEM != 0;
-      if is_system && !include_system {
-        continue;
-      }
-      target.store_entry(EntryType::Symlink, &entry.hash, &value)?;
-      target.counters().record_write(value.len() as u64);
-      entries_imported += 1;
+    budget.record_work(1)?;
+    let (header, _key, value) = required_import_entry(&backup, &entry.hash, EntryType::Symlink, maximum_value_length, "Symlink")?;
+    let is_system = header.flags & FLAG_SYSTEM != 0;
+    if is_system && !include_system {
+      continue;
     }
+    target.store_entry(EntryType::Symlink, &entry.hash, &value)?;
+    target.counters().record_write(value.len() as u64);
+    entries_imported += 1;
   }
 
   // Import Snapshot-type entries (only when system data is allowed —
   // snapshots reference system snapshot files and aren't useful without them)
   if include_system {
-    use crate::engine::kv_store::KV_TYPE_SNAPSHOT;
-    let snap_entries = backup.entries_by_type(KV_TYPE_SNAPSHOT)?;
-    for (hash, value) in &snap_entries {
-      if !target.has_entry(hash)? {
-        target.store_entry(EntryType::Snapshot, hash, value)?;
+    for entry in snapshot_kv_entries {
+      budget.record_work(1)?;
+      if !target.has_entry(&entry.hash)? {
+        let (_header, _key, value) = required_import_entry(&backup, &entry.hash, EntryType::Snapshot, maximum_value_length, "Snapshot")?;
+        target.store_entry(EntryType::Snapshot, &entry.hash, &value)?;
         target.counters().record_write(value.len() as u64);
         entries_imported += 1;
       }
@@ -956,11 +1444,11 @@ pub fn import_backup_with_mode(
 
   // Apply DeletionRecords (for patches)
   if backup_type == 2 {
-    let deletion_entries = backup.entries_by_type(KV_TYPE_DELETION)?;
-    for (hash, _value) in &deletion_entries {
+    for entry in deletion_kv_entries {
+      budget.record_work(1)?;
       // Mark the entry as deleted in the target
-      if target.has_entry(hash)? {
-        let _ = target.mark_entry_deleted(hash);
+      if target.has_entry(&entry.hash)? {
+        target.mark_entry_deleted(&entry.hash)?;
         target.counters().record_write(0);
         deletions_applied += 1;
         entries_imported += 1;
@@ -1002,6 +1490,85 @@ pub fn import_backup_with_mode(
   })
 }
 
+fn backup_entry_charge(header: &crate::engine::entry_header::EntryHeader) -> EngineResult<u64> {
+  u64::from(header.key_length)
+    .checked_add(u64::from(header.value_length))
+    .and_then(|bytes| bytes.checked_add(header.header_size() as u64))
+    .and_then(|bytes| bytes.checked_add(96))
+    .ok_or_else(|| EngineError::ResourceExhausted("backup entry buffer estimate overflow".to_string()))
+}
+
+fn required_backup_header(
+  backup: &StorageEngine,
+  hash: &[u8],
+  expected_type: EntryType,
+  context: &str,
+) -> EngineResult<crate::engine::entry_header::EntryHeader> {
+  let header = backup.get_entry_header_including_deleted(hash)?.ok_or_else(|| EngineError::CorruptEntry {
+    offset: 0,
+    reason: format!("{context} references missing {:?} entry {}", expected_type, hex::encode(hash)),
+  })?;
+  if header.entry_type != expected_type {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("{context} expected {:?}, found {:?} for {}", expected_type, header.entry_type, hex::encode(hash)),
+    });
+  }
+  Ok(header)
+}
+
+fn preflight_import_inventories(
+  backup: &StorageEngine,
+  inventories: &[(&[crate::engine::kv_store::KVEntry], EntryType, &str)],
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<(u64, u32)> {
+  let mut maximum_charge = 0u64;
+  let mut maximum_value_length = 0u32;
+  for (entries, expected_type, context) in inventories {
+    for entry in *entries {
+      budget.record_work(1)?;
+      let header = required_backup_header(backup, &entry.hash, *expected_type, context)?;
+      maximum_charge = maximum_charge.max(backup_entry_charge(&header)?);
+      maximum_value_length = maximum_value_length.max(header.value_length);
+    }
+  }
+  Ok((maximum_charge, maximum_value_length))
+}
+
+fn validate_import_inventories(
+  backup: &StorageEngine,
+  inventories: &[(&[crate::engine::kv_store::KVEntry], EntryType, &str)],
+  maximum_value_length: u32,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  for (entries, expected_type, context) in inventories {
+    for entry in *entries {
+      budget.record_work(1)?;
+      required_import_entry(backup, &entry.hash, *expected_type, maximum_value_length, context)?;
+    }
+  }
+  Ok(())
+}
+
+fn required_import_entry(
+  backup: &StorageEngine,
+  hash: &[u8],
+  expected_type: EntryType,
+  maximum_value_length: u32,
+  context: &str,
+) -> EngineResult<BackupEntry> {
+  let entry = backup.get_entry_including_deleted_verified_bounded(hash, maximum_value_length)?.ok_or_else(|| {
+    EngineError::CorruptEntry { offset: 0, reason: format!("import references missing {context} entry {}", hex::encode(hash)) }
+  })?;
+  if entry.0.entry_type != expected_type {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("import expected {:?}, found {:?} for {}", expected_type, entry.0.entry_type, hex::encode(hash)),
+    });
+  }
+  Ok(entry)
+}
+
 /// Result of an import operation.
 #[derive(Debug, Clone)]
 pub struct ImportResult {
@@ -1038,5 +1605,37 @@ impl std::fmt::Display for ImportResult {
         format!("has NOT been changed.\n  To promote: aeordb promote --hash {}", hex::encode(&self.version_hash))
       },
     )
+  }
+}
+
+#[cfg(test)]
+mod atomic_cleanup_tests {
+  use std::sync::{Arc, Mutex};
+  use std::panic::{catch_unwind, AssertUnwindSafe};
+
+  use super::*;
+
+  #[test]
+  fn export_atomic_removes_partial_artifact_during_unwind() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("panic.aeordb");
+    let output_string = output.to_string_lossy().into_owned();
+    let observed_part = Arc::new(Mutex::new(None::<String>));
+    let observed_part_for_work = observed_part.clone();
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+      let _ = export_atomic(&output_string, |part_path| -> EngineResult<ExportResult> {
+        *observed_part_for_work.lock().unwrap() = Some(part_path.to_string());
+        std::fs::write(part_path, b"partial")?;
+        std::fs::write(format!("{part_path}.lock"), b"")?;
+        panic!("injected backup writer panic");
+      });
+    }));
+
+    assert!(result.is_err());
+    assert!(!output.exists());
+    let part = observed_part.lock().unwrap().clone().expect("work closure should observe partial path");
+    assert!(!std::path::Path::new(&part).exists());
+    assert!(!std::path::Path::new(&format!("{part}.lock")).exists());
   }
 }

@@ -1,8 +1,14 @@
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use aeordb::engine::backup::{create_patch, export_version, import_backup, ExportResult, ImportResult};
+use aeordb::engine::backup::{backup_contains_system_data, create_patch, export_version, import_backup, ExportResult, ImportResult};
+use aeordb::engine::entry_header::FLAG_SYSTEM;
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::errors::EngineError;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::EntryType;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
@@ -401,4 +407,98 @@ fn test_import_entries_total_count() {
     result.chunks_imported + result.files_imported + result.directories_imported + result.deletions_applied,
     "entries_imported should be the sum of all sub-counts"
   );
+}
+
+#[test]
+fn test_backup_system_data_inspection_propagates_entry_read_failure() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = db_path(&temp, "corrupt-inspection.aeordb");
+  let backup = StorageEngine::create(&path).unwrap();
+  let key = vec![0xA5; backup.hash_algo().hash_length()];
+  backup.store_entry_with_flags(EntryType::FileRecord, &key, b"system-record", FLAG_SYSTEM).unwrap();
+  let entry = backup.get_kv_entry(&key).unwrap().unwrap();
+  let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+  file.seek(SeekFrom::Start(entry.offset)).unwrap();
+  file.write_all(&0u32.to_le_bytes()).unwrap();
+  file.sync_data().unwrap();
+
+  let error = backup_contains_system_data(&backup).unwrap_err();
+
+  assert!(error.to_string().contains("magic") || error.to_string().contains("Magic"), "unexpected error: {error}");
+}
+
+#[test]
+fn test_import_memory_pressure_fails_before_target_mutation() {
+  let (source, source_temp) = setup_engine_with_files();
+  let export_path = db_path(&source_temp, "pressure-import.aeordb");
+  export_to_path(&source, &export_path);
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+  let coordinator = target.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let remaining = policy.ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Task, remaining.saturating_sub(4 * 1024), AdmissionClass::Workload).unwrap();
+
+  let error = import_backup(&RequestContext::system(), &target, &export_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::BackupRestore).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_import_rejects_unknown_backup_type_before_target_mutation() {
+  let (source, source_temp) = setup_engine_with_files();
+  let export_path = db_path(&source_temp, "unknown-type.aeordb");
+  export_to_path(&source, &export_path);
+  {
+    let backup = StorageEngine::open_for_import(&export_path).unwrap();
+    let (_, base_hash, target_hash) = backup.backup_info().unwrap();
+    backup.set_backup_info(3, &base_hash, &target_hash).unwrap();
+  }
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup(&RequestContext::system(), &target, &export_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::InvalidInput(_)), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
+}
+
+#[test]
+fn test_import_rejects_corrupt_entry_body_before_target_mutation() {
+  let (source, source_temp) = setup_engine_with_files();
+  let export_path = db_path(&source_temp, "corrupt-body.aeordb");
+  export_to_path(&source, &export_path);
+  let corrupt_key = {
+    let backup = StorageEngine::open_for_import(&export_path).unwrap();
+    aeordb::engine::directory_ops::file_path_hash("/docs/goodbye.txt", &backup.hash_algo()).unwrap()
+  };
+  let (entry, header) = {
+    let backup = StorageEngine::open_for_import(&export_path).unwrap();
+    (backup.get_kv_entry(&corrupt_key).unwrap().unwrap(), backup.get_entry_header_including_deleted(&corrupt_key).unwrap().unwrap())
+  };
+  let value_offset = entry.offset + header.header_size() as u64 + u64::from(header.key_length);
+  let mut file = OpenOptions::new().write(true).open(&export_path).unwrap();
+  file.seek(SeekFrom::Start(value_offset)).unwrap();
+  file.write_all(&[0xFF]).unwrap();
+  file.sync_data().unwrap();
+  drop(file);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup(&RequestContext::system(), &target, &export_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before, "corrupt backup must fail before importing earlier entries");
 }

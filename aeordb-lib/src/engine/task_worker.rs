@@ -40,8 +40,8 @@ const TASK_WORKER_ADMISSION_BYTES: u64 = 256 * 1024;
 ///
 /// Follows the heartbeat pattern: `tokio::spawn` + loop + sleep.
 /// Accepts a [`CancellationToken`](tokio_util::sync::CancellationToken) for
-/// graceful shutdown. When the token is cancelled, the worker finishes
-/// processing the current task (if any) and then exits.
+/// graceful shutdown. Long-running task implementations observe the token at
+/// their own safe cancellation boundaries before the worker exits.
 ///
 /// Returns a JoinHandle that resolves when the task exits.
 pub fn spawn_task_worker(
@@ -160,7 +160,7 @@ fn process_next_task_internal_with_cancel(
   let result = match task.task_type.as_str() {
     "reindex" => execute_reindex(queue, &task, engine, plugin_manager, cancel),
     "gc" => execute_gc(queue, &task, engine, cancel),
-    "backup" => execute_backup(&task, engine),
+    "backup" => execute_backup(&task, engine, cancel),
     "cleanup" => execute_cleanup(&task, engine, event_bus),
     unknown => Err(format!("unknown task type: {}", unknown)),
   };
@@ -564,7 +564,7 @@ fn execute_gc(
 /// - `retention_count` (integer) -- keep at most this many `.aeordb` files in
 ///   `backup_dir`. 0 means unlimited. Default: 0.
 /// - `snapshot` (string, optional) -- export a named snapshot instead of HEAD.
-fn execute_backup(task: &TaskRecord, engine: &StorageEngine) -> Result<String, String> {
+fn execute_backup(task: &TaskRecord, engine: &StorageEngine, cancel: &tokio_util::sync::CancellationToken) -> Result<String, String> {
   let backup_dir = task.args.get("backup_dir").and_then(|v| v.as_str()).unwrap_or("./backups/");
 
   let retention_count = task.args.get("retention_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -585,7 +585,7 @@ fn execute_backup(task: &TaskRecord, engine: &StorageEngine) -> Result<String, S
 
   // Run the export. Scheduled backups don't include system data —
   // they're for user data history, not credential rotation.
-  let result = backup::export_snapshot(engine, snapshot_name, &output_path_string, false)
+  let result = backup::export_snapshot_with_cancellation(engine, snapshot_name, &output_path_string, false, cancel)
     .map_err(|error| format!("backup export failed: {}", error))?;
 
   // Enforce retention policy if configured.

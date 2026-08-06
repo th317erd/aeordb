@@ -68,6 +68,7 @@ pub mod native_durability;
 pub mod native_parsers;
 pub mod nvt;
 pub mod nvt_ops;
+pub(crate) mod operation_memory;
 pub mod path_utils;
 pub mod peer_connection;
 pub mod permission_resolver;
@@ -193,7 +194,7 @@ pub use tree_walker::{walk_version_tree, walk_subtree, diff_trees, VersionTree, 
 pub use version_access::{resolve_file_at_version, read_file_at_version};
 pub use backup::{
   export_version, export_snapshot, export_full, backup_contains_system_data, ExportResult, create_patch, create_patch_from_snapshots,
-  PatchResult, import_backup, ImportResult,
+  create_patch_from_references, PatchResult, import_backup, ImportResult,
 };
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
 pub use cluster_join::{has_signing_key, is_ready_for_traffic, get_cluster_mode};

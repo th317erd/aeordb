@@ -20,16 +20,7 @@ pub fn run(database: &str, output: &str, from: &str, to: Option<&str>) {
     }
   };
 
-  // Try snapshot names first, fall back to raw hashes
-  let result = aeordb::engine::backup::create_patch_from_snapshots(&source, from, to, output).or_else(|_| {
-    // Try as raw hashes
-    let from_bytes = hex::decode(from).map_err(|e| aeordb::engine::EngineError::NotFound(format!("Invalid 'from' hash: {}", e)))?;
-    let to_bytes = match to {
-      Some(h) => hex::decode(h).map_err(|e| aeordb::engine::EngineError::NotFound(format!("Invalid 'to' hash: {}", e)))?,
-      None => source.head_hash()?,
-    };
-    aeordb::engine::backup::create_patch(&source, &from_bytes, &to_bytes, output)
-  });
+  let result = aeordb::engine::backup::create_patch_from_references(&source, from, to, output);
 
   match result {
     Ok(result) => println!("\n{}", result),

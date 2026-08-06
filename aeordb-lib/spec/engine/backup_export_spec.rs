@@ -1,12 +1,21 @@
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use aeordb::engine::backup::{export_version, export_snapshot, ExportResult};
+use aeordb::engine::backup::{
+  create_patch, export_full, export_snapshot, export_version, export_version_with_cancellation, import_backup, ExportResult,
+};
+use aeordb::engine::directory_entry::{serialize_child_entries, ChildEntry};
+use aeordb::engine::entry_header::FLAG_SYSTEM;
+use aeordb::engine::errors::EngineError;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::version_manager::VersionManager;
-use aeordb::engine::{DirectoryOps, StorageEngine};
+use aeordb::engine::{is_btree_format, BufferedFile, DirectoryOps, EntryType, StorageEngine, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
+use tokio_util::sync::CancellationToken;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -26,6 +35,19 @@ fn output_path(temp: &tempfile::TempDir) -> String {
   temp.path().join("export.aeordb").to_str().unwrap().to_string()
 }
 
+fn assert_no_partial_artifacts(output: &str) {
+  let output = std::path::Path::new(output);
+  let parent = output.parent().unwrap();
+  let prefix = format!("{}.part-", output.file_name().unwrap().to_string_lossy());
+  let artifacts = std::fs::read_dir(parent)
+    .unwrap()
+    .filter_map(Result::ok)
+    .map(|entry| entry.file_name())
+    .filter(|name| name.to_string_lossy().starts_with(&prefix))
+    .collect::<Vec<_>>();
+  assert!(artifacts.is_empty(), "partial export artifacts remain: {artifacts:?}");
+}
+
 // ─── 1. test_export_head ────────────────────────────────────────────────
 
 #[test]
@@ -36,6 +58,8 @@ fn test_export_head() {
 
   let head = source.head_hash().unwrap();
   let result = export_version(&source, &head, &out, false).unwrap();
+
+  assert_no_partial_artifacts(&out);
 
   assert_eq!(result.files_written, 3);
   assert!(result.chunks_written >= 3, "expected at least 3 chunks, got {}", result.chunks_written);
@@ -428,4 +452,188 @@ fn test_export_invalid_version_hash() {
       // Also acceptable if the engine errors out
     }
   }
+}
+
+#[test]
+fn test_export_memory_pressure_fails_before_creating_output() {
+  let (source, _source_temp) = setup_engine_with_files();
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+  let coordinator = source.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let remaining = policy.ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let pressure_bytes = remaining.saturating_sub(2 * 1024).max(1);
+  let _pressure = coordinator.reserve(MemoryOwner::Task, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let error = export_version(&source, &source.head_hash().unwrap(), &out, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&out).exists(), "failed admission must not create the destination");
+  assert_no_partial_artifacts(&out);
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::BackupRestore).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_full_export_rejects_malformed_existing_system_record() {
+  let (source, _source_temp) = setup_engine_with_files();
+  let key = aeordb::engine::directory_ops::file_path_hash("/.aeordb-system/email-config.json", &source.hash_algo()).unwrap();
+  source.store_entry_with_flags(EntryType::FileRecord, &key, b"not-a-file-record", FLAG_SYSTEM).unwrap();
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+
+  let error = export_full(&source, &out, true).unwrap_err();
+
+  assert!(error.to_string().contains("FileRecord"), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&out).exists());
+  assert_no_partial_artifacts(&out);
+}
+
+#[test]
+fn test_cancelled_export_creates_no_artifact_and_releases_memory() {
+  let (source, _source_temp) = setup_engine_with_files();
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+
+  let error = export_version_with_cancellation(&source, &source.head_hash().unwrap(), &out, false, &cancellation).unwrap_err();
+
+  assert!(matches!(error, EngineError::Cancelled(_)), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&out).exists());
+  assert_no_partial_artifacts(&out);
+  let owner = source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::BackupRestore).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_export_rejects_directory_cycle_instead_of_omitting_branch() {
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let root_hash = source.head_hash().unwrap();
+  let cycle = ChildEntry {
+    entry_type: EntryType::DirectoryIndex.to_u8(),
+    hash: root_hash.clone(),
+    total_size: 0,
+    created_at: 0,
+    updated_at: 0,
+    name: "cycle".to_string(),
+    content_type: None,
+    virtual_time: 0,
+    node_id: 0,
+  };
+  let data = serialize_child_entries(&[cycle], source.hash_algo().hash_length()).unwrap();
+  source.store_entry(EntryType::DirectoryIndex, &root_hash, &data).unwrap();
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+
+  let error = export_version(&source, &root_hash, &out, false).unwrap_err();
+
+  assert!(error.to_string().contains("cycle"), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&out).exists());
+  assert_no_partial_artifacts(&out);
+}
+
+#[test]
+fn test_full_export_rejects_malformed_snapshot_record() {
+  let (source, _source_temp) = setup_engine_with_files();
+  let key = vec![0xA7; source.hash_algo().hash_length()];
+  source.store_entry(EntryType::Snapshot, &key, b"not-a-snapshot").unwrap();
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+
+  let error = export_full(&source, &out, true).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. } | EngineError::UnexpectedEof), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&out).exists());
+  assert_no_partial_artifacts(&out);
+}
+
+#[test]
+fn test_export_rejects_corrupt_referenced_entry_body() {
+  let (source, source_temp) = setup_engine_with_files();
+  let tree = walk_version_tree(&source, &source.head_hash().unwrap()).unwrap();
+  let key = tree.files.get("/docs/goodbye.txt").unwrap().1.chunk_hashes[0].clone();
+  let entry = source.get_kv_entry(&key).unwrap().unwrap();
+  let header = source.get_entry_header_including_deleted(&key).unwrap().unwrap();
+  let value_offset = entry.offset + header.header_size() as u64 + u64::from(header.key_length);
+  let mut file = OpenOptions::new().write(true).open(source_temp.path().join("test.aeordb")).unwrap();
+  file.seek(SeekFrom::Start(value_offset)).unwrap();
+  file.write_all(&[0xFF]).unwrap();
+  file.sync_data().unwrap();
+  drop(file);
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+
+  let error = export_version(&source, &source.head_hash().unwrap(), &out, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&out).exists());
+  assert_no_partial_artifacts(&out);
+}
+
+#[test]
+fn test_backup_artifacts_preserve_large_directory_btree_nodes() {
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  let files = (0..BTREE_CONVERSION_THRESHOLD - 1)
+    .map(|index| BufferedFile {
+      path: format!("/large/file-{index:04}.json"),
+      data: format!("{{\"index\":{index}}}").into_bytes(),
+      content_type: Some("application/json".to_string()),
+    })
+    .collect();
+  DirectoryOps::new(&source).store_files_buffered_batch(&context, files).unwrap();
+  let operations = DirectoryOps::new(&source);
+  for index in BTREE_CONVERSION_THRESHOLD - 1..BTREE_CONVERSION_THRESHOLD + 8 {
+    operations
+      .store_file_buffered(
+        &context,
+        &format!("/large/file-{index:04}.json"),
+        format!("{{\"index\":{index}}}").as_bytes(),
+        Some("application/json"),
+      )
+      .unwrap();
+  }
+  let directory_key = aeordb::engine::directory_path_hash("/large", &source.hash_algo()).unwrap();
+  let directory_link = source.get_entry(&directory_key).unwrap().unwrap().2;
+  let directory_data = source.get_entry(&directory_link).unwrap().unwrap().2;
+  assert!(is_btree_format(&directory_data), "source fixture must exercise B-tree export");
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+
+  export_version(&source, &source.head_hash().unwrap(), &out, false).unwrap();
+  let exported = StorageEngine::open_for_import(&out).unwrap();
+  let children = DirectoryOps::new(&exported).list_directory("/large/").unwrap();
+  assert_eq!(children.len(), BTREE_CONVERSION_THRESHOLD + 8);
+  drop(exported);
+
+  let (restored, _restored_temp) = create_temp_engine_for_tests();
+  import_backup(&context, &restored, &out, false, true, false).unwrap();
+  assert_eq!(DirectoryOps::new(&restored).list_directory("/large/").unwrap().len(), BTREE_CONVERSION_THRESHOLD + 8);
+
+  let patch_path = output_temp.path().join("large-directory.patch.aeordb").to_string_lossy().into_owned();
+  let empty_hash = vec![0xA3; source.hash_algo().hash_length()];
+  create_patch(&source, &empty_hash, &source.head_hash().unwrap(), &patch_path).unwrap();
+  let patch = StorageEngine::open_for_import(&patch_path).unwrap();
+  assert_eq!(DirectoryOps::new(&patch).list_directory("/large/").unwrap().len(), BTREE_CONVERSION_THRESHOLD + 8);
+}
+
+#[test]
+fn test_export_accepts_distinct_empty_directories_with_shared_content_hash() {
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&source);
+  operations.create_directory(&context, "/first-empty").unwrap();
+  operations.create_directory(&context, "/second-empty").unwrap();
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+
+  export_version(&source, &source.head_hash().unwrap(), &out, false).unwrap();
+  let exported = StorageEngine::open_for_import(&out).unwrap();
+
+  assert!(DirectoryOps::new(&exported).list_directory("/first-empty/").unwrap().is_empty());
+  assert!(DirectoryOps::new(&exported).list_directory("/second-empty/").unwrap().is_empty());
 }

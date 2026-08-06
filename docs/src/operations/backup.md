@@ -56,19 +56,24 @@ The output file must not already exist -- the command will refuse to overwrite.
 ```bash
 curl -X POST http://localhost:6830/versions/export \
   -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"output": "backup.aeordb"}'
+  --output backup.aeordb
 ```
 
 With a snapshot:
 ```bash
-curl -X POST http://localhost:6830/versions/export \
+curl -X POST "http://localhost:6830/versions/export?snapshot=v1" \
   -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"output": "backup.aeordb", "snapshot": "v1"}'
+  --output backup-v1.aeordb
 ```
 
 > **Note:** HTTP exports never include system data or other snapshots — that's CLI-only with `--root-key`. The HTTP endpoint is for sharing a single version's user data.
+
+HTTP export bodies are streamed from a temporary file beside the source
+database. The server does not materialize the complete `.aeordb` artifact in
+memory or stage it in the operating system's temporary directory. Dropping the
+response releases the stream reservation and temporary file. Keep enough free
+space on the database filesystem for the generated archive while it is being
+downloaded.
 
 ### Output
 
@@ -102,10 +107,9 @@ The `--from` and `--to` arguments accept either snapshot names or hex-encoded ve
 ### HTTP API
 
 ```bash
-curl -X POST http://localhost:6830/versions/diff \
+curl -X POST "http://localhost:6830/versions/diff?from=v1&to=v2" \
   -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"output": "patch.aeordb", "from": "v1", "to": "v2"}'
+  --output patch.aeordb
 ```
 
 ### Output
@@ -166,9 +170,19 @@ import succeeds but skips the system entries (a warning is printed).
 ```bash
 curl -X POST http://localhost:6830/versions/import \
   -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"file": "backup.aeordb", "promote": true}'
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @backup.aeordb
 ```
+
+Use `?promote=true`, `?force=true`, and `?mode=restore` as needed. Uploads are
+streamed to a temporary file beside the target database with a 10 GiB transfer
+limit. AeorDB rejects an oversized declared `Content-Length` before creating an
+artifact and independently counts streamed bytes, so chunked uploads cannot
+bypass the limit. Before the first target write, AeorDB validates the artifact type and
+every inventoried entry body and checksum, then admits its inventory and
+transfer workspace under the process memory coordinator. The temporary file is
+removed together with its lock sidecar on success, refusal, malformed input,
+cancellation, or handler failure.
 
 ### Patch Base Version Check
 
