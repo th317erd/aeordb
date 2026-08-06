@@ -1167,7 +1167,7 @@ impl<'a> DirectoryOps<'a> {
     let dir_key = directory_path_hash(&normalized, &algo)?;
     if normalized == "/" {
       let snapshot = self.engine.kv_snapshot.load();
-      if let Some(kv_entry) = snapshot.get(&dir_key) {
+      if let Some(kv_entry) = snapshot.get(&dir_key)? {
         tracing::debug!(kv_offset = kv_entry.offset, kv_type = kv_entry.type_flags, "list_directory: root KV entry");
       }
     }

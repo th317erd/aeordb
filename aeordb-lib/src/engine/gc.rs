@@ -224,7 +224,7 @@ fn walk_versions_bfs(
         continue;
       }
       // In-memory KV lookup tells us the type and offset without disk I/O.
-      match engine.get_kv_entry(&hash) {
+      match engine.get_kv_entry(&hash)? {
         Some(kv) => {
           let t = kv.entry_type();
           if t == KV_TYPE_CHUNK {
@@ -637,7 +637,7 @@ pub fn gc_sweep(engine: &StorageEngine, live: &HashSet<Vec<u8>>, dry_run: bool) 
   let mut verified_hashes: Vec<Vec<u8>> = Vec::with_capacity(garbage_candidates.len());
   let mut freed_regions: Vec<(u64, u32)> = Vec::with_capacity(garbage_candidates.len());
   for (hash, offset, entry_size) in &garbage_candidates {
-    match engine.get_kv_entry(hash) {
+    match engine.get_kv_entry(hash)? {
       Some(fresh) if fresh.offset == *offset => {
         if engine.is_current_reusable_range(*offset, *entry_size)? {
           verified_hashes.push(hash.clone());

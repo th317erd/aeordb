@@ -70,7 +70,7 @@ fn test_stress_many_small_files() {
   let read_elapsed = read_start.elapsed();
   println!("Read {} files in {:.2}s ({:.0} reads/sec)", reads, read_elapsed.as_secs_f64(), reads as f64 / read_elapsed.as_secs_f64(),);
 
-  let stats = engine.stats();
+  let stats = engine.stats().unwrap();
   assert!(stats.file_count >= count, "expected {} files, got {}", count, stats.file_count,);
 
   // Boundary checks: first and last file
@@ -273,7 +273,7 @@ fn test_stress_concurrent_writes_during_queries() {
 
   // Verify: all seed + new files should exist
   let expected_total = (seed_count + 50) as usize;
-  let stats = engine.stats();
+  let stats = engine.stats().unwrap();
   assert!(stats.file_count >= expected_total, "expected at least {} files, got {}", expected_total, stats.file_count,);
 
   // Spot-check the new files
@@ -422,7 +422,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
   }
   println!("Cycle 3: created 200 more");
 
-  let stats_before_gc = engine.stats();
+  let stats_before_gc = engine.stats().unwrap();
   println!(
     "Before GC: {} files, {} voids, {} void bytes, DB size: {} bytes",
     stats_before_gc.file_count, stats_before_gc.void_count, stats_before_gc.void_space_bytes, stats_before_gc.db_file_size_bytes,
@@ -432,7 +432,7 @@ fn test_stress_fragmentation_create_delete_cycles() {
   let gc_result = run_gc(&engine, &ctx, false).unwrap();
   println!("GC: {} garbage entries, {} bytes reclaimed", gc_result.garbage_entries, gc_result.reclaimed_bytes,);
 
-  let stats_after_gc = engine.stats();
+  let stats_after_gc = engine.stats().unwrap();
   println!(
     "After GC: {} files, {} voids, {} void bytes, DB size: {} bytes",
     stats_after_gc.file_count, stats_after_gc.void_count, stats_after_gc.void_space_bytes, stats_after_gc.db_file_size_bytes,
@@ -598,7 +598,7 @@ fn test_stress_large_files() {
   let dedup_elapsed = start.elapsed();
   println!("1MB dedup store: {:.1}ms (chunks already exist)", dedup_elapsed.as_millis());
 
-  let stats = engine.stats();
+  let stats = engine.stats().unwrap();
   println!("DB stats: {} chunks, {:.1}MB on disk", stats.chunk_count, stats.db_file_size_bytes as f64 / 1_048_576.0);
 }
 

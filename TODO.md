@@ -144,6 +144,8 @@
       - [x] Run focused, concurrency, malformed-policy, adjacent memory/metrics/cache/KV, cross-platform, broad, and real-engine gates; commit and push.
     - [ ] P2b-3: migrate KV, directory, index, query, parser/plugin, task, GC, repair, and maintenance growth to reservations and eviction.
       - [x] Add a bounded version-aware KV page provider with exact positioned reads, coalesced misses, clean LRU eviction, retained-generation admission before overwrite, and typed corruption/I/O failures.
+      - [x] Add bounded-page `ReadSnapshot` support and propagate page I/O/corruption errors through engine, backup, GC, counters, stats, metrics, portal, CLI diagnostics, and bulk-flush consumers.
+      - [x] Ensure known-corrupt KV pages rebuild from WAL before startup snapshot consumers or counters run; prove recovered reads and counts.
       - [ ] Replace full resident KV page sets with the bounded provider while preserving every `ReadSnapshot` consumer and eliminating error-to-not-found squelching.
       - [ ] Make KV cache and retained generations reserve through the coordinator, evict clean pages under pressure, and safely gate full-layout rewrite/expansion.
       - [ ] Cap and evict directory, generic server, and clean index caches from resolved policy; flush dirty indexes before releasing their reservations.

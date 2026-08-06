@@ -148,7 +148,7 @@ fn phase1_bulk_store(engine: &StorageEngine, ctx: &RequestContext) -> usize {
   let elapsed = start.elapsed();
   let rate = if elapsed.as_secs_f64() > 0.0 { stored as f64 / elapsed.as_secs_f64() } else { 0.0 };
 
-  let stats = engine.stats();
+  let stats = engine.stats().unwrap();
   log_progress(&format!("  Phase 1 DONE: {} files in {:.2}s ({:.0} files/s)", stored, elapsed.as_secs_f64(), rate));
   log_progress(&format!(
     "  DB stats: {} entries, {} files, {} dirs, {:.1} MB on disk",
@@ -442,7 +442,7 @@ fn phase5_gc_after_deletes(engine: &StorageEngine, ctx: &RequestContext, total_s
     del_rate
   ));
 
-  let stats_before = engine.stats();
+  let stats_before = engine.stats().unwrap();
   log_progress(&format!("  Before GC: {} voids, {} void bytes", stats_before.void_count, stats_before.void_space_bytes));
 
   // Run GC
@@ -450,7 +450,7 @@ fn phase5_gc_after_deletes(engine: &StorageEngine, ctx: &RequestContext, total_s
   let gc_result = run_gc(engine, ctx, false).expect("GC failed");
   let gc_elapsed = gc_start.elapsed();
 
-  let stats_after = engine.stats();
+  let stats_after = engine.stats().unwrap();
   log_progress(&format!(
     "  GC: scanned={}, live={}, garbage={}, reclaimed={} bytes, {:.2}s",
     gc_result.versions_scanned,
@@ -587,7 +587,11 @@ fn main() {
   let overall_elapsed = overall_start.elapsed();
   print_separator();
   log_progress(&format!("BENCHMARK COMPLETE in {:.1}s", overall_elapsed.as_secs_f64()));
-  log_progress(&format!("Final DB: {:.1} MB, {} files stored", engine.stats().db_file_size_bytes as f64 / (1024.0 * 1024.0), total_stored));
+  log_progress(&format!(
+    "Final DB: {:.1} MB, {} files stored",
+    engine.stats().unwrap().db_file_size_bytes as f64 / (1024.0 * 1024.0),
+    total_stored
+  ));
   print_separator();
 
   // Cleanup

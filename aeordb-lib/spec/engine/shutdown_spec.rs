@@ -243,13 +243,13 @@ fn test_engine_shutdown_preserves_stats() {
   ops.store_file_buffered(&ctx, "/a.txt", b"aaa", Some("text/plain")).unwrap();
   ops.store_file_buffered(&ctx, "/b.txt", b"bbb", Some("text/plain")).unwrap();
 
-  let stats_before = engine.stats();
+  let stats_before = engine.stats().unwrap();
   assert!(stats_before.file_count >= 2, "should have at least 2 files before shutdown");
 
   engine.shutdown().expect("shutdown should succeed");
 
   // Stats should still be queryable after shutdown
-  let stats_after = engine.stats();
+  let stats_after = engine.stats().unwrap();
   assert_eq!(stats_before.file_count, stats_after.file_count);
 }
 

@@ -400,9 +400,10 @@ fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
 
     matches += 1;
     let live = match engine.get_kv_entry(&scanned.key) {
-      Some(entry) if entry.offset == scanned.offset && entry.total_length == scanned.header.total_length => "LIVE exact".to_string(),
-      Some(entry) => format!("not live; current offset={} len={} deleted={}", entry.offset, entry.total_length, entry.is_deleted()),
-      None => "not live; key missing from KV".to_string(),
+      Ok(Some(entry)) if entry.offset == scanned.offset && entry.total_length == scanned.header.total_length => "LIVE exact".to_string(),
+      Ok(Some(entry)) => format!("not live; current offset={} len={} deleted={}", entry.offset, entry.total_length, entry.is_deleted()),
+      Ok(None) => "not live; key missing from KV".to_string(),
+      Err(error) => format!("KV lookup failed: {error}"),
     };
     let value_summary = if scanned.value.len() == hash_length {
       format!(" hard-link={}", hex::encode(&scanned.value))
@@ -607,8 +608,10 @@ fn print_chunk_diagnostics(engine: &StorageEngine, record: &FileRecord) {
   let mut verify_errors = Vec::new();
 
   for (index, hash) in record.chunk_hashes.iter().enumerate() {
-    if engine.get_kv_entry(hash).is_none() {
-      kv_missing += 1;
+    match engine.get_kv_entry(hash) {
+      Ok(None) => kv_missing += 1,
+      Ok(Some(_)) => {}
+      Err(error) => verify_errors.push(format!("chunk {} KV lookup: {error}", index)),
     }
 
     let chunk_start = Instant::now();
@@ -716,7 +719,7 @@ fn print_stream_read(ops: &DirectoryOps<'_>, normalized: &str) {
 
 fn kv_summary(engine: &StorageEngine, hash: &[u8]) -> String {
   match engine.get_kv_entry(hash) {
-    Some(entry) => format!(
+    Ok(Some(entry)) => format!(
       "PRESENT hash={} type={} flags={:#04x} offset={} len={} pending={} deleted={}",
       hex::encode(hash),
       entry.entry_type(),
@@ -726,7 +729,8 @@ fn kv_summary(engine: &StorageEngine, hash: &[u8]) -> String {
       entry.is_pending(),
       entry.is_deleted(),
     ),
-    None => format!("MISSING hash={}", hex::encode(hash)),
+    Ok(None) => format!("MISSING hash={}", hex::encode(hash)),
+    Err(error) => format!("ERROR hash={} error={error}", hex::encode(hash)),
   }
 }
 
@@ -774,7 +778,13 @@ fn throughput_mib_s(bytes: u64, elapsed_seconds: f64) -> f64 {
 //   3. void count + bytes (GC reclaim that may or may not be progressing)
 // ---------------------------------------------------------------------------
 fn print_growth_stats(engine: &aeordb::engine::StorageEngine) {
-  let stats = engine.stats();
+  let stats = match engine.stats() {
+    Ok(stats) => stats,
+    Err(error) => {
+      eprintln!("database stats: {error}");
+      std::process::exit(1);
+    }
+  };
   let writer = match engine.writer_read_lock() {
     Ok(w) => w,
     Err(e) => {

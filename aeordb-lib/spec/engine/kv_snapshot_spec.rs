@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use aeordb::engine::disk_kv_store::DiskKVStore;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
+use aeordb::engine::kv_page_provider::KvPageProvider;
 use aeordb::engine::kv_pages::{bucket_page_offset, page_size};
 use aeordb::engine::kv_snapshot::ReadSnapshot;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_FLAG_DELETED};
@@ -123,7 +124,7 @@ fn test_snapshot_get_finds_entry_in_buffer() {
 
   let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, empty_pages(bucket_count, 32));
 
-  let result = snap.get(&make_hash(42));
+  let result = snap.get(&make_hash(42)).unwrap();
   assert!(result.is_some());
   assert_eq!(result.unwrap().offset, 12345);
 }
@@ -141,11 +142,11 @@ fn test_snapshot_get_returns_none_for_deleted_in_buffer() {
 
   let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 0, empty_pages(bucket_count, 32));
 
-  let result = snap.get(&make_hash(42));
+  let result = snap.get(&make_hash(42)).unwrap();
   assert!(result.is_none(), "Deleted entry in buffer should return None from get()");
 
   // But get_raw should still find it
-  let raw = snap.get_raw(&make_hash(42));
+  let raw = snap.get_raw(&make_hash(42)).unwrap();
   assert!(raw.is_some(), "get_raw should return deleted entries");
   assert!(raw.unwrap().is_deleted());
 
@@ -162,15 +163,15 @@ fn test_snapshot_get_falls_through_to_disk() {
   // Empty buffer — all lookups must hit pages
   let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
 
-  let r1 = snap.get(&make_hash(1));
+  let r1 = snap.get(&make_hash(1)).unwrap();
   assert!(r1.is_some());
   assert_eq!(r1.unwrap().offset, 100);
 
-  let r2 = snap.get(&make_hash(2));
+  let r2 = snap.get(&make_hash(2)).unwrap();
   assert!(r2.is_some());
   assert_eq!(r2.unwrap().offset, 200);
 
-  let r3 = snap.get(&make_hash(3));
+  let r3 = snap.get(&make_hash(3)).unwrap();
   assert!(r3.is_some());
   assert_eq!(r3.unwrap().offset, 300);
 }
@@ -184,11 +185,11 @@ fn test_snapshot_get_returns_none_for_missing() {
   let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages);
 
   // Hash 99 was never inserted
-  let result = snap.get(&make_hash(99));
+  let result = snap.get(&make_hash(99)).unwrap();
   assert!(result.is_none(), "Missing hash should return None");
 
   // Also check buffer miss for a hash not in buffer or disk
-  let result2 = snap.get(&make_hash(200));
+  let result2 = snap.get(&make_hash(200)).unwrap();
   assert!(result2.is_none());
 }
 
@@ -207,7 +208,7 @@ fn test_snapshot_buffer_wins_over_disk() {
 
   let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages);
 
-  let result = snap.get(&make_hash(10));
+  let result = snap.get(&make_hash(10)).unwrap();
   assert!(result.is_some());
   assert_eq!(result.unwrap().offset, 9999, "Buffer entry should win over disk entry");
 }
@@ -284,8 +285,8 @@ fn test_snapshot_count_by_type_respects_buffer_overrides() {
 
   let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
 
-  assert_eq!(snap.count_by_type(KV_TYPE_CHUNK), 3);
-  let all = snap.iter_by_type(KV_TYPE_CHUNK);
+  assert_eq!(snap.count_by_type(KV_TYPE_CHUNK).unwrap(), 3);
+  let all = snap.iter_by_type(KV_TYPE_CHUNK).unwrap();
   assert_eq!(all.len(), 3);
   assert!(all.iter().any(|entry| entry.hash == make_hash(1)));
   assert!(all.iter().any(|entry| entry.hash == make_hash(2) && entry.offset == 2222));
@@ -306,7 +307,7 @@ fn test_snapshot_buffer_only_publish_reuses_pages_and_type_counts() {
   let new_entry = make_entry(3, 300);
   buffer.insert(new_entry.hash.clone(), new_entry);
 
-  let first_pages = Arc::clone(first.pages());
+  let first_pages = Arc::clone(first.resident_pages().unwrap());
   let second = ReadSnapshot::new_with_page_type_counts(
     buffer,
     make_nvt(bucket_count),
@@ -317,9 +318,9 @@ fn test_snapshot_buffer_only_publish_reuses_pages_and_type_counts() {
     page_type_counts,
   );
 
-  assert!(Arc::ptr_eq(second.pages(), &first_pages));
-  assert_eq!(second.count_by_type(KV_TYPE_CHUNK), 3);
-  assert!(second.iter_by_type(KV_TYPE_CHUNK).iter().any(|entry| entry.hash == make_hash(3)));
+  assert!(Arc::ptr_eq(second.resident_pages().unwrap(), &first_pages));
+  assert_eq!(second.count_by_type(KV_TYPE_CHUNK).unwrap(), 3);
+  assert!(second.iter_by_type(KV_TYPE_CHUNK).unwrap().iter().any(|entry| entry.hash == make_hash(3)));
 }
 
 #[test]
@@ -333,18 +334,66 @@ fn test_snapshot_get_concurrent_file_handles() {
 
   // Multiple sequential get() calls — all served from in-memory pages.
   for _ in 0..5 {
-    let r10 = snap.get(&make_hash(10));
+    let r10 = snap.get(&make_hash(10)).unwrap();
     assert!(r10.is_some());
     assert_eq!(r10.unwrap().offset, 1000);
 
-    let r20 = snap.get(&make_hash(20));
+    let r20 = snap.get(&make_hash(20)).unwrap();
     assert!(r20.is_some());
     assert_eq!(r20.unwrap().offset, 2000);
 
-    let r30 = snap.get(&make_hash(30));
+    let r30 = snap.get(&make_hash(30)).unwrap();
     assert!(r30.is_some());
     assert_eq!(r30.unwrap().offset, 3000);
   }
+}
+
+#[test]
+fn bounded_snapshot_reads_exact_pages_without_owning_the_full_page_set() {
+  let dir = tempdir().unwrap();
+  let entries = vec![make_entry(10, 1000), make_entry(20, 2000), make_entry(30, 3000)];
+  let (bucket_count, _) = create_flushed_store(dir.path(), &entries);
+  let file = OpenOptions::new().read(true).write(true).open(dir.path().join("test.aeordb")).unwrap();
+  let provider = KvPageProvider::new(file, 256, HashAlgorithm::Blake3_256, bucket_count, 0, None).unwrap();
+  let snapshot = ReadSnapshot::from_bounded_pages(
+    HashMap::new(),
+    make_nvt(bucket_count),
+    bucket_count,
+    HashAlgorithm::Blake3_256,
+    entries.len(),
+    provider.snapshot().unwrap(),
+  )
+  .unwrap();
+
+  assert!(snapshot.resident_pages().is_none());
+  assert!(snapshot.bounded_pages().is_some());
+  assert_eq!(snapshot.memory_stats().resident_page_bytes, 0);
+  assert_eq!(snapshot.get(&make_hash(20)).unwrap().unwrap().offset, 2000);
+  assert_eq!(snapshot.iter_all().unwrap().len(), 3);
+}
+
+#[test]
+fn bounded_snapshot_propagates_page_io_failure_instead_of_reporting_a_miss() {
+  let dir = tempdir().unwrap();
+  let entry = make_entry(12, 1200);
+  let (bucket_count, _) = create_flushed_store(dir.path(), std::slice::from_ref(&entry));
+  let path = dir.path().join("test.aeordb");
+  let file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+  let provider = KvPageProvider::new(file, 256, HashAlgorithm::Blake3_256, bucket_count, 0, None).unwrap();
+  let snapshot = ReadSnapshot::from_bounded_pages(
+    HashMap::new(),
+    make_nvt(bucket_count),
+    bucket_count,
+    HashAlgorithm::Blake3_256,
+    1,
+    provider.snapshot().unwrap(),
+  )
+  .unwrap();
+  OpenOptions::new().write(true).open(path).unwrap().set_len(256).unwrap();
+
+  assert!(snapshot.get(&entry.hash).is_err());
+  assert!(snapshot.iter_all().is_err());
+  assert!(snapshot.count_by_type(KV_TYPE_CHUNK).is_ok(), "precomputed counts remain readable without a buffer override");
 }
 
 // ============================================================================

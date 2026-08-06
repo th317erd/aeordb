@@ -1606,7 +1606,7 @@ impl StorageEngine {
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
-    let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
+    let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
     engine.counters.store(initialized);
     engine.initialize_configuration_shadow()?;
     engine.initialize_memory_coordinator()?;
@@ -1805,7 +1805,7 @@ impl StorageEngine {
       }
 
       let resolved = Self::resolve_rebuild_records(rebuild_records, hash_algo, &deletion_records)?;
-      kv.bulk_insert(&resolved);
+      kv.bulk_insert(&resolved)?;
       kv.flush()?;
 
       kv
@@ -1849,9 +1849,6 @@ impl StorageEngine {
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
-    let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
-    engine.counters.store(initialized);
-
     // After KV block expansion, rebuild the entire KV index from WAL.
     // The expansion zeroed the KV pages, so only hot tail entries are loaded.
     // A full rebuild repopulates all entries at their new offsets.
@@ -1865,7 +1862,7 @@ impl StorageEngine {
       }
       engine.rebuild_kv_with_progress(progress_callback.clone())?;
       // Re-initialize counters from the freshly rebuilt KV
-      let refreshed = Arc::new(EngineCounters::initialize_from_kv(&engine));
+      let refreshed = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
       engine.counters.store(refreshed);
 
       // Dirty rebuild lost the hot tail's void state. Re-derive voids by
@@ -1883,6 +1880,9 @@ impl StorageEngine {
         },
       );
       engine.recover_voids_via_gap_scan()?;
+    } else {
+      let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
+      engine.counters.store(initialized);
     }
 
     // Seed the DiskKVStore's pending_voids snapshot from the loaded
@@ -2372,7 +2372,7 @@ impl StorageEngine {
   pub fn get_entry(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
     let _operation = self.operation_guard("get_entry")?;
     let snapshot = self.kv_snapshot.load();
-    let kv_entry = match snapshot.get(hash) {
+    let kv_entry = match snapshot.get(hash)? {
       Some(entry) if !entry.is_deleted() => entry,
       _ => return Ok(None),
     };
@@ -2402,7 +2402,7 @@ impl StorageEngine {
   pub fn get_entry_header(&self, hash: &[u8]) -> EngineResult<Option<EntryHeader>> {
     let _operation = self.operation_guard("get_entry_header")?;
     let snapshot = self.kv_snapshot.load();
-    let kv_entry = match snapshot.get(hash) {
+    let kv_entry = match snapshot.get(hash)? {
       Some(entry) if !entry.is_deleted() => entry,
       _ => return Ok(None),
     };
@@ -2418,7 +2418,7 @@ impl StorageEngine {
   pub fn get_entry_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
     let _operation = self.operation_guard("get_entry_including_deleted")?;
     let snapshot = self.kv_snapshot.load();
-    let kv_entry = match snapshot.get_raw(hash) {
+    let kv_entry = match snapshot.get_raw(hash)? {
       Some(entry) => entry,
       None => return Ok(None),
     };
@@ -2442,7 +2442,7 @@ impl StorageEngine {
   pub fn get_entry_verified_bounded(&self, hash: &[u8], maximum_value_length: u32) -> EngineResult<Option<EntryData>> {
     let _operation = self.operation_guard("get_entry_verified")?;
     let snapshot = self.kv_snapshot.load();
-    let kv_entry = match snapshot.get(hash) {
+    let kv_entry = match snapshot.get(hash)? {
       Some(entry) if !entry.is_deleted() => entry,
       _ => return Ok(None),
     };
@@ -2466,7 +2466,7 @@ impl StorageEngine {
   pub fn get_entry_verified_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
     let _operation = self.operation_guard("get_entry_verified_including_deleted")?;
     let snapshot = self.kv_snapshot.load();
-    let kv_entry = match snapshot.get_raw(hash) {
+    let kv_entry = match snapshot.get_raw(hash)? {
       Some(entry) => entry,
       None => return Ok(None),
     };
@@ -2589,7 +2589,7 @@ impl StorageEngine {
   pub fn get_chunk_metadata(&self, hash: &[u8]) -> EngineResult<Option<ChunkEntryMetadata>> {
     let _operation = self.operation_guard("get_chunk_metadata")?;
     let snapshot = self.kv_snapshot.load();
-    let Some(kv_entry) = snapshot.get(hash) else {
+    let Some(kv_entry) = snapshot.get(hash)? else {
       return Ok(None);
     };
     if kv_entry.is_deleted() {
@@ -2639,7 +2639,7 @@ impl StorageEngine {
       let mut span_end = 0u64;
 
       for location in locations {
-        let kv_entry = match snapshot.get(&location.hash) {
+        let kv_entry = match snapshot.get(&location.hash)? {
           Some(entry) if !entry.is_deleted() => entry,
           _ => return Err(EngineError::NotFound(format!("Chunk not found: {}", hex::encode(&location.hash)))),
         };
@@ -2736,7 +2736,7 @@ impl StorageEngine {
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
     let _operation = self.operation_guard("has_entry")?;
     let snapshot = self.kv_snapshot.load();
-    match snapshot.get(hash) {
+    match snapshot.get(hash)? {
       Some(entry) => Ok(!entry.is_deleted()),
       None => Ok(false),
     }
@@ -2768,9 +2768,9 @@ impl StorageEngine {
 
   /// Reconcile live count counters from the authoritative KV snapshot while
   /// preserving monotonic throughput counters.
-  pub fn reconcile_counters_from_kv(&self) {
+  pub fn reconcile_counters_from_kv(&self) -> EngineResult<()> {
     let current = self.counters.load().snapshot();
-    let mut refreshed = EngineCounters::initialize_from_kv(self).snapshot();
+    let mut refreshed = EngineCounters::initialize_from_kv(self)?.snapshot();
     refreshed.writes_total = current.writes_total;
     refreshed.reads_total = current.reads_total;
     refreshed.bytes_written_total = current.bytes_written_total;
@@ -2778,6 +2778,7 @@ impl StorageEngine {
     refreshed.chunks_deduped_total = current.chunks_deduped_total;
     refreshed.write_buffer_depth = current.write_buffer_depth;
     self.counters.load().reconcile(&refreshed);
+    Ok(())
   }
 
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
@@ -3233,7 +3234,7 @@ impl StorageEngine {
   pub fn is_entry_deleted(&self, hash: &[u8]) -> EngineResult<bool> {
     let _operation = self.operation_guard("is_entry_deleted")?;
     let snapshot = self.kv_snapshot.load();
-    match snapshot.get_raw(hash) {
+    match snapshot.get_raw(hash)? {
       Some(entry) => Ok(entry.is_deleted()),
       None => Ok(false),
     }
@@ -3460,7 +3461,7 @@ impl StorageEngine {
     let _operation = self.operation_guard("remove_kv_entries_batch")?;
     self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-    kv.mark_deleted_batch(hashes);
+    kv.mark_deleted_batch(hashes)?;
     Ok(())
   }
 
@@ -3482,19 +3483,20 @@ impl StorageEngine {
 
   /// Lightweight single-hash lookup in the KV snapshot.
   /// Returns `None` for deleted or missing entries.
-  pub fn get_kv_entry(&self, hash: &[u8]) -> Option<KVEntry> {
+  pub fn get_kv_entry(&self, hash: &[u8]) -> EngineResult<Option<KVEntry>> {
+    let _operation = self.operation_guard("get_kv_entry")?;
     let snapshot = self.kv_snapshot.load();
     snapshot.get(hash)
   }
 
   /// Return all (key_hash, value) pairs for entries matching a KV type.
-  /// Uses the prebuilt type index for O(k) lookup where k is the number of
-  /// entries of the target type. Reads each entry's value from disk.
+  /// Scans KV pages through the active snapshot backend, then reads each
+  /// matching entry's value from the WAL.
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let _operation = self.operation_guard("entries_by_type")?;
     let entries: Vec<KVEntry> = {
       let snapshot = self.kv_snapshot.load();
-      snapshot.iter_by_type(target_type)
+      snapshot.iter_by_type(target_type)?
     };
 
     let mut results = Vec::with_capacity(entries.len());
@@ -3520,17 +3522,12 @@ impl StorageEngine {
 
   /// Return aggregate statistics about the database including entry counts
   /// by type, file sizes, void space, and timestamps.
-  pub fn stats(&self) -> DatabaseStats {
+  pub fn stats(&self) -> EngineResult<DatabaseStats> {
     // 1. Lock writer for file header info and file size
-    let (entry_count, created_at, updated_at, db_file_size_bytes, kv_size_bytes) = match self.writer.read() {
-      Ok(writer) => {
-        let fh = writer.file_header();
-        (fh.entry_count, fh.created_at, fh.updated_at, writer.file_size(), fh.kv_block_length)
-      }
-      Err(e) => {
-        tracing::error!("writer lock poisoned in stats(): {}", e);
-        (0, 0, 0, 0, 0)
-      }
+    let (entry_count, created_at, updated_at, db_file_size_bytes, kv_size_bytes) = {
+      let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      let fh = writer.file_header();
+      (fh.entry_count, fh.created_at, fh.updated_at, writer.file_size(), fh.kv_block_length)
     };
 
     // 2. Use snapshot for entry counts (lock-free)
@@ -3540,22 +3537,19 @@ impl StorageEngine {
 
     // Type counts are backed by compact snapshot counters and adjusted for
     // the small live write buffer without cloning every entry of that type.
-    let chunk_count = snapshot.count_by_type(KV_TYPE_CHUNK);
-    let file_count = snapshot.count_by_type(KV_TYPE_FILE_RECORD);
-    let directory_count = snapshot.count_by_type(KV_TYPE_DIRECTORY);
-    let snapshot_count = snapshot.count_by_type(KV_TYPE_SNAPSHOT);
-    let fork_count = snapshot.count_by_type(KV_TYPE_FORK);
+    let chunk_count = snapshot.count_by_type(KV_TYPE_CHUNK)?;
+    let file_count = snapshot.count_by_type(KV_TYPE_FILE_RECORD)?;
+    let directory_count = snapshot.count_by_type(KV_TYPE_DIRECTORY)?;
+    let snapshot_count = snapshot.count_by_type(KV_TYPE_SNAPSHOT)?;
+    let fork_count = snapshot.count_by_type(KV_TYPE_FORK)?;
 
     // 3. Lock void_manager for void stats
-    let (void_count, void_space_bytes) = match self.void_manager.read() {
-      Ok(vm) => (vm.void_count(), vm.total_void_space()),
-      Err(e) => {
-        tracing::error!("void_manager lock poisoned in stats(): {}", e);
-        (0, 0)
-      }
+    let (void_count, void_space_bytes) = {
+      let vm = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      (vm.void_count(), vm.total_void_space())
     };
 
-    DatabaseStats {
+    Ok(DatabaseStats {
       entry_count,
       kv_entries,
       kv_size_bytes,
@@ -3572,7 +3566,7 @@ impl StorageEngine {
       created_at,
       updated_at,
       hash_algorithm: format!("{:?}", self.hash_algo),
-    }
+    })
   }
 
   /// Rebuild the KV index from a full scan of the append log.
@@ -3805,7 +3799,7 @@ impl StorageEngine {
       },
     );
     new_kv.flush()?;
-    new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot));
+    new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot))?;
 
     tracing::debug!(write_buffer_after_flush = new_kv.write_buffer_len(), "rebuild_kv: flush complete");
 

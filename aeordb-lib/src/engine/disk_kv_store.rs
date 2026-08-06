@@ -445,7 +445,7 @@ impl DiskKVStore {
 
   /// Insert or update an entry.
   pub fn insert(&mut self, entry: KVEntry) -> EngineResult<()> {
-    let is_new = !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_disk(&entry.hash);
+    let is_new = !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_disk(&entry.hash)?;
 
     self.write_buffer.insert(entry.hash.clone(), entry.clone());
 
@@ -476,19 +476,18 @@ impl DiskKVStore {
   }
 
   /// Bulk insert without snapshot publishing or hot journaling.
-  pub fn bulk_insert(&mut self, entries: &[KVEntry]) {
+  pub fn bulk_insert(&mut self, entries: &[KVEntry]) -> EngineResult<()> {
     for entry in entries {
-      if !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_disk(&entry.hash) {
+      if !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_disk(&entry.hash)? {
         self.entry_count += 1;
       }
       self.write_buffer.insert(entry.hash.clone(), entry.clone());
 
       if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
-        if let Err(e) = self.flush_no_snapshot() {
-          tracing::warn!("Flush failed during bulk_insert: {}", e);
-        }
+        self.flush_no_snapshot()?;
       }
     }
+    Ok(())
   }
 
   fn flush_no_snapshot(&mut self) -> EngineResult<()> {
@@ -537,9 +536,9 @@ impl DiskKVStore {
     Ok(())
   }
 
-  fn entry_exists_on_disk(&self, hash: &[u8]) -> bool {
+  fn entry_exists_on_disk(&self, hash: &[u8]) -> EngineResult<bool> {
     let current = self.snapshot.load();
-    current.get_raw(hash).is_some()
+    Ok(current.get_raw(hash)?.is_some())
   }
 
   /// Flush the write buffer to KV bucket pages.
@@ -607,7 +606,7 @@ impl DiskKVStore {
 
     if !overflow_entries.is_empty() {
       // Publish snapshot BEFORE resize so iter_all sees flushed entries
-      self.publish_snapshot_incremental(&modified_buckets);
+      self.publish_snapshot_incremental(&modified_buckets)?;
       let old_stage = self.stage;
       self.resize_to_next_stage()?;
       if self.stage > old_stage {
@@ -637,7 +636,7 @@ impl DiskKVStore {
           self.db_file.set_len(end)?; // Truncate stale trailing data
           self.sync_data_barrier(0)?;
         }
-        self.publish_snapshot_incremental(&modified_buckets);
+        self.publish_snapshot_incremental(&modified_buckets)?;
         self.publish_buffer_only();
         let elapsed = timer_start.elapsed().as_secs_f64();
         metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
@@ -664,7 +663,7 @@ impl DiskKVStore {
       self.sync_data_barrier(0)?;
     }
 
-    self.publish_snapshot_incremental(&modified_buckets);
+    self.publish_snapshot_incremental(&modified_buckets)?;
 
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
@@ -720,11 +719,11 @@ impl DiskKVStore {
     self.entry_count = 0;
 
     // Re-insert all entries
-    self.bulk_insert(&all_entries);
+    self.bulk_insert(&all_entries)?;
     self.flush_no_snapshot()?;
 
     self.entry_count = all_entries.len();
-    self.publish_full_snapshot_with_new_nvt();
+    self.publish_full_snapshot_with_new_nvt()?;
 
     Ok(())
   }
@@ -742,11 +741,10 @@ impl DiskKVStore {
     }
   }
 
-  pub fn mark_deleted_batch(&mut self, hashes: &[Vec<u8>]) {
-    // Resolve each hash from the in-memory snapshot (or current write_buffer)
-    // instead of paying a disk seek per hash. The published ReadSnapshot
-    // holds every committed bucket page in RAM, so this is O(1) lookup
-    // versus O(disk_read) for the previous `self.get(hash)` path.
+  pub fn mark_deleted_batch(&mut self, hashes: &[Vec<u8>]) -> EngineResult<()> {
+    // Resolve each hash from the published snapshot (or current write_buffer)
+    // without taking the KV writer lock again for each candidate. The snapshot
+    // backend owns any required resident-page or bounded-provider access.
     let snapshot = self.snapshot.load();
     for hash in hashes {
       let mut entry = if let Some(buffered) = self.write_buffer.get(hash) {
@@ -754,7 +752,7 @@ impl DiskKVStore {
           continue;
         }
         buffered.clone()
-      } else if let Some(snap_entry) = snapshot.get_raw(hash) {
+      } else if let Some(snap_entry) = snapshot.get_raw(hash)? {
         if snap_entry.is_deleted() {
           continue;
         }
@@ -779,6 +777,7 @@ impl DiskKVStore {
     // on clean shutdown. This amortizes the bucket-page-rewrite cost
     // across subsequent writes instead of stalling the GC caller.
     self.publish_buffer_only();
+    Ok(())
   }
 
   pub fn iter_all(&mut self) -> EngineResult<Vec<KVEntry>> {
@@ -899,41 +898,40 @@ impl DiskKVStore {
   // Snapshot publishing
   // ========================================================================
 
-  fn read_all_pages(&mut self) -> KvPageSet {
+  fn read_all_pages(&mut self) -> EngineResult<KvPageSet> {
     let hash_length = self.hash_algo.hash_length();
     let psize = page_size(hash_length);
     let mut pages = Vec::with_capacity(self.bucket_count);
     for bucket in 0..self.bucket_count {
       let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
       let mut page_data = vec![0u8; psize];
-      if self.db_file.seek(SeekFrom::Start(offset)).is_ok() && self.db_file.read_exact(&mut page_data).is_ok() {
-        pages.push(Self::page_arc(page_data));
-        continue;
-      }
-      pages.push(Self::page_arc(vec![0u8; psize]));
+      self.db_file.seek(SeekFrom::Start(offset))?;
+      self.db_file.read_exact(&mut page_data)?;
+      live_type_counts_in_page(&page_data, hash_length).map_err(|error| match error {
+        EngineError::CorruptEntry { reason, .. } => EngineError::CorruptEntry { offset, reason },
+        other => other,
+      })?;
+      pages.push(Self::page_arc(page_data));
     }
-    Arc::new(pages)
+    Ok(Arc::new(pages))
   }
 
   fn publish_buffer_only(&mut self) {
-    let (current_pages, current_page_type_counts) = {
+    let snapshot = {
       let current = self.snapshot.load();
-      (Arc::clone(current.pages()), current.page_type_counts())
+      current.republish_with_buffer(
+        self.write_buffer.clone(),
+        Arc::clone(&self.shared_nvt),
+        self.bucket_count,
+        self.hash_algo,
+        self.entry_count,
+      )
     };
-    let snapshot = ReadSnapshot::new_with_page_type_counts(
-      self.write_buffer.clone(),
-      Arc::clone(&self.shared_nvt),
-      self.bucket_count,
-      self.hash_algo,
-      self.entry_count,
-      current_pages,
-      current_page_type_counts,
-    );
     self.snapshot.store(Arc::new(snapshot));
   }
 
-  fn publish_full_snapshot(&mut self) {
-    let pages = self.read_all_pages();
+  fn publish_full_snapshot(&mut self) -> EngineResult<()> {
+    let pages = self.read_all_pages()?;
     let snapshot = ReadSnapshot::new(
       self.write_buffer.clone(),
       Arc::clone(&self.shared_nvt),
@@ -943,15 +941,18 @@ impl DiskKVStore {
       pages,
     );
     self.snapshot.store(Arc::new(snapshot));
+    Ok(())
   }
 
-  fn publish_snapshot_incremental(&mut self, modified_buckets: &[usize]) {
+  fn publish_snapshot_incremental(&mut self, modified_buckets: &[usize]) -> EngineResult<()> {
     if self.shared_nvt.bucket_count() != self.nvt.bucket_count() {
       self.shared_nvt = Arc::new(self.nvt.clone());
     }
 
     let current = self.snapshot.load();
-    let old_pages = current.pages();
+    let old_pages = current
+      .resident_pages()
+      .ok_or_else(|| EngineError::InvalidInput("resident incremental publisher cannot update bounded KV pages".to_string()))?;
     let mut new_pages = (**old_pages).clone();
     let mut new_page_type_counts = current.page_type_counts();
 
@@ -959,13 +960,15 @@ impl DiskKVStore {
     let psize = page_size(hash_length);
     for &bucket in modified_buckets {
       if bucket < new_pages.len() {
-        let old_counts = live_type_counts_in_page(&new_pages[bucket], hash_length).unwrap_or([0usize; 16]);
+        let old_counts = live_type_counts_in_page(&new_pages[bucket], hash_length)?;
         let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
         let mut page_data = vec![0u8; psize];
-        if self.db_file.seek(SeekFrom::Start(offset)).is_ok() {
-          let _ = self.db_file.read_exact(&mut page_data);
-        }
-        let new_counts = live_type_counts_in_page(&page_data, hash_length).unwrap_or([0usize; 16]);
+        self.db_file.seek(SeekFrom::Start(offset))?;
+        self.db_file.read_exact(&mut page_data)?;
+        let new_counts = live_type_counts_in_page(&page_data, hash_length).map_err(|error| match error {
+          EngineError::CorruptEntry { reason, .. } => EngineError::CorruptEntry { offset, reason },
+          other => other,
+        })?;
         for i in 0..new_page_type_counts.len() {
           new_page_type_counts[i] = new_page_type_counts[i].saturating_sub(old_counts[i]).saturating_add(new_counts[i]);
         }
@@ -983,11 +986,12 @@ impl DiskKVStore {
       new_page_type_counts,
     );
     self.snapshot.store(Arc::new(snapshot));
+    Ok(())
   }
 
-  fn publish_full_snapshot_with_new_nvt(&mut self) {
+  fn publish_full_snapshot_with_new_nvt(&mut self) -> EngineResult<()> {
     self.shared_nvt = Arc::new(self.nvt.clone());
-    self.publish_full_snapshot();
+    self.publish_full_snapshot()
   }
 
   pub fn snapshot_handle(&self) -> &Arc<ArcSwap<ReadSnapshot>> {
@@ -998,9 +1002,9 @@ impl DiskKVStore {
   /// engine-owned snapshot handle. Used when `StorageEngine::rebuild_kv`
   /// swaps in a newly-created store without replacing the engine's shared
   /// `ArcSwap` handle that readers already hold.
-  pub fn adopt_snapshot_handle(&mut self, snapshot: Arc<ArcSwap<ReadSnapshot>>) {
+  pub fn adopt_snapshot_handle(&mut self, snapshot: Arc<ArcSwap<ReadSnapshot>>) -> EngineResult<()> {
     self.snapshot = snapshot;
-    self.publish_full_snapshot();
+    self.publish_full_snapshot()
   }
 
   /// Finalize KV block expansion after StorageEngine has relocated WAL data.
@@ -1071,7 +1075,7 @@ impl DiskKVStore {
       .collect();
 
     // Rehash into new bucket layout
-    self.bulk_insert(&adjusted);
+    self.bulk_insert(&adjusted)?;
     self.flush_no_snapshot()?;
     self.entry_count = adjusted.len();
 
@@ -1090,7 +1094,7 @@ impl DiskKVStore {
     // views over one selector.
 
     // Publish new snapshot
-    self.publish_full_snapshot_with_new_nvt();
+    self.publish_full_snapshot_with_new_nvt()?;
     self.needs_expansion = None;
 
     tracing::info!(target_stage, new_bucket_count, new_block_size, new_pages_size, "KV block expansion finalized");

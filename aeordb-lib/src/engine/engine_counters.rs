@@ -323,11 +323,11 @@ impl EngineCounters {
   /// This is the one-time O(n) startup cost. Counts entries by type,
   /// sums file sizes by reading file records from the WAL, and captures
   /// void space from the void manager.
-  pub fn initialize_from_kv(engine: &StorageEngine) -> Self {
+  pub fn initialize_from_kv(engine: &StorageEngine) -> crate::engine::errors::EngineResult<Self> {
     let counters = EngineCounters::new();
 
     let kv_snapshot = engine.kv_snapshot.load();
-    let all_entries = kv_snapshot.iter_all().unwrap_or_default();
+    let all_entries = kv_snapshot.iter_all()?;
     let hash_length = engine.hash_algo().hash_length();
 
     let mut chunk_size: u64 = 0;
@@ -385,7 +385,7 @@ impl EngineCounters {
       counters.void_space.store(void_manager.total_void_space(), Ordering::Relaxed);
     }
 
-    counters
+    Ok(counters)
   }
 }
 

@@ -42,8 +42,13 @@ pub fn spawn_metrics_pulse(
       let snapshot = counters.snapshot();
       let rates = rate_trackers.snapshot();
       let kv = engine.kv_snapshot.load();
-      let file_revisions = kv.count_by_type(KV_TYPE_FILE_RECORD) as u64;
-      let directory_revisions = kv.count_by_type(KV_TYPE_DIRECTORY) as u64;
+      let (file_revisions, directory_revisions) = match (kv.count_by_type(KV_TYPE_FILE_RECORD), kv.count_by_type(KV_TYPE_DIRECTORY)) {
+        (Ok(files), Ok(directories)) => (files as u64, directories as u64),
+        (files, directories) => {
+          tracing::error!(file_error = ?files.err(), directory_error = ?directories.err(), "Metrics pulse could not read KV type counts");
+          continue;
+        }
+      };
       let (kv_file, kv_fill_ratio) = engine.kv_layout_metrics();
       engine.evict_clean_index_cache();
       let memory = engine.memory_stats();

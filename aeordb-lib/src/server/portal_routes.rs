@@ -383,7 +383,7 @@ fn get_stats_inner(
   state: AppState,
   rate_ext: Option<Extension<Arc<crate::engine::rate_tracker::RateTrackerSet>>>,
   db_path_ext: Option<Extension<String>>,
-) -> Json<EnhancedStats> {
+) -> Result<Json<EnhancedStats>, (StatusCode, Json<serde_json::Value>)> {
   // O(1) counter snapshot from atomics
   let counters = state.engine.counters().snapshot();
 
@@ -441,6 +441,19 @@ fn get_stats_inner(
   // The full path leaks server filesystem layout to authenticated users.
   let db_filename = std::path::Path::new(db_path).file_name().and_then(|f| f.to_str()).unwrap_or("unknown").to_string();
 
+  let (file_revisions, directory_revisions) = {
+    let snapshot = state.engine.kv_snapshot.load();
+    let file_revisions = snapshot.count_by_type(crate::engine::kv_store::KV_TYPE_FILE_RECORD).map_err(|error| {
+      tracing::error!(%error, "Failed to read KV file revision count");
+      (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
+    })? as u64;
+    let directory_revisions = snapshot.count_by_type(crate::engine::kv_store::KV_TYPE_DIRECTORY).map_err(|error| {
+      tracing::error!(%error, "Failed to read KV directory revision count");
+      (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
+    })? as u64;
+    (file_revisions, directory_revisions)
+  };
+
   let stats = EnhancedStats {
     identity: StatsIdentity {
       version: env!("CARGO_PKG_VERSION").to_string(),
@@ -450,20 +463,15 @@ fn get_stats_inner(
       node_id: 1,
       uptime_seconds,
     },
-    counts: {
-      // Revision counts are computed on demand from the prebuilt type
-      // index — O(1) per type.
-      let snapshot = state.engine.kv_snapshot.load();
-      StatsCounts {
-        files: counters.files,
-        directories: counters.directories,
-        symlinks: counters.symlinks,
-        chunks: counters.chunks,
-        snapshots: counters.snapshots,
-        forks: counters.forks,
-        file_revisions: snapshot.count_by_type(crate::engine::kv_store::KV_TYPE_FILE_RECORD) as u64,
-        directory_revisions: snapshot.count_by_type(crate::engine::kv_store::KV_TYPE_DIRECTORY) as u64,
-      }
+    counts: StatsCounts {
+      files: counters.files,
+      directories: counters.directories,
+      symlinks: counters.symlinks,
+      chunks: counters.chunks,
+      snapshots: counters.snapshots,
+      forks: counters.forks,
+      file_revisions,
+      directory_revisions,
     },
     sizes: StatsSizes {
       disk_total,
@@ -483,5 +491,5 @@ fn get_stats_inner(
     memory,
   };
 
-  Json(stats)
+  Ok(Json(stats))
 }

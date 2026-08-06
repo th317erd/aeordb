@@ -744,7 +744,7 @@ pub fn backup_contains_system_data(backup: &StorageEngine) -> EngineResult<bool>
   use crate::engine::entry_header::FLAG_SYSTEM;
   // Scan FileRecords — system data is stored as FileRecords with FLAG_SYSTEM
   let snapshot = backup.kv_snapshot.load();
-  let entries = snapshot.iter_by_type(KV_TYPE_FILE_RECORD);
+  let entries = snapshot.iter_by_type(KV_TYPE_FILE_RECORD)?;
   for entry in entries {
     // Read the entry's flags from its header
     if let Ok(Some((header, _key, _value))) = backup.get_entry_including_deleted(&entry.hash) {
@@ -873,7 +873,7 @@ pub fn import_backup_with_mode(
   // shared between user and system files. Filtering happens at the file/dir level.)
   let chunk_kv_entries = {
     let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_CHUNK)
+    snapshot.iter_by_type(KV_TYPE_CHUNK)?
   };
   for entry in chunk_kv_entries {
     if !target.has_entry(&entry.hash)? {
@@ -890,7 +890,7 @@ pub fn import_backup_with_mode(
   // Import FileRecords (skip system entries when include_system = false)
   let file_kv_entries = {
     let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_FILE_RECORD)
+    snapshot.iter_by_type(KV_TYPE_FILE_RECORD)?
   };
   for entry in file_kv_entries {
     if let Some((flags, entry_version, value)) = read_entry(&entry.hash)? {
@@ -908,7 +908,7 @@ pub fn import_backup_with_mode(
   // Import DirectoryIndexes (skip system dirs when include_system = false)
   let dir_kv_entries = {
     let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_DIRECTORY)
+    snapshot.iter_by_type(KV_TYPE_DIRECTORY)?
   };
   for entry in dir_kv_entries {
     if let Some((flags, _entry_version, value)) = read_entry(&entry.hash)? {
@@ -926,7 +926,7 @@ pub fn import_backup_with_mode(
   // Import Symlinks (skip system symlinks when include_system = false)
   let sym_kv_entries = {
     let snapshot = backup.kv_snapshot.load();
-    snapshot.iter_by_type(KV_TYPE_SYMLINK)
+    snapshot.iter_by_type(KV_TYPE_SYMLINK)?
   };
   for entry in sym_kv_entries {
     if let Some((flags, _entry_version, value)) = read_entry(&entry.hash)? {
@@ -977,7 +977,7 @@ pub fn import_backup_with_mode(
     false
   };
 
-  target.reconcile_counters_from_kv();
+  target.reconcile_counters_from_kv()?;
 
   // Emit import completed event
   ctx.emit(

@@ -421,7 +421,7 @@ fn test_initialize_from_kv_counts_files() {
   ops.store_file_buffered(&ctx, "/delta.txt", b"hello delta", None).unwrap();
   ops.store_file_buffered(&ctx, "/epsilon.txt", b"hello epsilon", None).unwrap();
 
-  let counters = EngineCounters::initialize_from_kv(&engine);
+  let counters = EngineCounters::initialize_from_kv(&engine).unwrap();
   let snapshot = counters.snapshot();
 
   assert_eq!(snapshot.files, 5, "startup file counter should use live tree count");
@@ -453,7 +453,7 @@ fn test_initialize_from_kv_counts_from_head_when_root_path_key_is_stale() {
   let root_key = directory_path_hash("/", &algo).unwrap();
   engine.store_entry(EntryType::DirectoryIndex, &root_key, &stale_root_hash).unwrap();
 
-  let counters = EngineCounters::initialize_from_kv(&engine);
+  let counters = EngineCounters::initialize_from_kv(&engine).unwrap();
   let snapshot = counters.snapshot();
 
   assert_eq!(snapshot.files, 2, "startup file counter should walk HEAD, not the stale root path-key");
@@ -481,7 +481,7 @@ fn test_initialize_from_kv_counts_all_types() {
   // Create a fork
   version_manager.create_fork(&ctx, "feature-branch", None).unwrap();
 
-  let counters = EngineCounters::initialize_from_kv(&engine);
+  let counters = EngineCounters::initialize_from_kv(&engine).unwrap();
   let snapshot = counters.snapshot();
 
   assert_eq!(snapshot.files, 2, "startup file counter should use live tree count");
@@ -511,7 +511,7 @@ fn test_initialize_from_kv_sums_logical_size() {
   ops.store_file_buffered(&ctx, "/b.bin", &data_b, None).unwrap();
   ops.store_file_buffered(&ctx, "/c.bin", &data_c, None).unwrap();
 
-  let counters = EngineCounters::initialize_from_kv(&engine);
+  let counters = EngineCounters::initialize_from_kv(&engine).unwrap();
   let snapshot = counters.snapshot();
 
   assert_eq!(snapshot.logical_data_size, 600, "startup logical size should be measured from the live tree");
@@ -523,7 +523,7 @@ fn test_initialize_from_kv_empty_database() {
   let directory = tempfile::tempdir().unwrap();
   let engine = create_engine(&directory);
 
-  let counters = EngineCounters::initialize_from_kv(&engine);
+  let counters = EngineCounters::initialize_from_kv(&engine).unwrap();
   let snapshot = counters.snapshot();
 
   // The live directory counter excludes the root itself.

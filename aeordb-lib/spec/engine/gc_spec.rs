@@ -54,7 +54,7 @@ fn test_write_void_at_creates_valid_void() {
   engine.write_void_at(void_offset, remaining).unwrap();
 
   // Verify the void is registered
-  let stats = engine.stats();
+  let stats = engine.stats().unwrap();
   assert!(stats.void_count > 0, "void should be registered");
   assert!(stats.void_space_bytes >= remaining as u64);
 }
@@ -300,7 +300,7 @@ fn test_gc_mark_fails_closed_when_live_btree_child_is_missing() {
     BTreeNode::Internal(internal) => internal.children[1].clone(),
     BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
   };
-  let child_kv = engine.get_kv_entry(&child_to_remove).expect("B-tree child should be live before simulated corruption");
+  let child_kv = engine.get_kv_entry(&child_to_remove).unwrap().expect("B-tree child should be live before simulated corruption");
   engine.remove_kv_entry(&child_to_remove).unwrap();
   engine.write_void_at(child_kv.offset, child_kv.total_length).unwrap();
 
@@ -458,12 +458,12 @@ fn test_gc_in_place_overwrite_creates_voids() {
   let (engine, _temp) = setup_engine_with_versions();
   let ctx = RequestContext::system();
 
-  let stats_before = engine.stats();
+  let stats_before = engine.stats().unwrap();
   let void_count_before = stats_before.void_count;
 
   run_gc(&engine, &ctx, false).unwrap();
 
-  let stats_after = engine.stats();
+  let stats_after = engine.stats().unwrap();
   assert!(
     stats_after.void_count >= void_count_before,
     "GC should create voids (before={}, after={})",

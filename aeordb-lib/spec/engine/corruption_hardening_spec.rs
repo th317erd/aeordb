@@ -8,6 +8,8 @@ use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash};
 use aeordb::engine::file_header::read_active_header;
 use aeordb::engine::gc;
 use aeordb::engine::hot_tail::{self, HotTailPayload, VoidRecord};
+use aeordb::engine::kv_pages::{bucket_page_offset, page_size, PAGE_HEADER_SIZE, PAGE_MAGIC};
+use aeordb::engine::kv_stages::stage_params;
 use aeordb::engine::lost_found;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::verify;
@@ -54,6 +56,25 @@ fn file_size(path: &str) -> u64 {
 fn active_header(db_path: &str) -> aeordb::engine::file_header::FileHeader {
   let mut file = OpenOptions::new().read(true).open(db_path).unwrap();
   read_active_header(&mut file).unwrap().0
+}
+
+fn first_non_empty_kv_page_offset(db_path: &str) -> u64 {
+  let header = active_header(db_path);
+  let hash_length = header.hash_algo.hash_length();
+  let (_, bucket_count) = stage_params(header.kv_block_stage as usize, page_size(hash_length));
+  let mut file = OpenOptions::new().read(true).open(db_path).unwrap();
+  let mut magic = [0u8; 4];
+
+  for bucket in 0..bucket_count {
+    let offset = header.kv_block_offset + bucket_page_offset(bucket, hash_length);
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.read_exact(&mut magic).unwrap();
+    if u32::from_le_bytes(magic) == PAGE_MAGIC {
+      return offset;
+    }
+  }
+
+  panic!("test database did not contain a non-empty KV page");
 }
 
 fn inject_hot_tail_voids(db_path: &str, voids: Vec<VoidRecord>) {
@@ -158,6 +179,31 @@ fn scanner_recovers_from_multiple_corrupt_regions() {
 
   // Should not panic
   let _ = ops.list_directory("/");
+}
+
+#[test]
+fn open_rebuilds_corrupt_kv_before_reading_initial_counters() {
+  let (engine, temp) = create_test_db();
+  store_test_files(&engine);
+  engine.shutdown().unwrap();
+
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap();
+  let page_offset = first_non_empty_kv_page_offset(db_str);
+  drop(engine);
+
+  // Damage entry bytes while preserving page magic. Open must detect the CRC
+  // failure and rebuild from the authoritative WAL before any snapshot reader,
+  // including startup counter initialization, observes the damaged page.
+  inject_corruption(db_str, page_offset + PAGE_HEADER_SIZE as u64, 1);
+
+  let reopened = StorageEngine::open(db_str).expect("known-corrupt KV must rebuild before startup readers run");
+  let ops = DirectoryOps::new(&reopened);
+  for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt", "/images/photo.jpg"] {
+    assert!(ops.exists(path).unwrap(), "WAL rebuild lost {path}");
+  }
+  let stats = reopened.stats().unwrap();
+  assert!(stats.file_count >= 4, "startup counters were not initialized from the rebuilt KV: {stats:?}");
 }
 
 // ============================================================================
@@ -738,7 +784,7 @@ fn rebuild_directory_tree_skips_path_records_with_missing_chunks() {
   let (header, _key, value) = engine.get_entry(&path_key).unwrap().expect("path FileRecord should exist");
   let record = FileRecord::deserialize(&value, algo.hash_length(), header.entry_version).unwrap();
   let chunk_hash = record.chunk_hashes.first().expect("test file should have one chunk").clone();
-  let chunk_kv = engine.get_kv_entry(&chunk_hash).expect("chunk should be live before corruption");
+  let chunk_kv = engine.get_kv_entry(&chunk_hash).unwrap().expect("chunk should be live before corruption");
 
   engine.remove_kv_entry(&chunk_hash).unwrap();
   engine.write_void_at(chunk_kv.offset, chunk_kv.total_length).unwrap();

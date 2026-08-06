@@ -166,7 +166,7 @@ fn test_export_no_voids() {
 
   // The exported database should have zero voids
   let exported = StorageEngine::open(&out).unwrap();
-  let stats = exported.stats();
+  let stats = exported.stats().unwrap();
   assert_eq!(stats.void_count, 0, "exported database should have no voids");
 }
 

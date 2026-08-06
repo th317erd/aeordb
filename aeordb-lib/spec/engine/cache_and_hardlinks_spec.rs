@@ -345,7 +345,7 @@ fn test_kv_expansion_online() {
   let ops = DirectoryOps::new(&engine);
 
   // Check initial KV stage
-  let stats_before = engine.stats();
+  let stats_before = engine.stats().unwrap();
   let initial_kv_size = stats_before.kv_size_bytes;
 
   // Write enough entries to trigger KV overflow and expansion.
@@ -362,7 +362,7 @@ fn test_kv_expansion_online() {
   }
 
   // Check if expansion occurred (KV block grew)
-  let stats_after = engine.stats();
+  let stats_after = engine.stats().unwrap();
   assert!(
     stats_after.kv_size_bytes >= initial_kv_size,
     "KV block size should not shrink: before={}, after={}",
@@ -427,7 +427,7 @@ fn test_deleted_files_not_visible_in_get_entry() {
   let file_key = file_path_hash("/deltest/target.json", &algo).unwrap();
 
   // Verify it exists in the KV before deletion
-  let kv_entry_before = engine.get_kv_entry(&file_key);
+  let kv_entry_before = engine.get_kv_entry(&file_key).unwrap();
   assert!(kv_entry_before.is_some(), "File should exist in KV before deletion");
 
   // Delete the file
@@ -439,7 +439,7 @@ fn test_deleted_files_not_visible_in_get_entry() {
   assert!(entry.unwrap().is_none(), "Deleted file should not be visible via get_entry");
 
   // After deletion: get_kv_entry should also return None (filters deleted flag)
-  let kv_entry_after = engine.get_kv_entry(&file_key);
+  let kv_entry_after = engine.get_kv_entry(&file_key).unwrap();
   assert!(kv_entry_after.is_none(), "Deleted file should not be visible via get_kv_entry");
 
   // get_entry_including_deleted should still find it
