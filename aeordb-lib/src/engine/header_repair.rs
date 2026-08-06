@@ -24,6 +24,11 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_header::{write_initial_header_coordinated, FileHeader, FILE_HEADER_SIZE, FILE_MAGIC, SUPPORTED_HEADER_VERSION};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
+/// Pre-open legacy-header repair cannot use the runtime memory coordinator.
+/// Keep its only material allocation fixed and small so repairing a large
+/// database does not scale resident memory with database size.
+const HEADER_REPAIR_COPY_BUFFER_BYTES: usize = 256 * 1024;
+
 /// What the inspection found wrong with the header.
 #[derive(Debug, Clone, Default)]
 pub struct HeaderRepairReport {
@@ -281,22 +286,140 @@ fn shift_data_region_forward(
   let data_start = FILE_HEADER_SIZE as u64;
   let data_size = file_size - data_start;
 
-  const CHUNK: u64 = 64 * 1024 * 1024;
-  let mut buf = vec![0u8; CHUNK.min(data_size) as usize];
+  let buffer_length = usize::try_from((HEADER_REPAIR_COPY_BUFFER_BYTES as u64).min(data_size))
+    .map_err(|_| EngineError::ResourceExhausted("header repair copy buffer exceeds this platform".to_string()))?;
+  let mut buffer = Vec::new();
+  buffer
+    .try_reserve_exact(buffer_length)
+    .map_err(|error| EngineError::ResourceExhausted(format!("header repair copy buffer allocation failed: {error}")))?;
+  buffer.resize(buffer_length, 0);
 
-  let mut remaining = data_size;
-  while remaining > 0 {
-    let chunk_len = CHUNK.min(remaining) as usize;
-    let src = data_start + remaining - chunk_len as u64;
-    let dst = src + shift;
-    file.seek(SeekFrom::Start(src))?;
-    file.read_exact(&mut buf[..chunk_len])?;
-    file.seek(SeekFrom::Start(dst))?;
-    file.write_all(&buf[..chunk_len])?;
-    remaining -= chunk_len as u64;
-  }
+  copy_data_region_forward(file, file_size, shift, &mut buffer)?;
   durability_coordinator
     .execute_recoverable_file_barrier(file, NativeFileBarrierKind::Full, data_size)
     .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
   Ok(())
+}
+
+fn copy_data_region_forward<T: Read + Seek + Write>(file: &mut T, file_size: u64, shift: u64, buffer: &mut [u8]) -> EngineResult<()> {
+  if file_size <= FILE_HEADER_SIZE as u64 {
+    return Ok(());
+  }
+  if buffer.is_empty() {
+    return Err(EngineError::InvalidInput("header repair copy buffer must not be empty".to_string()));
+  }
+
+  let data_start = FILE_HEADER_SIZE as u64;
+  let mut remaining = file_size - data_start;
+  while remaining > 0 {
+    let chunk_len = usize::try_from((buffer.len() as u64).min(remaining))
+      .map_err(|_| EngineError::ResourceExhausted("header repair copy window exceeds this platform".to_string()))?;
+    let src = data_start + remaining - chunk_len as u64;
+    let dst = src.checked_add(shift).ok_or_else(|| EngineError::InvalidInput("header repair destination offset overflow".to_string()))?;
+    file.seek(SeekFrom::Start(src))?;
+    file.read_exact(&mut buffer[..chunk_len])?;
+    file.seek(SeekFrom::Start(dst))?;
+    file.write_all(&buffer[..chunk_len])?;
+    remaining -= chunk_len as u64;
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use std::io::Cursor;
+  use std::sync::Arc;
+
+  use super::*;
+  use crate::engine::durability_coordinator::RecoverableFileBarrier;
+  use crate::engine::native_durability::{NativeDurabilityError, NativeDurabilityOperation};
+
+  struct FaultingIo {
+    cursor: Cursor<Vec<u8>>,
+    fail_read: bool,
+    fail_write: bool,
+  }
+
+  impl Read for FaultingIo {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+      if self.fail_read {
+        Err(std::io::Error::other("injected header-repair read failure"))
+      } else {
+        self.cursor.read(buffer)
+      }
+    }
+  }
+
+  impl Write for FaultingIo {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+      if self.fail_write {
+        Err(std::io::Error::other("injected header-repair write failure"))
+      } else {
+        self.cursor.write(buffer)
+      }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+      Ok(())
+    }
+  }
+
+  impl Seek for FaultingIo {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+      self.cursor.seek(position)
+    }
+  }
+
+  #[derive(Debug)]
+  struct FailingBarrier;
+
+  impl RecoverableFileBarrier for FailingBarrier {
+    fn execute_file_barrier(&self, _file: &std::fs::File, _barrier_kind: NativeFileBarrierKind) -> Result<(), NativeDurabilityError> {
+      Err(NativeDurabilityError::from_io(
+        NativeDurabilityOperation::FileBarrier,
+        std::io::Error::other("injected header-repair barrier failure"),
+      ))
+    }
+  }
+
+  #[test]
+  fn legacy_copy_buffer_is_fixed_and_small() {
+    assert_eq!(HEADER_REPAIR_COPY_BUFFER_BYTES, 256 * 1024);
+  }
+
+  #[test]
+  fn legacy_copy_propagates_read_failure() {
+    let mut io = FaultingIo { cursor: Cursor::new(vec![0u8; FILE_HEADER_SIZE * 2]), fail_read: true, fail_write: false };
+    let mut buffer = vec![0u8; 64];
+    let error = copy_data_region_forward(&mut io, (FILE_HEADER_SIZE * 2) as u64, FILE_HEADER_SIZE as u64, &mut buffer).unwrap_err();
+    assert!(matches!(error, EngineError::IoError(_)));
+  }
+
+  #[test]
+  fn legacy_copy_propagates_write_failure() {
+    let mut io = FaultingIo { cursor: Cursor::new(vec![0u8; FILE_HEADER_SIZE * 2]), fail_read: false, fail_write: true };
+    let mut buffer = vec![0u8; 64];
+    let error = copy_data_region_forward(&mut io, (FILE_HEADER_SIZE * 2) as u64, FILE_HEADER_SIZE as u64, &mut buffer).unwrap_err();
+    assert!(matches!(error, EngineError::IoError(_)));
+  }
+
+  #[test]
+  fn legacy_copy_rejects_empty_buffer_and_offset_overflow() {
+    let mut io = FaultingIo { cursor: Cursor::new(vec![0u8; FILE_HEADER_SIZE * 2]), fail_read: false, fail_write: false };
+    let error = copy_data_region_forward(&mut io, (FILE_HEADER_SIZE * 2) as u64, FILE_HEADER_SIZE as u64, &mut []).unwrap_err();
+    assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("must not be empty")));
+
+    let mut buffer = vec![0u8; 64];
+    let error = copy_data_region_forward(&mut io, (FILE_HEADER_SIZE * 2) as u64, u64::MAX, &mut buffer).unwrap_err();
+    assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("offset overflow")));
+  }
+
+  #[test]
+  fn legacy_shift_propagates_barrier_failure() {
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&vec![0x5au8; FILE_HEADER_SIZE * 2]).unwrap();
+    let coordinator = DurabilityCoordinator::with_recoverable_file_barrier(Arc::new(FailingBarrier));
+    let error = shift_data_region_forward(&mut file, (FILE_HEADER_SIZE * 2) as u64, FILE_HEADER_SIZE as u64, &coordinator).unwrap_err();
+    assert!(matches!(error, EngineError::DurabilityFailure(_)));
+  }
 }

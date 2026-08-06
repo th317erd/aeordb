@@ -4,12 +4,56 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use aeordb::engine::{inspect_header, repair_header_in_place, DirectoryOps, RequestContext, StorageEngine};
+use aeordb::engine::file_header::{read_active_header, FILE_HEADER_SIZE, FILE_MAGIC};
+use aeordb::engine::{inspect_header, repair_header_in_place, DirectoryOps, HashAlgorithm, RequestContext, StorageEngine};
 
 fn make_temp_db() -> (tempfile::TempDir, String) {
   let dir = tempfile::tempdir().unwrap();
   let path = dir.path().join("test.aeordb").to_string_lossy().to_string();
   (dir, path)
+}
+
+fn write_v2_fixture(path: &str, payload: &[u8]) {
+  let mut header = [0u8; FILE_HEADER_SIZE];
+  header[..4].copy_from_slice(FILE_MAGIC);
+  header[4] = 2;
+  header[5..7].copy_from_slice(&HashAlgorithm::Blake3_256.to_u16().to_le_bytes());
+  let mut pos = 7usize;
+  for value in [1_700_000_000_000i64, 1_700_000_000_001i64] {
+    header[pos..pos + 8].copy_from_slice(&value.to_le_bytes());
+    pos += 8;
+  }
+  header[pos..pos + 8].copy_from_slice(&(FILE_HEADER_SIZE as u64).to_le_bytes());
+  pos += 8;
+  header[pos..pos + 8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+  pos += 8;
+  header[pos] = 1;
+  pos += 1;
+  pos += 8; // nvt_offset
+  pos += 8; // nvt_length
+  header[pos] = 1;
+  pos += 1;
+  pos += HashAlgorithm::Blake3_256.hash_length(); // head_hash
+  header[pos..pos + 8].copy_from_slice(&1u64.to_le_bytes());
+  pos += 8;
+  pos += 1; // resize_in_progress
+  pos += 8; // buffer_kvs_offset
+  pos += 8; // buffer_nvt_offset
+  let old_size = FILE_HEADER_SIZE as u64 + payload.len() as u64;
+  header[pos..pos + 8].copy_from_slice(&old_size.to_le_bytes());
+  pos += 8;
+  header[pos] = 0;
+  pos += 1;
+  header[pos] = 0;
+  pos += 1;
+  header[pos] = 0;
+  let crc = crc32fast::hash(&header[..FILE_HEADER_SIZE - 4]);
+  header[FILE_HEADER_SIZE - 4..].copy_from_slice(&crc.to_le_bytes());
+
+  let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(path).unwrap();
+  file.write_all(&header).unwrap();
+  file.write_all(payload).unwrap();
+  file.sync_all().unwrap();
 }
 
 /// Simulate the xenocept failure mode: corrupt the header so hot_tail_offset
@@ -190,4 +234,25 @@ fn inspect_reports_already_ok_on_clean_db() {
   assert!(report.hot_tail_past_eof.is_none());
   assert!(report.upgraded_version.is_none());
   assert!(!report.crc_failed);
+}
+
+#[test]
+fn legacy_header_repair_streams_multiple_bounded_copy_windows_exactly() {
+  let (_dir, path) = make_temp_db();
+  let payload: Vec<u8> = (0..(256 * 1024 * 3 + 17)).map(|index| (index % 251) as u8).collect();
+  write_v2_fixture(&path, &payload);
+
+  let report = repair_header_in_place(&path).unwrap();
+  assert!(report.repaired);
+  assert_eq!(report.upgraded_version, Some((2, 3)));
+
+  let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+  let (header, _) = read_active_header(&mut file).unwrap();
+  assert_eq!(header.kv_block_offset, (FILE_HEADER_SIZE * 2) as u64);
+  assert_eq!(header.hot_tail_offset, (FILE_HEADER_SIZE * 2 + payload.len()) as u64);
+  assert_eq!(file.metadata().unwrap().len(), (FILE_HEADER_SIZE * 2 + payload.len()) as u64);
+  file.seek(SeekFrom::Start((FILE_HEADER_SIZE * 2) as u64)).unwrap();
+  let mut migrated = Vec::new();
+  file.read_to_end(&mut migrated).unwrap();
+  assert_eq!(migrated, payload);
 }

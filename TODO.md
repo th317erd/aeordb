@@ -217,7 +217,7 @@
           - [x] Replace full-view integrity sampling with a bounded, cancellable `repair` maintenance sample.
           - [ ] Replace verify/KV comparison and directory-repair inventories with disk-backed or bounded-window working sets.
           - [ ] Replace dirty-startup/runtime KV rebuild inventories with bounded repair workspace and fail-closed corruption handling.
-          - [ ] Bound pre-open header migration with fixed scratch and prove copy/barrier failure behavior.
+          - [x] Bound pre-open header migration with fixed scratch and prove copy/barrier failure behavior.
         - [ ] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
         - [ ] Requeue checkpointed long-running maintenance when pressure rises after dequeue; do not convert an admission deferral into a terminal task failure.
