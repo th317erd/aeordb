@@ -182,6 +182,24 @@ fn test_memory_limit_enforced() {
 }
 
 #[test]
+fn exported_guest_memory_cannot_bypass_the_runtime_limit() {
+  let wasm_bytes = wat_to_wasm(
+    r#"
+    (module
+      (memory (export "memory") 2)
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (i64.const 0)
+      )
+    )
+    "#,
+  );
+  let runtime = WasmPluginRuntime::with_limits(&wasm_bytes, 64 * 1024, 1_000_000).expect("valid module");
+
+  let error = runtime.call_handle(b"").unwrap_err();
+  assert!(matches!(error, WasmRuntimeError::MemoryLimitExceeded), "exported guest memory bypassed limit: {error}");
+}
+
+#[test]
 fn test_fuel_limit_enforced() {
   let wasm_bytes = wat_to_wasm(infinite_loop_wat());
   // Very small fuel budget to ensure the loop gets cut off quickly.

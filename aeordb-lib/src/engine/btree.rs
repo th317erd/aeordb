@@ -56,6 +56,13 @@ impl BTreeListResult {
   }
 }
 
+/// Outcome of a bounded visitor walk over a B-tree.
+pub(crate) struct BTreeVisitResult {
+  pub warnings: Vec<BTreeWalkWarning>,
+  /// False when the visitor stopped the walk before every readable entry was visited.
+  pub completed: bool,
+}
+
 /// A B-tree node — either a leaf containing ChildEntry data,
 /// or an internal node containing sorted keys and child node hashes.
 #[derive(Debug, Clone)]
@@ -601,6 +608,101 @@ pub fn btree_list_from_node_with_mode(
   mode: BTreeWalkMode,
 ) -> EngineResult<BTreeListResult> {
   btree_list_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode)
+}
+
+/// Visit directory entries in key order without collecting the entire B-tree.
+/// Returning `false` from the visitor stops before loading any later branch.
+pub(crate) fn btree_visit_from_node_with_mode<F>(
+  root_data: &[u8],
+  engine: &StorageEngine,
+  hash_length: usize,
+  include_deleted: bool,
+  mode: BTreeWalkMode,
+  visitor: &mut F,
+) -> EngineResult<BTreeVisitResult>
+where
+  F: FnMut(&ChildEntry) -> EngineResult<bool>,
+{
+  btree_visit_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode, visitor)
+}
+
+fn btree_visit_hash_with_mode<F>(
+  node_hash: &[u8],
+  engine: &StorageEngine,
+  hash_length: usize,
+  include_deleted: bool,
+  mode: BTreeWalkMode,
+  visitor: &mut F,
+) -> EngineResult<BTreeVisitResult>
+where
+  F: FnMut(&ChildEntry) -> EngineResult<bool>,
+{
+  let node_data = if include_deleted { engine.get_entry_including_deleted(node_hash) } else { engine.get_entry(node_hash) };
+  let node_data = match node_data {
+    Ok(Some(data)) => data,
+    Ok(None) => {
+      return btree_visit_error(mode, Some(node_hash), EngineError::NotFound(format!("B-tree node not found: {}", hex::encode(node_hash))))
+    }
+    Err(error) => return btree_visit_error(mode, Some(node_hash), error),
+  };
+  if node_data.0.entry_type != EntryType::DirectoryIndex {
+    return btree_visit_error(
+      mode,
+      Some(node_hash),
+      EngineError::CorruptEntry { offset: 0, reason: format!("B-tree node hash resolved to {:?} entry", node_data.0.entry_type) },
+    );
+  }
+  btree_visit_loaded_node(Some(node_hash), &node_data.2, node_data.0.entry_version, engine, hash_length, include_deleted, mode, visitor)
+}
+
+fn btree_visit_loaded_node<F>(
+  node_hash: Option<&[u8]>,
+  node_data: &[u8],
+  entry_version: u8,
+  engine: &StorageEngine,
+  hash_length: usize,
+  include_deleted: bool,
+  mode: BTreeWalkMode,
+  visitor: &mut F,
+) -> EngineResult<BTreeVisitResult>
+where
+  F: FnMut(&ChildEntry) -> EngineResult<bool>,
+{
+  let node = match BTreeNode::deserialize(node_data, hash_length, entry_version) {
+    Ok(node) => node,
+    Err(error) => return btree_visit_error(mode, node_hash, error),
+  };
+  match node {
+    BTreeNode::Leaf(leaf) => {
+      for entry in &leaf.entries {
+        if !visitor(entry)? {
+          return Ok(BTreeVisitResult { warnings: Vec::new(), completed: false });
+        }
+      }
+      Ok(BTreeVisitResult { warnings: Vec::new(), completed: true })
+    }
+    BTreeNode::Internal(internal) => {
+      let mut warnings = Vec::new();
+      for child_hash in &internal.children {
+        let mut child = btree_visit_hash_with_mode(child_hash, engine, hash_length, include_deleted, mode, visitor)?;
+        warnings.append(&mut child.warnings);
+        if !child.completed {
+          return Ok(BTreeVisitResult { warnings, completed: false });
+        }
+      }
+      Ok(BTreeVisitResult { warnings, completed: true })
+    }
+  }
+}
+
+fn btree_visit_error(mode: BTreeWalkMode, node_hash: Option<&[u8]>, error: EngineError) -> EngineResult<BTreeVisitResult> {
+  match mode {
+    BTreeWalkMode::Strict => Err(error),
+    BTreeWalkMode::BestEffort => Ok(BTreeVisitResult {
+      warnings: vec![BTreeWalkWarning { node_hash: node_hash.map(Vec::from), reason: error.to_string() }],
+      completed: true,
+    }),
+  }
 }
 
 fn btree_list_loaded_node(

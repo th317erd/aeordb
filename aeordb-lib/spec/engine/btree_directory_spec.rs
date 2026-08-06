@@ -211,6 +211,54 @@ fn test_btree_directory_listing_best_effort_with_missing_child_node() {
   assert_eq!(normal_children.len(), checked_children.len());
 }
 
+#[test]
+fn test_btree_directory_window_stops_before_unneeded_damaged_branch() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_n_files(&engine, "/windowed", BTREE_CONVERSION_THRESHOLD + 100);
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let dir_key = directory_path_hash("/windowed", &algo).unwrap();
+  let raw_data = resolve_directory_value(&engine, &dir_key);
+  let root_node = BTreeNode::deserialize(&raw_data, hash_length, 0).unwrap();
+  let child_to_delete = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
+  };
+  engine.mark_entry_deleted(&child_to_delete).unwrap();
+
+  let window = DirectoryOps::new(&engine).list_directory_window("/windowed", 10, 5).unwrap();
+  let names: Vec<&str> = window.entries.iter().map(|entry| entry.name.as_str()).collect();
+  assert_eq!(names, ["file_00010.json", "file_00011.json", "file_00012.json", "file_00013.json", "file_00014.json"]);
+  assert!(window.has_more);
+  assert!(window.warnings.is_empty(), "bounded walk should not inspect a later branch once the page is complete");
+}
+
+#[test]
+fn test_btree_directory_window_reports_damage_reached_while_seeking_offset() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_n_files(&engine, "/windowed-damaged", BTREE_CONVERSION_THRESHOLD + 100);
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let dir_key = directory_path_hash("/windowed-damaged", &algo).unwrap();
+  let raw_data = resolve_directory_value(&engine, &dir_key);
+  let root_node = BTreeNode::deserialize(&raw_data, hash_length, 0).unwrap();
+  let child_to_delete = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
+  };
+  engine.mark_entry_deleted(&child_to_delete).unwrap();
+
+  let window = DirectoryOps::new(&engine).list_directory_window("/windowed-damaged", 50, 5).unwrap();
+  assert_eq!(window.entries.len(), 5);
+  assert!(window.has_more);
+  assert_eq!(window.warnings.len(), 1);
+  assert_eq!(window.warnings[0].node_hash.as_deref(), Some(child_to_delete.as_slice()));
+}
+
 // ---------------------------------------------------------------------------
 // Delete from B-tree directory
 // ---------------------------------------------------------------------------

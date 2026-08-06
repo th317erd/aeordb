@@ -4,11 +4,14 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::index_store::{IndexManager, IndexWriteBuffer};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::source_resolver::resolve_sources;
 use crate::engine::storage_engine::StorageEngine;
+use crate::plugins::plugin_manager::PluginManagerError;
 use crate::plugins::PluginManager;
+use tokio_util::sync::CancellationToken;
 
 pub use crate::engine::index_config_resolver::glob_matches;
 
@@ -32,6 +35,104 @@ fn canonical_metadata_field_name(field_name: &str) -> Option<&'static str> {
 pub struct IndexingPipeline<'a> {
   engine: &'a StorageEngine,
   plugin_manager: Option<&'a PluginManager>,
+}
+
+struct PipelineMemoryBudget {
+  reservation: MemoryReservation,
+  cancellation: Option<CancellationToken>,
+}
+
+impl PipelineMemoryBudget {
+  fn new_with_cancellation(engine: &StorageEngine, cancellation: Option<&CancellationToken>) -> EngineResult<Self> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+      return Err(EngineError::Cancelled("indexing pipeline".to_string()));
+    }
+    let reservation = engine
+      .memory_coordinator()
+      .reserve(MemoryOwner::ParserPlugin, 4 * 1024, AdmissionClass::Workload)
+      .map_err(|error| pipeline_memory_error("indexing pipeline admission failed", error))?;
+    Ok(Self { reservation, cancellation: cancellation.cloned() })
+  }
+
+  fn check_cancellation(&self) -> EngineResult<()> {
+    if self.cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
+      return Err(EngineError::Cancelled("indexing pipeline".to_string()));
+    }
+    Ok(())
+  }
+
+  fn reserve_growth(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    self.check_cancellation()?;
+    self.reservation.grow(bytes).map_err(|error| pipeline_memory_error(context, error))
+  }
+
+  fn reserve_parser_envelope(&mut self, data_bytes: usize, path_bytes: usize) -> EngineResult<()> {
+    let encoded_bytes = data_bytes
+      .checked_add(2)
+      .and_then(|bytes| bytes.checked_div(3))
+      .and_then(|bytes| bytes.checked_mul(4))
+      .ok_or_else(|| EngineError::ResourceExhausted("parser envelope estimate overflow".to_string()))?;
+    let bytes = encoded_bytes
+      .checked_mul(2)
+      .and_then(|bytes| bytes.checked_add(path_bytes))
+      .and_then(|bytes| bytes.checked_add(64 * 1024))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("parser envelope estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "parser envelope admission failed")
+  }
+
+  fn reserve_json_document(&mut self, data_bytes: usize, context: &str) -> EngineResult<()> {
+    let bytes = data_bytes
+      .checked_mul(6)
+      .and_then(|bytes| bytes.checked_add(1024 * 1024))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("parsed JSON estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, context)
+  }
+
+  fn reserve_mapper_input(&mut self, json_data: &serde_json::Value, args: &serde_json::Value) -> EngineResult<()> {
+    let estimated = estimate_json_memory(json_data)
+      .checked_add(estimate_json_memory(args))
+      .and_then(|bytes| bytes.checked_mul(3))
+      .and_then(|bytes| bytes.checked_add(1024 * 1024))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("mapper input estimate overflow".to_string()))?;
+    self.reserve_growth(estimated, "mapper input admission failed")
+  }
+
+  fn reserve_plugin_output(&mut self, output_bytes: usize) -> EngineResult<()> {
+    let bytes = output_bytes
+      .checked_mul(6)
+      .and_then(|bytes| bytes.checked_add(64 * 1024))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("plugin output estimate overflow".to_string()))?;
+    self.reserve_growth(bytes, "plugin output admission failed")
+  }
+}
+
+fn pipeline_memory_error(context: &str, error: MemoryCoordinatorError) -> EngineError {
+  match error {
+    MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. }
+    | MemoryCoordinatorError::PolicyUnavailable => EngineError::ResourceExhausted(format!("{context}: {error}")),
+    _ => EngineError::IoError(std::io::Error::other(format!("{context}: {error}"))),
+  }
+}
+
+fn estimate_json_memory(value: &serde_json::Value) -> usize {
+  match value {
+    serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => std::mem::size_of::<serde_json::Value>(),
+    serde_json::Value::String(value) => std::mem::size_of::<serde_json::Value>().saturating_add(value.capacity()),
+    serde_json::Value::Array(values) => values
+      .capacity()
+      .saturating_mul(std::mem::size_of::<serde_json::Value>())
+      .saturating_add(values.iter().fold(0usize, |total, value| total.saturating_add(estimate_json_memory(value)))),
+    serde_json::Value::Object(values) => values.iter().fold(
+      values.len().saturating_mul(std::mem::size_of::<(String, serde_json::Value)>().saturating_add(2 * std::mem::size_of::<usize>())),
+      |total, (key, value)| total.saturating_add(key.capacity()).saturating_add(estimate_json_memory(value)),
+    ),
+  }
 }
 
 trait IndexSink {
@@ -83,7 +184,21 @@ impl<'a> IndexingPipeline<'a> {
   /// Run the indexing pipeline for a stored file.
   pub fn run(&self, _ctx: &RequestContext, path: &str, data: &[u8], content_type: Option<&str>) -> EngineResult<()> {
     let mut index_manager = IndexManager::new(self.engine);
-    self.run_with_sink(path, data, content_type, &mut index_manager)
+    self.run_with_sink(path, data, content_type, &mut index_manager, None)
+  }
+
+  /// Run the indexing pipeline with cooperative cancellation between bounded
+  /// parser, mapper, and field-indexing work units.
+  pub fn run_with_cancellation(
+    &self,
+    _ctx: &RequestContext,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    cancellation: &CancellationToken,
+  ) -> EngineResult<()> {
+    let mut index_manager = IndexManager::new(self.engine);
+    self.run_with_sink(path, data, content_type, &mut index_manager, Some(cancellation))
   }
 
   /// Run the full indexing pipeline using a buffered writer for index updates.
@@ -99,10 +214,30 @@ impl<'a> IndexingPipeline<'a> {
     content_type: Option<&str>,
     index_buffer: &mut IndexWriteBuffer<'_>,
   ) -> EngineResult<()> {
-    self.run_with_sink(path, data, content_type, index_buffer)
+    self.run_with_sink(path, data, content_type, index_buffer, None)
   }
 
-  fn run_with_sink<S: IndexSink>(&self, path: &str, data: &[u8], content_type: Option<&str>, index_sink: &mut S) -> EngineResult<()> {
+  /// Buffered indexing with cooperative cancellation for maintenance tasks.
+  pub fn run_buffered_with_cancellation(
+    &self,
+    _ctx: &RequestContext,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    index_buffer: &mut IndexWriteBuffer<'_>,
+    cancellation: &CancellationToken,
+  ) -> EngineResult<()> {
+    self.run_with_sink(path, data, content_type, index_buffer, Some(cancellation))
+  }
+
+  fn run_with_sink<S: IndexSink>(
+    &self,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    index_sink: &mut S,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<()> {
     if crate::engine::directory_ops::is_internal_path(path) {
       return Ok(());
     }
@@ -127,14 +262,30 @@ impl<'a> IndexingPipeline<'a> {
       return Ok(());
     }
 
-    let Some(json_data) =
-      self.parse_index_document(&config, &config_dir, path, data, content_type, explicit_parser, registry_parser, ct, filename)
+    let mut memory = PipelineMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
+
+    let Some(json_data) = self.parse_index_document(
+      &config,
+      &config_dir,
+      path,
+      data,
+      content_type,
+      explicit_parser,
+      registry_parser,
+      ct,
+      filename,
+      &mut memory,
+    )?
     else {
       return Ok(());
     };
 
     for field_config in content_fields {
-      if let Err(e) = self.index_field(field_config, &json_data, &file_key, &config_dir, index_sink) {
+      memory.check_cancellation()?;
+      if let Err(e) = self.index_field(field_config, &json_data, &file_key, &config_dir, index_sink, &mut memory) {
+        if matches!(e, EngineError::ResourceExhausted(_)) {
+          return Err(e);
+        }
         if config.logging {
           self.log_system(&config_dir, "indexing.log", &format!("field '{}' indexing failed for {}: {}", field_config.name, path, e));
         }
@@ -155,52 +306,57 @@ impl<'a> IndexingPipeline<'a> {
     registry_parser: Option<String>,
     content_type_fallback: &str,
     filename: &str,
-  ) -> Option<serde_json::Value> {
+    memory: &mut PipelineMemoryBudget,
+  ) -> EngineResult<Option<serde_json::Value>> {
     // Priority order for the indexing pipeline:
     // 1. Explicit parser in config — always honored (user's intent)
     // 2. Content-type registry parser — user mapped this content type
     // 3. Raw JSON parse — preserves actual field structure for indexing
     // 4. Native parser — extracts metadata for non-JSON content.
     if let Some(ref parser) = explicit_parser {
-      match self.invoke_parser(parser, data, path, content_type, &config) {
-        Ok(json) => Some(json),
+      match self.invoke_parser(parser, data, path, content_type, &config, memory) {
+        Ok(json) => Ok(Some(json)),
+        Err(e @ EngineError::ResourceExhausted(_)) => Err(e),
         Err(e) => {
           if config.logging {
             self.log_system(config_dir, "parsing.log", &format!("parser '{}' failed for {}: {}", parser, path, e));
           }
-          None
+          Ok(None)
         }
       }
     } else if let Some(ref parser) = registry_parser {
-      match self.invoke_parser(parser, data, path, content_type, &config) {
-        Ok(json) => Some(json),
+      match self.invoke_parser(parser, data, path, content_type, &config, memory) {
+        Ok(json) => Ok(Some(json)),
+        Err(e @ EngineError::ResourceExhausted(_)) => Err(e),
         Err(e) => {
           if config.logging {
             self.log_system(config_dir, "parsing.log", &format!("parser '{}' failed for {}: {}", parser, path, e));
           }
-          None
+          Ok(None)
         }
       }
-    } else if let Ok(json) = self.parse_json(data) {
-      Some(json)
     } else {
+      memory.reserve_json_document(data.len(), "document parser admission failed")?;
+      if let Ok(json) = self.parse_json(data) {
+        return Ok(Some(json));
+      }
       let native_result = crate::engine::native_parsers::parse_native(data, content_type_fallback, filename, path, data.len() as u64);
 
       if let Some(result) = native_result {
         match result {
-          Ok(json) => Some(json),
+          Ok(json) => Ok(Some(json)),
           Err(e) => {
             if config.logging {
               self.log_system(config_dir, "parsing.log", &format!("native parser failed for {}: {}", path, e));
             }
-            None
+            Ok(None)
           }
         }
       } else {
         if config.logging {
           self.log_system(config_dir, "parsing.log", &format!("no parser available for {}", path));
         }
-        None
+        Ok(None)
       }
     }
   }
@@ -280,26 +436,32 @@ impl<'a> IndexingPipeline<'a> {
     file_key: &[u8],
     parent: &str,
     index_sink: &mut S,
+    memory: &mut PipelineMemoryBudget,
   ) -> EngineResult<()> {
     // @-prefixed fields: extract values from FileRecord metadata instead of JSON content.
     if field_config.name.starts_with('@') {
       return self.index_meta_field(field_config, file_key, parent, index_sink);
     }
 
-    let Some(field_values) = self.extract_field_values(field_config, json_data)? else {
+    let Some(field_values) = self.extract_field_values(field_config, json_data, memory)? else {
       return Ok(());
     };
 
     index_sink.update_index(parent, &field_config.name, field_config, &field_values, file_key)
   }
 
-  fn extract_field_values(&self, field_config: &IndexFieldConfig, json_data: &serde_json::Value) -> EngineResult<Option<Vec<Vec<u8>>>> {
+  fn extract_field_values(
+    &self,
+    field_config: &IndexFieldConfig,
+    json_data: &serde_json::Value,
+    memory: &mut PipelineMemoryBudget,
+  ) -> EngineResult<Option<Vec<Vec<u8>>>> {
     let field_values = if let Some(source) = &field_config.source {
       if let Some(obj) = source.as_object() {
         // Plugin mapper: {"plugin": "name", "args": {...}}
         if let Some(plugin_name) = obj.get("plugin").and_then(|v| v.as_str()) {
           let args = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
-          vec![self.invoke_mapper(plugin_name, json_data, &args)?]
+          vec![self.invoke_mapper(plugin_name, json_data, &args, memory)?]
         } else {
           return Ok(None); // invalid source object
         }
@@ -386,21 +548,26 @@ impl<'a> IndexingPipeline<'a> {
     path: &str,
     content_type: Option<&str>,
     config: &PathIndexConfig,
+    memory: &mut PipelineMemoryBudget,
   ) -> EngineResult<serde_json::Value> {
     let pm = self.plugin_manager.ok_or_else(|| EngineError::NotFound("Plugin manager required for parser invocation".to_string()))?;
 
     let memory_limit = config.parser_memory_limit.as_deref().map(Self::parse_memory_limit).unwrap_or(256 * 1024 * 1024); // 256MB default
 
+    memory.reserve_parser_envelope(data.len(), path.len())?;
     let envelope = Self::build_parser_envelope(data, path, content_type);
     let envelope_bytes =
       serde_json::to_vec(&envelope).map_err(|e| EngineError::JsonParseError(format!("Failed to serialize parser envelope: {}", e)))?;
 
     let output = pm
-      .invoke_wasm_plugin_with_limits(parser_name, &envelope_bytes, memory_limit)
-      .map_err(|e| EngineError::NotFound(format!("Parser '{}' failed: {}", parser_name, e)))?;
+      .invoke_wasm_plugin_with_limits_accounted(parser_name, &envelope_bytes, memory_limit)
+      .map_err(|e| Self::plugin_error("Parser", parser_name, e))?;
+    memory.check_cancellation()?;
+    memory.reserve_plugin_output(output.as_slice().len())?;
 
     // Validate output is JSON object
-    let text = std::str::from_utf8(&output).map_err(|_| EngineError::JsonParseError("Parser returned invalid UTF-8".to_string()))?;
+    let text =
+      std::str::from_utf8(output.as_slice()).map_err(|_| EngineError::JsonParseError("Parser returned invalid UTF-8".to_string()))?;
     let parsed: serde_json::Value =
       serde_json::from_str(text).map_err(|e| EngineError::JsonParseError(format!("Parser returned invalid JSON: {}", e)))?;
     if !parsed.is_object() {
@@ -410,9 +577,16 @@ impl<'a> IndexingPipeline<'a> {
   }
 
   /// Invoke a mapper plugin to extract field values from JSON data.
-  fn invoke_mapper(&self, plugin_name: &str, json_data: &serde_json::Value, args: &serde_json::Value) -> EngineResult<Vec<u8>> {
+  fn invoke_mapper(
+    &self,
+    plugin_name: &str,
+    json_data: &serde_json::Value,
+    args: &serde_json::Value,
+    memory: &mut PipelineMemoryBudget,
+  ) -> EngineResult<Vec<u8>> {
     let pm = self.plugin_manager.ok_or_else(|| EngineError::NotFound("Plugin manager required for mapper".to_string()))?;
 
+    memory.reserve_mapper_input(json_data, args)?;
     let mapper_input = serde_json::json!({
       "data": json_data,
       "args": args,
@@ -420,7 +594,19 @@ impl<'a> IndexingPipeline<'a> {
     let input_bytes =
       serde_json::to_vec(&mapper_input).map_err(|e| EngineError::JsonParseError(format!("Mapper input serialization failed: {}", e)))?;
 
-    pm.invoke_wasm_plugin(plugin_name, &input_bytes).map_err(|e| EngineError::NotFound(format!("Mapper '{}' failed: {}", plugin_name, e)))
+    let output = pm.invoke_wasm_plugin_accounted(plugin_name, &input_bytes).map_err(|e| Self::plugin_error("Mapper", plugin_name, e))?;
+    memory.check_cancellation()?;
+    memory.reserve_plugin_output(output.as_slice().len())?;
+    Ok(output.as_slice().to_vec())
+  }
+
+  fn plugin_error(kind: &str, plugin_name: &str, error: PluginManagerError) -> EngineError {
+    match error {
+      PluginManagerError::ResourceExhausted(message) => {
+        EngineError::ResourceExhausted(format!("{kind} '{plugin_name}' memory admission failed: {message}"))
+      }
+      other => EngineError::NotFound(format!("{kind} '{plugin_name}' failed: {other}")),
+    }
   }
 
   /// Look up a parser name from the global registry at /.aeordb-config/parsers.json

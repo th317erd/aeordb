@@ -8,6 +8,10 @@ use aeordb::engine::errors::EngineError;
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
+use aeordb::plugins::types::PluginType;
+use aeordb::plugins::PluginManager;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let ctx = RequestContext::system();
@@ -104,6 +108,61 @@ fn query_results_retain_and_release_their_memory_reservation() {
 }
 
 #[test]
+fn retained_query_and_plugin_invocation_share_one_hard_memory_budget() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = Arc::new(setup_users_engine(&dir));
+  let manager = PluginManager::new(engine.clone());
+  let wasm = wat::parse_str(
+    r#"
+    (module
+      (memory (export "memory") 1)
+      (func (export "handle") (param $request_ptr i32) (param $request_len i32) (result i64)
+        (i64.or
+          (i64.shl (i64.extend_i32_u (local.get $request_ptr)) (i64.const 32))
+          (i64.extend_i32_u (local.get $request_len))
+        )
+      )
+    )
+    "#,
+  )
+  .unwrap();
+  manager.deploy_plugin("echo", "pressure/echo", PluginType::Wasm, wasm.clone()).unwrap();
+
+  let results = QueryBuilder::new(&engine, "/users").field("age").gt(&0u64.to_be_bytes()).all().unwrap();
+  let retained = engine.memory_coordinator_snapshot().unwrap();
+  let query_bytes = retained.owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  assert!(query_bytes > 1);
+
+  let request = b"overlap";
+  let guest_limit = 64 * 1024usize;
+  let stored_plugin_bytes =
+    DirectoryOps::new(&engine).get_metadata("/.aeordb-system/plugins/pressure::echo").unwrap().expect("stored plugin metadata").total_size
+      as usize;
+  let invocation_bytes = guest_limit
+    .checked_mul(4)
+    .and_then(|bytes| bytes.checked_add(stored_plugin_bytes * 16))
+    .and_then(|bytes| bytes.checked_add(request.len() * 2))
+    .and_then(|bytes| bytes.checked_add(1024 * 1024))
+    .unwrap() as u64;
+  let available = retained.policy.unwrap().ordinary_limit_bytes().saturating_sub(retained.accounted_bytes);
+  assert!(available >= invocation_bytes);
+  let pressure_bytes = available - invocation_bytes + 1;
+  let pressure = engine.memory_coordinator().reserve(MemoryOwner::Task, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let error = manager.invoke_wasm_plugin_with_limits("pressure/echo", request, guest_limit).unwrap_err();
+  assert!(error.to_string().contains("resource exhausted"), "overlapping owners exceeded the hard budget: {error}");
+  let refused = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(refused.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
+
+  drop(results);
+  assert_eq!(manager.invoke_wasm_plugin_with_limits("pressure/echo", request, guest_limit).unwrap(), request);
+  drop(pressure);
+  let released = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(released.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(released.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
+}
+
+#[test]
 fn query_hard_limit_refusal_is_retryable_and_leaks_no_reservation() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_users_engine(&dir);
@@ -157,6 +216,20 @@ fn query_rejects_new_work_after_shutdown_without_leaking_memory() {
   let error = QueryBuilder::new(&engine, "/users").field("age").gt(&0u64.to_be_bytes()).all().unwrap_err();
   assert!(matches!(error, EngineError::ShuttingDown), "unexpected query error: {error}");
 
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(snapshot.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(snapshot.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
+}
+
+#[test]
+fn query_honors_explicit_cancellation_before_memory_admission() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_users_engine(&dir);
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+
+  let error = QueryBuilder::new(&engine, "/users").field("age").gt(&0u64.to_be_bytes()).cancellation_token(cancellation).all().unwrap_err();
+  assert!(matches!(error, EngineError::Cancelled(_)), "unexpected cancellation error: {error}");
   let snapshot = engine.memory_coordinator_snapshot().unwrap();
   assert_eq!(snapshot.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
   assert_eq!(snapshot.owner(MemoryOwner::Query).unwrap().active_reservations, 0);

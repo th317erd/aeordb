@@ -296,6 +296,10 @@ fn execute_reindex(
     let mut last_processed_path: Option<&str> = None;
 
     for file_path in batch {
+      if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
+        return Err("cancelled".to_string());
+      }
+
       if force {
         match ops.migrate_file_record_to_current_version(file_path) {
           Ok(true) => {
@@ -344,13 +348,14 @@ fn execute_reindex(
         };
 
         let content_type = ops.get_metadata(file_path).ok().flatten().and_then(|record| record.content_type);
-        pipeline.run_buffered(&ctx, file_path, &data, content_type.as_deref(), &mut index_buffer)
+        pipeline.run_buffered_with_cancellation(&ctx, file_path, &data, content_type.as_deref(), &mut index_buffer, cancel)
       };
 
       match index_result {
         Ok(()) => {
           consecutive_failures = 0;
         }
+        Err(crate::engine::errors::EngineError::Cancelled(_)) => return Err("cancelled".to_string()),
         Err(_) => {
           consecutive_failures += 1;
           if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {

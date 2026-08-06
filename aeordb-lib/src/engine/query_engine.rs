@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::directory_ops::DirectoryOps;
@@ -622,17 +623,39 @@ impl std::fmt::Debug for QueryMemoryLease {
 struct QueryMemoryBudget {
   coordinator: Arc<MemoryCoordinator>,
   reservation: Option<MemoryReservation>,
+  cancellation: Option<CancellationToken>,
+  work_since_cancellation_check: usize,
 }
 
 impl QueryMemoryBudget {
   const MINIMUM_WORKSPACE_BYTES: u64 = 4 * 1024;
 
-  fn new(engine: &StorageEngine) -> EngineResult<Self> {
+  fn new_with_cancellation(engine: &StorageEngine, cancellation: Option<&CancellationToken>) -> EngineResult<Self> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+      return Err(EngineError::Cancelled("query".to_string()));
+    }
     let coordinator = engine.memory_coordinator();
     let reservation = coordinator
       .reserve(MemoryOwner::Query, Self::MINIMUM_WORKSPACE_BYTES, AdmissionClass::Workload)
       .map_err(|error| query_memory_error("query workspace admission failed", error))?;
-    Ok(Self { coordinator, reservation: Some(reservation) })
+    Ok(Self { coordinator, reservation: Some(reservation), cancellation: cancellation.cloned(), work_since_cancellation_check: 0 })
+  }
+
+  fn check_cancellation(&self) -> EngineResult<()> {
+    if self.cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
+      return Err(EngineError::Cancelled("query".to_string()));
+    }
+    Ok(())
+  }
+
+  fn record_work(&mut self, units: usize) -> EngineResult<()> {
+    const CANCELLATION_QUANTUM: usize = 256;
+    self.work_since_cancellation_check = self.work_since_cancellation_check.saturating_add(units);
+    if self.work_since_cancellation_check >= CANCELLATION_QUANTUM {
+      self.work_since_cancellation_check = 0;
+      self.check_cancellation()?;
+    }
+    Ok(())
   }
 
   fn retain_results(mut self, results: &mut [QueryResult]) -> EngineResult<()> {
@@ -702,6 +725,7 @@ impl QueryMemoryBudget {
   }
 
   fn reserve_growth(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    self.check_cancellation()?;
     self.reservation_mut()?.grow(bytes).map_err(|error| query_memory_error(context, error))
   }
 
@@ -1013,9 +1037,19 @@ impl<'a> QueryEngine<'a> {
   /// Fuzzy queries (Contains, Similar, Phonetic, Fuzzy) use index-based candidate
   /// generation followed by a recheck phase.
   pub fn execute(&self, query: &Query) -> EngineResult<Vec<QueryResult>> {
+    self.execute_with_optional_cancellation(query, None)
+  }
+
+  /// Execute a query with cooperative cancellation checked between bounded
+  /// units of query work. WASM callers remain independently bounded by fuel.
+  pub fn execute_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<Vec<QueryResult>> {
+    self.execute_with_optional_cancellation(query, Some(cancellation))
+  }
+
+  fn execute_with_optional_cancellation(&self, query: &Query, cancellation: Option<&CancellationToken>) -> EngineResult<Vec<QueryResult>> {
     let _operation = self.engine.query_operation_guard()?;
     let timer_start = std::time::Instant::now();
-    let mut budget = QueryMemoryBudget::new(self.engine)?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
     let mut results = self.execute_internal(query, &mut budget)?;
 
     // Apply limit (use DEFAULT_QUERY_LIMIT when no explicit limit).
@@ -1040,10 +1074,22 @@ impl<'a> QueryEngine<'a> {
   /// using a streaming/lazy iterator would avoid this, but requires significant refactoring
   /// of the index evaluation pipeline.
   pub fn execute_paginated(&self, query: &Query) -> EngineResult<PaginatedResult> {
+    self.execute_paginated_with_optional_cancellation(query, None)
+  }
+
+  pub fn execute_paginated_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<PaginatedResult> {
+    self.execute_paginated_with_optional_cancellation(query, Some(cancellation))
+  }
+
+  fn execute_paginated_with_optional_cancellation(
+    &self,
+    query: &Query,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<PaginatedResult> {
     let _operation = self.engine.query_operation_guard()?;
     let explicit_limit = query.limit.is_some();
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
-    let mut budget = QueryMemoryBudget::new(self.engine)?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
 
     // Get all results (without limit)
     let mut all_results = self.execute_internal(query, &mut budget)?;
@@ -1115,8 +1161,20 @@ impl<'a> QueryEngine<'a> {
 
   /// Execute an EXPLAIN query, returning plan info and optionally execution metrics + results.
   pub fn execute_explain(&self, query: &Query) -> EngineResult<ExplainResult> {
+    self.execute_explain_with_optional_cancellation(query, None)
+  }
+
+  pub fn execute_explain_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<ExplainResult> {
+    self.execute_explain_with_optional_cancellation(query, Some(cancellation))
+  }
+
+  fn execute_explain_with_optional_cancellation(
+    &self,
+    query: &Query,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<ExplainResult> {
     let _operation = self.engine.query_operation_guard()?;
-    let mut budget = QueryMemoryBudget::new(self.engine)?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
     let index_manager = IndexManager::new(self.engine);
 
     // Build the plan by analyzing the query structure
@@ -1132,11 +1190,11 @@ impl<'a> QueryEngine<'a> {
     let start = std::time::Instant::now();
 
     let (results_json, candidate_count, result_count) = if query.aggregate.is_some() {
-      let agg_result = self.execute_aggregate(query)?;
+      let agg_result = self.execute_aggregate_with_optional_cancellation(query, cancellation)?;
       let count = agg_result.count.unwrap_or(0);
       (Some(serde_json::to_value(&agg_result).unwrap_or_default()), count as usize, count as usize)
     } else {
-      let paginated = self.execute_paginated(query)?;
+      let paginated = self.execute_paginated_with_optional_cancellation(query, cancellation)?;
       let total = paginated.total_count.unwrap_or(paginated.results.len() as u64);
       let returned = paginated.results.len();
       let results_value = serde_json::json!({
@@ -1330,6 +1388,7 @@ impl<'a> QueryEngine<'a> {
     let mut results = Vec::with_capacity(result_hashes.len());
 
     for file_hash in result_hashes {
+      budget.record_work(1)?;
       let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
         continue;
       };
@@ -1374,6 +1433,7 @@ impl<'a> QueryEngine<'a> {
     let mut sort_fields: Vec<SortData> = Vec::new();
 
     for sf in order_by {
+      budget.record_work(1)?;
       if sf.field.starts_with('@') {
         sort_fields.push(SortData { values: HashMap::new(), is_virtual: true, field: sf.field.clone(), direction: sf.direction.clone() });
       } else {
@@ -1421,6 +1481,7 @@ impl<'a> QueryEngine<'a> {
       }
       std::cmp::Ordering::Equal
     });
+    budget.check_cancellation()?;
 
     Ok(())
   }
@@ -1457,6 +1518,7 @@ impl<'a> QueryEngine<'a> {
         }
         let mut result = self.evaluate_node(&children[0], path, index_manager, budget)?;
         for child in &children[1..] {
+          budget.record_work(1)?;
           let child_set = self.evaluate_node(child, path, index_manager, budget)?;
           budget.reserve_hash_work(result.len().min(child_set.len()), self.engine.hash_algo().hash_length(), false)?;
           result = result.intersection(&child_set).cloned().collect();
@@ -1466,6 +1528,7 @@ impl<'a> QueryEngine<'a> {
       QueryNode::Or(children) => {
         let mut result = HashSet::new();
         for child in children {
+          budget.record_work(1)?;
           let child_set = self.evaluate_node(child, path, index_manager, budget)?;
           budget.reserve_hash_work(result.len().saturating_add(child_set.len()), self.engine.hash_algo().hash_length(), false)?;
           result = result.union(&child_set).cloned().collect();
@@ -1575,8 +1638,11 @@ impl<'a> QueryEngine<'a> {
 
     if has_exact_capable_index {
       for index in indexes.iter_mut().filter(|index| index.supports_scalar_exact_lookup()) {
+        budget.record_work(1)?;
         for value in values {
+          budget.record_work(1)?;
           for entry in index.lookup_exact(value) {
+            budget.record_work(1)?;
             result.insert(entry.file_hash.clone());
           }
         }
@@ -1589,7 +1655,9 @@ impl<'a> QueryEngine<'a> {
     // Use persisted raw values when present; legacy tokenizing indexes without
     // values have no safe exact-match accelerator and return no matches.
     for index in indexes.iter().filter(|index| !index.values.is_empty()) {
+      budget.record_work(1)?;
       for file_hash in index.lookup_stored_values_exact(values) {
+        budget.record_work(1)?;
         result.insert(file_hash);
       }
     }
@@ -1603,6 +1671,7 @@ impl<'a> QueryEngine<'a> {
     let field_names = index_manager.list_indexes(path)?;
     let mut all_hashes = HashSet::new();
     for index_name in &field_names {
+      budget.record_work(1)?;
       let loaded = if let Some((field_name, strategy)) = index_name.rsplit_once('.') {
         index_manager.load_index_by_strategy_accounted(path, field_name, strategy, budget.reservation_mut()?)?
       } else {
@@ -1611,6 +1680,7 @@ impl<'a> QueryEngine<'a> {
       if let Some(index) = loaded {
         budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), false)?;
         for entry in &index.entries {
+          budget.record_work(1)?;
           all_hashes.insert(entry.file_hash.clone());
         }
       }
@@ -1668,6 +1738,7 @@ impl<'a> QueryEngine<'a> {
     let mut matching_hashes = HashSet::new();
 
     for entry in &listing {
+      budget.record_work(1)?;
       // Only consider file entries, not directories.
       if entry.entry_type != EntryType::FileRecord.to_u8() {
         continue;
@@ -1711,6 +1782,7 @@ impl<'a> QueryEngine<'a> {
     let mut matching_hashes = HashSet::new();
 
     for file_hash in candidates {
+      budget.record_work(1)?;
       let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
         continue;
       };
@@ -1729,7 +1801,7 @@ impl<'a> QueryEngine<'a> {
       };
 
       let _score_memory = budget.reserve_fuzzy_score_scratch(&field_query.operation, field_value.len())?;
-      let (score, _strategy) = self.compute_score(&field_query.operation, &field_value)?;
+      let (score, _strategy) = self.compute_score(&field_query.operation, &field_value, budget)?;
       if score > 0.0 {
         matching_hashes.insert(file_hash);
       }
@@ -1755,6 +1827,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     for ancestor in virtual_index_ancestor_paths(path) {
+      budget.record_work(1)?;
       if !self.field_has_index(&ancestor, field_name, index_manager, budget)? {
         continue;
       }
@@ -1784,6 +1857,7 @@ impl<'a> QueryEngine<'a> {
     budget.reserve_hash_work(hashes.len(), hash_length, false)?;
     let mut filtered = HashSet::new();
     for file_hash in hashes {
+      budget.record_work(1)?;
       let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
         continue;
       };
@@ -2054,6 +2128,7 @@ impl<'a> QueryEngine<'a> {
     }
 
     for ancestor in virtual_index_ancestor_paths(path) {
+      budget.record_work(1)?;
       if self.field_has_index(&ancestor, field_name, index_manager, budget)? {
         return Ok(true);
       }
@@ -2076,6 +2151,7 @@ impl<'a> QueryEngine<'a> {
 
     if include_ancestors {
       for ancestor in virtual_index_ancestor_paths(path) {
+        budget.record_work(1)?;
         if let Some(index) = index_manager.load_index_by_strategy_accounted(&ancestor, field_name, strategy, budget.reservation_mut()?)? {
           return Ok(Some(index));
         }
@@ -2114,6 +2190,7 @@ impl<'a> QueryEngine<'a> {
     let mut results = Vec::with_capacity(candidates.len());
 
     for file_hash in candidates {
+      budget.record_work(1)?;
       // Load the FileRecord for the result
       let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
         continue;
@@ -2151,7 +2228,7 @@ impl<'a> QueryEngine<'a> {
 
       // Compute score based on operation
       let _score_memory = budget.reserve_fuzzy_score_scratch(&field_query.operation, field_value.len())?;
-      let (score, strategy) = self.compute_score(&field_query.operation, &field_value)?;
+      let (score, strategy) = self.compute_score(&field_query.operation, &field_value, budget)?;
       drop(fallback_memory);
 
       if score > 0.0 {
@@ -2167,6 +2244,7 @@ impl<'a> QueryEngine<'a> {
     // Sort by score descending
     budget.reserve_stable_sort::<QueryResult>(results.len())?;
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    budget.check_cancellation()?;
 
     Ok(results)
   }
@@ -2223,9 +2301,11 @@ impl<'a> QueryEngine<'a> {
             // avoid excluding valid matches.
             let mut all_candidates = HashSet::new();
             for trigram in &trigrams {
+              budget.record_work(1)?;
               let scalar = converter.to_scalar(trigram);
               let entries = index.lookup_by_scalar(scalar);
               for entry in entries {
+                budget.record_work(1)?;
                 all_candidates.insert(entry.file_hash.clone());
               }
             }
@@ -2238,6 +2318,7 @@ impl<'a> QueryEngine<'a> {
           if !search_trigrams.is_empty() {
             let mut first = true;
             for trigram in &search_trigrams {
+              budget.record_work(1)?;
               let scalar = converter.to_scalar(trigram);
               let entries = index.lookup_by_scalar(scalar);
               let hashes: HashSet<Vec<u8>> = entries.iter().map(|e| e.file_hash.clone()).collect();
@@ -2254,9 +2335,11 @@ impl<'a> QueryEngine<'a> {
           let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
           // OR: union all trigram lookups (broader candidates for similarity/fuzzy)
           for trigram in &trigrams {
+            budget.record_work(1)?;
             let scalar = converter.to_scalar(trigram);
             let entries = index.lookup_by_scalar(scalar);
             for entry in entries {
+              budget.record_work(1)?;
               candidates.insert(entry.file_hash.clone());
             }
           }
@@ -2280,6 +2363,7 @@ impl<'a> QueryEngine<'a> {
         let mut found_any_index = false;
 
         for strategy in &strategies {
+          budget.record_work(1)?;
           if let Some(mut index) =
             self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field, budget)?
           {
@@ -2288,6 +2372,7 @@ impl<'a> QueryEngine<'a> {
             budget.reserve_field_values(&index.values)?;
 
             for word in &query_words {
+              budget.record_work(1)?;
               let code = match *strategy {
                 "soundex" => crate::engine::phonetic::soundex(word),
                 "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(word),
@@ -2304,6 +2389,7 @@ impl<'a> QueryEngine<'a> {
               let scalar = index.converter.to_scalar(code.as_bytes());
               let entries = index.lookup_by_scalar(scalar);
               for entry in entries {
+                budget.record_work(1)?;
                 candidates.insert(entry.file_hash.clone());
               }
             }
@@ -2334,9 +2420,11 @@ impl<'a> QueryEngine<'a> {
           let trigrams = crate::engine::fuzzy::extract_trigrams(query_str);
           let converter = TrigramConverter;
           for trigram in &trigrams {
+            budget.record_work(1)?;
             let scalar = converter.to_scalar(trigram);
             let entries = index.lookup_by_scalar(scalar);
             for entry in entries {
+              budget.record_work(1)?;
               candidates.insert(entry.file_hash.clone());
             }
           }
@@ -2347,12 +2435,14 @@ impl<'a> QueryEngine<'a> {
         let query_words: Vec<&str> = query_str.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
         let phonetic_strategies = ["soundex", "dmetaphone", "dmetaphone_alt"];
         for strategy in &phonetic_strategies {
+          budget.record_work(1)?;
           if let Some(mut index) =
             self.load_index_by_strategy_for_query(path, index_field_name, strategy, index_manager, is_virtual_field, budget)?
           {
             budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), true)?;
             budget.reserve_field_values(&index.values)?;
             for word in &query_words {
+              budget.record_work(1)?;
               let code = match *strategy {
                 "soundex" => crate::engine::phonetic::soundex(word),
                 "dmetaphone" => crate::engine::phonetic::dmetaphone_primary(word),
@@ -2367,6 +2457,7 @@ impl<'a> QueryEngine<'a> {
               let scalar = index.converter.to_scalar(code.as_bytes());
               let entries = index.lookup_by_scalar(scalar);
               for entry in entries {
+                budget.record_work(1)?;
                 candidates.insert(entry.file_hash.clone());
               }
             }
@@ -2382,6 +2473,7 @@ impl<'a> QueryEngine<'a> {
           budget.reserve_field_values(&index.values)?;
           let entries = index.lookup_exact(query_str.as_bytes());
           for entry in entries {
+            budget.record_work(1)?;
             candidates.insert(entry.file_hash.clone());
           }
           all_values.extend(index.values.drain());
@@ -2438,7 +2530,8 @@ impl<'a> QueryEngine<'a> {
 
   /// Compute a fuzzy score for a field value given the query operation.
   /// Returns (score, strategy_name). Score of 0.0 means no match.
-  fn compute_score(&self, op: &QueryOp, field_value: &str) -> EngineResult<(f64, String)> {
+  fn compute_score(&self, op: &QueryOp, field_value: &str, budget: &mut QueryMemoryBudget) -> EngineResult<(f64, String)> {
+    budget.check_cancellation()?;
     match op {
       QueryOp::Contains(query_str) => {
         let query_lower = query_str.to_lowercase();
@@ -2466,6 +2559,7 @@ impl<'a> QueryEngine<'a> {
 
         for qw in &q_words {
           for vw in &v_words {
+            budget.record_work(1)?;
             let q_soundex = crate::engine::phonetic::soundex(qw);
             let v_soundex = crate::engine::phonetic::soundex(vw);
             if !q_soundex.is_empty() && q_soundex == v_soundex && !strategies.contains(&"soundex".to_string()) {
@@ -2499,7 +2593,7 @@ impl<'a> QueryEngine<'a> {
       }
       QueryOp::Fuzzy(query_str, options) => match options.algorithm {
         FuzzyAlgorithm::DamerauLevenshtein => {
-          let distance = crate::engine::fuzzy::damerau_levenshtein(query_str, field_value);
+          let distance = crate::engine::fuzzy::damerau_levenshtein_controlled(query_str, field_value, || budget.record_work(1))?;
           let max_edits = match options.fuzziness {
             Fuzziness::Auto => crate::engine::fuzzy::auto_fuzziness(query_str.len()),
             Fuzziness::Fixed(n) => n,
@@ -2550,6 +2644,7 @@ impl<'a> QueryEngine<'a> {
 
         'soundex_check: for qw in &q_words {
           for vw in &v_words {
+            budget.record_work(1)?;
             let qs = crate::engine::phonetic::soundex(qw);
             let vs = crate::engine::phonetic::soundex(vw);
             if !qs.is_empty() && qs == vs {
@@ -2564,6 +2659,7 @@ impl<'a> QueryEngine<'a> {
 
         'dm_check: for qw in &q_words {
           for vw in &v_words {
+            budget.record_work(1)?;
             let qd = crate::engine::phonetic::dmetaphone_primary(qw);
             let vd = crate::engine::phonetic::dmetaphone_primary(vw);
             let vda = crate::engine::phonetic::dmetaphone_alt(vw);
@@ -2578,7 +2674,7 @@ impl<'a> QueryEngine<'a> {
         }
 
         // Edit distance
-        let distance = crate::engine::fuzzy::damerau_levenshtein(query_str, field_value);
+        let distance = crate::engine::fuzzy::damerau_levenshtein_controlled(query_str, field_value, || budget.record_work(1))?;
         let max_edits = crate::engine::fuzzy::auto_fuzziness(query_str.len());
         if distance <= max_edits {
           let max_len = query_str.len().max(field_value.len()).max(1);
@@ -2602,9 +2698,21 @@ impl<'a> QueryEngine<'a> {
   /// Execute an aggregation query, computing statistics (count, sum, avg, min, max)
   /// over the matching result set, optionally grouped by one or more fields.
   pub fn execute_aggregate(&self, query: &Query) -> EngineResult<AggregateResult> {
+    self.execute_aggregate_with_optional_cancellation(query, None)
+  }
+
+  pub fn execute_aggregate_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<AggregateResult> {
+    self.execute_aggregate_with_optional_cancellation(query, Some(cancellation))
+  }
+
+  fn execute_aggregate_with_optional_cancellation(
+    &self,
+    query: &Query,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<AggregateResult> {
     let _operation = self.engine.query_operation_guard()?;
     let agg = query.aggregate.as_ref().ok_or_else(|| EngineError::NotFound("No aggregate query specified".to_string()))?;
-    let mut budget = QueryMemoryBudget::new(self.engine)?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
 
     // Run the filter to get matching file hashes
     let result_hashes = self.execute_internal(query, &mut budget)?;
@@ -2621,21 +2729,26 @@ impl<'a> QueryEngine<'a> {
     // Collect all aggregate field names
     let mut agg_fields: HashSet<&str> = HashSet::new();
     for f in &agg.sum {
+      budget.record_work(1)?;
       agg_fields.insert(f);
     }
     for f in &agg.avg {
+      budget.record_work(1)?;
       agg_fields.insert(f);
     }
     for f in &agg.min {
+      budget.record_work(1)?;
       agg_fields.insert(f);
     }
     for f in &agg.max {
+      budget.record_work(1)?;
       agg_fields.insert(f);
     }
 
     // Load indexes for aggregate fields
     let mut field_indexes: FieldIndexMap = HashMap::new();
     for field_name in &agg_fields {
+      budget.record_work(1)?;
       let indexes = index_manager.load_indexes_for_field_accounted(&query.path, field_name, budget.reservation_mut()?)?;
       let index =
         indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for aggregate field '{}'", field_name)))?;
@@ -2645,6 +2758,7 @@ impl<'a> QueryEngine<'a> {
 
     // Validate SUM/AVG fields are numeric
     for field_name in &agg.sum {
+      budget.record_work(1)?;
       if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
         if !is_numeric_type(*type_tag) {
           return Err(EngineError::NotFound(format!("Cannot compute SUM on field '{}' -- requires numeric index type", field_name)));
@@ -2652,6 +2766,7 @@ impl<'a> QueryEngine<'a> {
       }
     }
     for field_name in &agg.avg {
+      budget.record_work(1)?;
       if let Some((_, type_tag)) = field_indexes.get(field_name.as_str()) {
         if !is_numeric_type(*type_tag) {
           return Err(EngineError::NotFound(format!("Cannot compute AVG on field '{}' -- requires numeric index type", field_name)));
@@ -2661,7 +2776,7 @@ impl<'a> QueryEngine<'a> {
 
     // If no GROUP BY, compute flat aggregates
     if agg.group_by.is_empty() {
-      let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&result_hash_set, agg, &field_indexes);
+      let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&result_hash_set, agg, &field_indexes, &mut budget)?;
       let mut result = AggregateResult::new(count, sum, avg, min, max, None, false, false);
       drop(field_indexes);
       drop(result_hash_set);
@@ -2673,6 +2788,7 @@ impl<'a> QueryEngine<'a> {
     // GROUP BY: load group field indexes
     let mut group_field_data: GroupFieldEntries = Vec::new();
     for gf in &agg.group_by {
+      budget.record_work(1)?;
       let indexes = index_manager.load_indexes_for_field_accounted(&query.path, gf, budget.reservation_mut()?)?;
       let index = indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for group_by field '{}'", gf)))?;
       let type_tag = index.converter.type_tag();
@@ -2684,11 +2800,13 @@ impl<'a> QueryEngine<'a> {
     let mut groups: GroupBuckets = HashMap::new();
 
     for file_hash in &result_hash_set {
+      budget.record_work(1)?;
       // Build group key from all group_by fields
       let mut key_map = HashMap::new();
       let mut key_parts: Vec<String> = Vec::new();
 
       for (field_name, values, type_tag) in &group_field_data {
+        budget.record_work(1)?;
         let value = values.get(file_hash.as_slice()).map(|bytes| bytes_to_json_value(bytes, *type_tag)).unwrap_or(serde_json::Value::Null);
         key_parts.push(format!("{}={}", field_name, value));
         key_map.insert(field_name.clone(), value);
@@ -2704,9 +2822,10 @@ impl<'a> QueryEngine<'a> {
     let mut group_results: Vec<GroupResult> = Vec::with_capacity(groups.len());
 
     for (key_map, group_hashes) in groups.values() {
+      budget.record_work(1)?;
       budget.reserve_hash_work(group_hashes.len(), self.engine.hash_algo().hash_length(), false)?;
       let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
-      let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&group_hash_set, agg, &field_indexes);
+      let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&group_hash_set, agg, &field_indexes, &mut budget)?;
 
       group_results.push(GroupResult { key: key_map.clone(), count: group_hashes.len() as u64, sum, avg, min, max });
     }
@@ -2714,6 +2833,7 @@ impl<'a> QueryEngine<'a> {
     // Sort groups by count descending (most populated first)
     budget.reserve_stable_sort::<GroupResult>(group_results.len())?;
     group_results.sort_by(|a, b| b.count.cmp(&a.count));
+    budget.check_cancellation()?;
 
     // Apply limit to groups
     let has_more = group_results.len() > effective_limit;
@@ -2861,15 +2981,22 @@ pub fn is_numeric_type(type_tag: u8) -> bool {
 }
 
 /// Shared aggregation computation: iterates the hash set, computes SUM, AVG, MIN, MAX.
-fn compute_aggregates(hash_set: &HashSet<Vec<u8>>, agg: &AggregateQuery, field_indexes: &FieldIndexMap) -> ComputedAggregates {
+fn compute_aggregates(
+  hash_set: &HashSet<Vec<u8>>,
+  agg: &AggregateQuery,
+  field_indexes: &FieldIndexMap,
+  budget: &mut QueryMemoryBudget,
+) -> EngineResult<ComputedAggregates> {
   let mut sum_map: HashMap<String, f64> = HashMap::new();
   let mut avg_counts: HashMap<String, (f64, u64)> = HashMap::new();
   let mut min_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
   let mut max_map: HashMap<String, (serde_json::Value, Vec<u8>)> = HashMap::new();
 
   for file_hash in hash_set {
+    budget.record_work(1)?;
     // SUM
     for field_name in &agg.sum {
+      budget.record_work(1)?;
       if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
         if let Some(bytes) = values.get(file_hash.as_slice()) {
           if let Some(num) = bytes_to_f64(bytes, *type_tag) {
@@ -2881,6 +3008,7 @@ fn compute_aggregates(hash_set: &HashSet<Vec<u8>>, agg: &AggregateQuery, field_i
 
     // AVG (accumulate sum + count)
     for field_name in &agg.avg {
+      budget.record_work(1)?;
       if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
         if let Some(bytes) = values.get(file_hash.as_slice()) {
           if let Some(num) = bytes_to_f64(bytes, *type_tag) {
@@ -2894,6 +3022,7 @@ fn compute_aggregates(hash_set: &HashSet<Vec<u8>>, agg: &AggregateQuery, field_i
 
     // MIN
     for field_name in &agg.min {
+      budget.record_work(1)?;
       if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
         if let Some(bytes) = values.get(file_hash.as_slice()) {
           let should_replace = match min_map.get(field_name.as_str()) {
@@ -2909,6 +3038,7 @@ fn compute_aggregates(hash_set: &HashSet<Vec<u8>>, agg: &AggregateQuery, field_i
 
     // MAX
     for field_name in &agg.max {
+      budget.record_work(1)?;
       if let Some((values, type_tag)) = field_indexes.get(field_name.as_str()) {
         if let Some(bytes) = values.get(file_hash.as_slice()) {
           let should_replace = match max_map.get(field_name.as_str()) {
@@ -2930,7 +3060,7 @@ fn compute_aggregates(hash_set: &HashSet<Vec<u8>>, agg: &AggregateQuery, field_i
 
   let max_display: HashMap<String, serde_json::Value> = max_map.into_iter().map(|(k, (v, _))| (k, v)).collect();
 
-  ComputedAggregates { sum: sum_map, avg: avg_map, min: min_display, max: max_display }
+  Ok(ComputedAggregates { sum: sum_map, avg: avg_map, min: min_display, max: max_display })
 }
 
 /// Chainable query builder.
@@ -2945,6 +3075,7 @@ pub struct QueryBuilder<'a> {
   before_value: Option<String>,
   include_total_value: bool,
   strategy_value: QueryStrategy,
+  cancellation: Option<CancellationToken>,
 }
 
 impl<'a> QueryBuilder<'a> {
@@ -2960,6 +3091,7 @@ impl<'a> QueryBuilder<'a> {
       before_value: None,
       include_total_value: false,
       strategy_value: QueryStrategy::Full,
+      cancellation: None,
     }
   }
 
@@ -3010,12 +3142,19 @@ impl<'a> QueryBuilder<'a> {
     self
   }
 
+  /// Cooperatively cancel this query between bounded units of query work.
+  pub fn cancellation_token(mut self, cancellation: CancellationToken) -> Self {
+    self.cancellation = Some(cancellation);
+    self
+  }
+
   /// Add an explicit AND group via a sub-builder closure.
   pub fn and<F>(mut self, build_fn: F) -> Self
   where
     F: FnOnce(QueryBuilder<'a>) -> QueryBuilder<'a>,
   {
-    let sub = QueryBuilder::new(self.engine, &self.path);
+    let mut sub = QueryBuilder::new(self.engine, &self.path);
+    sub.cancellation = self.cancellation.clone();
     let built = build_fn(sub);
     if !built.nodes.is_empty() {
       self.nodes.push(QueryNode::And(built.nodes));
@@ -3028,7 +3167,8 @@ impl<'a> QueryBuilder<'a> {
   where
     F: FnOnce(QueryBuilder<'a>) -> QueryBuilder<'a>,
   {
-    let sub = QueryBuilder::new(self.engine, &self.path);
+    let mut sub = QueryBuilder::new(self.engine, &self.path);
+    sub.cancellation = self.cancellation.clone();
     let built = build_fn(sub);
     if !built.nodes.is_empty() {
       self.nodes.push(QueryNode::Or(built.nodes));
@@ -3041,7 +3181,8 @@ impl<'a> QueryBuilder<'a> {
   where
     F: FnOnce(QueryBuilder<'a>) -> QueryBuilder<'a>,
   {
-    let sub = QueryBuilder::new(self.engine, &self.path);
+    let mut sub = QueryBuilder::new(self.engine, &self.path);
+    sub.cancellation = self.cancellation.clone();
     let built = build_fn(sub);
     if !built.nodes.is_empty() {
       let inner = if built.nodes.len() == 1 { built.nodes.into_iter().next().unwrap() } else { QueryNode::And(built.nodes) };
@@ -3083,7 +3224,10 @@ impl<'a> QueryBuilder<'a> {
   pub fn all(&self) -> EngineResult<Vec<QueryResult>> {
     let query = self.build_query();
     let query_engine = QueryEngine::new(self.engine);
-    query_engine.execute(&query)
+    match self.cancellation.as_ref() {
+      Some(cancellation) => query_engine.execute_with_cancellation(&query, cancellation),
+      None => query_engine.execute(&query),
+    }
   }
 
   /// Execute and return the first matching result.
@@ -3091,7 +3235,10 @@ impl<'a> QueryBuilder<'a> {
     let mut query = self.build_query();
     query.limit = Some(1);
     let query_engine = QueryEngine::new(self.engine);
-    let mut results = query_engine.execute(&query)?;
+    let mut results = match self.cancellation.as_ref() {
+      Some(cancellation) => query_engine.execute_with_cancellation(&query, cancellation)?,
+      None => query_engine.execute(&query)?,
+    };
     Ok(results.pop())
   }
 
@@ -3099,7 +3246,10 @@ impl<'a> QueryBuilder<'a> {
   pub fn count(&self) -> EngineResult<usize> {
     let query = self.build_query();
     let query_engine = QueryEngine::new(self.engine);
-    let results = query_engine.execute(&query)?;
+    let results = match self.cancellation.as_ref() {
+      Some(cancellation) => query_engine.execute_with_cancellation(&query, cancellation)?,
+      None => query_engine.execute(&query)?,
+    };
     Ok(results.len())
   }
 
@@ -3107,7 +3257,10 @@ impl<'a> QueryBuilder<'a> {
   pub fn execute_paginated(&self) -> EngineResult<PaginatedResult> {
     let query = self.build_query();
     let query_engine = QueryEngine::new(self.engine);
-    query_engine.execute_paginated(&query)
+    match self.cancellation.as_ref() {
+      Some(cancellation) => query_engine.execute_paginated_with_cancellation(&query, cancellation),
+      None => query_engine.execute_paginated(&query),
+    }
   }
 }
 

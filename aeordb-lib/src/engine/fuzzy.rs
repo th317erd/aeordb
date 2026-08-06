@@ -116,6 +116,16 @@ pub fn auto_fuzziness(len: usize) -> usize {
 /// Supports insertions, deletions, substitutions, and transpositions of adjacent
 /// characters. Returns the minimum number of edit operations to transform `a` into `b`.
 pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
+  damerau_levenshtein_controlled(a, b, || Ok::<(), std::convert::Infallible>(())).expect("infallible edit-distance control cannot fail")
+}
+
+/// Compute OSA Damerau-Levenshtein while allowing the caller to interrupt
+/// between cells. Callers may internally amortize the check over a fixed work
+/// quantum so long strings cannot become one uninterruptible operation.
+pub fn damerau_levenshtein_controlled<E, F>(a: &str, b: &str, mut check: F) -> Result<usize, E>
+where
+  F: FnMut() -> Result<(), E>,
+{
   let a_chars: Vec<char> = a.chars().collect();
   let b_chars: Vec<char> = b.chars().collect();
   let (rows, columns) = if b_chars.len() <= a_chars.len() { (&a_chars, &b_chars) } else { (&b_chars, &a_chars) };
@@ -123,10 +133,10 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
   let n = columns.len();
 
   if m == 0 {
-    return n;
+    return Ok(n);
   }
   if n == 0 {
-    return m;
+    return Ok(m);
   }
 
   // OSA only references rows i, i-1, and i-2. Retaining the full matrix
@@ -138,6 +148,7 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
   for i in 1..=m {
     current[0] = i;
     for j in 1..=n {
+      check()?;
       let cost = usize::from(rows[i - 1] != columns[j - 1]);
 
       current[j] = (previous[j] + 1) // deletion
@@ -153,7 +164,7 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
     std::mem::swap(&mut previous, &mut current);
   }
 
-  previous[n]
+  Ok(previous[n])
 }
 
 /// Compute Jaro-Winkler similarity between two strings.

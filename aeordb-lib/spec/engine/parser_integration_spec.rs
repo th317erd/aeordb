@@ -9,10 +9,14 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::indexing_pipeline::IndexingPipeline;
+use aeordb::engine::errors::EngineError;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
+use aeordb::plugins::types::PluginType;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let ctx = RequestContext::system();
@@ -35,9 +39,172 @@ fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIn
   ops.store_file_buffered(&ctx, &config_path, &config_data, Some("application/json")).unwrap();
 }
 
+fn static_object_parser_wasm() -> Vec<u8> {
+  wat::parse_str(
+    r#"
+    (module
+      (memory (export "memory") 1)
+      (data (i32.const 1024) "{\22title\22:\22ok\22}")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (i64.or (i64.shl (i64.const 1024) (i64.const 32)) (i64.const 14))
+      )
+    )
+    "#,
+  )
+  .unwrap()
+}
+
+fn malformed_json_parser_wasm() -> Vec<u8> {
+  wat::parse_str(
+    r#"
+    (module
+      (memory (export "memory") 1)
+      (data (i32.const 1024) "not-json")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (i64.or (i64.shl (i64.const 1024) (i64.const 32)) (i64.const 8))
+      )
+    )
+    "#,
+  )
+  .unwrap()
+}
+
 // ============================================================
 // Task 8: Memory limit parsing
 // ============================================================
+
+#[test]
+fn parser_memory_refusal_propagates_instead_of_becoming_a_successful_noop() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = Arc::new(StorageEngine::create(dir.path().join("parser-memory.aeor").to_str().unwrap()).unwrap());
+  DirectoryOps::new(&engine).ensure_root_directory(&ctx).unwrap();
+  let manager = PluginManager::new(engine.clone());
+  manager.deploy_plugin("parser", "memory/parser", PluginType::Wasm, static_object_parser_wasm()).unwrap();
+  let config = PathIndexConfig {
+    parser: Some("memory/parser".to_string()),
+    parser_memory_limit: Some("64mb".to_string()),
+    logging: true,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "title".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/memory", &config);
+
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let available = before.policy.unwrap().ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  let remaining = 100 * 1024 * 1024;
+  assert!(available > remaining);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let pipeline = IndexingPipeline::with_plugin_manager(&engine, &manager);
+  let error = pipeline.run(&ctx, "/memory/file.bin", b"input", Some("application/octet-stream")).unwrap_err();
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "parser admission refusal was squelched: {error}");
+  drop(pressure);
+
+  pipeline.run(&ctx, "/memory/file.bin", b"input", Some("application/octet-stream")).unwrap();
+  assert!(IndexManager::new(&engine).load_index("/memory", "title").unwrap().is_some());
+}
+
+#[test]
+fn parser_envelope_remains_accounted_while_guest_execution_runs() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = Arc::new(StorageEngine::create(dir.path().join("parser-envelope.aeor").to_str().unwrap()).unwrap());
+  DirectoryOps::new(&engine).ensure_root_directory(&ctx).unwrap();
+  let manager = PluginManager::new(engine.clone());
+  let wasm = wat::parse_str(
+    r#"
+    (module
+      (memory (export "memory") 512)
+      (data (i32.const 1024) "{\22title\22:\22ok\22}")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (i64.or (i64.shl (i64.const 1024) (i64.const 32)) (i64.const 14))
+      )
+    )
+    "#,
+  )
+  .unwrap();
+  manager.deploy_plugin("parser", "memory/envelope", PluginType::Wasm, wasm).unwrap();
+  let config = PathIndexConfig {
+    parser: Some("memory/envelope".to_string()),
+    parser_memory_limit: Some("64mb".to_string()),
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "title".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/envelope", &config);
+  let input = vec![b'x'; 8 * 1024 * 1024];
+
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let available = before.policy.unwrap().ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  let remaining = 290 * 1024 * 1024;
+  assert!(available > remaining);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let pipeline = IndexingPipeline::with_plugin_manager(&engine, &manager);
+  let error = pipeline.run(&ctx, "/envelope/file.bin", &input, Some("application/octet-stream")).unwrap_err();
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "parser envelope bypassed admission: {error}");
+  assert_eq!(engine.memory_coordinator_snapshot().unwrap().owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
+  drop(pressure);
+
+  pipeline.run(&ctx, "/envelope/file.bin", &input, Some("application/octet-stream")).unwrap();
+}
+
+#[test]
+fn malformed_parser_output_preserves_compatibility_and_releases_memory() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = Arc::new(StorageEngine::create(dir.path().join("parser-malformed.aeor").to_str().unwrap()).unwrap());
+  DirectoryOps::new(&engine).ensure_root_directory(&ctx).unwrap();
+  let manager = PluginManager::new(engine.clone());
+  manager.deploy_plugin("parser", "failure/malformed", PluginType::Wasm, malformed_json_parser_wasm()).unwrap();
+  let config = PathIndexConfig {
+    parser: Some("failure/malformed".to_string()),
+    parser_memory_limit: Some("64kb".to_string()),
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "title".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/malformed", &config);
+
+  let pipeline = IndexingPipeline::with_plugin_manager(&engine, &manager);
+  pipeline
+    .run(&ctx, "/malformed/file.bin", b"input", Some("application/octet-stream"))
+    .expect("ordinary malformed parser output remains a compatibility no-op");
+
+  assert!(IndexManager::new(&engine).load_index("/malformed", "title").unwrap().is_none());
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  let parser = snapshot.owner(MemoryOwner::ParserPlugin).unwrap();
+  assert_eq!(parser.reserved_bytes, 0);
+  assert_eq!(parser.active_reservations, 0);
+}
+
+#[test]
+fn parser_pipeline_honors_explicit_cancellation_before_memory_admission() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = create_engine(&dir);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "title".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/cancelled", &config);
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+
+  let error = IndexingPipeline::new(&engine)
+    .run_with_cancellation(&ctx, "/cancelled/file.json", br#"{"title":"never indexed"}"#, Some("application/json"), &cancellation)
+    .unwrap_err();
+  assert!(matches!(error, EngineError::Cancelled(_)), "unexpected cancellation error: {error}");
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(snapshot.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
+  assert_eq!(snapshot.owner(MemoryOwner::ParserPlugin).unwrap().active_reservations, 0);
+}
 
 #[test]
 fn test_parse_memory_limit_mb() {

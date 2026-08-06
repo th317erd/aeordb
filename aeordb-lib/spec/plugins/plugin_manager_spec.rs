@@ -2,6 +2,7 @@ use aeordb::plugins::plugin_manager::{PluginManager, PluginManagerError};
 use aeordb::plugins::types::PluginType;
 use aeordb::server::create_temp_engine_for_tests;
 use aeordb::engine::RequestContext;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 
 /// Compile a minimal valid WASM module for testing.
 fn minimal_wasm_bytes() -> Vec<u8> {
@@ -20,6 +21,37 @@ fn minimal_wasm_bytes() -> Vec<u8> {
   )
   "#;
   wat::parse_str(wat).expect("WAT should be valid")
+}
+
+fn trapping_wasm_bytes() -> Vec<u8> {
+  wat::parse_str(
+    r#"
+    (module
+      (memory (export "memory") 1)
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (unreachable)
+      )
+    )
+    "#,
+  )
+  .expect("WAT should be valid")
+}
+
+fn fuel_exhausting_wasm_bytes() -> Vec<u8> {
+  wat::parse_str(
+    r#"
+    (module
+      (memory (export "memory") 1)
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (loop $forever
+          (br $forever)
+        )
+        (i64.const 0)
+      )
+    )
+    "#,
+  )
+  .expect("WAT should be valid")
 }
 
 /// Create a fresh PluginManager backed by a temp engine.
@@ -194,6 +226,62 @@ fn test_invoke_wasm_plugin() {
   let response = manager.invoke_wasm_plugin("db/schema/echo", b"hello").expect("invoke should succeed");
 
   assert_eq!(response, b"hello");
+}
+
+#[test]
+fn plugin_invocation_refuses_before_guest_memory_growth_and_retries_cleanly() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  manager.deploy_plugin("echo", "memory/echo", PluginType::Wasm, minimal_wasm_bytes()).expect("deploy");
+
+  let coordinator = engine.memory_coordinator();
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let available = before.policy.unwrap().ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  let remaining = 1024 * 1024;
+  assert!(available > remaining);
+  let pressure = coordinator.reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let error = manager.invoke_wasm_plugin("memory/echo", b"hello").unwrap_err();
+  assert!(error.to_string().contains("resource exhausted"), "unexpected refusal: {error}");
+  let refused = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(refused.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
+  assert_eq!(refused.owner(MemoryOwner::ParserPlugin).unwrap().active_reservations, 0);
+  drop(pressure);
+
+  assert_eq!(manager.invoke_wasm_plugin("memory/echo", b"hello").unwrap(), b"hello");
+}
+
+#[test]
+fn compiled_plugin_cache_is_accounted_and_invalidation_releases_it() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  manager.deploy_plugin("echo", "cache/echo", PluginType::Wasm, minimal_wasm_bytes()).expect("deploy");
+
+  assert_eq!(manager.invoke_wasm_plugin("cache/echo", b"hello").unwrap(), b"hello");
+  let cached = engine.memory_coordinator_snapshot().unwrap();
+  assert!(cached.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes > 0, "compiled runtime cache is not accounted");
+
+  assert!(manager.remove_plugin("cache/echo").unwrap());
+  let invalidated = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(invalidated.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
+  assert_eq!(invalidated.owner(MemoryOwner::ParserPlugin).unwrap().active_reservations, 0);
+}
+
+#[test]
+fn trap_and_fuel_exhaustion_release_every_invocation_reservation() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  manager.deploy_plugin("trap", "failure/trap", PluginType::Wasm, trapping_wasm_bytes()).expect("deploy trap");
+  manager.deploy_plugin("fuel", "failure/fuel", PluginType::Wasm, fuel_exhausting_wasm_bytes()).expect("deploy fuel exhaustion");
+
+  for path in ["failure/trap", "failure/fuel"] {
+    let error = manager.invoke_wasm_plugin_with_limits(path, b"request", 64 * 1024).unwrap_err();
+    assert!(matches!(error, PluginManagerError::ExecutionFailed(_)), "unexpected {path} error: {error}");
+    let snapshot = engine.memory_coordinator_snapshot().unwrap();
+    let parser = snapshot.owner(MemoryOwner::ParserPlugin).unwrap();
+    assert_eq!(parser.reserved_bytes, 0, "{path} leaked reserved bytes");
+    assert_eq!(parser.active_reservations, 0, "{path} leaked an active reservation");
+  }
 }
 
 #[test]

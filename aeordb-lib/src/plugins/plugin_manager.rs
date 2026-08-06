@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -7,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::types::{PluginMetadata, PluginType};
-use super::wasm_runtime::WasmPluginRuntime;
-use crate::engine::cache::Cache;
+use super::wasm_runtime::{DEFAULT_MEMORY_LIMIT_BYTES, WasmPluginRuntime};
+use crate::engine::cache::{Cache, CleanCache};
 use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
-use crate::engine::RequestContext;
-use crate::engine::StorageEngine;
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
+use crate::engine::{DirectoryOps, RequestContext, StorageEngine};
 use crate::engine::system_store;
 
 /// A first-party plugin embedded into the AeorDB binary.
@@ -114,21 +113,47 @@ impl PluginRecord {
 /// to avoid on every invocation. The runtime is reusable because `call_handle`
 /// creates a fresh `Store` per invocation (no shared mutable state).
 struct PluginCache {
-  entries: HashMap<String, Arc<WasmPluginRuntime>>,
+  entries: CleanCache<String, Arc<WasmPluginRuntime>>,
 }
 
 impl PluginCache {
-  fn new() -> Self {
-    PluginCache { entries: HashMap::new() }
+  fn new(engine: &StorageEngine) -> Self {
+    // Compiled modules are parser/plugin-owned clean derived state, not query plans.
+    // Keep their internal retention ceiling conservative without inventing a
+    // public configuration property outside the frozen v4 registry.
+    let max_bytes = engine
+      .memory_coordinator_snapshot()
+      .ok()
+      .and_then(|snapshot| snapshot.policy)
+      .map_or(0, |policy| (256 * 1024 * 1024).min(policy.hard_limit_bytes / 32));
+    PluginCache { entries: CleanCache::new_bounded((*engine.memory_coordinator()).clone(), MemoryOwner::ParserPlugin, max_bytes) }
+  }
+
+  fn compiled_weight(wasm_bytes: usize) -> Result<u64, PluginManagerError> {
+    wasm_bytes
+      .checked_mul(16)
+      .and_then(|bytes| bytes.checked_add(1024 * 1024))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| PluginManagerError::ResourceExhausted("compiled plugin cache estimate overflow".to_string()))
   }
 
   /// Get a cached runtime, or compile + cache it from the given WASM bytes.
-  fn get_or_compile(&mut self, path: &str, wasm_bytes: &[u8]) -> Result<Arc<WasmPluginRuntime>, super::wasm_runtime::WasmRuntimeError> {
-    if let Some(runtime) = self.entries.get(path) {
-      return Ok(Arc::clone(runtime));
+  fn get_or_compile(&mut self, path: &str, wasm_bytes: &[u8]) -> Result<Arc<WasmPluginRuntime>, PluginManagerError> {
+    let key = path.to_string();
+    if let Some(runtime) =
+      self.entries.get(&key).map_err(|error| PluginManagerError::ExecutionFailed(format!("plugin cache read failed: {error}")))?
+    {
+      return Ok(runtime);
     }
-    let runtime = Arc::new(WasmPluginRuntime::new(wasm_bytes)?);
-    self.entries.insert(path.to_string(), Arc::clone(&runtime));
+    let runtime = Arc::new(
+      WasmPluginRuntime::new(wasm_bytes)
+        .map_err(|error| PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {error}")))?,
+    );
+    let weight = Self::compiled_weight(wasm_bytes.len())?;
+    self
+      .entries
+      .insert_with_weight(key, Arc::clone(&runtime), weight)
+      .map_err(|error| PluginManagerError::ExecutionFailed(format!("plugin cache insertion failed: {error}")))?;
     Ok(runtime)
   }
 
@@ -143,8 +168,12 @@ impl PluginCache {
   }
 
   /// Invalidate the cache entry for a given path.
-  fn invalidate(&mut self, path: &str) {
-    self.entries.remove(path);
+  fn invalidate(&mut self, path: &str) -> Result<(), PluginManagerError> {
+    self
+      .entries
+      .remove(&path.to_string())
+      .map(|_| ())
+      .map_err(|error| PluginManagerError::ExecutionFailed(format!("plugin cache invalidation failed: {error}")))
   }
 }
 
@@ -156,10 +185,30 @@ pub struct PluginManager {
   cache: Mutex<PluginCache>,
 }
 
+pub(crate) struct AccountedPluginOutput {
+  bytes: Vec<u8>,
+  _reservation: MemoryReservation,
+}
+
+impl AccountedPluginOutput {
+  pub(crate) fn as_slice(&self) -> &[u8] {
+    &self.bytes
+  }
+
+  pub(crate) fn into_parts(self) -> (Vec<u8>, MemoryReservation) {
+    (self.bytes, self._reservation)
+  }
+
+  fn into_bytes(self) -> Vec<u8> {
+    self.bytes
+  }
+}
+
 impl PluginManager {
   /// Create a new PluginManager sharing the given StorageEngine.
   pub fn new(engine: std::sync::Arc<StorageEngine>) -> Self {
-    Self { engine, cache: Mutex::new(PluginCache::new()) }
+    let cache = Mutex::new(PluginCache::new(&engine));
+    Self { engine, cache }
   }
 
   /// Install or update all bundled first-party plugins.
@@ -286,15 +335,17 @@ impl PluginManager {
     plugin_id_override: Option<String>,
   ) -> Result<PluginRecord, PluginManagerError> {
     // Validate WASM bytes if this is a WASM plugin.
-    if plugin_type == PluginType::Wasm {
+    let _plugin_memory = if plugin_type == PluginType::Wasm {
+      let reservation = self.reserve_invocation_memory(wasm_bytes.len(), 0, 0)?;
       WasmPluginRuntime::new(&wasm_bytes)
         .map_err(|error| PluginManagerError::InvalidPlugin(format!("WASM validation failed: {}", error)))?;
-    }
+      Some(reservation)
+    } else {
+      None
+    };
 
     // Invalidate cached runtime for this path (new WASM bytes).
-    if let Ok(mut cache) = self.cache.lock() {
-      cache.invalidate(path);
-    }
+    self.invalidate_cached_runtime(path)?;
 
     // Check if a plugin already exists at this path — reuse its ID if so.
     let existing = self.get_plugin(path)?;
@@ -369,9 +420,7 @@ impl PluginManager {
   /// Invalidates any cached runtime for this path.
   pub fn remove_plugin(&self, path: &str) -> Result<bool, PluginManagerError> {
     // Invalidate cached runtime.
-    if let Ok(mut cache) = self.cache.lock() {
-      cache.invalidate(path);
-    }
+    self.invalidate_cached_runtime(path)?;
 
     let ctx = RequestContext::system();
     system_store::remove_plugin(&self.engine, &ctx, path).map_err(|error| PluginManagerError::Storage(error.to_string()))
@@ -383,21 +432,79 @@ impl PluginManager {
     cache.get_or_compile(path, wasm_bytes).map_err(|error| {
       tracing::error!(path = %path, error = %error, "Failed to load WASM module");
       metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "load_failed").increment(1);
-      PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error))
+      error
     })
+  }
+
+  fn invalidate_cached_runtime(&self, path: &str) -> Result<(), PluginManagerError> {
+    self.cache.lock().map_err(|error| PluginManagerError::ExecutionFailed(format!("plugin cache lock poisoned: {error}")))?.invalidate(path)
+  }
+
+  fn reserve_invocation_memory(
+    &self,
+    wasm_bytes: usize,
+    request_bytes: usize,
+    guest_memory_limit: usize,
+  ) -> Result<MemoryReservation, PluginManagerError> {
+    let bytes = guest_memory_limit
+      .checked_mul(4)
+      .and_then(|bytes| wasm_bytes.checked_mul(16).and_then(|compiled| bytes.checked_add(compiled)))
+      .and_then(|bytes| request_bytes.checked_mul(2).and_then(|request| bytes.checked_add(request)))
+      .and_then(|bytes| bytes.checked_add(1024 * 1024))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| PluginManagerError::ResourceExhausted("plugin invocation memory estimate overflow".to_string()))?;
+    self.engine.memory_coordinator().reserve(MemoryOwner::ParserPlugin, bytes, AdmissionClass::Workload).map_err(plugin_memory_error)
+  }
+
+  fn load_plugin_for_invocation(
+    &self,
+    path: &str,
+    request_bytes: usize,
+    guest_memory_limit: usize,
+  ) -> Result<(PluginRecord, MemoryReservation), PluginManagerError> {
+    let storage_path = system_store::plugin_storage_path(path);
+    let metadata = DirectoryOps::new(&self.engine)
+      .get_metadata(&storage_path)
+      .map_err(|error| PluginManagerError::Storage(error.to_string()))?
+      .ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+    let stored_bytes = usize::try_from(metadata.total_size)
+      .map_err(|_| PluginManagerError::ResourceExhausted("stored plugin size exceeds this platform's address space".to_string()))?;
+    let reservation = self.reserve_invocation_memory(stored_bytes, request_bytes, guest_memory_limit)?;
+    let record = self.get_plugin(path)?.ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+    if record.plugin_type != PluginType::Wasm {
+      return Err(PluginManagerError::InvalidPlugin(format!("plugin at '{}' is not a WASM plugin", path)));
+    }
+    Ok((record, reservation))
+  }
+
+  fn retain_plugin_output(mut reservation: MemoryReservation, bytes: Vec<u8>) -> Result<AccountedPluginOutput, PluginManagerError> {
+    let retained_bytes = bytes
+      .len()
+      .checked_mul(2)
+      .and_then(|value| value.checked_add(64 * 1024))
+      .and_then(|value| u64::try_from(value).ok())
+      .ok_or_else(|| PluginManagerError::ResourceExhausted("plugin output memory estimate overflow".to_string()))?
+      .max(1);
+    if retained_bytes < reservation.bytes() {
+      reservation
+        .shrink(reservation.bytes() - retained_bytes)
+        .map_err(|error| PluginManagerError::ExecutionFailed(format!("plugin output memory accounting failed: {error}")))?;
+    } else if retained_bytes > reservation.bytes() {
+      reservation.grow(retained_bytes - reservation.bytes()).map_err(plugin_memory_error)?;
+    }
+    Ok(AccountedPluginOutput { bytes, _reservation: reservation })
   }
 
   /// Instantiate and invoke a deployed WASM plugin.
   #[tracing::instrument(skip(self, request_bytes), fields(path = %path, request_size = request_bytes.len()))]
   pub fn invoke_wasm_plugin(&self, path: &str, request_bytes: &[u8]) -> Result<Vec<u8>, PluginManagerError> {
+    self.invoke_wasm_plugin_accounted(path, request_bytes).map(AccountedPluginOutput::into_bytes)
+  }
+
+  pub(crate) fn invoke_wasm_plugin_accounted(&self, path: &str, request_bytes: &[u8]) -> Result<AccountedPluginOutput, PluginManagerError> {
     let start = std::time::Instant::now();
 
-    let record = self.get_plugin(path)?.ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
-
-    if record.plugin_type != PluginType::Wasm {
-      return Err(PluginManagerError::InvalidPlugin(format!("plugin at '{}' is not a WASM plugin", path)));
-    }
-
+    let (record, memory) = self.load_plugin_for_invocation(path, request_bytes.len(), DEFAULT_MEMORY_LIMIT_BYTES)?;
     let runtime = self.get_cached_runtime(path, &record.wasm_bytes)?;
 
     let result = runtime.call_handle(request_bytes).map_err(|error| {
@@ -416,7 +523,8 @@ impl PluginManager {
       "Plugin invoked"
     );
 
-    result
+    let bytes = result?;
+    Self::retain_plugin_output(memory, bytes)
   }
 
   /// Instantiate and invoke a deployed WASM plugin with engine context.
@@ -458,14 +566,23 @@ impl PluginManager {
     group_cache: Arc<Cache<GroupLoader>>,
     api_key_cache: Arc<Cache<ApiKeyLoader>>,
   ) -> Result<Vec<u8>, PluginManagerError> {
+    self
+      .invoke_wasm_plugin_with_auth_accounted(path, request_bytes, engine, ctx, group_cache, api_key_cache)
+      .map(AccountedPluginOutput::into_bytes)
+  }
+
+  pub(crate) fn invoke_wasm_plugin_with_auth_accounted(
+    &self,
+    path: &str,
+    request_bytes: &[u8],
+    engine: std::sync::Arc<StorageEngine>,
+    ctx: RequestContext,
+    group_cache: Arc<Cache<GroupLoader>>,
+    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+  ) -> Result<AccountedPluginOutput, PluginManagerError> {
     let start = std::time::Instant::now();
 
-    let record = self.get_plugin(path)?.ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
-
-    if record.plugin_type != PluginType::Wasm {
-      return Err(PluginManagerError::InvalidPlugin(format!("plugin at '{}' is not a WASM plugin", path)));
-    }
-
+    let (record, memory) = self.load_plugin_for_invocation(path, request_bytes.len(), DEFAULT_MEMORY_LIMIT_BYTES)?;
     let runtime = self.get_cached_runtime(path, &record.wasm_bytes)?;
 
     let result = runtime.call_handle_with_context(request_bytes, engine, ctx, group_cache, api_key_cache).map_err(|error| {
@@ -484,7 +601,7 @@ impl PluginManager {
       "Plugin invoked with context"
     );
 
-    result
+    Self::retain_plugin_output(memory, result?)
   }
 
   /// Invoke a WASM plugin with custom memory limits (for parser plugins).
@@ -495,12 +612,16 @@ impl PluginManager {
     request_bytes: &[u8],
     memory_limit_bytes: usize,
   ) -> Result<Vec<u8>, PluginManagerError> {
-    let record = self.get_plugin(path)?.ok_or_else(|| PluginManagerError::NotFound(path.to_string()))?;
+    self.invoke_wasm_plugin_with_limits_accounted(path, request_bytes, memory_limit_bytes).map(AccountedPluginOutput::into_bytes)
+  }
 
-    if record.plugin_type != PluginType::Wasm {
-      return Err(PluginManagerError::InvalidPlugin(format!("plugin at '{}' is not a WASM plugin", path)));
-    }
-
+  pub(crate) fn invoke_wasm_plugin_with_limits_accounted(
+    &self,
+    path: &str,
+    request_bytes: &[u8],
+    memory_limit_bytes: usize,
+  ) -> Result<AccountedPluginOutput, PluginManagerError> {
+    let (record, memory) = self.load_plugin_for_invocation(path, request_bytes.len(), memory_limit_bytes)?;
     let runtime = PluginCache::compile_with_limits(
       &record.wasm_bytes,
       memory_limit_bytes,
@@ -508,7 +629,20 @@ impl PluginManager {
     )
     .map_err(|error| PluginManagerError::ExecutionFailed(format!("failed to load WASM module: {}", error)))?;
 
-    runtime.call_handle(request_bytes).map_err(|error| PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error)))
+    let bytes = runtime
+      .call_handle(request_bytes)
+      .map_err(|error| PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error)))?;
+    Self::retain_plugin_output(memory, bytes)
+  }
+}
+
+fn plugin_memory_error(error: MemoryCoordinatorError) -> PluginManagerError {
+  match error {
+    MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. }
+    | MemoryCoordinatorError::PolicyUnavailable => PluginManagerError::ResourceExhausted(error.to_string()),
+    _ => PluginManagerError::ExecutionFailed(format!("plugin memory accounting failed: {error}")),
   }
 }
 
@@ -523,6 +657,9 @@ pub enum PluginManagerError {
 
   #[error("plugin execution failed: {0}")]
   ExecutionFailed(String),
+
+  #[error("resource exhausted: {0}")]
+  ResourceExhausted(String),
 
   #[error("storage error: {0}")]
   Storage(String),

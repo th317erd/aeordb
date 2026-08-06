@@ -27,6 +27,7 @@ pub enum EngineError {
   /// admission and preserve volatile recovery evidence.
   PostMutationDurabilityFailure(String),
   ShuttingDown,
+  Cancelled(String),
   CyclicSymlink(String),
   SymlinkDepthExceeded(String),
 }
@@ -64,6 +65,7 @@ impl fmt::Display for EngineError {
       EngineError::DurabilityFailure(msg) => write!(formatter, "Durability failure: {}", msg),
       EngineError::PostMutationDurabilityFailure(msg) => write!(formatter, "Post-mutation durability failure: {}", msg),
       EngineError::ShuttingDown => write!(formatter, "Storage engine is shutting down"),
+      EngineError::Cancelled(operation) => write!(formatter, "Operation cancelled: {}", operation),
       EngineError::CyclicSymlink(message) => write!(formatter, "Cyclic symlink: {}", message),
       EngineError::SymlinkDepthExceeded(message) => write!(formatter, "Symlink depth exceeded: {}", message),
     }

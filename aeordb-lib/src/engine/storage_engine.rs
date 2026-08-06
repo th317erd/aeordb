@@ -677,7 +677,7 @@ impl StorageEngine {
       .activate_bounded_pages((*coordinator).clone(), max_resident_bytes)
   }
 
-  fn resolved_unsigned_config(&self, path: &str) -> Option<u64> {
+  pub(crate) fn resolved_unsigned_config(&self, path: &str) -> Option<u64> {
     self.configuration_shadow().resolution.as_ref()?.property(path)?.value.as_ref().and_then(|value| match value {
       crate::engine::config_resolver::ConfigValue::Unsigned(value) => Some(*value),
       _ => None,

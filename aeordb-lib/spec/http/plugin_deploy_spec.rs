@@ -7,6 +7,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
 use aeordb::plugins::plugin_manager::BUNDLED_PLUGINS;
 use aeordb::plugins::PluginManager;
@@ -201,6 +202,72 @@ async fn test_invoke_deployed_plugin_returns_result() {
   assert_eq!(echoed["metadata"]["name"], "echo");
   assert_eq!(echoed["metadata"]["path"], "/plugins/echo");
   assert_eq!(echoed["metadata"]["plugin_path"], "echo");
+}
+
+#[tokio::test]
+async fn plugin_http_response_retains_output_memory_until_the_body_is_released() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let deploy = Request::builder()
+    .method("PUT")
+    .uri("/plugins/accounted-response")
+    .header("authorization", &auth)
+    .body(Body::from(minimal_wasm_bytes()))
+    .unwrap();
+  assert_eq!(app.oneshot(deploy).await.unwrap().status(), StatusCode::OK);
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let invoke = Request::builder()
+    .method("POST")
+    .uri("/plugins/accounted-response/invoke")
+    .header("authorization", &auth)
+    .body(Body::from("held until response release"))
+    .unwrap();
+  let response = app.oneshot(invoke).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let held = engine.memory_coordinator_snapshot().unwrap();
+  let held_owner = held.owner(MemoryOwner::ParserPlugin).unwrap();
+  assert!(held_owner.active_reservations > 0);
+  let _body = body_bytes(response.into_body()).await;
+
+  let released = engine.memory_coordinator_snapshot().unwrap();
+  let released_owner = released.owner(MemoryOwner::ParserPlugin).unwrap();
+  assert!(held_owner.reserved_bytes > released_owner.reserved_bytes);
+  assert!(held_owner.active_reservations > released_owner.active_reservations);
+}
+
+#[tokio::test]
+async fn plugin_http_memory_refusal_is_retryable_service_unavailable() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let deploy = Request::builder()
+    .method("PUT")
+    .uri("/plugins/pressure-refusal")
+    .header("authorization", &auth)
+    .body(Body::from(minimal_wasm_bytes()))
+    .unwrap();
+  assert_eq!(app.oneshot(deploy).await.unwrap().status(), StatusCode::OK);
+
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  let available = snapshot.policy.unwrap().ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let remaining = 1024 * 1024;
+  assert!(available > remaining);
+  let _pressure = engine.memory_coordinator().reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let invoke = Request::builder()
+    .method("POST")
+    .uri("/plugins/pressure-refusal/invoke")
+    .header("authorization", &auth)
+    .body(Body::from("must refuse before guest growth"))
+    .unwrap();
+  let response = app.oneshot(invoke).await.unwrap();
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

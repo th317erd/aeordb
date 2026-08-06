@@ -419,10 +419,13 @@ fn decode_plugin_key(encoded: &str) -> String {
   encoded.replace("::", "/")
 }
 
+pub(crate) fn plugin_storage_path(key: &str) -> String {
+  format!("/.aeordb-system/plugins/{}", encode_plugin_key(key))
+}
+
 pub fn store_plugin(engine: &StorageEngine, ctx: &RequestContext, key: &str, encoded: &[u8]) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
-  let safe_key = encode_plugin_key(key);
-  let path = format!("/.aeordb-system/plugins/{}", safe_key);
+  let path = plugin_storage_path(key);
   ops.store_file_buffered(ctx, &path, encoded, Some("application/octet-stream"))?;
   Ok(())
 }
@@ -430,8 +433,7 @@ pub fn store_plugin(engine: &StorageEngine, ctx: &RequestContext, key: &str, enc
 /// Retrieve a plugin by key.
 pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<u8>>> {
   let ops = DirectoryOps::new(engine);
-  let safe_key = encode_plugin_key(key);
-  let path = format!("/.aeordb-system/plugins/{}", safe_key);
+  let path = plugin_storage_path(key);
   match ops.read_file_buffered(&path) {
     Ok(data) => Ok(Some(data)),
     Err(EngineError::NotFound(_)) => Ok(None),

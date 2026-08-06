@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, MemoryType, Module, Store};
+use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, MemoryType, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
@@ -17,7 +17,7 @@ use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
 /// Default maximum memory in bytes (16 MB).
-const DEFAULT_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default fuel budget for execution metering.
 const DEFAULT_FUEL_LIMIT: u64 = 10_000_000;
@@ -62,6 +62,16 @@ pub enum WasmRuntimeError {
   Serialization(String),
 }
 
+fn map_memory_instantiation_error(error: impl std::fmt::Display) -> WasmRuntimeError {
+  let message = error.to_string();
+  let normalized = message.to_ascii_lowercase();
+  if normalized.contains("resource limiter") && normalized.contains("memory") {
+    WasmRuntimeError::MemoryLimitExceeded
+  } else {
+    WasmRuntimeError::InstantiationFailed(message)
+  }
+}
+
 /// Host state passed into the WASM Store.
 struct HostState {
   /// Reference to the guest's linear memory (set after instantiation).
@@ -74,6 +84,8 @@ struct HostState {
   group_cache: Option<Arc<Cache<GroupLoader>>>,
   /// API key cache for scoped-key path checks.
   api_key_cache: Option<Arc<Cache<ApiKeyLoader>>>,
+  /// Enforces the configured ceiling for imported and module-defined memory.
+  limits: StoreLimits,
 }
 
 /// A sandboxed WASM plugin runtime powered by wasmi.
@@ -86,6 +98,10 @@ pub struct WasmPluginRuntime {
 }
 
 impl WasmPluginRuntime {
+  fn store_limits(&self) -> StoreLimits {
+    StoreLimitsBuilder::new().memory_size(self.memory_limit_bytes).build()
+  }
+
   /// Load and validate a WASM binary, preparing it for execution.
   pub fn new(wasm_bytes: &[u8]) -> Result<Self, WasmRuntimeError> {
     Self::with_limits(wasm_bytes, DEFAULT_MEMORY_LIMIT_BYTES, DEFAULT_FUEL_LIMIT)
@@ -110,74 +126,7 @@ impl WasmPluginRuntime {
   ///     packed i64: high 32 bits = response pointer, low 32 bits = response length.
   ///   - The host reads the response bytes from the guest's memory.
   pub fn call_handle(&self, request_bytes: &[u8]) -> Result<Vec<u8>, WasmRuntimeError> {
-    let mut store =
-      Store::new(&self.engine, HostState { memory: None, engine: None, request_context: None, group_cache: None, api_key_cache: None });
-    store.set_fuel(self.fuel_limit).map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
-
-    let mut linker = <Linker<HostState>>::new(&self.engine);
-    self.register_host_functions(&mut linker)?;
-
-    // Provide a default "env" memory if the module imports one.
-    let memory_pages = (self.memory_limit_bytes / (64 * 1024)).max(1) as u32;
-    let memory_type = MemoryType::new(1, Some(memory_pages)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-    let memory = Memory::new(&mut store, memory_type).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-    linker.define("env", "memory", Extern::Memory(memory)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-
-    let instance = linker
-      .instantiate(&mut store, &self.module)
-      .and_then(|pre_instance| pre_instance.start(&mut store))
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-
-    // Resolve guest memory — prefer the instance's own export, fall back to the one we created.
-    let guest_memory = instance.get_memory(&store, "memory").unwrap_or(memory);
-
-    store.data_mut().memory = Some(guest_memory);
-
-    // Write request bytes into guest memory starting at offset 0.
-    let request_length = request_bytes.len();
-    let memory_size = guest_memory.data_size(&store);
-    if request_length > memory_size {
-      return Err(WasmRuntimeError::MemoryLimitExceeded);
-    }
-    guest_memory.write(&mut store, 0, request_bytes).map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
-
-    // Call the exported `handle` function.
-    let handle_function = instance.get_func(&store, "handle").ok_or_else(|| WasmRuntimeError::ExportNotFound("handle".to_string()))?;
-
-    let handle_typed = handle_function
-      .typed::<(i32, i32), i64>(&store)
-      .map_err(|error| WasmRuntimeError::ExportNotFound(format!("handle type mismatch: {}", error)))?;
-
-    // NOTE: Fuel exhaustion is detected via string matching on the wasmi error
-    // message. This is brittle -- if wasmi changes the message format, fuel
-    // exhaustion would be reported as a generic trap. Consider checking for
-    // specific wasmi error variants when the wasmi API supports it.
-    let result = handle_typed.call(&mut store, (0i32, request_length as i32)).map_err(|error| {
-      let message = error.to_string();
-      if message.contains("fuel") {
-        WasmRuntimeError::FuelLimitExceeded
-      } else {
-        WasmRuntimeError::Trap(message)
-      }
-    })?;
-
-    // Unpack the response pointer and length from the i64 result.
-    let response_pointer = (result >> 32) as u32 as usize;
-    let response_length = (result & 0xFFFF_FFFF) as u32 as usize;
-
-    if response_length == 0 {
-      return Ok(Vec::new());
-    }
-
-    let current_memory_size = guest_memory.data_size(&store);
-    if response_pointer + response_length > current_memory_size {
-      return Err(WasmRuntimeError::MemoryOutOfBounds);
-    }
-
-    let mut response_buffer = vec![0u8; response_length];
-    guest_memory.read(&store, response_pointer, &mut response_buffer).map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
-
-    Ok(response_buffer)
+    self.call_handle_inner(request_bytes, None, None, None, None)
   }
 
   /// Invoke the plugin's exported `handle` function with engine access.
@@ -193,16 +142,22 @@ impl WasmPluginRuntime {
     group_cache: Arc<Cache<GroupLoader>>,
     api_key_cache: Arc<Cache<ApiKeyLoader>>,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
+    self.call_handle_inner(request_bytes, Some(engine), Some(ctx), Some(group_cache), Some(api_key_cache))
+  }
+
+  fn call_handle_inner(
+    &self,
+    request_bytes: &[u8],
+    engine: Option<Arc<StorageEngine>>,
+    request_context: Option<RequestContext>,
+    group_cache: Option<Arc<Cache<GroupLoader>>>,
+    api_key_cache: Option<Arc<Cache<ApiKeyLoader>>>,
+  ) -> Result<Vec<u8>, WasmRuntimeError> {
     let mut store = Store::new(
       &self.engine,
-      HostState {
-        memory: None,
-        engine: Some(engine),
-        request_context: Some(ctx),
-        group_cache: Some(group_cache),
-        api_key_cache: Some(api_key_cache),
-      },
+      HostState { memory: None, engine, request_context, group_cache, api_key_cache, limits: self.store_limits() },
     );
+    store.limiter(|state| &mut state.limits);
     store.set_fuel(self.fuel_limit).map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
 
     let mut linker = <Linker<HostState>>::new(&self.engine);
@@ -211,13 +166,13 @@ impl WasmPluginRuntime {
     // Provide a default "env" memory if the module imports one.
     let memory_pages = (self.memory_limit_bytes / (64 * 1024)).max(1) as u32;
     let memory_type = MemoryType::new(1, Some(memory_pages)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
-    let memory = Memory::new(&mut store, memory_type).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+    let memory = Memory::new(&mut store, memory_type).map_err(map_memory_instantiation_error)?;
     linker.define("env", "memory", Extern::Memory(memory)).map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
 
     let instance = linker
       .instantiate(&mut store, &self.module)
       .and_then(|pre_instance| pre_instance.start(&mut store))
-      .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
+      .map_err(map_memory_instantiation_error)?;
 
     // Resolve guest memory — prefer the instance's own export, fall back to the one we created.
     let guest_memory = instance.get_memory(&store, "memory").unwrap_or(memory);
@@ -227,7 +182,7 @@ impl WasmPluginRuntime {
     // Write request bytes into guest memory starting at offset 0.
     let request_length = request_bytes.len();
     let memory_size = guest_memory.data_size(&store);
-    if request_length > memory_size {
+    if request_length > memory_size || request_length > i32::MAX as usize {
       return Err(WasmRuntimeError::MemoryLimitExceeded);
     }
     guest_memory.write(&mut store, 0, request_bytes).map_err(|_| WasmRuntimeError::MemoryOutOfBounds)?;
@@ -261,7 +216,8 @@ impl WasmPluginRuntime {
     }
 
     let current_memory_size = guest_memory.data_size(&store);
-    if response_pointer + response_length > current_memory_size {
+    let response_end = response_pointer.checked_add(response_length).ok_or(WasmRuntimeError::MemoryOutOfBounds)?;
+    if response_end > current_memory_size {
       return Err(WasmRuntimeError::MemoryOutOfBounds);
     }
 
@@ -275,13 +231,8 @@ impl WasmPluginRuntime {
   ///
   /// Includes the database host functions and the log_message function.
   ///
-  /// **H4 — Permission gap**: These host functions currently do NOT enforce
-  /// per-operation permission checks beyond what `DirectoryOps` and the
-  /// `RequestContext` provide. Full permission enforcement requires threading
-  /// `PermissionResolver` (which depends on `GroupCache` + `PermissionsCache`)
-  /// into `HostState`. Until that refactor is done, WASM plugins operate
-  /// with the permissions of the request that invoked them, validated only
-  /// at the HTTP middleware level. See the TODO in `get_engine_and_context`.
+  /// Path-bearing host functions authorize the caller's request context and
+  /// scoped API-key rules before touching storage.
   fn register_host_functions(&self, linker: &mut Linker<HostState>) -> Result<(), WasmRuntimeError> {
     // -----------------------------------------------------------------------
     // aeordb_read_file(ptr, len) -> i64
@@ -310,17 +261,34 @@ impl WasmPluginRuntime {
         }
 
         let dir_ops = DirectoryOps::new(&engine);
-
-        // Read file content
-        let data = match dir_ops.read_file_buffered(&path) {
-          Ok(d) => d,
-          Err(e) => return write_error_response(&mut caller, &format!("Read failed: {}", e)),
+        let record = match dir_ops.get_metadata(&path) {
+          Ok(Some(record)) => record,
+          Ok(None) => return write_error_response(&mut caller, &format!("File not found: {path}")),
+          Err(error) => return write_error_response(&mut caller, &format!("Metadata failed: {error}")),
         };
+        let content_type = record.content_type.unwrap_or_default();
+        let response_capacity = host_response_capacity(&caller);
+        let encoded_length = record
+          .total_size
+          .checked_add(2)
+          .and_then(|bytes| bytes.checked_div(3))
+          .and_then(|bytes| bytes.checked_mul(4));
+        let response_length = encoded_length
+          .and_then(|bytes| bytes.checked_add((content_type.len() as u64).saturating_mul(6)))
+          .and_then(|bytes| bytes.checked_add(256));
+        if response_length.is_none_or(|bytes| bytes > response_capacity as u64) {
+          return write_error_response(
+            &mut caller,
+            &format!(
+              "File response is too large for guest memory (source bytes: {}, response capacity: {}); use aeordb_extract_file for bounded ranges",
+              record.total_size, response_capacity
+            ),
+          );
+        }
 
-        // Get metadata for content_type
-        let content_type = match dir_ops.get_metadata(&path) {
-          Ok(Some(record)) => record.content_type.unwrap_or_default(),
-          _ => String::new(),
+        let data = match dir_ops.read_file_buffered(&path) {
+          Ok(data) => data,
+          Err(error) => return write_error_response(&mut caller, &format!("Read failed: {error}")),
         };
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -355,13 +323,13 @@ impl WasmPluginRuntime {
         };
 
         let data_b64 = match args_json.get("data").and_then(|v| v.as_str()) {
-          Some(d) => d.to_string(),
+          Some(d) => d,
           None => return write_error_response(&mut caller, "Missing 'data' argument"),
         };
 
         let content_type = args_json.get("content_type").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-        let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
+        let data = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
           Ok(d) => d,
           Err(e) => return write_error_response(&mut caller, &format!("Base64 decode failed: {}", e)),
         };
@@ -418,7 +386,12 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
         };
 
-        match extract_file_text(&engine, &path, &args_json) {
+        let safe_text_bytes = host_response_capacity(&caller).saturating_sub(1024) / 6;
+        if safe_text_bytes == 0 {
+          return write_error_response(&mut caller, "Guest memory has no capacity for an extract response");
+        }
+
+        match extract_file_text(&engine, &path, &args_json, safe_text_bytes) {
           Ok(response) => write_json_response(&mut caller, &response),
           Err(e) => write_error_response(&mut caller, &e),
         }
@@ -535,22 +508,45 @@ impl WasmPluginRuntime {
         }
 
         let dir_ops = DirectoryOps::new(&engine);
+        let response_capacity = host_response_capacity(&caller);
+        let offset = args_json.get("offset").and_then(|value| value.as_u64()).and_then(|value| usize::try_from(value).ok()).unwrap_or(0);
+        let capacity_limit = response_capacity.saturating_sub(256) / 128;
+        let requested_limit = args_json.get("limit").and_then(|value| value.as_u64()).and_then(|value| usize::try_from(value).ok());
+        let limit = requested_limit.unwrap_or(capacity_limit).min(capacity_limit);
 
-        match dir_ops.list_directory(&path) {
-          Ok(children) => {
-            let entries: Vec<serde_json::Value> = children
-              .iter()
-              .map(|child| {
-                let entry_type = if child.entry_type == EntryType::DirectoryIndex.to_u8() { "directory" } else { "file" };
-                serde_json::json!({
-                  "name": child.name,
-                  "type": entry_type,
-                  "size": child.total_size,
-                })
-              })
-              .collect();
-
-            let response = serde_json::json!({"entries": entries});
+        match dir_ops.list_directory_window(&path, offset, limit) {
+          Ok(window) => {
+            for warning in &window.warnings {
+              tracing::warn!(
+                path = %path,
+                node_hash = %warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()),
+                reason = %warning.reason,
+                "Plugin directory listing skipped a damaged B-tree branch"
+              );
+            }
+            let mut response_bytes = 64usize;
+            let mut entries = Vec::with_capacity(window.entries.len());
+            for child in &window.entries {
+              let estimated = child.name.len().saturating_mul(6).saturating_add(96);
+              if response_bytes.saturating_add(estimated) > response_capacity {
+                break;
+              }
+              response_bytes = response_bytes.saturating_add(estimated);
+              let entry_type = if child.entry_type == EntryType::DirectoryIndex.to_u8() { "directory" } else { "file" };
+              entries.push(serde_json::json!({
+                "name": child.name,
+                "type": entry_type,
+                "size": child.total_size,
+              }));
+            }
+            let has_more = window.has_more || entries.len() < window.entries.len();
+            if requested_limit.is_none() && has_more {
+              return write_error_response(
+                &mut caller,
+                "Directory response is too large for guest memory; request a bounded limit and offset",
+              );
+            }
+            let response = serde_json::json!({"entries": entries, "has_more": has_more});
             write_json_response(&mut caller, &response)
           }
           Err(e) => write_error_response(&mut caller, &format!("List failed: {}", e)),
@@ -576,7 +572,7 @@ impl WasmPluginRuntime {
         };
 
         // Parse the query from JSON
-        let query = match parse_query_from_json(&args_json) {
+        let mut query = match parse_query_from_json(&args_json) {
           Ok(q) => q,
           Err(e) => return write_error_response(&mut caller, &e),
         };
@@ -585,34 +581,53 @@ impl WasmPluginRuntime {
           return write_error_response(&mut caller, &e);
         }
 
+        let response_capacity = host_response_capacity(&caller);
+        let response_item_limit = (response_capacity.saturating_sub(512) / 256).max(1);
+        query.limit = Some(query.limit.unwrap_or(response_item_limit).min(response_item_limit));
+
         let query_engine = QueryEngine::new(&engine);
         match query_engine.execute_paginated(&query) {
           Ok(paginated) => {
-            let result_items: Vec<serde_json::Value> = paginated
-              .results
-              .iter()
-              .filter(|r| authorize_plugin_path(&caller, &r.file_record.path, CrudlifyOp::Read).is_ok())
-              .map(|r| {
-                serde_json::json!({
-                  "path": r.file_record.path,
-                  "score": r.score,
-                  "total_size": r.file_record.total_size,
-                  "content_type": r.file_record.content_type,
-                  "created_at": r.file_record.created_at,
-                  "updated_at": r.file_record.updated_at,
-                  "matched_by": r.matched_by,
-                })
-              })
-              .collect();
+            let mut result_items = Vec::new();
+            let mut response_bytes = 256usize;
+            for result in &paginated.results {
+              if authorize_plugin_path(&caller, &result.file_record.path, CrudlifyOp::Read).is_err() {
+                continue;
+              }
+              let matched_bytes = result.matched_by.iter().fold(0usize, |total, value| total.saturating_add(value.len().saturating_mul(6)));
+              let estimated = result
+                .file_record
+                .path
+                .len()
+                .saturating_mul(6)
+                .saturating_add(result.file_record.content_type.as_ref().map_or(0, |value| value.len().saturating_mul(6)))
+                .saturating_add(matched_bytes)
+                .saturating_add(256);
+              if response_bytes.saturating_add(estimated) > response_capacity {
+                break;
+              }
+              response_bytes = response_bytes.saturating_add(estimated);
+              result_items.push(serde_json::json!({
+                "path": result.file_record.path,
+                "score": result.score,
+                "total_size": result.file_record.total_size,
+                "content_type": result.file_record.content_type,
+                "created_at": result.file_record.created_at,
+                "updated_at": result.file_record.updated_at,
+                "matched_by": result.matched_by,
+              }));
+            }
             let visible_count = result_items.len();
 
             let mut response = serde_json::json!({
               "items": result_items,
-              "has_more": paginated.has_more,
+              "has_more": paginated.has_more || visible_count < paginated.results.len(),
             });
 
-            if let Some(total) = paginated.total_count {
-              response["total"] = serde_json::json!(std::cmp::min(total, visible_count as u64));
+            if is_unrestricted_plugin_context(&caller) {
+              if let Some(total) = paginated.total_count {
+                response["total"] = serde_json::json!(total);
+              }
             }
 
             write_json_response(&mut caller, &response)
@@ -830,7 +845,12 @@ fn is_unrestricted_plugin_context(caller: &Caller<'_, HostState>) -> bool {
   uuid::Uuid::parse_str(&ctx.user_id).map(|user_id| user_id.is_nil()).unwrap_or(false)
 }
 
-fn extract_file_text(engine: &StorageEngine, path: &str, args_json: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn extract_file_text(
+  engine: &StorageEngine,
+  path: &str,
+  args_json: &serde_json::Value,
+  safe_text_bytes: usize,
+) -> Result<serde_json::Value, String> {
   let mode = match args_json.get("mode").and_then(|v| v.as_str()) {
     Some("lines") => RangeMode::Lines,
     Some("chars") => RangeMode::Chars,
@@ -845,7 +865,14 @@ fn extract_file_text(engine: &StorageEngine, path: &str, args_json: &serde_json:
     start: args_json.get("start").and_then(|v| v.as_u64()),
     end: args_json.get("end").and_then(|v| v.as_u64()),
     pointer: args_json.get("pointer").and_then(|v| v.as_str()).map(str::to_string),
-    max_bytes: args_json.get("max_bytes").and_then(|v| v.as_u64()).map(|v| v as usize),
+    max_bytes: Some(
+      args_json
+        .get("max_bytes")
+        .and_then(|v| v.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(safe_text_bytes)
+        .min(safe_text_bytes),
+    ),
   };
 
   let extracted = extract_range_by_path(engine, path, &request).map_err(|error| error.to_string())?;
@@ -892,31 +919,48 @@ fn read_guest_json(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Result
   serde_json::from_slice(&buf).map_err(|e| format!("Failed to parse JSON arguments: {}", e))
 }
 
+fn host_response_capacity(caller: &Caller<'_, HostState>) -> usize {
+  caller.data().memory.map_or(0, |memory| memory.data_size(caller).saturating_sub(HOST_RESPONSE_OFFSET))
+}
+
 /// Write a JSON response into guest memory at HOST_RESPONSE_OFFSET.
 /// Returns packed i64: (ptr << 32) | len.
 fn write_json_response(caller: &mut Caller<'_, HostState>, value: &serde_json::Value) -> i64 {
   let bytes = match serde_json::to_vec(value) {
     Ok(b) => b,
-    Err(_) => return 0i64,
+    Err(error) => return write_error_response(caller, &format!("Host response serialization failed: {error}")),
   };
 
+  if bytes.len() > host_response_capacity(caller) || bytes.len() > u32::MAX as usize {
+    return write_error_response(caller, "Host response exceeds guest memory capacity; request a smaller bounded result");
+  }
+  write_response_bytes(caller, &bytes)
+}
+
+fn write_response_bytes(caller: &mut Caller<'_, HostState>, bytes: &[u8]) -> i64 {
+  if bytes.len() > host_response_capacity(caller) || bytes.len() > u32::MAX as usize {
+    return 0;
+  }
   let memory = match caller.data().memory {
     Some(mem) => mem,
-    None => return 0i64,
+    None => return 0,
   };
 
-  let response_len = bytes.len();
   if memory.write(caller, HOST_RESPONSE_OFFSET, &bytes).is_err() {
-    return 0i64;
+    return 0;
   }
 
-  ((HOST_RESPONSE_OFFSET as i64) << 32) | (response_len as i64)
+  ((HOST_RESPONSE_OFFSET as i64) << 32) | (bytes.len() as i64)
 }
 
 /// Write an error response as {"error": "message"} into guest memory.
 fn write_error_response(caller: &mut Caller<'_, HostState>, message: &str) -> i64 {
-  let response = serde_json::json!({"error": message});
-  write_json_response(caller, &response)
+  if let Ok(bytes) = serde_json::to_vec(&serde_json::json!({"error": message})) {
+    if bytes.len() <= host_response_capacity(caller) {
+      return write_response_bytes(caller, &bytes);
+    }
+  }
+  write_response_bytes(caller, br#"{"error":"Host response exceeds guest memory capacity"}"#)
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,13 @@ use crate::engine::storage_engine::{StorageEngine, WriteBatch};
 /// Default chunk size for splitting file data (256 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
 
+/// One bounded, live window from a directory listing.
+pub struct DirectoryListWindow {
+  pub entries: Vec<ChildEntry>,
+  pub has_more: bool,
+  pub warnings: Vec<crate::engine::btree::BTreeWalkWarning>,
+}
+
 /// Compute the domain-prefixed hash for a file path.
 pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   algo.compute_hash(format!("file:{}", path).as_bytes())
@@ -1161,36 +1168,8 @@ impl<'a> DirectoryOps<'a> {
     path: &str,
   ) -> EngineResult<(Vec<ChildEntry>, Vec<crate::engine::btree::BTreeWalkWarning>)> {
     let normalized = normalize_path(path);
-    let algo = self.engine.hash_algo();
-    let hash_length = algo.hash_length();
-
-    let dir_key = directory_path_hash(&normalized, &algo)?;
-    if normalized == "/" {
-      let snapshot = self.engine.kv_snapshot.load();
-      if let Some(kv_entry) = snapshot.get(&dir_key)? {
-        tracing::debug!(kv_offset = kv_entry.offset, kv_type = kv_entry.type_flags, "list_directory: root KV entry");
-      }
-    }
-    // Defensive fallback: if dir_key's hard-link target is dead (a known
-    // failure mode after `snapshot_restore` + GC, where HEAD moves but
-    // dir_keys aren't rewritten), recover by resolving the directory via
-    // the parent's ChildEntry.hash — that's the authoritative current
-    // reference. Logs a warning so the corruption stays observable.
-    let recovered = self.recover_directory_data_if_stale(&normalized, &dir_key)?;
-    let read_result = if let Some(pair) = recovered {
-      // Divergence was detected. Propagate the heal up the ancestor
-      // chain — without this, ancestor dir_keys can stay stale
-      // indefinitely (queries to ancestors bypass the dir_key index via
-      // the cached merkle root, so the divergence-detection branch
-      // never fires for them). Best-effort: errors are logged, not
-      // returned, so the read path is never blocked by repair failure.
-      if let Err(e) = self.heal_stale_dir_keys_along_path(&normalized) {
-        tracing::warn!(path = %normalized, error = %e, "Ancestor dir_key heal failed; continuing with served canonical content");
-      }
-      Ok(Some(pair))
-    } else {
-      self.read_directory_data(&dir_key)
-    };
+    let hash_length = self.engine.hash_algo().hash_length();
+    let read_result = self.load_directory_listing_data(&normalized);
     match read_result {
       Ok(Some((header, value))) => {
         if normalized == "/" {
@@ -1233,38 +1212,86 @@ impl<'a> DirectoryOps<'a> {
     }
   }
 
-  fn filter_live_children(&self, parent: &str, children: Vec<ChildEntry>) -> EngineResult<Vec<ChildEntry>> {
+  /// Return a bounded live window without materializing an entire B-tree directory.
+  pub fn list_directory_window(&self, path: &str, offset: usize, limit: usize) -> EngineResult<DirectoryListWindow> {
+    let normalized = normalize_path(path);
+    let hash_length = self.engine.hash_algo().hash_length();
+    let Some((header, value)) = self.load_directory_listing_data(&normalized)? else {
+      return Err(EngineError::NotFound(normalized));
+    };
+    if value.is_empty() {
+      return Ok(DirectoryListWindow { entries: Vec::new(), has_more: false, warnings: Vec::new() });
+    }
+
+    if !crate::engine::btree::is_btree_format(&value) {
+      let children = match deserialize_child_entries(&value, hash_length, header.entry_version) {
+        Ok(children) => self.filter_live_children(&normalized, children)?,
+        Err(error) => {
+          tracing::warn!(path = %normalized, error = %error, "Corrupt flat directory index; returning an empty listing window");
+          Vec::new()
+        }
+      };
+      let start = offset.min(children.len());
+      let end = start.saturating_add(limit).min(children.len());
+      return Ok(DirectoryListWindow { entries: children[start..end].to_vec(), has_more: end < children.len(), warnings: Vec::new() });
+    }
+
+    let mut seen_live = 0usize;
+    let mut entries = Vec::with_capacity(limit.min(crate::engine::btree::BTREE_MAX_LEAF_ENTRIES));
+    let mut has_more = false;
+    let mut visitor = |child: &ChildEntry| -> EngineResult<bool> {
+      if !self.is_live_child(&normalized, child)? {
+        return Ok(true);
+      }
+      if seen_live < offset {
+        seen_live = seen_live.saturating_add(1);
+        return Ok(true);
+      }
+      if entries.len() < limit {
+        entries.push(child.clone());
+        return Ok(true);
+      }
+      has_more = true;
+      Ok(false)
+    };
+    let visit = crate::engine::btree::btree_visit_from_node_with_mode(
+      &value,
+      self.engine,
+      hash_length,
+      false,
+      crate::engine::btree::BTreeWalkMode::BestEffort,
+      &mut visitor,
+    )?;
+    Ok(DirectoryListWindow { entries, has_more, warnings: visit.warnings })
+  }
+
+  fn load_directory_listing_data(&self, normalized: &str) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
     let algo = self.engine.hash_algo();
+    let dir_key = directory_path_hash(normalized, &algo)?;
+    if normalized == "/" {
+      let snapshot = self.engine.kv_snapshot.load();
+      if let Some(kv_entry) = snapshot.get(&dir_key)? {
+        tracing::debug!(kv_offset = kv_entry.offset, kv_type = kv_entry.type_flags, "list_directory: root KV entry");
+      }
+    }
+
+    // HEAD/dir-key divergence is healed by the same path for full and bounded listings.
+    if let Some(pair) = self.recover_directory_data_if_stale(normalized, &dir_key)? {
+      if let Err(error) = self.heal_stale_dir_keys_along_path(normalized) {
+        tracing::warn!(path = %normalized, error = %error, "Ancestor dir_key heal failed; continuing with served canonical content");
+      }
+      Ok(Some(pair))
+    } else {
+      self.read_directory_data(&dir_key)
+    }
+  }
+
+  fn filter_live_children(&self, parent: &str, children: Vec<ChildEntry>) -> EngineResult<Vec<ChildEntry>> {
     let mut live = Vec::with_capacity(children.len());
 
     for child in children {
       let child_path = if parent == "/" { format!("/{}", child.name) } else { format!("{}/{}", parent, child.name) };
-
-      let keep = match EntryType::from_u8(child.entry_type) {
-        Ok(EntryType::FileRecord) => {
-          let key = file_path_hash(&child_path, &algo)?;
-          self.engine.has_entry(&key)?
-        }
-        Ok(EntryType::DirectoryIndex) => {
-          let key = directory_path_hash(&child_path, &algo)?;
-          self.engine.has_entry(&key)?
-        }
-        Ok(EntryType::Symlink) => {
-          let key = symlink_path_hash(&child_path, &algo)?;
-          self.engine.has_entry(&key)?
-        }
-        Ok(_) => true,
-        Err(error) => {
-          tracing::warn!(
-            parent = %parent,
-            child = %child.name,
-            entry_type = child.entry_type,
-            error = %error,
-            "Skipping directory child with invalid entry type"
-          );
-          false
-        }
-      };
+      let keep = self.is_live_child(parent, &child)?;
 
       if keep {
         live.push(child);
@@ -1279,6 +1306,27 @@ impl<'a> DirectoryOps<'a> {
     }
 
     Ok(live)
+  }
+
+  fn is_live_child(&self, parent: &str, child: &ChildEntry) -> EngineResult<bool> {
+    let algo = self.engine.hash_algo();
+    let child_path = if parent == "/" { format!("/{}", child.name) } else { format!("{}/{}", parent, child.name) };
+    match EntryType::from_u8(child.entry_type) {
+      Ok(EntryType::FileRecord) => self.engine.has_entry(&file_path_hash(&child_path, &algo)?),
+      Ok(EntryType::DirectoryIndex) => self.engine.has_entry(&directory_path_hash(&child_path, &algo)?),
+      Ok(EntryType::Symlink) => self.engine.has_entry(&symlink_path_hash(&child_path, &algo)?),
+      Ok(_) => Ok(true),
+      Err(error) => {
+        tracing::warn!(
+          parent = %parent,
+          child = %child.name,
+          entry_type = child.entry_type,
+          error = %error,
+          "Skipping directory child with invalid entry type"
+        );
+        Ok(false)
+      }
+    }
   }
 
   /// Create an empty directory at the given path.

@@ -216,6 +216,88 @@ fn test_echo_plugin_reads_file() {
 }
 
 #[test]
+fn read_file_host_function_rejects_oversized_response_before_buffering() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  let wasm = wat::parse_str(
+    r#"
+    (module
+      (import "aeordb" "aeordb_read_file" (func $read (param i32 i32) (result i64)))
+      (memory (export "memory") 1)
+      (data (i32.const 1024) "{\22path\22:\22/large/file.bin\22}")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (call $read (i32.const 1024) (i32.const 26))
+      )
+    )
+    "#,
+  )
+  .unwrap();
+  manager.deploy_plugin("read-large", "test/read-large", PluginType::Wasm, wasm).unwrap();
+  let ctx = RequestContext::system();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&ctx, "/large/file.bin", &vec![b'x'; 13 * 1024 * 1024], Some("application/octet-stream"))
+    .unwrap();
+
+  let response = manager
+    .invoke_wasm_plugin_with_context("test/read-large", b"{}", engine.clone(), ctx)
+    .expect("oversized host response should be a bounded plugin error");
+  let error: serde_json::Value = serde_json::from_slice(&response).expect("host must return a structured size error");
+  assert!(error["error"].as_str().is_some_and(|message| message.contains("aeordb_extract_file")), "unexpected host response: {error}");
+}
+
+#[test]
+fn list_directory_host_function_pages_a_large_btree_without_truncating_silently() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  let paged_wasm = wat::parse_str(
+    r#"
+    (module
+      (import "aeordb" "aeordb_list_directory" (func $list (param i32 i32) (result i64)))
+      (memory (export "memory") 1)
+      (data (i32.const 1024) "{\22path\22:\22/paged\22,\22offset\22:10,\22limit\22:3}")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (call $list (i32.const 1024) (i32.const 39))
+      )
+    )
+    "#,
+  )
+  .unwrap();
+  let unbounded_wasm = wat::parse_str(
+    r#"
+    (module
+      (import "aeordb" "aeordb_list_directory" (func $list (param i32 i32) (result i64)))
+      (memory (export "memory") 1)
+      (data (i32.const 1024) "{\22path\22:\22/paged\22}")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (call $list (i32.const 1024) (i32.const 17))
+      )
+    )
+    "#,
+  )
+  .unwrap();
+  manager.deploy_plugin("paged-list", "test/paged-list", PluginType::Wasm, paged_wasm).unwrap();
+  manager.deploy_plugin("unbounded-list", "test/unbounded-list", PluginType::Wasm, unbounded_wasm).unwrap();
+
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  for index in 0..600 {
+    ops.store_file_buffered(&ctx, &format!("/paged/file_{index:05}.txt"), b"x", Some("text/plain")).expect("store B-tree directory member");
+  }
+
+  let page = manager.invoke_wasm_plugin_with_context("test/paged-list", b"{}", engine.clone(), ctx.clone()).expect("bounded host listing");
+  let page: serde_json::Value = serde_json::from_slice(&page).unwrap();
+  let names: Vec<&str> = page["entries"].as_array().unwrap().iter().map(|entry| entry["name"].as_str().unwrap()).collect();
+  assert_eq!(names, ["file_00010.txt", "file_00011.txt", "file_00012.txt"]);
+  assert_eq!(page["has_more"], true);
+
+  let error = manager
+    .invoke_wasm_plugin_with_context("test/unbounded-list", b"{}", engine.clone(), ctx)
+    .expect("oversized listing should be a bounded host error");
+  let error: serde_json::Value = serde_json::from_slice(&error).unwrap();
+  assert!(error["error"].as_str().is_some_and(|message| message.contains("bounded limit and offset")), "unexpected host response: {error}");
+}
+
+#[test]
 fn test_echo_plugin_extracts_crlf_line_range() {
   let (engine, pm, _temp) = setup();
   let ctx = RequestContext::system();

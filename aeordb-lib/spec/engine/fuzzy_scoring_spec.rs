@@ -1,5 +1,5 @@
 use aeordb::engine::directory_ops::DirectoryOps;
-use aeordb::engine::fuzzy::{damerau_levenshtein, jaro_winkler};
+use aeordb::engine::fuzzy::{damerau_levenshtein, damerau_levenshtein_controlled, jaro_winkler};
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::query_engine::{FuzzyAlgorithm, FuzzyOptions, Fuzziness, QueryBuilder};
 use aeordb::engine::storage_engine::StorageEngine;
@@ -169,6 +169,22 @@ fn damerau_levenshtein_matches_independent_matrix_reference() {
       assert_eq!(damerau_levenshtein(left, right), reference_osa_distance(left, right), "OSA mismatch for {left:?} -> {right:?}",);
     }
   }
+}
+
+#[test]
+fn controlled_damerau_levenshtein_interrupts_at_a_bounded_cell_quantum() {
+  let mut cells = 0usize;
+  let result = damerau_levenshtein_controlled(&"a".repeat(10_000), &"b".repeat(10_000), || {
+    cells += 1;
+    if cells >= 513 {
+      Err("cancelled")
+    } else {
+      Ok(())
+    }
+  });
+
+  assert_eq!(result, Err("cancelled"));
+  assert_eq!(cells, 513, "control was not consulted once per edit-distance cell");
 }
 
 // =============================================================================

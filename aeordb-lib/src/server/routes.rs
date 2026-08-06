@@ -1,18 +1,22 @@
 use axum::{
   Extension,
-  body::Body,
+  body::{Body, Bytes},
   extract::{Path, Query, State},
   http::StatusCode,
   response::{IntoResponse, Response},
   Json,
 };
 use serde::Deserialize;
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use uuid::Uuid;
 
 use super::cache_invalidation::evict_caches_for_path;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::engine::RequestContext;
+use crate::engine::memory_coordinator::MemoryReservation;
 use crate::auth::{
   TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord, DEFAULT_EXPIRY_DAYS, generate_magic_link_code,
   hash_magic_link_code, generate_refresh_token, hash_refresh_token,
@@ -47,6 +51,44 @@ pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 // Plugin routes
 // ---------------------------------------------------------------------------
+
+struct AccountedResponseBody {
+  bytes: Option<Bytes>,
+  reservation: Option<MemoryReservation>,
+}
+
+impl AccountedResponseBody {
+  fn new(bytes: Vec<u8>, reservation: MemoryReservation) -> Self {
+    Self { bytes: Some(Bytes::from(bytes)), reservation: Some(reservation) }
+  }
+}
+
+impl http_body::Body for AccountedResponseBody {
+  type Data = Bytes;
+  type Error = Infallible;
+
+  fn is_end_stream(&self) -> bool {
+    self.bytes.is_none()
+  }
+
+  fn size_hint(&self) -> http_body::SizeHint {
+    let mut hint = http_body::SizeHint::new();
+    hint.set_exact(self.bytes.as_ref().map_or(0, |bytes| bytes.len() as u64));
+    hint
+  }
+
+  fn poll_frame(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+    if let Some(bytes) = self.bytes.take() {
+      return Poll::Ready(Some(Ok(http_body::Frame::data(bytes))));
+    }
+    drop(self.reservation.take());
+    Poll::Ready(None)
+  }
+}
+
+fn accounted_response_body(bytes: Vec<u8>, reservation: MemoryReservation) -> Body {
+  Body::new(AccountedResponseBody::new(bytes, reservation))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DeployPluginQuery {
@@ -102,6 +144,11 @@ pub async fn deploy_plugin(
     Err(crate::plugins::plugin_manager::PluginManagerError::InvalidPlugin(message)) => {
       ErrorResponse::new(format!("Invalid plugin: {}", message)).with_status(StatusCode::BAD_REQUEST).into_response()
     }
+    Err(crate::plugins::plugin_manager::PluginManagerError::ResourceExhausted(message)) => {
+      ErrorResponse::new(format!("Plugin deployment resource exhausted: {}", message))
+        .with_status(StatusCode::SERVICE_UNAVAILABLE)
+        .into_response()
+    }
     Err(error) => {
       tracing::error!("Failed to deploy plugin: {}", error);
       ErrorResponse::new(format!("Failed to deploy plugin: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
@@ -140,7 +187,7 @@ pub async fn invoke_plugin(
   // Create a RequestContext from the authenticated caller's claims.
   let ctx = RequestContext::from_claims_with_key(&claims.sub, claims.key_id.clone(), state.event_bus.clone());
 
-  match state.plugin_manager.invoke_wasm_plugin_with_auth(
+  match state.plugin_manager.invoke_wasm_plugin_with_auth_accounted(
     &plugin_path,
     &request_bytes,
     state.engine.clone(),
@@ -148,10 +195,11 @@ pub async fn invoke_plugin(
     state.group_cache.clone(),
     state.api_key_cache.clone(),
   ) {
-    Ok(response_bytes) => {
+    Ok(accounted_output) => {
       // Try to deserialize as a PluginResponse envelope.
-      match serde_json::from_slice::<aeordb_plugin_sdk::PluginResponse>(&response_bytes) {
+      match serde_json::from_slice::<aeordb_plugin_sdk::PluginResponse>(accounted_output.as_slice()) {
         Ok(plugin_response) => {
+          let (_, reservation) = accounted_output.into_parts();
           let status = StatusCode::from_u16(plugin_response.status_code).unwrap_or(StatusCode::OK);
           let content_type = plugin_response.content_type.unwrap_or_else(|| "application/octet-stream".to_string());
 
@@ -172,21 +220,27 @@ pub async fn invoke_plugin(
           }
 
           response_builder
-            .body(axum::body::Body::from(plugin_response.body))
+            .body(accounted_response_body(plugin_response.body, reservation))
             .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
         }
         Err(_) => {
+          let (response_bytes, reservation) = accounted_output.into_parts();
           // Fallback: return raw bytes for backward compatibility with old plugins.
           axum::http::Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/octet-stream")
-            .body(axum::body::Body::from(response_bytes))
+            .body(accounted_response_body(response_bytes, reservation))
             .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
         }
       }
     }
     Err(crate::plugins::plugin_manager::PluginManagerError::NotFound(path)) => {
       ErrorResponse::new(format!("Plugin not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response()
+    }
+    Err(crate::plugins::plugin_manager::PluginManagerError::ResourceExhausted(message)) => {
+      ErrorResponse::new(format!("Plugin invocation resource exhausted: {}", message))
+        .with_status(StatusCode::SERVICE_UNAVAILABLE)
+        .into_response()
     }
     Err(error) => {
       tracing::error!("Plugin invocation failed: {}", error);

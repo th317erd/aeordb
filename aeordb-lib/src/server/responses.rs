@@ -84,7 +84,7 @@ pub fn engine_error_status(error: &EngineError) -> StatusCode {
     EngineError::NotFound(_) => StatusCode::NOT_FOUND,
     EngineError::AlreadyExists(_) => StatusCode::CONFLICT,
     EngineError::SnapshotWritesDisabled => StatusCode::FORBIDDEN,
-    EngineError::ShuttingDown | EngineError::ResourceExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
+    EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
     EngineError::InvalidInput(_)
     | EngineError::ReservedUserId
     | EngineError::UnsafeQueryField(_)
@@ -102,7 +102,7 @@ pub fn engine_error_code(error: &EngineError) -> &'static str {
     EngineError::NotFound(_) => error_codes::NOT_FOUND,
     EngineError::AlreadyExists(_) => error_codes::ALREADY_EXISTS,
     EngineError::SnapshotWritesDisabled => error_codes::FORBIDDEN,
-    EngineError::ShuttingDown | EngineError::ResourceExhausted(_) => error_codes::SERVICE_UNAVAILABLE,
+    EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_) => error_codes::SERVICE_UNAVAILABLE,
     EngineError::InvalidInput(_)
     | EngineError::ReservedUserId
     | EngineError::UnsafeQueryField(_)
