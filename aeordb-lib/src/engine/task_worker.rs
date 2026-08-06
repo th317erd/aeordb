@@ -7,7 +7,7 @@ use crate::engine::backup;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::engine_event::{EngineEvent, EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED};
 use crate::engine::entry_type::EntryType;
-use crate::engine::errors::EngineResult;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::event_bus::EventBus;
 use crate::engine::gc::run_gc;
 use crate::engine::index_store::{
@@ -15,6 +15,7 @@ use crate::engine::index_store::{
 };
 use crate::engine::index_config_resolver::{glob_matches, IndexConfigResolver};
 use crate::engine::indexing_pipeline::IndexingPipeline;
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner};
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -31,6 +32,9 @@ const REINDEX_BATCH_SIZE: usize = 50;
 const CIRCUIT_BREAKER_THRESHOLD: usize = 10;
 /// Number of recent batch times to keep for ETA calculation.
 const ROLLING_AVERAGE_WINDOW: usize = 10;
+/// Scheduler bookkeeping retained while one task is claimed and dispatched.
+/// Individual task implementations reserve their own material work separately.
+const TASK_WORKER_ADMISSION_BYTES: u64 = 256 * 1024;
 
 /// Spawn a background task worker that dequeues and executes tasks in a loop.
 ///
@@ -115,6 +119,24 @@ fn process_next_task_internal_with_cancel(
   event_bus: &EventBus,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> EngineResult<bool> {
+  if cancel.is_cancelled() {
+    return Ok(false);
+  }
+
+  let _task_workspace =
+    match engine.memory_coordinator().reserve(MemoryOwner::Task, TASK_WORKER_ADMISSION_BYTES, AdmissionClass::Maintenance) {
+      Ok(reservation) => reservation,
+      Err(error @ (MemoryCoordinatorError::SoftPressureDeferred { .. } | MemoryCoordinatorError::HardLimitExceeded { .. })) => {
+        tracing::info!(error = %error, "task worker deferred pending maintenance before dequeue");
+        return Ok(false);
+      }
+      Err(error) => return Err(task_worker_memory_error(error)),
+    };
+
+  if cancel.is_cancelled() {
+    return Ok(false);
+  }
+
   // H18: dequeue_next atomically finds the oldest pending task and marks
   // it Running under a lock, preventing double-dequeue.
   let task = match queue.dequeue_next()? {
@@ -177,6 +199,15 @@ fn process_next_task_internal_with_cancel(
   let _ = queue.prune_completed(PRUNE_MAX_AGE_MS, PRUNE_MAX_COUNT);
 
   Ok(true)
+}
+
+fn task_worker_memory_error(error: MemoryCoordinatorError) -> EngineError {
+  match error {
+    MemoryCoordinatorError::PolicyUnavailable | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => {
+      EngineError::ResourceExhausted(format!("task worker memory admission failed: {error}"))
+    }
+    _ => EngineError::IoError(std::io::Error::other(format!("task worker memory admission failed: {error}"))),
+  }
 }
 
 /// Execute a reindex task: re-run the indexing pipeline on all files under a directory.
