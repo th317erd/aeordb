@@ -9,7 +9,7 @@ use crate::engine::engine_event::{EngineEvent, EVENT_TASKS_COMPLETED, EVENT_TASK
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::event_bus::EventBus;
-use crate::engine::gc::run_gc;
+use crate::engine::gc::run_gc_with_cancellation;
 use crate::engine::index_store::{
   IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL, DEFAULT_INDEX_BUFFER_FLUSH_WRITES,
 };
@@ -159,7 +159,7 @@ fn process_next_task_internal_with_cancel(
   // Execute based on task type.
   let result = match task.task_type.as_str() {
     "reindex" => execute_reindex(queue, &task, engine, plugin_manager, cancel),
-    "gc" => execute_gc(queue, &task, engine),
+    "gc" => execute_gc(queue, &task, engine, cancel),
     "backup" => execute_backup(&task, engine),
     "cleanup" => execute_cleanup(&task, engine, event_bus),
     unknown => Err(format!("unknown task type: {}", unknown)),
@@ -540,11 +540,16 @@ fn skip_indexing_path(path: &str) -> bool {
 }
 
 /// Execute a garbage collection task.
-fn execute_gc(_queue: &TaskQueue, task: &TaskRecord, engine: &StorageEngine) -> Result<String, String> {
+fn execute_gc(
+  _queue: &TaskQueue,
+  task: &TaskRecord,
+  engine: &StorageEngine,
+  cancel: &tokio_util::sync::CancellationToken,
+) -> Result<String, String> {
   let dry_run = task.args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
   let ctx = RequestContext::system();
-  let result = run_gc(engine, &ctx, dry_run).map_err(|e| format!("gc failed: {}", e))?;
+  let result = run_gc_with_cancellation(engine, &ctx, dry_run, cancel).map_err(|e| format!("gc failed: {}", e))?;
 
   Ok(format!(
     "gc completed: {} garbage entries, {} bytes reclaimed, dry_run={}",

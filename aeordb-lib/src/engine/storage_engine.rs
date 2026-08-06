@@ -30,7 +30,8 @@ use crate::engine::hot_tail::VoidRecord;
 use crate::engine::index_store::{IndexManager, IndexMemoryPolicy, IndexWriteBufferOptions, SharedIndexWriteBuffer};
 use crate::engine::kv_snapshot::ReadSnapshot;
 use crate::engine::memory_coordinator::{
-  HostMemorySample, MemoryCoordinator, MemoryCoordinatorError, MemoryCoordinatorSnapshot, MemoryObservation, MemoryOwner, MemoryPolicy,
+  AdmissionClass, HostMemorySample, MemoryCoordinator, MemoryCoordinatorError, MemoryCoordinatorSnapshot, MemoryObservation, MemoryOwner,
+  MemoryPolicy, MemoryReservation,
 };
 use crate::engine::native_durability::sync_file_all_native;
 use serde::Serialize;
@@ -542,6 +543,26 @@ fn observation_failed(owner: MemoryOwner, message: impl Into<String>) -> MemoryC
   MemoryCoordinatorError::ObservationFailed { owner, message: message.into() }
 }
 
+fn gc_recheck_memory_error(error: MemoryCoordinatorError) -> EngineError {
+  match error {
+    MemoryCoordinatorError::PolicyUnavailable
+    | MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => {
+      EngineError::ResourceExhausted(format!("GC recheck memory admission failed: {error}"))
+    }
+    _ => EngineError::IoError(std::io::Error::other(format!("GC recheck memory admission failed: {error}"))),
+  }
+}
+
+const GC_RECHECK_BYTES_PER_HASH: u64 = 128;
+
+struct GcRecheckState {
+  hashes: HashSet<Vec<u8>>,
+  reservation: MemoryReservation,
+  failure: Option<String>,
+}
+
 /// Top-level storage engine combining an append-only WAL, a disk-backed KV index,
 /// and a void manager for reclaimable space tracking.
 ///
@@ -606,7 +627,7 @@ pub struct StorageEngine {
   /// is added here so the sweep phase can avoid clobbering entries that were
   /// written after the mark snapshot was captured. `None` means GC is not
   /// active and writes don't bother recording. See bot-docs/plan/gc-mark-sweep.md.
-  pub(crate) gc_recheck: Mutex<Option<HashSet<Vec<u8>>>>,
+  gc_recheck: Mutex<Option<GcRecheckState>>,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
 }
@@ -865,18 +886,13 @@ impl StorageEngine {
     );
 
     let gc_recheck = self.gc_recheck.lock().map_err(|error| observation_failed(MemoryOwner::GarbageCollection, error.to_string()))?;
-    if let Some(hashes) = gc_recheck.as_ref() {
-      let payload = hashes.iter().fold(0usize, |total, hash| total.saturating_add(hash.capacity()));
-      let bytes = std::mem::size_of::<HashSet<Vec<u8>>>()
-        .saturating_add(hashes.capacity().saturating_mul(std::mem::size_of::<Vec<u8>>().saturating_add(2 * std::mem::size_of::<usize>())))
-        .saturating_add(payload) as u64;
+    if let Some(state) = gc_recheck.as_ref() {
       observations.insert(
         MemoryOwner::GarbageCollection,
         MemoryObservation {
-          resident_bytes: bytes,
-          dirty_bytes: bytes,
-          pinned_bytes: bytes,
-          items: hashes.len() as u64,
+          // Recheck memory is reservation-owned; reporting it as legacy
+          // resident memory here would count it twice.
+          items: state.hashes.len() as u64,
           ..Default::default()
         },
       );
@@ -2208,7 +2224,7 @@ impl StorageEngine {
 
     // Seed the DiskKVStore's pending_voids snapshot from the loaded
     // VoidManager state so the next hot tail flush carries it forward.
-    engine.sync_voids_to_kv_writer();
+    engine.sync_voids_to_kv_writer()?;
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_shadow()?;
     engine.initialize_memory_coordinator()?;
@@ -2308,7 +2324,7 @@ impl StorageEngine {
   pub fn recover_after_emergency_spill_replay(&self) -> EngineResult<()> {
     self.rebuild_kv()?;
     self.recover_voids_via_gap_scan()?;
-    self.sync_voids_to_kv_writer();
+    self.sync_voids_to_kv_writer()?;
     self.force_hot_tail_flush()
   }
 
@@ -2394,11 +2410,7 @@ impl StorageEngine {
   /// operation that changes the void set (GC sweep, void consumption,
   /// startup population). Also refreshes the void_count + void_space
   /// counters so dashboard metrics stay accurate.
-  pub(crate) fn sync_voids_to_kv_writer(&self) {
-    let _ = self.try_sync_voids_to_kv_writer();
-  }
-
-  fn try_sync_voids_to_kv_writer(&self) -> EngineResult<()> {
+  pub(crate) fn sync_voids_to_kv_writer(&self) -> EngineResult<()> {
     let (voids, count, total_bytes) = {
       let vm = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
       let collected: Vec<crate::engine::hot_tail::VoidRecord> =
@@ -2689,49 +2701,81 @@ impl StorageEngine {
   /// Record a write into the GC recheck set if GC mark+sweep is active.
   /// No-op otherwise. Cheap: one Mutex acquisition + an Option check.
   fn record_gc_recheck(&self, hash: &[u8]) {
-    if let Ok(mut guard) = self.gc_recheck.lock() {
-      if let Some(set) = guard.as_mut() {
-        set.insert(hash.to_vec());
+    let mut guard = match self.gc_recheck.lock() {
+      Ok(guard) => guard,
+      Err(error) => {
+        tracing::error!(%error, "GC recheck lock failed after a committed write; active GC will fail closed");
+        return;
       }
+    };
+    let Some(state) = guard.as_mut() else {
+      return;
+    };
+    if state.failure.is_some() || state.hashes.contains(hash) {
+      return;
     }
+    if let Err(error) = state.reservation.grow(GC_RECHECK_BYTES_PER_HASH) {
+      let message = format!("GC recheck memory admission failed after a committed write: {error}");
+      tracing::warn!(%error, "GC recheck stopped accepting hashes; sweep will abort without rejecting the write");
+      state.failure = Some(message);
+      return;
+    }
+    state.hashes.insert(hash.to_vec());
   }
 
   /// Begin GC recheck tracking. Subsequent writes have their hashes recorded
   /// into the recheck set. The caller (GC) reads + clears the set via
   /// `take_gc_recheck` between mark and sweep, and again after sweep.
-  pub fn begin_gc_recheck(&self) {
-    if let Ok(mut guard) = self.gc_recheck.lock() {
-      *guard = Some(HashSet::new());
+  pub fn begin_gc_recheck(&self) -> EngineResult<()> {
+    let reservation =
+      self.memory_coordinator().reserve(MemoryOwner::GarbageCollection, 0, AdmissionClass::Maintenance).map_err(gc_recheck_memory_error)?;
+    let mut guard = self.gc_recheck.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    if guard.is_some() {
+      return Err(EngineError::AlreadyExists("garbage collection recheck tracking is already active".to_string()));
     }
+    *guard = Some(GcRecheckState { hashes: HashSet::new(), reservation, failure: None });
+    Ok(())
   }
 
   /// Drain the GC recheck set. Returns the hashes accumulated since the last
   /// call (or since `begin_gc_recheck`). Leaves an empty set in place so
   /// recording continues.
-  pub fn take_gc_recheck(&self) -> HashSet<Vec<u8>> {
-    if let Ok(mut guard) = self.gc_recheck.lock() {
-      if let Some(set) = guard.as_mut() {
-        return std::mem::take(set);
-      }
+  pub fn take_gc_recheck(&self) -> EngineResult<HashSet<Vec<u8>>> {
+    let mut guard = self.gc_recheck.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let Some(state) = guard.as_mut() else {
+      return Ok(HashSet::new());
+    };
+    if let Some(failure) = &state.failure {
+      return Err(EngineError::ResourceExhausted(failure.clone()));
     }
-    HashSet::new()
+    Ok(std::mem::take(&mut state.hashes))
   }
 
   /// Peek at the GC recheck set without draining. Used during sweep to spare
   /// in-flight writes (writers can still add while we read).
-  pub fn gc_recheck_contains(&self, hash: &[u8]) -> bool {
-    if let Ok(guard) = self.gc_recheck.lock() {
-      if let Some(set) = guard.as_ref() {
-        return set.contains(hash);
-      }
+  pub fn gc_recheck_contains(&self, hash: &[u8]) -> EngineResult<bool> {
+    let guard = self.gc_recheck.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let Some(state) = guard.as_ref() else {
+      return Ok(false);
+    };
+    if let Some(failure) = &state.failure {
+      return Err(EngineError::ResourceExhausted(failure.clone()));
     }
-    false
+    Ok(state.hashes.contains(hash))
   }
 
   /// End GC recheck tracking. Writes will no longer record.
-  pub fn end_gc_recheck(&self) {
-    if let Ok(mut guard) = self.gc_recheck.lock() {
-      *guard = None;
+  pub fn end_gc_recheck(&self) -> EngineResult<()> {
+    match self.gc_recheck.lock() {
+      Ok(mut guard) => {
+        *guard = None;
+        Ok(())
+      }
+      Err(poisoned) => {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        Err(EngineError::IoError(std::io::Error::other("GC recheck lock is poisoned")))
+      }
     }
   }
 
@@ -3924,6 +3968,14 @@ impl StorageEngine {
     snapshot.iter_all()
   }
 
+  /// Return the number of rows in the current immutable KV read view without
+  /// cloning those rows. Maintenance owners use this for pre-allocation
+  /// admission before materializing a full scan.
+  pub fn kv_entry_count(&self) -> EngineResult<usize> {
+    let _operation = self.operation_guard("kv_entry_count")?;
+    Ok(self.kv_snapshot.load().len())
+  }
+
   /// Lightweight single-hash lookup in the KV snapshot.
   /// Returns `None` for deleted or missing entries.
   pub fn get_kv_entry(&self, hash: &[u8]) -> EngineResult<Option<KVEntry>> {
@@ -4342,7 +4394,7 @@ impl StorageEngine {
     }
 
     if self.void_snapshot_dirty.swap(false, Ordering::AcqRel) {
-      if let Err(error) = self.try_sync_voids_to_kv_writer() {
+      if let Err(error) = self.sync_voids_to_kv_writer() {
         self.void_snapshot_dirty.store(true, Ordering::Release);
         return Err(error);
       }
@@ -5307,6 +5359,42 @@ mod tests {
     let snapshot = coordinator.snapshot().unwrap();
     assert_eq!(snapshot.pending_hard, 0);
     assert_eq!(snapshot.failed, 0, "the failed driver must retire its own terminal waiter record");
+  }
+
+  #[test]
+  fn gc_sweep_refuses_poisoned_void_manager_before_kv_removal() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("gc-poisoned-void-manager.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let garbage_key = engine.compute_hash(b"gc-poisoned-void-garbage").unwrap();
+    engine.store_entry(EntryType::Chunk, &garbage_key, b"garbage").unwrap();
+    let live = crate::engine::gc::gc_mark(&engine).unwrap();
+    assert!(!live.contains(&garbage_key));
+
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _guard = engine.void_manager.write().unwrap();
+      panic!("poison void manager for GC refusal test");
+    }));
+
+    let error = crate::engine::gc::gc_sweep(&engine, &live, false)
+      .expect_err("GC must not remove KV rows when void registration authority is unavailable");
+    assert!(matches!(error, EngineError::IoError(_)));
+    assert!(engine.has_entry(&garbage_key).unwrap(), "preflight refusal must leave the candidate in the KV view");
+  }
+
+  #[test]
+  fn syncing_void_snapshot_surfaces_poisoned_void_manager() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("poisoned-void-snapshot.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _guard = engine.void_manager.write().unwrap();
+      panic!("poison void manager for snapshot propagation test");
+    }));
+
+    let error = engine.sync_voids_to_kv_writer().expect_err("void snapshot synchronization failures must never become success");
+    assert!(matches!(error, EngineError::IoError(_)));
   }
 }
 

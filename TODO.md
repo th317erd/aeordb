@@ -189,6 +189,7 @@
       - [x] Bound plugin metadata enumeration without retaining every stored WASM body, and retain its HTTP/rule-engine result memory through consumption.
       - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
         - [x] Gate task-worker dequeue on a coordinator-owned maintenance reservation so deferred work remains pending and restartable.
+        - [x] Gate every GC entry point before side effects, add cooperative cancellation, and account retained v3 mark/sweep work until v4 replaces it.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
       - [ ] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.

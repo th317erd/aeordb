@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::auth::TokenClaims;
 use crate::engine::gc::run_gc;
 use crate::engine::RequestContext;
-use crate::server::responses::{ErrorResponse, require_root};
+use crate::server::responses::{engine_error_response, require_root, ErrorResponse};
 use crate::server::state::AppState;
 
 #[derive(Deserialize)]
@@ -36,7 +36,7 @@ pub async fn run_gc_endpoint(
 
   match result {
     Ok(Ok(gc_result)) => (StatusCode::OK, Json(serde_json::json!(gc_result))).into_response(),
-    Ok(Err(e)) => ErrorResponse::new(format!("GC failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response(),
+    Ok(Err(error)) => engine_error_response("GC failed", &error),
     Err(e) => ErrorResponse::new(format!("GC task panicked unexpectedly: {}. This is a bug — please report it", e))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response(),

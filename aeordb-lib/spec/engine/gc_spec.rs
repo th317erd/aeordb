@@ -7,12 +7,173 @@ use aeordb::engine::{
 };
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::file_record::FileRecord;
-use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, GcResult};
+use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, GcResult};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::WriteBatch;
 use aeordb::engine::tree_walker::walk_version_tree;
+use aeordb::engine::{EngineError, EventBus};
 use aeordb::server::create_temp_engine_for_tests;
+use tokio_util::sync::CancellationToken;
 
 // ─── In-place write infrastructure ──────────────────────────────────────────
+
+#[test]
+fn test_gc_soft_pressure_defers_before_event_or_work() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let bus = Arc::new(EventBus::new());
+  let mut events = bus.subscribe();
+  let ctx = RequestContext::with_bus(bus);
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let policy = before.policy.expect("test engine must have a resolved memory policy");
+  let pressure_bytes = policy.soft_limit_bytes.saturating_sub(before.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let error = run_gc(&engine, &ctx, true).expect_err("soft pressure must defer GC before mark");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)));
+  assert!(events.try_recv().is_err(), "deferred GC must not emit a started event");
+
+  let snapshot = coordinator.snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.deferrals, 1);
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_hard_pressure_rejects_before_event_or_work() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let bus = Arc::new(EventBus::new());
+  let mut events = bus.subscribe();
+  let ctx = RequestContext::with_bus(bus);
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let policy = before.policy.expect("test engine must have a resolved memory policy");
+  let pressure_bytes = policy.ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let error = run_gc(&engine, &ctx, true).expect_err("hard pressure must reject GC before mark");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)));
+  assert!(events.try_recv().is_err(), "rejected GC must not emit a started event");
+
+  let snapshot = coordinator.snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.rejections, 1);
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_pre_cancelled_run_stops_before_event_or_work() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let bus = Arc::new(EventBus::new());
+  let mut events = bus.subscribe();
+  let ctx = RequestContext::with_bus(bus);
+  let cancel = CancellationToken::new();
+  cancel.cancel();
+
+  let error = run_gc_with_cancellation(&engine, &ctx, true, &cancel).expect_err("cancelled GC must not begin mark work");
+  assert!(matches!(error, EngineError::Cancelled(operation) if operation == "garbage collection"));
+  assert!(events.try_recv().is_err(), "cancelled GC must not emit a started event");
+
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_preflights_retained_workspace_from_kv_population() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  for index in 0..400u32 {
+    let key = engine.compute_hash(format!("gc-memory-{index}").as_bytes()).unwrap();
+    engine.store_entry(EntryType::Chunk, &key, &[index as u8]).unwrap();
+  }
+
+  let bus = Arc::new(EventBus::new());
+  let mut events = bus.subscribe();
+  let ctx = RequestContext::with_bus(bus);
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let policy = before.policy.expect("test engine must have a resolved memory policy");
+  let allowed_headroom = 600 * 1024;
+  let pressure_bytes = policy.soft_limit_bytes.saturating_sub(before.accounted_bytes).saturating_sub(allowed_headroom);
+  let _pressure = coordinator.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let error = run_gc(&engine, &ctx, true).expect_err("GC must reserve its KV-scaled retained workspace before mark");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)));
+  assert!(events.try_recv().is_err(), "workspace refusal must happen before the GC started event");
+
+  let snapshot = coordinator.snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_cancels_cooperatively_after_started_event_during_mark() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  for index in 0..5_000u32 {
+    let key = engine.compute_hash(format!("gc-cancel-{index}").as_bytes()).unwrap();
+    engine.store_entry(EntryType::Chunk, &key, &[index as u8]).unwrap();
+  }
+
+  let bus = Arc::new(EventBus::new());
+  let events = bus.subscribe();
+  let ctx = RequestContext::with_bus(bus);
+  let cancel = CancellationToken::new();
+  let watcher_cancel = cancel.clone();
+  let watcher = std::thread::spawn(move || {
+    let mut events = events;
+    let started = events.blocking_recv().expect("GC must emit its started event");
+    assert_eq!(started.event_type, aeordb::engine::engine_event::EVENT_GC_STARTED);
+    watcher_cancel.cancel();
+    events
+  });
+
+  let error = run_gc_with_cancellation(&engine, &ctx, true, &cancel).expect_err("GC must stop at a bounded mark cancellation point");
+  assert!(matches!(error, EngineError::Cancelled(operation) if operation == "garbage collection"));
+  let mut events = watcher.join().unwrap();
+  assert!(events.try_recv().is_err(), "cancelled dry-run GC must not emit a completed event");
+
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_standalone_gc_mark_retains_accounting_until_live_set_drop() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let live = gc_mark(&engine).unwrap();
+
+  let retained = engine.memory_coordinator().snapshot().unwrap();
+  let owner = retained.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert!(owner.reserved_bytes >= 512 * 1024);
+  assert_eq!(owner.active_reservations, 1);
+  assert!(!live.is_empty());
+
+  drop(live);
+  let released = engine.memory_coordinator().snapshot().unwrap();
+  let owner = released.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_mark_fails_closed_on_malformed_task_registry() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+  engine.store_entry(EntryType::FileRecord, &registry_key, br#"{"broken":true}"#).unwrap();
+
+  let error = gc_mark(&engine).expect_err("malformed task registry must stop GC before sweep");
+  assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("task registry")));
+
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
 
 #[test]
 fn test_write_entry_at_roundtrip() {
@@ -107,10 +268,10 @@ fn test_gc_recheck_records_flush_batch_hashes() {
   batch.add(EntryType::DirectoryIndex, key_a.clone(), b"a".to_vec());
   batch.add(EntryType::DirectoryIndex, key_b.clone(), b"b".to_vec());
 
-  engine.begin_gc_recheck();
+  engine.begin_gc_recheck().unwrap();
   engine.flush_batch(batch).unwrap();
-  let pending = engine.take_gc_recheck();
-  engine.end_gc_recheck();
+  let pending = engine.take_gc_recheck().unwrap();
+  engine.end_gc_recheck().unwrap();
 
   assert!(pending.contains(&key_a), "flush_batch must record first batch key for GC recheck");
   assert!(pending.contains(&key_b), "flush_batch must record second batch key for GC recheck");
@@ -124,13 +285,55 @@ fn test_gc_recheck_records_flush_batch_and_head_hash() {
   let mut batch = WriteBatch::new();
   batch.add(EntryType::DirectoryIndex, side_key.clone(), b"side".to_vec());
 
-  engine.begin_gc_recheck();
+  engine.begin_gc_recheck().unwrap();
   engine.flush_batch_and_update_head(batch, &head_key).unwrap();
-  let pending = engine.take_gc_recheck();
-  engine.end_gc_recheck();
+  let pending = engine.take_gc_recheck().unwrap();
+  engine.end_gc_recheck().unwrap();
 
   assert!(pending.contains(&side_key), "flush_batch_and_update_head must record batch keys for GC recheck");
   assert!(pending.contains(&head_key), "flush_batch_and_update_head must record the published HEAD hash for GC recheck");
+}
+
+#[test]
+fn test_gc_recheck_memory_refusal_aborts_gc_without_rejecting_the_write() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  engine.begin_gc_recheck().unwrap();
+
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let policy = before.policy.expect("test engine must have a resolved memory policy");
+  let pressure_bytes = policy.soft_limit_bytes.saturating_sub(before.accounted_bytes).saturating_sub(64);
+  let pressure = coordinator.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let key = engine.compute_hash(b"gc-recheck:memory-refusal").unwrap();
+  engine.store_entry(EntryType::Chunk, &key, b"committed").unwrap();
+  let error = engine.take_gc_recheck().expect_err("unrecorded concurrent writes must abort GC before sweep");
+  assert!(matches!(error, EngineError::ResourceExhausted(message) if message.contains("recheck")));
+  assert!(engine.has_entry(&key).unwrap(), "recheck pressure must not reject the user write");
+
+  drop(pressure);
+  engine.end_gc_recheck().unwrap();
+  let released = coordinator.snapshot().unwrap();
+  let owner = released.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_recheck_rejects_double_begin_and_can_restart_after_end() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  engine.begin_gc_recheck().unwrap();
+  assert!(matches!(engine.begin_gc_recheck(), Err(EngineError::AlreadyExists(_))));
+  engine.end_gc_recheck().unwrap();
+
+  engine.begin_gc_recheck().unwrap();
+  assert!(engine.take_gc_recheck().unwrap().is_empty());
+  engine.end_gc_recheck().unwrap();
+
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
 }
 
 // ─── Test helpers ───────────────────────────────────────────────────────────

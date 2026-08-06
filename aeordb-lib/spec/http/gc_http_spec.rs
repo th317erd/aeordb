@@ -7,6 +7,7 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::RequestContext;
 use aeordb::engine::StorageEngine;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
@@ -73,6 +74,25 @@ fn seed_engine(engine: &StorageEngine) {
 // ===========================================================================
 // Happy path: root user can run GC
 // ===========================================================================
+
+#[tokio::test]
+async fn test_gc_memory_pressure_returns_retryable_service_unavailable() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let policy = before.policy.expect("test engine must have a resolved memory policy");
+  let pressure_bytes = policy.soft_limit_bytes.saturating_sub(before.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let request =
+    Request::builder().method("POST").uri("/system/gc?dry_run=true").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["code"], "SERVICE_UNAVAILABLE");
+  assert!(json["error"].as_str().is_some_and(|message| message.contains("memory")));
+}
 
 #[tokio::test]
 async fn test_gc_root_user_succeeds() {

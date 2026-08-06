@@ -176,7 +176,7 @@ pub use range_extract::{
   extract_range_by_path, extract_range_from_record, ExtractedRange, RangeExtractionRequest, RangeMode, ABSOLUTE_RANGE_MAX_BYTES,
   DEFAULT_RANGE_MAX_BYTES,
 };
-pub use gc::{gc_mark, gc_sweep, run_gc, GcResult};
+pub use gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, GcLiveSet, GcResult};
 pub use health::{
   HealthStatus, HealthReport, HealthChecks, EngineHealth, DiskHealth, SyncHealth, AuthHealth, check_engine, check_disk, check_sync,
   check_auth, compute_overall_status, full_health_check,
