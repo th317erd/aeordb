@@ -404,7 +404,7 @@ fn write_all_at_platform(file: &File, offset: u64, bytes: &[u8]) -> io::Result<(
 }
 
 #[cfg(unix)]
-fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+pub(crate) fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
   use std::os::unix::fs::FileExt;
   let mut read = 0usize;
   while read < bytes.len() {
@@ -418,7 +418,7 @@ fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Res
 }
 
 #[cfg(windows)]
-fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+pub(crate) fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
   use std::os::windows::fs::FileExt;
   let mut read = 0usize;
   while read < bytes.len() {

@@ -796,6 +796,10 @@ path = "spec/engine/config_shadow_spec.rs"
 name = "memory_coordinator_spec"
 path = "spec/engine/memory_coordinator_spec.rs"
 
+[[test]]
+name = "kv_page_provider_spec"
+path = "spec/engine/kv_page_provider_spec.rs"
+
 
 [lints]
 workspace = true

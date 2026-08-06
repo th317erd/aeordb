@@ -52,6 +52,7 @@ pub mod integrity_scanner;
 pub mod json_parser;
 pub mod json_store;
 pub mod kv_expand;
+pub mod kv_page_provider;
 pub mod kv_pages;
 pub mod kv_resize;
 pub mod kv_snapshot;

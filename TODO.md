@@ -143,6 +143,15 @@
       - [x] Keep every current allocator on its legacy behavior until P2b-3 while exposing one read-only engine coordinator snapshot.
       - [x] Run focused, concurrency, malformed-policy, adjacent memory/metrics/cache/KV, cross-platform, broad, and real-engine gates; commit and push.
     - [ ] P2b-3: migrate KV, directory, index, query, parser/plugin, task, GC, repair, and maintenance growth to reservations and eviction.
+      - [x] Add a bounded version-aware KV page provider with exact positioned reads, coalesced misses, clean LRU eviction, retained-generation admission before overwrite, and typed corruption/I/O failures.
+      - [ ] Replace full resident KV page sets with the bounded provider while preserving every `ReadSnapshot` consumer and eliminating error-to-not-found squelching.
+      - [ ] Make KV cache and retained generations reserve through the coordinator, evict clean pages under pressure, and safely gate full-layout rewrite/expansion.
+      - [ ] Cap and evict directory, generic server, and clean index caches from resolved policy; flush dirty indexes before releasing their reservations.
+      - [ ] Reserve query candidates/results/sorts and parser/plugin amplification before growth, with bounded rejection and cancellation paths.
+      - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
+      - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
+      - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
+      - [ ] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
