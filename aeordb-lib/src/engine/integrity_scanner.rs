@@ -9,11 +9,21 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::kv_store::KVEntry;
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
 
 const DEFAULT_INTERVAL_SECS: u64 = 3600; // 60 minutes
 const MIN_SAMPLE: usize = 10;
 const MAX_SAMPLE: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntegrityScanResult {
+  pub checked: u64,
+  pub failures: u64,
+}
 
 /// Spawn the background integrity scanner.
 ///
@@ -31,31 +41,45 @@ pub fn spawn_integrity_scanner(engine: Arc<StorageEngine>, cancel: CancellationT
         _ = tokio::time::sleep(Duration::from_secs(DEFAULT_INTERVAL_SECS)) => {}
       }
 
-      run_scan_cycle(&engine);
+      match run_integrity_scan_cycle(&engine, &cancel) {
+        Ok(result) if result.failures > 0 => {
+          tracing::warn!(checked = result.checked, failures = result.failures, "Integrity scanner found corrupt entries");
+        }
+        Ok(result) => {
+          tracing::debug!(checked = result.checked, "Integrity scanner sample passed");
+        }
+        Err(EngineError::Cancelled(_)) if cancel.is_cancelled() => {
+          tracing::info!("Integrity scanner shutting down");
+          break;
+        }
+        Err(error) => {
+          tracing::warn!(error = %error, "Integrity scanner cycle did not complete");
+        }
+      }
     }
   })
 }
 
 /// Run a single scan cycle: pick random entries, read them, verify hashes.
-fn run_scan_cycle(engine: &StorageEngine) {
-  let snapshot = engine.kv_snapshot.load();
-  let all_entries = match snapshot.iter_all() {
-    Ok(entries) => entries,
-    Err(e) => {
-      tracing::warn!("Integrity scanner: failed to read KV snapshot: {}", e);
-      return;
-    }
-  };
-
-  if all_entries.is_empty() {
-    return;
+pub fn run_integrity_scan_cycle(engine: &StorageEngine, cancellation: &CancellationToken) -> EngineResult<IntegrityScanResult> {
+  let total_entries = engine.kv_entry_count()?;
+  let sample_size = compute_sample_size(total_entries);
+  let sample_bytes = integrity_sample_bytes(sample_size, engine.hash_algo().hash_length())?;
+  let mut memory = OperationMemoryBudget::new(
+    engine,
+    "integrity scan",
+    MemoryOwner::Repair,
+    AdmissionClass::Maintenance,
+    sample_bytes,
+    Some(cancellation),
+  )?;
+  if sample_size == 0 {
+    return Ok(IntegrityScanResult { checked: 0, failures: 0 });
   }
 
   // Calculate sample size: ~1% of entries, clamped to [MIN_SAMPLE, MAX_SAMPLE]
-  let sample_size = ((all_entries.len() as f64 * 0.01).ceil() as usize).max(MIN_SAMPLE).min(MAX_SAMPLE).min(all_entries.len());
-
   // Pick entries by stepping through with a stride
-  let stride = (all_entries.len() / sample_size).max(1);
+  let stride = (total_entries / sample_size).max(1);
 
   // Use a simple offset that changes each cycle so we cover different
   // entries. Jitter the wall-clock-derived offset with a process-local
@@ -68,14 +92,27 @@ fn run_scan_cycle(engine: &StorageEngine) {
     ((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().wrapping_add(jitter))
       % stride as u64) as usize;
 
+  let sampled_entries = {
+    let snapshot = engine.kv_snapshot.load();
+    let mut sampled = Vec::with_capacity(sample_size);
+    let mut visited = 0usize;
+    snapshot.visit_all(|entry| {
+      memory.record_work(1)?;
+      let selected = (visited + cycle_offset).is_multiple_of(stride);
+      visited = visited.saturating_add(1);
+      if selected {
+        sampled.push(entry.clone());
+      }
+      Ok(sampled.len() < sample_size)
+    })?;
+    sampled
+  };
+
   let mut checked = 0u64;
   let mut failures = 0u64;
 
-  for (i, entry) in all_entries.iter().enumerate() {
-    if !(i + cycle_offset).is_multiple_of(stride) {
-      continue;
-    }
-
+  for entry in &sampled_entries {
+    memory.record_work(1)?;
     checked += 1;
 
     // get_entry does hash verification via read_entry_at_shared
@@ -100,16 +137,30 @@ fn run_scan_cycle(engine: &StorageEngine) {
         );
       }
     }
-
-    if checked >= sample_size as u64 {
-      break;
-    }
   }
 
-  if failures > 0 {
-    tracing::warn!("Integrity scanner: checked {} entries, {} failures detected", checked, failures);
-  } else {
-    tracing::debug!("Integrity scanner: checked {} entries, all OK", checked);
+  Ok(IntegrityScanResult { checked, failures })
+}
+
+fn compute_sample_size(total: usize) -> usize {
+  ((total as f64 * 0.01).ceil() as usize).max(MIN_SAMPLE).min(MAX_SAMPLE).min(total)
+}
+
+fn integrity_sample_bytes(sample_size: usize, hash_length: usize) -> EngineResult<u64> {
+  let bytes_per_entry = std::mem::size_of::<KVEntry>()
+    .checked_add(hash_length)
+    .ok_or_else(|| EngineError::ResourceExhausted("integrity scan sample estimate overflow".to_string()))?;
+  sample_size
+    .checked_mul(bytes_per_entry)
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| EngineError::ResourceExhausted("integrity scan sample estimate overflow".to_string()))
+}
+
+#[cfg(test)]
+fn run_scan_cycle(engine: &StorageEngine) {
+  let cancellation = CancellationToken::new();
+  if let Err(error) = run_integrity_scan_cycle(engine, &cancellation) {
+    tracing::warn!(error = %error, "Integrity scanner test cycle did not complete");
   }
 }
 
@@ -191,20 +242,17 @@ mod tests {
 
   #[test]
   fn sample_size_clamped_correctly() {
-    // Test the clamping logic directly
-    let compute_sample = |total: usize| -> usize { ((total as f64 * 0.01).ceil() as usize).max(MIN_SAMPLE).min(MAX_SAMPLE).min(total) };
-
     // Small DB: clamp to min but not more than total
-    assert_eq!(compute_sample(5), 5); // min(max(1, 10), 5) = 5
-    assert_eq!(compute_sample(10), 10); // min(max(1, 10), 10) = 10
-    assert_eq!(compute_sample(100), 10); // min(max(1, 10), 100) = 10
+    assert_eq!(compute_sample_size(5), 5); // min(max(1, 10), 5) = 5
+    assert_eq!(compute_sample_size(10), 10); // min(max(1, 10), 10) = 10
+    assert_eq!(compute_sample_size(100), 10); // min(max(1, 10), 100) = 10
 
     // Medium DB: 1%
-    assert_eq!(compute_sample(2000), 20); // 1% of 2000 = 20
-    assert_eq!(compute_sample(50_000), 500); // 1% of 50k = 500
+    assert_eq!(compute_sample_size(2000), 20); // 1% of 2000 = 20
+    assert_eq!(compute_sample_size(50_000), 500); // 1% of 50k = 500
 
     // Large DB: clamp to max
-    assert_eq!(compute_sample(200_000), 1000); // 1% of 200k = 2000, clamped to 1000
+    assert_eq!(compute_sample_size(200_000), 1000); // 1% of 200k = 2000, clamped to 1000
   }
 
   #[tokio::test]

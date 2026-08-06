@@ -211,6 +211,11 @@
           - [x] Prove pressure refusal, malformed metadata, bounded channel backpressure, cancellation/disconnect, exact ranges, restart, and live large-file behavior.
         - [ ] Bound v3/v4 migration capture, checkpoints, and cutover scratch under `migration` admission.
         - [ ] Bound verify, rebuild, header repair, integrity, and explicit recovery scratch under `repair` admission.
+          - [x] Add one page-at-a-time KV visitor with override, early-stop, and error semantics for every diagnostic/migration scan.
+          - [x] Replace full-view integrity sampling with a bounded, cancellable `repair` maintenance sample.
+          - [ ] Replace verify/KV comparison and directory-repair inventories with disk-backed or bounded-window working sets.
+          - [ ] Replace dirty-startup/runtime KV rebuild inventories with bounded repair workspace and fail-closed corruption handling.
+          - [ ] Bound pre-open header migration with fixed scratch and prove copy/barrier failure behavior.
         - [ ] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.

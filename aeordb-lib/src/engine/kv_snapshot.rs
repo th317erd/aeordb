@@ -315,6 +315,17 @@ impl ReadSnapshot {
     Ok(entries)
   }
 
+  /// Visit live entries of one type one page at a time without materializing
+  /// the complete matching view. Returning `Ok(false)` stops the scan and is
+  /// reflected in this method's return value; callback and page errors are
+  /// propagated unchanged.
+  pub fn visit_by_type<F>(&self, target_type: u8, visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&KVEntry) -> EngineResult<bool>,
+  {
+    self.visit(Some(target_type), visitor)
+  }
+
   /// Count entries of a specific type without cloning entries.
   pub fn count_by_type(&self, target_type: u8) -> EngineResult<usize> {
     let target_index = (target_type & 0x0F) as usize;
@@ -363,6 +374,48 @@ impl ReadSnapshot {
       }
     }
     Ok(all)
+  }
+
+  /// Visit every live entry one page at a time without cloning the complete
+  /// KV view. Buffered entries retain their normal override semantics.
+  pub fn visit_all<F>(&self, visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&KVEntry) -> EngineResult<bool>,
+  {
+    self.visit(None, visitor)
+  }
+
+  fn visit<F>(&self, target_type: Option<u8>, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&KVEntry) -> EngineResult<bool>,
+  {
+    let hash_length = self.hash_algo.hash_length();
+
+    for bucket in 0..self.bucket_count {
+      let page_data = self.page(bucket)?;
+      for entry in deserialize_page(&page_data, hash_length)? {
+        if entry.is_deleted() || self.buffer.contains_key(entry.hash.as_slice()) {
+          continue;
+        }
+        if target_type.is_some_and(|expected| entry.entry_type() != expected) {
+          continue;
+        }
+        if !visitor(&entry)? {
+          return Ok(false);
+        }
+      }
+    }
+
+    for entry in self.buffer.values() {
+      if entry.is_deleted() || target_type.is_some_and(|expected| entry.entry_type() != expected) {
+        continue;
+      }
+      if !visitor(entry)? {
+        return Ok(false);
+      }
+    }
+
+    Ok(true)
   }
 
   /// Check if an entry is marked as deleted in the buffer.

@@ -8,7 +8,7 @@ use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::kv_page_provider::KvPageProvider;
 use aeordb::engine::kv_pages::{bucket_page_offset, page_size};
 use aeordb::engine::kv_snapshot::ReadSnapshot;
-use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_FLAG_DELETED};
+use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_FLAG_DELETED};
 use aeordb::engine::nvt::NormalizedVectorTable;
 use aeordb::engine::scalar_converter::HashConverter;
 use tempfile::tempdir;
@@ -292,6 +292,70 @@ fn test_snapshot_count_by_type_respects_buffer_overrides() {
   assert!(all.iter().any(|entry| entry.hash == make_hash(2) && entry.offset == 2222));
   assert!(all.iter().any(|entry| entry.hash == make_hash(4)));
   assert!(!all.iter().any(|entry| entry.hash == make_hash(3)));
+}
+
+#[test]
+fn snapshot_visitors_preserve_overrides_filters_and_early_stop() {
+  let dir = tempdir().unwrap();
+  let mut file_record = make_entry(2, 200);
+  file_record.type_flags = KV_TYPE_FILE_RECORD;
+  let disk_entries = vec![make_entry(1, 100), file_record, make_entry(3, 300)];
+  let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
+
+  let mut buffer = HashMap::new();
+  let updated = make_entry(1, 1111);
+  let deleted = make_deleted_entry(3, 300);
+  let inserted = make_entry(4, 400);
+  buffer.insert(updated.hash.clone(), updated);
+  buffer.insert(deleted.hash.clone(), deleted);
+  buffer.insert(inserted.hash.clone(), inserted);
+
+  let snapshot = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+  let mut all = Vec::new();
+  let completed = snapshot
+    .visit_all(|entry| {
+      all.push((entry.hash.clone(), entry.offset));
+      Ok(true)
+    })
+    .unwrap();
+
+  assert!(completed);
+  assert_eq!(all.len(), 3);
+  assert!(all.iter().any(|(hash, offset)| *hash == make_hash(1) && *offset == 1111));
+  assert!(all.iter().any(|(hash, offset)| *hash == make_hash(2) && *offset == 200));
+  assert!(all.iter().any(|(hash, offset)| *hash == make_hash(4) && *offset == 400));
+  assert!(!all.iter().any(|(hash, _)| *hash == make_hash(3)));
+
+  let mut chunk_hashes = Vec::new();
+  let completed = snapshot
+    .visit_by_type(KV_TYPE_CHUNK, |entry| {
+      chunk_hashes.push(entry.hash.clone());
+      Ok(chunk_hashes.len() < 2)
+    })
+    .unwrap();
+
+  assert!(!completed, "visitor should report an explicit early stop");
+  assert_eq!(chunk_hashes.len(), 2);
+  assert!(!chunk_hashes.iter().any(|hash| *hash == make_hash(2)));
+}
+
+#[test]
+fn snapshot_visitors_propagate_callback_errors_without_scanning_further() {
+  let dir = tempdir().unwrap();
+  let disk_entries = vec![make_entry(1, 100), make_entry(2, 200), make_entry(3, 300)];
+  let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
+  let snapshot = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+  let mut visits = 0usize;
+
+  let error = snapshot
+    .visit_all(|_| {
+      visits += 1;
+      Err(aeordb::engine::EngineError::Cancelled("visitor proof".to_string()))
+    })
+    .unwrap_err();
+
+  assert!(matches!(error, aeordb::engine::EngineError::Cancelled(message) if message == "visitor proof"));
+  assert_eq!(visits, 1);
 }
 
 #[test]

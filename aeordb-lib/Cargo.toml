@@ -808,6 +808,10 @@ path = "spec/engine/memory_coordinator_spec.rs"
 name = "kv_page_provider_spec"
 path = "spec/engine/kv_page_provider_spec.rs"
 
+[[test]]
+name = "integrity_scanner_spec"
+path = "spec/engine/integrity_scanner_spec.rs"
+
 
 [lints]
 workspace = true
