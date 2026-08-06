@@ -482,7 +482,11 @@ pub async fn update_api_key(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
   match system_store::store_api_key(&state.engine, &ctx, &record) {
     Ok(()) => {
-      evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", key_id_string));
+      if let Err(error) = evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", key_id_string)) {
+        return ErrorResponse::new(format!("API key updated but cache invalidation failed: {error}"))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response();
+      }
       (
         StatusCode::OK,
         Json(serde_json::json!({

@@ -551,7 +551,7 @@ fn test_group_cache_evict_user() {
   assert_eq!(groups_before, groups_cached, "Cache should return stale data");
 
   // Evict and reload
-  cache.evict(&user_id);
+  cache.evict(&user_id).unwrap();
   let groups_after = cache.get(&user_id, &engine).unwrap();
   assert!(groups_after.contains(&"new_group".to_string()), "Should see new group after eviction");
 }
@@ -572,7 +572,7 @@ fn test_group_cache_evict_all() {
   create_test_group(&engine, "new_team", "is_active", "eq", "true");
 
   // Evict all
-  cache.evict_all();
+  cache.evict_all().unwrap();
 
   // Both should now see the new group
   let groups_a = cache.get(&user_id_a, &engine).unwrap();
@@ -609,7 +609,7 @@ fn test_group_cache_evict_reloads() {
   assert!(!stale.contains(&"evict_test_group".to_string()));
 
   // Evict and reload
-  cache.evict(&user_id);
+  cache.evict(&user_id).unwrap();
   let groups = cache.get(&user_id, &engine).unwrap();
   assert!(groups.contains(&"evict_test_group".to_string()), "Should see new group after eviction");
 }
@@ -672,7 +672,7 @@ fn test_permissions_cache_evict() {
   assert_eq!(stale.unwrap().links[0].group, "team_v1");
 
   // Evict and reload
-  cache.evict(&"/".to_string());
+  cache.evict(&"/".to_string()).unwrap();
   let fresh = cache.get(&"/".to_string(), &engine).unwrap();
   assert_eq!(fresh.unwrap().links[0].group, "team_v2");
 }
@@ -688,7 +688,7 @@ fn test_permissions_cache_evict_all() {
   cache.get(&"/".to_string(), &engine).unwrap();
   cache.get(&"/app".to_string(), &engine).unwrap();
 
-  cache.evict_all();
+  cache.evict_all().unwrap();
 
   // Both should reload on next access
   let root = cache.get(&"/".to_string(), &engine).unwrap();
@@ -714,7 +714,7 @@ fn test_permissions_cache_evict_reloads() {
   assert_eq!(stale.unwrap().links[0].group, "original");
 
   // After eviction, should reload
-  cache.evict(&"/".to_string());
+  cache.evict(&"/".to_string()).unwrap();
   let result = cache.get(&"/".to_string(), &engine).unwrap();
   assert_eq!(result.unwrap().links[0].group, "updated");
 }

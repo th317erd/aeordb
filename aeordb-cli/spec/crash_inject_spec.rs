@@ -69,12 +69,10 @@ fn spawn_worker(db_path: &str, checkpoint_path: &str, mode: &str) -> Child {
     .expect("spawn worker")
 }
 
-/// SIGKILL the child by PID — bypasses Drop, mimics power loss / OOM kill.
+/// Terminate the child without graceful shutdown. `Child::kill` maps to
+/// SIGKILL on Unix and the equivalent forced process termination on Windows.
 fn sigkill(child: &mut Child) {
-  let pid = child.id() as i32;
-  unsafe {
-    libc::kill(pid, libc::SIGKILL);
-  }
+  child.kill().expect("force-stop crash soak worker");
   let _ = child.wait();
 }
 

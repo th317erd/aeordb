@@ -232,7 +232,11 @@ pub async fn share(
         .into_response();
     }
 
-    evict_caches_for_path(&state, &perm_file_path);
+    if let Err(error) = evict_caches_for_path(&state, &perm_file_path) {
+      return ErrorResponse::new(format!("Permissions stored but cache invalidation failed: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
 
     shared_count += 1;
     shared_paths.push(normalized);
@@ -434,7 +438,11 @@ pub async fn unshare(
   }
 
   // Evict cache
-  evict_caches_for_path(&state, &perm_file_path);
+  if let Err(error) = evict_caches_for_path(&state, &perm_file_path) {
+    return ErrorResponse::new(format!("Permissions updated but cache invalidation failed: {error}"))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
+  }
 
   Json(serde_json::json!({
       "revoked": true,

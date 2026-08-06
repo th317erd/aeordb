@@ -1,4 +1,5 @@
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
+use crate::engine::EngineResult;
 use crate::server::state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,26 +45,34 @@ fn invalidations_for_path(path: &str) -> Vec<CacheInvalidation> {
 /// This intentionally stays path-based rather than operation-based because the
 /// same engine mutations are reachable through PUT, upload commit, merge,
 /// delete, restore, copy, and rename routes.
-pub fn evict_caches_for_path(state: &AppState, path: &str) {
+pub fn evict_caches_for_path(state: &AppState, path: &str) -> EngineResult<()> {
   for invalidation in invalidations_for_path(path) {
     match invalidation {
-      CacheInvalidation::Permissions(parent) => state.engine.permissions_cache.evict(&parent),
-      CacheInvalidation::GrantsIndex => state.engine.grants_index_cache.evict_all(),
-      CacheInvalidation::IndexConfig(path) => state.engine.index_config_cache.evict(&path),
-      CacheInvalidation::ApiKey(key_id) => state.api_key_cache.evict(&key_id),
-      CacheInvalidation::Groups => state.group_cache.evict_all(),
+      CacheInvalidation::Permissions(parent) => {
+        state.engine.permissions_cache.evict(&parent)?;
+      }
+      CacheInvalidation::GrantsIndex => state.engine.grants_index_cache.evict_all()?,
+      CacheInvalidation::IndexConfig(path) => {
+        state.engine.index_config_cache.evict(&path)?;
+      }
+      CacheInvalidation::ApiKey(key_id) => {
+        state.api_key_cache.evict(&key_id)?;
+      }
+      CacheInvalidation::Groups => state.group_cache.evict_all()?,
     }
   }
+  Ok(())
 }
 
-pub fn evict_caches_for_paths<I, P>(state: &AppState, paths: I)
+pub fn evict_caches_for_paths<I, P>(state: &AppState, paths: I) -> EngineResult<()>
 where
   I: IntoIterator<Item = P>,
   P: AsRef<str>,
 {
   for path in paths {
-    evict_caches_for_path(state, path.as_ref());
+    evict_caches_for_path(state, path.as_ref())?;
   }
+  Ok(())
 }
 
 #[cfg(test)]

@@ -1,8 +1,12 @@
 use aeordb::engine::directory_ops::DirectoryOps;
-use aeordb::engine::index_store::{FieldIndex, IndexManager};
+use aeordb::engine::index_store::{FieldIndex, IndexEntry, IndexManager};
+use aeordb::engine::memory_coordinator::MemoryOwner;
 use aeordb::engine::scalar_converter::{HashConverter, PhoneticConverter, StringConverter, TrigramConverter, U64Converter};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
+use std::process::Command;
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
@@ -379,16 +383,16 @@ fn test_clean_index_cache_eviction_keeps_dirty_indexes() {
   index.insert_expanded(b"alice", vec![0xAA; 32]);
   index_manager.save_index("/users", &index).unwrap();
 
-  let stats = index_manager.buffered_index_stats();
+  let stats = index_manager.buffered_index_stats().unwrap();
   assert_eq!(stats.cached_indexes, 1);
   assert_eq!(stats.dirty_indexes, 1);
   assert_eq!(stats.estimated_clean_bytes, 0);
   assert_eq!(stats.estimated_dirty_bytes, stats.estimated_bytes);
 
-  let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO);
+  let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO).unwrap();
   assert_eq!(evicted, 0, "dirty indexes must never be evicted");
 
-  let stats = index_manager.buffered_index_stats();
+  let stats = index_manager.buffered_index_stats().unwrap();
   assert_eq!(stats.cached_indexes, 1);
   assert_eq!(stats.dirty_indexes, 1);
 }
@@ -404,21 +408,354 @@ fn test_clean_index_cache_eviction_drops_flushed_indexes_only_from_memory() {
   index_manager.save_index("/users", &index).unwrap();
   index_manager.flush_buffered_indexes().unwrap();
 
-  let stats = index_manager.buffered_index_stats();
+  let stats = index_manager.buffered_index_stats().unwrap();
   assert_eq!(stats.cached_indexes, 1);
   assert_eq!(stats.dirty_indexes, 0);
   assert_eq!(stats.estimated_dirty_bytes, 0);
   assert_eq!(stats.estimated_clean_bytes, stats.estimated_bytes);
 
-  let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO);
+  let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO).unwrap();
   assert_eq!(evicted, 1, "flushed clean index should be evicted from memory");
 
-  let stats = index_manager.buffered_index_stats();
+  let stats = index_manager.buffered_index_stats().unwrap();
   assert_eq!(stats.cached_indexes, 0);
   assert_eq!(stats.dirty_indexes, 0);
 
   let loaded = index_manager.load_index("/users", "name").unwrap();
   assert!(loaded.is_some(), "eviction must not delete the persisted index");
+}
+
+#[test]
+fn index_cache_transitions_exact_reservations_only_after_successful_flush() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let index_manager = IndexManager::new(&engine);
+
+  let mut index = FieldIndex::new("name".to_string(), Box::new(StringConverter::new(256)));
+  index.insert_expanded(b"alice", vec![0xAA; 32]);
+  index_manager.save_index("/users", &index).unwrap();
+
+  let dirty = index_manager.buffered_index_stats().unwrap();
+  assert!(dirty.mutation_max_bytes > 0);
+  assert!(dirty.dirty_reserved_bytes >= dirty.estimated_dirty_bytes);
+  assert_eq!(dirty.clean_reserved_bytes, 0);
+  let dirty_owner = engine.memory_coordinator_snapshot().unwrap();
+  let dirty_owner = dirty_owner.owner(MemoryOwner::IndexDirtyBuffers).unwrap();
+  assert_eq!(dirty_owner.reserved_bytes, dirty.dirty_reserved_bytes);
+  assert_eq!(dirty_owner.observed.resident_bytes, 0, "reservation-owned dirty indexes must not be double-counted");
+
+  index_manager.flush_buffered_indexes().unwrap();
+  let clean = index_manager.buffered_index_stats().unwrap();
+  assert_eq!(clean.dirty_indexes, 0);
+  assert_eq!(clean.dirty_reserved_bytes, 0);
+  assert!(clean.clean_reserved_bytes >= clean.estimated_clean_bytes);
+  let clean_owner = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(clean_owner.owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes, 0);
+  assert_eq!(clean_owner.owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes, clean.clean_reserved_bytes);
+  assert_eq!(clean_owner.owner(MemoryOwner::IndexCleanCache).unwrap().observed.resident_bytes, 0);
+
+  assert_eq!(index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO).unwrap(), 1);
+  let evicted_owner = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(evicted_owner.owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn index_flush_admission_failure_restores_every_selected_dirty_index() {
+  const CHILD_MARKER: &str = "AEORDB_INDEX_FLUSH_ROLLBACK_CHILD";
+  if std::env::var_os(CHILD_MARKER).is_none() {
+    let status = Command::new(std::env::current_exe().unwrap())
+      .arg("--exact")
+      .arg("index_flush_admission_failure_restores_every_selected_dirty_index")
+      .arg("--nocapture")
+      .env(CHILD_MARKER, "1")
+      .env("AEORDB_INDEX_PUBLICATION_BATCH_MAX_BYTES", (1024 * 1024).to_string())
+      .status()
+      .unwrap();
+    assert!(status.success(), "isolated index-flush rollback child failed: {status}");
+    return;
+  }
+
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let index_manager = IndexManager::new(&engine);
+
+  let mut small = FieldIndex::new("a".to_string(), Box::new(StringConverter::new(256)));
+  let mut sequence = 0u64;
+  while small.serialized_size(32) < 300 * 1024 {
+    let value = format!("small-{sequence:016x}");
+    small.insert_expanded(value.as_bytes(), blake3::hash(value.as_bytes()).as_bytes().to_vec());
+    sequence += 1;
+  }
+  let mut oversized = FieldIndex::new("z".to_string(), Box::new(StringConverter::new(256)));
+  while oversized.serialized_size(32) <= 1024 * 1024 {
+    let value = format!("oversized-{sequence:016x}");
+    oversized.insert_expanded(value.as_bytes(), blake3::hash(value.as_bytes()).as_bytes().to_vec());
+    sequence += 1;
+  }
+
+  index_manager.save_index("/users", &small).unwrap();
+  index_manager.save_index("/users", &oversized).unwrap();
+  let before = index_manager.buffered_index_stats().unwrap();
+  assert_eq!(before.dirty_indexes, 2);
+  assert_eq!(before.pending_mutations, 2);
+  assert_eq!(before.publication_batch_max_bytes, 1024 * 1024);
+
+  let error = index_manager.flush_buffered_indexes().unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+
+  let after = index_manager.buffered_index_stats().unwrap();
+  assert_eq!(after.dirty_indexes, 2, "a rejected publication batch must restore every selected dirty key");
+  assert_eq!(after.pending_mutations, 2);
+  assert_eq!(after.flushing_indexes, 0);
+  assert_eq!(after.flush_reserved_bytes, 0);
+  assert_eq!(after.clean_reserved_bytes, 0);
+  assert!(after.dirty_reserved_bytes >= after.estimated_dirty_bytes);
+  assert_eq!(
+    index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO).unwrap(),
+    0,
+    "dirty rollback state must remain non-evictable"
+  );
+
+  let memory = engine.memory_coordinator_snapshot().unwrap();
+  let dirty = memory.owner(MemoryOwner::IndexDirtyBuffers).unwrap();
+  assert_eq!(dirty.reserved_bytes, after.dirty_reserved_bytes);
+  assert_eq!(dirty.critical_reserved_bytes, 0, "rejected flush scratch reservations must be released");
+}
+
+#[test]
+fn index_mutation_cap_rejects_without_retaining_unreserved_state() {
+  const CHILD_MARKER: &str = "AEORDB_INDEX_MUTATION_CAP_CHILD";
+  if std::env::var_os(CHILD_MARKER).is_none() {
+    let status = Command::new(std::env::current_exe().unwrap())
+      .arg("--exact")
+      .arg("index_mutation_cap_rejects_without_retaining_unreserved_state")
+      .arg("--nocapture")
+      .env(CHILD_MARKER, "1")
+      .env("AEORDB_INDEX_MUTATION_BUFFER_MAX_BYTES", (16 * 1024 * 1024).to_string())
+      .status()
+      .unwrap();
+    assert!(status.success(), "isolated index-mutation cap child failed: {status}");
+    return;
+  }
+
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let index_manager = IndexManager::new(&engine);
+  let mut index = FieldIndex::new("large".to_string(), Box::new(StringConverter::new(256)));
+  let entry_count = (18 * 1024 * 1024) / (8 + 32) + 1;
+  index.entries.reserve(entry_count);
+  for sequence in 0..entry_count {
+    let mut hash = vec![0u8; 32];
+    hash[..8].copy_from_slice(&(sequence as u64).to_be_bytes());
+    index.entries.push(IndexEntry { scalar: sequence as f64 / entry_count as f64, file_hash: hash });
+  }
+  assert!(index.serialized_size(32) > 18 * 1024 * 1024);
+
+  let error = index_manager.save_index("/users", &index).unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  let stats = index_manager.buffered_index_stats().unwrap();
+  assert_eq!(stats.mutation_max_bytes, 16 * 1024 * 1024);
+  assert_eq!(stats.cached_indexes, 0);
+  assert_eq!(stats.dirty_indexes, 0);
+  assert_eq!(stats.pending_mutations, 0);
+  assert_eq!(stats.dirty_reserved_bytes, 0);
+  assert_eq!(engine.memory_coordinator_snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn mutation_during_flush_remains_dirty_until_the_new_generation_is_durable() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = Arc::new(create_engine(&dir));
+  let manager = IndexManager::new(&engine);
+  let mut original = FieldIndex::new("race".to_string(), Box::new(StringConverter::new(256)));
+  let entry_count = (12 * 1024 * 1024) / (8 + 32) + 1;
+  original.entries.reserve(entry_count);
+  for sequence in 0..entry_count {
+    let hash = blake3::hash(&(sequence as u64).to_be_bytes()).as_bytes().to_vec();
+    original.entries.push(IndexEntry { scalar: sequence as f64 / entry_count as f64, file_hash: hash });
+  }
+  let serialized_bytes = original.serialized_size(32) as u64;
+  manager.save_index("/users", &original).unwrap();
+
+  let flush_engine = Arc::clone(&engine);
+  let flush = thread::spawn(move || IndexManager::new(&flush_engine).flush_buffered_indexes());
+  let started = std::time::Instant::now();
+  loop {
+    let in_flight = manager.buffered_index_stats().unwrap();
+    if in_flight.flushing_indexes == 1 {
+      assert!(
+        in_flight.flush_reserved_bytes >= serialized_bytes.saturating_add(64 * 1024),
+        "flush admission must cover the publication buffer and bounded NVT/converter serialization scratch"
+      );
+      let memory = engine.memory_coordinator_snapshot().unwrap();
+      let dirty = memory.owner(MemoryOwner::IndexDirtyBuffers).unwrap();
+      assert_eq!(dirty.reserved_bytes, in_flight.dirty_reserved_bytes.saturating_add(in_flight.flush_reserved_bytes));
+      assert_eq!(dirty.critical_reserved_bytes, in_flight.flush_reserved_bytes);
+      break;
+    }
+    assert!(started.elapsed() < Duration::from_secs(5), "flush did not expose its in-flight generation");
+    thread::sleep(Duration::from_millis(1));
+  }
+
+  let mut replacement = FieldIndex::new("race".to_string(), Box::new(StringConverter::new(256)));
+  replacement.insert_expanded(b"replacement", vec![0xCC; 32]);
+  manager.save_index("/users", &replacement).unwrap();
+  assert_eq!(flush.join().unwrap().unwrap(), 1);
+
+  let redirtied = manager.buffered_index_stats().unwrap();
+  assert_eq!(redirtied.flushing_indexes, 0);
+  assert_eq!(redirtied.dirty_indexes, 1, "the generation written during the race must not clean a newer mutation");
+  assert_eq!(redirtied.clean_reserved_bytes, 0);
+  assert!(redirtied.dirty_reserved_bytes >= redirtied.estimated_dirty_bytes);
+  let mut visible = manager.load_index_by_strategy("/users", "race", "string").unwrap().unwrap();
+  assert_eq!(visible.lookup_exact(b"replacement").len(), 1, "queries must observe the newer buffered generation");
+
+  assert_eq!(manager.flush_buffered_indexes().unwrap(), 1);
+  assert_eq!(manager.evict_clean_indexes_with_policy(0, Duration::ZERO).unwrap(), 1);
+  let mut persisted = manager.load_index_by_strategy("/users", "race", "string").unwrap().unwrap();
+  assert_eq!(persisted.lookup_exact(b"replacement").len(), 1, "the follow-up flush must persist the newer generation");
+}
+
+#[test]
+fn deletion_during_flush_remains_dirty_until_the_delete_is_durable() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = Arc::new(create_engine(&dir));
+  let manager = IndexManager::new(&engine);
+  let mut original = FieldIndex::new("race-delete".to_string(), Box::new(StringConverter::new(256)));
+  let entry_count = (12 * 1024 * 1024) / (8 + 32) + 1;
+  original.entries.reserve(entry_count);
+  for sequence in 0..entry_count {
+    let hash = blake3::hash(&(sequence as u64).to_be_bytes()).as_bytes().to_vec();
+    original.entries.push(IndexEntry { scalar: sequence as f64 / entry_count as f64, file_hash: hash });
+  }
+  manager.save_index("/users", &original).unwrap();
+
+  let flush_engine = Arc::clone(&engine);
+  let flush = thread::spawn(move || IndexManager::new(&flush_engine).flush_buffered_indexes());
+  let started = std::time::Instant::now();
+  loop {
+    if manager.buffered_index_stats().unwrap().flushing_indexes == 1 {
+      break;
+    }
+    assert!(started.elapsed() < Duration::from_secs(5), "flush did not expose its in-flight generation");
+    thread::sleep(Duration::from_millis(1));
+  }
+
+  manager.delete_index("/users", "race-delete", "string").unwrap();
+  assert_eq!(flush.join().unwrap().unwrap(), 1);
+
+  let pending_delete = manager.buffered_index_stats().unwrap();
+  assert_eq!(pending_delete.flushing_indexes, 0);
+  assert_eq!(pending_delete.deleted_indexes, 1, "the old generation must not clean a newer delete");
+  assert_eq!(pending_delete.pending_mutations, 1);
+  assert_eq!(pending_delete.clean_reserved_bytes, 0);
+  assert!(pending_delete.dirty_reserved_bytes > 0);
+  assert!(manager.load_index_by_strategy("/users", "race-delete", "string").unwrap().is_none());
+
+  assert_eq!(manager.flush_buffered_indexes().unwrap(), 0);
+  let durable_delete = manager.buffered_index_stats().unwrap();
+  assert_eq!(durable_delete.deleted_indexes, 0);
+  assert_eq!(durable_delete.pending_mutations, 0);
+  assert_eq!(durable_delete.dirty_reserved_bytes, 0);
+  assert!(manager.load_index_by_strategy("/users", "race-delete", "string").unwrap().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn disk_write_failure_after_flush_snapshot_restores_dirty_state_and_reservations() {
+  const CHILD_MARKER: &str = "AEORDB_INDEX_DISK_FAILURE_CHILD";
+  if std::env::var_os(CHILD_MARKER).is_none() {
+    let status = Command::new(std::env::current_exe().unwrap())
+      .arg("--exact")
+      .arg("disk_write_failure_after_flush_snapshot_restores_dirty_state_and_reservations")
+      .arg("--nocapture")
+      .env(CHILD_MARKER, "1")
+      .status()
+      .unwrap();
+    assert!(status.success(), "isolated index disk-failure child failed: {status}");
+    return;
+  }
+
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let manager = IndexManager::new(&engine);
+  let mut index = FieldIndex::new("disk-failure".to_string(), Box::new(StringConverter::new(256)));
+  let entry_count = (2 * 1024 * 1024) / (8 + 32) + 1;
+  index.entries.reserve(entry_count);
+  for sequence in 0..entry_count {
+    let hash = blake3::hash(&(sequence as u64).to_be_bytes()).as_bytes().to_vec();
+    index.entries.push(IndexEntry { scalar: sequence as f64 / entry_count as f64, file_hash: hash });
+  }
+  manager.save_index("/users", &index).unwrap();
+  let before = manager.buffered_index_stats().unwrap();
+  assert_eq!(before.dirty_indexes, 1);
+  assert_eq!(before.pending_mutations, 1);
+
+  let database_length = std::fs::metadata(dir.path().join("test.aeor")).unwrap().len();
+  unsafe {
+    libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    let limit = libc::rlimit { rlim_cur: database_length as libc::rlim_t, rlim_max: database_length as libc::rlim_t };
+    assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0, "failed to install isolated file-size limit");
+  }
+
+  let error = manager.flush_buffered_indexes().unwrap_err();
+  assert!(
+    matches!(error, aeordb::engine::EngineError::IoError(_) | aeordb::engine::EngineError::DurabilityFailure(_)),
+    "unexpected persistence failure: {error}"
+  );
+  let restored = manager.buffered_index_stats().unwrap();
+  assert_eq!(restored.dirty_indexes, 1);
+  assert_eq!(restored.pending_mutations, 1);
+  assert_eq!(restored.flushing_indexes, 0);
+  assert_eq!(restored.flush_reserved_bytes, 0);
+  assert_eq!(restored.clean_reserved_bytes, 0);
+  assert!(restored.dirty_reserved_bytes >= restored.estimated_dirty_bytes);
+  let memory = engine.memory_coordinator_snapshot().unwrap();
+  let dirty = memory.owner(MemoryOwner::IndexDirtyBuffers).unwrap();
+  assert_eq!(dirty.reserved_bytes, restored.dirty_reserved_bytes);
+  assert_eq!(dirty.critical_reserved_bytes, 0);
+}
+
+#[test]
+fn forced_flush_batches_to_the_resolved_publication_limit() {
+  const CHILD_MARKER: &str = "AEORDB_INDEX_PUBLICATION_BATCH_CHILD";
+  if std::env::var_os(CHILD_MARKER).is_none() {
+    let status = Command::new(std::env::current_exe().unwrap())
+      .arg("--exact")
+      .arg("forced_flush_batches_to_the_resolved_publication_limit")
+      .arg("--nocapture")
+      .env(CHILD_MARKER, "1")
+      .env("AEORDB_INDEX_PUBLICATION_BATCH_MAX_BYTES", (1024 * 1024).to_string())
+      .status()
+      .unwrap();
+    assert!(status.success(), "isolated index-publication batch child failed: {status}");
+    return;
+  }
+
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let manager = IndexManager::new(&engine);
+  for field in ["a", "b"] {
+    let mut index = FieldIndex::new(field.to_string(), Box::new(StringConverter::new(256)));
+    let entry_count = (600 * 1024) / (8 + 32) + 1;
+    index.entries.reserve(entry_count);
+    for sequence in 0..entry_count {
+      let hash = blake3::hash(format!("{field}-{sequence}").as_bytes()).as_bytes().to_vec();
+      index.entries.push(IndexEntry { scalar: sequence as f64 / entry_count as f64, file_hash: hash });
+    }
+    assert!((512 * 1024..1024 * 1024).contains(&index.serialized_size(32)));
+    manager.save_index("/users", &index).unwrap();
+  }
+
+  assert_eq!(manager.flush_buffered_indexes().unwrap(), 2);
+  let stats = manager.buffered_index_stats().unwrap();
+  assert_eq!(stats.pending_mutations, 0);
+  assert_eq!(stats.dirty_indexes, 0);
+  assert_eq!(stats.flushes, 2, "the one-MiB publication cap should split two 600-KiB indexes into two generations");
+  assert_eq!(stats.flushing_indexes, 0);
+  assert_eq!(stats.flush_reserved_bytes, 0);
+  assert_eq!(stats.dirty_reserved_bytes, 0);
+  assert!(stats.clean_reserved_bytes >= stats.estimated_clean_bytes);
 }
 
 // --- NVT-backed lookup tests ---

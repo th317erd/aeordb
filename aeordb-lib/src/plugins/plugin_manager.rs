@@ -432,13 +432,14 @@ impl PluginManager {
     engine: std::sync::Arc<StorageEngine>,
     ctx: RequestContext,
   ) -> Result<Vec<u8>, PluginManagerError> {
+    let memory_coordinator = engine.memory_coordinator();
     self.invoke_wasm_plugin_with_auth(
       path,
       request_bytes,
       engine,
       ctx,
-      Arc::new(Cache::new(GroupLoader)),
-      Arc::new(Cache::new(ApiKeyLoader)),
+      Arc::new(Cache::new_bounded(GroupLoader, (*memory_coordinator).clone(), u64::MAX)),
+      Arc::new(Cache::new_bounded(ApiKeyLoader, (*memory_coordinator).clone(), u64::MAX)),
     )
   }
 

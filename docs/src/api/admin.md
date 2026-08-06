@@ -692,8 +692,17 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
       "entries": 2500000,
       "values": 350000,
       "estimated_bytes": 734003200,
+      "estimated_clean_bytes": 503316480,
+      "estimated_dirty_bytes": 230686720,
+      "clean_reserved_bytes": 503316480,
+      "dirty_reserved_bytes": 234881024,
+      "flush_reserved_bytes": 16777216,
+      "flushing_indexes": 1,
       "max_bytes": 2147483648,
+      "mutation_max_bytes": 1073741824,
+      "publication_batch_max_bytes": 268435456,
       "clean_ttl_ms": 300000,
+      "reservation_owned": true,
       "top_cached_indexes": [
         {
           "parent": "/",
@@ -716,7 +725,7 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
       "index_config_entries": 16,
       "grants_index_entries": 4
     },
-    "estimated_engine_owned_bytes": 750780416
+    "estimated_engine_owned_bytes": 767557632
   },
   "sync": {
     "active_peers": 2,
@@ -744,9 +753,9 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
 
 `sizes.logical_data` is the sum of live file sizes reachable from the current HEAD tree. `sizes.chunk_data` is the stored payload size of unique chunk entries in the KV index, initialized from entry metadata without reading chunk bodies. `sizes.void_space` is tracked reusable space inside the append log; it is not filesystem free space.
 
-`memory.process` is sampled from the operating system. On Linux this uses `/proc/self/status` plus `/proc/self/fd`; on macOS it uses Mach task information plus `/dev/fd`. Platform-specific fields that are unavailable are reported as `0`. `memory.index_cache.estimated_bytes`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are best-effort estimates intended for diagnosis and trend monitoring; they are not allocator-exact byte accounting.
+`memory.process` is sampled from the operating system. On Linux this uses `/proc/self/status` plus `/proc/self/fd`; on macOS it uses Mach task information plus `/dev/fd`. Platform-specific fields that are unavailable are reported as `0`. `memory.index_cache.estimated_*`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are allocation estimates intended for diagnosis and trend monitoring. The index `*_reserved_bytes` fields are exact coordinator reservations: clean cache, retained dirty state, and serialized flush scratch are reported separately. While `reservation_owned` is true, the `index_dirty_buffers` coordinator owner reconciles to `dirty_reserved_bytes + flush_reserved_bytes`; flush scratch alone is critical durable-write headroom.
 
-The index cache holds full field/strategy index files while they have unflushed mutations or recent read/write activity. Clean indexes are recoverable from disk and may be evicted after `clean_ttl_ms` of idleness or earlier when the cache exceeds `max_bytes`. Dirty indexes are never evicted before they are flushed. Defaults are 2 GiB and 5 minutes; override with `AEORDB_INDEX_CACHE_MAX_BYTES` and `AEORDB_INDEX_CACHE_CLEAN_TTL_SECS`.
+The index cache holds full field/strategy index files while they have unflushed mutations or recent read/write activity. Clean indexes are recoverable from disk and may be evicted after `clean_ttl_ms` of idleness or earlier when the cache exceeds `max_bytes`. Dirty and in-flight indexes are never evicted before durable publication succeeds. Publication failure restores the exact dirty generation and releases its flush scratch reservation. The resolved defaults are `min(2 GiB, hard-memory-limit / 4)` for clean indexes, `min(1 GiB, hard-memory-limit / 8)` for dirty mutations, 256 MiB per publication batch, and five minutes idle TTL. Use the registered runtime properties or their official environment forms: `AEORDB_CACHE_INDEX_CLEAN_MAX_BYTES`, `AEORDB_INDEX_MUTATION_BUFFER_MAX_BYTES`, `AEORDB_INDEX_PUBLICATION_BATCH_MAX_BYTES`, and `AEORDB_CACHE_INDEX_CLEAN_TTL_SECONDS`.
 
 **Example:**
 
@@ -820,9 +829,18 @@ Memory gauges are updated when `/system/metrics` is rendered and by the periodic
 | `aeordb_process_fd_count` | Open file descriptor count where available |
 | `aeordb_engine_memory_estimated_bytes` | Estimated AeorDB-owned cache memory tracked by diagnostics |
 | `aeordb_index_cache_estimated_bytes` | Estimated shared index cache memory |
+| `aeordb_index_cache_estimated_clean_bytes` | Estimated clean, evictable index memory |
+| `aeordb_index_cache_estimated_dirty_bytes` | Estimated retained dirty or flushing index memory |
+| `aeordb_index_cache_clean_reserved_bytes` | Exact coordinator reservation for clean index cache state |
+| `aeordb_index_cache_dirty_reserved_bytes` | Exact coordinator reservation for dirty index state, excluding flush scratch |
+| `aeordb_index_cache_flush_reserved_bytes` | Exact critical reservation for serialized publication scratch |
 | `aeordb_index_cache_cached_indexes` | Cached field/strategy index count |
 | `aeordb_index_cache_dirty_indexes` | Cached indexes with unflushed mutations |
+| `aeordb_index_cache_flushing_indexes` | Index generations currently being durably published |
 | `aeordb_index_cache_pending_mutations` | Pending index mutations in the shared buffer |
+| `aeordb_index_cache_max_bytes` | Resolved clean index cache limit |
+| `aeordb_index_mutation_buffer_max_bytes` | Resolved dirty index mutation limit |
+| `aeordb_index_publication_batch_max_bytes` | Resolved serialized publication batch limit |
 | `aeordb_index_cache_evictions` | Number of clean index eviction passes that removed at least one index |
 | `aeordb_index_cache_evicted_indexes` | Total clean indexes evicted from memory since startup |
 | `aeordb_index_cache_evicted_bytes` | Estimated clean index bytes evicted from memory since startup |

@@ -380,7 +380,7 @@ fn execute_reindex(
     // Only advance the checkpoint past buffered index mutations after they have
     // been flushed. If there are no pending index mutations, all completed work
     // is durable and the batch checkpoint is safe.
-    if index_buffer.stats().pending_mutations == 0 {
+    if index_buffer.stats().map_err(|error| format!("index buffer stats failed: {error}"))?.pending_mutations == 0 {
       if let Some(last_path) = last_processed_path {
         let _ = queue.update_checkpoint(&task.id, last_path);
       }
@@ -390,7 +390,7 @@ fn execute_reindex(
     let progress = indexed_count as f64 / total_count as f64;
     let eta_ms = compute_eta(&batch_times, total_count, indexed_count);
 
-    let index_stats = index_buffer.stats();
+    let index_stats = index_buffer.stats().map_err(|error| format!("index buffer stats failed: {error}"))?;
     queue.set_progress(
       &task.id,
       ProgressInfo {
@@ -430,7 +430,7 @@ fn execute_reindex(
   }
 
   let elapsed_ms = start.elapsed().as_millis();
-  let index_stats = index_buffer.stats();
+  let index_stats = index_buffer.stats().map_err(|error| format!("index buffer stats failed: {error}"))?;
   let index_summary = format!(
     ", metadata_only={}, stale_indexes_deleted={}, index_mutations={}, index_flushes={}, flushed_indexes={} (+{} final), cached_indexes={}",
     metadata_only,

@@ -299,7 +299,7 @@ fn test_streaming_metadata_indexes_remain_buffered_until_flush() {
     ops.finalize_file(&ctx, &path, vec![chunk_hash], data.len() as u64, Some("application/json"), &data).unwrap();
   }
 
-  let stats = engine.index_buffer_stats();
+  let stats = engine.index_buffer_stats().unwrap();
   assert_eq!(stats.flushes, 0, "streaming metadata indexing must not force flush before policy/shutdown");
   assert_eq!(stats.pending_mutations, 40, "two metadata indexes should be pending for each streamed file");
 
@@ -354,7 +354,7 @@ fn test_batch_metadata_indexes_remain_buffered_until_flush() {
     .collect();
   ops.store_files_buffered_batch(&ctx, files).unwrap();
 
-  let stats = engine.index_buffer_stats();
+  let stats = engine.index_buffer_stats().unwrap();
   assert_eq!(stats.flushes, 0, "batch metadata indexing must not force flush before policy/shutdown");
   assert_eq!(stats.pending_mutations, 40, "two metadata indexes should be pending for each batch file");
 

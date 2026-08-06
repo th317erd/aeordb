@@ -428,8 +428,9 @@ fn create_app_with_all_and_task_queue_inner(
     tracing::warn!("Failed to install bundled plugins: {}", error);
   }
 
-  let group_cache = Arc::new(Cache::new(GroupLoader));
-  let api_key_cache = Arc::new(Cache::new(ApiKeyLoader));
+  let memory_coordinator = engine.memory_coordinator();
+  let group_cache = Arc::new(Cache::new_bounded(GroupLoader, (*memory_coordinator).clone(), u64::MAX));
+  let api_key_cache = Arc::new(Cache::new_bounded(ApiKeyLoader, (*memory_coordinator).clone(), u64::MAX));
   let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));
   let peer_manager = Arc::new(PeerManager::new());
 

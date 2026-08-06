@@ -170,7 +170,14 @@
         - [x] Prove crash/restart recovery at every expansion publication boundary with exact file reads and offline verification.
         - [x] Classify normal KV page failures after overwrite begins as durability-critical, latch every live insertion path, and prove pre-overwrite admission refusal remains non-latching.
         - [x] Prevent timer/direct header publishers from leapfrogging an admitted transaction hard-authority ticket; centralize namespace/frontier admission and prove the first-start race live.
-      - [ ] Cap and evict directory, generic server, and clean index caches from resolved policy; flush dirty indexes before releasing their reservations.
+        - [x] Make every blocking and nonblocking namespace authority operation-admitted before lock ownership so layout maintenance cannot deadlock against a pre-transaction namespace holder.
+      - [x] Cap and evict directory, generic server, and clean index caches from resolved policy; flush dirty indexes before releasing their reservations.
+        - [x] Add one reusable reservation-owning clean LRU store with byte limits, singleflight-compatible loader caches, and exact eviction/accounting tests.
+        - [x] Migrate immutable directory content and engine/server permission, group, API-key, index-config, and grants caches to the shared clean-cache path.
+        - [x] Resolve directory/index/mutation/flush limits from the startup configuration shadow instead of module-local environment/default parsing.
+        - [x] Keep index flush snapshots dirty, reserved, and non-evictable until durable publication succeeds; restore exact dirty state on failure.
+        - [x] Prove clean eviction preserves results, dirty indexes never disappear, reservation failures do not change semantics, and migrated owners are not double-counted.
+        - [x] Preserve true singleflight result handoff when clean-cache retention is deliberately skipped under pressure.
       - [ ] Reserve query candidates/results/sorts and parser/plugin amplification before growth, with bounded rejection and cancellation paths.
       - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.

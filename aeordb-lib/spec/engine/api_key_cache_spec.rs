@@ -36,7 +36,7 @@ fn store_test_key(engine: &Arc<aeordb::engine::storage_engine::StorageEngine>) -
 fn new_cache_is_empty() {
   let cache = Cache::new(ApiKeyLoader);
   // evict_all on an empty cache should not panic.
-  cache.evict_all();
+  cache.evict_all().unwrap();
 }
 
 // ===========================================================================
@@ -128,7 +128,7 @@ fn evict_removes_cached_key() {
   let _ = cache.get(&key_str, &engine).unwrap();
 
   // Evict.
-  cache.evict(&key_str);
+  cache.evict(&key_str).unwrap();
 
   // Next get should re-load from engine (still finds it because engine has it).
   let r = cache.get(&key_str, &engine).unwrap();
@@ -139,7 +139,7 @@ fn evict_removes_cached_key() {
 fn evict_nonexistent_key_does_not_panic() {
   let cache = Cache::new(ApiKeyLoader);
   // Should not panic.
-  cache.evict(&"nonexistent-key-id".to_string());
+  cache.evict(&"nonexistent-key-id".to_string()).unwrap();
 }
 
 // ===========================================================================
@@ -158,7 +158,7 @@ fn evict_all_clears_all_entries() {
   cache.get(&r2.key_id.to_string(), &engine).unwrap();
 
   // Evict all.
-  cache.evict_all();
+  cache.evict_all().unwrap();
 
   // Both should re-load (still exist in engine, so still return Some).
   let re1 = cache.get(&r1.key_id.to_string(), &engine).unwrap();
@@ -170,8 +170,8 @@ fn evict_all_clears_all_entries() {
 #[test]
 fn evict_all_on_empty_cache_does_not_panic() {
   let cache = Cache::new(ApiKeyLoader);
-  cache.evict_all();
-  cache.evict_all(); // Double evict should also be fine.
+  cache.evict_all().unwrap();
+  cache.evict_all().unwrap(); // Double evict should also be fine.
 }
 
 // ===========================================================================
@@ -241,7 +241,7 @@ fn concurrent_evict_and_get_do_not_panic() {
       std::thread::spawn(move || {
         for _ in 0..10 {
           if i % 2 == 0 {
-            cache.evict(&ks);
+            cache.evict(&ks).unwrap();
           } else {
             let _ = cache.get(&ks, &engine);
           }
@@ -270,7 +270,7 @@ fn concurrent_evict_all_and_get_do_not_panic() {
       std::thread::spawn(move || {
         for _ in 0..5 {
           if i == 0 {
-            cache.evict_all();
+            cache.evict_all().unwrap();
           } else {
             let _ = cache.get(&ks, &engine);
           }
@@ -309,7 +309,7 @@ fn revoked_key_is_still_returned_from_cache() {
   assert!(!cached.is_revoked, "cached version should still show non-revoked until evicted");
 
   // After explicit eviction, next fetch sees the revoked version.
-  cache.evict(&key_str);
+  cache.evict(&key_str).unwrap();
   let refreshed = cache.get(&key_str, &engine).unwrap().unwrap();
   assert!(refreshed.is_revoked, "after eviction, should see revoked=true");
 }

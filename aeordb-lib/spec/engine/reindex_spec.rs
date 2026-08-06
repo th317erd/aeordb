@@ -41,7 +41,7 @@ fn store_hash_index_config_with_type(engine: &StorageEngine, parent: &str, index
   });
   let config_path = format!("{}/.aeordb-config/indexes.json", parent);
   ops.store_file_buffered(&ctx, &config_path, serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json")).unwrap();
-  engine.index_config_cache.evict(&parent.to_string());
+  engine.index_config_cache.evict(&parent.to_string()).unwrap();
 }
 
 fn store_metadata_and_content_index_config(engine: &StorageEngine, parent: &str) {
@@ -336,7 +336,7 @@ fn test_shared_index_write_buffer_is_query_visible_before_disk_flush() {
     "buffered updates should not hit storage before a flush"
   );
 
-  let stats_before_flush = buffer.stats();
+  let stats_before_flush = buffer.stats().unwrap();
   assert_eq!(stats_before_flush.pending_mutations, 2);
   assert_eq!(buffer.flush_all().unwrap(), 1, "one field/strategy index should be flushed");
 

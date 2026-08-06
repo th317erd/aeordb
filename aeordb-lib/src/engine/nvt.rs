@@ -123,6 +123,14 @@ impl NormalizedVectorTable {
     std::mem::size_of::<Self>().saturating_add(self.buckets.capacity().saturating_mul(std::mem::size_of::<NVTBucket>())) as u64
   }
 
+  pub fn serialized_size(&self) -> usize {
+    1usize
+      .saturating_add(4)
+      .saturating_add(self.converter.inner.serialize().len())
+      .saturating_add(4)
+      .saturating_add(self.buckets.len().saturating_mul(12))
+  }
+
   pub fn serialize(&self) -> Vec<u8> {
     let converter_data = self.converter.inner.serialize();
     // version(1) + converter_length(4) + converter_data + bucket_count(4) + buckets(12 each)

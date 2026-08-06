@@ -431,7 +431,10 @@ fn get_stats_inner(
 
   // Disk health: single statvfs call
   let disk_health = check_disk(db_path);
-  let memory = state.engine.memory_stats();
+  let memory = state.engine.memory_stats().map_err(|error| {
+    tracing::error!(%error, "Failed to collect engine memory statistics");
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
+  })?;
 
   // Dedup hit rate: chunks_deduped / (chunks + chunks_deduped)
   let total_chunk_operations = counters.chunks + counters.chunks_deduped_total;

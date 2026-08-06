@@ -7,6 +7,7 @@ use base64::Engine as _;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::index_config::{create_converter_from_config, IndexFieldConfig, PathIndexConfig};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
@@ -25,6 +26,9 @@ pub const DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL: Duration = Duration::from_secs(30
 pub const DEFAULT_INDEX_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Default idle age before a clean in-memory index may be evicted.
 pub const DEFAULT_INDEX_CACHE_CLEAN_TTL: Duration = Duration::from_secs(5 * 60);
+/// Bounded headroom for NVT rebuild and nested converter/NVT serialization
+/// allocations that coexist with the final publication buffer.
+const INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES: u64 = 64 * 1024;
 
 /// A single entry in a field index: maps a scalar to a file's hash.
 #[derive(Debug, Clone)]
@@ -72,18 +76,6 @@ impl IndexWriteBufferOptions {
   }
 }
 
-fn configured_index_cache_max_bytes() -> u64 {
-  std::env::var("AEORDB_INDEX_CACHE_MAX_BYTES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(DEFAULT_INDEX_CACHE_MAX_BYTES)
-}
-
-fn configured_index_cache_clean_ttl() -> Duration {
-  let seconds = std::env::var("AEORDB_INDEX_CACHE_CLEAN_TTL_SECS")
-    .ok()
-    .and_then(|value| value.parse::<u64>().ok())
-    .unwrap_or_else(|| DEFAULT_INDEX_CACHE_CLEAN_TTL.as_secs());
-  Duration::from_secs(seconds)
-}
-
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct IndexWriteBufferStats {
   pub mutations: usize,
@@ -101,8 +93,15 @@ pub struct IndexWriteBufferStats {
   pub estimated_bytes: u64,
   pub estimated_clean_bytes: u64,
   pub estimated_dirty_bytes: u64,
+  pub clean_reserved_bytes: u64,
+  pub dirty_reserved_bytes: u64,
+  pub flush_reserved_bytes: u64,
+  pub flushing_indexes: usize,
   pub max_bytes: u64,
+  pub mutation_max_bytes: u64,
+  pub publication_batch_max_bytes: u64,
   pub clean_ttl_ms: u64,
+  pub reservation_owned: bool,
   pub top_cached_indexes: Vec<CachedIndexMemoryStats>,
 }
 
@@ -125,9 +124,41 @@ pub(crate) struct BufferedIndexKey {
   strategy: String,
 }
 
+impl BufferedIndexKey {
+  fn estimated_memory_bytes(&self) -> u64 {
+    size_of::<Self>()
+      .saturating_add(self.parent.capacity())
+      .saturating_add(self.field_name.capacity())
+      .saturating_add(self.strategy.capacity()) as u64
+  }
+}
+
 pub(crate) struct IndexFlushSnapshot {
   saves: Vec<(BufferedIndexKey, Vec<u8>)>,
   deletes: Vec<BufferedIndexKey>,
+  mutation_counts: Vec<(BufferedIndexKey, usize)>,
+  pending_mutations: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct IndexMemoryPolicy {
+  coordinator: MemoryCoordinator,
+  clean_max_bytes: u64,
+  mutation_max_bytes: u64,
+  publication_batch_max_bytes: u64,
+  clean_ttl: Duration,
+}
+
+impl IndexMemoryPolicy {
+  pub(crate) fn new(
+    coordinator: MemoryCoordinator,
+    clean_max_bytes: u64,
+    mutation_max_bytes: u64,
+    publication_batch_max_bytes: u64,
+    clean_ttl: Duration,
+  ) -> Self {
+    Self { coordinator, clean_max_bytes, mutation_max_bytes, publication_batch_max_bytes, clean_ttl }
+  }
 }
 
 /// Shared in-memory index mutation buffer.
@@ -140,7 +171,13 @@ pub(crate) struct SharedIndexWriteBuffer {
   indexes: HashMap<BufferedIndexKey, FieldIndex>,
   last_access: HashMap<BufferedIndexKey, Instant>,
   dirty_keys: HashSet<BufferedIndexKey>,
+  flushing_keys: HashSet<BufferedIndexKey>,
   deleted_keys: HashSet<BufferedIndexKey>,
+  pending_by_key: HashMap<BufferedIndexKey, usize>,
+  clean_reservations: HashMap<BufferedIndexKey, MemoryReservation>,
+  dirty_reservations: HashMap<BufferedIndexKey, MemoryReservation>,
+  flush_reservations: HashMap<BufferedIndexKey, MemoryReservation>,
+  memory_policy: Option<IndexMemoryPolicy>,
   pending_mutations: usize,
   total_mutations: usize,
   flush_count: usize,
@@ -164,7 +201,13 @@ impl SharedIndexWriteBuffer {
       indexes: HashMap::new(),
       last_access: HashMap::new(),
       dirty_keys: HashSet::new(),
+      flushing_keys: HashSet::new(),
       deleted_keys: HashSet::new(),
+      pending_by_key: HashMap::new(),
+      clean_reservations: HashMap::new(),
+      dirty_reservations: HashMap::new(),
+      flush_reservations: HashMap::new(),
+      memory_policy: None,
       pending_mutations: 0,
       total_mutations: 0,
       flush_count: 0,
@@ -180,6 +223,23 @@ impl SharedIndexWriteBuffer {
     self.options
   }
 
+  pub(crate) fn activate_memory_policy(&mut self, policy: IndexMemoryPolicy, options: IndexWriteBufferOptions) -> EngineResult<()> {
+    if !self.indexes.is_empty()
+      || !self.dirty_keys.is_empty()
+      || !self.flushing_keys.is_empty()
+      || !self.deleted_keys.is_empty()
+      || !self.pending_by_key.is_empty()
+      || !self.clean_reservations.is_empty()
+      || !self.dirty_reservations.is_empty()
+      || !self.flush_reservations.is_empty()
+    {
+      return Err(EngineError::InvalidInput("cannot activate index memory policy after index state has been admitted".to_string()));
+    }
+    self.options = options;
+    self.memory_policy = Some(policy);
+    Ok(())
+  }
+
   fn effective_options(&self, override_options: Option<IndexWriteBufferOptions>) -> IndexWriteBufferOptions {
     override_options.unwrap_or_else(|| self.options())
   }
@@ -191,6 +251,139 @@ impl SharedIndexWriteBuffer {
 
   fn touch(&mut self, key: &BufferedIndexKey) {
     self.last_access.insert(key.clone(), Instant::now());
+  }
+
+  fn record_mutation(&mut self, key: &BufferedIndexKey) {
+    *self.pending_by_key.entry(key.clone()).or_insert(0) += 1;
+    self.pending_mutations = self.pending_mutations.saturating_add(1);
+    self.total_mutations = self.total_mutations.saturating_add(1);
+  }
+
+  fn memory_error(context: &str, error: MemoryCoordinatorError) -> EngineError {
+    match error {
+      MemoryCoordinatorError::HardLimitExceeded { .. }
+      | MemoryCoordinatorError::SoftPressureDeferred { .. }
+      | MemoryCoordinatorError::EmergencyReserveExceeded { .. }
+      | MemoryCoordinatorError::PolicyUnavailable => EngineError::ResourceExhausted(format!("{context}: {error}")),
+      _ => EngineError::IoError(std::io::Error::other(format!("{context}: {error}"))),
+    }
+  }
+
+  fn is_clean_admission_refusal(error: &MemoryCoordinatorError) -> bool {
+    matches!(
+      error,
+      MemoryCoordinatorError::PolicyUnavailable
+        | MemoryCoordinatorError::HardLimitExceeded { .. }
+        | MemoryCoordinatorError::SoftPressureDeferred { .. }
+        | MemoryCoordinatorError::EmergencyReserveExceeded { .. }
+    )
+  }
+
+  fn reservation_bytes(reservations: &HashMap<BufferedIndexKey, MemoryReservation>) -> u64 {
+    reservations.values().fold(0u64, |total, reservation| total.saturating_add(reservation.bytes()))
+  }
+
+  fn reserve_dirty_exact(&mut self, key: &BufferedIndexKey, required_bytes: u64) -> EngineResult<()> {
+    let Some(policy) = self.memory_policy.clone() else {
+      return Ok(());
+    };
+    let previous_bytes = self.dirty_reservations.get(key).map_or(0, MemoryReservation::bytes);
+    let projected = Self::reservation_bytes(&self.dirty_reservations).saturating_sub(previous_bytes).saturating_add(required_bytes);
+    if projected > policy.mutation_max_bytes {
+      return Err(EngineError::ResourceExhausted(format!(
+        "index mutation buffer requires {projected} bytes but index.mutation_buffer_max_bytes is {}",
+        policy.mutation_max_bytes
+      )));
+    }
+
+    if let Some(reservation) = self.dirty_reservations.get_mut(key) {
+      if required_bytes > previous_bytes {
+        reservation
+          .grow(required_bytes - previous_bytes)
+          .map_err(|error| Self::memory_error("index mutation memory admission failed", error))?;
+      } else if required_bytes < previous_bytes {
+        reservation
+          .shrink(previous_bytes - required_bytes)
+          .map_err(|error| Self::memory_error("index mutation memory accounting failed", error))?;
+      }
+      return Ok(());
+    }
+
+    let reservation = policy
+      .coordinator
+      .reserve(MemoryOwner::IndexDirtyBuffers, required_bytes, AdmissionClass::Workload)
+      .map_err(|error| Self::memory_error("index mutation memory admission failed", error))?;
+    self.clean_reservations.remove(key);
+    self.dirty_reservations.insert(key.clone(), reservation);
+    Ok(())
+  }
+
+  fn prepare_dirty_reservation(&self, key: &BufferedIndexKey, required_bytes: u64) -> EngineResult<Option<MemoryReservation>> {
+    let Some(policy) = self.memory_policy.as_ref() else {
+      return Ok(None);
+    };
+    let previous_bytes = self.dirty_reservations.get(key).map_or(0, MemoryReservation::bytes);
+    let projected = Self::reservation_bytes(&self.dirty_reservations).saturating_sub(previous_bytes).saturating_add(required_bytes);
+    if projected > policy.mutation_max_bytes {
+      return Err(EngineError::ResourceExhausted(format!(
+        "index mutation buffer requires {projected} bytes but index.mutation_buffer_max_bytes is {}",
+        policy.mutation_max_bytes
+      )));
+    }
+    policy
+      .coordinator
+      .reserve(MemoryOwner::IndexDirtyBuffers, required_bytes, AdmissionClass::Workload)
+      .map(Some)
+      .map_err(|error| Self::memory_error("index mutation memory admission failed", error))
+  }
+
+  fn adopt_dirty_reservation(
+    &mut self,
+    key: &BufferedIndexKey,
+    required_bytes: u64,
+    prepared: Option<MemoryReservation>,
+  ) -> EngineResult<()> {
+    let Some(policy) = self.memory_policy.as_ref() else {
+      return Ok(());
+    };
+    let mut reservation =
+      prepared.ok_or_else(|| EngineError::IoError(std::io::Error::other("bounded index insertion has no reservation")))?;
+    if reservation.bytes() < required_bytes {
+      return Err(EngineError::IoError(std::io::Error::other("prepared index reservation is smaller than retained index state")));
+    }
+    if reservation.bytes() > required_bytes {
+      reservation
+        .shrink(reservation.bytes() - required_bytes)
+        .map_err(|error| Self::memory_error("prepared index memory accounting failed", error))?;
+    }
+    let previous_bytes = self.dirty_reservations.get(key).map_or(0, MemoryReservation::bytes);
+    let projected = Self::reservation_bytes(&self.dirty_reservations).saturating_sub(previous_bytes).saturating_add(reservation.bytes());
+    if projected > policy.mutation_max_bytes {
+      return Err(EngineError::ResourceExhausted(format!(
+        "index mutation buffer changed during admission and now requires {projected} bytes but index.mutation_buffer_max_bytes is {}",
+        policy.mutation_max_bytes
+      )));
+    }
+    self.clean_reservations.remove(key);
+    self.dirty_reservations.insert(key.clone(), reservation);
+    Ok(())
+  }
+
+  fn release_key_reservations(&mut self, key: &BufferedIndexKey) {
+    self.clean_reservations.remove(key);
+    self.dirty_reservations.remove(key);
+  }
+
+  fn mutation_reservation_target(index: &FieldIndex, field_values: &[Vec<u8>], file_key: &[u8]) -> u64 {
+    let current = index.estimated_memory_bytes();
+    let value_bytes = field_values.iter().fold(0u64, |total, value| total.saturating_add(value.len() as u64));
+    let maximum_expansions = field_values.iter().fold(0u64, |total, value| total.saturating_add(value.len().max(1) as u64));
+    let entry_bytes = maximum_expansions.saturating_mul((size_of::<IndexEntry>() + file_key.len() + size_of::<Vec<u8>>()) as u64);
+    current
+      .saturating_mul(2)
+      .saturating_add(value_bytes.saturating_mul(2))
+      .saturating_add(entry_bytes.saturating_mul(2))
+      .saturating_add(64 * 1024)
   }
 
   pub(crate) fn stats(&self) -> IndexWriteBufferStats {
@@ -205,7 +398,7 @@ impl SharedIndexWriteBuffer {
         entries: index.entries.len(),
         values: index.values.len(),
         estimated_bytes: index.estimated_memory_bytes(),
-        dirty: self.dirty_keys.contains(key),
+        dirty: self.dirty_keys.contains(key) || self.flushing_keys.contains(key),
         last_access_age_ms: self.last_access.get(key).map(|instant| now.saturating_duration_since(*instant).as_millis() as u64),
       })
       .collect();
@@ -218,9 +411,12 @@ impl SharedIndexWriteBuffer {
     let estimated_dirty_bytes = self
       .indexes
       .iter()
-      .filter(|(key, _)| self.dirty_keys.contains(*key))
+      .filter(|(key, _)| self.dirty_keys.contains(*key) || self.flushing_keys.contains(*key))
       .fold(0u64, |total, (_, index)| total.saturating_add(index.estimated_memory_bytes()));
     let estimated_clean_bytes = estimated_bytes.saturating_sub(estimated_dirty_bytes);
+    let clean_reserved_bytes: u64 = self.clean_reservations.values().map(MemoryReservation::bytes).sum();
+    let dirty_reserved_bytes: u64 = self.dirty_reservations.values().map(MemoryReservation::bytes).sum();
+    let flush_reserved_bytes: u64 = self.flush_reservations.values().map(MemoryReservation::bytes).sum();
 
     IndexWriteBufferStats {
       mutations: self.total_mutations,
@@ -230,7 +426,7 @@ impl SharedIndexWriteBuffer {
       evicted_indexes: self.evicted_indexes,
       evicted_bytes: self.evicted_bytes,
       cached_indexes: self.indexes.len(),
-      dirty_indexes: self.dirty_keys.len(),
+      dirty_indexes: self.dirty_keys.union(&self.flushing_keys).count(),
       deleted_indexes: self.deleted_keys.len(),
       pending_mutations: self.pending_mutations,
       entries,
@@ -238,8 +434,15 @@ impl SharedIndexWriteBuffer {
       estimated_bytes,
       estimated_clean_bytes,
       estimated_dirty_bytes,
-      max_bytes: configured_index_cache_max_bytes(),
-      clean_ttl_ms: configured_index_cache_clean_ttl().as_millis() as u64,
+      clean_reserved_bytes,
+      dirty_reserved_bytes,
+      flush_reserved_bytes,
+      flushing_indexes: self.flushing_keys.len(),
+      max_bytes: self.memory_policy.as_ref().map_or(DEFAULT_INDEX_CACHE_MAX_BYTES, |policy| policy.clean_max_bytes),
+      mutation_max_bytes: self.memory_policy.as_ref().map_or(u64::MAX, |policy| policy.mutation_max_bytes),
+      publication_batch_max_bytes: self.memory_policy.as_ref().map_or(u64::MAX, |policy| policy.publication_batch_max_bytes),
+      clean_ttl_ms: self.memory_policy.as_ref().map_or(DEFAULT_INDEX_CACHE_CLEAN_TTL, |policy| policy.clean_ttl).as_millis() as u64,
+      reservation_owned: self.memory_policy.is_some(),
       top_cached_indexes,
     }
   }
@@ -278,13 +481,14 @@ impl SharedIndexWriteBuffer {
     parents
   }
 
-  fn put_index(&mut self, key: BufferedIndexKey, index: FieldIndex) {
+  fn put_index(&mut self, key: BufferedIndexKey, index: FieldIndex, prepared: Option<MemoryReservation>) -> EngineResult<()> {
+    self.adopt_dirty_reservation(&key, index.estimated_memory_bytes(), prepared)?;
     self.deleted_keys.remove(&key);
     self.indexes.insert(key.clone(), index);
     self.touch(&key);
-    self.dirty_keys.insert(key);
-    self.pending_mutations += 1;
-    self.total_mutations += 1;
+    self.dirty_keys.insert(key.clone());
+    self.record_mutation(&key);
+    Ok(())
   }
 
   fn update_index(
@@ -295,102 +499,310 @@ impl SharedIndexWriteBuffer {
     field_values: &[Vec<u8>],
     file_key: &[u8],
   ) -> EngineResult<()> {
-    self.deleted_keys.remove(&key);
     if !self.indexes.contains_key(&key) {
       let index = match initial_index {
         Some(index) => index,
         None => create_index()?,
       };
+      let reservation_target = Self::mutation_reservation_target(&index, field_values, file_key);
+      self.reserve_dirty_exact(&key, reservation_target)?;
       self.indexes.insert(key.clone(), index);
+    } else {
+      let reservation_target =
+        Self::mutation_reservation_target(self.indexes.get(&key).expect("buffered index exists before mutation"), field_values, file_key);
+      self.reserve_dirty_exact(&key, reservation_target)?;
     }
+    self.deleted_keys.remove(&key);
 
     let index = self.indexes.get_mut(&key).expect("buffered index exists after insertion");
     index.remove(file_key);
     for value in field_values {
       index.insert_expanded(value, file_key.to_vec());
     }
-
+    let actual_bytes = index.estimated_memory_bytes();
     self.dirty_keys.insert(key.clone());
     self.touch(&key);
-    self.pending_mutations += 1;
-    self.total_mutations += 1;
+    self.record_mutation(&key);
+    self.reserve_dirty_exact(&key, actual_bytes)?;
     Ok(())
   }
 
-  fn remove_file_from_index(&mut self, key: BufferedIndexKey, initial_index: Option<FieldIndex>, file_key: &[u8]) {
+  fn remove_file_from_index(&mut self, key: BufferedIndexKey, initial_index: Option<FieldIndex>, file_key: &[u8]) -> EngineResult<()> {
     if self.deleted_keys.contains(&key) {
-      return;
+      return Ok(());
     }
     if !self.indexes.contains_key(&key) {
       if let Some(index) = initial_index {
+        self.reserve_dirty_exact(&key, index.estimated_memory_bytes())?;
         self.indexes.insert(key.clone(), index);
         self.touch(&key);
       } else {
-        return;
+        return Ok(());
       }
     }
 
     let Some(index) = self.indexes.get_mut(&key) else {
-      return;
+      return Ok(());
     };
     let before_entries = index.len();
     let before_values = index.values.len();
     index.remove(file_key);
     if index.len() != before_entries || index.values.len() != before_values {
+      let actual_bytes = index.estimated_memory_bytes();
       self.dirty_keys.insert(key.clone());
       self.touch(&key);
-      self.pending_mutations += 1;
-      self.total_mutations += 1;
+      self.record_mutation(&key);
+      self.reserve_dirty_exact(&key, actual_bytes)?;
     }
+    Ok(())
   }
 
-  fn delete_index(&mut self, key: BufferedIndexKey) {
+  fn delete_index(&mut self, key: BufferedIndexKey) -> EngineResult<()> {
+    self.reserve_dirty_exact(&key, key.estimated_memory_bytes())?;
     self.indexes.remove(&key);
     self.last_access.remove(&key);
     self.dirty_keys.remove(&key);
-    self.deleted_keys.insert(key);
-    self.pending_mutations += 1;
-    self.total_mutations += 1;
+    self.deleted_keys.insert(key.clone());
+    self.record_mutation(&key);
+    Ok(())
   }
 
   fn snapshot_flush(&mut self, hash_length: usize) -> EngineResult<IndexFlushSnapshot> {
-    let dirty_keys = std::mem::take(&mut self.dirty_keys);
-    let deleted_keys = std::mem::take(&mut self.deleted_keys);
+    if !self.flushing_keys.is_empty() {
+      return Err(EngineError::ResourceExhausted("an index flush generation is already in progress".to_string()));
+    }
+    let publication_max_bytes = self.memory_policy.as_ref().map_or(u64::MAX, |policy| policy.publication_batch_max_bytes);
+    let candidate_count = self.deleted_keys.union(&self.dirty_keys).count();
+    let candidate_bytes = self
+      .deleted_keys
+      .union(&self.dirty_keys)
+      .fold(size_of::<Vec<BufferedIndexKey>>() as u64, |total, key| total.saturating_add(key.estimated_memory_bytes()));
+    let _candidate_reservation = match self.memory_policy.as_ref() {
+      Some(policy) => Some(
+        policy
+          .coordinator
+          .reserve(
+            MemoryOwner::IndexDirtyBuffers,
+            candidate_bytes,
+            AdmissionClass::Critical(crate::engine::memory_coordinator::CriticalMemoryPurpose::DurableWrite),
+          )
+          .map_err(|error| Self::memory_error("index flush key-generation memory admission failed", error))?,
+      ),
+      None => None,
+    };
+    let mut candidates: Vec<BufferedIndexKey> = Vec::with_capacity(candidate_count);
+    candidates.extend(self.deleted_keys.union(&self.dirty_keys).cloned());
+    candidates.sort_by(|left, right| {
+      left.parent.cmp(&right.parent).then_with(|| left.field_name.cmp(&right.field_name)).then_with(|| left.strategy.cmp(&right.strategy))
+    });
     let mut saves = Vec::new();
+    let mut deletes = Vec::new();
+    let mut mutation_counts = Vec::new();
+    let mut pending_mutations = 0usize;
+    let mut publication_bytes = 0u64;
 
-    for key in dirty_keys {
-      if deleted_keys.contains(&key) {
-        continue;
+    for key in candidates {
+      let delete = self.deleted_keys.contains(&key);
+      let serialized_size = if delete {
+        key.estimated_memory_bytes()
+      } else {
+        let Some(index) = self.indexes.get(&key) else {
+          let partial = IndexFlushSnapshot { saves, deletes, mutation_counts, pending_mutations };
+          self.restore_failed_flush(&partial);
+          return Err(EngineError::IoError(std::io::Error::other(format!(
+            "dirty index state has no cached index for {}.{} at {}",
+            key.field_name, key.strategy, key.parent
+          ))));
+        };
+        index.serialized_size(hash_length) as u64
+      };
+      if serialized_size > publication_max_bytes {
+        let partial = IndexFlushSnapshot { saves, deletes, mutation_counts, pending_mutations };
+        self.restore_failed_flush(&partial);
+        return Err(EngineError::ResourceExhausted(format!(
+          "index {}.{} at {} serializes to {serialized_size} bytes, exceeding index.publication_batch_max_bytes={publication_max_bytes}",
+          key.field_name, key.strategy, key.parent
+        )));
       }
-      if let Some(index) = self.indexes.get_mut(&key) {
+      if (!saves.is_empty() || !deletes.is_empty()) && publication_bytes.saturating_add(serialized_size) > publication_max_bytes {
+        break;
+      }
+
+      if let Some(policy) = self.memory_policy.as_ref() {
+        let scratch_bytes = if delete {
+          key.estimated_memory_bytes()
+        } else {
+          let Some(scratch_bytes) = serialized_size.checked_add(INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES) else {
+            let partial = IndexFlushSnapshot { saves, deletes, mutation_counts, pending_mutations };
+            self.restore_failed_flush(&partial);
+            return Err(EngineError::ResourceExhausted(format!(
+              "index {}.{} at {} has an overflowing flush-memory requirement",
+              key.field_name, key.strategy, key.parent
+            )));
+          };
+          scratch_bytes
+        };
+        let reservation = match policy.coordinator.reserve(
+          MemoryOwner::IndexDirtyBuffers,
+          scratch_bytes,
+          AdmissionClass::Critical(crate::engine::memory_coordinator::CriticalMemoryPurpose::DurableWrite),
+        ) {
+          Ok(reservation) => reservation,
+          Err(error) => {
+            let partial = IndexFlushSnapshot { saves, deletes, mutation_counts, pending_mutations };
+            self.restore_failed_flush(&partial);
+            return Err(Self::memory_error("index flush serialization memory admission failed", error));
+          }
+        };
+        self.flush_reservations.insert(key.clone(), reservation);
+      }
+      if !delete {
+        let index = self.indexes.get_mut(&key).expect("selected dirty index remains cached");
         index.ensure_nvt_current();
-        saves.push((key, index.serialize(hash_length)));
+        let data = index.serialize(hash_length);
+        debug_assert_eq!(data.len() as u64, serialized_size);
+        saves.push((key.clone(), data));
+        self.dirty_keys.remove(&key);
+      } else {
+        deletes.push(key.clone());
+        self.deleted_keys.remove(&key);
       }
+      self.flushing_keys.insert(key.clone());
+      let key_mutations = self.pending_by_key.remove(&key).unwrap_or(0);
+      mutation_counts.push((key, key_mutations));
+      pending_mutations = pending_mutations.saturating_add(key_mutations);
+      self.pending_mutations = self.pending_mutations.saturating_sub(key_mutations);
+      publication_bytes = publication_bytes.saturating_add(serialized_size);
     }
 
-    let deletes: Vec<BufferedIndexKey> = deleted_keys.into_iter().collect();
-    if !saves.is_empty() || !deletes.is_empty() || self.pending_mutations > 0 {
-      self.flush_count += 1;
-      self.flushed_indexes += saves.len();
-      self.pending_mutations = 0;
-      self.last_flush = Instant::now();
+    if saves.is_empty() && deletes.is_empty() && self.pending_mutations > 0 {
+      return Err(EngineError::IoError(std::io::Error::other("index pending-mutation accounting has no dirty or deleted key")));
     }
 
-    Ok(IndexFlushSnapshot { saves, deletes })
+    Ok(IndexFlushSnapshot { saves, deletes, mutation_counts, pending_mutations })
   }
 
   fn restore_failed_flush(&mut self, snapshot: &IndexFlushSnapshot) {
     for (key, _) in &snapshot.saves {
+      self.flushing_keys.remove(key);
+      self.flush_reservations.remove(key);
       if self.indexes.contains_key(key) && !self.deleted_keys.contains(key) {
         self.dirty_keys.insert(key.clone());
       }
     }
     for key in &snapshot.deletes {
+      self.flushing_keys.remove(key);
+      self.flush_reservations.remove(key);
       if !self.indexes.contains_key(key) {
         self.deleted_keys.insert(key.clone());
       }
     }
-    self.pending_mutations = self.pending_mutations.saturating_add(snapshot.saves.len() + snapshot.deletes.len());
+    for (key, count) in &snapshot.mutation_counts {
+      let restored = self.pending_by_key.entry(key.clone()).or_insert(0);
+      *restored = restored.saturating_add(*count);
+    }
+    self.pending_mutations = self.pending_mutations.saturating_add(snapshot.pending_mutations);
+  }
+
+  fn finish_successful_flush(&mut self, snapshot: &IndexFlushSnapshot) -> EngineResult<()> {
+    let mut first_error = None;
+    for (key, _) in &snapshot.saves {
+      self.flushing_keys.remove(key);
+      self.flush_reservations.remove(key);
+      if self.dirty_keys.contains(key) || self.deleted_keys.contains(key) {
+        continue;
+      }
+      if let Err(error) = self.transition_persisted_index_to_clean(key) {
+        first_error.get_or_insert(error);
+      }
+    }
+    for key in &snapshot.deletes {
+      self.flushing_keys.remove(key);
+      self.flush_reservations.remove(key);
+      if self.dirty_keys.contains(key) || self.deleted_keys.contains(key) || self.indexes.contains_key(key) {
+        continue;
+      }
+      self.release_key_reservations(key);
+    }
+    self.flush_count = self.flush_count.saturating_add(1);
+    self.flushed_indexes = self.flushed_indexes.saturating_add(snapshot.saves.len());
+    self.last_flush = Instant::now();
+    match first_error {
+      Some(error) => Err(error),
+      None => Ok(()),
+    }
+  }
+
+  fn transition_persisted_index_to_clean(&mut self, key: &BufferedIndexKey) -> EngineResult<()> {
+    let Some(policy) = self.memory_policy.clone() else {
+      self.dirty_reservations.remove(key);
+      return Ok(());
+    };
+    let Some(index_bytes) = self.indexes.get(key).map(FieldIndex::estimated_memory_bytes) else {
+      self.release_key_reservations(key);
+      return Ok(());
+    };
+
+    self.evict_clean_to_fit(policy.clean_max_bytes, index_bytes, Some(key));
+    if policy.clean_max_bytes == 0 || index_bytes > policy.clean_max_bytes {
+      self.remove_clean_index(key);
+      self.dirty_reservations.remove(key);
+      return Ok(());
+    }
+    let reservation = policy.coordinator.reserve(MemoryOwner::IndexCleanCache, index_bytes, AdmissionClass::Cache);
+    match reservation {
+      Ok(reservation) => {
+        self.clean_reservations.insert(key.clone(), reservation);
+        self.dirty_reservations.remove(key);
+        Ok(())
+      }
+      Err(error) if Self::is_clean_admission_refusal(&error) => {
+        tracing::debug!(parent = %key.parent, field = %key.field_name, strategy = %key.strategy, %error, "Clean index retention skipped after durable flush");
+        self.remove_clean_index(key);
+        self.dirty_reservations.remove(key);
+        Ok(())
+      }
+      Err(error) => {
+        self.remove_clean_index(key);
+        self.dirty_reservations.remove(key);
+        Err(Self::memory_error("clean index memory accounting failed after durable flush", error))
+      }
+    }
+  }
+
+  fn remove_clean_index(&mut self, key: &BufferedIndexKey) -> Option<u64> {
+    let removed_bytes = self.indexes.remove(key).map(|index| index.estimated_memory_bytes());
+    self.last_access.remove(key);
+    self.clean_reservations.remove(key);
+    removed_bytes
+  }
+
+  fn evict_clean_to_fit(&mut self, max_bytes: u64, additional_bytes: u64, excluded: Option<&BufferedIndexKey>) {
+    let mut evicted = 0usize;
+    while Self::reservation_bytes(&self.clean_reservations).saturating_add(additional_bytes) > max_bytes {
+      let candidate = self
+        .last_access
+        .iter()
+        .filter(|(key, _)| {
+          excluded != Some(*key)
+            && self.clean_reservations.contains_key(*key)
+            && !self.dirty_keys.contains(*key)
+            && !self.flushing_keys.contains(*key)
+            && !self.deleted_keys.contains(*key)
+        })
+        .min_by_key(|(_, accessed)| **accessed)
+        .map(|(key, _)| key.clone());
+      let Some(candidate) = candidate else {
+        break;
+      };
+      let removed_bytes = self.remove_clean_index(&candidate).unwrap_or(0);
+      self.evicted_indexes = self.evicted_indexes.saturating_add(1);
+      self.evicted_bytes = self.evicted_bytes.saturating_add(removed_bytes);
+      evicted = evicted.saturating_add(1);
+    }
+    if evicted > 0 {
+      self.eviction_count = self.eviction_count.saturating_add(1);
+    }
   }
 
   fn evict_clean_indexes(&mut self, max_bytes: u64, clean_ttl: Duration) -> usize {
@@ -399,11 +811,16 @@ impl SharedIndexWriteBuffer {
     }
 
     let now = Instant::now();
-    let mut total_bytes: u64 = self.indexes.values().map(|index| index.estimated_memory_bytes()).sum();
+    let mut total_bytes: u64 = self
+      .indexes
+      .iter()
+      .filter(|(key, _)| !self.dirty_keys.contains(*key) && !self.flushing_keys.contains(*key) && !self.deleted_keys.contains(*key))
+      .map(|(_, index)| index.estimated_memory_bytes())
+      .sum();
     let mut to_evict: HashSet<BufferedIndexKey> = HashSet::new();
 
     for key in self.indexes.keys() {
-      if self.dirty_keys.contains(key) || self.deleted_keys.contains(key) {
+      if self.dirty_keys.contains(key) || self.flushing_keys.contains(key) || self.deleted_keys.contains(key) {
         continue;
       }
       let idle_for = self.last_access.get(key).map(|last| now.saturating_duration_since(*last)).unwrap_or(clean_ttl);
@@ -420,7 +837,8 @@ impl SharedIndexWriteBuffer {
         .indexes
         .iter()
         .filter_map(|(key, index)| {
-          if self.dirty_keys.contains(key) || self.deleted_keys.contains(key) || to_evict.contains(key) {
+          if self.dirty_keys.contains(key) || self.flushing_keys.contains(key) || self.deleted_keys.contains(key) || to_evict.contains(key)
+          {
             return None;
           }
           let last_access = self.last_access.get(key).copied().unwrap_or(now);
@@ -446,11 +864,10 @@ impl SharedIndexWriteBuffer {
     let mut evicted_bytes = 0u64;
     let mut evicted = 0usize;
     for key in to_evict {
-      if let Some(index) = self.indexes.remove(&key) {
-        evicted_bytes = evicted_bytes.saturating_add(index.estimated_memory_bytes());
+      if let Some(bytes) = self.remove_clean_index(&key) {
+        evicted_bytes = evicted_bytes.saturating_add(bytes);
         evicted += 1;
       }
-      self.last_access.remove(&key);
     }
 
     if evicted > 0 {
@@ -582,9 +999,9 @@ impl<'a> IndexWriteBuffer<'a> {
     Ok(flushed)
   }
 
-  pub fn stats(&self) -> IndexWriteBufferStats {
-    let manager_stats = self.manager.buffered_index_stats();
-    IndexWriteBufferStats {
+  pub fn stats(&self) -> EngineResult<IndexWriteBufferStats> {
+    let manager_stats = self.manager.buffered_index_stats()?;
+    Ok(IndexWriteBufferStats {
       mutations: self.total_mutations,
       flushes: self.flush_count,
       flushed_indexes: self.flushed_indexes,
@@ -600,10 +1017,17 @@ impl<'a> IndexWriteBuffer<'a> {
       estimated_bytes: manager_stats.estimated_bytes,
       estimated_clean_bytes: manager_stats.estimated_clean_bytes,
       estimated_dirty_bytes: manager_stats.estimated_dirty_bytes,
+      clean_reserved_bytes: manager_stats.clean_reserved_bytes,
+      dirty_reserved_bytes: manager_stats.dirty_reserved_bytes,
+      flush_reserved_bytes: manager_stats.flush_reserved_bytes,
+      flushing_indexes: manager_stats.flushing_indexes,
       max_bytes: manager_stats.max_bytes,
+      mutation_max_bytes: manager_stats.mutation_max_bytes,
+      publication_batch_max_bytes: manager_stats.publication_batch_max_bytes,
       clean_ttl_ms: manager_stats.clean_ttl_ms,
+      reservation_owned: manager_stats.reservation_owned,
       top_cached_indexes: manager_stats.top_cached_indexes,
-    }
+    })
   }
 }
 
@@ -668,16 +1092,18 @@ impl FieldIndex {
   }
 
   pub fn estimated_memory_bytes(&self) -> u64 {
-    let entry_hash_len = self.entries.first().map(|entry| entry.file_hash.len()).unwrap_or(32);
-    let value_sample_bytes = self.values.iter().next().map(|(key, value)| key.len().saturating_add(value.len())).unwrap_or(64);
-    let entries_bytes = self.entries.capacity().saturating_mul(size_of::<IndexEntry>().saturating_add(entry_hash_len));
-    let values_bytes = self.values.len().saturating_mul(size_of::<(Vec<u8>, Vec<u8>)>().saturating_add(value_sample_bytes));
-    let nvt_bytes = self.nvt.bucket_count().saturating_mul(size_of::<crate::engine::nvt::NVTBucket>());
+    let entry_payload_bytes = self.entries.iter().fold(0usize, |total, entry| total.saturating_add(entry.file_hash.capacity()));
+    let entries_bytes = self.entries.capacity().saturating_mul(size_of::<IndexEntry>()).saturating_add(entry_payload_bytes);
+    let values_payload_bytes =
+      self.values.iter().fold(0usize, |total, (key, value)| total.saturating_add(key.capacity()).saturating_add(value.capacity()));
+    let values_bytes = self.values.capacity().saturating_mul(size_of::<(Vec<u8>, Vec<u8>)>()).saturating_add(values_payload_bytes);
+    let converter_bytes = self.converter.serialize().len();
     size_of::<FieldIndex>()
       .saturating_add(self.field_name.capacity())
       .saturating_add(entries_bytes)
       .saturating_add(values_bytes)
-      .saturating_add(nvt_bytes) as u64
+      .saturating_add(converter_bytes)
+      .saturating_add(self.nvt.estimated_memory_bytes() as usize) as u64
   }
 
   /// Return true when this index stores one scalar for the complete raw field
@@ -989,6 +1415,23 @@ impl FieldIndex {
     FieldIndex::deserialize(&self.serialize(hash_length), hash_length)
   }
 
+  pub fn serialized_size(&self, hash_length: usize) -> usize {
+    let converter_length = serialize_converter(self.converter.as_ref()).len();
+    let values_size =
+      self.values.iter().fold(0usize, |total, (key, value)| total.saturating_add(key.len()).saturating_add(4).saturating_add(value.len()));
+    1usize
+      .saturating_add(2)
+      .saturating_add(self.field_name.len())
+      .saturating_add(4)
+      .saturating_add(converter_length)
+      .saturating_add(4)
+      .saturating_add(self.nvt.serialized_size())
+      .saturating_add(4)
+      .saturating_add(self.entries.len().saturating_mul(8usize.saturating_add(hash_length)))
+      .saturating_add(4)
+      .saturating_add(values_size)
+  }
+
   /// Current on-disk schema version for a FieldIndex blob. Bump alongside
   /// a new `deserialize_v{n}` arm when the layout changes.
   pub const SCHEMA_VERSION: u8 = 0;
@@ -1001,18 +1444,7 @@ impl FieldIndex {
     let nvt_data = self.nvt.serialize();
     let field_name_bytes = self.field_name.as_bytes();
 
-    let values_size: usize = self.values.iter().map(|(k, v)| k.len() + 4 + v.len()).sum();
-    let capacity = 1
-      + 2
-      + field_name_bytes.len()
-      + 4
-      + converter_data.len()
-      + 4
-      + nvt_data.len()
-      + 4
-      + self.entries.len() * (8 + hash_length)
-      + 4
-      + values_size;
+    let capacity = self.serialized_size(hash_length);
     let mut buffer = Vec::with_capacity(capacity);
 
     // Schema version byte at offset 0. The reader checks this FIRST and
@@ -1259,6 +1691,10 @@ impl<'a> IndexManager<'a> {
     self.engine.index_write_buffer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))
   }
 
+  fn lock_flush_guard(&self) -> EngineResult<std::sync::MutexGuard<'_, ()>> {
+    self.engine.index_flush_guard.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))
+  }
+
   fn load_index_legacy_from_disk(&self, path: &str, field_name: &str) -> EngineResult<Option<FieldIndex>> {
     let old_path = Self::index_file_path_legacy(path, field_name);
     let ops = DirectoryOps::new(self.engine);
@@ -1373,10 +1809,15 @@ impl<'a> IndexManager<'a> {
     let strategy = index.converter.strategy();
     let key = Self::buffer_key(path, &index.field_name, strategy);
     let hash_length = self.engine.hash_algo().hash_length();
+    let reservation_bytes = index.estimated_memory_bytes().max(index.serialized_size(hash_length) as u64);
+    let prepared = {
+      let buffer = self.lock_buffer()?;
+      buffer.prepare_dirty_reservation(&key, reservation_bytes)?
+    };
     let index_clone = index.deep_clone(hash_length)?;
     {
       let mut buffer = self.lock_buffer()?;
-      buffer.put_index(key, index_clone);
+      buffer.put_index(key, index_clone, prepared)?;
     }
     self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
   }
@@ -1416,7 +1857,7 @@ impl<'a> IndexManager<'a> {
     }
     {
       let mut buffer = self.lock_buffer()?;
-      buffer.delete_index(key);
+      buffer.delete_index(key)?;
     }
     self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
   }
@@ -1535,7 +1976,7 @@ impl<'a> IndexManager<'a> {
       let key = Self::buffer_key(parent, &index.field_name, &strategy);
       {
         let mut buffer = self.lock_buffer()?;
-        buffer.remove_file_from_index(key, Some(index), file_key);
+        buffer.remove_file_from_index(key, Some(index), file_key)?;
       }
       self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
     }
@@ -1551,27 +1992,26 @@ impl<'a> IndexManager<'a> {
     let initial_index = if needs_load { self.load_index_by_strategy_from_disk(&key.parent, field_name, strategy)? } else { None };
     {
       let mut buffer = self.lock_buffer()?;
-      buffer.remove_file_from_index(key, initial_index, file_key);
+      buffer.remove_file_from_index(key, initial_index, file_key)?;
     }
     self.flush_buffered_indexes_if_due_with_options(None).map(|_| ())
   }
 
-  pub fn buffered_index_stats(&self) -> IndexWriteBufferStats {
-    match self.lock_buffer() {
-      Ok(buffer) => buffer.stats(),
-      Err(_) => IndexWriteBufferStats::default(),
-    }
+  pub fn buffered_index_stats(&self) -> EngineResult<IndexWriteBufferStats> {
+    Ok(self.lock_buffer()?.stats())
   }
 
-  pub fn evict_clean_indexes(&self) -> usize {
-    self.evict_clean_indexes_with_policy(configured_index_cache_max_bytes(), configured_index_cache_clean_ttl())
+  pub fn evict_clean_indexes(&self) -> EngineResult<usize> {
+    let mut buffer = self.lock_buffer()?;
+    let (max_bytes, clean_ttl) = buffer
+      .memory_policy
+      .as_ref()
+      .map_or((DEFAULT_INDEX_CACHE_MAX_BYTES, DEFAULT_INDEX_CACHE_CLEAN_TTL), |policy| (policy.clean_max_bytes, policy.clean_ttl));
+    Ok(buffer.evict_clean_indexes(max_bytes, clean_ttl))
   }
 
-  pub fn evict_clean_indexes_with_policy(&self, max_bytes: u64, clean_ttl: Duration) -> usize {
-    match self.lock_buffer() {
-      Ok(mut buffer) => buffer.evict_clean_indexes(max_bytes, clean_ttl),
-      Err(_) => 0,
-    }
+  pub fn evict_clean_indexes_with_policy(&self, max_bytes: u64, clean_ttl: Duration) -> EngineResult<usize> {
+    Ok(self.lock_buffer()?.evict_clean_indexes(max_bytes, clean_ttl))
   }
 
   pub fn flush_buffered_indexes_if_due(&self) -> EngineResult<bool> {
@@ -1580,6 +2020,7 @@ impl<'a> IndexManager<'a> {
 
   pub(crate) fn flush_buffered_indexes_if_due_with_options(&self, options: Option<IndexWriteBufferOptions>) -> EngineResult<bool> {
     self.engine.ensure_writable()?;
+    let _flush_guard = self.lock_flush_guard()?;
     match self.take_flush_snapshot(false, options)? {
       Some(snapshot) => {
         self.write_flush_snapshot(snapshot)?;
@@ -1591,10 +2032,23 @@ impl<'a> IndexManager<'a> {
 
   pub fn flush_buffered_indexes(&self) -> EngineResult<usize> {
     self.engine.ensure_writable()?;
-    match self.take_flush_snapshot(true, None)? {
-      Some(snapshot) => self.write_flush_snapshot(snapshot),
-      None => Ok(0),
+    let _flush_guard = self.lock_flush_guard()?;
+    let mut target_keys = {
+      let buffer = self.lock_buffer()?;
+      buffer.pending_by_key.keys().cloned().collect::<HashSet<_>>()
+    };
+    let mut flushed_indexes = 0usize;
+    while !target_keys.is_empty() {
+      let Some(snapshot) = self.take_flush_snapshot(true, None)? else {
+        break;
+      };
+      let completed_keys = snapshot.mutation_counts.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+      flushed_indexes = flushed_indexes.saturating_add(self.write_flush_snapshot(snapshot)?);
+      for key in completed_keys {
+        target_keys.remove(&key);
+      }
     }
+    Ok(flushed_indexes)
   }
 
   fn take_flush_snapshot(&self, force: bool, options: Option<IndexWriteBufferOptions>) -> EngineResult<Option<IndexFlushSnapshot>> {
@@ -1644,15 +2098,24 @@ impl<'a> IndexManager<'a> {
     match result {
       Ok(()) => {
         let flushed = snapshot.saves.len();
-        self.evict_clean_indexes();
+        let finish_result = {
+          let mut buffer = self.lock_buffer()?;
+          buffer.finish_successful_flush(&snapshot)
+        };
+        let eviction_result = self.evict_clean_indexes();
+        finish_result?;
+        eviction_result?;
         Ok(flushed)
       }
-      Err(error) => {
-        if let Ok(mut buffer) = self.lock_buffer() {
+      Err(error) => match self.lock_buffer() {
+        Ok(mut buffer) => {
           buffer.restore_failed_flush(&snapshot);
+          Err(error)
         }
-        Err(error)
-      }
+        Err(restore_error) => Err(EngineError::IoError(std::io::Error::other(format!(
+          "index publication failed ({error}) and its dirty generation could not be restored ({restore_error})"
+        )))),
+      },
     }
   }
 

@@ -316,7 +316,9 @@ fn engine_observation_adapter_attributes_current_material_owners() {
   assert!(resident_pages.reserved_bytes > 0);
   assert!(snapshot.owner(MemoryOwner::KvSnapshotGenerations).unwrap().observed.resident_bytes > 0);
   assert!(snapshot.owner(MemoryOwner::KvWriteBuffers).unwrap().observed.resident_bytes > 0);
-  assert!(snapshot.owner(MemoryOwner::DirectoryCache).unwrap().observed.resident_bytes > 0);
+  let directory_cache = snapshot.owner(MemoryOwner::DirectoryCache).unwrap();
+  assert_eq!(directory_cache.observed.resident_bytes, 0, "bounded directory entries must not be double-counted as legacy observation");
+  assert!(directory_cache.reserved_bytes > 0);
   assert!(snapshot.owner(MemoryOwner::DurabilityWaiters).unwrap().observed.items > 0);
   if cfg!(target_os = "linux") {
     assert!(snapshot.host.rss_bytes > 0);

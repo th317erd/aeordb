@@ -1,8 +1,13 @@
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
+use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::{
-  Cache, DirectoryOps, GroupLoader, PathPermissions, PermissionLink, PermissionsLoader, RequestContext, StorageEngine, directory_path_hash,
-  file_path_hash,
+  Cache, CacheLoader, CleanCache, DirectoryOps, GroupLoader, PathPermissions, PermissionLink, PermissionsLoader, RequestContext,
+  StorageEngine, directory_path_hash, file_path_hash,
 };
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -17,6 +22,52 @@ fn test_engine() -> (Arc<StorageEngine>, tempfile::TempDir) {
 
 fn system_ctx() -> RequestContext {
   RequestContext::system()
+}
+
+fn memory_coordinator() -> MemoryCoordinator {
+  MemoryCoordinator::new(MemoryPolicy::new(600, 800, 200, 100).unwrap())
+}
+
+#[derive(Clone)]
+struct CountingLoader {
+  loads: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct PanicHashKey {
+  panic: Arc<AtomicBool>,
+}
+
+impl PartialEq for PanicHashKey {
+  fn eq(&self, _other: &Self) -> bool {
+    true
+  }
+}
+
+impl Eq for PanicHashKey {}
+
+impl Hash for PanicHashKey {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    if self.panic.load(Ordering::SeqCst) {
+      panic!("intentional cache-lock poison");
+    }
+    state.write_u8(1);
+  }
+}
+
+impl CacheLoader for CountingLoader {
+  type Key = String;
+  type Value = String;
+
+  fn load(&self, key: &Self::Key, _engine: &StorageEngine) -> aeordb::engine::EngineResult<Self::Value> {
+    self.loads.fetch_add(1, Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(20));
+    Ok(format!("loaded:{key}"))
+  }
+
+  fn estimated_entry_bytes(&self, key: &Self::Key, value: &Self::Value) -> u64 {
+    key.len().saturating_add(value.len()) as u64
+  }
 }
 
 /// Write a .aeordb-permissions file at a given directory path.
@@ -48,6 +99,186 @@ fn member_link(group: &str, allow: &str, deny: &str) -> PermissionLink {
 // ===========================================================================
 
 #[test]
+fn clean_cache_evicts_lru_before_crossing_its_byte_cap() {
+  let cache = CleanCache::new_bounded(memory_coordinator(), MemoryOwner::DirectoryCache, 200);
+  assert!(cache.insert_with_weight("first", vec![1u8; 40], 100).unwrap());
+  assert!(cache.insert_with_weight("second", vec![2u8; 40], 100).unwrap());
+  assert_eq!(cache.get(&"first").unwrap(), Some(vec![1u8; 40]));
+
+  assert!(cache.insert_with_weight("third", vec![3u8; 40], 100).unwrap());
+  assert!(cache.get(&"second").unwrap().is_none(), "least-recently-used entry must be evicted first");
+  assert_eq!(cache.get(&"first").unwrap(), Some(vec![1u8; 40]));
+  assert_eq!(cache.get(&"third").unwrap(), Some(vec![3u8; 40]));
+
+  let stats = cache.stats().unwrap();
+  assert_eq!(stats.entries, 2);
+  assert_eq!(stats.resident_bytes, 200);
+  assert_eq!(stats.evictions, 1);
+  assert_eq!(stats.evicted_entries, 1);
+}
+
+#[test]
+fn clean_cache_releases_reservations_on_replace_clear_and_drop() {
+  let coordinator = memory_coordinator();
+  {
+    let cache = CleanCache::new_bounded(coordinator.clone(), MemoryOwner::ServerCaches, 500);
+    assert!(cache.insert_with_weight("key", vec![1u8; 10], 120).unwrap());
+    assert!(cache.insert_with_weight("key", vec![2u8; 20], 180).unwrap());
+    let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::ServerCaches).unwrap().clone();
+    assert_eq!(owner.reserved_bytes, 180);
+    assert_eq!(owner.active_reservations, 1);
+    cache.clear().unwrap();
+    let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::ServerCaches).unwrap().clone();
+    assert_eq!(owner.reserved_bytes, 0);
+    assert_eq!(owner.active_reservations, 0);
+  }
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::ServerCaches).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn clean_cache_admission_failure_skips_retention_without_changing_the_value() {
+  let coordinator = memory_coordinator();
+  coordinator.update_host_sample(HostMemorySample { rss_bytes: 800, host_available_bytes: Some(10_000), ..Default::default() }).unwrap();
+  let cache = CleanCache::new_bounded(coordinator, MemoryOwner::DirectoryCache, 200);
+  assert!(!cache.insert_with_weight("key", vec![9u8; 10], 100).unwrap());
+  assert!(cache.get(&"key").unwrap().is_none());
+  assert_eq!(cache.stats().unwrap().admission_skips, 1);
+}
+
+#[test]
+fn zero_byte_clean_cache_is_an_explicit_no_retention_policy() {
+  let cache = CleanCache::new_bounded(memory_coordinator(), MemoryOwner::DirectoryCache, 0);
+  assert!(!cache.insert_with_weight("key", vec![1u8], 1).unwrap());
+  assert!(cache.is_empty());
+}
+
+#[test]
+fn rejected_clean_cache_replacement_preserves_the_previously_admitted_value() {
+  let cache = CleanCache::new_bounded(memory_coordinator(), MemoryOwner::DirectoryCache, 100);
+  assert!(cache.insert_with_weight("key", vec![1u8], 80).unwrap());
+  assert!(!cache.insert_with_weight("key", vec![2u8], 101).unwrap());
+  assert_eq!(cache.get(&"key").unwrap(), Some(vec![1u8]));
+  assert_eq!(cache.stats().unwrap().resident_bytes, 80);
+}
+
+#[test]
+fn rejected_zero_weight_clean_cache_replacement_preserves_the_previously_admitted_value() {
+  let coordinator = memory_coordinator();
+  let cache = CleanCache::new_bounded(coordinator.clone(), MemoryOwner::DirectoryCache, 500);
+  assert!(cache.insert_with_weight("key", vec![1u8], 0).unwrap());
+  let _pressure = coordinator.reserve(MemoryOwner::Query, 650, AdmissionClass::Workload).unwrap();
+
+  assert!(!cache.insert_with_weight("key", vec![2u8], 100).unwrap());
+  assert_eq!(cache.get(&"key").unwrap(), Some(vec![1u8]));
+  let stats = cache.stats().unwrap();
+  assert_eq!(stats.entries, 1);
+  assert_eq!(stats.resident_bytes, 0);
+  assert_eq!(stats.admission_skips, 1);
+}
+
+#[test]
+fn poisoned_clean_cache_reads_surface_an_error_instead_of_becoming_a_cache_miss() {
+  let panic = Arc::new(AtomicBool::new(false));
+  let key = PanicHashKey { panic: Arc::clone(&panic) };
+  let cache = Arc::new(CleanCache::new_bounded(memory_coordinator(), MemoryOwner::DirectoryCache, 100));
+  assert!(cache.insert_with_weight(key.clone(), vec![1u8], 1).unwrap());
+  panic.store(true, Ordering::SeqCst);
+  let poisoner = Arc::clone(&cache);
+  let poison_key = key.clone();
+  assert!(thread::spawn(move || poisoner.insert_with_weight(poison_key, vec![2u8], 1)).join().is_err());
+  panic.store(false, Ordering::SeqCst);
+
+  assert!(cache.get(&key).is_err());
+  assert!(cache.clear().is_err());
+}
+
+#[test]
+fn concurrent_clean_cache_hits_preserve_values_and_exact_hit_accounting() {
+  const THREADS: usize = 16;
+  const READS_PER_THREAD: usize = 1_000;
+  let cache = Arc::new(CleanCache::new_bounded(memory_coordinator(), MemoryOwner::DirectoryCache, 100));
+  assert!(cache.insert_with_weight("key", vec![7u8; 8], 80).unwrap());
+
+  let readers = (0..THREADS)
+    .map(|_| {
+      let cache = Arc::clone(&cache);
+      thread::spawn(move || {
+        for _ in 0..READS_PER_THREAD {
+          assert_eq!(cache.get(&"key").unwrap(), Some(vec![7u8; 8]));
+        }
+      })
+    })
+    .collect::<Vec<_>>();
+  for reader in readers {
+    reader.join().unwrap();
+  }
+
+  let stats = cache.stats().unwrap();
+  assert_eq!(stats.hits, (THREADS * READS_PER_THREAD) as u64);
+  assert_eq!(stats.misses, 0);
+  assert_eq!(stats.entries, 1);
+  assert_eq!(stats.resident_bytes, 80);
+}
+
+#[test]
+fn bounded_loader_cache_preserves_singleflight_on_concurrent_cold_misses() {
+  let (engine, _temp_dir) = test_engine();
+  let loads = Arc::new(AtomicUsize::new(0));
+  let cache = Arc::new(Cache::new_bounded(CountingLoader { loads: Arc::clone(&loads) }, memory_coordinator(), 100));
+  let readers = (0..16)
+    .map(|_| {
+      let cache = Arc::clone(&cache);
+      let engine = Arc::clone(&engine);
+      thread::spawn(move || assert_eq!(cache.get(&"key".to_string(), &engine).unwrap(), "loaded:key"))
+    })
+    .collect::<Vec<_>>();
+  for reader in readers {
+    reader.join().unwrap();
+  }
+
+  assert_eq!(loads.load(Ordering::SeqCst), 1, "one cold key must invoke its loader exactly once");
+  assert_eq!(cache.len(), 1);
+}
+
+#[test]
+fn loader_cache_admission_skip_returns_the_loaded_value_without_retaining_it() {
+  let (engine, _temp_dir) = test_engine();
+  let loads = Arc::new(AtomicUsize::new(0));
+  let cache = Cache::new_bounded(CountingLoader { loads: Arc::clone(&loads) }, memory_coordinator(), 0);
+
+  assert_eq!(cache.get(&"key".to_string(), &engine).unwrap(), "loaded:key");
+  assert_eq!(cache.len(), 0);
+  assert_eq!(loads.load(Ordering::SeqCst), 1);
+  assert_eq!(cache.stats().unwrap().admission_skips, 1);
+}
+
+#[test]
+fn loader_cache_admission_skip_still_shares_one_concurrent_load() {
+  let (engine, _temp_dir) = test_engine();
+  let loads = Arc::new(AtomicUsize::new(0));
+  let cache = Arc::new(Cache::new_bounded(CountingLoader { loads: Arc::clone(&loads) }, memory_coordinator(), 0));
+  let start = Arc::new(std::sync::Barrier::new(17));
+  let readers = (0..16)
+    .map(|_| {
+      let cache = Arc::clone(&cache);
+      let engine = Arc::clone(&engine);
+      let start = Arc::clone(&start);
+      thread::spawn(move || {
+        start.wait();
+        assert_eq!(cache.get(&"key".to_string(), &engine).unwrap(), "loaded:key");
+      })
+    })
+    .collect::<Vec<_>>();
+  start.wait();
+  for reader in readers {
+    reader.join().unwrap();
+  }
+
+  assert_eq!(loads.load(Ordering::SeqCst), 1, "concurrent callers must share a successful load even when retention is skipped");
+  assert_eq!(cache.len(), 0);
+}
+
+#[test]
 fn test_cache_get_loads_on_miss_and_caches() {
   let (engine, _temp_dir) = test_engine();
 
@@ -71,7 +302,7 @@ fn test_cache_get_loads_on_miss_and_caches() {
   assert_eq!(result2.as_ref().unwrap().links[0].group, "testers");
 
   // Evict, then verify third call reloads from disk
-  cache.evict(&"/test".to_string());
+  cache.evict(&"/test".to_string()).unwrap();
   let result3 = cache.get(&"/test".to_string(), &engine).unwrap();
   assert!(result3.is_some(), "Third call after eviction should reload");
   assert_eq!(result3.as_ref().unwrap().links[0].group, "testers");
@@ -112,7 +343,7 @@ fn test_cache_reflects_updated_data_after_eviction() {
   assert_eq!(stale.unwrap().links[0].group, "team_v1", "Cache should serve stale without eviction");
 
   // After eviction, fresh data
-  cache.evict(&"/".to_string());
+  cache.evict(&"/".to_string()).unwrap();
   let fresh = cache.get(&"/".to_string(), &engine).unwrap();
   assert_eq!(fresh.unwrap().links[0].group, "team_v2", "Cache should serve fresh after eviction");
 }
@@ -142,7 +373,7 @@ fn test_cache_evict_single_key_leaves_others() {
   write_permissions(&engine, "/a", &perm_a_v2);
 
   // Evict only /a/
-  cache.evict(&"/a".to_string());
+  cache.evict(&"/a".to_string()).unwrap();
 
   // /a/ should reload and see the update
   let result_a = cache.get(&"/a".to_string(), &engine).unwrap();
@@ -173,7 +404,7 @@ fn test_cache_evict_all_clears_everything() {
   write_permissions(&engine, "/b", &PathPermissions { links: vec![member_link("updated_b", "crudlify", "........")] });
 
   // evict_all
-  cache.evict_all();
+  cache.evict_all().unwrap();
 
   // Both should reload
   let result_a = cache.get(&"/a".to_string(), &engine).unwrap();
@@ -188,7 +419,7 @@ fn test_cache_evict_nonexistent_key_is_noop() {
   let cache = Cache::new(PermissionsLoader);
 
   // Evicting a key that was never loaded should not panic
-  cache.evict(&"/never_loaded".to_string());
+  cache.evict(&"/never_loaded".to_string()).unwrap();
 
   // Should still be able to load it fresh
   let result = cache.get(&"/never_loaded".to_string(), &engine).unwrap();
@@ -199,7 +430,33 @@ fn test_cache_evict_nonexistent_key_is_noop() {
 fn test_cache_evict_all_on_empty_cache_is_noop() {
   let cache: Cache<PermissionsLoader> = Cache::new(PermissionsLoader);
   // Should not panic
-  cache.evict_all();
+  cache.evict_all().unwrap();
+}
+
+#[test]
+fn production_clean_caches_hold_exact_reservations_without_legacy_double_counting() {
+  let (engine, _temp_dir) = test_engine();
+  let ctx = system_ctx();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/bounded/cache.txt", b"cache me", Some("text/plain")).unwrap();
+
+  let permissions = PathPermissions { links: vec![member_link("bounded", ".r..l...", "........")] };
+  write_permissions(&engine, "/bounded", &permissions);
+  assert!(engine.permissions_cache.get(&"/bounded".to_string(), &engine).unwrap().is_some());
+
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  let directory = snapshot.owner(MemoryOwner::DirectoryCache).unwrap();
+  assert!(directory.reserved_bytes > 0, "directory cache must retain a real coordinator reservation");
+  assert_eq!(directory.observed.resident_bytes, 0, "reservation-owned directory bytes must not be observed a second time");
+  let server = snapshot.owner(MemoryOwner::ServerCaches).unwrap();
+  assert!(server.reserved_bytes > 0, "permission cache must retain a real coordinator reservation");
+  assert_eq!(server.observed.resident_bytes, 0, "reservation-owned server-cache bytes must not be observed a second time");
+
+  engine.clear_dir_content_cache().unwrap();
+  engine.permissions_cache.evict_all().unwrap();
+  let cleared = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(cleared.owner(MemoryOwner::DirectoryCache).unwrap().reserved_bytes, 0);
+  assert_eq!(cleared.owner(MemoryOwner::ServerCaches).unwrap().reserved_bytes, 0);
 }
 
 // ===========================================================================
@@ -306,7 +563,7 @@ fn test_directory_content_cache_after_clear() {
   ops.store_file_buffered(&ctx, "/cached/b.txt", b"bbb", Some("text/plain")).unwrap();
 
   // Clear the content cache
-  engine.clear_dir_content_cache();
+  engine.clear_dir_content_cache().unwrap();
 
   // Write another file — should still work correctly even with a cold cache
   ops.store_file_buffered(&ctx, "/cached/c.txt", b"ccc", Some("text/plain")).unwrap();

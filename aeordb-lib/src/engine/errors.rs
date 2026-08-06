@@ -20,6 +20,7 @@ pub enum EngineError {
   UnsafeQueryField(String),
   PatchDatabase(String),
   InvalidInput(String),
+  ResourceExhausted(String),
   SnapshotWritesDisabled,
   DurabilityFailure(String),
   /// A storage mutation began before failure, so the caller must latch write
@@ -58,6 +59,7 @@ impl fmt::Display for EngineError {
       EngineError::UnsafeQueryField(field) => write!(formatter, "Unsafe query field: '{}' is not allowed in group queries", field),
       EngineError::PatchDatabase(msg) => write!(formatter, "Patch database: {}", msg),
       EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
+      EngineError::ResourceExhausted(msg) => write!(formatter, "Resource exhausted: {}", msg),
       EngineError::SnapshotWritesDisabled => write!(formatter, "Snapshot writes are disabled by lifecycle configuration"),
       EngineError::DurabilityFailure(msg) => write!(formatter, "Durability failure: {}", msg),
       EngineError::PostMutationDurabilityFailure(msg) => write!(formatter, "Post-mutation durability failure: {}", msg),

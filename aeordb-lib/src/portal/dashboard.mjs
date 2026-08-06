@@ -38,11 +38,18 @@ const MEMORY_DEFINITIONS = [
   { path: ['process', 'data_bytes'],              label: 'Data / Heap',          format: formatBytes },
   { path: ['process', 'swap_bytes'],              label: 'Swap',                 format: formatBytes },
   { path: ['index_cache', 'estimated_bytes'],     label: 'Index Cache',          format: formatBytes },
+  { path: ['index_cache', 'estimated_dirty_bytes'], label: 'Dirty Index Data',   format: formatBytes },
+  { path: ['index_cache', 'clean_reserved_bytes'], label: 'Clean Index Reserved', format: formatBytes },
+  { path: ['index_cache', 'dirty_reserved_bytes'], label: 'Dirty Index Reserved', format: formatBytes },
+  { path: ['index_cache', 'flush_reserved_bytes'], label: 'Index Flush Scratch', format: formatBytes },
   { path: ['directory_cache', 'estimated_bytes'], label: 'Directory Cache',      format: formatBytes },
   { path: ['index_cache', 'cached_indexes'],      label: 'Cached Indexes',       format: formatNumber },
   { path: ['index_cache', 'pending_mutations'],   label: 'Pending Index Writes', format: formatNumber },
+  { path: ['index_cache', 'flushing_indexes'],    label: 'Flushing Indexes',     format: formatNumber },
   { path: ['index_cache', 'evicted_indexes'],     label: 'Evicted Indexes',      format: formatNumber },
   { path: ['index_cache', 'max_bytes'],           label: 'Index Cache Cap',      format: formatBytes },
+  { path: ['index_cache', 'mutation_max_bytes'],  label: 'Dirty Index Cap',      format: formatBytes },
+  { path: ['index_cache', 'publication_batch_max_bytes'], label: 'Index Batch Cap', format: formatBytes },
 ];
 
 const DARK_THEME = {

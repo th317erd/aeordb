@@ -33,6 +33,22 @@ impl CacheLoader for PermissionsLoader {
       Err(e) => Err(e),
     }
   }
+
+  fn estimated_entry_bytes(&self, path: &String, value: &Option<PathPermissions>) -> u64 {
+    let links = value.as_ref().map_or(0usize, |permissions| {
+      permissions.links.iter().fold(0usize, |total, link| {
+        total
+          .saturating_add(std::mem::size_of_val(link))
+          .saturating_add(link.group.capacity())
+          .saturating_add(link.allow.capacity())
+          .saturating_add(link.deny.capacity())
+          .saturating_add(link.others_allow.as_ref().map_or(0, String::capacity))
+          .saturating_add(link.others_deny.as_ref().map_or(0, String::capacity))
+          .saturating_add(link.path_pattern.as_ref().map_or(0, String::capacity))
+      })
+    });
+    std::mem::size_of::<(String, Option<PathPermissions>)>().saturating_add(path.capacity()).saturating_add(links) as u64
+  }
 }
 
 /// Loads group memberships for a user by user_id.
@@ -59,6 +75,12 @@ impl CacheLoader for GroupLoader {
 
     Ok(member_groups)
   }
+
+  fn estimated_entry_bytes(&self, _user_id: &Uuid, groups: &Vec<String>) -> u64 {
+    std::mem::size_of::<(Uuid, Vec<String>)>()
+      .saturating_add(groups.capacity().saturating_mul(std::mem::size_of::<String>()))
+      .saturating_add(groups.iter().map(String::capacity).sum::<usize>()) as u64
+  }
 }
 
 /// Loads API key records by key_id string.
@@ -74,8 +96,18 @@ impl CacheLoader for ApiKeyLoader {
       Err(_) => return Ok(None),
     };
 
-    let all_keys = system_store::list_api_keys(engine)?;
-    Ok(all_keys.into_iter().find(|k| k.key_id == key_uuid))
+    system_store::get_api_key(engine, key_uuid)
+  }
+
+  fn estimated_entry_bytes(&self, key_id: &String, value: &Option<ApiKeyRecord>) -> u64 {
+    let record_bytes = value.as_ref().map_or(0usize, |record| {
+      std::mem::size_of_val(record)
+        .saturating_add(record.key_hash.capacity())
+        .saturating_add(record.label.as_ref().map_or(0, String::capacity))
+        .saturating_add(record.rules.capacity().saturating_mul(std::mem::size_of::<crate::engine::api_key_rules::KeyRule>()))
+        .saturating_add(record.rules.iter().map(|rule| rule.glob.capacity().saturating_add(rule.permitted.capacity())).sum::<usize>())
+    });
+    std::mem::size_of::<(String, Option<ApiKeyRecord>)>().saturating_add(key_id.capacity()).saturating_add(record_bytes) as u64
   }
 }
 
@@ -95,5 +127,49 @@ impl CacheLoader for IndexConfigLoader {
       Err(EngineError::NotFound(_)) => Ok(None),
       Err(e) => Err(e),
     }
+  }
+
+  fn estimated_entry_bytes(&self, path: &String, value: &Option<PathIndexConfig>) -> u64 {
+    let config_bytes = value.as_ref().map_or(0usize, |config| {
+      std::mem::size_of_val(config)
+        .saturating_add(config.parser.as_ref().map_or(0, String::capacity))
+        .saturating_add(config.parser_memory_limit.as_ref().map_or(0, String::capacity))
+        .saturating_add(config.glob.as_ref().map_or(0, String::capacity))
+        .saturating_add(config.indexes.capacity().saturating_mul(std::mem::size_of::<crate::engine::index_config::IndexFieldConfig>()))
+        .saturating_add(
+          config
+            .indexes
+            .iter()
+            .map(|index| {
+              index
+                .name
+                .capacity()
+                .saturating_add(index.index_type.capacity())
+                .saturating_add(index.source.as_ref().map_or(0, estimated_json_bytes))
+            })
+            .sum::<usize>(),
+        )
+    });
+    std::mem::size_of::<(String, Option<PathIndexConfig>)>().saturating_add(path.capacity()).saturating_add(config_bytes) as u64
+  }
+}
+
+fn estimated_json_bytes(value: &serde_json::Value) -> usize {
+  match value {
+    serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => std::mem::size_of::<serde_json::Value>(),
+    serde_json::Value::String(value) => std::mem::size_of::<serde_json::Value>().saturating_add(value.capacity()),
+    serde_json::Value::Array(values) => values
+      .capacity()
+      .saturating_mul(std::mem::size_of::<serde_json::Value>())
+      .saturating_add(values.iter().map(estimated_json_bytes).sum::<usize>()),
+    serde_json::Value::Object(values) => values.iter().fold(
+      std::mem::size_of_val(values).saturating_add(
+        values
+          .len()
+          .saturating_mul(2)
+          .saturating_mul(std::mem::size_of::<(String, serde_json::Value)>().saturating_add(2 * std::mem::size_of::<usize>())),
+      ),
+      |total, (key, value)| total.saturating_add(key.capacity()).saturating_add(estimated_json_bytes(value)),
+    ),
   }
 }

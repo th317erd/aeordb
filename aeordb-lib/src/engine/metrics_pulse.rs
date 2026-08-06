@@ -50,8 +50,17 @@ pub fn spawn_metrics_pulse(
         }
       };
       let (kv_file, kv_fill_ratio) = engine.kv_layout_metrics();
-      engine.evict_clean_index_cache();
-      let memory = engine.memory_stats();
+      if let Err(error) = engine.evict_clean_index_cache() {
+        tracing::error!(%error, "Metrics pulse could not evict the clean index cache");
+        continue;
+      }
+      let memory = match engine.memory_stats() {
+        Ok(memory) => memory,
+        Err(error) => {
+          tracing::error!(%error, "Metrics pulse could not collect engine memory statistics");
+          continue;
+        }
+      };
       crate::metrics::record_memory_metrics(&memory);
 
       // Get the db file size from disk metadata.

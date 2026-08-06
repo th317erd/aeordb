@@ -237,7 +237,7 @@ async fn test_commit_multichunk_file_records_whole_file_hash() {
   let file_key = file_path_hash("/test/multichunk.bin", &engine.hash_algo()).unwrap();
   let (header, _key, _value) = engine.get_entry(&file_key).unwrap().unwrap();
   assert_eq!(header.entry_version, CURRENT_FILE_RECORD_VERSION);
-  let index_stats = engine.index_buffer_stats();
+  let index_stats = engine.index_buffer_stats().unwrap();
   assert!(index_stats.pending_mutations > 0, "blob commit metadata indexes should remain buffered until the shared flush policy runs");
   assert_eq!(index_stats.flushes, 0, "blob commit should not synchronously flush recoverable metadata indexes");
 

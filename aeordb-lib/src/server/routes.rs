@@ -590,7 +590,11 @@ pub async fn revoke_api_key(
 
   match state.auth_provider.revoke_api_key(parsed_key_id) {
     Ok(true) => {
-      evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id));
+      if let Err(error) = evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id)) {
+        return ErrorResponse::new(format!("API key revoked but cache invalidation failed: {error}"))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response();
+      }
       (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1111,7 +1115,15 @@ pub async fn refresh_token(State(state): State<AppState>, Json(payload): Json<Re
 
 /// GET /admin/metrics -- render Prometheus metrics.
 pub async fn metrics_endpoint(State(state): State<AppState>) -> Response {
-  let memory = state.engine.memory_stats();
+  let memory = match state.engine.memory_stats() {
+    Ok(memory) => memory,
+    Err(error) => {
+      tracing::error!(%error, "Failed to collect engine memory statistics");
+      return ErrorResponse::new(format!("Failed to collect engine memory statistics: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
   crate::metrics::record_memory_metrics(&memory);
   let output = state.prometheus_handle.render();
   Response::builder()

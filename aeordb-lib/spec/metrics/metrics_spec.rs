@@ -147,6 +147,19 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
   let output = body_string(response.into_body()).await;
   assert!(output.contains("aeordb_process_rss_bytes"), "metrics should contain process RSS gauge, got:\n{}", output);
   assert!(output.contains("aeordb_index_cache_estimated_bytes"), "metrics should contain index cache memory gauge, got:\n{}", output);
+  for metric in [
+    "aeordb_index_cache_estimated_clean_bytes",
+    "aeordb_index_cache_estimated_dirty_bytes",
+    "aeordb_index_cache_clean_reserved_bytes",
+    "aeordb_index_cache_dirty_reserved_bytes",
+    "aeordb_index_cache_flush_reserved_bytes",
+    "aeordb_index_cache_flushing_indexes",
+    "aeordb_index_cache_max_bytes",
+    "aeordb_index_mutation_buffer_max_bytes",
+    "aeordb_index_publication_batch_max_bytes",
+  ] {
+    assert!(output.contains(metric), "metrics should contain {metric}, got:\n{output}");
+  }
 }
 
 #[tokio::test]

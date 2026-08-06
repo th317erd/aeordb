@@ -423,7 +423,9 @@ pub async fn engine_store_file(
     response_body.hash = Some(hex::encode(&content_hash));
   }
 
-  evict_caches_for_path(&state, &path);
+  if let Err(error) = evict_caches_for_path(&state, &path) {
+    return engine_error_response("File stored but cache invalidation failed", &error);
+  }
 
   (StatusCode::CREATED, Json(response_body)).into_response()
 }
@@ -1565,7 +1567,9 @@ pub async fn engine_delete_file(
 
   match result {
     Ok(Ok(kind)) => {
-      evict_caches_for_path(&state, &path);
+      if let Err(error) = evict_caches_for_path(&state, &path) {
+        return engine_error_response("Path deleted but cache invalidation failed", &error);
+      }
       if kind == "file" {
         state.index_cleanup.queue(path.clone());
       }
@@ -2458,7 +2462,9 @@ async fn do_merge_patch(
     }
   };
 
-  evict_caches_for_path(&state, &path);
+  if let Err(error) = evict_caches_for_path(&state, &path) {
+    return engine_error_response("File merged but cache invalidation failed", &error);
+  }
 
   let mut response_body = EngineFileResponse::from(&file_record);
   let algo = state.engine.hash_algo();
@@ -2531,7 +2537,9 @@ async fn do_rename(
 
   match result {
     Ok(kind) => {
-      evict_caches_for_paths(&state, [path.as_str(), destination]);
+      if let Err(error) = evict_caches_for_paths(&state, [path.as_str(), destination]) {
+        return engine_error_response("Path renamed but cache invalidation failed", &error);
+      }
       let from_normalized = crate::engine::path_utils::normalize_path(&path);
       let to_normalized = crate::engine::path_utils::normalize_path(destination);
       (

@@ -211,8 +211,17 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
       "entries": 2500000,
       "values": 350000,
       "estimated_bytes": 734003200,
+      "estimated_clean_bytes": 503316480,
+      "estimated_dirty_bytes": 230686720,
+      "clean_reserved_bytes": 503316480,
+      "dirty_reserved_bytes": 234881024,
+      "flush_reserved_bytes": 16777216,
+      "flushing_indexes": 1,
       "max_bytes": 2147483648,
+      "mutation_max_bytes": 1073741824,
+      "publication_batch_max_bytes": 268435456,
       "clean_ttl_ms": 300000,
+      "reservation_owned": true,
       "top_cached_indexes": [
         {
           "parent": "/",
@@ -235,12 +244,12 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
       "index_config_entries": 16,
       "grants_index_entries": 4
     },
-    "estimated_engine_owned_bytes": 750780416
+    "estimated_engine_owned_bytes": 767557632
   }
 }
 ```
 
-`memory.process` is sampled from the operating system. `memory.index_cache.estimated_bytes`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are best-effort diagnostic estimates, not allocator-exact accounting. Clean index cache entries are evicted after the configured idle TTL or when the configured cache cap is exceeded; dirty indexes are retained until flushed.
+`memory.process` is sampled from the operating system. The index `estimated_*` fields remain allocation estimates, while `clean_reserved_bytes`, `dirty_reserved_bytes`, and `flush_reserved_bytes` report exact coordinator reservations. Dirty reservations exclude flush scratch, so the `index_dirty_buffers` owner reconciles to `dirty_reserved_bytes + flush_reserved_bytes`. Clean index cache entries are evicted after the resolved idle TTL or cache cap; dirty and flushing generations remain reserved and non-evictable until publication succeeds or their exact state is restored after failure.
 
 **Payload sections:**
 

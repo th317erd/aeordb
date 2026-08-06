@@ -104,22 +104,13 @@ impl CacheLoader for GrantsIndexLoader {
   fn load(&self, _key: &(), engine: &StorageEngine) -> EngineResult<GrantsIndex> {
     let ops = DirectoryOps::new(engine);
 
-    let perm_files = match list_directory_recursive(engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES)) {
-      Ok(entries) => entries,
-      Err(_) => return Ok(GrantsIndex::default()),
-    };
+    let perm_files = list_directory_recursive(engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES))?;
 
     let mut by_group: HashMap<String, Vec<GrantRecord>> = HashMap::new();
 
     for entry in &perm_files {
-      let data = match ops.read_file_buffered(&entry.path) {
-        Ok(d) => d,
-        Err(_) => continue,
-      };
-      let perms = match PathPermissions::deserialize(&data) {
-        Ok(p) => p,
-        Err(_) => continue,
-      };
+      let data = ops.read_file_buffered(&entry.path)?;
+      let perms = PathPermissions::deserialize(&data)?;
 
       let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
         let stripped = &entry.path[..entry.path.len() - "/.aeordb-permissions".len()];
@@ -147,6 +138,36 @@ impl CacheLoader for GrantsIndexLoader {
     }
 
     Ok(GrantsIndex { by_group })
+  }
+
+  fn estimated_entry_bytes(&self, _key: &(), value: &GrantsIndex) -> u64 {
+    let map_storage = std::mem::size_of_val(&value.by_group).saturating_add(
+      value
+        .by_group
+        .capacity()
+        .saturating_mul(std::mem::size_of::<(String, Vec<GrantRecord>)>().saturating_add(2 * std::mem::size_of::<usize>())),
+    );
+    let bytes = value.by_group.iter().fold(map_storage, |total, (group, records)| {
+      total
+        .saturating_add(group.capacity())
+        .saturating_add(records.capacity().saturating_mul(std::mem::size_of::<GrantRecord>()))
+        .saturating_add(
+          records
+            .iter()
+            .map(|record| {
+              record
+                .dir_path
+                .capacity()
+                .saturating_add(record.allow.capacity())
+                .saturating_add(record.deny.capacity())
+                .saturating_add(record.others_allow.as_ref().map_or(0, String::capacity))
+                .saturating_add(record.others_deny.as_ref().map_or(0, String::capacity))
+                .saturating_add(record.path_pattern.as_ref().map_or(0, String::capacity))
+            })
+            .sum::<usize>(),
+        )
+    });
+    std::mem::size_of::<((), GrantsIndex)>().saturating_add(bytes) as u64
   }
 }
 

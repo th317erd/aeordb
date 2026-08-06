@@ -5,13 +5,14 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
+use std::time::Duration;
 
 use fs2::FileExt;
 
 use arc_swap::ArcSwap;
 
 use crate::engine::append_writer::{read_span_at, AppendWriter};
-use crate::engine::cache::Cache;
+use crate::engine::cache::{Cache, CleanCache};
 use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
@@ -26,7 +27,7 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::file_header::{FILE_HEADER_SIZE, v3_header_commit_plan};
 use crate::engine::hot_tail::VoidRecord;
-use crate::engine::index_store::{IndexManager, SharedIndexWriteBuffer};
+use crate::engine::index_store::{IndexManager, IndexMemoryPolicy, IndexWriteBufferOptions, SharedIndexWriteBuffer};
 use crate::engine::kv_snapshot::ReadSnapshot;
 use crate::engine::memory_coordinator::{
   HostMemorySample, MemoryCoordinator, MemoryCoordinatorError, MemoryCoordinatorSnapshot, MemoryObservation, MemoryOwner, MemoryPolicy,
@@ -487,8 +488,17 @@ pub struct IndexCacheMemoryStats {
   pub entries: usize,
   pub values: usize,
   pub estimated_bytes: u64,
+  pub estimated_clean_bytes: u64,
+  pub estimated_dirty_bytes: u64,
+  pub clean_reserved_bytes: u64,
+  pub dirty_reserved_bytes: u64,
+  pub flush_reserved_bytes: u64,
+  pub flushing_indexes: usize,
   pub max_bytes: u64,
+  pub mutation_max_bytes: u64,
+  pub publication_batch_max_bytes: u64,
   pub clean_ttl_ms: u64,
+  pub reservation_owned: bool,
   pub top_cached_indexes: Vec<crate::engine::index_store::CachedIndexMemoryStats>,
 }
 
@@ -587,10 +597,11 @@ pub struct StorageEngine {
   /// Cache of directory content keyed by content hash. Content-addressed data
   /// is immutable, so this cache can never serve stale data for a given key.
   /// Populated by update_parent_directories, read by directory lookups.
-  pub(crate) dir_content_cache: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+  pub(crate) dir_content_cache: CleanCache<Vec<u8>, Vec<u8>>,
   /// Shared in-memory index write buffer. All index mutations pass through
   /// this state and are flushed to disk by write-count/time policy.
   pub(crate) index_write_buffer: Mutex<SharedIndexWriteBuffer>,
+  pub(crate) index_flush_guard: Mutex<()>,
   /// GC recheck queue. While GC mark+sweep runs, every successful write hash
   /// is added here so the sweep phase can avoid clobbering entries that were
   /// written after the mark snapshot was captured. `None` means GC is not
@@ -664,6 +675,66 @@ impl StorageEngine {
       .lock()
       .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
       .activate_bounded_pages((*coordinator).clone(), max_resident_bytes)
+  }
+
+  fn resolved_unsigned_config(&self, path: &str) -> Option<u64> {
+    self.configuration_shadow().resolution.as_ref()?.property(path)?.value.as_ref().and_then(|value| match value {
+      crate::engine::config_resolver::ConfigValue::Unsigned(value) => Some(*value),
+      _ => None,
+    })
+  }
+
+  fn activate_bounded_clean_caches(&self) -> EngineResult<()> {
+    let directory_max_bytes = self.resolved_unsigned_config("cache.directory_max_bytes").unwrap_or_else(|| {
+      tracing::warn!("Directory cache retention is disabled because cache.directory_max_bytes is unresolved");
+      0
+    });
+    let coordinator = self.memory_coordinator();
+    let server_cache_max_bytes = coordinator
+      .snapshot()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+      .policy
+      .map(|policy| policy.soft_limit_bytes)
+      .unwrap_or_else(|| {
+        tracing::warn!("Generic clean-cache retention is disabled because the process memory policy is unavailable");
+        0
+      });
+
+    self.dir_content_cache.activate_bounded((*coordinator).clone(), MemoryOwner::DirectoryCache, directory_max_bytes)?;
+    self.permissions_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
+    self.index_config_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
+    self.grants_index_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
+    self.activate_bounded_index_cache()?;
+    Ok(())
+  }
+
+  fn activate_bounded_index_cache(&self) -> EngineResult<()> {
+    let coordinator = self.memory_coordinator();
+    let policy_available =
+      coordinator.snapshot().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.policy.is_some();
+    if !policy_available {
+      tracing::warn!("Bounded index residency remains inactive because the process memory policy is unavailable");
+      return Ok(());
+    }
+    let required = |path: &str| {
+      self
+        .resolved_unsigned_config(path)
+        .ok_or_else(|| EngineError::InvalidInput(format!("required resolved configuration is unavailable: {path}")))
+    };
+    let clean_max_bytes = required("cache.index_clean_max_bytes")?;
+    let mutation_max_bytes = required("index.mutation_buffer_max_bytes")?;
+    let publication_batch_max_bytes = required("index.publication_batch_max_bytes")?;
+    let clean_ttl = Duration::from_secs(required("cache.index_clean_ttl_seconds")?);
+    let flush_after_writes = usize::try_from(required("index.flush_after_mutations")?)
+      .map_err(|_| EngineError::InvalidInput("index.flush_after_mutations does not fit this platform".to_string()))?;
+    let flush_after = Duration::from_secs(required("index.flush_after_seconds")?);
+    let policy =
+      IndexMemoryPolicy::new((*coordinator).clone(), clean_max_bytes, mutation_max_bytes, publication_batch_max_bytes, clean_ttl);
+    self
+      .index_write_buffer
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+      .activate_memory_policy(policy, IndexWriteBufferOptions::new(flush_after_writes, flush_after))
   }
 
   pub fn memory_coordinator(&self) -> Arc<MemoryCoordinator> {
@@ -750,34 +821,32 @@ impl StorageEngine {
       },
     );
 
-    let directory = self.dir_content_cache.read().map_err(|error| observation_failed(MemoryOwner::DirectoryCache, error.to_string()))?;
-    let directory_payload =
-      directory.iter().fold(0usize, |total, (key, value)| total.saturating_add(key.capacity()).saturating_add(value.capacity()));
-    let directory_bytes = std::mem::size_of::<HashMap<Vec<u8>, Vec<u8>>>()
-      .saturating_add(
-        directory.capacity().saturating_mul(std::mem::size_of::<(Vec<u8>, Vec<u8>)>().saturating_add(2 * std::mem::size_of::<usize>())),
-      )
-      .saturating_add(directory_payload) as u64;
+    let directory = self.dir_content_cache.stats().map_err(|error| observation_failed(MemoryOwner::DirectoryCache, error.to_string()))?;
+    let directory_legacy_bytes = if directory.max_bytes.is_some() { 0 } else { directory.resident_bytes };
     observations.insert(
       MemoryOwner::DirectoryCache,
       MemoryObservation {
-        resident_bytes: directory_bytes,
-        clean_bytes: directory_bytes,
-        evictable_bytes: directory_bytes,
-        items: directory.len() as u64,
+        resident_bytes: directory_legacy_bytes,
+        clean_bytes: directory_legacy_bytes,
+        evictable_bytes: directory_legacy_bytes,
+        items: directory.entries as u64,
+        hits: directory.hits,
+        misses: directory.misses,
+        evictions: directory.evictions,
         ..Default::default()
       },
     );
-    drop(directory);
 
     let index =
       self.index_write_buffer.lock().map_err(|error| observation_failed(MemoryOwner::IndexDirtyBuffers, error.to_string()))?.stats();
+    let index_clean_legacy_bytes = if index.reservation_owned { 0 } else { index.estimated_clean_bytes };
+    let index_dirty_legacy_bytes = if index.reservation_owned { 0 } else { index.estimated_dirty_bytes };
     observations.insert(
       MemoryOwner::IndexCleanCache,
       MemoryObservation {
-        resident_bytes: index.estimated_clean_bytes,
-        clean_bytes: index.estimated_clean_bytes,
-        evictable_bytes: index.estimated_clean_bytes,
+        resident_bytes: index_clean_legacy_bytes,
+        clean_bytes: index_clean_legacy_bytes,
+        evictable_bytes: index_clean_legacy_bytes,
         items: index.cached_indexes.saturating_sub(index.dirty_indexes) as u64,
         evictions: index.evictions as u64,
         ..Default::default()
@@ -786,9 +855,9 @@ impl StorageEngine {
     observations.insert(
       MemoryOwner::IndexDirtyBuffers,
       MemoryObservation {
-        resident_bytes: index.estimated_dirty_bytes,
-        dirty_bytes: index.estimated_dirty_bytes,
-        pinned_bytes: index.estimated_dirty_bytes,
+        resident_bytes: index_dirty_legacy_bytes,
+        dirty_bytes: index_dirty_legacy_bytes,
+        pinned_bytes: index_dirty_legacy_bytes,
         items: index.dirty_indexes as u64,
         evictions: index.evictions as u64,
         ..Default::default()
@@ -828,20 +897,25 @@ impl StorageEngine {
     );
     drop(voids);
 
-    let server_cache_bytes = self
-      .permissions_cache
-      .estimated_container_bytes()
-      .and_then(|bytes| self.index_config_cache.estimated_container_bytes().map(|other| bytes.saturating_add(other)))
-      .and_then(|bytes| self.grants_index_cache.estimated_container_bytes().map(|other| bytes.saturating_add(other)))
-      .map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let permission_cache =
+      self.permissions_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let index_config_cache =
+      self.index_config_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let grants_cache = self.grants_index_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let server_cache_bytes = [&permission_cache, &index_config_cache, &grants_cache]
+      .into_iter()
+      .filter(|cache| cache.max_bytes.is_none())
+      .fold(0u64, |total, cache| total.saturating_add(cache.resident_bytes));
     observations.insert(
       MemoryOwner::ServerCaches,
       MemoryObservation {
         resident_bytes: server_cache_bytes,
         clean_bytes: server_cache_bytes,
         evictable_bytes: server_cache_bytes,
-        items: self.permissions_cache.len().saturating_add(self.index_config_cache.len()).saturating_add(self.grants_index_cache.len())
-          as u64,
+        items: permission_cache.entries.saturating_add(index_config_cache.entries).saturating_add(grants_cache.entries) as u64,
+        hits: permission_cache.hits.saturating_add(index_config_cache.hits).saturating_add(grants_cache.hits),
+        misses: permission_cache.misses.saturating_add(index_config_cache.misses).saturating_add(grants_cache.misses),
+        evictions: permission_cache.evictions.saturating_add(index_config_cache.evictions).saturating_add(grants_cache.evictions),
         ..Default::default()
       },
     );
@@ -1494,15 +1568,20 @@ impl StorageEngine {
   /// another namespace writer.
   pub(crate) fn namespace_write_guard(&self) -> EngineResult<NamespaceWriteGuard<'_>> {
     let engine_id = self as *const StorageEngine as usize;
+    // Maintenance closes top-level operation admission before it drains the
+    // current set. Namespace authority must therefore be admitted before the
+    // mutex is acquired: a holder can finish nested work, and every waiter is
+    // visible to maintenance before it can become a lock dependency.
+    let operation = self.operation_guard("namespace_authority")?;
     let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
     if already_held {
       NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
-      return Ok(NamespaceWriteGuard { engine_id, _guard: None });
+      return Ok(NamespaceWriteGuard { engine_id, _guard: None, _operation: operation });
     }
 
     let guard = self.namespace_write_lock.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
-    Ok(NamespaceWriteGuard { engine_id, _guard: Some(guard) })
+    Ok(NamespaceWriteGuard { engine_id, _guard: Some(guard), _operation: operation })
   }
 
   /// Acquire namespace authority for a header publication that creates its
@@ -1572,6 +1651,7 @@ impl StorageEngine {
       return self.namespace_write_guard().map(Some);
     }
 
+    let operation = self.operation_guard("namespace_authority")?;
     let guard = match self.namespace_write_lock.try_lock() {
       Ok(guard) => guard,
       Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
@@ -1580,7 +1660,7 @@ impl StorageEngine {
       }
     };
     NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
-    let authority = NamespaceWriteGuard { engine_id, _guard: Some(guard) };
+    let authority = NamespaceWriteGuard { engine_id, _guard: Some(guard), _operation: operation };
     self.ensure_writable()?;
     let snapshot = self.durability_coordinator.snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
     if snapshot.pending_hard > 0 || snapshot.driver_active || snapshot.admitted > 0 || snapshot.executing > 0 {
@@ -1834,8 +1914,9 @@ impl StorageEngine {
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
-      dir_content_cache: RwLock::new(HashMap::new()),
+      dir_content_cache: CleanCache::new(),
       index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
+      index_flush_guard: Mutex::new(()),
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
@@ -1843,6 +1924,7 @@ impl StorageEngine {
     engine.counters.store(initialized);
     engine.initialize_configuration_shadow()?;
     engine.initialize_memory_coordinator()?;
+    engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
     Ok(engine)
   }
@@ -2078,8 +2160,9 @@ impl StorageEngine {
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
-      dir_content_cache: RwLock::new(HashMap::new()),
+      dir_content_cache: CleanCache::new(),
       index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
+      index_flush_guard: Mutex::new(()),
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
@@ -2125,6 +2208,7 @@ impl StorageEngine {
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_shadow()?;
     engine.initialize_memory_coordinator()?;
+    engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
     Self::report_startup_progress(
       &progress_callback,
@@ -2293,11 +2377,11 @@ impl StorageEngine {
     IndexManager::new(self).flush_buffered_indexes()
   }
 
-  pub fn index_buffer_stats(&self) -> crate::engine::index_store::IndexWriteBufferStats {
+  pub fn index_buffer_stats(&self) -> EngineResult<crate::engine::index_store::IndexWriteBufferStats> {
     IndexManager::new(self).buffered_index_stats()
   }
 
-  pub fn evict_clean_index_cache(&self) -> usize {
+  pub fn evict_clean_index_cache(&self) -> EngineResult<usize> {
     IndexManager::new(self).evict_clean_indexes()
   }
 
@@ -3293,22 +3377,20 @@ impl StorageEngine {
   }
 
   /// Get directory content from cache by content hash.
-  pub(crate) fn get_cached_dir_content(&self, content_key: &[u8]) -> Option<Vec<u8>> {
-    self.dir_content_cache.read().ok()?.get(content_key).cloned()
+  pub(crate) fn get_cached_dir_content(&self, content_key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
+    self.dir_content_cache.get(&content_key.to_vec())
   }
 
   /// Cache directory content by content hash.
-  pub(crate) fn cache_dir_content(&self, content_key: Vec<u8>, value: Vec<u8>) {
-    if let Ok(mut cache) = self.dir_content_cache.write() {
-      cache.insert(content_key, value);
-    }
+  pub(crate) fn cache_dir_content(&self, content_key: Vec<u8>, value: Vec<u8>) -> EngineResult<()> {
+    let weight = std::mem::size_of::<(Vec<u8>, Vec<u8>)>().saturating_add(content_key.capacity()).saturating_add(value.capacity()) as u64;
+    self.dir_content_cache.insert_with_weight(content_key, value, weight)?;
+    Ok(())
   }
 
   /// Clear the directory content cache (called on snapshot restore).
-  pub fn clear_dir_content_cache(&self) {
-    if let Ok(mut cache) = self.dir_content_cache.write() {
-      cache.clear();
-    }
+  pub fn clear_dir_content_cache(&self) -> EngineResult<()> {
+    self.dir_content_cache.clear()
   }
 
   /// Best-effort sizes of the engine's in-memory caches. Returns
@@ -3317,18 +3399,21 @@ impl StorageEngine {
   pub fn engine_cache_sizes(&self) -> (usize, usize, usize) {
     let perms = self.permissions_cache.len();
     let idx = self.index_config_cache.len();
-    let dirc = self.dir_content_cache.read().map(|m| m.len()).unwrap_or(0);
+    let dirc = self.dir_content_cache.len();
     (perms, idx, dirc)
   }
 
-  pub fn memory_stats(&self) -> EngineMemoryStats {
+  pub fn memory_stats(&self) -> EngineResult<EngineMemoryStats> {
     let process = crate::engine::rss_sampler::read_process_memory();
-    let index_stats = self.index_buffer_stats();
-    let directory_cache = self.directory_cache_memory_stats();
+    let index_stats = self.index_buffer_stats()?;
+    let directory_cache = self.directory_cache_memory_stats()?;
+    let permission_cache = self.permissions_cache.stats()?;
+    let index_config_cache = self.index_config_cache.stats()?;
+    let grants_index_cache = self.grants_index_cache.stats()?;
     let caches = EngineCacheMemoryStats {
-      permissions_entries: self.permissions_cache.len(),
-      index_config_entries: self.index_config_cache.len(),
-      grants_index_entries: self.grants_index_cache.len(),
+      permissions_entries: permission_cache.entries,
+      index_config_entries: index_config_cache.entries,
+      grants_index_entries: grants_index_cache.entries,
     };
     let index_cache = IndexCacheMemoryStats {
       cached_indexes: index_stats.cached_indexes,
@@ -3344,13 +3429,23 @@ impl StorageEngine {
       entries: index_stats.entries,
       values: index_stats.values,
       estimated_bytes: index_stats.estimated_bytes,
+      estimated_clean_bytes: index_stats.estimated_clean_bytes,
+      estimated_dirty_bytes: index_stats.estimated_dirty_bytes,
+      clean_reserved_bytes: index_stats.clean_reserved_bytes,
+      dirty_reserved_bytes: index_stats.dirty_reserved_bytes,
+      flush_reserved_bytes: index_stats.flush_reserved_bytes,
+      flushing_indexes: index_stats.flushing_indexes,
       max_bytes: index_stats.max_bytes,
+      mutation_max_bytes: index_stats.mutation_max_bytes,
+      publication_batch_max_bytes: index_stats.publication_batch_max_bytes,
       clean_ttl_ms: index_stats.clean_ttl_ms,
+      reservation_owned: index_stats.reservation_owned,
       top_cached_indexes: index_stats.top_cached_indexes,
     };
-    let estimated_engine_owned_bytes = index_cache.estimated_bytes.saturating_add(directory_cache.estimated_bytes);
+    let estimated_engine_owned_bytes =
+      index_cache.estimated_bytes.saturating_add(index_cache.flush_reserved_bytes).saturating_add(directory_cache.estimated_bytes);
 
-    EngineMemoryStats {
+    Ok(EngineMemoryStats {
       process: ProcessMemoryStats {
         rss_bytes: process.resident_kb.saturating_mul(1024),
         peak_rss_bytes: process.peak_resident_kb.saturating_mul(1024),
@@ -3364,20 +3459,12 @@ impl StorageEngine {
       directory_cache,
       caches,
       estimated_engine_owned_bytes,
-    }
+    })
   }
 
-  fn directory_cache_memory_stats(&self) -> DirectoryCacheMemoryStats {
-    let Ok(cache) = self.dir_content_cache.read() else {
-      return DirectoryCacheMemoryStats::default();
-    };
-    let entries = cache.len();
-    let sample_bytes = cache.iter().next().map(|(key, value)| key.len().saturating_add(value.len())).unwrap_or(64);
-    let per_entry = std::mem::size_of::<(Vec<u8>, Vec<u8>)>().saturating_add(sample_bytes);
-    DirectoryCacheMemoryStats {
-      entries,
-      estimated_bytes: std::mem::size_of::<HashMap<Vec<u8>, Vec<u8>>>().saturating_add(entries.saturating_mul(per_entry)) as u64,
-    }
+  fn directory_cache_memory_stats(&self) -> EngineResult<DirectoryCacheMemoryStats> {
+    let cache = self.dir_content_cache.stats()?;
+    Ok(DirectoryCacheMemoryStats { entries: cache.entries, estimated_bytes: cache.resident_bytes })
   }
 
   /// Best-effort O(1) metrics for the in-file KV block.
@@ -4660,6 +4747,51 @@ mod tests {
   }
 
   #[test]
+  fn namespace_authority_is_operation_admitted_before_lock_ownership() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("namespace-maintenance-order.aeordb");
+    let engine = Arc::new(StorageEngine::create(engine_path.to_str().unwrap()).unwrap());
+    let namespace = engine.namespace_write_guard().unwrap();
+
+    let held = engine.active_operations_snapshot();
+    assert_eq!(held.active_operations, 1, "namespace ownership was invisible to exclusive maintenance");
+    assert_eq!(held.operations, vec![("namespace_authority".to_string(), 1)]);
+
+    std::thread::scope(|scope| {
+      let maintenance_engine = Arc::clone(&engine);
+      let (result_tx, result_rx) = std::sync::mpsc::channel();
+      scope.spawn(move || {
+        let operation = maintenance_engine.operation_guard("layout_owner").unwrap();
+        let engine_id = Arc::as_ptr(&maintenance_engine) as usize;
+        let result = maintenance_engine.operation_tracker.begin_maintenance(engine_id, Duration::from_secs(1));
+        result_tx.send(result.map(drop)).unwrap();
+        drop(operation);
+      });
+
+      let deadline = Instant::now() + Duration::from_secs(1);
+      loop {
+        let maintenance_started = engine.operation_tracker.state.lock().unwrap().maintenance_in_progress;
+        if maintenance_started {
+          break;
+        }
+        assert!(Instant::now() < deadline, "maintenance did not close admission");
+        std::thread::yield_now();
+      }
+      assert!(result_rx.recv_timeout(Duration::from_millis(30)).is_err(), "maintenance ignored a held namespace authority");
+
+      drop(namespace);
+      result_rx.recv_timeout(Duration::from_secs(1)).expect("maintenance did not resume after namespace release").unwrap();
+    });
+
+    let try_namespace = engine.try_direct_hard_authority_guard().unwrap().expect("uncontended try-lock must succeed");
+    let held = engine.active_operations_snapshot();
+    assert_eq!(held.active_operations, 1, "try-lock namespace ownership was invisible to exclusive maintenance");
+    assert_eq!(held.operations, vec![("namespace_authority".to_string(), 1)]);
+    drop(try_namespace);
+    assert_eq!(engine.active_operations_snapshot().active_operations, 0);
+  }
+
+  #[test]
   #[serial]
   fn layout_mutation_failure_latches_engine_read_only() {
     let temp = tempfile::tempdir().unwrap();
@@ -5196,6 +5328,7 @@ impl Drop for DurabilityRepairAuthorityGuard<'_> {
 pub(crate) struct NamespaceWriteGuard<'a> {
   engine_id: usize,
   _guard: Option<MutexGuard<'a, ()>>,
+  _operation: EngineOperationGuard<'a>,
 }
 
 impl Drop for NamespaceWriteGuard<'_> {

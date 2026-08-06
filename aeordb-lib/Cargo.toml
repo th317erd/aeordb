@@ -152,6 +152,10 @@ name = "plugin_deploy_spec"
 path = "spec/http/plugin_deploy_spec.rs"
 
 [[test]]
+name = "responses_spec"
+path = "spec/http/responses_spec.rs"
+
+[[test]]
 name = "magic_link_spec"
 path = "spec/auth/magic_link_spec.rs"
 

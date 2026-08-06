@@ -533,7 +533,7 @@ fn finish_batch_commit(
       }
     }
   }
-  let index_stats = index_buffer.stats();
+  let index_stats = index_buffer.stats()?;
   timings.metadata_index_mutations = index_stats.mutations;
   timings.metadata_index_pending_mutations = index_stats.pending_mutations;
   timings.metadata_index_flushes = index_stats.flushes;

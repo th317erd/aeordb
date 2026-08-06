@@ -130,6 +130,12 @@ fn test_display_shutting_down() {
   assert_eq!(display_text, "Storage engine is shutting down");
 }
 
+#[test]
+fn test_display_resource_exhausted() {
+  let engine_error = EngineError::ResourceExhausted("index mutation memory limit reached".to_string());
+  assert_eq!(format!("{}", engine_error), "Resource exhausted: index mutation memory limit reached");
+}
+
 // --- Additional coverage for std::error::Error impl ---
 
 #[test]
@@ -160,6 +166,7 @@ fn test_error_source_non_io_variants_return_none() {
     EngineError::ReservedUserId,
     EngineError::UnsafeQueryField("x".into()),
     EngineError::PatchDatabase("x".into()),
+    EngineError::ResourceExhausted("x".into()),
     EngineError::ShuttingDown,
   ];
 

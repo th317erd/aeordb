@@ -2031,13 +2031,13 @@ impl<'a> DirectoryOps<'a> {
         .engine
         .get_entry(&root_hash)?
         .ok_or_else(|| EngineError::NotFound("B-tree root not found after directory rebuild".to_string()))?;
-      self.engine.cache_dir_content(root_hash.clone(), root_entry.2.clone());
+      self.engine.cache_dir_content(root_hash.clone(), root_entry.2.clone())?;
       (root_entry.2, root_hash)
     } else {
       let dir_value = serialize_child_entries(&children, hash_length)?;
       let content_key = directory_content_hash(&dir_value, algo)?;
       batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-      self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
+      self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
       (dir_value, content_key)
     };
 
@@ -2583,14 +2583,14 @@ impl<'a> DirectoryOps<'a> {
       let content_key = &value;
 
       // Check cache first
-      if let Some(cached) = self.engine.get_cached_dir_content(content_key) {
+      if let Some(cached) = self.engine.get_cached_dir_content(content_key)? {
         return Ok(Some((header, cached)));
       }
 
       // Cache miss — read from WAL
       match self.engine.get_entry(content_key)? {
         Some((_h, _k, content_value)) => {
-          self.engine.cache_dir_content(content_key.to_vec(), content_value.clone());
+          self.engine.cache_dir_content(content_key.to_vec(), content_value.clone())?;
           Ok(Some((header, content_value)))
         }
         None => {
@@ -2663,7 +2663,7 @@ impl<'a> DirectoryOps<'a> {
             crate::engine::btree::btree_insert_batched(self.engine, &value, current_child_entry, hash_length, &algo)?;
 
           // Cache the B-tree root data for subsequent reads in this propagation
-          self.engine.cache_dir_content(new_root_hash.clone(), new_root_data.clone());
+          self.engine.cache_dir_content(new_root_hash.clone(), new_root_data.clone())?;
           (new_root_data, new_root_hash)
         }
         Some((header, value)) => {
@@ -2687,14 +2687,14 @@ impl<'a> DirectoryOps<'a> {
               .engine
               .get_entry(&root_hash)?
               .ok_or_else(|| EngineError::NotFound("B-tree root not found after conversion".to_string()))?;
-            self.engine.cache_dir_content(root_hash.clone(), root_entry.2.clone());
+            self.engine.cache_dir_content(root_hash.clone(), root_entry.2.clone())?;
             (root_entry.2, root_hash)
           } else {
             // Stay flat — batch the content write
             let dir_value = serialize_child_entries(&children, hash_length)?;
             let content_key = directory_content_hash(&dir_value, &algo)?;
             batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-            self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
+            self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
             (dir_value, content_key)
           }
         }
@@ -2705,7 +2705,7 @@ impl<'a> DirectoryOps<'a> {
           let dir_value = serialize_child_entries(&children, hash_length)?;
           let content_key = directory_content_hash(&dir_value, &algo)?;
           batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-          self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
+          self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
           (dir_value, content_key)
         }
       };
@@ -2772,7 +2772,7 @@ impl<'a> DirectoryOps<'a> {
               .get_entry(&new_root_hash)?
               .ok_or_else(|| EngineError::NotFound("B-tree root not found after delete".to_string()))?;
             // Cache the B-tree root data
-            self.engine.cache_dir_content(new_root_hash.clone(), new_root_entry.2.clone());
+            self.engine.cache_dir_content(new_root_hash.clone(), new_root_entry.2.clone())?;
             (new_root_entry.2, new_root_hash)
           }
           None => {
@@ -2780,7 +2780,7 @@ impl<'a> DirectoryOps<'a> {
             let dir_value = Vec::new();
             let content_key = directory_content_hash(&dir_value, &algo)?;
             batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-            self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
+            self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
             (dir_value, content_key)
           }
         }
@@ -2795,14 +2795,14 @@ impl<'a> DirectoryOps<'a> {
         let dir_value = serialize_child_entries(&children, hash_length)?;
         let content_key = directory_content_hash(&dir_value, &algo)?;
         batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-        self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
+        self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
         (dir_value, content_key)
       }
       None => {
         let dir_value = Vec::new();
         let content_key = directory_content_hash(&dir_value, &algo)?;
         batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-        self.engine.cache_dir_content(content_key.clone(), dir_value.clone());
+        self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
         (dir_value, content_key)
       }
     };

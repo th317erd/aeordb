@@ -1114,8 +1114,8 @@ fn resolver_check_direct_permission_does_not_grant_ancestor_navigation() {
   let group = format!("user:{}", user_id);
   let perms = PathPermissions { links: vec![member_link(&group, ".r..l...", "........")] };
   write_permissions(&engine, "/A/B", &perms);
-  engine.permissions_cache.evict_all();
-  engine.grants_index_cache.evict_all();
+  engine.permissions_cache.evict_all().unwrap();
+  engine.grants_index_cache.evict_all().unwrap();
 
   // Directory paths use trailing slash so path_levels treats them as
   // directory hierarchies (the resolver only walks directory levels).
@@ -1131,6 +1131,19 @@ fn resolver_check_direct_permission_does_not_grant_ancestor_navigation() {
   assert!(resolver.check_permission(&user_id, "/A/", CrudlifyOp::Read).unwrap());
   // But non-Read/List ops on ancestors stay denied.
   assert!(!resolver.check_permission(&user_id, "/A/", CrudlifyOp::Update).unwrap());
+}
+
+#[test]
+fn grants_index_surfaces_malformed_permissions_instead_of_caching_empty_grants() {
+  let (engine, _temp_dir) = test_engine();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/broken/.aeordb-permissions", b"{not valid json", Some("application/json")).unwrap();
+  engine.grants_index_cache.evict_all().unwrap();
+
+  let error = engine.grants_index_cache.get(&(), &engine).expect_err("malformed permission metadata must fail the grant-index load");
+  assert!(error.to_string().contains("JSON parse error"), "unexpected malformed-permissions error: {error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,8 +1564,8 @@ fn resolver_accessible_child_names_returns_navigable_segments() {
     "/D",
     &PathPermissions { links: vec![member_link_with_pattern(&group, ".r......", "........", "report.pdf")] },
   );
-  engine.permissions_cache.evict_all();
-  engine.grants_index_cache.evict_all();
+  engine.permissions_cache.evict_all().unwrap();
+  engine.grants_index_cache.evict_all().unwrap();
 
   let mut root_children = resolver.accessible_child_names(&user_id, "/").unwrap();
   root_children.sort();

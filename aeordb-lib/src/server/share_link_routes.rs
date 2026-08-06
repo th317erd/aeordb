@@ -374,7 +374,11 @@ pub async fn revoke_share_link(
   match state.auth_provider.revoke_api_key(parsed_key_id) {
     Ok(true) => {
       // 5. Invalidate cache.
-      evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id));
+      if let Err(error) = evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id)) {
+        return ErrorResponse::new(format!("Share link revoked but cache invalidation failed: {error}"))
+          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+          .into_response();
+      }
 
       (
         StatusCode::OK,

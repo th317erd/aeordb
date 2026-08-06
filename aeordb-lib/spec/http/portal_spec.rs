@@ -352,6 +352,17 @@ async fn test_stats_has_enhanced_structure() {
     "entries",
     "values",
     "estimated_bytes",
+    "estimated_clean_bytes",
+    "estimated_dirty_bytes",
+    "clean_reserved_bytes",
+    "dirty_reserved_bytes",
+    "flush_reserved_bytes",
+    "flushing_indexes",
+    "max_bytes",
+    "mutation_max_bytes",
+    "publication_batch_max_bytes",
+    "clean_ttl_ms",
+    "reservation_owned",
     "top_cached_indexes",
   ] {
     assert!(index_cache.get(field).is_some(), "memory.index_cache.{} missing", field);
