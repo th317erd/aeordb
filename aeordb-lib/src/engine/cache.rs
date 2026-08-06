@@ -124,4 +124,22 @@ impl<L: CacheLoader> Cache<L> {
   pub fn is_empty(&self) -> bool {
     self.len() == 0
   }
+
+  /// Estimate container-owned bytes. Heap allocations retained inside a
+  /// loader-specific key or value remain part of RSS remainder until that
+  /// loader supplies a deeper accounting adapter.
+  pub fn estimated_container_bytes(&self) -> EngineResult<u64> {
+    let entries =
+      self.entries.read().map_err(|error| EngineError::IoError(std::io::Error::other(format!("Cache read lock poisoned: {error}"))))?;
+    let entry_bytes =
+      entries.capacity().saturating_mul(std::mem::size_of::<(L::Key, L::Value)>().saturating_add(2 * std::mem::size_of::<usize>()));
+    drop(entries);
+    let in_flight = self
+      .in_flight
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Cache in_flight lock poisoned: {error}"))))?;
+    let in_flight_bytes =
+      in_flight.capacity().saturating_mul(std::mem::size_of::<(L::Key, Arc<Mutex<()>>)>().saturating_add(2 * std::mem::size_of::<usize>()));
+    Ok(std::mem::size_of::<Self>().saturating_add(entry_bytes).saturating_add(in_flight_bytes) as u64)
+  }
 }

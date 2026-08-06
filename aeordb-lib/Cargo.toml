@@ -103,7 +103,13 @@ tempfile = "3"
 thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_ProcessStatus",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 futures-util = "0.3"
@@ -785,6 +791,10 @@ path = "spec/engine/config_resolver_spec.rs"
 [[test]]
 name = "config_shadow_spec"
 path = "spec/engine/config_shadow_spec.rs"
+
+[[test]]
+name = "memory_coordinator_spec"
+path = "spec/engine/memory_coordinator_spec.rs"
 
 
 [lints]

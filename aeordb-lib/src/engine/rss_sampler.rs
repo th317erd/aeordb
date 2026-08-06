@@ -6,8 +6,8 @@
 //!
 //! Cross-platform: Linux reads `/proc/self/status` (VmRSS, VmHWM, etc.).
 //! macOS calls Mach `task_info(MACH_TASK_BASIC_INFO)` for resident_size and
-//! resident_size_max. All values are reported in kB to match the Linux
-//! `/proc` semantics.
+//! resident_size_max. Windows calls `K32GetProcessMemoryInfo`. All values are
+//! reported in kB to match the Linux `/proc` semantics.
 //!
 //! Gated on `AEORDB_GC_MEM_PROFILE` so production builds pay nothing.
 
@@ -49,10 +49,99 @@ pub fn read_process_memory() -> ProcessMemory {
   {
     read_macos_task_info().unwrap_or_default()
   }
-  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  #[cfg(target_os = "windows")]
+  {
+    read_windows_process_memory().unwrap_or_default()
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
   {
     ProcessMemory::default()
   }
+}
+
+/// Host memory currently available without swapping, in bytes. `None` means
+/// the platform probe failed or the platform has no supported native probe.
+pub fn read_host_available_bytes() -> Option<u64> {
+  #[cfg(target_os = "linux")]
+  {
+    let memory = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kilobytes = memory.lines().find_map(|line| {
+      line.strip_prefix("MemAvailable:")?.trim().trim_end_matches(" kB").split_ascii_whitespace().next()?.parse::<u64>().ok()
+    })?;
+    return kilobytes.checked_mul(1024);
+  }
+  #[cfg(target_os = "windows")]
+  {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 {
+      return Some(status.ullAvailPhys);
+    }
+    return None;
+  }
+  #[cfg(target_os = "macos")]
+  {
+    return read_macos_available_bytes();
+  }
+  #[allow(unreachable_code)]
+  None
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_available_bytes() -> Option<u64> {
+  #[repr(C)]
+  #[derive(Default)]
+  struct VmStatistics64 {
+    free_count: u32,
+    active_count: u32,
+    inactive_count: u32,
+    wire_count: u32,
+    zero_fill_count: u64,
+    reactivations: u64,
+    pageins: u64,
+    pageouts: u64,
+    faults: u64,
+    cow_faults: u64,
+    lookups: u64,
+    hits: u64,
+    purges: u64,
+    purgeable_count: u32,
+    speculative_count: u32,
+    decompressions: u64,
+    compressions: u64,
+    swapins: u64,
+    swapouts: u64,
+    compressor_page_count: u32,
+    throttled_count: u32,
+    external_page_count: u32,
+    internal_page_count: u32,
+    total_uncompressed_pages_in_compressor: u64,
+  }
+
+  const HOST_VM_INFO64: i32 = 4;
+  const KERN_SUCCESS: i32 = 0;
+  unsafe extern "C" {
+    fn mach_host_self() -> u32;
+    fn host_page_size(host: u32, page_size: *mut u32) -> i32;
+    fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+  }
+
+  let host = unsafe { mach_host_self() };
+  let mut page_size = 0u32;
+  if unsafe { host_page_size(host, &mut page_size) } != KERN_SUCCESS || page_size == 0 {
+    return None;
+  }
+  let mut statistics = VmStatistics64::default();
+  let mut count = (std::mem::size_of::<VmStatistics64>() / std::mem::size_of::<u32>()) as u32;
+  if unsafe { host_statistics64(host, HOST_VM_INFO64, &mut statistics as *mut VmStatistics64 as *mut i32, &mut count) } != KERN_SUCCESS {
+    return None;
+  }
+  u64::from(statistics.free_count)
+    .saturating_add(u64::from(statistics.inactive_count))
+    .saturating_add(u64::from(statistics.speculative_count))
+    .saturating_add(u64::from(statistics.purgeable_count))
+    .checked_mul(u64::from(page_size))
 }
 
 #[cfg(target_os = "linux")]
@@ -139,6 +228,28 @@ fn read_macos_task_info() -> Option<ProcessMemory> {
   })
 }
 
+#[cfg(target_os = "windows")]
+fn read_windows_process_memory() -> Option<ProcessMemory> {
+  use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+  use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+  let mut counters = PROCESS_MEMORY_COUNTERS { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+  let result = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+  if result == 0 {
+    return None;
+  }
+  Some(ProcessMemory {
+    resident_kb: counters.WorkingSetSize as u64 / 1024,
+    peak_resident_kb: counters.PeakWorkingSetSize as u64 / 1024,
+    virtual_kb: 0,
+    data_kb: 0,
+    swap_kb: 0,
+    thread_count: 0,
+    fd_count: 0,
+  })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read_fd_count() -> u64 {
   let path = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
   std::fs::read_dir(path).map(|entries| entries.count() as u64).unwrap_or(0)
@@ -245,7 +356,7 @@ mod tests {
 
   #[test]
   fn read_rss_returns_nonzero_on_supported_platforms() {
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
+    if cfg!(any(target_os = "linux", target_os = "macos", target_os = "windows")) {
       let rss = read_rss_kb();
       assert!(rss > 0, "expected nonzero RSS, got {rss}");
     }
@@ -253,7 +364,7 @@ mod tests {
 
   #[test]
   fn read_hwm_returns_nonzero_on_supported_platforms() {
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
+    if cfg!(any(target_os = "linux", target_os = "macos", target_os = "windows")) {
       let hwm = read_hwm_kb();
       assert!(hwm > 0, "expected nonzero peak RSS, got {hwm}");
     }
@@ -261,7 +372,7 @@ mod tests {
 
   #[test]
   fn read_process_memory_is_internally_consistent() {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !cfg!(any(target_os = "linux", target_os = "macos", target_os = "windows")) {
       return;
     }
     let m = read_process_memory();

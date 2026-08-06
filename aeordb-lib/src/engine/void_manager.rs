@@ -130,6 +130,20 @@ impl VoidManager {
     self.by_offset.len()
   }
 
+  /// Estimate the resident bytes owned by both in-memory lookup indexes.
+  pub fn estimated_memory_bytes(&self) -> u64 {
+    let offset_rows =
+      self.by_offset.len().saturating_mul(std::mem::size_of::<(u64, u32)>().saturating_add(4 * std::mem::size_of::<usize>()));
+    let size_rows = self.by_size.values().fold(0usize, |total, offsets| {
+      total.saturating_add(
+        std::mem::size_of::<u32>()
+          .saturating_add(4 * std::mem::size_of::<usize>())
+          .saturating_add(offsets.len().saturating_mul(std::mem::size_of::<u64>().saturating_add(4 * std::mem::size_of::<usize>()))),
+      )
+    });
+    std::mem::size_of::<Self>().saturating_add(offset_rows).saturating_add(size_rows) as u64
+  }
+
   /// Iterate voids in offset order: `(offset, size)`. Used by the hot tail
   /// flush and by metrics reporting.
   pub fn iter(&self) -> impl Iterator<Item = (u64, u32)> + '_ {

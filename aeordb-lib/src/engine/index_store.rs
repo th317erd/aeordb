@@ -99,6 +99,8 @@ pub struct IndexWriteBufferStats {
   pub entries: usize,
   pub values: usize,
   pub estimated_bytes: u64,
+  pub estimated_clean_bytes: u64,
+  pub estimated_dirty_bytes: u64,
   pub max_bytes: u64,
   pub clean_ttl_ms: u64,
   pub top_cached_indexes: Vec<CachedIndexMemoryStats>,
@@ -191,7 +193,7 @@ impl SharedIndexWriteBuffer {
     self.last_access.insert(key.clone(), Instant::now());
   }
 
-  fn stats(&self) -> IndexWriteBufferStats {
+  pub(crate) fn stats(&self) -> IndexWriteBufferStats {
     let now = Instant::now();
     let mut top_cached_indexes: Vec<CachedIndexMemoryStats> = self
       .indexes
@@ -212,7 +214,13 @@ impl SharedIndexWriteBuffer {
 
     let entries = self.indexes.values().map(|index| index.entries.len()).sum();
     let values = self.indexes.values().map(|index| index.values.len()).sum();
-    let estimated_bytes = self.indexes.values().map(|index| index.estimated_memory_bytes()).sum();
+    let estimated_bytes = self.indexes.values().fold(0u64, |total, index| total.saturating_add(index.estimated_memory_bytes()));
+    let estimated_dirty_bytes = self
+      .indexes
+      .iter()
+      .filter(|(key, _)| self.dirty_keys.contains(*key))
+      .fold(0u64, |total, (_, index)| total.saturating_add(index.estimated_memory_bytes()));
+    let estimated_clean_bytes = estimated_bytes.saturating_sub(estimated_dirty_bytes);
 
     IndexWriteBufferStats {
       mutations: self.total_mutations,
@@ -228,6 +236,8 @@ impl SharedIndexWriteBuffer {
       entries,
       values,
       estimated_bytes,
+      estimated_clean_bytes,
+      estimated_dirty_bytes,
       max_bytes: configured_index_cache_max_bytes(),
       clean_ttl_ms: configured_index_cache_clean_ttl().as_millis() as u64,
       top_cached_indexes,
@@ -588,6 +598,8 @@ impl<'a> IndexWriteBuffer<'a> {
       entries: manager_stats.entries,
       values: manager_stats.values,
       estimated_bytes: manager_stats.estimated_bytes,
+      estimated_clean_bytes: manager_stats.estimated_clean_bytes,
+      estimated_dirty_bytes: manager_stats.estimated_dirty_bytes,
       max_bytes: manager_stats.max_bytes,
       clean_ttl_ms: manager_stats.clean_ttl_ms,
       top_cached_indexes: manager_stats.top_cached_indexes,

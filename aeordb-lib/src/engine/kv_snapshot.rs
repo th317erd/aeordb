@@ -11,6 +11,20 @@ use crate::engine::nvt::NormalizedVectorTable;
 pub type KvPageSet = Arc<Vec<Arc<[u8]>>>;
 pub type KvTypeCounts = [usize; 16];
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadSnapshotMemoryStats {
+  pub resident_page_bytes: u64,
+  pub snapshot_metadata_bytes: u64,
+  pub buffer_bytes: u64,
+  pub nvt_bytes: u64,
+}
+
+impl ReadSnapshotMemoryStats {
+  pub fn total_bytes(self) -> u64 {
+    self.resident_page_bytes.saturating_add(self.snapshot_metadata_bytes).saturating_add(self.buffer_bytes).saturating_add(self.nvt_bytes)
+  }
+}
+
 /// An immutable, lock-free read view of the KV store.
 ///
 /// Holds a frozen snapshot of the write buffer, shared NVT state, and an
@@ -269,6 +283,21 @@ impl ReadSnapshot {
   /// Number of entries in the frozen buffer.
   pub fn buffer_len(&self) -> usize {
     self.buffer.len()
+  }
+
+  pub fn memory_stats(&self) -> ReadSnapshotMemoryStats {
+    let resident_page_bytes = self.pages.iter().fold(0u64, |total, page| total.saturating_add(page.len() as u64));
+    let page_vector_bytes = self.pages.capacity().saturating_mul(std::mem::size_of::<Arc<[u8]>>());
+    let buffer_slots =
+      self.buffer.capacity().saturating_mul(std::mem::size_of::<(Vec<u8>, KVEntry)>().saturating_add(2 * std::mem::size_of::<usize>()));
+    let buffer_payload =
+      self.buffer.iter().fold(0usize, |total, (key, entry)| total.saturating_add(key.capacity()).saturating_add(entry.hash.capacity()));
+    ReadSnapshotMemoryStats {
+      resident_page_bytes,
+      snapshot_metadata_bytes: std::mem::size_of::<Self>().saturating_add(page_vector_bytes) as u64,
+      buffer_bytes: std::mem::size_of::<HashMap<Vec<u8>, KVEntry>>().saturating_add(buffer_slots).saturating_add(buffer_payload) as u64,
+      nvt_bytes: self.nvt.estimated_memory_bytes(),
+    }
   }
 }
 

@@ -56,12 +56,14 @@ fn test_cache_get_loads_on_miss_and_caches() {
   write_permissions(&engine, "/test", &permissions);
 
   let cache = Cache::new(PermissionsLoader);
+  let empty_bytes = cache.estimated_container_bytes().unwrap();
 
   // First call should load from disk (cache miss)
   let result1 = cache.get(&"/test".to_string(), &engine).unwrap();
   assert!(result1.is_some(), "First call should load permissions from disk");
   assert_eq!(result1.as_ref().unwrap().links.len(), 1);
   assert_eq!(result1.as_ref().unwrap().links[0].group, "testers");
+  assert!(cache.estimated_container_bytes().unwrap() >= empty_bytes);
 
   // Second call should return cached value (no disk read needed, same result)
   let result2 = cache.get(&"/test".to_string(), &engine).unwrap();

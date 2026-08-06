@@ -59,6 +59,7 @@ pub mod kv_stages;
 pub mod kv_store;
 pub mod lifecycle_config;
 pub mod lost_found;
+pub mod memory_coordinator;
 pub mod merge;
 pub mod merge_patch;
 pub mod metrics_pulse;

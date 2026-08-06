@@ -28,6 +28,9 @@ use crate::engine::file_header::{FILE_HEADER_SIZE, v3_header_commit_plan};
 use crate::engine::hot_tail::VoidRecord;
 use crate::engine::index_store::{IndexManager, SharedIndexWriteBuffer};
 use crate::engine::kv_snapshot::ReadSnapshot;
+use crate::engine::memory_coordinator::{
+  HostMemorySample, MemoryCoordinator, MemoryCoordinatorError, MemoryCoordinatorSnapshot, MemoryObservation, MemoryOwner, MemoryPolicy,
+};
 use crate::engine::native_durability::sync_file_all_native;
 use serde::Serialize;
 
@@ -437,6 +440,33 @@ pub struct EngineCacheMemoryStats {
   pub grants_index_entries: usize,
 }
 
+fn memory_policy_from_config_shadow(report: &crate::engine::config_resolver::ConfigShadowReport) -> Result<MemoryPolicy, String> {
+  let resolution = report
+    .resolution
+    .as_ref()
+    .ok_or_else(|| report.context_error.clone().unwrap_or_else(|| "startup configuration resolution is unavailable".to_string()))?;
+  let paths = ["memory.soft_limit_bytes", "memory.hard_limit_bytes", "memory.host_available_floor_bytes", "memory.emergency_reserve_bytes"];
+  let blocking = resolution
+    .issues
+    .iter()
+    .filter(|issue| issue.blocking && issue.property.as_deref().is_some_and(|property| paths.contains(&property)))
+    .map(|issue| issue.message.as_str())
+    .collect::<Vec<_>>();
+  if !blocking.is_empty() {
+    return Err(format!("memory configuration is unresolved: {}", blocking.join("; ")));
+  }
+  let unsigned = |path: &str| match resolution.property(path).and_then(|property| property.value.as_ref()) {
+    Some(crate::engine::config_resolver::ConfigValue::Unsigned(value)) => Ok(*value),
+    Some(value) => Err(format!("{path} resolved to unexpected value {value:?}")),
+    None => Err(format!("{path} has no resolved value")),
+  };
+  MemoryPolicy::new(unsigned(paths[0])?, unsigned(paths[1])?, unsigned(paths[2])?, unsigned(paths[3])?).map_err(|error| error.to_string())
+}
+
+fn observation_failed(owner: MemoryOwner, message: impl Into<String>) -> MemoryCoordinatorError {
+  MemoryCoordinatorError::ObservationFailed { owner, message: message.into() }
+}
+
 /// Top-level storage engine combining an append-only WAL, a disk-backed KV index,
 /// and a void manager for reclaimable space tracking.
 ///
@@ -451,6 +481,7 @@ pub struct EngineCacheMemoryStats {
 pub struct StorageEngine {
   database_path: PathBuf,
   configuration_shadow: OnceLock<Arc<crate::engine::config_resolver::ConfigShadowReport>>,
+  memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
   operation_tracker: EngineOperationTracker,
   shutdown_started: AtomicBool,
   shutdown_flush_started: AtomicBool,
@@ -525,6 +556,201 @@ impl StorageEngine {
 
   pub fn configuration_shadow(&self) -> Arc<crate::engine::config_resolver::ConfigShadowReport> {
     Arc::clone(self.configuration_shadow.get().expect("StorageEngine constructors initialize configuration shadow"))
+  }
+
+  fn initialize_memory_coordinator(&self) -> EngineResult<()> {
+    let report = self.configuration_shadow();
+    let coordinator = match memory_policy_from_config_shadow(&report) {
+      Ok(policy) => MemoryCoordinator::new(policy),
+      Err(reason) => {
+        tracing::warn!(%reason, "Memory coordinator started in observation-only mode");
+        MemoryCoordinator::without_policy_reason(reason)
+      }
+    };
+    self
+      .memory_coordinator
+      .set(Arc::new(coordinator))
+      .map_err(|_| EngineError::InvalidInput("memory coordinator was initialized more than once".to_string()))?;
+    Ok(())
+  }
+
+  pub fn memory_coordinator(&self) -> Arc<MemoryCoordinator> {
+    Arc::clone(self.memory_coordinator.get().expect("StorageEngine constructors initialize the memory coordinator"))
+  }
+
+  pub fn memory_coordinator_snapshot(&self) -> Result<MemoryCoordinatorSnapshot, MemoryCoordinatorError> {
+    let coordinator = self.memory_coordinator();
+    let process = crate::engine::rss_sampler::read_process_memory();
+    coordinator.update_host_sample(HostMemorySample {
+      rss_bytes: process.resident_kb.saturating_mul(1024),
+      private_bytes: None,
+      mapped_bytes: None,
+      allocator_bytes: None,
+      host_available_bytes: crate::engine::rss_sampler::read_host_available_bytes(),
+    })?;
+    for (owner, observation) in self.current_memory_observations()? {
+      coordinator.observe_legacy(owner, observation)?;
+    }
+    coordinator.snapshot()
+  }
+
+  fn current_memory_observations(&self) -> Result<Vec<(MemoryOwner, MemoryObservation)>, MemoryCoordinatorError> {
+    let mut observations =
+      MemoryOwner::ALL.into_iter().map(|owner| (owner, MemoryObservation::default())).collect::<std::collections::BTreeMap<_, _>>();
+
+    let snapshot = self.kv_snapshot.load();
+    let snapshot_memory = snapshot.memory_stats();
+    observations.insert(
+      MemoryOwner::KvResidentPages,
+      MemoryObservation {
+        resident_bytes: snapshot_memory.resident_page_bytes,
+        clean_bytes: snapshot_memory.resident_page_bytes,
+        pinned_bytes: snapshot_memory.resident_page_bytes,
+        items: snapshot.bucket_count() as u64,
+        ..Default::default()
+      },
+    );
+    let snapshot_generation_bytes =
+      snapshot_memory.snapshot_metadata_bytes.saturating_add(snapshot_memory.buffer_bytes).saturating_add(snapshot_memory.nvt_bytes);
+    observations.insert(
+      MemoryOwner::KvSnapshotGenerations,
+      MemoryObservation {
+        resident_bytes: snapshot_generation_bytes,
+        clean_bytes: snapshot_memory.snapshot_metadata_bytes.saturating_add(snapshot_memory.nvt_bytes),
+        dirty_bytes: snapshot_memory.buffer_bytes,
+        pinned_bytes: snapshot_generation_bytes,
+        items: 1,
+        ..Default::default()
+      },
+    );
+    drop(snapshot);
+
+    let kv_memory =
+      self.kv_writer.lock().map_err(|error| observation_failed(MemoryOwner::KvWriteBuffers, error.to_string()))?.memory_stats();
+    observations.insert(
+      MemoryOwner::KvWriteBuffers,
+      MemoryObservation {
+        resident_bytes: kv_memory.total_bytes(),
+        dirty_bytes: kv_memory.total_bytes(),
+        pinned_bytes: kv_memory.total_bytes(),
+        items: self.counters.load().snapshot().write_buffer_depth,
+        ..Default::default()
+      },
+    );
+
+    let durability =
+      self.durability_coordinator.snapshot().map_err(|error| observation_failed(MemoryOwner::DurabilityWaiters, error.to_string()))?;
+    let durability_bytes = std::mem::size_of_val(&durability).saturating_add(
+      durability.ledger.capacity().saturating_mul(std::mem::size_of::<crate::engine::durability_coordinator::DurabilityLedgerEntry>()),
+    ) as u64;
+    observations.insert(
+      MemoryOwner::DurabilityWaiters,
+      MemoryObservation {
+        resident_bytes: durability_bytes,
+        dirty_bytes: durability_bytes,
+        pinned_bytes: durability_bytes,
+        items: durability.ledger.len().saturating_add(durability.pending_hard) as u64,
+        ..Default::default()
+      },
+    );
+
+    let directory = self.dir_content_cache.read().map_err(|error| observation_failed(MemoryOwner::DirectoryCache, error.to_string()))?;
+    let directory_payload =
+      directory.iter().fold(0usize, |total, (key, value)| total.saturating_add(key.capacity()).saturating_add(value.capacity()));
+    let directory_bytes = std::mem::size_of::<HashMap<Vec<u8>, Vec<u8>>>()
+      .saturating_add(
+        directory.capacity().saturating_mul(std::mem::size_of::<(Vec<u8>, Vec<u8>)>().saturating_add(2 * std::mem::size_of::<usize>())),
+      )
+      .saturating_add(directory_payload) as u64;
+    observations.insert(
+      MemoryOwner::DirectoryCache,
+      MemoryObservation {
+        resident_bytes: directory_bytes,
+        clean_bytes: directory_bytes,
+        evictable_bytes: directory_bytes,
+        items: directory.len() as u64,
+        ..Default::default()
+      },
+    );
+    drop(directory);
+
+    let index =
+      self.index_write_buffer.lock().map_err(|error| observation_failed(MemoryOwner::IndexDirtyBuffers, error.to_string()))?.stats();
+    observations.insert(
+      MemoryOwner::IndexCleanCache,
+      MemoryObservation {
+        resident_bytes: index.estimated_clean_bytes,
+        clean_bytes: index.estimated_clean_bytes,
+        evictable_bytes: index.estimated_clean_bytes,
+        items: index.cached_indexes.saturating_sub(index.dirty_indexes) as u64,
+        evictions: index.evictions as u64,
+        ..Default::default()
+      },
+    );
+    observations.insert(
+      MemoryOwner::IndexDirtyBuffers,
+      MemoryObservation {
+        resident_bytes: index.estimated_dirty_bytes,
+        dirty_bytes: index.estimated_dirty_bytes,
+        pinned_bytes: index.estimated_dirty_bytes,
+        items: index.dirty_indexes as u64,
+        evictions: index.evictions as u64,
+        ..Default::default()
+      },
+    );
+
+    let gc_recheck = self.gc_recheck.lock().map_err(|error| observation_failed(MemoryOwner::GarbageCollection, error.to_string()))?;
+    if let Some(hashes) = gc_recheck.as_ref() {
+      let payload = hashes.iter().fold(0usize, |total, hash| total.saturating_add(hash.capacity()));
+      let bytes = std::mem::size_of::<HashSet<Vec<u8>>>()
+        .saturating_add(hashes.capacity().saturating_mul(std::mem::size_of::<Vec<u8>>().saturating_add(2 * std::mem::size_of::<usize>())))
+        .saturating_add(payload) as u64;
+      observations.insert(
+        MemoryOwner::GarbageCollection,
+        MemoryObservation {
+          resident_bytes: bytes,
+          dirty_bytes: bytes,
+          pinned_bytes: bytes,
+          items: hashes.len() as u64,
+          ..Default::default()
+        },
+      );
+    }
+    drop(gc_recheck);
+
+    let voids = self.void_manager.read().map_err(|error| observation_failed(MemoryOwner::VoidManager, error.to_string()))?;
+    let void_bytes = voids.estimated_memory_bytes();
+    observations.insert(
+      MemoryOwner::VoidManager,
+      MemoryObservation {
+        resident_bytes: void_bytes,
+        dirty_bytes: void_bytes,
+        pinned_bytes: void_bytes,
+        items: voids.void_count() as u64,
+        ..Default::default()
+      },
+    );
+    drop(voids);
+
+    let server_cache_bytes = self
+      .permissions_cache
+      .estimated_container_bytes()
+      .and_then(|bytes| self.index_config_cache.estimated_container_bytes().map(|other| bytes.saturating_add(other)))
+      .and_then(|bytes| self.grants_index_cache.estimated_container_bytes().map(|other| bytes.saturating_add(other)))
+      .map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    observations.insert(
+      MemoryOwner::ServerCaches,
+      MemoryObservation {
+        resident_bytes: server_cache_bytes,
+        clean_bytes: server_cache_bytes,
+        evictable_bytes: server_cache_bytes,
+        items: self.permissions_cache.len().saturating_add(self.index_config_cache.len()).saturating_add(self.grants_index_cache.len())
+          as u64,
+        ..Default::default()
+      },
+    );
+
+    Ok(observations.into_iter().collect())
   }
 
   fn operation_guard(&self, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
@@ -1350,6 +1576,7 @@ impl StorageEngine {
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
       configuration_shadow: OnceLock::new(),
+      memory_coordinator: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
@@ -1382,6 +1609,7 @@ impl StorageEngine {
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
     engine.counters.store(initialized);
     engine.initialize_configuration_shadow()?;
+    engine.initialize_memory_coordinator()?;
     Ok(engine)
   }
 
@@ -1591,6 +1819,7 @@ impl StorageEngine {
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
       configuration_shadow: OnceLock::new(),
+      memory_coordinator: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
@@ -1661,6 +1890,7 @@ impl StorageEngine {
     engine.sync_voids_to_kv_writer();
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_shadow()?;
+    engine.initialize_memory_coordinator()?;
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {

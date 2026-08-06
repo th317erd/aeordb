@@ -82,6 +82,24 @@ fn make_nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
   Arc::new(NormalizedVectorTable::new(Box::new(HashConverter), bucket_count))
 }
 
+#[test]
+fn test_snapshot_memory_stats_separate_pages_buffer_and_metadata() {
+  let bucket_count = 2;
+  let pages = empty_pages(bucket_count, HashAlgorithm::Blake3_256.hash_length());
+  let expected_page_bytes = pages.iter().map(|page| page.len() as u64).sum::<u64>();
+  let mut buffer = HashMap::new();
+  let entry = make_entry(7, 700);
+  buffer.insert(entry.hash.clone(), entry);
+  let snapshot = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages);
+
+  let stats = snapshot.memory_stats();
+  assert_eq!(stats.resident_page_bytes, expected_page_bytes);
+  assert!(stats.snapshot_metadata_bytes > 0);
+  assert!(stats.buffer_bytes > 0);
+  assert!(stats.nvt_bytes > 0);
+  assert_eq!(stats.total_bytes(), stats.resident_page_bytes + stats.snapshot_metadata_bytes + stats.buffer_bytes + stats.nvt_bytes);
+}
+
 /// Create empty pages for a given bucket count and hash length.
 fn empty_pages(bucket_count: usize, hash_length: usize) -> Arc<Vec<Arc<[u8]>>> {
   let empty = page_arc(vec![0u8; page_size(hash_length)]);

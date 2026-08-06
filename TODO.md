@@ -86,7 +86,7 @@
     - [x] Implement bounded A/B/I ControlStore read selection with expected kind/database/identity verification.
     - [ ] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
     - [ ] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.
-  - [ ] P2a: converge every acknowledged v3 write behind one truthful durability coordinator.
+  - [x] P2a: converge every acknowledged v3 write behind one truthful durability coordinator.
     - [x] P2a-1: freeze the current durability-operation inventory and land the coordinator/ledger shell without changing writers.
       - [x] Refresh raw write/barrier/replace/header/shutdown producer and consumer territory from current source.
       - [x] Add the red `v3_contract_facade_spec` for commit classes, operation IDs, ordering, and hard-frontier waiter behavior.
@@ -134,7 +134,14 @@
         - [x] Retain one immutable startup shadow report and expose a read-only engine snapshot without logging redacted path values.
         - [x] Prove missing, valid, malformed, unreadable, override, and no-live-owner-activation behavior against a real engine.
       - [x] Run focused, malformed, precedence, registry, adjacent lifecycle/config, and broad gates; commit and push.
-    - [ ] P2b-2: add the process-wide memory coordinator and complete owner accounting behind current-behavior adapters.
+    - [x] P2b-2: add the process-wide memory coordinator and complete owner accounting behind current-behavior adapters.
+      - [x] Freeze one owner registry, policy, admission classes, pressure states, and emergency-purpose matrix.
+      - [x] Prove tiny-budget, overflow, soft/hard, host-floor, emergency, concurrent, grow/shrink, and RAII release behavior before production integration.
+      - [x] Add immutable snapshots with per-owner reservations, observed legacy bytes, clean/dirty/evictable/pinned/spill state, counters, and RSS remainder.
+      - [x] Derive the coordinator policy from the startup configuration shadow without activating malformed or unresolved values.
+      - [x] Account current KV pages/snapshots/buffers, durability waiters, directory/index caches, GC recheck, Void, and generic engine caches through observation adapters.
+      - [x] Keep every current allocator on its legacy behavior until P2b-3 while exposing one read-only engine coordinator snapshot.
+      - [x] Run focused, concurrency, malformed-policy, adjacent memory/metrics/cache/KV, cross-platform, broad, and real-engine gates; commit and push.
     - [ ] P2b-3: migrate KV, directory, index, query, parser/plugin, task, GC, repair, and maintenance growth to reservations and eviction.
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.

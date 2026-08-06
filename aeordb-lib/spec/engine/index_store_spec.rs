@@ -382,6 +382,8 @@ fn test_clean_index_cache_eviction_keeps_dirty_indexes() {
   let stats = index_manager.buffered_index_stats();
   assert_eq!(stats.cached_indexes, 1);
   assert_eq!(stats.dirty_indexes, 1);
+  assert_eq!(stats.estimated_clean_bytes, 0);
+  assert_eq!(stats.estimated_dirty_bytes, stats.estimated_bytes);
 
   let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO);
   assert_eq!(evicted, 0, "dirty indexes must never be evicted");
@@ -405,6 +407,8 @@ fn test_clean_index_cache_eviction_drops_flushed_indexes_only_from_memory() {
   let stats = index_manager.buffered_index_stats();
   assert_eq!(stats.cached_indexes, 1);
   assert_eq!(stats.dirty_indexes, 0);
+  assert_eq!(stats.estimated_dirty_bytes, 0);
+  assert_eq!(stats.estimated_clean_bytes, stats.estimated_bytes);
 
   let evicted = index_manager.evict_clean_indexes_with_policy(0, Duration::ZERO);
   assert_eq!(evicted, 1, "flushed clean index should be evicted from memory");

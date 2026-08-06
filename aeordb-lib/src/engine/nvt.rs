@@ -118,6 +118,11 @@ impl NormalizedVectorTable {
     self.converter.inner.as_ref()
   }
 
+  /// Estimate owned resident bytes without serializing or cloning the table.
+  pub fn estimated_memory_bytes(&self) -> u64 {
+    std::mem::size_of::<Self>().saturating_add(self.buckets.capacity().saturating_mul(std::mem::size_of::<NVTBucket>())) as u64
+  }
+
   pub fn serialize(&self) -> Vec<u8> {
     let converter_data = self.converter.inner.serialize();
     // version(1) + converter_length(4) + converter_data + bucket_count(4) + buckets(12 each)

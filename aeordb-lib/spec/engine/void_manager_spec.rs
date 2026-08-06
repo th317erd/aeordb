@@ -266,3 +266,14 @@ fn test_total_void_space_after_consumption() {
   manager.find_void(500);
   assert_eq!(manager.total_void_space(), 300);
 }
+
+#[test]
+fn test_memory_estimate_tracks_both_void_indexes() {
+  let mut manager = VoidManager::new(HashAlgorithm::Blake3_256);
+  let empty_bytes = manager.estimated_memory_bytes();
+  manager.register_void(1000, 500);
+  manager.register_void(2000, 500);
+  manager.register_void(3000, 700);
+
+  assert!(manager.estimated_memory_bytes() > empty_bytes);
+}

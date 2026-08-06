@@ -76,7 +76,45 @@ pub struct DiskKVStore {
   pub pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiskKvMemoryStats {
+  pub write_buffer_bytes: u64,
+  pub hot_buffer_bytes: u64,
+  pub pending_void_bytes: u64,
+  pub mutable_nvt_bytes: u64,
+}
+
+impl DiskKvMemoryStats {
+  pub fn total_bytes(self) -> u64 {
+    self
+      .write_buffer_bytes
+      .saturating_add(self.hot_buffer_bytes)
+      .saturating_add(self.pending_void_bytes)
+      .saturating_add(self.mutable_nvt_bytes)
+  }
+}
+
 impl DiskKVStore {
+  pub(crate) fn memory_stats(&self) -> DiskKvMemoryStats {
+    let write_buffer_slots = self
+      .write_buffer
+      .capacity()
+      .saturating_mul(std::mem::size_of::<(Vec<u8>, KVEntry)>().saturating_add(2 * std::mem::size_of::<usize>()));
+    let write_buffer_payload = self
+      .write_buffer
+      .iter()
+      .fold(0usize, |total, (key, entry)| total.saturating_add(key.capacity()).saturating_add(entry.hash.capacity()));
+    let hot_buffer_payload = self.hot_buffer.iter().fold(0usize, |total, entry| total.saturating_add(entry.hash.capacity()));
+    DiskKvMemoryStats {
+      write_buffer_bytes: std::mem::size_of::<HashMap<Vec<u8>, KVEntry>>()
+        .saturating_add(write_buffer_slots)
+        .saturating_add(write_buffer_payload) as u64,
+      hot_buffer_bytes: self.hot_buffer.capacity().saturating_mul(std::mem::size_of::<KVEntry>()).saturating_add(hot_buffer_payload) as u64,
+      pending_void_bytes: self.pending_voids.capacity().saturating_mul(std::mem::size_of::<crate::engine::hot_tail::VoidRecord>()) as u64,
+      mutable_nvt_bytes: self.nvt.estimated_memory_bytes(),
+    }
+  }
+
   fn sync_data_barrier(&self, estimated_bytes: u64) -> EngineResult<()> {
     self
       .durability_coordinator
