@@ -16,6 +16,7 @@ use crate::engine::index_store::{
 use crate::engine::index_config_resolver::{glob_matches, IndexConfigResolver};
 use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner};
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -222,6 +223,14 @@ fn execute_reindex(
   let force = task.args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
   let metadata_only = task.args.get("metadata_only").and_then(|v| v.as_bool()).unwrap_or(false);
   let index_flush_options = reindex_index_buffer_options(&task.args);
+  let mut migration_memory = if force {
+    Some(
+      OperationMemoryBudget::new(engine, "forced reindex migration", MemoryOwner::Migration, AdmissionClass::Maintenance, 0, Some(cancel))
+        .map_err(|error| error.to_string())?,
+    )
+  } else {
+    None
+  };
 
   let ops = DirectoryOps::new(engine);
   let resolver = IndexConfigResolver::new(engine);
@@ -268,7 +277,7 @@ fn execute_reindex(
   // Build a sorted list of full file paths to reindex.
   let prefix = reindex_root.trim_end_matches('/');
   let mut file_paths: Vec<String> = if force {
-    collect_current_file_record_paths(engine, &reindex_root)?
+    collect_current_file_record_paths(engine, &reindex_root, migration_memory.as_mut().expect("force creates migration memory"))?
   } else if let Some(ref config) = config {
     if let Some(ref glob_pattern) = config.glob {
       // Glob mode: recursive listing filtered by glob pattern.
@@ -332,11 +341,14 @@ fn execute_reindex(
       }
 
       if force {
-        match ops.migrate_file_record_to_current_version(file_path) {
+        match ops
+          .migrate_file_record_to_current_version_with_memory(file_path, migration_memory.as_mut().expect("force creates migration memory"))
+        {
           Ok(true) => {
             migrated_count += 1;
           }
           Ok(false) => {}
+          Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_))) => return Err(error.to_string()),
           Err(error) => {
             tracing::warn!(
               path = %file_path,
@@ -498,33 +510,67 @@ fn reindex_index_buffer_options(args: &serde_json::Value) -> IndexWriteBufferOpt
   IndexWriteBufferOptions::new(flush_after_writes, flush_after)
 }
 
-fn collect_current_file_record_paths(engine: &StorageEngine, base_path: &str) -> Result<Vec<String>, String> {
+fn collect_current_file_record_paths(
+  engine: &StorageEngine,
+  base_path: &str,
+  memory: &mut OperationMemoryBudget,
+) -> Result<Vec<String>, String> {
   let normalized_base = crate::engine::path_utils::normalize_path(base_path);
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
-  let entries = engine.entries_by_type(crate::engine::KV_TYPE_FILE_RECORD).map_err(|error| error.to_string())?;
-  let mut paths = std::collections::BTreeSet::new();
+  let snapshot = engine.kv_snapshot.load();
+  let candidate_count = snapshot.count_by_type(crate::engine::KV_TYPE_FILE_RECORD).map_err(|error| error.to_string())?;
+  let vector_bytes = candidate_count
+    .checked_mul(std::mem::size_of::<String>())
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| "forced reindex path vector estimate overflow".to_string())?;
+  memory.reserve(vector_bytes, "forced reindex path vector admission failed").map_err(|error| error.to_string())?;
+  let mut paths = Vec::new();
+  paths.try_reserve_exact(candidate_count).map_err(|error| format!("forced reindex path vector allocation failed: {error}"))?;
 
-  for (hash, value) in entries {
-    let Ok(Some((header, _key, _value))) = engine.get_entry_including_deleted(&hash) else {
-      continue;
-    };
-    let Ok(record) = crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) else {
-      continue;
-    };
-    if !path_in_reindex_scope(&normalized_base, &record.path) {
-      continue;
-    }
-
-    let Ok(path_key) = crate::engine::directory_ops::file_path_hash(&record.path, &algo) else {
-      continue;
-    };
-    if engine.get_entry(&path_key).map_err(|error| error.to_string())?.is_some() {
-      paths.insert(record.path);
-    }
-  }
-
-  Ok(paths.into_iter().collect())
+  snapshot
+    .visit_by_type(crate::engine::KV_TYPE_FILE_RECORD, |entry| {
+      memory.record_work(1)?;
+      let transient_bytes = u64::from(entry.total_length)
+        .checked_mul(2)
+        .ok_or_else(|| EngineError::ResourceExhausted("forced reindex FileRecord estimate overflow".to_string()))?;
+      memory.reserve(transient_bytes, "forced reindex FileRecord admission failed")?;
+      let read_result = engine.get_entry_including_deleted(&entry.hash);
+      let selected = match read_result {
+        Ok(Some((header, _key, value))) => {
+          match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
+            Ok(record) if path_in_reindex_scope(&normalized_base, &record.path) => {
+              let path_key = crate::engine::directory_ops::file_path_hash(&record.path, &algo)?;
+              if entry.hash == path_key {
+                let retained_bytes = u64::try_from(record.path.capacity())
+                  .map_err(|_| EngineError::ResourceExhausted("forced reindex path estimate overflow".to_string()))?;
+                memory.reserve(retained_bytes, "forced reindex retained path admission failed")?;
+                Some(record.path)
+              } else {
+                None
+              }
+            }
+            Ok(_) | Err(_) => None,
+          }
+        }
+        Ok(None) => None,
+        Err(error) => {
+          return match memory.release(transient_bytes, "forced reindex FileRecord release after read failure") {
+            Ok(()) => Err(error),
+            Err(release_error) => Err(release_error),
+          };
+        }
+      };
+      memory.release(transient_bytes, "forced reindex FileRecord release failed")?;
+      if let Some(path) = selected {
+        paths.push(path);
+      }
+      Ok(true)
+    })
+    .map_err(|error| error.to_string())?;
+  drop(snapshot);
+  paths.sort();
+  Ok(paths)
 }
 
 fn path_in_reindex_scope(base_path: &str, candidate_path: &str) -> bool {

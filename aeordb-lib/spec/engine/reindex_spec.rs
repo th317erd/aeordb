@@ -3,12 +3,13 @@ use std::sync::Arc;
 use aeordb::engine::directory_ops::{DirectoryOps, file_content_hash, file_identity_hash, file_path_hash};
 use aeordb::engine::event_bus::EventBus;
 use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::query_engine::{FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryStrategy, ExplainMode};
 use aeordb::engine::request_context::RequestContext;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::task_queue::{TaskQueue, TaskStatus};
 use aeordb::engine::task_worker::process_next_task;
-use aeordb::engine::{EntryType, IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, IndexingPipeline};
+use aeordb::engine::{EngineError, EntryType, IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, IndexingPipeline};
 use aeordb::plugins::PluginManager;
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -237,6 +238,52 @@ fn test_forced_reindex_migrates_legacy_file_record_to_current_version_and_indexe
     .unwrap();
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].file_record.path, "/legacy/a.txt");
+}
+
+#[test]
+fn file_record_migration_defers_before_rewrite_under_soft_pressure() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let path = "/migration-pressure/a.txt";
+  ops.store_file_buffered(&ctx, path, b"legacy migration pressure proof", Some("text/plain")).unwrap();
+  rewrite_file_record_as_v0(&engine, path);
+
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let policy = before.policy.expect("test engine must have a resolved memory policy");
+  let pressure_bytes = policy.soft_limit_bytes.saturating_sub(before.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let error = ops.migrate_file_record_to_current_version(path).expect_err("soft pressure must defer migration before rewrite");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)));
+
+  let path_key = file_path_hash(path, &engine.hash_algo()).unwrap();
+  let (header, _key, _value) = engine.get_entry(&path_key).unwrap().unwrap();
+  assert_eq!(header.entry_version, 0, "deferred migration must leave the old FileRecord authoritative");
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+  assert!(owner.deferrals > 0);
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn file_record_migration_accounts_and_releases_its_working_set() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let path = "/migration-memory/a.txt";
+  ops.store_file_buffered(&ctx, path, &vec![0x5a; 700_000], Some("text/plain")).unwrap();
+  rewrite_file_record_as_v0(&engine, path);
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+
+  assert!(ops.migrate_file_record_to_current_version(path).unwrap());
+
+  let after = coordinator.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+  assert!(after.peak_reserved_bytes > before.peak_reserved_bytes);
+  assert_eq!(after.reserved_bytes, before.reserved_bytes);
+  assert_eq!(after.active_reservations, before.active_reservations);
 }
 
 #[test]

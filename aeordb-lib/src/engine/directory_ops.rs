@@ -11,6 +11,7 @@ use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_co
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
@@ -193,6 +194,63 @@ fn ensure_file_record_content_hash(engine: &StorageEngine, record: &mut FileReco
     )));
   }
   record.content_hash = whole_file_content_hash_from_chunks(engine, &record.chunk_hashes)?;
+  Ok(())
+}
+
+fn ensure_file_record_content_hash_for_migration(
+  engine: &StorageEngine,
+  record: &mut FileRecord,
+  memory: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  let hash_length = engine.hash_algo().hash_length();
+  if record.content_hash.len() == hash_length {
+    return Ok(());
+  }
+  if !record.content_hash.is_empty() {
+    return Err(EngineError::InvalidInput(format!(
+      "FileRecord content hash length {} does not match expected hash length {}",
+      record.content_hash.len(),
+      hash_length,
+    )));
+  }
+
+  let mut hasher = engine.hash_algo().incremental_hasher()?;
+  for chunk_hash in &record.chunk_hashes {
+    memory.record_work(1)?;
+    let metadata = engine
+      .get_chunk_stream_metadata(chunk_hash, false)?
+      .ok_or_else(|| EngineError::NotFound(format!("Chunk not found while computing file content hash: {}", hex::encode(chunk_hash))))?;
+    let decoded_bound = metadata.raw_value_length.unwrap_or(DEFAULT_CHUNK_SIZE as u64);
+    let chunk_workspace = u64::from(metadata.total_length)
+      .checked_add(decoded_bound)
+      .ok_or_else(|| EngineError::ResourceExhausted("file record migration chunk estimate overflow".to_string()))?;
+    memory.reserve(chunk_workspace, "file record migration chunk admission failed")?;
+    let decoded_bound_usize = usize::try_from(decoded_bound)
+      .map_err(|_| EngineError::ResourceExhausted(format!("file record migration chunk bound exceeds this platform: {decoded_bound}")))?;
+    let read_result = engine.read_chunk_verified_bounded(chunk_hash, decoded_bound_usize);
+    let consume_result = match read_result {
+      Ok(Some(chunk)) => {
+        if metadata.raw_value_length.is_some_and(|length| length != chunk.len() as u64) {
+          Err(EngineError::CorruptEntry {
+            offset: metadata.offset,
+            reason: format!("migration chunk length {} does not match stored raw length {:?}", chunk.len(), metadata.raw_value_length),
+          })
+        } else {
+          hasher.update(&chunk);
+          Ok(())
+        }
+      }
+      Ok(None) => Err(EngineError::NotFound(format!("Chunk not found while computing file content hash: {}", hex::encode(chunk_hash)))),
+      Err(error) => Err(error),
+    };
+    let release_result = memory.release(chunk_workspace, "file record migration chunk release failed");
+    match (consume_result, release_result) {
+      (Ok(()), Ok(())) => {}
+      (Err(error), Ok(())) => return Err(error),
+      (_, Err(error)) => return Err(error),
+    }
+  }
+  record.content_hash = hasher.finalize();
   Ok(())
 }
 
@@ -1599,12 +1657,46 @@ impl<'a> DirectoryOps<'a> {
   /// refreshing the path, identity, and current content-addressed FileRecord
   /// keys. Old content-addressed keys are left as garbage for normal GC.
   pub fn migrate_file_record_to_current_version(&self, path: &str) -> EngineResult<bool> {
+    let mut memory =
+      OperationMemoryBudget::new(self.engine, "file record migration", MemoryOwner::Migration, AdmissionClass::Maintenance, 0, None)?;
+    self.migrate_file_record_to_current_version_with_memory(path, &mut memory)
+  }
+
+  pub(crate) fn migrate_file_record_to_current_version_with_memory(
+    &self,
+    path: &str,
+    memory: &mut OperationMemoryBudget,
+  ) -> EngineResult<bool> {
+    let checkpoint = memory.checkpoint();
+    let result = self.migrate_file_record_to_current_version_inner(path, memory);
+    let release = memory.release_to(checkpoint, "file record migration workspace release failed");
+    match (result, release) {
+      (Ok(value), Ok(())) => Ok(value),
+      (Err(error), Ok(())) => Err(error),
+      (_, Err(error)) => Err(error),
+    }
+  }
+
+  fn migrate_file_record_to_current_version_inner(&self, path: &str, memory: &mut OperationMemoryBudget) -> EngineResult<bool> {
+    let path_workspace = path
+      .len()
+      .checked_mul(2)
+      .and_then(|bytes| bytes.checked_add(512))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("file record migration path estimate overflow".to_string()))?;
+    memory.reserve(path_workspace, "file record migration path admission failed")?;
     let normalized = normalize_path(path);
     let _namespace = self.engine.namespace_write_guard()?;
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let file_key = file_path_hash(&normalized, &algo)?;
 
+    let path_entry = self.engine.get_kv_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
+    let record_workspace = u64::from(path_entry.total_length)
+      .checked_mul(3)
+      .and_then(|bytes| bytes.checked_add(std::mem::size_of::<FileRecord>() as u64))
+      .ok_or_else(|| EngineError::ResourceExhausted("file record migration record estimate overflow".to_string()))?;
+    memory.reserve(record_workspace, "file record migration record admission failed")?;
     let (path_header, _stored_key, value) = self.engine.get_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
     let mut record = FileRecord::deserialize(&value, hash_length, path_header.entry_version)?;
 
@@ -1617,7 +1709,7 @@ impl<'a> DirectoryOps<'a> {
     if record.content_hash.len() != hash_length {
       needs_migration = true;
     }
-    ensure_file_record_content_hash(self.engine, &mut record)?;
+    ensure_file_record_content_hash_for_migration(self.engine, &mut record, memory)?;
 
     let identity_key = file_identity_hash(&normalized, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
     if file_record_header_needs_migration(self.engine, &identity_key)? {
@@ -1629,6 +1721,8 @@ impl<'a> DirectoryOps<'a> {
     if file_record_header_needs_migration(self.engine, &content_key)? {
       needs_migration = true;
     }
+    drop(file_value);
+    drop(value);
 
     if !needs_migration {
       return Ok(false);
