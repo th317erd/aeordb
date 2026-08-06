@@ -122,7 +122,8 @@ impl PluginCache {
     // Keep their internal retention ceiling conservative without inventing a
     // public configuration property outside the frozen v4 registry.
     let max_bytes = engine
-      .memory_coordinator_snapshot()
+      .memory_coordinator()
+      .snapshot()
       .ok()
       .and_then(|snapshot| snapshot.policy)
       .map_or(0, |policy| (256 * 1024 * 1024).min(policy.hard_limit_bytes / 32));

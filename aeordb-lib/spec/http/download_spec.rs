@@ -8,7 +8,8 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
-use aeordb::engine::RequestContext;
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+use aeordb::engine::{RequestContext, DEFAULT_CHUNK_SIZE};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<aeordb::engine::StorageEngine>, tempfile::TempDir) {
@@ -80,6 +81,60 @@ async fn download_zip_with_valid_paths() {
   let mut content = String::new();
   readme.read_to_string(&mut content).unwrap();
   assert_eq!(content, "# Hello");
+}
+
+#[tokio::test]
+async fn download_zip_frame_retains_streaming_reservation_until_consumed() {
+  let (app, jwt_manager, engine, temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let mut state = 0x9e37_79b9u32;
+  let data: Vec<u8> = (0..1024 * 1024)
+    .map(|_| {
+      state ^= state << 13;
+      state ^= state >> 17;
+      state ^= state << 5;
+      state as u8
+    })
+    .collect();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/downloads/random.bin", &data, Some("application/octet-stream"))
+    .unwrap();
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let body = serde_json::json!({ "paths": ["/downloads/random.bin"] });
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/download")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let frame = body.frame().await.unwrap().unwrap();
+  assert!(!frame.data_ref().unwrap().is_empty());
+  drop(body);
+
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations, "ZIP response bytes lost their reservation before consumption");
+  drop(frame);
+  for _ in 0..100 {
+    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    let has_artifact = std::fs::read_dir(temp.path())
+      .unwrap()
+      .filter_map(Result::ok)
+      .any(|entry| entry.file_name().to_string_lossy().starts_with(".aeordb-response-zip-"));
+    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes && !has_artifact {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  panic!("ZIP response reservation did not release after disconnect");
 }
 
 #[tokio::test]
@@ -379,6 +434,170 @@ async fn batch_fetch_binary_content_is_encoded_as_lossy_utf8_string() {
   assert_eq!(response.status(), StatusCode::OK);
   let json = response_json(response).await;
   assert_eq!(json["/bin/data.bin"]["content"], "f\u{FFFD}g");
+}
+
+#[tokio::test]
+async fn batch_fetch_preserves_utf8_and_json_escaping_across_chunk_boundaries() {
+  let (app, jwt_manager, engine, _temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let mut data = vec![b'a'; DEFAULT_CHUNK_SIZE - 1];
+  data.extend_from_slice("é\n\"\\tail".as_bytes());
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/utf8/boundary.txt", &data, Some("text/plain")).unwrap();
+
+  let body = serde_json::json!({ "paths": ["/utf8/boundary.txt"] });
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/fetch")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let json = response_json(response).await;
+  assert_eq!(json["/utf8/boundary.txt"]["content"], String::from_utf8(data).unwrap());
+}
+
+#[tokio::test]
+async fn batch_fetch_frame_retains_reservation_and_disconnect_removes_artifact() {
+  let (app, jwt_manager, engine, temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let data = vec![b'x'; DEFAULT_CHUNK_SIZE * 3];
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/fetch/disconnect.txt", &data, Some("text/plain")).unwrap();
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let body = serde_json::json!({ "paths": ["/fetch/disconnect.txt"] });
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/fetch")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let frame = body.frame().await.unwrap().unwrap();
+  drop(body);
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations);
+  drop(frame);
+
+  for _ in 0..100 {
+    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    let has_artifact = std::fs::read_dir(temp.path())
+      .unwrap()
+      .filter_map(Result::ok)
+      .any(|entry| entry.file_name().to_string_lossy().starts_with(".aeordb-response-fetch-"));
+    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes && !has_artifact {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  panic!("batch fetch response retained memory or its temporary artifact after disconnect");
+}
+
+#[tokio::test]
+async fn bulk_response_pressure_returns_503_without_orphaning_artifacts() {
+  let (app, jwt_manager, engine, temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/pressure/file.txt", b"bounded", Some("text/plain")).unwrap();
+  let zip_app = app.clone();
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let pressure = memory
+    .reserve(
+      MemoryOwner::StreamingRead,
+      policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes,
+      AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead),
+    )
+    .unwrap();
+
+  for (app, route) in [(zip_app, "/files/download"), (app, "/files/fetch")] {
+    let body = serde_json::json!({ "paths": ["/pressure/file.txt"] });
+    let response = app
+      .oneshot(
+        Request::builder()
+          .method("POST")
+          .uri(route)
+          .header("content-type", "application/json")
+          .header("authorization", &auth)
+          .body(Body::from(serde_json::to_vec(&body).unwrap()))
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{route} should refuse under streaming pressure");
+  }
+  drop(pressure);
+  assert!(engine.durability_failure().is_none());
+  assert!(
+    !std::fs::read_dir(temp.path())
+      .unwrap()
+      .filter_map(Result::ok)
+      .any(|entry| entry.file_name().to_string_lossy().starts_with(".aeordb-response-")),
+    "failed bulk responses must remove temporary artifacts"
+  );
+}
+
+#[tokio::test]
+async fn batch_range_pressure_is_503_even_when_continue_on_error_is_requested() {
+  let (app, jwt_manager, engine, temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/pressure/range.txt", b"bounded range", Some("text/plain"))
+    .unwrap();
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let response_frame_headroom = 128 * 1024;
+  let pressure = memory
+    .reserve(
+      MemoryOwner::StreamingRead,
+      policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes - response_frame_headroom,
+      AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead),
+    )
+    .unwrap();
+
+  let body = serde_json::json!({
+    "items": [{
+      "path": "/pressure/range.txt",
+      "range": { "mode": "chars", "start": 0, "end": 4 }
+    }],
+    "continue_on_error": true
+  });
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/fetch")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  drop(pressure);
+  assert!(engine.durability_failure().is_none());
+  assert!(
+    !std::fs::read_dir(temp.path())
+      .unwrap()
+      .filter_map(Result::ok)
+      .any(|entry| entry.file_name().to_string_lossy().starts_with(".aeordb-response-fetch-range-")),
+    "range admission refusal must remove its partial response artifact"
+  );
 }
 
 #[tokio::test]

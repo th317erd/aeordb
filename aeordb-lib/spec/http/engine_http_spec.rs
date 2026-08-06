@@ -7,8 +7,9 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::{
-  save_lifecycle_config, CompressionAlgorithm, DirectoryOps, LifecycleConfig, RequestContext, StorageEngine, DEFAULT_CHUNK_SIZE,
+  save_lifecycle_config, CompressionAlgorithm, DirectoryOps, EntryType, LifecycleConfig, RequestContext, StorageEngine, DEFAULT_CHUNK_SIZE,
 };
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -118,6 +119,249 @@ async fn test_engine_get_file_returns_data() {
   let after_read = engine.counters().snapshot();
   assert!(after_read.reads_total > before_read.reads_total, "GET /files should count as a read");
   assert!(after_read.bytes_read_total - before_read.bytes_read_total >= 5, "GET /files should count at least the served bytes");
+}
+
+#[tokio::test]
+async fn file_response_frame_retains_streaming_reservation_after_body_drop() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 3).map(|index| (index % 251) as u8).collect();
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/test/frame-lifetime.bin")
+        .header("content-type", "application/octet-stream")
+        .header("authorization", &auth)
+        .body(Body::from(data))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder().method("GET").uri("/files/test/frame-lifetime.bin").header("authorization", &auth).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let frame = body.frame().await.unwrap().unwrap();
+  assert!(frame.data_ref().is_some());
+  drop(body);
+
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations, "delivered bytes lost their reservation with the body stream");
+  drop(frame);
+  for _ in 0..100 {
+    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  panic!("streaming response reservations did not release after frame and body drop");
+}
+
+#[tokio::test]
+async fn contiguous_full_file_read_uses_one_default_prefetch_frame() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 5 + 123).map(|index| (index % 251) as u8).collect();
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/test/coalesced-full.bin")
+        .header("content-type", "application/octet-stream")
+        .header("authorization", &auth)
+        .body(Body::from(data.clone()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder().method("GET").uri("/files/test/coalesced-full.bin").header("authorization", &auth).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let mut frames = 0usize;
+  let mut actual = Vec::new();
+  while let Some(frame) = body.frame().await {
+    let frame = frame.unwrap();
+    if let Some(bytes) = frame.data_ref() {
+      frames += 1;
+      actual.extend_from_slice(bytes);
+    }
+  }
+  assert_eq!(actual, data);
+  assert_eq!(frames, 1, "five contiguous 256 KiB chunks fit inside the default 2.5 MiB prefetch window");
+}
+
+#[tokio::test]
+async fn full_file_read_obeys_stored_prefetch_and_coalesce_limits_after_restart() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("configured-read.aeordb");
+  {
+    let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+    DirectoryOps::new(&engine)
+      .store_file_buffered(
+        &RequestContext::system(),
+        "/.aeordb-config/runtime.json",
+        br#"{"schema_version":1,"io":{"read_prefetch_bytes":262144,"read_coalesce_max_bytes":262144}}"#,
+        Some("application/json"),
+      )
+      .unwrap();
+    engine.shutdown().unwrap();
+  }
+  let engine = Arc::new(StorageEngine::open(path.to_str().unwrap()).unwrap());
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let auth = bearer_token(&jwt_manager);
+  let app = create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone());
+  let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 3).map(|index| (index % 251) as u8).collect();
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/test/configured-frames.bin")
+        .header("content-type", "application/octet-stream")
+        .header("authorization", &auth)
+        .body(Body::from(data.clone()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder().method("GET").uri("/files/test/configured-frames.bin").header("authorization", &auth).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let mut frames = 0usize;
+  let mut actual = Vec::new();
+  while let Some(frame) = body.frame().await {
+    let frame = frame.unwrap();
+    if let Some(bytes) = frame.data_ref() {
+      frames += 1;
+      actual.extend_from_slice(bytes);
+    }
+  }
+  assert_eq!(actual, data);
+  assert_eq!(frames, 3, "a one-chunk prefetch/coalesce policy must emit one frame per chunk");
+}
+
+#[tokio::test]
+async fn file_response_backpressure_keeps_only_one_pending_frame() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("backpressure-read.aeordb");
+  {
+    let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+    DirectoryOps::new(&engine)
+      .store_file_buffered(
+        &RequestContext::system(),
+        "/.aeordb-config/runtime.json",
+        br#"{"schema_version":1,"io":{"read_prefetch_bytes":262144,"read_coalesce_max_bytes":262144}}"#,
+        Some("application/json"),
+      )
+      .unwrap();
+    engine.shutdown().unwrap();
+  }
+  let engine = Arc::new(StorageEngine::open(path.to_str().unwrap()).unwrap());
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let auth = bearer_token(&jwt_manager);
+  let data = vec![b'x'; DEFAULT_CHUNK_SIZE * 8];
+  let response = create_app_with_jwt_and_engine(jwt_manager.clone(), engine.clone())
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/test/backpressure.bin")
+        .header("content-type", "application/octet-stream")
+        .header("authorization", &auth)
+        .body(Body::from(data))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder().method("GET").uri("/files/test/backpressure.bin").header("authorization", &auth).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  let blocked = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(blocked.active_reservations > baseline.active_reservations);
+  assert!(
+    blocked.active_reservations <= baseline.active_reservations + 3,
+    "one inventory, one queued frame, and one producer-held frame are the maximum under channel(1) backpressure: {blocked:?}"
+  );
+
+  drop(response);
+  for _ in 0..100 {
+    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes {
+      return;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+  }
+  panic!("backpressured file response retained reservations after disconnect");
+}
+
+#[tokio::test]
+async fn file_stream_inventory_pressure_is_a_retryable_503() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/test/stream-pressure.bin")
+        .header("content-type", "application/octet-stream")
+        .header("authorization", &auth)
+        .body(Body::from("bounded"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let pressure = memory
+    .reserve(
+      MemoryOwner::StreamingRead,
+      policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes,
+      AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead),
+    )
+    .unwrap();
+  let response = app
+    .oneshot(
+      Request::builder().method("GET").uri("/files/test/stream-pressure.bin").header("authorization", &auth).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  drop(pressure);
+  assert!(engine.durability_failure().is_none());
 }
 
 #[tokio::test]
@@ -1429,6 +1673,109 @@ async fn test_get_by_hash_returns_file_content() {
 
   let bytes = body_bytes(response.into_body()).await;
   assert_eq!(String::from_utf8(bytes).unwrap(), content);
+}
+
+#[tokio::test]
+async fn get_chunk_by_hash_frame_retains_streaming_reservation() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE).map(|index| (index % 251) as u8).collect();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&RequestContext::system(), "/hashtest/raw-chunk.bin", &data, Some("application/octet-stream")).unwrap();
+  let record = ops.get_metadata("/hashtest/raw-chunk.bin").unwrap().unwrap();
+  let chunk_hash = hex::encode(&record.chunk_hashes[0]);
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let response = app
+    .oneshot(
+      Request::builder().method("GET").uri(format!("/blobs/{chunk_hash}")).header("authorization", &auth).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let frame = body.frame().await.unwrap().unwrap();
+  assert_eq!(frame.data_ref().unwrap().as_ref(), data);
+  drop(body);
+
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations, "raw chunk bytes lost their reservation before socket consumption");
+  drop(frame);
+  for _ in 0..100 {
+    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  panic!("raw chunk response reservation did not release after frame drop");
+}
+
+#[tokio::test]
+async fn get_raw_entry_by_hash_frame_retains_streaming_reservation() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let key = engine.compute_hash(b"raw-directory-index").unwrap();
+  let value = vec![b'd'; 128 * 1024];
+  engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri(format!("/blobs/{}", hex::encode(&key)))
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let frame = body.frame().await.unwrap().unwrap();
+  assert_eq!(frame.data_ref().unwrap().as_ref(), value);
+  drop(body);
+
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations, "raw entry bytes lost their reservation before socket consumption");
+  drop(frame);
+  let released = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert_eq!(released.active_reservations, baseline.active_reservations);
+  assert_eq!(released.reserved_bytes, baseline.reserved_bytes);
+}
+
+#[tokio::test]
+async fn get_raw_entry_by_hash_pressure_is_a_retryable_503() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let key = engine.compute_hash(b"pressured-raw-directory-index").unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &key, &vec![b'd'; 128 * 1024]).unwrap();
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let pressure = memory
+    .reserve(
+      MemoryOwner::StreamingRead,
+      policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes,
+      AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead),
+    )
+    .unwrap();
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri(format!("/blobs/{}", hex::encode(&key)))
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  drop(pressure);
+  assert!(engine.durability_failure().is_none());
 }
 
 #[tokio::test]

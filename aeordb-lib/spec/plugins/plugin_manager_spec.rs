@@ -2,7 +2,7 @@ use aeordb::plugins::plugin_manager::{PluginManager, PluginManagerError};
 use aeordb::plugins::types::PluginType;
 use aeordb::server::create_temp_engine_for_tests;
 use aeordb::engine::RequestContext;
-use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
 
 /// Compile a minimal valid WASM module for testing.
 fn minimal_wasm_bytes() -> Vec<u8> {
@@ -52,6 +52,23 @@ fn fuel_exhausting_wasm_bytes() -> Vec<u8> {
     "#,
   )
   .expect("WAT should be valid")
+}
+
+#[test]
+fn plugin_manager_construction_does_not_resample_or_mutate_host_memory() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let sentinel = HostMemorySample {
+    rss_bytes: 17,
+    private_bytes: Some(19),
+    mapped_bytes: Some(23),
+    allocator_bytes: Some(29),
+    host_available_bytes: Some(u64::MAX),
+  };
+  engine.memory_coordinator().update_host_sample(sentinel).unwrap();
+
+  let _manager = PluginManager::new(engine.clone());
+
+  assert_eq!(engine.memory_coordinator().snapshot().unwrap().host, sentinel);
 }
 
 /// Create a fresh PluginManager backed by a temp engine.

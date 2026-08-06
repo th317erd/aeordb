@@ -775,7 +775,14 @@ impl StorageEngine {
   }
 
   pub fn memory_coordinator(&self) -> Arc<MemoryCoordinator> {
-    Arc::clone(self.memory_coordinator.get().expect("StorageEngine constructors initialize the memory coordinator"))
+    self.memory_coordinator_if_initialized().expect("StorageEngine constructors initialize the memory coordinator")
+  }
+
+  /// Return the process memory coordinator when startup has reached memory
+  /// policy activation. Early startup must read configuration and persistent
+  /// recovery controls before that policy can be resolved.
+  pub(crate) fn memory_coordinator_if_initialized(&self) -> Option<Arc<MemoryCoordinator>> {
+    self.memory_coordinator.get().map(Arc::clone)
   }
 
   pub(crate) fn database_path(&self) -> &Path {
@@ -3111,12 +3118,59 @@ impl StorageEngine {
 
   /// Return metadata for a live chunk without loading its value.
   pub fn get_chunk_metadata(&self, hash: &[u8]) -> EngineResult<Option<ChunkEntryMetadata>> {
+    self.get_chunk_metadata_internal(hash, false)
+  }
+
+  /// Return header-accurate metadata for read planning. Unlike the commit-side
+  /// metadata shortcut, this reports an unknown decoded length for compressed
+  /// chunks so callers cannot mistake stored bytes for logical file bytes.
+  pub(crate) fn get_chunk_stream_metadata(&self, hash: &[u8], include_deleted: bool) -> EngineResult<Option<ChunkEntryMetadata>> {
+    let _operation = self.operation_guard("get_chunk_stream_metadata")?;
+    let snapshot = self.kv_snapshot.load();
+    let Some(kv_entry) = snapshot.get(hash)? else {
+      return Ok(None);
+    };
+    if kv_entry.is_deleted() && !include_deleted {
+      return Ok(None);
+    }
+    if kv_entry.entry_type() != KV_TYPE_CHUNK {
+      return Err(EngineError::InvalidInput(format!("Hash {} is not a chunk entry", hex::encode(hash))));
+    }
+
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Self::validate_kv_entry_offset(&writer, &kv_entry, hash, "get_chunk_stream_metadata")?;
+    let header = writer.read_entry_header_at_shared(kv_entry.offset)?;
+    if header.entry_type != EntryType::Chunk {
+      return Err(EngineError::CorruptEntry {
+        offset: kv_entry.offset,
+        reason: format!("Chunk KV row points to {:?} entry", header.entry_type),
+      });
+    }
+    if header.total_length != kv_entry.total_length {
+      return Err(EngineError::CorruptEntry {
+        offset: kv_entry.offset,
+        reason: format!("Chunk header length {} does not match KV length {}", header.total_length, kv_entry.total_length),
+      });
+    }
+
+    let stored_value_length = header.value_length as u64;
+    let raw_value_length = (header.compression_algo == CompressionAlgorithm::None).then_some(stored_value_length);
+    Ok(Some(ChunkEntryMetadata {
+      offset: kv_entry.offset,
+      total_length: kv_entry.total_length,
+      stored_value_length,
+      raw_value_length,
+      compression_algo: header.compression_algo,
+    }))
+  }
+
+  fn get_chunk_metadata_internal(&self, hash: &[u8], include_deleted: bool) -> EngineResult<Option<ChunkEntryMetadata>> {
     let _operation = self.operation_guard("get_chunk_metadata")?;
     let snapshot = self.kv_snapshot.load();
     let Some(kv_entry) = snapshot.get(hash)? else {
       return Ok(None);
     };
-    if kv_entry.is_deleted() {
+    if kv_entry.is_deleted() && !include_deleted {
       return Ok(None);
     }
 
@@ -3239,10 +3293,34 @@ impl StorageEngine {
   /// Read and verify a live chunk while bounding both its stored representation
   /// and decoded output before either can grow without caller control.
   pub fn read_chunk_verified_bounded(&self, hash: &[u8], maximum_decoded_length: usize) -> EngineResult<Option<Vec<u8>>> {
+    self.read_chunk_verified_bounded_internal(hash, maximum_decoded_length, false)
+  }
+
+  /// Read and verify a live or deleted historical chunk while bounding both
+  /// its stored representation and decoded output before allocation.
+  pub(crate) fn read_chunk_verified_including_deleted_bounded(
+    &self,
+    hash: &[u8],
+    maximum_decoded_length: usize,
+  ) -> EngineResult<Option<Vec<u8>>> {
+    self.read_chunk_verified_bounded_internal(hash, maximum_decoded_length, true)
+  }
+
+  fn read_chunk_verified_bounded_internal(
+    &self,
+    hash: &[u8],
+    maximum_decoded_length: usize,
+    include_deleted: bool,
+  ) -> EngineResult<Option<Vec<u8>>> {
     let bounded_decoded_length = maximum_decoded_length.min(u32::MAX as usize);
     let maximum_stored_length =
       zstd::zstd_safe::compress_bound(bounded_decoded_length).max(maximum_decoded_length).try_into().unwrap_or(u32::MAX);
-    match self.get_entry_verified_bounded(hash, maximum_stored_length)? {
+    let entry = if include_deleted {
+      self.get_entry_including_deleted_verified_bounded(hash, maximum_stored_length)?
+    } else {
+      self.get_entry_verified_bounded(hash, maximum_stored_length)?
+    };
+    match entry {
       Some((header, _key, value)) => self.decode_chunk_entry_bounded(hash, header, value, maximum_decoded_length).map(Some),
       None => Ok(None),
     }

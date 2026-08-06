@@ -25,6 +25,7 @@ pub mod state;
 pub mod symlink_routes;
 pub mod sync_routes;
 pub mod task_routes;
+mod temp_response;
 pub mod upload_routes;
 pub mod version_file_routes;
 pub mod version_routes;

@@ -203,7 +203,12 @@
           - [x] Refuse pre-mutation admission without latching the database when durability waiter headroom is exhausted.
           - [x] Retain each reservation until its exact waiter record is retired, including failure and unwind paths.
           - [x] Prove bounded zero-byte estimates, group selection, concurrent pressure, accounting release, and unchanged hard-frontier semantics.
-        - [ ] Bound file and range stream inventories, coalesced spans, decoded chunks, and response lifetime under `streaming_read` admission.
+        - [x] Bound file and range stream inventories, coalesced spans, decoded chunks, and response lifetime under `streaming_read` admission.
+          - [x] Make embedded streams reserve hash inventories and decoded chunks, with exact release on success, error, exhaustion, and drop.
+          - [x] Replace hard-coded range batching with resolved prefetch/coalesce limits and reserve every planned span before disk reads or decoding.
+          - [x] Move synchronous database reads off async body polling and retain frame reservations through HTTP completion or disconnect.
+          - [x] Cover direct hash/chunk downloads, historical/deleted reads, and ZIP/batch response amplification without full-file memory spikes.
+          - [x] Prove pressure refusal, malformed metadata, bounded channel backpressure, cancellation/disconnect, exact ranges, restart, and live large-file behavior.
         - [ ] Bound v3/v4 migration capture, checkpoints, and cutover scratch under `migration` admission.
         - [ ] Bound verify, rebuild, header repair, integrity, and explicit recovery scratch under `repair` admission.
         - [ ] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
@@ -211,6 +216,7 @@
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
       - [ ] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
+      - [ ] Correct `verify` logical-data accounting to report file logical bytes rather than serialized `FileRecord` bytes, with explicit current/live versus retained-history semantics.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
 

@@ -8,7 +8,7 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::version_manager::VersionManager;
-use aeordb::engine::{RequestContext, StorageEngine};
+use aeordb::engine::{CompressionAlgorithm, DirectoryOps, RequestContext, StorageEngine, DEFAULT_CHUNK_SIZE};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -110,6 +110,41 @@ async fn test_get_file_at_snapshot() {
   let (status, _, bytes) = get_file(app, &auth, "/files/file.txt?snapshot=snap1").await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(bytes, b"version-one");
+}
+
+#[tokio::test]
+async fn test_get_compressed_historical_file_range_across_deleted_chunks() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let ctx = RequestContext::system();
+  let mut original = vec![b'a'; DEFAULT_CHUNK_SIZE];
+  original.extend(std::iter::repeat_n(b'b', DEFAULT_CHUNK_SIZE));
+  original.extend(std::iter::repeat_n(b'c', 97));
+  DirectoryOps::new(&engine)
+    .store_file_compressed(&ctx, "/compressed-history.bin", &original, Some("application/octet-stream"), CompressionAlgorithm::Zstd)
+    .unwrap();
+  VersionManager::new(&engine).create_snapshot(&ctx, "compressed-history", HashMap::new()).unwrap();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&ctx, "/compressed-history.bin", b"replacement", Some("application/octet-stream"))
+    .unwrap();
+
+  let start = DEFAULT_CHUNK_SIZE - 17;
+  let end = DEFAULT_CHUNK_SIZE * 2 + 31;
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri("/files/compressed-history.bin?snapshot=compressed-history")
+        .header("authorization", &auth)
+        .header("range", format!("bytes={start}-{end}"))
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+  assert_eq!(response.headers()["content-range"], format!("bytes {start}-{end}/{}", original.len()));
+  assert_eq!(body_bytes(response.into_body()).await, original[start..=end]);
 }
 
 /// Store v1, snapshot, GET with ?version={hex_hash} returns v1 content.

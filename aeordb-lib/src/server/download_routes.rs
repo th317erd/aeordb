@@ -8,12 +8,14 @@ use axum::{
 use serde::Deserialize;
 use std::io::Write;
 
-use super::responses::ErrorResponse;
+use super::responses::{engine_error_response, ErrorResponse};
 use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
+use super::temp_response::{body_from_tempfile, tempfile_for_engine, ResponseBuildCancellation, ResponseBuildGuard};
 use crate::auth::TokenClaims;
 use crate::engine::directory_ops::{DirectoryOps, is_system_path};
 use crate::engine::entry_type::EntryType;
+use crate::engine::errors::EngineError;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::permission_resolver::CrudlifyOp;
 
@@ -73,90 +75,107 @@ pub async fn download_zip(
 
   const MAX_ZIP_SIZE: u64 = 2_147_483_648; // 2 GB
 
-  let ops = DirectoryOps::new(&state.engine);
-  let mut zip_buffer = Vec::new();
-  let mut skipped: Vec<String> = Vec::new();
-  let mut cumulative_size: u64 = 0;
-
   // Compute common path prefix so ZIP entries are relative to the user's
   // browsing context, not the DB root. E.g. selecting /docs/readme.md and
   // /docs/notes.txt produces readme.md and notes.txt, not docs/readme.md.
   let normalized_paths: Vec<String> = body.paths.iter().map(|p| normalize_path(p)).collect();
   let common_prefix = compute_common_prefix(&normalized_paths);
+  let engine = std::sync::Arc::clone(&state.engine);
+  let paths = body.paths;
+  let mut build_guard = ResponseBuildGuard::new();
+  let cancellation = build_guard.cancellation();
+  let build = tokio::task::spawn_blocking(move || build_zip(&engine, &paths, &common_prefix, MAX_ZIP_SIZE, &cancellation)).await;
+  build_guard.disarm();
+  let zip = match build {
+    Ok(Ok(zip)) => zip,
+    Ok(Err(ZipBuildError::TooLarge)) => {
+      return ErrorResponse::new("Download exceeds the 2 GB size limit. Select fewer files or download individually.")
+        .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+        .into_response();
+    }
+    Ok(Err(ZipBuildError::Engine(error))) => return engine_error_response("Failed to create ZIP archive", &error),
+    Ok(Err(error)) => {
+      tracing::error!("Failed to create ZIP archive: {}", error);
+      return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+    }
+    Err(error) => {
+      tracing::error!("ZIP builder task panicked: {}", error);
+      return ErrorResponse::new("Failed to create ZIP archive: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
 
+  let (response_body, content_length) = match body_from_tempfile(zip.file, std::sync::Arc::clone(&state.engine)) {
+    Ok(response) => response,
+    Err(error) => return engine_error_response("Failed to stream ZIP archive", &error),
+  };
+
+  let mut builder = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header(header::CONTENT_TYPE, "application/zip")
+    .header(header::CONTENT_LENGTH, content_length.to_string())
+    .header(header::CONTENT_DISPOSITION, "attachment; filename=\"aeordb-download.zip\"");
+
+  if !zip.skipped.is_empty() {
+    builder = builder.header(header::HeaderName::from_static("x-aeordb-skipped"), zip.skipped.join(", "));
+  }
+
+  builder.body(response_body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build ZIP response").into_response())
+}
+
+struct ZipBuildOutput {
+  file: tempfile::NamedTempFile,
+  skipped: Vec<String>,
+}
+
+fn build_zip(
+  engine: &crate::engine::StorageEngine,
+  paths: &[String],
+  common_prefix: &str,
+  max_size: u64,
+  cancellation: &ResponseBuildCancellation,
+) -> Result<ZipBuildOutput, ZipBuildError> {
+  cancellation.check().map_err(ZipBuildError::Engine)?;
+  let ops = DirectoryOps::new(engine);
+  let mut file = tempfile_for_engine(engine, "zip").map_err(|error| ZipBuildError::Write(error.to_string()))?;
+  let mut skipped = Vec::new();
+  let mut cumulative_size = 0u64;
   {
-    let mut zip_writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buffer));
+    let mut zip_writer = zip::ZipWriter::new(file.as_file_mut());
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
-    for raw_path in &body.paths {
+    for raw_path in paths {
+      cancellation.check().map_err(ZipBuildError::Engine)?;
       let normalized = normalize_path(raw_path);
-
-      // Skip .system/ paths
       if is_system_path(&normalized) {
         skipped.push(raw_path.clone());
         continue;
       }
 
-      // Try as file first
-      match ops.read_file_buffered(&normalized) {
-        Ok(data) => {
-          cumulative_size += data.len() as u64;
-          if cumulative_size > MAX_ZIP_SIZE {
-            return ErrorResponse::new("Download exceeds the 2 GB size limit. Select fewer files or download individually.")
-              .with_status(StatusCode::PAYLOAD_TOO_LARGE)
-              .into_response();
-          }
-          let zip_entry_name = strip_prefix(&normalized, &common_prefix);
-          if let Err(error) = zip_writer.start_file(&zip_entry_name, options) {
-            tracing::error!("Failed to start ZIP entry '{}': {}", zip_entry_name, error);
-            return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-          }
-          if let Err(error) = zip_writer.write_all(&data) {
-            tracing::error!("Failed to write ZIP entry '{}': {}", zip_entry_name, error);
-            return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-          }
+      match ops.get_metadata(&normalized) {
+        Ok(Some(record)) => {
+          let walk = ZipWalk { ops: &ops, common_prefix, options, max_size, cancellation };
+          let mut state = ZipState { writer: &mut zip_writer, skipped: &mut skipped, cumulative_size: &mut cumulative_size };
+          add_file_to_zip(&walk, &normalized, record.total_size, &mut state)?;
         }
-        Err(crate::engine::errors::EngineError::NotFound(_)) => {
-          // Not a file — try as directory
-          let walk = ZipWalk { ops: &ops, common_prefix: &common_prefix, options, max_size: MAX_ZIP_SIZE };
+        Ok(None) | Err(EngineError::NotFound(_)) => {
+          let walk = ZipWalk { ops: &ops, common_prefix, options, max_size, cancellation };
           let mut state = ZipState { writer: &mut zip_writer, skipped: &mut skipped, cumulative_size: &mut cumulative_size };
           if let Err(error) = add_directory_to_zip(&walk, &normalized, &mut state) {
-            if matches!(&error, ZipBuildError::TooLarge) {
-              return ErrorResponse::new("Download exceeds the 2 GB size limit. Select fewer files or download individually.")
-                .with_status(StatusCode::PAYLOAD_TOO_LARGE)
-                .into_response();
+            if matches!(error, ZipBuildError::SourceUnavailable) {
+              skipped.push(raw_path.clone());
+            } else {
+              return Err(error);
             }
-            if matches!(&error, ZipBuildError::Write(_)) {
-              tracing::error!("Failed to add directory '{}' to ZIP: {}", normalized, error);
-              return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-            }
-            skipped.push(raw_path.clone());
           }
         }
-        Err(_) => {
-          skipped.push(raw_path.clone());
-        }
+        Err(EngineError::ResourceExhausted(error)) => return Err(ZipBuildError::Engine(EngineError::ResourceExhausted(error))),
+        Err(_) => skipped.push(raw_path.clone()),
       }
     }
-
-    if let Err(error) = zip_writer.finish() {
-      tracing::error!("Failed to finalize ZIP: {}", error);
-      return ErrorResponse::new("Failed to create ZIP archive").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-    }
+    zip_writer.finish().map_err(|error| ZipBuildError::Write(error.to_string()))?;
   }
-
-  let mut builder = axum::http::Response::builder()
-    .status(StatusCode::OK)
-    .header(header::CONTENT_TYPE, "application/zip")
-    .header(header::CONTENT_DISPOSITION, "attachment; filename=\"aeordb-download.zip\"");
-
-  if !skipped.is_empty() {
-    builder = builder.header(header::HeaderName::from_static("x-aeordb-skipped"), skipped.join(", "));
-  }
-
-  builder
-    .body(axum::body::Body::from(zip_buffer))
-    .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build ZIP response").into_response())
+  Ok(ZipBuildOutput { file, skipped })
 }
 
 /// Walk-invariant arguments for the recursive ZIP builder.
@@ -165,12 +184,13 @@ struct ZipWalk<'a> {
   common_prefix: &'a str,
   options: zip::write::SimpleFileOptions,
   max_size: u64,
+  cancellation: &'a ResponseBuildCancellation,
 }
 
 /// Mutable state threaded through the recursive ZIP builder. Bundled so the
 /// recursion signature stays short.
 struct ZipState<'a, 'b> {
-  writer: &'a mut zip::ZipWriter<std::io::Cursor<&'b mut Vec<u8>>>,
+  writer: &'a mut zip::ZipWriter<&'b mut std::fs::File>,
   skipped: &'a mut Vec<String>,
   cumulative_size: &'a mut u64,
 }
@@ -180,6 +200,7 @@ enum ZipBuildError {
   SourceUnavailable,
   TooLarge,
   Write(String),
+  Engine(EngineError),
 }
 
 impl std::fmt::Display for ZipBuildError {
@@ -188,14 +209,35 @@ impl std::fmt::Display for ZipBuildError {
       ZipBuildError::SourceUnavailable => write!(formatter, "source unavailable"),
       ZipBuildError::TooLarge => write!(formatter, "download exceeds size limit"),
       ZipBuildError::Write(error) => write!(formatter, "zip write failed: {}", error),
+      ZipBuildError::Engine(error) => write!(formatter, "engine read failed: {}", error),
     }
   }
 }
 
+fn add_file_to_zip(walk: &ZipWalk<'_>, path: &str, size: u64, state: &mut ZipState<'_, '_>) -> Result<(), ZipBuildError> {
+  walk.cancellation.check().map_err(ZipBuildError::Engine)?;
+  let next_size = state.cumulative_size.checked_add(size).ok_or(ZipBuildError::TooLarge)?;
+  if next_size > walk.max_size {
+    return Err(ZipBuildError::TooLarge);
+  }
+  let zip_entry_name = strip_prefix(path, walk.common_prefix);
+  state.writer.start_file(&zip_entry_name, walk.options).map_err(|error| ZipBuildError::Write(error.to_string()))?;
+  let mut stream = walk.ops.read_file_streaming(path).map_err(ZipBuildError::Engine)?;
+  while let Some(chunk) = stream.next_reserved() {
+    walk.cancellation.check().map_err(ZipBuildError::Engine)?;
+    let chunk = chunk.map_err(ZipBuildError::Engine)?;
+    state.writer.write_all(chunk.as_ref()).map_err(|error| ZipBuildError::Write(error.to_string()))?;
+  }
+  *state.cumulative_size = next_size;
+  Ok(())
+}
+
 fn add_directory_to_zip(walk: &ZipWalk<'_>, dir_path: &str, state: &mut ZipState<'_, '_>) -> Result<(), ZipBuildError> {
+  walk.cancellation.check().map_err(ZipBuildError::Engine)?;
   let entries = walk.ops.list_directory(dir_path).map_err(|_| ZipBuildError::SourceUnavailable)?;
 
   for entry in entries {
+    walk.cancellation.check().map_err(ZipBuildError::Engine)?;
     let child_path = if dir_path == "/" { format!("/{}", entry.name) } else { format!("{}/{}", dir_path, entry.name) };
 
     let normalized = normalize_path(&child_path);
@@ -208,14 +250,10 @@ fn add_directory_to_zip(walk: &ZipWalk<'_>, dir_path: &str, state: &mut ZipState
     if entry.entry_type == EntryType::DirectoryIndex.to_u8() {
       add_directory_to_zip(walk, &normalized, state)?;
     } else if entry.entry_type == EntryType::FileRecord.to_u8() {
-      if let Ok(data) = walk.ops.read_file_buffered(&normalized) {
-        *state.cumulative_size += data.len() as u64;
-        if *state.cumulative_size > walk.max_size {
-          return Err(ZipBuildError::TooLarge);
-        }
-        let zip_entry_name = strip_prefix(&normalized, walk.common_prefix);
-        state.writer.start_file(&zip_entry_name, walk.options).map_err(|error| ZipBuildError::Write(error.to_string()))?;
-        state.writer.write_all(&data).map_err(|error| ZipBuildError::Write(error.to_string()))?;
+      match walk.ops.get_metadata(&normalized) {
+        Ok(Some(record)) => add_file_to_zip(walk, &normalized, record.total_size, state)?,
+        Ok(None) | Err(EngineError::NotFound(_)) => state.skipped.push(normalized),
+        Err(error) => return Err(ZipBuildError::Engine(error)),
       }
     }
   }

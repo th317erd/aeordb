@@ -7,8 +7,9 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | Method | Path | Description | Auth | Status Codes |
 |--------|------|-------------|------|-------------|
 | PUT | `/files/{path}` | Store a file | Yes | 201, 400, 404, 409, 413, 500 |
-| GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 206, 404, 416, 500 |
-| POST | `/files/fetch` | Batch read file bodies as JSON strings | Yes | 200, 400, 404, 413, 500 |
+| GET | `/files/{path}` | Read a file or list a directory | Yes | 200, 206, 404, 416, 500, 503 |
+| POST | `/files/fetch` | Batch read file bodies as JSON strings | Yes | 200, 400, 404, 413, 500, 503 |
+| POST | `/files/download` | Build and stream a ZIP of files/directories | Yes | 200, 400, 413, 500, 503 |
 | DELETE | `/files/{path}` | Delete a file | Yes | 200, 404, 500 |
 | HEAD | `/files/{path}` | Check existence and get metadata | Yes | 200, 404, 500 |
 | PATCH | `/files/{path}` | Rename a file/symlink (`application/json`) or [JSON merge-patch](./merge-patch.md) into a stored document (`application/merge-patch+json`) | Yes | 200, 201, 400, 404, 413, 415, 500 |
@@ -118,8 +119,8 @@ Read a file or list a directory. The server determines the type automatically:
 | `Content-Range` | Returned on `206 Partial Content`, e.g. `bytes 1024-2047/4096` |
 | `X-AeorDB-Path` | Canonical path of the file |
 | `X-AeorDB-Size` | File size in bytes |
-| `X-AeorDB-Created-At` | Unix timestamp (milliseconds) |
-| `X-AeorDB-Updated-At` | Unix timestamp (milliseconds) |
+| `X-AeorDB-Created` | Unix timestamp (milliseconds) |
+| `X-AeorDB-Updated` | Unix timestamp (milliseconds) |
 | `Content-Type` | MIME type (if known) |
 
 **Body:** raw file bytes (streamed)
@@ -144,6 +145,12 @@ Supported forms:
 | `bytes=-1024` | Last 1024 bytes |
 
 Unsatisfiable or malformed byte ranges return `416 Range Not Satisfiable` with `Content-Range: bytes */<file_size>`. Multi-range requests are not supported.
+
+### Streaming and Memory Pressure
+
+Live uncompressed chunks that are close in the WAL are read together, up to both the resolved `io.read_prefetch_bytes` output limit and `io.read_coalesce_max_bytes` WAL-span limit. The defaults are 2.5 MiB and 16 MiB. Compressed and historical/deleted chunks use the bounded one-chunk compatibility path because their decoded offsets cannot be inferred from stored lengths.
+
+File setup and body reads run on blocking workers. The response channel holds one pending frame, and each inventory, read span, decoded chunk, and delivered frame remains charged to the `streaming_read` memory owner until its final consumer drops it. If the configured streaming headroom is unavailable before response construction, the server returns retryable `503 Service Unavailable`; this does not latch the database read-only.
 
 ### Directory Response
 
@@ -295,6 +302,8 @@ Fetch multiple files or multiple file ranges in one request. There are two reque
 
 Provide either `paths` or `items`, not both. Directories, missing files, system paths, and unreadable paths return `404`. File bytes are encoded into JSON strings with UTF-8 lossy conversion, so binary data may contain replacement characters.
 
+Whole-file and range responses are built in a uniquely named temporary file beside the database, then streamed in bounded 64 KiB frames. AeorDB does not retain the complete JSON response in RAM or place it in the operating-system temporary directory. The artifact is removed after completion, build failure, panic, request cancellation, or response disconnect. Operators must leave enough free space on the database filesystem for the encoded response; JSON escaping can make the staged file larger than the cumulative source-byte limit.
+
 ### Request
 
 - **Headers:**
@@ -437,6 +446,26 @@ curl -X POST http://localhost:6830/files/fetch \
 | 409 | Range item is stale because `if_content_hash` or `if_updated_at` no longer matches |
 | 413 | Response would exceed the cumulative byte limit |
 | 500 | Internal read failure |
+| 503 | Streaming memory admission is temporarily unavailable; retry the request |
+
+---
+
+## POST /files/download
+
+Build a ZIP archive from one or more readable files or directories. Directory inputs are traversed recursively. Paths are stored relative to their common directory prefix, and protected system paths are skipped.
+
+```json
+{
+  "paths": [
+    "/docs/guide.md",
+    "/media/photos/"
+  ]
+}
+```
+
+The uncompressed logical input is limited to 2 GiB. AeorDB streams each source file into a same-filesystem temporary ZIP rather than buffering source files or the archive in memory, then returns the archive with `Content-Type: application/zip` and `Content-Disposition: attachment; filename="aeordb-download.zip"`. Missing or skipped paths are listed in the `X-AeorDB-Skipped` response header when applicable.
+
+Temporary archive construction is cooperatively cancelled if the request disappears, and the artifact is removed on every completion, error, panic, or response-disconnect path. A request that cannot acquire bounded streaming memory returns retryable `503 Service Unavailable` without changing database durability state.
 
 ---
 

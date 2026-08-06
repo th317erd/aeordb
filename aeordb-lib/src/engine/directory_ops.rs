@@ -10,6 +10,7 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
+use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
@@ -352,11 +353,6 @@ fn deletion_record_hash(path: &str, timestamp: i64, algo: &HashAlgorithm) -> Eng
   algo.compute_hash(format!("del:{}:{}", path, timestamp).as_bytes())
 }
 
-/// An iterator that yields chunk data pre-read from the engine.
-///
-/// All chunks are eagerly loaded upfront to avoid storing a raw pointer
-/// or reference to the StorageEngine. Each chunk is yielded one at a time,
-/// which still allows the HTTP layer to stream chunk-by-chunk from the Vec.
 /// Internal handle that lets [`EngineFileStream`] satisfy both lifetime
 /// regimes: a borrowed `&StorageEngine` for fast in-process calls
 /// (e.g. CLI, soak-worker), and an owned `Arc<StorageEngine>` for cases
@@ -375,12 +371,12 @@ impl<'a> EngineHandle<'a> {
   }
 }
 
-/// Lazy chunk stream over a file's chunk_hashes list.
+/// Lazy chunk stream over a file's admitted chunk-hash inventory.
 ///
-/// **Truly streaming.** Construction is O(1) — no I/O happens in `new()`.
-/// Each call to `next()` fetches exactly one chunk from the engine, returns
-/// it, and frees the previous chunk on the subsequent call. Peak memory
-/// is one chunk (~256 KB), regardless of file size.
+/// Construction accounts the already-owned inventory but performs no chunk
+/// I/O. Each call to `next()` fetches exactly one bounded chunk and keeps its
+/// reservation until the next legacy iterator call or the returned HTTP frame
+/// is dropped. Peak payload memory is one chunk for embedded iteration.
 ///
 /// History: an earlier version of this struct loaded every chunk eagerly
 /// in its constructor and just iterated a pre-populated `Vec`. That made
@@ -391,6 +387,93 @@ pub struct EngineFileStream<'a> {
   engine: EngineHandle<'a>,
   current_index: usize,
   include_deleted: bool,
+  _inventory_reservation: StreamingReadReservation,
+  legacy_chunk_reservation: Option<StreamingReadReservation>,
+}
+
+/// Streaming reads preserve the P2b shadow-mode compatibility contract: when
+/// startup configuration is unresolved, the legacy engine remains readable
+/// without pretending that a configured memory policy exists. Once a policy
+/// is active, `inner` owns the real coordinator reservation and all admission
+/// failures remain enforced.
+pub(crate) struct StreamingReadReservation {
+  inner: Option<MemoryReservation>,
+  bytes: u64,
+}
+
+impl std::fmt::Debug for StreamingReadReservation {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.debug_struct("StreamingReadReservation").field("bytes", &self.bytes).field("tracked", &self.inner.is_some()).finish()
+  }
+}
+
+impl StreamingReadReservation {
+  fn admitted(reservation: MemoryReservation) -> Self {
+    let bytes = reservation.bytes();
+    Self { inner: Some(reservation), bytes }
+  }
+
+  fn legacy_untracked(bytes: u64) -> Self {
+    Self { inner: None, bytes }
+  }
+
+  pub(crate) fn bytes(&self) -> u64 {
+    self.bytes
+  }
+
+  pub(crate) fn grow(&mut self, additional_bytes: u64) -> Result<(), MemoryCoordinatorError> {
+    let next_bytes =
+      self.bytes.checked_add(additional_bytes).ok_or(MemoryCoordinatorError::AccountingOverflow { owner: MemoryOwner::StreamingRead })?;
+    if let Some(reservation) = self.inner.as_mut() {
+      reservation.grow(additional_bytes)?;
+    }
+    self.bytes = next_bytes;
+    Ok(())
+  }
+
+  pub(crate) fn shrink(&mut self, bytes: u64) -> Result<(), MemoryCoordinatorError> {
+    if bytes > self.bytes {
+      return Err(MemoryCoordinatorError::InvalidShrink {
+        owner: MemoryOwner::StreamingRead,
+        requested_bytes: bytes,
+        reserved_bytes: self.bytes,
+      });
+    }
+    if let Some(reservation) = self.inner.as_mut() {
+      reservation.shrink(bytes)?;
+    }
+    self.bytes -= bytes;
+    Ok(())
+  }
+}
+
+/// One decoded file chunk whose memory remains admitted until the chunk is
+/// dropped by its final consumer. HTTP converts this owner directly into
+/// `Bytes`, so socket backpressure and disconnects retain/release the exact
+/// reservation with the payload rather than with the iterator cursor.
+pub(crate) struct ReservedReadChunk {
+  data: Vec<u8>,
+  _reservation: StreamingReadReservation,
+}
+
+impl ReservedReadChunk {
+  pub(crate) fn len(&self) -> usize {
+    self.data.len()
+  }
+
+  pub(crate) fn from_admitted(data: Vec<u8>, reservation: StreamingReadReservation) -> Self {
+    Self { data, _reservation: reservation }
+  }
+
+  fn into_parts(self) -> (Vec<u8>, StreamingReadReservation) {
+    (self.data, self._reservation)
+  }
+}
+
+impl AsRef<[u8]> for ReservedReadChunk {
+  fn as_ref(&self) -> &[u8] {
+    &self.data
+  }
 }
 
 impl<'a> EngineFileStream<'a> {
@@ -407,7 +490,16 @@ impl<'a> EngineFileStream<'a> {
   }
 
   pub(crate) fn new(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine, include_deleted: bool) -> EngineResult<Self> {
-    Ok(EngineFileStream { chunk_hashes, engine: EngineHandle::Borrowed(engine), current_index: 0, include_deleted })
+    let inventory_bytes = stream_hash_inventory_bytes(&chunk_hashes, chunk_hashes.capacity())?;
+    let inventory_reservation = reserve_streaming_read(engine, inventory_bytes, "file stream inventory admission failed")?;
+    Ok(EngineFileStream {
+      chunk_hashes,
+      engine: EngineHandle::Borrowed(engine),
+      current_index: 0,
+      include_deleted,
+      _inventory_reservation: inventory_reservation,
+      legacy_chunk_reservation: None,
+    })
   }
 
   /// Number of chunks the stream will yield.
@@ -427,14 +519,18 @@ impl<'a> EngineFileStream<'a> {
     Ok(result)
   }
 
-  fn fetch_chunk(&self, hash: &[u8]) -> EngineResult<Vec<u8>> {
-    let engine = self.engine.engine();
-    let entry =
-      if self.include_deleted { engine.read_chunk_verified_including_deleted(hash)? } else { engine.read_chunk_verified(hash)? };
-    match entry {
-      Some(value) => Ok(value),
-      None => Err(EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash)))),
+  fn fetch_chunk_reserved(&self, hash: &[u8]) -> EngineResult<ReservedReadChunk> {
+    read_chunk_reserved(self.engine.engine(), hash, self.include_deleted)
+  }
+
+  pub(crate) fn next_reserved(&mut self) -> Option<EngineResult<ReservedReadChunk>> {
+    drop(self.legacy_chunk_reservation.take());
+    if self.current_index >= self.chunk_hashes.len() {
+      return None;
     }
+    let index = self.current_index;
+    self.current_index += 1;
+    Some(self.fetch_chunk_reserved(&self.chunk_hashes[index]))
   }
 }
 
@@ -455,7 +551,16 @@ impl EngineFileStream<'static> {
   }
 
   pub(crate) fn new_owned(chunk_hashes: Vec<Vec<u8>>, engine: std::sync::Arc<StorageEngine>, include_deleted: bool) -> EngineResult<Self> {
-    Ok(EngineFileStream { chunk_hashes, engine: EngineHandle::Owned(engine), current_index: 0, include_deleted })
+    let inventory_bytes = stream_hash_inventory_bytes(&chunk_hashes, chunk_hashes.capacity())?;
+    let inventory_reservation = reserve_streaming_read(&engine, inventory_bytes, "file stream inventory admission failed")?;
+    Ok(EngineFileStream {
+      chunk_hashes,
+      engine: EngineHandle::Owned(engine),
+      current_index: 0,
+      include_deleted,
+      _inventory_reservation: inventory_reservation,
+      legacy_chunk_reservation: None,
+    })
   }
 }
 
@@ -463,12 +568,13 @@ impl<'a> Iterator for EngineFileStream<'a> {
   type Item = EngineResult<Vec<u8>>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    if self.current_index >= self.chunk_hashes.len() {
-      return None;
-    }
-    let hash = self.chunk_hashes[self.current_index].clone();
-    self.current_index += 1;
-    Some(self.fetch_chunk(&hash))
+    self.next_reserved().map(|result| {
+      result.map(|chunk| {
+        let (data, reservation) = chunk.into_parts();
+        self.legacy_chunk_reservation = Some(reservation);
+        data
+      })
+    })
   }
 
   fn size_hint(&self) -> (usize, Option<usize>) {
@@ -478,6 +584,96 @@ impl<'a> Iterator for EngineFileStream<'a> {
 }
 
 impl<'a> ExactSizeIterator for EngineFileStream<'a> {}
+
+pub(crate) fn stream_hash_inventory_bytes(chunk_hashes: &[Vec<u8>], outer_capacity: usize) -> EngineResult<u64> {
+  let outer = outer_capacity
+    .checked_mul(std::mem::size_of::<Vec<u8>>())
+    .ok_or_else(|| EngineError::ResourceExhausted("file stream hash inventory estimate overflow".to_string()))?;
+  let inner = chunk_hashes.iter().try_fold(0usize, |total, hash| {
+    total
+      .checked_add(hash.capacity())
+      .ok_or_else(|| EngineError::ResourceExhausted("file stream hash inventory estimate overflow".to_string()))
+  })?;
+  outer
+    .checked_add(inner)
+    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<EngineFileStream<'static>>()))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| EngineError::ResourceExhausted("file stream hash inventory estimate overflow".to_string()))
+}
+
+pub(crate) fn reserve_streaming_read(engine: &StorageEngine, bytes: u64, context: &str) -> EngineResult<StreamingReadReservation> {
+  let Some(coordinator) = engine.memory_coordinator_if_initialized() else {
+    return Ok(StreamingReadReservation::legacy_untracked(bytes));
+  };
+  match coordinator.reserve(MemoryOwner::StreamingRead, bytes, AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead)) {
+    Ok(reservation) => Ok(StreamingReadReservation::admitted(reservation)),
+    Err(MemoryCoordinatorError::PolicyUnavailable) => Ok(StreamingReadReservation::legacy_untracked(bytes)),
+    Err(error) => Err(streaming_memory_error(context, error)),
+  }
+}
+
+pub(crate) fn streaming_memory_error(context: &str, error: MemoryCoordinatorError) -> EngineError {
+  match error {
+    MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => EngineError::ResourceExhausted(format!("{context}: {error}")),
+    other => EngineError::IoError(std::io::Error::other(format!("{context}: {other}"))),
+  }
+}
+
+pub(crate) fn read_chunk_reserved(engine: &StorageEngine, hash: &[u8], include_deleted: bool) -> EngineResult<ReservedReadChunk> {
+  let metadata = engine
+    .get_chunk_stream_metadata(hash, include_deleted)?
+    .ok_or_else(|| EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash))))?;
+  let decoded_bound = metadata.raw_value_length.unwrap_or(DEFAULT_CHUNK_SIZE as u64);
+  let admitted_bytes = (metadata.total_length as u64)
+    .checked_add(decoded_bound)
+    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ReservedReadChunk>() as u64))
+    .ok_or_else(|| EngineError::ResourceExhausted("streaming chunk memory estimate overflow".to_string()))?;
+  let mut reservation = reserve_streaming_read(engine, admitted_bytes, "decoded chunk admission failed")?;
+  let decoded_bound: usize = decoded_bound
+    .try_into()
+    .map_err(|_| EngineError::ResourceExhausted(format!("decoded chunk bound exceeds this platform's address space: {decoded_bound}")))?;
+  let read_result = if include_deleted {
+    engine.read_chunk_verified_including_deleted_bounded(hash, decoded_bound)
+  } else {
+    engine.read_chunk_verified_bounded(hash, decoded_bound)
+  };
+  let entry = read_result.map_err(|error| match error {
+    EngineError::InvalidInput(reason) => {
+      EngineError::CorruptEntry { offset: metadata.offset, reason: format!("Chunk exceeds its streaming contract: {reason}") }
+    }
+    other => other,
+  })?;
+  let data = entry.ok_or_else(|| EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash))))?;
+  if metadata.raw_value_length.is_some_and(|decoded_bytes| data.len() as u64 != decoded_bytes) {
+    return Err(EngineError::CorruptEntry {
+      offset: metadata.offset,
+      reason: format!(
+        "Chunk length does not match admitted metadata: metadata {:?}, bound {}, decoded {}",
+        metadata.raw_value_length,
+        decoded_bound,
+        data.len()
+      ),
+    });
+  }
+  let retained_bytes = u64::try_from(data.capacity())
+    .ok()
+    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ReservedReadChunk>() as u64))
+    .ok_or_else(|| EngineError::ResourceExhausted("streaming chunk retained memory estimate overflow".to_string()))?;
+  if retained_bytes > reservation.bytes() {
+    return Err(EngineError::CorruptEntry {
+      offset: metadata.offset,
+      reason: format!("Decoded chunk allocation {} exceeds admitted {} bytes", retained_bytes, reservation.bytes()),
+    });
+  }
+  if retained_bytes < reservation.bytes() {
+    reservation
+      .shrink(reservation.bytes() - retained_bytes)
+      .map_err(|error| streaming_memory_error("decoded chunk accounting failed", error))?;
+  }
+  Ok(ReservedReadChunk::from_admitted(data, reservation))
+}
 
 /// Directory operations built on top of the StorageEngine.
 ///
@@ -3374,6 +3570,7 @@ impl<'a> DirectoryOps<'a> {
 #[cfg(test)]
 mod engine_file_stream_tests {
   use super::*;
+  use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
   use crate::engine::request_context::RequestContext;
   use crate::engine::storage_engine::StorageEngine;
 
@@ -3433,6 +3630,120 @@ mod engine_file_stream_tests {
       assert!(r.is_err(), "expected NotFound for bogus chunk hash");
     }
     assert!(stream.next().is_none(), "stream should be exhausted");
+  }
+
+  #[test]
+  fn stream_inventory_and_decoded_chunk_reservations_live_until_their_exact_owners_drop() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&ctx, "/reserved.bin", &multi_chunk_payload(), Some("application/octet-stream")).unwrap();
+    let memory = engine.memory_coordinator();
+    let baseline = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+    let mut stream = ops.read_file_streaming("/reserved.bin").unwrap();
+    let inventory = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert_eq!(inventory.active_reservations, baseline.active_reservations + 1);
+    assert!(inventory.reserved_bytes > baseline.reserved_bytes);
+
+    let chunk = stream.next_reserved().unwrap().unwrap();
+    let decoded = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert_eq!(decoded.active_reservations, inventory.active_reservations + 1);
+    assert!(decoded.reserved_bytes >= inventory.reserved_bytes + chunk.len() as u64);
+
+    drop(stream);
+    let chunk_only = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert_eq!(chunk_only.active_reservations, baseline.active_reservations + 1);
+    drop(chunk);
+    let released = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert_eq!(released.active_reservations, baseline.active_reservations);
+    assert_eq!(released.reserved_bytes, baseline.reserved_bytes);
+  }
+
+  #[test]
+  fn stream_pressure_refuses_before_chunk_io_without_latching_storage() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&ctx, "/pressure.bin", b"still durable", Some("application/octet-stream")).unwrap();
+    let memory = engine.memory_coordinator();
+    let snapshot = memory.snapshot().unwrap();
+    let policy = snapshot.policy.unwrap();
+    let remaining = policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+    let pressure =
+      memory.reserve(MemoryOwner::StreamingRead, remaining, AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead)).unwrap();
+
+    let error = match ops.read_file_streaming("/pressure.bin") {
+      Ok(_) => panic!("stream inventory admission unexpectedly succeeded"),
+      Err(error) => error,
+    };
+    assert!(matches!(error, EngineError::ResourceExhausted(_)));
+    assert!(engine.durability_failure().is_none());
+
+    drop(pressure);
+    assert_eq!(ops.read_file_streaming("/pressure.bin").unwrap().collect_to_vec().unwrap(), b"still durable");
+  }
+
+  #[test]
+  fn compressed_stream_reserves_the_encoded_and_decoded_chunk_lifetimes() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    let payload = vec![b'z'; DEFAULT_CHUNK_SIZE * 2];
+    ops.store_file_compressed(&ctx, "/compressed.bin", &payload, Some("application/octet-stream"), CompressionAlgorithm::Zstd).unwrap();
+    let memory = engine.memory_coordinator();
+    let baseline = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+    let mut stream = ops.read_file_streaming("/compressed.bin").unwrap();
+    let chunk = stream.next_reserved().unwrap().unwrap();
+    assert_eq!(chunk.as_ref(), &payload[..DEFAULT_CHUNK_SIZE]);
+    let held = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert!(held.active_reservations >= baseline.active_reservations + 2, "inventory and decoded chunk must both remain admitted");
+    drop(chunk);
+    drop(stream);
+    let released = memory.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert_eq!(released.active_reservations, baseline.active_reservations);
+    assert_eq!(released.reserved_bytes, baseline.reserved_bytes);
+  }
+
+  #[test]
+  fn compressed_stream_rejects_expansion_through_the_bounded_decoder() {
+    let (engine, _temp) = create_test_engine();
+    let payload = vec![b'z'; DEFAULT_CHUNK_SIZE * 2];
+    let chunk_key = chunk_content_hash(&payload, &engine.hash_algo()).unwrap();
+    let compressed = compress(&payload, CompressionAlgorithm::Zstd).unwrap();
+    engine.store_entry_compressed(EntryType::Chunk, &chunk_key, &compressed, CompressionAlgorithm::Zstd).unwrap();
+
+    let mut stream = EngineFileStream::from_chunk_hashes(vec![chunk_key], &engine).unwrap();
+    let error = stream.next().unwrap().unwrap_err();
+    assert!(
+      error.to_string().contains("exceeds caller bound 262144"),
+      "compressed stream must reject expansion in the bounded decoder before collecting it: {error}"
+    );
+  }
+
+  #[test]
+  fn stream_metadata_rejects_a_chunk_header_length_that_disagrees_with_kv() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let (engine, temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&ctx, "/malformed.bin", b"metadata must agree", Some("application/octet-stream")).unwrap();
+    let record = ops.get_metadata("/malformed.bin").unwrap().unwrap();
+    let metadata = engine.get_chunk_metadata(&record.chunk_hashes[0]).unwrap().unwrap();
+    let original_total_length = metadata.total_length;
+    let mut database = std::fs::OpenOptions::new().write(true).open(temp.path().join("test.aeordb")).unwrap();
+    database.seek(SeekFrom::Start(metadata.offset + 27)).unwrap();
+    database.write_all(&original_total_length.saturating_add(1).to_le_bytes()).unwrap();
+    database.flush().unwrap();
+
+    let error = engine.get_chunk_stream_metadata(&record.chunk_hashes[0], false).unwrap_err();
+
+    database.seek(SeekFrom::Start(metadata.offset + 27)).unwrap();
+    database.write_all(&original_total_length.to_le_bytes()).unwrap();
+    database.flush().unwrap();
+    assert!(matches!(error, EngineError::CorruptEntry { offset, .. } if offset == metadata.offset));
   }
 
   #[test]

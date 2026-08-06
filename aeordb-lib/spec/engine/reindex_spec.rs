@@ -173,7 +173,7 @@ fn test_reindex_indexes_all_files() {
 
   // Process the task.
   let processed = process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
-  assert!(processed);
+  assert!(processed, "task was not processed; tasks={:?}; memory={:?}", queue.list_tasks(), engine.memory_coordinator_snapshot());
 
   // Verify the task completed.
   let completed = queue.get_task(&task.id).unwrap().unwrap();

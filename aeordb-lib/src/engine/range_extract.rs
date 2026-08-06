@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::engine::directory_ops::{DirectoryOps, EngineFileStream};
+use crate::engine::directory_ops::{reserve_streaming_read, DirectoryOps, EngineFileStream, StreamingReadReservation, DEFAULT_CHUNK_SIZE};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::storage_engine::StorageEngine;
@@ -37,7 +37,7 @@ pub struct RangeExtractionRequest {
   pub max_bytes: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ExtractedRange {
   pub content: String,
   pub content_type: String,
@@ -50,6 +50,8 @@ pub struct ExtractedRange {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub pointer: Option<String>,
   pub truncated: bool,
+  #[serde(skip)]
+  _memory_reservation: Option<StreamingReadReservation>,
 }
 
 struct ExtractedText {
@@ -69,6 +71,11 @@ pub fn extract_range_from_record(
   request: &RangeExtractionRequest,
 ) -> EngineResult<ExtractedRange> {
   let max_bytes = effective_max_bytes(request.max_bytes)?;
+  let mut memory_reservation = reserve_streaming_read(
+    engine,
+    extraction_working_set_bytes(&request.mode, file_record.total_size, max_bytes)?,
+    "range extraction admission failed",
+  )?;
   let content_type = file_record.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string());
   let source_size = file_record.total_size;
 
@@ -95,6 +102,7 @@ pub fn extract_range_from_record(
         end,
         pointer: None,
         truncated: extracted.truncated,
+        _memory_reservation: None,
       }
     }
     RangeMode::Chars => {
@@ -116,6 +124,7 @@ pub fn extract_range_from_record(
         end,
         pointer: None,
         truncated: extracted.truncated,
+        _memory_reservation: None,
       }
     }
     RangeMode::Bytes => {
@@ -137,6 +146,7 @@ pub fn extract_range_from_record(
         end,
         pointer: None,
         truncated: extracted.truncated,
+        _memory_reservation: None,
       }
     }
     RangeMode::JsonPointer => {
@@ -161,12 +171,59 @@ pub fn extract_range_from_record(
         end: None,
         pointer: Some(pointer.to_string()),
         truncated,
+        _memory_reservation: None,
       }
     }
   };
 
+  let mut extracted = extracted;
+  let retained_bytes = retained_extraction_bytes(&extracted)?;
+  if retained_bytes > memory_reservation.bytes() {
+    return Err(EngineError::ResourceExhausted(format!(
+      "range extraction retained {} bytes exceeds admitted {} bytes",
+      retained_bytes,
+      memory_reservation.bytes()
+    )));
+  }
+  if retained_bytes < memory_reservation.bytes() {
+    memory_reservation
+      .shrink(memory_reservation.bytes() - retained_bytes)
+      .map_err(|error| crate::engine::directory_ops::streaming_memory_error("range extraction accounting failed", error))?;
+  }
+  extracted._memory_reservation = Some(memory_reservation);
+
   engine.counters().record_read(extracted.content.len() as u64);
   Ok(extracted)
+}
+
+fn extraction_working_set_bytes(mode: &RangeMode, source_size: u64, max_bytes: usize) -> EngineResult<u64> {
+  let output_bytes = u64::try_from(max_bytes)
+    .ok()
+    .and_then(|bytes| bytes.checked_mul(4))
+    .ok_or_else(|| EngineError::ResourceExhausted("range extraction output estimate overflow".to_string()))?;
+  let source_scratch = match mode {
+    RangeMode::JsonPointer => {
+      source_size.checked_mul(8).ok_or_else(|| EngineError::ResourceExhausted("JSON range extraction estimate overflow".to_string()))?
+    }
+    RangeMode::Lines | RangeMode::Chars | RangeMode::Bytes => (DEFAULT_CHUNK_SIZE as u64)
+      .checked_mul(2)
+      .ok_or_else(|| EngineError::ResourceExhausted("streaming range scratch estimate overflow".to_string()))?,
+  };
+  source_scratch
+    .checked_add(output_bytes)
+    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ExtractedRange>() as u64))
+    .ok_or_else(|| EngineError::ResourceExhausted("range extraction working-set estimate overflow".to_string()))
+}
+
+fn retained_extraction_bytes(extracted: &ExtractedRange) -> EngineResult<u64> {
+  extracted
+    .content
+    .capacity()
+    .checked_add(extracted.content_type.capacity())
+    .and_then(|bytes| bytes.checked_add(extracted.pointer.as_ref().map_or(0, String::capacity)))
+    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ExtractedRange>()))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| EngineError::ResourceExhausted("range extraction retained-memory estimate overflow".to_string()))
 }
 
 fn effective_max_bytes(max_bytes: Option<usize>) -> EngineResult<usize> {
@@ -370,8 +427,63 @@ fn truncate_utf8_string(text: &str, max_bytes: usize) -> (String, bool) {
 mod tests {
   use super::*;
   use crate::engine::directory_ops::DirectoryOps;
+  use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
   use crate::engine::request_context::RequestContext;
   use crate::server::create_temp_engine_for_tests;
+
+  #[test]
+  fn extracted_text_retains_streaming_memory_until_the_result_is_dropped() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let ops = DirectoryOps::new(&engine);
+    let ctx = RequestContext::system();
+    ops.store_file_buffered(&ctx, "/retained.txt", &vec![b'x'; 512 * 1024], Some("text/plain")).unwrap();
+    let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+    let request = RangeExtractionRequest { mode: RangeMode::Bytes, start: Some(0), end: None, pointer: None, max_bytes: Some(128 * 1024) };
+    let extracted = extract_range_by_path(&engine, "/retained.txt", &request).unwrap();
+    assert_eq!(extracted.content.len(), 128 * 1024);
+    let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert!(held.active_reservations > baseline.active_reservations, "returned range lost its memory reservation");
+    assert!(held.reserved_bytes >= baseline.reserved_bytes + extracted.content.capacity() as u64);
+
+    drop(extracted);
+    let released = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    assert_eq!(released.active_reservations, baseline.active_reservations);
+    assert_eq!(released.reserved_bytes, baseline.reserved_bytes);
+  }
+
+  #[test]
+  fn json_pointer_reserves_buffered_parse_amplification_before_reading() {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let ops = DirectoryOps::new(&engine);
+    let ctx = RequestContext::system();
+    let document = serde_json::json!({"payload": "x".repeat(1024 * 1024)}).to_string();
+    ops.store_file_buffered(&ctx, "/large.json", document.as_bytes(), Some("application/json")).unwrap();
+
+    let memory = engine.memory_coordinator();
+    let snapshot = memory.snapshot().unwrap();
+    let policy = snapshot.policy.unwrap();
+    let available_for_extraction = 4 * 1024 * 1024;
+    let pressure = memory
+      .reserve(
+        MemoryOwner::StreamingRead,
+        policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes - available_for_extraction,
+        AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead),
+      )
+      .unwrap();
+    let request = RangeExtractionRequest {
+      mode: RangeMode::JsonPointer,
+      start: None,
+      end: None,
+      pointer: Some("/payload".to_string()),
+      max_bytes: Some(1024),
+    };
+
+    let error = extract_range_by_path(&engine, "/large.json", &request).unwrap_err();
+    assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+    drop(pressure);
+    assert!(engine.durability_failure().is_none());
+  }
 
   #[test]
   fn line_ranges_treat_crlf_as_one_break() {

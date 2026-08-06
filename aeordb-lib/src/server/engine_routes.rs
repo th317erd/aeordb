@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use axum::{
   Extension,
   body::Body,
@@ -8,8 +6,9 @@ use axum::{
   response::{IntoResponse, Response},
   Json,
 };
-use futures_util::{stream, StreamExt};
+use futures_util::StreamExt;
 use serde::Deserialize;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use super::blocking::run_engine_blocking;
@@ -23,10 +22,14 @@ use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
 use crate::engine::{DirectoryOps, RequestContext, SearchResult, StorageEngine, TaskStatus, VersionManager, is_root};
 use crate::engine::directory_listing::list_directory_recursive;
-use crate::engine::directory_ops::{is_system_path, EngineFileStream, file_content_hash};
+use crate::engine::directory_ops::{
+  is_system_path, read_chunk_reserved, reserve_streaming_read, stream_hash_inventory_bytes, streaming_memory_error, file_content_hash,
+  ReservedReadChunk,
+};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::directory_ops::StreamingReadReservation;
 use crate::engine::ChunkReadLocation;
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::permission_resolver::CrudlifyOp;
@@ -502,83 +505,127 @@ fn range_not_satisfiable_response(total_size: u64) -> Response {
     .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
 }
 
-const RANGE_READ_SPAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const RANGE_READ_SPAN_MAX_GAP_BYTES: u64 = 256 * 1024;
+const DEFAULT_READ_PREFETCH_BYTES: u64 = 2_621_440;
+const DEFAULT_READ_COALESCE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct ReadStreamLimits {
+  prefetch_bytes: u64,
+  coalesce_max_bytes: u64,
+}
+
+impl ReadStreamLimits {
+  fn resolve(engine: &StorageEngine) -> EngineResult<Self> {
+    let prefetch_bytes = engine.resolved_unsigned_config("io.read_prefetch_bytes").unwrap_or(DEFAULT_READ_PREFETCH_BYTES);
+    let coalesce_max_bytes = engine.resolved_unsigned_config("io.read_coalesce_max_bytes").unwrap_or(DEFAULT_READ_COALESCE_MAX_BYTES);
+    if prefetch_bytes == 0 || coalesce_max_bytes < prefetch_bytes {
+      return Err(EngineError::InvalidInput(format!(
+        "Invalid streaming read limits: prefetch={}, coalesce={}",
+        prefetch_bytes, coalesce_max_bytes
+      )));
+    }
+    usize::try_from(prefetch_bytes)
+      .and_then(|_| usize::try_from(coalesce_max_bytes))
+      .map_err(|_| EngineError::ResourceExhausted("streaming read limits exceed this platform's address space".to_string()))?;
+    Ok(Self { prefetch_bytes, coalesce_max_bytes })
+  }
+}
 
 struct LegacyEngineByteRangeStream {
   chunk_hashes: Vec<Vec<u8>>,
-  engine: std::sync::Arc<crate::engine::StorageEngine>,
+  engine: std::sync::Arc<StorageEngine>,
   include_deleted: bool,
-  use_metadata_skip: bool,
   current_index: usize,
   cursor: u64,
   range_start: u64,
   range_end_exclusive: u64,
+  _inventory_reservation: StreamingReadReservation,
 }
 
 impl LegacyEngineByteRangeStream {
   fn new(
     chunk_hashes: Vec<Vec<u8>>,
-    engine: std::sync::Arc<crate::engine::StorageEngine>,
+    engine: std::sync::Arc<StorageEngine>,
     include_deleted: bool,
-    use_metadata_skip: bool,
     range: HttpByteRange,
-  ) -> Self {
-    Self {
+  ) -> EngineResult<Self> {
+    let inventory_bytes = stream_hash_inventory_bytes(&chunk_hashes, chunk_hashes.capacity())?;
+    let inventory_reservation = reserve_streaming_read(&engine, inventory_bytes, "range stream inventory admission failed")?;
+    Ok(Self {
       chunk_hashes,
       engine,
       include_deleted,
-      use_metadata_skip,
       current_index: 0,
       cursor: 0,
       range_start: range.start,
       range_end_exclusive: range.end.saturating_add(1),
-    }
+      _inventory_reservation: inventory_reservation,
+    })
   }
 
   fn chunk_metadata_len(&self, hash: &[u8]) -> EngineResult<Option<u64>> {
-    if self.include_deleted || !self.use_metadata_skip {
-      return Ok(None);
-    }
-    Ok(self.engine.get_chunk_metadata(hash)?.and_then(|metadata| metadata.raw_value_length))
+    self
+      .engine
+      .get_chunk_stream_metadata(hash, self.include_deleted)?
+      .map(|metadata| metadata.raw_value_length)
+      .ok_or_else(|| EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash))))
   }
 
-  fn read_chunk(&self, hash: &[u8]) -> EngineResult<Vec<u8>> {
-    let entry = if self.include_deleted {
-      self.engine.read_chunk_verified_including_deleted(hash)?
-    } else {
-      self.engine.read_chunk_verified(hash)?
-    };
-    match entry {
-      Some(value) => Ok(value),
-      None => Err(EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash)))),
+  fn reserve_slice(&self, chunk: ReservedReadChunk, start: usize, end: usize, offset: u64) -> EngineResult<ReservedReadChunk> {
+    if start == 0 && end == chunk.len() {
+      return Ok(chunk);
     }
+    let output_len = end.checked_sub(start).ok_or_else(|| EngineError::InvalidInput("Streaming range slice underflowed".to_string()))?;
+    let admitted_bytes = u64::try_from(output_len)
+      .ok()
+      .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ReservedReadChunk>() as u64))
+      .ok_or_else(|| EngineError::ResourceExhausted("streaming range output estimate overflow".to_string()))?;
+    let mut reservation = reserve_streaming_read(&self.engine, admitted_bytes, "range output admission failed")?;
+    let mut data = Vec::with_capacity(output_len);
+    data.extend_from_slice(&chunk.as_ref()[start..end]);
+    drop(chunk);
+
+    let retained_bytes = u64::try_from(data.capacity())
+      .ok()
+      .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ReservedReadChunk>() as u64))
+      .ok_or_else(|| EngineError::ResourceExhausted("streaming range output accounting overflow".to_string()))?;
+    if retained_bytes > reservation.bytes() {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("Range output allocation {} exceeds admitted {} bytes", retained_bytes, reservation.bytes()),
+      });
+    }
+    if retained_bytes < reservation.bytes() {
+      reservation
+        .shrink(reservation.bytes() - retained_bytes)
+        .map_err(|error| streaming_memory_error("range output accounting failed", error))?;
+    }
+    Ok(ReservedReadChunk::from_admitted(data, reservation))
   }
 }
 
 impl Iterator for LegacyEngineByteRangeStream {
-  type Item = EngineResult<Vec<u8>>;
+  type Item = EngineResult<ReservedReadChunk>;
 
   fn next(&mut self) -> Option<Self::Item> {
     while self.current_index < self.chunk_hashes.len() && self.cursor < self.range_end_exclusive {
-      let hash = self.chunk_hashes[self.current_index].clone();
+      let hash = &self.chunk_hashes[self.current_index];
       self.current_index += 1;
-
-      match self.chunk_metadata_len(&hash) {
-        Ok(Some(chunk_len)) if self.cursor.saturating_add(chunk_len) <= self.range_start => {
-          self.cursor = self.cursor.saturating_add(chunk_len);
-          continue;
-        }
-        Ok(_) => {}
-        Err(error) => return Some(Err(error)),
-      }
-
       let chunk_start = self.cursor;
-      let data = match self.read_chunk(&hash) {
-        Ok(data) => data,
+      let mut decoded_chunk = None;
+      let chunk_len = match self.chunk_metadata_len(hash) {
+        Ok(Some(chunk_len)) => chunk_len,
+        Ok(None) => match read_chunk_reserved(&self.engine, hash, self.include_deleted) {
+          Ok(chunk) => {
+            let chunk_len = chunk.len() as u64;
+            decoded_chunk = Some(chunk);
+            chunk_len
+          }
+          Err(error) => return Some(Err(error)),
+        },
         Err(error) => return Some(Err(error)),
       };
-      let chunk_len = data.len() as u64;
       let chunk_end = match chunk_start.checked_add(chunk_len) {
         Some(end) => end,
         None => {
@@ -600,7 +647,20 @@ impl Iterator for LegacyEngineByteRangeStream {
         continue;
       }
 
-      return Some(Ok(data[start_in_chunk..end_in_chunk].to_vec()));
+      let chunk = match decoded_chunk {
+        Some(chunk) => chunk,
+        None => match read_chunk_reserved(&self.engine, hash, self.include_deleted) {
+          Ok(chunk) => chunk,
+          Err(error) => return Some(Err(error)),
+        },
+      };
+      if chunk.len() as u64 != chunk_len {
+        return Some(Err(EngineError::CorruptEntry {
+          offset: chunk_start,
+          reason: format!("Chunk length changed while serving range: metadata {}, decoded {}", chunk_len, chunk.len()),
+        }));
+      }
+      return Some(self.reserve_slice(chunk, start_in_chunk, end_in_chunk, chunk_start));
     }
 
     None
@@ -635,49 +695,69 @@ impl PlannedRangeChunk {
 
 struct CoalescedEngineByteRangeStream {
   chunks: Vec<PlannedRangeChunk>,
-  engine: std::sync::Arc<crate::engine::StorageEngine>,
+  engine: std::sync::Arc<StorageEngine>,
   next_index: usize,
-  pending: VecDeque<Vec<u8>>,
   range_start: u64,
   range_end_exclusive: u64,
+  limits: ReadStreamLimits,
+  _inventory_reservation: StreamingReadReservation,
+}
+
+enum CoalescedStreamBuild {
+  Ready(CoalescedEngineByteRangeStream),
+  Legacy(Vec<Vec<u8>>),
 }
 
 impl CoalescedEngineByteRangeStream {
   fn new(
     chunk_hashes: Vec<Vec<u8>>,
-    engine: std::sync::Arc<crate::engine::StorageEngine>,
+    engine: std::sync::Arc<StorageEngine>,
     range: HttpByteRange,
     total_size: u64,
-  ) -> EngineResult<Option<Self>> {
+    limits: ReadStreamLimits,
+  ) -> EngineResult<CoalescedStreamBuild> {
     let range_start = range.start;
     let range_end_exclusive = range.end.saturating_add(1);
-    let mut chunks = Vec::new();
+    let inventory_bytes = stream_hash_inventory_bytes(&chunk_hashes, chunk_hashes.capacity())?;
+    let mut inventory_reservation = reserve_streaming_read(&engine, inventory_bytes, "range stream inventory admission failed")?;
+    let plan_bytes = chunk_hashes
+      .len()
+      .checked_mul(std::mem::size_of::<PlannedRangeChunk>())
+      .and_then(|bytes| chunk_hashes.iter().try_fold(bytes, |total, hash| total.checked_add(hash.len())))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("range plan estimate overflow".to_string()))?;
+    inventory_reservation.grow(plan_bytes).map_err(|error| streaming_memory_error("range plan admission failed", error))?;
+    let mut chunks = Vec::with_capacity(chunk_hashes.len());
     let mut cursor = 0u64;
-    let mut total_metadata_size = 0u64;
 
-    for hash in chunk_hashes {
-      let metadata =
-        engine.get_chunk_metadata(&hash)?.ok_or_else(|| EngineError::NotFound(format!("Chunk not found: {}", hex::encode(&hash))))?;
-      let chunk_len =
-        metadata.raw_value_length.ok_or_else(|| EngineError::InvalidInput(format!("Chunk length unavailable: {}", hex::encode(&hash))))?;
-      total_metadata_size = total_metadata_size
-        .checked_add(chunk_len)
-        .ok_or_else(|| EngineError::InvalidInput("File metadata chunk lengths overflowed while planning byte range".to_string()))?;
+    for hash in &chunk_hashes {
+      if cursor >= range_end_exclusive {
+        break;
+      }
+      let metadata = engine
+        .get_chunk_stream_metadata(hash, false)?
+        .ok_or_else(|| EngineError::NotFound(format!("Chunk not found: {}", hex::encode(hash))))?;
+      let Some(chunk_len) = metadata.raw_value_length else {
+        drop(inventory_reservation);
+        return Ok(CoalescedStreamBuild::Legacy(chunk_hashes));
+      };
       let chunk_start = cursor;
       let chunk_end = chunk_start
         .checked_add(chunk_len)
         .ok_or_else(|| EngineError::InvalidInput("File chunk offsets overflowed while planning byte range".to_string()))?;
+      if chunk_end > total_size {
+        return Err(EngineError::CorruptEntry {
+          offset: metadata.offset,
+          reason: format!("Chunk metadata extends past declared file size: {} > {}", chunk_end, total_size),
+        });
+      }
       cursor = chunk_end;
 
       if chunk_end <= range_start {
         continue;
       }
-      if chunk_start >= range_end_exclusive {
-        break;
-      }
-
       chunks.push(PlannedRangeChunk {
-        hash,
+        hash: hash.clone(),
         file_start: chunk_start,
         file_end: chunk_end,
         wal_offset: metadata.offset,
@@ -685,31 +765,66 @@ impl CoalescedEngineByteRangeStream {
       });
     }
 
-    if total_metadata_size != total_size {
-      tracing::debug!(
-        expected_size = total_size,
-        metadata_size = total_metadata_size,
-        "Range stream falling back to per-chunk reads because cheap chunk metadata does not match logical file size"
-      );
-      return Ok(None);
+    if cursor < range_end_exclusive || chunks.is_empty() {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("Chunk metadata ended at {} before requested byte {}", cursor, range_end_exclusive),
+      });
+    }
+    drop(chunk_hashes);
+
+    let retained_bytes = chunks
+      .capacity()
+      .checked_mul(std::mem::size_of::<PlannedRangeChunk>())
+      .and_then(|bytes| chunks.iter().try_fold(bytes, |total, chunk| total.checked_add(chunk.hash.capacity())))
+      .and_then(|bytes| bytes.checked_add(std::mem::size_of::<CoalescedEngineByteRangeStream>()))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("range plan retained accounting overflow".to_string()))?;
+    if retained_bytes > inventory_reservation.bytes() {
+      return Err(EngineError::ResourceExhausted(format!(
+        "range plan retained {} bytes exceeds admitted {} bytes",
+        retained_bytes,
+        inventory_reservation.bytes()
+      )));
+    }
+    if retained_bytes < inventory_reservation.bytes() {
+      inventory_reservation
+        .shrink(inventory_reservation.bytes() - retained_bytes)
+        .map_err(|error| streaming_memory_error("range plan accounting failed", error))?;
     }
 
-    Ok(Some(Self { chunks, engine, next_index: 0, pending: VecDeque::new(), range_start, range_end_exclusive }))
+    Ok(CoalescedStreamBuild::Ready(Self {
+      chunks,
+      engine,
+      next_index: 0,
+      range_start,
+      range_end_exclusive,
+      limits,
+      _inventory_reservation: inventory_reservation,
+    }))
   }
 
-  fn load_next_span(&mut self) -> EngineResult<()> {
+  fn selected_len(&self, chunk: &PlannedRangeChunk) -> u64 {
+    let start = self.range_start.saturating_sub(chunk.file_start).min(chunk.file_len());
+    let end = self.range_end_exclusive.saturating_sub(chunk.file_start).min(chunk.file_len());
+    end.saturating_sub(start)
+  }
+
+  fn load_next_span(&mut self) -> EngineResult<ReservedReadChunk> {
     if self.next_index >= self.chunks.len() {
-      return Ok(());
+      return Err(EngineError::InvalidInput("Range stream is exhausted".to_string()));
     }
 
     let start_index = self.next_index;
     let first = &self.chunks[start_index];
     let span_start = first.wal_offset;
     let mut span_end = first.wal_end()?;
-    self.next_index += 1;
+    let mut end_index = start_index + 1;
+    let mut output_len = self.selected_len(first);
+    let mut decoded_len = first.file_len();
 
-    while self.next_index < self.chunks.len() {
-      let next = &self.chunks[self.next_index];
+    while end_index < self.chunks.len() {
+      let next = &self.chunks[end_index];
       if next.wal_offset < span_end {
         break;
       }
@@ -718,14 +833,47 @@ impl CoalescedEngineByteRangeStream {
       let span_len = next_end
         .checked_sub(span_start)
         .ok_or_else(|| EngineError::InvalidInput("Chunk WAL span underflowed while planning byte range".to_string()))?;
-      if gap > RANGE_READ_SPAN_MAX_GAP_BYTES || span_len > RANGE_READ_SPAN_MAX_BYTES {
+      let next_output_len = self.selected_len(next);
+      let combined_output_len = output_len
+        .checked_add(next_output_len)
+        .ok_or_else(|| EngineError::ResourceExhausted("streaming output length overflow".to_string()))?;
+      if gap > RANGE_READ_SPAN_MAX_GAP_BYTES
+        || span_len > self.limits.coalesce_max_bytes
+        || combined_output_len > self.limits.prefetch_bytes
+      {
         break;
       }
       span_end = next_end;
-      self.next_index += 1;
+      end_index += 1;
+      output_len = combined_output_len;
+      decoded_len = decoded_len
+        .checked_add(next.file_len())
+        .ok_or_else(|| EngineError::ResourceExhausted("decoded span length overflow".to_string()))?;
     }
 
-    let span_chunks = &self.chunks[start_index..self.next_index];
+    let span_chunks = &self.chunks[start_index..end_index];
+    let span_len = span_end
+      .checked_sub(span_start)
+      .ok_or_else(|| EngineError::InvalidInput("Chunk WAL span underflowed while admitting byte range".to_string()))?;
+    let locations_bytes = span_chunks
+      .len()
+      .checked_mul(std::mem::size_of::<ChunkReadLocation>())
+      .and_then(|bytes| span_chunks.iter().try_fold(bytes, |total, chunk| total.checked_add(chunk.hash.len())))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("chunk location estimate overflow".to_string()))?;
+    let decoded_outer_bytes = span_chunks
+      .len()
+      .checked_mul(std::mem::size_of::<Vec<u8>>())
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("decoded chunk inventory estimate overflow".to_string()))?;
+    let scratch_bytes = span_len
+      .checked_add(decoded_len)
+      .and_then(|bytes| bytes.checked_add(output_len))
+      .and_then(|bytes| bytes.checked_add(locations_bytes))
+      .and_then(|bytes| bytes.checked_add(decoded_outer_bytes))
+      .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ReservedReadChunk>() as u64))
+      .ok_or_else(|| EngineError::ResourceExhausted("coalesced streaming span estimate overflow".to_string()))?;
+    let mut reservation = reserve_streaming_read(&self.engine, scratch_bytes, "coalesced read span admission failed")?;
     let locations: Vec<ChunkReadLocation> = span_chunks.iter().map(PlannedRangeChunk::location).collect();
     let values = self.engine.read_chunk_span_verified(&locations)?;
     if values.len() != span_chunks.len() {
@@ -736,7 +884,11 @@ impl CoalescedEngineByteRangeStream {
       )));
     }
 
-    for (chunk, data) in span_chunks.iter().zip(values) {
+    let output_capacity: usize = output_len
+      .try_into()
+      .map_err(|_| EngineError::ResourceExhausted(format!("streaming output too large for this platform: {}", output_len)))?;
+    let mut output = Vec::with_capacity(output_capacity);
+    for (chunk, data) in span_chunks.iter().zip(values.iter()) {
       let expected_len = chunk.file_len();
       if data.len() as u64 != expected_len {
         return Err(EngineError::CorruptEntry {
@@ -748,28 +900,47 @@ impl CoalescedEngineByteRangeStream {
       let start_in_chunk = self.range_start.saturating_sub(chunk.file_start).min(expected_len) as usize;
       let end_in_chunk = self.range_end_exclusive.saturating_sub(chunk.file_start).min(expected_len) as usize;
       if start_in_chunk < end_in_chunk {
-        self.pending.push_back(data[start_in_chunk..end_in_chunk].to_vec());
+        output.extend_from_slice(&data[start_in_chunk..end_in_chunk]);
       }
     }
+    if output.len() as u64 != output_len {
+      return Err(EngineError::CorruptEntry {
+        offset: span_start,
+        reason: format!("Coalesced range produced {} bytes, expected {}", output.len(), output_len),
+      });
+    }
+    drop(values);
+    drop(locations);
 
-    Ok(())
+    let retained_bytes = u64::try_from(output.capacity())
+      .ok()
+      .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ReservedReadChunk>() as u64))
+      .ok_or_else(|| EngineError::ResourceExhausted("coalesced output accounting overflow".to_string()))?;
+    if retained_bytes > reservation.bytes() {
+      return Err(EngineError::CorruptEntry {
+        offset: span_start,
+        reason: format!("Coalesced output allocation {} exceeds admitted {} bytes", retained_bytes, reservation.bytes()),
+      });
+    }
+    if retained_bytes < reservation.bytes() {
+      reservation
+        .shrink(reservation.bytes() - retained_bytes)
+        .map_err(|error| streaming_memory_error("coalesced output accounting failed", error))?;
+    }
+    self.next_index = end_index;
+
+    Ok(ReservedReadChunk::from_admitted(output, reservation))
   }
 }
 
 impl Iterator for CoalescedEngineByteRangeStream {
-  type Item = EngineResult<Vec<u8>>;
+  type Item = EngineResult<ReservedReadChunk>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    loop {
-      if let Some(data) = self.pending.pop_front() {
-        return Some(Ok(data));
-      }
-      if self.next_index >= self.chunks.len() {
-        return None;
-      }
-      if let Err(error) = self.load_next_span() {
-        return Some(Err(error));
-      }
+    if self.next_index >= self.chunks.len() {
+      None
+    } else {
+      Some(self.load_next_span())
     }
   }
 }
@@ -782,24 +953,27 @@ enum EngineByteRangeStream {
 impl EngineByteRangeStream {
   fn new(
     chunk_hashes: Vec<Vec<u8>>,
-    engine: std::sync::Arc<crate::engine::StorageEngine>,
+    engine: std::sync::Arc<StorageEngine>,
     include_deleted: bool,
     range: HttpByteRange,
     total_size: u64,
   ) -> EngineResult<Self> {
+    let limits = ReadStreamLimits::resolve(&engine)?;
     if include_deleted {
-      Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, true, false, range)))
+      Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, true, range)?))
     } else {
-      match CoalescedEngineByteRangeStream::new(chunk_hashes.clone(), std::sync::Arc::clone(&engine), range, total_size)? {
-        Some(stream) => Ok(Self::Coalesced(stream)),
-        None => Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, false, false, range))),
+      match CoalescedEngineByteRangeStream::new(chunk_hashes, std::sync::Arc::clone(&engine), range, total_size, limits)? {
+        CoalescedStreamBuild::Ready(stream) => Ok(Self::Coalesced(stream)),
+        CoalescedStreamBuild::Legacy(chunk_hashes) => {
+          Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, false, range)?))
+        }
       }
     }
   }
 }
 
 impl Iterator for EngineByteRangeStream {
-  type Item = EngineResult<Vec<u8>>;
+  type Item = EngineResult<ReservedReadChunk>;
 
   fn next(&mut self) -> Option<Self::Item> {
     match self {
@@ -809,9 +983,67 @@ impl Iterator for EngineByteRangeStream {
   }
 }
 
-fn build_file_streaming_response(
-  engine: &std::sync::Arc<crate::engine::StorageEngine>,
-  file_record: &FileRecord,
+fn engine_stream_body(mut stream: EngineByteRangeStream) -> Body {
+  let (sender, receiver) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+  tokio::task::spawn_blocking(move || {
+    for result in &mut stream {
+      let is_error = result.is_err();
+      let result = result.map(axum::body::Bytes::from_owner).map_err(|error| std::io::Error::other(error.to_string()));
+      if sender.blocking_send(result).is_err() || is_error {
+        break;
+      }
+    }
+  });
+  Body::from_stream(ReceiverStream::new(receiver))
+}
+
+fn read_raw_entry_reserved(
+  engine: &StorageEngine,
+  hash: &[u8],
+  expected_value_length: u32,
+  expected_total_length: u32,
+) -> EngineResult<ReservedReadChunk> {
+  let admitted_bytes = u64::from(expected_total_length)
+    .checked_add(std::mem::size_of::<ReservedReadChunk>() as u64)
+    .ok_or_else(|| EngineError::ResourceExhausted("raw entry memory estimate overflow".to_string()))?;
+  let mut reservation = reserve_streaming_read(engine, admitted_bytes, "raw entry admission failed")?;
+  let entry = engine.get_entry_verified_bounded(hash, expected_value_length).map_err(|error| match error {
+    EngineError::InvalidInput(reason) => {
+      EngineError::CorruptEntry { offset: 0, reason: format!("Raw entry exceeds its preflight metadata: {reason}") }
+    }
+    other => other,
+  })?;
+  let (header, _key, value) = entry.ok_or_else(|| EngineError::NotFound(format!("Entry not found: {}", hex::encode(hash))))?;
+  if header.value_length != expected_value_length || header.total_length != expected_total_length {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!(
+        "Raw entry metadata changed while reading: expected value/total {expected_value_length}/{expected_total_length}, found {}/{}",
+        header.value_length, header.total_length
+      ),
+    });
+  }
+  let retained_bytes = u64::try_from(value.capacity())
+    .ok()
+    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ReservedReadChunk>() as u64))
+    .ok_or_else(|| EngineError::ResourceExhausted("raw entry retained memory estimate overflow".to_string()))?;
+  if retained_bytes > reservation.bytes() {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("Raw entry allocation {retained_bytes} exceeds admitted {} bytes", reservation.bytes()),
+    });
+  }
+  if retained_bytes < reservation.bytes() {
+    reservation
+      .shrink(reservation.bytes() - retained_bytes)
+      .map_err(|error| streaming_memory_error("raw entry accounting failed", error))?;
+  }
+  Ok(ReservedReadChunk::from_admitted(value, reservation))
+}
+
+async fn build_file_streaming_response(
+  engine: &std::sync::Arc<StorageEngine>,
+  mut file_record: FileRecord,
   symlink_target: Option<&str>,
   request_headers: &HeaderMap,
   include_deleted: bool,
@@ -822,56 +1054,29 @@ fn build_file_streaming_response(
     Err(()) => return range_not_satisfiable_response(file_record.total_size),
   };
 
-  let (status, body, served_len, content_range) = if let Some(range) = range {
-    let range_stream = match EngineByteRangeStream::new(
-      file_record.chunk_hashes.clone(),
-      std::sync::Arc::clone(engine),
-      include_deleted,
-      range,
-      file_record.total_size,
-    ) {
-      Ok(stream) => stream,
-      Err(error) => {
-        tracing::error!("Engine: failed to prepare range stream for '{}': {}", file_record.path, error);
-        return ErrorResponse::new(format!(
-          "Failed to stream file range '{}': the file data may be corrupted. Contact your administrator",
-          file_record.path
-        ))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-      }
-    };
-    let chunk_stream = stream::iter(
-      range_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
-    );
-    (
-      StatusCode::PARTIAL_CONTENT,
-      Body::from_stream(chunk_stream),
-      range.len(),
-      Some(format!("bytes {}-{}/{}", range.start, range.end, file_record.total_size)),
-    )
+  let (status, selected_range, served_len, content_range) = if let Some(range) = range {
+    (StatusCode::PARTIAL_CONTENT, Some(range), range.len(), Some(format!("bytes {}-{}/{}", range.start, range.end, file_record.total_size)))
+  } else if file_record.total_size == 0 {
+    (StatusCode::OK, None, 0, None)
   } else {
-    let file_stream = if include_deleted {
-      EngineFileStream::from_chunk_hashes_including_deleted_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine))
-    } else {
-      EngineFileStream::from_chunk_hashes_owned(file_record.chunk_hashes.clone(), std::sync::Arc::clone(engine))
+    (StatusCode::OK, Some(HttpByteRange { start: 0, end: file_record.total_size - 1 }), file_record.total_size, None)
+  };
+
+  let body = if let Some(selected_range) = selected_range {
+    let stream_engine = std::sync::Arc::clone(engine);
+    let chunk_hashes = std::mem::take(&mut file_record.chunk_hashes);
+    let total_size = file_record.total_size;
+    let stream = match run_engine_blocking("prepare_file_stream", "Failed to prepare file stream", move || {
+      EngineByteRangeStream::new(chunk_hashes, stream_engine, include_deleted, selected_range, total_size)
+    })
+    .await
+    {
+      Ok(stream) => stream,
+      Err(response) => return response,
     };
-    let file_stream = match file_stream {
-      Ok(s) => s,
-      Err(error) => {
-        tracing::error!("Engine: failed to stream file '{}': {}", file_record.path, error);
-        return ErrorResponse::new(format!(
-          "Failed to stream file '{}': the file data may be corrupted. Contact your administrator",
-          file_record.path
-        ))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-      }
-    };
-    let chunk_stream = stream::iter(
-      file_stream.map(|chunk_result| chunk_result.map(axum::body::Bytes::from).map_err(|error| std::io::Error::other(error.to_string()))),
-    );
-    (StatusCode::OK, Body::from_stream(chunk_stream), file_record.total_size, None)
+    engine_stream_body(stream)
+  } else {
+    Body::empty()
   };
 
   engine.counters().record_read(served_len);
@@ -1134,7 +1339,7 @@ fn attach_effective_permissions(
 
 /// Handle a symlink path: resolve and produce the appropriate file or
 /// directory response, or return an error for dangling / cyclic symlinks.
-fn handle_symlink_resolution(
+async fn handle_symlink_resolution(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   path: &str,
   symlink_target: &str,
@@ -1148,7 +1353,7 @@ fn handle_symlink_resolution(
   let directory_ops = DirectoryOps::new(engine);
 
   match resolve_symlink(engine, path) {
-    Ok(ResolvedTarget::File(ref file_record)) => {
+    Ok(ResolvedTarget::File(file_record)) => {
       // Block ALL access to symlinks resolving to /.aeordb-system/ paths — system
       // data is invisible through the API for all users, including root.
       if is_system_path(&file_record.path) {
@@ -1173,7 +1378,7 @@ fn handle_symlink_resolution(
         }
       }
 
-      build_file_streaming_response(engine, file_record, Some(symlink_target), request_headers, false, &[])
+      build_file_streaming_response(engine, file_record, Some(symlink_target), request_headers, false, &[]).await
     }
     Ok(ResolvedTarget::Directory(dir_path)) => {
       // Block ALL access to symlinks resolving to /.aeordb-system/ directories —
@@ -1221,23 +1426,12 @@ fn handle_symlink_resolution(
 }
 
 /// Handle a direct file read: stream the file content as an HTTP response.
-fn handle_file_response(engine: &std::sync::Arc<crate::engine::StorageEngine>, path: &str, request_headers: &HeaderMap) -> Response {
-  let directory_ops = DirectoryOps::new(engine);
-
-  let file_record = match directory_ops.get_metadata(path) {
-    Ok(Some(record)) => record,
-    Ok(None) => {
-      return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
-      return ErrorResponse::new(format!("Failed to read metadata for '{}'. The file may be corrupted — contact your administrator", path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
-
-  build_file_streaming_response(engine, &file_record, None, request_headers, false, &[])
+async fn handle_file_response(
+  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  file_record: FileRecord,
+  request_headers: &HeaderMap,
+) -> Response {
+  build_file_streaming_response(engine, file_record, None, request_headers, false, &[]).await
 }
 
 /// Handle recursive directory listing with depth and/or glob parameters.
@@ -1439,13 +1633,14 @@ pub async fn engine_get(
       filter_ref,
       version_query.limit,
       version_query.offset,
-    );
+    )
+    .await;
   }
 
   // Try as file first
   match directory_ops.get_metadata(&path) {
-    Ok(Some(_file_record)) => {
-      return handle_file_response(&state.engine, &path, &headers);
+    Ok(Some(file_record)) => {
+      return handle_file_response(&state.engine, file_record, &headers).await;
     }
     Ok(None) => {
       // Not a file -- fall through to directory listing
@@ -1526,7 +1721,7 @@ async fn engine_get_at_version(state: &AppState, path: &str, version_query: &Eng
     }
   };
 
-  build_file_streaming_response(&state.engine, &file_record, None, request_headers, true, &[])
+  build_file_streaming_response(&state.engine, file_record, None, request_headers, true, &[]).await
 }
 
 /// DELETE /engine/*path -- delete a file via the custom storage engine.
@@ -1798,14 +1993,16 @@ pub async fn engine_get_by_hash(
     }
   };
 
-  let (header, _key, value) = match state.engine.get_entry(&hash_bytes) {
-    Ok(Some(entry)) => entry,
-    Ok(None) => {
-      return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
-    }
-    Err(e) => {
-      tracing::error!("Engine: failed to retrieve entry by hash '{}': {}", hex_hash, e);
-      return ErrorResponse::new(format!("Failed to retrieve entry: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+  let header = {
+    let engine = std::sync::Arc::clone(&state.engine);
+    let hash = hash_bytes.clone();
+    match run_engine_blocking("get_entry_header_by_hash", "Failed to retrieve entry header", move || {
+      engine.get_entry_header(&hash)?.ok_or_else(|| EngineError::NotFound(format!("Entry not found: {}", hex::encode(hash))))
+    })
+    .await
+    {
+      Ok(header) => header,
+      Err(response) => return response,
     }
   };
 
@@ -1815,6 +2012,25 @@ pub async fn engine_get_by_hash(
     return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
   }
 
+  let mut file_record = if header.entry_type == EntryType::FileRecord {
+    let engine = std::sync::Arc::clone(&state.engine);
+    let hash = hash_bytes.clone();
+    let hash_length = state.engine.hash_algo().hash_length();
+    let entry_version = header.entry_version;
+    match run_engine_blocking("get_file_record_by_hash", "Failed to retrieve file record", move || {
+      let (_, _, value) =
+        engine.get_entry_verified(&hash)?.ok_or_else(|| EngineError::NotFound(format!("Entry not found: {}", hex::encode(&hash))))?;
+      FileRecord::deserialize(&value, hash_length, entry_version)
+    })
+    .await
+    {
+      Ok(record) => Some(record),
+      Err(response) => return response,
+    }
+  } else {
+    None
+  };
+
   // Scoped-key check. ActiveKeyRules is only inserted by the permission
   // middleware when the key is scoped (rules non-empty). Root keys and
   // unscoped keys skip this entirely.
@@ -1822,15 +2038,11 @@ pub async fn engine_get_by_hash(
     use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
     match header.entry_type {
       EntryType::FileRecord => {
-        let algo = state.engine.hash_algo();
-        let hash_length = algo.hash_length();
-        let path = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
-          Ok(r) => r.path,
-          Err(_) => {
-            return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
-          }
+        let path = match file_record.as_ref() {
+          Some(record) => &record.path,
+          None => return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response(),
         };
-        let allowed = match match_rules(&rules.0, &path) {
+        let allowed = match match_rules(&rules.0, path) {
           Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
           None => false,
         };
@@ -1848,46 +2060,46 @@ pub async fn engine_get_by_hash(
     }
   }
 
+  let raw_value = if matches!(header.entry_type, EntryType::FileRecord | EntryType::Chunk) {
+    None
+  } else {
+    let engine = std::sync::Arc::clone(&state.engine);
+    let hash = hash_bytes.clone();
+    let value_length = header.value_length;
+    let total_length = header.total_length;
+    match run_engine_blocking("get_raw_entry_by_hash", "Failed to retrieve entry", move || {
+      read_raw_entry_reserved(&engine, &hash, value_length, total_length)
+    })
+    .await
+    {
+      Ok(value) => Some(value),
+      Err(response) => return response,
+    }
+  };
+
   match header.entry_type {
     EntryType::FileRecord => {
-      // Deserialize the FileRecord and stream its chunk data, just like engine_get.
-      let algo = state.engine.hash_algo();
-      let hash_length = algo.hash_length();
-
-      let file_record = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
-        Ok(r) => r,
-        Err(e) => {
-          tracing::error!("Engine: corrupt FileRecord at hash '{}': {}", hex_hash, e);
-          return ErrorResponse::new(format!(
-            "Corrupt or unreadable file record at hash '{}'. The entry may need to be re-uploaded — contact your administrator",
-            hex_hash
-          ))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
-        }
-      };
+      let file_record = file_record.take().expect("FileRecord dispatch must load its record");
 
       build_file_streaming_response(
         &state.engine,
-        &file_record,
+        file_record,
         None,
         &headers,
         false,
         &[("X-AeorDB-Type", header.entry_type.to_u8().to_string()), ("X-AeorDB-Hash", hex_hash.clone())],
       )
+      .await
     }
 
     EntryType::Chunk => {
-      let data = match state.engine.read_chunk(&hash_bytes) {
-        Ok(Some(data)) => data,
-        Ok(None) => {
-          return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
-        }
-        Err(error) => {
-          tracing::error!("Engine: failed to read chunk by hash '{}': {}", hex_hash, error);
-          return ErrorResponse::new(format!("Failed to retrieve entry: {}", error))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response();
+      let data = {
+        let engine = std::sync::Arc::clone(&state.engine);
+        let hash = hash_bytes.clone();
+        match run_engine_blocking("get_chunk_by_hash", "Failed to retrieve chunk", move || read_chunk_reserved(&engine, &hash, false)).await
+        {
+          Ok(data) => data,
+          Err(response) => return response,
         }
       };
       state.engine.counters().record_read(data.len() as u64);
@@ -1897,29 +2109,31 @@ pub async fn engine_get_by_hash(
         .header("content-type", "application/octet-stream")
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
-        .body(Body::from(data))
+        .body(Body::from(axum::body::Bytes::from_owner(data)))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
     }
 
     EntryType::DirectoryIndex => {
+      let value = raw_value.expect("raw entry dispatch must load its value");
       state.engine.counters().record_read(value.len() as u64);
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
-        .body(Body::from(value))
+        .body(Body::from(axum::body::Bytes::from_owner(value)))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
     }
 
     _ => {
       // Other types: return raw value bytes.
+      let value = raw_value.expect("raw entry dispatch must load its value");
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
-        .body(Body::from(value))
+        .body(Body::from(axum::body::Bytes::from_owner(value)))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
     }
   }
