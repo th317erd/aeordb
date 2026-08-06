@@ -11,12 +11,20 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 
+use crate::engine::directory_ops::file_path_hash;
+use crate::engine::entry_type::EntryType;
+use crate::engine::file_record::FileRecord;
+use crate::engine::storage_engine::StorageEngine;
 use crate::engine::v4::contract_generated::{CONFIGURATION_PROPERTIES, ConfigProperty};
 
 const KIB: u64 = 1024;
 const MIB: u64 = 1024 * KIB;
 const GIB: u64 = 1024 * MIB;
 const TIB: u64 = 1024 * GIB;
+const MAX_CONFIG_FILE_RECORD_BYTES: u32 = 64 * 1024;
+
+pub const MAX_CONFIG_DOCUMENT_BYTES: usize = 1024 * 1024;
+pub const RUNTIME_CONFIG_PATH: &str = "/.aeordb-config/runtime.json";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigValue {
@@ -88,8 +96,25 @@ pub struct ConfigResolutionContext {
   pub filesystem_capacity_bytes: u64,
   pub chunk_size_bytes: u64,
   pub database_path: PathBuf,
-  pub default_gc_workspace_root: PathBuf,
-  pub default_emergency_spill_dir: PathBuf,
+  pub default_gc_workspace_root: Option<PathBuf>,
+  pub default_emergency_spill_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfigShadowReport {
+  pub context: Option<ConfigResolutionContext>,
+  pub resolution: Option<ConfigResolution>,
+  pub context_error: Option<String>,
+}
+
+impl ConfigShadowReport {
+  pub fn complete(&self) -> bool {
+    self.resolution.as_ref().is_some_and(ConfigResolution::complete)
+  }
+
+  pub fn degraded(&self) -> bool {
+    self.context_error.is_some() || self.resolution.as_ref().is_none_or(ConfigResolution::degraded)
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,6 +410,7 @@ impl ConfigResolver {
               message,
             });
           }
+          Self::mark_lower_issues_superseded(property.path, &mut resolution.issues);
           let target = resolution.properties.get_mut(property.path).expect("frozen property exists");
           target.value = Some(value);
           target.source = Some(ConfigSource::CommandLine);
@@ -402,6 +428,7 @@ impl ConfigResolver {
         }
         None => match environment_value {
           Some(Ok((value, source))) => {
+            Self::mark_lower_issues_superseded(property.path, &mut resolution.issues);
             let target = resolution.properties.get_mut(property.path).expect("frozen property exists");
             target.value = Some(value);
             target.source = Some(source);
@@ -420,6 +447,12 @@ impl ConfigResolver {
           None => {}
         },
       }
+    }
+  }
+
+  fn mark_lower_issues_superseded(path: &str, issues: &mut [ConfigIssue]) {
+    for issue in issues.iter_mut().filter(|issue| issue.blocking && issue.property.as_deref() == Some(path)) {
+      issue.blocking = false;
     }
   }
 
@@ -601,8 +634,20 @@ impl ConfigResolver {
   fn parse_path(&self, property: &ConfigProperty, raw: &OsStr) -> Result<ConfigValue, String> {
     if raw == OsStr::new("auto") {
       return match property.id {
-        20 => validate_absolute_path(&self.context.default_gc_workspace_root).map(ConfigValue::Path),
-        29 => validate_absolute_path(&self.context.default_emergency_spill_dir).map(ConfigValue::Path),
+        20 => self
+          .context
+          .default_gc_workspace_root
+          .as_deref()
+          .ok_or_else(|| format!("{} automatic path is unavailable", property.path))
+          .and_then(validate_absolute_path)
+          .map(ConfigValue::Path),
+        29 => self
+          .context
+          .default_emergency_spill_dir
+          .as_deref()
+          .ok_or_else(|| format!("{} OS user-data path is unavailable", property.path))
+          .and_then(validate_absolute_path)
+          .map(ConfigValue::Path),
         _ => Err(format!("{} does not define an automatic path", property.path)),
       };
     }
@@ -632,7 +677,13 @@ impl ConfigResolver {
       17 => ConfigValue::OptionalBytes(None),
       18 => ConfigValue::Unsigned(300),
       19 => ConfigValue::Unsigned(GIB),
-      20 => validate_absolute_path(&self.context.default_gc_workspace_root).map(ConfigValue::Path)?,
+      20 => self
+        .context
+        .default_gc_workspace_root
+        .as_deref()
+        .ok_or_else(|| format!("{} automatic path is unavailable", property.path))
+        .and_then(validate_absolute_path)
+        .map(ConfigValue::Path)?,
       21 => {
         ConfigValue::Unsigned(self.context.chunk_size_bytes.checked_mul(10).ok_or_else(|| "read prefetch default overflows".to_string())?)
       }
@@ -643,7 +694,13 @@ impl ConfigResolver {
       26 => ConfigValue::Unsigned(64 * MIB),
       27 => ConfigValue::Unsigned(100),
       28 => ConfigValue::Unsigned((self.context.logical_cpu_count / 4).clamp(1, 2)),
-      29 => validate_absolute_path(&self.context.default_emergency_spill_dir).map(ConfigValue::Path)?,
+      29 => self
+        .context
+        .default_emergency_spill_dir
+        .as_deref()
+        .ok_or_else(|| format!("{} OS user-data path is unavailable", property.path))
+        .and_then(validate_absolute_path)
+        .map(ConfigValue::Path)?,
       30 => ConfigValue::Unsigned(4 * GIB),
       31 => ConfigValue::Unsigned(600),
       32 => ConfigValue::Unsigned(64 * GIB),
@@ -782,6 +839,138 @@ impl ConfigResolver {
     }
     failures
   }
+}
+
+pub(crate) fn build_startup_config_shadow(engine: &StorageEngine, database_path: &Path, chunk_size_bytes: u64) -> ConfigShadowReport {
+  let context = match detect_context(database_path, chunk_size_bytes) {
+    Ok(context) => context,
+    Err(message) => return ConfigShadowReport { context: None, resolution: None, context_error: Some(message) },
+  };
+  let inputs = ConfigResolutionInputs {
+    runtime: read_config_document(engine, RUNTIME_CONFIG_PATH),
+    lifecycle: read_config_document(engine, crate::engine::lifecycle_config::LIFECYCLE_CONFIG_PATH),
+    environment: collect_registered_environment(),
+    ..Default::default()
+  };
+  let resolution = ConfigResolver::new(context.clone()).resolve(inputs);
+  ConfigShadowReport { context: Some(context), resolution: Some(resolution), context_error: None }
+}
+
+fn detect_context(database_path: &Path, chunk_size_bytes: u64) -> Result<ConfigResolutionContext, String> {
+  let database_path = std::fs::canonicalize(database_path)
+    .map_err(|error| format!("cannot canonicalize database path {}: {error}", database_path.display()))?;
+  let filesystem_capacity_bytes = fs2::total_space(&database_path)
+    .map_err(|error| format!("cannot detect filesystem capacity for {}: {error}", database_path.display()))?;
+  let logical_cpu_count =
+    std::thread::available_parallelism().map_err(|error| format!("cannot detect logical CPU count: {error}"))?.get() as u64;
+  let default_gc_workspace_root = private_gc_workspace_root(&database_path)?;
+  Ok(ConfigResolutionContext {
+    physical_memory_bytes: detect_physical_memory_bytes()?,
+    logical_cpu_count,
+    filesystem_capacity_bytes,
+    chunk_size_bytes,
+    database_path,
+    default_gc_workspace_root: Some(default_gc_workspace_root),
+    default_emergency_spill_dir: crate::engine::emergency_spill::os_user_data_emergency_spill_dir(),
+  })
+}
+
+fn private_gc_workspace_root(database_path: &Path) -> Result<PathBuf, String> {
+  let parent = database_path.parent().ok_or_else(|| format!("database path {} has no parent", database_path.display()))?;
+  let file_name = database_path.file_name().ok_or_else(|| format!("database path {} has no file name", database_path.display()))?;
+  let mut sibling_name = OsString::from(".");
+  sibling_name.push(file_name);
+  sibling_name.push("-gc");
+  Ok(parent.join(sibling_name))
+}
+
+#[cfg(unix)]
+fn detect_physical_memory_bytes() -> Result<u64, String> {
+  let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+  let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+  if pages <= 0 || page_size <= 0 {
+    return Err(format!("physical-memory sysconf returned pages={pages}, page_size={page_size}"));
+  }
+  (pages as u64).checked_mul(page_size as u64).ok_or_else(|| "detected physical-memory size overflows u64".to_string())
+}
+
+#[cfg(windows)]
+fn detect_physical_memory_bytes() -> Result<u64, String> {
+  use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+  let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+  if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+    return Err(format!("GlobalMemoryStatusEx failed: {}", std::io::Error::last_os_error()));
+  }
+  Ok(status.ullTotalPhys)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn detect_physical_memory_bytes() -> Result<u64, String> {
+  Err("physical-memory detection is unsupported on this platform".to_string())
+}
+
+fn collect_registered_environment() -> BTreeMap<String, OsString> {
+  let mut environment = BTreeMap::new();
+  for property in CONFIGURATION_PROPERTIES {
+    if let Some(value) = std::env::var_os(property.environment) {
+      environment.insert(property.environment.to_string(), value);
+    }
+    if let Some(alias) = legacy_environment_alias(property.path) {
+      if let Some(value) = std::env::var_os(alias) {
+        environment.insert(alias.to_string(), value);
+      }
+    }
+  }
+  environment
+}
+
+fn read_config_document(engine: &StorageEngine, path: &str) -> ConfigDocumentInput {
+  match read_config_document_inner(engine, path) {
+    Ok(Some(bytes)) => ConfigDocumentInput::Bytes(bytes),
+    Ok(None) => ConfigDocumentInput::Missing,
+    Err(message) => ConfigDocumentInput::Unreadable(message),
+  }
+}
+
+fn read_config_document_inner(engine: &StorageEngine, path: &str) -> Result<Option<Vec<u8>>, String> {
+  let key = file_path_hash(path, &engine.hash_algo()).map_err(|error| error.to_string())?;
+  let Some((header, _, value)) = engine
+    .get_entry_verified_bounded(&key, MAX_CONFIG_FILE_RECORD_BYTES)
+    .map_err(|error| format!("cannot read bounded FileRecord for {path}: {error}"))?
+  else {
+    return Ok(None);
+  };
+  if header.entry_type != EntryType::FileRecord {
+    return Err(format!("{path} resolves to {:?}, not FileRecord", header.entry_type));
+  }
+  let record = FileRecord::deserialize(&value, engine.hash_algo().hash_length(), header.entry_version)
+    .map_err(|error| format!("cannot decode FileRecord for {path}: {error}"))?;
+  if record.path != path {
+    return Err(format!("FileRecord path {} does not match requested configuration path {path}", record.path));
+  }
+  if record.total_size > MAX_CONFIG_DOCUMENT_BYTES as u64 {
+    return Err(format!("configuration document length {} exceeds {} bytes", record.total_size, MAX_CONFIG_DOCUMENT_BYTES));
+  }
+
+  let mut bytes = Vec::with_capacity(record.total_size as usize);
+  for chunk_hash in record.chunk_hashes {
+    let remaining = (record.total_size as usize)
+      .checked_sub(bytes.len())
+      .ok_or_else(|| format!("configuration document {path} exceeded its declared length"))?;
+    if remaining == 0 {
+      return Err(format!("configuration document {path} contains chunks beyond its declared length"));
+    }
+    let chunk = engine
+      .read_chunk_verified_bounded(&chunk_hash, remaining)
+      .map_err(|error| format!("cannot read bounded configuration document {path}: {error}"))?
+      .ok_or_else(|| format!("configuration document {path} references a missing chunk {}", hex::encode(chunk_hash)))?;
+    bytes.extend_from_slice(&chunk);
+  }
+  if bytes.len() as u64 != record.total_size {
+    return Err(format!("configuration document {path} expected {} bytes but read {}", record.total_size, bytes.len()));
+  }
+  Ok(Some(bytes))
 }
 
 #[derive(Clone, Copy)]

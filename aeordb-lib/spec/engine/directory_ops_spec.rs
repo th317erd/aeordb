@@ -145,6 +145,46 @@ fn test_storage_engine_read_chunk_decompresses_compressed_chunks() {
 }
 
 #[test]
+fn test_storage_engine_bounded_chunk_read_rejects_compressed_expansion() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  let data = vec![b'x'; 2 * 1024 * 1024];
+  let chunk_key = chunk_content_hash(&data, &engine.hash_algo()).unwrap();
+  let compressed = compress(&data, CompressionAlgorithm::Zstd).unwrap();
+  engine.store_entry_compressed(EntryType::Chunk, &chunk_key, &compressed, CompressionAlgorithm::Zstd).unwrap();
+
+  let error = engine.read_chunk_verified_bounded(&chunk_key, 1024 * 1024).unwrap_err();
+  assert!(error.to_string().contains("exceeds caller bound 1048576"));
+}
+
+#[test]
+fn test_storage_engine_bounded_chunk_read_accepts_exact_limit() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  let data = vec![b'x'; 64 * 1024];
+  let chunk_key = chunk_content_hash(&data, &engine.hash_algo()).unwrap();
+  let compressed = compress(&data, CompressionAlgorithm::Zstd).unwrap();
+  engine.store_entry_compressed(EntryType::Chunk, &chunk_key, &compressed, CompressionAlgorithm::Zstd).unwrap();
+
+  assert_eq!(engine.read_chunk_verified_bounded(&chunk_key, data.len()).unwrap().unwrap(), data);
+}
+
+#[test]
+fn test_storage_engine_bounded_chunk_read_rejects_stored_payload_from_header() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+
+  let data = vec![b'x'; 2 * 1024 * 1024];
+  let chunk_key = chunk_content_hash(&data, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::Chunk, &chunk_key, &data).unwrap();
+
+  let error = engine.read_chunk_verified_bounded(&chunk_key, 1024 * 1024).unwrap_err();
+  assert!(error.to_string().contains("entry value length 2097152 exceeds caller bound"));
+}
+
+#[test]
 fn test_storage_engine_read_chunk_rejects_non_chunk_entries() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);

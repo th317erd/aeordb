@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 
 use fs2::FileExt;
 
@@ -450,6 +450,7 @@ pub struct EngineCacheMemoryStats {
 /// appends new entries.
 pub struct StorageEngine {
   database_path: PathBuf,
+  configuration_shadow: OnceLock<Arc<crate::engine::config_resolver::ConfigShadowReport>>,
   operation_tracker: EngineOperationTracker,
   shutdown_started: AtomicBool,
   shutdown_flush_started: AtomicBool,
@@ -504,6 +505,28 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
+  fn initialize_configuration_shadow(&self) -> EngineResult<()> {
+    let report = Arc::new(crate::engine::config_resolver::build_startup_config_shadow(
+      self,
+      &self.database_path,
+      crate::engine::directory_ops::DEFAULT_CHUNK_SIZE as u64,
+    ));
+    let complete = report.complete();
+    let degraded = report.degraded();
+    let blocking_issues =
+      report.resolution.as_ref().map(|resolution| resolution.issues.iter().filter(|issue| issue.blocking).count()).unwrap_or(1);
+    self
+      .configuration_shadow
+      .set(report)
+      .map_err(|_| EngineError::InvalidInput("startup configuration shadow was initialized more than once".to_string()))?;
+    tracing::info!(complete, degraded, blocking_issues, "Captured startup configuration shadow diagnostics");
+    Ok(())
+  }
+
+  pub fn configuration_shadow(&self) -> Arc<crate::engine::config_resolver::ConfigShadowReport> {
+    Arc::clone(self.configuration_shadow.get().expect("StorageEngine constructors initialize configuration shadow"))
+  }
+
   fn operation_guard(&self, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
     let engine_id = self as *const StorageEngine as usize;
     self.operation_tracker.begin(engine_id, operation)
@@ -1326,6 +1349,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
+      configuration_shadow: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
@@ -1357,6 +1381,7 @@ impl StorageEngine {
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine));
     engine.counters.store(initialized);
+    engine.initialize_configuration_shadow()?;
     Ok(engine)
   }
 
@@ -1565,6 +1590,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
+      configuration_shadow: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: AtomicBool::new(false),
       shutdown_flush_started: AtomicBool::new(false),
@@ -1634,6 +1660,7 @@ impl StorageEngine {
     // VoidManager state so the next hot tail flush carries it forward.
     engine.sync_voids_to_kv_writer();
     engine.refresh_persistent_durability_recovery()?;
+    engine.initialize_configuration_shadow()?;
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {
@@ -2233,6 +2260,19 @@ impl StorageEngine {
     }
   }
 
+  fn decode_chunk_entry_bounded(
+    &self,
+    requested_hash: &[u8],
+    header: EntryHeader,
+    value: Vec<u8>,
+    maximum_decoded_length: usize,
+  ) -> EngineResult<Vec<u8>> {
+    if header.entry_type != EntryType::Chunk {
+      return Err(EngineError::InvalidInput(format!("Hash {} is not a chunk entry", hex::encode(requested_hash))));
+    }
+    crate::engine::compression::decompress_bounded(&value, header.compression_algo, maximum_decoded_length)
+  }
+
   fn decode_verified_chunk_entry_from_buffer(
     &self,
     requested_hash: &[u8],
@@ -2438,6 +2478,18 @@ impl StorageEngine {
   pub fn read_chunk_verified(&self, hash: &[u8]) -> EngineResult<Option<Vec<u8>>> {
     match self.get_entry_verified(hash)? {
       Some((header, _key, value)) => self.decode_chunk_entry(hash, header, value).map(Some),
+      None => Ok(None),
+    }
+  }
+
+  /// Read and verify a live chunk while bounding both its stored representation
+  /// and decoded output before either can grow without caller control.
+  pub fn read_chunk_verified_bounded(&self, hash: &[u8], maximum_decoded_length: usize) -> EngineResult<Option<Vec<u8>>> {
+    let bounded_decoded_length = maximum_decoded_length.min(u32::MAX as usize);
+    let maximum_stored_length =
+      zstd::zstd_safe::compress_bound(bounded_decoded_length).max(maximum_decoded_length).try_into().unwrap_or(u32::MAX);
+    match self.get_entry_verified_bounded(hash, maximum_stored_length)? {
+      Some((header, _key, value)) => self.decode_chunk_entry_bounded(hash, header, value, maximum_decoded_length).map(Some),
       None => Ok(None),
     }
   }

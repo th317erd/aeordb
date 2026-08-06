@@ -37,8 +37,8 @@ fn context() -> ConfigResolutionContext {
     filesystem_capacity_bytes: 2 * 1024 * GIB,
     chunk_size_bytes: 256 * 1024,
     database_path,
-    default_gc_workspace_root,
-    default_emergency_spill_dir,
+    default_gc_workspace_root: Some(default_gc_workspace_root),
+    default_emergency_spill_dir: Some(default_emergency_spill_dir),
   }
 }
 
@@ -393,4 +393,19 @@ fn unreadable_current_document_does_not_apply_defaults_without_a_valid_fallback(
   assert!(resolution.property("lifecycle.snapshot_writes_enabled").unwrap().value.is_none());
   assert!(!resolution.owner_ready("lifecycle_runtime"));
   assert!(resolution.owner_ready("read_runtime"));
+}
+
+#[test]
+fn valid_higher_override_supplies_an_unavailable_auto_path_without_hiding_degradation() {
+  let mut unavailable = context();
+  unavailable.default_emergency_spill_dir = None;
+  let mut inputs = ConfigResolutionInputs::default();
+  let (_, explicit_spill_path) = alternate_spill_paths();
+  inputs.environment.insert("AEORDB_RECOVERY_EMERGENCY_SPILL_DIR".into(), explicit_spill_path.as_os_str().into());
+
+  let resolution = ConfigResolver::new(unavailable).resolve(inputs);
+  assert!(resolution.complete(), "{:?}", resolution.issues);
+  assert!(resolution.degraded(), "the unavailable lower auto default must remain visible");
+  assert_eq!(resolution.property("recovery.emergency_spill_dir").unwrap().value, Some(ConfigValue::Path(explicit_spill_path)));
+  assert_eq!(resolution.property("recovery.emergency_spill_dir").unwrap().source, Some(ConfigSource::Environment));
 }

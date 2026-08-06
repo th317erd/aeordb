@@ -1,4 +1,5 @@
 use crate::engine::errors::{EngineError, EngineResult};
+use std::io::Read;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -37,6 +38,44 @@ pub fn decompress(data: &[u8], algorithm: CompressionAlgorithm) -> EngineResult<
   match algorithm {
     CompressionAlgorithm::None => Ok(data.to_vec()),
     CompressionAlgorithm::Zstd => zstd::decode_all(data).map_err(EngineError::IoError),
+  }
+}
+
+/// Decompress data without allowing its decoded form to exceed a caller-owned
+/// allocation bound.
+pub fn decompress_bounded(data: &[u8], algorithm: CompressionAlgorithm, maximum_output_length: usize) -> EngineResult<Vec<u8>> {
+  match algorithm {
+    CompressionAlgorithm::None => {
+      if data.len() > maximum_output_length {
+        return Err(EngineError::InvalidInput(format!(
+          "decompressed payload length {} exceeds caller bound {}",
+          data.len(),
+          maximum_output_length
+        )));
+      }
+      Ok(data.to_vec())
+    }
+    CompressionAlgorithm::Zstd => {
+      let mut decoder = zstd::stream::read::Decoder::new(data).map_err(EngineError::IoError)?;
+      let initial_capacity = data.len().min(maximum_output_length).min(64 * 1024);
+      let mut output = Vec::with_capacity(initial_capacity);
+      let mut buffer = [0u8; 16 * 1024];
+      loop {
+        let read = decoder.read(&mut buffer).map_err(EngineError::IoError)?;
+        if read == 0 {
+          break;
+        }
+        let decoded_length = output
+          .len()
+          .checked_add(read)
+          .ok_or_else(|| EngineError::InvalidInput("decompressed payload length overflowed usize".to_string()))?;
+        if decoded_length > maximum_output_length {
+          return Err(EngineError::InvalidInput(format!("decompressed payload exceeds caller bound {}", maximum_output_length)));
+        }
+        output.extend_from_slice(&buffer[..read]);
+      }
+      Ok(output)
+    }
   }
 }
 

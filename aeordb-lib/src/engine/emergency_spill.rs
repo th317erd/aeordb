@@ -106,6 +106,30 @@ pub fn emergency_spill_base_dirs() -> Vec<PathBuf> {
   emergency_spill_locations().into_iter().map(|location| location.path).collect()
 }
 
+pub fn os_user_data_emergency_spill_dir() -> Option<PathBuf> {
+  #[cfg(target_os = "windows")]
+  {
+    return std::env::var_os("LOCALAPPDATA")
+      .or_else(|| std::env::var_os("APPDATA"))
+      .map(PathBuf::from)
+      .map(|path| path.join("AeorDB").join("emergency-spill"));
+  }
+  #[cfg(target_os = "macos")]
+  {
+    return std::env::var_os("HOME")
+      .map(PathBuf::from)
+      .map(|path| path.join("Library").join("Application Support").join("aeordb").join("emergency-spill"));
+  }
+  #[cfg(all(unix, not(target_os = "macos")))]
+  {
+    return std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).map(|path| path.join("aeordb").join("emergency-spill")).or_else(|| {
+      std::env::var_os("HOME").map(PathBuf::from).map(|path| path.join(".local").join("share").join("aeordb").join("emergency-spill"))
+    });
+  }
+  #[allow(unreachable_code)]
+  None
+}
+
 pub fn emergency_spill_locations() -> Vec<EmergencySpillLocation> {
   let mut locations = Vec::new();
   #[cfg(test)]
@@ -113,47 +137,9 @@ pub fn emergency_spill_locations() -> Vec<EmergencySpillLocation> {
   #[cfg(not(test))]
   let configured_only = false;
 
-  #[cfg(target_os = "windows")]
-  {
-    if !configured_only {
-      if let Ok(path) = std::env::var("LOCALAPPDATA") {
-        locations.push(EmergencySpillLocation {
-          class: SpillLocationClass::OsUserData,
-          path: PathBuf::from(path).join("AeorDB").join("emergency-spill"),
-        });
-      } else if let Ok(path) = std::env::var("APPDATA") {
-        locations.push(EmergencySpillLocation {
-          class: SpillLocationClass::OsUserData,
-          path: PathBuf::from(path).join("AeorDB").join("emergency-spill"),
-        });
-      }
-    }
-  }
-  #[cfg(target_os = "macos")]
-  {
-    if !configured_only {
-      if let Ok(home) = std::env::var("HOME") {
-        locations.push(EmergencySpillLocation {
-          class: SpillLocationClass::OsUserData,
-          path: PathBuf::from(home).join("Library").join("Application Support").join("aeordb").join("emergency-spill"),
-        });
-      }
-    }
-  }
-  #[cfg(all(unix, not(target_os = "macos")))]
-  {
-    if !configured_only {
-      if let Ok(path) = std::env::var("XDG_DATA_HOME") {
-        locations.push(EmergencySpillLocation {
-          class: SpillLocationClass::OsUserData,
-          path: PathBuf::from(path).join("aeordb").join("emergency-spill"),
-        });
-      } else if let Ok(home) = std::env::var("HOME") {
-        locations.push(EmergencySpillLocation {
-          class: SpillLocationClass::OsUserData,
-          path: PathBuf::from(home).join(".local").join("share").join("aeordb").join("emergency-spill"),
-        });
-      }
+  if !configured_only {
+    if let Some(path) = os_user_data_emergency_spill_dir() {
+      locations.push(EmergencySpillLocation { class: SpillLocationClass::OsUserData, path });
     }
   }
 

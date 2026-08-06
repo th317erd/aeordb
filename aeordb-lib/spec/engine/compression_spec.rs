@@ -1,4 +1,4 @@
-use aeordb::engine::compression::{CompressionAlgorithm, compress, decompress, should_compress};
+use aeordb::engine::compression::{CompressionAlgorithm, compress, decompress, decompress_bounded, should_compress};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config_resolver::IndexConfigResolver;
 use aeordb::engine::storage_engine::StorageEngine;
@@ -74,6 +74,45 @@ fn test_decompress_invalid_zstd_data() {
   let garbage = b"this is not valid zstd data";
   let result = decompress(garbage, CompressionAlgorithm::Zstd);
   assert!(result.is_err(), "Decompressing garbage should fail");
+}
+
+#[test]
+fn test_decompress_bounded_accepts_exact_zstd_limit() {
+  let original = vec![b'x'; 64 * 1024];
+  let compressed = compress(&original, CompressionAlgorithm::Zstd).unwrap();
+
+  let decompressed = decompress_bounded(&compressed, CompressionAlgorithm::Zstd, original.len()).unwrap();
+
+  assert_eq!(decompressed, original);
+}
+
+#[test]
+fn test_decompress_bounded_rejects_zstd_expansion_past_limit() {
+  let original = vec![b'x'; 2 * 1024 * 1024];
+  let compressed = compress(&original, CompressionAlgorithm::Zstd).unwrap();
+
+  let error = decompress_bounded(&compressed, CompressionAlgorithm::Zstd, 1024 * 1024).unwrap_err();
+
+  assert!(error.to_string().contains("exceeds caller bound 1048576"));
+}
+
+#[test]
+fn test_decompress_bounded_rejects_uncompressed_input_past_limit() {
+  let error = decompress_bounded(b"12345", CompressionAlgorithm::None, 4).unwrap_err();
+
+  assert!(error.to_string().contains("exceeds caller bound 4"));
+}
+
+#[test]
+fn test_decompress_bounded_accepts_empty_input_at_zero_limit() {
+  assert_eq!(decompress_bounded(&[], CompressionAlgorithm::None, 0).unwrap(), Vec::<u8>::new());
+  let compressed = compress(&[], CompressionAlgorithm::Zstd).unwrap();
+  assert_eq!(decompress_bounded(&compressed, CompressionAlgorithm::Zstd, 0).unwrap(), Vec::<u8>::new());
+}
+
+#[test]
+fn test_decompress_bounded_rejects_malformed_zstd() {
+  assert!(decompress_bounded(b"not-zstd", CompressionAlgorithm::Zstd, 1024).is_err());
 }
 
 #[test]
