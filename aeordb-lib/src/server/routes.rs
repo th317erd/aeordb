@@ -251,14 +251,35 @@ pub async fn invoke_plugin(
 
 /// GET /plugins — list all deployed plugins.
 pub async fn list_plugins(State(state): State<AppState>) -> Response {
-  match state.plugin_manager.list_plugins() {
-    Ok(plugins) => match serde_json::to_value(plugins) {
-      Ok(value) => (StatusCode::OK, Json(serde_json::json!({"items": value}))).into_response(),
-      Err(e) => {
-        tracing::error!("Failed to serialize plugins: {}", e);
-        ErrorResponse::new(format!("Failed to serialize plugins: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
+  match state.plugin_manager.list_plugins_accounted() {
+    Ok(plugins) => {
+      #[derive(serde::Serialize)]
+      struct PluginListResponse<'a> {
+        items: &'a [crate::plugins::PluginMetadata],
       }
-    },
+
+      match serde_json::to_vec(&PluginListResponse { items: plugins.as_slice() }) {
+        Ok(bytes) => {
+          let (_, reservation) = plugins.into_parts();
+          axum::http::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(accounted_response_body(bytes, reservation))
+            .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+        }
+        Err(error) => {
+          tracing::error!("Failed to serialize plugins: {}", error);
+          ErrorResponse::new(format!("Failed to serialize plugins: {}", error))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response()
+        }
+      }
+    }
+    Err(crate::plugins::plugin_manager::PluginManagerError::ResourceExhausted(message)) => {
+      ErrorResponse::new(format!("Plugin listing resource exhausted: {}", message))
+        .with_status(StatusCode::SERVICE_UNAVAILABLE)
+        .into_response()
+    }
     Err(error) => {
       tracing::error!("Failed to list plugins: {}", error);
       ErrorResponse::new(format!("Failed to list plugins: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()

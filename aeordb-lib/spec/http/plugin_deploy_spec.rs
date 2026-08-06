@@ -315,6 +315,46 @@ async fn test_list_deployed_plugins() {
 }
 
 #[tokio::test]
+async fn plugin_list_response_retains_memory_until_the_body_is_released() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let before = engine.memory_coordinator_snapshot().unwrap();
+  let before_owner = before.owner(MemoryOwner::ParserPlugin).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder().method("GET").uri("/plugins").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let held = engine.memory_coordinator_snapshot().unwrap();
+  let held_owner = held.owner(MemoryOwner::ParserPlugin).unwrap();
+  assert!(held_owner.reserved_bytes > before_owner.reserved_bytes);
+  assert!(held_owner.active_reservations > before_owner.active_reservations);
+  let _body = body_bytes(response.into_body()).await;
+
+  let released = engine.memory_coordinator_snapshot().unwrap();
+  let released_owner = released.owner(MemoryOwner::ParserPlugin).unwrap();
+  assert_eq!(released_owner.reserved_bytes, before_owner.reserved_bytes);
+  assert_eq!(released_owner.active_reservations, before_owner.active_reservations);
+}
+
+#[tokio::test]
+async fn plugin_list_memory_refusal_is_retryable_service_unavailable() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  let available = snapshot.policy.unwrap().ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let remaining = 64 * 1024;
+  assert!(available > remaining);
+  let _pressure = engine.memory_coordinator().reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder().method("GET").uri("/plugins").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);

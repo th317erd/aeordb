@@ -444,22 +444,38 @@ pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<
 /// List all plugins, returning (key, encoded_bytes) for each.
 /// Plugin keys are encoded with '::' replacing '/' for flat storage.
 pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>)>> {
-  let ops = DirectoryOps::new(engine);
-  let entries = match ops.list_directory("/.aeordb-system/plugins") {
-    Ok(entries) => entries,
-    Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
-    Err(error) => return Err(error),
-  };
-
   let mut results = Vec::new();
-  for entry in &entries {
-    let path = format!("/.aeordb-system/plugins/{}", entry.name);
-    if let Ok(data) = ops.read_file_buffered(&path) {
-      let original_key = decode_plugin_key(&entry.name);
-      results.push((original_key, data));
+  let mut offset = 0usize;
+  loop {
+    let (keys, has_more) = list_plugin_keys_window(engine, offset, 64)?;
+    if keys.is_empty() {
+      break;
+    }
+    offset = offset.saturating_add(keys.len());
+    for key in keys {
+      if let Some(data) = get_plugin(engine, &key)? {
+        results.push((key, data));
+      }
+    }
+    if !has_more {
+      break;
     }
   }
   Ok(results)
+}
+
+/// Return one bounded window of decoded plugin keys without reading plugin bodies.
+pub fn list_plugin_keys_window(engine: &StorageEngine, offset: usize, limit: usize) -> EngineResult<(Vec<String>, bool)> {
+  let ops = DirectoryOps::new(engine);
+  let window = match ops.list_directory_window("/.aeordb-system/plugins", offset, limit) {
+    Ok(window) => window,
+    Err(EngineError::NotFound(_)) => return Ok((Vec::new(), false)),
+    Err(error) => return Err(error),
+  };
+  for warning in window.warnings {
+    tracing::warn!(reason = %warning.reason, "Plugin directory index is partially unreadable");
+  }
+  Ok((window.entries.into_iter().map(|entry| decode_plugin_key(&entry.name)).collect(), window.has_more))
 }
 
 /// Remove a plugin by key.

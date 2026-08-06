@@ -586,6 +586,23 @@ fn test_list_plugins() {
 }
 
 #[test]
+fn plugin_key_windows_page_without_loading_plugin_bodies() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  system_store::store_plugin(&engine, &ctx, "plugin-a", b"large-body-a").unwrap();
+  system_store::store_plugin(&engine, &ctx, "plugin-b", b"large-body-b").unwrap();
+  system_store::store_plugin(&engine, &ctx, "plugin-c", b"large-body-c").unwrap();
+
+  let (first, has_more) = system_store::list_plugin_keys_window(&engine, 0, 2).unwrap();
+  assert_eq!(first, vec!["plugin-a", "plugin-b"]);
+  assert!(has_more);
+
+  let (second, has_more) = system_store::list_plugin_keys_window(&engine, 2, 2).unwrap();
+  assert_eq!(second, vec!["plugin-c"]);
+  assert!(!has_more);
+}
+
+#[test]
 fn test_remove_plugin() {
   let (engine, _dir) = setup();
   let ctx = test_context();

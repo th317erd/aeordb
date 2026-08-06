@@ -186,7 +186,7 @@
         - [x] Bound plugin host reads by guest response capacity before buffering source files, and preserve range extraction as the large-file path.
         - [x] Add cancellation checks at bounded query/parser work quanta without changing result correctness.
         - [x] Prove exact accounting/release, tiny-budget rejection, malformed plugin output, traps/fuel exhaustion, oversized host reads, and concurrent query/plugin pressure.
-      - [ ] Bound plugin metadata enumeration without retaining every stored WASM body, and retain its HTTP/rule-engine result memory through consumption.
+      - [x] Bound plugin metadata enumeration without retaining every stored WASM body, and retain its HTTP/rule-engine result memory through consumption.
       - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.

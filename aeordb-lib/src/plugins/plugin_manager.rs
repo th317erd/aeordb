@@ -190,6 +190,25 @@ pub(crate) struct AccountedPluginOutput {
   _reservation: MemoryReservation,
 }
 
+pub(crate) struct AccountedPluginList {
+  items: Vec<PluginMetadata>,
+  reservation: MemoryReservation,
+}
+
+impl AccountedPluginList {
+  pub(crate) fn as_slice(&self) -> &[PluginMetadata] {
+    &self.items
+  }
+
+  pub(crate) fn into_parts(self) -> (Vec<PluginMetadata>, MemoryReservation) {
+    (self.items, self.reservation)
+  }
+
+  fn into_items(self) -> Vec<PluginMetadata> {
+    self.items
+  }
+}
+
 impl AccountedPluginOutput {
   pub(crate) fn as_slice(&self) -> &[u8] {
     &self.bytes
@@ -401,17 +420,53 @@ impl PluginManager {
 
   /// List metadata for all deployed plugins.
   pub fn list_plugins(&self) -> Result<Vec<PluginMetadata>, PluginManagerError> {
-    let entries = system_store::list_plugins(&self.engine).map_err(|error| PluginManagerError::Storage(error.to_string()))?;
+    self.list_plugins_accounted().map(AccountedPluginList::into_items)
+  }
 
+  pub(crate) fn list_plugins_accounted(&self) -> Result<AccountedPluginList, PluginManagerError> {
+    const PAGE_SIZE: usize = 64;
+    const LIST_WORKSPACE_BYTES: u64 = 256 * 1024;
+    let coordinator = self.engine.memory_coordinator();
+    let mut reservation =
+      coordinator.reserve(MemoryOwner::ParserPlugin, LIST_WORKSPACE_BYTES, AdmissionClass::Workload).map_err(plugin_memory_error)?;
     let mut plugins = Vec::new();
-    for (_path, bytes) in entries {
-      let mut record: PluginRecord =
-        serde_json::from_slice(&bytes).map_err(|error| PluginManagerError::Storage(format!("deserialization failed: {}", error)))?;
-      record.normalize_metadata();
-      plugins.push(record.to_metadata());
+    let mut offset = 0usize;
+    loop {
+      let (keys, has_more) = system_store::list_plugin_keys_window(&self.engine, offset, PAGE_SIZE)
+        .map_err(|error| PluginManagerError::Storage(error.to_string()))?;
+      if keys.is_empty() {
+        break;
+      }
+      offset = offset.saturating_add(keys.len());
+      for key in keys {
+        let storage_path = system_store::plugin_storage_path(&key);
+        let Some(metadata) =
+          DirectoryOps::new(&self.engine).get_metadata(&storage_path).map_err(|error| PluginManagerError::Storage(error.to_string()))?
+        else {
+          continue;
+        };
+        let stored_bytes = usize::try_from(metadata.total_size)
+          .map_err(|_| PluginManagerError::ResourceExhausted("stored plugin size exceeds this platform's address space".to_string()))?;
+        let record_work_bytes = stored_bytes
+          .checked_mul(2)
+          .and_then(|bytes| bytes.checked_add(64 * 1024))
+          .and_then(|bytes| u64::try_from(bytes).ok())
+          .ok_or_else(|| PluginManagerError::ResourceExhausted("plugin listing record estimate overflow".to_string()))?;
+        let _record_memory =
+          coordinator.reserve(MemoryOwner::ParserPlugin, record_work_bytes, AdmissionClass::Workload).map_err(plugin_memory_error)?;
+        let Some(mut record) = self.get_plugin(&key)? else {
+          continue;
+        };
+        record.normalize_metadata();
+        let metadata = record.to_metadata();
+        reservation.grow(plugin_metadata_retained_bytes(&metadata)?).map_err(plugin_memory_error)?;
+        plugins.push(metadata);
+      }
+      if !has_more {
+        break;
+      }
     }
-
-    Ok(plugins)
+    Ok(AccountedPluginList { items: plugins, reservation })
   }
 
   /// Remove a deployed plugin by its path.
@@ -644,6 +699,24 @@ fn plugin_memory_error(error: MemoryCoordinatorError) -> PluginManagerError {
     | MemoryCoordinatorError::PolicyUnavailable => PluginManagerError::ResourceExhausted(error.to_string()),
     _ => PluginManagerError::ExecutionFailed(format!("plugin memory accounting failed: {error}")),
   }
+}
+
+fn plugin_metadata_retained_bytes(metadata: &PluginMetadata) -> Result<u64, PluginManagerError> {
+  let strings = metadata
+    .plugin_id
+    .len()
+    .checked_add(metadata.name.len())
+    .and_then(|bytes| bytes.checked_add(metadata.path.len()))
+    .and_then(|bytes| bytes.checked_add(metadata.version.as_ref().map_or(0, String::len)))
+    .and_then(|bytes| bytes.checked_add(metadata.author.as_ref().map_or(0, String::len)))
+    .and_then(|bytes| bytes.checked_add(metadata.checksum.len()))
+    .ok_or_else(|| PluginManagerError::ResourceExhausted("plugin metadata size overflow".to_string()))?;
+  strings
+    .checked_mul(8)
+    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<PluginMetadata>()))
+    .and_then(|bytes| bytes.checked_add(4096))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| PluginManagerError::ResourceExhausted("plugin metadata retained estimate overflow".to_string()))
 }
 
 /// Errors specific to plugin management operations.

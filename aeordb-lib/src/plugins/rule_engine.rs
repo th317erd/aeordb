@@ -18,11 +18,11 @@ impl<'a> RuleEngine<'a> {
   /// Rules at parent scopes apply to children (inheritance).
   /// Rules are returned ordered from most specific (deepest) to least specific.
   pub fn collect_applicable_rules(&self, scope_path: &str) -> Result<Vec<String>, PluginManagerError> {
-    let all_plugins = self.plugin_manager.list_plugins()?;
+    let all_plugins = self.plugin_manager.list_plugins_accounted()?;
 
     let mut applicable: Vec<(usize, String)> = Vec::new();
 
-    for plugin_metadata in &all_plugins {
+    for plugin_metadata in all_plugins.as_slice() {
       if plugin_metadata.plugin_type != PluginType::Rule {
         continue;
       }
