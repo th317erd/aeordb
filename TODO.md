@@ -146,8 +146,30 @@
       - [x] Add a bounded version-aware KV page provider with exact positioned reads, coalesced misses, clean LRU eviction, retained-generation admission before overwrite, and typed corruption/I/O failures.
       - [x] Add bounded-page `ReadSnapshot` support and propagate page I/O/corruption errors through engine, backup, GC, counters, stats, metrics, portal, CLI diagnostics, and bulk-flush consumers.
       - [x] Ensure known-corrupt KV pages rebuild from WAL before startup snapshot consumers or counters run; prove recovered reads and counts.
-      - [ ] Replace full resident KV page sets with the bounded provider while preserving every `ReadSnapshot` consumer and eliminating error-to-not-found squelching.
-      - [ ] Make KV cache and retained generations reserve through the coordinator, evict clean pages under pressure, and safely gate full-layout rewrite/expansion.
+      - [x] Replace full resident KV page sets with the bounded provider while preserving every `ReadSnapshot` consumer and eliminating error-to-not-found squelching.
+        - [x] Activate the resolved bounded provider after bootstrap/recovery and drop the resident compatibility snapshot before ready admission.
+        - [x] Converge ordinary and no-publish flushes on one prepare-before-overwrite authority with exact error propagation.
+        - [x] Preserve old bounded snapshots across page replacement and publish the new generation only after the durability barrier.
+        - [x] Remove the direct `DiskKVStore::get` seek/read error-to-not-found path.
+      - [x] Make KV cache and retained generations reserve through the coordinator, evict clean pages under pressure, and safely gate full-layout rewrite/expansion.
+        - [x] Add a reversible exclusive engine-operation gate for layout changes.
+        - [x] Retire and drain the old page provider before any resize/rebuild can reinterpret overwritten offsets.
+        - [x] Restore readable state on pre-overwrite refusal and latch/fail closed after an uncertain layout overwrite.
+        - [x] Prove bounded residency, refusal-before-mutation, concurrent old/new reads, restart, corruption recovery, and expansion.
+        - [x] Preserve target-layout collision overflow in the durable hot tail and request a later stage without losing keys across reopen.
+        - [x] Replace expansion magic-byte boundary probing with validated WAL entry walking so a final straddling entry cannot be truncated.
+        - [x] Keep the old bounded KV view published when expansion boundary validation fails before any layout mutation.
+        - [x] Preserve a valid queued expansion request after a non-latching preflight refusal so later write boundaries can retry it.
+        - [x] Latch the whole database read-only and spill volatile evidence after any expansion failure at or beyond resize-marker publication.
+        - [x] Eliminate the all-pages resident bootstrap in `DiskKVStore::open`; use a zero-retention provider before strict config activation.
+        - [x] Place relocated WAL data and the hot tail after the expanded KV block when the new block overtakes the old WAL frontier.
+        - [x] Count the exact merged live KV view on reopen, excluding deleted rows and hot-tail overrides.
+        - [x] Remove the duplicate DiskKVStore-owned full-layout rewrite; only StorageEngine may consume a requested target stage.
+        - [x] Publish distinct pre-relocation and relocation-durable header phases before any old WAL byte is overwritten.
+        - [x] Make startup expansion recovery idempotently retry pre-relocation state or finalize relocation-durable state, and abort rather than warning-success on failure.
+        - [x] Prove crash/restart recovery at every expansion publication boundary with exact file reads and offline verification.
+        - [x] Classify normal KV page failures after overwrite begins as durability-critical, latch every live insertion path, and prove pre-overwrite admission refusal remains non-latching.
+        - [x] Prevent timer/direct header publishers from leapfrogging an admitted transaction hard-authority ticket; centralize namespace/frontier admission and prove the first-start race live.
       - [ ] Cap and evict directory, generic server, and clean index caches from resolved policy; flush dirty indexes before releasing their reservations.
       - [ ] Reserve query candidates/results/sorts and parser/plugin amplification before growth, with bounded rejection and cancellation paths.
       - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.

@@ -16,6 +16,7 @@ pub type KvTypeCounts = [usize; 16];
 enum SnapshotPages {
   Resident(KvPageSet),
   Bounded(KvPageSnapshot),
+  Unavailable(Arc<str>),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,15 +35,10 @@ impl ReadSnapshotMemoryStats {
 
 /// An immutable, lock-free read view of the KV store.
 ///
-/// Holds a frozen snapshot of the write buffer, shared NVT state, and an
-/// in-memory copy of all KV pages at snapshot creation time. Each snapshot is
-/// fully self-contained: buffer + NVT + pages. Reads are served entirely from
-/// memory -- no disk I/O, no race conditions with concurrent writers.
-///
-/// NOTE: At max KV stage (131K buckets x 1.3KB/page = ~164MB), the pages
-/// Vec uses significant memory. Old snapshots survive via Arc until all
-/// readers drop their references. Under sustained read load, multiple
-/// snapshot generations can coexist. Monitor memory usage at scale.
+/// Holds a frozen write buffer and NVT plus either bootstrap resident pages or
+/// a lease on the bounded positioned-read provider. Provider-backed snapshots
+/// load clean pages on demand and retain only page generations that an older
+/// view can still observe while writers replace pages in place.
 pub struct ReadSnapshot {
   /// Frozen copy of the write buffer at snapshot creation time.
   buffer: HashMap<Vec<u8>, KVEntry>,
@@ -74,6 +70,7 @@ impl fmt::Debug for ReadSnapshot {
         &match self.pages {
           SnapshotPages::Resident(_) => "resident",
           SnapshotPages::Bounded(_) => "bounded",
+          SnapshotPages::Unavailable(_) => "unavailable",
         },
       )
       .finish_non_exhaustive()
@@ -163,6 +160,28 @@ impl ReadSnapshot {
     Self { buffer, nvt, bucket_count, hash_algo, entry_count, pages: SnapshotPages::Bounded(pages), page_type_counts, buffer_type_counts }
   }
 
+  pub fn unavailable(
+    buffer: HashMap<Vec<u8>, KVEntry>,
+    nvt: Arc<NormalizedVectorTable>,
+    bucket_count: usize,
+    hash_algo: HashAlgorithm,
+    entry_count: usize,
+    page_type_counts: KvTypeCounts,
+    reason: impl Into<Arc<str>>,
+  ) -> Self {
+    let buffer_type_counts = Self::build_buffer_type_counts(&buffer);
+    Self {
+      buffer,
+      nvt,
+      bucket_count,
+      hash_algo,
+      entry_count,
+      pages: SnapshotPages::Unavailable(reason.into()),
+      page_type_counts,
+      buffer_type_counts,
+    }
+  }
+
   /// Build compact type counts from flushed KV pages only. Deleted entries are
   /// excluded. Corrupt pages are treated as empty here; open/flush paths are
   /// responsible for flagging corruption and triggering rebuild.
@@ -195,7 +214,7 @@ impl ReadSnapshot {
   pub fn resident_pages(&self) -> Option<&KvPageSet> {
     match &self.pages {
       SnapshotPages::Resident(pages) => Some(pages),
-      SnapshotPages::Bounded(_) => None,
+      SnapshotPages::Bounded(_) | SnapshotPages::Unavailable(_) => None,
     }
   }
 
@@ -203,6 +222,7 @@ impl ReadSnapshot {
     match &self.pages {
       SnapshotPages::Resident(_) => None,
       SnapshotPages::Bounded(pages) => Some(pages),
+      SnapshotPages::Unavailable(_) => None,
     }
   }
 
@@ -382,6 +402,7 @@ impl ReadSnapshot {
         pages.capacity().saturating_mul(std::mem::size_of::<Arc<[u8]>>()),
       ),
       SnapshotPages::Bounded(_) => (0, 0),
+      SnapshotPages::Unavailable(_) => (0, 0),
     };
     let buffer_slots =
       self.buffer.capacity().saturating_mul(std::mem::size_of::<(Vec<u8>, KVEntry)>().saturating_add(2 * std::mem::size_of::<usize>()));
@@ -401,6 +422,7 @@ impl ReadSnapshot {
         crate::engine::errors::EngineError::InvalidInput(format!("KV snapshot bucket {bucket} is outside {} resident pages", pages.len()))
       }),
       SnapshotPages::Bounded(pages) => pages.read_page(bucket),
+      SnapshotPages::Unavailable(reason) => Err(crate::engine::errors::EngineError::DurabilityFailure(reason.to_string())),
     }
   }
 }

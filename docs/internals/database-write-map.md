@@ -1,6 +1,6 @@
 # AeorDB Database Write Map
 
-**Date:** 2026-05-09
+**Last verified:** 2026-08-05
 **Purpose:** Exhaustive documentation of every write operation in the database, including byte-level layout, ordering, locking, fsync behavior, and crash recovery properties.
 
 ---
@@ -10,46 +10,51 @@
 ```
 Offset 0                                File End
 |                                            |
-[File Header][KV Block      ][WAL Entries...][Hot Tail]
-|  256 bytes ||  variable   ||  variable    ||variable|
+[Header A][Header B][KV Block      ][WAL Entries...][Hot Tail]
+| 256 bytes|| 256 bytes||  variable   ||  variable    ||variable|
               |              |               |
               kv_block_offset |              hot_tail_offset
-                   (256)      |              (= writer.current_offset)
+                   (512)      |              (= writer.current_offset)
                               kv_block_offset + kv_block_length
 ```
 
-### 1.1 File Header (256 bytes, offset 0)
+### 1.1 File Header (two 256-byte A/B slots, offsets 0 and 256)
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 4 | magic | `AEOR` (0x41454F52) |
 | 4 | 1 | header_version | Currently 1 |
 | 5 | 2 | hash_algo | LE u16. BLAKE3_256 = 0x0010 |
-| 7 | 8 | created_at | LE i64, ms since epoch |
-| 15 | 8 | updated_at | LE i64, ms since epoch |
-| 23 | 8 | kv_block_offset | LE u64. Always 256 (after header) |
-| 31 | 8 | kv_block_length | LE u64. Depends on stage |
-| 39 | 1 | kv_block_version | Currently 1 |
-| 40 | 8 | nvt_offset | LE u64. Currently unused (NVT is in-memory) |
-| 48 | 8 | nvt_length | LE u64. Currently unused |
-| 56 | 1 | nvt_version | Currently 1 |
-| 57 | 32 | head_hash | BLAKE3 hash of root directory content |
-| 89 | 8 | entry_count | LE u64. Total WAL entries written |
-| 97 | 1 | resize_in_progress | 0 or 1 |
-| 98 | 8 | buffer_kvs_offset | LE u64. Currently unused |
-| 106 | 8 | buffer_nvt_offset | LE u64. Currently unused |
-| 114 | 8 | hot_tail_offset | LE u64. Where the hot tail starts |
-| 122 | 1 | kv_block_stage | Current KV stage (0-based) |
-| 123 | 1 | resize_target_stage | Target stage for pending expansion (0 = none) |
-| 124 | 1 | backup_type | 0=normal, 1=export, 2=patch |
-| 125 | 32 | base_hash | For patches: source version hash |
-| 157 | 32 | target_hash | For patches: destination version hash |
-| 189 | 67 | _padding | Zeros (reserved for future fields) |
+| 7 | 8 | sequence | LE u64 A/B publication sequence |
+| 15 | 8 | created_at | LE i64, ms since epoch |
+| 23 | 8 | updated_at | LE i64, ms since epoch |
+| 31 | 8 | kv_block_offset | LE u64. 512 for current v3 files |
+| 39 | 8 | kv_block_length | LE u64. Depends on stage/boundary alignment |
+| 47 | 1 | kv_block_version | Currently 1 |
+| 48 | 8 | nvt_offset | LE u64. Currently unused |
+| 56 | 8 | nvt_length | LE u64. Currently unused |
+| 64 | 1 | nvt_version | Currently 1 |
+| 65 | 32 | head_hash | BLAKE3 hash of root directory content |
+| 97 | 8 | entry_count | LE u64. Current merged KV entry count |
+| 105 | 1 | resize_in_progress | Pre-relocation phase marker |
+| 106 | 8 | buffer_kvs_offset | LE u64. Reserved |
+| 114 | 8 | buffer_nvt_offset | LE u64. Reserved |
+| 122 | 8 | hot_tail_offset | LE u64. Where the hot tail starts |
+| 130 | 1 | kv_block_stage | Current completed KV stage |
+| 131 | 1 | resize_target_stage | Selected recovery target stage |
+| 132 | 1 | backup_type | 0=normal, 1=export, 2=patch |
+| 133 | 32 | base_hash | For patches: source version hash |
+| 165 | 32 | target_hash | For patches: destination version hash |
+| 197 | 55 | _padding | Zeros (reserved for future fields) |
+| 252 | 4 | crc32 | CRC over bytes 0..252 |
 
 **Writes to header:**
-- `AppendWriter::update_header()` — seeks to 0, writes 256 bytes, calls `sync_data()`
-- `AppendWriter::update_file_header()` — same as above (alias)
-- Called during: HEAD update, shutdown, KV expansion
+- Every publication goes through the shared `DurabilityCoordinator`.
+- The dependency/data barrier runs before the inactive slot is written.
+- The inactive slot is written positionally, followed by an authority barrier and read-back.
+- Only after successful read-back does `AppendWriter` select the new in-memory slot.
+- Namespace transactions mutate the in-memory header and publish it only from their grouped hard-authority completion.
+- Timer/direct publishers acquire the namespace/frontier guard; the timer defers on contention.
 
 ### 1.2 KV Block (offset 256, variable length)
 
@@ -57,29 +62,38 @@ Divided into bucket pages. Each page holds up to 32 KV entries.
 
 **KV Stage Sizes:**
 
-| Stage | Block Size | Buckets (BLAKE3) | Page Size |
-|-------|-----------|-----------------|-----------|
-| 0 | 64 KB | 49 | 1,314 bytes |
-| 1 | 512 KB | 399 | 1,314 bytes |
-| 2 | 4 MB | 3,192 | 1,314 bytes |
-| 3 | 32 MB | 25,532 | 1,314 bytes |
-| 4 | 128 MB | 102,130 | 1,314 bytes |
+| Stage | Nominal Block Size |
+|-------|--------------------|
+| 0 | 64 KiB |
+| 1 | 512 KiB |
+| 2 | 4 MiB |
+| 3 | 32 MiB |
+| 4 | 128 MiB |
+| 5 | 512 MiB |
+| 6-9 | 1, 2, 4, and 8 GiB |
 
-**Page format (1,314 bytes for BLAKE3):**
+Bucket count is derived from the current page width. Expansion may extend the
+stored block beyond the nominal size so its end lands on a validated WAL entry
+boundary.
+
+**Page format (1,450 bytes for BLAKE3):**
 
 | Offset | Size | Description |
 |--------|------|-------------|
-| 0 | 2 | entry_count (LE u16, max 32) |
-| 2 | 41×N | N entries, each: hash(32) + type_flags(1) + offset(8) |
-| 2+41×32 | remaining | Zero padding |
+| 0 | 4 | page magic |
+| 4 | 4 | crc32 over the complete page with this field zeroed |
+| 8 | 2 | entry_count (LE u16, max 32) |
+| 10 | 45×N | hash(32) + type_flags(1) + offset(8) + total_length(4) |
+| remainder | variable | Zero padding |
 
-**KV entry (41 bytes for BLAKE3):**
+**KV entry (45 bytes for BLAKE3):**
 
 | Offset | Size | Field |
 |--------|------|-------|
 | 0 | 32 | hash (key hash) |
 | 32 | 1 | type_flags (lower 4 bits = type, upper 4 bits = flags) |
 | 33 | 8 | offset (LE u64, position in WAL) |
+| 41 | 4 | total_length (LE u32, complete WAL entry extent) |
 
 **type_flags values:**
 - `0x0` = Chunk
@@ -95,9 +109,10 @@ Divided into bucket pages. Each page holds up to 32 KV entries.
 - `0x80` = DELETED flag (ORed with type)
 
 **Writes to KV pages:**
-- `DiskKVStore::flush()` — reads each modified page, merges new entries via `upsert_in_page`, writes back, calls `sync_data()` once after all pages
-- `DiskKVStore::flush_no_snapshot()` — same but no snapshot publish
-- `DiskKVStore::finalize_expansion()` — zeroes ALL pages, then bulk_insert + flush_no_snapshot
+- `flush()` and the no-publish bulk path share `prepare_page_flush` plus `apply_prepared_page_flush`.
+- Preparation reads through the bounded provider, validates magic/CRC/framing, computes every replacement and overflow, and reserves retained generations before mutation.
+- Application writes exact pages, crosses one coordinator data barrier, commits the provider generation, and only then publishes/clears buffered state.
+- A pre-overwrite error leaves disk and the published view unchanged. A failure after the first overwrite is `PostMutationDurabilityFailure` and latches the database read-only at the engine boundary.
 
 ### 1.3 WAL Entries (after KV block, before hot tail)
 
@@ -138,14 +153,17 @@ Journal of recent KV entries for crash recovery.
 
 | Offset | Size | Field |
 |--------|------|-------|
-| 0 | 5 | magic: `AE 01 7D B1 0C` |
-| 5 | 4 | entry_count (LE u32) |
-| 9 | 4 | crc32 of entry_count bytes |
-| 13 | 41×N | N entries, each: hash(32) + type_flags(1) + offset(8) |
+| 0 | 5 | magic: `AE 01 7D B1 0D` |
+| 5 | 1 | top-level format version |
+| 6 | 4 | write_count (LE u32) |
+| 10 | 4 | void_count (LE u32) |
+| 14 | 4 | crc32 of bytes 0..14 |
+| 18 | 46×N | v1 write records: version + hash(32) + flags + offset + total_length |
+| following | 13×M | v1 Void records: version + offset + size |
 
 **Writes to hot tail:**
-- `DiskKVStore::flush_hot_buffer()` — writes ALL write_buffer entries to hot tail at `self.hot_tail_offset`, calls `set_len(end)` to truncate, calls `sync_data()`
-- `DiskKVStore::flush()` — when overflow → writes overflow entries to hot tail (line 461). When all fit → writes empty hot tail (line 481)
+- `DiskKVStore::flush_hot_buffer()` — writes all `write_buffer` entries plus the complete sanitized Void snapshot at `self.hot_tail_offset`, then uses the shared recoverable data barrier
+- `DiskKVStore::flush()` — when overflow remains, writes that recoverable state and requests expansion; when pages contain all writes, retains the Void snapshot with zero write records
 - `hot_tail::write_hot_tail()` — generic writer function
 
 ---
@@ -160,7 +178,11 @@ The database file is opened by THREE separate handles:
 | `AppendWriter.reader` | StorageEngine.writer (RwLock) | pread for entry reads | read-only |
 | `DiskKVStore.db_file` | StorageEngine.kv_writer (Mutex) | KV page read/write, hot tail | read+write |
 
-**CRITICAL:** These are separate file handles to the SAME file. Writes via one handle are visible to reads via another handle ONLY after `sync_data()` / `sync_all()` flushes kernel buffers.
+These handles share the same kernel file/cache state, so ordinary coherent reads
+see completed writes without an fsync. `sync_data`/`sync_all` are durability
+barriers, not visibility primitives. AeorDB still coordinates publication and
+read-back explicitly; it does not use cross-descriptor visibility as proof that
+bytes survived a crash.
 
 ---
 
@@ -170,8 +192,17 @@ The database file is opened by THREE separate handles:
 |------|------|----------|-------------------|
 | `StorageEngine.writer` | `RwLock<AppendWriter>` | WAL appends, header reads/writes | First (always) |
 | `StorageEngine.kv_writer` | `Mutex<DiskKVStore>` | KV pages, hot tail, write buffer | Second (after writer) |
+| `StorageEngine.namespace_write_lock` | Reentrant-by-thread mutex protocol | Mutable path/directory/HEAD publication | Before writer/KV for namespace writes |
+| `EngineOperationTracker` maintenance gate | Mutex + condition variable | Exclusive full-layout reinterpretation | Drain ordinary operations before writer/KV |
 
 **Lock order MUST be: writer first, then kv_writer.** Violating this causes deadlock.
+
+Hard header publication additionally requires namespace authority and an idle
+hard frontier. A transaction admits its hard ticket while it still owns
+namespace authority. Direct publishers wait before acquiring the namespace;
+reentrant non-transaction publishers fail closed rather than deadlocking while
+holding it. KV expansion takes the exclusive maintenance gate, then the same
+namespace/frontier authority, before any marker or page is changed.
 
 ---
 
@@ -193,19 +224,22 @@ Steps:
 2. kv.set_hot_tail_offset(writer.current_offset())
    → updates kv.hot_tail_offset (but NOT on disk)
 
-3. kv.insert(KVEntry { hash, type_flags, offset })
+3. kv.insert(KVEntry { hash, type_flags, offset, total_length })
    → write_buffer.insert(hash, entry)
    → hot_buffer.push(entry)
-   → IF hot_buffer.len() >= 32:
-       flush_hot_buffer() → writes ALL write_buffer to hot tail on disk (sync_data)
+   → IF hot_buffer.len() >= 512:
+       flush_hot_buffer() → writes ALL write_buffer to hot tail through the coordinator barrier
    → IF write_buffer.len() >= WRITE_BUFFER_THRESHOLD:
-       flush() → writes modified pages to disk (sync_data)
-              → may trigger resize_to_next_stage()
+       flush() → prepares all pages, reserves retained generations, writes exact replacements, crosses one coordinator barrier
+              → may request a later layout stage
    → ELSE:
        publish_buffer_only() → updates in-memory snapshot
 
 4. Check kv.needs_expansion
-   → if Some(stage): drop locks, call expand_kv_block_online()
+   → outside a transaction: take the request, drop locks, call the sole engine expansion owner
+   → a pre-mutation refusal restores a still-valid future-stage request; a
+     post-marker failure latches read-only and leaves startup recovery in charge
+   → inside a transaction: leave the request queued until hard completion
 
 Durability: WAL entry is on disk (but NOT fsynced). KV entry is in
 write_buffer (memory). Hot buffer entry accumulates until threshold.
@@ -227,12 +261,8 @@ Steps:
    kv.insert(KVEntry { hash, type_flags, offset })
    → may trigger hot_buffer flush or page flush
 
-3. kv.flush_hot_buffer()  ← NEW (as of today's fix)
-   → writes ALL write_buffer entries to hot tail
-   → sync_data()
-
-4. Drop locks
-5. Check kv.needs_expansion
+3. Drop locks
+4. Run a queued expansion only when transaction depth is zero
 ```
 
 ### 4.3 flush_batch_and_update_head (directory propagation + HEAD)
@@ -244,14 +274,12 @@ Locks: writer(WRITE) + kv_writer(LOCK)
 Steps:
 1-2. Same as flush_batch
 
-3. writer.update_file_header(header with new head_hash)
-   → seek to 0, write 256 bytes, sync_data()
+3. If a namespace transaction is active, update HEAD only in memory.
+   Otherwise publish the inactive A/B slot through the shared hard-authority plan.
 
-4. kv.flush_hot_buffer()  ← NEW (as of today's fix)
-   → sync_data()
-
-5. Drop locks
-6. Check kv.needs_expansion
+4. Drop locks
+5. Run a queued expansion only when transaction depth is zero. Transactional
+   callers run it after their grouped hard commit, never before.
 ```
 
 ### 4.4 DiskKVStore::insert (single KV entry)
@@ -264,11 +292,11 @@ Steps:
 1. write_buffer.insert(hash, entry)  [MEMORY]
 2. IF is_new: entry_count += 1  [MEMORY]
 3. hot_buffer.push(entry)  [MEMORY]
-4. IF hot_buffer.len() >= 32:
-     flush_hot_buffer()  [DISK: hot tail write + sync_data]
+4. IF hot_buffer.len() >= 512:
+     flush_hot_buffer()  [DISK: hot tail write + coordinator data barrier]
 5. IF write_buffer.len() >= WRITE_BUFFER_THRESHOLD:
-     flush()  [DISK: KV page writes + sync_data]
-     → may trigger resize_to_next_stage()
+     flush()  [prepare-before-overwrite + retained-generation admission + one barrier]
+     → may set `needs_expansion`
    ELSE:
      publish_buffer_only()  [MEMORY: update ArcSwap snapshot]
 ```
@@ -280,31 +308,18 @@ Caller: insert() threshold, shutdown(), Drop
 Lock: kv_writer already held
 
 Steps:
-1. Group write_buffer entries by NVT bucket
-2. FOR EACH modified bucket:
-   a. Read page from disk (seek + read_exact)
-   b. Deserialize existing entries
-   c. Upsert new entries (replace if same hash, append if space)
-   d. If page full → entry goes to overflow_entries
-   e. Serialize page
-   f. Write page to disk (seek + write_all)
-3. sync_data()  [ONE sync for ALL modified pages]
-4. write_buffer.clear()
-
-5. IF overflow_entries not empty:
-   a. publish_snapshot_incremental()
-   b. resize_to_next_stage()
-   c. IF resize succeeded: re-insert overflow, recursive flush()
-   d. IF resize blocked (needs expansion):
-      - Re-insert overflow to write_buffer
-      - Write ALL write_buffer to hot tail  [DISK: sync_data]
-      - Set needs_expansion = Some(target_stage)
-      - publish_buffer_only()
-
-6. IF no overflow:
-   a. flush_hot_buffer()
-   b. Write empty hot tail (clears old data)
-   c. publish_snapshot_incremental()
+1. Group `write_buffer` entries by NVT bucket.
+2. Read each current page through the bounded provider and validate magic,
+   CRC, entry count, offsets, and framing.
+3. Build every replacement and collect overflow without touching disk.
+4. Begin one provider update, reserving all old page generations. Any pressure,
+   corruption, or I/O error here returns before mutation.
+5. Write all replacement pages and cross one coordinator data barrier.
+6. Commit the replacement generation, update exact type counts, and retain only
+   overflow in `write_buffer`.
+7. If overflow remains, publish it in the recoverable hot tail and request the
+   next layout stage. Otherwise retain the current Void snapshot in an empty-write
+   hot tail and publish the new bounded snapshot.
 ```
 
 ### 4.6 DiskKVStore::flush_hot_buffer
@@ -314,11 +329,12 @@ Lock: kv_writer already held
 
 Steps:
 1. Collect ALL write_buffer values (not just hot_buffer)
-2. hot_tail::write_hot_tail(db_file, hot_tail_offset, all_entries, hash_length)
+2. Serialize the complete recoverable payload: all `write_buffer` entries plus
+   the current sanitized Void snapshot.
    → seek to hot_tail_offset
-   → write magic(5) + count(4) + crc32(4) + entries(41×N)
+   → write versioned/checksummed hot-tail bytes
 3. db_file.set_len(end)  [truncate stale trailing data]
-4. db_file.sync_data()
+4. Cross the shared coordinator data barrier
 5. hot_buffer.clear()
 ```
 
@@ -330,30 +346,20 @@ Steps:
 Caller: StorageEngine::shutdown() / Drop
 
 Steps:
-1. Lock kv_writer
-2. kv.flush()
-   → writes all write_buffer entries to KV pages
-   → may trigger resize_to_next_stage() → needs_expansion
-   → if all fit: writes empty hot tail
-   → if overflow: writes overflow to hot tail
-3. kv.flush_hot_buffer()
-   → writes remaining write_buffer to hot tail
-4. Unlock kv_writer
-
-5. Lock kv_writer again (separate scope)
-6. Read kv.hot_tail_offset() and kv.len()
-7. Unlock kv_writer
-
-8. Lock writer
-9. Update header: hot_tail_offset, entry_count
-10. writer.update_header() [DISK: seek 0, write 256, sync_data]
-11. writer.sync_all() [DISK: full fsync including metadata]
-12. Unlock writer
+1. Reject new operations and wait, with a bounded timeout, for active operations
+   and every durability waiter/driver to drain.
+2. Flush dirty indexes through their shared buffer owner.
+3. Lock `kv_writer`; run the same prepare-before-overwrite page flush used by
+   live writes, then publish any remaining recoverable hot tail.
+4. Release `kv_writer` before recording any serious failure so emergency spill
+   can inspect volatile KV state.
+5. Read `hot_tail_offset` and the exact merged entry count.
+6. Publish those values through the inactive A/B header slot using the shared
+   hard-authority coordinator and read-back.
+7. On any serious failure, latch read-only, preserve first/latest evidence, try
+   emergency spill, and return an error. A repeated blocked shutdown does not
+   start another flush.
 ```
-
-**BUG (potential):** Between step 2 (kv.flush) and step 3 (kv.flush_hot_buffer), if kv.flush triggered a resize that set needs_expansion, the expansion never happens during shutdown. The needs_expansion flag is in-memory only and is lost. On next startup, the KV pages may be incomplete (overflow entries only in hot tail), but the hot tail has them, so they're recoverable.
-
-**BUG (confirmed, fixed today):** Step 2 (kv.flush) may write the hot tail at a stale hot_tail_offset if overflow → resize blocked. The `set_hot_tail_offset` guard now prevents backward movement, but the offset could still be incorrect if the writer advanced past what the KV thinks is the hot_tail.
 
 ### 4.8 Startup (open_internal)
 
@@ -363,19 +369,19 @@ Steps:
 2. Open AppendWriter (reads header)
 3. Set writer offset to header.hot_tail_offset (if > 0)
 
-4. Check for pending KV expansion:
-   IF resize_target_stage > kv_block_stage:
-   → drop writer
-   → expand_kv_block (offline relocation)
-   → reopen writer, re-read header
+4. Recover a selected expansion phase:
+   - `resize_in_progress=true`: validate/retry relocation from the old layout.
+   - `resize_in_progress=false` with a later target: relocated WAL is already
+     durable; finish page rebuild/final publication without relocating twice.
+   - Any malformed/out-of-range phase aborts startup rather than warning-success.
 
 5. Read hot tail entries from hot_tail_offset
 
 6. Open DiskKVStore:
-   a. Read all KV pages into memory
-   b. Count entries from page headers
-   c. Pre-populate write_buffer with hot tail entries
-   d. Create initial ReadSnapshot (pages + write_buffer)
+   a. Create a zero-retention positioned-read page provider
+   b. Validate and count one KV page at a time, releasing each page immediately
+   c. Pre-populate write_buffer with hot tail entries and void masks
+   d. Create an initial provider-backed ReadSnapshot
 
 7. Scan WAL for void entries (void_manager)
 
@@ -385,6 +391,11 @@ Steps:
    → rebuild_kv() — full WAL scan, re-populate KV
 
 10. Initialize counters from KV snapshot
+11. Resolve strict memory configuration and atomically replace the bootstrap
+    provider with the process-coordinator-backed bounded cache before ready
+    admission. If configuration remains unresolved during the transition
+    release, clean pages stay zero-retention and retained generations use a
+    private 8 MiB fail-closed bootstrap bound.
 ```
 
 **CRITICAL:** The hot tail entries loaded at step 5 go into the write_buffer at step 6b. They are NOT flushed to KV pages during startup. They remain in the write buffer until a flush is triggered (by threshold or explicit call). The in-memory snapshot includes them, so reads work. But if the server shuts down before they're flushed to pages, they must survive via the hot tail again.
@@ -420,84 +431,58 @@ AT ROOT:
 
 ---
 
-## 6. Fsync Points
+## 6. Durability Barriers
 
-| Operation | Fsync Call | What It Syncs |
-|-----------|-----------|---------------|
-| append_entry | NONE | WAL entry NOT synced (relies on hot tail) |
-| update_header | sync_data() | File header (256 bytes) |
-| KV page flush | sync_data() | All modified KV pages (one sync for batch) |
-| flush_hot_buffer | sync_data() | Hot tail (write_buffer contents) |
-| write_void_at | sync_all() | Void entry (includes metadata) |
-| shutdown sync_all | sync_all() | Entire file including metadata |
+| Commit step | Coordinator operation | Purpose |
+|-------------|-----------------------|---------|
+| dependency append | `DependencyAppend` | Write hot-tail/dependency bytes before authority |
+| data barrier | `DataBarrier` | Make WAL, KV pages, or hot-tail dependencies recoverable |
+| inactive-slot write | `AuthorityWrite` / `HeaderAb` | Publish the next A/B authority candidate |
+| authority barrier | `AuthorityBarrier` | Make the selected slot durable |
+| read-back | `AuthorityReadback` | Prove the exact serialized slot before acknowledgement |
+| shutdown | `ShutdownFlush` | Attribute and latch any final-flush failure |
 
-**Durability guarantees:**
-- WAL entries: durable only after hot tail or KV page flush
-- KV entries: durable after KV page flush OR hot tail flush
-- File header: durable after update_header's sync_data
-- Hot tail: durable after flush_hot_buffer's sync_data
-
----
-
-## 7. Crash Scenarios
-
-### 7.1 Crash during append_entry (WAL write)
-- Entry may be partially written (torn write)
-- No KV entry exists yet
-- Entry scanner will skip it (invalid magic or hash mismatch)
-- No data loss (entry never made it to KV)
-
-### 7.2 Crash after append_entry but before KV insert
-- WAL has the entry, KV doesn't
-- Hot tail doesn't have it (hot_buffer not flushed)
-- On restart: entry is in WAL but invisible to KV
-- Recovery: `verify --repair` scans WAL, rebuilds KV
-
-### 7.3 Crash after KV insert but before hot tail flush
-- WAL has the entry
-- KV write_buffer has the entry (memory only)
-- Hot tail does NOT have the entry
-- On restart: entry is in WAL, not in KV, not in hot tail
-- Recovery: same as 7.2
-
-### 7.4 Crash after hot tail flush
-- WAL has the entry
-- Hot tail has the KV entry
-- On restart: hot tail entries loaded into write_buffer → visible immediately
-- No data loss
-
-### 7.5 Crash during KV page flush
-- Some pages written, others not
-- Hot tail may be stale (pre-flush snapshot)
-- On restart: KV pages partially updated, hot tail fills gaps
-- May leave stale entries in pages that were written
-
-### 7.6 Crash during shutdown
-- kv.flush() may have partially completed
-- kv.flush_hot_buffer() may not have run
-- writer.update_header() may not have run
-- On restart: depends on which steps completed
-- Hot tail may be stale → some entries lost from KV
-- Recovery: `verify --repair`
+Native `sync_data`, `sync_all`, positional writes, and read-back are confined to
+the platform/coordinator adapters and the architecture allowlist. WAL appends are
+intentionally buffered, but no successful namespace mutation is acknowledged
+until its grouped hard plan has made both the WAL/hot-tail dependency and A/B
+authority durable.
 
 ---
 
-## 8. Known Issues
+## 7. Crash Direction
 
-### 8.1 WAL entries are not fsynced individually
-WAL appends do NOT call fsync. If the OS crashes (not just the process), WAL entries since the last fsync may be lost entirely. The hot tail provides process-crash recovery but NOT OS-crash recovery for the WAL itself.
+- Before a transaction hard commit, the previously selected A/B header remains
+  authoritative. In-memory HEAD/backup changes are not independently published.
+- A torn or failed inactive slot loses by CRC/sequence selection; the old slot
+  remains valid.
+- KV page replacements retain old generations before overwrite, cross the data
+  barrier before new-generation publication, and classify every later failure as
+  durability-critical.
+- Expansion first selects a pre-relocation marker. It then copies only complete
+  validated WAL entries, writes the relocated hot tail, and crosses a barrier.
+  A distinct relocation-durable marker is selected before old bytes are zeroed
+  or rehashed. Startup retries/finalizes according to the selected phase.
+- Failures before any layout/header mutation preserve the current view and do
+  not latch merely for resource pressure or malformed input. Failures at or
+  after uncertain mutation latch the database read-only and preserve spill
+  evidence for explicit repair.
+- Unacknowledged WAL bytes may require dirty-start scanning, but acknowledged
+  namespace state never relies on an unbarriered hot tail.
 
-### 8.2 Hot tail offset can become stale
-The `DiskKVStore.hot_tail_offset` is updated via `set_hot_tail_offset()` after each WAL append. However, during `flush()` overflow handling (line 461), the hot tail is written at `self.hot_tail_offset`. If this value is stale (not updated from a concurrent write path), the hot tail may overwrite WAL data. The backward-movement guard mitigates this but doesn't guarantee correctness if the offset was never updated.
+---
 
-### 8.3 Hot buffer threshold delay
-With HOT_BUFFER_THRESHOLD=32, up to 31 entries can be in memory without a hot tail flush. If the process crashes with 31 unflushed entries, those KV entries are lost (though the WAL entries survive and are recoverable via repair).
+## 8. Remaining Transition Boundaries
 
-### 8.4 DiskKVStore::Drop calls flush() which can trigger resize
-The `Drop` impl calls `flush()` which can trigger `resize_to_next_stage()`. During drop, the StorageEngine may already be partially dismantled. If resize triggers `needs_expansion`, the expansion never happens (no one checks it after Drop). Overflow entries stay in the write buffer which is about to be dropped.
-
-### 8.5 Separate file handles
-The writer and KV store use separate file handles. After one handle writes and syncs, the other handle's reads should see the new data (fsync flushes kernel buffers). However, this depends on OS-level guarantees. On some systems, page cache coherency between file descriptors is not guaranteed without explicit synchronization.
+- P2b-3 still has to move directory, generic server, index, query, parser/plugin,
+  task, GC, repair, and maintenance allocations from observation-only accounting
+  to enforced process-coordinator reservations and eviction.
+- The v3 KV block still uses fixed-size bucket pages. The v4 migration replaces
+  its index artifacts and NVT semantics; this document describes the protected
+  v3 write path that remains live during that migration.
+- `DiskKVStore::Drop` is only a last-resort best-effort cleanup. Truthful
+  acknowledgement belongs to explicit engine operations and `shutdown()`; Drop
+  errors are logged and never converted into success.
 
 ---
 
@@ -554,28 +539,32 @@ To store `/docs/file.txt` with content "hello" (3 levels deep):
           kv.insert(content_key_root, offset=F)
           kv.insert(dir_key_root, offset=G)
 
-        Header update (fsync):
+        Transaction-local header update:
           header.head_hash = content_key_root
-          writer.update_file_header()  → sync_data()
-
-        Hot tail flush (fsync):
-          kv.flush_hot_buffer()  → writes ALL write_buffer to hot tail
-                                 → sync_data()
+          writer.set_header_in_memory()  → no authority publication yet
 
         Unlock
 
-3. Indexing pipeline (if config exists):
+3. Transaction hard completion (while ticket ordering is still protected by
+   namespace authority):
+   → admit the v3 hard-authority plan
+   → serialize the complete hot tail as the dependency
+   → one data barrier for WAL/hot-tail recovery state
+   → write the inactive A/B header slot
+   → one authority barrier and exact read-back
+   → only then acknowledge the file write and emit counters/SSE
+
+4. Indexing pipeline (if config exists):
    → may write index files via store_file
    → each triggers its own update_parent_directories cycle
 ```
 
-**Total disk writes for one file at 3 levels:**
-- 5 WAL appends (chunk + 2 FileRecords + 4 DirectoryIndex entries in batch)
-  - Wait, the chunk and FileRecords are separate store_entry calls (step 1)
-  - Actually: chunk(1) + FileRecord identity(1) + FileRecord path(1) + dir batch(4) = 7 WAL appends
-- 1 file header update (sync_data)
-- 1 hot tail flush (sync_data)
+**Typical physical work for one file at 3 levels:**
+- 7 WAL appends: chunk(1) + FileRecord identity/content/path materializations + directory batches (exact count varies with dedup and current FileRecord version).
+- 1 complete recoverable hot-tail dependency write.
+- 1 inactive A/B header-slot write plus read-back.
 - 0-1 KV page flushes (if threshold reached)
 
-**Fsync count: 2 minimum** (header update + hot tail flush)
-**Fsync count before today's fix: 1** (header update only — hot tail might never flush)
+**Barrier count: 2 for the grouped hard plan** (dependency/data barrier, then
+authority barrier). KV pressure may add one recoverable page barrier before the
+transaction completion; it does not add another independent header authority.

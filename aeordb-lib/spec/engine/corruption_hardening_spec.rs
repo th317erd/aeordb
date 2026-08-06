@@ -4,12 +4,14 @@
 //! directory listing resilience when faced with corrupt data.
 
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
+use aeordb::engine::append_writer::AppendWriter;
 use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash};
 use aeordb::engine::file_header::read_active_header;
 use aeordb::engine::gc;
 use aeordb::engine::hot_tail::{self, HotTailPayload, VoidRecord};
 use aeordb::engine::kv_pages::{bucket_page_offset, page_size, PAGE_HEADER_SIZE, PAGE_MAGIC};
 use aeordb::engine::kv_stages::stage_params;
+use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK};
 use aeordb::engine::lost_found;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::verify;
@@ -914,11 +916,9 @@ fn kv_expansion_relocates_reusable_voids_from_growth_zone() {
   let expanded_header = active_header(&db_str);
   let expected_stage_size =
     aeordb::engine::kv_stages::stage_params(1, aeordb::engine::kv_pages::page_size(expanded_header.hash_algo.hash_length())).0;
-  assert_eq!(
-    expanded_header.kv_block_length, expected_stage_size,
-    "online expansion must reserve the full KV stage size, including page-layout slack"
-  );
+  assert!(expanded_header.kv_block_length >= expected_stage_size, "online expansion must reserve at least the full KV stage size");
   let new_wal_start = expanded_header.kv_block_offset + expanded_header.kv_block_length;
+  assert_eq!(read_u32_at(&db_str, new_wal_start), ENTRY_MAGIC, "expanded KV slack must end on a complete WAL entry boundary");
   assert!(void_offset < new_wal_start, "the original void offset should now be inside the expanded KV block");
   let mut db_file = OpenOptions::new().read(true).open(&db_str).unwrap();
   let expanded_hot_tail = hot_tail::read_hot_tail(&mut db_file, expanded_header.hot_tail_offset, expanded_header.hash_algo.hash_length())
@@ -940,6 +940,292 @@ fn kv_expansion_relocates_reusable_voids_from_growth_zone() {
     "KV expansion should not leave live KV pointers inside the reserved block: {:?}",
     report.invalid_kv_offsets
   );
+}
+
+#[test]
+fn kv_expansion_relocates_the_complete_final_straddling_entry() {
+  let (db_str, _temp) = raw_test_db();
+  let initial_header = active_header(&db_str);
+  let old_wal_start = initial_header.kv_block_offset + initial_header.kv_block_length;
+  let engine = StorageEngine::open(&db_str).unwrap();
+  let key = vec![0x6Au8; engine.hash_algo().hash_length()];
+  let value = vec![0xC3u8; 600 * 1024];
+  let offset = engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+  assert_eq!(offset, old_wal_start, "the final test entry must begin at the old WAL frontier");
+
+  engine.expand_kv_block_online(1).unwrap();
+
+  let (_header, stored_key, stored_value) = engine.get_entry(&key).unwrap().expect("relocated entry must remain indexed and readable");
+  assert_eq!(stored_key, key);
+  assert_eq!(stored_value, value, "expansion must relocate the tail of the last entry even when no later entry marks its boundary");
+  let report = verify::verify(&engine, &db_str);
+  assert!(report.invalid_kv_offsets.is_empty(), "relocated entry must remain outside the expanded KV block");
+}
+
+#[test]
+fn kv_expansion_preflight_failure_preserves_the_published_kv_view() {
+  let (db_str, _temp) = raw_test_db();
+  let engine = StorageEngine::open(&db_str).unwrap();
+  let key = vec![0x71u8; engine.hash_algo().hash_length()];
+  let offset = engine.store_entry(EntryType::DirectoryIndex, &key, b"boundary-check").unwrap();
+
+  {
+    let mut file = OpenOptions::new().write(true).open(&db_str).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&[0u8; 4]).unwrap();
+    file.sync_all().unwrap();
+  }
+
+  let error = engine.expand_kv_block_online(1).expect_err("corrupt WAL boundary must refuse expansion before mutation");
+  assert!(error.to_string().to_ascii_lowercase().contains("magic"), "unexpected preflight error: {error}");
+  assert_eq!(engine.is_entry_deleted(&key).unwrap(), false, "preflight refusal must leave the old KV snapshot readable");
+  assert!(engine.kv_page_provider_stats().unwrap().is_some(), "preflight refusal must keep the bounded provider active");
+}
+
+#[test]
+fn kv_expansion_preflight_rejects_internally_inconsistent_entry_lengths_before_mutation() {
+  let (db_str, _temp) = raw_test_db();
+  let engine = StorageEngine::open(&db_str).unwrap();
+  let key = vec![0x72u8; engine.hash_algo().hash_length()];
+  let offset = engine.store_entry(EntryType::DirectoryIndex, &key, b"length-consistency").unwrap();
+  let header = engine.read_entry_header_at(offset).unwrap();
+
+  {
+    let mut file = OpenOptions::new().write(true).open(&db_str).unwrap();
+    file.seek(SeekFrom::Start(offset + 11)).unwrap();
+    file.write_all(&header.key_length.saturating_add(1).to_le_bytes()).unwrap();
+    file.sync_all().unwrap();
+  }
+  let before = std::fs::read(&db_str).unwrap();
+
+  let error = engine.expand_kv_block_online(1).expect_err("inconsistent entry lengths must fail read-only expansion preflight");
+  assert!(error.to_string().contains("exceeds total_length"), "unexpected preflight error: {error}");
+  assert!(engine.durability_failure().is_none(), "read-only boundary refusal must not latch write admission");
+  assert_eq!(std::fs::read(&db_str).unwrap(), before, "preflight failure must not publish a resize marker or relocate bytes");
+  assert!(engine.kv_page_provider_stats().unwrap().is_some(), "preflight refusal must leave the bounded provider active");
+}
+
+#[test]
+fn kv_expansion_places_a_short_wal_after_the_new_block() {
+  let (db_str, _temp) = raw_test_db();
+  let engine = StorageEngine::open(&db_str).unwrap();
+  let key = vec![0x91u8; engine.hash_algo().hash_length()];
+  let value = vec![0x4Du8; 16 * 1024];
+  engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+
+  engine.expand_kv_block_online(1).unwrap();
+
+  let header = active_header(&db_str);
+  let new_kv_end = header.kv_block_offset + header.kv_block_length;
+  assert!(header.hot_tail_offset >= new_kv_end, "expanded hot tail must not remain inside the new KV block");
+  let mut file = OpenOptions::new().read(true).open(&db_str).unwrap();
+  assert!(
+    hot_tail::read_hot_tail(&mut file, header.hot_tail_offset, header.hash_algo.hash_length()).is_some(),
+    "completed expansion must publish a valid hot tail after the new block"
+  );
+  assert_eq!(engine.get_entry(&key).unwrap().unwrap().2, value, "short-WAL relocation must preserve the copied entry");
+  let report = verify::verify(&engine, &db_str);
+  assert!(report.invalid_kv_offsets.is_empty());
+}
+
+#[test]
+fn startup_retries_a_pre_relocation_expansion_marker_and_clears_both_phase_fields() {
+  let (db_str, _temp) = raw_test_db();
+  let key = vec![0xA1u8; 32];
+  let value = b"pre-relocation-recovery".to_vec();
+  {
+    let engine = StorageEngine::open(&db_str).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  {
+    let mut writer = AppendWriter::open(std::path::Path::new(&db_str)).unwrap();
+    let mut marker = writer.file_header().clone();
+    marker.resize_in_progress = true;
+    marker.resize_target_stage = 1;
+    writer.update_file_header(&marker).unwrap();
+  }
+
+  let reopened = StorageEngine::open(&db_str).unwrap();
+  assert_eq!(reopened.get_entry(&key).unwrap().unwrap().2, value);
+  let recovered = active_header(&db_str);
+  assert_eq!(recovered.kv_block_stage, 1);
+  assert!(!recovered.resize_in_progress, "completed recovery must clear the pre-relocation phase marker");
+  assert_eq!(recovered.resize_target_stage, 0);
+  let report = verify::verify(&reopened, &db_str);
+  assert!(report.invalid_kv_offsets.is_empty());
+}
+
+#[test]
+fn pre_relocation_recovery_does_not_trust_an_unselected_future_hot_tail() {
+  let (db_str, _temp) = raw_test_db();
+  {
+    let engine = StorageEngine::open(&db_str).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &[0xA3; 32], b"selected-old-hot-tail").unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  let original = active_header(&db_str);
+  let old_kv_end = original.kv_block_offset + original.kv_block_length;
+  let target_block_length = stage_params(1, page_size(original.hash_algo.hash_length())).0;
+  let new_kv_end = original.kv_block_offset + target_block_length;
+  assert!(original.hot_tail_offset < new_kv_end, "test requires a short WAL relocated beyond the expanded block");
+  let relocation_bytes = original.hot_tail_offset - old_kv_end;
+  let future_hot_tail = new_kv_end + relocation_bytes;
+
+  {
+    let mut writer = AppendWriter::open(std::path::Path::new(&db_str)).unwrap();
+    let mut marker = writer.file_header().clone();
+    marker.resize_in_progress = true;
+    marker.resize_target_stage = 1;
+    writer.update_file_header(&marker).unwrap();
+  }
+  {
+    let mut file = OpenOptions::new().read(true).write(true).open(&db_str).unwrap();
+    let stale = HotTailPayload {
+      writes: vec![KVEntry { type_flags: KV_TYPE_CHUNK, hash: vec![0xEE; 32], offset: new_kv_end, total_length: 64 }],
+      voids: Vec::new(),
+    };
+    hot_tail::write_hot_tail(&mut file, future_hot_tail, &stale, original.hash_algo.hash_length()).unwrap();
+    file.sync_all().unwrap();
+  }
+
+  aeordb::engine::kv_expand::expand_kv_block(&db_str, 1, original.hash_algo.hash_length()).unwrap();
+
+  let recovered = active_header(&db_str);
+  let mut file = OpenOptions::new().read(true).open(&db_str).unwrap();
+  let payload = hot_tail::read_hot_tail(&mut file, recovered.hot_tail_offset, recovered.hash_algo.hash_length()).unwrap();
+  assert!(
+    payload.writes.iter().all(|entry| entry.hash != vec![0xEE; 32]),
+    "bytes at an unselected future offset must never become recovery authority"
+  );
+}
+
+#[test]
+fn startup_finalizes_a_relocation_durable_marker_without_relocating_wal_twice() {
+  let (db_str, _temp) = raw_test_db();
+  let initial = active_header(&db_str);
+  let key = vec![0xA2u8; 32];
+  let value = vec![0x5Du8; 96 * 1024];
+  {
+    let engine = StorageEngine::open(&db_str).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+    engine.expand_kv_block_online(1).unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  let expanded = active_header(&db_str);
+  let relocation_frontier = expanded.hot_tail_offset;
+  {
+    let mut writer = AppendWriter::open(std::path::Path::new(&db_str)).unwrap();
+    let mut marker = writer.file_header().clone();
+    marker.kv_block_stage = initial.kv_block_stage;
+    marker.resize_in_progress = false;
+    marker.resize_target_stage = 1;
+    marker.hot_tail_offset = relocation_frontier;
+    writer.update_file_header(&marker).unwrap();
+  }
+
+  let reopened = StorageEngine::open(&db_str).unwrap();
+  let recovered = active_header(&db_str);
+  assert_eq!(recovered.kv_block_stage, 1);
+  assert_eq!(recovered.hot_tail_offset, relocation_frontier, "relocation-durable recovery must not shift the WAL a second time");
+  assert!(!recovered.resize_in_progress);
+  assert_eq!(recovered.resize_target_stage, 0);
+  assert_eq!(reopened.get_entry(&key).unwrap().unwrap().2, value);
+  let report = verify::verify(&reopened, &db_str);
+  assert!(report.invalid_kv_offsets.is_empty());
+}
+
+#[test]
+fn startup_refuses_a_corrupt_pre_relocation_boundary_without_mutating_the_database() {
+  let (db_str, _temp) = raw_test_db();
+  let old_wal_start = {
+    let engine = StorageEngine::open(&db_str).unwrap();
+    let header = active_header(&db_str);
+    let old_wal_start = header.kv_block_offset + header.kv_block_length;
+    engine.store_entry(EntryType::DirectoryIndex, &[0xB1; 32], b"must-not-move").unwrap();
+    engine.shutdown().unwrap();
+    old_wal_start
+  };
+  {
+    let mut writer = AppendWriter::open(std::path::Path::new(&db_str)).unwrap();
+    let mut marker = writer.file_header().clone();
+    marker.resize_in_progress = true;
+    marker.resize_target_stage = 1;
+    writer.update_file_header(&marker).unwrap();
+  }
+  {
+    let mut file = OpenOptions::new().write(true).open(&db_str).unwrap();
+    file.seek(SeekFrom::Start(old_wal_start)).unwrap();
+    file.write_all(&[0u8; 4]).unwrap();
+    file.sync_all().unwrap();
+  }
+  let before = std::fs::read(&db_str).unwrap();
+
+  let error = match StorageEngine::open(&db_str) {
+    Ok(_) => panic!("corrupt expansion boundary must abort startup"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("requires explicit repair"), "unexpected startup error: {error}");
+  assert_eq!(std::fs::read(&db_str).unwrap(), before, "failed expansion preflight must not mutate database bytes");
+}
+
+#[test]
+fn startup_refuses_an_out_of_range_expansion_stage_before_allocation_or_mutation() {
+  let (db_str, _temp) = raw_test_db();
+  {
+    let mut writer = AppendWriter::open(std::path::Path::new(&db_str)).unwrap();
+    let mut marker = writer.file_header().clone();
+    marker.resize_in_progress = true;
+    marker.resize_target_stage = u8::MAX;
+    writer.update_file_header(&marker).unwrap();
+  }
+  let before = std::fs::read(&db_str).unwrap();
+
+  let error = match StorageEngine::open(&db_str) {
+    Ok(_) => panic!("unsupported expansion target must abort startup"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("outside the supported stage table"), "unexpected startup error: {error}");
+  assert_eq!(std::fs::read(&db_str).unwrap(), before, "malformed target refusal must happen before mutation");
+}
+
+#[test]
+fn startup_refuses_a_corrupt_relocation_durable_wal_before_zeroing_the_block() {
+  let (db_str, _temp) = raw_test_db();
+  let initial = active_header(&db_str);
+  {
+    let engine = StorageEngine::open(&db_str).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &[0xB2; 32], &vec![0x6E; 96 * 1024]).unwrap();
+    engine.expand_kv_block_online(1).unwrap();
+    engine.shutdown().unwrap();
+  }
+  let expanded = active_header(&db_str);
+  let relocated_wal_start = expanded.kv_block_offset + expanded.kv_block_length;
+  {
+    let mut writer = AppendWriter::open(std::path::Path::new(&db_str)).unwrap();
+    let mut marker = writer.file_header().clone();
+    marker.kv_block_stage = initial.kv_block_stage;
+    marker.resize_in_progress = false;
+    marker.resize_target_stage = 1;
+    writer.update_file_header(&marker).unwrap();
+  }
+  {
+    let mut file = OpenOptions::new().write(true).open(&db_str).unwrap();
+    file.seek(SeekFrom::Start(relocated_wal_start)).unwrap();
+    file.write_all(&[0u8; 4]).unwrap();
+    file.sync_all().unwrap();
+  }
+  let before = std::fs::read(&db_str).unwrap();
+
+  let error = match StorageEngine::open(&db_str) {
+    Ok(_) => panic!("corrupt relocation-durable WAL must abort startup"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("requires explicit repair"), "unexpected startup error: {error}");
+  assert_eq!(std::fs::read(&db_str).unwrap(), before, "phase-2 WAL refusal must happen before zeroing the KV block");
 }
 
 #[test]

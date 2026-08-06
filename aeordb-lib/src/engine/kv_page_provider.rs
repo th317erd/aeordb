@@ -107,6 +107,7 @@ impl Drop for SnapshotLease {
       }
     }
     prune_historical_pages(&mut state);
+    provider.loaded.notify_all();
   }
 }
 
@@ -396,6 +397,34 @@ impl KvPageProvider {
 
   pub fn is_poisoned(&self) -> EngineResult<bool> {
     Ok(self.lock()?.poisoned_reason.is_some())
+  }
+
+  /// Wait until every snapshot lease from this provider has been released.
+  /// The caller must first remove the provider-backed view from its publication
+  /// authority so no new lease can become visible while draining.
+  pub fn wait_for_no_snapshots(&self, timeout: std::time::Duration) -> EngineResult<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut state = self.lock()?;
+    loop {
+      let active: u64 = state.active_generations.values().copied().sum();
+      if active == 0 {
+        return Ok(true);
+      }
+      let now = std::time::Instant::now();
+      if now >= deadline {
+        return Ok(false);
+      }
+      let remaining = deadline.saturating_duration_since(now);
+      let (next, result) = self
+        .inner
+        .loaded
+        .wait_timeout(state, remaining)
+        .map_err(|error| EngineError::IoError(std::io::Error::other(format!("KV snapshot drain lock poisoned: {error}"))))?;
+      state = next;
+      if result.timed_out() {
+        return Ok(state.active_generations.values().copied().sum::<u64>() == 0);
+      }
+    }
   }
 
   pub fn stats(&self) -> EngineResult<KvPageProviderStats> {

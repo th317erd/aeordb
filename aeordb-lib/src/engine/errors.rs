@@ -7,7 +7,10 @@ pub enum EngineError {
   InvalidEntryVersion(u8),
   InvalidEntryType(u8),
   InvalidHashAlgorithm(u16),
-  CorruptEntry { offset: u64, reason: String },
+  CorruptEntry {
+    offset: u64,
+    reason: String,
+  },
   UnexpectedEof,
   NotFound(String),
   AlreadyExists(String),
@@ -19,6 +22,9 @@ pub enum EngineError {
   InvalidInput(String),
   SnapshotWritesDisabled,
   DurabilityFailure(String),
+  /// A storage mutation began before failure, so the caller must latch write
+  /// admission and preserve volatile recovery evidence.
+  PostMutationDurabilityFailure(String),
   ShuttingDown,
   CyclicSymlink(String),
   SymlinkDepthExceeded(String),
@@ -54,6 +60,7 @@ impl fmt::Display for EngineError {
       EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
       EngineError::SnapshotWritesDisabled => write!(formatter, "Snapshot writes are disabled by lifecycle configuration"),
       EngineError::DurabilityFailure(msg) => write!(formatter, "Durability failure: {}", msg),
+      EngineError::PostMutationDurabilityFailure(msg) => write!(formatter, "Post-mutation durability failure: {}", msg),
       EngineError::ShuttingDown => write!(formatter, "Storage engine is shutting down"),
       EngineError::CyclicSymlink(message) => write!(formatter, "Cyclic symlink: {}", message),
       EngineError::SymlinkDepthExceeded(message) => write!(formatter, "Symlink depth exceeded: {}", message),

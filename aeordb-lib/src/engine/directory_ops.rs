@@ -1571,6 +1571,7 @@ impl<'a> DirectoryOps<'a> {
 
   /// Ensure the root directory exists. Called during database creation.
   pub fn ensure_root_directory(&self, _ctx: &RequestContext) -> EngineResult<()> {
+    let _namespace = self.engine.direct_hard_authority_guard()?;
     let algo = self.engine.hash_algo();
     let dir_key = directory_path_hash("/", &algo)?;
 
@@ -1616,7 +1617,7 @@ impl<'a> DirectoryOps<'a> {
   /// rebuilding directories from them can resurrect stale paths and rewrites
   /// every ancestor repeatedly. A bottom-up rebuild writes each directory once.
   pub fn rebuild_directory_tree(&self, _ctx: &RequestContext) -> EngineResult<usize> {
-    let _namespace = self.engine.namespace_write_guard()?;
+    let _namespace = self.engine.direct_hard_authority_guard()?;
     let algo = self.engine.hash_algo();
     let hash_length = self.engine.hash_algo().hash_length();
     let snapshot = self.engine.kv_snapshot.load();
@@ -1745,7 +1746,7 @@ impl<'a> DirectoryOps<'a> {
   /// by descendant path records, and preserves any readable child directories
   /// already present in the damaged directory.
   pub fn repair_directory_index_from_path_records(&self, path: &str) -> EngineResult<usize> {
-    let _namespace = self.engine.namespace_write_guard()?;
+    let _namespace = self.engine.direct_hard_authority_guard()?;
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();

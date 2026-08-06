@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::File;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::engine::native_durability::{
@@ -26,6 +26,25 @@ pub enum CommitClass {
 pub enum NativeFileBarrierKind {
   Data,
   Full,
+}
+
+/// Testable platform boundary for recoverable file barriers. Production uses
+/// the native implementation; fault suites can inject an exact barrier
+/// failure without filling a filesystem or mutating process-wide limits.
+pub trait RecoverableFileBarrier: fmt::Debug + Send + Sync {
+  fn execute_file_barrier(&self, file: &File, barrier_kind: NativeFileBarrierKind) -> Result<(), NativeDurabilityError>;
+}
+
+#[derive(Debug, Default)]
+struct NativeRecoverableFileBarrier;
+
+impl RecoverableFileBarrier for NativeRecoverableFileBarrier {
+  fn execute_file_barrier(&self, file: &File, barrier_kind: NativeFileBarrierKind) -> Result<(), NativeDurabilityError> {
+    match barrier_kind {
+      NativeFileBarrierKind::Data => sync_file_data_native(file),
+      NativeFileBarrierKind::Full => sync_file_all_native(file),
+    }
+  }
 }
 
 impl CommitClass {
@@ -664,6 +683,7 @@ pub struct DurabilityCoordinator {
   state: Mutex<CoordinatorState>,
   changed: Condvar,
   group_policy: DurabilityGroupPolicy,
+  recoverable_file_barrier: Arc<dyn RecoverableFileBarrier>,
 }
 
 impl Default for DurabilityCoordinator {
@@ -678,24 +698,32 @@ impl DurabilityCoordinator {
   }
 
   pub fn with_policy(group_policy: DurabilityGroupPolicy) -> Self {
-    Self {
-      id: uuid::Uuid::new_v4(),
-      state: Mutex::new(CoordinatorState::new(DEFAULT_DURABILITY_LEDGER_CAPACITY)),
-      changed: Condvar::new(),
-      group_policy,
-    }
+    Self::with_components(group_policy, DEFAULT_DURABILITY_LEDGER_CAPACITY, Arc::new(NativeRecoverableFileBarrier))
+  }
+
+  pub fn with_recoverable_file_barrier(recoverable_file_barrier: Arc<dyn RecoverableFileBarrier>) -> Self {
+    Self::with_components(DurabilityGroupPolicy::default(), DEFAULT_DURABILITY_LEDGER_CAPACITY, recoverable_file_barrier)
   }
 
   pub fn with_ledger_capacity(ledger_capacity: usize) -> Result<Self, DurabilityCoordinatorError> {
     if ledger_capacity == 0 {
       return Err(DurabilityCoordinatorError::InvalidConfiguration("ledger capacity must be nonzero".to_string()));
     }
-    Ok(Self {
+    Ok(Self::with_components(DurabilityGroupPolicy::default(), ledger_capacity, Arc::new(NativeRecoverableFileBarrier)))
+  }
+
+  fn with_components(
+    group_policy: DurabilityGroupPolicy,
+    ledger_capacity: usize,
+    recoverable_file_barrier: Arc<dyn RecoverableFileBarrier>,
+  ) -> Self {
+    Self {
       id: uuid::Uuid::new_v4(),
       state: Mutex::new(CoordinatorState::new(ledger_capacity)),
       changed: Condvar::new(),
-      group_policy: Default::default(),
-    })
+      group_policy,
+      recoverable_file_barrier,
+    }
   }
 
   pub fn admit(&self, plan: DurabilityCommitPlan) -> Result<DurabilityTicket, DurabilityCoordinatorError> {
@@ -735,7 +763,7 @@ impl DurabilityCoordinator {
       vec![DurabilityOperation::DependencyAppend, DurabilityOperation::DataBarrier],
     )?;
     let ticket = self.admit_sized(plan, estimated_bytes)?;
-    let mut executor = NativeFileBarrierExecutor { file, barrier_kind };
+    let mut executor = NativeFileBarrierExecutor { file, barrier_kind, barrier: self.recoverable_file_barrier.as_ref() };
     self.execute_group(&[ticket], &mut executor)?;
     match self.take_waiter_state(ticket)? {
       DurabilityWaiterState::Succeeded(_) => Ok(()),
@@ -1191,6 +1219,7 @@ struct SingleExecutorAdapter<'a, E> {
 struct NativeFileBarrierExecutor<'a> {
   file: &'a File,
   barrier_kind: NativeFileBarrierKind,
+  barrier: &'a dyn RecoverableFileBarrier,
 }
 
 impl DurabilityGroupExecutor for NativeFileBarrierExecutor<'_> {
@@ -1199,10 +1228,7 @@ impl DurabilityGroupExecutor for NativeFileBarrierExecutor<'_> {
   fn execute_group(&mut self, _sequences: &[u64], operation: DurabilityOperation) -> Result<(), Self::Error> {
     match operation {
       DurabilityOperation::DependencyAppend => Ok(()),
-      DurabilityOperation::DataBarrier => match self.barrier_kind {
-        NativeFileBarrierKind::Data => sync_file_data_native(self.file),
-        NativeFileBarrierKind::Full => sync_file_all_native(self.file),
-      },
+      DurabilityOperation::DataBarrier => self.barrier.execute_file_barrier(self.file, self.barrier_kind),
       _ => Err(NativeDurabilityError::invalid(
         NativeDurabilityOperation::FileBarrier,
         format!("unsupported operation in recoverable file-barrier plan: {operation:?}"),

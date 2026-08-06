@@ -13,11 +13,13 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBarrierKind};
+use crate::engine::entry_header::EntryHeader;
 use crate::engine::errors::EngineError;
 use crate::engine::errors::EngineResult;
 use crate::engine::file_header::{read_active_header, write_header_to_inactive_slot_coordinated};
+use crate::engine::hot_tail::{HotTailPayload, VoidRecord};
 use crate::engine::kv_pages::page_size;
-use crate::engine::kv_stages::stage_params;
+use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 
 /// Expand the KV block in-place by relocating WAL entries forward.
 ///
@@ -27,100 +29,278 @@ use crate::engine::kv_stages::stage_params;
 /// The caller must rebuild the KV index after this — all WAL offsets
 /// have changed by `delta`.
 pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -> EngineResult<(u64, usize, u64)> {
+  if target_stage >= KV_STAGE_SIZES.len() {
+    return Err(EngineError::InvalidInput(format!("KV target stage {target_stage} is outside the supported stage table")));
+  }
   let psize = page_size(hash_length);
-  let (new_block_size, _new_bucket_count) = stage_params(target_stage, psize);
+  let (minimum_block_size, _new_bucket_count) = stage_params(target_stage, psize);
 
   // Read the active header slot (v3 A/B layout).
   let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
   let coordinator = DurabilityCoordinator::new();
-  let (mut header, active_slot) = read_active_header(&mut file)?;
+  let (mut header, mut active_slot) = read_active_header(&mut file)?;
 
-  let old_kv_offset = header.kv_block_offset;
-  let old_kv_length = header.kv_block_length;
-  let old_hot_tail = header.hot_tail_offset;
-
-  // WAL region: from (kv_offset + old_kv_length) to hot_tail_offset
-  let wal_start = old_kv_offset + old_kv_length;
-  let wal_end = old_hot_tail;
-  let wal_size = wal_end.saturating_sub(wal_start);
-
-  if new_block_size <= old_kv_length {
-    tracing::info!("KV block already large enough ({} >= {})", old_kv_length, new_block_size);
-    return Ok((old_kv_length, header.kv_block_stage as usize, 0));
+  if target_stage <= header.kv_block_stage as usize {
+    // Older recovery code cleared resize_target_stage but accidentally left
+    // resize_in_progress selected. It had already published the final stage,
+    // so clearing that stale boolean is the only mutation required.
+    if header.resize_in_progress && target_stage == 0 && header.kv_block_stage > 0 {
+      header.resize_in_progress = false;
+      write_header_to_inactive_slot_coordinated(&mut file, &mut header, active_slot, &coordinator)?;
+      return Ok((header.kv_block_length, header.kv_block_stage as usize, 0));
+    }
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("KV expansion target stage {target_stage} does not advance current stage {}", header.kv_block_stage),
+    });
   }
 
-  let delta = new_block_size - old_kv_length;
-  // hot_tail_offset == 0 means "no hot tail"; preserve that sentinel.
-  let new_hot_tail = if old_hot_tail == 0 { 0 } else { wal_end + delta };
+  let mut relocation_delta = 0u64;
+  if header.resize_in_progress {
+    let old_kv_offset = header.kv_block_offset;
+    let old_kv_end = old_kv_offset
+      .checked_add(header.kv_block_length)
+      .ok_or_else(|| EngineError::CorruptEntry { offset: old_kv_offset, reason: "current KV block end overflows u64".to_string() })?;
+    let minimum_kv_end = old_kv_offset
+      .checked_add(minimum_block_size)
+      .ok_or_else(|| EngineError::CorruptEntry { offset: old_kv_offset, reason: "expanded KV block end overflows u64".to_string() })?;
+    let old_hot_tail = header.hot_tail_offset;
+    if old_hot_tail < old_kv_end {
+      return Err(EngineError::CorruptEntry {
+        offset: old_hot_tail,
+        reason: format!("hot tail begins before the current KV block ends at {old_kv_end}"),
+      });
+    }
 
-  tracing::info!(
-    old_kv_length,
-    new_block_size = new_block_size,
-    delta,
-    wal_size,
-    "Expanding KV block: relocating {} bytes of WAL data forward by {} bytes",
-    wal_size,
-    delta,
-  );
+    // Establish the exact complete-entry boundary before writing anything.
+    let relocation_end = strict_relocation_end(&mut file, old_kv_end, minimum_kv_end, old_hot_tail, header.hash_algo)?;
+    let new_kv_end = minimum_kv_end.max(relocation_end);
+    let new_block_length = new_kv_end - old_kv_offset;
+    let relocation_bytes = relocation_end - old_kv_end;
+    let copy_destination = old_hot_tail.max(new_kv_end);
+    let new_hot_tail = copy_destination.checked_add(relocation_bytes).ok_or_else(|| EngineError::CorruptEntry {
+      offset: copy_destination,
+      reason: "relocated hot-tail offset overflows u64".to_string(),
+    })?;
+    let raw_delta = i128::from(copy_destination) - i128::from(old_kv_end);
+    let offset_delta = i64::try_from(raw_delta)
+      .map_err(|_| EngineError::InvalidInput(format!("KV relocation delta {raw_delta} cannot be represented as i64")))?;
+    relocation_delta = u64::try_from(raw_delta)
+      .map_err(|_| EngineError::InvalidInput(format!("KV relocation delta {raw_delta} cannot be represented as u64")))?;
 
-  // Relocate WAL entries: copy backwards from end to avoid overwriting
-  // data we haven't copied yet.
-  //
-  // Crash-safety ordering — MUST match `expand_kv_block_online` in
-  // storage_engine.rs. Without intermediate fsyncs, the OS may persist the
-  // new header (pointing at the new layout) before the relocated WAL data
-  // is durable. After a crash the header would say "new layout" but the
-  // WAL data would still live at old offsets → those entries get treated
-  // as part of the KV block and effectively lost.
-  const CHUNK_SIZE: u64 = 64 * 1024 * 1024; // 64MB copy chunks
-  let mut remaining = wal_size;
-  let mut buf = vec![0u8; CHUNK_SIZE.min(remaining) as usize];
+    let relocated_payload = if let Some(old_payload) = crate::engine::hot_tail::read_hot_tail(&mut file, old_hot_tail, hash_length) {
+      relocate_hot_tail_payload(old_payload, old_kv_end, relocation_end, offset_delta, new_kv_end, new_hot_tail)?
+    } else {
+      // A previous pre-relocation attempt may have overwritten the selected
+      // old hot tail while copying WAL bytes. Bytes at the future hot-tail
+      // offset are not authority until phase 2 is selected, so never trust
+      // them even when they happen to contain valid framing and checksums.
+      // WAL bytes remain authoritative and the subsequent mandatory
+      // rebuild/gap scan recovers KV and Void state.
+      tracing::warn!(
+        old_hot_tail,
+        new_hot_tail,
+        "No complete hot-tail copy survived pre-relocation recovery; rebuilding it from authoritative WAL"
+      );
+      HotTailPayload::default()
+    };
 
-  while remaining > 0 {
-    let chunk_len = CHUNK_SIZE.min(remaining) as usize;
-    let src_offset = wal_start + remaining - chunk_len as u64;
-    let dst_offset = src_offset + delta;
+    copy_nonoverlapping_region(&mut file, old_kv_end, copy_destination, relocation_bytes)?;
+    let hot_end = crate::engine::hot_tail::write_hot_tail(&mut file, new_hot_tail, &relocated_payload, hash_length)?;
+    file.set_len(hot_end)?;
+    coordinator
+      .execute_recoverable_file_barrier(
+        &file,
+        NativeFileBarrierKind::Full,
+        relocation_bytes.saturating_add(hot_end.saturating_sub(new_hot_tail)),
+      )
+      .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
-    file.seek(SeekFrom::Start(src_offset))?;
-    file.read_exact(&mut buf[..chunk_len])?;
-    file.seek(SeekFrom::Start(dst_offset))?;
-    file.write_all(&buf[..chunk_len])?;
-
-    remaining -= chunk_len as u64;
+    // Phase 2 is selected only after the relocated WAL and hot tail are
+    // durable. From here, recovery must finalize/rebuild, never relocate again.
+    header.kv_block_length = new_block_length;
+    header.hot_tail_offset = new_hot_tail;
+    header.resize_in_progress = false;
+    write_header_to_inactive_slot_coordinated(&mut file, &mut header, active_slot, &coordinator)?;
+    active_slot = 1 - active_slot;
   }
 
-  // CRITICAL: fsync after WAL relocation, BEFORE the header rewrite.
-  // Otherwise a reordered durability would expose new-layout header
-  // with old-position WAL data.
+  // A selected relocation-durable marker already carries the exact block end
+  // and hot-tail frontier. Repeating this zero/finalize phase is idempotent.
+  if header.kv_block_length < minimum_block_size {
+    return Err(EngineError::CorruptEntry {
+      offset: header.kv_block_offset,
+      reason: format!(
+        "relocation-durable KV block length {} is smaller than the {minimum_block_size}-byte stage {target_stage} minimum",
+        header.kv_block_length
+      ),
+    });
+  }
+  let new_kv_end = header.kv_block_offset.checked_add(header.kv_block_length).ok_or_else(|| EngineError::CorruptEntry {
+    offset: header.kv_block_offset,
+    reason: "relocation-durable KV block end overflows u64".to_string(),
+  })?;
+  if header.hot_tail_offset < new_kv_end {
+    return Err(EngineError::CorruptEntry {
+      offset: header.hot_tail_offset,
+      reason: format!("relocation-durable hot tail begins before the expanded KV block ends at {new_kv_end}"),
+    });
+  }
+  let validated_wal_end = strict_relocation_end(&mut file, new_kv_end, header.hot_tail_offset, header.hot_tail_offset, header.hash_algo)?;
+  if validated_wal_end != header.hot_tail_offset {
+    return Err(EngineError::CorruptEntry {
+      offset: validated_wal_end,
+      reason: format!("relocation-durable WAL validation stopped before hot-tail frontier {}", header.hot_tail_offset),
+    });
+  }
+
+  zero_region(&mut file, header.kv_block_offset, header.kv_block_length)?;
   coordinator
-    .execute_recoverable_file_barrier(&file, NativeFileBarrierKind::Full, wal_size)
+    .execute_recoverable_file_barrier(&file, NativeFileBarrierKind::Full, header.kv_block_length)
     .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
-  // Zero-fill the new KV block area (old KV area + expansion gap)
-  let zero_buf = vec![0u8; 65536.min(new_block_size as usize)];
-  let mut zeroed = 0u64;
-  while zeroed < new_block_size {
-    let chunk = zero_buf.len().min((new_block_size - zeroed) as usize);
-    file.seek(SeekFrom::Start(old_kv_offset + zeroed))?;
-    file.write_all(&zero_buf[..chunk])?;
-    zeroed += chunk as u64;
-  }
-
-  // Fsync the zero-fill before the header update so the rebuilt KV doesn't
-  // see stale old-KV bytes in the "new" block.
-  coordinator
-    .execute_recoverable_file_barrier(&file, NativeFileBarrierKind::Full, new_block_size)
-    .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
-
-  // Update header — write to the inactive slot. The old slot remains the
-  // rollback point if the write crashes mid-flight.
-  header.kv_block_length = new_block_size;
   header.kv_block_stage = target_stage as u8;
-  header.resize_target_stage = 0; // Clear pending resize flag
-  header.hot_tail_offset = new_hot_tail;
+  header.resize_in_progress = false;
+  header.resize_target_stage = 0;
   write_header_to_inactive_slot_coordinated(&mut file, &mut header, active_slot, &coordinator)?;
 
-  tracing::info!(new_block_size, new_hot_tail, target_stage, "KV block expansion complete");
+  tracing::info!(
+    new_block_length = header.kv_block_length,
+    new_hot_tail = header.hot_tail_offset,
+    target_stage,
+    relocation_delta,
+    "Interrupted KV block expansion recovered"
+  );
 
-  Ok((new_block_size, target_stage, delta))
+  Ok((header.kv_block_length, target_stage, relocation_delta))
+}
+
+fn strict_relocation_end(
+  file: &mut std::fs::File,
+  old_kv_end: u64,
+  minimum_kv_end: u64,
+  wal_end: u64,
+  expected_hash_algo: crate::engine::hash_algorithm::HashAlgorithm,
+) -> EngineResult<u64> {
+  let overlap_end = minimum_kv_end.min(wal_end);
+  let mut offset = old_kv_end;
+  while offset < overlap_end {
+    file.seek(SeekFrom::Start(offset))?;
+    let header = EntryHeader::deserialize(file).map_err(|error| EngineError::CorruptEntry {
+      offset,
+      reason: format!("cannot establish interrupted KV expansion boundary: {error}"),
+    })?;
+    if header.hash_algo != expected_hash_algo {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("WAL entry hash algorithm {:?} differs from database algorithm {expected_hash_algo:?}", header.hash_algo),
+      });
+    }
+    let expected_total = EntryHeader::compute_total_length(header.hash_algo, header.key_length as usize, header.value_length as usize)?;
+    if header.total_length != expected_total {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("WAL entry length {} does not match encoded fields ({expected_total})", header.total_length),
+      });
+    }
+    let entry_end = offset.checked_add(u64::from(header.total_length)).ok_or_else(|| EngineError::CorruptEntry {
+      offset,
+      reason: format!("WAL entry length {} overflows its file offset", header.total_length),
+    })?;
+    if entry_end > wal_end {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("WAL entry ends at {entry_end}, beyond the active WAL frontier {wal_end}"),
+      });
+    }
+    offset = entry_end;
+  }
+  Ok(offset)
+}
+
+fn copy_nonoverlapping_region(file: &mut std::fs::File, source: u64, destination: u64, length: u64) -> EngineResult<()> {
+  if length == 0 {
+    return Ok(());
+  }
+  let source_end = source
+    .checked_add(length)
+    .ok_or_else(|| EngineError::CorruptEntry { offset: source, reason: "KV relocation source end overflows u64".to_string() })?;
+  if destination < source_end {
+    return Err(EngineError::InvalidInput(format!(
+      "KV recovery copy destination {destination} overlaps source range {source}..{source_end}"
+    )));
+  }
+  let mut buffer = vec![0u8; 1024 * 1024];
+  let mut copied = 0u64;
+  while copied < length {
+    let chunk = usize::try_from((length - copied).min(buffer.len() as u64))
+      .map_err(|_| EngineError::InvalidInput("KV relocation chunk cannot be represented as usize".to_string()))?;
+    file.seek(SeekFrom::Start(source + copied))?;
+    file.read_exact(&mut buffer[..chunk])?;
+    file.seek(SeekFrom::Start(destination + copied))?;
+    file.write_all(&buffer[..chunk])?;
+    copied += chunk as u64;
+  }
+  Ok(())
+}
+
+fn relocate_hot_tail_payload(
+  mut payload: HotTailPayload,
+  old_kv_end: u64,
+  relocation_end: u64,
+  offset_delta: i64,
+  new_wal_start: u64,
+  new_wal_end: u64,
+) -> EngineResult<HotTailPayload> {
+  for entry in &mut payload.writes {
+    if entry.offset >= old_kv_end && entry.offset < relocation_end {
+      entry.offset = shifted_offset(entry.offset, offset_delta)?;
+    }
+    if entry.offset < new_wal_start || entry.offset >= new_wal_end {
+      return Err(EngineError::CorruptEntry {
+        offset: entry.offset,
+        reason: format!("relocated hot-tail write falls outside WAL range {new_wal_start}..{new_wal_end}"),
+      });
+    }
+  }
+
+  let mut adjusted_voids = Vec::with_capacity(payload.voids.len());
+  for mut void in payload.voids {
+    let old_end = void
+      .offset
+      .checked_add(u64::from(void.size))
+      .ok_or_else(|| EngineError::CorruptEntry { offset: void.offset, reason: "hot-tail void end overflows u64".to_string() })?;
+    if void.offset >= old_kv_end && old_end <= relocation_end {
+      void.offset = shifted_offset(void.offset, offset_delta)?;
+    } else if void.offset < new_wal_start {
+      continue;
+    }
+    let new_end = void
+      .offset
+      .checked_add(u64::from(void.size))
+      .ok_or_else(|| EngineError::CorruptEntry { offset: void.offset, reason: "relocated hot-tail void end overflows u64".to_string() })?;
+    if void.offset >= new_wal_start && new_end <= new_wal_end {
+      adjusted_voids.push(VoidRecord { offset: void.offset, size: void.size });
+    }
+  }
+  payload.voids = adjusted_voids;
+  Ok(payload)
+}
+
+fn shifted_offset(offset: u64, delta: i64) -> EngineResult<u64> {
+  let shifted = i128::from(offset) + i128::from(delta);
+  u64::try_from(shifted).map_err(|_| EngineError::InvalidInput(format!("relocated offset {shifted} cannot be represented as u64")))
+}
+
+fn zero_region(file: &mut std::fs::File, offset: u64, length: u64) -> EngineResult<()> {
+  let zeroes = vec![0u8; 1024 * 1024];
+  let mut written = 0u64;
+  while written < length {
+    let chunk = usize::try_from((length - written).min(zeroes.len() as u64))
+      .map_err(|_| EngineError::InvalidInput("KV zero-fill chunk cannot be represented as usize".to_string()))?;
+    file.seek(SeekFrom::Start(offset + written))?;
+    file.write_all(&zeroes[..chunk])?;
+    written += chunk as u64;
+  }
+  Ok(())
 }

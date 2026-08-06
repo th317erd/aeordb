@@ -305,13 +305,15 @@ fn malformed_runtime_keeps_coordinator_observability_without_inventing_a_policy(
 fn engine_observation_adapter_attributes_current_material_owners() {
   let directory = tempfile::tempdir().unwrap();
   let engine = create_engine(&directory);
-  DirectoryOps::new(&engine)
-    .store_file_buffered(&RequestContext::system(), "/folder/file.txt", &vec![b'x'; 512 * 1024], Some("text/plain"))
-    .unwrap();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&RequestContext::system(), "/folder/file.txt", &vec![b'x'; 512 * 1024], Some("text/plain")).unwrap();
+  assert_eq!(ops.read_file_buffered("/folder/file.txt").unwrap().len(), 512 * 1024);
 
   let snapshot = engine.memory_coordinator_snapshot().unwrap();
   assert_eq!(snapshot.owners.len(), MemoryOwner::ALL.len());
-  assert!(snapshot.owner(MemoryOwner::KvResidentPages).unwrap().observed.resident_bytes > 0);
+  let resident_pages = snapshot.owner(MemoryOwner::KvResidentPages).unwrap();
+  assert_eq!(resident_pages.observed.resident_bytes, 0, "bounded pages are coordinator reservations, not legacy observation");
+  assert!(resident_pages.reserved_bytes > 0);
   assert!(snapshot.owner(MemoryOwner::KvSnapshotGenerations).unwrap().observed.resident_bytes > 0);
   assert!(snapshot.owner(MemoryOwner::KvWriteBuffers).unwrap().observed.resident_bytes > 0);
   assert!(snapshot.owner(MemoryOwner::DirectoryCache).unwrap().observed.resident_bytes > 0);

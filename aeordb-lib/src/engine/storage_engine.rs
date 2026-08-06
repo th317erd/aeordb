@@ -226,6 +226,7 @@ struct EngineOperationTracker {
 #[derive(Default)]
 struct EngineOperationState {
   shutting_down: bool,
+  maintenance_in_progress: bool,
   active_operations: usize,
   operations: HashMap<&'static str, usize>,
 }
@@ -236,6 +237,10 @@ struct EngineOperationGuard<'a> {
   engine_id: usize,
   counted: bool,
   _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+struct EngineMaintenanceGuard<'a> {
+  tracker: &'a EngineOperationTracker,
 }
 
 impl EngineOperationTracker {
@@ -257,6 +262,17 @@ impl EngineOperationTracker {
         return Err(EngineError::IoError(std::io::Error::other(error.to_string())));
       }
     };
+    while state.maintenance_in_progress && !state.shutting_down {
+      state = match self.idle.wait(state) {
+        Ok(state) => state,
+        Err(error) => {
+          ENGINE_OPERATION_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+          });
+          return Err(EngineError::IoError(std::io::Error::other(error.to_string())));
+        }
+      };
+    }
     if state.shutting_down {
       ENGINE_OPERATION_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
@@ -273,10 +289,50 @@ impl EngineOperationTracker {
   fn begin_shutdown(&self) {
     if let Ok(mut state) = self.state.lock() {
       state.shutting_down = true;
+      self.idle.notify_all();
       if state.active_operations == 0 {
         self.idle.notify_all();
       }
     }
+  }
+
+  fn begin_maintenance(&self, engine_id: usize, timeout: std::time::Duration) -> EngineResult<EngineMaintenanceGuard<'_>> {
+    let admitted = ENGINE_OPERATION_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    if !admitted {
+      return Err(EngineError::InvalidInput("KV layout maintenance requires an admitted engine operation".to_string()));
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let mut state = self.state.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    if state.shutting_down {
+      return Err(EngineError::ShuttingDown);
+    }
+    if state.maintenance_in_progress {
+      return Err(EngineError::InvalidInput("another engine maintenance operation is already in progress".to_string()));
+    }
+    state.maintenance_in_progress = true;
+    while state.active_operations > 1 {
+      let now = std::time::Instant::now();
+      if now >= deadline {
+        state.maintenance_in_progress = false;
+        self.idle.notify_all();
+        return Err(EngineError::InvalidInput("timed out waiting for active operations before KV layout maintenance".to_string()));
+      }
+      let remaining = deadline.saturating_duration_since(now);
+      let (next, result) =
+        self.idle.wait_timeout(state, remaining).map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      state = next;
+      if state.shutting_down {
+        state.maintenance_in_progress = false;
+        self.idle.notify_all();
+        return Err(EngineError::ShuttingDown);
+      }
+      if result.timed_out() && state.active_operations > 1 {
+        state.maintenance_in_progress = false;
+        self.idle.notify_all();
+        return Err(EngineError::InvalidInput("timed out waiting for active operations before KV layout maintenance".to_string()));
+      }
+    }
+    Ok(EngineMaintenanceGuard { tracker: self })
   }
 
   fn snapshot(&self) -> EngineOperationSnapshot {
@@ -338,7 +394,16 @@ impl Drop for EngineOperationGuard<'_> {
         state.operations.remove(self.operation);
       }
     }
-    if state.active_operations == 0 {
+    if state.active_operations == 0 || state.maintenance_in_progress {
+      self.tracker.idle.notify_all();
+    }
+  }
+}
+
+impl Drop for EngineMaintenanceGuard<'_> {
+  fn drop(&mut self) {
+    if let Ok(mut state) = self.tracker.state.lock() {
+      state.maintenance_in_progress = false;
       self.tracker.idle.notify_all();
     }
   }
@@ -574,8 +639,39 @@ impl StorageEngine {
     Ok(())
   }
 
+  fn activate_bounded_kv_pages(&self) -> EngineResult<()> {
+    let report = self.configuration_shadow();
+    let Some(resolution) = report.resolution.as_ref() else {
+      tracing::warn!("Bounded KV residency remains inactive because startup configuration resolution is unavailable");
+      return Ok(());
+    };
+    let max_resident_bytes = match resolution.property("cache.kv_resident_max_bytes").and_then(|property| property.value.as_ref()) {
+      Some(crate::engine::config_resolver::ConfigValue::Unsigned(value)) => *value,
+      _ => {
+        tracing::warn!("Bounded KV residency remains inactive because cache.kv_resident_max_bytes is unresolved");
+        return Ok(());
+      }
+    };
+    let coordinator = self.memory_coordinator();
+    let policy_available =
+      coordinator.snapshot().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.policy.is_some();
+    if !policy_available {
+      tracing::warn!("Bounded KV residency remains inactive because the process memory policy is unavailable");
+      return Ok(());
+    }
+    self
+      .kv_writer
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+      .activate_bounded_pages((*coordinator).clone(), max_resident_bytes)
+  }
+
   pub fn memory_coordinator(&self) -> Arc<MemoryCoordinator> {
     Arc::clone(self.memory_coordinator.get().expect("StorageEngine constructors initialize the memory coordinator"))
+  }
+
+  pub fn kv_page_provider_stats(&self) -> EngineResult<Option<crate::engine::kv_page_provider::KvPageProviderStats>> {
+    self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.kv_page_provider_stats()
   }
 
   pub fn memory_coordinator_snapshot(&self) -> Result<MemoryCoordinatorSnapshot, MemoryCoordinatorError> {
@@ -972,6 +1068,13 @@ impl StorageEngine {
       tracing::error!(context, error = %message, "Critical durability failure");
     }
     EngineError::DurabilityFailure(message)
+  }
+
+  fn normalize_runtime_write_error(&self, operation: DurabilityOperation, context: &str, error: EngineError) -> EngineError {
+    match error {
+      EngineError::PostMutationDurabilityFailure(message) => self.record_durability_failure(operation, context, message),
+      other => other,
+    }
   }
 
   fn attempt_emergency_spill(
@@ -1402,6 +1505,91 @@ impl StorageEngine {
     Ok(NamespaceWriteGuard { engine_id, _guard: Some(guard) })
   }
 
+  /// Acquire namespace authority for a header publication that creates its
+  /// own hard-authority ticket. A transaction admits its ticket before
+  /// releasing namespace authority, so a direct publisher must let the
+  /// existing hard frontier drain before it can admit another ticket.
+  pub(crate) fn direct_hard_authority_guard(&self) -> EngineResult<NamespaceWriteGuard<'_>> {
+    let engine_id = self as *const StorageEngine as usize;
+    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    if already_held {
+      let transaction_active =
+        self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
+      if !transaction_active {
+        let snapshot = self.durability_coordinator.snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+        if snapshot.pending_hard > 0 || snapshot.driver_active || snapshot.admitted > 0 || snapshot.executing > 0 {
+          return Err(EngineError::DurabilityFailure(
+            "direct header publication cannot publish while an earlier hard-authority ticket is pending".to_string(),
+          ));
+        }
+      }
+      return self.namespace_write_guard();
+    }
+
+    let deadline = std::time::Instant::now() + Self::shutdown_operation_wait_timeout();
+    loop {
+      self.ensure_writable()?;
+      let now = std::time::Instant::now();
+      if now >= deadline {
+        return Err(EngineError::DurabilityFailure(
+          "timed out waiting for the existing hard-authority frontier before direct header publication".to_string(),
+        ));
+      }
+      let remaining = deadline.saturating_duration_since(now);
+      let snapshot =
+        self.durability_coordinator.wait_until_idle(remaining).map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+      if snapshot.pending_hard > 0 || snapshot.driver_active || snapshot.admitted > 0 || snapshot.executing > 0 {
+        return Err(EngineError::DurabilityFailure(
+          "timed out waiting for the existing hard-authority frontier before direct header publication".to_string(),
+        ));
+      }
+
+      let guard = self.namespace_write_guard()?;
+      self.ensure_writable()?;
+      let snapshot = self.durability_coordinator.snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+      if snapshot.pending_hard == 0 && !snapshot.driver_active && snapshot.admitted == 0 && snapshot.executing == 0 {
+        return Ok(guard);
+      }
+      drop(guard);
+    }
+  }
+
+  /// Non-blocking timer form of [`direct_hard_authority_guard`]. Contention
+  /// is normal: the admitted transaction owns the next hard publication, so
+  /// the timer simply defers to a later tick.
+  fn try_direct_hard_authority_guard(&self) -> EngineResult<Option<NamespaceWriteGuard<'_>>> {
+    let engine_id = self as *const StorageEngine as usize;
+    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    if already_held {
+      let transaction_active =
+        self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
+      if !transaction_active {
+        let snapshot = self.durability_coordinator.snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+        if snapshot.pending_hard > 0 || snapshot.driver_active || snapshot.admitted > 0 || snapshot.executing > 0 {
+          return Ok(None);
+        }
+      }
+      return self.namespace_write_guard().map(Some);
+    }
+
+    let guard = match self.namespace_write_lock.try_lock() {
+      Ok(guard) => guard,
+      Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+      Err(std::sync::TryLockError::Poisoned(error)) => {
+        return Err(EngineError::IoError(std::io::Error::other(error.to_string())));
+      }
+    };
+    NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
+    let authority = NamespaceWriteGuard { engine_id, _guard: Some(guard) };
+    self.ensure_writable()?;
+    let snapshot = self.durability_coordinator.snapshot().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+    if snapshot.pending_hard > 0 || snapshot.driver_active || snapshot.admitted > 0 || snapshot.executing > 0 {
+      drop(authority);
+      return Ok(None);
+    }
+    Ok(Some(authority))
+  }
+
   fn validate_kv_entry_offset(writer: &AppendWriter, kv_entry: &KVEntry, hash: &[u8], context: &str) -> EngineResult<()> {
     let (wal_start, wal_end) = Self::writer_wal_bounds(writer);
     if Self::valid_reusable_range(kv_entry.offset, kv_entry.total_length, wal_start, wal_end) {
@@ -1487,6 +1675,51 @@ impl StorageEngine {
     }
 
     adjusted
+  }
+
+  fn shifted_expansion_offset(offset: u64, offset_delta: i64) -> EngineResult<u64> {
+    let shifted = i128::from(offset) + i128::from(offset_delta);
+    u64::try_from(shifted).map_err(|_| EngineError::InvalidInput(format!("relocated offset {shifted} cannot be represented as u64")))
+  }
+
+  fn expansion_relocation_end(writer: &AppendWriter, old_kv_end: u64, new_kv_end: u64, wal_end: u64) -> EngineResult<u64> {
+    if old_kv_end > wal_end {
+      return Err(EngineError::CorruptEntry {
+        offset: old_kv_end,
+        reason: format!("KV block ends after the active WAL frontier at {wal_end}"),
+      });
+    }
+
+    let overlap_end = new_kv_end.min(wal_end);
+    let mut entry_offset = old_kv_end;
+    while entry_offset < overlap_end {
+      let header = writer.read_entry_header_at_shared(entry_offset).map_err(|error| match error {
+        EngineError::CorruptEntry { reason, .. } => {
+          EngineError::CorruptEntry { offset: entry_offset, reason: format!("cannot establish KV expansion boundary: {reason}") }
+        }
+        other => other,
+      })?;
+      let total_length = u64::from(header.total_length);
+      let minimum_length = header.header_size() as u64;
+      if total_length < minimum_length {
+        return Err(EngineError::CorruptEntry {
+          offset: entry_offset,
+          reason: format!("WAL entry length {total_length} is smaller than its {minimum_length}-byte header"),
+        });
+      }
+      let entry_end = entry_offset.checked_add(total_length).ok_or_else(|| EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("WAL entry length {total_length} overflows its file offset"),
+      })?;
+      if entry_end > wal_end {
+        return Err(EngineError::CorruptEntry {
+          offset: entry_offset,
+          reason: format!("WAL entry ends at {entry_end}, beyond the active WAL frontier {wal_end}"),
+        });
+      }
+      entry_offset = entry_end;
+    }
+    Ok(entry_offset)
   }
 
   /// Acquire an exclusive advisory file lock. Returns the locked file handle
@@ -1610,6 +1843,7 @@ impl StorageEngine {
     engine.counters.store(initialized);
     engine.initialize_configuration_shadow()?;
     engine.initialize_memory_coordinator()?;
+    engine.activate_bounded_kv_pages()?;
     Ok(engine)
   }
 
@@ -1660,19 +1894,18 @@ impl StorageEngine {
     let mut needs_kv_rebuild = false;
     let resize_target = file_header.resize_target_stage as usize;
     let current_stage = file_header.kv_block_stage as usize;
-    if resize_target > current_stage {
+    if file_header.resize_in_progress || resize_target > current_stage {
       tracing::info!(current_stage, resize_target, "Pending KV block expansion detected — expanding before opening");
       // Drop the writer to release the file handle during expansion
       drop(writer);
-      match crate::engine::kv_expand::expand_kv_block(path, resize_target, hash_length) {
-        Ok((new_length, new_stage, delta)) => {
-          tracing::info!(new_length, new_stage, delta, "KV block expanded successfully — will rebuild KV index");
-          needs_kv_rebuild = true;
-        }
-        Err(e) => {
-          tracing::error!("KV block expansion failed: {}. Continuing with overflow buffer.", e);
-        }
-      }
+      let (new_length, new_stage, delta) =
+        crate::engine::kv_expand::expand_kv_block(path, resize_target, hash_length).map_err(|error| {
+          EngineError::DurabilityFailure(format!(
+            "interrupted KV expansion recovery failed; database remains closed and requires explicit repair: {error}"
+          ))
+        })?;
+      tracing::info!(new_length, new_stage, delta, "KV block expansion recovered successfully — will rebuild KV index");
+      needs_kv_rebuild = true;
       // Re-open writer and re-read the (possibly updated) header
       writer = AppendWriter::open(Path::new(path))?;
       file_header = writer.file_header().clone();
@@ -1733,10 +1966,11 @@ impl StorageEngine {
     let kv_store = if kv_block_valid {
       // KV block is in the file — open from in-file pages
       let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
-      let kv = DiskKVStore::open_with_coordinator(
+      let kv = DiskKVStore::open_with_layout_and_coordinator(
         kv_file,
         hash_algo,
         kv_block_offset,
+        file_header.kv_block_length,
         hot_tail_offset,
         kv_block_stage,
         hot_entries,
@@ -1891,6 +2125,7 @@ impl StorageEngine {
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_shadow()?;
     engine.initialize_memory_coordinator()?;
+    engine.activate_bounded_kv_pages()?;
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {
@@ -1994,6 +2229,7 @@ impl StorageEngine {
   /// threshold trigger.
   pub(crate) fn force_hot_tail_flush(&self) -> EngineResult<()> {
     self.ensure_writable()?;
+    let _authority = self.direct_hard_authority_guard()?;
     let commit_result = {
       let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       let mut kv = self.kv_writer.lock().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
@@ -2281,7 +2517,11 @@ impl StorageEngine {
     kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry { type_flags: entry_type.to_kv_type(), hash: key.to_vec(), offset, total_length };
-    kv.insert(kv_entry)?;
+    if let Err(error) = kv.insert(kv_entry) {
+      drop(kv);
+      drop(writer);
+      return Err(self.normalize_runtime_write_error(DurabilityOperation::DataBarrier, "KV page flush failed", error));
+    }
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
     self.record_gc_recheck(key);
 
@@ -2298,16 +2538,14 @@ impl StorageEngine {
     }
 
     // Check if KV block needs expansion (set during insert → flush → resize)
-    let pending_expansion = kv.needs_expansion.take();
+    let pending_expansion = Self::take_ready_kv_expansion(&mut kv);
 
     // Drop locks before expansion (expansion acquires them itself)
     drop(kv);
     drop(writer);
 
     if let Some(target_stage) = pending_expansion {
-      if let Err(e) = self.expand_kv_block_online(target_stage) {
-        tracing::error!("Online KV expansion failed: {}. Will retry on next overflow.", e);
-      }
+      self.execute_kv_expansion_request(target_stage)?;
     }
 
     Ok(offset)
@@ -2315,6 +2553,49 @@ impl StorageEngine {
 
   fn can_reuse_void_for_entry(entry_type: EntryType) -> bool {
     matches!(entry_type, EntryType::Chunk)
+  }
+
+  fn take_ready_kv_expansion(kv: &mut DiskKVStore) -> Option<usize> {
+    if kv.transaction_depth == 0 {
+      kv.needs_expansion.take()
+    } else {
+      None
+    }
+  }
+
+  fn run_ready_kv_expansion(&self) -> EngineResult<()> {
+    let pending_expansion = {
+      let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      Self::take_ready_kv_expansion(&mut kv)
+    };
+    if let Some(target_stage) = pending_expansion {
+      self.execute_kv_expansion_request(target_stage)?;
+    }
+    Ok(())
+  }
+
+  fn execute_kv_expansion_request(&self, target_stage: usize) -> EngineResult<()> {
+    match self.expand_kv_block_online(target_stage) {
+      Ok(()) => Ok(()),
+      Err(error) => {
+        // Failures after the first layout marker latch the engine read-only and
+        // startup recovery owns the unfinished transition. A read-only
+        // preflight refusal leaves the current layout authoritative, so retain
+        // the request for a later write/transaction boundary instead of losing
+        // the only signal that the current pages remain overfull.
+        if self.durability_failure().is_none() && target_stage < crate::engine::kv_stages::KV_STAGE_SIZES.len() {
+          let mut kv = self.kv_writer.lock().map_err(|lock_error| {
+            EngineError::IoError(std::io::Error::other(format!(
+              "KV expansion preflight failed ({error}) and its retry request could not be restored: {lock_error}"
+            )))
+          })?;
+          if target_stage > kv.stage() {
+            kv.needs_expansion = Some(kv.needs_expansion.map_or(target_stage, |pending| pending.max(target_stage)));
+          }
+        }
+        Err(error)
+      }
+    }
   }
 
   /// Record a write into the GC recheck set if GC mark+sweep is active.
@@ -2785,7 +3066,7 @@ impl StorageEngine {
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
     let _operation = self.operation_guard("update_head")?;
     self.ensure_writable()?;
-    let _namespace = self.namespace_write_guard()?;
+    let _namespace = self.direct_hard_authority_guard()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let in_transaction =
       self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
@@ -2825,12 +3106,19 @@ impl StorageEngine {
   pub fn set_backup_info(&self, backup_type: u8, base_hash: &[u8], target_hash: &[u8]) -> EngineResult<()> {
     let _operation = self.operation_guard("set_backup_info")?;
     self.ensure_writable()?;
+    let _namespace = self.direct_hard_authority_guard()?;
+    let in_transaction =
+      self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
     let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
     let mut header = writer.file_header().clone();
     header.backup_type = backup_type;
     header.base_hash = base_hash.to_vec();
     header.target_hash = target_hash.to_vec();
-    writer.update_file_header(&header)?;
+    if in_transaction {
+      writer.set_header_in_memory(header);
+    } else {
+      writer.update_file_header(&header)?;
+    }
     Ok(())
   }
 
@@ -2852,9 +3140,21 @@ impl StorageEngine {
     kv.set_hot_tail_offset(writer.current_offset());
 
     let kv_entry = KVEntry { type_flags: kv_type, hash: key.to_vec(), offset, total_length };
-    kv.insert(kv_entry)?;
+    if let Err(error) = kv.insert(kv_entry) {
+      drop(kv);
+      drop(writer);
+      return Err(self.normalize_runtime_write_error(DurabilityOperation::DataBarrier, "Typed KV page flush failed", error));
+    }
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
     self.record_gc_recheck(key);
+
+    let pending_expansion = Self::take_ready_kv_expansion(&mut kv);
+    drop(kv);
+    drop(writer);
+
+    if let Some(target_stage) = pending_expansion {
+      self.execute_kv_expansion_request(target_stage)?;
+    }
 
     Ok(offset)
   }
@@ -2895,7 +3195,11 @@ impl StorageEngine {
 
     for (i, entry) in batch.entries.iter().enumerate() {
       let kv_entry = KVEntry { type_flags: entry.kv_type, hash: entry.key.clone(), offset: offsets[i], total_length: totals[i] };
-      kv.insert(kv_entry)?;
+      if let Err(error) = kv.insert(kv_entry) {
+        drop(kv);
+        drop(writer);
+        return Err(self.normalize_runtime_write_error(DurabilityOperation::DataBarrier, "Batched KV page flush failed", error));
+      }
     }
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
@@ -2903,14 +3207,12 @@ impl StorageEngine {
       self.record_gc_recheck(&entry.key);
     }
 
-    let pending_expansion = kv.needs_expansion.take();
+    let pending_expansion = Self::take_ready_kv_expansion(&mut kv);
     drop(kv);
     drop(writer);
 
     if let Some(target_stage) = pending_expansion {
-      if let Err(e) = self.expand_kv_block_online(target_stage) {
-        tracing::error!("Online KV expansion failed: {}. Will retry on next overflow.", e);
-      }
+      self.execute_kv_expansion_request(target_stage)?;
     }
 
     Ok(offsets)
@@ -2921,7 +3223,7 @@ impl StorageEngine {
   pub fn flush_batch_and_update_head(&self, batch: WriteBatch, head_hash: &[u8]) -> EngineResult<Vec<u64>> {
     let _operation = self.operation_guard("flush_batch_and_update_head")?;
     self.ensure_writable()?;
-    let _namespace = self.namespace_write_guard()?;
+    let _namespace = self.direct_hard_authority_guard()?;
     if batch.is_empty() {
       // Still update HEAD even if batch is empty (e.g., system path that skips propagation)
       return self.update_head(head_hash).map(|_| Vec::new());
@@ -2947,7 +3249,11 @@ impl StorageEngine {
 
     for (i, entry) in batch.entries.iter().enumerate() {
       let kv_entry = KVEntry { type_flags: entry.kv_type, hash: entry.key.clone(), offset: offsets[i], total_length: totals[i] };
-      kv.insert(kv_entry)?;
+      if let Err(error) = kv.insert(kv_entry) {
+        drop(kv);
+        drop(writer);
+        return Err(self.normalize_runtime_write_error(DurabilityOperation::DataBarrier, "Batched HEAD KV page flush failed", error));
+      }
     }
     for entry in &batch.entries {
       self.record_gc_recheck(&entry.key);
@@ -2975,14 +3281,12 @@ impl StorageEngine {
 
     self.counters.load().set_write_buffer_depth(kv.write_buffer_len() as u64);
 
-    let pending_expansion = kv.needs_expansion.take();
+    let pending_expansion = Self::take_ready_kv_expansion(&mut kv);
     drop(kv);
     drop(writer);
 
     if let Some(target_stage) = pending_expansion {
-      if let Err(e) = self.expand_kv_block_online(target_stage) {
-        tracing::error!("Online KV expansion failed: {}. Will retry on next overflow.", e);
-      }
+      self.execute_kv_expansion_request(target_stage)?;
     }
 
     Ok(offsets)
@@ -3108,125 +3412,173 @@ impl StorageEngine {
   /// 4. Tells the KV store to finalize: zero pages, rehash, update header
   /// 5. Updates the writer's offset to reflect the new file layout
   pub fn expand_kv_block_online(&self, target_stage: usize) -> EngineResult<()> {
+    let _operation = self.operation_guard("expand_kv_block_online")?;
     self.ensure_writable()?;
+    let engine_id = self as *const StorageEngine as usize;
+    let _maintenance = self.operation_tracker.begin_maintenance(engine_id, std::time::Duration::from_secs(300))?;
+    let _authority = self.direct_hard_authority_guard()?;
+    if self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0 {
+      return Err(EngineError::InvalidInput("KV layout expansion cannot publish while a namespace transaction is active".to_string()));
+    }
     let hash_length = self.hash_algo.hash_length();
     let psize = crate::engine::kv_pages::page_size(hash_length);
-    let (new_block_size, _new_bucket_count) = crate::engine::kv_stages::stage_params(target_stage, psize);
+    if target_stage >= crate::engine::kv_stages::KV_STAGE_SIZES.len() {
+      return Err(EngineError::InvalidInput(format!("KV target stage {target_stage} is outside the supported stage table")));
+    }
+    let (minimum_block_size, _new_bucket_count) = crate::engine::kv_stages::stage_params(target_stage, psize);
 
     // Acquire both locks: writer first, then KV
     let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+    let all_entries = kv.iter_all()?;
 
     let header = writer.file_header().clone();
-    let old_kv_end = header.kv_block_offset + header.kv_block_length;
-    let new_kv_end = header.kv_block_offset + new_block_size;
+    if target_stage <= header.kv_block_stage as usize {
+      return Err(EngineError::InvalidInput(format!(
+        "KV target stage {target_stage} must be greater than current stage {}",
+        header.kv_block_stage
+      )));
+    }
+    let old_kv_end = header
+      .kv_block_offset
+      .checked_add(header.kv_block_length)
+      .ok_or_else(|| EngineError::InvalidInput("current KV block end overflows u64".to_string()))?;
+    let minimum_kv_end = header
+      .kv_block_offset
+      .checked_add(minimum_block_size)
+      .ok_or_else(|| EngineError::InvalidInput("expanded KV block end overflows u64".to_string()))?;
     // Use the writer's current offset (end of WAL) as the actual hot tail position,
     // NOT the header's hot_tail_offset which may be stale.
     let hot_tail_offset = writer.current_offset();
 
-    // The growth zone is [old_kv_end..new_kv_end], but entries may straddle
-    // the new_kv_end boundary. We must copy the straddling entry's tail too,
-    // otherwise the relocated copy is truncated. Scan forward from new_kv_end
-    // to find the first valid entry header — everything before it is the
-    // straddling tail that must be included in the copy.
-    let magic_bytes = crate::engine::entry_header::ENTRY_MAGIC.to_le_bytes();
-    let mut actual_copy_end = new_kv_end;
-    let scan_limit = new_kv_end + 1024 * 1024; // 1MB max scan for boundary
-    let mut scan_pos = new_kv_end;
-    while scan_pos < scan_limit && scan_pos < hot_tail_offset {
-      let mut buf = [0u8; 4];
-      if writer.read_bytes_at(scan_pos, &mut buf).is_err() {
-        break;
-      }
-      if buf == magic_bytes {
-        actual_copy_end = scan_pos;
-        break;
-      }
-      scan_pos += 1;
-    }
-    if actual_copy_end == new_kv_end {
-      // No straddling entry found, or couldn't scan — just use new_kv_end
-      actual_copy_end = new_kv_end;
-    }
+    // Walk validated entry boundaries from the current WAL start. Looking for
+    // magic bytes inside payloads is ambiguous, and a final straddling entry
+    // has no later magic marker. The first boundary at or beyond the overlap
+    // is the exact byte through which relocation must copy.
+    let actual_copy_end = Self::expansion_relocation_end(&writer, old_kv_end, minimum_kv_end, hot_tail_offset)?;
+    // A page block may need a small amount of slack so its WAL boundary lands
+    // between complete entries. This avoids overwriting a straddling entry tail
+    // with a synthetic marker and makes the relocation-durable phase directly
+    // scannable after a crash.
+    let new_kv_end = minimum_kv_end.max(actual_copy_end);
+    let new_block_length = new_kv_end
+      .checked_sub(header.kv_block_offset)
+      .ok_or_else(|| EngineError::InvalidInput("expanded KV block length underflows its offset".to_string()))?;
     let growth_zone_size = actual_copy_end - old_kv_end;
+    // If the boundary-aligned block overtakes the old WAL frontier, append the
+    // relocated bytes after it. Otherwise the old frontier remains the first
+    // non-overlapping destination and avoids growing the file unnecessarily.
+    let copy_dst = hot_tail_offset.max(new_kv_end);
+    let new_hot_tail = copy_dst
+      .checked_add(growth_zone_size)
+      .ok_or_else(|| EngineError::InvalidInput("expanded hot-tail offset overflows u64".to_string()))?;
+    let raw_offset_delta = i128::from(copy_dst) - i128::from(old_kv_end);
+    let offset_delta = i64::try_from(raw_offset_delta)
+      .map_err(|_| EngineError::InvalidInput(format!("KV relocation delta {raw_offset_delta} cannot be represented as i64")))?;
+    let current_voids = self
+      .void_manager
+      .read()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+      .iter()
+      .map(|(offset, size)| VoidRecord { offset, size })
+      .collect::<Vec<_>>();
+    let adjusted_voids =
+      Self::adjust_voids_for_expansion(current_voids, old_kv_end, actual_copy_end, offset_delta, new_kv_end, new_hot_tail);
+    let mut relocation_hot_payload = kv.emergency_hot_tail_payload();
+    for entry in &mut relocation_hot_payload.writes {
+      if entry.offset >= old_kv_end && entry.offset < actual_copy_end {
+        entry.offset = Self::shifted_expansion_offset(entry.offset, offset_delta)?;
+      }
+    }
+    relocation_hot_payload.voids = adjusted_voids.clone();
 
     tracing::info!(
       growth_zone_size,
       old_kv_end,
+      minimum_kv_end,
       new_kv_end,
+      new_block_length,
       hot_tail_offset,
       "Online KV expansion: relocating {} bytes of WAL data",
       growth_zone_size,
     );
 
-    // Step 1: Mark resize in progress
-    {
+    // Boundary validation is read-only. Keep the current provider published
+    // until every preflight check has succeeded, then drain old snapshot
+    // generations immediately before the first durable layout mutation.
+    kv.suspend_bounded_pages_for_layout_rewrite(std::time::Duration::from_secs(30))?;
+
+    let expansion_result = (|| -> EngineResult<()> {
+      // Step 1: Mark resize in progress. From this call onward any failure is
+      // durability-critical because the selected header or relocated bytes
+      // may already differ from the in-memory preflight view.
       let mut h = header.clone();
       h.resize_in_progress = true;
       h.resize_target_stage = target_stage as u8;
       writer.update_file_header(&h)?;
+
+      // Step 2: Copy the complete overlapping WAL entries to the old frontier
+      // and publish the adjusted recoverable hot tail at the new frontier.
+      writer.copy_region(old_kv_end, copy_dst, growth_zone_size)?;
+      writer.write_hot_tail_at(new_hot_tail, &relocation_hot_payload, hash_length)?;
+
+      // Step 3: Fsync. Two complete copies now exist.
+      writer.sync()?;
+
+      // Publish a second, distinct phase only after the relocated WAL and hot
+      // tail are durable. Its block length ends on a validated entry boundary,
+      // so startup can finish by zeroing/rebuilding without relocating again.
+      let mut relocated_header = writer.file_header().clone();
+      relocated_header.kv_block_length = new_block_length;
+      relocated_header.resize_in_progress = false;
+      relocated_header.resize_target_stage = target_stage as u8;
+      relocated_header.hot_tail_offset = new_hot_tail;
+      writer.update_file_header(&relocated_header)?;
+      self.last_published_hot_tail_offset.store(new_hot_tail, Ordering::Release);
+
+      // Step 4-8: rehash and durably publish the final pages/hot tail, then
+      // replace the resize marker with the completed layout header.
+      writer.set_offset(new_hot_tail);
+      kv.finalize_expansion_with_block_length(
+        target_stage,
+        new_block_length,
+        old_kv_end,
+        actual_copy_end,
+        offset_delta,
+        new_hot_tail,
+        adjusted_voids.clone(),
+        all_entries,
+      )?;
+
+      let mut final_header = writer.file_header().clone();
+      final_header.kv_block_length = new_block_length;
+      final_header.kv_block_stage = target_stage as u8;
+      final_header.resize_in_progress = false;
+      final_header.resize_target_stage = 0;
+      final_header.hot_tail_offset = new_hot_tail;
+      writer.update_file_header(&final_header)?;
+      self.last_published_hot_tail_offset.store(final_header.hot_tail_offset, Ordering::Release);
+      writer.sync()?;
+
+      self
+        .void_manager
+        .write()
+        .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+        .replace_all(adjusted_voids.iter().map(|void| (void.offset, void.size)));
+      Ok(())
+    })();
+
+    if let Err(error) = expansion_result {
+      drop(kv);
+      drop(writer);
+      return Err(self.record_durability_failure(
+        DurabilityOperation::AuthorityWrite,
+        "KV layout expansion failed after mutation began",
+        error,
+      ));
     }
-
-    // Step 2: Read hot tail into memory, then copy growth zone data to
-    // where the hot tail was. The hot tail gets rewritten after.
-    let mut hot_payload = writer.read_hot_tail_payload(hot_tail_offset, hash_length);
-
-    // Copy growth zone [old_kv_end .. actual_copy_end] to [hot_tail_offset ..]
-    let copy_dst = hot_tail_offset;
-    let new_hot_tail = hot_tail_offset + growth_zone_size;
-    let offset_delta: i64 = copy_dst as i64 - old_kv_end as i64;
-
-    let adjusted_voids = {
-      let mut vm = self.void_manager.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
-      let current_voids = vm.iter().map(|(offset, size)| VoidRecord { offset, size }).collect::<Vec<_>>();
-      let adjusted = Self::adjust_voids_for_expansion(current_voids, old_kv_end, actual_copy_end, offset_delta, new_kv_end, new_hot_tail);
-      vm.replace_all(adjusted.iter().map(|void| (void.offset, void.size)));
-      adjusted
-    };
-    hot_payload.voids = adjusted_voids.clone();
-
-    writer.copy_region(old_kv_end, copy_dst, growth_zone_size)?;
-
-    // Rewrite hot tail at new position
-    writer.write_hot_tail_at(new_hot_tail, &hot_payload, hash_length)?;
-
-    // Step 3: Fsync — two copies exist, crash-safe
-    writer.sync()?;
-
-    // The straddling tail region [new_kv_end..actual_copy_end] was relocated
-    // to the end of the WAL. Write a void entry over the dead original so
-    // the entry scanner doesn't trip over it on restart.
-    if actual_copy_end > new_kv_end {
-      let tail_size = (actual_copy_end - new_kv_end) as u32;
-      let min_void = (crate::engine::entry_header::EntryHeader::FIXED_HEADER_SIZE + self.hash_algo.hash_length()) as u32;
-      if tail_size >= min_void {
-        writer.write_void_at(new_kv_end, tail_size)?;
-      }
-    }
-
-    // Update writer's offset to after the relocated data (before new hot tail)
-    writer.set_offset(new_hot_tail);
-
-    // Step 4-8: KV finalization (zero pages, rehash, update header, publish snapshot)
-    // Use actual_copy_end (not new_kv_end) for offset adjustment range —
-    // entries straddling the boundary were also relocated.
-    kv.finalize_expansion(target_stage, old_kv_end, actual_copy_end, offset_delta, new_hot_tail, adjusted_voids)?;
-
-    // Update writer's header to match what KV wrote
-    let mut final_header = writer.file_header().clone();
-    final_header.kv_block_length = new_block_size;
-    final_header.kv_block_stage = target_stage as u8;
-    final_header.resize_in_progress = false;
-    final_header.resize_target_stage = 0;
-    final_header.hot_tail_offset = new_hot_tail;
-    writer.update_file_header(&final_header)?;
-    self.last_published_hot_tail_offset.store(final_header.hot_tail_offset, Ordering::Release);
-
-    // Sync the writer's file handle to ensure it sees the KV's changes
-    writer.sync()?;
 
     tracing::info!("Online KV block expansion complete");
-
     Ok(())
   }
 
@@ -3245,7 +3597,7 @@ impl StorageEngine {
     let _operation = self.operation_guard("mark_entry_deleted")?;
     self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-    let updated = kv.update_flags(hash, KV_FLAG_DELETED);
+    let updated = kv.update_flags(hash, KV_FLAG_DELETED)?;
     if !updated {
       return Err(EngineError::NotFound(format!("Entry not found for hash: {}", hex::encode(hash))));
     }
@@ -3470,7 +3822,7 @@ impl StorageEngine {
     let _operation = self.operation_guard("remove_kv_entry")?;
     self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-    kv.mark_deleted(hash);
+    kv.mark_deleted(hash)?;
     Ok(())
   }
 
@@ -3579,7 +3931,10 @@ impl StorageEngine {
   }
 
   pub fn rebuild_kv_with_progress(&self, progress_callback: Option<EngineStartupProgressCallback>) -> EngineResult<()> {
+    let _operation = self.operation_guard("rebuild_kv")?;
     self.ensure_writable()?;
+    let engine_id = self as *const StorageEngine as usize;
+    let _maintenance = self.operation_tracker.begin_maintenance(engine_id, std::time::Duration::from_secs(300))?;
     let _mem = crate::engine::rss_sampler::PhaseSampler::start("rebuild_kv", std::time::Duration::from_millis(50));
     tracing::info!("Rebuilding KV index from append log...");
     let timer = std::time::Instant::now();
@@ -3755,9 +4110,19 @@ impl StorageEngine {
       "rebuild_kv: creating new KV store"
     );
 
+    let bounded_page_config = {
+      let mut current = self.kv_writer.lock().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let config = current.bounded_page_configuration();
+      current.suspend_bounded_pages_for_layout_rewrite(std::time::Duration::from_secs(30))?;
+      config
+    };
     let kv_file = OpenOptions::new().read(true).write(true).open(&file_path)?;
     let mut new_kv =
       DiskKVStore::create_with_coordinator(kv_file, hash_algo, kv_offset, hot_offset, rebuild_stage, durability_coordinator)?;
+    let configure_bootstrap_after_flush = bounded_page_config.is_none();
+    if let Some((coordinator, max_resident_bytes)) = bounded_page_config {
+      new_kv.activate_bounded_pages(coordinator, max_resident_bytes)?;
+    }
 
     // Insert all entries with auto-flush disabled. We want a single flush
     // at the end so that page writes don't clobber each other across
@@ -3799,6 +4164,9 @@ impl StorageEngine {
       },
     );
     new_kv.flush()?;
+    if configure_bootstrap_after_flush {
+      new_kv.activate_bootstrap_page_provider()?;
+    }
     new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot))?;
 
     tracing::debug!(write_buffer_after_flush = new_kv.write_buffer_len(), "rebuild_kv: flush complete");
@@ -3977,13 +4345,21 @@ impl StorageEngine {
   /// End a transaction and wait until its exact hard-authority ticket is at or
   /// below the proven durability frontier.
   pub fn end_transaction(&self) -> EngineResult<()> {
-    let result = match self.prepare_transaction_completion() {
-      Ok(Some(ticket)) => self.complete_transaction_ticket(ticket),
+    let namespace = self.namespace_write_guard()?;
+    self.end_transaction_after(namespace)
+  }
+
+  fn end_transaction_after(&self, namespace: NamespaceWriteGuard<'_>) -> EngineResult<()> {
+    let prepared = self.prepare_transaction_completion();
+    drop(namespace);
+    match prepared {
+      Ok(Some(ticket)) => {
+        if let Err(error) = self.complete_transaction_ticket(ticket) {
+          return Err(self.record_durability_failure(DurabilityOperation::DependencyAppend, "Transaction hard completion failed", error));
+        }
+        self.run_ready_kv_expansion()
+      }
       Ok(None) => Ok(()),
-      Err(error) => Err(error),
-    };
-    match result {
-      Ok(()) => Ok(()),
       Err(error) => Err(self.record_durability_failure(DurabilityOperation::DependencyAppend, "Transaction hard completion failed", error)),
     }
   }
@@ -4024,6 +4400,15 @@ impl StorageEngine {
     if !has_pending {
       return;
     }
+
+    let _authority = match self.try_direct_hard_authority_guard() {
+      Ok(Some(authority)) => authority,
+      Ok(None) => return,
+      Err(error) => {
+        self.record_durability_failure(DurabilityOperation::HeaderAb, "Timer namespace authority failed", error);
+        return;
+      }
+    };
 
     // Acquire in the engine's canonical writer -> KV order and execute the
     // hot-tail write as the dependency step of the same hard plan that
@@ -4205,7 +4590,101 @@ impl Drop for StorageEngine {
 mod tests {
   use super::*;
   use serial_test::serial;
+  use std::io::{Seek, SeekFrom};
   use std::time::{Duration, Instant};
+
+  #[test]
+  fn layout_maintenance_drains_existing_operations_and_blocks_new_admission() {
+    let tracker = Arc::new(EngineOperationTracker::default());
+    let engine_id = Arc::as_ptr(&tracker) as usize;
+    let owner = tracker.begin(engine_id, "layout_owner").unwrap();
+
+    std::thread::scope(|scope| {
+      let (active_tx, active_rx) = std::sync::mpsc::channel();
+      let (release_tx, release_rx) = std::sync::mpsc::channel();
+      let worker_tracker = Arc::clone(&tracker);
+      scope.spawn(move || {
+        let worker = worker_tracker.begin(engine_id, "existing_reader").unwrap();
+        active_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        drop(worker);
+      });
+      active_rx.recv().unwrap();
+
+      scope.spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        release_tx.send(()).unwrap();
+      });
+      let started = Instant::now();
+      let maintenance = tracker.begin_maintenance(engine_id, Duration::from_secs(1)).unwrap();
+      assert!(started.elapsed() >= Duration::from_millis(30), "maintenance returned before the admitted reader drained");
+
+      let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+      let blocked_tracker = Arc::clone(&tracker);
+      scope.spawn(move || {
+        let blocked = blocked_tracker.begin(engine_id, "new_reader").unwrap();
+        admitted_tx.send(()).unwrap();
+        drop(blocked);
+      });
+      assert!(admitted_rx.recv_timeout(Duration::from_millis(40)).is_err(), "new work entered during exclusive maintenance");
+      drop(maintenance);
+      admitted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    });
+    drop(owner);
+  }
+
+  #[test]
+  fn layout_maintenance_timeout_reopens_normal_admission() {
+    let tracker = Arc::new(EngineOperationTracker::default());
+    let engine_id = Arc::as_ptr(&tracker) as usize;
+    let owner = tracker.begin(engine_id, "layout_owner").unwrap();
+
+    std::thread::scope(|scope| {
+      let (active_tx, active_rx) = std::sync::mpsc::channel();
+      let (release_tx, release_rx) = std::sync::mpsc::channel();
+      let worker_tracker = Arc::clone(&tracker);
+      scope.spawn(move || {
+        let worker = worker_tracker.begin(engine_id, "slow_reader").unwrap();
+        active_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        drop(worker);
+      });
+      active_rx.recv().unwrap();
+
+      assert!(tracker.begin_maintenance(engine_id, Duration::from_millis(10)).is_err());
+      release_tx.send(()).unwrap();
+    });
+    let admitted = tracker.begin(engine_id, "after_timeout").unwrap();
+    drop(admitted);
+    drop(owner);
+  }
+
+  #[test]
+  #[serial]
+  fn layout_mutation_failure_latches_engine_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = SpillTestEnv::new(&temp.path().join("spill"));
+    let db_path = temp.path().join("layout-failure.aeordb");
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    let key = vec![0x83u8; engine.hash_algo().hash_length()];
+    let value = vec![0x5Au8; 600 * 1024];
+    let offset = engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+    let header_size = engine.read_entry_header_at(offset).unwrap().header_size() as u64;
+
+    // Leave a valid header for read-only boundary preflight, but make the
+    // later region copy fail after resize_in_progress has been published.
+    {
+      let file = OpenOptions::new().write(true).open(&db_path).unwrap();
+      file.set_len(offset + header_size).unwrap();
+      crate::engine::native_durability::sync_file_all_native(&file).unwrap();
+    }
+
+    let error = engine.expand_kv_block_online(1).expect_err("truncated relocation source must fail expansion");
+    assert!(matches!(error, EngineError::DurabilityFailure(_)), "post-marker failure must be classified as durability-critical: {error}");
+    let failure = engine.durability_failure().expect("post-marker failure must latch write authority");
+    assert!(failure.contains("KV layout expansion failed after mutation began"));
+    assert!(matches!(engine.ensure_writable(), Err(EngineError::DurabilityFailure(_))));
+  }
 
   struct SpillTestEnv {
     spill_dir: Option<std::ffi::OsString>,
@@ -4250,6 +4729,168 @@ mod tests {
         }
       }
     }
+  }
+
+  fn admit_pending_namespace_transaction(engine: &StorageEngine, key: &[u8]) -> DurabilityTicket {
+    let namespace = engine.namespace_write_guard().unwrap();
+    engine.begin_transaction().unwrap();
+    engine.store_entry(EntryType::Chunk, key, b"pending transaction bytes").unwrap();
+    let ticket = engine.prepare_transaction_completion().unwrap().expect("outer transaction must admit a hard-authority ticket");
+    drop(namespace);
+    ticket
+  }
+
+  #[test]
+  #[serial]
+  fn timer_defers_to_an_earlier_transaction_hard_authority_ticket() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
+    let engine_path = temp_dir.path().join("timer-hard-frontier-race.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let ticket = admit_pending_namespace_transaction(&engine, b"timer-race-key");
+
+    engine.try_flush_hot_buffer();
+    let premature_failure = engine.durability_failure();
+    engine.complete_transaction_ticket(ticket).unwrap();
+
+    assert!(premature_failure.is_none(), "timer treated coordinator contention as a serious storage failure: {premature_failure:?}");
+    assert_eq!(engine.durability_snapshot().unwrap().pending_hard, 0);
+    assert!(engine.get_entry(b"timer-race-key").unwrap().is_some());
+  }
+
+  #[test]
+  #[serial]
+  fn direct_header_publication_waits_for_the_existing_hard_frontier() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
+    let engine_path = temp_dir.path().join("direct-hard-frontier-race.aeordb");
+    let engine = Arc::new(StorageEngine::create(engine_path.to_str().unwrap()).unwrap());
+    let ticket = admit_pending_namespace_transaction(&engine, b"direct-race-key");
+    let new_head = vec![0x5au8; engine.hash_algo().hash_length()];
+
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let publishing_engine = Arc::clone(&engine);
+    let publishing_head = new_head.clone();
+    let publisher = std::thread::spawn(move || {
+      result_sender.send(publishing_engine.update_head(&publishing_head)).unwrap();
+    });
+
+    let early_result = result_receiver.recv_timeout(Duration::from_millis(50));
+    let completed_early = early_result.is_ok();
+    engine.complete_transaction_ticket(ticket).unwrap();
+    let publication_result = match early_result {
+      Ok(result) => result,
+      Err(std::sync::mpsc::RecvTimeoutError::Timeout) => result_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+      Err(error) => panic!("direct publisher result channel failed: {error}"),
+    };
+    publisher.join().unwrap();
+
+    assert!(!completed_early, "direct publication did not wait for the prior ticket");
+    publication_result.unwrap();
+    assert_eq!(engine.head_hash().unwrap(), new_head);
+    assert!(engine.durability_failure().is_none());
+  }
+
+  #[test]
+  #[serial]
+  fn reentrant_non_transaction_header_publication_refuses_an_older_hard_ticket() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
+    let engine_path = temp_dir.path().join("reentrant-hard-frontier-race.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let original_head = engine.head_hash().unwrap();
+    let ticket = admit_pending_namespace_transaction(&engine, b"reentrant-race-key");
+    let namespace = engine.namespace_write_guard().unwrap();
+    let new_head = vec![0x6bu8; engine.hash_algo().hash_length()];
+
+    let error = engine.update_head(&new_head).expect_err("reentrant direct publication must not leapfrog an older ticket");
+
+    assert!(error.to_string().contains("cannot publish while an earlier hard-authority ticket is pending"), "unexpected refusal: {error}");
+    assert_eq!(engine.head_hash().unwrap(), original_head);
+    assert!(engine.durability_failure().is_none());
+    drop(namespace);
+    engine.complete_transaction_ticket(ticket).unwrap();
+  }
+
+  #[test]
+  #[serial]
+  fn backup_header_changes_remain_in_memory_until_transaction_hard_completion() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
+    let engine_path = temp_dir.path().join("transaction-backup-header.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let initial_sequence = engine.writer.read().unwrap().file_header().sequence;
+    let namespace = engine.namespace_write_guard().unwrap();
+    let transaction = TransactionGuard::new(&engine).unwrap();
+    let base_hash = vec![0x71; engine.hash_algo().hash_length()];
+    let target_hash = vec![0x72; engine.hash_algo().hash_length()];
+
+    engine.set_backup_info(1, &base_hash, &target_hash).unwrap();
+
+    let header = engine.writer.read().unwrap().file_header().clone();
+    assert_eq!(header.sequence, initial_sequence, "transactional backup metadata published a header before hard completion");
+    assert_eq!(header.backup_type, 1);
+    assert_eq!(header.base_hash, base_hash);
+    assert_eq!(header.target_hash, target_hash);
+
+    transaction.commit_after(namespace).unwrap();
+    assert!(engine.writer.read().unwrap().file_header().sequence > initial_sequence);
+    drop(engine);
+
+    let reopened = StorageEngine::open(engine_path.to_str().unwrap()).unwrap();
+    assert_eq!(reopened.backup_info().unwrap(), (1, base_hash, target_hash));
+  }
+
+  #[test]
+  #[serial]
+  fn kv_expansion_requested_inside_a_transaction_waits_for_hard_completion() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
+    let engine_path = temp_dir.path().join("transaction-expansion.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let namespace = engine.namespace_write_guard().unwrap();
+    let transaction = TransactionGuard::new(&engine).unwrap();
+    engine.kv_writer.lock().unwrap().needs_expansion = Some(1);
+
+    engine.store_entry(EntryType::Chunk, &[0x81; 32], b"transaction expansion payload").unwrap();
+
+    assert_eq!(
+      engine.writer.read().unwrap().file_header().kv_block_stage,
+      0,
+      "online expansion published layout headers before transaction hard completion"
+    );
+    assert_eq!(engine.kv_writer.lock().unwrap().needs_expansion, Some(1));
+
+    transaction.commit_after(namespace).unwrap();
+    assert_eq!(engine.writer.read().unwrap().file_header().kv_block_stage, 1);
+    assert_eq!(engine.kv_writer.lock().unwrap().needs_expansion, None);
+    assert!(engine.get_entry(&[0x81; 32]).unwrap().is_some());
+  }
+
+  #[test]
+  #[serial]
+  fn kv_expansion_preflight_failure_keeps_the_request_queued_for_retry() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
+    let engine_path = temp_dir.path().join("expansion-preflight-retry.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let wal_start = engine.store_entry(EntryType::Chunk, &[0x91; 32], b"entry in expansion growth zone").unwrap();
+    {
+      let mut file = OpenOptions::new().write(true).open(&engine_path).unwrap();
+      file.seek(SeekFrom::Start(wal_start)).unwrap();
+      file.write_all(&[0u8; 4]).unwrap();
+      crate::engine::native_durability::sync_file_all_native(&file).unwrap();
+    }
+    engine.kv_writer.lock().unwrap().needs_expansion = Some(1);
+
+    let error = engine.run_ready_kv_expansion().expect_err("corrupt WAL boundary must refuse expansion preflight");
+
+    assert!(matches!(error, EngineError::InvalidMagic), "unexpected preflight error: {error}");
+    assert!(engine.durability_failure().is_none(), "read-only preflight refusal must not latch the engine");
+    assert_eq!(engine.kv_writer.lock().unwrap().needs_expansion, Some(1), "retryable expansion request was lost");
+    let header = engine.writer.read().unwrap().file_header().clone();
+    assert!(!header.resize_in_progress);
+    assert_eq!(header.resize_target_stage, 0);
   }
 
   #[test]
@@ -4605,37 +5246,35 @@ impl<'a> TransactionGuard<'a> {
   }
 
   pub(crate) fn commit_after(mut self, namespace: NamespaceWriteGuard<'a>) -> EngineResult<()> {
-    let prepared = self.engine.prepare_transaction_completion();
     self.completed = true;
-    drop(namespace);
-    let result = match prepared {
-      Err(error) => Err(error),
-      Ok(Some(ticket)) => self.engine.complete_transaction_ticket(ticket),
-      Ok(None) => Ok(()),
-    };
-    match result {
-      Ok(()) => Ok(()),
-      Err(error) => Err(self.engine.record_durability_failure(
-        DurabilityOperation::DependencyAppend,
-        "Namespace transaction hard completion failed",
-        error,
-      )),
-    }
+    self.engine.end_transaction_after(namespace)
   }
 
   pub fn finish<T>(self, result: EngineResult<T>) -> EngineResult<T> {
+    let engine = self.engine;
     let completion = self.commit();
     match (result, completion) {
       (_, Err(error)) => Err(error),
-      (result, Ok(())) => result,
+      (Err(error), Ok(())) => Err(engine.normalize_runtime_write_error(
+        DurabilityOperation::DataBarrier,
+        "Transaction failed after storage mutation began",
+        error,
+      )),
+      (Ok(value), Ok(())) => Ok(value),
     }
   }
 
   pub(crate) fn finish_after<T>(self, result: EngineResult<T>, namespace: NamespaceWriteGuard<'a>) -> EngineResult<T> {
+    let engine = self.engine;
     let completion = self.commit_after(namespace);
     match (result, completion) {
       (_, Err(error)) => Err(error),
-      (result, Ok(())) => result,
+      (Err(error), Ok(())) => Err(engine.normalize_runtime_write_error(
+        DurabilityOperation::DataBarrier,
+        "Namespace transaction failed after storage mutation began",
+        error,
+      )),
+      (Ok(value), Ok(())) => Ok(value),
     }
   }
 }

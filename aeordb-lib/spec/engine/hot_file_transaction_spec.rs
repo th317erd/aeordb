@@ -7,7 +7,48 @@
 
 use aeordb::engine::storage_engine::{StorageEngine, TransactionGuard};
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::errors::EngineError;
 use aeordb::engine::RequestContext;
+use serial_test::serial;
+
+struct SpillEnvironment {
+  spill_directory: Option<std::ffi::OsString>,
+  spill_max_bytes: Option<std::ffi::OsString>,
+  config_only: Option<std::ffi::OsString>,
+}
+
+impl SpillEnvironment {
+  fn new(spill_directory: &std::path::Path) -> Self {
+    let previous = Self {
+      spill_directory: std::env::var_os("AEORDB_EMERGENCY_SPILL_DIR"),
+      spill_max_bytes: std::env::var_os("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES"),
+      config_only: std::env::var_os("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY"),
+    };
+    unsafe {
+      std::env::set_var("AEORDB_EMERGENCY_SPILL_DIR", spill_directory);
+      std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", "1048576");
+      std::env::set_var("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY", "1");
+    }
+    previous
+  }
+}
+
+impl Drop for SpillEnvironment {
+  fn drop(&mut self) {
+    unsafe {
+      restore_environment("AEORDB_EMERGENCY_SPILL_DIR", self.spill_directory.take());
+      restore_environment("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", self.spill_max_bytes.take());
+      restore_environment("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY", self.config_only.take());
+    }
+  }
+}
+
+unsafe fn restore_environment(name: &str, value: Option<std::ffi::OsString>) {
+  match value {
+    Some(value) => unsafe { std::env::set_var(name, value) },
+    None => unsafe { std::env::remove_var(name) },
+  }
+}
 
 /// Create a fresh test database with hot directory enabled.
 fn create_test_db_with_hot_dir() -> (StorageEngine, tempfile::TempDir) {
@@ -62,6 +103,34 @@ fn transaction_guard_fires_on_error() {
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
   ops.store_file_buffered(&ctx, "/after-error.txt", b"recovered", Some("text/plain")).unwrap();
+}
+
+#[test]
+#[serial]
+fn transaction_result_latches_only_typed_post_mutation_durability_failures() {
+  let temp = tempfile::tempdir().unwrap();
+  let _spill_environment = SpillEnvironment::new(&temp.path().join("spill"));
+  let db_path = temp.path().join("post-mutation-latch.aeordb");
+  let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+
+  let ordinary = TransactionGuard::new(&engine)
+    .unwrap()
+    .finish::<()>(Err(EngineError::DurabilityFailure("pre-overwrite memory admission refused".to_string())))
+    .unwrap_err();
+  assert!(matches!(ordinary, EngineError::DurabilityFailure(_)));
+  assert!(engine.durability_failure().is_none(), "pre-overwrite refusal must not latch the database");
+
+  let serious = TransactionGuard::new(&engine)
+    .unwrap()
+    .finish::<()>(Err(EngineError::PostMutationDurabilityFailure("page barrier failed after overwrite".to_string())))
+    .unwrap_err();
+  assert!(matches!(serious, EngineError::DurabilityFailure(_)));
+  assert!(engine.durability_failure().unwrap().contains("page barrier failed after overwrite"));
+  assert!(engine.emergency_spill_report().is_some(), "the first serious failure must attempt an emergency spill");
+  assert!(matches!(
+    engine.store_entry(aeordb::engine::entry_type::EntryType::Chunk, b"blocked", b"blocked"),
+    Err(EngineError::DurabilityFailure(_))
+  ));
 }
 
 #[test]

@@ -240,6 +240,19 @@ fn update_sets_are_unique_bounded_and_single_writer() {
 }
 
 #[test]
+fn snapshot_drain_waits_for_live_views_and_completes_after_release() {
+  let directory = tempfile::tempdir().unwrap();
+  let original = pages();
+  let file = write_pages(&directory.path().join("snapshot-drain.aeordb"), &original);
+  let provider = provider(&file, page_size(32) as u64 * 2, coordinator());
+  let view = provider.snapshot().unwrap();
+
+  assert!(!provider.wait_for_no_snapshots(std::time::Duration::from_millis(5)).unwrap());
+  drop(view);
+  assert!(provider.wait_for_no_snapshots(std::time::Duration::from_millis(50)).unwrap());
+}
+
+#[test]
 fn update_validation_failures_release_pre_overwrite_state_but_poison_after_overwrite_admission() {
   let directory = tempfile::tempdir().unwrap();
   let original = pages();

@@ -1,12 +1,21 @@
 use aeordb::engine::disk_kv_store::DiskKVStore;
 use aeordb::engine::directory_ops::DirectoryOps;
-use aeordb::engine::durability_coordinator::{DurabilityCoordinator, DurabilityOperation};
+use aeordb::engine::durability_coordinator::{DurabilityCoordinator, DurabilityOperation, NativeFileBarrierKind, RecoverableFileBarrier};
+use aeordb::engine::errors::EngineError;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
+use aeordb::engine::hot_tail;
 use aeordb::engine::kv_pages::*;
+use aeordb::engine::memory_coordinator::{HostMemorySample, MemoryCoordinator, MemoryOwner, MemoryPolicy};
+use aeordb::engine::native_durability::{
+  NativeDurabilityError, NativeDurabilityOperation, NativeDurabilityResult, sync_file_all_native, sync_file_data_native,
+};
+use aeordb::engine::nvt::NormalizedVectorTable;
+use aeordb::engine::scalar_converter::HashConverter;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_FLAG_DELETED, KV_FLAG_PENDING};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -23,6 +32,10 @@ fn make_entry(seed: u8, offset: u64) -> KVEntry {
   KVEntry { type_flags: KV_TYPE_CHUNK, hash: make_hash(seed), offset, total_length: 64 }
 }
 
+fn get(store: &DiskKVStore, hash: &[u8]) -> Option<KVEntry> {
+  store.get(hash).unwrap()
+}
+
 fn create_test_kv(dir: &std::path::Path) -> DiskKVStore {
   let db_path = dir.join("test.aeordb");
   let file = OpenOptions::new().read(true).write(true).create_new(true).open(&db_path).unwrap();
@@ -30,6 +43,54 @@ fn create_test_kv(dir: &std::path::Path) -> DiskKVStore {
   let block_size = aeordb::engine::kv_stages::initial_block_size();
   let hot_tail_offset = kv_block_offset + block_size;
   DiskKVStore::create(file, HashAlgorithm::Blake3_256, kv_block_offset, hot_tail_offset, 0).unwrap()
+}
+
+fn memory_coordinator() -> MemoryCoordinator {
+  let coordinator = MemoryCoordinator::new(MemoryPolicy::new(64 * 1024, 128 * 1024, 16 * 1024, 16 * 1024).unwrap());
+  coordinator.update_host_sample(HostMemorySample { rss_bytes: 0, host_available_bytes: Some(1024 * 1024), ..Default::default() }).unwrap();
+  coordinator
+}
+
+#[derive(Debug)]
+struct FailBarrierOnCall {
+  calls: AtomicUsize,
+  fail_on_call: usize,
+}
+
+impl RecoverableFileBarrier for FailBarrierOnCall {
+  fn execute_file_barrier(&self, file: &File, barrier_kind: NativeFileBarrierKind) -> NativeDurabilityResult<()> {
+    let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+    if call == self.fail_on_call {
+      return Err(NativeDurabilityError::from_io(
+        NativeDurabilityOperation::DataBarrier,
+        std::io::Error::from_raw_os_error(platform_media_io_error()),
+      ));
+    }
+    match barrier_kind {
+      NativeFileBarrierKind::Data => sync_file_data_native(file),
+      NativeFileBarrierKind::Full => sync_file_all_native(file),
+    }
+  }
+}
+
+#[cfg(unix)]
+const fn platform_media_io_error() -> i32 {
+  libc::EIO
+}
+
+#[cfg(windows)]
+const fn platform_media_io_error() -> i32 {
+  1117 // ERROR_IO_DEVICE
+}
+
+fn read_bucket(path: &std::path::Path, bucket: usize) -> Vec<u8> {
+  use std::io::{Read, Seek, SeekFrom};
+
+  let mut file = OpenOptions::new().read(true).open(path).unwrap();
+  file.seek(SeekFrom::Start(256 + bucket_page_offset(bucket, 32))).unwrap();
+  let mut page = vec![0u8; page_size(32)];
+  file.read_exact(&mut page).unwrap();
+  page
 }
 
 fn create_test_kv_at_stage(dir: &std::path::Path, stage: usize) -> DiskKVStore {
@@ -300,11 +361,151 @@ fn test_create_and_open() {
 
   // Reopen and verify
   {
-    let mut store = open_test_kv(dir.path());
-    let entry = store.get(&make_hash(1));
+    let store = open_test_kv(dir.path());
+    let entry = get(&store, &make_hash(1));
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().offset, 100);
   }
+}
+
+#[test]
+fn storage_engine_activates_bounded_kv_pages_before_constructor_success() {
+  let dir = tempdir().unwrap();
+  let path = dir.path().join("bounded-engine.aeordb");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+
+  let provider = engine.kv_page_provider_stats().unwrap().expect("production engine must activate the bounded KV provider");
+  assert_eq!(provider.resident_pages, 0);
+  assert_eq!(provider.resident_bytes, 0);
+  let memory = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(memory.owner(MemoryOwner::KvResidentPages).unwrap().observed.resident_bytes, 0);
+}
+
+#[test]
+fn open_uses_a_non_resident_bootstrap_page_provider() {
+  let dir = tempdir().unwrap();
+  {
+    let mut store = create_test_kv_at_stage(dir.path(), 2);
+    let entry = make_entry(44, 4_400);
+    store.insert(entry).unwrap();
+    store.flush().unwrap();
+  }
+
+  let mut store = open_test_kv_at_stage(dir.path(), 2);
+  let snapshot = store.snapshot_handle().load();
+  assert!(snapshot.resident_pages().is_none(), "open must not materialize the complete KV page array");
+  assert!(snapshot.bounded_pages().is_some(), "bootstrap reads must use positioned provider access before config activation");
+  assert_eq!(snapshot.memory_stats().resident_page_bytes, 0);
+  assert!(store.kv_page_provider_stats().unwrap().is_some());
+  assert_eq!(get(&store, &make_hash(44)).unwrap().offset, 4_400);
+
+  let post_open = make_entry(45, 4_500);
+  store.insert(post_open.clone()).unwrap();
+  store.flush().unwrap();
+  assert_eq!(get(&store, &post_open.hash), Some(post_open));
+}
+
+#[test]
+fn bounded_flush_keeps_an_old_snapshot_exact_until_it_is_dropped() {
+  let dir = tempdir().unwrap();
+  let mut store = create_test_kv(dir.path());
+  let coordinator = memory_coordinator();
+  store.activate_bounded_pages(coordinator.clone(), page_size(32) as u64 * 2).unwrap();
+
+  let hash = make_hash(17);
+  store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash: hash.clone(), offset: 100, total_length: 64 }).unwrap();
+  store.flush().unwrap();
+  let old = store.snapshot_handle().load_full();
+  assert_eq!(old.get(&hash).unwrap().unwrap().offset, 100);
+
+  store.insert(KVEntry { type_flags: KV_TYPE_FILE_RECORD, hash: hash.clone(), offset: 900, total_length: 96 }).unwrap();
+  store.flush().unwrap();
+  let current = store.snapshot_handle().load_full();
+  assert_eq!(current.get(&hash).unwrap().unwrap().offset, 900);
+  assert_eq!(old.get(&hash).unwrap().unwrap().offset, 100);
+  assert_eq!(store.kv_page_provider_stats().unwrap().unwrap().historical_pages, 1);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::KvSnapshotGenerations).unwrap().reserved_bytes, page_size(32) as u64);
+
+  drop(old);
+  assert_eq!(store.kv_page_provider_stats().unwrap().unwrap().historical_pages, 0);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::KvSnapshotGenerations).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn bounded_flush_reservation_refusal_changes_no_page_bytes_and_keeps_the_buffer_visible() {
+  let dir = tempdir().unwrap();
+  let db_path = dir.path().join("test.aeordb");
+  let mut store = create_test_kv(dir.path());
+  let constrained = MemoryCoordinator::new(MemoryPolicy::new(900, 1_500, 200, 500).unwrap());
+  constrained.update_host_sample(HostMemorySample { rss_bytes: 0, host_available_bytes: Some(1024 * 1024), ..Default::default() }).unwrap();
+  store.activate_bounded_pages(constrained, 0).unwrap();
+
+  let hash = make_hash(23);
+  let nvt = NormalizedVectorTable::new(Box::new(HashConverter), store.bucket_count());
+  let bucket = nvt.bucket_for_value(&hash);
+  let before = read_bucket(&db_path, bucket);
+  store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash: hash.clone(), offset: 2300, total_length: 64 }).unwrap();
+
+  let error = store.flush().unwrap_err().to_string();
+  assert!(error.contains("cannot preserve KV page"), "unexpected error: {error}");
+  assert_eq!(read_bucket(&db_path, bucket), before);
+  assert_eq!(store.write_buffer_len(), 1);
+  assert_eq!(store.snapshot_handle().load().get(&hash).unwrap().unwrap().offset, 2300);
+}
+
+#[test]
+fn bounded_flush_barrier_failure_after_page_overwrite_is_durability_critical() {
+  let dir = tempdir().unwrap();
+  let db_path = dir.path().join("post-overwrite-failure.aeordb");
+  let file = OpenOptions::new().read(true).write(true).create_new(true).open(&db_path).unwrap();
+  let barrier = Arc::new(FailBarrierOnCall { calls: AtomicUsize::new(0), fail_on_call: 2 });
+  let coordinator = Arc::new(DurabilityCoordinator::with_recoverable_file_barrier(barrier));
+  let kv_block_offset = 256;
+  let hot_tail_offset = kv_block_offset + aeordb::engine::kv_stages::initial_block_size();
+  let mut store =
+    DiskKVStore::create_with_coordinator(file, HashAlgorithm::Blake3_256, kv_block_offset, hot_tail_offset, 0, coordinator).unwrap();
+  store.activate_bounded_pages(memory_coordinator(), page_size(32) as u64 * 2).unwrap();
+
+  let hash = make_hash(31);
+  let nvt = NormalizedVectorTable::new(Box::new(HashConverter), store.bucket_count());
+  let bucket = nvt.bucket_for_value(&hash);
+  let before = read_bucket(&db_path, bucket);
+  let old_snapshot = store.snapshot_handle().load_full();
+  store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash: hash.clone(), offset: 3_100, total_length: 64 }).unwrap();
+
+  let error = store.flush().expect_err("the injected post-write data barrier must fail");
+  assert!(matches!(error, EngineError::PostMutationDurabilityFailure(_)), "unexpected error class: {error}");
+  assert_ne!(read_bucket(&db_path, bucket), before, "the fault must occur after page bytes were overwritten");
+  assert!(old_snapshot.get(&hash).unwrap().is_none(), "the pre-overwrite snapshot must retain the old page generation");
+  assert_eq!(store.write_buffer_len(), 1, "failed publication must retain the buffered update for spill/recovery");
+  assert!(store.flush().unwrap_err().to_string().contains("publication is poisoned"));
+}
+
+#[test]
+fn bounded_flush_rejects_a_corrupt_page_without_resetting_or_overwriting_it() {
+  use std::io::{Seek, SeekFrom, Write};
+
+  let dir = tempdir().unwrap();
+  let db_path = dir.path().join("test.aeordb");
+  let mut store = create_test_kv(dir.path());
+  store.activate_bounded_pages(memory_coordinator(), 0).unwrap();
+
+  let hash = make_hash(29);
+  let nvt = NormalizedVectorTable::new(Box::new(HashConverter), store.bucket_count());
+  let bucket = nvt.bucket_for_value(&hash);
+  let mut corrupt = read_bucket(&db_path, bucket);
+  corrupt[0] = 0x7f;
+  let mut file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  file.seek(SeekFrom::Start(256 + bucket_page_offset(bucket, 32))).unwrap();
+  file.write_all(&corrupt).unwrap();
+  file.sync_data().unwrap();
+
+  assert!(store.get(&hash).is_err(), "a corrupt positioned read must not become a missing key");
+  store.buffer_only(KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset: 2900, total_length: 64 });
+  assert!(store.flush().is_err());
+  assert_eq!(read_bucket(&db_path, bucket), corrupt, "flush must not reset a corrupt page and destroy rebuild evidence");
+  assert!(store.needs_rebuild);
+  assert_eq!(store.write_buffer_len(), 1);
 }
 
 #[test]
@@ -315,7 +516,7 @@ fn test_insert_and_get() {
   let entry = make_entry(42, 12345);
   store.insert(entry.clone()).unwrap();
 
-  let result = store.get(&make_hash(42));
+  let result = get(&store, &make_hash(42));
   assert!(result.is_some());
   let found = result.unwrap();
   assert_eq!(found.hash, entry.hash);
@@ -334,7 +535,7 @@ fn test_insert_multiple() {
   store.flush().unwrap();
 
   for i in 0..100u8 {
-    let result = store.get(&make_hash(i));
+    let result = get(&store, &make_hash(i));
     assert!(result.is_some(), "Entry {} should exist", i);
     assert_eq!(result.unwrap().offset, i as u64 * 100);
   }
@@ -343,9 +544,9 @@ fn test_insert_multiple() {
 #[test]
 fn test_get_missing() {
   let dir = tempdir().unwrap();
-  let mut store = create_test_kv(dir.path());
+  let store = create_test_kv(dir.path());
 
-  let result = store.get(&make_hash(99));
+  let result = get(&store, &make_hash(99));
   assert!(result.is_none());
 }
 
@@ -355,8 +556,8 @@ fn test_contains() {
   let mut store = create_test_kv(dir.path());
 
   store.insert(make_entry(1, 100)).unwrap();
-  assert!(store.contains(&make_hash(1)));
-  assert!(!store.contains(&make_hash(99)));
+  assert!(store.contains(&make_hash(1)).unwrap());
+  assert!(!store.contains(&make_hash(99)).unwrap());
 }
 
 #[test]
@@ -365,11 +566,11 @@ fn test_mark_deleted() {
   let mut store = create_test_kv(dir.path());
 
   store.insert(make_entry(1, 100)).unwrap();
-  assert!(store.contains(&make_hash(1)));
+  assert!(store.contains(&make_hash(1)).unwrap());
 
-  store.mark_deleted(&make_hash(1));
-  assert!(!store.contains(&make_hash(1)));
-  assert!(store.get(&make_hash(1)).is_none());
+  store.mark_deleted(&make_hash(1)).unwrap();
+  assert!(!store.contains(&make_hash(1)).unwrap());
+  assert!(get(&store, &make_hash(1)).is_none());
 }
 
 #[test]
@@ -385,8 +586,8 @@ fn test_flush_persists() {
 
   // Reopen and verify
   {
-    let mut store = open_test_kv(dir.path());
-    let entry = store.get(&make_hash(7));
+    let store = open_test_kv(dir.path());
+    let entry = get(&store, &make_hash(7));
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().offset, 777);
   }
@@ -412,11 +613,11 @@ fn test_auto_flush() {
 
   // Reopen and verify some entries persist
   {
-    let mut store = open_test_kv(dir.path());
+    let store = open_test_kv(dir.path());
     // Check a few entries
     for i in [0u32, 100, 500, 799] {
       let hash = blake3::hash(&i.to_le_bytes()).as_bytes().to_vec();
-      let entry = store.get(&hash);
+      let entry = get(&store, &hash);
       assert!(entry.is_some(), "Entry {} should persist after auto-flush", i);
       assert_eq!(entry.unwrap().offset, i as u64);
     }
@@ -471,7 +672,7 @@ fn test_upsert_same_hash() {
   store.insert(updated).unwrap();
   store.flush().unwrap();
 
-  let result = store.get(&make_hash(1)).unwrap();
+  let result = get(&store, &make_hash(1)).unwrap();
   assert_eq!(result.offset, 999);
   assert_eq!(result.entry_type(), KV_TYPE_FILE_RECORD);
 }
@@ -493,7 +694,7 @@ fn test_large_dataset() {
 
   // Verify all entries are findable
   for (i, hash) in hashes.iter().enumerate() {
-    let entry = store.get(hash);
+    let entry = get(&store, hash);
     assert!(entry.is_some(), "Entry {} should be findable", i);
     assert_eq!(entry.unwrap().offset, i as u64);
   }
@@ -529,10 +730,10 @@ fn test_update_flags() {
   store.flush().unwrap();
 
   // Update flags
-  let result = store.update_flags(&make_hash(1), KV_FLAG_PENDING);
+  let result = store.update_flags(&make_hash(1), KV_FLAG_PENDING).unwrap();
   assert!(result);
 
-  let entry = store.get(&make_hash(1)).unwrap();
+  let entry = get(&store, &make_hash(1)).unwrap();
   assert!(entry.is_pending());
   assert_eq!(entry.entry_type(), KV_TYPE_CHUNK); // type preserved
 
@@ -540,8 +741,8 @@ fn test_update_flags() {
   store.flush().unwrap();
   drop(store);
 
-  let mut store = open_test_kv(dir.path());
-  let entry = store.get(&make_hash(1)).unwrap();
+  let store = open_test_kv(dir.path());
+  let entry = get(&store, &make_hash(1)).unwrap();
   assert!(entry.is_pending());
 }
 
@@ -552,14 +753,14 @@ fn test_update_offset() {
 
   store.insert(make_entry(1, 100)).unwrap();
 
-  let result = store.update_offset(&make_hash(1), 5555);
+  let result = store.update_offset(&make_hash(1), 5555).unwrap();
   assert!(result);
 
-  let entry = store.get(&make_hash(1)).unwrap();
+  let entry = get(&store, &make_hash(1)).unwrap();
   assert_eq!(entry.offset, 5555);
 
   // Update non-existent entry
-  let result = store.update_offset(&make_hash(99), 1234);
+  let result = store.update_offset(&make_hash(99), 1234).unwrap();
   assert!(!result);
 }
 
@@ -568,7 +769,7 @@ fn test_update_flags_missing() {
   let dir = tempdir().unwrap();
   let mut store = create_test_kv(dir.path());
 
-  let result = store.update_flags(&make_hash(99), KV_FLAG_PENDING);
+  let result = store.update_flags(&make_hash(99), KV_FLAG_PENDING).unwrap();
   assert!(!result);
 }
 
@@ -578,7 +779,7 @@ fn test_mark_deleted_missing() {
   let mut store = create_test_kv(dir.path());
 
   // Should not panic on missing entry
-  store.mark_deleted(&make_hash(99));
+  store.mark_deleted(&make_hash(99)).unwrap();
   assert_eq!(store.len(), 0);
 }
 
@@ -590,13 +791,13 @@ fn test_mark_deleted_persists() {
     let mut store = create_test_kv(dir.path());
     store.insert(make_entry(1, 100)).unwrap();
     store.flush().unwrap();
-    store.mark_deleted(&make_hash(1));
+    store.mark_deleted(&make_hash(1)).unwrap();
     store.flush().unwrap();
   }
 
   {
-    let mut store = open_test_kv(dir.path());
-    assert!(store.get(&make_hash(1)).is_none(), "Deleted entry should not be found after reopen");
+    let store = open_test_kv(dir.path());
+    assert!(get(&store, &make_hash(1)).is_none(), "Deleted entry should not be found after reopen");
   }
 }
 
@@ -610,7 +811,7 @@ fn test_iter_all_excludes_deleted() {
   store.insert(make_entry(3, 300)).unwrap();
   store.flush().unwrap();
 
-  store.mark_deleted(&make_hash(2));
+  store.mark_deleted(&make_hash(2)).unwrap();
   let all = store.iter_all().unwrap();
   assert_eq!(all.len(), 2, "iter_all should exclude deleted entries");
 }
@@ -657,6 +858,67 @@ fn test_entry_count_after_reopen() {
 }
 
 #[test]
+fn reopen_entry_count_excludes_durable_deleted_page_entries() {
+  let dir = tempdir().unwrap();
+
+  {
+    let mut store = create_test_kv(dir.path());
+    store.insert(make_entry(1, 100)).unwrap();
+    store.flush().unwrap();
+    assert!(store.mark_deleted(&make_hash(1)).unwrap());
+    store.flush().unwrap();
+    assert_eq!(store.len(), 0);
+  }
+
+  let store = open_test_kv(dir.path());
+  assert_eq!(store.len(), 0, "deleted page rows are not live KV entries");
+  assert_eq!(store.snapshot_handle().load().len(), 0, "the published snapshot must use the same exact effective count");
+}
+
+#[test]
+fn reopen_entry_count_merges_hot_tail_overrides_without_double_counting() {
+  let dir = tempdir().unwrap();
+  let db_path = dir.path().join("test.aeordb");
+  let hash_algo = HashAlgorithm::Blake3_256;
+  let kv_block_offset = 256u64;
+  let hot_tail_offset = kv_block_offset + aeordb::engine::kv_stages::initial_block_size();
+  let original = make_entry(7, 100);
+
+  {
+    let mut store = create_test_kv(dir.path());
+    store.insert(original.clone()).unwrap();
+    store.flush().unwrap();
+  }
+
+  let mut replacement = original.clone();
+  replacement.offset = 999;
+  let file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  let store = DiskKVStore::open(
+    file,
+    hash_algo,
+    kv_block_offset,
+    hot_tail_offset,
+    0,
+    vec![replacement],
+    vec![],
+    DiskKVStore::CURRENT_KV_BLOCK_VERSION,
+  )
+  .unwrap();
+  assert_eq!(store.len(), 1, "a hot-tail replacement must supersede, not duplicate, its page row");
+  assert_eq!(store.snapshot_handle().load().len(), 1);
+  drop(store);
+
+  let mut tombstone = original;
+  tombstone.type_flags |= KV_FLAG_DELETED;
+  let file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  let store =
+    DiskKVStore::open(file, hash_algo, kv_block_offset, hot_tail_offset, 0, vec![tombstone], vec![], DiskKVStore::CURRENT_KV_BLOCK_VERSION)
+      .unwrap();
+  assert_eq!(store.len(), 0, "a hot-tail tombstone removes the overridden page row from the effective view");
+  assert_eq!(store.snapshot_handle().load().len(), 0);
+}
+
+#[test]
 fn test_cache_eviction() {
   let dir = tempdir().unwrap();
   let mut store = create_test_kv(dir.path());
@@ -671,13 +933,13 @@ fn test_cache_eviction() {
   // Access them all to fill cache
   for i in 0..100u32 {
     let hash = blake3::hash(&i.to_le_bytes()).as_bytes().to_vec();
-    let _ = store.get(&hash);
+    let _ = get(&store, &hash);
   }
 
   // All should still be findable
   for i in 0..100u32 {
     let hash = blake3::hash(&i.to_le_bytes()).as_bytes().to_vec();
-    assert!(store.get(&hash).is_some());
+    assert!(get(&store, &hash).is_some());
   }
 }
 
@@ -728,6 +990,24 @@ fn test_open_existing_kv_skips_rebuild() {
     let content2 = ops.read_file_buffered("/file2.txt").unwrap();
     assert_eq!(content2, b"world");
   }
+}
+
+#[test]
+fn runtime_kv_rebuild_reinstalls_bounded_pages_and_preserves_reads() {
+  let ctx = RequestContext::system();
+  let dir = tempdir().unwrap();
+  let engine_path = dir.path().join("runtime-rebuild.aeordb");
+  let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+  let ops = DirectoryOps::new(&engine);
+  ops.ensure_root_directory(&ctx).unwrap();
+  ops.store_file_buffered(&ctx, "/before.txt", b"before", Some("text/plain")).unwrap();
+
+  engine.rebuild_kv().unwrap();
+
+  assert_eq!(ops.read_file_buffered("/before.txt").unwrap(), b"before");
+  assert!(engine.kv_page_provider_stats().unwrap().is_some());
+  ops.store_file_buffered(&ctx, "/after.txt", b"after", Some("text/plain")).unwrap();
+  assert_eq!(ops.read_file_buffered("/after.txt").unwrap(), b"after");
 }
 
 #[test]
@@ -833,12 +1113,60 @@ fn test_kv_stage_grows_via_storage_engine() {
     writer.file_header().kv_block_stage
   };
   assert!(final_stage > initial_stage, "KV stage should grow after heavy insert: initial={}, final={}", initial_stage, final_stage);
+  let provider = engine.kv_page_provider_stats().unwrap().expect("expansion must install a provider for the new layout");
+  assert_eq!(provider.active_snapshots, 1, "only the currently published generation should remain after expansion");
 
   // Stored files must still be readable after the expansion.
   for i in (0..count).step_by(100) {
     let path = format!("/many/file_{:05}.txt", i);
     let content = ops.read_file_buffered(&path).unwrap();
     assert_eq!(content, format!("v{}", i).as_bytes());
+  }
+}
+
+#[test]
+fn expansion_persists_target_bucket_overflow_in_hot_tail() {
+  let dir = tempdir().unwrap();
+  let db_path = dir.path().join("test.aeordb");
+  let mut store = create_test_kv_resizable(dir.path());
+  let old_kv_end = 256 + aeordb::engine::kv_stages::initial_block_size();
+  let new_hot_tail = store.hot_tail_offset();
+
+  // HashConverter maps the first eight bytes. These distinct keys therefore
+  // all land in bucket zero at every stage and deliberately exceed one page.
+  let entries = (0..=MAX_ENTRIES_PER_PAGE)
+    .map(|index| {
+      let mut hash = vec![0u8; 32];
+      hash[8..16].copy_from_slice(&(index as u64).to_le_bytes());
+      KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset: 10_000 + index as u64, total_length: 64 }
+    })
+    .collect::<Vec<_>>();
+
+  store.finalize_expansion(1, old_kv_end, old_kv_end, 0, new_hot_tail, Vec::new(), entries.clone()).unwrap();
+  assert_eq!(store.write_buffer_len(), 1, "one colliding key should remain outside the full target page");
+
+  let mut file = OpenOptions::new().read(true).open(&db_path).unwrap();
+  let payload = hot_tail::read_hot_tail(&mut file, new_hot_tail, HashAlgorithm::Blake3_256.hash_length())
+    .expect("expansion must publish a recoverable hot tail");
+  assert_eq!(payload.writes.len(), 1, "target-layout overflow must remain durable in the hot tail");
+  assert!(entries.iter().any(|entry| entry.hash == payload.writes[0].hash));
+
+  drop(file);
+  drop(store);
+  let file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  let reopened = DiskKVStore::open(
+    file,
+    HashAlgorithm::Blake3_256,
+    256,
+    new_hot_tail,
+    1,
+    payload.writes,
+    payload.voids,
+    DiskKVStore::CURRENT_KV_BLOCK_VERSION,
+  )
+  .unwrap();
+  for entry in entries {
+    assert_eq!(get(&reopened, &entry.hash), Some(entry));
   }
 }
 
@@ -859,13 +1187,11 @@ fn test_resize_preserves_all_entries() {
 
   // Even if resize was triggered by auto-flush, all 5000 should be findable
   for (i, hash) in hashes.iter().enumerate() {
-    let entry = store.get(hash);
+    let entry = get(&store, hash);
     assert!(entry.is_some(), "Entry {} should be preserved", i);
     assert_eq!(entry.unwrap().offset, i as u64);
   }
-  // entry_count may drift slightly during resize due to duplicate
-  // counting when entries are re-inserted. All entries are findable above.
-  assert!(store.len() >= count as usize - 200, "entry_count should be close to {}", count);
+  assert_eq!(store.len(), count as usize, "entry_count must remain exact while a coordinated layout change is pending");
 }
 
 #[test]
@@ -886,7 +1212,7 @@ fn test_create_at_stage() {
   store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash: hash.clone(), offset: 999, total_length: 64 }).unwrap();
   store.flush().unwrap();
 
-  let entry = store.get(&hash).unwrap();
+  let entry = get(&store, &hash).unwrap();
   assert_eq!(entry.offset, 999);
 }
 
@@ -913,6 +1239,22 @@ fn test_resize_at_max_stage_returns_error() {
 }
 
 #[test]
+fn resize_requests_engine_coordinated_layout_change_without_rewriting_pages() {
+  let dir = tempdir().unwrap();
+  let mut store = create_test_kv_resizable(dir.path());
+  let entry = make_entry(31, 31_000);
+  store.insert(entry.clone()).unwrap();
+  store.flush().unwrap();
+  let before_stage = store.stage();
+
+  store.resize_to_next_stage().unwrap();
+
+  assert_eq!(store.stage(), before_stage, "DiskKVStore must not reinterpret the page layout without engine authority");
+  assert_eq!(store.needs_expansion, Some(before_stage + 1));
+  assert_eq!(get(&store, &entry.hash), Some(entry), "requesting a coordinated resize must leave the current view readable");
+}
+
+#[test]
 fn test_deleted_entries_not_migrated_on_resize() {
   let dir = tempdir().unwrap();
   let mut store = create_test_kv_resizable(dir.path());
@@ -927,7 +1269,7 @@ fn test_deleted_entries_not_migrated_on_resize() {
   // Delete entries 0-49
   for i in 0..50u32 {
     let hash = make_unique_hash(i);
-    store.mark_deleted(&hash);
+    store.mark_deleted(&hash).unwrap();
   }
   store.flush().unwrap();
 
@@ -944,12 +1286,12 @@ fn test_deleted_entries_not_migrated_on_resize() {
   // Deleted entries should NOT be in the new store
   for i in 0..50u32 {
     let hash = make_unique_hash(i);
-    assert!(store.get(&hash).is_none(), "Deleted entry {} should not exist after resize", i);
+    assert!(get(&store, &hash).is_none(), "Deleted entry {} should not exist after resize", i);
   }
 
   // Non-deleted entries should still exist
   for i in 50..100u32 {
     let hash = make_unique_hash(i);
-    assert!(store.get(&hash).is_some(), "Non-deleted entry {} should survive resize", i);
+    assert!(get(&store, &hash).is_some(), "Non-deleted entry {} should survive resize", i);
   }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -10,9 +10,11 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail;
 use crate::engine::kv_pages::*;
-use crate::engine::kv_snapshot::{KvPageSet, ReadSnapshot};
+use crate::engine::kv_page_provider::{KvPageProvider, KvPageProviderStats};
+use crate::engine::kv_snapshot::{KvPageSet, KvTypeCounts, ReadSnapshot};
 use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
+use crate::engine::memory_coordinator::{HostMemorySample, MemoryCoordinator, MemoryPolicy};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::scalar_converter::HashConverter;
 
@@ -24,6 +26,13 @@ const WRITE_BUFFER_THRESHOLD: usize = 512;
 /// The timer is the primary durability mechanism — this threshold
 /// handles bursts that exceed what 100ms can cover.
 const HOT_BUFFER_THRESHOLD: usize = 512;
+
+/// Temporary hard bound for retained page generations before the strict
+/// process policy is available. Clean pages are still zero-retention; this
+/// budget only permits safe prepare-before-overwrite publication.
+const BOOTSTRAP_GENERATION_SOFT_BYTES: u64 = 4 * 1024 * 1024;
+const BOOTSTRAP_GENERATION_HARD_BYTES: u64 = 8 * 1024 * 1024;
+const BOOTSTRAP_GENERATION_EMERGENCY_BYTES: u64 = 1024 * 1024;
 
 /// A disk-resident KV store using NVT-indexed bucket pages inside the main
 /// database file. No sidecar files — the KV block lives at the head of the
@@ -59,9 +68,17 @@ pub struct DiskKVStore {
   hot_buffer: Vec<KVEntry>,
   /// Shared snapshot for lock-free readers. Updated after every mutation.
   snapshot: Arc<ArcSwap<ReadSnapshot>>,
+  /// Lazy, reservation-owned page authority activated after bootstrap and
+  /// recovery have completed. `None` is retained only for construction,
+  /// rebuild, and compatibility tests that instantiate DiskKVStore directly.
+  page_provider: Option<KvPageProvider>,
+  bounded_page_config: Option<BoundedPageConfig>,
+  /// Authoritative live type counts for flushed pages. Keeping this beside the
+  /// writer lets bounded snapshots publish without rescanning every page.
+  page_type_counts: KvTypeCounts,
   /// Shared NVT wrapped in Arc — re-cloned only on flush/resize.
   shared_nvt: Arc<NormalizedVectorTable>,
-  /// Set to true when a corrupt KV page is detected and zeroed during flush.
+  /// Set to true when a corrupt KV page requires an authoritative WAL rebuild.
   pub needs_rebuild: bool,
   /// Set to Some(target_stage) when the KV block needs expansion.
   /// StorageEngine reads this after flush and performs the expansion.
@@ -74,6 +91,18 @@ pub struct DiskKVStore {
   /// this from disk; runtime register/consume operations on void_manager
   /// also update this field via the engine.
   pub pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+}
+
+struct PreparedPageFlush {
+  replacements: Vec<(usize, Arc<[u8]>)>,
+  overflow_entries: Vec<KVEntry>,
+  page_type_counts: KvTypeCounts,
+}
+
+#[derive(Clone)]
+struct BoundedPageConfig {
+  coordinator: MemoryCoordinator,
+  max_resident_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -124,6 +153,17 @@ impl DiskKVStore {
 
   fn page_arc(page_data: Vec<u8>) -> Arc<[u8]> {
     Arc::<[u8]>::from(page_data.into_boxed_slice())
+  }
+
+  fn bootstrap_page_memory_coordinator() -> EngineResult<MemoryCoordinator> {
+    let policy =
+      MemoryPolicy::new(BOOTSTRAP_GENERATION_SOFT_BYTES, BOOTSTRAP_GENERATION_HARD_BYTES, 1, BOOTSTRAP_GENERATION_EMERGENCY_BYTES)
+        .map_err(|error| EngineError::InvalidInput(format!("invalid bootstrap KV memory policy: {error}")))?;
+    let coordinator = MemoryCoordinator::new(policy);
+    coordinator
+      .update_host_sample(HostMemorySample { host_available_bytes: Some(u64::MAX), ..Default::default() })
+      .map_err(|error| EngineError::InvalidInput(format!("cannot initialize bootstrap KV memory policy: {error}")))?;
+    Ok(coordinator)
   }
 
   fn valid_void_range_for_layout(kv_block_offset: u64, kv_block_length: u64, hot_tail_offset: u64, offset: u64, size: u32) -> bool {
@@ -226,6 +266,9 @@ impl DiskKVStore {
       bucket_count,
       hot_buffer: Vec::new(),
       snapshot,
+      page_provider: None,
+      bounded_page_config: None,
+      page_type_counts: [0; 16],
       shared_nvt,
       needs_rebuild: false,
       needs_expansion: None,
@@ -271,9 +314,38 @@ impl DiskKVStore {
 
   #[allow(clippy::too_many_arguments)]
   pub fn open_with_coordinator(
-    mut db_file: File,
+    db_file: File,
     hash_algo: HashAlgorithm,
     kv_block_offset: u64,
+    hot_tail_offset: u64,
+    stage: usize,
+    hot_entries: Vec<KVEntry>,
+    hot_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+    kv_block_version: u8,
+    durability_coordinator: Arc<DurabilityCoordinator>,
+  ) -> EngineResult<Self> {
+    let hash_length = hash_algo.hash_length();
+    let (kv_block_length, _) = stage_params(stage.min(KV_STAGE_SIZES.len() - 1), page_size(hash_length));
+    Self::open_with_layout_and_coordinator(
+      db_file,
+      hash_algo,
+      kv_block_offset,
+      kv_block_length,
+      hot_tail_offset,
+      stage,
+      hot_entries,
+      hot_voids,
+      kv_block_version,
+      durability_coordinator,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn open_with_layout_and_coordinator(
+    db_file: File,
+    hash_algo: HashAlgorithm,
+    kv_block_offset: u64,
+    kv_block_length: u64,
     hot_tail_offset: u64,
     stage: usize,
     hot_entries: Vec<KVEntry>,
@@ -292,63 +364,33 @@ impl DiskKVStore {
     let stage = stage.min(KV_STAGE_SIZES.len() - 1);
     let hash_length = hash_algo.hash_length();
     let psize = page_size(hash_length);
-    let (block_size, bucket_count) = stage_params(stage, psize);
-    let kv_block_length = block_size;
+    let (minimum_block_size, bucket_count) = stage_params(stage, psize);
+    if kv_block_length < minimum_block_size {
+      return Err(EngineError::CorruptEntry {
+        offset: kv_block_offset,
+        reason: format!("KV block length {kv_block_length} is smaller than the {minimum_block_size}-byte minimum for stage {stage}"),
+      });
+    }
+    let kv_block_end = kv_block_offset
+      .checked_add(kv_block_length)
+      .ok_or_else(|| EngineError::CorruptEntry { offset: kv_block_offset, reason: "KV block end overflows u64".to_string() })?;
+    if hot_tail_offset < kv_block_end {
+      return Err(EngineError::CorruptEntry {
+        offset: hot_tail_offset,
+        reason: format!("hot tail begins before the KV block ends at {kv_block_end}"),
+      });
+    }
 
     tracing::debug!(kv_block_offset, kv_block_length, hot_tail_offset, stage, bucket_count, hot_entry_count, "DiskKVStore::open");
 
-    // Rebuild entry count by reading each page header. The entry_count
-    // u16 lives at offset PAGE_HEADER_SIZE-2 within the page (after magic
-    // u32 + crc32 u32). Empty (zero-magic) pages contribute 0.
-    let mut entry_count = 0;
-    let mut header_buf = [0u8; crate::engine::kv_pages::PAGE_HEADER_SIZE];
-    for bucket in 0..bucket_count {
-      let offset = kv_block_offset + bucket_page_offset(bucket, hash_length);
-      db_file.seek(SeekFrom::Start(offset))?;
-      if db_file.read_exact(&mut header_buf).is_ok() {
-        // Skip zero-magic pages — those are fresh empty pages.
-        let magic = u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
-        if magic == crate::engine::kv_pages::PAGE_MAGIC {
-          let count_offset = crate::engine::kv_pages::PAGE_HEADER_SIZE - 2;
-          entry_count += u16::from_le_bytes([header_buf[count_offset], header_buf[count_offset + 1]]) as usize;
-        }
-      }
-    }
-
     let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
     let shared_nvt = Arc::new(nvt.clone());
-
-    // Read all pages for initial snapshot, validating the page CRC on
-    // every non-empty bucket. A CRC failure means the page got corrupted
-    // (torn write, disk error, bit flip). Flag `needs_rebuild` so the
-    // outer open path will trigger dirty startup and reconstruct the KV
-    // from a full WAL scan — the WAL is the source of truth.
-    let mut detected_page_corruption = false;
-    let pages = {
-      let mut pages = Vec::with_capacity(bucket_count);
-      for bucket in 0..bucket_count {
-        let offset = kv_block_offset + bucket_page_offset(bucket, hash_length);
-        let mut page_data = vec![0u8; psize];
-        db_file.seek(SeekFrom::Start(offset))?;
-        db_file.read_exact(&mut page_data)?;
-        // Validate CRC for non-empty pages. deserialize_page accepts
-        // an all-zero "empty page" sentinel; any other state failing
-        // CRC means the page is corrupt.
-        if let Err(error) = crate::engine::kv_pages::deserialize_page(&page_data, hash_length) {
-          tracing::warn!(bucket, ?error, "KV bucket page failed CRC on open — triggering dirty startup");
-          detected_page_corruption = true;
-        }
-        pages.push(Self::page_arc(page_data));
-      }
-      Arc::new(pages)
-    };
 
     // Pre-populate write buffer with hot entries (not yet flushed to pages)
     let mut write_buffer = HashMap::new();
     for entry in hot_entries {
       write_buffer.insert(entry.hash.clone(), entry);
     }
-    let hot_count = write_buffer.len();
 
     // Hot-tail voids are durable tombstones for WAL ranges reclaimed by GC.
     // Bucket pages may still contain old live KV entries for those ranges if
@@ -356,29 +398,64 @@ impl DiskKVStore {
     // write buffer was flushed to pages. Mask those page entries with deleted
     // buffer entries so clean startup never serves data from reusable space.
     let merged_hot_void_ranges = build_merged_void_ranges(&hot_voids);
-    let mut voided_page_entries = 0usize;
-    if !hot_voids.is_empty() {
-      for page_data in pages.iter() {
-        if let Ok(entries) = deserialize_page(page_data, hash_length) {
-          for entry in entries {
-            if write_buffer.contains_key(&entry.hash) {
-              continue;
-            }
-            let entry_end = entry.offset.saturating_add(entry.total_length as u64);
-            if entry_overlaps_void_ranges(entry.offset, entry_end, &merged_hot_void_ranges) {
-              let mut deleted = entry.clone();
-              deleted.type_flags |= KV_FLAG_DELETED;
-              write_buffer.insert(deleted.hash.clone(), deleted);
-              voided_page_entries += 1;
-            }
+    let mut effective_entry_count = 0usize;
+    let mut page_type_counts = [0usize; 16];
+    let mut detected_page_corruption = false;
+    let bootstrap_provider = KvPageProvider::new(
+      db_file.try_clone()?,
+      kv_block_offset,
+      hash_algo,
+      bucket_count,
+      0,
+      Some(Self::bootstrap_page_memory_coordinator()?),
+    )?;
+    let bootstrap_pages = bootstrap_provider.snapshot()?;
+
+    // Validate and account one page at a time without retaining the complete
+    // block. Corrupt pages trigger a WAL rebuild before startup consumers run;
+    // exact I/O failures still abort because truncation may also destroy WAL.
+    for bucket in 0..bucket_count {
+      let page_data = match bootstrap_pages.read_page(bucket) {
+        Ok(page) => page,
+        Err(error @ EngineError::CorruptEntry { .. }) => {
+          tracing::warn!(bucket, ?error, "KV bucket page failed validation on open — triggering dirty startup");
+          detected_page_corruption = true;
+          continue;
+        }
+        Err(error) => return Err(error),
+      };
+      let entries = deserialize_page(&page_data, hash_length)?;
+      let counts = live_type_counts_in_page(&page_data, hash_length)?;
+      for (index, count) in counts.into_iter().enumerate() {
+        page_type_counts[index] = page_type_counts[index].saturating_add(count);
+      }
+      for entry in entries {
+        if entry.is_deleted() || write_buffer.contains_key(&entry.hash) {
+          continue;
+        }
+        if !hot_voids.is_empty() {
+          let entry_end = entry.offset.saturating_add(entry.total_length as u64);
+          if entry_overlaps_void_ranges(entry.offset, entry_end, &merged_hot_void_ranges) {
+            let mut deleted = entry;
+            deleted.type_flags |= KV_FLAG_DELETED;
+            write_buffer.insert(deleted.hash.clone(), deleted);
+            continue;
           }
         }
+        effective_entry_count = effective_entry_count.saturating_add(1);
       }
     }
 
-    let effective_entry_count = entry_count.saturating_sub(voided_page_entries) + hot_count;
-    let initial_snapshot =
-      ReadSnapshot::new(write_buffer.clone(), Arc::clone(&shared_nvt), bucket_count, hash_algo, effective_entry_count, pages);
+    effective_entry_count = effective_entry_count.saturating_add(write_buffer.values().filter(|entry| !entry.is_deleted()).count());
+    let initial_snapshot = ReadSnapshot::from_bounded_pages_with_type_counts(
+      write_buffer.clone(),
+      Arc::clone(&shared_nvt),
+      bucket_count,
+      hash_algo,
+      effective_entry_count,
+      bootstrap_pages,
+      page_type_counts,
+    );
     let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
 
     Ok(DiskKVStore {
@@ -396,6 +473,9 @@ impl DiskKVStore {
       bucket_count,
       hot_buffer: Vec::new(),
       snapshot,
+      page_provider: Some(bootstrap_provider),
+      bounded_page_config: None,
+      page_type_counts,
       shared_nvt,
       needs_rebuild: detected_page_corruption,
       needs_expansion: None,
@@ -411,36 +491,111 @@ impl DiskKVStore {
     Ok(store)
   }
 
+  /// Replace the bootstrap snapshot backend with the configured bounded page
+  /// provider. Activation is atomic from readers' perspective: the new
+  /// generation lease is acquired before ArcSwap releases the prior view.
+  pub fn activate_bounded_pages(&mut self, coordinator: MemoryCoordinator, max_resident_bytes: u64) -> EngineResult<()> {
+    if self.bounded_page_config.is_some() && self.page_provider.is_some() {
+      return Err(EngineError::InvalidInput("bounded KV pages are already active".to_string()));
+    }
+    let provider = KvPageProvider::new(
+      self.db_file.try_clone()?,
+      self.kv_block_offset,
+      self.hash_algo,
+      self.bucket_count,
+      max_resident_bytes,
+      Some(coordinator.clone()),
+    )?;
+    self.publish_through_page_provider(provider)?;
+    self.bounded_page_config = Some(BoundedPageConfig { coordinator, max_resident_bytes });
+    Ok(())
+  }
+
+  pub(crate) fn activate_bootstrap_page_provider(&mut self) -> EngineResult<()> {
+    if self.page_provider.is_some() {
+      return Ok(());
+    }
+    let provider = KvPageProvider::new(
+      self.db_file.try_clone()?,
+      self.kv_block_offset,
+      self.hash_algo,
+      self.bucket_count,
+      0,
+      Some(Self::bootstrap_page_memory_coordinator()?),
+    )?;
+    self.publish_through_page_provider(provider)
+  }
+
+  fn publish_through_page_provider(&mut self, provider: KvPageProvider) -> EngineResult<()> {
+    let pages = provider.snapshot()?;
+    let snapshot = ReadSnapshot::from_bounded_pages_with_type_counts(
+      self.write_buffer.clone(),
+      Arc::clone(&self.shared_nvt),
+      self.bucket_count,
+      self.hash_algo,
+      self.entry_count,
+      pages,
+      self.page_type_counts,
+    );
+    self.page_provider = Some(provider);
+    self.snapshot.store(Arc::new(snapshot));
+    Ok(())
+  }
+
+  pub fn kv_page_provider_stats(&self) -> EngineResult<Option<KvPageProviderStats>> {
+    self.page_provider.as_ref().map(KvPageProvider::stats).transpose()
+  }
+
+  pub(crate) fn bounded_page_configuration(&self) -> Option<(MemoryCoordinator, u64)> {
+    self.bounded_page_config.as_ref().map(|config| (config.coordinator.clone(), config.max_resident_bytes))
+  }
+
+  /// Remove the provider-backed snapshot from publication and wait for every
+  /// previously loaded view to drain before a complete page-layout rewrite.
+  /// A timeout restores a fresh bounded view before returning an error.
+  pub(crate) fn suspend_bounded_pages_for_layout_rewrite(&mut self, timeout: std::time::Duration) -> EngineResult<bool> {
+    let Some(provider) = self.page_provider.take() else {
+      return Ok(false);
+    };
+    let placeholder = ReadSnapshot::unavailable(
+      self.write_buffer.clone(),
+      Arc::clone(&self.shared_nvt),
+      self.bucket_count,
+      self.hash_algo,
+      self.entry_count,
+      self.page_type_counts,
+      "KV page layout is changing",
+    );
+    self.snapshot.store(Arc::new(placeholder));
+    if provider.wait_for_no_snapshots(timeout)? {
+      return Ok(true);
+    }
+
+    self.page_provider = Some(provider);
+    self.publish_full_snapshot()?;
+    Err(EngineError::InvalidInput("timed out waiting for KV snapshots before page-layout rewrite".to_string()))
+  }
+
+  fn reactivate_bounded_pages_after_layout_rewrite(&mut self) -> EngineResult<bool> {
+    if self.page_provider.is_some() {
+      return Ok(false);
+    }
+    if let Some(config) = self.bounded_page_config.clone() {
+      self.activate_bounded_pages(config.coordinator, config.max_resident_bytes)?;
+    } else {
+      self.activate_bootstrap_page_provider()?;
+    }
+    Ok(true)
+  }
+
   // ========================================================================
   // Core KV operations
   // ========================================================================
 
   /// Look up an entry by hash.
   /// Search order: write_buffer → disk page.
-  pub fn get(&mut self, hash: &[u8]) -> Option<KVEntry> {
-    if let Some(entry) = self.write_buffer.get(hash) {
-      if entry.is_deleted() {
-        return None;
-      }
-      return Some(entry.clone());
-    }
-
-    let bucket_index = self.nvt.bucket_for_value(hash);
-    let hash_length = self.hash_algo.hash_length();
-    let offset = self.kv_block_offset + bucket_page_offset(bucket_index, hash_length);
-    let psize = page_size(hash_length);
-
-    let mut page_data = vec![0u8; psize];
-    if self.db_file.seek(SeekFrom::Start(offset)).is_err() {
-      return None;
-    }
-    if self.db_file.read_exact(&mut page_data).is_err() {
-      return None;
-    }
-
-    let entries = deserialize_page(&page_data, hash_length).ok()?;
-    let found = find_in_page(&entries, hash)?.clone();
-    Some(found)
+  pub fn get(&self, hash: &[u8]) -> EngineResult<Option<KVEntry>> {
+    self.snapshot.load().get(hash)
   }
 
   /// Insert or update an entry.
@@ -478,7 +633,7 @@ impl DiskKVStore {
   /// Bulk insert without snapshot publishing or hot journaling.
   pub fn bulk_insert(&mut self, entries: &[KVEntry]) -> EngineResult<()> {
     for entry in entries {
-      if !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_disk(&entry.hash)? {
+      if !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_current_layout(&entry.hash)? {
         self.entry_count += 1;
       }
       self.write_buffer.insert(entry.hash.clone(), entry.clone());
@@ -494,46 +649,140 @@ impl DiskKVStore {
     if self.write_buffer.is_empty() {
       return Ok(());
     }
+    let prepared = self.prepare_page_flush()?;
+    self.apply_prepared_page_flush(prepared)?;
+    Ok(())
+  }
 
+  fn current_page(&mut self, bucket: usize) -> EngineResult<Arc<[u8]>> {
+    if let Some(provider) = &self.page_provider {
+      provider.read_page(bucket)
+    } else {
+      if bucket >= self.bucket_count {
+        return Err(EngineError::InvalidInput(format!(
+          "KV bucket {bucket} is outside the current layout of {} buckets",
+          self.bucket_count
+        )));
+      }
+      let hash_length = self.hash_algo.hash_length();
+      let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
+      let mut page = vec![0u8; page_size(hash_length)];
+      self.db_file.seek(SeekFrom::Start(offset))?;
+      self.db_file.read_exact(&mut page)?;
+      live_type_counts_in_page(&page, hash_length).map_err(|error| match error {
+        EngineError::CorruptEntry { reason, .. } => EngineError::CorruptEntry { offset, reason },
+        other => other,
+      })?;
+      Ok(Self::page_arc(page))
+    }
+  }
+
+  fn entry_exists_on_current_layout(&mut self, hash: &[u8]) -> EngineResult<bool> {
+    let bucket = self.nvt.bucket_for_value(hash);
+    let page = self.current_page(bucket)?;
+    Ok(find_entry_in_page_data(&page, self.hash_algo.hash_length(), hash, true)?.is_some())
+  }
+
+  /// Build every replacement and detect overflow before any on-disk page is
+  /// touched. Corruption is rebuild evidence, never an invitation to zero the
+  /// page and continue with a partial index.
+  fn prepare_page_flush(&mut self) -> EngineResult<PreparedPageFlush> {
     let hash_length = self.hash_algo.hash_length();
-    let buffer_entries: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
-    let mut by_bucket: HashMap<usize, Vec<KVEntry>> = HashMap::new();
-    for entry in buffer_entries {
-      let bucket = self.nvt.bucket_for_value(&entry.hash);
-      by_bucket.entry(bucket).or_default().push(entry);
+    let mut by_bucket: BTreeMap<usize, Vec<KVEntry>> = BTreeMap::new();
+    for entry in self.write_buffer.values().cloned() {
+      by_bucket.entry(self.nvt.bucket_for_value(&entry.hash)).or_default().push(entry);
     }
 
-    for (bucket_index, new_entries) in by_bucket {
-      let offset = self.kv_block_offset + bucket_page_offset(bucket_index, hash_length);
-      let psize = page_size(hash_length);
-
-      let mut page_data = vec![0u8; psize];
-      self.db_file.seek(SeekFrom::Start(offset))?;
-      self.db_file.read_exact(&mut page_data)?;
-
-      let mut existing = match deserialize_page(&page_data, hash_length) {
-        Ok(entries) => entries,
-        Err(_) => {
-          let empty_page = vec![0u8; psize];
-          self.db_file.seek(SeekFrom::Start(offset))?;
-          self.db_file.write_all(&empty_page)?;
-          self.needs_rebuild = true;
-          Vec::new()
+    let mut replacements = Vec::with_capacity(by_bucket.len());
+    let mut overflow_entries = Vec::new();
+    let mut next_type_counts = self.page_type_counts;
+    for (bucket, new_entries) in by_bucket {
+      let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
+      let page = match self.current_page(bucket) {
+        Ok(page) => page,
+        Err(error) => {
+          if matches!(error, EngineError::CorruptEntry { .. }) {
+            self.needs_rebuild = true;
+          }
+          return Err(error);
         }
       };
-
+      let old_counts = live_type_counts_in_page(&page, hash_length).map_err(|error| match error {
+        EngineError::CorruptEntry { reason, .. } => EngineError::CorruptEntry { offset, reason },
+        other => other,
+      });
+      let old_counts = match old_counts {
+        Ok(counts) => counts,
+        Err(error) => {
+          self.needs_rebuild = true;
+          return Err(error);
+        }
+      };
+      let mut existing = match deserialize_page(&page, hash_length) {
+        Ok(entries) => entries,
+        Err(error) => {
+          self.needs_rebuild = true;
+          return Err(match error {
+            EngineError::CorruptEntry { reason, .. } => EngineError::CorruptEntry { offset, reason },
+            other => other,
+          });
+        }
+      };
       for entry in new_entries {
-        upsert_in_page(&mut existing, entry);
+        if !upsert_in_page(&mut existing, entry.clone()) {
+          overflow_entries.push(entry);
+        }
       }
+      let replacement = Self::page_arc(serialize_page(&existing, hash_length));
+      let new_counts = live_type_counts_in_page(&replacement, hash_length)?;
+      for index in 0..next_type_counts.len() {
+        next_type_counts[index] = next_type_counts[index].saturating_sub(old_counts[index]).saturating_add(new_counts[index]);
+      }
+      replacements.push((bucket, replacement));
+    }
+    Ok(PreparedPageFlush { replacements, overflow_entries, page_type_counts: next_type_counts })
+  }
 
-      let serialized = serialize_page(&existing, hash_length);
-      self.db_file.seek(SeekFrom::Start(offset))?;
-      self.db_file.write_all(&serialized)?;
+  /// Apply one completely prepared replacement set. Provider retention is
+  /// admitted before `mark_overwrite_started`; the buffer and publication
+  /// state remain untouched on every pre-overwrite failure.
+  fn apply_prepared_page_flush(&mut self, prepared: PreparedPageFlush) -> EngineResult<Vec<(usize, Arc<[u8]>)>> {
+    let buckets = prepared.replacements.iter().map(|(bucket, _)| *bucket).collect::<Vec<_>>();
+    let mut update = self.page_provider.as_ref().map(|provider| provider.begin_update(&buckets)).transpose()?;
+    let hash_length = self.hash_algo.hash_length();
+    let mut overwrite_started = false;
+    for (bucket, page) in &prepared.replacements {
+      let offset = self.kv_block_offset + bucket_page_offset(*bucket, hash_length);
+      self.db_file.seek(SeekFrom::Start(offset)).map_err(|error| {
+        if overwrite_started {
+          EngineError::PostMutationDurabilityFailure(format!("cannot seek to KV page {bucket} after another page overwrite began: {error}"))
+        } else {
+          EngineError::from(error)
+        }
+      })?;
+      if !overwrite_started {
+        if let Some(update) = update.as_mut() {
+          update.mark_overwrite_started()?;
+        }
+        overwrite_started = true;
+      }
+      self
+        .db_file
+        .write_all(page)
+        .map_err(|error| EngineError::PostMutationDurabilityFailure(format!("KV page {bucket} overwrite failed: {error}")))?;
+    }
+    self
+      .sync_data_barrier(prepared.replacements.iter().map(|(_, page)| page.len() as u64).sum())
+      .map_err(|error| EngineError::PostMutationDurabilityFailure(format!("KV page overwrite barrier failed: {error}")))?;
+    if let Some(update) = update {
+      update
+        .commit(prepared.replacements.clone())
+        .map_err(|error| EngineError::PostMutationDurabilityFailure(format!("KV page generation publication failed: {error}")))?;
     }
 
-    self.sync_data_barrier(0)?;
-    self.write_buffer.clear();
-    Ok(())
+    self.page_type_counts = prepared.page_type_counts;
+    self.write_buffer = prepared.overflow_entries.into_iter().map(|entry| (entry.hash.clone(), entry)).collect();
+    Ok(prepared.replacements)
   }
 
   fn entry_exists_on_disk(&self, hash: &[u8]) -> EngineResult<bool> {
@@ -556,57 +805,16 @@ impl DiskKVStore {
       "flush: starting"
     );
 
-    let hash_length = self.hash_algo.hash_length();
-    let mut overflow_entries: Vec<KVEntry> = Vec::new();
-
-    let buffer_entries: Vec<KVEntry> = self.write_buffer.values().cloned().collect();
-    let mut by_bucket: HashMap<usize, Vec<KVEntry>> = HashMap::new();
-    for entry in buffer_entries {
-      let bucket = self.nvt.bucket_for_value(&entry.hash);
-      by_bucket.entry(bucket).or_default().push(entry);
-    }
-
-    let modified_buckets: Vec<usize> = by_bucket.keys().cloned().collect();
-
-    for (bucket_index, new_entries) in by_bucket {
-      let offset = self.kv_block_offset + bucket_page_offset(bucket_index, hash_length);
-      let psize = page_size(hash_length);
-
-      let mut page_data = vec![0u8; psize];
-      self.db_file.seek(SeekFrom::Start(offset))?;
-      self.db_file.read_exact(&mut page_data)?;
-
-      let mut existing = match deserialize_page(&page_data, hash_length) {
-        Ok(entries) => entries,
-        Err(e) => {
-          tracing::warn!("Corrupt KV page at bucket {}: {}. Resetting.", bucket_index, e);
-          let empty_page = vec![0u8; psize];
-          self.db_file.seek(SeekFrom::Start(offset))?;
-          self.db_file.write_all(&empty_page)?;
-          self.needs_rebuild = true;
-          Vec::new()
-        }
-      };
-
-      for entry in new_entries {
-        if !upsert_in_page(&mut existing, entry.clone()) {
-          overflow_entries.push(entry);
-        }
-      }
-
-      let serialized = serialize_page(&existing, hash_length);
-      self.db_file.seek(SeekFrom::Start(offset))?;
-      self.db_file.write_all(&serialized)?;
-    }
-
-    self.sync_data_barrier(0)?;
-    self.write_buffer.clear();
+    let prepared = self.prepare_page_flush()?;
+    let overflow_entries = prepared.overflow_entries.clone();
+    let replacements = self.apply_prepared_page_flush(prepared)?;
+    let modified_buckets = replacements.iter().map(|(bucket, _)| *bucket).collect::<Vec<_>>();
 
     tracing::debug!(overflow_count = overflow_entries.len(), modified_buckets = modified_buckets.len(), "flush: pages written");
 
     if !overflow_entries.is_empty() {
       // Publish snapshot BEFORE resize so iter_all sees flushed entries
-      self.publish_snapshot_incremental(&modified_buckets)?;
+      self.publish_snapshot_incremental(&replacements)?;
       let old_stage = self.stage;
       self.resize_to_next_stage()?;
       if self.stage > old_stage {
@@ -618,9 +826,6 @@ impl DiskKVStore {
       } else {
         // Resize blocked (block too small) — keep overflow in write buffer.
         // They're queryable via snapshot and will be persisted in the hot tail.
-        for entry in overflow_entries {
-          self.write_buffer.insert(entry.hash.clone(), entry);
-        }
         // Write overflow entries to hot tail for crash recovery
         if self.hot_tail_enabled {
           let hash_length = self.hash_algo.hash_length();
@@ -636,7 +841,7 @@ impl DiskKVStore {
           self.db_file.set_len(end)?; // Truncate stale trailing data
           self.sync_data_barrier(0)?;
         }
-        self.publish_snapshot_incremental(&modified_buckets)?;
+        self.publish_snapshot_incremental(&replacements)?;
         self.publish_buffer_only();
         let elapsed = timer_start.elapsed().as_secs_f64();
         metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
@@ -663,7 +868,7 @@ impl DiskKVStore {
       self.sync_data_barrier(0)?;
     }
 
-    self.publish_snapshot_incremental(&modified_buckets)?;
+    self.publish_snapshot_incremental(&replacements)?;
 
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::KV_FLUSH_DURATION).record(elapsed);
@@ -671,73 +876,35 @@ impl DiskKVStore {
     Ok(())
   }
 
-  /// Resize the KV store to the next stage.
-  /// Currently creates a temp sidecar for migration. In the future, this will
-  /// do in-place expansion via background WAL relocation (Task 6).
+  /// Request a coordinated layout change to the next stage.
+  ///
+  /// DiskKVStore does not own the file header, WAL relocation, or persistent
+  /// durability latch, so it must never reinterpret page offsets itself.
+  /// StorageEngine consumes `needs_expansion` after releasing the writer/KV
+  /// locks and performs the only authorized full-layout mutation.
   pub fn resize_to_next_stage(&mut self) -> EngineResult<()> {
     let new_stage = (self.stage + 1).min(KV_STAGE_SIZES.len() - 1);
     if new_stage == self.stage {
       return Err(EngineError::IoError(std::io::Error::other("KV store at maximum stage — cannot resize further")));
     }
-
-    let hash_length = self.hash_algo.hash_length();
-    let psize = page_size(hash_length);
-    let (_block_size, new_bucket_count) = stage_params(new_stage, psize);
-
-    // Check that new pages fit within the KV block
-    let new_pages_size = (new_bucket_count as u64) * (psize as u64);
-    if new_pages_size > self.kv_block_length {
-      // Can't resize in-place — signal that expansion is needed.
-      // StorageEngine::expand_kv_block_online() handles the actual expansion
-      // since it needs to coordinate both the AppendWriter and KV store.
-      tracing::info!(
-        "KV block expansion needed: stage {} requires {}B, current block is {}B",
-        new_stage,
-        new_pages_size,
-        self.kv_block_length,
-      );
-      self.needs_expansion = Some(new_stage);
-      return Ok(());
-    }
-
-    // Read all non-deleted entries
-    let all_entries = self.iter_all()?;
-
-    // Zero-fill new pages
-    let empty_page = vec![0u8; psize];
-    for bucket in 0..new_bucket_count {
-      let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
-      self.db_file.seek(SeekFrom::Start(offset))?;
-      self.db_file.write_all(&empty_page)?;
-    }
-    self.sync_data_barrier(0)?;
-
-    // Update internal state
-    self.stage = new_stage;
-    self.bucket_count = new_bucket_count;
-    self.nvt = NormalizedVectorTable::new(Box::new(HashConverter), new_bucket_count);
-    self.entry_count = 0;
-
-    // Re-insert all entries
-    self.bulk_insert(&all_entries)?;
-    self.flush_no_snapshot()?;
-
-    self.entry_count = all_entries.len();
-    self.publish_full_snapshot_with_new_nvt()?;
-
+    tracing::info!(current_stage = self.stage, target_stage = new_stage, "KV layout change requested from StorageEngine");
+    self.needs_expansion = Some(new_stage);
     Ok(())
   }
 
-  pub fn contains(&mut self, hash: &[u8]) -> bool {
-    self.get(hash).is_some()
+  pub fn contains(&self, hash: &[u8]) -> EngineResult<bool> {
+    Ok(self.get(hash)?.is_some())
   }
 
-  pub fn mark_deleted(&mut self, hash: &[u8]) {
-    if let Some(mut entry) = self.get(hash) {
+  pub fn mark_deleted(&mut self, hash: &[u8]) -> EngineResult<bool> {
+    if let Some(mut entry) = self.get(hash)? {
       entry.type_flags |= KV_FLAG_DELETED;
       self.write_buffer.insert(hash.to_vec(), entry);
       self.entry_count = self.entry_count.saturating_sub(1);
       self.publish_buffer_only();
+      Ok(true)
+    } else {
+      Ok(false)
     }
   }
 
@@ -780,29 +947,8 @@ impl DiskKVStore {
     Ok(())
   }
 
-  pub fn iter_all(&mut self) -> EngineResult<Vec<KVEntry>> {
-    let hash_length = self.hash_algo.hash_length();
-    let psize = page_size(hash_length);
-    let mut all: HashMap<Vec<u8>, KVEntry> = HashMap::new();
-
-    for bucket in 0..self.bucket_count {
-      let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
-      let mut page_data = vec![0u8; psize];
-      self.db_file.seek(SeekFrom::Start(offset))?;
-      if self.db_file.read_exact(&mut page_data).is_ok() {
-        if let Ok(entries) = deserialize_page(&page_data, hash_length) {
-          for entry in entries {
-            all.insert(entry.hash.clone(), entry);
-          }
-        }
-      }
-    }
-
-    for (hash, entry) in &self.write_buffer {
-      all.insert(hash.clone(), entry.clone());
-    }
-
-    Ok(all.into_values().filter(|e| !e.is_deleted()).collect())
+  pub fn iter_all(&self) -> EngineResult<Vec<KVEntry>> {
+    self.snapshot.load().iter_all()
   }
 
   pub fn len(&self) -> usize {
@@ -846,26 +992,26 @@ impl DiskKVStore {
     }
   }
 
-  pub fn update_flags(&mut self, hash: &[u8], new_flags: u8) -> bool {
-    if let Some(mut entry) = self.get(hash) {
+  pub fn update_flags(&mut self, hash: &[u8], new_flags: u8) -> EngineResult<bool> {
+    if let Some(mut entry) = self.get(hash)? {
       let entry_type = entry.type_flags & 0x0F;
       entry.type_flags = entry_type | (new_flags & 0xF0);
       self.write_buffer.insert(hash.to_vec(), entry);
       self.publish_buffer_only();
-      true
+      Ok(true)
     } else {
-      false
+      Ok(false)
     }
   }
 
-  pub fn update_offset(&mut self, hash: &[u8], new_offset: u64) -> bool {
-    if let Some(mut entry) = self.get(hash) {
+  pub fn update_offset(&mut self, hash: &[u8], new_offset: u64) -> EngineResult<bool> {
+    if let Some(mut entry) = self.get(hash)? {
       entry.offset = new_offset;
       self.write_buffer.insert(hash.to_vec(), entry);
       self.publish_buffer_only();
-      true
+      Ok(true)
     } else {
-      false
+      Ok(false)
     }
   }
 
@@ -931,6 +1077,20 @@ impl DiskKVStore {
   }
 
   fn publish_full_snapshot(&mut self) -> EngineResult<()> {
+    if let Some(provider) = &self.page_provider {
+      let pages = provider.snapshot()?;
+      let snapshot = ReadSnapshot::from_bounded_pages_with_type_counts(
+        self.write_buffer.clone(),
+        Arc::clone(&self.shared_nvt),
+        self.bucket_count,
+        self.hash_algo,
+        self.entry_count,
+        pages,
+        self.page_type_counts,
+      );
+      self.snapshot.store(Arc::new(snapshot));
+      return Ok(());
+    }
     let pages = self.read_all_pages()?;
     let snapshot = ReadSnapshot::new(
       self.write_buffer.clone(),
@@ -944,9 +1104,24 @@ impl DiskKVStore {
     Ok(())
   }
 
-  fn publish_snapshot_incremental(&mut self, modified_buckets: &[usize]) -> EngineResult<()> {
+  fn publish_snapshot_incremental(&mut self, replacements: &[(usize, Arc<[u8]>)]) -> EngineResult<()> {
     if self.shared_nvt.bucket_count() != self.nvt.bucket_count() {
       self.shared_nvt = Arc::new(self.nvt.clone());
+    }
+
+    if let Some(provider) = &self.page_provider {
+      let pages = provider.snapshot()?;
+      let snapshot = ReadSnapshot::from_bounded_pages_with_type_counts(
+        self.write_buffer.clone(),
+        Arc::clone(&self.shared_nvt),
+        self.bucket_count,
+        self.hash_algo,
+        self.entry_count,
+        pages,
+        self.page_type_counts,
+      );
+      self.snapshot.store(Arc::new(snapshot));
+      return Ok(());
     }
 
     let current = self.snapshot.load();
@@ -954,25 +1129,9 @@ impl DiskKVStore {
       .resident_pages()
       .ok_or_else(|| EngineError::InvalidInput("resident incremental publisher cannot update bounded KV pages".to_string()))?;
     let mut new_pages = (**old_pages).clone();
-    let mut new_page_type_counts = current.page_type_counts();
-
-    let hash_length = self.hash_algo.hash_length();
-    let psize = page_size(hash_length);
-    for &bucket in modified_buckets {
-      if bucket < new_pages.len() {
-        let old_counts = live_type_counts_in_page(&new_pages[bucket], hash_length)?;
-        let offset = self.kv_block_offset + bucket_page_offset(bucket, hash_length);
-        let mut page_data = vec![0u8; psize];
-        self.db_file.seek(SeekFrom::Start(offset))?;
-        self.db_file.read_exact(&mut page_data)?;
-        let new_counts = live_type_counts_in_page(&page_data, hash_length).map_err(|error| match error {
-          EngineError::CorruptEntry { reason, .. } => EngineError::CorruptEntry { offset, reason },
-          other => other,
-        })?;
-        for i in 0..new_page_type_counts.len() {
-          new_page_type_counts[i] = new_page_type_counts[i].saturating_sub(old_counts[i]).saturating_add(new_counts[i]);
-        }
-        new_pages[bucket] = Self::page_arc(page_data);
+    for (bucket, page) in replacements {
+      if *bucket < new_pages.len() {
+        new_pages[*bucket] = Arc::clone(page);
       }
     }
 
@@ -983,7 +1142,7 @@ impl DiskKVStore {
       self.hash_algo,
       self.entry_count,
       Arc::new(new_pages),
-      new_page_type_counts,
+      self.page_type_counts,
     );
     self.snapshot.store(Arc::new(snapshot));
     Ok(())
@@ -991,7 +1150,11 @@ impl DiskKVStore {
 
   fn publish_full_snapshot_with_new_nvt(&mut self) -> EngineResult<()> {
     self.shared_nvt = Arc::new(self.nvt.clone());
-    self.publish_full_snapshot()
+    if self.reactivate_bounded_pages_after_layout_rewrite()? {
+      Ok(())
+    } else {
+      self.publish_full_snapshot()
+    }
   }
 
   pub fn snapshot_handle(&self) -> &Arc<ArcSwap<ReadSnapshot>> {
@@ -1027,15 +1190,42 @@ impl DiskKVStore {
     offset_delta: i64,
     new_hot_tail: u64,
     pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+    all_entries: Vec<KVEntry>,
+  ) -> EngineResult<()> {
+    let target_block_length = stage_params(target_stage, page_size(self.hash_algo.hash_length())).0;
+    self.finalize_expansion_with_block_length(
+      target_stage,
+      target_block_length,
+      old_kv_end,
+      relocation_end,
+      offset_delta,
+      new_hot_tail,
+      pending_voids,
+      all_entries,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn finalize_expansion_with_block_length(
+    &mut self,
+    target_stage: usize,
+    new_block_length: u64,
+    old_kv_end: u64,
+    relocation_end: u64,
+    offset_delta: i64,
+    new_hot_tail: u64,
+    pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+    all_entries: Vec<KVEntry>,
   ) -> EngineResult<()> {
     let hash_length = self.hash_algo.hash_length();
     let psize = page_size(hash_length);
-    let (new_block_size, new_bucket_count) = stage_params(target_stage, psize);
+    let (minimum_block_size, new_bucket_count) = stage_params(target_stage, psize);
+    if new_block_length < minimum_block_size {
+      return Err(EngineError::InvalidInput(format!(
+        "expanded KV block length {new_block_length} is smaller than the {minimum_block_size}-byte stage {target_stage} minimum"
+      )));
+    }
     let new_pages_size = (new_bucket_count as u64) * (psize as u64);
-
-    // Capture the complete live KV view before changing layout state or
-    // zeroing pages. This includes entries still in the write buffer.
-    let all_entries = self.iter_all()?;
 
     // Zero-fill all KV bucket pages in the expanded region
     let empty_page = vec![0u8; psize];
@@ -1044,16 +1234,22 @@ impl DiskKVStore {
       self.db_file.seek(SeekFrom::Start(offset))?;
       self.db_file.write_all(&empty_page)?;
     }
-    if new_block_size > new_pages_size {
+    if new_block_length > new_pages_size {
       let slack_offset = self.kv_block_offset + new_pages_size;
-      let slack_len = (new_block_size - new_pages_size) as usize;
+      let mut slack_len = new_block_length - new_pages_size;
+      let zeroes = vec![0u8; 64 * 1024];
       self.db_file.seek(SeekFrom::Start(slack_offset))?;
-      self.db_file.write_all(&vec![0u8; slack_len])?;
+      while slack_len > 0 {
+        let write_len = usize::try_from(slack_len.min(zeroes.len() as u64))
+          .map_err(|_| EngineError::InvalidInput("KV expansion slack chunk cannot be represented as usize".to_string()))?;
+        self.db_file.write_all(&zeroes[..write_len])?;
+        slack_len -= write_len as u64;
+      }
     }
     self.sync_data_barrier(0)?;
 
     // Update internal state
-    self.kv_block_length = new_block_size;
+    self.kv_block_length = new_block_length;
     self.stage = target_stage;
     self.bucket_count = new_bucket_count;
     self.nvt = NormalizedVectorTable::new(Box::new(HashConverter), new_bucket_count);
@@ -1068,22 +1264,26 @@ impl DiskKVStore {
       .into_iter()
       .map(|mut e| {
         if e.offset >= old_kv_end && e.offset < relocation_end {
-          e.offset = (e.offset as i64 + offset_delta) as u64;
+          let shifted = i128::from(e.offset) + i128::from(offset_delta);
+          e.offset = u64::try_from(shifted)
+            .map_err(|_| EngineError::InvalidInput(format!("relocated KV entry offset {shifted} cannot be represented as u64")))?;
         }
-        e
+        Ok(e)
       })
-      .collect();
+      .collect::<EngineResult<_>>()?;
 
     // Rehash into new bucket layout
     self.bulk_insert(&adjusted)?;
     self.flush_no_snapshot()?;
     self.entry_count = adjusted.len();
 
-    // The entries are now durable in the expanded KV pages. Publish a clean
-    // hot tail for the new header rather than carrying pre-expansion hot
-    // writes that may still point at the old growth zone.
-    self.sanitize_pending_voids("finalize expansion hot-tail clear");
-    let payload = hot_tail::HotTailPayload { writes: Vec::new(), voids: self.pending_voids.clone() };
+    // Most entries are now durable in the expanded pages. A concentrated
+    // bucket can still overflow the target layout, so the residual buffer is
+    // part of the authoritative hot tail until a later stage can absorb it.
+    // These are adjusted entries produced above, never stale pre-expansion
+    // writes that point into the relocated growth zone.
+    self.sanitize_pending_voids("finalize expansion hot-tail publish");
+    let payload = hot_tail::HotTailPayload { writes: self.write_buffer.values().cloned().collect(), voids: self.pending_voids.clone() };
     let end = hot_tail::write_hot_tail(&mut self.db_file, self.hot_tail_offset, &payload, hash_length)?;
     self.db_file.set_len(end)?;
     self.sync_data_barrier(0)?;
@@ -1095,9 +1295,28 @@ impl DiskKVStore {
 
     // Publish new snapshot
     self.publish_full_snapshot_with_new_nvt()?;
-    self.needs_expansion = None;
+    self.needs_expansion = if self.write_buffer.is_empty() {
+      None
+    } else if target_stage + 1 < KV_STAGE_SIZES.len() {
+      Some(target_stage + 1)
+    } else {
+      tracing::warn!(
+        target_stage,
+        overflow_entries = self.write_buffer.len(),
+        "KV target layout remains overfull at the maximum stage; overflow remains recoverable in the hot tail"
+      );
+      None
+    };
 
-    tracing::info!(target_stage, new_bucket_count, new_block_size, new_pages_size, "KV block expansion finalized");
+    tracing::info!(
+      target_stage,
+      new_bucket_count,
+      new_block_length,
+      new_pages_size,
+      overflow_entries = self.write_buffer.len(),
+      next_expansion_stage = self.needs_expansion,
+      "KV block expansion finalized"
+    );
 
     Ok(())
   }

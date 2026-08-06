@@ -719,7 +719,7 @@ pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> En
   // path keys/HEAD), so a concurrent sweep can otherwise collect nodes that
   // are about to become reachable. Dry-run GC does not sweep and can remain
   // non-blocking.
-  let _namespace_guard = if dry_run { None } else { Some(engine.namespace_write_guard()?) };
+  let _namespace_guard = if dry_run { None } else { Some(engine.direct_hard_authority_guard()?) };
 
   // Emit GC started event
   ctx.emit(
