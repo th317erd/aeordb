@@ -718,7 +718,7 @@ reference_jobs=${CARGO_BUILD_JOBS:-4}
 if ((reference_jobs > 6)); then
   reference_jobs=6
 fi
-reference_target=${AEORDB_V4_REFERENCE_TARGET_DIR:-/tmp/codex/aeordb-v4-reference-target}
+reference_target=${AEORDB_V4_REFERENCE_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo_root/target}/v4-reference}
 CARGO_TARGET_DIR="$reference_target" cargo run -j "$reference_jobs" --locked --quiet \
   --manifest-path "$reference_root/Cargo.toml" -- verify "$fixture_root" \
   || fail "independent v4 reference verification failed"
