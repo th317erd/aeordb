@@ -256,6 +256,7 @@
     "docs/src/plugins/default-plugins.md",
     "docs/src/plugins/sdk-reference.md",
     "docs/src/operations/gc.md",
+    "docs/src/operations/deployment-safety.md",
     "docs/src/operations/reindex.md",
     "docs/src/operations/tasks.md",
     "docs/src/operations/backup.md",

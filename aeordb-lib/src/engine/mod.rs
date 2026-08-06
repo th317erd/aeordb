@@ -10,6 +10,7 @@ pub mod cache;
 pub mod cache_loaders;
 pub mod cluster_join;
 pub mod compression;
+pub mod config_resolver;
 pub mod conflict_store;
 pub mod content_type;
 pub mod cron_scheduler;

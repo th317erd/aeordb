@@ -93,7 +93,7 @@ fn render(registry_path: &Path, system_family_manifest_path: &Path, architecture
   );
   output.push_str(
     "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
-     pub struct ConfigProperty { pub id: u16, pub path: &'static str, pub environment: &'static str, pub cli: &'static str, pub kind: &'static str, pub activation: &'static str, pub owner: &'static str, pub lkg: bool, pub redaction: Option<&'static str> }\n\n\
+     pub struct ConfigProperty { pub id: u16, pub path: &'static str, pub environment: &'static str, pub cli: &'static str, pub kind: &'static str, pub default: &'static str, pub constraint: &'static str, pub activation: &'static str, pub owner: &'static str, pub lkg: bool, pub redaction: Option<&'static str> }\n\n\
      #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
      pub struct DynamicRecordContract { pub id: u16, pub name: &'static str, pub discoverability: &'static str, pub retention_owner: &'static str }\n\n\
      #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
@@ -202,12 +202,14 @@ fn render(registry_path: &Path, system_family_manifest_path: &Path, architecture
   for row in config_properties {
     let path = string_field(row, "path")?;
     output.push_str(&format!(
-      "  ConfigProperty {{ id: {}, path: {:?}, environment: {:?}, cli: {:?}, kind: {:?}, activation: {:?}, owner: {:?}, lkg: {}, redaction: {} }},\n",
+      "  ConfigProperty {{ id: {}, path: {:?}, environment: {:?}, cli: {:?}, kind: {:?}, default: {:?}, constraint: {:?}, activation: {:?}, owner: {:?}, lkg: {}, redaction: {} }},\n",
       u64_field(row, "id")?,
       path,
       environment_name(path),
       cli_name(path),
       string_field(row, "kind")?,
+      string_field(row, "default")?,
+      string_field(row, "constraint")?,
       string_field(row, "activation")?,
       string_field(row, "owner")?,
       bool_field(row, "lkg")?,

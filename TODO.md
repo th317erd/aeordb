@@ -122,6 +122,21 @@
         - [x] Document checked rollback/install behavior and record live disposable-database evidence.
       - [x] Run fault, restart, repair, broad regression, and real-world v3 evidence gates; commit and push each green slice.
   - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
+    - [ ] P2b-1: freeze the complete property registry and strict resolver in diagnostic shadow mode.
+      - [x] Extend generated registry metadata with frozen defaults and constraints without changing registry identities.
+      - [x] Add strict duplicate-aware runtime v1 and lifecycle v0/v1 document decoders.
+      - [x] Resolve each property through CLI, environment, stored, LKG/history, and default policy with visible source attribution.
+      - [x] Validate legacy aliases/conflicts, quantities, paths, ranges, and cross-property invariants.
+      - [ ] Expose unresolved/degraded/capability diagnostics without activating new values in live consumers.
+        - [ ] Derive bounded native RAM/CPU/filesystem/chunk/path context without mutating engine state.
+        - [ ] Read current runtime/lifecycle inputs with metadata-first size bounds and collect only registered process overrides.
+        - [ ] Retain one immutable startup shadow report and expose a read-only engine snapshot without logging redacted path values.
+        - [ ] Prove missing, valid, malformed, unreadable, override, and no-live-owner-activation behavior against a real engine.
+      - [ ] Run focused, malformed, precedence, registry, adjacent lifecycle/config, and broad gates; commit and push.
+    - [ ] P2b-2: add the process-wide memory coordinator and complete owner accounting behind current-behavior adapters.
+    - [ ] P2b-3: migrate KV, directory, index, query, parser/plugin, task, GC, repair, and maintenance growth to reservations and eviction.
+    - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
+    - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
