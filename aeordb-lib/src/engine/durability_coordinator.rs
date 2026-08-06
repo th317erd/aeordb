@@ -7,11 +7,14 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::File;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::engine::native_durability::{
   NativeDurabilityError, NativeDurabilityErrorClass, NativeDurabilityOperation, sync_file_all_native, sync_file_data_native,
+};
+use crate::engine::memory_coordinator::{
+  AdmissionClass, CriticalMemoryPurpose, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation,
 };
 use crate::engine::v4::contract_generated::{durability_operation_v1, os_error_class_v1, retry_class_v1};
 
@@ -548,6 +551,7 @@ pub enum DurabilityCoordinatorError {
   StateUnavailable,
   SequenceExhausted,
   InvalidConfiguration(String),
+  ResourceExhausted(String),
 }
 
 impl DurabilityCoordinatorError {
@@ -576,6 +580,7 @@ impl fmt::Display for DurabilityCoordinatorError {
       Self::StateUnavailable => write!(formatter, "durability coordinator state is unavailable"),
       Self::SequenceExhausted => write!(formatter, "durability sequence space is exhausted"),
       Self::InvalidConfiguration(message) => write!(formatter, "invalid durability coordinator configuration: {message}"),
+      Self::ResourceExhausted(message) => write!(formatter, "durability memory admission failed: {message}"),
     }
   }
 }
@@ -590,15 +595,14 @@ enum CommitStatus {
   Failed(DurabilityFailure),
 }
 
-#[derive(Clone, Debug)]
 struct CommitRecord {
   plan: DurabilityCommitPlan,
   status: CommitStatus,
   estimated_bytes: u64,
   admitted_at: Instant,
+  _memory_reservation: Option<MemoryReservation>,
 }
 
-#[derive(Debug)]
 struct CoordinatorState {
   next_sequence: u64,
   hard_frontier: u64,
@@ -638,7 +642,14 @@ pub const DEFAULT_GROUP_COMMIT_MAX_DELAY: Duration = Duration::from_millis(100);
 pub const MIN_GROUP_COMMIT_MAX_BYTES: u64 = 1024 * 1024;
 pub const MAX_GROUP_COMMIT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_GROUP_COMMIT_MAX_DELAY: Duration = Duration::from_millis(1_000);
+/// A zero-byte estimate must not allow one execution driver to materialize an
+/// arbitrarily large ticket/hash-set scratch group.
+pub const MAX_GROUP_COMMIT_RECORDS: usize = 1_024;
+pub const MAX_DURABILITY_WAITER_RECORDS: usize = 4_096;
 const LIVE_GROUP_DRIVER_DELAY: Duration = Duration::from_millis(1);
+const DURABILITY_RECORD_BASE_BYTES: u64 = 512;
+const MAX_DURABILITY_FAILURE_MESSAGE_BYTES: u64 = 4 * 1024;
+const DURABILITY_LEDGER_ENTRY_BYTES: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DurabilityGroupPolicy {
@@ -677,13 +688,18 @@ impl Default for DurabilityGroupPolicy {
   }
 }
 
-#[derive(Debug)]
 pub struct DurabilityCoordinator {
   id: uuid::Uuid,
   state: Mutex<CoordinatorState>,
   changed: Condvar,
   group_policy: DurabilityGroupPolicy,
   recoverable_file_barrier: Arc<dyn RecoverableFileBarrier>,
+  memory_policy: RwLock<Option<DurabilityMemoryPolicy>>,
+}
+
+struct DurabilityMemoryPolicy {
+  coordinator: Arc<MemoryCoordinator>,
+  _ledger_reservation: Option<MemoryReservation>,
 }
 
 impl Default for DurabilityCoordinator {
@@ -712,6 +728,19 @@ impl DurabilityCoordinator {
     Ok(Self::with_components(DurabilityGroupPolicy::default(), ledger_capacity, Arc::new(NativeRecoverableFileBarrier)))
   }
 
+  pub fn with_policy_and_memory_coordinator(
+    group_policy: DurabilityGroupPolicy,
+    ledger_capacity: usize,
+    memory_coordinator: Arc<MemoryCoordinator>,
+  ) -> Result<Self, DurabilityCoordinatorError> {
+    if ledger_capacity == 0 {
+      return Err(DurabilityCoordinatorError::InvalidConfiguration("ledger capacity must be nonzero".to_string()));
+    }
+    let coordinator = Self::with_components(group_policy, ledger_capacity, Arc::new(NativeRecoverableFileBarrier));
+    coordinator.activate_memory_coordinator(memory_coordinator)?;
+    Ok(coordinator)
+  }
+
   fn with_components(
     group_policy: DurabilityGroupPolicy,
     ledger_capacity: usize,
@@ -723,7 +752,41 @@ impl DurabilityCoordinator {
       changed: Condvar::new(),
       group_policy,
       recoverable_file_barrier,
+      memory_policy: RwLock::new(None),
     }
+  }
+
+  pub(crate) fn activate_memory_coordinator(&self, memory_coordinator: Arc<MemoryCoordinator>) -> Result<(), DurabilityCoordinatorError> {
+    let mut policy = self.memory_policy.write().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    if policy.is_some() {
+      return Err(DurabilityCoordinatorError::InvalidConfiguration(
+        "durability memory coordinator was activated more than once".to_string(),
+      ));
+    }
+    let state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    if !state.records.is_empty() || !state.pending_hard.is_empty() {
+      return Err(DurabilityCoordinatorError::InvalidConfiguration(
+        "durability memory coordinator cannot activate while waiter records are live".to_string(),
+      ));
+    }
+    let ledger_bytes = u64::try_from(state.ledger_capacity)
+      .ok()
+      .and_then(|capacity| capacity.checked_mul(DURABILITY_LEDGER_ENTRY_BYTES))
+      .and_then(|bytes| bytes.checked_add(MAX_DURABILITY_FAILURE_MESSAGE_BYTES))
+      .ok_or_else(|| DurabilityCoordinatorError::InvalidConfiguration("durability ledger reservation overflow".to_string()))?;
+    drop(state);
+    let policy_available = memory_coordinator.snapshot().map_err(durability_memory_error)?.policy.is_some();
+    let ledger_reservation = if policy_available {
+      Some(
+        memory_coordinator
+          .reserve(MemoryOwner::DurabilityWaiters, ledger_bytes, AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite))
+          .map_err(durability_memory_error)?,
+      )
+    } else {
+      return Ok(());
+    };
+    *policy = Some(DurabilityMemoryPolicy { coordinator: memory_coordinator, _ledger_reservation: ledger_reservation });
+    Ok(())
   }
 
   pub fn admit(&self, plan: DurabilityCommitPlan) -> Result<DurabilityTicket, DurabilityCoordinatorError> {
@@ -731,18 +794,41 @@ impl DurabilityCoordinator {
   }
 
   pub fn admit_sized(&self, plan: DurabilityCommitPlan, estimated_bytes: u64) -> Result<DurabilityTicket, DurabilityCoordinatorError> {
-    let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
-    if plan.class == CommitClass::HardAuthority {
-      if let Some(failure) = &state.hard_failure {
-        return Err(DurabilityCoordinatorError::ExecutorFailure(failure.clone()));
-      }
+    {
+      let state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+      ensure_waiter_admission_available(&state, plan.class)?;
     }
+    let memory_policy = self.memory_policy.read().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    let memory_reservation = match memory_policy.as_ref() {
+      Some(policy) => Some(
+        policy
+          .coordinator
+          .reserve(
+            MemoryOwner::DurabilityWaiters,
+            durability_record_bytes(&plan)?,
+            AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite),
+          )
+          .map_err(durability_memory_error)?,
+      ),
+      None => None,
+    };
+    let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    ensure_waiter_admission_available(&state, plan.class)?;
     let sequence = state.next_sequence;
     state.next_sequence = state.next_sequence.checked_add(1).ok_or(DurabilityCoordinatorError::SequenceExhausted)?;
     if plan.class == CommitClass::HardAuthority {
       state.pending_hard.push_back(sequence);
     }
-    state.records.insert(sequence, CommitRecord { plan, status: CommitStatus::Admitted, estimated_bytes, admitted_at: Instant::now() });
+    state.records.insert(
+      sequence,
+      CommitRecord {
+        plan,
+        status: CommitStatus::Admitted,
+        estimated_bytes,
+        admitted_at: Instant::now(),
+        _memory_reservation: memory_reservation,
+      },
+    );
     drop(state);
     self.changed.notify_all();
     Ok(DurabilityTicket { coordinator_id: self.id, sequence })
@@ -916,7 +1002,9 @@ impl DurabilityCoordinator {
     let waiter_state = self.waiter_state(ticket)?;
     if !matches!(waiter_state, DurabilityWaiterState::Pending) {
       let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
-      state.records.remove(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+      let retired = state.records.remove(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+      drop(state);
+      drop(retired);
     }
     Ok(waiter_state)
   }
@@ -950,6 +1038,17 @@ impl DurabilityCoordinator {
     Ok(state.hard_failure.clone())
   }
 
+  pub fn memory_reservations_active(&self) -> Result<bool, DurabilityCoordinatorError> {
+    Ok(
+      self
+        .memory_policy
+        .read()
+        .map_err(|_| DurabilityCoordinatorError::StateUnavailable)?
+        .as_ref()
+        .is_some_and(|policy| policy._ledger_reservation.is_some()),
+    )
+  }
+
   fn validate_ticket(&self, ticket: DurabilityTicket) -> Result<(), DurabilityCoordinatorError> {
     if ticket.coordinator_id == self.id {
       Ok(())
@@ -969,6 +1068,12 @@ impl DurabilityCoordinator {
   ) -> Result<(Vec<u64>, Vec<DurabilityOperation>), DurabilityCoordinatorError> {
     if tickets.is_empty() {
       return Err(DurabilityCoordinatorError::InvalidPlan("durability group cannot be empty".to_string()));
+    }
+    if tickets.len() > MAX_GROUP_COMMIT_RECORDS {
+      return Err(DurabilityCoordinatorError::InvalidPlan(format!(
+        "durability group contains {} tickets; maximum is {MAX_GROUP_COMMIT_RECORDS}",
+        tickets.len()
+      )));
     }
     let mut unique = HashSet::with_capacity(tickets.len());
     for ticket in tickets {
@@ -1016,6 +1121,7 @@ impl DurabilityCoordinator {
     disposition: DurabilityFailureDisposition,
     attempts: u8,
   ) -> Result<Vec<DurabilityFailure>, DurabilityCoordinatorError> {
+    let message = bounded_failure_message(message);
     let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
     let hard_authority = sequences
       .first()
@@ -1043,6 +1149,20 @@ impl DurabilityCoordinator {
     }
     Ok(failures)
   }
+}
+
+fn ensure_waiter_admission_available(state: &CoordinatorState, class: CommitClass) -> Result<(), DurabilityCoordinatorError> {
+  if class == CommitClass::HardAuthority {
+    if let Some(failure) = &state.hard_failure {
+      return Err(DurabilityCoordinatorError::ExecutorFailure(failure.clone()));
+    }
+  }
+  if state.records.len() >= MAX_DURABILITY_WAITER_RECORDS {
+    return Err(DurabilityCoordinatorError::ResourceExhausted(format!(
+      "durability waiter record limit reached: {MAX_DURABILITY_WAITER_RECORDS}"
+    )));
+  }
+  Ok(())
 }
 
 fn coordinator_has_nonterminal_work(state: &CoordinatorState) -> bool {
@@ -1096,6 +1216,7 @@ fn fail_pending_hard_locked(
     return vec![failure.clone()];
   }
 
+  let message = bounded_failure_message(message);
   let pending: Vec<_> = state.pending_hard.drain(..).collect();
   let mut failures = Vec::with_capacity(pending.len());
   for sequence in pending {
@@ -1118,6 +1239,19 @@ fn fail_pending_hard_locked(
     state.hard_failure = Some(failure.clone());
   }
   failures
+}
+
+fn bounded_failure_message(mut message: String) -> String {
+  let maximum = MAX_DURABILITY_FAILURE_MESSAGE_BYTES as usize;
+  if message.len() <= maximum {
+    return message;
+  }
+  let mut end = maximum;
+  while end > 0 && !message.is_char_boundary(end) {
+    end -= 1;
+  }
+  message.truncate(end);
+  message
 }
 
 pub enum DurabilityHardTurn<'a> {
@@ -1202,6 +1336,9 @@ fn select_ready_hard_group_locked(
     if selected_bytes >= policy.max_bytes {
       break;
     }
+    if selected.len() >= MAX_GROUP_COMMIT_RECORDS {
+      break;
+    }
   }
 
   let elapsed = now.checked_duration_since(first.admitted_at).unwrap_or_default();
@@ -1209,6 +1346,27 @@ fn select_ready_hard_group_locked(
     Ok(selected)
   } else {
     Ok(Vec::new())
+  }
+}
+
+fn durability_record_bytes(plan: &DurabilityCommitPlan) -> Result<u64, DurabilityCoordinatorError> {
+  let operation_bytes = u64::try_from(plan.operations.capacity())
+    .ok()
+    .and_then(|capacity| capacity.checked_mul(std::mem::size_of::<DurabilityOperation>() as u64))
+    .ok_or_else(|| DurabilityCoordinatorError::ResourceExhausted("commit-plan memory estimate overflow".to_string()))?;
+  DURABILITY_RECORD_BASE_BYTES
+    .checked_add(MAX_DURABILITY_FAILURE_MESSAGE_BYTES.saturating_mul(3))
+    .and_then(|bytes| bytes.checked_add(operation_bytes))
+    .ok_or_else(|| DurabilityCoordinatorError::ResourceExhausted("waiter-record memory estimate overflow".to_string()))
+}
+
+fn durability_memory_error(error: MemoryCoordinatorError) -> DurabilityCoordinatorError {
+  match error {
+    MemoryCoordinatorError::PolicyUnavailable
+    | MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => DurabilityCoordinatorError::ResourceExhausted(error.to_string()),
+    other => DurabilityCoordinatorError::InvalidConfiguration(format!("memory coordinator rejected durability accounting: {other}")),
   }
 }
 

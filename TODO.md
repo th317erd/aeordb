@@ -199,6 +199,14 @@
           - [x] Fail closed on system-subtree/read errors and preserve retryable resource-exhaustion responses.
           - [x] Prove embedded, task, HTTP, cancellation, malformed, pressure, cleanup, restart, and round-trip behavior.
         - [ ] Normalize historical snapshot roots that retain stale system-child relationships during user-only export, with an explicit v3 compatibility fixture and no dangling restored relation.
+        - [x] Bound durability coordinator records, hard-waiter queues, execution scratch, and retained ledger entries under `durability_waiters` critical admission.
+          - [x] Refuse pre-mutation admission without latching the database when durability waiter headroom is exhausted.
+          - [x] Retain each reservation until its exact waiter record is retired, including failure and unwind paths.
+          - [x] Prove bounded zero-byte estimates, group selection, concurrent pressure, accounting release, and unchanged hard-frontier semantics.
+        - [ ] Bound file and range stream inventories, coalesced spans, decoded chunks, and response lifetime under `streaming_read` admission.
+        - [ ] Bound v3/v4 migration capture, checkpoints, and cutover scratch under `migration` admission.
+        - [ ] Bound verify, rebuild, header repair, integrity, and explicit recovery scratch under `repair` admission.
+        - [ ] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
       - [ ] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.

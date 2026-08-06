@@ -775,6 +775,15 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
 
 `memory.process` is sampled from the operating system. On Linux this uses `/proc/self/status` plus `/proc/self/fd`; on macOS it uses Mach task information plus `/dev/fd`. Platform-specific fields that are unavailable are reported as `0`. `memory.index_cache.estimated_*`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are allocation estimates intended for diagnosis and trend monitoring. The index `*_reserved_bytes` fields are exact coordinator reservations: clean cache, retained dirty state, and serialized flush scratch are reported separately. While `reservation_owned` is true, the `index_dirty_buffers` coordinator owner reconciles to `dirty_reserved_bytes + flush_reserved_bytes`; flush scratch alone is critical durable-write headroom.
 
+The `durability_waiters` owner reserves bounded emergency headroom for the
+operation ledger and each admitted commit record until its exact result is
+retired. Hard-authority records additionally enter the bounded frontier queue.
+Exhausting that headroom refuses a new pre-mutation commit with a
+retryable `503` instead of allowing the queue to grow or falsely latching a
+storage failure. Until strict runtime activation, an unavailable memory policy
+retains the legacy write path behind a fixed structural waiter ceiling and
+reports its bytes as legacy observation; it does not permit an unbounded queue.
+
 The index cache holds full field/strategy index files while they have unflushed mutations or recent read/write activity. Clean indexes are recoverable from disk and may be evicted after `clean_ttl_ms` of idleness or earlier when the cache exceeds `max_bytes`. Dirty and in-flight indexes are never evicted before durable publication succeeds. Publication failure restores the exact dirty generation and releases its flush scratch reservation. The resolved defaults are `min(2 GiB, hard-memory-limit / 4)` for clean indexes, `min(1 GiB, hard-memory-limit / 8)` for dirty mutations, 256 MiB per publication batch, and five minutes idle TTL. Use the registered runtime properties or their official environment forms: `AEORDB_CACHE_INDEX_CLEAN_MAX_BYTES`, `AEORDB_INDEX_MUTATION_BUFFER_MAX_BYTES`, `AEORDB_INDEX_PUBLICATION_BATCH_MAX_BYTES`, and `AEORDB_CACHE_INDEX_CLEAN_TTL_SECONDS`.
 
 **Example:**

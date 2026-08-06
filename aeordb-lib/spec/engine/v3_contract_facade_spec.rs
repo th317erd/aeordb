@@ -1,8 +1,10 @@
 use aeordb::engine::durability_coordinator::{
   CommitClass, DurabilityCommitPlan, DurabilityCoordinator, DurabilityExecutor, DurabilityFailureDisposition, DurabilityGroupExecutor,
   DEFAULT_GROUP_COMMIT_MAX_BYTES, DEFAULT_GROUP_COMMIT_MAX_DELAY, DurabilityGroupPolicy, DurabilityHardTurn, DurabilityOperation,
-  DurabilityWaiterState, NativeFileBarrierKind, OsErrorClass, RetryClass, classify_io_error, classify_native_durability_error,
+  DurabilityWaiterState, MAX_DURABILITY_WAITER_RECORDS, MAX_GROUP_COMMIT_RECORDS, NativeFileBarrierKind, OsErrorClass, RetryClass,
+  classify_io_error, classify_native_durability_error,
 };
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::native_durability::{platform_file_identity, preallocate_file};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::kv_store::KV_TYPE_CHUNK;
@@ -188,6 +190,186 @@ fn operation_ledger_is_bounded_and_zero_capacity_is_rejected() {
   assert_eq!(snapshot.ledger.len(), 2);
   assert_eq!(snapshot.ledger[0].operation, DurabilityOperation::AuthorityBarrier);
   assert_eq!(snapshot.ledger[1].operation, DurabilityOperation::AuthorityReadback);
+}
+
+fn durability_reserved_bytes(coordinator: &MemoryCoordinator) -> u64 {
+  coordinator.snapshot().unwrap().owner(MemoryOwner::DurabilityWaiters).unwrap().reserved_bytes
+}
+
+fn memory_bounded_durability_coordinator(emergency_reserve_bytes: u64) -> (std::sync::Arc<MemoryCoordinator>, DurabilityCoordinator) {
+  let hard_limit_bytes = emergency_reserve_bytes + 16 * 1024;
+  let memory =
+    std::sync::Arc::new(MemoryCoordinator::new(MemoryPolicy::new(8 * 1024, hard_limit_bytes, 1, emergency_reserve_bytes).unwrap()));
+  let durability = DurabilityCoordinator::with_policy_and_memory_coordinator(
+    DurabilityGroupPolicy::new(1024 * 1024, std::time::Duration::ZERO).unwrap(),
+    4,
+    std::sync::Arc::clone(&memory),
+  )
+  .unwrap();
+  (memory, durability)
+}
+
+#[test]
+fn durability_waiter_admission_is_bounded_before_sequence_or_queue_mutation() {
+  let (memory, coordinator) = memory_bounded_durability_coordinator(48 * 1024);
+  let baseline = durability_reserved_bytes(&memory);
+  let mut tickets = Vec::new();
+  loop {
+    match coordinator.admit_sized(header_commit_plan(), 0) {
+      Ok(ticket) => tickets.push(ticket),
+      Err(aeordb::engine::durability_coordinator::DurabilityCoordinatorError::ResourceExhausted(_)) => break,
+      Err(error) => panic!("unexpected durability admission error: {error}"),
+    }
+  }
+
+  assert!(!tickets.is_empty());
+  let after_refusal = coordinator.snapshot().unwrap();
+  assert_eq!(after_refusal.admitted, tickets.len());
+  assert_eq!(after_refusal.pending_hard, tickets.len());
+  assert_eq!(after_refusal.next_sequence, tickets.last().unwrap().sequence() + 1);
+  assert!(durability_reserved_bytes(&memory) > baseline);
+
+  coordinator
+    .fail_pending_hard(
+      DurabilityOperation::DependencyAppend,
+      "retire pressure-test waiters",
+      DurabilityFailureDisposition::serious(OsErrorClass::OtherPersistentIo, RetryClass::AfterRepair),
+      1,
+    )
+    .unwrap();
+  for ticket in tickets {
+    assert!(matches!(coordinator.take_waiter_state(ticket).unwrap(), DurabilityWaiterState::Failed(_)));
+  }
+  assert_eq!(durability_reserved_bytes(&memory), baseline);
+}
+
+#[test]
+fn durability_waiter_reservation_survives_success_failure_and_unwind_until_retirement() {
+  let (memory, coordinator) = memory_bounded_durability_coordinator(256 * 1024);
+  let baseline = durability_reserved_bytes(&memory);
+
+  let succeeded = coordinator.admit(header_commit_plan()).unwrap();
+  let after_success_admission = durability_reserved_bytes(&memory);
+  assert!(after_success_admission > baseline);
+  coordinator.execute(succeeded, &mut RecordingExecutor::default()).unwrap();
+  assert_eq!(durability_reserved_bytes(&memory), after_success_admission);
+  assert!(matches!(coordinator.take_waiter_state(succeeded).unwrap(), DurabilityWaiterState::Succeeded(_)));
+  assert_eq!(durability_reserved_bytes(&memory), baseline);
+
+  let (memory, coordinator) = memory_bounded_durability_coordinator(256 * 1024);
+  let baseline = durability_reserved_bytes(&memory);
+  let failed = coordinator.admit(header_commit_plan()).unwrap();
+  let after_failure_admission = durability_reserved_bytes(&memory);
+  let mut failing = RecordingExecutor { operations: Vec::new(), fail_at: Some(DurabilityOperation::AuthorityBarrier) };
+  assert!(coordinator.execute(failed, &mut failing).is_err());
+  assert_eq!(durability_reserved_bytes(&memory), after_failure_admission);
+  assert!(matches!(coordinator.take_waiter_state(failed).unwrap(), DurabilityWaiterState::Failed(_)));
+  assert_eq!(durability_reserved_bytes(&memory), baseline);
+
+  let (memory, coordinator) = memory_bounded_durability_coordinator(256 * 1024);
+  let baseline = durability_reserved_bytes(&memory);
+  let unwound = coordinator.admit(header_commit_plan()).unwrap();
+  let after_unwind_admission = durability_reserved_bytes(&memory);
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| coordinator.execute(unwound, &mut PanicExecutor)));
+  assert!(result.is_err());
+  assert_eq!(durability_reserved_bytes(&memory), after_unwind_admission);
+  assert!(matches!(coordinator.take_waiter_state(unwound).unwrap(), DurabilityWaiterState::Failed(_)));
+  assert_eq!(durability_reserved_bytes(&memory), baseline);
+}
+
+#[test]
+fn zero_byte_estimates_cannot_create_an_unbounded_execution_group() {
+  let coordinator = DurabilityCoordinator::new();
+  let tickets: Vec<_> = (0..=MAX_GROUP_COMMIT_RECORDS).map(|_| coordinator.admit_sized(header_commit_plan(), 0).unwrap()).collect();
+  let selected = coordinator.select_ready_hard_group(true).unwrap();
+
+  assert_eq!(selected.len(), MAX_GROUP_COMMIT_RECORDS);
+  assert_eq!(selected.first(), tickets.first());
+  assert_eq!(selected.last(), tickets.get(MAX_GROUP_COMMIT_RECORDS - 1));
+
+  let mut executor = RecordingGroupExecutor::default();
+  assert!(coordinator.execute_group(&tickets, &mut executor).is_err());
+  assert!(executor.calls.is_empty());
+}
+
+#[test]
+fn unconfigured_coordinator_retains_legacy_admission_behind_a_structural_ceiling() {
+  let coordinator = DurabilityCoordinator::new();
+  let disposable_plan = || DurabilityCommitPlan::new(CommitClass::Disposable, Vec::new()).unwrap();
+  for _ in 0..MAX_DURABILITY_WAITER_RECORDS {
+    coordinator.admit(disposable_plan()).unwrap();
+  }
+  let before_refusal = coordinator.snapshot().unwrap();
+
+  let error = coordinator.admit(disposable_plan()).unwrap_err();
+
+  assert!(matches!(error, aeordb::engine::durability_coordinator::DurabilityCoordinatorError::ResourceExhausted(_)));
+  let after_refusal = coordinator.snapshot().unwrap();
+  assert_eq!(after_refusal.next_sequence, before_refusal.next_sequence);
+  assert_eq!(after_refusal.admitted, MAX_DURABILITY_WAITER_RECORDS);
+}
+
+#[test]
+fn concurrent_durability_admission_never_crosses_the_emergency_reserve() {
+  let (memory, coordinator) = memory_bounded_durability_coordinator(96 * 1024);
+  let baseline = durability_reserved_bytes(&memory);
+  let coordinator = std::sync::Arc::new(coordinator);
+  let workers: Vec<_> = (0..32)
+    .map(|_| {
+      let coordinator = std::sync::Arc::clone(&coordinator);
+      std::thread::spawn(move || coordinator.admit_sized(header_commit_plan(), 0))
+    })
+    .collect();
+  let mut tickets = Vec::new();
+  let mut refusals = 0usize;
+  for worker in workers {
+    match worker.join().unwrap() {
+      Ok(ticket) => tickets.push(ticket),
+      Err(aeordb::engine::durability_coordinator::DurabilityCoordinatorError::ResourceExhausted(_)) => refusals += 1,
+      Err(error) => panic!("unexpected concurrent admission error: {error}"),
+    }
+  }
+
+  assert!(!tickets.is_empty());
+  assert!(refusals > 0);
+  let memory_snapshot = memory.snapshot().unwrap();
+  assert!(memory_snapshot.critical_reserved_bytes <= memory_snapshot.policy.unwrap().emergency_reserve_bytes);
+
+  coordinator
+    .fail_pending_hard(
+      DurabilityOperation::DependencyAppend,
+      "retire concurrent pressure-test waiters",
+      DurabilityFailureDisposition::serious(OsErrorClass::OtherPersistentIo, RetryClass::AfterRepair),
+      1,
+    )
+    .unwrap();
+  for ticket in tickets {
+    assert!(matches!(coordinator.take_waiter_state(ticket).unwrap(), DurabilityWaiterState::Failed(_)));
+  }
+  assert_eq!(durability_reserved_bytes(&memory), baseline);
+}
+
+#[test]
+fn durability_failure_evidence_is_bounded_by_the_admitted_waiter_charge() {
+  let (_memory, coordinator) = memory_bounded_durability_coordinator(96 * 1024);
+  let tickets: Vec<_> = (0..2).map(|_| coordinator.admit(header_commit_plan()).unwrap()).collect();
+  let oversized = "failure-evidence-".repeat(1024);
+  coordinator
+    .fail_pending_hard(
+      DurabilityOperation::AuthorityBarrier,
+      oversized,
+      DurabilityFailureDisposition::serious(OsErrorClass::MediaIo, RetryClass::AfterRepair),
+      1,
+    )
+    .unwrap();
+
+  for ticket in tickets {
+    let DurabilityWaiterState::Failed(failure) = coordinator.take_waiter_state(ticket).unwrap() else {
+      panic!("waiter did not retain bounded failure evidence")
+    };
+    assert!(failure.message.len() <= 4 * 1024);
+    assert!(failure.message.is_char_boundary(failure.message.len()));
+  }
 }
 
 struct PanicExecutor;
@@ -468,6 +650,23 @@ fn bounded_group_failure_halts_and_retires_every_pending_hard_waiter() {
 
   let error = coordinator.admit(header_commit_plan()).unwrap_err();
   assert_eq!(error.operation(), Some(DurabilityOperation::AuthorityBarrier));
+}
+
+#[test]
+fn hard_frontier_failure_only_blocks_new_hard_authority_admission() {
+  let coordinator = DurabilityCoordinator::new();
+  let failed = coordinator.admit(header_commit_plan()).unwrap();
+  let mut executor = RecordingExecutor { operations: Vec::new(), fail_at: Some(DurabilityOperation::AuthorityBarrier) };
+  assert!(coordinator.execute(failed, &mut executor).is_err());
+
+  let soft = DurabilityCommitPlan::new(
+    CommitClass::RecoverableSoftState,
+    vec![DurabilityOperation::DependencyAppend, DurabilityOperation::DataBarrier],
+  )
+  .unwrap();
+  assert!(coordinator.admit(soft).is_ok());
+  assert!(coordinator.admit(DurabilityCommitPlan::new(CommitClass::Disposable, Vec::new()).unwrap()).is_ok());
+  assert!(coordinator.admit(header_commit_plan()).is_err());
 }
 
 #[test]

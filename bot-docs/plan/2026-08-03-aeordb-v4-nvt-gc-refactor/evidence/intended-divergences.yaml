@@ -81,7 +81,7 @@ allowed_divergences:
 
   - id: V4-BOUNDED-MEMORY
     phase: P2-P6
-    behavior: one memory coordinator admits and evicts material cache, KV snapshot, directory, index, query, and GC ownership under configured budgets.
+    behavior: one memory coordinator admits and evicts material cache, KV snapshot, directory, index, query, GC, backup/restore, task, and durability-waiter ownership under configured budgets.
     preserves:
       - correctness under eviction
       - clean derived data is reconstructible

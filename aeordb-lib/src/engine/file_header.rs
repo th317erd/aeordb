@@ -548,7 +548,10 @@ impl V3HeaderDependency<'_> {
 }
 
 fn coordinator_error(error: crate::engine::durability_coordinator::DurabilityCoordinatorError) -> EngineError {
-  EngineError::DurabilityFailure(error.to_string())
+  match error {
+    DurabilityCoordinatorError::ResourceExhausted(message) => EngineError::ResourceExhausted(message),
+    other => EngineError::DurabilityFailure(other.to_string()),
+  }
 }
 
 struct V3HeaderPublicationExecutor<'a> {

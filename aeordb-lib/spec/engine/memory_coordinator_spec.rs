@@ -299,6 +299,13 @@ fn malformed_runtime_keeps_coordinator_observability_without_inventing_a_policy(
   assert!(snapshot.policy.is_none());
   assert!(snapshot.accounted_bytes > 0);
   assert_eq!(snapshot.pressure, MemoryPressure::Unconfigured);
+  let durability = snapshot.owner(MemoryOwner::DurabilityWaiters).unwrap();
+  assert_eq!(durability.reserved_bytes, 0);
+  assert!(durability.observed.resident_bytes > 0, "unconfigured durability state remains visible as legacy observation");
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/bounded-compatibility.txt", b"data", Some("text/plain"))
+    .unwrap();
+  assert!(engine.durability_failure().is_none());
 }
 
 #[test]
@@ -319,7 +326,10 @@ fn engine_observation_adapter_attributes_current_material_owners() {
   let directory_cache = snapshot.owner(MemoryOwner::DirectoryCache).unwrap();
   assert_eq!(directory_cache.observed.resident_bytes, 0, "bounded directory entries must not be double-counted as legacy observation");
   assert!(directory_cache.reserved_bytes > 0);
-  assert!(snapshot.owner(MemoryOwner::DurabilityWaiters).unwrap().observed.items > 0);
+  let durability = snapshot.owner(MemoryOwner::DurabilityWaiters).unwrap();
+  assert_eq!(durability.observed.resident_bytes, 0, "reservation-owned durability state must not be double-counted");
+  assert!(durability.reserved_bytes > 0);
+  assert!(durability.observed.items > 0);
   if cfg!(target_os = "linux") {
     assert!(snapshot.host.rss_bytes > 0);
     assert!(snapshot.host.host_available_bytes.is_some());

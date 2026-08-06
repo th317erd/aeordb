@@ -17,8 +17,8 @@ use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::durability_coordinator::{
-  DurabilityCoordinator, DurabilityFailureDisposition, DurabilityHardTurn, DurabilityOperation, DurabilityTicket, DurabilityWaiterState,
-  OsErrorClass, RetryClass,
+  DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition, DurabilityHardTurn, DurabilityOperation,
+  DurabilityTicket, DurabilityWaiterState, OsErrorClass, RetryClass,
 };
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::entry_header::EntryHeader;
@@ -543,6 +543,13 @@ fn observation_failed(owner: MemoryOwner, message: impl Into<String>) -> MemoryC
   MemoryCoordinatorError::ObservationFailed { owner, message: message.into() }
 }
 
+fn durability_coordinator_engine_error(error: DurabilityCoordinatorError) -> EngineError {
+  match error {
+    DurabilityCoordinatorError::ResourceExhausted(message) => EngineError::ResourceExhausted(message),
+    other => EngineError::DurabilityFailure(other.to_string()),
+  }
+}
+
 fn gc_recheck_memory_error(error: MemoryCoordinatorError) -> EngineError {
   match error {
     MemoryCoordinatorError::PolicyUnavailable
@@ -674,8 +681,9 @@ impl StorageEngine {
     };
     self
       .memory_coordinator
-      .set(coordinator)
+      .set(Arc::clone(&coordinator))
       .map_err(|_| EngineError::InvalidInput("memory coordinator was initialized more than once".to_string()))?;
+    self.durability_coordinator.activate_memory_coordinator(coordinator).map_err(durability_coordinator_engine_error)?;
     Ok(())
   }
 
@@ -840,9 +848,17 @@ impl StorageEngine {
 
     let durability =
       self.durability_coordinator.snapshot().map_err(|error| observation_failed(MemoryOwner::DurabilityWaiters, error.to_string()))?;
-    let durability_bytes = std::mem::size_of_val(&durability).saturating_add(
-      durability.ledger.capacity().saturating_mul(std::mem::size_of::<crate::engine::durability_coordinator::DurabilityLedgerEntry>()),
-    ) as u64;
+    let durability_reservation_owned = self
+      .durability_coordinator
+      .memory_reservations_active()
+      .map_err(|error| observation_failed(MemoryOwner::DurabilityWaiters, error.to_string()))?;
+    let durability_bytes = if durability_reservation_owned {
+      0
+    } else {
+      std::mem::size_of_val(&durability).saturating_add(
+        durability.ledger.capacity().saturating_mul(std::mem::size_of::<crate::engine::durability_coordinator::DurabilityLedgerEntry>()),
+      ) as u64
+    };
     observations.insert(
       MemoryOwner::DurabilityWaiters,
       MemoryObservation {
@@ -4515,7 +4531,7 @@ impl StorageEngine {
     let ticket = self
       .durability_coordinator
       .admit_sized(plan, estimated_dependency_bytes.saturating_add(FILE_HEADER_SIZE as u64))
-      .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+      .map_err(durability_coordinator_engine_error)?;
     Ok(Some(ticket))
   }
 
@@ -4523,9 +4539,9 @@ impl StorageEngine {
     let coordinator = Arc::clone(&self.durability_coordinator);
 
     loop {
-      match coordinator.wait_for_hard_turn(ticket).map_err(|error| EngineError::DurabilityFailure(error.to_string()))? {
+      match coordinator.wait_for_hard_turn(ticket).map_err(durability_coordinator_engine_error)? {
         DurabilityHardTurn::Complete(_) => {
-          return match coordinator.take_waiter_state(ticket).map_err(|error| EngineError::DurabilityFailure(error.to_string()))? {
+          return match coordinator.take_waiter_state(ticket).map_err(durability_coordinator_engine_error)? {
             DurabilityWaiterState::Succeeded(_) => Ok(()),
             DurabilityWaiterState::Failed(failure) => Err(EngineError::DurabilityFailure(failure.message)),
             DurabilityWaiterState::Pending => {
@@ -4546,7 +4562,7 @@ impl StorageEngine {
             Err(error) => {
               drop(namespace);
               permit.release();
-              return Err(self.fail_transaction_ticket(&coordinator, ticket, EngineError::DurabilityFailure(error.to_string())));
+              return Err(self.fail_transaction_ticket(&coordinator, ticket, durability_coordinator_engine_error(error)));
             }
           };
           if group.is_empty() {
@@ -4604,12 +4620,19 @@ impl StorageEngine {
     match prepared {
       Ok(Some(ticket)) => {
         if let Err(error) = self.complete_transaction_ticket(ticket) {
-          return Err(self.record_durability_failure(DurabilityOperation::DependencyAppend, "Transaction hard completion failed", error));
+          return Err(self.classify_transaction_completion_error(error));
         }
         self.run_ready_kv_expansion()
       }
       Ok(None) => Ok(()),
-      Err(error) => Err(self.record_durability_failure(DurabilityOperation::DependencyAppend, "Transaction hard completion failed", error)),
+      Err(error) => Err(self.classify_transaction_completion_error(error)),
+    }
+  }
+
+  fn classify_transaction_completion_error(&self, error: EngineError) -> EngineError {
+    match error {
+      EngineError::ResourceExhausted(_) => error,
+      other => self.record_durability_failure(DurabilityOperation::DependencyAppend, "Transaction hard completion failed", other),
     }
   }
 
@@ -4683,7 +4706,9 @@ impl StorageEngine {
       Ok(Some(hot_tail_offset)) => self.last_published_hot_tail_offset.store(hot_tail_offset, Ordering::Release),
       Ok(None) => {}
       Err(error) => {
-        self.record_durability_failure(DurabilityOperation::HeaderAb, "Timer hard commit failed", error);
+        if !matches!(error, EngineError::ResourceExhausted(_)) {
+          self.record_durability_failure(DurabilityOperation::HeaderAb, "Timer hard commit failed", error);
+        }
       }
     }
   }
@@ -4951,6 +4976,60 @@ mod tests {
     assert_eq!(held.operations, vec![("namespace_authority".to_string(), 1)]);
     drop(try_namespace);
     assert_eq!(engine.active_operations_snapshot().active_operations, 0);
+  }
+
+  #[test]
+  fn durability_waiter_pressure_refuses_transaction_without_latching_the_engine() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = StorageEngine::create(temp.path().join("waiter-pressure.aeordb").to_str().unwrap()).unwrap();
+    let memory = engine.memory_coordinator();
+    let snapshot = memory.snapshot().unwrap();
+    let policy = snapshot.policy.unwrap();
+    let remaining = policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+    let pressure = memory
+      .reserve(
+        MemoryOwner::DurabilityWaiters,
+        remaining.saturating_sub(1),
+        AdmissionClass::Critical(crate::engine::memory_coordinator::CriticalMemoryPurpose::DurableWrite),
+      )
+      .unwrap();
+
+    let error = TransactionGuard::new(&engine).unwrap().commit().unwrap_err();
+    assert!(matches!(error, EngineError::ResourceExhausted(_)));
+    assert!(engine.durability_failure().is_none(), "pre-mutation waiter refusal must not latch the database");
+
+    drop(pressure);
+    TransactionGuard::new(&engine).unwrap().commit().unwrap();
+    assert!(engine.durability_failure().is_none());
+  }
+
+  #[test]
+  fn timer_waiter_pressure_defers_without_latching_or_consuming_the_hot_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = StorageEngine::create(temp.path().join("timer-waiter-pressure.aeordb").to_str().unwrap()).unwrap();
+    engine.store_entry(EntryType::Chunk, b"timer-pressure-key", b"staged dependency").unwrap();
+    assert!(engine.kv_writer.lock().unwrap().hot_buffer_len() > 0);
+
+    let memory = engine.memory_coordinator();
+    let snapshot = memory.snapshot().unwrap();
+    let policy = snapshot.policy.unwrap();
+    let remaining = policy.emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+    let pressure = memory
+      .reserve(
+        MemoryOwner::DurabilityWaiters,
+        remaining.saturating_sub(1),
+        AdmissionClass::Critical(crate::engine::memory_coordinator::CriticalMemoryPurpose::DurableWrite),
+      )
+      .unwrap();
+
+    engine.try_flush_hot_buffer();
+    assert!(engine.durability_failure().is_none(), "pre-dependency timer refusal must not latch the database");
+    assert!(engine.kv_writer.lock().unwrap().hot_buffer_len() > 0, "refused timer publication consumed recoverable dependency state");
+
+    drop(pressure);
+    engine.try_flush_hot_buffer();
+    assert!(engine.durability_failure().is_none());
+    assert_eq!(engine.kv_writer.lock().unwrap().hot_buffer_len(), 0);
   }
 
   #[test]
