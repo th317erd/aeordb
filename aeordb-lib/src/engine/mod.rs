@@ -54,6 +54,7 @@ pub mod json_store;
 pub mod kv_expand;
 pub mod kv_page_provider;
 pub mod kv_pages;
+pub(crate) mod kv_rebuild_workspace;
 pub mod kv_resize;
 pub mod kv_snapshot;
 pub mod kv_stages;

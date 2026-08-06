@@ -406,6 +406,20 @@ fn open_uses_a_non_resident_bootstrap_page_provider() {
 }
 
 #[test]
+fn create_uses_a_non_resident_bootstrap_page_provider() {
+  let dir = tempdir().unwrap();
+  let store = create_test_kv_at_stage(dir.path(), 2);
+  let snapshot = store.snapshot_handle().load();
+
+  assert!(snapshot.resident_pages().is_none(), "create must not materialize one in-memory page slot per KV bucket");
+  assert!(snapshot.bounded_pages().is_some(), "new stores must expose their empty layout through positioned provider access");
+  assert_eq!(snapshot.memory_stats().resident_page_bytes, 0);
+  let provider = store.kv_page_provider_stats().unwrap().expect("create must install a bootstrap page provider");
+  assert_eq!(provider.resident_pages, 0);
+  assert_eq!(provider.resident_bytes, 0);
+}
+
+#[test]
 fn bounded_flush_keeps_an_old_snapshot_exact_until_it_is_dropped() {
   let dir = tempdir().unwrap();
   let mut store = create_test_kv(dir.path());
@@ -622,6 +636,82 @@ fn test_auto_flush() {
       assert_eq!(entry.unwrap().offset, i as u64);
     }
   }
+}
+
+#[test]
+fn bulk_insert_preserves_prior_pages_across_multiple_bounded_flushes() {
+  let dir = tempdir().unwrap();
+  let count = 1_400u32;
+
+  {
+    let mut store = create_test_kv_at_stage(dir.path(), 1);
+    for start in (0..count).step_by(137) {
+      let end = (start + 137).min(count);
+      let entries = (start..end)
+        .map(|index| KVEntry {
+          type_flags: KV_TYPE_CHUNK,
+          hash: blake3::hash(&index.to_le_bytes()).as_bytes().to_vec(),
+          offset: index as u64,
+          total_length: 64,
+        })
+        .collect::<Vec<_>>();
+      store.bulk_insert(&entries).unwrap();
+    }
+
+    let replacement_hash = blake3::hash(&17u32.to_le_bytes()).as_bytes().to_vec();
+    store.bulk_insert(&[KVEntry { type_flags: KV_TYPE_FILE_RECORD, hash: replacement_hash, offset: 99_017, total_length: 96 }]).unwrap();
+    store.flush().unwrap();
+  }
+
+  let store = open_test_kv_at_stage(dir.path(), 1);
+  for index in 0..count {
+    let hash = blake3::hash(&index.to_le_bytes()).as_bytes().to_vec();
+    let entry = get(&store, &hash).unwrap_or_else(|| panic!("bulk insert lost entry {index} across an intermediate flush"));
+    if index == 17 {
+      assert_eq!(entry.offset, 99_017);
+      assert_eq!(entry.entry_type(), KV_TYPE_FILE_RECORD);
+    } else {
+      assert_eq!(entry.offset, index as u64);
+    }
+  }
+}
+
+#[test]
+fn bulk_insert_defers_intermediate_barriers_until_the_explicit_checkpoint() {
+  let dir = tempdir().unwrap();
+  let db_path = dir.path().join("bulk-checkpoint.aeordb");
+  let file = OpenOptions::new().read(true).write(true).create_new(true).open(&db_path).unwrap();
+  let barrier = Arc::new(FailBarrierOnCall { calls: AtomicUsize::new(0), fail_on_call: usize::MAX });
+  let coordinator = Arc::new(DurabilityCoordinator::with_recoverable_file_barrier(barrier.clone()));
+  let kv_block_offset = 256u64;
+  let block_size = aeordb::engine::kv_stages::stage_params(1, page_size(32)).0;
+  let hot_tail_offset = kv_block_offset + block_size;
+  let mut store =
+    DiskKVStore::create_with_coordinator(file, HashAlgorithm::Blake3_256, kv_block_offset, hot_tail_offset, 1, Arc::clone(&coordinator))
+      .unwrap();
+  let after_create = barrier.calls.load(Ordering::SeqCst);
+
+  let entries = (0..1_100u32)
+    .map(|index| KVEntry {
+      type_flags: KV_TYPE_CHUNK,
+      hash: blake3::hash(&index.to_le_bytes()).as_bytes().to_vec(),
+      offset: index as u64,
+      total_length: 64,
+    })
+    .collect::<Vec<_>>();
+  store.bulk_insert(&entries).unwrap();
+  assert_eq!(
+    barrier.calls.load(Ordering::SeqCst),
+    after_create,
+    "intermediate recoverable page batches must not issue one durability barrier per write-buffer window"
+  );
+
+  store.force_flush_hot_buffer().unwrap();
+  assert_eq!(
+    barrier.calls.load(Ordering::SeqCst),
+    after_create + 1,
+    "the explicit hot-tail checkpoint must make all prior page writes durable"
+  );
 }
 
 #[test]

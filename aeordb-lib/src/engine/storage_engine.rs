@@ -18,7 +18,7 @@ use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::durability_coordinator::{
   DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition, DurabilityHardTurn, DurabilityOperation,
-  DurabilityTicket, DurabilityWaiterState, OsErrorClass, RetryClass,
+  DurabilityTicket, DurabilityWaiterState, NativeFileBarrierKind, OsErrorClass, RetryClass,
 };
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::entry_header::EntryHeader;
@@ -28,10 +28,11 @@ use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::file_header::{FILE_HEADER_SIZE, v3_header_commit_plan};
 use crate::engine::hot_tail::VoidRecord;
 use crate::engine::index_store::{IndexManager, IndexMemoryPolicy, IndexWriteBufferOptions, SharedIndexWriteBuffer};
+use crate::engine::kv_rebuild_workspace::{KvRebuildWorkspace, RebuildOrder as WorkspaceRebuildOrder};
 use crate::engine::kv_snapshot::ReadSnapshot;
 use crate::engine::memory_coordinator::{
-  AdmissionClass, HostMemorySample, MemoryCoordinator, MemoryCoordinatorError, MemoryCoordinatorSnapshot, MemoryObservation, MemoryOwner,
-  MemoryPolicy, MemoryReservation,
+  AdmissionClass, CriticalMemoryPurpose, HostMemorySample, MemoryCoordinator, MemoryCoordinatorError, MemoryCoordinatorSnapshot,
+  MemoryObservation, MemoryOwner, MemoryPolicy, MemoryReservation,
 };
 use crate::engine::native_durability::sync_file_all_native;
 use serde::Serialize;
@@ -586,7 +587,7 @@ pub struct StorageEngine {
   configuration_shadow: OnceLock<Arc<crate::engine::config_resolver::ConfigShadowReport>>,
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
   operation_tracker: EngineOperationTracker,
-  shutdown_started: AtomicBool,
+  shutdown_started: Arc<AtomicBool>,
   shutdown_flush_started: AtomicBool,
   shutdown_complete: AtomicBool,
   durability_failure: Mutex<Option<DurabilityFailureState>>,
@@ -1954,7 +1955,7 @@ impl StorageEngine {
       configuration_shadow: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
-      shutdown_started: AtomicBool::new(false),
+      shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
@@ -2191,6 +2192,9 @@ impl StorageEngine {
       let resolved = Self::resolve_rebuild_records(rebuild_records, hash_algo, &deletion_records)?;
       kv.bulk_insert(&resolved)?;
       kv.flush()?;
+      // `bulk_insert` deliberately defers per-window barriers. Publish one
+      // recoverable checkpoint before this bootstrap store can be observed.
+      kv.force_flush_hot_buffer()?;
 
       kv
     };
@@ -2205,7 +2209,7 @@ impl StorageEngine {
       configuration_shadow: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
-      shutdown_started: AtomicBool::new(false),
+      shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
@@ -4284,13 +4288,20 @@ impl StorageEngine {
 
     let hash_algo = self.hash_algo;
 
-    // Scan the append log (needs read lock on writer)
-    // For directory entries, we track value_length so we can prefer
-    // entries with children over empty entries (e.g., root directory
-    // overwritten by ensure_root_directory on a corrupt session). We also
-    // track entry timestamp because WAL offset order stops being chronology
-    // once GC reuses lower void ranges for newer writes.
-    let (scanned_records, deletion_records): (Vec<RebuildKvRecord>, Vec<(String, RebuildOrder)>) = {
+    let memory_coordinator = self.memory_coordinator_if_initialized();
+    let mut rebuild_workspace = KvRebuildWorkspace::new(
+      &self.database_path,
+      hash_algo,
+      memory_coordinator.as_deref(),
+      AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery),
+      Some(Arc::clone(&self.shutdown_started)),
+    )?;
+
+    // Scan the append log under the exclusive maintenance gate. The external
+    // workspace spills sorted runs beside the database, so WAL cardinality no
+    // longer determines resident memory. Entry chronology remains
+    // (timestamp, offset) because GC can reuse lower physical offsets.
+    let (scanned_count, dirty_max_end) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       tracing::debug!(
         writer_offset = writer.current_offset(),
@@ -4302,8 +4313,10 @@ impl StorageEngine {
       let scan_total_bytes = scanner.file_length().saturating_sub(scan_start_offset);
       let mut last_progress_log = std::time::Instant::now();
       let scan_timer = std::time::Instant::now();
-      let mut collected = Vec::new();
-      let mut deletions = Vec::new();
+      let mut scanned_count = 0u64;
+      let mut deletion_count = 0u64;
+      let mut corrupt_entry_count = 0u64;
+      let mut dirty_max_end = 0u64;
       Self::report_startup_progress(
         &progress_callback,
         EngineStartupProgress {
@@ -4319,28 +4332,39 @@ impl StorageEngine {
       while let Some(result) = scanner.next_rebuild_entry() {
         match result {
           Ok(scanned) => {
-            let order = RebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
+            let order = WorkspaceRebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
             if scanned.header.entry_type == EntryType::DeletionRecord {
-              if let Some(value) = scanned.value.as_ref() {
-                if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(value, scanned.header.entry_version) {
-                  deletions.push((record.path, order));
-                }
-              }
+              let value = scanned.value.as_ref().ok_or_else(|| EngineError::CorruptEntry {
+                offset: scanned.offset,
+                reason: "deletion record payload was omitted during KV rebuild".to_string(),
+              })?;
+              let record = crate::engine::deletion_record::DeletionRecord::deserialize(value, scanned.header.entry_version)?;
+              rebuild_workspace.push_deletion_path(&record.path, order)?;
+              deletion_count = deletion_count.saturating_add(1);
             }
             if matches!(scanned.header.entry_type, EntryType::Chunk | EntryType::Void) {
               skipped_payload_bytes = skipped_payload_bytes.saturating_add(scanned.header.value_length as u64);
             }
-            collected.push(RebuildKvRecord {
-              type_flags: scanned.header.entry_type.to_kv_type(),
-              hash: scanned.key.clone(),
-              offset: scanned.offset,
-              value_length: scanned.header.value_length,
-              total_length: scanned.header.total_length,
+            rebuild_workspace.push_value(
+              scanned.header.entry_type.to_kv_type(),
+              &scanned.key,
+              scanned.offset,
+              scanned.header.value_length,
+              scanned.header.total_length,
               order,
-            });
+            )?;
+            scanned_count = scanned_count
+              .checked_add(1)
+              .ok_or_else(|| EngineError::ResourceExhausted("KV rebuild scanned-entry count overflow".to_string()))?;
+            let entry_end = scanned.offset.checked_add(scanned.header.total_length as u64).ok_or_else(|| EngineError::CorruptEntry {
+              offset: scanned.offset,
+              reason: "KV rebuild entry end overflows u64".to_string(),
+            })?;
+            dirty_max_end = dirty_max_end.max(entry_end);
           }
           Err(e) => {
             tracing::warn!("Skipping corrupt entry during KV rebuild: {}", e);
+            corrupt_entry_count = corrupt_entry_count.saturating_add(1);
           }
         }
         if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
@@ -4355,8 +4379,9 @@ impl StorageEngine {
             scanned_bytes,
             total_scan_bytes = scan_total_bytes,
             progress_pct,
-            entries_collected = collected.len(),
-            deletion_records = deletions.len(),
+            entries_collected = scanned_count,
+            deletion_records = deletion_count,
+            corrupt_entries = corrupt_entry_count,
             skipped_payload_bytes,
             "rebuild_kv: WAL scan progress"
           );
@@ -4377,23 +4402,27 @@ impl StorageEngine {
       tracing::info!(
         scanned_bytes = scanner.current_offset().saturating_sub(scan_start_offset),
         total_scan_bytes = scan_total_bytes,
-        entries_collected = collected.len(),
-        deletion_records = deletions.len(),
+        entries_collected = scanned_count,
+        deletion_records = deletion_count,
+        corrupt_entries = corrupt_entry_count,
         skipped_payload_bytes,
         duration_ms = scan_timer.elapsed().as_millis() as u64,
         "rebuild_kv: WAL scan complete"
       );
-      (collected, deletions)
+      (scanned_count, dirty_max_end)
     };
     // Writer lock released here
-    let scanned_count = scanned_records.len() as u64;
+    rebuild_workspace.finish()?;
+    let workspace_record_count = rebuild_workspace.raw_record_count();
+    let resolved_count = rebuild_workspace.resolved_record_count()?;
+    tracing::info!(scanned_count, workspace_record_count, resolved_count, "rebuild_kv: external resolution complete");
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {
         phase: "rebuild_kv_resolve".to_string(),
         message: "Resolving latest WAL records for the rebuilt KV index".to_string(),
-        current: scanned_count,
-        total: Some(scanned_count),
+        current: resolved_count,
+        total: Some(resolved_count),
         progress: Some(0.82),
         eta_seconds: None,
       },
@@ -4422,7 +4451,6 @@ impl StorageEngine {
     //
     // The real end of the WAL is one byte past the last byte of the
     // furthest-out entry the scanner returned.
-    let dirty_max_end: u64 = scanned_records.iter().map(|record| record.offset + record.total_length as u64).max().unwrap_or(0);
     let wal_end = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       writer.current_offset().max(dirty_max_end)
@@ -4437,7 +4465,10 @@ impl StorageEngine {
       // Place KV block at the end of the WAL, sized to fit all entries.
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       let wal_end = writer.current_offset();
-      let target_stage = crate::engine::kv_pages::stage_for_count(scanned_records.len(), hash_length);
+      let resolved_count_usize = usize::try_from(resolved_count).map_err(|_| {
+        EngineError::ResourceExhausted(format!("KV rebuild resolved count {resolved_count} exceeds platform address space"))
+      })?;
+      let target_stage = crate::engine::kv_pages::stage_for_count(resolved_count_usize, hash_length);
       let (bs, _) = crate::engine::kv_stages::stage_params(target_stage, psize);
       tracing::info!("Legacy database: placing KV block at WAL end (offset {}), stage {} ({}B)", wal_end, target_stage, bs);
       (wal_end, bs, wal_end + bs, target_stage)
@@ -4459,58 +4490,117 @@ impl StorageEngine {
       current.suspend_bounded_pages_for_layout_rewrite(std::time::Duration::from_secs(30))?;
       config
     };
-    let kv_file = OpenOptions::new().read(true).write(true).open(&file_path)?;
-    let mut new_kv =
-      DiskKVStore::create_with_coordinator(kv_file, hash_algo, kv_offset, hot_offset, rebuild_stage, durability_coordinator)?;
-    let configure_bootstrap_after_flush = bounded_page_config.is_none();
-    if let Some((coordinator, max_resident_bytes)) = bounded_page_config {
-      new_kv.activate_bounded_pages(coordinator, max_resident_bytes)?;
-    }
+    let mut inserted_count = 0u64;
+    let mut deleted_count = 0u64;
+    let rebuild_result = (|| -> EngineResult<DiskKVStore> {
+      // A valid hot tail tells startup that KV pages represent a clean
+      // checkpoint. Remove that claim durably before the first page is
+      // overwritten. A crash from here until flush restores a valid tail will
+      // therefore re-enter WAL recovery instead of accepting partial pages.
+      let marker_file = OpenOptions::new().read(true).write(true).open(&file_path)?;
+      marker_file.set_len(wal_end)?;
+      durability_coordinator
+        .execute_recoverable_file_barrier(&marker_file, NativeFileBarrierKind::Data, 0)
+        .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
-    // Insert all entries with auto-flush disabled. We want a single flush
-    // at the end so that page writes don't clobber each other across
-    // multiple auto-flush cycles (each auto-flush overwrites the same
-    // bucket pages, potentially evicting entries from earlier flushes).
-    let resolved_entries = Self::resolve_rebuild_records(scanned_records, hash_algo, &deletion_records)?;
-    let inserted_count = resolved_entries.len();
-    Self::report_startup_progress(
-      &progress_callback,
-      EngineStartupProgress {
-        phase: "rebuild_kv_insert".to_string(),
-        message: "Buffering resolved KV records".to_string(),
-        current: 0,
-        total: Some(inserted_count as u64),
-        progress: Some(0.86),
-        eta_seconds: None,
-      },
-    );
-    for kv_entry in &resolved_entries {
-      new_kv.buffer_only(kv_entry.clone());
-    }
+      let kv_file = OpenOptions::new().read(true).write(true).open(&file_path)?;
+      let mut new_kv = DiskKVStore::create_with_coordinator(
+        kv_file,
+        hash_algo,
+        kv_offset,
+        hot_offset,
+        rebuild_stage,
+        Arc::clone(&durability_coordinator),
+      )?;
+      let configure_bootstrap_after_flush = bounded_page_config.is_none();
+      if let Some((coordinator, max_resident_bytes)) = bounded_page_config {
+        new_kv.activate_bounded_pages(coordinator, max_resident_bytes)?;
+      }
 
-    tracing::debug!(
-      inserted = inserted_count,
-      write_buffer_len = new_kv.write_buffer_len(),
-      deletion_records = deletion_records.len(),
-      "rebuild_kv: all entries inserted, replaying deletions and flushing"
-    );
+      // Stream the resolved run through DiskKVStore's
+      // prepare-before-overwrite bulk path. The write buffer flushes at its
+      // fixed threshold, so rebuild memory is independent of WAL cardinality.
+      let mut last_insert_progress = std::time::Instant::now();
+      Self::report_startup_progress(
+        &progress_callback,
+        EngineStartupProgress {
+          phase: "rebuild_kv_insert".to_string(),
+          message: "Buffering resolved KV records".to_string(),
+          current: 0,
+          total: Some(resolved_count),
+          progress: Some(0.86),
+          eta_seconds: None,
+        },
+      );
+      rebuild_workspace.visit_resolved(|record| {
+        if record.is_deleted() {
+          deleted_count = deleted_count.saturating_add(1);
+        }
+        let entry = record.to_kv_entry();
+        new_kv.bulk_insert(std::slice::from_ref(&entry))?;
+        inserted_count = inserted_count
+          .checked_add(1)
+          .ok_or_else(|| EngineError::ResourceExhausted("KV rebuild inserted-entry count overflow".to_string()))?;
+        if last_insert_progress.elapsed() >= std::time::Duration::from_secs(5) {
+          let progress = if resolved_count == 0 { 0.92 } else { 0.86 + (inserted_count as f64 / resolved_count as f64) * 0.06 };
+          Self::report_startup_progress(
+            &progress_callback,
+            EngineStartupProgress {
+              phase: "rebuild_kv_insert".to_string(),
+              message: "Writing resolved KV records in bounded batches".to_string(),
+              current: inserted_count,
+              total: Some(resolved_count),
+              progress: Some(progress.clamp(0.86, 0.92)),
+              eta_seconds: None,
+            },
+          );
+          last_insert_progress = std::time::Instant::now();
+        }
+        Ok(())
+      })?;
+      if inserted_count != resolved_count {
+        return Err(EngineError::CorruptEntry {
+          offset: kv_offset,
+          reason: format!("KV rebuild resolved {resolved_count} records but emitted {inserted_count}"),
+        });
+      }
 
-    Self::report_startup_progress(
-      &progress_callback,
-      EngineStartupProgress {
-        phase: "rebuild_kv_flush".to_string(),
-        message: "Flushing rebuilt KV pages to disk".to_string(),
-        current: inserted_count as u64,
-        total: Some(inserted_count as u64),
-        progress: Some(0.92),
-        eta_seconds: None,
-      },
-    );
-    new_kv.flush()?;
-    if configure_bootstrap_after_flush {
-      new_kv.activate_bootstrap_page_provider()?;
-    }
-    new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot))?;
+      tracing::debug!(
+        inserted = inserted_count,
+        write_buffer_len = new_kv.write_buffer_len(),
+        deleted_entries = deleted_count,
+        "rebuild_kv: all resolved entries inserted; flushing"
+      );
+
+      Self::report_startup_progress(
+        &progress_callback,
+        EngineStartupProgress {
+          phase: "rebuild_kv_flush".to_string(),
+          message: "Flushing rebuilt KV pages to disk".to_string(),
+          current: inserted_count,
+          total: Some(resolved_count),
+          progress: Some(0.92),
+          eta_seconds: None,
+        },
+      );
+      new_kv.flush()?;
+      new_kv.force_flush_hot_buffer()?;
+      if configure_bootstrap_after_flush {
+        new_kv.activate_bootstrap_page_provider()?;
+      }
+      new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot))?;
+      Ok(new_kv)
+    })();
+    let new_kv = match rebuild_result {
+      Ok(kv) => kv,
+      Err(error) => {
+        return Err(self.record_durability_failure(
+          DurabilityOperation::AuthorityWrite,
+          "KV rebuild failed after dirty-startup marker publication",
+          error,
+        ));
+      }
+    };
 
     tracing::debug!(write_buffer_after_flush = new_kv.write_buffer_len(), "rebuild_kv: flush complete");
 
@@ -4557,8 +4647,8 @@ impl StorageEngine {
       EngineStartupProgress {
         phase: "rebuild_kv_complete".to_string(),
         message: "KV rebuild complete".to_string(),
-        current: inserted_count as u64,
-        total: Some(inserted_count as u64),
+        current: inserted_count,
+        total: Some(resolved_count),
         progress: Some(0.95),
         eta_seconds: Some(0),
       },

@@ -99,6 +99,12 @@ struct PreparedPageFlush {
   page_type_counts: KvTypeCounts,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageFlushDurability {
+  Immediate,
+  DeferredToBulkCheckpoint,
+}
+
 #[derive(Clone)]
 struct BoundedPageConfig {
   coordinator: MemoryCoordinator,
@@ -246,9 +252,24 @@ impl DiskKVStore {
 
     let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
     let shared_nvt = Arc::new(nvt.clone());
-    let empty_page = Self::page_arc(vec![0u8; psize]);
-    let pages = Arc::new(vec![empty_page; bucket_count]);
-    let initial_snapshot = ReadSnapshot::new(HashMap::new(), Arc::clone(&shared_nvt), bucket_count, hash_algo, 0, pages);
+    let bootstrap_provider = KvPageProvider::new(
+      db_file.try_clone()?,
+      kv_block_offset,
+      hash_algo,
+      bucket_count,
+      0,
+      Some(Self::bootstrap_page_memory_coordinator()?),
+    )?;
+    let bootstrap_pages = bootstrap_provider.snapshot()?;
+    let initial_snapshot = ReadSnapshot::from_bounded_pages_with_type_counts(
+      HashMap::new(),
+      Arc::clone(&shared_nvt),
+      bucket_count,
+      hash_algo,
+      0,
+      bootstrap_pages,
+      [0; 16],
+    );
     let snapshot = Arc::new(ArcSwap::new(Arc::new(initial_snapshot)));
 
     Ok(DiskKVStore {
@@ -266,7 +287,7 @@ impl DiskKVStore {
       bucket_count,
       hot_buffer: Vec::new(),
       snapshot,
-      page_provider: None,
+      page_provider: Some(bootstrap_provider),
       bounded_page_config: None,
       page_type_counts: [0; 16],
       shared_nvt,
@@ -630,7 +651,12 @@ impl DiskKVStore {
     Ok(())
   }
 
-  /// Bulk insert without snapshot publishing or hot journaling.
+  /// Bulk insert without public snapshot publication or per-window barriers.
+  ///
+  /// This is only for exclusive rebuild/expansion owners. The caller must
+  /// finish with a durable page/hot-tail checkpoint before publishing the
+  /// resulting layout. Intermediate pages are deliberately recoverable soft
+  /// state so a large rebuild does not issue one barrier per 512 records.
   pub fn bulk_insert(&mut self, entries: &[KVEntry]) -> EngineResult<()> {
     for entry in entries {
       if !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_current_layout(&entry.hash)? {
@@ -650,7 +676,7 @@ impl DiskKVStore {
       return Ok(());
     }
     let prepared = self.prepare_page_flush()?;
-    self.apply_prepared_page_flush(prepared)?;
+    self.apply_prepared_page_flush(prepared, PageFlushDurability::DeferredToBulkCheckpoint)?;
     Ok(())
   }
 
@@ -746,7 +772,11 @@ impl DiskKVStore {
   /// Apply one completely prepared replacement set. Provider retention is
   /// admitted before `mark_overwrite_started`; the buffer and publication
   /// state remain untouched on every pre-overwrite failure.
-  fn apply_prepared_page_flush(&mut self, prepared: PreparedPageFlush) -> EngineResult<Vec<(usize, Arc<[u8]>)>> {
+  fn apply_prepared_page_flush(
+    &mut self,
+    prepared: PreparedPageFlush,
+    durability: PageFlushDurability,
+  ) -> EngineResult<Vec<(usize, Arc<[u8]>)>> {
     let buckets = prepared.replacements.iter().map(|(bucket, _)| *bucket).collect::<Vec<_>>();
     let mut update = self.page_provider.as_ref().map(|provider| provider.begin_update(&buckets)).transpose()?;
     let hash_length = self.hash_algo.hash_length();
@@ -771,9 +801,11 @@ impl DiskKVStore {
         .write_all(page)
         .map_err(|error| EngineError::PostMutationDurabilityFailure(format!("KV page {bucket} overwrite failed: {error}")))?;
     }
-    self
-      .sync_data_barrier(prepared.replacements.iter().map(|(_, page)| page.len() as u64).sum())
-      .map_err(|error| EngineError::PostMutationDurabilityFailure(format!("KV page overwrite barrier failed: {error}")))?;
+    if durability == PageFlushDurability::Immediate {
+      self
+        .sync_data_barrier(prepared.replacements.iter().map(|(_, page)| page.len() as u64).sum())
+        .map_err(|error| EngineError::PostMutationDurabilityFailure(format!("KV page overwrite barrier failed: {error}")))?;
+    }
     if let Some(update) = update {
       update
         .commit(prepared.replacements.clone())
@@ -807,7 +839,7 @@ impl DiskKVStore {
 
     let prepared = self.prepare_page_flush()?;
     let overflow_entries = prepared.overflow_entries.clone();
-    let replacements = self.apply_prepared_page_flush(prepared)?;
+    let replacements = self.apply_prepared_page_flush(prepared, PageFlushDurability::Immediate)?;
     let modified_buckets = replacements.iter().map(|(bucket, _)| *bucket).collect::<Vec<_>>();
 
     tracing::debug!(overflow_count = overflow_entries.len(), modified_buckets = modified_buckets.len(), "flush: pages written");

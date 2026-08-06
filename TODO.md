@@ -217,6 +217,8 @@
           - [x] Replace full-view integrity sampling with a bounded, cancellable `repair` maintenance sample.
           - [ ] Replace verify/KV comparison and directory-repair inventories with disk-backed or bounded-window working sets.
           - [ ] Replace dirty-startup/runtime KV rebuild inventories with bounded repair workspace and fail-closed corruption handling.
+            - [x] Stream the common dirty-startup/runtime WAL rebuild through checksummed same-filesystem external runs, bounded page writes, and a crash-recoverable missing-hot-tail marker.
+            - [ ] Replace or retire the pre-single-file no-KV bootstrap path without overwriting its legacy WAL, and bound scanner recovery-region diagnostics.
           - [x] Bound pre-open header migration with fixed scratch and prove copy/barrier failure behavior.
         - [ ] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.

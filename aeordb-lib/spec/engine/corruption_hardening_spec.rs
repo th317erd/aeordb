@@ -13,6 +13,7 @@ use aeordb::engine::kv_pages::{bucket_page_offset, page_size, PAGE_HEADER_SIZE, 
 use aeordb::engine::kv_stages::stage_params;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK};
 use aeordb::engine::lost_found;
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::verify;
 use aeordb::engine::{EntryType, RequestContext, ENTRY_MAGIC, file_path_hash};
@@ -447,6 +448,75 @@ fn rebuild_kv_on_clean_database_is_idempotent() {
   assert_eq!(ops.read_file_buffered("/docs/b.txt").unwrap(), b"file-b");
   assert_eq!(ops.read_file_buffered("/docs/c.txt").unwrap(), b"file-c");
   assert_eq!(ops.read_file_buffered("/images/photo.jpg").unwrap(), b"jpeg-data");
+}
+
+#[test]
+fn rebuild_kv_memory_refusal_precedes_database_mutation_and_releases_cleanly() {
+  let (engine, temp) = create_test_db();
+  store_test_files(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let before = std::fs::read(&db_path).unwrap();
+
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let remaining_critical = policy.emergency_reserve_bytes.checked_sub(snapshot.critical_reserved_bytes).unwrap();
+  let pressure =
+    coordinator.reserve(MemoryOwner::Repair, remaining_critical, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery)).unwrap();
+
+  let error = engine.rebuild_kv().unwrap_err();
+  assert!(matches!(error, aeordb::engine::errors::EngineError::ResourceExhausted(_)));
+  assert_eq!(std::fs::read(&db_path).unwrap(), before, "memory refusal must occur before the live KV block is touched");
+
+  drop(pressure);
+  engine.rebuild_kv().unwrap();
+  let ops = DirectoryOps::new(&engine);
+  assert_eq!(ops.read_file_buffered("/docs/a.txt").unwrap(), b"file-a");
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::Repair).unwrap().clone();
+  assert_eq!(owner.active_reservations, 0);
+  assert_eq!(owner.reserved_bytes, 0);
+}
+
+#[test]
+fn rebuild_kv_completion_restores_a_valid_hot_tail_checkpoint() {
+  let (engine, temp) = create_test_db();
+  store_test_files(&engine);
+  let db_path = temp.path().join("test.aeordb");
+
+  engine.rebuild_kv().unwrap();
+
+  let header = active_header(db_path.to_str().unwrap());
+  let mut file = OpenOptions::new().read(true).open(&db_path).unwrap();
+  assert!(
+    hot_tail::read_hot_tail(&mut file, header.hot_tail_offset, header.hash_algo.hash_length()).is_some(),
+    "a completed rebuild must not leave the durable dirty-startup marker active"
+  );
+}
+
+#[test]
+fn durable_missing_hot_tail_marker_recovers_partially_rewritten_kv_on_reopen() {
+  let (engine, temp) = create_test_db();
+  store_test_files(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap();
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let header = active_header(db_str);
+  let mut file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  file.set_len(header.hot_tail_offset).unwrap();
+  file.seek(SeekFrom::Start(header.kv_block_offset)).unwrap();
+  file.write_all(&vec![0u8; page_size(header.hash_algo.hash_length())]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+
+  let reopened = StorageEngine::open(db_str).unwrap();
+  let ops = DirectoryOps::new(&reopened);
+  assert_eq!(ops.read_file_buffered("/docs/a.txt").unwrap(), b"file-a");
+  assert_eq!(ops.read_file_buffered("/images/photo.jpg").unwrap(), b"jpeg-data");
+  let recovered = active_header(db_str);
+  let mut file = OpenOptions::new().read(true).open(&db_path).unwrap();
+  assert!(hot_tail::read_hot_tail(&mut file, recovered.hot_tail_offset, recovered.hash_algo.hash_length()).is_some());
 }
 
 #[test]
