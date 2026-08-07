@@ -648,18 +648,19 @@ pub struct StorageEngine {
 
 impl StorageEngine {
   fn initialize_configuration_authority(&self) -> EngineResult<()> {
-    let report = Arc::new(crate::engine::config_resolver::build_startup_config_shadow(
+    let startup_state = crate::engine::config_resolver::build_startup_configuration(
       self,
       &self.database_path,
       crate::engine::directory_ops::DEFAULT_CHUNK_SIZE as u64,
-    ));
+    );
+    let report = &startup_state.report;
     let complete = report.complete();
     let degraded = report.degraded();
     let blocking_issues =
       report.resolution.as_ref().map(|resolution| resolution.issues.iter().filter(|issue| issue.blocking).count()).unwrap_or(1);
     self
       .configuration_authority
-      .set(Arc::new(crate::engine::configuration_authority::ConfigurationAuthority::new(report)))
+      .set(Arc::new(crate::engine::configuration_authority::ConfigurationAuthority::new(startup_state)))
       .map_err(|_| EngineError::InvalidInput("configuration authority was initialized more than once".to_string()))?;
     tracing::info!(complete, degraded, blocking_issues, "Initialized configuration authority from startup diagnostics");
     Ok(())
@@ -671,6 +672,23 @@ impl StorageEngine {
 
   pub fn configuration_snapshot(&self) -> Arc<crate::engine::configuration_authority::ConfigurationAuthoritySnapshot> {
     self.configuration_authority().snapshot()
+  }
+
+  pub fn replace_configuration_document(
+    &self,
+    family: crate::engine::config_resolver::ConfigurationFamily,
+    bytes: &[u8],
+  ) -> EngineResult<Arc<crate::engine::configuration_authority::ConfigurationAuthoritySnapshot>> {
+    let authority = self.configuration_authority();
+    authority.replace_document(family, bytes, |validated| {
+      crate::engine::directory_ops::DirectoryOps::new(self).store_file_buffered(
+        &crate::engine::request_context::RequestContext::system(),
+        family.path(),
+        validated,
+        Some("application/json"),
+      )?;
+      Ok(())
+    })
   }
 
   fn configuration_authority(&self) -> Arc<crate::engine::configuration_authority::ConfigurationAuthority> {

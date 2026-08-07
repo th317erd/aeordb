@@ -1,6 +1,8 @@
 use std::ffi::{OsStr, OsString};
 
-use aeordb::engine::config_resolver::{ConfigDocumentStatus, ConfigSource, ConfigValue, MAX_CONFIG_DOCUMENT_BYTES, RUNTIME_CONFIG_PATH};
+use aeordb::engine::config_resolver::{
+  ConfigDocumentStatus, ConfigSource, ConfigValue, ConfigurationFamily, MAX_CONFIG_DOCUMENT_BYTES, RUNTIME_CONFIG_PATH,
+};
 use aeordb::engine::compression::{CompressionAlgorithm, compress};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::entry_type::EntryType;
@@ -94,7 +96,7 @@ fn reopen_shadow_reads_valid_runtime_and_lifecycle_documents() {
 
 #[test]
 #[serial]
-fn malformed_shadow_is_visible_but_does_not_activate_or_disable_live_legacy_owners() {
+fn malformed_lifecycle_state_is_visible_and_fails_snapshot_writes_closed() {
   let directory = tempfile::tempdir().unwrap();
   let path = database_path(&directory);
   let engine = create_engine(&directory);
@@ -108,7 +110,7 @@ fn malformed_shadow_is_visible_but_does_not_activate_or_disable_live_legacy_owne
   assert!(matches!(resolution.lifecycle_status, ConfigDocumentStatus::Invalid { .. }));
   assert!(!resolution.complete());
 
-  assert!(load_lifecycle_config(&engine).snapshot_writes_enabled);
+  assert!(!load_lifecycle_config(&engine).snapshot_writes_enabled);
   let ops = DirectoryOps::new(&engine);
   ops.store_file_buffered(&RequestContext::system(), "/still-writable.txt", b"ok", Some("text/plain")).unwrap();
   assert_eq!(ops.read_file_buffered("/still-writable.txt").unwrap(), b"ok");
@@ -218,6 +220,120 @@ fn engine_configuration_authority_retains_startup_evidence_and_one_coherent_acti
       assert!(std::sync::Arc::ptr_eq(&current, &observed));
     }
   });
+}
+
+#[test]
+#[serial]
+fn strict_replacement_is_durable_before_activation_and_preserves_startup_evidence() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let startup = engine.configuration_shadow();
+  let lifecycle = br#"{"schema_version":1,"snapshot_writes_enabled":false}"#;
+
+  let updated = engine.replace_configuration_document(ConfigurationFamily::Lifecycle, lifecycle).unwrap();
+
+  assert_eq!(updated.generation, 2);
+  assert_eq!(updated.resolved_boolean("lifecycle.snapshot_writes_enabled"), Some(false));
+  assert!(updated.pending_restart.is_empty());
+  assert!(updated.pending_convergence.is_empty());
+  assert_eq!(updated.active_properties["index.flush_after_seconds"].activated_generation, 1);
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered(LIFECYCLE_CONFIG_PATH).unwrap(), lifecycle);
+  assert!(std::sync::Arc::ptr_eq(&startup, &engine.configuration_shadow()));
+  assert_eq!(startup.resolution.as_ref().unwrap().lifecycle_status, ConfigDocumentStatus::Missing);
+}
+
+#[test]
+#[serial]
+fn replacement_activates_dynamic_values_but_stages_startup_bound_values_for_restart() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let before = engine.configuration_snapshot();
+  let original_hard_limit = before.resolved_unsigned("memory.hard_limit_bytes").unwrap();
+  let runtime = br#"{"schema_version":1,"memory":{"hard_limit_bytes":4294967296},"index":{"flush_after_seconds":45}}"#;
+
+  let updated = engine.replace_configuration_document(ConfigurationFamily::Runtime, runtime).unwrap();
+
+  assert_eq!(updated.generation, 2);
+  assert_eq!(updated.resolved_unsigned("index.flush_after_seconds"), Some(45));
+  assert_eq!(updated.resolved_unsigned("memory.hard_limit_bytes"), Some(original_hard_limit));
+  assert_eq!(
+    updated.desired.resolution.as_ref().unwrap().property("memory.hard_limit_bytes").unwrap().value,
+    Some(ConfigValue::Unsigned(4_294_967_296))
+  );
+  assert!(updated.pending_restart.contains("memory.hard_limit_bytes"));
+  assert!(!updated.pending_restart.contains("index.flush_after_seconds"));
+}
+
+#[test]
+#[serial]
+fn rejected_replacement_leaves_stored_bytes_generation_and_active_values_unchanged() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let valid = br#"{"schema_version":1,"snapshot_writes_enabled":false}"#;
+  let current = engine.replace_configuration_document(ConfigurationFamily::Lifecycle, valid).unwrap();
+
+  let error = engine
+    .replace_configuration_document(
+      ConfigurationFamily::Lifecycle,
+      br#"{"schema_version":1,"snapshot_writes_enabled":true,"snapshot_writes_enabled":false}"#,
+    )
+    .unwrap_err();
+
+  assert!(error.to_string().contains("duplicate"), "{error}");
+  let after = engine.configuration_snapshot();
+  assert_eq!(after.generation, current.generation);
+  assert_eq!(after.resolved_boolean("lifecycle.snapshot_writes_enabled"), Some(false));
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered(LIFECYCLE_CONFIG_PATH).unwrap(), valid);
+}
+
+#[test]
+#[serial]
+fn failed_durable_publication_leaves_generation_active_policy_and_stored_bytes_unchanged() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = database_path(&directory);
+  let engine = create_engine(&directory);
+  let valid = br#"{"schema_version":1,"snapshot_writes_enabled":false}"#;
+  let current = engine.replace_configuration_document(ConfigurationFamily::Lifecycle, valid).unwrap();
+  engine.shutdown().unwrap();
+
+  let error = engine
+    .replace_configuration_document(ConfigurationFamily::Lifecycle, br#"{"schema_version":1,"snapshot_writes_enabled":true}"#)
+    .unwrap_err();
+
+  assert!(error.to_string().contains("shutting down"), "{error}");
+  let after = engine.configuration_snapshot();
+  assert_eq!(after.generation, current.generation);
+  assert_eq!(after.resolved_boolean("lifecycle.snapshot_writes_enabled"), Some(false));
+  drop(engine);
+
+  let reopened = StorageEngine::open(&path).unwrap();
+  assert_eq!(DirectoryOps::new(&reopened).read_file_buffered(LIFECYCLE_CONFIG_PATH).unwrap(), valid);
+  assert_eq!(reopened.configuration_snapshot().resolved_boolean("lifecycle.snapshot_writes_enabled"), Some(false));
+}
+
+#[test]
+#[serial]
+fn concurrent_replacements_serialize_file_bytes_and_authority_generations() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = std::sync::Arc::new(create_engine(&directory));
+  let documents: [&[u8]; 2] =
+    [br#"{"schema_version":1,"index":{"flush_after_seconds":45}}"#, br#"{"schema_version":1,"index":{"flush_after_seconds":60}}"#];
+
+  let returned = std::thread::scope(|scope| {
+    let handles = documents.map(|document| {
+      let engine = std::sync::Arc::clone(&engine);
+      scope.spawn(move || engine.replace_configuration_document(ConfigurationFamily::Runtime, document).unwrap())
+    });
+    handles.map(|handle| handle.join().unwrap())
+  });
+
+  let final_snapshot = engine.configuration_snapshot();
+  assert_eq!(final_snapshot.generation, 3);
+  assert_eq!(returned.iter().map(|snapshot| snapshot.generation).collect::<std::collections::BTreeSet<_>>(), [2, 3].into());
+  let final_seconds = final_snapshot.resolved_unsigned("index.flush_after_seconds").unwrap();
+  let final_bytes = DirectoryOps::new(&engine).read_file_buffered(RUNTIME_CONFIG_PATH).unwrap();
+  let expected = if final_seconds == 45 { documents[0] } else { documents[1] };
+  assert_eq!(final_bytes, expected);
 }
 
 #[test]

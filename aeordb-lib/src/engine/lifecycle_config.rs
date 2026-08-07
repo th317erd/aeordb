@@ -1,12 +1,13 @@
 //! Database lifecycle configuration: snapshot retention and related policies.
 //!
 //! Stored as a virtual file at `/.aeordb-config/lifecycle.json` inside the
-//! database. Loaded on demand by the GC task. Defaults preserve the
-//! "always recoverable" promise: zero pruning unless the user opts in.
+//! database. The configuration authority validates and activates it as one
+//! coherent generation. Defaults preserve the "always recoverable" promise:
+//! zero pruning unless the user opts in.
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::config_resolver::ConfigurationFamily;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -57,28 +58,32 @@ impl Default for LifecycleConfig {
   }
 }
 
-/// Load lifecycle config. Returns defaults (everything zeroed = never prune)
-/// if the file is missing or unparseable.
+/// Read the active lifecycle policy from the configuration authority.
+///
+/// Missing properties use their registered defaults. An unresolved property
+/// fails closed: snapshot writes stay disabled and retention stays off rather
+/// than silently substituting a potentially destructive policy.
 pub fn load_lifecycle_config(engine: &StorageEngine) -> LifecycleConfig {
-  let ops = DirectoryOps::new(engine);
-  match ops.read_file_buffered(LIFECYCLE_CONFIG_PATH) {
-    Ok(data) => match serde_json::from_slice::<LifecycleConfig>(&data) {
-      Ok(config) => config,
-      Err(e) => {
-        tracing::warn!("Failed to parse {}: {} — using defaults", LIFECYCLE_CONFIG_PATH, e);
-        LifecycleConfig::default()
-      }
+  let snapshot = engine.configuration_snapshot();
+  LifecycleConfig {
+    snapshot_writes_enabled: snapshot.resolved_boolean("lifecycle.snapshot_writes_enabled").unwrap_or(false),
+    snapshot_retention: SnapshotRetention {
+      auto_months: snapshot
+        .resolved_unsigned("lifecycle.snapshot_retention_auto_months")
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0),
+      manual_months: snapshot
+        .resolved_unsigned("lifecycle.snapshot_retention_manual_months")
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0),
     },
-    Err(_) => LifecycleConfig::default(),
   }
 }
 
-/// Persist lifecycle config.
+/// Validate, durably persist, and activate lifecycle configuration.
 pub fn save_lifecycle_config(engine: &StorageEngine, config: &LifecycleConfig) -> EngineResult<()> {
-  let ops = DirectoryOps::new(engine);
-  let ctx = RequestContext::system();
   let data = serde_json::to_vec_pretty(config).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
-  ops.store_file_buffered(&ctx, LIFECYCLE_CONFIG_PATH, &data, Some("application/json"))?;
+  engine.replace_configuration_document(ConfigurationFamily::Lifecycle, &data)?;
   Ok(())
 }
 

@@ -241,6 +241,8 @@
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
       - [x] Make derived defaults depend on the effective higher-precedence property values, including CLI/environment hard-memory overrides.
       - [ ] Replace the immutable diagnostic shadow with one configuration authority that retains startup, effective, stored, and activation state.
+        - [x] Add serialized strict embedded replacement with family-isolated generations, durable-before-active ordering, and publication-failure consistency.
+        - [x] Converge lifecycle reads and typed saves on the shared authority; malformed unresolved lifecycle state fails snapshot writes closed.
       - [ ] Persist and recover validated runtime/lifecycle LKG plus diagnostics through the approved v3 transition ControlStore without emitting v4 authority.
         - [x] Add the production CanonicalConfigValueV1 codec and typed runtime/lifecycle LKG/diagnostic control codecs against independent fixtures.
         - [ ] Publish and recover the typed controls through the configuration authority when a validated transition database identity exists.

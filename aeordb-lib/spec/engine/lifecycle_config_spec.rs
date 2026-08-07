@@ -42,6 +42,7 @@ fn config_round_trip_through_disk() {
 fn legacy_config_without_snapshot_write_flag_defaults_enabled() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let path = dir.path().join("test.aeor");
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
   ops
@@ -52,6 +53,10 @@ fn legacy_config_without_snapshot_write_flag_defaults_enabled() {
       Some("application/json"),
     )
     .unwrap();
+
+  engine.shutdown().unwrap();
+  drop(engine);
+  let engine = StorageEngine::open(path.to_str().unwrap()).unwrap();
 
   let config = load_lifecycle_config(&engine);
   assert!(config.snapshot_writes_enabled);

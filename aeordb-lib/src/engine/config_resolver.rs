@@ -208,9 +208,15 @@ impl ConfigResolver {
       fallback_identities: Vec::new(),
     };
 
-    self.resolve_family(ConfigFamily::Runtime, &inputs.runtime, inputs.runtime_lkg.as_ref(), &mut inputs.runtime_history, &mut resolution);
     self.resolve_family(
-      ConfigFamily::Lifecycle,
+      ConfigurationFamily::Runtime,
+      &inputs.runtime,
+      inputs.runtime_lkg.as_ref(),
+      &mut inputs.runtime_history,
+      &mut resolution,
+    );
+    self.resolve_family(
+      ConfigurationFamily::Lifecycle,
       &inputs.lifecycle,
       inputs.lifecycle_lkg.as_ref(),
       &mut inputs.lifecycle_history,
@@ -245,9 +251,16 @@ impl ConfigResolver {
     resolution
   }
 
+  pub fn validate_document(&self, family: ConfigurationFamily, bytes: &[u8]) -> Result<u64, String> {
+    if bytes.len() > MAX_CONFIG_DOCUMENT_BYTES {
+      return Err(format!("configuration document length {} exceeds {} bytes", bytes.len(), MAX_CONFIG_DOCUMENT_BYTES));
+    }
+    self.parse_document(family, bytes).map(|layer| layer.schema_version)
+  }
+
   fn resolve_family(
     &self,
-    family: ConfigFamily,
+    family: ConfigurationFamily,
     current: &ConfigDocumentInput,
     lkg: Option<&ConfigFallback>,
     history: &mut [ConfigFallback],
@@ -287,14 +300,14 @@ impl ConfigResolver {
     }
   }
 
-  fn set_document_status(&self, family: ConfigFamily, status: ConfigDocumentStatus, resolution: &mut ConfigResolution) {
+  fn set_document_status(&self, family: ConfigurationFamily, status: ConfigDocumentStatus, resolution: &mut ConfigResolution) {
     match family {
-      ConfigFamily::Runtime => resolution.runtime_status = status,
-      ConfigFamily::Lifecycle => resolution.lifecycle_status = status,
+      ConfigurationFamily::Runtime => resolution.runtime_status = status,
+      ConfigurationFamily::Lifecycle => resolution.lifecycle_status = status,
     }
   }
 
-  fn apply_current_layer(&self, family: ConfigFamily, layer: ParsedLayer, resolution: &mut ConfigResolution) {
+  fn apply_current_layer(&self, family: ConfigurationFamily, layer: ParsedLayer, resolution: &mut ConfigResolution) {
     let values = self
       .complete_family_values(family, &layer.values)
       .expect("a parsed configuration layer has already passed complete-value validation");
@@ -307,7 +320,7 @@ impl ConfigResolver {
     }
   }
 
-  fn apply_default_layer(&self, family: ConfigFamily, source: ConfigSource, resolution: &mut ConfigResolution) {
+  fn apply_default_layer(&self, family: ConfigurationFamily, source: ConfigSource, resolution: &mut ConfigResolution) {
     let mut values = BTreeMap::new();
     for property in CONFIGURATION_PROPERTIES.iter().filter(|property| family.contains(property)) {
       match self.default_value(property, &values) {
@@ -326,7 +339,7 @@ impl ConfigResolver {
 
   fn apply_fallback_layer(
     &self,
-    family: ConfigFamily,
+    family: ConfigurationFamily,
     lkg: Option<&ConfigFallback>,
     history: &mut [ConfigFallback],
     resolution: &mut ConfigResolution,
@@ -365,7 +378,13 @@ impl ConfigResolver {
     }
   }
 
-  fn apply_validated_fallback(&self, family: ConfigFamily, layer: ParsedLayer, source: ConfigSource, resolution: &mut ConfigResolution) {
+  fn apply_validated_fallback(
+    &self,
+    family: ConfigurationFamily,
+    layer: ParsedLayer,
+    source: ConfigSource,
+    resolution: &mut ConfigResolution,
+  ) {
     let values =
       self.complete_family_values(family, &layer.values).expect("a parsed fallback layer has already passed complete-value validation");
     for property in CONFIGURATION_PROPERTIES.iter().filter(|property| family.contains(property)) {
@@ -528,17 +547,17 @@ impl ConfigResolver {
     Ok(value)
   }
 
-  fn parse_document(&self, family: ConfigFamily, bytes: &[u8]) -> Result<ParsedLayer, String> {
+  fn parse_document(&self, family: ConfigurationFamily, bytes: &[u8]) -> Result<ParsedLayer, String> {
     let value = parse_strict_json(bytes)?;
     let layer = match family {
-      ConfigFamily::Runtime => self.parse_runtime_document(value),
-      ConfigFamily::Lifecycle => self.parse_lifecycle_document(value),
+      ConfigurationFamily::Runtime => self.parse_runtime_document(value),
+      ConfigurationFamily::Lifecycle => self.parse_lifecycle_document(value),
     }?;
     self.validate_document_layer(family, &layer)?;
     Ok(layer)
   }
 
-  fn validate_document_layer(&self, family: ConfigFamily, layer: &ParsedLayer) -> Result<(), String> {
+  fn validate_document_layer(&self, family: ConfigurationFamily, layer: &ParsedLayer) -> Result<(), String> {
     let values = self.complete_family_values(family, &layer.values)?;
     let failures = self.cross_property_failures(&values);
     if failures.is_empty() {
@@ -557,7 +576,9 @@ impl ConfigResolver {
     let mut values = BTreeMap::new();
     for (group, value) in root {
       let prefix = format!("{group}.");
-      if !CONFIGURATION_PROPERTIES.iter().any(|property| !ConfigFamily::Lifecycle.contains(property) && property.path.starts_with(&prefix))
+      if !CONFIGURATION_PROPERTIES
+        .iter()
+        .any(|property| !ConfigurationFamily::Lifecycle.contains(property) && property.path.starts_with(&prefix))
       {
         return Err(format!("unknown runtime configuration group {group}"));
       }
@@ -565,7 +586,7 @@ impl ConfigResolver {
       for (field, value) in fields {
         let path = format!("{group}.{field}");
         let property = property_by_path(&path)
-          .filter(|property| !ConfigFamily::Lifecycle.contains(property))
+          .filter(|property| !ConfigurationFamily::Lifecycle.contains(property))
           .ok_or_else(|| format!("unknown runtime property {path}"))?;
         let parsed = self.parse_stored_value(property, value)?;
         values.insert(path, parsed);
@@ -660,7 +681,7 @@ impl ConfigResolver {
 
   fn complete_family_values(
     &self,
-    family: ConfigFamily,
+    family: ConfigurationFamily,
     explicit: &BTreeMap<String, ConfigValue>,
   ) -> Result<BTreeMap<String, ConfigValue>, String> {
     let mut values = explicit.clone();
@@ -861,10 +882,24 @@ impl ConfigResolver {
   }
 }
 
-pub(crate) fn build_startup_config_shadow(engine: &StorageEngine, database_path: &Path, chunk_size_bytes: u64) -> ConfigShadowReport {
+pub(crate) struct StartupConfigurationState {
+  pub report: ConfigShadowReport,
+  pub inputs: ConfigResolutionInputs,
+}
+
+pub(crate) fn build_startup_configuration(
+  engine: &StorageEngine,
+  database_path: &Path,
+  chunk_size_bytes: u64,
+) -> StartupConfigurationState {
   let context = match detect_context(database_path, chunk_size_bytes) {
     Ok(context) => context,
-    Err(message) => return ConfigShadowReport { context: None, resolution: None, context_error: Some(message) },
+    Err(message) => {
+      return StartupConfigurationState {
+        report: ConfigShadowReport { context: None, resolution: None, context_error: Some(message) },
+        inputs: ConfigResolutionInputs::default(),
+      };
+    }
   };
   let inputs = ConfigResolutionInputs {
     runtime: read_config_document(engine, RUNTIME_CONFIG_PATH),
@@ -872,8 +907,11 @@ pub(crate) fn build_startup_config_shadow(engine: &StorageEngine, database_path:
     environment: collect_registered_environment(),
     ..Default::default()
   };
-  let resolution = ConfigResolver::new(context.clone()).resolve(inputs);
-  ConfigShadowReport { context: Some(context), resolution: Some(resolution), context_error: None }
+  let resolution = ConfigResolver::new(context.clone()).resolve(inputs.clone());
+  StartupConfigurationState {
+    report: ConfigShadowReport { context: Some(context), resolution: Some(resolution), context_error: None },
+    inputs,
+  }
 }
 
 fn detect_context(database_path: &Path, chunk_size_bytes: u64) -> Result<ConfigResolutionContext, String> {
@@ -993,14 +1031,14 @@ fn read_config_document_inner(engine: &StorageEngine, path: &str) -> Result<Opti
   Ok(Some(bytes))
 }
 
-#[derive(Clone, Copy)]
-enum ConfigFamily {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigurationFamily {
   Runtime,
   Lifecycle,
 }
 
-impl ConfigFamily {
-  fn contains(self, property: &ConfigProperty) -> bool {
+impl ConfigurationFamily {
+  pub fn contains(self, property: &ConfigProperty) -> bool {
     let lifecycle = property.path.starts_with("lifecycle.");
     match self {
       Self::Runtime => !lifecycle,
@@ -1008,10 +1046,17 @@ impl ConfigFamily {
     }
   }
 
-  fn name(self) -> &'static str {
+  pub fn name(self) -> &'static str {
     match self {
       Self::Runtime => "runtime",
       Self::Lifecycle => "lifecycle",
+    }
+  }
+
+  pub fn path(self) -> &'static str {
+    match self {
+      Self::Runtime => RUNTIME_CONFIG_PATH,
+      Self::Lifecycle => crate::engine::lifecycle_config::LIFECYCLE_CONFIG_PATH,
     }
   }
 }
