@@ -14,6 +14,10 @@ pub const BTREE_MAX_INTERNAL_KEYS: usize = 77;
 pub const BTREE_MIN_INTERNAL_KEYS: usize = 38;
 /// Directory size threshold for converting flat list to B-tree.
 pub const BTREE_CONVERSION_THRESHOLD: usize = 256;
+const BTREE_MAX_WALK_DEPTH: usize = 128;
+const BTREE_MAX_WALK_NODES: u64 = 16 * 1024 * 1024;
+const BTREE_MAX_WALK_WARNINGS: usize = 1024;
+const BTREE_WARNING_OMISSION: &str = "additional B-tree traversal warnings omitted";
 
 /// B-tree node marker bytes for format detection.
 pub const BTREE_LEAF_MARKER: u8 = 0x00;
@@ -61,6 +65,41 @@ pub(crate) struct BTreeVisitResult {
   pub warnings: Vec<BTreeWalkWarning>,
   /// False when the visitor stopped the walk before every readable entry was visited.
   pub completed: bool,
+}
+
+#[derive(Default)]
+struct BTreeWalkState {
+  ancestors: Vec<Vec<u8>>,
+  visited_nodes: u64,
+}
+
+impl BTreeWalkState {
+  fn enter(&mut self, node_hash: Option<&[u8]>) -> EngineResult<bool> {
+    self.visited_nodes = self
+      .visited_nodes
+      .checked_add(1)
+      .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "B-tree visited-node counter overflow".to_string() })?;
+    if self.visited_nodes > BTREE_MAX_WALK_NODES {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("B-tree traversal exceeds {BTREE_MAX_WALK_NODES} nodes") });
+    }
+    let Some(node_hash) = node_hash else {
+      return Ok(false);
+    };
+    if self.ancestors.len() >= BTREE_MAX_WALK_DEPTH {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("B-tree traversal exceeds depth {BTREE_MAX_WALK_DEPTH}") });
+    }
+    if self.ancestors.iter().any(|ancestor| ancestor.as_slice() == node_hash) {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("B-tree cycle at node {}", hex::encode(node_hash)) });
+    }
+    self.ancestors.push(node_hash.to_vec());
+    Ok(true)
+  }
+
+  fn leave(&mut self, entered_hash: bool) {
+    if entered_hash {
+      self.ancestors.pop();
+    }
+  }
 }
 
 /// A B-tree node — either a leaf containing ChildEntry data,
@@ -535,15 +574,20 @@ pub fn btree_lookup(
   hash_length: usize,
   include_deleted: bool,
 ) -> EngineResult<Option<ChildEntry>> {
-  let node_data = if include_deleted { engine.get_entry_including_deleted(root_hash)? } else { engine.get_entry(root_hash)? }
-    .ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
-  let node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
+  let mut state = BTreeWalkState::default();
+  let mut current_hash = root_hash.to_vec();
+  loop {
+    state.enter(Some(&current_hash))?;
+    let node_data = if include_deleted { engine.get_entry_including_deleted(&current_hash)? } else { engine.get_entry(&current_hash)? }
+      .ok_or_else(|| EngineError::NotFound("B-tree node not found".to_string()))?;
+    let node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
 
-  match node {
-    BTreeNode::Leaf(leaf) => Ok(leaf.find(name).cloned()),
-    BTreeNode::Internal(internal) => {
-      let child_idx = internal.find_child_index(name);
-      btree_lookup(engine, &internal.children[child_idx], name, hash_length, include_deleted)
+    match node {
+      BTreeNode::Leaf(leaf) => return Ok(leaf.find(name).cloned()),
+      BTreeNode::Internal(internal) => {
+        let child_idx = internal.find_child_index(name);
+        current_hash = internal.children[child_idx].clone();
+      }
     }
   }
 }
@@ -580,22 +624,42 @@ pub fn btree_list_with_mode(
   include_deleted: bool,
   mode: BTreeWalkMode,
 ) -> EngineResult<BTreeListResult> {
-  let node_data = if include_deleted { engine.get_entry_including_deleted(root_hash) } else { engine.get_entry(root_hash) };
-  let node_data = match node_data {
-    Ok(Some(data)) => data,
-    Ok(None) => {
-      return btree_walk_error(mode, Some(root_hash), EngineError::NotFound(format!("B-tree node not found: {}", hex::encode(root_hash))))
-    }
+  let mut state = BTreeWalkState::default();
+  btree_list_hash_with_mode(engine, root_hash, hash_length, include_deleted, mode, &mut state)
+}
+
+fn btree_list_hash_with_mode(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  hash_length: usize,
+  include_deleted: bool,
+  mode: BTreeWalkMode,
+  state: &mut BTreeWalkState,
+) -> EngineResult<BTreeListResult> {
+  let entered = match state.enter(Some(root_hash)) {
+    Ok(entered) => entered,
     Err(error) => return btree_walk_error(mode, Some(root_hash), error),
   };
-  if node_data.0.entry_type != EntryType::DirectoryIndex {
-    return btree_walk_error(
-      mode,
-      Some(root_hash),
-      EngineError::CorruptEntry { offset: 0, reason: format!("B-tree node hash resolved to {:?} entry", node_data.0.entry_type) },
-    );
-  }
-  btree_list_loaded_node(Some(root_hash), &node_data.2, node_data.0.entry_version, engine, hash_length, include_deleted, mode)
+  let result = (|| {
+    let node_data = if include_deleted { engine.get_entry_including_deleted(root_hash) } else { engine.get_entry(root_hash) };
+    let node_data = match node_data {
+      Ok(Some(data)) => data,
+      Ok(None) => {
+        return btree_walk_error(mode, Some(root_hash), EngineError::NotFound(format!("B-tree node not found: {}", hex::encode(root_hash))))
+      }
+      Err(error) => return btree_walk_error(mode, Some(root_hash), error),
+    };
+    if node_data.0.entry_type != EntryType::DirectoryIndex {
+      return btree_walk_error(
+        mode,
+        Some(root_hash),
+        EngineError::CorruptEntry { offset: 0, reason: format!("B-tree node hash resolved to {:?} entry", node_data.0.entry_type) },
+      );
+    }
+    btree_list_loaded_node(Some(root_hash), &node_data.2, node_data.0.entry_version, engine, hash_length, include_deleted, mode, state)
+  })();
+  state.leave(entered);
+  result
 }
 
 /// List all children starting from serialized root node data with an explicit
@@ -607,7 +671,9 @@ pub fn btree_list_from_node_with_mode(
   include_deleted: bool,
   mode: BTreeWalkMode,
 ) -> EngineResult<BTreeListResult> {
-  btree_list_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode)
+  let mut state = BTreeWalkState::default();
+  state.enter(None)?;
+  btree_list_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode, &mut state)
 }
 
 /// Visit directory entries in key order without collecting the entire B-tree.
@@ -623,7 +689,9 @@ pub(crate) fn btree_visit_from_node_with_mode<F>(
 where
   F: FnMut(&ChildEntry) -> EngineResult<bool>,
 {
-  btree_visit_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode, visitor)
+  let mut state = BTreeWalkState::default();
+  state.enter(None)?;
+  btree_visit_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode, visitor, &mut state)
 }
 
 fn btree_visit_hash_with_mode<F>(
@@ -633,26 +701,49 @@ fn btree_visit_hash_with_mode<F>(
   include_deleted: bool,
   mode: BTreeWalkMode,
   visitor: &mut F,
+  state: &mut BTreeWalkState,
 ) -> EngineResult<BTreeVisitResult>
 where
   F: FnMut(&ChildEntry) -> EngineResult<bool>,
 {
-  let node_data = if include_deleted { engine.get_entry_including_deleted(node_hash) } else { engine.get_entry(node_hash) };
-  let node_data = match node_data {
-    Ok(Some(data)) => data,
-    Ok(None) => {
-      return btree_visit_error(mode, Some(node_hash), EngineError::NotFound(format!("B-tree node not found: {}", hex::encode(node_hash))))
-    }
+  let entered = match state.enter(Some(node_hash)) {
+    Ok(entered) => entered,
     Err(error) => return btree_visit_error(mode, Some(node_hash), error),
   };
-  if node_data.0.entry_type != EntryType::DirectoryIndex {
-    return btree_visit_error(
-      mode,
+  let result = (|| {
+    let node_data = if include_deleted { engine.get_entry_including_deleted(node_hash) } else { engine.get_entry(node_hash) };
+    let node_data = match node_data {
+      Ok(Some(data)) => data,
+      Ok(None) => {
+        return btree_visit_error(
+          mode,
+          Some(node_hash),
+          EngineError::NotFound(format!("B-tree node not found: {}", hex::encode(node_hash))),
+        )
+      }
+      Err(error) => return btree_visit_error(mode, Some(node_hash), error),
+    };
+    if node_data.0.entry_type != EntryType::DirectoryIndex {
+      return btree_visit_error(
+        mode,
+        Some(node_hash),
+        EngineError::CorruptEntry { offset: 0, reason: format!("B-tree node hash resolved to {:?} entry", node_data.0.entry_type) },
+      );
+    }
+    btree_visit_loaded_node(
       Some(node_hash),
-      EngineError::CorruptEntry { offset: 0, reason: format!("B-tree node hash resolved to {:?} entry", node_data.0.entry_type) },
-    );
-  }
-  btree_visit_loaded_node(Some(node_hash), &node_data.2, node_data.0.entry_version, engine, hash_length, include_deleted, mode, visitor)
+      &node_data.2,
+      node_data.0.entry_version,
+      engine,
+      hash_length,
+      include_deleted,
+      mode,
+      visitor,
+      state,
+    )
+  })();
+  state.leave(entered);
+  result
 }
 
 fn btree_visit_loaded_node<F>(
@@ -664,6 +755,7 @@ fn btree_visit_loaded_node<F>(
   include_deleted: bool,
   mode: BTreeWalkMode,
   visitor: &mut F,
+  state: &mut BTreeWalkState,
 ) -> EngineResult<BTreeVisitResult>
 where
   F: FnMut(&ChildEntry) -> EngineResult<bool>,
@@ -684,8 +776,8 @@ where
     BTreeNode::Internal(internal) => {
       let mut warnings = Vec::new();
       for child_hash in &internal.children {
-        let mut child = btree_visit_hash_with_mode(child_hash, engine, hash_length, include_deleted, mode, visitor)?;
-        warnings.append(&mut child.warnings);
+        let child = btree_visit_hash_with_mode(child_hash, engine, hash_length, include_deleted, mode, visitor, state)?;
+        append_bounded_warnings(&mut warnings, child.warnings);
         if !child.completed {
           return Ok(BTreeVisitResult { warnings, completed: false });
         }
@@ -698,6 +790,7 @@ where
 fn btree_visit_error(mode: BTreeWalkMode, node_hash: Option<&[u8]>, error: EngineError) -> EngineResult<BTreeVisitResult> {
   match mode {
     BTreeWalkMode::Strict => Err(error),
+    BTreeWalkMode::BestEffort if is_operational_walk_error(&error) => Err(error),
     BTreeWalkMode::BestEffort => Ok(BTreeVisitResult {
       warnings: vec![BTreeWalkWarning { node_hash: node_hash.map(Vec::from), reason: error.to_string() }],
       completed: true,
@@ -713,6 +806,7 @@ fn btree_list_loaded_node(
   hash_length: usize,
   include_deleted: bool,
   mode: BTreeWalkMode,
+  state: &mut BTreeWalkState,
 ) -> EngineResult<BTreeListResult> {
   let node = match BTreeNode::deserialize(node_data, hash_length, entry_version) {
     Ok(node) => node,
@@ -723,9 +817,9 @@ fn btree_list_loaded_node(
     BTreeNode::Internal(internal) => {
       let mut result = BTreeListResult::default();
       for child_hash in &internal.children {
-        let mut child_result = btree_list_with_mode(engine, child_hash, hash_length, include_deleted, mode)?;
+        let mut child_result = btree_list_hash_with_mode(engine, child_hash, hash_length, include_deleted, mode, state)?;
         result.entries.append(&mut child_result.entries);
-        result.warnings.append(&mut child_result.warnings);
+        append_bounded_warnings(&mut result.warnings, child_result.warnings);
       }
       Ok(result)
     }
@@ -735,11 +829,39 @@ fn btree_list_loaded_node(
 fn btree_walk_error(mode: BTreeWalkMode, node_hash: Option<&[u8]>, error: EngineError) -> EngineResult<BTreeListResult> {
   match mode {
     BTreeWalkMode::Strict => Err(error),
+    BTreeWalkMode::BestEffort if is_operational_walk_error(&error) => Err(error),
     BTreeWalkMode::BestEffort => Ok(BTreeListResult {
       entries: Vec::new(),
       warnings: vec![BTreeWalkWarning { node_hash: node_hash.map(Vec::from), reason: error.to_string() }],
     }),
   }
+}
+
+fn is_operational_walk_error(error: &EngineError) -> bool {
+  matches!(
+    error,
+    EngineError::IoError(_)
+      | EngineError::ResourceExhausted(_)
+      | EngineError::DurabilityFailure(_)
+      | EngineError::PostMutationDurabilityFailure(_)
+      | EngineError::ShuttingDown
+      | EngineError::Cancelled(_)
+  )
+}
+
+fn append_bounded_warnings(target: &mut Vec<BTreeWalkWarning>, mut source: Vec<BTreeWalkWarning>) {
+  if source.is_empty() || target.last().is_some_and(|warning| warning.reason == BTREE_WARNING_OMISSION) {
+    return;
+  }
+  if target.len().saturating_add(source.len()) <= BTREE_MAX_WALK_WARNINGS {
+    target.append(&mut source);
+    return;
+  }
+
+  target.truncate(BTREE_MAX_WALK_WARNINGS.saturating_sub(1));
+  let available = BTREE_MAX_WALK_WARNINGS.saturating_sub(1).saturating_sub(target.len());
+  target.extend(source.drain(..source.len().min(available)));
+  target.push(BTreeWalkWarning { node_hash: None, reason: BTREE_WARNING_OMISSION.to_string() });
 }
 
 /// Delete a child from a B-tree directory.
@@ -911,5 +1033,26 @@ fn btree_insert_node_batched(
         }
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod walk_bound_tests {
+  use super::*;
+
+  #[test]
+  fn best_effort_warning_collection_is_bounded_and_marks_omissions() {
+    let mut target = (0..BTREE_MAX_WALK_WARNINGS - 1)
+      .map(|index| BTreeWalkWarning { node_hash: None, reason: format!("warning-{index}") })
+      .collect::<Vec<_>>();
+    let source = vec![
+      BTreeWalkWarning { node_hash: None, reason: "overflow-a".to_string() },
+      BTreeWalkWarning { node_hash: None, reason: "overflow-b".to_string() },
+    ];
+
+    append_bounded_warnings(&mut target, source);
+
+    assert_eq!(target.len(), BTREE_MAX_WALK_WARNINGS);
+    assert_eq!(target.last().unwrap().reason, BTREE_WARNING_OMISSION);
   }
 }

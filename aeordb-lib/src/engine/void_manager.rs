@@ -150,6 +150,19 @@ impl VoidManager {
     self.by_offset.iter().map(|(&o, &s)| (o, s))
   }
 
+  /// Return whether a half-open byte range overlaps the current reusable
+  /// space map. Registered voids are maintained as non-overlapping extents,
+  /// so only the predecessor of the requested end can intersect it.
+  pub fn overlaps_range(&self, offset: u64, size: u32) -> bool {
+    if size == 0 {
+      return false;
+    }
+    let Some(end) = offset.checked_add(size as u64) else {
+      return true;
+    };
+    self.by_offset.range(..end).next_back().is_some_and(|(&void_offset, &void_size)| void_offset.saturating_add(void_size as u64) > offset)
+  }
+
   /// Smallest entry that could be written into a void of this size: the
   /// fixed entry header + the hash, with zero-byte key+value. Below this
   /// size, a void cannot hold any real entry — but it's still tracked.

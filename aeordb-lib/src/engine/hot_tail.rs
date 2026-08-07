@@ -1,4 +1,4 @@
-use crate::engine::errors::EngineResult;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::KVEntry;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -26,7 +26,15 @@ const HOT_TAIL_HEADER_SIZE: usize = 5 + 1 + 4 + 4 + 4;
 
 /// Per-write-record size: version(1) + hash + type_flags(1) + offset(8) + total_length(4).
 fn write_record_size(hash_length: usize) -> usize {
-  1 + hash_length + 1 + 8 + 4
+  checked_write_record_size(hash_length).expect("supported hash lengths fit the hot-tail record format")
+}
+
+fn checked_write_record_size(hash_length: usize) -> Option<usize> {
+  hash_length.checked_add(1 + 1 + 8 + 4)
+}
+
+fn checked_body_size(write_count: usize, void_count: usize, hash_length: usize) -> Option<usize> {
+  write_count.checked_mul(checked_write_record_size(hash_length)?)?.checked_add(void_count.checked_mul(VOID_RECORD_SIZE)?)
 }
 
 /// Per-void-record size: version(1) + offset(8) + size(4) = 13 bytes.
@@ -114,21 +122,23 @@ pub fn deserialize_hot_tail(data: &[u8], hash_length: usize) -> Option<HotTailPa
     return None;
   }
 
-  let wsize = write_record_size(hash_length);
-  let expected_len = HOT_TAIL_HEADER_SIZE + write_count * wsize + void_count * VOID_RECORD_SIZE;
+  let expected_len = HOT_TAIL_HEADER_SIZE.checked_add(checked_body_size(write_count, void_count, hash_length)?)?;
   if data.len() < expected_len {
     return None;
   }
 
-  let mut writes = Vec::with_capacity(write_count);
+  let mut writes = Vec::new();
+  writes.try_reserve_exact(write_count).ok()?;
   let mut cursor = HOT_TAIL_HEADER_SIZE;
 
   for _ in 0..write_count {
-    // Per-record version is currently always WRITE_RECORD_VERSION; future
-    // record-format changes branch here.
-    let _record_version = data[cursor];
+    if data[cursor] != WRITE_RECORD_VERSION {
+      return None;
+    }
     cursor += 1;
-    let hash = data[cursor..cursor + hash_length].to_vec();
+    let mut hash = Vec::new();
+    hash.try_reserve_exact(hash_length).ok()?;
+    hash.extend_from_slice(&data[cursor..cursor + hash_length]);
     cursor += hash_length;
     let type_flags = data[cursor];
     cursor += 1;
@@ -139,9 +149,12 @@ pub fn deserialize_hot_tail(data: &[u8], hash_length: usize) -> Option<HotTailPa
     writes.push(KVEntry { hash, type_flags, offset, total_length });
   }
 
-  let mut voids = Vec::with_capacity(void_count);
+  let mut voids = Vec::new();
+  voids.try_reserve_exact(void_count).ok()?;
   for _ in 0..void_count {
-    let _record_version = data[cursor];
+    if data[cursor] != VOID_RECORD_VERSION {
+      return None;
+    }
     cursor += 1;
     let offset = u64::from_le_bytes(data[cursor..cursor + 8].try_into().ok()?);
     cursor += 8;
@@ -183,20 +196,177 @@ pub fn read_hot_tail<R: Read + Seek>(reader: &mut R, offset: u64, hash_length: u
     return None;
   }
 
-  let wsize = write_record_size(hash_length);
-  let body_len = write_count * wsize + void_count * VOID_RECORD_SIZE;
-  let mut body = vec![0u8; body_len];
-  reader.read_exact(&mut body).ok()?;
+  let body_len = checked_body_size(write_count, void_count, hash_length)?;
+  let records_start = offset.checked_add(HOT_TAIL_HEADER_SIZE as u64)?;
+  let required_end = records_start.checked_add(u64::try_from(body_len).ok()?)?;
+  if required_end > reader.seek(SeekFrom::End(0)).ok()? {
+    return None;
+  }
+  reader.seek(SeekFrom::Start(records_start)).ok()?;
 
-  let mut full = Vec::with_capacity(HOT_TAIL_HEADER_SIZE + body_len);
-  full.extend_from_slice(&header);
-  full.extend_from_slice(&body);
-  deserialize_hot_tail(&full, hash_length)
+  let write_size = checked_write_record_size(hash_length)?;
+  let mut write_record = Vec::new();
+  write_record.try_reserve_exact(write_size).ok()?;
+  write_record.resize(write_size, 0);
+  let mut writes = Vec::new();
+  writes.try_reserve_exact(write_count).ok()?;
+  for _ in 0..write_count {
+    reader.read_exact(&mut write_record).ok()?;
+    if write_record[0] != WRITE_RECORD_VERSION {
+      return None;
+    }
+    let mut hash = Vec::new();
+    hash.try_reserve_exact(hash_length).ok()?;
+    hash.extend_from_slice(&write_record[1..1 + hash_length]);
+    let type_flags = write_record[1 + hash_length];
+    let number_start = 2 + hash_length;
+    let entry_offset = u64::from_le_bytes(write_record[number_start..number_start + 8].try_into().ok()?);
+    let total_length = u32::from_le_bytes(write_record[number_start + 8..number_start + 12].try_into().ok()?);
+    writes.push(KVEntry { hash, type_flags, offset: entry_offset, total_length });
+  }
+
+  let mut voids = Vec::new();
+  voids.try_reserve_exact(void_count).ok()?;
+  let mut void_record = [0u8; VOID_RECORD_SIZE];
+  for _ in 0..void_count {
+    reader.read_exact(&mut void_record).ok()?;
+    if void_record[0] != VOID_RECORD_VERSION {
+      return None;
+    }
+    let void_offset = u64::from_le_bytes(void_record[1..9].try_into().ok()?);
+    let size = u32::from_le_bytes(void_record[9..13].try_into().ok()?);
+    voids.push(VoidRecord { offset: void_offset, size });
+  }
+
+  Some(HotTailPayload { writes, voids })
+}
+
+/// Validate a hot tail and visit its void records without allocating arrays
+/// from its on-disk counts. Verification and recovery diagnostics use this
+/// path because those counts are untrusted until every fixed-size record has
+/// been read successfully.
+pub(crate) fn visit_hot_tail_voids<R, F>(
+  reader: &mut R,
+  offset: u64,
+  hash_length: usize,
+  cancellation: Option<&std::sync::atomic::AtomicBool>,
+  mut visitor: F,
+) -> EngineResult<(u32, u32)>
+where
+  R: Read + Seek,
+  F: FnMut(u32, VoidRecord) -> EngineResult<()>,
+{
+  reader.seek(SeekFrom::Start(offset))?;
+  let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
+  reader.read_exact(&mut header)?;
+  if header[..5] != HOT_TAIL_MAGIC {
+    return Err(EngineError::InvalidMagic);
+  }
+  if header[5] != HOT_TAIL_FORMAT_VERSION {
+    return Err(EngineError::InvalidEntryVersion(header[5]));
+  }
+  let write_count = u32::from_le_bytes(header[6..10].try_into().map_err(|_| EngineError::UnexpectedEof)?);
+  let void_count = u32::from_le_bytes(header[10..14].try_into().map_err(|_| EngineError::UnexpectedEof)?);
+  let stored_crc = u32::from_le_bytes(header[14..18].try_into().map_err(|_| EngineError::UnexpectedEof)?);
+  if crc32fast::hash(&header[..14]) != stored_crc {
+    return Err(EngineError::CorruptEntry { offset, reason: "hot-tail header checksum mismatch".to_string() });
+  }
+
+  let write_record_length = write_record_size(hash_length);
+  let records_start = offset
+    .checked_add(HOT_TAIL_HEADER_SIZE as u64)
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail record offset overflow".to_string() })?;
+  let records_bytes = u64::from(write_count)
+    .checked_mul(
+      u64::try_from(write_record_length)
+        .map_err(|_| EngineError::CorruptEntry { offset, reason: "hot-tail write record length exceeds u64".to_string() })?,
+    )
+    .and_then(|bytes| bytes.checked_add(u64::from(void_count).checked_mul(VOID_RECORD_SIZE as u64)?))
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail record span overflow".to_string() })?;
+  let required_end = records_start
+    .checked_add(records_bytes)
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail end offset overflow".to_string() })?;
+  let physical_end = reader.seek(SeekFrom::End(0))?;
+  if required_end > physical_end {
+    return Err(EngineError::CorruptEntry {
+      offset,
+      reason: format!("hot-tail record counts require end {required_end}, beyond file length {physical_end}"),
+    });
+  }
+  reader.seek(SeekFrom::Start(records_start))?;
+
+  let mut write_record = Vec::new();
+  write_record
+    .try_reserve_exact(write_record_length)
+    .map_err(|error| EngineError::ResourceExhausted(format!("hot-tail verification buffer allocation failed: {error}")))?;
+  write_record.resize(write_record_length, 0);
+  for index in 0..write_count {
+    if index % 4_096 == 0 && cancellation.is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::Acquire)) {
+      return Err(EngineError::ShuttingDown);
+    }
+    reader.read_exact(&mut write_record).map_err(|error| hot_tail_record_error(offset, "write", index, error))?;
+    if write_record[0] != WRITE_RECORD_VERSION {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("hot-tail write record {index} has unsupported version {}", write_record[0]),
+      });
+    }
+  }
+
+  let mut void_record = [0u8; VOID_RECORD_SIZE];
+  for index in 0..void_count {
+    if index % 4_096 == 0 && cancellation.is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::Acquire)) {
+      return Err(EngineError::ShuttingDown);
+    }
+    reader.read_exact(&mut void_record).map_err(|error| hot_tail_record_error(offset, "void", index, error))?;
+    if void_record[0] != VOID_RECORD_VERSION {
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("hot-tail void record {index} has unsupported version {}", void_record[0]),
+      });
+    }
+    let void = VoidRecord {
+      offset: u64::from_le_bytes(void_record[1..9].try_into().map_err(|_| EngineError::UnexpectedEof)?),
+      size: u32::from_le_bytes(void_record[9..13].try_into().map_err(|_| EngineError::UnexpectedEof)?),
+    };
+    visitor(index, void)?;
+  }
+  Ok((write_count, void_count))
+}
+
+fn hot_tail_record_error(offset: u64, section: &str, index: u32, error: std::io::Error) -> EngineError {
+  if error.kind() == std::io::ErrorKind::UnexpectedEof {
+    EngineError::CorruptEntry { offset, reason: format!("hot-tail {section} record {index} is truncated: {error}") }
+  } else {
+    EngineError::IoError(error)
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  struct FailAfterCursor {
+    inner: std::io::Cursor<Vec<u8>>,
+    fail_at: u64,
+  }
+
+  impl std::io::Read for FailAfterCursor {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+      if self.inner.position() >= self.fail_at {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected hot-tail read failure"));
+      }
+      let remaining = usize::try_from(self.fail_at - self.inner.position()).unwrap_or(usize::MAX);
+      let width = buffer.len().min(remaining);
+      std::io::Read::read(&mut self.inner, &mut buffer[..width])
+    }
+  }
+
+  impl std::io::Seek for FailAfterCursor {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+      std::io::Seek::seek(&mut self.inner, position)
+    }
+  }
 
   fn make_entry(hash_val: u8, type_flags: u8, offset: u64, total_length: u32) -> KVEntry {
     KVEntry { hash: vec![hash_val; 32], type_flags, offset, total_length }
@@ -277,6 +447,26 @@ mod tests {
   }
 
   #[test]
+  fn readers_reject_unknown_record_versions() {
+    let payload = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![] };
+    let mut bytes = serialize_hot_tail(&payload, 32);
+    bytes[HOT_TAIL_HEADER_SIZE] = WRITE_RECORD_VERSION + 1;
+
+    assert!(deserialize_hot_tail(&bytes, 32).is_none());
+    assert!(read_hot_tail(&mut std::io::Cursor::new(bytes), 0, 32).is_none());
+  }
+
+  #[test]
+  fn file_reader_preflights_untrusted_counts_against_physical_extent() {
+    let mut bytes = serialize_hot_tail(&HotTailPayload::default(), 32);
+    bytes[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+    let crc = crc32fast::hash(&bytes[..14]);
+    bytes[14..18].copy_from_slice(&crc.to_le_bytes());
+
+    assert!(read_hot_tail(&mut std::io::Cursor::new(bytes), 0, 32).is_none());
+  }
+
+  #[test]
   fn write_read_file_roundtrip() {
     let p = HotTailPayload {
       writes: vec![make_entry(0x11, 0x02, 1000, 80), make_entry(0x22, 0x03, 2000, 200)],
@@ -300,5 +490,47 @@ mod tests {
 
     let got = read_hot_tail(&mut cursor, 256, 32).unwrap();
     assert_eq!(got.writes[0].offset, 999);
+  }
+
+  #[test]
+  fn bounded_void_visitor_rejects_truncated_untrusted_counts() {
+    let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
+    let mut bytes = serialize_hot_tail(&payload, 32);
+    bytes[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
+    let crc = crc32fast::hash(&bytes[..14]);
+    bytes[14..18].copy_from_slice(&crc.to_le_bytes());
+    let error = visit_hot_tail_voids(&mut std::io::Cursor::new(bytes), 0, 32, None, |_index, _void| Ok(())).unwrap_err();
+    assert!(matches!(error, EngineError::CorruptEntry { .. }));
+  }
+
+  #[test]
+  fn bounded_void_visitor_rejects_unknown_record_versions() {
+    let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
+    let mut bytes = serialize_hot_tail(&payload, 32);
+    bytes[HOT_TAIL_HEADER_SIZE] = VOID_RECORD_VERSION + 1;
+    let error = visit_hot_tail_voids(&mut std::io::Cursor::new(bytes), 0, 32, None, |_index, _void| Ok(())).unwrap_err();
+    assert!(matches!(error, EngineError::CorruptEntry { reason, .. } if reason.contains("unsupported version")));
+  }
+
+  #[test]
+  fn bounded_void_visitor_preserves_non_eof_io_failures() {
+    let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
+    let bytes = serialize_hot_tail(&payload, 32);
+    let mut reader = FailAfterCursor { inner: std::io::Cursor::new(bytes), fail_at: HOT_TAIL_HEADER_SIZE as u64 };
+
+    let error = visit_hot_tail_voids(&mut reader, 0, 32, None, |_index, _void| Ok(())).unwrap_err();
+
+    assert!(matches!(error, EngineError::IoError(ref io) if io.kind() == std::io::ErrorKind::PermissionDenied));
+  }
+
+  #[test]
+  fn bounded_void_visitor_honors_cancellation_before_record_reads() {
+    let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
+    let bytes = serialize_hot_tail(&payload, 32);
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+
+    let error = visit_hot_tail_voids(&mut std::io::Cursor::new(bytes), 0, 32, Some(&cancelled), |_index, _void| Ok(())).unwrap_err();
+
+    assert!(matches!(error, EngineError::ShuttingDown));
   }
 }

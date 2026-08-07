@@ -1468,9 +1468,105 @@ impl<'a> DirectoryOps<'a> {
 
   /// Return a bounded live window without materializing an entire B-tree directory.
   pub fn list_directory_window(&self, path: &str, offset: usize, limit: usize) -> EngineResult<DirectoryListWindow> {
+    self.list_directory_window_inner(path, offset, limit, true, true)
+  }
+
+  /// Visit every raw child for verification without collecting a complete
+  /// B-tree listing, filtering dead path keys, or healing stale directory
+  /// state. Flat directories remain structurally bounded by the conversion
+  /// threshold; B-tree directories are visited one leaf at a time.
+  pub(crate) fn visit_directory_for_verification<F>(
+    &self,
+    path: &str,
+    mut visitor: F,
+  ) -> EngineResult<(Vec<crate::engine::btree::BTreeWalkWarning>, bool)>
+  where
+    F: FnMut(&ChildEntry) -> EngineResult<()>,
+  {
     let normalized = normalize_path(path);
     let hash_length = self.engine.hash_algo().hash_length();
-    let Some((header, value)) = self.load_directory_listing_data(&normalized)? else {
+    let dir_key = directory_path_hash(&normalized, &self.engine.hash_algo())?;
+    let (listing, recovered_stale_path_key) = match self.recover_directory_data_if_stale(&normalized, &dir_key)? {
+      Some(pair) => (Some(pair), true),
+      None => (self.read_directory_data(&dir_key)?, false),
+    };
+    let Some((header, value)) = listing else {
+      if normalized == "/" {
+        let head = self.engine.head_hash()?;
+        if head.is_empty() || head.iter().all(|byte| *byte == 0) {
+          return Ok((Vec::new(), false));
+        }
+      }
+      return Err(EngineError::NotFound(normalized));
+    };
+    if value.is_empty() {
+      return Ok((Vec::new(), recovered_stale_path_key));
+    }
+    if crate::engine::btree::is_btree_format(&value) {
+      let mut visit = |child: &ChildEntry| -> EngineResult<bool> {
+        visitor(child)?;
+        Ok(true)
+      };
+      let result = crate::engine::btree::btree_visit_from_node_with_mode(
+        &value,
+        self.engine,
+        hash_length,
+        false,
+        crate::engine::btree::BTreeWalkMode::BestEffort,
+        &mut visit,
+      )?;
+      return Ok((result.warnings, recovered_stale_path_key));
+    }
+
+    Self::visit_bounded_flat_children(&value, hash_length, header.entry_version, |child| {
+      visitor(&child)?;
+      Ok(true)
+    })?;
+    Ok((Vec::new(), recovered_stale_path_key))
+  }
+
+  pub(crate) fn visit_bounded_flat_children<F>(data: &[u8], hash_length: usize, version: u8, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&ChildEntry) -> EngineResult<bool>,
+  {
+    let mut offset = 0usize;
+    let mut count = 0usize;
+    while offset < data.len() {
+      if count >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!(
+            "flat directory exceeds the bounded {}-entry compatibility limit",
+            crate::engine::btree::BTREE_CONVERSION_THRESHOLD
+          ),
+        });
+      }
+      let (child, consumed) = ChildEntry::deserialize(&data[offset..], hash_length, version)?;
+      if consumed == 0 {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "flat directory child consumed zero bytes".to_string() });
+      }
+      offset = offset
+        .checked_add(consumed)
+        .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "flat directory offset overflow".to_string() })?;
+      count = count.saturating_add(1);
+      if !visitor(&child)? {
+        return Ok(false);
+      }
+    }
+    Ok(true)
+  }
+
+  fn list_directory_window_inner(
+    &self,
+    path: &str,
+    offset: usize,
+    limit: usize,
+    filter_live: bool,
+    heal_stale: bool,
+  ) -> EngineResult<DirectoryListWindow> {
+    let normalized = normalize_path(path);
+    let hash_length = self.engine.hash_algo().hash_length();
+    let Some((header, value)) = self.load_directory_listing_data_inner(&normalized, heal_stale)? else {
       return Err(EngineError::NotFound(normalized));
     };
     if value.is_empty() {
@@ -1479,8 +1575,12 @@ impl<'a> DirectoryOps<'a> {
 
     if !crate::engine::btree::is_btree_format(&value) {
       let children = match deserialize_child_entries(&value, hash_length, header.entry_version) {
-        Ok(children) => self.filter_live_children(&normalized, children)?,
+        Ok(children) if filter_live => self.filter_live_children(&normalized, children)?,
+        Ok(children) => children,
         Err(error) => {
+          if !filter_live {
+            return Err(error);
+          }
           tracing::warn!(path = %normalized, error = %error, "Corrupt flat directory index; returning an empty listing window");
           Vec::new()
         }
@@ -1490,15 +1590,15 @@ impl<'a> DirectoryOps<'a> {
       return Ok(DirectoryListWindow { entries: children[start..end].to_vec(), has_more: end < children.len(), warnings: Vec::new() });
     }
 
-    let mut seen_live = 0usize;
+    let mut seen = 0usize;
     let mut entries = Vec::with_capacity(limit.min(crate::engine::btree::BTREE_MAX_LEAF_ENTRIES));
     let mut has_more = false;
     let mut visitor = |child: &ChildEntry| -> EngineResult<bool> {
-      if !self.is_live_child(&normalized, child)? {
+      if filter_live && !self.is_live_child(&normalized, child)? {
         return Ok(true);
       }
-      if seen_live < offset {
-        seen_live = seen_live.saturating_add(1);
+      if seen < offset {
+        seen = seen.saturating_add(1);
         return Ok(true);
       }
       if entries.len() < limit {
@@ -1520,6 +1620,14 @@ impl<'a> DirectoryOps<'a> {
   }
 
   fn load_directory_listing_data(&self, normalized: &str) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
+    self.load_directory_listing_data_inner(normalized, true)
+  }
+
+  fn load_directory_listing_data_inner(
+    &self,
+    normalized: &str,
+    heal_stale: bool,
+  ) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
     let algo = self.engine.hash_algo();
     let dir_key = directory_path_hash(normalized, &algo)?;
     if normalized == "/" {
@@ -1531,8 +1639,10 @@ impl<'a> DirectoryOps<'a> {
 
     // HEAD/dir-key divergence is healed by the same path for full and bounded listings.
     if let Some(pair) = self.recover_directory_data_if_stale(normalized, &dir_key)? {
-      if let Err(error) = self.heal_stale_dir_keys_along_path(normalized) {
-        tracing::warn!(path = %normalized, error = %error, "Ancestor dir_key heal failed; continuing with served canonical content");
+      if heal_stale {
+        if let Err(error) = self.heal_stale_dir_keys_along_path(normalized) {
+          tracing::warn!(path = %normalized, error = %error, "Ancestor dir_key heal failed; continuing with served canonical content");
+        }
       }
       Ok(Some(pair))
     } else {
@@ -2854,29 +2964,36 @@ impl<'a> DirectoryOps<'a> {
 
     let mut current_content_hash = head_hash;
     for segment in &segments {
-      let content = match self.engine.get_entry(&current_content_hash)? {
-        Some((_h, _k, v)) => v,
+      let (content_header, content) = match self.engine.get_entry(&current_content_hash)? {
+        Some((header, _key, value)) => (header, value),
         None => return Ok(None), // tree-level break — can't recover
       };
-      // Parse children
-      let children = if !content.is_empty() && crate::engine::btree::is_btree_format(&content) {
-        crate::engine::btree::btree_list_from_node(&content, self.engine, hash_length, false)?
-      } else if content.is_empty() {
+      if content.is_empty() {
         return Ok(None);
+      }
+      let child = if crate::engine::btree::is_btree_format(&content) {
+        crate::engine::btree::btree_lookup(self.engine, &current_content_hash, segment, hash_length, false)?
       } else {
-        deserialize_child_entries(&content, hash_length, 0)?
+        let mut found = None;
+        Self::visit_bounded_flat_children(&content, hash_length, content_header.entry_version, |child| {
+          if child.name == *segment {
+            found = Some(child.clone());
+            return Ok(false);
+          }
+          Ok(true)
+        })?;
+        found
       };
 
-      // Find ChildEntry by name
-      let child = match children.iter().find(|c| c.name == *segment) {
-        Some(c) => c,
+      let child = match child {
+        Some(child) => child,
         None => return Ok(None),
       };
       // Only follow if it's a directory
       if child.entry_type != EntryType::DirectoryIndex.to_u8() {
         return Ok(None);
       }
-      current_content_hash = child.hash.clone();
+      current_content_hash = child.hash;
     }
 
     // If dir_key's hard-link target matches HEAD's canonical, nothing to
@@ -3686,6 +3803,30 @@ mod engine_file_stream_tests {
     }
     data.extend(std::iter::repeat(0xFFu8).take(1024));
     data
+  }
+
+  #[test]
+  fn verification_flat_directory_parser_rejects_oversized_legacy_lists() {
+    let entry = ChildEntry {
+      entry_type: EntryType::FileRecord.to_u8(),
+      hash: vec![0x5a; 32],
+      total_size: 1,
+      created_at: 1,
+      updated_at: 1,
+      name: "child".to_string(),
+      content_type: None,
+      virtual_time: 1,
+      node_id: 1,
+    };
+    let encoded = entry.serialize(32).unwrap();
+    let mut oversized = Vec::new();
+    for _ in 0..=crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+      oversized.extend_from_slice(&encoded);
+    }
+
+    let error = DirectoryOps::visit_bounded_flat_children(&oversized, 32, 0, |_child| Ok(true)).unwrap_err();
+
+    assert!(matches!(error, EngineError::CorruptEntry { reason, .. } if reason.contains("flat directory exceeds")));
   }
 
   #[test]

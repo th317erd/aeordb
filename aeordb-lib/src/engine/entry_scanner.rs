@@ -1,9 +1,15 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
+
+const MAX_RECORDED_SKIPPED_REGIONS: usize = 1024;
+const VERIFY_IO_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_DELETION_RECORD_BYTES: usize = 2 + u16::MAX as usize + 8 + 2 + u16::MAX as usize;
 
 #[derive(Debug)]
 pub struct ScannedEntry {
@@ -32,6 +38,9 @@ pub struct EntryScanner {
   pub last_skipped_region: Option<(u64, usize)>,
   /// All skipped regions accumulated during the scan.
   pub skipped_regions: Vec<(u64, usize)>,
+  skipped_region_count: u64,
+  skipped_region_bytes: u64,
+  cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl EntryScanner {
@@ -42,6 +51,20 @@ impl EntryScanner {
   /// Create a scanner that reports errors for corrupt entries instead of skipping.
   pub fn new_reporting(file: File) -> EngineResult<Self> {
     Self::new_internal(file, true, false)
+  }
+
+  pub(crate) fn new_reporting_to(file: File, wal_end: u64, cancellation: Option<Arc<AtomicBool>>) -> EngineResult<Self> {
+    let physical_length = file.metadata()?.len();
+    let mut scanner = Self::new_internal(file, true, false)?;
+    if wal_end < scanner.current_offset || wal_end > physical_length {
+      return Err(EngineError::InvalidInput(format!(
+        "verification WAL end {wal_end} is outside {}..{physical_length}",
+        scanner.current_offset
+      )));
+    }
+    scanner.file_length = wal_end;
+    scanner.cancellation = cancellation;
+    Ok(scanner)
   }
 
   /// Construct a scanner for dirty-startup recovery: ignore the stale
@@ -110,62 +133,136 @@ impl EntryScanner {
       report_errors,
       last_skipped_region: None,
       skipped_regions: Vec::new(),
+      skipped_region_count: 0,
+      skipped_region_bytes: 0,
+      cancellation: None,
     })
   }
 
   /// Scan forward from `start` looking for the 4-byte entry magic (0x0AE012DB LE).
-  /// Caps the search at 1MB to avoid scanning the entire file.
+  /// The scan walks overlapping 1 MiB windows so memory stays bounded without
+  /// discarding valid records after a large corrupt region.
   /// Returns Some((offset, bytes_skipped)) if found, None if not.
-  fn scan_for_next_magic(&mut self, start: u64) -> Option<(u64, u64)> {
+  fn scan_for_next_magic(&mut self, start: u64) -> EngineResult<Option<(u64, u64)>> {
     use crate::engine::entry_header::ENTRY_MAGIC;
     let magic_bytes = ENTRY_MAGIC.to_le_bytes();
-    let max_scan = 1_048_576u64; // 1MB search window
-    let end = (start + max_scan).min(self.file_length);
-
-    // Read the search window into memory
-    let window_size = (end - start) as usize;
-    if window_size < 4 {
-      return None;
-    }
-
-    if self.file.seek(SeekFrom::Start(start)).is_err() {
-      return None;
-    }
-
-    let mut buffer = vec![0u8; window_size];
-    if self.file.read_exact(&mut buffer).is_err() {
-      // Partial read — truncate to what we actually have
-      if self.file.seek(SeekFrom::Start(start)).is_err() {
-        return None;
+    let mut buffer = Vec::new();
+    let mut window_start = start;
+    while window_start < self.file_length {
+      self.check_cancelled()?;
+      let window_end = window_start.saturating_add(1_048_576).min(self.file_length);
+      let window_size = usize::try_from(window_end.saturating_sub(window_start))
+        .map_err(|_| EngineError::ResourceExhausted("entry recovery scan window exceeds platform address space".to_string()))?;
+      if window_size < 4 {
+        return Ok(None);
       }
-      let actual = self.file.read(&mut buffer).unwrap_or(0);
-      buffer.truncate(actual);
-    }
 
-    // Search for magic bytes
-    for i in 0..buffer.len().saturating_sub(3) {
-      if buffer[i..i + 4] == magic_bytes {
-        let candidate_offset = start + i as u64;
+      buffer.clear();
+      buffer
+        .try_reserve_exact(window_size)
+        .map_err(|error| EngineError::ResourceExhausted(format!("entry recovery scan allocation failed: {error}")))?;
+      buffer.resize(window_size, 0);
+      self.file.seek(SeekFrom::Start(window_start))?;
+      self.file.read_exact(&mut buffer)?;
 
-        // Validate: try to deserialize a header at this offset
-        if self.file.seek(SeekFrom::Start(candidate_offset)).is_ok() {
-          if let Ok(header) = EntryHeader::deserialize(&mut self.file) {
-            // Sanity check: total_length should be reasonable
-            let remaining = self.file_length - candidate_offset;
-            if (header.total_length as u64) <= remaining && header.total_length > 0 {
-              return Some((candidate_offset, candidate_offset - start + 1));
+      for i in 0..buffer.len().saturating_sub(3) {
+        if i % 4_096 == 0 {
+          self.check_cancelled()?;
+        }
+        if buffer[i..i + 4] == magic_bytes {
+          let candidate_offset = window_start.checked_add(i as u64).ok_or_else(|| EngineError::CorruptEntry {
+            offset: window_start,
+            reason: "entry recovery candidate offset overflow".to_string(),
+          })?;
+
+          self.file.seek(SeekFrom::Start(candidate_offset))?;
+          match EntryHeader::deserialize(&mut self.file) {
+            Ok(header) => {
+              if Self::validated_entry_end(&header, candidate_offset, self.file_length).is_ok() {
+                return Ok(Some((candidate_offset, candidate_offset.saturating_sub(start).saturating_add(1))));
+              }
             }
+            Err(EngineError::IoError(error)) => return Err(EngineError::IoError(error)),
+            Err(_) => {}
           }
         }
       }
+
+      if window_end == self.file_length {
+        return Ok(None);
+      }
+      window_start = window_end.saturating_sub(3);
     }
 
-    None
+    Ok(None)
+  }
+
+  fn validated_entry_end(header: &EntryHeader, entry_offset: u64, file_length: u64) -> EngineResult<u64> {
+    let expected_total = EntryHeader::compute_total_length(header.hash_algo, header.key_length as usize, header.value_length as usize)
+      .map_err(|error| EngineError::CorruptEntry { offset: entry_offset, reason: format!("invalid entry lengths: {error}") })?;
+    if header.total_length != expected_total {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("entry total length {} does not match encoded length {expected_total}", header.total_length),
+      });
+    }
+    let entry_end = entry_offset
+      .checked_add(u64::from(expected_total))
+      .ok_or_else(|| EngineError::CorruptEntry { offset: entry_offset, reason: "entry end offset overflow".to_string() })?;
+    if entry_end > file_length {
+      return Err(EngineError::CorruptEntry {
+        offset: entry_offset,
+        reason: format!("entry end {entry_end} exceeds WAL boundary {file_length}"),
+      });
+    }
+    Ok(entry_end)
+  }
+
+  fn allocate_buffer(length: usize, context: &str) -> EngineResult<Vec<u8>> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(length).map_err(|error| EngineError::ResourceExhausted(format!("{context} allocation failed: {error}")))?;
+    buffer.resize(length, 0);
+    Ok(buffer)
+  }
+
+  fn recover_after_malformed_header(&mut self, entry_offset: u64) -> EngineResult<()> {
+    match self.scan_for_next_magic(entry_offset.saturating_add(1))? {
+      Some((next_offset, skipped_bytes)) => {
+        tracing::warn!(entry_offset, next_offset, skipped_bytes, "Recovered at the next validated entry header");
+        self.record_skipped_region(entry_offset, skipped_bytes as usize);
+        self.current_offset = next_offset;
+      }
+      None => {
+        let skipped = self.file_length.saturating_sub(entry_offset);
+        self.record_skipped_region(entry_offset, skipped as usize);
+        self.current_offset = self.file_length;
+      }
+    }
+    Ok(())
+  }
+
+  fn check_cancelled(&self) -> EngineResult<()> {
+    if self.cancellation.as_ref().is_some_and(|cancelled| cancelled.load(AtomicOrdering::Acquire)) {
+      return Err(EngineError::ShuttingDown);
+    }
+    Ok(())
   }
 
   fn record_skipped_region(&mut self, offset: u64, length: usize) {
     self.last_skipped_region = Some((offset, length));
-    self.skipped_regions.push((offset, length));
+    self.skipped_region_count = self.skipped_region_count.saturating_add(1);
+    self.skipped_region_bytes = self.skipped_region_bytes.saturating_add(length as u64);
+    if self.skipped_regions.len() < MAX_RECORDED_SKIPPED_REGIONS {
+      self.skipped_regions.push((offset, length));
+    }
+  }
+
+  pub fn skipped_region_count(&self) -> u64 {
+    self.skipped_region_count
+  }
+
+  pub fn skipped_region_bytes(&self) -> u64 {
+    self.skipped_region_bytes
   }
 
   pub fn current_offset(&self) -> u64 {
@@ -180,7 +277,21 @@ impl EntryScanner {
   /// because rebuild only needs the key/header metadata for those large
   /// records. Mutable metadata records are still read and hash-verified.
   pub(crate) fn next_rebuild_entry(&mut self) -> Option<EngineResult<ScannedRebuildEntry>> {
+    self.next_bounded_entry(false)
+  }
+
+  /// Scan one entry for verification without materializing its value. Every
+  /// payload is hash-verified through a fixed-size buffer; only the bounded
+  /// deletion-record value is retained because KV resolution needs its path.
+  pub(crate) fn next_verify_entry(&mut self) -> Option<EngineResult<ScannedRebuildEntry>> {
+    self.next_bounded_entry(true)
+  }
+
+  fn next_bounded_entry(&mut self, verify_large_payloads: bool) -> Option<EngineResult<ScannedRebuildEntry>> {
     loop {
+      if let Err(error) = self.check_cancelled() {
+        return Some(Err(error));
+      }
       if self.current_offset >= self.file_length {
         return None;
       }
@@ -192,66 +303,67 @@ impl EntryScanner {
 
       let header = match EntryHeader::deserialize(&mut self.file) {
         Ok(header) => header,
-        Err(EngineError::UnexpectedEof) => return None,
+        Err(EngineError::UnexpectedEof) => {
+          let length = self.file_length.saturating_sub(entry_offset) as usize;
+          self.record_skipped_region(entry_offset, length);
+          self.current_offset = self.file_length;
+          if self.report_errors {
+            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "truncated entry header".to_string() }));
+          }
+          return None;
+        }
+        Err(EngineError::IoError(error)) => return Some(Err(EngineError::IoError(error))),
         Err(error) => {
           tracing::warn!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
-          match self.scan_for_next_magic(entry_offset + 1) {
-            Some((next_offset, skipped_bytes)) => {
-              tracing::warn!("Found next valid entry at offset {} (skipped {} bytes from {})", next_offset, skipped_bytes, entry_offset);
-              self.record_skipped_region(entry_offset, skipped_bytes as usize);
-              self.current_offset = next_offset;
-              if self.report_errors {
-                return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("Corrupt header: {}", error) }));
-              }
-              continue;
-            }
-            None => {
-              tracing::warn!("No valid entry found after offset {}. Stopping scan.", entry_offset);
-              self.record_skipped_region(entry_offset, (self.file_length - entry_offset) as usize);
-              return None;
-            }
+          if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
+            return Some(Err(recovery_error));
           }
+          if self.report_errors {
+            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("Corrupt header: {}", error) }));
+          }
+          continue;
         }
       };
 
-      let header_size = header.header_size() as u64;
-      let payload_size = header.key_length as u64 + header.value_length as u64;
-      if header.total_length as u64 != header_size + payload_size {
-        tracing::warn!(
-          "Corrupt entry at offset {}: key_length ({}) + value_length ({}) + header ({}) does not equal total_length ({}). Skipping.",
-          entry_offset,
-          header.key_length,
-          header.value_length,
-          header_size,
-          header.total_length,
-        );
-        self.current_offset = entry_offset + header.total_length.max(1) as u64;
+      let entry_end = match Self::validated_entry_end(&header, entry_offset, self.file_length) {
+        Ok(entry_end) => entry_end,
+        Err(error) => {
+          if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
+            return Some(Err(recovery_error));
+          }
+          if self.report_errors {
+            return Some(Err(error));
+          }
+          continue;
+        }
+      };
+
+      let expected_key_length = if header.entry_type == EntryType::Void { 0 } else { header.hash_algo.hash_length() };
+      if header.key_length as usize != expected_key_length {
+        let error = EngineError::CorruptEntry {
+          offset: entry_offset,
+          reason: format!(
+            "database entry key length {} does not match the expected length {} for {:?}",
+            header.key_length, expected_key_length, header.entry_type
+          ),
+        };
+        if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
+          return Some(Err(recovery_error));
+        }
         if self.report_errors {
-          return Some(Err(EngineError::CorruptEntry {
-            offset: entry_offset,
-            reason: format!(
-              "Corrupt header: key_length ({}) + value_length ({}) + header ({}) does not equal total_length ({})",
-              header.key_length, header.value_length, header_size, header.total_length,
-            ),
-          }));
+          return Some(Err(error));
         }
         continue;
       }
 
-      let entry_end = entry_offset + header.total_length as u64;
-      if entry_end > self.file_length {
-        self.current_offset = self.file_length;
-        if self.report_errors {
-          return Some(Err(EngineError::CorruptEntry {
-            offset: entry_offset,
-            reason: format!("entry extends past scan end: {} > {}", entry_end, self.file_length),
-          }));
-        }
-        return None;
-      }
-
-      let mut key = vec![0u8; header.key_length as usize];
+      let mut key = match Self::allocate_buffer(header.key_length as usize, "entry key scan") {
+        Ok(key) => key,
+        Err(error) => return Some(Err(error)),
+      };
       if let Err(error) = self.file.read_exact(&mut key) {
+        if error.kind() != std::io::ErrorKind::UnexpectedEof {
+          return Some(Err(error.into()));
+        }
         tracing::warn!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
         self.record_skipped_region(entry_offset, header.total_length as usize);
         self.current_offset = entry_end;
@@ -261,36 +373,70 @@ impl EntryScanner {
         continue;
       }
 
-      let read_value = !matches!(header.entry_type, EntryType::Chunk | EntryType::Void);
-      let value = if read_value {
-        let mut value = vec![0u8; header.value_length as usize];
-        if let Err(error) = self.file.read_exact(&mut value) {
-          tracing::warn!("IO error reading value at offset {}: {}. Skipping entry.", entry_offset, error);
-          self.record_skipped_region(entry_offset, header.total_length as usize);
-          self.current_offset = entry_end;
-          if self.report_errors {
-            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading value: {}", error) }));
-          }
-          continue;
-        }
-        if !header.verify(&key, &value) {
-          tracing::warn!("Hash verification failed for metadata entry at offset {}. Skipping.", entry_offset);
-          self.current_offset = entry_end;
-          if self.report_errors {
-            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "Hash verification failed".to_string() }));
-          }
-          continue;
-        }
-        Some(value)
-      } else {
+      let should_verify = verify_large_payloads || !matches!(header.entry_type, EntryType::Chunk | EntryType::Void);
+      if !should_verify {
         if let Err(error) = self.file.seek(SeekFrom::Start(entry_end)) {
           return Some(Err(error.into()));
         }
+        self.current_offset = entry_end;
+        return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value: None }));
+      }
+
+      let retain_value = header.entry_type == EntryType::DeletionRecord;
+      if retain_value && header.value_length as usize > MAX_DELETION_RECORD_BYTES {
+        self.current_offset = entry_end;
+        return Some(Err(EngineError::CorruptEntry {
+          offset: entry_offset,
+          reason: format!("deletion record value length {} exceeds format maximum {}", header.value_length, MAX_DELETION_RECORD_BYTES),
+        }));
+      }
+      let mut retained = if retain_value {
+        let mut value = Vec::new();
+        if let Err(error) = value.try_reserve_exact(header.value_length as usize) {
+          self.current_offset = entry_end;
+          return Some(Err(EngineError::ResourceExhausted(format!("verification deletion-record allocation failed: {error}"))));
+        }
+        Some(value)
+      } else {
         None
       };
+      let mut hasher = match header.hash_algo.incremental_hasher() {
+        Ok(hasher) => hasher,
+        Err(error) => return Some(Err(error)),
+      };
+      hasher.update(&[header.entry_type.to_u8()]);
+      hasher.update(&key);
+      let mut remaining = header.value_length as usize;
+      let mut buffer = [0u8; VERIFY_IO_BUFFER_BYTES];
+      while remaining > 0 {
+        if let Err(error) = self.check_cancelled() {
+          return Some(Err(error));
+        }
+        let width = remaining.min(buffer.len());
+        if let Err(error) = self.file.read_exact(&mut buffer[..width]) {
+          if error.kind() != std::io::ErrorKind::UnexpectedEof {
+            return Some(Err(error.into()));
+          }
+          self.record_skipped_region(entry_offset, header.total_length as usize);
+          self.current_offset = entry_end;
+          return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading value: {error}") }));
+        }
+        hasher.update(&buffer[..width]);
+        if let Some(value) = retained.as_mut() {
+          value.extend_from_slice(&buffer[..width]);
+        }
+        remaining -= width;
+      }
+      if hasher.finalize() != header.hash {
+        self.current_offset = entry_end;
+        if self.report_errors {
+          return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "Hash verification failed".to_string() }));
+        }
+        continue;
+      }
 
       self.current_offset = entry_end;
-      return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value }));
+      return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value: retained }));
     }
   }
 }
@@ -300,6 +446,9 @@ impl Iterator for EntryScanner {
 
   fn next(&mut self) -> Option<Self::Item> {
     loop {
+      if let Err(error) = self.check_cancelled() {
+        return Some(Err(error));
+      }
       if self.current_offset >= self.file_length {
         return None;
       }
@@ -314,66 +463,52 @@ impl Iterator for EntryScanner {
       // Try to read the header
       let header = match EntryHeader::deserialize(&mut self.file) {
         Ok(header) => header,
-        Err(EngineError::UnexpectedEof) => return None,
+        Err(EngineError::UnexpectedEof) => {
+          let length = self.file_length.saturating_sub(entry_offset) as usize;
+          self.record_skipped_region(entry_offset, length);
+          self.current_offset = self.file_length;
+          if self.report_errors {
+            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "truncated entry header".to_string() }));
+          }
+          return None;
+        }
+        Err(EngineError::IoError(error)) => return Some(Err(EngineError::IoError(error))),
         Err(error) => {
           // Corrupt entry header — can't use total_length to skip.
           // Scan forward looking for the next valid entry magic bytes.
           tracing::warn!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
-
-          match self.scan_for_next_magic(entry_offset + 1) {
-            Some((next_offset, skipped_bytes)) => {
-              tracing::warn!("Found next valid entry at offset {} (skipped {} bytes from {})", next_offset, skipped_bytes, entry_offset,);
-              self.record_skipped_region(entry_offset, skipped_bytes as usize);
-              self.current_offset = next_offset;
-
-              if self.report_errors {
-                return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("Corrupt header: {}", error) }));
-              }
-              continue;
-            }
-            None => {
-              tracing::warn!("No valid entry found after offset {}. Stopping scan.", entry_offset,);
-              self.record_skipped_region(entry_offset, (self.file_length - entry_offset) as usize);
-              return None;
-            }
+          if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
+            return Some(Err(recovery_error));
           }
+          if self.report_errors {
+            return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("Corrupt header: {}", error) }));
+          }
+          continue;
         }
       };
 
-      // Validate payload lengths against total_length to prevent unbounded allocation
-      // from corrupt headers (H7).
-      let header_size = header.header_size() as u64;
-      let payload_size = header.key_length as u64 + header.value_length as u64;
-      let max_payload = (header.total_length as u64).saturating_sub(header_size);
-      if payload_size > max_payload {
-        tracing::warn!(
-          "Corrupt entry at offset {}: key_length ({}) + value_length ({}) exceeds total_length ({}) minus header ({}). Skipping.",
-          entry_offset,
-          header.key_length,
-          header.value_length,
-          header.total_length,
-          header_size,
-        );
-        self.current_offset = entry_offset + header.total_length as u64;
-
-        if self.report_errors {
-          return Some(Err(EngineError::CorruptEntry {
-            offset: entry_offset,
-            reason: format!(
-              "Corrupt header: key_length ({}) + value_length ({}) exceeds total_length ({})",
-              header.key_length, header.value_length, header.total_length,
-            ),
-          }));
+      let entry_end = match Self::validated_entry_end(&header, entry_offset, self.file_length) {
+        Ok(entry_end) => entry_end,
+        Err(error) => {
+          if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
+            return Some(Err(recovery_error));
+          }
+          if self.report_errors {
+            return Some(Err(error));
+          }
+          continue;
         }
-        continue;
-      }
+      };
 
       // Read key
-      let mut key = vec![0u8; header.key_length as usize];
+      let mut key = match Self::allocate_buffer(header.key_length as usize, "entry key scan") {
+        Ok(key) => key,
+        Err(error) => return Some(Err(error)),
+      };
       if let Err(error) = self.file.read_exact(&mut key) {
         tracing::warn!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
         self.record_skipped_region(entry_offset, header.total_length as usize);
-        self.current_offset = entry_offset + header.total_length as u64;
+        self.current_offset = entry_end;
 
         if self.report_errors {
           return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading key: {}", error) }));
@@ -382,11 +517,14 @@ impl Iterator for EntryScanner {
       }
 
       // Read value
-      let mut value = vec![0u8; header.value_length as usize];
+      let mut value = match Self::allocate_buffer(header.value_length as usize, "entry value scan") {
+        Ok(value) => value,
+        Err(error) => return Some(Err(error)),
+      };
       if let Err(error) = self.file.read_exact(&mut value) {
         tracing::warn!("IO error reading value at offset {}: {}. Skipping entry.", entry_offset, error);
         self.record_skipped_region(entry_offset, header.total_length as usize);
-        self.current_offset = entry_offset + header.total_length as u64;
+        self.current_offset = entry_end;
 
         if self.report_errors {
           return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading value: {}", error) }));
@@ -397,7 +535,7 @@ impl Iterator for EntryScanner {
       // Verify hash integrity
       if !header.verify(&key, &value) {
         tracing::warn!("Hash verification failed for entry at offset {}. Skipping.", entry_offset);
-        self.current_offset = entry_offset + header.total_length as u64;
+        self.current_offset = entry_end;
 
         if self.report_errors {
           return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "Hash verification failed".to_string() }));
@@ -406,9 +544,61 @@ impl Iterator for EntryScanner {
       }
 
       // Advance to next entry using total_length
-      self.current_offset = entry_offset + header.total_length as u64;
+      self.current_offset = entry_end;
 
       return Some(Ok(ScannedEntry { offset: entry_offset, header, key, value }));
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::engine::append_writer::AppendWriter;
+
+  #[test]
+  fn bounded_verification_scan_honors_preexisting_cancellation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cancelled-scan.aeordb");
+    let mut writer = AppendWriter::create(&path).unwrap();
+    let key = [0x5a; 32];
+    writer.append_entry(EntryType::Chunk, &key, b"payload", 0).unwrap();
+    let cancellation = Arc::new(AtomicBool::new(true));
+    let mut scanner = EntryScanner::new_reporting_to(File::open(path).unwrap(), writer.current_offset(), Some(cancellation)).unwrap();
+
+    assert!(matches!(scanner.next_verify_entry(), Some(Err(EngineError::ShuttingDown))));
+  }
+
+  #[test]
+  fn scanners_recover_after_a_header_with_mismatched_total_length() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("mismatched-total.aeordb");
+    let mut writer = AppendWriter::create(&path).unwrap();
+    let first_key = [0x11; 32];
+    let second_key = [0x22; 32];
+    let (first_offset, first_length) = writer.append_entry(EntryType::Chunk, &first_key, b"first", 0).unwrap();
+    writer.set_offset(writer.current_offset() + 1_048_576 + 4_096);
+    writer.append_entry(EntryType::Chunk, &second_key, b"second", 0).unwrap();
+    let wal_end = writer.current_offset();
+
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(first_offset + 27)).unwrap();
+    file.write_all(&first_length.saturating_add(7).to_le_bytes()).unwrap();
+    crate::engine::native_durability::sync_file_data_native(&file).unwrap();
+    drop(file);
+
+    let mut scanner = EntryScanner::new_reporting_to(File::open(&path).unwrap(), wal_end, None).unwrap();
+    assert!(matches!(scanner.next_verify_entry(), Some(Err(EngineError::CorruptEntry { .. }))));
+    let recovered = scanner.next_verify_entry().unwrap().unwrap();
+    assert_eq!(recovered.key, second_key);
+    assert!(scanner.next_verify_entry().is_none());
+
+    let mut buffered = EntryScanner::new_reporting_to(File::open(&path).unwrap(), wal_end, None).unwrap();
+    assert!(matches!(buffered.next(), Some(Err(EngineError::CorruptEntry { .. }))));
+    let recovered = buffered.next().unwrap().unwrap();
+    assert_eq!(recovered.key, second_key);
+    assert!(buffered.next().is_none());
   }
 }

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
-use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD, is_btree_format};
+use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD, InternalNode, btree_lookup, is_btree_format};
 use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash};
+use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::verify;
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::RequestContext;
@@ -212,6 +214,25 @@ fn test_btree_directory_listing_best_effort_with_missing_child_node() {
 }
 
 #[test]
+fn btree_cycle_is_bounded_for_lookup_and_best_effort_listing() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let cycle_hash = engine.compute_hash(b"btree-cycle-node").unwrap();
+  let node = BTreeNode::Internal(InternalNode { keys: Vec::new(), children: vec![cycle_hash.clone()] });
+  let node_data = node.serialize(engine.hash_algo().hash_length()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &cycle_hash, &node_data).unwrap();
+  let path_key = directory_path_hash("/cycle", &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &path_key, &cycle_hash).unwrap();
+
+  let lookup_error = btree_lookup(&engine, &cycle_hash, "anything", engine.hash_algo().hash_length(), false).unwrap_err();
+  assert!(lookup_error.to_string().contains("cycle"), "unexpected lookup error: {lookup_error}");
+
+  let (entries, warnings) = DirectoryOps::new(&engine).list_directory_with_btree_warnings("/cycle").unwrap();
+  assert!(entries.is_empty());
+  assert!(warnings.iter().any(|warning| warning.reason.contains("cycle")), "cycle produced no bounded warning: {warnings:?}");
+}
+
+#[test]
 fn test_btree_directory_window_stops_before_unneeded_damaged_branch() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -257,6 +278,40 @@ fn test_btree_directory_window_reports_damage_reached_while_seeking_offset() {
   assert!(window.has_more);
   assert_eq!(window.warnings.len(), 1);
   assert_eq!(window.warnings[0].node_hash.as_deref(), Some(child_to_delete.as_slice()));
+}
+
+#[test]
+fn verify_stale_descendant_uses_point_lookup_past_unrelated_btree_damage() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/parent/child/inside.txt", b"inside", Some("text/plain")).unwrap();
+  store_n_files(&engine, "/parent", BTREE_CONVERSION_THRESHOLD + 100);
+
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  let parent_key = directory_path_hash("/parent", &algo).unwrap();
+  let parent_data = resolve_directory_value(&engine, &parent_key);
+  let root_node = BTreeNode::deserialize(&parent_data, hash_length, 0).unwrap();
+  let unrelated_branch = match root_node {
+    BTreeNode::Internal(internal) => internal.children[1].clone(),
+    BTreeNode::Leaf(_) => panic!("expected internal B-tree root"),
+  };
+  engine.mark_entry_deleted(&unrelated_branch).unwrap();
+
+  let child_key = directory_path_hash("/parent/child", &algo).unwrap();
+  let dead_target = engine.compute_hash(b"dead-stale-directory-target").unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &child_key, &dead_target).unwrap();
+
+  let db_path = dir.path().join("test.aeor");
+  let report = verify::verify_checked(&engine, db_path.to_str().unwrap()).unwrap();
+
+  assert!(report.btree_directory_issue_details.iter().any(|issue| issue.path == "/parent"));
+  assert!(
+    report.stale_dir_path_keys.iter().any(|path| path == "/parent/child"),
+    "point recovery missed the stale child because of unrelated B-tree damage: {report:?}"
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,25 @@ use crate::engine::storage_engine::StorageEngine;
 const TASK_PREFIX: &str = "::aeordb:task:";
 const TASK_REGISTRY: &str = "::aeordb:task:_registry";
 
+fn task_storage_hash(key: &str) -> Vec<u8> {
+  blake3::hash(key.as_bytes()).as_bytes().to_vec()
+}
+
+/// Recognize and validate the task queue's sanctioned reuse of the low-level
+/// FileRecord tag. `None` means the row belongs to another FileRecord producer.
+pub(crate) fn validate_task_storage_record(hash: &[u8], value: &[u8]) -> Option<EngineResult<()>> {
+  if hash == task_storage_hash(TASK_REGISTRY) {
+    return Some(
+      serde_json::from_slice::<Vec<String>>(value)
+        .map(|_| ())
+        .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("task registry is malformed: {error}") }),
+    );
+  }
+
+  let record = serde_json::from_slice::<TaskRecord>(value).ok()?;
+  (hash == task_storage_hash(&format!("{TASK_PREFIX}{}", record.id))).then_some(Ok(()))
+}
+
 /// Lifecycle status of a background task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -104,7 +123,7 @@ impl TaskQueue {
 
   /// Compute a deterministic hash for a system-table key string.
   fn hash_key(&self, key_string: &str) -> Vec<u8> {
-    blake3::hash(key_string.as_bytes()).as_bytes().to_vec()
+    task_storage_hash(key_string)
   }
 
   /// Create a new task with `status = Pending`, persist it, and add its ID to the registry.

@@ -190,6 +190,22 @@ fn test_iter_in_offset_order() {
 }
 
 #[test]
+fn test_overlap_lookup_uses_half_open_ranges() {
+  let mut manager = VoidManager::new(HashAlgorithm::Blake3_256);
+  manager.register_void(100, 20);
+  manager.register_void(200, 20);
+
+  assert!(!manager.overlaps_range(80, 20));
+  assert!(manager.overlaps_range(80, 21));
+  assert!(manager.overlaps_range(100, 1));
+  assert!(manager.overlaps_range(119, 2));
+  assert!(!manager.overlaps_range(120, 80));
+  assert!(manager.overlaps_range(199, 2));
+  assert!(!manager.overlaps_range(220, 1));
+  assert!(manager.overlaps_range(u64::MAX, 1));
+}
+
+#[test]
 fn test_replace_all_bulk_repopulate() {
   let mut manager = VoidManager::new(HashAlgorithm::Blake3_256);
   manager.register_void(1000, 500);

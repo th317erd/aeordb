@@ -790,6 +790,36 @@ fn verify_does_not_count_gc_voided_entries_as_missing_kv() {
 }
 
 #[test]
+fn rebuild_kv_skips_keyless_physical_void_records() {
+  let (engine, temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  for version in 0..12 {
+    let body = format!("version-{version:02}");
+    ops.store_file_buffered(&ctx, "/gc/rebuild.txt", body.as_bytes(), Some("text/plain")).unwrap();
+  }
+  let gc_result = gc::run_gc(&engine, &ctx, false).unwrap();
+  assert!(gc_result.garbage_entries > 0, "test setup should create physical void records");
+
+  engine.rebuild_kv().unwrap();
+
+  let db_path = temp.path().join("test.aeordb");
+  let db_path = db_path.to_str().unwrap().to_string();
+  let report = verify::verify_checked(&engine, &db_path).unwrap();
+  assert!(!report.has_issues(), "rebuilding across physical voids damaged the live KV view: {report:?}");
+  assert_eq!(ops.read_file_buffered("/gc/rebuild.txt").unwrap(), b"version-11");
+
+  drop(ops);
+  engine.shutdown().unwrap();
+  drop(engine);
+  let reopened = StorageEngine::open(&db_path).unwrap();
+  let reopened_report = verify::verify_checked(&reopened, &db_path).unwrap();
+  assert!(!reopened_report.has_issues(), "GC-void filtering was not durably published: {reopened_report:?}");
+  assert_eq!(DirectoryOps::new(&reopened).read_file_buffered("/gc/rebuild.txt").unwrap(), b"version-11");
+}
+
+#[test]
 fn clean_startup_masks_page_kv_entries_covered_by_hot_tail_voids() {
   let (engine, temp) = create_test_db();
   let ctx = RequestContext::system();

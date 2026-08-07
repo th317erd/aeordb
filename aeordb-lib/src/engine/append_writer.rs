@@ -637,6 +637,14 @@ impl AppendWriter {
     EntryScanner::new_reporting(file)
   }
 
+  pub(crate) fn scan_entries_reporting_current_wal(
+    &self,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+  ) -> EngineResult<EntryScanner> {
+    let file = File::open(&self.file_path)?;
+    EntryScanner::new_reporting_to(file, self.current_offset, cancellation)
+  }
+
   /// Scan the WAL for dirty-startup recovery: ignore the stale
   /// `header.hot_tail_offset` and walk to EOF. **MUST** be used by
   /// `rebuild_kv` when the hot tail was detected as corrupt/missing —

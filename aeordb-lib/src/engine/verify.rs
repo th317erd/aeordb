@@ -3,7 +3,6 @@
 //! Scans the append log, verifies entry hashes, checks directory consistency,
 //! validates KV index, and produces a structured report.
 
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
 use crate::engine::directory_ops::DirectoryOps;
@@ -11,7 +10,10 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::entry_type::EntryType;
 use crate::engine::file_header::read_active_header;
 use crate::engine::hot_tail;
-use crate::engine::kv_store::{KV_TYPE_DIRECTORY, KV_TYPE_VOID};
+use crate::engine::kv_rebuild_workspace::{KvRebuildWorkspace, RebuildOrder, ResolvedKvRecord};
+use crate::engine::kv_store::{KV_FLAG_DELETED, KV_TYPE_VOID};
+use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::v4::durability_recovery::DurabilityRepairVerification;
 use crate::engine::v4::hash::digest_parts;
@@ -25,20 +27,8 @@ pub struct BTreeDirectoryIssue {
   pub reason: String,
 }
 
-#[derive(Debug, Clone, Default)]
-struct ExpectedKvEntry {
-  offset: u64,
-  total_length: u32,
-  value_length: u32,
-  kv_type: u8,
-  timestamp: i64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ExpectedKvIndex {
-  entries: HashMap<Vec<u8>, ExpectedKvEntry>,
-  deletion_records: Vec<(String, i64, u64)>,
-}
+const MAX_VERIFY_DETAILS: usize = 20;
+const MAX_VERIFY_DIAGNOSTICS: usize = 1024;
 
 /// Result of a full database integrity check.
 #[derive(Debug, Clone)]
@@ -87,6 +77,7 @@ pub struct VerifyReport {
   pub missing_kv_details: Vec<String>,
   pub invalid_kv_offsets: Vec<String>,
   pub invalid_hot_tail_voids: Vec<String>,
+  pub verification_errors: Vec<String>,
 
   /// Directories whose `dir:{path}` entry hard-links to a content hash
   /// that's been swept by GC. The directory is reachable through its
@@ -141,6 +132,7 @@ impl VerifyReport {
       missing_kv_details: Vec::new(),
       invalid_kv_offsets: Vec::new(),
       invalid_hot_tail_voids: Vec::new(),
+      verification_errors: Vec::new(),
       stale_dir_path_keys: Vec::new(),
       snapshots_checked: 0,
       broken_snapshots: Vec::new(),
@@ -159,6 +151,7 @@ impl VerifyReport {
       || self.missing_kv_entries > 0
       || !self.invalid_kv_offsets.is_empty()
       || !self.invalid_hot_tail_voids.is_empty()
+      || !self.verification_errors.is_empty()
       || !self.broken_snapshots.is_empty()
       || !self.stale_dir_path_keys.is_empty()
   }
@@ -166,34 +159,45 @@ impl VerifyReport {
 
 /// Run a full integrity check on the database.
 pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
+  match verify_checked(engine, db_path) {
+    Ok(report) => report,
+    Err(error) => {
+      let mut report = VerifyReport::new(db_path);
+      report.hash_algorithm = format!("{:?}", engine.hash_algo());
+      report.file_size = std::fs::metadata(engine.database_path()).map(|metadata| metadata.len()).unwrap_or(0);
+      report.verification_errors.push(error.to_string());
+      report
+    }
+  }
+}
+
+/// Run a full integrity check and surface operational/resource failures to
+/// callers that must not mistake an incomplete scan for a clean database.
+pub fn verify_checked(engine: &StorageEngine, db_path: &str) -> EngineResult<VerifyReport> {
+  engine.with_repair_maintenance("verify", || verify_checked_inner(engine, db_path))
+}
+
+fn verify_checked_inner(engine: &StorageEngine, db_path: &str) -> EngineResult<VerifyReport> {
   let mut report = VerifyReport::new(db_path);
 
-  // File size
-  report.file_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+  report.file_size = std::fs::metadata(engine.database_path())?.len();
   report.hash_algorithm = format!("{:?}", engine.hash_algo());
 
-  // Phase 1: Scan all entries from the append log. Also collects the
-  // expected live KV hashes so check_kv_index doesn't need a second WAL pass.
-  let mut expected = scan_entries(engine, &mut report);
-
-  // Current hot-tail void records are durable tombstones for GC-swept WAL
-  // ranges. The old bytes may still contain valid-looking entry headers, but
-  // they are intentionally absent from the live KV index.
-  let hot_tail_voids = check_hot_tail_voids(db_path, &mut report);
-  remove_expected_entries_in_voids(&mut expected, &hot_tail_voids);
-
-  // Phase 2: Check KV index consistency — uses the unique_hashes count
-  // from Phase 1 (no WAL re-scan).
-  check_kv_index(engine, &mut report, expected);
+  check_hot_tail_voids(engine, &mut report)?;
+  let expected = scan_entries(engine, &mut report)?;
+  let actual = scan_kv_index(engine, &mut report)?;
+  compare_kv_runs(&mut report, &expected, &actual)?;
+  drop(expected);
+  drop(actual);
 
   // Phase 3: Check directory consistency
-  check_directories(engine, &mut report);
-  check_path_file_records(engine, &mut report);
+  check_directories(engine, &mut report)?;
+  check_path_file_records(engine, &mut report)?;
 
   // Phase 4: Check snapshot tree integrity (detects GC damage)
-  check_snapshot_integrity(engine, &mut report);
+  check_snapshot_integrity(engine, &mut report)?;
 
-  report
+  Ok(report)
 }
 
 /// Run the final clean verification pass for an explicit durability repair.
@@ -204,9 +208,24 @@ pub fn verify_durability_repair(engine: &StorageEngine, db_path: &str) -> Engine
     .persistent_durability_recovery()
     .filter(|recovery| recovery.blocks_writes && recovery.latch_state == Some(2))
     .ok_or_else(|| EngineError::InvalidInput("durability repair verification requires an active repair-verifying latch".to_string()))?;
-  let report = verify(engine, db_path);
+  let report = verify_checked(engine, db_path)?;
   if report.has_issues() {
-    return Err(EngineError::DurabilityFailure("durability repair verification still reports unresolved database issues".to_string()));
+    return Err(EngineError::DurabilityFailure(format!(
+      "durability repair verification still reports unresolved database issues: corrupt_hash={}, corrupt_header={}, missing_children={} (sample={:?}), dangling_file_records={}, btree_issues={}, stale_kv={}, missing_kv={}, invalid_kv_offsets={}, invalid_hot_tail_voids={}, verification_errors={}, broken_snapshots={}, stale_dir_keys={}",
+      report.corrupt_hash,
+      report.corrupt_header,
+      report.missing_children.len(),
+      report.missing_children.first(),
+      report.dangling_file_records.len(),
+      report.btree_directory_issues.len(),
+      report.stale_kv_entries,
+      report.missing_kv_entries,
+      report.invalid_kv_offsets.len(),
+      report.invalid_hot_tail_voids.len(),
+      report.verification_errors.len(),
+      report.broken_snapshots.len(),
+      report.stale_dir_path_keys.len(),
+    )));
   }
   let selected_header_sequence = engine.writer_read_lock()?.file_header().sequence;
   let durable_sequence = engine.durability_snapshot()?.hard_frontier;
@@ -243,25 +262,45 @@ pub fn verify_durability_repair(engine: &StorageEngine, db_path: &str) -> Engine
 /// For KV block expansion, use the CLI's verify command which handles
 /// the engine drop/reopen cycle needed for WAL relocation.
 pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport {
-  let mut report = verify(engine, db_path);
+  match verify_and_repair_checked(engine, db_path) {
+    Ok(report) => report,
+    Err(error) => {
+      let mut report = VerifyReport::new(db_path);
+      report.hash_algorithm = format!("{:?}", engine.hash_algo());
+      report.file_size = std::fs::metadata(engine.database_path()).map(|metadata| metadata.len()).unwrap_or(0);
+      report.verification_errors.push(error.to_string());
+      report
+    }
+  }
+}
+
+pub fn verify_and_repair_checked(engine: &StorageEngine, db_path: &str) -> EngineResult<VerifyReport> {
+  let report = verify_checked(engine, db_path)?;
+  let repairs = repair_verified_report(engine, &report)?;
+  if repairs.is_empty() {
+    return Ok(report);
+  }
+
+  let mut final_report = verify_checked(engine, db_path)?;
+  final_report.repairs = repairs;
+  Ok(final_report)
+}
+
+fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> EngineResult<Vec<String>> {
+  let mut repairs = Vec::new();
+  let mut mutated = false;
 
   // Repair 1: Rebuild KV if there are missing or stale entries
   if report.missing_kv_entries > 0 || report.stale_kv_entries > 0 {
-    match engine.rebuild_kv() {
-      Ok(()) => {
-        report
-          .repairs
-          .push(format!("KV index rebuilt ({} missing + {} stale entries recovered)", report.missing_kv_entries, report.stale_kv_entries,));
-      }
-      Err(e) => {
-        report.repairs.push(format!("KV rebuild failed: {}", e));
-      }
-    }
+    engine.rebuild_kv()?;
+    mutated = true;
+    repairs
+      .push(format!("KV index rebuilt ({} missing + {} stale entries recovered)", report.missing_kv_entries, report.stale_kv_entries,));
   }
 
   // Repair 2: Note corrupt entries
   if report.corrupt_hash > 0 || report.corrupt_header > 0 {
-    report.repairs.push(format!(
+    repairs.push(format!(
       "Found {} corrupt entries ({} hash failures + {} header failures)",
       report.corrupt_hash + report.corrupt_header,
       report.corrupt_hash,
@@ -287,11 +326,13 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
         match ops.repair_directory_index_from_path_records(&path) {
           Ok(count) => {
             targeted_repair_succeeded = true;
-            report.repairs.push(format!("B-tree directory repaired from path records: {} ({} directory written)", path, count));
+            mutated |= count > 0;
+            repairs.push(format!("B-tree directory repaired from path records: {} ({} directory written)", path, count));
           }
-          Err(e) => {
+          Err(error) if is_operational_verification_error(&error) => return Err(error),
+          Err(error) => {
             targeted_repair_failed = true;
-            report.repairs.push(format!("B-tree directory targeted repair failed for {}: {}", path, e));
+            repairs.push(format!("B-tree directory targeted repair failed for {}: {}; falling back to full rebuild", path, error));
           }
         }
       }
@@ -299,14 +340,9 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
 
     let missing_kv_needs_full_rebuild = report.missing_kv_entries > 0 && report.file_records > 0 && !targeted_repair_succeeded;
     if targeted_repair_failed || !report.missing_children.is_empty() || missing_kv_needs_full_rebuild {
-      match ops.rebuild_directory_tree(&ctx) {
-        Ok(count) => {
-          report.repairs.push(format!("Directory tree rebuilt ({} directories written)", count));
-        }
-        Err(e) => {
-          report.repairs.push(format!("Directory tree rebuild failed: {}", e));
-        }
-      }
+      let count = ops.rebuild_directory_tree(&ctx)?;
+      mutated |= count > 0;
+      repairs.push(format!("Directory tree rebuilt ({} directories written)", count));
     }
   }
 
@@ -320,328 +356,417 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
   if !report.stale_dir_path_keys.is_empty() {
     let ops = DirectoryOps::new(engine);
     let mut repaired = 0usize;
-    let mut failed = 0usize;
-    // Clone to avoid borrow conflicts when we mutate report.repairs.
-    let paths: Vec<String> = report.stale_dir_path_keys.clone();
-    for path in &paths {
-      match ops.repair_stale_dir_key(path) {
-        Ok(true) => repaired += 1,
-        Ok(false) => {}
-        Err(_) => failed += 1,
+    for path in &report.stale_dir_path_keys {
+      if ops.repair_stale_dir_key(path)? {
+        repaired = repaired.saturating_add(1);
       }
     }
-    report.repairs.push(format!("Stale dir_keys rewritten: {} fixed, {} unfixable", repaired, failed,));
+    mutated |= repaired > 0;
+    repairs.push(format!("Stale dir_keys rewritten: {} fixed", repaired));
   }
 
-  // Persist repairs to disk
-  if !report.repairs.is_empty() {
-    match engine.shutdown() {
-      Ok(()) => {
-        report.repairs.push("Repairs persisted to disk.".to_string());
-      }
-      Err(e) => {
-        report.repairs.push(format!("Warning: failed to persist repairs: {}", e));
-      }
-    }
+  if !report.invalid_hot_tail_voids.is_empty() {
+    engine.sync_voids_to_kv_writer()?;
+    mutated = true;
+    repairs.push(format!("Hot-tail void snapshot republished after {} invalid diagnostic(s)", report.invalid_hot_tail_voids.len()));
   }
 
-  report
+  if mutated {
+    engine.force_hot_tail_flush()?;
+    repairs.push("Repairs durably published.".to_string());
+  }
+
+  Ok(repairs)
+}
+
+#[cfg(test)]
+mod repair_tests {
+  use super::*;
+  use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+  use crate::server::create_temp_engine_for_tests;
+
+  #[test]
+  fn checked_repair_propagates_rebuild_pressure_without_shutting_down_engine() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    let coordinator = engine.memory_coordinator();
+    let snapshot = coordinator.snapshot().unwrap();
+    let policy = snapshot.policy.unwrap();
+    let remaining_critical = policy.emergency_reserve_bytes.checked_sub(snapshot.critical_reserved_bytes).unwrap();
+    let pressure = coordinator
+      .reserve(MemoryOwner::Repair, remaining_critical, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery))
+      .unwrap();
+
+    let db_path = temp.path().join("test.aeordb");
+    let mut report = VerifyReport::new(db_path.to_str().unwrap());
+    report.missing_kv_entries = 1;
+    let error = repair_verified_report(&engine, &report).unwrap_err();
+    assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected repair failure: {error}");
+
+    drop(pressure);
+    let key = engine.compute_hash(b"repair-pressure-released").unwrap();
+    engine.store_entry(EntryType::Chunk, &key, b"still-writable").unwrap();
+    assert!(engine.has_entry(&key).unwrap());
+  }
 }
 
 /// Scan the WAL, accumulating per-type counts, integrity counts, and
 /// the set of KV hash keys expected to be live. Void entries are storage
 /// bookkeeping, not user/content records, so they are counted in the storage
 /// summary but excluded from live-KV completeness checks.
-fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> ExpectedKvIndex {
-  use crate::engine::errors::EngineError;
-
-  // Use the writer to scan entries — reporting mode yields errors
-  // for corrupt entries instead of silently skipping them.
-  let writer = match engine.writer_read_lock() {
-    Ok(w) => w,
-    Err(_) => return ExpectedKvIndex::default(),
-  };
-
-  let mut expected = ExpectedKvIndex::default();
-
-  if let Ok(mut scanner) = writer.scan_entries_reporting() {
-    for result in scanner.by_ref() {
-      match result {
-        Ok(scanned) => {
-          report.total_entries += 1;
-          report.valid_entries += 1;
-
-          match scanned.header.entry_type {
-            EntryType::Chunk => {
-              report.chunks += 1;
-              report.chunk_data_size += scanned.value.len() as u64;
-            }
-            EntryType::FileRecord => {
-              report.file_records += 1;
-              report.logical_data_size += scanned.header.value_length as u64;
-            }
-            EntryType::DirectoryIndex => report.directory_indexes += 1,
-            EntryType::Symlink => report.symlinks += 1,
-            EntryType::Snapshot => report.snapshots += 1,
-            EntryType::DeletionRecord => report.deletion_records += 1,
-            EntryType::Fork => report.forks += 1,
-            // Void WAL records are historical bookkeeping. The current
-            // reusable-space state lives in the hot-tail void snapshot and is
-            // counted in check_hot_tail_voids().
-            EntryType::Void => {}
+fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<KvRebuildWorkspace> {
+  let coordinator = engine.memory_coordinator();
+  let mut expected = KvRebuildWorkspace::new_for_purpose(
+    engine.database_path(),
+    "verify-expected",
+    engine.hash_algo(),
+    Some(coordinator.as_ref()),
+    AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery),
+    Some(engine.repair_cancellation()),
+  )?;
+  let mut scanner = engine.writer_read_lock()?.scan_entries_reporting_current_wal(Some(engine.repair_cancellation()))?;
+  while let Some(result) = scanner.next_verify_entry() {
+    match result {
+      Ok(scanned) => {
+        report.total_entries = report.total_entries.saturating_add(1);
+        report.valid_entries = report.valid_entries.saturating_add(1);
+        match scanned.header.entry_type {
+          EntryType::Chunk => {
+            report.chunks = report.chunks.saturating_add(1);
+            report.chunk_data_size = report.chunk_data_size.saturating_add(scanned.header.value_length as u64);
           }
-
-          if scanned.header.entry_type == EntryType::DeletionRecord {
-            if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(&scanned.value, scanned.header.entry_version) {
-              expected.deletion_records.push((record.path, scanned.header.timestamp, scanned.offset));
-            }
+          EntryType::FileRecord => {
+            report.file_records = report.file_records.saturating_add(1);
+            report.logical_data_size = report.logical_data_size.saturating_add(scanned.header.value_length as u64);
           }
-
-          if scanned.header.entry_type != EntryType::Void {
-            let candidate = ExpectedKvEntry {
-              offset: scanned.offset,
-              total_length: scanned.header.total_length,
-              value_length: scanned.header.value_length,
-              kv_type: scanned.header.entry_type.to_kv_type(),
-              timestamp: scanned.header.timestamp,
-            };
-            let replace =
-              expected.entries.get(&scanned.key).map(|existing| should_replace_expected_entry(existing, &candidate)).unwrap_or(true);
-            if replace {
-              expected.entries.insert(scanned.key, candidate);
-            }
-          }
+          EntryType::DirectoryIndex => report.directory_indexes = report.directory_indexes.saturating_add(1),
+          EntryType::Symlink => report.symlinks = report.symlinks.saturating_add(1),
+          EntryType::Snapshot => report.snapshots = report.snapshots.saturating_add(1),
+          EntryType::DeletionRecord => report.deletion_records = report.deletion_records.saturating_add(1),
+          EntryType::Fork => report.forks = report.forks.saturating_add(1),
+          EntryType::Void => {}
         }
-        Err(EngineError::CorruptEntry { ref reason, .. }) => {
-          report.total_entries += 1;
-          if reason.contains("Hash verification") {
-            report.corrupt_hash += 1;
-          } else {
-            report.corrupt_header += 1;
-          }
+
+        if engine.entry_overlaps_current_void(scanned.offset, scanned.header.total_length)? {
+          continue;
         }
-        Err(_) => {
-          report.total_entries += 1;
-          report.corrupt_header += 1;
+        let order = RebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
+        if scanned.header.entry_type == EntryType::DeletionRecord {
+          let value = scanned.value.as_deref().ok_or_else(|| EngineError::CorruptEntry {
+            offset: scanned.offset,
+            reason: "verification scanner omitted a deletion-record payload".to_string(),
+          })?;
+          let deletion = crate::engine::deletion_record::DeletionRecord::deserialize(value, scanned.header.entry_version)?;
+          expected.push_deletion_path(&deletion.path, order)?;
+        }
+        if scanned.header.entry_type != EntryType::Void {
+          expected.push_value(
+            scanned.header.entry_type.to_kv_type(),
+            &scanned.key,
+            scanned.offset,
+            scanned.header.value_length,
+            scanned.header.total_length,
+            order,
+          )?;
         }
       }
-    }
-
-    // Collect skipped regions from the scanner
-    for (offset, length) in &scanner.skipped_regions {
-      report.skipped_regions.push((*offset, *length as u64));
+      Err(EngineError::CorruptEntry { reason, .. }) => {
+        report.total_entries = report.total_entries.saturating_add(1);
+        if reason.contains("Hash verification") {
+          report.corrupt_hash = report.corrupt_hash.saturating_add(1);
+        } else {
+          report.corrupt_header = report.corrupt_header.saturating_add(1);
+        }
+      }
+      Err(error) => return Err(error),
     }
   }
-
+  report.skipped_regions.extend(scanner.skipped_regions.iter().map(|(offset, length)| (*offset, *length as u64)));
+  if scanner.skipped_region_count() > scanner.skipped_regions.len() as u64 && report.verification_errors.len() < MAX_VERIFY_DIAGNOSTICS {
+    report.verification_errors.push(format!(
+      "{} additional corrupt WAL regions ({} total skipped bytes) were omitted from bounded diagnostics",
+      scanner.skipped_region_count().saturating_sub(scanner.skipped_regions.len() as u64),
+      scanner.skipped_region_bytes()
+    ));
+  }
   report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
-  expected
+  expected.finish()?;
+  Ok(expected)
 }
 
-fn should_replace_expected_entry(existing: &ExpectedKvEntry, candidate: &ExpectedKvEntry) -> bool {
-  if existing.kv_type == KV_TYPE_DIRECTORY && candidate.kv_type == KV_TYPE_DIRECTORY {
-    if candidate.value_length == 0 && existing.value_length > 0 {
-      return false;
+fn scan_kv_index(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<KvRebuildWorkspace> {
+  let coordinator = engine.memory_coordinator();
+  let mut actual = KvRebuildWorkspace::new_for_purpose(
+    engine.database_path(),
+    "verify-actual",
+    engine.hash_algo(),
+    Some(coordinator.as_ref()),
+    AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery),
+    Some(engine.repair_cancellation()),
+  )?;
+  let (wal_start, wal_end) = {
+    let writer = engine.writer_read_lock()?;
+    let header = writer.file_header();
+    (header.kv_block_offset.saturating_add(header.kv_block_length), writer.current_offset())
+  };
+  engine.visit_kv_entries_for_repair(|entry| {
+    if entry.entry_type() == KV_TYPE_VOID {
+      return Ok(true);
     }
-    if candidate.value_length > 0 && existing.value_length == 0 {
-      return true;
+    report.kv_entries = report.kv_entries.saturating_add(1);
+    if !StorageEngine::valid_reusable_range(entry.offset, entry.total_length, wal_start, wal_end)
+      && report.invalid_kv_offsets.len() < MAX_VERIFY_DIAGNOSTICS
+    {
+      report.invalid_kv_offsets.push(format!(
+        "hash {} offset {} length {} outside WAL region {}..{}",
+        short_hash(&entry.hash),
+        entry.offset,
+        entry.total_length,
+        wal_start,
+        wal_end
+      ));
     }
-  }
-
-  (candidate.timestamp, candidate.offset) > (existing.timestamp, existing.offset)
+    actual.push_value(
+      entry.type_flags,
+      &entry.hash,
+      entry.offset,
+      0,
+      entry.total_length,
+      RebuildOrder { timestamp: 0, offset: entry.offset },
+    )?;
+    Ok(true)
+  })?;
+  actual.finish()?;
+  Ok(actual)
 }
 
-fn check_kv_index(engine: &StorageEngine, report: &mut VerifyReport, mut expected: ExpectedKvIndex) {
-  apply_deletion_records(engine, &mut expected);
-
-  // Count KV entries from snapshot
-  let snapshot = engine.kv_snapshot.load();
-  if let Ok(entries) = snapshot.iter_all() {
-    let live_entries: Vec<_> = entries.into_iter().filter(|entry| entry.entry_type() != KV_TYPE_VOID).collect();
-    report.kv_entries = live_entries.len() as u64;
-    if let Ok(writer) = engine.writer_read_lock() {
-      let header = writer.file_header();
-      let wal_start = header.kv_block_offset.saturating_add(header.kv_block_length);
-      let wal_end = writer.current_offset();
-      for entry in &live_entries {
-        if !StorageEngine::valid_reusable_range(entry.offset, entry.total_length, wal_start, wal_end) {
-          report.invalid_kv_offsets.push(format!(
-            "hash {} offset {} length {} outside WAL region {}..{}",
-            hex::encode(&entry.hash[..8.min(entry.hash.len())]),
-            entry.offset,
-            entry.total_length,
-            wal_start,
-            wal_end
-          ));
+fn compare_kv_runs(report: &mut VerifyReport, expected: &KvRebuildWorkspace, actual: &KvRebuildWorkspace) -> EngineResult<()> {
+  let mut expected_cursor = expected.resolved_cursor()?;
+  let mut actual_cursor = actual.resolved_cursor()?;
+  let mut expected_entry = next_live_record(&mut expected_cursor)?;
+  let mut actual_entry = next_live_record(&mut actual_cursor)?;
+  loop {
+    match (&expected_entry, &actual_entry) {
+      (Some(expected), Some(actual)) if expected.hash < actual.hash => {
+        record_missing(report, expected);
+        expected_entry = next_live_record(&mut expected_cursor)?;
+      }
+      (Some(expected), Some(actual)) if actual.hash < expected.hash => {
+        record_stale(report, actual);
+        actual_entry = next_live_record(&mut actual_cursor)?;
+      }
+      (Some(expected), Some(actual)) => {
+        if expected.offset != actual.offset
+          || expected.total_length != actual.total_length
+          || expected.type_flags & 0x0f != actual.type_flags & 0x0f
+        {
+          record_missing(report, expected);
+          record_stale(report, actual);
         }
+        expected_entry = next_live_record(&mut expected_cursor)?;
+        actual_entry = next_live_record(&mut actual_cursor)?;
       }
-    }
-
-    let expected_hashes: HashSet<Vec<u8>> = expected.entries.keys().cloned().collect();
-    let mut actual_by_hash = HashMap::with_capacity(live_entries.len());
-    for entry in live_entries {
-      actual_by_hash.insert(entry.hash.clone(), entry);
-    }
-    let actual_hashes: HashSet<Vec<u8>> = actual_by_hash.keys().cloned().collect();
-
-    report.missing_kv_entries = expected_hashes.difference(&actual_hashes).count() as u64;
-    report.stale_kv_entries = actual_hashes.difference(&expected_hashes).count() as u64;
-    for hash in expected_hashes.difference(&actual_hashes).take(20) {
-      if let Some(entry) = expected.entries.get(hash) {
-        report.missing_kv_details.push(format!(
-          "hash {} offset {} length {}",
-          hex::encode(&hash[..8.min(hash.len())]),
-          entry.offset,
-          entry.total_length
-        ));
+      (Some(expected), None) => {
+        record_missing(report, expected);
+        expected_entry = next_live_record(&mut expected_cursor)?;
       }
-    }
-    for hash in actual_hashes.difference(&expected_hashes).take(20) {
-      if let Some(entry) = actual_by_hash.get(hash) {
-        report.stale_kv_details.push(format!(
-          "hash {} type_flags=0x{:02x} offset {} length {}",
-          hex::encode(&hash[..8.min(hash.len())]),
-          entry.type_flags,
-          entry.offset,
-          entry.total_length
-        ));
+      (None, Some(actual)) => {
+        record_stale(report, actual);
+        actual_entry = next_live_record(&mut actual_cursor)?;
       }
+      (None, None) => return Ok(()),
     }
   }
 }
 
-fn apply_deletion_records(engine: &StorageEngine, expected: &mut ExpectedKvIndex) {
-  let hash_algo = engine.hash_algo();
-  for (path, deletion_timestamp, deletion_offset) in expected.deletion_records.clone() {
-    let normalized = crate::engine::path_utils::normalize_path(&path);
-
-    if let Ok(file_key) = crate::engine::directory_ops::file_path_hash(&normalized, &hash_algo) {
-      remove_expected_if_older(expected, &file_key, deletion_timestamp, deletion_offset);
-    }
-    if let Ok(dir_key) = crate::engine::directory_ops::directory_path_hash(&normalized, &hash_algo) {
-      remove_expected_if_older(expected, &dir_key, deletion_timestamp, deletion_offset);
-    }
-    if let Ok(symlink_key) = crate::engine::symlink_record::symlink_path_hash(&normalized, &hash_algo) {
-      remove_expected_if_older(expected, &symlink_key, deletion_timestamp, deletion_offset);
-    }
-    if let Ok(raw_key) = hash_algo.compute_hash(path.as_bytes()) {
-      remove_expected_if_older(expected, &raw_key, deletion_timestamp, deletion_offset);
+fn next_live_record(cursor: &mut crate::engine::kv_rebuild_workspace::ResolvedRecordCursor) -> EngineResult<Option<ResolvedKvRecord>> {
+  loop {
+    let Some(record) = cursor.next_record()? else {
+      return Ok(None);
+    };
+    if record.type_flags & KV_FLAG_DELETED == 0 && record.type_flags & 0x0f != KV_TYPE_VOID {
+      return Ok(Some(record));
     }
   }
 }
 
-fn remove_expected_if_older(expected: &mut ExpectedKvIndex, key: &[u8], deletion_timestamp: i64, deletion_offset: u64) {
-  if expected.entries.get(key).map(|entry| (deletion_timestamp, deletion_offset) > (entry.timestamp, entry.offset)).unwrap_or(false) {
-    expected.entries.remove(key);
+fn record_missing(report: &mut VerifyReport, entry: &ResolvedKvRecord) {
+  report.missing_kv_entries = report.missing_kv_entries.saturating_add(1);
+  if report.missing_kv_details.len() < MAX_VERIFY_DETAILS {
+    report.missing_kv_details.push(format!("hash {} offset {} length {}", short_hash(&entry.hash), entry.offset, entry.total_length));
   }
 }
 
-fn remove_expected_entries_in_voids(expected: &mut ExpectedKvIndex, voids: &[hot_tail::VoidRecord]) {
-  if voids.is_empty() {
-    return;
+fn record_stale(report: &mut VerifyReport, entry: &ResolvedKvRecord) {
+  report.stale_kv_entries = report.stale_kv_entries.saturating_add(1);
+  if report.stale_kv_details.len() < MAX_VERIFY_DETAILS {
+    report.stale_kv_details.push(format!(
+      "hash {} type_flags=0x{:02x} offset {} length {}",
+      short_hash(&entry.hash),
+      entry.type_flags,
+      entry.offset,
+      entry.total_length
+    ));
   }
-
-  expected.entries.retain(|_hash, entry| {
-    let entry_end = entry.offset.saturating_add(entry.total_length as u64);
-    !voids.iter().any(|void| {
-      let void_end = void.offset.saturating_add(void.size as u64);
-      entry.offset < void_end && void.offset < entry_end
-    })
-  });
 }
 
-fn check_hot_tail_voids(db_path: &str, report: &mut VerifyReport) -> Vec<hot_tail::VoidRecord> {
-  let mut file = match File::open(db_path) {
-    Ok(file) => file,
-    Err(_) => return Vec::new(),
-  };
-  let (header, _) = match read_active_header(&mut file) {
-    Ok(header) => header,
-    Err(_) => return Vec::new(),
-  };
+fn short_hash(hash: &[u8]) -> String {
+  hex::encode(&hash[..8.min(hash.len())])
+}
+
+fn check_hot_tail_voids(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
+  let mut file = File::open(engine.database_path())?;
+  let (header, _) = read_active_header(&mut file)?;
   if header.hot_tail_offset == 0 {
-    return Vec::new();
+    return Ok(());
   }
 
   let hash_length = header.hash_algo.hash_length();
   let wal_start = header.kv_block_offset.saturating_add(header.kv_block_length);
   let hot_tail_offset = header.hot_tail_offset;
-  let payload = match hot_tail::read_hot_tail(&mut file, hot_tail_offset, hash_length) {
-    Some(payload) => payload,
-    None => return Vec::new(),
+  let current_wal_end = engine.writer_read_lock()?.current_offset();
+  let validation_end = hot_tail_offset.max(current_wal_end);
+  let mut previous_end = None;
+  let cancellation = engine.repair_cancellation();
+  let mut inspect_void = |index: u64, void: crate::engine::hot_tail::VoidRecord| -> EngineResult<()> {
+    ensure_repair_active(engine)?;
+    report.voids = report.voids.saturating_add(1);
+    report.void_bytes = report.void_bytes.saturating_add(void.size as u64);
+    if !StorageEngine::valid_reusable_range(void.offset, void.size, wal_start, validation_end) {
+      if report.invalid_hot_tail_voids.len() < MAX_VERIFY_DIAGNOSTICS {
+        report.invalid_hot_tail_voids.push(format!(
+          "void #{} offset {} length {} outside WAL region {}..{}",
+          index, void.offset, void.size, wal_start, validation_end
+        ));
+      }
+    } else if previous_end.is_some_and(|end| void.offset < end) && report.invalid_hot_tail_voids.len() < MAX_VERIFY_DIAGNOSTICS {
+      report.invalid_hot_tail_voids.push(format!("void #{} offset {} overlaps or is out of order", index, void.offset));
+    }
+    previous_end = Some(previous_end.unwrap_or(0).max(void.offset.saturating_add(void.size as u64)));
+    Ok(())
   };
 
-  let mut valid_voids = Vec::new();
-  for (index, void) in payload.voids.iter().enumerate() {
-    report.voids += 1;
-    report.void_bytes += void.size as u64;
-    if !StorageEngine::valid_reusable_range(void.offset, void.size, wal_start, hot_tail_offset) {
-      report
-        .invalid_hot_tail_voids
-        .push(format!("void #{} offset {} length {} outside WAL region {}..{}", index, void.offset, void.size, wal_start, hot_tail_offset));
-    } else {
-      valid_voids.push(*void);
+  // An admitted embedded write can advance the live WAL before the periodic
+  // checkpoint republishes the hot-tail offset. During that bounded interval
+  // the old offset now contains WAL data, so validate the in-memory void
+  // authority rather than misclassifying the expected entry magic as damage.
+  if hot_tail_offset < current_wal_end {
+    let mut index = 0u64;
+    return engine.visit_current_voids_for_repair(|offset, size| {
+      let current = index;
+      index = index.saturating_add(1);
+      inspect_void(current, crate::engine::hot_tail::VoidRecord { offset, size })
+    });
+  }
+
+  let result = hot_tail::visit_hot_tail_voids(&mut file, hot_tail_offset, hash_length, Some(cancellation.as_ref()), |index, void| {
+    inspect_void(u64::from(index), void)
+  });
+  if let Err(error) = result {
+    match error {
+      EngineError::InvalidMagic
+      | EngineError::InvalidEntryVersion(_)
+      | EngineError::InvalidEntryType(_)
+      | EngineError::InvalidHashAlgorithm(_)
+      | EngineError::CorruptEntry { .. }
+      | EngineError::UnexpectedEof => {
+        if report.invalid_hot_tail_voids.len() < MAX_VERIFY_DIAGNOSTICS {
+          report.invalid_hot_tail_voids.push(error.to_string());
+        }
+      }
+      operational => return Err(operational),
     }
   }
-  valid_voids
+  Ok(())
 }
 
-fn check_directories(engine: &StorageEngine, report: &mut VerifyReport) {
+fn check_directories(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
 
   // List root directory and recursively check all children
-  check_directory_recursive(&ops, engine, "/", report, 0);
+  check_directory_recursive(&ops, engine, "/", report, 0)
 }
 
-fn check_directory_recursive(ops: &DirectoryOps, engine: &StorageEngine, path: &str, report: &mut VerifyReport, depth: usize) {
+fn check_directory_recursive(
+  ops: &DirectoryOps,
+  engine: &StorageEngine,
+  path: &str,
+  report: &mut VerifyReport,
+  depth: usize,
+) -> EngineResult<()> {
   // Limit recursion depth to prevent infinite loops on corrupt directory cycles
   if depth > 100 {
-    return;
+    record_verification_error(report, format!("directory traversal exceeded 100 levels at {path}"));
+    return Ok(());
   }
+  ensure_repair_active(engine)?;
 
-  report.directories_checked += 1;
+  report.directories_checked = report.directories_checked.saturating_add(1);
 
-  // Detect stale dir_key (hard-link target dead, recoverable via parent
-  // walk). `recover_directory_data_if_stale` returns Some only when the
-  // path-key entry is a hard-link AND its target is missing from LIVE
-  // AND we can reach the canonical content via HEAD's merkle walk.
-  {
-    let algo = engine.hash_algo();
-    if let Ok(dir_key) = crate::engine::directory_ops::directory_path_hash(path, &algo) {
-      if let Ok(Some(_)) = ops.recover_directory_data_if_stale(path, &dir_key) {
+  let result = ops.visit_directory_for_verification(path, |child| {
+    ensure_repair_active(engine)?;
+    let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path.trim_end_matches('/'), child.name) };
+
+    match EntryType::from_u8(child.entry_type) {
+      Ok(EntryType::DirectoryIndex) => check_directory_recursive(ops, engine, &child_path, report, depth + 1)?,
+      Ok(EntryType::FileRecord) => {
+        let key = crate::engine::directory_ops::file_path_hash(&child_path, &engine.hash_algo())?;
+        match engine.get_entry_header(&key) {
+          Ok(Some(header)) if header.entry_type == EntryType::FileRecord => {}
+          Ok(Some(header)) => record_missing_child(report, format!("{} (path key resolves to {:?})", child_path, header.entry_type)),
+          Ok(None) => record_missing_child(report, format!("{} (file record not found)", child_path)),
+          Err(error) if is_operational_verification_error(&error) => return Err(error),
+          Err(error) => record_missing_child(report, format!("{} ({})", child_path, error)),
+        }
+      }
+      Ok(EntryType::Symlink) => {
+        let key = crate::engine::symlink_record::symlink_path_hash(&child_path, &engine.hash_algo())?;
+        match engine.has_entry(&key) {
+          Ok(true) => {}
+          Ok(false) => record_missing_child(report, format!("{} (symlink record not found)", child_path)),
+          Err(error) if is_operational_verification_error(&error) => return Err(error),
+          Err(error) => record_missing_child(report, format!("{} ({})", child_path, error)),
+        }
+      }
+      Ok(other) => record_missing_child(report, format!("{} (unexpected directory child type {:?})", child_path, other)),
+      Err(error) => record_missing_child(report, format!("{} ({})", child_path, error)),
+    }
+    Ok(())
+  });
+  match result {
+    Ok((warnings, recovered_stale_path_key)) => {
+      if recovered_stale_path_key && report.stale_dir_path_keys.len() < MAX_VERIFY_DIAGNOSTICS {
         report.stale_dir_path_keys.push(path.to_string());
       }
-    }
-  }
-
-  match ops.list_directory_with_btree_warnings(path) {
-    Ok((children, warnings)) => {
       for warning in warnings {
         record_btree_directory_issue(report, path, &warning);
       }
-      for child in &children {
-        let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path.trim_end_matches('/'), child.name) };
+      Ok(())
+    }
+    Err(error) if is_operational_verification_error(&error) => Err(error),
+    Err(error) => {
+      record_missing_child(report, format!("{} (directory unreadable: {})", path, error));
+      Ok(())
+    }
+  }
+}
 
-        if child.entry_type == EntryType::DirectoryIndex.to_u8() {
-          // Recurse into subdirectories
-          check_directory_recursive(ops, engine, &child_path, report, depth + 1);
-        } else if child.entry_type == EntryType::FileRecord.to_u8() {
-          // Verify file record is readable
-          match ops.read_file_buffered(&child_path) {
-            Ok(_) => {}
-            Err(e) => {
-              report.missing_children.push(format!("{} ({})", child_path, e));
-            }
-          }
-        }
-      }
-    }
-    Err(_) => {
-      // Directory itself doesn't exist or is corrupt
-    }
+fn ensure_repair_active(engine: &StorageEngine) -> EngineResult<()> {
+  if engine.repair_cancellation().load(std::sync::atomic::Ordering::Acquire) {
+    return Err(EngineError::ShuttingDown);
+  }
+  Ok(())
+}
+
+fn record_missing_child(report: &mut VerifyReport, detail: String) {
+  if report.missing_children.len() < MAX_VERIFY_DIAGNOSTICS {
+    report.missing_children.push(detail);
   }
 }
 
 fn record_btree_directory_issue(report: &mut VerifyReport, path: &str, warning: &crate::engine::btree::BTreeWalkWarning) {
+  if report.btree_directory_issue_details.len() >= MAX_VERIFY_DIAGNOSTICS {
+    return;
+  }
   let node_hash = warning.node_hash_hex();
   let issue = BTreeDirectoryIssue { path: path.to_string(), node_hash, reason: warning.reason.clone() };
   report.btree_directory_issues.push(format_btree_directory_issue(&issue));
@@ -652,185 +777,441 @@ fn format_btree_directory_issue(issue: &BTreeDirectoryIssue) -> String {
   format!("{} (B-tree node {}: {})", issue.path, issue.node_hash.as_deref().unwrap_or("inline-root"), issue.reason)
 }
 
-fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) {
+fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
   let hash_length = engine.hash_algo().hash_length();
   let algo = engine.hash_algo();
-  let entries = match engine.iter_kv_entries() {
-    Ok(entries) => entries,
-    Err(_) => return,
-  };
-
-  for entry in &entries {
+  let mut memory = OperationMemoryBudget::new(
+    engine,
+    "FileRecord verification",
+    MemoryOwner::Repair,
+    AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery),
+    0,
+    None,
+  )?;
+  let result = engine.visit_kv_entries_for_repair(|entry| {
     if entry.entry_type() != crate::engine::kv_store::KV_TYPE_FILE_RECORD {
-      continue;
+      return Ok(true);
     }
+    ensure_repair_active(engine)?;
+    let checkpoint = memory.checkpoint();
+    let result = check_path_file_record_entry(engine, entry, hash_length, &algo, report, &mut memory);
+    let release = memory.release_to(checkpoint, "FileRecord verification entry release failed");
+    match (result, release) {
+      (Ok(()), Ok(())) => Ok(true),
+      (Err(error), Ok(())) => Err(error),
+      (_, Err(error)) => Err(error),
+    }
+  });
+  result?;
+  Ok(())
+}
 
-    let Ok(Some((header, _key, value))) = engine.get_entry(&entry.hash) else {
-      continue;
-    };
-    let Ok(record) = crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) else {
-      continue;
-    };
-    let normalized = crate::engine::path_utils::normalize_path(&record.path);
-    if normalized == "/" || normalized.starts_with("/.aeordb-") {
-      continue;
+fn check_path_file_record_entry(
+  engine: &StorageEngine,
+  entry: &crate::engine::kv_store::KVEntry,
+  hash_length: usize,
+  algo: &crate::engine::hash_algorithm::HashAlgorithm,
+  report: &mut VerifyReport,
+  memory: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  let header = match engine.get_entry_header(&entry.hash) {
+    Ok(Some(header)) => header,
+    Ok(None) => {
+      record_verification_error(report, format!("FileRecord KV entry {} is not readable", short_hash(&entry.hash)));
+      return Ok(());
     }
-    let Ok(path_key) = crate::engine::directory_ops::file_path_hash(&normalized, &algo) else {
-      continue;
-    };
-    if entry.hash != path_key {
-      continue;
+    Err(error) if is_operational_verification_error(&error) => return Err(error),
+    Err(error) => {
+      record_verification_error(report, format!("FileRecord KV entry {} could not be read: {error}", short_hash(&entry.hash)));
+      return Ok(());
     }
+  };
+  reserve_decoded_payload(memory, header.value_length, "FileRecord payload admission failed")?;
+  let (header, value) = match engine.get_entry_verified_bounded(&entry.hash, header.value_length) {
+    Ok(Some((header, _key, value))) => (header, value),
+    Ok(None) => {
+      record_verification_error(report, format!("FileRecord KV entry {} disappeared during verification", short_hash(&entry.hash)));
+      return Ok(());
+    }
+    Err(error) if is_operational_verification_error(&error) => return Err(error),
+    Err(error) => {
+      record_verification_error(report, format!("FileRecord KV entry {} failed integrity read: {error}", short_hash(&entry.hash)));
+      return Ok(());
+    }
+  };
+  if let Some(task_record) = crate::engine::task_queue::validate_task_storage_record(&entry.hash, &value) {
+    if let Err(error) = task_record {
+      record_verification_error(report, error.to_string());
+    }
+    return Ok(());
+  }
+  let record = match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
+    Ok(record) => record,
+    Err(error) => {
+      record_verification_error(report, format!("FileRecord {} is malformed: {error}", short_hash(&entry.hash)));
+      return Ok(());
+    }
+  };
+  let normalized = crate::engine::path_utils::normalize_path(&record.path);
+  if normalized == "/" || normalized.starts_with("/.aeordb-") {
+    return Ok(());
+  }
+  let path_key = match crate::engine::directory_ops::file_path_hash(&normalized, algo) {
+    Ok(path_key) => path_key,
+    Err(error) => {
+      record_verification_error(report, format!("FileRecord {} has an invalid path: {error}", short_hash(&entry.hash)));
+      return Ok(());
+    }
+  };
+  if entry.hash != path_key {
+    return Ok(());
+  }
 
-    let mut missing = Vec::new();
-    for chunk_hash in &record.chunk_hashes {
-      match engine.has_entry(chunk_hash) {
-        Ok(true) => {}
-        _ => missing.push(hex::encode(chunk_hash)),
+  let mut missing_count = 0usize;
+  let mut missing_examples = Vec::with_capacity(3);
+  for chunk_hash in &record.chunk_hashes {
+    ensure_repair_active(engine)?;
+    match engine.get_entry_header(chunk_hash) {
+      Ok(Some(chunk_header)) if chunk_header.entry_type == EntryType::Chunk => {}
+      Ok(Some(chunk_header)) => {
+        missing_count = missing_count.saturating_add(1);
+        if missing_examples.len() < 3 {
+          missing_examples.push(format!("{} ({:?})", hex::encode(chunk_hash), chunk_header.entry_type));
+        }
+      }
+      Ok(None) => {
+        missing_count = missing_count.saturating_add(1);
+        if missing_examples.len() < 3 {
+          missing_examples.push(hex::encode(chunk_hash));
+        }
+      }
+      Err(error) if is_operational_verification_error(&error) => return Err(error),
+      Err(error) => {
+        record_verification_error(report, format!("FileRecord {} chunk {} lookup failed: {error}", normalized, short_hash(chunk_hash)));
+        missing_count = missing_count.saturating_add(1);
       }
     }
-    if !missing.is_empty() {
-      report.dangling_file_records.push(format!(
-        "{} ({} missing chunk(s): {})",
-        normalized,
-        missing.len(),
-        missing.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-      ));
-    }
   }
+  if missing_count > 0 && report.dangling_file_records.len() < MAX_VERIFY_DIAGNOSTICS {
+    report.dangling_file_records.push(format!("{} ({} missing chunk(s): {})", normalized, missing_count, missing_examples.join(", ")));
+  }
+  Ok(())
 }
 
 /// Phase 4: Walk each snapshot's directory tree and verify all entries
 /// are reachable. Detects damage from GC sweeping snapshot-referenced data.
-fn check_snapshot_integrity(engine: &StorageEngine, report: &mut VerifyReport) {
-  use crate::engine::version_manager::VersionManager;
-
-  let vm = VersionManager::new(engine);
-  let snapshots = match vm.list_snapshots() {
-    Ok(s) => s,
-    Err(_) => return,
-  };
-
+fn check_snapshot_integrity(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
   let hash_length = engine.hash_algo().hash_length();
-
-  for snapshot in &snapshots {
-    report.snapshots_checked += 1;
-
-    let mut missing = Vec::new();
-    walk_snapshot_tree(engine, &snapshot.root_hash, "/", hash_length, &mut missing, 0);
-
-    if !missing.is_empty() {
-      report.broken_snapshots.push(format!(
-        "{} (id: {}): {} broken references — {}",
-        snapshot.name,
-        hex::encode(&snapshot.root_hash),
-        missing.len(),
-        missing.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
-      ));
+  let mut memory = OperationMemoryBudget::new(
+    engine,
+    "snapshot verification",
+    MemoryOwner::Repair,
+    AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery),
+    0,
+    None,
+  )?;
+  engine.visit_kv_entries_for_repair(|entry| {
+    if entry.entry_type() != crate::engine::kv_store::KV_TYPE_SNAPSHOT {
+      return Ok(true);
     }
+    ensure_repair_active(engine)?;
+    report.snapshots_checked = report.snapshots_checked.saturating_add(1);
+    let checkpoint = memory.checkpoint();
+    let result = verify_snapshot_entry(engine, entry, hash_length, report, &mut memory);
+    let release = memory.release_to(checkpoint, "snapshot verification entry release failed");
+    match (result, release) {
+      (Ok(()), Ok(())) => Ok(true),
+      (Err(error), Ok(())) => Err(error),
+      (_, Err(error)) => Err(error),
+    }
+  })?;
+  Ok(())
+}
+
+fn is_operational_verification_error(error: &EngineError) -> bool {
+  matches!(
+    error,
+    EngineError::IoError(_)
+      | EngineError::ResourceExhausted(_)
+      | EngineError::DurabilityFailure(_)
+      | EngineError::PostMutationDurabilityFailure(_)
+      | EngineError::ShuttingDown
+      | EngineError::Cancelled(_)
+  )
+}
+
+fn reserve_decoded_payload(memory: &mut OperationMemoryBudget, value_length: u32, context: &'static str) -> EngineResult<()> {
+  let bytes = u64::from(value_length)
+    .checked_mul(3)
+    .and_then(|bytes| bytes.checked_add(512))
+    .ok_or_else(|| EngineError::ResourceExhausted(format!("{context}: decoded payload estimate overflow")))?;
+  memory.reserve(bytes, context)
+}
+
+fn record_verification_error(report: &mut VerifyReport, message: String) {
+  if report.verification_errors.len() < MAX_VERIFY_DIAGNOSTICS {
+    report.verification_errors.push(message);
   }
 }
 
-/// Recursively walk a snapshot's directory tree, collecting paths where
-/// entries are missing (GC damage or corruption).
+fn verify_snapshot_entry(
+  engine: &StorageEngine,
+  entry: &crate::engine::kv_store::KVEntry,
+  hash_length: usize,
+  report: &mut VerifyReport,
+  memory: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  let header = match engine.get_entry_header(&entry.hash) {
+    Ok(Some(header)) => header,
+    Ok(None) => {
+      record_broken_snapshot(report, format!("snapshot {} has no readable WAL entry", short_hash(&entry.hash)));
+      return Ok(());
+    }
+    Err(error) if is_operational_verification_error(&error) => return Err(error),
+    Err(error) => {
+      record_broken_snapshot(report, format!("snapshot {} metadata entry is corrupt: {error}", short_hash(&entry.hash)));
+      return Ok(());
+    }
+  };
+  reserve_decoded_payload(memory, header.value_length, "snapshot metadata admission failed")?;
+  let (header, value) = match engine.get_entry_verified_bounded(&entry.hash, header.value_length) {
+    Ok(Some((header, _key, value))) => (header, value),
+    Ok(None) => {
+      record_broken_snapshot(report, format!("snapshot {} disappeared during verification", short_hash(&entry.hash)));
+      return Ok(());
+    }
+    Err(error) if is_operational_verification_error(&error) => return Err(error),
+    Err(error) => {
+      record_broken_snapshot(report, format!("snapshot {} metadata body is corrupt: {error}", short_hash(&entry.hash)));
+      return Ok(());
+    }
+  };
+  let snapshot = match crate::engine::version_manager::SnapshotInfo::deserialize(&value, hash_length, header.entry_version) {
+    Ok(snapshot) => snapshot,
+    Err(error) => {
+      record_verification_error(report, format!("snapshot {} metadata is malformed: {error}", short_hash(&entry.hash)));
+      return Ok(());
+    }
+  };
+
+  let mut missing_count = 0u64;
+  let mut missing_details = Vec::with_capacity(5);
+  walk_snapshot_tree(engine, &snapshot.root_hash, "/", hash_length, &mut missing_count, &mut missing_details, 0, memory)?;
+  if missing_count > 0 {
+    record_broken_snapshot(
+      report,
+      format!(
+        "{} (id: {}): {} broken references - {}",
+        snapshot.name,
+        hex::encode(&snapshot.root_hash),
+        missing_count,
+        missing_details.join(", "),
+      ),
+    );
+  }
+  Ok(())
+}
+
+fn record_broken_snapshot(report: &mut VerifyReport, detail: String) {
+  if report.broken_snapshots.len() < MAX_VERIFY_DIAGNOSTICS {
+    report.broken_snapshots.push(detail);
+  }
+}
+
+fn record_snapshot_missing(count: &mut u64, details: &mut Vec<String>, detail: String) {
+  *count = count.saturating_add(1);
+  if details.len() < 5 {
+    details.push(detail);
+  }
+}
+
+/// Recursively walk a snapshot's directory tree, retaining only a bounded
+/// diagnostic sample while charging each live payload before it is loaded.
+#[allow(clippy::too_many_arguments)]
 fn walk_snapshot_tree(
   engine: &StorageEngine,
   root_hash: &[u8],
   dir_path: &str,
   hash_length: usize,
-  missing: &mut Vec<String>,
+  missing_count: &mut u64,
+  missing_details: &mut Vec<String>,
   depth: usize,
-) {
+  memory: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  ensure_repair_active(engine)?;
   if depth > 100 {
-    return;
+    record_snapshot_missing(missing_count, missing_details, format!("{} (directory depth exceeds 100)", dir_path));
+    return Ok(());
   }
 
-  let value = match engine.get_entry_including_deleted(root_hash) {
-    Ok(Some((_header, _key, value))) => value,
+  let header = match engine.get_entry_header_including_deleted(root_hash) {
+    Ok(Some(header)) => header,
     Ok(None) => {
-      missing.push(format!("{} (dir entry missing)", dir_path));
-      return;
+      record_snapshot_missing(missing_count, missing_details, format!("{} (dir entry missing)", dir_path));
+      return Ok(());
     }
-    Err(_) => return,
+    Err(error) if is_operational_verification_error(&error) => return Err(error),
+    Err(error) => {
+      record_snapshot_missing(missing_count, missing_details, format!("{} (dir entry corrupt: {})", dir_path, error));
+      return Ok(());
+    }
   };
+  let checkpoint = memory.checkpoint();
+  reserve_decoded_payload(memory, header.value_length, "snapshot directory admission failed")?;
+  let result = (|| {
+    let (header, value) = match engine.get_entry_including_deleted_verified_bounded(root_hash, header.value_length) {
+      Ok(Some((header, _key, value))) => (header, value),
+      Ok(None) => {
+        record_snapshot_missing(missing_count, missing_details, format!("{} (dir entry missing)", dir_path));
+        return Ok(());
+      }
+      Err(error) if is_operational_verification_error(&error) => return Err(error),
+      Err(error) => {
+        record_snapshot_missing(missing_count, missing_details, format!("{} (dir entry corrupt: {})", dir_path, error));
+        return Ok(());
+      }
+    };
 
-  if value.is_empty() {
-    return;
+    if value.is_empty() {
+      return Ok(());
+    }
+
+    if crate::engine::btree::is_btree_format(&value) {
+      let mut visitor = |child: &crate::engine::directory_entry::ChildEntry| -> EngineResult<bool> {
+        walk_snapshot_child(engine, child, dir_path, hash_length, missing_count, missing_details, depth, memory)?;
+        Ok(true)
+      };
+      let visit = crate::engine::btree::btree_visit_from_node_with_mode(
+        &value,
+        engine,
+        hash_length,
+        true,
+        crate::engine::btree::BTreeWalkMode::BestEffort,
+        &mut visitor,
+      )?;
+      for warning in visit.warnings {
+        let issue = BTreeDirectoryIssue { path: dir_path.to_string(), node_hash: warning.node_hash_hex(), reason: warning.reason };
+        record_snapshot_missing(missing_count, missing_details, format_btree_directory_issue(&issue));
+      }
+      return Ok(());
+    }
+
+    if let Err(error) = DirectoryOps::visit_bounded_flat_children(&value, hash_length, header.entry_version, |child| {
+      walk_snapshot_child(engine, child, dir_path, hash_length, missing_count, missing_details, depth, memory)?;
+      Ok(true)
+    }) {
+      if is_operational_verification_error(&error) {
+        return Err(error);
+      }
+      record_snapshot_missing(missing_count, missing_details, format!("{} (corrupt flat index: {})", dir_path, error));
+    }
+    Ok(())
+  })();
+  let release = memory.release_to(checkpoint, "snapshot directory release failed");
+  match (result, release) {
+    (Ok(()), Ok(())) => Ok(()),
+    (Err(error), Ok(())) => Err(error),
+    (_, Err(error)) => Err(error),
   }
+}
 
-  let children = if crate::engine::btree::is_btree_format(&value) {
-    match crate::engine::btree::btree_list_from_node_with_mode(
-      &value,
-      engine,
-      hash_length,
-      true,
-      crate::engine::btree::BTreeWalkMode::BestEffort,
-    ) {
-      Ok(result) => {
-        for warning in &result.warnings {
-          let issue =
-            BTreeDirectoryIssue { path: dir_path.to_string(), node_hash: warning.node_hash_hex(), reason: warning.reason.clone() };
-          missing.push(format_btree_directory_issue(&issue));
+#[allow(clippy::too_many_arguments)]
+fn walk_snapshot_child(
+  engine: &StorageEngine,
+  child: &crate::engine::directory_entry::ChildEntry,
+  dir_path: &str,
+  hash_length: usize,
+  missing_count: &mut u64,
+  missing_details: &mut Vec<String>,
+  depth: usize,
+  memory: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  ensure_repair_active(engine)?;
+  let child_path = if dir_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", dir_path, child.name) };
+
+  match crate::engine::entry_type::EntryType::from_u8(child.entry_type) {
+    Ok(crate::engine::entry_type::EntryType::DirectoryIndex) => {
+      walk_snapshot_tree(engine, &child.hash, &child_path, hash_length, missing_count, missing_details, depth + 1, memory)
+    }
+    Ok(crate::engine::entry_type::EntryType::FileRecord) => {
+      let header = match engine.get_entry_header_including_deleted(&child.hash) {
+        Ok(Some(header)) => header,
+        Ok(None) => {
+          record_snapshot_missing(missing_count, missing_details, format!("{} (file record missing)", child_path));
+          return Ok(());
         }
-        result.entries
-      }
-      Err(_) => {
-        missing.push(format!("{} (corrupt btree)", dir_path));
-        return;
-      }
-    }
-  } else {
-    match crate::engine::directory_entry::deserialize_child_entries(&value, hash_length, 0) {
-      Ok(c) => c,
-      Err(_) => {
-        missing.push(format!("{} (corrupt flat index)", dir_path));
-        return;
-      }
-    }
-  };
-
-  for child in &children {
-    let child_path = if dir_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", dir_path, child.name) };
-
-    let child_type = crate::engine::entry_type::EntryType::from_u8(child.entry_type);
-    match child_type {
-      Ok(crate::engine::entry_type::EntryType::DirectoryIndex) => {
-        walk_snapshot_tree(engine, &child.hash, &child_path, hash_length, missing, depth + 1);
-      }
-      Ok(crate::engine::entry_type::EntryType::FileRecord) => {
-        // Verify file record and its chunks are readable
-        match engine.get_entry_including_deleted(&child.hash) {
-          Ok(Some((header, _key, value))) => {
-            match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
-              Ok(record) => {
-                for chunk_hash in &record.chunk_hashes {
-                  match engine.get_entry_including_deleted(chunk_hash) {
-                    Ok(Some(_)) => {}
-                    _ => {
-                      missing.push(format!("{} (chunk {} missing)", child_path, hex::encode(chunk_hash)));
-                    }
-                  }
-                }
-              }
-              Err(_) => {
-                missing.push(format!("{} (corrupt file record)", child_path));
-              }
-            }
-          }
+        Err(error) if is_operational_verification_error(&error) => return Err(error),
+        Err(error) => {
+          record_snapshot_missing(missing_count, missing_details, format!("{} (file record corrupt: {})", child_path, error));
+          return Ok(());
+        }
+      };
+      let checkpoint = memory.checkpoint();
+      reserve_decoded_payload(memory, header.value_length, "snapshot FileRecord admission failed")?;
+      let result = (|| {
+        let (header, value) = match engine.get_entry_including_deleted_verified_bounded(&child.hash, header.value_length) {
+          Ok(Some((header, _key, value))) => (header, value),
           Ok(None) => {
-            missing.push(format!("{} (file record missing)", child_path));
+            record_snapshot_missing(missing_count, missing_details, format!("{} (file record missing)", child_path));
+            return Ok(());
           }
-          Err(_) => {
-            missing.push(format!("{} (read error)", child_path));
+          Err(error) if is_operational_verification_error(&error) => return Err(error),
+          Err(error) => {
+            record_snapshot_missing(missing_count, missing_details, format!("{} (file record corrupt: {})", child_path, error));
+            return Ok(());
+          }
+        };
+        let record = match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
+          Ok(record) => record,
+          Err(error) => {
+            record_snapshot_missing(missing_count, missing_details, format!("{} (corrupt file record: {})", child_path, error));
+            return Ok(());
+          }
+        };
+        for chunk_hash in &record.chunk_hashes {
+          ensure_repair_active(engine)?;
+          match engine.get_entry_header_including_deleted(chunk_hash) {
+            Ok(Some(chunk_header)) if chunk_header.entry_type == EntryType::Chunk => {}
+            Ok(Some(chunk_header)) => record_snapshot_missing(
+              missing_count,
+              missing_details,
+              format!("{} (chunk {} resolves to {:?})", child_path, hex::encode(chunk_hash), chunk_header.entry_type),
+            ),
+            Ok(None) => {
+              record_snapshot_missing(missing_count, missing_details, format!("{} (chunk {} missing)", child_path, hex::encode(chunk_hash)))
+            }
+            Err(error) if is_operational_verification_error(&error) => return Err(error),
+            Err(error) => record_snapshot_missing(
+              missing_count,
+              missing_details,
+              format!("{} (chunk {} entry corrupt: {})", child_path, hex::encode(chunk_hash), error),
+            ),
           }
         }
+        Ok(())
+      })();
+      let release = memory.release_to(checkpoint, "snapshot FileRecord release failed");
+      match (result, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (_, Err(error)) => Err(error),
       }
-      _ => {
-        // Symlinks and other types — just verify entry exists
-        if let Ok(None) = engine.get_entry_including_deleted(&child.hash) {
-          missing.push(format!("{} (entry missing)", child_path));
-        }
+    }
+    Ok(_) => match engine.get_entry_header_including_deleted(&child.hash) {
+      Ok(Some(_)) => Ok(()),
+      Ok(None) => {
+        record_snapshot_missing(missing_count, missing_details, format!("{} (entry missing)", child_path));
+        Ok(())
       }
+      Err(error) if is_operational_verification_error(&error) => Err(error),
+      Err(error) => {
+        record_snapshot_missing(missing_count, missing_details, format!("{} (entry corrupt: {})", child_path, error));
+        Ok(())
+      }
+    },
+    Err(error) => {
+      record_snapshot_missing(missing_count, missing_details, format!("{} (invalid entry type: {})", child_path, error));
+      Ok(())
     }
   }
 }

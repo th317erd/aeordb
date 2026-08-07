@@ -984,6 +984,20 @@ impl StorageEngine {
     self.operation_guard("query")
   }
 
+  pub(crate) fn repair_cancellation(&self) -> Arc<AtomicBool> {
+    Arc::clone(&self.shutdown_started)
+  }
+
+  pub(crate) fn with_repair_maintenance<T, F>(&self, operation: &'static str, action: F) -> EngineResult<T>
+  where
+    F: FnOnce() -> EngineResult<T>,
+  {
+    let _operation = self.operation_guard(operation)?;
+    let engine_id = self as *const StorageEngine as usize;
+    let _maintenance = self.operation_tracker.begin_maintenance(engine_id, std::time::Duration::from_secs(300))?;
+    action()
+  }
+
   fn internal_operation_scope(&self, operation: &'static str) -> EngineOperationGuard<'_> {
     let engine_id = self as *const StorageEngine as usize;
     ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
@@ -1616,6 +1630,22 @@ impl StorageEngine {
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
     Ok(Self::valid_reusable_range(offset, size, wal_start, wal_end))
+  }
+
+  pub(crate) fn entry_overlaps_current_void(&self, offset: u64, size: u32) -> EngineResult<bool> {
+    let voids = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    Ok(voids.overlaps_range(offset, size))
+  }
+
+  pub(crate) fn visit_current_voids_for_repair<F>(&self, mut visitor: F) -> EngineResult<()>
+  where
+    F: FnMut(u64, u32) -> EngineResult<()>,
+  {
+    let voids = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    for (offset, size) in voids.iter() {
+      visitor(offset, size)?;
+    }
+    Ok(())
   }
 
   /// Serialize namespace-level mutations that publish mutable path keys and
@@ -2463,18 +2493,20 @@ impl StorageEngine {
   /// startup population). Also refreshes the void_count + void_space
   /// counters so dashboard metrics stay accurate.
   pub(crate) fn sync_voids_to_kv_writer(&self) -> EngineResult<()> {
-    let (voids, count, total_bytes) = {
-      let vm = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-      let collected: Vec<crate::engine::hot_tail::VoidRecord> =
-        vm.iter().map(|(offset, size)| crate::engine::hot_tail::VoidRecord { offset, size }).collect();
-      let total = vm.total_void_space();
-      let count = vm.void_count() as u64;
-      (collected, count, total)
-    };
+    let (voids, count, total_bytes) = self.collect_void_snapshot()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.set_pending_voids(voids);
     self.counters.load().set_void_stats(count, total_bytes);
     Ok(())
+  }
+
+  fn collect_void_snapshot(&self) -> EngineResult<(Vec<crate::engine::hot_tail::VoidRecord>, u64, u64)> {
+    let vm = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let count = vm.void_count();
+    let mut voids = Vec::new();
+    voids.try_reserve_exact(count).map_err(|error| EngineError::ResourceExhausted(format!("void snapshot allocation failed: {error}")))?;
+    voids.extend(vm.iter().map(|(offset, size)| crate::engine::hot_tail::VoidRecord { offset, size }));
+    Ok((voids, count as u64, vm.total_void_space()))
   }
 
   /// Open an existing database file.
@@ -4161,6 +4193,14 @@ impl StorageEngine {
     snapshot.iter_all()
   }
 
+  pub(crate) fn visit_kv_entries_for_repair<F>(&self, visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&KVEntry) -> EngineResult<bool>,
+  {
+    let snapshot = self.kv_snapshot.load();
+    snapshot.visit_all(visitor)
+  }
+
   /// Return the number of rows in the current immutable KV read view without
   /// cloning those rows. Maintenance owners use this for pre-allocation
   /// admission before materializing a full scan.
@@ -4303,6 +4343,7 @@ impl StorageEngine {
     // (timestamp, offset) because GC can reuse lower physical offsets.
     let (scanned_count, dirty_max_end) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
+      let voids = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
       tracing::debug!(
         writer_offset = writer.current_offset(),
         file_path = %writer.file_path().display(),
@@ -4333,6 +4374,20 @@ impl StorageEngine {
         match result {
           Ok(scanned) => {
             let order = WorkspaceRebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
+            scanned_count = scanned_count
+              .checked_add(1)
+              .ok_or_else(|| EngineError::ResourceExhausted("KV rebuild scanned-entry count overflow".to_string()))?;
+            let entry_end = scanned.offset.checked_add(scanned.header.total_length as u64).ok_or_else(|| EngineError::CorruptEntry {
+              offset: scanned.offset,
+              reason: "KV rebuild entry end overflows u64".to_string(),
+            })?;
+            dirty_max_end = dirty_max_end.max(entry_end);
+            if matches!(scanned.header.entry_type, EntryType::Chunk | EntryType::Void) {
+              skipped_payload_bytes = skipped_payload_bytes.saturating_add(scanned.header.value_length as u64);
+            }
+            if scanned.header.entry_type == EntryType::Void || voids.overlaps_range(scanned.offset, scanned.header.total_length) {
+              continue;
+            }
             if scanned.header.entry_type == EntryType::DeletionRecord {
               let value = scanned.value.as_ref().ok_or_else(|| EngineError::CorruptEntry {
                 offset: scanned.offset,
@@ -4342,9 +4397,6 @@ impl StorageEngine {
               rebuild_workspace.push_deletion_path(&record.path, order)?;
               deletion_count = deletion_count.saturating_add(1);
             }
-            if matches!(scanned.header.entry_type, EntryType::Chunk | EntryType::Void) {
-              skipped_payload_bytes = skipped_payload_bytes.saturating_add(scanned.header.value_length as u64);
-            }
             rebuild_workspace.push_value(
               scanned.header.entry_type.to_kv_type(),
               &scanned.key,
@@ -4353,14 +4405,6 @@ impl StorageEngine {
               scanned.header.total_length,
               order,
             )?;
-            scanned_count = scanned_count
-              .checked_add(1)
-              .ok_or_else(|| EngineError::ResourceExhausted("KV rebuild scanned-entry count overflow".to_string()))?;
-            let entry_end = scanned.offset.checked_add(scanned.header.total_length as u64).ok_or_else(|| EngineError::CorruptEntry {
-              offset: scanned.offset,
-              reason: "KV rebuild entry end overflows u64".to_string(),
-            })?;
-            dirty_max_end = dirty_max_end.max(entry_end);
           }
           Err(e) => {
             tracing::warn!("Skipping corrupt entry during KV rebuild: {}", e);
@@ -4584,6 +4628,9 @@ impl StorageEngine {
         },
       );
       new_kv.flush()?;
+      let (voids, void_count, void_bytes) = self.collect_void_snapshot()?;
+      new_kv.set_pending_voids(voids);
+      self.counters.load().set_void_stats(void_count, void_bytes);
       new_kv.force_flush_hot_buffer()?;
       if configure_bootstrap_after_flush {
         new_kv.activate_bootstrap_page_provider()?;

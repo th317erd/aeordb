@@ -159,9 +159,21 @@ impl KvRebuildWorkspace {
     admission_class: AdmissionClass,
     cancellation: Option<Arc<AtomicBool>>,
   ) -> EngineResult<Self> {
+    Self::new_for_purpose(database_path, "rebuild", hash_algo, memory_coordinator, admission_class, cancellation)
+  }
+
+  pub(crate) fn new_for_purpose(
+    database_path: &Path,
+    purpose: &str,
+    hash_algo: HashAlgorithm,
+    memory_coordinator: Option<&MemoryCoordinator>,
+    admission_class: AdmissionClass,
+    cancellation: Option<Arc<AtomicBool>>,
+  ) -> EngineResult<Self> {
     let record_capacity = (DEFAULT_RECORD_BUFFER_BYTES / std::mem::size_of::<WorkspaceRecord>()).max(1);
-    Self::new_with_limits_and_cancellation(
+    Self::new_with_limits_for_purpose(
       database_path,
+      purpose,
       hash_algo,
       memory_coordinator,
       admission_class,
@@ -180,8 +192,9 @@ impl KvRebuildWorkspace {
     record_capacity: usize,
     merge_fanout: usize,
   ) -> EngineResult<Self> {
-    Self::new_with_limits_and_cancellation(
+    Self::new_with_limits_for_purpose(
       database_path,
+      "rebuild",
       hash_algo,
       memory_coordinator,
       admission_class,
@@ -192,8 +205,32 @@ impl KvRebuildWorkspace {
   }
 
   #[allow(clippy::too_many_arguments)]
+  #[cfg(test)]
   fn new_with_limits_and_cancellation(
     database_path: &Path,
+    hash_algo: HashAlgorithm,
+    memory_coordinator: Option<&MemoryCoordinator>,
+    admission_class: AdmissionClass,
+    record_capacity: usize,
+    merge_fanout: usize,
+    cancellation: Option<Arc<AtomicBool>>,
+  ) -> EngineResult<Self> {
+    Self::new_with_limits_for_purpose(
+      database_path,
+      "rebuild",
+      hash_algo,
+      memory_coordinator,
+      admission_class,
+      record_capacity,
+      merge_fanout,
+      cancellation,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn new_with_limits_for_purpose(
+    database_path: &Path,
+    purpose: &str,
     hash_algo: HashAlgorithm,
     memory_coordinator: Option<&MemoryCoordinator>,
     admission_class: AdmissionClass,
@@ -204,8 +241,14 @@ impl KvRebuildWorkspace {
     if record_capacity == 0 || merge_fanout < 2 {
       return Err(EngineError::InvalidInput("rebuild workspace requires a nonzero record window and fanout of at least two".to_string()));
     }
+    if purpose.is_empty()
+      || purpose.len() > 32
+      || !purpose.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+      return Err(EngineError::InvalidInput(format!("invalid rebuild workspace purpose {purpose:?}")));
+    }
     let parent = database_path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let prefix = workspace_prefix(database_path);
+    let prefix = workspace_prefix_for_purpose(database_path, purpose);
     cleanup_stale_workspaces(parent, &prefix)?;
     let directory = tempfile::Builder::new().prefix(&prefix).tempdir_in(parent)?;
     let memory = memory_coordinator
@@ -331,43 +374,23 @@ impl KvRebuildWorkspace {
   where
     F: FnMut(ResolvedKvRecord) -> EngineResult<()>,
   {
+    let mut cursor = self.resolved_cursor()?;
+    while let Some(record) = cursor.next_record()? {
+      visitor(record)?;
+    }
+    Ok(())
+  }
+
+  pub(crate) fn resolved_cursor(&self) -> EngineResult<ResolvedRecordCursor> {
     let final_run = self
       .final_run
       .as_ref()
       .ok_or_else(|| EngineError::InvalidInput("rebuild workspace must be finalized before iteration".to_string()))?;
-    let mut reader = RunReader::open(final_run, self.hash_algo, self.hash_length, self.record_length)?;
-    let mut group_hash = [0u8; MAX_HASH_LENGTH];
-    let mut has_group = false;
-    let mut selected: Option<WorkspaceRecord> = None;
-    let mut latest_deletion: Option<RebuildOrder> = None;
-
-    while let Some(record) = reader.next_record()? {
-      self.check_cancelled()?;
-      if has_group && record.hash() != &group_hash[..self.hash_length] {
-        emit_resolved(selected.take(), latest_deletion.take(), &mut visitor)?;
-      }
-      if !has_group || record.hash() != &group_hash[..self.hash_length] {
-        group_hash[..self.hash_length].copy_from_slice(record.hash());
-        has_group = true;
-      }
-      match record.action {
-        WorkspaceAction::Value => {
-          let replace = selected.as_ref().map(|existing| should_replace_value(existing, &record)).unwrap_or(true);
-          if replace {
-            selected = Some(record);
-          }
-        }
-        WorkspaceAction::Delete => {
-          if latest_deletion.map(|existing| record.order.is_after(existing)).unwrap_or(true) {
-            latest_deletion = Some(record.order);
-          }
-        }
-      }
-    }
-    if has_group {
-      emit_resolved(selected, latest_deletion, &mut visitor)?;
-    }
-    Ok(())
+    Ok(ResolvedRecordCursor {
+      reader: RunReader::open(final_run, self.hash_algo, self.hash_length, self.record_length)?,
+      pending: None,
+      cancellation: self.cancellation.clone(),
+    })
   }
 
   fn count_resolved_records(&self) -> EngineResult<u64> {
@@ -473,9 +496,18 @@ impl KvRebuildWorkspace {
   }
 }
 
+#[cfg(test)]
 fn workspace_prefix(database_path: &Path) -> String {
+  workspace_prefix_for_purpose(database_path, "rebuild")
+}
+
+fn workspace_prefix_for_purpose(database_path: &Path, purpose: &str) -> String {
   let identity = blake3::hash(database_path.to_string_lossy().as_bytes());
-  format!(".aeordb-rebuild-{}-", &identity.to_hex()[..16])
+  if purpose == "rebuild" {
+    format!(".aeordb-rebuild-{}-", &identity.to_hex()[..16])
+  } else {
+    format!(".aeordb-rebuild-{}-{purpose}-", &identity.to_hex()[..16])
+  }
 }
 
 /// The caller owns AeorDB's exclusive database lock before constructing a
@@ -514,17 +546,14 @@ fn should_replace_value(existing: &WorkspaceRecord, candidate: &WorkspaceRecord)
   candidate.order.is_after(existing.order)
 }
 
-fn emit_resolved<F>(selected: Option<WorkspaceRecord>, deletion: Option<RebuildOrder>, visitor: &mut F) -> EngineResult<()>
-where
-  F: FnMut(ResolvedKvRecord) -> EngineResult<()>,
-{
+fn resolve_record(selected: Option<WorkspaceRecord>, deletion: Option<RebuildOrder>) -> Option<ResolvedKvRecord> {
   let Some(mut selected) = selected else {
-    return Ok(());
+    return None;
   };
   if deletion.is_some_and(|order| order.is_after(selected.order)) {
     selected.type_flags = (selected.type_flags & 0x0f) | KV_FLAG_DELETED;
   }
-  visitor(ResolvedKvRecord {
+  Some(ResolvedKvRecord {
     type_flags: selected.type_flags,
     hash: selected.hash().to_vec(),
     offset: selected.offset,
@@ -532,6 +561,69 @@ where
     total_length: selected.total_length,
     order: selected.order,
   })
+}
+
+pub(crate) struct ResolvedRecordCursor {
+  reader: RunReader,
+  pending: Option<WorkspaceRecord>,
+  cancellation: Option<Arc<AtomicBool>>,
+}
+
+impl ResolvedRecordCursor {
+  pub(crate) fn next_record(&mut self) -> EngineResult<Option<ResolvedKvRecord>> {
+    loop {
+      self.check_cancelled()?;
+      let first = match self.pending.take() {
+        Some(record) => Some(record),
+        None => self.reader.next_record()?,
+      };
+      let Some(first) = first else {
+        return Ok(None);
+      };
+      let group_hash = first.hash().to_vec();
+      let mut selected = None;
+      let mut latest_deletion = None;
+      update_resolved_group(first, &mut selected, &mut latest_deletion);
+
+      loop {
+        self.check_cancelled()?;
+        match self.reader.next_record()? {
+          Some(record) if record.hash() == group_hash => update_resolved_group(record, &mut selected, &mut latest_deletion),
+          Some(record) => {
+            self.pending = Some(record);
+            break;
+          }
+          None => break,
+        }
+      }
+
+      if let Some(record) = resolve_record(selected, latest_deletion) {
+        return Ok(Some(record));
+      }
+    }
+  }
+
+  fn check_cancelled(&self) -> EngineResult<()> {
+    if self.cancellation.as_ref().is_some_and(|cancelled| cancelled.load(AtomicOrdering::Acquire)) {
+      return Err(EngineError::ShuttingDown);
+    }
+    Ok(())
+  }
+}
+
+fn update_resolved_group(record: WorkspaceRecord, selected: &mut Option<WorkspaceRecord>, latest_deletion: &mut Option<RebuildOrder>) {
+  match record.action {
+    WorkspaceAction::Value => {
+      if selected.as_ref().map(|existing| should_replace_value(existing, &record)).unwrap_or(true) {
+        *selected = Some(record);
+      }
+    }
+    WorkspaceAction::Delete => {
+      if latest_deletion.map(|existing| record.order.is_after(existing)).unwrap_or(true) {
+        *latest_deletion = Some(record.order);
+      }
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -926,5 +1018,50 @@ mod tests {
     assert!(matches!(workspace.finish(), Err(EngineError::ShuttingDown)));
     drop(workspace);
     assert!(!workspace_path.exists());
+  }
+
+  #[test]
+  fn independent_workspace_purposes_coexist_without_stale_cleanup_collisions() {
+    let temp = tempfile::tempdir().unwrap();
+    let database_path = temp.path().join("test.aeordb");
+    File::create(&database_path).unwrap();
+    let expected = KvRebuildWorkspace::new_for_purpose(
+      &database_path,
+      "verify-expected",
+      HashAlgorithm::Blake3_256,
+      None,
+      AdmissionClass::Maintenance,
+      None,
+    )
+    .unwrap();
+    let expected_path = expected.directory.path().to_path_buf();
+    let actual = KvRebuildWorkspace::new_for_purpose(
+      &database_path,
+      "verify-actual",
+      HashAlgorithm::Blake3_256,
+      None,
+      AdmissionClass::Maintenance,
+      None,
+    )
+    .unwrap();
+
+    assert!(expected_path.exists(), "creating a separate purpose must not delete a live workspace");
+    assert!(actual.directory.path().exists());
+  }
+
+  #[test]
+  fn resolved_cursor_skips_deletion_only_groups_and_yields_hash_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut workspace = workspace(&temp);
+    workspace.push_deletion_path("/absent", RebuildOrder { timestamp: 1, offset: 1 }).unwrap();
+    workspace.push_value(1, &hash(9), 90, 1, 2, RebuildOrder { timestamp: 9, offset: 90 }).unwrap();
+    workspace.push_value(1, &hash(2), 20, 1, 2, RebuildOrder { timestamp: 2, offset: 20 }).unwrap();
+    workspace.finish().unwrap();
+
+    let mut cursor = workspace.resolved_cursor().unwrap();
+    let first = cursor.next_record().unwrap().unwrap();
+    let second = cursor.next_record().unwrap().unwrap();
+    assert!(first.hash < second.hash);
+    assert!(cursor.next_record().unwrap().is_none());
   }
 }

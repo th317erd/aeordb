@@ -1451,8 +1451,8 @@ async fn snapshot_restore_then_gc_leaves_stale_dir_keys_but_listing_recovers() {
   let report_pre_list = aeordb::engine::verify::verify(&engine, "<test>");
   assert!(
     report_pre_list.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
-    "test setup must produce a stale dir_key for /A/B. Found: {:?}",
-    report_pre_list.stale_dir_path_keys
+    "test setup must produce a stale dir_key for /A/B. Report: {:?}",
+    report_pre_list
   );
 
   // Direct GET on /A/B should still work — via runtime recovery fallback —

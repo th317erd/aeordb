@@ -8,6 +8,24 @@ use aeordb::engine::verify;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
 use crate::utils::format_bytes;
 
+#[derive(Debug, PartialEq, Eq)]
+enum RepairCopyPreparation<OpenError> {
+  Flushed,
+  OpenUnavailable(OpenError),
+}
+
+fn prepare_source_for_repair_copy<Engine, OpenError, ShutdownError>(
+  open_result: Result<Engine, OpenError>,
+  shutdown: impl FnOnce(&Engine) -> Result<(), ShutdownError>,
+) -> Result<RepairCopyPreparation<OpenError>, ShutdownError> {
+  let engine = match open_result {
+    Ok(engine) => engine,
+    Err(error) => return Ok(RepairCopyPreparation::OpenUnavailable(error)),
+  };
+  shutdown(&engine)?;
+  Ok(RepairCopyPreparation::Flushed)
+}
+
 pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   // Initialize logging so debug/trace output works with AEORDB_LOG env var.
   initialize_logging(&LogConfig { format: LogFormat::Pretty, level: "warn".to_string(), ..LogConfig::default() });
@@ -62,15 +80,14 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     // Flush the hot tail into the main file before copying, so the
     // repaired copy starts with a fully-consistent on-disk state.
     println!("Flushing hot tail before copy...");
-    match StorageEngine::open(database) {
-      Ok(flush_engine) => {
-        if let Err(e) = flush_engine.shutdown() {
-          eprintln!("Warning: hot-tail flush failed: {}", e);
-        }
-        drop(flush_engine);
+    match prepare_source_for_repair_copy(StorageEngine::open(database), StorageEngine::shutdown) {
+      Ok(RepairCopyPreparation::Flushed) => {}
+      Ok(RepairCopyPreparation::OpenUnavailable(e)) => {
+        eprintln!("Warning: could not open database for hot-tail flush: {}", e);
       }
       Err(e) => {
-        eprintln!("Warning: could not open database for hot-tail flush: {}", e);
+        eprintln!("Error: hot-tail flush failed; refusing to create a repair copy: {}", e);
+        process::exit(1);
       }
     }
 
@@ -225,7 +242,13 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
       }
     }
   } else {
-    verify::verify(&engine, database)
+    match verify::verify_checked(&engine, database) {
+      Ok(report) => report,
+      Err(error) => {
+        eprintln!("Verification could not complete: {}", error);
+        process::exit(1);
+      }
+    }
   };
 
   if let Some(apply_report) = &spill_apply_report {
@@ -263,6 +286,9 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   println!("  Valid:              {:>8}", report.valid_entries);
   println!("  Corrupt hash:       {:>8}", report.corrupt_hash);
   println!("  Corrupt header:     {:>8}", report.corrupt_header);
+  for error in &report.verification_errors {
+    println!("  Verification error: {}", error);
+  }
   if !report.skipped_regions.is_empty() {
     for (offset, len) in &report.skipped_regions {
       println!("  Skipped region:     {} bytes at offset {}", len, offset);
@@ -452,7 +478,13 @@ fn run_repair_pass(
     println!();
   }
 
-  let initial = verify::verify(engine, database);
+  let initial = match verify::verify_checked(engine, database) {
+    Ok(report) => report,
+    Err(error) => {
+      eprintln!("Verification could not complete before repair: {}", error);
+      process::exit(1);
+    }
+  };
   if allow_kv_expansion && (initial.missing_kv_entries > 0 || initial.stale_kv_entries > 0) {
     let hash_length = engine.hash_algo().hash_length();
     let psize = aeordb::engine::kv_pages::page_size(hash_length);
@@ -468,7 +500,13 @@ fn run_repair_pass(
     }
   }
 
-  let report = verify::verify_and_repair(engine, database);
+  let report = match verify::verify_and_repair_checked(engine, database) {
+    Ok(report) => report,
+    Err(error) => {
+      eprintln!("Verification could not complete during repair: {}", error);
+      process::exit(1);
+    }
+  };
   complete_durability_repair(engine, database, durability_repair, &report);
   RepairPass::Complete(report)
 }
@@ -568,4 +606,42 @@ fn format_emergency_spill_repair_summary(report: &EmergencySpillApplyReport) -> 
     format_bytes(report.wal_tail_bytes_present),
     format_bytes(report.wal_tail_bytes_written)
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{RepairCopyPreparation, prepare_source_for_repair_copy};
+  use std::cell::Cell;
+
+  #[test]
+  fn repair_copy_preparation_flushes_an_open_engine() {
+    let shutdown_called = Cell::new(false);
+    let result = prepare_source_for_repair_copy::<_, &str, &str>(Ok(17_u8), |engine| {
+      assert_eq!(*engine, 17);
+      shutdown_called.set(true);
+      Ok(())
+    });
+
+    assert_eq!(result, Ok(RepairCopyPreparation::Flushed));
+    assert!(shutdown_called.get());
+  }
+
+  #[test]
+  fn repair_copy_preparation_preserves_an_unopenable_source_for_low_level_repair() {
+    let shutdown_called = Cell::new(false);
+    let result = prepare_source_for_repair_copy::<u8, _, &str>(Err("bad header"), |_| {
+      shutdown_called.set(true);
+      Ok(())
+    });
+
+    assert_eq!(result, Ok(RepairCopyPreparation::OpenUnavailable("bad header")));
+    assert!(!shutdown_called.get());
+  }
+
+  #[test]
+  fn repair_copy_preparation_rejects_a_failed_flush() {
+    let result = prepare_source_for_repair_copy::<_, &str, _>(Ok(17_u8), |_| Err("disk full"));
+
+    assert_eq!(result, Err("disk full"));
+  }
 }
