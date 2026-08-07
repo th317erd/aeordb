@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::api_key_rules::{match_rules, KeyRule};
-use crate::engine::engine_event::{EngineEvent, EVENT_SERVER_READY};
+use crate::engine::engine_event::{EngineEvent, EVENT_METRICS, EVENT_SERVER_READY};
 
 #[derive(Debug, Deserialize)]
 pub struct SseParams {
@@ -88,7 +88,11 @@ fn event_passes_filters(
   event_filter: &Option<Vec<String>>,
   path_prefix: &Option<String>,
   subscriber_rules: &[KeyRule],
+  is_root: bool,
 ) -> bool {
+  if event.event_type == EVENT_METRICS && !is_root {
+    return false;
+  }
   if let Some(filter) = event_filter {
     if !filter.contains(&event.event_type) {
       return false;
@@ -171,13 +175,16 @@ pub async fn event_stream(
 
   let path_prefix = params.path_prefix;
   let ready_event = server_ready_event(&state);
-  let initial_ready =
-    if event_passes_filters(&ready_event, &event_filter, &path_prefix, &subscriber_rules) { event_to_sse(ready_event) } else { None };
+  let initial_ready = if event_passes_filters(&ready_event, &event_filter, &path_prefix, &subscriber_rules, is_root) {
+    event_to_sse(ready_event)
+  } else {
+    None
+  };
 
   let live_stream = BroadcastStream::new(rx).filter_map(move |result| {
     match result {
       Ok(event) => {
-        if event_passes_filters(&event, &event_filter, &path_prefix, &subscriber_rules) {
+        if event_passes_filters(&event, &event_filter, &path_prefix, &subscriber_rules, is_root) {
           event_to_sse(event)
         } else {
           None

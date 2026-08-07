@@ -7,5 +7,6 @@ pub mod import_cmd;
 pub mod probe;
 pub mod promote;
 pub mod start;
+pub mod status;
 pub mod stress;
 pub mod verify;

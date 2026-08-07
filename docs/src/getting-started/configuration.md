@@ -70,6 +70,8 @@ aeordb start [OPTIONS]
 
 Process overrides are ephemeral. AeorDB reports their source as `command_line` through `/system/runtime` or `/system/lifecycle`, but never copies them into the stored JSON document.
 
+The same complete configuration envelopes are embedded in root `/system/stats`, root-only Prometheus source gauges, the root-only `metrics` SSE pulse, `aeordb status --json`, and the Dashboard. Non-root stats callers retain operational values but receive explicit redaction markers for registered root-only paths. This keeps source, validity, degradation, pending-restart, and pending-convergence reporting consistent across every observability surface.
+
 ```bash
 aeordb start -D data.aeordb \
   --memory-hard-limit-bytes 8GiB \

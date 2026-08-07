@@ -112,7 +112,11 @@ pub struct EmergencySpillReport {
   pub wal_tail_original_start: Option<u64>,
   pub wal_tail_copy_start: Option<u64>,
   pub wal_tail_end: Option<u64>,
+  pub hot_tail_bytes: u64,
+  pub index_buffer_bytes: u64,
   pub wal_tail_bytes: u64,
+  pub manifest_bytes: u64,
+  pub total_bytes: u64,
   pub wal_tail_truncated: bool,
   pub errors: Vec<String>,
 }
@@ -462,9 +466,10 @@ pub struct DatabaseStats {
   pub hash_algorithm: String,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EngineMemoryStats {
   pub process: ProcessMemoryStats,
+  pub coordinator: MemoryCoordinatorSnapshot,
   pub index_cache: IndexCacheMemoryStats,
   pub directory_cache: DirectoryCacheMemoryStats,
   pub caches: EngineCacheMemoryStats,
@@ -480,6 +485,10 @@ pub struct ProcessMemoryStats {
   pub swap_bytes: u64,
   pub thread_count: u64,
   pub fd_count: u64,
+  pub private_bytes: Option<u64>,
+  pub shared_bytes: Option<u64>,
+  pub mapped_bytes: Option<u64>,
+  pub allocator_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -527,6 +536,15 @@ pub struct EngineCacheMemoryStats {
   pub grants_index_entries: usize,
 }
 
+struct EngineMemoryInputs {
+  process: crate::engine::rss_sampler::ProcessMemory,
+  index: crate::engine::index_store::IndexWriteBufferStats,
+  directory: crate::engine::cache::CleanCacheStats,
+  permissions: crate::engine::cache::CleanCacheStats,
+  index_config: crate::engine::cache::CleanCacheStats,
+  grants: crate::engine::cache::CleanCacheStats,
+}
+
 fn memory_policy_from_config_shadow(report: &crate::engine::config_resolver::ConfigShadowReport) -> Result<MemoryPolicy, String> {
   let resolution = report
     .resolution
@@ -563,6 +581,10 @@ fn desired_unsigned_configuration(
 
 fn observation_failed(owner: MemoryOwner, message: impl Into<String>) -> MemoryCoordinatorError {
   MemoryCoordinatorError::ObservationFailed { owner, message: message.into() }
+}
+
+fn memory_observation_engine_error(error: MemoryCoordinatorError) -> EngineError {
+  EngineError::IoError(std::io::Error::other(format!("memory observation failed: {error}")))
 }
 
 fn durability_coordinator_engine_error(error: DurabilityCoordinatorError) -> EngineError {
@@ -996,7 +1018,7 @@ impl StorageEngine {
   }
 
   pub(crate) fn resolved_unsigned_config(&self, path: &str) -> Option<u64> {
-    self.configuration_snapshot().resolved_unsigned(path)
+    self.configuration_authority.get().and_then(|authority| authority.snapshot().resolved_unsigned(path))
   }
 
   fn activate_bounded_clean_caches(&self) -> EngineResult<()> {
@@ -1060,6 +1082,17 @@ impl StorageEngine {
     self.durability_coordinator.group_policy().map_err(durability_coordinator_engine_error)
   }
 
+  pub fn durability_group_policy_snapshot(&self) -> EngineResult<crate::engine::durability_coordinator::DurabilityGroupPolicySnapshot> {
+    self.durability_coordinator.group_policy_snapshot().map_err(durability_coordinator_engine_error)
+  }
+
+  pub fn runtime_observability_snapshot(
+    &self,
+    visibility: crate::engine::configuration_observability::ConfigurationVisibility,
+  ) -> EngineResult<crate::engine::runtime_observability::RuntimeObservabilitySnapshot> {
+    crate::engine::runtime_observability::collect_runtime_observability(self, visibility)
+  }
+
   /// Return the process memory coordinator when startup has reached memory
   /// policy activation. Early startup must read configuration and persistent
   /// recovery controls before that policy can be resolved.
@@ -1076,22 +1109,43 @@ impl StorageEngine {
   }
 
   pub fn memory_coordinator_snapshot(&self) -> Result<MemoryCoordinatorSnapshot, MemoryCoordinatorError> {
+    let inputs = self.collect_memory_inputs()?;
+    self.memory_coordinator_snapshot_from_inputs(&inputs)
+  }
+
+  fn collect_memory_inputs(&self) -> Result<EngineMemoryInputs, MemoryCoordinatorError> {
+    let process = crate::engine::rss_sampler::read_process_memory_detailed();
+    let index =
+      self.index_write_buffer.lock().map_err(|error| observation_failed(MemoryOwner::IndexDirtyBuffers, error.to_string()))?.stats();
+    let directory = self.dir_content_cache.stats().map_err(|error| observation_failed(MemoryOwner::DirectoryCache, error.to_string()))?;
+    let permissions = self.permissions_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let index_config = self.index_config_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let grants = self.grants_index_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    Ok(EngineMemoryInputs { process, index, directory, permissions, index_config, grants })
+  }
+
+  fn memory_coordinator_snapshot_from_inputs(
+    &self,
+    inputs: &EngineMemoryInputs,
+  ) -> Result<MemoryCoordinatorSnapshot, MemoryCoordinatorError> {
     let coordinator = self.memory_coordinator();
-    let process = crate::engine::rss_sampler::read_process_memory();
     coordinator.update_host_sample(HostMemorySample {
-      rss_bytes: process.resident_kb.saturating_mul(1024),
-      private_bytes: None,
-      mapped_bytes: None,
-      allocator_bytes: None,
+      rss_bytes: inputs.process.resident_kb.saturating_mul(1024),
+      private_bytes: inputs.process.private_kb.map(|value| value.saturating_mul(1024)),
+      mapped_bytes: inputs.process.mapped_kb.map(|value| value.saturating_mul(1024)),
+      allocator_bytes: inputs.process.allocator_kb.map(|value| value.saturating_mul(1024)),
       host_available_bytes: crate::engine::rss_sampler::read_host_available_bytes(),
     })?;
-    for (owner, observation) in self.current_memory_observations()? {
+    for (owner, observation) in self.current_memory_observations(inputs)? {
       coordinator.observe_legacy(owner, observation)?;
     }
     coordinator.snapshot()
   }
 
-  fn current_memory_observations(&self) -> Result<Vec<(MemoryOwner, MemoryObservation)>, MemoryCoordinatorError> {
+  fn current_memory_observations(
+    &self,
+    inputs: &EngineMemoryInputs,
+  ) -> Result<Vec<(MemoryOwner, MemoryObservation)>, MemoryCoordinatorError> {
     let mut observations =
       MemoryOwner::ALL.into_iter().map(|owner| (owner, MemoryObservation::default())).collect::<std::collections::BTreeMap<_, _>>();
 
@@ -1159,7 +1213,7 @@ impl StorageEngine {
       },
     );
 
-    let directory = self.dir_content_cache.stats().map_err(|error| observation_failed(MemoryOwner::DirectoryCache, error.to_string()))?;
+    let directory = &inputs.directory;
     let directory_legacy_bytes = if directory.max_bytes.is_some() { 0 } else { directory.resident_bytes };
     observations.insert(
       MemoryOwner::DirectoryCache,
@@ -1175,8 +1229,7 @@ impl StorageEngine {
       },
     );
 
-    let index =
-      self.index_write_buffer.lock().map_err(|error| observation_failed(MemoryOwner::IndexDirtyBuffers, error.to_string()))?.stats();
+    let index = &inputs.index;
     let index_clean_legacy_bytes = if index.reservation_owned { 0 } else { index.estimated_clean_bytes };
     let index_dirty_legacy_bytes = if index.reservation_owned { 0 } else { index.estimated_dirty_bytes };
     observations.insert(
@@ -1230,11 +1283,9 @@ impl StorageEngine {
     );
     drop(voids);
 
-    let permission_cache =
-      self.permissions_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
-    let index_config_cache =
-      self.index_config_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
-    let grants_cache = self.grants_index_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let permission_cache = &inputs.permissions;
+    let index_config_cache = &inputs.index_config;
+    let grants_cache = &inputs.grants;
     let server_cache_bytes = [&permission_cache, &index_config_cache, &grants_cache]
       .into_iter()
       .filter(|cache| cache.max_bytes.is_none())
@@ -1550,7 +1601,11 @@ impl StorageEngine {
       wal_tail_original_start: None,
       wal_tail_copy_start: None,
       wal_tail_end: None,
+      hot_tail_bytes: 0,
+      index_buffer_bytes: 0,
       wal_tail_bytes: 0,
+      manifest_bytes: 0,
+      total_bytes: 0,
       wal_tail_truncated: false,
       errors: Vec::new(),
     }
@@ -1717,7 +1772,11 @@ impl StorageEngine {
     report.index_dirty_saves = 0;
     report.index_deletes = 0;
     report.wal_tail_copy_start = None;
+    report.hot_tail_bytes = 0;
+    report.index_buffer_bytes = 0;
     report.wal_tail_bytes = 0;
+    report.manifest_bytes = 0;
+    report.total_bytes = 0;
     report.wal_tail_truncated = false;
     let pending_path = spill_dir.join("pending.json");
     let pending = serde_json::json!({
@@ -1747,6 +1806,7 @@ impl StorageEngine {
         "blake3": hex::encode(digest),
       }));
       report.hot_tail_path = Some(hot_tail_path.display().to_string());
+      report.hot_tail_bytes = length;
     }
 
     match self.index_write_buffer.try_lock() {
@@ -1768,6 +1828,7 @@ impl StorageEngine {
                 "blake3": hex::encode(digest),
               }));
               report.index_buffer_path = Some(index_buffer_path.display().to_string());
+              report.index_buffer_bytes = length;
             }
             Err(error) => {
               let cleanup = std::fs::remove_file(&index_buffer_path).err();
@@ -1888,6 +1949,12 @@ impl StorageEngine {
     }
     Self::write_durable_file(&manifest_path, &manifest_bytes)?;
     report.manifest_path = Some(manifest_path.display().to_string());
+    report.manifest_bytes = manifest_bytes.len() as u64;
+    report.total_bytes = report
+      .hot_tail_bytes
+      .saturating_add(report.index_buffer_bytes)
+      .saturating_add(report.wal_tail_bytes)
+      .saturating_add(report.manifest_bytes);
     if let Err(error) = std::fs::remove_file(&pending_path) {
       Self::push_spill_error(
         report,
@@ -4108,16 +4175,19 @@ impl StorageEngine {
   }
 
   pub fn memory_stats(&self) -> EngineResult<EngineMemoryStats> {
-    let process = crate::engine::rss_sampler::read_process_memory();
-    let index_stats = self.index_buffer_stats()?;
-    let directory_cache = self.directory_cache_memory_stats()?;
-    let permission_cache = self.permissions_cache.stats()?;
-    let index_config_cache = self.index_config_cache.stats()?;
-    let grants_index_cache = self.grants_index_cache.stats()?;
+    let inputs = self.collect_memory_inputs().map_err(memory_observation_engine_error)?;
+    let coordinator = self.memory_coordinator_snapshot_from_inputs(&inputs).map_err(memory_observation_engine_error)?;
+    let process = inputs.process;
+    let index_stats = inputs.index;
+    let directory_cache = DirectoryCacheMemoryStats {
+      entries: inputs.directory.entries,
+      estimated_bytes: inputs.directory.resident_bytes,
+      max_bytes: inputs.directory.max_bytes,
+    };
     let caches = EngineCacheMemoryStats {
-      permissions_entries: permission_cache.entries,
-      index_config_entries: index_config_cache.entries,
-      grants_index_entries: grants_index_cache.entries,
+      permissions_entries: inputs.permissions.entries,
+      index_config_entries: inputs.index_config.entries,
+      grants_index_entries: inputs.grants.entries,
     };
     let index_cache = IndexCacheMemoryStats {
       cached_indexes: index_stats.cached_indexes,
@@ -4160,17 +4230,17 @@ impl StorageEngine {
         swap_bytes: process.swap_kb.saturating_mul(1024),
         thread_count: process.thread_count,
         fd_count: process.fd_count,
+        private_bytes: process.private_kb.map(|value| value.saturating_mul(1024)),
+        shared_bytes: process.shared_kb.map(|value| value.saturating_mul(1024)),
+        mapped_bytes: process.mapped_kb.map(|value| value.saturating_mul(1024)),
+        allocator_bytes: process.allocator_kb.map(|value| value.saturating_mul(1024)),
       },
+      coordinator,
       index_cache,
       directory_cache,
       caches,
       estimated_engine_owned_bytes,
     })
-  }
-
-  fn directory_cache_memory_stats(&self) -> EngineResult<DirectoryCacheMemoryStats> {
-    let cache = self.dir_content_cache.stats()?;
-    Ok(DirectoryCacheMemoryStats { entries: cache.entries, estimated_bytes: cache.resident_bytes, max_bytes: cache.max_bytes })
   }
 
   /// Best-effort O(1) metrics for the in-file KV block.

@@ -42,6 +42,7 @@
 
 # Operations
 
+- [Observability](./operations/observability.md)
 - [Garbage Collection](./operations/gc.md)
 - [Reindexing](./operations/reindex.md)
 - [Task System & Cron](./operations/tasks.md)

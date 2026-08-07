@@ -31,6 +31,16 @@ pub struct PersistentDurabilityRecoveryState {
   pub reason: String,
 }
 
+impl PersistentDurabilityRecoveryState {
+  pub(crate) fn is_repair_verifying(&self) -> bool {
+    self.latch_state == Some(LATCH_REPAIR_VERIFYING)
+  }
+
+  pub(crate) fn is_catalog_replaying(&self) -> bool {
+    self.catalog_state == Some(CATALOG_REPLAYING)
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurabilityRepairReceipt {
   pub database_id: [u8; 16],

@@ -1106,8 +1106,18 @@ fn spill_path_from_resolution(resolution: &ConfigResolution) -> Option<(PathBuf,
 
 fn detect_context(database_path: &Path, chunk_size_bytes: u64) -> Result<ConfigResolutionContext, String> {
   let database_path = canonical_database_path(database_path)?;
-  let filesystem_capacity_bytes = fs2::total_space(&database_path)
-    .map_err(|error| format!("cannot detect filesystem capacity for {}: {error}", database_path.display()))?;
+  let filesystem_probe_path = if database_path.exists() {
+    database_path.as_path()
+  } else {
+    database_path.parent().ok_or_else(|| format!("database path {} has no parent", database_path.display()))?
+  };
+  let filesystem_capacity_bytes = fs2::total_space(filesystem_probe_path).map_err(|error| {
+    format!(
+      "cannot detect filesystem capacity for database {} through {}: {error}",
+      database_path.display(),
+      filesystem_probe_path.display(),
+    )
+  })?;
   let logical_cpu_count =
     std::thread::available_parallelism().map_err(|error| format!("cannot detect logical CPU count: {error}"))?.get() as u64;
   let default_gc_workspace_root = private_gc_workspace_root(&database_path)?;

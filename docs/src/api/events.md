@@ -92,7 +92,7 @@ Each event is a JSON object with:
 | `tasks_failed` | A background task failed terminally | `{"task_id": "...", "task_type": "...", "error": "..."}` |
 | `tasks_cancelled` | A running task cancellation was observed | `{"task_id": "...", "task_type": "..."}` |
 | `heartbeat` | Clock synchronization pulse (every 15s) | `{"intent_time", "construct_time", "node_id"}` |
-| `metrics` | System metrics snapshot (every 15s) | `{"counts", "sizes", "throughput", "health"}` |
+| `metrics` | Root-only administrative runtime snapshot (every 15s) | `{"counts", "sizes", "throughput", "health", "memory", "durability", "configuration"}` |
 
 ---
 
@@ -151,7 +151,9 @@ The delta between `intent_time` and `construct_time` is used by peers to measure
 
 ### Metrics Event
 
-The `metrics` event delivers system metrics to connected clients every 15 seconds (configurable, independent of the heartbeat interval). All values are computed in O(1) from atomic counters — subscribing to this event has no performance impact on the server.
+The `metrics` event delivers a bounded administrative snapshot every 15 seconds, independent of the heartbeat interval. Only the root user receives this event; non-root streams filter it even when `events=metrics` is requested. Non-root dashboards use authenticated `/system/stats` polling, where root-only paths are explicitly redacted.
+
+The producer reads counters, fixed memory-owner/configuration registries, in-memory durability/recovery state, and bounded operating-system probes. It never scans the WAL, KV store, file bodies, or index files, and metrics collection does not trigger cache eviction.
 
 **Subscribe to metrics:**
 
@@ -200,7 +202,20 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
       "data_bytes": 1610612736,
       "swap_bytes": 0,
       "thread_count": 32,
-      "fd_count": 128
+      "fd_count": 128,
+      "private_bytes": 1900000000,
+      "shared_bytes": 247483648,
+      "mapped_bytes": 805306368,
+      "allocator_bytes": null
+    },
+    "coordinator": {
+      "pressure": "normal",
+      "maintenance_paused": false,
+      "accounted_bytes": 1505755136,
+      "unaccounted_rss_bytes": 641728512,
+      "rejected_reservations": 0,
+      "deferred_reservations": 0,
+      "owners": []
     },
     "index_cache": {
       "cached_indexes": 16,
@@ -250,11 +265,22 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
       "grants_index_entries": 4
     },
     "estimated_engine_owned_bytes": 767557632
+  },
+  "durability": {
+    "frontier": { "hard_frontier": 4521, "next_sequence": 4522, "waiter_depth": 0, "last_barrier": null },
+    "group_policy": { "enabled": true, "max_bytes": 67108864, "max_delay_ms": 100, "disabled_reason": null },
+    "latch": { "read_only": false, "runtime_failure": null, "persistent_recovery": null },
+    "spill": { "count": 0, "total_bytes": 0, "locations": [], "latest": null },
+    "repair": { "required": false, "state": "not_required", "command": null, "progress": null }
+  },
+  "configuration": {
+    "runtime": { "config": {}, "status": { "valid": true, "degraded": false, "sources": {} } },
+    "lifecycle": { "config": {}, "status": { "valid": true, "degraded": false, "sources": {} } }
   }
 }
 ```
 
-`memory.process` is sampled from the operating system. The index `estimated_*` fields remain allocation estimates, while `clean_reserved_bytes`, `dirty_reserved_bytes`, and `flush_reserved_bytes` report exact coordinator reservations. Dirty reservations exclude flush scratch, so the `index_dirty_buffers` owner reconciles to `dirty_reserved_bytes + flush_reserved_bytes`. Clean index cache entries are evicted after the resolved idle TTL or cache cap; dirty and flushing generations remain reserved and non-evictable until publication succeeds or their exact state is restored after failure.
+`memory.process` is sampled from the operating system. Optional fields are `null` when unsupported. The index `estimated_*` fields and owner observations remain bounded estimates, while coordinator reservations are exact. Dirty reservations exclude flush scratch, so the `index_dirty_buffers` owner reconciles to `dirty_reserved_bytes + flush_reserved_bytes`. Clean index cache entries are evicted after the resolved idle TTL or cache cap; dirty and flushing generations remain reserved and non-evictable until publication succeeds or their exact state is restored after failure.
 
 **Payload sections:**
 
@@ -264,6 +290,9 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
 | `sizes` | Byte-level storage breakdown: disk total, KV file, logical data, chunk data, void space, dedup savings |
 | `throughput` | Rolling rates (1m, 5m, 15m averages and peak) for read/write operations and bytes |
 | `health` | Operational health signals: disk usage, KV fill ratio, dedup efficiency, write buffer depth |
+| `memory` | Process, policy, pressure, fixed owner, reservation, and cache diagnostics |
+| `durability` | Hard frontier, waiters, last barrier, grouping, read-only latch, spill, and repair state |
+| `configuration` | Complete runtime/lifecycle values, sources, validity, degradation, and pending activation |
 
 > **Migration note:** If your dashboard previously subscribed to `?events=heartbeat` for monitoring data, switch to `?events=metrics`. If you need both clock data and metrics (uncommon), subscribe to `?events=heartbeat,metrics`.
 

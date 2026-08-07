@@ -32,7 +32,7 @@ AeorDB is a content-addressed file database that treats your data as a filesyste
 - **Auth:** Self-contained JWT auth, API keys, user/group management with tags, path-level permissions, or `--auth false` for local use
 - **TLS:** Native HTTPS via rustls with `--tls-cert` and `--tls-key` flags
 - **Configuration:** TOML server settings plus strict stored, environment, and CLI runtime/lifecycle policy with per-property source reporting
-- **Observability:** O(1) stats and memory diagnostics at `/system/stats`, Prometheus metrics at `/system/metrics`, real-time `metrics` SSE event, structured logging
+- **Observability:** bounded stats and memory/durability/configuration diagnostics at `/system/stats`, root-only Prometheus and `metrics` SSE, `aeordb status`, Dashboard state, and structured logging
 
 ## Next Steps
 

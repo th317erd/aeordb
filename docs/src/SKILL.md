@@ -33,6 +33,7 @@ If auth is disabled for a development instance, authenticated routes may work wi
 |---------|-------|
 | Health | `GET /system/health` |
 | Stats | `GET /system/stats` |
+| Root operator status | `aeordb status --target <url> --json` |
 | Read file | `GET /files/{path}` |
 | Write file | `PUT /files/{path}` |
 | List directory | `GET /files/{dir}/` |
@@ -44,6 +45,8 @@ If auth is disabled for a development instance, authenticated routes may work wi
 | Commit uploaded chunks | `POST /blobs/commit` |
 | Invoke plugin | `POST /plugins/{name}/invoke` |
 | Events | `GET /system/events` |
+
+`GET /system/stats` is available to authenticated users, but filesystem paths in administrative configuration/recovery fields are redacted for non-root callers. The Prometheus endpoint and `metrics` SSE event are root-only. Bots with root credentials should prefer `aeordb status --json` for one bounded operational snapshot.
 
 ## Search Examples
 

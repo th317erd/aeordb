@@ -13,7 +13,7 @@ use std::task::{Context, Poll};
 use uuid::Uuid;
 
 use super::cache_invalidation::evict_caches_for_path;
-use super::responses::ErrorResponse;
+use super::responses::{require_root, ErrorResponse};
 use super::state::AppState;
 use crate::engine::RequestContext;
 use crate::engine::memory_coordinator::MemoryReservation;
@@ -1188,18 +1188,22 @@ pub async fn refresh_token(State(state): State<AppState>, Json(payload): Json<Re
 // Metrics
 // ---------------------------------------------------------------------------
 
-/// GET /admin/metrics -- render Prometheus metrics.
-pub async fn metrics_endpoint(State(state): State<AppState>) -> Response {
-  let memory = match state.engine.memory_stats() {
-    Ok(memory) => memory,
+/// GET /system/metrics -- render root-only Prometheus metrics.
+pub async fn metrics_endpoint(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
+  if let Err(response) = require_root(&claims) {
+    return response;
+  }
+  let runtime = match state.engine.runtime_observability_snapshot(crate::engine::configuration_observability::ConfigurationVisibility::Root)
+  {
+    Ok(runtime) => runtime,
     Err(error) => {
-      tracing::error!(%error, "Failed to collect engine memory statistics");
-      return ErrorResponse::new(format!("Failed to collect engine memory statistics: {error}"))
+      tracing::error!(%error, "Failed to collect runtime observability snapshot");
+      return ErrorResponse::new(format!("Failed to collect runtime observability snapshot: {error}"))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
   };
-  crate::metrics::record_memory_metrics(&memory);
+  crate::metrics::record_runtime_metrics(&runtime);
   let output = state.prometheus_handle.render();
   Response::builder()
     .status(StatusCode::OK)

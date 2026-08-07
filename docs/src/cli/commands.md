@@ -164,6 +164,32 @@ for the policy matrix and installer behavior.
 
 ---
 
+## `aeordb status`
+
+Inspect a running server through the authenticated `GET /system/stats` contract without opening the database file locally.
+
+```bash
+aeordb status [--target URL] [--api-key KEY | --token TOKEN] [--json]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--target` | `http://127.0.0.1:6830` | AeorDB HTTP or HTTPS base URL |
+| `--api-key` | `AEORDB_ROOT_KEY` when set | Root API key to exchange for a short-lived bearer token |
+| `--token` | -- | Existing root bearer token; mutually exclusive with `--api-key` |
+| `--json` | `false` | Print the exact structured server response instead of the concise operator view |
+
+The command uses bounded response reads, a five-second connection timeout, and a 30-second request timeout. It rejects HTTP redirects so an API-key request body or bearer token cannot be forwarded to another endpoint. It exits nonzero for invalid targets, credential conflicts, authentication/authorization failures, unreachable servers, oversized responses, malformed JSON, or an incomplete status schema. Credentials are never printed: token-exchange failure bodies are suppressed, and a bearer token reflected by a failed stats endpoint is redacted while non-secret diagnostics remain visible. Prefer `AEORDB_ROOT_KEY` over a command-line key where process listings are visible.
+
+```bash
+AEORDB_ROOT_KEY="$ROOT_KEY" aeordb status --target https://files.example.org
+aeordb status --target https://files.example.org --token "$TOKEN" --json
+```
+
+The human view reports process/coordinator memory, pressure, durability writability/frontier/waiters, repair state, and runtime/lifecycle validity. Use `--json` for per-owner memory, exact configuration sources, spill evidence, and the last completed durability barrier.
+
+---
+
 ## `aeordb verify`
 
 Verify database integrity and optionally repair recoverable issues.

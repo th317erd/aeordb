@@ -2,6 +2,7 @@
 
 const POLL_INTERVAL_MS = 15000;
 const MAX_ACTIVITY_POINTS = 60;
+const ROOT_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 function normalizeStatsEnvelope(raw) {
   if (!raw)
@@ -54,14 +55,16 @@ class DashboardMetricsStore {
     this._notify();
 
     this.fetchStats();
-    this._connectSSE();
+    const isRoot = allowNoAuth || (auth?.currentUserId && auth.currentUserId() === ROOT_USER_ID);
+    if (isRoot) {
+      this._connectSSE();
+    } else {
+      this._startPollingFallback();
+    }
   }
 
   stop(options = {}) {
-    if (this._eventSource) {
-      this._eventSource.close();
-      this._eventSource = null;
-    }
+    this._closeEventSource();
 
     if (this._pollInterval) {
       clearInterval(this._pollInterval);
@@ -140,24 +143,33 @@ class DashboardMetricsStore {
       this._eventSource.addEventListener('metrics', (event) => {
         try {
           this._applyStats(normalizeStatsEnvelope(JSON.parse(event.data)));
-        } catch (_) {
-          // Ignore malformed metrics events; the next pulse or poll will fix state.
+        } catch (error) {
+          this._error = new Error(`Malformed metrics SSE event: ${error.message}`);
+          this._notify();
+          this._startPollingFallback();
         }
       });
 
       this._eventSource.onerror = () => {
-        if (this._eventSource) {
-          this._eventSource.close();
-          this._eventSource = null;
-        }
         this._startPollingFallback();
       };
-    } catch (_) {
+    } catch (error) {
+      this._error = new Error(`Metrics SSE connection failed: ${error.message}`);
+      this._notify();
       this._startPollingFallback();
     }
   }
 
+  _closeEventSource() {
+    if (!this._eventSource)
+      return;
+
+    this._eventSource.close();
+    this._eventSource = null;
+  }
+
   _startPollingFallback() {
+    this._closeEventSource();
     if (this._pollInterval)
       return;
     this._pollInterval = setInterval(() => this.fetchStats(), POLL_INTERVAL_MS);
@@ -184,8 +196,8 @@ class DashboardMetricsStore {
     for (const subscriber of this._subscribers) {
       try {
         subscriber(snapshot);
-      } catch (_) {
-        // Subscriber rendering failures should not break metrics collection.
+      } catch (error) {
+        console.error('Dashboard metrics subscriber failed', error);
       }
     }
   }

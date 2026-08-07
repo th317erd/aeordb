@@ -49,7 +49,7 @@ AeorDB ships with 8 built-in format parsers (text, HTML/XML, PDF, images, audio,
 
 ## Metrics Counters
 
-System metrics (file counts, disk sizes, throughput rates, process memory, and bounded cache diagnostics) are tracked via O(1) atomic counters or cheap in-memory snapshots that are updated inline during normal operations. On startup, live file counts and logical bytes are initialized by walking the current directory tree, while stored chunk payload bytes are initialized from KV entry metadata without reading chunk bodies. The `GET /system/stats` endpoint and the `metrics` SSE event read directly from these counters and bounded snapshots -- there is no full database scan at query time. Rolling rate computation (1-minute, 5-minute, 15-minute averages) is maintained continuously, so monitoring data is always available at near-zero cost.
+System metrics combine O(1) atomic counters with one shared bounded runtime-observability producer. That producer samples fixed memory-owner/configuration registries, in-memory durability/recovery state, cache summaries, and bounded operating-system process data. On startup, live file counts and logical bytes are initialized by walking the current directory tree, while stored chunk payload bytes are initialized from KV entry metadata without reading chunk bodies. `GET /system/stats`, root-only Prometheus collection, the root-only `metrics` SSE event, `aeordb status`, and the Dashboard consume the same contract. Collection never scans the WAL, KV store, file bodies, or index files and never evicts caches as a monitoring side effect. Rolling rate computation (1-minute, 5-minute, 15-minute averages) is maintained continuously.
 
 ## The Database File (`.aeordb`)
 

@@ -14,7 +14,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::api_key_rules::KeyRule;
-use aeordb::engine::{EngineEvent, EventBus, RequestContext, StorageEngine, EVENT_SERVER_READY};
+use aeordb::engine::{EngineEvent, EventBus, RequestContext, StorageEngine, EVENT_METRICS, EVENT_SERVER_READY};
 use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
@@ -222,6 +222,32 @@ async fn read_first_sse_frame(mut body: Body) -> String {
     .expect("failed to read first SSE frame");
   let bytes = frame.into_data().expect("first SSE frame should contain data");
   String::from_utf8_lossy(&bytes).to_string()
+}
+
+#[tokio::test]
+async fn test_metrics_events_are_administrative_and_root_only() {
+  let (app, jwt_manager, _engine, event_bus, _temp) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let request =
+    Request::builder().method("GET").uri("/system/events?events=metrics").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  event_bus.emit(EngineEvent::new(EVENT_METRICS, "system", serde_json::json!({"memory": {"accounted_bytes": 1}})));
+  let mut non_root_body = response.into_body();
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), non_root_body.frame()).await.is_err(),
+    "non-root subscriber received an administrative metrics event"
+  );
+
+  let (app, jwt_manager, _engine, event_bus, _temp) = test_app();
+  let root_auth = root_bearer_token(&jwt_manager);
+  let request =
+    Request::builder().method("GET").uri("/system/events?events=metrics").header("authorization", &root_auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  event_bus.emit(EngineEvent::new(EVENT_METRICS, "system", serde_json::json!({"memory": {"accounted_bytes": 2}})));
+  let frame = read_first_sse_frame(response.into_body()).await;
+  assert!(frame.contains("\"accounted_bytes\":2"), "root subscriber did not receive metrics event: {frame}");
 }
 
 #[tokio::test]

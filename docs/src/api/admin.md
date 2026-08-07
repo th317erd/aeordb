@@ -53,8 +53,8 @@ Administrative endpoints for garbage collection, background tasks, cron scheduli
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
-| GET | `/system/stats` | System stats (JSON) | Yes (auth required) |
-| GET | `/system/metrics` | Prometheus metrics | Yes (auth required) |
+| GET | `/system/stats` | Bounded system/runtime snapshot (JSON) | Authenticated; root paths are redacted for non-root callers |
+| GET | `/system/metrics` | Prometheus metrics | Yes |
 | GET | `/system/health` | Health check | No (public) |
 
 ### API Key Management
@@ -721,7 +721,9 @@ curl -X POST "http://localhost:6830/versions/promote?hash=a1b2c3d4e5f6..." \
 
 ### GET /system/stats
 
-System statistics endpoint. Returns a structured JSON snapshot of all engine metrics. All values are read from O(1) atomic counters — this endpoint is safe to poll frequently with no performance impact.
+System statistics endpoint. Returns counters plus one bounded runtime-observability snapshot. Collection reads in-memory authority, cache, memory-coordinator, durability, and recovery state plus bounded operating-system probes. It does not scan the WAL, KV store, file bodies, or index files.
+
+Authentication is required. Share-link tokens are rejected. Root callers receive administrative paths and repair commands; non-root callers receive explicit `{"redacted":true}` markers for those values while retaining the bounded operational state.
 
 **Response:** `200 OK`
 
@@ -757,17 +759,10 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
     "bytes_written_per_sec": { "1m": 435200, "5m": 392000, "15m": 367000 },
     "bytes_read_per_sec": { "1m": 16065536, "5m": 14450000, "15m": 14200000 }
   },
-  "latency": {
-    "write": { "p50": 5.6, "p95": 15.4, "p99": 20.5 },
-    "read": { "p50": 2.1, "p95": 8.3, "p99": 12.0 },
-    "query": { "p50": 4.2, "p95": 22.0, "p99": 45.0 },
-    "flush": { "p50": 1.2, "p95": 5.0, "p99": 12.0 }
-  },
   "health": {
     "disk_usage_percent": 48.5,
     "kv_fill_ratio": 0.72,
     "dedup_hit_rate": 0.33,
-    "gc_last_reclaimed_bytes": 1048576,
     "write_buffer_depth": 42
   },
   "memory": {
@@ -778,7 +773,23 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
       "data_bytes": 1610612736,
       "swap_bytes": 0,
       "thread_count": 32,
-      "fd_count": 128
+      "fd_count": 128,
+      "private_bytes": 1900000000,
+      "shared_bytes": 247483648,
+      "mapped_bytes": 805306368,
+      "allocator_bytes": null
+    },
+    "coordinator": {
+      "pressure": "normal",
+      "maintenance_paused": false,
+      "observed_bytes": 767557632,
+      "reserved_bytes": 738197504,
+      "critical_reserved_bytes": 16777216,
+      "accounted_bytes": 1505755136,
+      "unaccounted_rss_bytes": 641728512,
+      "rejected_reservations": 0,
+      "deferred_reservations": 0,
+      "owners": []
     },
     "index_cache": {
       "cached_indexes": 16,
@@ -829,11 +840,21 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
     },
     "estimated_engine_owned_bytes": 767557632
   },
-  "sync": {
-    "active_peers": 2,
-    "failing_peers": 0,
-    "last_sync_ms": 1776563922032,
-    "sync_lag_entries": { "peer_2": 0, "peer_3": 15 }
+  "durability": {
+    "frontier": {
+      "hard_frontier": 4521,
+      "next_sequence": 4522,
+      "waiter_depth": 0,
+      "last_barrier": null
+    },
+    "group_policy": { "enabled": true, "max_bytes": 67108864, "max_delay_ms": 100, "disabled_reason": null },
+    "latch": { "read_only": false, "runtime_failure": null, "persistent_recovery": null },
+    "spill": { "count": 0, "total_bytes": 0, "locations": [], "latest": null },
+    "repair": { "required": false, "state": "not_required", "command": null, "progress": null }
+  },
+  "configuration": {
+    "runtime": { "config": {}, "status": { "valid": true, "degraded": false, "sources": {} } },
+    "lifecycle": { "config": {}, "status": { "valid": true, "degraded": false, "sources": {} } }
   }
 }
 ```
@@ -842,20 +863,20 @@ System statistics endpoint. Returns a structured JSON snapshot of all engine met
 
 | Section | Description |
 |---------|-------------|
-| `identity` | Server version, database path, hash algorithm, chunk size, node ID, and uptime |
+| `identity` | Server version, database filename (never the absolute host path), hash algorithm, chunk size, node ID, and uptime |
 | `counts` | Current totals for files, directories, symlinks, chunks, snapshots, and forks |
 | `sizes` | Byte-level storage breakdown: disk total, KV file size, logical data, chunk data, void space, dedup savings |
 | `throughput` | Rolling read/write rates (1m, 5m, 15m averages) and peak rates |
-| `latency` | Percentile latencies (p50, p95, p99) for write, read, query, and flush operations (in milliseconds) |
-| `health` | Operational health signals: disk usage, KV fill ratio, dedup hit rate, last GC reclamation, write buffer depth |
-| `memory` | Process memory and AeorDB-owned cache diagnostics, including RSS, swap, thread/fd counts, index cache estimates, directory cache estimates, and cache entry counts |
-| `sync` | Replication status: active/failing peers, last sync timestamp, per-peer sync lag (only present when replication is active) |
+| `health` | Operational health signals: disk usage, KV fill ratio, dedup hit rate, and write buffer depth |
+| `memory` | Process probes, memory policy/pressure, per-owner observations and reservations, and bounded cache diagnostics |
+| `durability` | Hard frontier, waiter depth, last completed barrier, grouping policy, read-only latch, spill evidence, and repair state |
+| `configuration` | Complete runtime/lifecycle envelopes: active and desired values, exact sources, validity, degradation, and pending activation |
 
-> **Note:** The previous `GET /system/stats` returned a flat object computed via O(n) iteration. The new response is structured into nested sections and is O(1) — no performance concerns polling at high frequency.
+The response is bounded by fixed owner/property registries and bounded diagnostic arrays. Collection does not evict caches or otherwise mutate storage policy. Poll at a monitoring cadence rather than treating it as a hot data-plane endpoint.
 
 `sizes.logical_data` is the sum of live file sizes reachable from the current HEAD tree. `sizes.chunk_data` is the stored payload size of unique chunk entries in the KV index, initialized from entry metadata without reading chunk bodies. `sizes.void_space` is tracked reusable space inside the append log; it is not filesystem free space.
 
-`memory.process` is sampled from the operating system. On Linux this uses `/proc/self/status` plus `/proc/self/fd`; on macOS it uses Mach task information plus `/dev/fd`. Platform-specific fields that are unavailable are reported as `0`. `memory.index_cache.estimated_*`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are allocation estimates intended for diagnosis and trend monitoring. The index `*_reserved_bytes` fields are exact coordinator reservations: clean cache, retained dirty state, and serialized flush scratch are reported separately. While `reservation_owned` is true, the `index_dirty_buffers` coordinator owner reconciles to `dirty_reserved_bytes + flush_reserved_bytes`; flush scratch alone is critical durable-write headroom.
+`memory.process` is sampled from the operating system. On Linux this uses `/proc/self/status`, `/proc/self/fd`, and `/proc/self/smaps_rollup`; on macOS it uses Mach task information plus `/dev/fd`. Optional ownership fields are `null` when the platform cannot provide trustworthy evidence. Private, shared, and mapped categories may overlap with RSS and must not be added together. `memory.index_cache.estimated_*`, `memory.directory_cache.estimated_bytes`, and `memory.estimated_engine_owned_bytes` are allocation estimates intended for diagnosis and trend monitoring. The coordinator's reservation fields are exact; its owner observations remain bounded estimates. `unaccounted_rss_bytes` is the RSS not explained by current owner observations/reservations, not proof of a leak by itself.
 
 The `durability_waiters` owner reserves bounded emergency headroom for the
 operation ledger and each admitted commit record until its exact result is
@@ -920,7 +941,7 @@ curl http://localhost:6830/system/health
 
 ### GET /system/metrics
 
-Prometheus-format metrics endpoint. Requires authentication.
+Prometheus-format metrics endpoint. Requires a root bearer token. Non-root callers receive `403 Forbidden` because the series include administrative runtime state.
 
 **Response:** `200 OK`
 
@@ -938,6 +959,14 @@ Memory gauges are updated when `/system/metrics` is rendered and by the periodic
 | `aeordb_process_swap_bytes` | Process swap usage where available |
 | `aeordb_process_thread_count` | Process thread count where available |
 | `aeordb_process_fd_count` | Open file descriptor count where available |
+| `aeordb_process_private_bytes` | Private process memory where supported, otherwise `NaN` |
+| `aeordb_process_shared_bytes` | Shared process memory where supported, otherwise `NaN` |
+| `aeordb_process_mapped_bytes` | File/shmem proportional-set memory where supported, otherwise `NaN` |
+| `aeordb_process_allocator_bytes` | Allocator-owned memory where supported, otherwise `NaN` |
+| `aeordb_memory_accounted_bytes` | Coordinator-observed plus reserved memory |
+| `aeordb_memory_unaccounted_rss_bytes` | RSS not explained by current coordinator accounting |
+| `aeordb_memory_pressure{level}` | One-hot unconfigured/normal/soft/hard pressure state |
+| `aeordb_memory_owner_*{owner}` | Fixed-registry per-owner observations, reservations, items, and activity |
 | `aeordb_engine_memory_estimated_bytes` | Estimated AeorDB-owned cache memory tracked by diagnostics |
 | `aeordb_index_cache_estimated_bytes` | Estimated shared index cache memory |
 | `aeordb_index_cache_estimated_clean_bytes` | Estimated clean, evictable index memory |
@@ -959,6 +988,9 @@ Memory gauges are updated when `/system/metrics` is rendered and by the periodic
 | `aeordb_index_cache_values` | Raw indexed value count currently cached |
 | `aeordb_directory_cache_estimated_bytes` | Estimated directory content cache memory |
 | `aeordb_directory_cache_entries` | Directory content cache entry count |
+| `aeordb_durability_*` | Frontier, waiters, last barrier, group policy, latch, spill, and repair gauges |
+| `aeordb_configuration_family_*{family}` | Runtime/lifecycle validity, degradation, and pending-state gauges |
+| `aeordb_configuration_property_active{family,path,source}` | Fixed-registry one-hot active source for each configuration property |
 
 **Example:**
 

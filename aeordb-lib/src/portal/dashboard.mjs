@@ -35,8 +35,18 @@ const SIZE_DEFINITIONS = [
 const MEMORY_DEFINITIONS = [
   { path: ['process', 'rss_bytes'],               label: 'RSS',                  format: formatBytes },
   { path: ['process', 'peak_rss_bytes'],          label: 'Peak RSS',             format: formatBytes },
+  { path: ['process', 'private_bytes'],           label: 'Private Memory',       format: formatBytes },
+  { path: ['process', 'shared_bytes'],            label: 'Shared Memory',        format: formatBytes },
+  { path: ['process', 'mapped_bytes'],            label: 'Mapped Memory',        format: formatBytes },
+  { path: ['process', 'allocator_bytes'],         label: 'Allocator Memory',     format: formatBytes },
   { path: ['process', 'data_bytes'],              label: 'Data / Heap',          format: formatBytes },
   { path: ['process', 'swap_bytes'],              label: 'Swap',                 format: formatBytes },
+  { path: ['coordinator', 'accounted_bytes'],     label: 'Accounted Memory',     format: formatBytes },
+  { path: ['coordinator', 'unaccounted_rss_bytes'], label: 'Unaccounted RSS',    format: formatBytes },
+  { path: ['coordinator', 'reserved_bytes'],      label: 'Reserved Memory',      format: formatBytes },
+  { path: ['coordinator', 'critical_reserved_bytes'], label: 'Emergency Reserved', format: formatBytes },
+  { path: ['coordinator', 'policy', 'soft_limit_bytes'], label: 'Soft Limit',    format: formatBytes },
+  { path: ['coordinator', 'policy', 'hard_limit_bytes'], label: 'Hard Limit',    format: formatBytes },
   { path: ['index_cache', 'estimated_bytes'],     label: 'Index Cache',          format: formatBytes },
   { path: ['index_cache', 'estimated_dirty_bytes'], label: 'Dirty Index Data',   format: formatBytes },
   { path: ['index_cache', 'clean_reserved_bytes'], label: 'Clean Index Reserved', format: formatBytes },
@@ -62,6 +72,57 @@ const DARK_THEME = {
 };
 
 const CHART_COLORS = ['#f0883e', '#3fb950', '#d2a8ff', '#58a6ff'];
+
+function formatObservabilityValue(value) {
+  if (value == null)
+    return '\u2014';
+
+  if (typeof value === 'object' && value.redacted === true)
+    return 'redacted';
+
+  if (typeof value === 'object')
+    return JSON.stringify(value);
+
+  return String(value);
+}
+
+function readNestedValue(value, path) {
+  let current = value;
+  for (const segment of path) {
+    if (current == null || typeof current !== 'object')
+      return null;
+
+    current = current[segment];
+  }
+
+  return current;
+}
+
+function readConfigurationValue(family, envelope, propertyPath) {
+  const config = envelope?.config;
+  if (!config)
+    return null;
+
+  if (family === 'runtime')
+    return readNestedValue(config, propertyPath.split('.'));
+
+  const lifecyclePaths = {
+    'lifecycle.snapshot_writes_enabled':                         ['snapshot_writes_enabled'],
+    'lifecycle.snapshot_retention_auto_months':                  ['snapshot_retention', 'auto_months'],
+    'lifecycle.snapshot_retention_manual_months':                ['snapshot_retention', 'manual_months'],
+    'lifecycle.garbage_collection_pending_delete_grace_seconds': ['garbage_collection', 'pending_delete_grace_seconds'],
+  };
+  const path = lifecyclePaths[propertyPath];
+  return (path) ? readNestedValue(config, path) : null;
+}
+
+function countObjectProperties(value) {
+  return (value && typeof value === 'object') ? Object.keys(value).length : 0;
+}
+
+function formatOptionalBytes(value) {
+  return (value != null) ? formatBytes(value) : '\u2014';
+}
 
 class AeorDashboard extends HTMLElement {
   constructor() {
@@ -173,6 +234,29 @@ class AeorDashboard extends HTMLElement {
           <div class="stat-value" id="health-write-buffer-depth">&mdash;</div>
         </div>
       </div>
+      <div class="dashboard-section-heading">Runtime</div>
+      <div class="dashboard-runtime-grid" id="runtime-observability">
+        <div class="dashboard-state-card">
+          <div class="dashboard-state-label">Memory pressure</div>
+          <div class="dashboard-state-value" id="memory-pressure">&mdash;</div>
+          <div class="dashboard-state-detail" id="memory-pressure-detail"></div>
+        </div>
+        <div class="dashboard-state-card">
+          <div class="dashboard-state-label">Durability</div>
+          <div class="dashboard-state-value" id="durability-state">&mdash;</div>
+          <div class="dashboard-state-detail" id="durability-frontier"></div>
+        </div>
+        <div class="dashboard-state-card">
+          <div class="dashboard-state-label">Recovery</div>
+          <div class="dashboard-state-value" id="recovery-state">&mdash;</div>
+          <div class="dashboard-state-detail" id="recovery-detail"></div>
+        </div>
+        <div class="dashboard-state-card">
+          <div class="dashboard-state-label">Configuration</div>
+          <div class="dashboard-state-value" id="configuration-state">&mdash;</div>
+          <div class="dashboard-state-detail" id="configuration-detail"></div>
+        </div>
+      </div>
       <div style="font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Memory</div>
       <div class="stats-grid" id="stats-memory">
         ${MEMORY_DEFINITIONS.map((definition, index) => `
@@ -197,6 +281,46 @@ class AeorDashboard extends HTMLElement {
               </tr>
             </thead>
             <tbody id="memory-index-rows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="chart-card dashboard-observability-table" id="memory-owner-card">
+        <div class="chart-title">Memory Owners</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Owner</th>
+                <th>Resident</th>
+                <th>Clean</th>
+                <th>Dirty</th>
+                <th>Reserved</th>
+                <th>Evictable</th>
+                <th>Pinned</th>
+                <th>Items</th>
+                <th>Hits</th>
+                <th>Misses</th>
+                <th>Evictions</th>
+              </tr>
+            </thead>
+            <tbody id="memory-owner-rows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="chart-card dashboard-observability-table" id="configuration-card">
+        <div class="chart-title">Effective Configuration</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Family</th>
+                <th>Property</th>
+                <th>Value</th>
+                <th>Source</th>
+                <th>Activation</th>
+              </tr>
+            </thead>
+            <tbody id="configuration-rows"></tbody>
           </table>
         </div>
       </div>
@@ -232,6 +356,7 @@ class AeorDashboard extends HTMLElement {
       this.updateThroughput(this._stats.throughput);
       this.updateHealthIndicators(this._stats.health);
       this.updateMemory(this._stats.memory);
+      this.updateRuntimeObservability(this._stats);
       this.updateStorageChart(this._stats);
       this.updateActivityChart();
     }
@@ -418,6 +543,199 @@ class AeorDashboard extends HTMLElement {
       `;
     }).join('');
     card.style.display = '';
+  }
+
+  updateRuntimeObservability(data) {
+    const memory       = data.memory || {};
+    const coordinator  = memory.coordinator || {};
+    const durability   = data.durability || {};
+    const frontier     = durability.frontier || {};
+    const latch        = durability.latch || {};
+    const repair       = durability.repair || {};
+    const spill        = durability.spill || {};
+    const configuration = data.configuration || {};
+
+    const pressure = coordinator.pressure || 'unconfigured';
+    this.setRuntimeState('memory-pressure', pressure.replaceAll('_', ' '), pressure);
+    this.setRuntimeDetail(
+      'memory-pressure-detail',
+      `${formatOptionalBytes(coordinator.accounted_bytes)} accounted, ${formatOptionalBytes(coordinator.unaccounted_rss_bytes)} unaccounted, `
+        + `${formatNumber(coordinator.rejected_reservations || 0)} rejected, ${formatNumber(coordinator.deferred_reservations || 0)} deferred`
+        + ((coordinator.maintenance_paused) ? ', maintenance paused' : ''),
+    );
+
+    const durabilityState = (latch.read_only) ? 'Read only' : 'Writable';
+    this.setRuntimeState('durability-state', durabilityState, (latch.read_only) ? 'read-only' : 'writable');
+    let frontierDetail = `frontier ${formatNumber(frontier.hard_frontier || 0)} / ${formatNumber(frontier.next_sequence || 0)}, `
+      + `${formatNumber(frontier.waiter_depth || 0)} waiters`;
+    if (frontier.last_barrier) {
+      const result = (frontier.last_barrier.succeeded) ? 'succeeded' : 'failed';
+      frontierDetail += `, last ${frontier.last_barrier.operation || 'barrier'} ${result} in ${formatNumber(frontier.last_barrier.latency_ms || 0)} ms`;
+    }
+    this.setRuntimeDetail('durability-frontier', frontierDetail);
+
+    const repairState = repair.state || 'unknown';
+    this.setRuntimeState(
+      'recovery-state',
+      repairState.replaceAll('_', ' '),
+      (repair.required) ? 'invalid' : 'normal',
+    );
+    let recoveryDetail = `${formatNumber(spill.count || 0)} spill artifacts, ${formatBytes(spill.total_bytes || 0)}`;
+    if (repair.command != null)
+      recoveryDetail += `, repair command: ${formatObservabilityValue(repair.command)}`;
+    this.setRuntimeDetail('recovery-detail', recoveryDetail);
+
+    const configurationState = this.configurationState(configuration);
+    this.setRuntimeState('configuration-state', configurationState.label, configurationState.state);
+    this.setRuntimeDetail('configuration-detail', configurationState.detail);
+    this.updateMemoryOwners(coordinator.owners || []);
+    this.updateConfigurationRows(configuration);
+  }
+
+  setRuntimeState(id, value, state) {
+    const element = this.querySelector(`#${id}`);
+    if (!element)
+      return;
+
+    element.textContent = value || '\u2014';
+    if (state) {
+      element.dataset.state = state;
+    } else {
+      delete element.dataset.state;
+    }
+  }
+
+  setRuntimeDetail(id, value) {
+    const element = this.querySelector(`#${id}`);
+    if (element)
+      element.textContent = value || '\u2014';
+  }
+
+  configurationState(configuration) {
+    const envelopes = [configuration.runtime, configuration.lifecycle].filter(Boolean);
+    if (!envelopes.length)
+      return { label: 'Unavailable', state: 'invalid', detail: 'No configuration snapshot is available' };
+
+    const statuses          = envelopes.map((envelope) => envelope.status || {});
+    const invalid           = statuses.some((status) => status.valid === false);
+    const degraded          = statuses.some((status) => status.degraded === true);
+    const pendingRestart    = statuses.reduce((count, status) => count + countObjectProperties(status.pending_restart), 0);
+    const pendingConvergence = statuses.reduce((count, status) => count + countObjectProperties(status.pending_convergence), 0);
+    const disabled          = statuses.reduce((count, status) => count + (status.disabled_capabilities?.length || 0), 0);
+    const issues            = statuses.reduce((count, status) => count + (status.issues?.length || 0), 0);
+
+    let label = 'Valid';
+    let state = 'valid';
+    if (invalid) {
+      label = 'Invalid';
+      state = 'invalid';
+    } else if (degraded) {
+      label = 'Degraded';
+      state = 'degraded';
+    }
+
+    return {
+      label,
+      state,
+      detail: `${formatNumber(pendingRestart)} pending restart, ${formatNumber(pendingConvergence)} pending convergence, `
+        + `${formatNumber(disabled)} disabled capabilities, ${formatNumber(issues)} issues`,
+    };
+  }
+
+  updateMemoryOwners(owners) {
+    const rows = this.querySelector('#memory-owner-rows');
+    if (!rows)
+      return;
+
+    rows.replaceChildren();
+    if (!owners.length) {
+      this.appendEmptyRow(rows, 11, 'No memory-owner samples are available');
+      return;
+    }
+
+    for (const owner of owners) {
+      const observation = owner.observed || {};
+      const row = document.createElement('tr');
+      const values = [
+        owner.owner || '\u2014',
+        formatOptionalBytes(observation.resident_bytes),
+        formatOptionalBytes(observation.clean_bytes),
+        formatOptionalBytes(observation.dirty_bytes),
+        formatOptionalBytes(owner.reserved_bytes),
+        formatOptionalBytes(observation.evictable_bytes),
+        formatOptionalBytes(observation.pinned_bytes),
+        formatNumber(observation.items || 0),
+        formatNumber(observation.hits || 0),
+        formatNumber(observation.misses || 0),
+        formatNumber(observation.evictions || 0),
+      ];
+      for (const value of values)
+        this.appendTableCell(row, value);
+
+      rows.append(row);
+    }
+  }
+
+  updateConfigurationRows(configuration) {
+    const rows = this.querySelector('#configuration-rows');
+    if (!rows)
+      return;
+
+    rows.replaceChildren();
+    for (const family of ['runtime', 'lifecycle']) {
+      const envelope = configuration[family];
+      const status   = envelope?.status || {};
+      const sources  = status.sources || {};
+      const properties = Object.keys(sources).sort();
+      for (const propertyPath of properties) {
+        const row = document.createElement('tr');
+        const value = readConfigurationValue(family, envelope, propertyPath);
+        const activation = this.configurationActivation(status, propertyPath);
+        const values = [
+          family,
+          propertyPath,
+          formatObservabilityValue(value),
+          formatObservabilityValue(sources[propertyPath]),
+          activation,
+        ];
+        for (const cellValue of values)
+          this.appendTableCell(row, cellValue);
+
+        rows.append(row);
+      }
+    }
+
+    if (!rows.childElementCount)
+      this.appendEmptyRow(rows, 5, 'No configuration properties are available');
+  }
+
+  configurationActivation(status, propertyPath) {
+    if (status.convergence_errors?.[propertyPath] != null)
+      return 'error';
+
+    if (status.pending_convergence?.[propertyPath] != null)
+      return 'pending convergence';
+
+    if (status.pending_restart?.[propertyPath] != null)
+      return 'pending restart';
+
+    return 'active';
+  }
+
+  appendTableCell(row, value) {
+    const cell = document.createElement('td');
+    cell.textContent = value;
+    row.append(cell);
+  }
+
+  appendEmptyRow(rows, columnCount, message) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = columnCount;
+    cell.className = 'dashboard-empty-row';
+    cell.textContent = message;
+    row.append(cell);
+    rows.append(row);
   }
 
   updateStorageChart(data) {

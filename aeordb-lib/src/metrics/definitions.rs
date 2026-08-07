@@ -58,6 +58,35 @@ pub const PROCESS_DATA_BYTES: &str = "aeordb_process_data_bytes";
 pub const PROCESS_SWAP_BYTES: &str = "aeordb_process_swap_bytes";
 pub const PROCESS_THREAD_COUNT: &str = "aeordb_process_thread_count";
 pub const PROCESS_FD_COUNT: &str = "aeordb_process_fd_count";
+pub const PROCESS_PRIVATE_BYTES: &str = "aeordb_process_private_bytes";
+pub const PROCESS_SHARED_BYTES: &str = "aeordb_process_shared_bytes";
+pub const PROCESS_MAPPED_BYTES: &str = "aeordb_process_mapped_bytes";
+pub const PROCESS_ALLOCATOR_BYTES: &str = "aeordb_process_allocator_bytes";
+pub const MEMORY_OBSERVED_BYTES: &str = "aeordb_memory_observed_bytes";
+pub const MEMORY_RESERVED_BYTES: &str = "aeordb_memory_reserved_bytes";
+pub const MEMORY_CRITICAL_RESERVED_BYTES: &str = "aeordb_memory_critical_reserved_bytes";
+pub const MEMORY_ACCOUNTED_BYTES: &str = "aeordb_memory_accounted_bytes";
+pub const MEMORY_UNACCOUNTED_RSS_BYTES: &str = "aeordb_memory_unaccounted_rss_bytes";
+pub const MEMORY_REJECTED_RESERVATIONS: &str = "aeordb_memory_rejected_reservations";
+pub const MEMORY_DEFERRED_RESERVATIONS: &str = "aeordb_memory_deferred_reservations";
+pub const MEMORY_PRESSURE: &str = "aeordb_memory_pressure";
+pub const MEMORY_MAINTENANCE_PAUSED: &str = "aeordb_memory_maintenance_paused";
+pub const MEMORY_OWNER_RESIDENT_BYTES: &str = "aeordb_memory_owner_resident_bytes";
+pub const MEMORY_OWNER_CLEAN_BYTES: &str = "aeordb_memory_owner_clean_bytes";
+pub const MEMORY_OWNER_DIRTY_BYTES: &str = "aeordb_memory_owner_dirty_bytes";
+pub const MEMORY_OWNER_EVICTABLE_BYTES: &str = "aeordb_memory_owner_evictable_bytes";
+pub const MEMORY_OWNER_PINNED_BYTES: &str = "aeordb_memory_owner_pinned_bytes";
+pub const MEMORY_OWNER_SPILL_BYTES: &str = "aeordb_memory_owner_spill_bytes";
+pub const MEMORY_OWNER_RESERVED_BYTES: &str = "aeordb_memory_owner_reserved_bytes";
+pub const MEMORY_OWNER_CRITICAL_RESERVED_BYTES: &str = "aeordb_memory_owner_critical_reserved_bytes";
+pub const MEMORY_OWNER_PEAK_RESERVED_BYTES: &str = "aeordb_memory_owner_peak_reserved_bytes";
+pub const MEMORY_OWNER_ACTIVE_RESERVATIONS: &str = "aeordb_memory_owner_active_reservations";
+pub const MEMORY_OWNER_ITEMS: &str = "aeordb_memory_owner_items";
+pub const MEMORY_OWNER_HITS: &str = "aeordb_memory_owner_hits";
+pub const MEMORY_OWNER_MISSES: &str = "aeordb_memory_owner_misses";
+pub const MEMORY_OWNER_EVICTIONS: &str = "aeordb_memory_owner_evictions";
+pub const MEMORY_OWNER_REJECTIONS: &str = "aeordb_memory_owner_rejections";
+pub const MEMORY_OWNER_DEFERRALS: &str = "aeordb_memory_owner_deferrals";
 pub const ENGINE_MEMORY_ESTIMATED_BYTES: &str = "aeordb_engine_memory_estimated_bytes";
 pub const INDEX_CACHE_ESTIMATED_BYTES: &str = "aeordb_index_cache_estimated_bytes";
 pub const INDEX_CACHE_ESTIMATED_CLEAN_BYTES: &str = "aeordb_index_cache_estimated_clean_bytes";
@@ -79,6 +108,30 @@ pub const INDEX_CACHE_ENTRIES: &str = "aeordb_index_cache_entries";
 pub const INDEX_CACHE_VALUES: &str = "aeordb_index_cache_values";
 pub const DIRECTORY_CACHE_ESTIMATED_BYTES: &str = "aeordb_directory_cache_estimated_bytes";
 pub const DIRECTORY_CACHE_ENTRIES: &str = "aeordb_directory_cache_entries";
+
+// Durability
+pub const DURABILITY_HARD_FRONTIER: &str = "aeordb_durability_hard_frontier";
+pub const DURABILITY_NEXT_SEQUENCE: &str = "aeordb_durability_next_sequence";
+pub const DURABILITY_WAITER_DEPTH: &str = "aeordb_durability_waiter_depth";
+pub const DURABILITY_PENDING_HARD: &str = "aeordb_durability_pending_hard";
+pub const DURABILITY_OLDEST_WAITER_AGE_MS: &str = "aeordb_durability_oldest_waiter_age_ms";
+pub const DURABILITY_LAST_BARRIER_LATENCY_MS: &str = "aeordb_durability_last_barrier_latency_ms";
+pub const DURABILITY_LAST_BARRIER_SUCCESS: &str = "aeordb_durability_last_barrier_success";
+pub const DURABILITY_GROUP_COMMIT_ENABLED: &str = "aeordb_durability_group_commit_enabled";
+pub const DURABILITY_GROUP_COMMIT_MAX_BYTES: &str = "aeordb_durability_group_commit_max_bytes";
+pub const DURABILITY_GROUP_COMMIT_MAX_DELAY_MS: &str = "aeordb_durability_group_commit_max_delay_ms";
+pub const DURABILITY_READ_ONLY: &str = "aeordb_durability_read_only";
+pub const DURABILITY_SPILL_COUNT: &str = "aeordb_durability_spill_count";
+pub const DURABILITY_SPILL_BYTES: &str = "aeordb_durability_spill_bytes";
+pub const DURABILITY_REPAIR_REQUIRED: &str = "aeordb_durability_repair_required";
+
+// Configuration
+pub const CONFIGURATION_FAMILY_VALID: &str = "aeordb_configuration_family_valid";
+pub const CONFIGURATION_FAMILY_DEGRADED: &str = "aeordb_configuration_family_degraded";
+pub const CONFIGURATION_PENDING_RESTART: &str = "aeordb_configuration_pending_restart";
+pub const CONFIGURATION_PENDING_CONVERGENCE: &str = "aeordb_configuration_pending_convergence";
+pub const CONFIGURATION_DISABLED_CAPABILITIES: &str = "aeordb_configuration_disabled_capabilities";
+pub const CONFIGURATION_PROPERTY_ACTIVE: &str = "aeordb_configuration_property_active";
 
 // Versions
 pub const VERSION_SNAPSHOTS_TOTAL: &str = "aeordb_version_snapshots_total";

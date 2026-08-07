@@ -5,6 +5,8 @@ use aeordb::engine::memory_coordinator::{
   AdmissionClass, CriticalMemoryPurpose, HostMemorySample, MemoryCoordinator, MemoryCoordinatorError, MemoryObservation, MemoryOwner,
   MemoryPolicy, MemoryPressure,
 };
+#[cfg(target_os = "linux")]
+use aeordb::engine::rss_sampler::parse_linux_smaps_rollup;
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
 
 fn policy() -> MemoryPolicy {
@@ -49,6 +51,36 @@ fn owner_registry_is_complete_unique_and_stable() {
     ]
   );
   assert_eq!(names.into_iter().collect::<std::collections::BTreeSet<_>>().len(), MemoryOwner::ALL.len());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_smaps_rollup_parser_reports_private_shared_and_mapped_memory() {
+  let sample = "\
+Rss:                4096 kB\n\
+Pss_File:            700 kB\n\
+Pss_Shmem:           300 kB\n\
+Shared_Clean:        400 kB\n\
+Shared_Dirty:         50 kB\n\
+Private_Clean:       800 kB\n\
+Private_Dirty:      1200 kB\n\
+Private_Hugetlb:     100 kB\n\
+Shared_Hugetlb:       25 kB\n";
+
+  let parsed = parse_linux_smaps_rollup(sample).expect("smaps rollup");
+  assert_eq!(parsed.private_kb, 2_100);
+  assert_eq!(parsed.shared_kb, 475);
+  assert_eq!(parsed.mapped_kb, 1_000);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_smaps_rollup_parser_ignores_malformed_fields_and_requires_evidence() {
+  assert!(
+    parse_linux_smaps_rollup("Private_Clean: nope kB\nShared_Dirty: 17 kB\n").is_none(),
+    "an incomplete category set must not invent zeroes for unsupported ownership evidence"
+  );
+  assert!(parse_linux_smaps_rollup("Rss: nope kB\nAnonymous: 42 kB\n").is_none());
 }
 
 #[test]

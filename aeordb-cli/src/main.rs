@@ -5,6 +5,7 @@
 //! ## Commands
 //!
 //! - `aeordb start` — start the database server
+//! - `aeordb status` — inspect a running database server
 //! - `aeordb gc` — run garbage collection
 //! - `aeordb export` — export a version
 //! - `aeordb diff` — create a patch between versions
@@ -94,6 +95,8 @@ enum Commands {
     #[arg(long)]
     advertise_url: Option<String>,
   },
+  /// Inspect bounded runtime diagnostics from a running server
+  Status(commands::status::StatusArgs),
   /// Run stress tests against a running instance
   Stress(StressArgs),
   /// Emergency reset: revoke the current root API key and generate a new one
@@ -355,6 +358,12 @@ async fn main() {
         command_line_overrides,
       })
       .await;
+    }
+    Commands::Status(arguments) => {
+      if let Err(error) = commands::status::run(arguments).await {
+        eprintln!("Status request failed: {error}");
+        std::process::exit(1);
+      }
     }
     Commands::Stress(arguments) => {
       if let Err(error) = commands::stress::run(arguments).await {

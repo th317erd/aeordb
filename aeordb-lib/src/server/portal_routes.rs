@@ -8,12 +8,14 @@ use super::state::AppState;
 use crate::engine::directory_ops::DEFAULT_CHUNK_SIZE;
 use crate::engine::health::check_disk;
 use crate::engine::rate_tracker::RateSnapshot;
+use crate::engine::configuration_observability::ConfigurationVisibility;
 
 // Embed portal assets at compile time
 const PORTAL_HTML: &str = include_str!("../portal/index.html");
 const PORTAL_APP_MJS: &str = include_str!("../portal/app.mjs");
 const PORTAL_METRICS_MJS: &str = include_str!("../portal/metrics.mjs");
 const PORTAL_DASHBOARD_MJS: &str = include_str!("../portal/dashboard.mjs");
+const PORTAL_DASHBOARD_CSS: &str = include_str!("../portal/dashboard.css");
 const PORTAL_USERS_MJS: &str = include_str!("../portal/users.mjs");
 const PORTAL_GROUPS_MJS: &str = include_str!("../portal/groups.mjs");
 const PORTAL_SHARED_UTILS_JS: &str = include_str!("../portal/shared/utils.js");
@@ -130,6 +132,7 @@ pub async fn portal_asset(request: axum::http::request::Parts) -> impl IntoRespo
     "app.mjs" => (PORTAL_APP_MJS, "application/javascript; charset=utf-8"),
     "metrics.mjs" => (PORTAL_METRICS_MJS, "application/javascript; charset=utf-8"),
     "dashboard.mjs" => (PORTAL_DASHBOARD_MJS, "application/javascript; charset=utf-8"),
+    "dashboard.css" => (PORTAL_DASHBOARD_CSS, "text/css; charset=utf-8"),
     "users.mjs" => (PORTAL_USERS_MJS, "application/javascript; charset=utf-8"),
     "groups.mjs" => (PORTAL_GROUPS_MJS, "application/javascript; charset=utf-8"),
     "files.mjs" => (PORTAL_FILES_MJS, "application/javascript; charset=utf-8"),
@@ -297,6 +300,8 @@ pub struct EnhancedStats {
   pub throughput: StatsThroughput,
   pub health: StatsHealth,
   pub memory: crate::engine::storage_engine::EngineMemoryStats,
+  pub durability: crate::engine::runtime_observability::DurabilityObservabilitySnapshot,
+  pub configuration: crate::engine::runtime_observability::ConfigurationObservabilitySnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -356,7 +361,7 @@ pub struct StatsHealth {
   pub write_buffer_depth: u64,
 }
 
-/// Return O(1) database stats as JSON using atomic counters and rate trackers.
+/// Return bounded database and runtime statistics without a storage scan.
 ///
 /// Replaces the old `engine.stats()` call which performed an O(n) KV scan.
 /// All data now comes from:
@@ -364,6 +369,7 @@ pub struct StatsHealth {
 /// - `RateTrackerSet::snapshot()` — O(window_size) but bounded at 900 samples
 /// - `check_disk()` — single `statvfs` syscall
 /// - `std::fs::metadata()` — single `stat` syscall
+/// - one bounded runtime-observability snapshot over fixed owner/property sets
 pub async fn get_stats(
   State(state): State<AppState>,
   claims: Option<Extension<crate::auth::TokenClaims>>,
@@ -376,13 +382,21 @@ pub async fn get_stats(
       return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Not available for share links"}))).into_response();
     }
   }
-  get_stats_inner(state, rate_ext, db_path_ext).into_response()
+  let visibility = match claims.as_ref() {
+    None => ConfigurationVisibility::Root,
+    Some(Extension(claims)) => match uuid::Uuid::parse_str(&claims.sub) {
+      Ok(user_id) if crate::engine::user::is_root(&user_id) => ConfigurationVisibility::Root,
+      Ok(_) | Err(_) => ConfigurationVisibility::Redacted,
+    },
+  };
+  get_stats_inner(state, rate_ext, db_path_ext, visibility).into_response()
 }
 
 fn get_stats_inner(
   state: AppState,
   rate_ext: Option<Extension<Arc<crate::engine::rate_tracker::RateTrackerSet>>>,
   db_path_ext: Option<Extension<String>>,
+  visibility: ConfigurationVisibility,
 ) -> Result<Json<EnhancedStats>, (StatusCode, Json<serde_json::Value>)> {
   // O(1) counter snapshot from atomics
   let counters = state.engine.counters().snapshot();
@@ -431,8 +445,8 @@ fn get_stats_inner(
 
   // Disk health: single statvfs call
   let disk_health = check_disk(db_path);
-  let memory = state.engine.memory_stats().map_err(|error| {
-    tracing::error!(%error, "Failed to collect engine memory statistics");
+  let runtime = state.engine.runtime_observability_snapshot(visibility).map_err(|error| {
+    tracing::error!(%error, "Failed to collect runtime observability snapshot");
     (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
   })?;
 
@@ -491,7 +505,9 @@ fn get_stats_inner(
       dedup_hit_rate,
       write_buffer_depth: counters.write_buffer_depth,
     },
-    memory,
+    memory: runtime.memory,
+    durability: runtime.durability,
+    configuration: runtime.configuration,
   };
 
   Ok(Json(stats))

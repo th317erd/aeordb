@@ -701,6 +701,7 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/app.mjs", get(portal_routes::portal_asset))
     .route("/metrics.mjs", get(portal_routes::portal_asset))
     .route("/dashboard.mjs", get(portal_routes::portal_asset))
+    .route("/dashboard.css", get(portal_routes::portal_asset))
     .route("/users.mjs", get(portal_routes::portal_asset))
     .route("/groups.mjs", get(portal_routes::portal_asset))
     .route("/files.mjs", get(portal_routes::portal_asset))

@@ -65,6 +65,23 @@ async fn body_json(body: Body) -> serde_json::Value {
   serde_json::from_slice(&bytes).expect("valid JSON response body")
 }
 
+fn remove_dynamic_configuration_fields(value: &mut serde_json::Value) {
+  match value {
+    serde_json::Value::Array(values) => {
+      for value in values {
+        remove_dynamic_configuration_fields(value);
+      }
+    }
+    serde_json::Value::Object(values) => {
+      values.remove("age_ms");
+      for value in values.values_mut() {
+        remove_dynamic_configuration_fields(value);
+      }
+    }
+    _ => {}
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Portal asset tests (public, no auth needed)
 // ---------------------------------------------------------------------------
@@ -85,6 +102,7 @@ async fn test_portal_index_returns_html() {
   let body_str = String::from_utf8_lossy(&bytes);
   assert!(body_str.contains("AeorDB Portal"), "Expected body to contain 'AeorDB Portal', got: {}", &body_str[..body_str.len().min(200)],);
   assert!(body_str.contains("href=\"./docs/\""), "Portal root should advertise the public documentation route");
+  assert_eq!(body_str.matches("href=\"/dashboard.css\"").count(), 1, "Dashboard CSS should be loaded through one shared stylesheet link");
 }
 
 #[tokio::test]
@@ -124,6 +142,11 @@ async fn test_portal_metrics_mjs_returns_javascript() {
 
   let content_type = response.headers().get("content-type").expect("content-type header present").to_str().unwrap();
   assert_eq!(content_type, "application/javascript; charset=utf-8");
+  let body = String::from_utf8(body_bytes(response.into_body()).await).unwrap();
+  assert!(body.contains("currentUserId"), "non-root metrics clients must choose polling instead of administrative SSE");
+  assert!(body.contains("Malformed metrics SSE event"), "malformed metrics events must be surfaced");
+  assert!(body.contains("_closeEventSource"), "polling fallback must close a failed or malformed SSE stream");
+  assert!(body.contains("console.error"), "subscriber rendering failures must not be silently squelched");
 }
 
 #[tokio::test]
@@ -137,6 +160,21 @@ async fn test_portal_dashboard_mjs_returns_javascript() {
 
   let content_type = response.headers().get("content-type").expect("content-type header present").to_str().unwrap();
   assert_eq!(content_type, "application/javascript; charset=utf-8");
+  let body = String::from_utf8(body_bytes(response.into_body()).await).unwrap();
+  for contract in
+    ["memory-owner-rows", "configuration-rows", "durability-frontier", "memory-pressure", "updateRuntimeObservability", "replaceChildren"]
+  {
+    assert!(body.contains(contract), "Dashboard asset is missing {contract}");
+  }
+}
+
+#[tokio::test]
+async fn test_portal_dashboard_css_returns_stylesheet() {
+  let (app, _, _, _temp_dir) = test_app();
+  let request = Request::builder().method("GET").uri("/dashboard.css").body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(response.headers().get("content-type").unwrap(), "text/css; charset=utf-8");
 }
 
 #[tokio::test]
@@ -286,7 +324,7 @@ async fn test_stats_has_enhanced_structure() {
   let json = body_json(response.into_body()).await;
 
   // Top-level sections must be present
-  for section in &["identity", "counts", "sizes", "throughput", "health", "memory"] {
+  for section in &["identity", "counts", "sizes", "throughput", "health", "memory", "durability", "configuration"] {
     assert!(json.get(section).is_some(), "Expected top-level section '{}' to be present in stats response", section,);
   }
 
@@ -370,6 +408,88 @@ async fn test_stats_has_enhanced_structure() {
 
   assert!(memory["directory_cache"].get("entries").is_some(), "memory.directory_cache.entries missing");
   assert!(memory["directory_cache"].get("estimated_bytes").is_some(), "memory.directory_cache.estimated_bytes missing");
+
+  for field in &["private_bytes", "shared_bytes", "mapped_bytes", "allocator_bytes"] {
+    assert!(memory["process"].get(field).is_some(), "memory.process.{} missing", field);
+  }
+  let coordinator = &memory["coordinator"];
+  for field in &[
+    "policy",
+    "policy_error",
+    "host",
+    "pressure",
+    "maintenance_paused",
+    "observed_bytes",
+    "reserved_bytes",
+    "critical_reserved_bytes",
+    "accounted_bytes",
+    "unaccounted_rss_bytes",
+    "rejected_reservations",
+    "deferred_reservations",
+    "owners",
+  ] {
+    assert!(coordinator.get(field).is_some(), "memory.coordinator.{} missing", field);
+  }
+
+  let durability = &json["durability"];
+  for field in &["frontier", "group_policy", "latch", "spill", "repair"] {
+    assert!(durability.get(field).is_some(), "durability.{} missing", field);
+  }
+
+  for family in &["runtime", "lifecycle"] {
+    let configuration = &json["configuration"][family];
+    assert!(configuration["config"].is_object(), "configuration.{}.config missing", family);
+    assert!(configuration["status"]["sources"].is_object(), "configuration.{}.status.sources missing", family);
+    assert!(configuration["status"]["disabled_capabilities"].is_array());
+  }
+}
+
+#[tokio::test]
+async fn test_stats_redacts_root_only_configuration_paths_for_non_root_callers() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+
+  let request = Request::builder().method("GET").uri("/system/stats").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let non_root = body_json(response.into_body()).await;
+  assert_eq!(non_root["configuration"]["runtime"]["config"]["recovery"]["emergency_spill_dir"], serde_json::json!({"redacted": true}));
+  assert!(non_root["configuration"]["runtime"]["status"]["sources"]["recovery.emergency_spill_dir"].is_string());
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let root_auth = root_bearer_token(&jwt_manager);
+  let request = Request::builder().method("GET").uri("/system/stats").header("authorization", &root_auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let root = body_json(response.into_body()).await;
+  assert!(root["configuration"]["runtime"]["config"]["recovery"]["emergency_spill_dir"].is_string());
+}
+
+#[tokio::test]
+async fn test_stats_configuration_matches_dedicated_configuration_routes() {
+  let (app, jwt_manager, _, _temp_dir) = test_app();
+  let authorization = root_bearer_token(&jwt_manager);
+  let stats_response = app
+    .clone()
+    .oneshot(Request::builder().method("GET").uri("/system/stats").header("authorization", &authorization).body(Body::empty()).unwrap())
+    .await
+    .unwrap();
+  assert_eq!(stats_response.status(), StatusCode::OK);
+  let stats = body_json(stats_response.into_body()).await;
+
+  for (family, route) in [("runtime", "/system/runtime"), ("lifecycle", "/system/lifecycle")] {
+    let response = app
+      .clone()
+      .oneshot(Request::builder().method("GET").uri(route).header("authorization", &authorization).body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut dedicated = body_json(response.into_body()).await;
+    let mut embedded = stats["configuration"][family].clone();
+    remove_dynamic_configuration_fields(&mut dedicated);
+    remove_dynamic_configuration_fields(&mut embedded);
+    assert_eq!(embedded, dedicated, "{family} observability drifted from its dedicated route");
+  }
 }
 
 #[tokio::test]

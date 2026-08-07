@@ -263,10 +263,16 @@
         - [x] Generate the `start` command's configuration arguments directly from the frozen registry and capture raw OS values without a parallel field list.
         - [x] Carry validated command-line overrides through every serving-engine create/open path into the shared configuration authority.
         - [x] Prove exact 41-property coverage, parser failure behavior, precedence, source attribution, and ephemeral storage semantics.
-      - [ ] Publish configuration and memory-policy state through metrics, administrative SSE, CLI status, and the Dashboard without storage scans on collection.
-      - [ ] Update API, operations, CLI, lifecycle, memory, SSE, and Dashboard documentation and examples.
+      - [x] Publish configuration and memory-policy state through metrics, administrative SSE, CLI status, and the Dashboard without storage scans on collection.
+        - [x] Add one bounded runtime-observability snapshot for configuration, memory owners/pressure, durability, recovery, and capability state.
+        - [x] Make `/system/stats`, Prometheus collection, and metrics SSE consume the shared snapshot with root-only administrative detail and non-root path redaction.
+        - [x] Add `aeordb status` against the live authenticated server with human and machine-readable output.
+        - [x] Render configuration, owner memory, pressure, durability, and recovery state in the Dashboard without a cold navigation fetch.
+        - [x] Prove schema parity, malformed/unavailable owner behavior, authorization/redaction, bounded collection, SSE filtering, and CLI failure exits.
+        - [x] Run focused observability regressions, the complete workspace suite, Windows GNU cross-checking, and authenticated/browser-backed disposable-server tests.
+      - [x] Update API, operations, CLI, lifecycle, memory, SSE, and Dashboard documentation and examples.
       - [ ] Correct `verify` logical-data accounting to report file logical bytes rather than serialized `FileRecord` bytes, with explicit current/live versus retained-history semantics.
-      - [ ] Run focused malformed/precedence/concurrency/durability tests, affected regressions, full workspace and cross-platform gates, and a real authenticated disposable-server test.
+      - [ ] After verify accounting, run the remaining P2b-4 focused regressions, full workspace/cross-platform gates, and a disk-backed verification test.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.

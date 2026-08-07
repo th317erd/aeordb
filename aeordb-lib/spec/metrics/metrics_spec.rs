@@ -56,6 +56,21 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
   format!("Bearer {}", token)
 }
 
+fn user_bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: uuid::Uuid::new_v4().to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
+}
+
 /// Collect response body into bytes.
 async fn body_bytes(body: Body) -> Vec<u8> {
   body.collect().await.unwrap().to_bytes().to_vec()
@@ -116,6 +131,16 @@ async fn test_metrics_endpoint_rejects_invalid_token() {
 }
 
 #[tokio::test]
+async fn test_metrics_endpoint_rejects_non_root_users() {
+  let (app, jwt_manager, _, _, _temp_dir) = test_app_standalone();
+  let auth = user_bearer_token(&jwt_manager);
+  let request = Request::builder().uri("/system/metrics").header("authorization", &auth).body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn test_metrics_endpoint_returns_empty_when_no_activity() {
   let (app, jwt_manager, _, _, _temp_dir) = test_app_standalone();
   let auth = bearer_token(&jwt_manager);
@@ -148,6 +173,22 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
   assert!(output.contains("aeordb_process_rss_bytes"), "metrics should contain process RSS gauge, got:\n{}", output);
   assert!(output.contains("aeordb_index_cache_estimated_bytes"), "metrics should contain index cache memory gauge, got:\n{}", output);
   for metric in [
+    "aeordb_process_private_bytes",
+    "aeordb_process_shared_bytes",
+    "aeordb_process_mapped_bytes",
+    "aeordb_process_allocator_bytes",
+    "aeordb_memory_accounted_bytes",
+    "aeordb_memory_unaccounted_rss_bytes",
+    "aeordb_memory_owner_resident_bytes",
+    "aeordb_memory_owner_reserved_bytes",
+    "aeordb_memory_owner_evictions",
+    "aeordb_durability_hard_frontier",
+    "aeordb_durability_waiter_depth",
+    "aeordb_durability_group_commit_enabled",
+    "aeordb_durability_read_only",
+    "aeordb_durability_spill_bytes",
+    "aeordb_configuration_family_valid",
+    "aeordb_configuration_property_active",
     "aeordb_index_cache_estimated_clean_bytes",
     "aeordb_index_cache_estimated_dirty_bytes",
     "aeordb_index_cache_clean_reserved_bytes",

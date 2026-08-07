@@ -54,7 +54,8 @@ impl CommitClass {
   pub const ALL: [Self; 3] = [Self::HardAuthority, Self::RecoverableSoftState, Self::Disposable];
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DurabilityOperation {
   DependencyAppend,
   DataBarrier,
@@ -527,6 +528,19 @@ pub struct DurabilityLedgerEntry {
   pub succeeded: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DurabilityBarrierObservation {
+  pub operation: DurabilityOperation,
+  pub first_sequence: u64,
+  pub last_sequence: u64,
+  pub waiter_count: usize,
+  pub succeeded: bool,
+  pub attempts: u8,
+  pub latency_ms: u64,
+  pub completed_at_ms: i64,
+  pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurabilityCoordinatorSnapshot {
   pub hard_frontier: u64,
@@ -538,6 +552,7 @@ pub struct DurabilityCoordinatorSnapshot {
   pub pending_hard: usize,
   pub driver_active: bool,
   pub oldest_pending_age_ms: Option<u64>,
+  pub last_barrier: Option<DurabilityBarrierObservation>,
   pub ledger: Vec<DurabilityLedgerEntry>,
 }
 
@@ -612,6 +627,7 @@ struct CoordinatorState {
   ledger: VecDeque<DurabilityLedgerEntry>,
   ledger_capacity: usize,
   driver_active: bool,
+  last_barrier: Option<DurabilityBarrierObservation>,
 }
 
 impl CoordinatorState {
@@ -625,6 +641,7 @@ impl CoordinatorState {
       ledger: VecDeque::new(),
       ledger_capacity,
       driver_active: false,
+      last_barrier: None,
     }
   }
 
@@ -924,11 +941,13 @@ impl DurabilityCoordinator {
     executor: &mut E,
   ) -> Result<(), DurabilityCoordinatorError> {
     let (sequences, operations) = self.begin_group_execution(tickets)?;
-    let mut execution_guard = GroupExecutionGuard { coordinator: self, sequences: &sequences, operation: None, armed: true };
+    let mut execution_guard =
+      GroupExecutionGuard { coordinator: self, sequences: &sequences, operation: None, operation_started: None, armed: true };
     let mut mutation_started = false;
 
     for operation in operations {
       execution_guard.operation = Some(operation);
+      execution_guard.operation_started = Some(Instant::now());
       let operation_may_mutate = operation_may_mutate(operation);
       let mut attempts = 0u8;
       loop {
@@ -939,24 +958,47 @@ impl DurabilityCoordinator {
             for sequence in &sequences {
               state.record_ledger(DurabilityLedgerEntry { sequence: *sequence, operation, succeeded: true });
             }
+            if is_barrier(operation) {
+              state.last_barrier = Some(barrier_observation(
+                &sequences,
+                operation,
+                true,
+                attempts,
+                execution_guard.operation_started.unwrap_or_else(Instant::now),
+                None,
+              ));
+            }
             mutation_started |= operation_may_mutate;
             execution_guard.operation = None;
+            execution_guard.operation_started = None;
             break;
           }
           Err(error) => {
             let disposition = executor.classify_error(operation, &error, mutation_started || operation_may_mutate);
+            let error = bounded_failure_message(error.to_string());
             let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
             for sequence in &sequences {
               state.record_ledger(DurabilityLedgerEntry { sequence: *sequence, operation, succeeded: false });
             }
-            drop(state);
             if should_retry(disposition, attempts) {
+              drop(state);
               if disposition.retry_class == RetryClass::BoundedBackoff {
                 std::thread::sleep(retry_backoff(attempts));
               }
               continue;
             }
-            let failures = self.fail_group(&sequences, operation, error.to_string(), disposition, attempts)?;
+            if is_barrier(operation) {
+              state.last_barrier = Some(barrier_observation(
+                &sequences,
+                operation,
+                false,
+                attempts,
+                execution_guard.operation_started.unwrap_or_else(Instant::now),
+                Some(error.clone()),
+              ));
+            }
+            drop(state);
+            let failures = self.fail_group(&sequences, operation, error, disposition, attempts)?;
             self.changed.notify_all();
             execution_guard.armed = false;
             let Some(first_failure) = failures.into_iter().next() else {
@@ -1263,7 +1305,29 @@ fn snapshot_locked(state: &CoordinatorState) -> DurabilityCoordinatorSnapshot {
     pending_hard: state.pending_hard.len(),
     driver_active: state.driver_active,
     oldest_pending_age_ms,
+    last_barrier: state.last_barrier.clone(),
     ledger: state.ledger.iter().cloned().collect(),
+  }
+}
+
+fn barrier_observation(
+  sequences: &[u64],
+  operation: DurabilityOperation,
+  succeeded: bool,
+  attempts: u8,
+  started_at: Instant,
+  error: Option<String>,
+) -> DurabilityBarrierObservation {
+  DurabilityBarrierObservation {
+    operation,
+    first_sequence: sequences.first().copied().unwrap_or_default(),
+    last_sequence: sequences.last().copied().unwrap_or_default(),
+    waiter_count: sequences.len(),
+    succeeded,
+    attempts,
+    latency_ms: started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    completed_at_ms: chrono::Utc::now().timestamp_millis(),
+    error: error.map(bounded_failure_message),
   }
 }
 
@@ -1491,6 +1555,7 @@ struct GroupExecutionGuard<'a> {
   coordinator: &'a DurabilityCoordinator,
   sequences: &'a [u64],
   operation: Option<DurabilityOperation>,
+  operation_started: Option<Instant>,
   armed: bool,
 }
 
@@ -1514,6 +1579,16 @@ impl Drop for GroupExecutionGuard<'_> {
     if hard_authority {
       for sequence in self.sequences {
         state.record_ledger(DurabilityLedgerEntry { sequence: *sequence, operation, succeeded: false });
+      }
+      if is_barrier(operation) {
+        state.last_barrier = Some(barrier_observation(
+          self.sequences,
+          operation,
+          false,
+          1,
+          self.operation_started.unwrap_or_else(Instant::now),
+          Some("durability executor unwound before reporting completion".to_string()),
+        ));
       }
       fail_pending_hard_locked(
         &mut state,
@@ -1544,6 +1619,16 @@ impl Drop for GroupExecutionGuard<'_> {
           record.status = CommitStatus::Failed(failure);
         }
       }
+    }
+    if is_barrier(operation) {
+      state.last_barrier = Some(barrier_observation(
+        self.sequences,
+        operation,
+        false,
+        1,
+        self.operation_started.unwrap_or_else(Instant::now),
+        Some("durability executor unwound before reporting completion".to_string()),
+      ));
     }
     drop(state);
     self.coordinator.changed.notify_all();

@@ -38,6 +38,10 @@ pub struct ProcessMemory {
   pub swap_kb: u64,          // Linux VmSwap; 0 when unavailable
   pub thread_count: u64,     // Linux Threads; 0 when unavailable
   pub fd_count: u64,         // open file descriptors; 0 when unavailable
+  pub private_kb: Option<u64>,
+  pub shared_kb: Option<u64>,
+  pub mapped_kb: Option<u64>,
+  pub allocator_kb: Option<u64>,
 }
 
 pub fn read_process_memory() -> ProcessMemory {
@@ -57,6 +61,94 @@ pub fn read_process_memory() -> ProcessMemory {
   {
     ProcessMemory::default()
   }
+}
+
+/// Process memory with the platform's more expensive ownership breakdown.
+/// Fast RSS/HWM samplers intentionally use [`read_process_memory`] instead.
+pub fn read_process_memory_detailed() -> ProcessMemory {
+  #[cfg(target_os = "linux")]
+  {
+    let mut process = read_process_memory();
+    if let Ok(rollup) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+      if let Some(rollup) = parse_linux_smaps_rollup(&rollup) {
+        process.private_kb = Some(rollup.private_kb);
+        process.shared_kb = Some(rollup.shared_kb);
+        process.mapped_kb = Some(rollup.mapped_kb);
+      }
+    }
+    process
+  }
+  #[cfg(not(target_os = "linux"))]
+  {
+    read_process_memory()
+  }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinuxSmapsRollup {
+  pub private_kb: u64,
+  pub shared_kb: u64,
+  pub mapped_kb: u64,
+}
+
+/// Parse the ownership fields used from Linux `/proc/<pid>/smaps_rollup`.
+/// Unknown and malformed lines are ignored; `None` means no supported field
+/// supplied trustworthy numeric evidence.
+#[cfg(target_os = "linux")]
+pub fn parse_linux_smaps_rollup(input: &str) -> Option<LinuxSmapsRollup> {
+  const PRIVATE_CLEAN: u8 = 1 << 0;
+  const PRIVATE_DIRTY: u8 = 1 << 1;
+  const SHARED_CLEAN: u8 = 1 << 2;
+  const SHARED_DIRTY: u8 = 1 << 3;
+  const PSS_FILE: u8 = 1 << 4;
+  const PSS_SHMEM: u8 = 1 << 5;
+  const REQUIRED_FIELDS: u8 = PRIVATE_CLEAN | PRIVATE_DIRTY | SHARED_CLEAN | SHARED_DIRTY | PSS_FILE | PSS_SHMEM;
+
+  let mut private_kb = 0u64;
+  let mut shared_kb = 0u64;
+  let mut mapped_kb = 0u64;
+  let mut seen = 0u8;
+
+  for line in input.lines() {
+    let Some((name, value)) = line.split_once(':') else {
+      continue;
+    };
+    let Some(value) = value.trim().split_ascii_whitespace().next().and_then(|value| value.parse::<u64>().ok()) else {
+      continue;
+    };
+    match name {
+      "Private_Clean" => {
+        private_kb = private_kb.saturating_add(value);
+        seen |= PRIVATE_CLEAN;
+      }
+      "Private_Dirty" => {
+        private_kb = private_kb.saturating_add(value);
+        seen |= PRIVATE_DIRTY;
+      }
+      "Private_Hugetlb" => private_kb = private_kb.saturating_add(value),
+      "Shared_Clean" => {
+        shared_kb = shared_kb.saturating_add(value);
+        seen |= SHARED_CLEAN;
+      }
+      "Shared_Dirty" => {
+        shared_kb = shared_kb.saturating_add(value);
+        seen |= SHARED_DIRTY;
+      }
+      "Shared_Hugetlb" => shared_kb = shared_kb.saturating_add(value),
+      "Pss_File" => {
+        mapped_kb = mapped_kb.saturating_add(value);
+        seen |= PSS_FILE;
+      }
+      "Pss_Shmem" => {
+        mapped_kb = mapped_kb.saturating_add(value);
+        seen |= PSS_SHMEM;
+      }
+      _ => {}
+    }
+  }
+
+  (seen & REQUIRED_FIELDS == REQUIRED_FIELDS).then_some(LinuxSmapsRollup { private_kb, shared_kb, mapped_kb })
 }
 
 /// Host memory currently available without swapping, in bytes. `None` means
@@ -225,6 +317,10 @@ fn read_macos_task_info() -> Option<ProcessMemory> {
     swap_kb: 0,
     thread_count: 0,
     fd_count: read_fd_count(),
+    private_kb: None,
+    shared_kb: None,
+    mapped_kb: None,
+    allocator_kb: None,
   })
 }
 
@@ -246,6 +342,10 @@ fn read_windows_process_memory() -> Option<ProcessMemory> {
     swap_kb: 0,
     thread_count: 0,
     fd_count: 0,
+    private_kb: None,
+    shared_kb: None,
+    mapped_kb: None,
+    allocator_kb: None,
   })
 }
 

@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::engine_event::{EngineEvent, EVENT_METRICS};
 use crate::engine::event_bus::EventBus;
+use crate::engine::configuration_observability::ConfigurationVisibility;
 use crate::engine::kv_store::{KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD};
 use crate::engine::rate_tracker::RateTrackerSet;
 use crate::engine::storage_engine::StorageEngine;
@@ -50,18 +51,14 @@ pub fn spawn_metrics_pulse(
         }
       };
       let (kv_file, kv_fill_ratio) = engine.kv_layout_metrics();
-      if let Err(error) = engine.evict_clean_index_cache() {
-        tracing::error!(%error, "Metrics pulse could not evict the clean index cache");
-        continue;
-      }
-      let memory = match engine.memory_stats() {
-        Ok(memory) => memory,
+      let runtime = match engine.runtime_observability_snapshot(ConfigurationVisibility::Root) {
+        Ok(runtime) => runtime,
         Err(error) => {
-          tracing::error!(%error, "Metrics pulse could not collect engine memory statistics");
+          tracing::error!(%error, "Metrics pulse could not collect runtime observability snapshot");
           continue;
         }
       };
-      crate::metrics::record_memory_metrics(&memory);
+      crate::metrics::record_runtime_metrics(&runtime);
 
       // Get the db file size from disk metadata.
       let disk_total = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
@@ -125,7 +122,9 @@ pub fn spawn_metrics_pulse(
               "kv_fill_ratio": kv_fill_ratio,
               "disk_usage_percent": disk_health.usage_percent,
           },
-          "memory": memory,
+          "memory": runtime.memory,
+          "durability": runtime.durability,
+          "configuration": runtime.configuration,
       });
 
       let event = EngineEvent::new(EVENT_METRICS, "system", payload);

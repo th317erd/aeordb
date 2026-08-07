@@ -334,6 +334,19 @@ fn preopen_scan_reads_stored_startup_spill_root_without_mutating_the_database() 
 
 #[test]
 #[serial]
+fn preopen_scan_accepts_a_new_database_path_without_creating_it() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("new.aeordb");
+  assert!(!path.exists());
+
+  let locations = preopen_emergency_spill_locations(&path, &CommandLineConfigOverrides::default()).unwrap();
+
+  assert!(!locations.is_empty());
+  assert!(!path.exists(), "pre-open spill discovery must not create the database");
+}
+
+#[test]
+#[serial]
 fn dynamic_replacement_converges_memory_and_index_owners_before_reporting_active() {
   let directory = tempfile::tempdir().unwrap();
   let engine = create_engine(&directory);

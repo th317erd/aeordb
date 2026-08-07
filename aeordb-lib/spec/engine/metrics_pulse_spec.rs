@@ -4,6 +4,7 @@ use aeordb::engine::engine_counters::EngineCounters;
 use aeordb::engine::event_bus::EventBus;
 use aeordb::engine::metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
 use aeordb::engine::rate_tracker::RateTrackerSet;
+use aeordb::engine::configuration_observability::ConfigurationVisibility;
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
 
@@ -89,6 +90,33 @@ async fn test_metrics_pulse_payload_structure() {
   assert!(health["write_buffer_depth"].is_number());
   assert!(health["dedup_hit_rate"].is_number());
   assert!(health["kv_fill_ratio"].is_number());
+
+  let memory = &payload["memory"];
+  assert!(memory["coordinator"]["owners"].is_array());
+  assert!(memory["coordinator"]["pressure"].is_string());
+  assert!(memory["process"].get("private_bytes").is_some());
+  assert!(memory["process"].get("shared_bytes").is_some());
+  assert!(memory["process"].get("mapped_bytes").is_some());
+  assert!(memory["process"].get("allocator_bytes").is_some());
+
+  let durability = &payload["durability"];
+  assert!(durability["frontier"].is_object());
+  assert!(durability["group_policy"].is_object());
+  assert!(durability["latch"].is_object());
+  assert!(durability["spill"].is_object());
+  assert!(durability["repair"].is_object());
+
+  for family in &["runtime", "lifecycle"] {
+    assert!(payload["configuration"][family]["config"].is_object());
+    assert!(payload["configuration"][family]["status"]["sources"].is_object());
+  }
+
+  let current = engine.runtime_observability_snapshot(ConfigurationVisibility::Root).unwrap();
+  let current_configuration = serde_json::to_value(current.configuration).unwrap();
+  for family in &["runtime", "lifecycle"] {
+    assert_eq!(payload["configuration"][family]["config"], current_configuration[family]["config"]);
+    assert_eq!(payload["configuration"][family]["status"]["sources"], current_configuration[family]["status"]["sources"]);
+  }
 
   cancel.cancel();
   let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;

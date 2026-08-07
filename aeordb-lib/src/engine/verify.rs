@@ -206,7 +206,7 @@ fn verify_checked_inner(engine: &StorageEngine, db_path: &str) -> EngineResult<V
 pub fn verify_durability_repair(engine: &StorageEngine, db_path: &str) -> EngineResult<(VerifyReport, DurabilityRepairVerification)> {
   let recovery = engine
     .persistent_durability_recovery()
-    .filter(|recovery| recovery.blocks_writes && recovery.latch_state == Some(2))
+    .filter(|recovery| recovery.blocks_writes && recovery.is_repair_verifying())
     .ok_or_else(|| EngineError::InvalidInput("durability repair verification requires an active repair-verifying latch".to_string()))?;
   let report = verify_checked(engine, db_path)?;
   if report.has_issues() {

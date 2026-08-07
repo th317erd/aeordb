@@ -192,6 +192,61 @@ fn operation_ledger_is_bounded_and_zero_capacity_is_rejected() {
   assert_eq!(snapshot.ledger[1].operation, DurabilityOperation::AuthorityReadback);
 }
 
+#[test]
+fn durability_snapshot_retains_only_the_last_completed_barrier() {
+  let coordinator = DurabilityCoordinator::new();
+  assert!(coordinator.snapshot().unwrap().last_barrier.is_none());
+
+  let ticket = coordinator.admit(header_commit_plan()).unwrap();
+  coordinator.execute(ticket, &mut RecordingExecutor::default()).unwrap();
+
+  let completed = coordinator.snapshot().unwrap().last_barrier.expect("last barrier");
+  assert_eq!(completed.operation, DurabilityOperation::AuthorityBarrier);
+  assert_eq!(completed.first_sequence, ticket.sequence());
+  assert_eq!(completed.last_sequence, ticket.sequence());
+  assert_eq!(completed.waiter_count, 1);
+  assert!(completed.succeeded);
+  assert_eq!(completed.attempts, 1);
+  assert!(completed.completed_at_ms > 0);
+  assert!(completed.error.is_none());
+}
+
+#[test]
+fn durability_snapshot_records_failed_and_unwound_barriers_with_bounded_evidence() {
+  let coordinator = DurabilityCoordinator::new();
+  let failed = coordinator.admit(header_commit_plan()).unwrap();
+  let mut executor = RecordingExecutor { operations: Vec::new(), fail_at: Some(DurabilityOperation::AuthorityBarrier) };
+  assert!(coordinator.execute(failed, &mut executor).is_err());
+
+  let failure = coordinator.snapshot().unwrap().last_barrier.expect("failed barrier");
+  assert_eq!(failure.operation, DurabilityOperation::AuthorityBarrier);
+  assert!(!failure.succeeded);
+  assert_eq!(failure.attempts, 1);
+  assert!(failure.error.as_deref().is_some_and(|message| message.contains("injected durability failure")));
+  assert!(failure.error.as_ref().unwrap().len() <= 4 * 1024);
+
+  struct PanicAtBarrier;
+  impl DurabilityExecutor for PanicAtBarrier {
+    type Error = &'static str;
+
+    fn execute(&mut self, _sequence: u64, operation: DurabilityOperation) -> Result<(), Self::Error> {
+      if operation == DurabilityOperation::AuthorityBarrier {
+        panic!("injected barrier unwind");
+      }
+      Ok(())
+    }
+  }
+
+  let coordinator = DurabilityCoordinator::new();
+  let unwound = coordinator.admit(header_commit_plan()).unwrap();
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| coordinator.execute(unwound, &mut PanicAtBarrier)));
+  assert!(result.is_err());
+  let unwind = coordinator.snapshot().unwrap().last_barrier.expect("unwound barrier");
+  assert_eq!(unwind.operation, DurabilityOperation::AuthorityBarrier);
+  assert!(!unwind.succeeded);
+  assert!(unwind.error.as_deref().is_some_and(|message| message.contains("unwound")));
+}
+
 fn durability_reserved_bytes(coordinator: &MemoryCoordinator) -> u64 {
   coordinator.snapshot().unwrap().owner(MemoryOwner::DurabilityWaiters).unwrap().reserved_bytes
 }
