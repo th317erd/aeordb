@@ -1,6 +1,7 @@
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::file_record::FileRecord;
-use crate::engine::directory_ops::{file_path_hash, directory_path_hash, file_content_hash, is_system_path};
+use crate::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
+use crate::engine::directory_ops::{directory_content_hash, directory_path_hash, file_content_hash, file_path_hash, is_system_path};
 
 /// Credential paths are always excluded from backups. Importing credentials
 /// would tie the target's auth state to the source's identity — confusing
@@ -26,6 +27,14 @@ use std::path::Path;
 
 const BACKUP_MINIMUM_WORKSPACE_BYTES: u64 = 4 * 1024;
 const KV_INVENTORY_ENTRY_BYTES: u64 = std::mem::size_of::<crate::engine::kv_store::KVEntry>() as u64 + 96;
+const BACKUP_COLLECTION_OVERHEAD_BYTES: u64 = 96;
+
+struct TreeWriteResult {
+  chunks_written: u64,
+  files_written: u64,
+  directories_written: u64,
+  root_hash: Vec<u8>,
+}
 
 struct PartialBackupArtifact {
   path: String,
@@ -92,7 +101,10 @@ fn store_file_record_entry_preserving_version(
 ///
 /// The output database contains only live entries at the given version:
 /// no voids, no deletion records, no stale overwrites, no history.
-/// backup_type = 1 (full export), base_hash = target_hash = version_hash.
+/// backup_type = 1 (full export), with base_hash and target_hash set to the
+/// root actually written to the artifact. A user-only export of a historical
+/// root that still names protected system children is normalized, so its
+/// returned root can differ from the requested source hash.
 ///
 /// If `include_system` is true, all `/.aeordb-system/` entries (users,
 /// groups, API keys, etc.) are included. Otherwise they are filtered out.
@@ -133,16 +145,16 @@ fn export_version_with_budget(
     let tree = walk_version_tree_with_budget(source, version_hash, budget)?;
     budget.check_cancellation()?;
     let output = StorageEngine::create_with_memory_coordinator(part_path, source.memory_coordinator())?;
-    output.set_backup_info(1, version_hash, version_hash)?;
     let stats = write_tree_to_engine(&tree, source, &output, include_system, budget)?;
     budget.check_cancellation()?;
-    output.update_head(version_hash)?;
+    output.set_backup_info(1, &stats.root_hash, &stats.root_hash)?;
+    output.update_head(&stats.root_hash)?;
 
     Ok(ExportResult {
-      chunks_written: stats.0,
-      files_written: stats.1,
-      directories_written: stats.2,
-      version_hash: version_hash.to_vec(),
+      chunks_written: stats.chunks_written,
+      files_written: stats.files_written,
+      directories_written: stats.directories_written,
+      version_hash: stats.root_hash,
       snapshots_written: 0,
     })
   })
@@ -259,7 +271,6 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
     let output = StorageEngine::create_with_memory_coordinator(part_path, source.memory_coordinator())?;
 
     let head_hash = source.head_hash()?;
-    output.set_backup_info(1, &head_hash, &head_hash)?;
 
     let mut total_chunks = 0u64;
     let mut total_files = 0u64;
@@ -273,9 +284,10 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
       write_tree_to_engine(&head_tree, source, &output, include_system, &mut budget)?
     };
     budget.release_to(head_checkpoint, "HEAD tree release failed")?;
-    total_chunks += stats.0;
-    total_files += stats.1;
-    total_dirs += stats.2;
+    total_chunks += stats.chunks_written;
+    total_files += stats.files_written;
+    total_dirs += stats.directories_written;
+    let exported_head_hash = stats.root_hash;
     budget.reserve(KV_INVENTORY_ENTRY_BYTES, "walked-version set admission failed")?;
     walked.insert(head_hash.clone());
 
@@ -293,9 +305,9 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
         write_tree_to_engine(&tree, source, &output, include_system, &mut budget)?
       };
       budget.release_to(tree_checkpoint, "snapshot tree release failed")?;
-      total_chunks += stats.0;
-      total_files += stats.1;
-      total_dirs += stats.2;
+      total_chunks += stats.chunks_written;
+      total_files += stats.files_written;
+      total_dirs += stats.directories_written;
       walked.insert(snap.root_hash.clone());
     }
 
@@ -308,20 +320,21 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
       copy_snapshot_entries(source, &output, &mut budget)?;
     }
 
-    output.update_head(&head_hash)?;
+    output.set_backup_info(1, &exported_head_hash, &exported_head_hash)?;
+    output.update_head(&exported_head_hash)?;
 
     Ok(ExportResult {
       chunks_written: total_chunks,
       files_written: total_files,
       directories_written: total_dirs,
-      version_hash: head_hash,
+      version_hash: exported_head_hash,
       snapshots_written: if include_system { snapshot_count } else { 0 },
     })
   })
 }
 
 /// Write all entries from a VersionTree into an output engine.
-/// Returns (chunks_written, files_written, directories_written).
+/// Returns exact write counts and the root identity published by the export.
 ///
 /// SECURITY: All entries under /.aeordb-system/ are filtered out. Exports must
 /// contain only user data, never system internals (JWT keys, API key
@@ -332,10 +345,11 @@ fn write_tree_to_engine(
   output: &StorageEngine,
   include_system: bool,
   budget: &mut OperationMemoryBudget,
-) -> EngineResult<(u64, u64, u64)> {
+) -> EngineResult<TreeWriteResult> {
   let mut chunks_written = 0u64;
   let mut files_written = 0u64;
   let mut dirs_written = 0u64;
+  let mut root_hash = None;
 
   // Walk file-owned hashes directly. The destination KV de-duplicates shared
   // chunks, avoiding a second unbounded in-memory set alongside VersionTree.
@@ -417,7 +431,6 @@ fn write_tree_to_engine(
 
   // Write DirectoryIndexes at both content-hash and path-hash keys.
   let algo = output.hash_algo();
-  write_btree_nodes(tree, source, output, budget, 0)?;
   for (path, (dir_hash, _data)) in &tree.directories {
     budget.record_work(1)?;
     if is_credential_path(path) {
@@ -434,12 +447,29 @@ fn write_tree_to_engine(
           reason: format!("backup directory '{}' resolved to {:?}", path, header.entry_type),
         });
       }
-      if !output.has_entry(&key)? {
-        output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
-      }
+      let flags = if is_system_path(path) { crate::engine::entry_header::FLAG_SYSTEM } else { 0 };
       let path_key = directory_path_hash(path, &algo)?;
-      if path_key != key && !output.has_entry(&path_key)? {
-        output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
+      let normalized = if path == "/" && !include_system {
+        normalize_user_export_root(tree, source, &value, header.entry_version, output, budget)?
+      } else {
+        None
+      };
+      let exported_hash = if let Some(normalized_hash) = normalized {
+        normalized_hash
+      } else {
+        if !output.has_entry(&key)? {
+          store_directory_entry_preserving_version(output, &key, &value, flags, header.entry_version)?;
+        }
+        if path_key != key && !output.has_entry(&path_key)? {
+          store_directory_entry_preserving_version(output, &path_key, &value, flags, header.entry_version)?;
+        }
+        if crate::engine::btree::is_btree_format(&value) {
+          copy_reachable_btree_nodes(&value, header.entry_version, source, output, budget, flags)?;
+        }
+        key
+      };
+      if path == "/" {
+        root_hash = Some(exported_hash);
       }
       dirs_written += 1;
       budget.release(charge, "DirectoryIndex copy buffer release failed")?;
@@ -475,7 +505,302 @@ fn write_tree_to_engine(
     }
   }
 
-  Ok((chunks_written, files_written, dirs_written))
+  let root_hash = root_hash
+    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "backup version tree does not contain a root directory".to_string() })?;
+  Ok(TreeWriteResult { chunks_written, files_written, directories_written: dirs_written, root_hash })
+}
+
+fn store_directory_entry_preserving_version(
+  engine: &StorageEngine,
+  key: &[u8],
+  value: &[u8],
+  flags: u8,
+  entry_version: u8,
+) -> EngineResult<()> {
+  if flags == 0 {
+    engine.store_entry_with_version(EntryType::DirectoryIndex, key, value, entry_version)?;
+  } else {
+    engine.store_entry_with_flags_and_version(EntryType::DirectoryIndex, key, value, flags, entry_version)?;
+  }
+  Ok(())
+}
+
+fn normalize_user_export_root(
+  tree: &VersionTree,
+  source: &StorageEngine,
+  root_data: &[u8],
+  entry_version: u8,
+  output: &StorageEngine,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<Option<Vec<u8>>> {
+  if root_data.is_empty() {
+    return Ok(None);
+  }
+
+  let checkpoint = budget.checkpoint();
+  let result = (|| {
+    let hash_length = output.hash_algo().hash_length();
+    let (entries, removed_system_child) = if crate::engine::btree::is_btree_format(root_data) {
+      collect_user_root_btree_entries(tree, source, root_data, entry_version, hash_length, budget)?
+    } else {
+      let parse_charge = scaled_backup_charge(root_data.len(), 4, "flat root normalization estimate overflow")?;
+      budget.reserve(parse_charge, "flat root normalization admission failed")?;
+      let mut entries = deserialize_child_entries(root_data, hash_length, entry_version)?;
+      let original_len = entries.len();
+      entries.retain(|entry| !is_protected_root_child(entry));
+      let removed_system_child = original_len != entries.len();
+      (entries, removed_system_child)
+    };
+
+    if !removed_system_child {
+      return Ok(None);
+    }
+
+    let serialized_bytes = serialized_child_entries_len(&entries, hash_length)?;
+    let build_charge = scaled_backup_charge(serialized_bytes, 3, "root normalization build estimate overflow")?;
+    budget.reserve(build_charge, "root normalization build admission failed")?;
+
+    let normalized_hash = if crate::engine::btree::is_btree_format(root_data) {
+      crate::engine::btree::btree_from_entries(output, entries, hash_length, &output.hash_algo())?
+    } else {
+      let normalized_data = serialize_child_entries(&entries, hash_length)?;
+      let normalized_hash = directory_content_hash(&normalized_data, &output.hash_algo())?;
+      store_directory_entry_preserving_version(output, &normalized_hash, &normalized_data, 0, 0)?;
+      normalized_hash
+    };
+
+    let root_header = output
+      .get_entry_header_including_deleted(&normalized_hash)?
+      .ok_or_else(|| EngineError::NotFound(format!("normalized root {} was not stored", hex::encode(&normalized_hash))))?;
+    let root_charge = u64::from(root_header.value_length)
+      .checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES)
+      .ok_or_else(|| EngineError::ResourceExhausted("normalized root read estimate overflow".to_string()))?;
+    budget.reserve(root_charge, "normalized root read admission failed")?;
+    let (_, _, normalized_data) = output
+      .get_entry_including_deleted_bounded(&normalized_hash, root_header.value_length)?
+      .ok_or_else(|| EngineError::NotFound(format!("normalized root {} disappeared", hex::encode(&normalized_hash))))?;
+    let root_path_key = directory_path_hash("/", &output.hash_algo())?;
+    if root_path_key != normalized_hash {
+      store_directory_entry_preserving_version(output, &root_path_key, &normalized_data, 0, root_header.entry_version)?;
+    }
+    Ok(Some(normalized_hash))
+  })();
+  let release_result = budget.release_to(checkpoint, "root normalization release failed");
+  match result {
+    Ok(result) => {
+      release_result?;
+      Ok(result)
+    }
+    Err(error) => {
+      let _ = release_result;
+      Err(error)
+    }
+  }
+}
+
+fn collect_user_root_btree_entries(
+  tree: &VersionTree,
+  source: &StorageEngine,
+  root_data: &[u8],
+  entry_version: u8,
+  hash_length: usize,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<(Vec<ChildEntry>, bool)> {
+  let mut entries = Vec::new();
+  let mut removed_system_child = false;
+  let mut frontier = Vec::<(Vec<u8>, u64)>::new();
+  let mut visited = std::collections::HashSet::<Vec<u8>>::new();
+  let mut visited_charge = 0u64;
+
+  collect_user_root_btree_node(root_data, entry_version, hash_length, budget, &mut frontier, &mut entries, &mut removed_system_child)?;
+  while let Some((node_hash, frontier_charge)) = frontier.pop() {
+    budget.release(frontier_charge, "root B-tree frontier release failed")?;
+    let seen_charge = backup_collection_charge(node_hash.len())?;
+    budget.reserve(seen_charge, "root B-tree visited-set admission failed")?;
+    visited_charge = visited_charge
+      .checked_add(seen_charge)
+      .ok_or_else(|| EngineError::ResourceExhausted("root B-tree visited-set estimate overflow".to_string()))?;
+    if !visited.insert(node_hash.clone()) {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("duplicate or cyclic B-tree node {} while normalizing export root", hex::encode(node_hash)),
+      });
+    }
+    let node_data = tree.btree_nodes.get(&node_hash).ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("missing retained B-tree node {} while normalizing export root", hex::encode(&node_hash)),
+    })?;
+    let node_header = source.get_entry_header_including_deleted(&node_hash)?.ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("missing B-tree node header {} while normalizing export root", hex::encode(&node_hash)),
+    })?;
+    if node_header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("B-tree node {} resolved to {:?} while normalizing export root", hex::encode(&node_hash), node_header.entry_type),
+      });
+    }
+    collect_user_root_btree_node(
+      node_data,
+      node_header.entry_version,
+      hash_length,
+      budget,
+      &mut frontier,
+      &mut entries,
+      &mut removed_system_child,
+    )?;
+  }
+  budget.release(visited_charge, "root B-tree visited-set release failed")?;
+  Ok((entries, removed_system_child))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_user_root_btree_node(
+  node_data: &[u8],
+  entry_version: u8,
+  hash_length: usize,
+  budget: &mut OperationMemoryBudget,
+  frontier: &mut Vec<(Vec<u8>, u64)>,
+  entries: &mut Vec<ChildEntry>,
+  removed_system_child: &mut bool,
+) -> EngineResult<()> {
+  let parse_charge = scaled_backup_charge(node_data.len(), 4, "root B-tree parse estimate overflow")?;
+  budget.reserve(parse_charge, "root B-tree parse admission failed")?;
+  let result = (|| {
+    match crate::engine::btree::BTreeNode::deserialize(node_data, hash_length, entry_version)? {
+      crate::engine::btree::BTreeNode::Leaf(leaf) => {
+        for entry in leaf.entries {
+          if is_protected_root_child(&entry) {
+            *removed_system_child = true;
+            continue;
+          }
+          budget.reserve(child_entry_charge(&entry)?, "root child retention admission failed")?;
+          entries.push(entry);
+        }
+      }
+      crate::engine::btree::BTreeNode::Internal(internal) => {
+        for child_hash in internal.children.into_iter().rev() {
+          let charge = backup_collection_charge(child_hash.len())?;
+          budget.reserve(charge, "root B-tree frontier admission failed")?;
+          frontier.push((child_hash, charge));
+        }
+      }
+    }
+    Ok(())
+  })();
+  let release_result = budget.release(parse_charge, "root B-tree parse release failed");
+  match result {
+    Ok(()) => release_result,
+    Err(error) => {
+      let _ = release_result;
+      Err(error)
+    }
+  }
+}
+
+fn is_protected_root_child(entry: &ChildEntry) -> bool {
+  is_system_path(&format!("/{}", entry.name))
+}
+
+fn child_entry_charge(entry: &ChildEntry) -> EngineResult<u64> {
+  let content_type_len = entry.content_type.as_ref().map_or(0, String::len);
+  entry
+    .hash
+    .len()
+    .checked_add(entry.name.len())
+    .and_then(|bytes| bytes.checked_add(content_type_len))
+    .and_then(|bytes| bytes.checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES as usize))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| EngineError::ResourceExhausted("root child retention estimate overflow".to_string()))
+}
+
+fn serialized_child_entries_len(entries: &[ChildEntry], hash_length: usize) -> EngineResult<usize> {
+  entries.iter().try_fold(0usize, |total, entry| {
+    let content_type_len = entry.content_type.as_ref().map_or(0, String::len);
+    45usize
+      .checked_add(hash_length)
+      .and_then(|bytes| bytes.checked_add(entry.name.len()))
+      .and_then(|bytes| bytes.checked_add(content_type_len))
+      .and_then(|bytes| total.checked_add(bytes))
+      .ok_or_else(|| EngineError::ResourceExhausted("serialized root estimate overflow".to_string()))
+  })
+}
+
+fn scaled_backup_charge(bytes: usize, multiplier: u64, context: &'static str) -> EngineResult<u64> {
+  u64::try_from(bytes)
+    .ok()
+    .and_then(|bytes| bytes.checked_mul(multiplier))
+    .and_then(|bytes| bytes.checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES))
+    .ok_or_else(|| EngineError::ResourceExhausted(context.to_string()))
+}
+
+fn backup_collection_charge(bytes: usize) -> EngineResult<u64> {
+  u64::try_from(bytes)
+    .ok()
+    .and_then(|bytes| bytes.checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES))
+    .ok_or_else(|| EngineError::ResourceExhausted("backup collection estimate overflow".to_string()))
+}
+
+fn copy_reachable_btree_nodes(
+  root_data: &[u8],
+  root_entry_version: u8,
+  source: &StorageEngine,
+  output: &StorageEngine,
+  budget: &mut OperationMemoryBudget,
+  flags: u8,
+) -> EngineResult<()> {
+  let hash_length = output.hash_algo().hash_length();
+  let mut frontier = Vec::<(Vec<u8>, u64)>::new();
+  enqueue_btree_children(root_data, root_entry_version, hash_length, budget, &mut frontier)?;
+  while let Some((node_hash, frontier_charge)) = frontier.pop() {
+    budget.record_work(1)?;
+    budget.release(frontier_charge, "B-tree copy frontier release failed")?;
+    if output.has_entry(&node_hash)? {
+      continue;
+    }
+    let ((header, key, value), charge) = required_backup_entry(source, &node_hash, "B-tree DirectoryIndex", budget)?;
+    if header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("B-tree node {} resolved to {:?}", hex::encode(&node_hash), header.entry_type),
+      });
+    }
+    enqueue_btree_children(&value, header.entry_version, hash_length, budget, &mut frontier)?;
+    store_directory_entry_preserving_version(output, &key, &value, flags, header.entry_version)?;
+    budget.release(charge, "B-tree node buffer release failed")?;
+  }
+  Ok(())
+}
+
+fn enqueue_btree_children(
+  node_data: &[u8],
+  entry_version: u8,
+  hash_length: usize,
+  budget: &mut OperationMemoryBudget,
+  frontier: &mut Vec<(Vec<u8>, u64)>,
+) -> EngineResult<()> {
+  let parse_charge = scaled_backup_charge(node_data.len(), 3, "B-tree copy parse estimate overflow")?;
+  budget.reserve(parse_charge, "B-tree copy parse admission failed")?;
+  let result = (|| {
+    if let crate::engine::btree::BTreeNode::Internal(internal) =
+      crate::engine::btree::BTreeNode::deserialize(node_data, hash_length, entry_version)?
+    {
+      for child_hash in internal.children.into_iter().rev() {
+        let charge = backup_collection_charge(child_hash.len())?;
+        budget.reserve(charge, "B-tree copy frontier admission failed")?;
+        frontier.push((child_hash, charge));
+      }
+    }
+    Ok(())
+  })();
+  let release_result = budget.release(parse_charge, "B-tree copy parse release failed");
+  match result {
+    Ok(()) => release_result,
+    Err(error) => {
+      let _ = release_result;
+      Err(error)
+    }
+  }
 }
 
 /// Walk the /.aeordb-system/ subtree(s) and copy all entries.

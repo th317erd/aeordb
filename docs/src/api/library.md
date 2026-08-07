@@ -319,11 +319,15 @@ let results = qe.execute(&query).unwrap();
 use aeordb::engine::{export_version, import_backup};
 
 // Export current HEAD as a .aeordb file
-let result = export_version(&engine, &head_hash, "/tmp/backup.aeordb").unwrap();
+let result = export_version(&engine, &head_hash, "/tmp/backup.aeordb", false).unwrap();
 
 // Import a backup
-let result = import_backup(&engine, &ctx, "/tmp/backup.aeordb").unwrap();
+let result = import_backup(&ctx, &engine, "/tmp/backup.aeordb", false, false, false).unwrap();
 ```
+
+`result.version_hash` is the root stored in the export. It normally equals
+`head_hash`; user-only export can replace a legacy root that still names a
+protected system tree with a normalized root.
 
 ## Garbage Collection
 

@@ -6,13 +6,16 @@ use std::sync::Arc;
 use aeordb::engine::backup::{
   create_patch, export_full, export_snapshot, export_version, export_version_with_cancellation, import_backup, ExportResult,
 };
-use aeordb::engine::directory_entry::{serialize_child_entries, ChildEntry};
+use aeordb::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
 use aeordb::engine::entry_header::FLAG_SYSTEM;
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::version_manager::VersionManager;
-use aeordb::engine::{is_btree_format, BufferedFile, DirectoryOps, EntryType, StorageEngine, BTREE_CONVERSION_THRESHOLD};
+use aeordb::engine::{
+  btree_from_entries, btree_list_from_node, directory_path_hash, is_btree_format, BufferedFile, DirectoryOps, EntryType, StorageEngine,
+  BTREE_CONVERSION_THRESHOLD,
+};
 use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
@@ -46,6 +49,42 @@ fn assert_no_partial_artifacts(output: &str) {
     .filter(|name| name.to_string_lossy().starts_with(&prefix))
     .collect::<Vec<_>>();
   assert!(artifacts.is_empty(), "partial export artifacts remain: {artifacts:?}");
+}
+
+fn install_legacy_system_root(source: &StorageEngine) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+  let clean_root = source.head_hash().unwrap();
+  let clean_root_entry = source.get_entry(&clean_root).unwrap().unwrap();
+  let mut root_children = if is_btree_format(&clean_root_entry.2) {
+    btree_list_from_node(&clean_root_entry.2, source, source.hash_algo().hash_length(), true).unwrap()
+  } else {
+    deserialize_child_entries(&clean_root_entry.2, source.hash_algo().hash_length(), clean_root_entry.0.entry_version).unwrap()
+  };
+  let system_path_hash = directory_path_hash("/.aeordb-system", &source.hash_algo()).unwrap();
+  let system_hash = source.get_entry(&system_path_hash).unwrap().unwrap().2;
+  assert_eq!(system_hash.len(), source.hash_algo().hash_length());
+  root_children.push(ChildEntry {
+    entry_type: EntryType::DirectoryIndex.to_u8(),
+    hash: system_hash.clone(),
+    total_size: 0,
+    created_at: 1,
+    updated_at: 1,
+    name: ".aeordb-system".to_string(),
+    content_type: None,
+    virtual_time: 1,
+    node_id: 1,
+  });
+
+  let stale_root = if is_btree_format(&clean_root_entry.2) {
+    btree_from_entries(source, root_children, source.hash_algo().hash_length(), &source.hash_algo()).unwrap()
+  } else {
+    root_children.sort_by(|left, right| left.name.cmp(&right.name));
+    let stale_root_data = serialize_child_entries(&root_children, source.hash_algo().hash_length()).unwrap();
+    let stale_root = aeordb::engine::directory_content_hash(&stale_root_data, &source.hash_algo()).unwrap();
+    source.store_entry(EntryType::DirectoryIndex, &stale_root, &stale_root_data).unwrap();
+    stale_root
+  };
+  source.update_head(&stale_root).unwrap();
+  (clean_root, stale_root, system_hash)
 }
 
 // ─── 1. test_export_head ────────────────────────────────────────────────
@@ -604,7 +643,9 @@ fn test_backup_artifacts_preserve_large_directory_btree_nodes() {
   let output_temp = tempfile::tempdir().unwrap();
   let out = output_path(&output_temp);
 
-  export_version(&source, &source.head_hash().unwrap(), &out, false).unwrap();
+  let source_head = source.head_hash().unwrap();
+  let result = export_version(&source, &source_head, &out, false).unwrap();
+  assert_eq!(result.version_hash, source_head, "ordinary B-tree exports must preserve their root identity");
   let exported = StorageEngine::open_for_import(&out).unwrap();
   let children = DirectoryOps::new(&exported).list_directory("/large/").unwrap();
   assert_eq!(children.len(), BTREE_CONVERSION_THRESHOLD + 8);
@@ -636,4 +677,89 @@ fn test_export_accepts_distinct_empty_directories_with_shared_content_hash() {
 
   assert!(DirectoryOps::new(&exported).list_directory("/first-empty/").unwrap().is_empty());
   assert!(DirectoryOps::new(&exported).list_directory("/second-empty/").unwrap().is_empty());
+}
+
+#[test]
+fn user_only_export_normalizes_a_legacy_snapshot_root_that_names_the_system_tree() {
+  let context = RequestContext::system();
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&context, "/docs/user.txt", b"user-data", Some("text/plain")).unwrap();
+  operations
+    .store_file_buffered(&context, "/.aeordb-system/users/legacy-user.json", br#"{"id":"legacy-user"}"#, Some("application/json"))
+    .unwrap();
+
+  // Modern system writes do not propagate into HEAD. Construct the exact v3
+  // compatibility state produced by older writers: a historical root that
+  // still names the otherwise detached system tree.
+  let (clean_root, stale_root, system_hash) = install_legacy_system_root(&source);
+  assert!(!is_btree_format(&source.get_entry(&stale_root).unwrap().unwrap().2), "small compatibility fixture should use a flat root");
+  VersionManager::new(&source).create_snapshot(&context, "legacy-system-root", HashMap::new()).unwrap();
+  source.update_head(&clean_root).unwrap();
+
+  let output_temp = tempfile::tempdir().unwrap();
+  let output = output_path(&output_temp);
+  let result = export_snapshot(&source, Some("legacy-system-root"), &output, false).unwrap();
+
+  assert_ne!(result.version_hash, stale_root, "filtering a root child must produce a new exported root identity");
+  let exported = StorageEngine::open_for_import(&output).unwrap();
+  assert_eq!(exported.head_hash().unwrap(), result.version_hash);
+  let (_, backup_base, backup_target) = exported.backup_info().unwrap();
+  assert_eq!(backup_base, result.version_hash);
+  assert_eq!(backup_target, result.version_hash);
+  let exported_root = exported.get_entry(&result.version_hash).unwrap().unwrap();
+  let exported_children =
+    deserialize_child_entries(&exported_root.2, exported.hash_algo().hash_length(), exported_root.0.entry_version).unwrap();
+  assert!(exported_children.iter().all(|child| child.name != ".aeordb-system" && child.name != ".aeordb-config"));
+  assert!(!exported.has_entry(&system_hash).unwrap(), "excluded system directory content leaked into user-only export");
+  assert_eq!(DirectoryOps::new(&exported).read_file_buffered("/docs/user.txt").unwrap(), b"user-data");
+  assert!(DirectoryOps::new(&exported).read_file_buffered("/.aeordb-system/users/legacy-user.json").is_err());
+  assert!(walk_version_tree(&exported, &result.version_hash).unwrap().files.keys().all(|path| !path.starts_with("/.aeordb-")));
+  let export_report = aeordb::engine::verify::verify_checked(&exported, &output).unwrap();
+  assert!(!export_report.has_issues(), "normalized export is inconsistent: {export_report:#?}");
+  drop(exported);
+
+  let (restored, restored_temp) = create_temp_engine_for_tests();
+  let imported = import_backup(&context, &restored, &output, false, true, false).unwrap();
+  assert_eq!(imported.version_hash, result.version_hash);
+  assert_eq!(restored.head_hash().unwrap(), result.version_hash);
+  assert_eq!(DirectoryOps::new(&restored).read_file_buffered("/docs/user.txt").unwrap(), b"user-data");
+  assert!(DirectoryOps::new(&restored).list_directory("/").unwrap().iter().all(|child| child.name != ".aeordb-system"));
+  let restored_path = restored_temp.path().join("test.aeordb");
+  restored.shutdown().unwrap();
+  drop(restored);
+  let restored = StorageEngine::open_for_import(restored_path.to_str().unwrap()).unwrap();
+  let restored_report = aeordb::engine::verify::verify_checked(&restored, restored_path.to_str().unwrap()).unwrap();
+  assert!(!restored_report.has_issues(), "normalized restore is inconsistent: {restored_report:#?}");
+}
+
+#[test]
+fn user_only_full_export_normalizes_a_legacy_btree_head_without_copying_the_system_subtree() {
+  let context = RequestContext::system();
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let operations = DirectoryOps::new(&source);
+  let file_count = BTREE_CONVERSION_THRESHOLD + 8;
+  for index in 0..file_count {
+    operations
+      .store_file_buffered(&context, &format!("/root-{index:04}.txt"), format!("value-{index}").as_bytes(), Some("text/plain"))
+      .unwrap();
+  }
+  operations
+    .store_file_buffered(&context, "/.aeordb-system/users/legacy-user.json", br#"{"id":"legacy-user"}"#, Some("application/json"))
+    .unwrap();
+  assert!(is_btree_format(&source.get_entry(&source.head_hash().unwrap()).unwrap().unwrap().2));
+  let (_clean_root, stale_root, system_hash) = install_legacy_system_root(&source);
+
+  let output_temp = tempfile::tempdir().unwrap();
+  let output = output_path(&output_temp);
+  let result = export_full(&source, &output, false).unwrap();
+
+  assert_ne!(result.version_hash, stale_root);
+  let exported = StorageEngine::open_for_import(&output).unwrap();
+  assert_eq!(exported.head_hash().unwrap(), result.version_hash);
+  assert_eq!(DirectoryOps::new(&exported).list_directory("/").unwrap().len(), file_count);
+  assert_eq!(DirectoryOps::new(&exported).read_file_buffered("/root-0000.txt").unwrap(), b"value-0");
+  assert!(!exported.has_entry(&system_hash).unwrap(), "excluded system B-tree content leaked into user-only export");
+  let report = aeordb::engine::verify::verify_checked(&exported, &output).unwrap();
+  assert!(!report.has_issues(), "normalized B-tree export is inconsistent: {report:#?}");
 }

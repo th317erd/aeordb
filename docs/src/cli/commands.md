@@ -279,6 +279,11 @@ aeordb export --database data.aeordb --output backup.aeordb --hash abc123def456.
 
 The output file must not already exist.
 
+The command reports the root hash actually written to the artifact. User-only
+exports normally preserve the requested root hash, but an older root that
+still names a protected system tree is normalized during export. In that case,
+use the reported hash for promotion and identity checks.
+
 See [Backup & Restore](../operations/backup.md) for full backup workflows.
 
 ---

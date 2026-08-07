@@ -13,6 +13,15 @@ AeorDB supports exporting database versions as self-contained `.aeordb` files, c
 
 By default, `aeordb export` includes only user data — the export omits everything under `/.aeordb-system/` (users, groups, snapshot records) and stops at the specified version (HEAD or one named snapshot).
 
+Modern databases keep protected system trees detached from the user-data
+root. When exporting an older snapshot whose root still names
+`/.aeordb-system` or `/.aeordb-config`, a user-only export removes those root
+relationships and writes a normalized root. In that compatibility case, the
+reported `Version` differs from the requested source hash. The reported hash
+is authoritative: it is also stored as the export's base hash, target hash,
+and `HEAD`, so importing and promoting the artifact never creates a dangling
+system relationship. Ordinary exports preserve their source root hash.
+
 When you supply the source database's **root API key**, the CLI unlocks privileged backup mode:
 
 - **System data** is included: `/.aeordb-system/users/`, `/.aeordb-system/groups/`, `/.aeordb-system/snapshots/`, `/.aeordb-system/config/`.
@@ -84,6 +93,10 @@ Export complete.
   Directories: 23
   Version: abc123def456...
 ```
+
+Use the returned `Version` for later promotion or identity checks. It is the
+root contained in the artifact and may be a normalized replacement for a
+legacy source root as described above.
 
 ## Diff / Patch
 

@@ -198,7 +198,7 @@
           - [x] Enforce the documented 10 GiB import cap for raw and chunked streamed request bodies.
           - [x] Fail closed on system-subtree/read errors and preserve retryable resource-exhaustion responses.
           - [x] Prove embedded, task, HTTP, cancellation, malformed, pressure, cleanup, restart, and round-trip behavior.
-        - [ ] Normalize historical snapshot roots that retain stale system-child relationships during user-only export, with an explicit v3 compatibility fixture and no dangling restored relation.
+        - [x] Normalize historical snapshot roots that retain stale system-child relationships during user-only export, with an explicit v3 compatibility fixture and no dangling restored relation.
         - [x] Bound durability coordinator records, hard-waiter queues, execution scratch, and retained ledger entries under `durability_waiters` critical admission.
           - [x] Refuse pre-mutation admission without latching the database when durability waiter headroom is exhausted.
           - [x] Retain each reservation until its exact waiter record is retired, including failure and unwind paths.
