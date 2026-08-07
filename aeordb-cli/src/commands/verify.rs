@@ -306,12 +306,7 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   }
   println!();
 
-  println!("Storage:");
-  println!("  Logical data:  {}", format_bytes(report.logical_data_size));
-  println!("  Chunk data:    {}", format_bytes(report.chunk_data_size));
-  println!("  Dedup savings: {}", format_bytes(report.dedup_savings));
-  println!("  Void space:    {}", format_bytes(report.void_bytes));
-  println!();
+  print!("{}", format_storage_summary(&report));
 
   println!("Directory Consistency:");
   println!("  Directories:        {:>8}", report.directories_checked);
@@ -618,9 +613,24 @@ fn format_emergency_spill_repair_summary(report: &EmergencySpillApplyReport) -> 
   )
 }
 
+fn format_storage_summary(report: &verify::VerifyReport) -> String {
+  format!(
+    "Storage:\n  Logical data (current HEAD):  {}\n  Retained file-version data:    {} ({} unique versions; includes current HEAD)\n  Retained outside current HEAD: {}\n  FileRecord payloads (WAL):      {}\n  Chunk payloads (WAL):           {}\n  Logical/WAL chunk delta:        {} (clamped at zero)\n  Void space:                     {}\n\n",
+    format_bytes(report.logical_data_size),
+    format_bytes(report.retained_logical_data_size),
+    report.retained_file_versions,
+    format_bytes(report.non_head_retained_logical_data_size),
+    format_bytes(report.file_record_payload_size),
+    format_bytes(report.chunk_data_size),
+    format_bytes(report.dedup_savings),
+    format_bytes(report.void_bytes),
+  )
+}
+
 #[cfg(test)]
 mod tests {
-  use super::{RepairCopyPreparation, prepare_source_for_repair_copy};
+  use super::{RepairCopyPreparation, format_storage_summary, prepare_source_for_repair_copy};
+  use aeordb::engine::verify::VerifyReport;
   use std::cell::Cell;
 
   #[test]
@@ -653,5 +663,27 @@ mod tests {
     let result = prepare_source_for_repair_copy::<_, &str, _>(Ok(17_u8), |_| Err("disk full"));
 
     assert_eq!(result, Err("disk full"));
+  }
+
+  #[test]
+  fn storage_summary_labels_current_retained_and_physical_payloads_explicitly() {
+    let mut report = VerifyReport::new("fixture.aeordb");
+    report.logical_data_size = 10;
+    report.retained_logical_data_size = 30;
+    report.non_head_retained_logical_data_size = 20;
+    report.retained_file_versions = 2;
+    report.file_record_payload_size = 40;
+    report.chunk_data_size = 8;
+    report.dedup_savings = 2;
+    report.void_bytes = 3;
+
+    let rendered = format_storage_summary(&report);
+
+    assert!(rendered.contains("Logical data (current HEAD):  10 bytes"));
+    assert!(rendered.contains("Retained file-version data:    30 bytes (2 unique versions; includes current HEAD)"));
+    assert!(rendered.contains("Retained outside current HEAD: 20 bytes"));
+    assert!(rendered.contains("FileRecord payloads (WAL):      40 bytes"));
+    assert!(rendered.contains("Chunk payloads (WAL):           8 bytes"));
+    assert!(rendered.contains("Logical/WAL chunk delta:        2 bytes (clamped at zero)"));
   }
 }

@@ -198,6 +198,105 @@ fn verify_reports_storage_metrics() {
 }
 
 #[test]
+fn verify_reports_current_head_file_bytes_instead_of_serialized_file_records() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let path = format!("/docs/{}/versioned.txt", "long-directory-name".repeat(8));
+  let historical = vec![b'h'; 300_123];
+  let current = b"current";
+
+  let historical_record = ops.store_file_buffered(&ctx, &path, &historical, Some("text/plain")).unwrap();
+  VersionManager::new(&engine).create_snapshot(&ctx, "before-overwrite", std::collections::HashMap::new()).unwrap();
+  let current_record = ops.store_file_buffered(&ctx, &path, current, Some("text/plain")).unwrap();
+
+  let db_path = temp.path().join("test.aeordb");
+  let report = verify::verify_checked(&engine, db_path.to_str().unwrap()).unwrap();
+
+  assert_eq!(
+    report.logical_data_size,
+    current.len() as u64,
+    "logical data must describe current HEAD file content, not serialized FileRecord payloads or retained versions"
+  );
+  assert_eq!(report.retained_file_versions, 2, "the current and snapshotted file identities should each be counted once");
+  assert_eq!(report.retained_logical_data_size, (historical.len() + current.len()) as u64);
+  assert_eq!(report.non_head_retained_logical_data_size, historical.len() as u64);
+  let hash_length = engine.hash_algo().hash_length();
+  let expected_file_record_payload_size =
+    3 * (historical_record.serialize(hash_length).unwrap().len() as u64 + current_record.serialize(hash_length).unwrap().len() as u64);
+  assert_eq!(
+    report.file_record_payload_size, expected_file_record_payload_size,
+    "raw WAL payload accounting should remain available separately and include all three FileRecord aliases"
+  );
+}
+
+#[test]
+fn verify_separates_deleted_snapshot_history_from_an_empty_current_head() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let historical = b"retained only by the snapshot";
+
+  ops.store_file_buffered(&ctx, "/history/only.txt", historical, Some("text/plain")).unwrap();
+  VersionManager::new(&engine).create_snapshot(&ctx, "retained-history", std::collections::HashMap::new()).unwrap();
+  ops.delete_file(&ctx, "/history/only.txt").unwrap();
+
+  let db_path = temp.path().join("test.aeordb");
+  let report = verify::verify_checked(&engine, db_path.to_str().unwrap()).unwrap();
+
+  assert_eq!(report.logical_data_size, 0);
+  assert_eq!(report.retained_file_versions, 1);
+  assert_eq!(report.retained_logical_data_size, historical.len() as u64);
+  assert_eq!(report.non_head_retained_logical_data_size, historical.len() as u64);
+}
+
+#[test]
+fn verify_counts_current_logical_bytes_through_btree_directories() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let mut expected = 0u64;
+
+  for index in 0..=aeordb::engine::btree::BTREE_CONVERSION_THRESHOLD {
+    let content = vec![b'x'; index % 17];
+    expected += content.len() as u64;
+    ops.store_file_buffered(&ctx, &format!("/many/file-{index:04}.txt"), &content, Some("text/plain")).unwrap();
+  }
+
+  let db_path = temp.path().join("test.aeordb");
+  let report = verify::verify_checked(&engine, db_path.to_str().unwrap()).unwrap();
+
+  assert_eq!(report.logical_data_size, expected);
+  assert_eq!(report.retained_file_versions, (aeordb::engine::btree::BTREE_CONVERSION_THRESHOLD + 1) as u64);
+  assert_eq!(report.retained_logical_data_size, expected);
+  assert_eq!(report.non_head_retained_logical_data_size, 0);
+}
+
+#[test]
+fn verify_uses_content_then_path_aliases_for_legacy_retained_version_accounting() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let path = "/legacy/layout.txt";
+  let content = b"legacy alias fallback";
+  let record = ops.store_file_buffered(&ctx, path, content, Some("text/plain")).unwrap();
+  let algo = engine.hash_algo();
+  let identity_key = aeordb::engine::file_identity_hash(path, record.content_type.as_deref(), &record.chunk_hashes, &algo).unwrap();
+  let content_key = aeordb::engine::file_content_hash(&record.serialize(algo.hash_length()).unwrap(), &algo).unwrap();
+  let db_path = temp.path().join("test.aeordb");
+
+  engine.remove_kv_entry(&identity_key).unwrap();
+  let content_fallback = verify::verify_checked(&engine, db_path.to_str().unwrap()).unwrap();
+  assert_eq!(content_fallback.retained_file_versions, 1);
+  assert_eq!(content_fallback.retained_logical_data_size, content.len() as u64);
+
+  engine.remove_kv_entry(&content_key).unwrap();
+  let path_fallback = verify::verify_checked(&engine, db_path.to_str().unwrap()).unwrap();
+  assert_eq!(path_fallback.retained_file_versions, 1);
+  assert_eq!(path_fallback.retained_logical_data_size, content.len() as u64);
+}
+
+#[test]
 fn verify_checked_detects_a_live_wal_entry_missing_from_kv() {
   let (engine, temp) = create_temp_engine_for_tests();
   let key = engine.compute_hash(b"verify-missing-kv").unwrap();

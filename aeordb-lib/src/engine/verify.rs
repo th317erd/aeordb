@@ -51,7 +51,22 @@ pub struct VerifyReport {
   pub void_bytes: u64,
 
   // Storage metrics
+  /// Logical file bytes reachable from the current HEAD namespace.
   pub logical_data_size: u64,
+  /// Logical bytes represented by unique retained FileRecord versions in the
+  /// live KV index. Canonical `fileid:` keys win; content and path aliases are
+  /// fallback representatives for databases written before identity aliases.
+  pub retained_logical_data_size: u64,
+  /// The retained logical total minus the current HEAD total. This includes
+  /// snapshots/forks, system records outside HEAD, path-safety records, and
+  /// unreachable versions awaiting GC. It saturates at zero when corruption
+  /// makes either independently measured side incomplete.
+  pub non_head_retained_logical_data_size: u64,
+  /// Number of unique retained FileRecord versions in live KV.
+  pub retained_file_versions: u64,
+  /// Serialized FileRecord value bytes physically encountered in the WAL,
+  /// including aliases, superseded entries, and entries awaiting reclamation.
+  pub file_record_payload_size: u64,
   pub chunk_data_size: u64,
   pub dedup_savings: u64,
 
@@ -113,6 +128,10 @@ impl VerifyReport {
       voids: 0,
       void_bytes: 0,
       logical_data_size: 0,
+      retained_logical_data_size: 0,
+      non_head_retained_logical_data_size: 0,
+      retained_file_versions: 0,
+      file_record_payload_size: 0,
       chunk_data_size: 0,
       dedup_savings: 0,
       valid_entries: 0,
@@ -193,6 +212,9 @@ fn verify_checked_inner(engine: &StorageEngine, db_path: &str) -> EngineResult<V
   // Phase 3: Check directory consistency
   check_directories(engine, &mut report)?;
   check_path_file_records(engine, &mut report)?;
+
+  report.non_head_retained_logical_data_size = report.retained_logical_data_size.saturating_sub(report.logical_data_size);
+  report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
 
   // Phase 4: Check snapshot tree integrity (detects GC damage)
   check_snapshot_integrity(engine, &mut report)?;
@@ -436,7 +458,7 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResu
           }
           EntryType::FileRecord => {
             report.file_records = report.file_records.saturating_add(1);
-            report.logical_data_size = report.logical_data_size.saturating_add(scanned.header.value_length as u64);
+            report.file_record_payload_size = report.file_record_payload_size.saturating_add(scanned.header.value_length as u64);
           }
           EntryType::DirectoryIndex => report.directory_indexes = report.directory_indexes.saturating_add(1),
           EntryType::Symlink => report.symlinks = report.symlinks.saturating_add(1),
@@ -488,7 +510,6 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResu
       scanner.skipped_region_bytes()
     ));
   }
-  report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
   expected.finish()?;
   Ok(expected)
 }
@@ -709,6 +730,7 @@ fn check_directory_recursive(
     match EntryType::from_u8(child.entry_type) {
       Ok(EntryType::DirectoryIndex) => check_directory_recursive(ops, engine, &child_path, report, depth + 1)?,
       Ok(EntryType::FileRecord) => {
+        report.logical_data_size = report.logical_data_size.saturating_add(child.total_size);
         let key = crate::engine::directory_ops::file_path_hash(&child_path, &engine.hash_algo())?;
         match engine.get_entry_header(&key) {
           Ok(Some(header)) if header.entry_type == EntryType::FileRecord => {}
@@ -853,16 +875,24 @@ fn check_path_file_record_entry(
     }
   };
   let normalized = crate::engine::path_utils::normalize_path(&record.path);
+  let identity_key =
+    crate::engine::directory_ops::file_identity_hash(&normalized, record.content_type.as_deref(), &record.chunk_hashes, algo)?;
+  let path_key = crate::engine::directory_ops::file_path_hash(&normalized, algo)?;
+  let represents_retained_version = if entry.hash == identity_key {
+    true
+  } else if engine.has_entry(&identity_key)? {
+    false
+  } else {
+    let content_key = crate::engine::directory_ops::file_content_hash(&value, algo)?;
+    entry.hash == content_key || (entry.hash == path_key && !engine.has_entry(&content_key)?)
+  };
+  if represents_retained_version {
+    report.retained_file_versions = report.retained_file_versions.saturating_add(1);
+    report.retained_logical_data_size = report.retained_logical_data_size.saturating_add(record.total_size);
+  }
   if normalized == "/" || normalized.starts_with("/.aeordb-") {
     return Ok(());
   }
-  let path_key = match crate::engine::directory_ops::file_path_hash(&normalized, algo) {
-    Ok(path_key) => path_key,
-    Err(error) => {
-      record_verification_error(report, format!("FileRecord {} has an invalid path: {error}", short_hash(&entry.hash)));
-      return Ok(());
-    }
-  };
   if entry.hash != path_key {
     return Ok(());
   }

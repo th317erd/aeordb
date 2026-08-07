@@ -238,7 +238,7 @@
         - [x] Run broad, cross-platform, and live disk-backed pressure/restart evidence before closing the maintenance-pressure slice.
       - [x] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
       - [x] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
-    - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
+    - [x] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
       - [x] Make derived defaults depend on the effective higher-precedence property values, including CLI/environment hard-memory overrides.
       - [x] Replace the immutable diagnostic shadow with one configuration authority that retains startup, effective, stored, and activation state.
         - [x] Add serialized strict embedded replacement with family-isolated generations, durable-before-active ordering, and publication-failure consistency.
@@ -271,8 +271,11 @@
         - [x] Prove schema parity, malformed/unavailable owner behavior, authorization/redaction, bounded collection, SSE filtering, and CLI failure exits.
         - [x] Run focused observability regressions, the complete workspace suite, Windows GNU cross-checking, and authenticated/browser-backed disposable-server tests.
       - [x] Update API, operations, CLI, lifecycle, memory, SSE, and Dashboard documentation and examples.
-      - [ ] Correct `verify` logical-data accounting to report file logical bytes rather than serialized `FileRecord` bytes, with explicit current/live versus retained-history semantics.
-      - [ ] After verify accounting, run the remaining P2b-4 focused regressions, full workspace/cross-platform gates, and a disk-backed verification test.
+      - [x] Correct `verify` logical-data accounting to report file logical bytes rather than serialized `FileRecord` bytes, with explicit current/live versus retained-history semantics.
+        - [x] Prove current HEAD logical bytes are independent of path length, chunk-count metadata, and retained overwritten versions.
+        - [x] Report unique retained FileRecord-version logical bytes and raw serialized FileRecord payload bytes under distinct names.
+        - [x] Keep the legacy clamped logical/WAL-chunk delta explicit rather than implying current-only dedup, and document the CLI/report contract.
+      - [x] After verify accounting, run the remaining P2b-4 focused regressions, full workspace/cross-platform gates, and a disk-backed verification test.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.

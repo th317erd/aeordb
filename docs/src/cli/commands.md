@@ -229,6 +229,18 @@ aeordb verify --repair --force-fix-in-place --yes --database data.aeordb
 
 When `--repair` is used, B-tree directory issues are repaired by first rebuilding only the affected B-tree directory from current live path records. If targeted repair cannot recover the issue, repair falls back to rebuilding the live directory tree from path-key FileRecords.
 
+### Storage Accounting
+
+The verification report separates namespace, retention, and physical WAL accounting:
+
+- **Logical data (current HEAD)** is the sum of file sizes reachable from the current HEAD directory tree. Path length, MIME metadata, chunk-list length, and superseded revisions do not inflate it.
+- **Retained file-version data** is the logical size of unique live FileRecord versions in the KV index. Canonical `fileid:` identities are counted once; content and path keys are fallback representatives for legacy databases that lack an identity alias. It includes current HEAD versions plus snapshot/fork history, system records outside HEAD, path-safety records, and unreachable versions awaiting garbage collection.
+- **Retained outside current HEAD** is retained file-version data minus current HEAD data. It is not synonymous with snapshot history because the retained set has the additional categories above. On a damaged database, both independent measurements remain visible and the subtraction saturates at zero.
+- **FileRecord payloads (WAL)** is the serialized FileRecord value volume encountered in the append log. It includes path, identity, and content aliases plus superseded or not-yet-reclaimed entries; it is physical diagnostic data, not user-file size.
+- **Chunk payloads (WAL)** is chunk value volume encountered in the append log. **Logical/WAL chunk delta** preserves the legacy current-HEAD-logical minus WAL-chunk calculation, clamped at zero. It is not a current-only deduplication measurement because the WAL side can include retained history and entries awaiting reclamation.
+
+These values do not materialize file content. Current logical bytes come from directory child metadata, while retained-version bytes come from bounded FileRecord metadata reads already performed by verification.
+
 ### Emergency Spill Recovery
 
 If startup finds unresolved emergency-spill artifacts for the target database, it exits before serving the normal API and prints the repair command:
