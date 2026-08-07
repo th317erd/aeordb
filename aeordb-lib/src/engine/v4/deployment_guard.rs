@@ -279,8 +279,12 @@ impl ReadOnlyV3TransitionControlStore {
     }
     let hash_length = header.hash_algo.hash_length();
     let page_length = page_size(hash_length);
-    let (expected_kv_length, bucket_count) = stage_params(stage, page_length);
-    if header.kv_block_offset < HEADER_REGION_SIZE as u64 || header.kv_block_length != expected_kv_length || bucket_count == 0 {
+    let (minimum_kv_length, bucket_count) = stage_params(stage, page_length);
+    // Online expansion may extend the block through the end of a WAL entry so
+    // the new WAL frontier lands on a verified entry boundary. The bucket
+    // pages still occupy the stage minimum at the front of that block; any
+    // extra bytes are intentional alignment slack.
+    if header.kv_block_offset < HEADER_REGION_SIZE as u64 || header.kv_block_length < minimum_kv_length || bucket_count == 0 {
       return Err(EngineError::InvalidInput("v3 KV layout is inconsistent with its selected header".to_string()));
     }
     let kv_end = header

@@ -13,7 +13,7 @@ use aeordb::engine::v4::system_control::{
   DurabilityLatchBodyV1, EmergencySpillCatalogBodyV1, EmergencySpillCatalogRowV1, SystemControlKindV1, SystemControlSlotV1,
   decode_system_control, encode_durability_latch_control, encode_emergency_spill_catalog_control, system_control_path,
 };
-use aeordb::engine::{HashAlgorithm, StorageEngine};
+use aeordb::engine::{EntryType, HashAlgorithm, StorageEngine};
 use aeordb::engine::directory_ops::file_path_hash;
 use aeordb::engine::kv_pages::bucket_page_offset;
 use aeordb::engine::kv_stages::stage_params;
@@ -94,6 +94,30 @@ fn read_only_inspection_preserves_database_bytes_and_reports_no_transition_state
   assert!(state.persistent_recovery.is_none());
   assert_eq!(state.external_spill_count, 0);
   assert_eq!(fs::read(&database).unwrap(), before, "inspection must not write even a header or hot-tail byte");
+}
+
+#[test]
+fn read_only_inspection_accepts_boundary_aligned_kv_expansion_slack() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("expanded.aeordb");
+  let engine = StorageEngine::create(database.to_str().unwrap()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &[0x71; 32], &vec![0x5a; 600 * 1024]).unwrap();
+  engine.expand_kv_block_online(1).unwrap();
+  engine.shutdown().unwrap();
+
+  let header = {
+    let mut file = fs::File::open(&database).unwrap();
+    match read_database_header_read_only(&mut file).unwrap() {
+      ReadOnlyDatabaseHeader::V3 { header, .. } => header,
+      ReadOnlyDatabaseHeader::V4(_) => unreachable!(),
+    }
+  };
+  let (minimum_length, _) =
+    stage_params(header.kv_block_stage as usize, aeordb::engine::kv_pages::page_size(header.hash_algo.hash_length()));
+  assert!(header.kv_block_length > minimum_length, "fixture must include legal boundary-alignment slack");
+
+  let state = inspect_deployment_transition_state_read_only(&database).unwrap();
+  assert!(!state.requires_transition_capability);
 }
 
 #[test]

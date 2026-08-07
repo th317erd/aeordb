@@ -187,6 +187,15 @@ pub fn scan_for_database_with_locations(
     let manifest_paths = manifest_paths_in_base_dir(&location.path)?;
     let mut complete_directories = HashSet::new();
     for manifest_path in manifest_paths {
+      let directory = manifest_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+      match manifest_matches_database(&manifest_path, db_path)? {
+        Some(false) => {
+          complete_directories.insert(directory);
+          continue;
+        }
+        Some(true) => {}
+        None => continue,
+      }
       let Some(artifact) = parse_manifest(&manifest_path, location.class)? else {
         continue;
       };
@@ -468,6 +477,13 @@ fn pending_matches_database(pending_path: &Path, source_location_class: SpillLoc
   if pending.get("format").and_then(|value| value.as_str()) != Some(EMERGENCY_SPILL_PENDING_FORMAT_V2) {
     return Err(EngineError::InvalidInput(format!("invalid emergency spill pending record {}", pending_path.display())));
   }
+  let path_encoding = u16::try_from(required_u64(&pending, "path_encoding")?)
+    .map_err(|_| EngineError::InvalidInput("emergency spill pending path encoding overflows u16".to_string()))?;
+  let db_path_native = required_hex_bytes(&pending, "db_path_bytes")?;
+  let pending_database_path = path_from_native_bytes(path_encoding, &db_path_native)?;
+  if !paths_equivalent(&pending_database_path, db_path) {
+    return Ok(false);
+  }
   let database_id = required_hex_array::<16>(&pending, "database_id")?;
   let incident_id = required_hex_array::<16>(&pending, "incident_id")?;
   if database_id == [0; 16] || incident_id == [0; 16] {
@@ -480,15 +496,34 @@ fn pending_matches_database(pending_path: &Path, source_location_class: SpillLoc
       pending_path.display()
     )));
   }
-  let path_encoding = u16::try_from(required_u64(&pending, "path_encoding")?)
-    .map_err(|_| EngineError::InvalidInput("emergency spill pending path encoding overflows u16".to_string()))?;
   if required_u64(&pending, "creation_sequence")? == 0 {
     return Err(EngineError::InvalidInput("emergency spill pending creation sequence must be nonzero".to_string()));
   }
   required_i64(&pending, "first_failure_at_ms")?;
-  let db_path_native = required_hex_bytes(&pending, "db_path_bytes")?;
-  let pending_database_path = path_from_native_bytes(path_encoding, &db_path_native)?;
-  Ok(paths_equivalent(&pending_database_path, db_path))
+  Ok(true)
+}
+
+/// Identify ownership before validating artifact-specific evidence. Shared OS
+/// spill roots may contain incidents for many databases; corruption or policy
+/// differences in a foreign incident must not block an unrelated database.
+/// Once the canonical path matches, the full parser remains fail-closed.
+fn manifest_matches_database(manifest_path: &Path, db_path: &Path) -> EngineResult<Option<bool>> {
+  reject_symlink(manifest_path, "emergency spill manifest")?;
+  let bytes = read_small_file_no_follow(manifest_path, MANIFEST_SIZE_CAP)?;
+  let manifest: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+  match manifest.get("format").and_then(|value| value.as_str()) {
+    Some(EMERGENCY_SPILL_FORMAT) => {
+      Ok(Some(manifest.get("db_path").and_then(|value| value.as_str()).is_some_and(|path| paths_equivalent(Path::new(path), db_path))))
+    }
+    Some(EMERGENCY_SPILL_FORMAT_V2) => {
+      let path_encoding = u16::try_from(required_u64(&manifest, "path_encoding")?)
+        .map_err(|_| EngineError::InvalidInput("emergency spill manifest path encoding overflows u16".to_string()))?;
+      let native = required_hex_bytes(&manifest, "db_path_bytes")?;
+      let declared_path = path_from_native_bytes(path_encoding, &native)?;
+      Ok(Some(paths_equivalent(&declared_path, db_path)))
+    }
+    _ => Ok(None),
+  }
 }
 
 fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClass) -> EngineResult<Option<EmergencySpillArtifact>> {

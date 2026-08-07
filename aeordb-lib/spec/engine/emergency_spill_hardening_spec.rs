@@ -198,6 +198,50 @@ fn damaged_foreign_spill_does_not_block_an_unrelated_database() {
 }
 
 #[test]
+fn foreign_spill_location_class_mismatch_does_not_block_an_unrelated_database() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("target.aeordb");
+  let foreign_database = temp.path().join("foreign.aeordb");
+  fs::write(&database, b"target").unwrap();
+  fs::write(&foreign_database, b"foreign").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  write_v2_artifact(&base, "foreign", &foreign_database, [0x49; 16], 1_700_000_000_000, 1, b"tail");
+
+  let locations = [EmergencySpillLocation { class: SpillLocationClass::OsUserData, path: base }];
+  assert!(scan_for_database_with_locations(&database, &locations).unwrap().is_empty());
+}
+
+#[test]
+fn foreign_pending_location_class_mismatch_does_not_block_an_unrelated_database() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("target.aeordb");
+  let foreign_database = temp.path().join("foreign.aeordb");
+  fs::write(&database, b"target").unwrap();
+  fs::write(&foreign_database, b"foreign").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  write_pending_artifact(&base, "foreign", &foreign_database, [0x4a; 16]);
+
+  let locations = [EmergencySpillLocation { class: SpillLocationClass::OsUserData, path: base }];
+  assert!(scan_for_database_with_locations(&database, &locations).unwrap().is_empty());
+}
+
+#[test]
+fn matching_spill_location_class_mismatch_still_fails_closed() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("target.aeordb");
+  fs::write(&database, b"target").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  write_v2_artifact(&base, "matching", &database, [0x4b; 16], 1_700_000_000_000, 1, b"tail");
+
+  let locations = [EmergencySpillLocation { class: SpillLocationClass::OsUserData, path: base }];
+  let error = scan_for_database_with_locations(&database, &locations).unwrap_err();
+  assert!(error.to_string().contains("location class does not match"), "{error}");
+}
+
+#[test]
 fn v2_scan_rejects_an_empty_native_database_path() {
   let temp = tempfile::tempdir().unwrap();
   let database = temp.path().join("test.aeordb");
