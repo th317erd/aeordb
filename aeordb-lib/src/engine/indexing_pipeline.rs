@@ -9,6 +9,8 @@ use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::source_resolver::resolve_sources;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
+use crate::engine::v4::system_family::{IndexPolicyV1, SystemFamilyPolicyDecisionV1};
 use crate::plugins::plugin_manager::PluginManagerError;
 use crate::plugins::PluginManager;
 use tokio_util::sync::CancellationToken;
@@ -238,7 +240,7 @@ impl<'a> IndexingPipeline<'a> {
     index_sink: &mut S,
     cancellation: Option<&CancellationToken>,
   ) -> EngineResult<()> {
-    if crate::engine::directory_ops::is_internal_path(path) {
+    if !self.path_is_indexable(path)? {
       return Ok(());
     }
 
@@ -368,28 +370,46 @@ impl<'a> IndexingPipeline<'a> {
   /// not have the full file bytes in memory.
   pub fn run_metadata_only(&self, _ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let mut index_manager = IndexManager::new(self.engine);
-    self.run_metadata_only_with_sink(path, &mut index_manager)
+    self.run_metadata_only_with_sink(path, &mut index_manager).map(|_| ())
   }
 
   /// Update only @-prefixed metadata indexes using a buffered writer.
   pub fn run_metadata_only_buffered(&self, _ctx: &RequestContext, path: &str, index_buffer: &mut IndexWriteBuffer<'_>) -> EngineResult<()> {
+    self.run_metadata_only_with_sink(path, index_buffer).map(|_| ())
+  }
+
+  pub(crate) fn run_metadata_only_buffered_with_outcome(&self, path: &str, index_buffer: &mut IndexWriteBuffer<'_>) -> EngineResult<bool> {
     self.run_metadata_only_with_sink(path, index_buffer)
   }
 
-  fn run_metadata_only_with_sink<S: IndexSink>(&self, path: &str, index_sink: &mut S) -> EngineResult<()> {
-    if crate::engine::directory_ops::is_internal_path(path) {
-      return Ok(());
+  fn run_metadata_only_with_sink<S: IndexSink>(&self, path: &str, index_sink: &mut S) -> EngineResult<bool> {
+    if !self.path_is_indexable(path)? {
+      return Ok(false);
     }
 
     let normalized = normalize_path(path);
     let (config, config_dir) = match self.find_config_for_path(&normalized)? {
       Some(pair) => pair,
-      None => return Ok(()),
+      None => return Ok(false),
     };
 
     let algo = self.engine.hash_algo();
     let file_key = crate::engine::directory_ops::file_path_hash(&normalized, &algo)?;
-    self.index_metadata_fields(&config, &config_dir, path, &file_key, index_sink)
+    self.index_metadata_fields(&config, &config_dir, path, &file_key, index_sink)?;
+    Ok(true)
+  }
+
+  pub(crate) fn path_is_indexable(&self, path: &str) -> EngineResult<bool> {
+    let resolver = SystemFamilyPolicyResolver::new(self.engine.hash_algo())?;
+    Ok(match resolver.index_policy_for_path(path)? {
+      SystemFamilyPolicyDecisionV1::Ordinary => true,
+      SystemFamilyPolicyDecisionV1::StructuralContainer => false,
+      SystemFamilyPolicyDecisionV1::Known { policy: IndexPolicyV1::IncludeUnderOrdinaryScope, .. } => true,
+      SystemFamilyPolicyDecisionV1::Known {
+        policy: IndexPolicyV1::NotApplicable | IndexPolicyV1::ExcludeFromAllIndexes | IndexPolicyV1::CanonicalProjectionOnly,
+        ..
+      } => false,
+    })
   }
 
   fn index_metadata_fields<S: IndexSink>(

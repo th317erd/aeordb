@@ -43,6 +43,13 @@
 - **Proof:** the runtime target passes 6 tests, including every transfer operation over all 46 independent manifest rows. Admission passes 9 tests, persistent formats pass 72, the bounded reader-hardening target passes its 21,364-case corpus, all-target checking is green apart from the historical unused WASM-test macro warning, and the contract gate remains green at 436 fixtures, 95 routes, and 38 documentation pages.
 - **Boundary:** this unit adds the single consumer-facing decision surface but deliberately changes no backup, replication, indexing, authorization, GC, or generic route behavior. Those consumers are converted in the following landing units.
 
+## P2c-2 Index Scope Convergence
+
+- **Red proof:** direct indexing accepted an unknown `.aeordb-future` path as ordinary data, while the reindex worker downgraded its typed pipeline failure and completed successfully. Wrapper-level predicates also made streaming, batch, full-parser, and reindex paths choose independently. The strengthened reindex fixture deletes the unknown file's body to prove classification must happen before body I/O.
+- **Implementation:** added the engine-facing `SystemFamilyPolicyResolver`, which centralizes path normalization and typed runtime error translation. The indexing pipeline now selects the frozen `IndexPolicyV1`; permissions and ordinary data remain indexable, declared excluded/not-applicable/canonical-only families are skipped, and unknown protected state returns `EngineError::SystemFamilyPolicy`. Streamed, buffered, full-parser, and batch paths delegate to the pipeline. Reindex classifies before migration or body reads, preserves known internal FileRecord migration, and treats policy failure as a task-fatal result.
+- **Proof:** the affected gate passes 171 tests across `pipeline_spec` (49), `reindex_spec` (28), `write_pipeline_spec` (21), `upload_commit_spec` (21), `directory_ops_spec` (46), and `v4_system_family_runtime_spec` (6). Package all-target checking passes with only the historical unused WASM-test macro warning.
+- **Removal evidence:** `is_internal_path` has no remaining indexing or reindex consumer. Its only live consumer is the pending client-sync conversion; wrapper-level index guards and task-owned protected-name lists are gone.
+
 ## P2c Preflight Test Protocol
 
 1. **Registry authority:** decode the checked-in binary through the production reader while using the independently generated manifest as the policy oracle. Prove all 46 families, 61 descriptors, every typed policy value, all five hash-specific cached registry instances, and admission/runtime pointer identity. The production serializer or decoder may not generate its own expected values.

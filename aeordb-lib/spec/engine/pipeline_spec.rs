@@ -6,7 +6,7 @@ use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::indexing_pipeline::{IndexingPipeline, glob_matches};
 use aeordb::engine::query_engine::QueryBuilder;
 use aeordb::engine::storage_engine::StorageEngine;
-use aeordb::engine::RequestContext;
+use aeordb::engine::{EngineError, RequestContext};
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let ctx = RequestContext::system();
@@ -147,6 +147,56 @@ fn test_normal_path_not_system() {
   let index = index_manager.load_index("/users", "name").unwrap();
   assert!(index.is_some(), "Expected index to be created for normal path");
   assert_eq!(index.unwrap().len(), 1);
+}
+
+#[test]
+fn namespace_permissions_remain_indexable_under_ordinary_scope() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let mut config = make_simple_config("name", "string");
+  config.glob = Some("**".to_string());
+  store_index_config(&engine, "/", &config);
+
+  let pipeline = IndexingPipeline::new(&engine);
+  pipeline
+    .run(&RequestContext::system(), "/docs/.aeordb-permissions", br#"{"name":"permission-record"}"#, Some("application/json"))
+    .unwrap();
+
+  let index = IndexManager::new(&engine).load_index("/", "name").unwrap().expect("permission family remains index-visible");
+  assert_eq!(index.len(), 1);
+}
+
+#[test]
+fn registry_excluded_system_families_do_not_enter_ordinary_indexes() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let mut config = make_simple_config("name", "string");
+  config.glob = Some("**".to_string());
+  store_index_config(&engine, "/", &config);
+  let pipeline = IndexingPipeline::new(&engine);
+
+  for path in [
+    "/.aeordb-system/email-config.json",
+    "/.aeordb-conflicts/item.json",
+    "/docs/.aeordb-indexes/field.idx",
+    "/docs/.aeordb-logs/indexing.log",
+  ] {
+    pipeline.run(&RequestContext::system(), path, br#"{"name":"must-not-index"}"#, Some("application/json")).unwrap();
+  }
+
+  assert!(IndexManager::new(&engine).load_index("/", "name").unwrap().is_none());
+}
+
+#[test]
+fn unknown_protected_families_fail_indexing_with_a_typed_diagnostic() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_index_config(&engine, "/", &make_simple_config("name", "string"));
+
+  let error = IndexingPipeline::new(&engine)
+    .run(&RequestContext::system(), "/docs/.aeordb-future/value.json", br#"{"name":"must-not-index"}"#, Some("application/json"))
+    .unwrap_err();
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
 }
 
 #[test]

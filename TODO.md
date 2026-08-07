@@ -302,6 +302,7 @@
         - [x] Preserve malformed flat-directory evidence instead of returning an unqualified empty success.
       - [ ] Route backup, sync, peer, import, index scope, GC, permissions, plugin host, repair, verify, and generic APIs through operation-specific registry policy.
         - [x] Freeze and implement one shared runtime resolver plus typed transfer/index operation selectors before converting consumers.
+        - [x] Convert live indexing and reindex scope decisions, preserving permission indexing and rejecting unknown protected families.
       - [ ] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
       - [ ] Run focused, adjacent, broad, architecture, documentation, and live disposable-database proof; record and land P2c.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.

@@ -100,6 +100,7 @@ pub mod symlink_resolver;
 pub mod sync_api;
 pub mod sync_apply;
 pub mod sync_engine;
+pub mod system_family_policy;
 pub mod system_store;
 pub mod task_queue;
 pub mod task_worker;
@@ -173,6 +174,7 @@ pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE, MINIMUM_USEFUL_VOID_SIZE}
 pub use storage_engine::{
   ChunkEntryMetadata, ChunkReadLocation, EngineStartupProgress, EngineStartupProgressCallback, StorageEngine, WriteBatch,
 };
+pub use system_family_policy::SystemFamilyPolicyResolver;
 pub use directory_ops::{
   DirectoryListWindow, DirectoryOps, DirectoryTraversalResult, EngineFileStream, directory_content_hash, directory_path_hash,
   file_path_hash, file_content_hash, file_identity_hash, symlink_identity_hash, chunk_content_hash, system_chunk_hash,

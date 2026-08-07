@@ -253,6 +253,37 @@ fn test_reindex_indexes_all_files() {
 }
 
 #[test]
+fn reindex_fails_closed_when_scope_contains_unknown_protected_state() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let config = serde_json::json!({
+      "glob": "**",
+      "indexes": [{"name": "count", "type": "u64", "source": ["count"], "min": 0, "max": 200}]
+  });
+  ops
+    .store_file_buffered(&ctx, "/.aeordb-config/indexes.json", serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json"))
+    .unwrap();
+  ops.store_file_buffered(&ctx, "/docs/.aeordb-future/value.json", br#"{"count":1}"#, Some("application/json")).unwrap();
+  let unknown = ops.get_metadata("/docs/.aeordb-future/value.json").unwrap().unwrap();
+  engine.mark_entry_deleted(unknown.chunk_hashes.first().expect("unknown protected fixture chunk")).unwrap();
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/"})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+
+  let failed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(failed.status, TaskStatus::Failed);
+  assert!(
+    failed.error.as_deref().unwrap_or_default().contains("unknown_protected_system_family"),
+    "classification must fail before the deliberately missing file body is read: {:?}",
+    failed.error,
+  );
+}
+
+#[test]
 fn scoped_reindex_uses_ancestor_glob_config_and_owner_relative_matching() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let event_bus = Arc::new(EventBus::new());

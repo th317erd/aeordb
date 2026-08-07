@@ -630,6 +630,14 @@ fn execute_reindex(
         return Err(task_worker_memory_error(error));
       }
 
+      let indexable = match pipeline.path_is_indexable(file_path) {
+        Ok(indexable) => indexable,
+        Err(error) => {
+          flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+          return Err(error);
+        }
+      };
+
       if force {
         match ops
           .migrate_file_record_to_current_version_with_memory(file_path, migration_memory.as_mut().expect("force creates migration memory"))
@@ -658,12 +666,19 @@ fn execute_reindex(
           }
         }
 
-        if config.is_none() || skip_indexing_path(file_path) {
+        if config.is_none() || !indexable {
           consecutive_failures = 0;
           indexed_count += 1;
           last_processed_path = Some(file_path);
           continue;
         }
+      }
+
+      if !indexable {
+        consecutive_failures = 0;
+        indexed_count += 1;
+        last_processed_path = Some(file_path);
+        continue;
       }
 
       let index_result = if metadata_only {
@@ -732,7 +747,12 @@ fn execute_reindex(
         Ok(()) => {
           consecutive_failures = 0;
         }
-        Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
+        Err(
+          error @ (EngineError::ResourceExhausted(_)
+          | EngineError::Cancelled(_)
+          | EngineError::ShuttingDown
+          | EngineError::SystemFamilyPolicy { .. }),
+        ) => {
           flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
           return Err(error);
         }
@@ -898,7 +918,7 @@ fn collect_recursive_reindex_paths(
 }
 
 fn reindex_listing_entry_matches(entry: &crate::engine::directory_listing::ListingEntry, prefix: &str, glob_pattern: &str) -> bool {
-  if entry.entry_type != EntryType::FileRecord.to_u8() || crate::engine::directory_ops::is_internal_path(&entry.path) {
+  if entry.entry_type != EntryType::FileRecord.to_u8() {
     return false;
   }
   let relative = entry.path.trim_start_matches(prefix).trim_start_matches('/');
@@ -924,12 +944,11 @@ fn collect_direct_reindex_paths_with_between_pass_hook<F>(
 where
   F: FnOnce(),
 {
-  let root_is_internal = crate::engine::directory_ops::is_internal_path(reindex_root);
   let mut retained_bytes = 0u64;
   let mut path_count = 0usize;
   ops.visit_live_directory_children(reindex_root, |entry| {
     memory.record_work(1)?;
-    if !direct_reindex_child_matches(entry, root_is_internal) {
+    if !direct_reindex_child_matches(entry) {
       return Ok(true);
     }
     let path_length = prefix
@@ -953,7 +972,7 @@ where
   let mut populated_bytes = 0u64;
   ops.visit_live_directory_children(reindex_root, |entry| {
     memory.record_work(1)?;
-    if !direct_reindex_child_matches(entry, root_is_internal) {
+    if !direct_reindex_child_matches(entry) {
       return Ok(true);
     }
     let path_length = prefix
@@ -976,10 +995,8 @@ where
   Ok(paths)
 }
 
-fn direct_reindex_child_matches(entry: &crate::engine::directory_entry::ChildEntry, root_is_internal: bool) -> bool {
+fn direct_reindex_child_matches(entry: &crate::engine::directory_entry::ChildEntry) -> bool {
   entry.entry_type == EntryType::FileRecord.to_u8()
-    && !root_is_internal
-    && !matches!(entry.name.as_str(), ".aeordb-logs" | ".aeordb-indexes" | ".aeordb-config")
 }
 
 fn flush_reindex_before_retry(
@@ -1078,10 +1095,6 @@ fn path_in_reindex_scope(base_path: &str, candidate_path: &str) -> bool {
   }
 
   candidate_path == base_path || candidate_path.strip_prefix(base_path.trim_end_matches('/')).is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn skip_indexing_path(path: &str) -> bool {
-  crate::engine::directory_ops::is_internal_path(path) || crate::engine::directory_ops::is_system_path(path)
 }
 
 /// Execute a garbage collection task.

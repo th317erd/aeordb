@@ -19,6 +19,10 @@ pub enum EngineError {
   ReservedUserId,
   UnsafeQueryField(String),
   PatchDatabase(String),
+  SystemFamilyPolicy {
+    code: &'static str,
+    reason: String,
+  },
   InvalidInput(String),
   ResourceExhausted(String),
   SnapshotWritesDisabled,
@@ -59,6 +63,7 @@ impl fmt::Display for EngineError {
       EngineError::ReservedUserId => write!(formatter, "Cannot use the nil UUID (root user ID) for regular users or API keys"),
       EngineError::UnsafeQueryField(field) => write!(formatter, "Unsafe query field: '{}' is not allowed in group queries", field),
       EngineError::PatchDatabase(msg) => write!(formatter, "Patch database: {}", msg),
+      EngineError::SystemFamilyPolicy { code, reason } => write!(formatter, "System family policy failure ({code}): {reason}"),
       EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
       EngineError::ResourceExhausted(msg) => write!(formatter, "Resource exhausted: {}", msg),
       EngineError::SnapshotWritesDisabled => write!(formatter, "Snapshot writes are disabled by lifecycle configuration"),

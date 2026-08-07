@@ -268,7 +268,7 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   }
   let publish_file_records_ms = publish_start.elapsed().as_millis();
 
-  let (result, mut finish_timings) = finish_batch_commit(engine, ctx, file_infos)?;
+  let (result, mut finish_timings) = finish_batch_commit(engine, file_infos)?;
   let transaction_commit_start = std::time::Instant::now();
   txn.commit_after(namespace)?;
   let transaction_commit_ms = transaction_commit_start.elapsed().as_millis();
@@ -380,7 +380,7 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     });
   }
 
-  let (result, _timings) = match finish_batch_commit(engine, ctx, file_infos) {
+  let (result, _timings) = match finish_batch_commit(engine, file_infos) {
     Ok(value) => value,
     Err(error) => return txn.finish_after(Err(error), namespace),
   };
@@ -389,11 +389,7 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
   Ok(result)
 }
 
-fn finish_batch_commit(
-  engine: &StorageEngine,
-  ctx: &RequestContext,
-  file_infos: Vec<BatchFileInfo>,
-) -> EngineResult<(CommitResult, FinishBatchCommitTimings)> {
+fn finish_batch_commit(engine: &StorageEngine, file_infos: Vec<BatchFileInfo>) -> EngineResult<(CommitResult, FinishBatchCommitTimings)> {
   let mut timings = FinishBatchCommitTimings::default();
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
@@ -523,14 +519,15 @@ fn finish_batch_commit(
   let pipeline = IndexingPipeline::new(engine);
   let mut index_buffer = IndexWriteBuffer::new(engine, live_commit_index_buffer_options());
   for info in &file_infos {
-    if !is_system_path(&info.normalized_path) {
-      timings.metadata_indexed_files += 1;
-      if let Err(error) = pipeline.run_metadata_only_buffered(ctx, &info.normalized_path, &mut index_buffer) {
+    match pipeline.run_metadata_only_buffered_with_outcome(&info.normalized_path, &mut index_buffer) {
+      Ok(true) => timings.metadata_indexed_files += 1,
+      Ok(false) => {}
+      Err(error) => {
         tracing::warn!("Metadata indexing failed for '{}': {}", info.normalized_path, error);
       }
-      if let Err(error) = index_buffer.flush_if_due() {
-        tracing::warn!("Metadata index flush failed during batch commit for '{}': {}", info.normalized_path, error);
-      }
+    }
+    if let Err(error) = index_buffer.flush_if_due() {
+      tracing::warn!("Metadata index flush failed during batch commit for '{}': {}", info.normalized_path, error);
     }
   }
   let index_stats = index_buffer.stats()?;

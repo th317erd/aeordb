@@ -1045,10 +1045,6 @@ impl<'a> DirectoryOps<'a> {
   }
 
   fn index_metadata_after_streaming_store(&self, ctx: &RequestContext, path: &str) {
-    if is_internal_path(path) {
-      return;
-    }
-
     let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
     if let Err(error) = pipeline.run_metadata_only(ctx, path) {
       tracing::warn!("Metadata indexing failed for streamed file '{}': {}", path, error);
@@ -2857,11 +2853,6 @@ impl<'a> DirectoryOps<'a> {
     let compression_algo = self.detect_compression(path, content_type, data.len());
     let file_record = self.store_file_internal(ctx, path, data, content_type, compression_algo)?;
 
-    // Guard: skip indexing for system directories
-    if is_internal_path(path) {
-      return Ok(file_record);
-    }
-
     // Delegate to indexing pipeline using the detected content type from the file record
     let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
     let detected_ct = file_record.content_type.as_deref();
@@ -2884,10 +2875,6 @@ impl<'a> DirectoryOps<'a> {
     let compression_algo = self.detect_compression(path, content_type, data.len());
 
     let file_record = self.store_file_internal(ctx, path, data, content_type, compression_algo)?;
-
-    if is_internal_path(path) {
-      return Ok(file_record);
-    }
 
     // Use full pipeline with plugin manager, passing detected content type
     let pipeline = match plugin_manager {
