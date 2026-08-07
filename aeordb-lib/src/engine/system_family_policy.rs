@@ -1,4 +1,5 @@
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::entry_type::EntryType;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::v4::reader::FormatError;
 use crate::engine::v4::system_family::{
@@ -58,6 +59,16 @@ impl SystemFamilyPolicyResolver {
       .map_err(|error| system_family_path_error(error, &normalized, operation.name()))
   }
 
+  pub fn transfer_policy_for_entry_type(
+    self,
+    entry_type: EntryType,
+    operation: SystemFamilyTransferOperationV1,
+  ) -> EngineResult<SystemFamilyPolicyDecisionV1<TransferPolicyV1>> {
+    self.inner.transfer_policy(SystemFamilySubjectV1::EntryType(u16::from(entry_type.to_u8())), operation).map_err(|error| {
+      EngineError::SystemFamilyPolicy { code: error.code(), reason: format!("{} entry type {:?}: {error}", operation.name(), entry_type) }
+    })
+  }
+
   /// Decide whether a broad transfer operation traverses one path.
   ///
   /// `NamedSubsetOnly` is deliberately excluded here: those families require
@@ -68,22 +79,15 @@ impl SystemFamilyPolicyResolver {
     path: &str,
     operation: SystemFamilyTransferOperationV1,
   ) -> EngineResult<TransferPathSelection> {
-    match self.transfer_policy_for_path(path, operation)? {
-      SystemFamilyPolicyDecisionV1::Ordinary => Ok(TransferPathSelection::Include),
-      SystemFamilyPolicyDecisionV1::StructuralContainer => Ok(TransferPathSelection::StructuralContainer),
-      SystemFamilyPolicyDecisionV1::Known { policy: TransferPolicyV1::RequiredInclude | TransferPolicyV1::OptionalValidated, .. } => {
-        Ok(TransferPathSelection::Include)
-      }
-      SystemFamilyPolicyDecisionV1::Known {
-        policy:
-          TransferPolicyV1::OmitDeclared | TransferPolicyV1::NodeLocal | TransferPolicyV1::RedactOmit | TransferPolicyV1::NamedSubsetOnly,
-        ..
-      } => Ok(TransferPathSelection::Omit),
-      SystemFamilyPolicyDecisionV1::Known { family_id, policy: TransferPolicyV1::FailUnknown } => Err(EngineError::SystemFamilyPolicy {
-        code: "system_family_transfer_refused",
-        reason: format!("{} refuses family 0x{family_id:04x}", operation.name()),
-      }),
-    }
+    transfer_selection(self.transfer_policy_for_path(path, operation)?, operation)
+  }
+
+  pub(crate) fn transfer_entry_type_selection(
+    self,
+    entry_type: EntryType,
+    operation: SystemFamilyTransferOperationV1,
+  ) -> EngineResult<TransferPathSelection> {
+    transfer_selection(self.transfer_policy_for_entry_type(entry_type, operation)?, operation)
   }
 
   pub fn transfer_path_is_included(self, path: &str, operation: SystemFamilyTransferOperationV1) -> EngineResult<bool> {
@@ -136,6 +140,28 @@ impl SystemFamilyPolicyResolver {
   pub fn index_policy_for_path(self, path: &str) -> EngineResult<SystemFamilyPolicyDecisionV1<IndexPolicyV1>> {
     let normalized = normalize_path(path);
     self.inner.index_policy(SystemFamilySubjectV1::Path(&normalized)).map_err(system_family_error)
+  }
+}
+
+fn transfer_selection(
+  decision: SystemFamilyPolicyDecisionV1<TransferPolicyV1>,
+  operation: SystemFamilyTransferOperationV1,
+) -> EngineResult<TransferPathSelection> {
+  match decision {
+    SystemFamilyPolicyDecisionV1::Ordinary => Ok(TransferPathSelection::Include),
+    SystemFamilyPolicyDecisionV1::StructuralContainer => Ok(TransferPathSelection::StructuralContainer),
+    SystemFamilyPolicyDecisionV1::Known { policy: TransferPolicyV1::RequiredInclude | TransferPolicyV1::OptionalValidated, .. } => {
+      Ok(TransferPathSelection::Include)
+    }
+    SystemFamilyPolicyDecisionV1::Known {
+      policy:
+        TransferPolicyV1::OmitDeclared | TransferPolicyV1::NodeLocal | TransferPolicyV1::RedactOmit | TransferPolicyV1::NamedSubsetOnly,
+      ..
+    } => Ok(TransferPathSelection::Omit),
+    SystemFamilyPolicyDecisionV1::Known { family_id, policy: TransferPolicyV1::FailUnknown } => Err(EngineError::SystemFamilyPolicy {
+      code: "system_family_transfer_refused",
+      reason: format!("{} refuses family 0x{family_id:04x}", operation.name()),
+    }),
   }
 }
 

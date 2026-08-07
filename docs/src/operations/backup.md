@@ -195,6 +195,13 @@ aeordb import --database data.aeordb --file backup.aeordb \
 When the backup contains system data and no root key is provided, the
 import succeeds but skips the system entries (a warning is printed).
 
+The CLI determines whether privileged import is required from decoded record
+paths and the embedded SystemFamily policy, not from the legacy `FLAG_SYSTEM`
+header bit. A missing or forged flag therefore cannot move portable protected
+state through the ordinary data-import path. Even with a valid root key,
+credentials, secrets, node-local controls, logs, GC state, and derived indexes
+remain omitted according to import policy.
+
 ### HTTP API
 
 ```bash
@@ -208,11 +215,21 @@ Use `?promote=true`, `?force=true`, and `?mode=restore` as needed. Uploads are
 streamed to a temporary file beside the target database with a 10 GiB transfer
 limit. AeorDB rejects an oversized declared `Content-Length` before creating an
 artifact and independently counts streamed bytes, so chunked uploads cannot
-bypass the limit. Before the first target write, AeorDB validates the artifact type and
-every inventoried entry body and checksum, then admits its inventory and
-transfer workspace under the process memory coordinator. The temporary file is
-removed together with its lock sidecar on success, refusal, malformed input,
-cancellation, or handler failure.
+bypass the limit. Before the first target write, AeorDB validates the artifact
+type and every inventoried entry body and checksum, then admits its inventory
+and transfer workspace under the process memory coordinator. Full exports also
+walk HEAD and every imported snapshot through the selected data-import policy
+before mutation. Import rebuilds directory closure when policy omits a child,
+remaps snapshot roots to that rebuilt closure, and rejects unknown protected or
+structurally invalid paths. The temporary file is removed together with its
+lock sidecar on success, refusal, malformed input, cancellation, or handler
+failure.
+
+For full exports, `entries_imported` counts selected logical objects across
+HEAD and each imported snapshot. `chunks_imported` includes only chunk payloads
+that were not already present; file and directory counts include each selected
+root in which the object was processed. Import write metrics count these
+logical mutations, with newly copied chunk payload bytes counted once.
 
 ### Patch Base Version Check
 

@@ -335,7 +335,15 @@ let result = import_backup(&ctx, &engine, "/tmp/backup.aeordb", false, false, fa
 
 `result.version_hash` is the root stored in the export. It normally equals
 `head_hash`; user-only export can replace a legacy root that still names a
-protected system tree with a normalized root.
+protected system tree with a normalized root. Full import validates and
+rebuilds the selected SystemFamily closure before the first target mutation;
+the final `result.version_hash` is the imported root after that policy pass.
+The final boolean selects privileged import authorization, but it never permits
+credentials, secrets, node-local controls, logs, GC state, or derived indexes.
+Full-import counts describe logical objects in each imported root: chunks count
+only newly stored payloads, while files, directories, and symlinks count the
+selected objects processed for HEAD and each imported snapshot. Runtime write
+metrics use the same logical operations and count chunk payload bytes once.
 
 ## Garbage Collection
 

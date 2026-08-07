@@ -1,9 +1,9 @@
 # Child 03 Progress: Namespace
 
 - **Status:** blocked only by Child 01 native-platform execution
-- **Current landing unit:** P2c-2 consumer conversion and duplicate-policy removal
-- **Entry commit:** pending native P1c closure; preflight baseline `ff3f95c`
-- **Last green commit:** P2 runtime/recovery closure `e4c8f17`; architecture inventory refresh `ff3f95c`
+- **Current landing unit:** P2c-3 registry-governed import
+- **Entry commit:** `08651a3`
+- **Last green commit:** P2c peer/client sync convergence `08651a3`
 - **Owner:** Codex, namespace/semantic authority and integration owner
 - **Start gate:** Child 02 is green; Child 01 is code-complete and Linux-green, but native `wyatt-mac` and `win11vm` execution remains required
 - **Plan:** [Child 03](../children/03-namespace-semantic-roots-and-system-families.md)
@@ -14,7 +14,7 @@
 - **Broad gate:** green for P2c-2: 4,814 tests across 196 suites, zero failures and seven ignored; workspace/all-target check, formatting, docs, and v4 contract gate are green
 - **Drift/risks:** the frozen registry has no persisted family for structural parent directories such as `/.aeordb-system`; runtime traversal must recognize only strict ancestors of known path descriptors without granting those containers a persisted family policy. Existing flat-directory parse failures can become empty/complete results, best-effort B-tree warnings are discarded by several wrappers, peer/system augmentation silently skips every error, and hard-coded path lists disagree with the 46-family registry. P2 retains the old v3 system-flag predicate only as an explicitly named v0 byte-layout evaluator.
 - **Evidence:** exhaustive source searches found the old predicates in DirectoryOps/batch v3 flags, auth, backup, sync, indexing, task, plugin, download/fetch/symlink/version/engine routes, plus hard-coded protected roots in GC, backup, and tree walking. Traversal consumers include backup/import, peer and embedded sync, directory accounting, reindex, verify, and route sync. The current registry decoder exposes eighteen raw policy bytes and its five-algorithm embedded cache is private to admission. A 194-test P2c-adjacent characterization gate passed across B-tree directories, tree walking, backup/import, sync, permissions, and GC. Existing peer tests require node-local `/.aeordb-system/config/secret_key` replication and backup tests inspect secret email configuration, directly characterizing behavior the ratified registry intentionally corrects; `V4-SYSTEM-FAMILY-POLICY` now records that approved divergence. Both native hosts remained unavailable at `ff3f95c` (`wyatt-mac`: no route; `win11vm`: forwarded port refused).
-- **Next action:** keep retrying the exact P1c native gates when both hosts are online; meanwhile land the independent, production-red P2c registry-policy/structural-container tests without activating P2c production behavior
+- **Next action:** prove full-export and sparse-patch imports validate one registry-authorized path closure before target mutation, while continuing to retry the exact P1c native gates when both hosts are online
 
 ## 2026-08-06 Context Recovery
 
@@ -68,6 +68,13 @@
 - **Removal evidence:** sync producer code contains no `is_system_path`, `is_internal_path`, protected path literal, `augment_with_system_subtrees`, duplicate `walk_version_tree`, or duplicate `diff_trees` policy path. The compatibility boolean remains only as an adapter selecting the closed peer/client transfer operation.
 - **Deferred receiver hardening:** the legacy HTTP receiver still needs strict typed response/chunk decoding, chunk payload hash and completeness proof, and convergence on the shared apply authority. Embedded apply also still squelches non-`NotFound` delete errors. These are explicit P2e/Child 06 obligations and prevent claiming end-to-end sync apply closure here.
 - **Broad proof:** `cargo test -j4 --workspace --all-targets -- --test-threads=4` passed 4,814 tests across 196 suites with zero failures and seven ignored. `cargo check -j4 --workspace --all-targets`, workspace and reference-tool formatting checks, `mdbook build docs`, `git diff --check`, and the v4 contract gate are green. The contract gate independently verifies 436 fixtures, 95 routes, and 38 documentation pages.
+
+## P2c-3 Registry-Governed Full-Export Import
+
+- **Red proof:** a full export augmented with an unknown `/.aeordb-*` path imported successfully and advanced HEAD, while a privileged import copied a node-local API-key payload. Clearing legacy `FLAG_SYSTEM` from a portable user record also made CLI inspection misclassify the artifact as user-data-only.
+- **Implementation:** full-export import now validates HEAD and every named snapshot through one operation-specific registry walk before the first target mutation. A second bounded walk writes only selected closure, rebuilds directories when children are omitted, replaces current path aliases, remaps snapshot roots, preserves portable required state, and omits credentials, node-local controls, logs, GC state, and derived indexes. CLI inspection decodes FileRecord, Symlink, DeletionRecord, and Snapshot subjects through registry Import versus DataExport policy instead of trusting header flags. Import-mode tree writes preserve logical operation metrics and count newly copied chunk bytes once; artifact construction does not contaminate runtime metrics.
+- **Proof:** `backup_import_spec` (27), `backup_export_spec` (31), `backup_http_spec` (20), `event_emission_spec` (34), `tree_walker_spec` (21), and `v4_system_family_runtime_spec` (6) pass, for 139 tests. Workspace/all-target checking, formatting, `git diff --check`, and `mdbook build docs` are green.
+- **Boundary:** sparse patch artifacts still use the legacy raw-inventory application path. They require an overlay-aware registry validation/rebuild design so omitted patch families cannot be copied or left reachable through the advertised target root; that remains the next P2c-3 landing unit.
 
 ## P2c Preflight Test Protocol
 

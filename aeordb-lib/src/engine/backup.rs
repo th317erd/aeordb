@@ -3,13 +3,14 @@ use crate::engine::directory_entry::{deserialize_child_entries, serialize_child_
 use crate::engine::directory_ops::{directory_content_hash, directory_path_hash, file_path_hash, is_system_path};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::file_record::FileRecord;
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
-use crate::engine::symlink_record::symlink_path_hash;
+use crate::engine::system_family_policy::{SystemFamilyPolicyResolver, TransferPathSelection};
+use crate::engine::symlink_record::{symlink_path_hash, SymlinkRecord};
 use crate::engine::tree_walker::{
   diff_trees_with_budget, walk_version_tree_for_transfer_with_budget, walk_version_tree_with_budget, VersionTree,
 };
@@ -27,6 +28,7 @@ struct TreeWriteResult {
   chunks_written: u64,
   files_written: u64,
   directories_written: u64,
+  symlinks_written: u64,
   root_hash: Vec<u8>,
 }
 
@@ -150,7 +152,7 @@ fn export_version_with_budget(
     let tree = walk_version_tree_for_transfer_with_budget(source, version_hash, operation, include_system, budget)?;
     budget.check_cancellation()?;
     let output = StorageEngine::create_with_memory_coordinator(part_path, source.memory_coordinator())?;
-    let stats = write_tree_to_engine(&tree, source, &output, resolver, operation, budget)?;
+    let stats = write_tree_to_engine(&tree, source, &output, resolver, operation, TransferDestinationMode::Artifact, budget)?;
     budget.check_cancellation()?;
     output.set_backup_info(1, &stats.root_hash, &stats.root_hash)?;
     output.update_head(&stats.root_hash)?;
@@ -289,7 +291,7 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
     let head_checkpoint = budget.checkpoint();
     let stats = {
       let head_tree = walk_version_tree_for_transfer_with_budget(source, &head_hash, operation, include_system, &mut budget)?;
-      write_tree_to_engine(&head_tree, source, &output, resolver, operation, &mut budget)?
+      write_tree_to_engine(&head_tree, source, &output, resolver, operation, TransferDestinationMode::Artifact, &mut budget)?
     };
     budget.release_to(head_checkpoint, "HEAD tree release failed")?;
     total_chunks += stats.chunks_written;
@@ -310,7 +312,7 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
       let tree_checkpoint = budget.checkpoint();
       let stats = {
         let tree = walk_version_tree_for_transfer_with_budget(source, &snap.root_hash, operation, false, &mut budget)?;
-        write_tree_to_engine(&tree, source, &output, resolver, operation, &mut budget)?
+        write_tree_to_engine(&tree, source, &output, resolver, operation, TransferDestinationMode::Artifact, &mut budget)?
       };
       budget.release_to(tree_checkpoint, "snapshot tree release failed")?;
       total_chunks += stats.chunks_written;
@@ -342,12 +344,29 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
 /// The tree has already been classified by the operation-specific registry
 /// policy. Directory indexes are rebuilt as needed so omitted descendants do
 /// not remain reachable through copied parent metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransferDestinationMode {
+  Artifact,
+  Import,
+}
+
+impl TransferDestinationMode {
+  fn replaces_path_aliases(self) -> bool {
+    self == Self::Import
+  }
+
+  fn records_runtime_metrics(self) -> bool {
+    self == Self::Import
+  }
+}
+
 fn write_tree_to_engine(
   tree: &VersionTree,
   source: &StorageEngine,
   output: &StorageEngine,
   resolver: SystemFamilyPolicyResolver,
   operation: SystemFamilyTransferOperationV1,
+  destination_mode: TransferDestinationMode,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<TreeWriteResult> {
   let mut chunks_written = 0u64;
@@ -370,6 +389,10 @@ fn write_tree_to_engine(
         });
       }
       output.store_entry(EntryType::Chunk, &key, &value)?;
+      if destination_mode.records_runtime_metrics() {
+        output.counters().record_chunk_stored(value.len() as u64);
+        output.counters().record_write(value.len() as u64);
+      }
       budget.release(charge, "chunk copy buffer release failed")?;
       chunks_written += 1;
     }
@@ -391,15 +414,18 @@ fn write_tree_to_engine(
       }
       // Also write at path-hash key (for read_file lookups)
       let path_key = file_path_hash(path, &file_algo)?;
-      if path_key != key && !output.has_entry(&path_key)? {
+      if path_key != key && (destination_mode.replaces_path_aliases() || !output.has_entry(&path_key)?) {
         store_file_record_entry_preserving_version(&output, &path_key, &value, header.flags, header.entry_version)?;
+      }
+      if destination_mode.records_runtime_metrics() {
+        output.counters().record_write(0);
       }
       files_written += 1;
       budget.release(charge, "FileRecord copy buffer release failed")?;
     }
   }
 
-  let (dirs_written, root_hash) = write_transfer_directories(tree, source, output, resolver, operation, budget)?;
+  let (dirs_written, root_hash) = write_transfer_directories(tree, source, output, resolver, operation, destination_mode, budget)?;
 
   // Write symlink entries at both content-hash and path-hash keys.
   let symlink_algo = output.hash_algo();
@@ -417,14 +443,23 @@ fn write_tree_to_engine(
         output.store_entry_with_flags_and_version(EntryType::Symlink, &key, &value, header.flags, header.entry_version)?;
       }
       let path_key = symlink_path_hash(path, &symlink_algo)?;
-      if path_key != key && !output.has_entry(&path_key)? {
+      if path_key != key && (destination_mode.replaces_path_aliases() || !output.has_entry(&path_key)?) {
         output.store_entry_with_flags_and_version(EntryType::Symlink, &path_key, &value, header.flags, header.entry_version)?;
+      }
+      if destination_mode.records_runtime_metrics() {
+        output.counters().record_write(0);
       }
       budget.release(charge, "Symlink copy buffer release failed")?;
     }
   }
 
-  Ok(TreeWriteResult { chunks_written, files_written, directories_written: dirs_written, root_hash })
+  Ok(TreeWriteResult {
+    chunks_written,
+    files_written,
+    directories_written: dirs_written,
+    symlinks_written: tree.symlinks.len() as u64,
+    root_hash,
+  })
 }
 
 fn write_transfer_directories(
@@ -433,6 +468,7 @@ fn write_transfer_directories(
   output: &StorageEngine,
   resolver: SystemFamilyPolicyResolver,
   operation: SystemFamilyTransferOperationV1,
+  destination_mode: TransferDestinationMode,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(u64, Vec<u8>)> {
   let algorithm = output.hash_algo();
@@ -538,7 +574,7 @@ fn write_transfer_directories(
       };
 
       let path_key = directory_path_hash(path, &algorithm)?;
-      if path_key != exported_hash && !output.has_entry(&path_key)? {
+      if path_key != exported_hash && (destination_mode.replaces_path_aliases() || !output.has_entry(&path_key)?) {
         let exported_header = output
           .get_entry_header_including_deleted(&exported_hash)?
           .ok_or_else(|| EngineError::NotFound(format!("exported directory {} was not stored", hex::encode(&exported_hash))))?;
@@ -552,6 +588,9 @@ fn write_transfer_directories(
           .get_entry_including_deleted_bounded(&exported_hash, exported_header.value_length)?
           .ok_or_else(|| EngineError::NotFound(format!("exported directory {} disappeared", hex::encode(&exported_hash))))?;
         store_directory_entry_preserving_version(output, &path_key, &exported_value, flags, exported_header.entry_version)?;
+      }
+      if destination_mode.records_runtime_metrics() {
+        output.counters().record_write(0);
       }
       written_hashes.insert(path.clone(), exported_hash);
       directories_written += 1;
@@ -1288,21 +1327,117 @@ impl std::fmt::Display for PatchResult {
   }
 }
 
-/// Detect whether a backup contains any system data (entries with FLAG_SYSTEM set).
-/// Used to determine whether root-key authority is required for import.
+/// Detect whether a backup contains registry-selected state that requires a
+/// privileged import rather than an ordinary data import.
+///
+/// Legacy entry flags are intentionally not authority here: an imported
+/// artifact can be old, malformed, or adversarially mislabeled. The embedded
+/// SystemFamily registry and each decoded record path decide the boundary.
 pub fn backup_contains_system_data(backup: &StorageEngine) -> EngineResult<bool> {
-  use crate::engine::entry_header::FLAG_SYSTEM;
   let mut budget = backup_budget(backup, None)?;
-  let (entries, _inventory_charge) =
-    load_type_inventory(backup, KV_TYPE_FILE_RECORD, &mut budget, "system-data inventory admission failed")?;
+  let resolver = SystemFamilyPolicyResolver::new(backup.hash_algo())?;
+  let hash_length = backup.hash_algo().hash_length();
+
+  let (entries, inventory_charge) =
+    load_type_inventory(backup, KV_TYPE_FILE_RECORD, &mut budget, "system-data FileRecord inventory admission failed")?;
   for entry in entries {
     budget.record_work(1)?;
-    let header = required_backup_header(backup, &entry.hash, EntryType::FileRecord, "system-data inspection")?;
-    if header.flags & FLAG_SYSTEM != 0 {
+    let ((header, _key, value), charge) = required_backup_entry(backup, &entry.hash, "system-data FileRecord", &mut budget)?;
+    if header.entry_type != EntryType::FileRecord {
+      return Err(EngineError::CorruptEntry {
+        offset: entry.offset,
+        reason: format!("system-data FileRecord inventory key resolved to {:?}", header.entry_type),
+      });
+    }
+    let record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+    budget.release(charge, "system-data FileRecord buffer release failed")?;
+    if path_requires_privileged_import(resolver, &record.path)? {
       return Ok(true);
     }
   }
+  budget.release(inventory_charge, "system-data FileRecord inventory release failed")?;
+
+  let (entries, inventory_charge) =
+    load_type_inventory(backup, KV_TYPE_SYMLINK, &mut budget, "system-data Symlink inventory admission failed")?;
+  for entry in entries {
+    budget.record_work(1)?;
+    let ((header, _key, value), charge) = required_backup_entry(backup, &entry.hash, "system-data Symlink", &mut budget)?;
+    if header.entry_type != EntryType::Symlink {
+      return Err(EngineError::CorruptEntry {
+        offset: entry.offset,
+        reason: format!("system-data Symlink inventory key resolved to {:?}", header.entry_type),
+      });
+    }
+    let record = SymlinkRecord::deserialize(&value, header.entry_version)?;
+    budget.release(charge, "system-data Symlink buffer release failed")?;
+    if path_requires_privileged_import(resolver, &record.path)? {
+      return Ok(true);
+    }
+  }
+  budget.release(inventory_charge, "system-data Symlink inventory release failed")?;
+
+  let (entries, inventory_charge) =
+    load_type_inventory(backup, KV_TYPE_DELETION, &mut budget, "system-data deletion inventory admission failed")?;
+  for entry in entries {
+    budget.record_work(1)?;
+    let ((header, _key, value), charge) = required_backup_entry(backup, &entry.hash, "system-data DeletionRecord", &mut budget)?;
+    if header.entry_type != EntryType::DeletionRecord {
+      return Err(EngineError::CorruptEntry {
+        offset: entry.offset,
+        reason: format!("system-data deletion inventory key resolved to {:?}", header.entry_type),
+      });
+    }
+    let record = DeletionRecord::deserialize(&value, header.entry_version)?;
+    budget.release(charge, "system-data deletion buffer release failed")?;
+    if path_requires_privileged_import(resolver, &record.path)? {
+      return Ok(true);
+    }
+  }
+  budget.release(inventory_charge, "system-data deletion inventory release failed")?;
+
+  let snapshots = load_snapshot_infos(backup, &mut budget)?;
+  if !snapshots.is_empty() && entry_type_requires_privileged_import(resolver, EntryType::Snapshot)? {
+    return Ok(true);
+  }
   Ok(false)
+}
+
+fn path_requires_privileged_import(resolver: SystemFamilyPolicyResolver, path: &str) -> EngineResult<bool> {
+  requires_privileged_import(
+    resolver.transfer_path_selection(path, SystemFamilyTransferOperationV1::Import)?,
+    resolver.transfer_path_selection(path, SystemFamilyTransferOperationV1::DataExport)?,
+    path,
+  )
+}
+
+fn entry_type_requires_privileged_import(resolver: SystemFamilyPolicyResolver, entry_type: EntryType) -> EngineResult<bool> {
+  requires_privileged_import(
+    resolver.transfer_entry_type_selection(entry_type, SystemFamilyTransferOperationV1::Import)?,
+    resolver.transfer_entry_type_selection(entry_type, SystemFamilyTransferOperationV1::DataExport)?,
+    &format!("{:?}", entry_type),
+  )
+}
+
+fn requires_privileged_import(
+  import_selection: TransferPathSelection,
+  data_export_selection: TransferPathSelection,
+  subject: &str,
+) -> EngineResult<bool> {
+  match import_selection {
+    TransferPathSelection::Omit => Ok(false),
+    TransferPathSelection::StructuralContainer => Err(EngineError::SystemFamilyPolicy {
+      code: "system_family_structural_leaf",
+      reason: format!("import inspection uses structural container '{subject}' as a leaf"),
+    }),
+    TransferPathSelection::Include => match data_export_selection {
+      TransferPathSelection::Include => Ok(false),
+      TransferPathSelection::Omit => Ok(true),
+      TransferPathSelection::StructuralContainer => Err(EngineError::SystemFamilyPolicy {
+        code: "system_family_structural_leaf",
+        reason: format!("data export inspection uses structural container '{subject}' as a leaf"),
+      }),
+    },
+  }
 }
 
 /// Import an export or patch .aeordb file into a target database.
@@ -1415,18 +1550,20 @@ pub fn import_backup_with_mode(
   // Admit every inventory and the largest source-entry buffer before the
   // first target mutation. A memory-pressure or malformed-backup failure must
   // not turn an import into an avoidable partial write.
-  let (chunk_kv_entries, _) = load_type_inventory(&backup, KV_TYPE_CHUNK, &mut budget, "chunk import inventory admission failed")?;
-  let (file_kv_entries, _) =
+  let (chunk_kv_entries, chunk_inventory_charge) =
+    load_type_inventory(&backup, KV_TYPE_CHUNK, &mut budget, "chunk import inventory admission failed")?;
+  let (file_kv_entries, file_inventory_charge) =
     load_type_inventory(&backup, KV_TYPE_FILE_RECORD, &mut budget, "FileRecord import inventory admission failed")?;
-  let (dir_kv_entries, _) =
+  let (dir_kv_entries, directory_inventory_charge) =
     load_type_inventory(&backup, KV_TYPE_DIRECTORY, &mut budget, "DirectoryIndex import inventory admission failed")?;
-  let (sym_kv_entries, _) = load_type_inventory(&backup, KV_TYPE_SYMLINK, &mut budget, "Symlink import inventory admission failed")?;
-  let (snapshot_kv_entries, _) = if include_system {
+  let (sym_kv_entries, symlink_inventory_charge) =
+    load_type_inventory(&backup, KV_TYPE_SYMLINK, &mut budget, "Symlink import inventory admission failed")?;
+  let (snapshot_kv_entries, snapshot_inventory_charge) = if include_system {
     load_type_inventory(&backup, crate::engine::kv_store::KV_TYPE_SNAPSHOT, &mut budget, "Snapshot import inventory admission failed")?
   } else {
     (Vec::new(), 0)
   };
-  let (deletion_kv_entries, _) = if backup_type == 2 {
+  let (deletion_kv_entries, deletion_inventory_charge) = if backup_type == 2 {
     load_type_inventory(&backup, KV_TYPE_DELETION, &mut budget, "deletion import inventory admission failed")?
   } else {
     (Vec::new(), 0)
@@ -1443,6 +1580,22 @@ pub fn import_backup_with_mode(
   let (maximum_entry_charge, maximum_value_length) = preflight_import_inventories(&backup, inventories, &mut budget)?;
   budget.reserve(maximum_entry_charge, "largest import entry buffer admission failed")?;
   validate_import_inventories(&backup, inventories, maximum_value_length, &mut budget)?;
+
+  if backup_type == 1 {
+    drop(chunk_kv_entries);
+    drop(file_kv_entries);
+    drop(dir_kv_entries);
+    drop(sym_kv_entries);
+    drop(snapshot_kv_entries);
+    drop(deletion_kv_entries);
+    budget.release(chunk_inventory_charge, "chunk import inventory release failed")?;
+    budget.release(file_inventory_charge, "FileRecord import inventory release failed")?;
+    budget.release(directory_inventory_charge, "DirectoryIndex import inventory release failed")?;
+    budget.release(symlink_inventory_charge, "Symlink import inventory release failed")?;
+    budget.release(snapshot_inventory_charge, "Snapshot import inventory release failed")?;
+    budget.release(deletion_inventory_charge, "deletion import inventory release failed")?;
+    return import_full_export_with_policy(ctx, target, &backup, &target_hash, include_system, promote, &mut budget);
+  }
 
   // Import chunks (chunks themselves don't carry FLAG_SYSTEM — they're
   // shared between user and system files. Filtering happens at the file/dir level.)
@@ -1560,6 +1713,114 @@ pub fn import_backup_with_mode(
     version_hash: target_hash.clone(),
     head_promoted,
   })
+}
+
+fn import_full_export_with_policy(
+  ctx: &RequestContext,
+  target: &StorageEngine,
+  backup: &StorageEngine,
+  target_hash: &[u8],
+  include_system: bool,
+  promote: bool,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<ImportResult> {
+  let operation = if include_system { SystemFamilyTransferOperationV1::Import } else { SystemFamilyTransferOperationV1::DataExport };
+  let resolver = SystemFamilyPolicyResolver::new(backup.hash_algo())?;
+  let snapshots_checkpoint = budget.checkpoint();
+  let snapshots = if include_system { load_snapshot_infos(backup, budget)? } else { Vec::new() };
+
+  // Validate every authoritative tree before the first target write. The
+  // second walk performs the copy so a database with many snapshots remains
+  // bounded by one decoded tree rather than retaining every tree at once.
+  validate_full_import_tree(backup, target_hash, operation, include_system, budget)?;
+  for snapshot in &snapshots {
+    validate_full_import_tree(backup, &snapshot.root_hash, operation, false, budget)?;
+  }
+
+  let head_checkpoint = budget.checkpoint();
+  let head_tree = walk_version_tree_for_transfer_with_budget(backup, target_hash, operation, include_system, budget)?;
+  let head_stats = write_tree_to_engine(&head_tree, backup, target, resolver, operation, TransferDestinationMode::Import, budget)?;
+  drop(head_tree);
+  budget.release_to(head_checkpoint, "imported HEAD tree release failed")?;
+
+  let mut chunks_imported = head_stats.chunks_written;
+  let mut files_imported = head_stats.files_written;
+  let mut directories_imported = head_stats.directories_written;
+  let mut entries_imported = head_stats
+    .chunks_written
+    .saturating_add(head_stats.files_written)
+    .saturating_add(head_stats.directories_written)
+    .saturating_add(head_stats.symlinks_written);
+
+  for mut snapshot in snapshots {
+    let tree_checkpoint = budget.checkpoint();
+    let tree = walk_version_tree_for_transfer_with_budget(backup, &snapshot.root_hash, operation, false, budget)?;
+    let stats = write_tree_to_engine(&tree, backup, target, resolver, operation, TransferDestinationMode::Import, budget)?;
+    drop(tree);
+    budget.release_to(tree_checkpoint, "imported snapshot tree release failed")?;
+
+    chunks_imported = chunks_imported.saturating_add(stats.chunks_written);
+    files_imported = files_imported.saturating_add(stats.files_written);
+    directories_imported = directories_imported.saturating_add(stats.directories_written);
+    entries_imported = entries_imported
+      .saturating_add(stats.chunks_written)
+      .saturating_add(stats.files_written)
+      .saturating_add(stats.directories_written)
+      .saturating_add(stats.symlinks_written);
+
+    snapshot.root_hash = stats.root_hash;
+    let snapshot_key = target.compute_hash(format!("snap:{}", snapshot.name).as_bytes())?;
+    if !target.has_entry(&snapshot_key)? {
+      let value = snapshot.serialize(target.hash_algo().hash_length())?;
+      target.store_entry_with_version(EntryType::Snapshot, &snapshot_key, &value, 0)?;
+      target.counters().record_write(value.len() as u64);
+      entries_imported = entries_imported.saturating_add(1);
+    }
+  }
+  budget.release_to(snapshots_checkpoint, "imported snapshot inventory release failed")?;
+
+  let head_promoted = if promote {
+    target.update_head(&head_stats.root_hash)?;
+    target.counters().record_write(0);
+    true
+  } else {
+    false
+  };
+
+  target.reconcile_counters_from_kv()?;
+  ctx.emit(
+    EVENT_IMPORTS_COMPLETED,
+    serde_json::json!({"imports": [ImportEventData {
+      backup_type: "export".to_string(),
+      version_hash: hex::encode(&head_stats.root_hash),
+      entries_imported,
+      head_promoted,
+    }]}),
+  );
+
+  Ok(ImportResult {
+    backup_type: 1,
+    entries_imported,
+    chunks_imported,
+    files_imported,
+    directories_imported,
+    deletions_applied: 0,
+    version_hash: head_stats.root_hash,
+    head_promoted,
+  })
+}
+
+fn validate_full_import_tree(
+  backup: &StorageEngine,
+  root_hash: &[u8],
+  operation: SystemFamilyTransferOperationV1,
+  include_detached_current_state: bool,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  let checkpoint = budget.checkpoint();
+  let tree = walk_version_tree_for_transfer_with_budget(backup, root_hash, operation, include_detached_current_state, budget)?;
+  drop(tree);
+  budget.release_to(checkpoint, "validated import tree release failed")
 }
 
 fn backup_entry_charge(header: &crate::engine::entry_header::EntryHeader) -> EngineResult<u64> {

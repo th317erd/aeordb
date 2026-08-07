@@ -1,16 +1,22 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use aeordb::engine::backup::{backup_contains_system_data, create_patch, export_version, import_backup, ExportResult, ImportResult};
+use aeordb::engine::backup::{
+  backup_contains_system_data, create_patch, export_full, export_version, import_backup, ExportResult, ImportResult,
+};
 use aeordb::engine::entry_header::FLAG_SYSTEM;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::errors::EngineError;
+use aeordb::engine::file_record::FileRecord;
+use aeordb::engine::kv_store::KV_TYPE_FILE_RECORD;
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::EntryType;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::RequestContext;
+use aeordb::engine::VersionManager;
 use aeordb::server::create_temp_engine_for_tests;
 use tempfile::TempDir;
 
@@ -37,6 +43,14 @@ fn export_to_path(engine: &StorageEngine, path: &str) -> ExportResult {
   export_version(engine, &head, path, false).unwrap()
 }
 
+fn add_file_to_backup(path: &str, file_path: &str, content: &[u8]) {
+  let backup = StorageEngine::open_for_import(path).unwrap();
+  let ops = DirectoryOps::new(&backup);
+  ops.store_file_buffered(&RequestContext::system(), file_path, content, Some("application/octet-stream")).unwrap();
+  let head = backup.head_hash().unwrap();
+  backup.set_backup_info(1, &head, &head).unwrap();
+}
+
 // ─── 1. test_import_full_export ─────────────────────────────────────────
 
 #[test]
@@ -56,6 +70,22 @@ fn test_import_full_export() {
   assert!(result.chunks_imported >= 3, "expected at least 3 chunks imported, got {}", result.chunks_imported);
   assert!(result.directories_imported >= 3, "expected at least 3 dirs imported, got {}", result.directories_imported);
   assert_eq!(result.deletions_applied, 0);
+}
+
+#[test]
+fn test_full_import_records_logical_write_metrics() {
+  let (source, source_temp) = setup_engine_with_files();
+  let export_path = db_path(&source_temp, "metrics-export.aeordb");
+  export_to_path(&source, &export_path);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let before = target.counters().snapshot();
+  let result = import_backup(&RequestContext::system(), &target, &export_path, false, false, false).unwrap();
+  let after = target.counters().snapshot();
+
+  let expected_writes = result.chunks_imported.saturating_add(result.files_imported).saturating_add(result.directories_imported);
+  assert_eq!(after.writes_total - before.writes_total, expected_writes);
+  assert!(after.bytes_written_total > before.bytes_written_total, "imported chunks must contribute write throughput bytes");
 }
 
 // ─── 2. test_import_preserves_content ───────────────────────────────────
@@ -428,6 +458,25 @@ fn test_backup_system_data_inspection_propagates_entry_read_failure() {
 }
 
 #[test]
+fn test_backup_system_data_inspection_uses_registry_instead_of_header_flag() {
+  let (source, source_temp) = setup_engine_with_files();
+  let export_path = db_path(&source_temp, "unflagged-portable-system.aeordb");
+  export_to_path(&source, &export_path);
+  add_file_to_backup(&export_path, "/.aeordb-system/users/user.json", br#"{"name":"portable"}"#);
+
+  let backup = StorageEngine::open_for_import(&export_path).unwrap();
+  for (key, value) in backup.entries_by_type(KV_TYPE_FILE_RECORD).unwrap() {
+    let header = backup.get_entry_header_including_deleted(&key).unwrap().unwrap();
+    let record = FileRecord::deserialize(&value, backup.hash_algo().hash_length(), header.entry_version).unwrap();
+    if record.path == "/.aeordb-system/users/user.json" {
+      backup.store_entry_with_flags_and_version(EntryType::FileRecord, &key, &value, 0, header.entry_version).unwrap();
+    }
+  }
+
+  assert!(backup_contains_system_data(&backup).unwrap(), "portable protected state must be identified from the registry path policy");
+}
+
+#[test]
 fn test_import_memory_pressure_fails_before_target_mutation() {
   let (source, source_temp) = setup_engine_with_files();
   let export_path = db_path(&source_temp, "pressure-import.aeordb");
@@ -501,4 +550,64 @@ fn test_import_rejects_corrupt_entry_body_before_target_mutation() {
   assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
   assert_eq!(target.head_hash().unwrap(), head_before);
   assert_eq!(target.kv_entry_count().unwrap(), entries_before, "corrupt backup must fail before importing earlier entries");
+}
+
+#[test]
+fn test_import_rejects_unknown_protected_path_before_target_mutation() {
+  let (source, source_temp) = setup_engine_with_files();
+  let export_path = db_path(&source_temp, "unknown-protected.aeordb");
+  export_to_path(&source, &export_path);
+  add_file_to_backup(&export_path, "/.aeordb-future/secret.bin", b"must not cross import boundary");
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup(&RequestContext::system(), &target, &export_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { .. }), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before, "policy failure must precede every target write");
+}
+
+#[test]
+fn test_privileged_import_omits_node_local_credentials() {
+  let (source, source_temp) = setup_engine_with_files();
+  let export_path = db_path(&source_temp, "node-local-credential.aeordb");
+  export_to_path(&source, &export_path);
+  add_file_to_backup(&export_path, "/.aeordb-system/api-keys/secret.bin", b"node-local credential");
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  import_backup(&RequestContext::system(), &target, &export_path, false, true, true).unwrap();
+
+  let ops = DirectoryOps::new(&target);
+  assert_eq!(ops.read_file_buffered("/docs/hello.txt").unwrap(), b"Hello World");
+  assert!(matches!(ops.read_file_buffered("/.aeordb-system/api-keys/secret.bin"), Err(EngineError::NotFound(_))));
+}
+
+#[test]
+fn test_privileged_full_import_preserves_portable_state_and_snapshots() {
+  let (source, source_temp) = setup_engine_with_files();
+  let context = RequestContext::system();
+  DirectoryOps::new(&source)
+    .store_file_buffered(&context, "/.aeordb-system/users/portable-user.json", br#"{"name":"portable"}"#, Some("application/json"))
+    .unwrap();
+  VersionManager::new(&source).create_snapshot(&context, "before-update", HashMap::new()).unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/docs/after.txt", b"after", Some("text/plain")).unwrap();
+  let export_path = db_path(&source_temp, "portable-full.aeordb");
+  export_full(&source, &export_path, true).unwrap();
+
+  let backup = StorageEngine::open_for_import(&export_path).unwrap();
+  assert!(backup_contains_system_data(&backup).unwrap());
+  drop(backup);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  import_backup(&context, &target, &export_path, false, true, true).unwrap();
+
+  assert_eq!(DirectoryOps::new(&target).read_file_buffered("/.aeordb-system/users/portable-user.json").unwrap(), br#"{"name":"portable"}"#,);
+  let snapshots = VersionManager::new(&target).list_snapshots().unwrap();
+  let snapshot = snapshots.iter().find(|snapshot| snapshot.name == "before-update").expect("snapshot must be imported");
+  let snapshot_tree = walk_version_tree(&target, &snapshot.root_hash).unwrap();
+  assert!(snapshot_tree.files.contains_key("/docs/hello.txt"));
+  assert!(!snapshot_tree.files.contains_key("/docs/after.txt"));
 }
