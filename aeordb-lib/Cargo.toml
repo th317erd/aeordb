@@ -801,6 +801,10 @@ name = "config_shadow_spec"
 path = "spec/engine/config_shadow_spec.rs"
 
 [[test]]
+name = "configuration_control_store_spec"
+path = "spec/engine/configuration_control_store_spec.rs"
+
+[[test]]
 name = "memory_coordinator_spec"
 path = "spec/engine/memory_coordinator_spec.rs"
 

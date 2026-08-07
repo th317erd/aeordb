@@ -88,6 +88,88 @@ pub fn decode_canonical_value(bytes: &[u8], bounds: CanonicalValueBounds) -> For
   Ok(value)
 }
 
+/// Recover strict JSON from a canonical configuration value without allowing
+/// the textual representation to exceed the caller's allocation boundary.
+pub fn canonical_value_to_json(bytes: &[u8], bounds: CanonicalValueBounds, maximum_json_length: usize) -> FormatResult<Vec<u8>> {
+  let value = decode_canonical_value(bytes, bounds)?;
+  let mut output = Vec::new();
+  write_json_value(&value, &mut output, maximum_json_length)?;
+  Ok(output)
+}
+
+fn write_json_value(value: &CanonicalConfigValueV1, output: &mut Vec<u8>, maximum_length: usize) -> FormatResult<()> {
+  match value {
+    CanonicalConfigValueV1::Null => append_json(output, b"null", maximum_length),
+    CanonicalConfigValueV1::Boolean(false) => append_json(output, b"false", maximum_length),
+    CanonicalConfigValueV1::Boolean(true) => append_json(output, b"true", maximum_length),
+    CanonicalConfigValueV1::Signed(value) => append_json(output, value.to_string().as_bytes(), maximum_length),
+    CanonicalConfigValueV1::Unsigned(value) => append_json(output, value.to_string().as_bytes(), maximum_length),
+    CanonicalConfigValueV1::FloatBits(bits) => {
+      let value = f64::from_bits(*bits);
+      let encoded = serde_json::to_vec(&value).map_err(|source| {
+        error(MalformedInputClass::UnknownTypeKindOrEnum, "config_json_float", format!("cannot encode canonical float: {source}"))
+      })?;
+      append_json(output, &encoded, maximum_length)
+    }
+    CanonicalConfigValueV1::String(value) => {
+      let encoded = serde_json::to_vec(value).map_err(|source| {
+        error(
+          MalformedInputClass::InvalidUtf8PathGlobOrNativePath,
+          "config_json_string",
+          format!("cannot encode canonical string: {source}"),
+        )
+      })?;
+      append_json(output, &encoded, maximum_length)
+    }
+    CanonicalConfigValueV1::Bytes(_) => Err(error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "config_json_bytes",
+      "canonical byte strings do not have a JSON representation",
+    )),
+    CanonicalConfigValueV1::Array(values) => {
+      append_json(output, b"[", maximum_length)?;
+      for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+          append_json(output, b",", maximum_length)?;
+        }
+        write_json_value(value, output, maximum_length)?;
+      }
+      append_json(output, b"]", maximum_length)
+    }
+    CanonicalConfigValueV1::Map(values) => {
+      append_json(output, b"{", maximum_length)?;
+      for (index, (key, value)) in values.iter().enumerate() {
+        if index > 0 {
+          append_json(output, b",", maximum_length)?;
+        }
+        let encoded_key = serde_json::to_vec(key).map_err(|source| {
+          error(MalformedInputClass::InvalidUtf8PathGlobOrNativePath, "config_json_key", format!("cannot encode canonical key: {source}"))
+        })?;
+        append_json(output, &encoded_key, maximum_length)?;
+        append_json(output, b":", maximum_length)?;
+        write_json_value(value, output, maximum_length)?;
+      }
+      append_json(output, b"}", maximum_length)
+    }
+  }
+}
+
+fn append_json(output: &mut Vec<u8>, bytes: &[u8], maximum_length: usize) -> FormatResult<()> {
+  let next_length = output.len().checked_add(bytes.len()).ok_or_else(|| length_error("canonical JSON output length overflow"))?;
+  if next_length > maximum_length {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "config_json_output_oversize",
+      format!("canonical JSON output exceeds {maximum_length} bytes"),
+    ));
+  }
+  output.try_reserve(bytes.len()).map_err(|source| {
+    error(MalformedInputClass::AllocationAmplification, "config_json_output_reserve", format!("cannot reserve JSON output: {source}"))
+  })?;
+  output.extend_from_slice(bytes);
+  Ok(())
+}
+
 pub fn validate_canonical_value(bytes: &[u8], bounds: CanonicalValueBounds) -> FormatResult<CanonicalValueSummary> {
   if bytes.len() > bounds.maximum_value_length {
     return Err(error(

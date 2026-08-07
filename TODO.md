@@ -245,7 +245,8 @@
         - [x] Converge lifecycle reads and typed saves on the shared authority; malformed unresolved lifecycle state fails snapshot writes closed.
       - [ ] Persist and recover validated runtime/lifecycle LKG plus diagnostics through the approved v3 transition ControlStore without emitting v4 authority.
         - [x] Add the production CanonicalConfigValueV1 codec and typed runtime/lifecycle LKG/diagnostic control codecs against independent fixtures.
-        - [ ] Publish and recover the typed controls through the configuration authority when a validated transition database identity exists.
+        - [x] Publish and recover the typed controls through the configuration authority when a validated transition database identity exists.
+        - [ ] Add bounded append-history recovery after invalid/absent LKG without changing valid-current or missing-current precedence.
       - [ ] Add root-only GET, replacement PUT, and RFC 7396 PATCH for both `/system/runtime` and `/system/lifecycle`, validating the complete proposed document before durable publication.
       - [ ] Keep CLI/environment values ephemeral and expose exact per-property source, stored validity, LKG identity, degradation, disabled capability, and pending restart/convergence.
       - [ ] Converge every lifecycle/runtime consumer on the shared authority with frozen dynamic, next-run-captured, and startup-bound activation semantics.

@@ -891,6 +891,8 @@ pub(crate) fn build_startup_configuration(
   engine: &StorageEngine,
   database_path: &Path,
   chunk_size_bytes: u64,
+  runtime_lkg: Option<ConfigFallback>,
+  lifecycle_lkg: Option<ConfigFallback>,
 ) -> StartupConfigurationState {
   let context = match detect_context(database_path, chunk_size_bytes) {
     Ok(context) => context,
@@ -904,6 +906,8 @@ pub(crate) fn build_startup_configuration(
   let inputs = ConfigResolutionInputs {
     runtime: read_config_document(engine, RUNTIME_CONFIG_PATH),
     lifecycle: read_config_document(engine, crate::engine::lifecycle_config::LIFECYCLE_CONFIG_PATH),
+    runtime_lkg,
+    lifecycle_lkg,
     environment: collect_registered_environment(),
     ..Default::default()
   };
@@ -1031,13 +1035,15 @@ fn read_config_document_inner(engine: &StorageEngine, path: &str) -> Result<Opti
   Ok(Some(bytes))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigurationFamily {
   Runtime,
   Lifecycle,
 }
 
 impl ConfigurationFamily {
+  pub const ALL: [Self; 2] = [Self::Runtime, Self::Lifecycle];
+
   pub fn contains(self, property: &ConfigProperty) -> bool {
     let lifecycle = property.path.starts_with("lifecycle.");
     match self {

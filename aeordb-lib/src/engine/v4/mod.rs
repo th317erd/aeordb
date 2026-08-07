@@ -7,6 +7,7 @@
 pub mod contract_generated;
 pub mod admission;
 pub mod config_value;
+pub mod configuration_controls;
 pub mod control_store;
 pub mod database_header;
 pub mod dependency;

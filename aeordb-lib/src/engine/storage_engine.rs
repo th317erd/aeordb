@@ -648,10 +648,13 @@ pub struct StorageEngine {
 
 impl StorageEngine {
   fn initialize_configuration_authority(&self) -> EngineResult<()> {
+    let controls = crate::engine::v4::configuration_controls::load_configuration_controls(self);
     let startup_state = crate::engine::config_resolver::build_startup_configuration(
       self,
       &self.database_path,
       crate::engine::directory_ops::DEFAULT_CHUNK_SIZE as u64,
+      controls.runtime_lkg,
+      controls.lifecycle_lkg,
     );
     let report = &startup_state.report;
     let complete = report.complete();
@@ -660,7 +663,7 @@ impl StorageEngine {
       report.resolution.as_ref().map(|resolution| resolution.issues.iter().filter(|issue| issue.blocking).count()).unwrap_or(1);
     self
       .configuration_authority
-      .set(Arc::new(crate::engine::configuration_authority::ConfigurationAuthority::new(startup_state)))
+      .set(Arc::new(crate::engine::configuration_authority::ConfigurationAuthority::new(startup_state, controls.statuses)))
       .map_err(|_| EngineError::InvalidInput("configuration authority was initialized more than once".to_string()))?;
     tracing::info!(complete, degraded, blocking_issues, "Initialized configuration authority from startup diagnostics");
     Ok(())
@@ -680,14 +683,8 @@ impl StorageEngine {
     bytes: &[u8],
   ) -> EngineResult<Arc<crate::engine::configuration_authority::ConfigurationAuthoritySnapshot>> {
     let authority = self.configuration_authority();
-    authority.replace_document(family, bytes, |validated| {
-      crate::engine::directory_ops::DirectoryOps::new(self).store_file_buffered(
-        &crate::engine::request_context::RequestContext::system(),
-        family.path(),
-        validated,
-        Some("application/json"),
-      )?;
-      Ok(())
+    authority.replace_document(family, bytes, |validated, schema_version, prospective| {
+      crate::engine::v4::configuration_controls::publish_configuration_document(self, family, validated, schema_version, prospective)
     })
   }
 

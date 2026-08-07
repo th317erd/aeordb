@@ -9,7 +9,9 @@ use aeordb::engine::native_durability::{
   preallocate_file, probe_native_durability, sync_directory_native, sync_file_all_native, sync_file_data_native,
 };
 use aeordb::engine::v4::control_store::{ControlStoreReadV1, ControlStoreSlotsV1, select_control_store_read};
-use aeordb::engine::v4::config_value::{CanonicalValueBounds, canonicalize_json, decode_canonical_value, encode_canonical_value};
+use aeordb::engine::v4::config_value::{
+  CanonicalConfigValueV1, CanonicalValueBounds, canonical_value_to_json, canonicalize_json, decode_canonical_value, encode_canonical_value,
+};
 use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::v4::system_control::{
   ConfigDiagnosticsBodyV1, ConfigLKGBodyV1, ConfigurationKindV1, SystemControlKindV1, SystemControlSlotV1, decode_config_diagnostics_body,
@@ -446,6 +448,30 @@ fn strict_json_canonicalization_matches_lkg_payloads_and_rejects_noncanonical_in
       .class(),
     MalformedInputClass::AllocationAmplification
   );
+}
+
+#[test]
+fn canonical_config_recovers_bounded_strict_json_without_changing_policy_identity() {
+  let json = br#"{"lifecycle":{"enabled":true,"limits":[0,9223372036854775808]},"name":"line\nvalue"}"#;
+  let canonical = canonicalize_json(json, CanonicalValueBounds::AUDIT_VALUE).unwrap();
+
+  let recovered = canonical_value_to_json(&canonical, CanonicalValueBounds::AUDIT_VALUE, 1_048_576).unwrap();
+
+  assert_eq!(canonicalize_json(&recovered, CanonicalValueBounds::AUDIT_VALUE).unwrap(), canonical);
+}
+
+#[test]
+fn canonical_config_json_recovery_rejects_non_json_bytes_and_output_amplification() {
+  let bytes = encode_canonical_value(&CanonicalConfigValueV1::Bytes(vec![1, 2, 3]), CanonicalValueBounds::AUDIT_VALUE).unwrap();
+  assert!(canonical_value_to_json(&bytes, CanonicalValueBounds::AUDIT_VALUE, 1_048_576).is_err());
+
+  let escaped = encode_canonical_value(
+    &CanonicalConfigValueV1::Array(vec![CanonicalConfigValueV1::String("\0".repeat(64)); 16]),
+    CanonicalValueBounds::AUDIT_VALUE,
+  )
+  .unwrap();
+  let error = canonical_value_to_json(&escaped, CanonicalValueBounds::AUDIT_VALUE, 128).unwrap_err();
+  assert_eq!(error.class(), MalformedInputClass::AllocationAmplification);
 }
 
 #[test]

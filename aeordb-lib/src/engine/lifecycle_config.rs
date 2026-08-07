@@ -82,7 +82,9 @@ pub fn load_lifecycle_config(engine: &StorageEngine) -> LifecycleConfig {
 
 /// Validate, durably persist, and activate lifecycle configuration.
 pub fn save_lifecycle_config(engine: &StorageEngine, config: &LifecycleConfig) -> EngineResult<()> {
-  let data = serde_json::to_vec_pretty(config).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
+  let mut value = serde_json::to_value(config).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
+  value.as_object_mut().expect("LifecycleConfig serializes as an object").insert("schema_version".to_string(), serde_json::Value::from(1));
+  let data = serde_json::to_vec_pretty(&value).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
   engine.replace_configuration_document(ConfigurationFamily::Lifecycle, &data)?;
   Ok(())
 }

@@ -8,6 +8,7 @@ use crate::engine::config_resolver::{
   StartupConfigurationState,
 };
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::v4::configuration_controls::ConfigurationControlFamilyStatus;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveConfigProperty {
@@ -28,6 +29,7 @@ pub struct ConfigurationAuthoritySnapshot {
   pub active_properties: BTreeMap<String, ActiveConfigProperty>,
   pub pending_restart: BTreeSet<String>,
   pub pending_convergence: BTreeSet<String>,
+  pub control_statuses: BTreeMap<ConfigurationFamily, ConfigurationControlFamilyStatus>,
 }
 
 impl ConfigurationAuthoritySnapshot {
@@ -44,6 +46,10 @@ impl ConfigurationAuthoritySnapshot {
       _ => None,
     })
   }
+
+  pub fn control_status(&self, family: ConfigurationFamily) -> &ConfigurationControlFamilyStatus {
+    self.control_statuses.get(&family).expect("both frozen configuration families have control status")
+  }
 }
 
 pub struct ConfigurationAuthority {
@@ -53,7 +59,10 @@ pub struct ConfigurationAuthority {
 }
 
 impl ConfigurationAuthority {
-  pub(crate) fn new(startup_state: StartupConfigurationState) -> Self {
+  pub(crate) fn new(
+    startup_state: StartupConfigurationState,
+    control_statuses: BTreeMap<ConfigurationFamily, ConfigurationControlFamilyStatus>,
+  ) -> Self {
     let startup = Arc::new(startup_state.report);
     let active_properties = startup
       .resolution
@@ -90,6 +99,7 @@ impl ConfigurationAuthority {
       active_properties,
       pending_restart: BTreeSet::new(),
       pending_convergence: BTreeSet::new(),
+      control_statuses,
     };
     Self { startup, current: ArcSwap::from_pointee(initial), inputs: Mutex::new(startup_state.inputs) }
   }
@@ -109,15 +119,17 @@ impl ConfigurationAuthority {
     publish: F,
   ) -> EngineResult<Arc<ConfigurationAuthoritySnapshot>>
   where
-    F: FnOnce(&[u8]) -> EngineResult<()>,
+    F: FnOnce(&[u8], u16, &ConfigurationAuthoritySnapshot) -> EngineResult<ConfigurationControlFamilyStatus>,
   {
     let context = self.startup.context.clone().ok_or_else(|| {
       EngineError::InvalidInput(self.startup.context_error.clone().unwrap_or_else(|| "configuration context is unavailable".to_string()))
     })?;
     let resolver = ConfigResolver::new(context.clone());
-    resolver
+    let schema_version = resolver
       .validate_document(family, bytes)
       .map_err(|message| EngineError::InvalidInput(format!("invalid {} configuration: {message}", family.name())))?;
+    let schema_version = u16::try_from(schema_version)
+      .map_err(|_| EngineError::InvalidInput(format!("{} configuration schema exceeds u16", family.name())))?;
 
     let mut inputs = self.inputs.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut candidate_inputs = inputs.clone();
@@ -143,9 +155,6 @@ impl ConfigurationAuthority {
       .checked_add(1)
       .ok_or_else(|| EngineError::InvalidInput("configuration authority generation exhausted".to_string()))?;
 
-    publish(bytes)?;
-
-    *inputs = candidate_inputs;
     let mut active_properties = previous.active_properties.clone();
     let mut pending_restart = previous.pending_restart.clone();
     let mut pending_convergence = previous.pending_convergence.clone();
@@ -184,14 +193,20 @@ impl ConfigurationAuthority {
       pending_restart.remove(&property.path);
       pending_convergence.remove(&property.path);
     }
-    let next = Arc::new(ConfigurationAuthoritySnapshot {
+    let mut next = ConfigurationAuthoritySnapshot {
       generation,
       startup: Arc::clone(&self.startup),
       desired,
       active_properties,
       pending_restart,
       pending_convergence,
-    });
+      control_statuses: previous.control_statuses.clone(),
+    };
+    let control_status = publish(bytes, schema_version, &next)?;
+    next.control_statuses.insert(family, control_status);
+
+    *inputs = candidate_inputs;
+    let next = Arc::new(next);
     self.current.store(Arc::clone(&next));
     Ok(next)
   }
