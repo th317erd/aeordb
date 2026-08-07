@@ -24,6 +24,25 @@ allowed_divergences:
       - current v3 behavior until capability activation
     proof: producer convergence gate and root-publication model
 
+  - id: V4-SYSTEM-FAMILY-POLICY
+    phase: P2c
+    behavior: >-
+      the frozen operation-specific SystemFamily policies replace the legacy
+      include_system boolean, credential list, protected-root list, and
+      internal-path predicates.
+    intentional_corrections:
+      - node-local or redact/omit credentials and secret configuration are not copied by logical backup, peer replication, client sync, or generic data APIs
+      - conflicts are included by logical backup and migration but omitted from peer replication and generic data APIs
+      - namespace permissions remain user-visible and index-visible under normal authorization, while malformed permission state fails affected authorization closed
+      - ControlStore, GC, credential, conflict, log, and derived-index state cannot be generically mutated or indexed
+      - unknown protected state and incomplete authoritative traversal fail with typed diagnostics instead of skip or empty success
+    preserves:
+      - ordinary user-data transfer and authorization
+      - concealment of protected existence from unauthorized generic callers
+      - exact v3 system-flag bytes through the named v0 migration evaluator
+      - typed system and conflict APIs as the owners of their protected families
+    proof: complete 46-family policy matrix, consumer architecture gate, transfer matrix, and corruption traversal tests
+
   - id: V4-HISTORICAL-ROOT-SELECTOR
     phase: P7
     behavior: authorized queries may select a retained root with an explicit root_hash request parameter.

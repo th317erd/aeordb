@@ -289,6 +289,7 @@
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
     - [ ] P2c: converge protected-state classification and traversal failure boundaries on the frozen SystemFamily registry.
       - [x] Map every old system/internal predicate, protected-path list, registry producer, and traversal consumer from current source.
+      - [x] Characterize the current adjacent behavior with 194 green B-tree, tree-walk, backup/import, sync, permission, and GC tests; record the ratified policy differences explicitly.
       - [ ] Close P1c by running the native durability/fixture/malformed gates on `wyatt-mac` and `win11vm` when the hosts are online.
       - [ ] Add failing registry tests for typed policies, exact embedded-registry reuse, structural namespace containers, unknown protected state, and permissions/conflicts/controls contracts.
       - [ ] Add failing traversal tests for complete, diagnostically partial, and corrupt flat/B-tree outcomes without empty-success conversion.
