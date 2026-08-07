@@ -5,13 +5,15 @@
 //! This allows embedded clients to replicate without HTTP overhead.
 
 use crate::engine::conflict_store;
-use crate::engine::directory_ops;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::file_record::FileRecord;
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::SymlinkRecord;
-use crate::engine::tree_walker::{diff_trees, walk_version_tree, TreeDiff, VersionTree};
+use crate::engine::tree_walker::{diff_trees_with_budget, walk_version_tree_for_transfer_with_budget, TreeDiff, VersionTree};
+use crate::engine::v4::system_family::SystemFamilyTransferOperationV1;
 use crate::engine::version_manager::VersionManager;
 
 // ---------------------------------------------------------------------------
@@ -105,13 +107,10 @@ pub struct ConflictVersionInfo {
 ///
 /// If `since_root_hash` is None, returns the entire tree as "added".
 /// If `paths_filter` is Some, only entries matching the glob patterns are included.
-/// If `include_system` is false, entries under `/.aeordb-system/` are excluded.
-///
-/// NOTE: If `since_root_hash` refers to a hash that does not exist in the engine,
-/// `walk_version_tree` returns an empty tree, causing the diff to treat all current
-/// entries as "added" -- effectively a full re-sync. This is a safe degradation but
-/// may cause unexpected bandwidth usage. Callers should validate the base hash
-/// if they want to detect this case.
+/// `include_system=true` selects peer-replication policy;
+/// `include_system=false` selects client-sync policy. Unknown protected state,
+/// malformed required state, and missing historical roots fail the operation
+/// rather than being converted into an empty or partial diff.
 pub fn compute_sync_diff(
   engine: &StorageEngine,
   since_root_hash: Option<&[u8]>,
@@ -120,22 +119,18 @@ pub fn compute_sync_diff(
 ) -> EngineResult<SyncDiff> {
   let vm = VersionManager::new(engine);
   let head_hash = vm.get_head_hash()?;
+  let operation =
+    if include_system { SystemFamilyTransferOperationV1::PeerReplication } else { SystemFamilyTransferOperationV1::ClientSync };
+  let mut memory = OperationMemoryBudget::new(engine, "sync diff", MemoryOwner::StreamingRead, AdmissionClass::Workload, 0, None)?;
+  let current_tree = walk_version_tree_for_transfer_with_budget(engine, &head_hash, operation, true, &mut memory)?;
 
-  let mut current_tree = walk_version_tree(engine, &head_hash)?;
-  if include_system {
-    // System paths aren't reachable from HEAD's user tree (by design).
-    // Walk them explicitly so they appear in the diff. The base tree
-    // intentionally is NOT augmented — system data isn't versioned with
-    // HEAD, so we can't reconstruct its past state. Diff treats every
-    // system file as "added"; the receiving peer dedupes by content
-    // hash.
-    crate::engine::tree_walker::augment_with_system_subtrees(engine, &mut current_tree);
-  }
-
-  let (mut diff_result, chunk_hashes) = if let Some(since) = since_root_hash {
-    let base_tree = walk_version_tree(engine, since)?;
-    let diff = diff_trees(&base_tree, &current_tree);
-    build_diff_from_tree_diff(&diff, &current_tree)
+  let mut diff_result = if let Some(since) = since_root_hash {
+    // Detached system families are current-state authorities rather than part
+    // of historical HEAD roots. Excluding them from the base makes current
+    // portable peer state appear as idempotent additions.
+    let base_tree = walk_version_tree_for_transfer_with_budget(engine, since, operation, false, &mut memory)?;
+    let diff = diff_trees_with_budget(&base_tree, &current_tree, &mut memory)?;
+    build_diff_from_tree_diff(&diff)
   } else {
     build_full_diff(&current_tree)
   };
@@ -145,13 +140,8 @@ pub fn compute_sync_diff(
     filter_diff_by_paths(&mut diff_result, paths);
   }
 
-  // Apply system filtering
-  if !include_system {
-    filter_diff_system(&mut diff_result);
-  }
-
   diff_result.root_hash = head_hash;
-  diff_result.chunk_hashes_needed = chunk_hashes;
+  refresh_needed_chunk_hashes(&mut diff_result);
 
   Ok(diff_result)
 }
@@ -243,14 +233,12 @@ fn symlink_record_to_entry(path: &str, hash: &[u8], record: &SymlinkRecord) -> S
 }
 
 /// Build a full sync diff (no base hash) — everything in the tree is "added".
-fn build_full_diff(tree: &VersionTree) -> (SyncDiff, Vec<Vec<u8>>) {
+fn build_full_diff(tree: &VersionTree) -> SyncDiff {
   let mut files_added = Vec::new();
   let mut symlinks_added = Vec::new();
-  let mut chunk_hashes: Vec<Vec<u8>> = Vec::new();
 
   for (path, (hash, record)) in &tree.files {
     let entry = file_record_to_entry(path, hash, record);
-    chunk_hashes.extend(entry.chunk_hashes.iter().cloned());
     files_added.push(entry);
   }
 
@@ -261,10 +249,8 @@ fn build_full_diff(tree: &VersionTree) -> (SyncDiff, Vec<Vec<u8>>) {
   // Sort for deterministic output
   files_added.sort_by(|a, b| a.path.cmp(&b.path));
   symlinks_added.sort_by(|a, b| a.path.cmp(&b.path));
-  chunk_hashes.sort();
-  chunk_hashes.dedup();
 
-  let diff = SyncDiff {
+  SyncDiff {
     root_hash: Vec::new(), // filled in by caller
     files_added,
     files_modified: Vec::new(),
@@ -273,30 +259,25 @@ fn build_full_diff(tree: &VersionTree) -> (SyncDiff, Vec<Vec<u8>>) {
     symlinks_modified: Vec::new(),
     symlinks_deleted: Vec::new(),
     chunk_hashes_needed: Vec::new(), // filled in by caller
-  };
-
-  (diff, chunk_hashes)
+  }
 }
 
 /// Build a sync diff from a TreeDiff (incremental sync).
-fn build_diff_from_tree_diff(diff: &TreeDiff, _current_tree: &VersionTree) -> (SyncDiff, Vec<Vec<u8>>) {
+fn build_diff_from_tree_diff(diff: &TreeDiff) -> SyncDiff {
   let mut files_added = Vec::new();
   let mut files_modified = Vec::new();
   let mut files_deleted = Vec::new();
   let mut symlinks_added = Vec::new();
   let mut symlinks_modified = Vec::new();
   let mut symlinks_deleted = Vec::new();
-  let mut chunk_hashes: Vec<Vec<u8>> = Vec::new();
 
   for (path, (hash, record)) in &diff.added {
     let entry = file_record_to_entry(path, hash, record);
-    chunk_hashes.extend(entry.chunk_hashes.iter().cloned());
     files_added.push(entry);
   }
 
   for (path, (hash, record)) in &diff.modified {
     let entry = file_record_to_entry(path, hash, record);
-    chunk_hashes.extend(entry.chunk_hashes.iter().cloned());
     files_modified.push(entry);
   }
 
@@ -323,10 +304,8 @@ fn build_diff_from_tree_diff(diff: &TreeDiff, _current_tree: &VersionTree) -> (S
   symlinks_added.sort_by(|a, b| a.path.cmp(&b.path));
   symlinks_modified.sort_by(|a, b| a.path.cmp(&b.path));
   symlinks_deleted.sort_by(|a, b| a.path.cmp(&b.path));
-  chunk_hashes.sort();
-  chunk_hashes.dedup();
 
-  let result = SyncDiff {
+  SyncDiff {
     root_hash: Vec::new(),
     files_added,
     files_modified,
@@ -335,9 +314,7 @@ fn build_diff_from_tree_diff(diff: &TreeDiff, _current_tree: &VersionTree) -> (S
     symlinks_modified,
     symlinks_deleted,
     chunk_hashes_needed: Vec::new(),
-  };
-
-  (result, chunk_hashes)
+  }
 }
 
 /// Filter diff entries to only include those matching at least one glob pattern.
@@ -356,16 +333,12 @@ fn filter_diff_by_paths(diff: &mut SyncDiff, patterns: &[String]) {
   diff.symlinks_deleted.retain(|e| matches(&e.path));
 }
 
-/// Remove entries whose path starts with `/.system`.
-fn filter_diff_system(diff: &mut SyncDiff) {
-  let is_system = |path: &str| -> bool { directory_ops::is_system_path(path) };
-
-  diff.files_added.retain(|e| !is_system(&e.path));
-  diff.files_modified.retain(|e| !is_system(&e.path));
-  diff.files_deleted.retain(|e| !is_system(&e.path));
-  diff.symlinks_added.retain(|e| !is_system(&e.path));
-  diff.symlinks_modified.retain(|e| !is_system(&e.path));
-  diff.symlinks_deleted.retain(|e| !is_system(&e.path));
+fn refresh_needed_chunk_hashes(diff: &mut SyncDiff) {
+  let mut hashes =
+    diff.files_added.iter().chain(diff.files_modified.iter()).flat_map(|entry| entry.chunk_hashes.iter().cloned()).collect::<Vec<_>>();
+  hashes.sort();
+  hashes.dedup();
+  diff.chunk_hashes_needed = hashes;
 }
 
 // ---------------------------------------------------------------------------

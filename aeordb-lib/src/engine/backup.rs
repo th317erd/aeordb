@@ -1,7 +1,6 @@
 use crate::engine::deletion_record::DeletionRecord;
-use crate::engine::file_record::FileRecord;
 use crate::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
-use crate::engine::directory_ops::{directory_content_hash, directory_path_hash, file_content_hash, file_path_hash, is_system_path};
+use crate::engine::directory_ops::{directory_content_hash, directory_path_hash, file_path_hash, is_system_path};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
@@ -12,8 +11,7 @@ use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
 use crate::engine::symlink_record::symlink_path_hash;
 use crate::engine::tree_walker::{
-  diff_trees_with_budget, walk_subtree_filtered_with_budget, walk_version_tree_filtered_with_budget, walk_version_tree_with_budget,
-  VersionTree,
+  diff_trees_with_budget, walk_version_tree_for_transfer_with_budget, walk_version_tree_with_budget, VersionTree,
 };
 use crate::engine::v4::system_family::SystemFamilyTransferOperationV1;
 use crate::engine::entry_type::EntryType;
@@ -86,92 +84,6 @@ fn export_transfer_operation(include_system: bool) -> SystemFamilyTransferOperat
   }
 }
 
-/// Add registry-selected state that is deliberately detached from HEAD.
-///
-/// Candidate roots come from the immutable registry rather than a second
-/// protected-path list. Structural ancestors are inspected so exported path
-/// listings remain coherent, while each child is classified before its body is
-/// read by the filtered walker. Direct candidates remain necessary for legacy
-/// databases whose structural parent listing did not retain every system root.
-fn collect_detached_transfer_paths(
-  source: &StorageEngine,
-  tree: &mut VersionTree,
-  resolver: SystemFamilyPolicyResolver,
-  operation: SystemFamilyTransferOperationV1,
-  budget: &mut OperationMemoryBudget,
-) -> EngineResult<()> {
-  let mut candidates = std::collections::BTreeMap::<String, bool>::new();
-  for candidate in resolver.included_absolute_paths(operation)? {
-    candidates.entry(candidate.path.clone()).and_modify(|is_prefix| *is_prefix |= candidate.is_prefix).or_insert(candidate.is_prefix);
-    let mut ancestor = candidate.path.as_str();
-    while let Some((parent, _)) = ancestor.rsplit_once('/') {
-      if parent.is_empty() {
-        break;
-      }
-      if matches!(resolver.classify_path(parent)?, crate::engine::v4::system_family::SystemFamilyClassificationV1::StructuralContainer) {
-        candidates.entry(parent.to_string()).or_insert(true);
-      }
-      ancestor = parent;
-    }
-  }
-
-  let algorithm = source.hash_algo();
-  let hash_length = algorithm.hash_length();
-  let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
-  for (path, is_prefix) in candidates {
-    budget.record_work(1)?;
-    if !resolver.transfer_path_is_included(&path, operation)? {
-      continue;
-    }
-
-    if !is_prefix {
-      let file_key = file_path_hash(&path, &algorithm)?;
-      if let Some(((header, _key, raw), loaded_charge)) = load_backup_entry(source, &file_key, budget)? {
-        if header.entry_type != EntryType::FileRecord {
-          return Err(EngineError::CorruptEntry {
-            offset: 0,
-            reason: format!("transfer path '{}' resolved to {:?} instead of FileRecord", path, header.entry_type),
-          });
-        }
-        let record = FileRecord::deserialize(&raw, hash_length, header.entry_version).map_err(|error| EngineError::CorruptEntry {
-          offset: 0,
-          reason: format!("transfer FileRecord '{}' is malformed: {error}", path),
-        })?;
-        let content_hash = file_content_hash(&raw, &algorithm)?;
-        let retained_bytes = path
-          .len()
-          .checked_add(content_hash.len())
-          .and_then(|bytes| bytes.checked_add(raw.len()))
-          .ok_or_else(|| EngineError::ResourceExhausted("detached transfer file estimate overflow".to_string()))?;
-        let retained_charge = backup_collection_charge(retained_bytes)?;
-        budget.reserve(retained_charge, "detached transfer file admission failed")?;
-        for chunk_hash in &record.chunk_hashes {
-          if tree.chunks.insert(chunk_hash.clone()) {
-            budget.reserve(backup_collection_charge(chunk_hash.len())?, "detached transfer chunk set admission failed")?;
-          }
-        }
-        tree.files.insert(path.clone(), (content_hash, record));
-        budget.release(loaded_charge, "detached transfer FileRecord buffer release failed")?;
-      }
-    }
-
-    let directory_key = directory_path_hash(&path, &algorithm)?;
-    let Some(((header, _key, raw), loaded_charge)) = load_backup_entry(source, &directory_key, budget)? else {
-      continue;
-    };
-    if header.entry_type != EntryType::DirectoryIndex {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("transfer directory '{}' resolved to {:?} instead of DirectoryIndex", path, header.entry_type),
-      });
-    }
-    let directory_hash = if raw.len() == hash_length { raw.clone() } else { directory_content_hash(&raw, &algorithm)? };
-    budget.release(loaded_charge, "detached transfer directory path-entry buffer release failed")?;
-    walk_subtree_filtered_with_budget(source, &path, &directory_hash, tree, budget, &mut filter)?;
-  }
-  Ok(())
-}
-
 fn store_file_record_entry_preserving_version(
   engine: &StorageEngine,
   key: &[u8],
@@ -235,11 +147,7 @@ fn export_version_with_budget(
     budget.check_cancellation()?;
     let operation = export_transfer_operation(include_system);
     let resolver = SystemFamilyPolicyResolver::new(source.hash_algo())?;
-    let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
-    let mut tree = walk_version_tree_filtered_with_budget(source, version_hash, budget, &mut filter)?;
-    if include_system {
-      collect_detached_transfer_paths(source, &mut tree, resolver, operation, budget)?;
-    }
+    let tree = walk_version_tree_for_transfer_with_budget(source, version_hash, operation, include_system, budget)?;
     budget.check_cancellation()?;
     let output = StorageEngine::create_with_memory_coordinator(part_path, source.memory_coordinator())?;
     let stats = write_tree_to_engine(&tree, source, &output, resolver, operation, budget)?;
@@ -380,11 +288,7 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
 
     let head_checkpoint = budget.checkpoint();
     let stats = {
-      let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
-      let mut head_tree = walk_version_tree_filtered_with_budget(source, &head_hash, &mut budget, &mut filter)?;
-      if include_system {
-        collect_detached_transfer_paths(source, &mut head_tree, resolver, operation, &mut budget)?;
-      }
+      let head_tree = walk_version_tree_for_transfer_with_budget(source, &head_hash, operation, include_system, &mut budget)?;
       write_tree_to_engine(&head_tree, source, &output, resolver, operation, &mut budget)?
     };
     budget.release_to(head_checkpoint, "HEAD tree release failed")?;
@@ -405,8 +309,7 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
       budget.reserve(KV_INVENTORY_ENTRY_BYTES, "walked-version set admission failed")?;
       let tree_checkpoint = budget.checkpoint();
       let stats = {
-        let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
-        let tree = walk_version_tree_filtered_with_budget(source, &snap.root_hash, &mut budget, &mut filter)?;
+        let tree = walk_version_tree_for_transfer_with_budget(source, &snap.root_hash, operation, false, &mut budget)?;
         write_tree_to_engine(&tree, source, &output, resolver, operation, &mut budget)?
       };
       budget.release_to(tree_checkpoint, "snapshot tree release failed")?;

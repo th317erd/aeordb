@@ -43,7 +43,7 @@ fn selected_v4_headers_require_exact_capabilities_and_embedded_registry() {
     let V4AdmissionResult::SemanticReadOnly(read) = admitted else {
       panic!("expected semantic read-only admission")
     };
-    assert_eq!(read.registry.bytes.len(), 3_060);
+    assert_eq!(read.registry.bytes.len(), 3_155);
     assert_eq!(read.registry.operational_fingerprint, selected.header.system_family_registry_fingerprint);
     assert_eq!(read.selected_slot, selected.selected_slot);
   }
@@ -251,8 +251,12 @@ fn system_family_classification_follows_frozen_specificity_and_unknown_rules() {
     "system_family_matcher_exact_shape"
   );
   assert_eq!(
-    classify_system_family(&read.registry, SystemFamilySubjectV1::Path("/.aeordb-indexes/page.bin")).unwrap(),
-    SystemFamilyClassificationV1::UnknownProtected
+    classify_system_family(&read.registry, SystemFamilySubjectV1::Path("/.aeordb-indexes/page.bin")).unwrap().family_id(),
+    Some(0x0060)
+  );
+  assert_eq!(
+    classify_system_family(&read.registry, SystemFamilySubjectV1::Path("/.aeordb-logs/index.log")).unwrap().family_id(),
+    Some(0x0061)
   );
   assert_eq!(
     classify_system_family(&read.registry, SystemFamilySubjectV1::EntryType(0xffff)).unwrap(),

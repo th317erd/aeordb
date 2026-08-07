@@ -55,6 +55,8 @@ Required live corrections include:
 | `0x0019` | exact and descendant `.aeordb-permissions` | user-visible and index-visible under normal path authorization; malformed state fails affected auth closed |
 | `0x001A` | `/.aeordb-conflicts/` | included in logical backup/migration; omitted from peer replication and generic data APIs; exposed by typed conflict APIs |
 | `0x0043` | `/.aeordb-system/controls/v1/` | protected, traversed, backed up/migrated by policy, never generically mutable |
+| `0x0060` | root and descendant `.aeordb-indexes` | root and nested legacy index children share one derived/rebuildable policy; each container remains structural traversal state |
+| `0x0061` | root and descendant `.aeordb-logs` | root and nested log children share one operational/omitted policy; each container remains structural traversal state |
 
 `IndexPolicy` is exactly one of: not applicable, include under ordinary scope,
 exclude from all indexes, or canonical projection only. Unmatched ordinary user

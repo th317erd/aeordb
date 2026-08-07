@@ -2,7 +2,7 @@ use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::merge::MergeOp;
 use aeordb::engine::symlink_record::SymlinkRecord;
 use aeordb::engine::sync_apply::apply_merge_operations;
-use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
+use aeordb::engine::{DirectoryOps, EngineError, RequestContext, StorageEngine};
 use aeordb::server::create_temp_engine_for_tests;
 
 // ---------------------------------------------------------------------------
@@ -217,4 +217,67 @@ fn test_apply_empty_operations() {
 
   let result = apply_merge_operations(&engine, &context, &[]);
   assert!(result.is_ok(), "empty operations should succeed");
+}
+
+#[test]
+fn peer_apply_rejects_every_omitted_mutation_shape_before_mutation() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&context, "/.aeordb-system/config/delete-file.json", b"keep file", Some("application/json")).unwrap();
+  ops.store_symlink(&context, "/.aeordb-system/config/delete-link", "/target").unwrap();
+
+  let omitted_file = FileRecord {
+    path: "/.aeordb-system/config/add-file.json".to_string(),
+    content_type: Some("application/json".to_string()),
+    total_size: 1,
+    created_at: 1,
+    updated_at: 1,
+    metadata: Vec::new(),
+    content_hash: vec![0x11; 32],
+    chunk_hashes: vec![vec![0x22; 32]],
+  };
+  let operations = vec![
+    MergeOp::AddFile { path: "/.aeordb-system/config/add-file.json".to_string(), file_hash: vec![0x33; 32], file_record: omitted_file },
+    MergeOp::DeleteFile { path: "/.aeordb-system/config/delete-file.json".to_string() },
+    MergeOp::AddSymlink {
+      path: "/.aeordb-system/config/add-link".to_string(),
+      symlink_hash: vec![0x44; 32],
+      symlink_record: SymlinkRecord {
+        path: "/.aeordb-system/config/add-link".to_string(),
+        target: "/target".to_string(),
+        created_at: 1,
+        updated_at: 1,
+      },
+    },
+    MergeOp::DeleteSymlink { path: "/.aeordb-system/config/delete-link".to_string() },
+  ];
+
+  let error = apply_merge_operations(&engine, &context, &operations).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "system_family_transfer_omitted", .. }), "unexpected error: {error}");
+  assert_eq!(ops.read_file_buffered("/.aeordb-system/config/delete-file.json").unwrap(), b"keep file");
+  let config_entries = ops.list_directory("/.aeordb-system/config").unwrap();
+  assert!(config_entries.iter().any(|entry| entry.name == "delete-link"));
+}
+
+#[test]
+fn peer_apply_rejects_structural_container_as_a_leaf_before_chunk_reads() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  let file_record = FileRecord {
+    path: "/.aeordb-system".to_string(),
+    content_type: Some("application/octet-stream".to_string()),
+    total_size: 1,
+    created_at: 1,
+    updated_at: 1,
+    metadata: Vec::new(),
+    content_hash: vec![0x55; 32],
+    chunk_hashes: vec![vec![0x66; 32]],
+  };
+  let operations = vec![MergeOp::AddFile { path: "/.aeordb-system".to_string(), file_hash: vec![0x77; 32], file_record }];
+
+  let error = apply_merge_operations(&engine, &context, &operations).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "system_family_structural_leaf", .. }), "unexpected error: {error}");
 }

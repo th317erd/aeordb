@@ -346,8 +346,13 @@ fn source_rows() -> Vec<SourceRow> {
     row(0x0055, "kv_authority", policy(0x0055, 0, 0x02, 3, 4, 3), vec![control(6), control(7), control(8)]),
     row(0x0056, "database_nvt", policy(0x0056, 4, 0x08, 3, 4, 3), vec![control(9)]),
     row(0x0057, "wal_publication", policy(0x0057, 0, 0x02, 3, 4, 3), vec![control(10), control(11)]),
-    row(0x0060, "legacy_indexes", policy(0x0060, 4, 0x08, 3, 3, 3), vec![descendant_subtree(".aeordb-indexes")]),
-    row(0x0061, "nested_logs", policy(0x0061, 0, 0x04, 3, 3, 3), vec![descendant_subtree(".aeordb-logs")]),
+    row(
+      0x0060,
+      "legacy_indexes",
+      policy(0x0060, 4, 0x08, 3, 3, 3),
+      vec![path_prefix("/.aeordb-indexes/"), descendant_subtree(".aeordb-indexes")],
+    ),
+    row(0x0061, "nested_logs", policy(0x0061, 0, 0x04, 3, 3, 3), vec![path_prefix("/.aeordb-logs/"), descendant_subtree(".aeordb-logs")]),
     row(
       0x0062,
       "legacy_snapshots",
@@ -1222,6 +1227,8 @@ mod tests {
     assert_eq!(classify_path("/docs/.aeordb-config/custom.json").unwrap(), Some(0x0008));
     assert_eq!(classify_path("/docs/.aeordb-permissions").unwrap(), Some(0x0019));
     assert_eq!(classify_path("/docs/.aeordb-config/archive/.aeordb-indexes/postings/page.bin").unwrap(), Some(0x0060));
+    assert_eq!(classify_path("/.aeordb-indexes/postings/page.bin").unwrap(), Some(0x0060));
+    assert_eq!(classify_path("/.aeordb-logs/index.log").unwrap(), Some(0x0061));
     assert_eq!(classify_path("/.aeordb-system/controls/v1/index-registry/a.ctrl").unwrap(), Some(0x0043));
     assert_eq!(classify_path("/docs/.aeordb-unknown/value").unwrap(), Some(0xfffe));
     assert_eq!(classify_path("/docs/readme.md").unwrap(), None);

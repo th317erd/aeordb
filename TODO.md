@@ -293,7 +293,7 @@
       - [x] Freeze the P2c red-test protocol, independent policy oracle, traversal-state matrix, consumer proof, and architecture-removal gate.
       - [ ] Close P1c by running the native durability/fixture/malformed gates on `wyatt-mac` and `win11vm` when the hosts are online.
       - [x] Add failing registry tests for typed policies, exact embedded-registry reuse, structural namespace containers, unknown protected state, and permissions/conflicts/controls contracts.
-        - [x] Prove all 46 family policies and 61 descriptors against the independent manifest oracle.
+        - [x] Prove all 46 family policies and 63 descriptors against the independent manifest oracle.
         - [x] Prove one cached embedded registry per hash algorithm and pointer reuse by v4 admission.
         - [x] Prove runtime-only structural containers never inherit or invent a persisted family policy.
       - [x] Add failing traversal tests for complete, diagnostically partial, and corrupt flat/B-tree outcomes without empty-success conversion.
@@ -304,7 +304,12 @@
         - [x] Freeze and implement one shared runtime resolver plus typed transfer/index operation selectors before converting consumers.
         - [x] Convert live indexing and reindex scope decisions, preserving permission indexing and rejecting unknown protected families.
         - [x] Convert logical backup and user-data export traversal, detached-family discovery, and directory closure rebuilding to registry policy.
+        - [x] Convert embedded and HTTP peer/client sync to one registry-filtered diff authority; remove hard-coded subtree and route filter paths.
+          - [x] Correct the pre-writer registry contract so root `/.aeordb-indexes/` and `/.aeordb-logs/` children receive the same declared policies as nested instances.
       - [ ] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
+      - [ ] Child 06: replace hash-only client chunk authorization with a path/diff-bound transfer capability; chunk `FLAG_SYSTEM` cannot prove that a requested hash belongs to the caller's authorized diff.
+      - [ ] P2e/Child 06: strictly decode remote sync responses, reject omitted/malformed/hash-mismatched chunks before mutation or checkpoint advancement, and route HTTP receive/apply through the shared merge authority.
+      - [ ] P2e: propagate every embedded sync delete failure except `NotFound`; remove the current delete-error squelch with injected-fault coverage.
       - [ ] Run focused, adjacent, broad, architecture, documentation, and live disposable-database proof; record and land P2c.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

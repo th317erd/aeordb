@@ -22,7 +22,7 @@ GC uses a **mark-and-sweep** algorithm:
 - HEAD and all reachable entries from HEAD
 - All snapshot root trees and their descendants
 - All fork root trees and their descendants
-- System table entries (`/.system`, `/.config`)
+- Registry-classified system and namespace state (`/.aeordb-system`, `/.aeordb-config`, and descendant namespace metadata)
 - Task queue records (registry + individual task entries)
 - DeletionRecord entries (needed for KV rebuild from `.aeordb` scan)
 - Chunks referenced by a live path-key FileRecord, even if a directory index is temporarily stale

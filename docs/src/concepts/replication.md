@@ -21,7 +21,7 @@ When two nodes sync:
 4. Node A merges the changes into its own tree, detecting conflicts
 5. Node A updates its HEAD to the merged state
 
-This process is **atomic** — either all changes are applied, or none are. A network failure mid-sync leaves the database unchanged.
+Chunk availability and transfer policy are validated before merge operations begin. The current v3 apply path is not a single database transaction: each resulting namespace operation is committed durably in order. If a later operation fails, earlier operations may already be visible; the peer checkpoint is not advanced, so the next cycle retries from the last successful base. The v4 migration campaign replaces whole-tree transitions with bounded reconciliation markers.
 
 ### Sync is bidirectional. After Node A pulls from Node B, Node B can pull from Node A to get any changes that originated on Node A.
 
@@ -31,9 +31,9 @@ When two nodes modify the same file independently, AeorDB detects the conflict a
 
 - **Last-Write-Wins (LWW)** — the version with the higher virtual timestamp becomes the "current" version
 - **Modify beats delete** — if one node modifies a file while another deletes it, the modification wins. Work is never silently lost.
-- **Loser preserved** — the "losing" version is stored in `/.conflicts/` so it can be recovered
+- **Loser preserved** — the "losing" version is stored in `/.aeordb-conflicts/` so it can be recovered
 
-Conflicts are stored as regular database entries, which means they sync to all nodes automatically. A conflict resolved on any node propagates the resolution to all other nodes.
+Conflict records are local conflict authority and do not replicate as ordinary peer data. The winning namespace content can converge normally; operators inspect and resolve each node's retained conflict evidence through the typed conflict API.
 
 ### Viewing Conflicts
 
@@ -72,18 +72,20 @@ This is useful for:
 
 ## Client = Node
 
-The replication protocol is the same protocol that the AeorDB client uses. A desktop client syncing with a server and a server syncing with another server use the same mechanism — compare hashes, exchange chunks, merge trees.
+Peers and desktop clients use the same transport shape -- compare roots, exchange a filtered diff, then fetch chunks -- but they do not have the same visibility policy. The SystemFamily registry selects peer-replication policy for root sync JWTs and client-sync policy for ordinary authenticated clients.
 
 ## Client Sync
 
 Desktop clients and other non-peer applications can sync using the same protocol as replication peers, with appropriate access restrictions:
 
 - Clients authenticate with their JWT token
-- The `/.system/` directory is automatically excluded from client sync results
+- Ordinary authorized files are included
+- Required namespace metadata such as descendant `/.aeordb-permissions` and `/.aeordb-config/` records is included under the caller's authorized paths
+- Central protected families, node-local state, credentials, conflict records, logs, and derived indexes are omitted
 - API key scoping rules apply — a scoped key with restricted path access only sees changes for allowed paths
 - Clients can use the `paths` filter for selective sync (e.g., only sync `/assets/**`)
 
-This means a client with a read-only key scoped to `/assets/` will only see file changes under `/assets/` in sync diffs, and cannot access system data, other users' files, or paths outside its scope.
+This means a client with a read-only key scoped to `/assets/` sees file changes and required namespace metadata under `/assets/`, but cannot access central protected state, other users' files, or paths outside its scope. Chunk hashes are recomputed after all policy and authorization filters, so omitted files do not leak through the chunk manifest.
 
 ## Comparison with Strong Consistency
 

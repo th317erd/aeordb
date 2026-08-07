@@ -138,7 +138,15 @@ fn embedded_registries_are_cached_per_hash_algorithm_and_reused_by_admission() {
 #[test]
 fn strict_ancestors_of_absolute_families_are_runtime_only_structural_containers() {
   let registry = embedded_system_family_registry(HashAlgorithm::Blake3_256).unwrap();
-  for path in ["/.aeordb-config", "/.aeordb-system", "/.aeordb-system/cluster", "/.aeordb-system/controls", "/.aeordb-system/users"] {
+  for path in [
+    "/.aeordb-config",
+    "/.aeordb-indexes",
+    "/.aeordb-logs",
+    "/.aeordb-system",
+    "/.aeordb-system/cluster",
+    "/.aeordb-system/controls",
+    "/.aeordb-system/users",
+  ] {
     let classification = classify_system_family(registry, SystemFamilySubjectV1::Path(path)).unwrap();
     assert_eq!(classification, SystemFamilyClassificationV1::StructuralContainer, "{path}");
     assert_eq!(classification.family_id(), None);
@@ -156,6 +164,11 @@ fn strict_ancestors_of_absolute_families_are_runtime_only_structural_containers(
   for (path, family_id) in [("/docs/.aeordb-config", 0x0008), ("/docs/.aeordb-indexes", 0x0060), ("/docs/.aeordb-logs", 0x0061)] {
     let classification = classify_system_family(registry, SystemFamilySubjectV1::Path(path)).unwrap();
     assert_eq!(classification.family_id(), Some(family_id), "reserved subtree container {path}");
+  }
+
+  for (path, family_id) in [("/.aeordb-indexes/text.idx", 0x0060), ("/.aeordb-logs/index.log", 0x0061)] {
+    let classification = classify_system_family(registry, SystemFamilySubjectV1::Path(path)).unwrap();
+    assert_eq!(classification.family_id(), Some(family_id), "root reserved subtree child {path}");
   }
 }
 

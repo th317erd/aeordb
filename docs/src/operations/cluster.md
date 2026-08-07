@@ -50,7 +50,9 @@ curl -X POST http://localhost:6830/sync/peers \
 
 All `/sync/*` endpoints require JWT authentication. Nodes mint short-lived root JWTs (nil UUID `sub`) internally when calling each other's `/sync/diff` and `/sync/chunks` endpoints. This works because every node in the cluster shares the same Ed25519 signing key (distributed by `/sync/join`).
 
-The `.system/` namespace is never exposed through the HTTP file APIs (`/files/`, `/links/`, `/blobs/`) — not even to root users. Instead, the sync system transfers `.system/` data internally through `/sync/diff` and `/sync/chunks` when the caller is authenticated as root. Operators do not need to manage `.system/` data manually.
+Protected `/.aeordb-*` state is not exposed through generic HTTP file APIs merely because a caller is root. Peer sync also does not copy the entire `/.aeordb-system/` tree. A root sync JWT selects the peer-replication policy in AeorDB's SystemFamily registry: portable state such as users, groups, central permissions, plugin definitions, and namespace configuration is included, while node-local credentials, signing keys, API keys, email secrets, operational controls, logs, derived indexes, and conflict records are omitted. Root and nested `.aeordb-indexes` and `.aeordb-logs` instances use the same declared policies. Cluster join transfers the signing key through the dedicated `/sync/join` protocol rather than ordinary replication.
+
+Both sync producers and receivers enforce this policy. A peer response containing an unknown protected path, an omitted family, or a structural container presented as a file/symlink is rejected before AeorDB requests its chunks or mutates the destination.
 
 ### TLS
 
@@ -140,13 +142,13 @@ All sync endpoints use JWT Bearer token authentication:
 
 | Caller | Access Level |
 |--------|-------------|
-| Root JWT (nil UUID) | Full sync access -- `.system/` data is included automatically by the sync internals |
-| Non-root JWT | Filtered access (scoped) |
+| Root sync JWT (nil UUID) | Peer-replication policy: ordinary data plus registry-approved portable system families |
+| Non-root JWT | Client-sync policy plus current path authorization |
 
-The `.system/` namespace is completely invisible through all HTTP file APIs, regardless of caller privilege. During sync, `.system/` data is transferred internally when the sync system detects a root JWT caller -- this is handled by the `include_system()` mechanism and requires no operator intervention. Non-root tokens get filtered results:
+The boolean compatibility selector used inside the sync implementation maps to complete registry policies; it is not an "include every system path" switch. Client sync includes ordinary authorized files and required namespace metadata such as descendant `/.aeordb-permissions` and `/.aeordb-config/` records. It omits central protected state, conflicts, derived indexes, logs, credentials, and node-local data. Non-root tokens are then filtered further:
 
 - API key scoping rules restrict which paths are visible
-- Chunks with the `FLAG_SYSTEM` flag are never served through file APIs
+- `chunk_hashes_needed` is rebuilt from the files left after registry and authorization filtering
 
 ### Example: Client Sync
 

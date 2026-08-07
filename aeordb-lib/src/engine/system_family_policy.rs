@@ -23,6 +23,13 @@ pub(crate) struct AbsoluteTransferPath {
   pub is_prefix: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransferPathSelection {
+  Include,
+  Omit,
+  StructuralContainer,
+}
+
 impl SystemFamilyPolicyResolver {
   pub fn new(algorithm: HashAlgorithm) -> EngineResult<Self> {
     let inner = SystemFamilyPolicyResolverV1::embedded(algorithm).map_err(system_family_error)?;
@@ -56,20 +63,46 @@ impl SystemFamilyPolicyResolver {
   /// `NamedSubsetOnly` is deliberately excluded here: those families require
   /// an operation-specific named selector and must never leak into a broad
   /// traversal merely because their structural parent was selected.
-  pub fn transfer_path_is_included(self, path: &str, operation: SystemFamilyTransferOperationV1) -> EngineResult<bool> {
+  pub(crate) fn transfer_path_selection(
+    self,
+    path: &str,
+    operation: SystemFamilyTransferOperationV1,
+  ) -> EngineResult<TransferPathSelection> {
     match self.transfer_policy_for_path(path, operation)? {
-      SystemFamilyPolicyDecisionV1::Ordinary | SystemFamilyPolicyDecisionV1::StructuralContainer => Ok(true),
+      SystemFamilyPolicyDecisionV1::Ordinary => Ok(TransferPathSelection::Include),
+      SystemFamilyPolicyDecisionV1::StructuralContainer => Ok(TransferPathSelection::StructuralContainer),
       SystemFamilyPolicyDecisionV1::Known { policy: TransferPolicyV1::RequiredInclude | TransferPolicyV1::OptionalValidated, .. } => {
-        Ok(true)
+        Ok(TransferPathSelection::Include)
       }
       SystemFamilyPolicyDecisionV1::Known {
         policy:
           TransferPolicyV1::OmitDeclared | TransferPolicyV1::NodeLocal | TransferPolicyV1::RedactOmit | TransferPolicyV1::NamedSubsetOnly,
         ..
-      } => Ok(false),
+      } => Ok(TransferPathSelection::Omit),
       SystemFamilyPolicyDecisionV1::Known { family_id, policy: TransferPolicyV1::FailUnknown } => Err(EngineError::SystemFamilyPolicy {
         code: "system_family_transfer_refused",
         reason: format!("{} refuses family 0x{family_id:04x}", operation.name()),
+      }),
+    }
+  }
+
+  pub fn transfer_path_is_included(self, path: &str, operation: SystemFamilyTransferOperationV1) -> EngineResult<bool> {
+    Ok(!matches!(self.transfer_path_selection(path, operation)?, TransferPathSelection::Omit))
+  }
+
+  /// Require a path to be legal as a concrete file, symlink, or deletion in a
+  /// transfer payload. Structural containers are valid traversal waypoints but
+  /// are never valid leaves.
+  pub fn require_transfer_leaf_path(self, path: &str, operation: SystemFamilyTransferOperationV1) -> EngineResult<()> {
+    match self.transfer_path_selection(path, operation)? {
+      TransferPathSelection::Include => Ok(()),
+      TransferPathSelection::Omit => Err(EngineError::SystemFamilyPolicy {
+        code: "system_family_transfer_omitted",
+        reason: format!("{} payload contains omitted path '{}'", operation.name(), normalize_path(path)),
+      }),
+      TransferPathSelection::StructuralContainer => Err(EngineError::SystemFamilyPolicy {
+        code: "system_family_structural_leaf",
+        reason: format!("{} payload uses structural container '{}' as a leaf", operation.name(), normalize_path(path)),
       }),
     }
   }

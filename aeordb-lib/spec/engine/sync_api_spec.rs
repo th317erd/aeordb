@@ -2,7 +2,7 @@ use aeordb::engine::conflict_store;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::merge::{ConflictEntry, ConflictType, ConflictVersion};
 use aeordb::engine::sync_api::{apply_sync_chunks, compute_sync_diff, get_needed_chunks, list_conflicts_typed};
-use aeordb::engine::{RequestContext, StorageEngine};
+use aeordb::engine::{EngineError, EntryType, RequestContext, StorageEngine, deserialize_child_entries, serialize_child_entries};
 use aeordb::server::create_temp_engine_for_tests;
 
 // ---------------------------------------------------------------------------
@@ -97,6 +97,9 @@ fn test_compute_diff_with_paths_filter() {
   let added_paths: Vec<&str> = diff.files_added.iter().map(|f| f.path.as_str()).collect();
   assert!(added_paths.contains(&"/a/x.txt"), "expected /a/x.txt, got {:?}", added_paths);
   assert!(!added_paths.contains(&"/b/y.txt"), "/b/y.txt should be filtered out");
+  let visible_chunk_hashes = diff.files_added.iter().flat_map(|entry| entry.chunk_hashes.iter()).collect::<std::collections::BTreeSet<_>>();
+  let advertised_chunk_hashes = diff.chunk_hashes_needed.iter().collect::<std::collections::BTreeSet<_>>();
+  assert_eq!(advertised_chunk_hashes, visible_chunk_hashes, "path filtering leaked chunk hashes for omitted files");
 }
 
 // ---------------------------------------------------------------------------
@@ -107,11 +110,8 @@ fn test_compute_diff_with_paths_filter() {
 fn test_compute_diff_excludes_system() {
   let (engine, _temp) = create_temp_engine_for_tests();
   store_file(&engine, "/user/doc.txt", b"user doc");
-  // Use a path under a known system subdirectory (config/) — these are
-  // the paths `augment_with_system_subtrees` walks. Bare files directly
-  // under /.aeordb-system/ (no subdirectory) are only walked for the
-  // explicit list (e.g. email-config.json).
-  store_file(&engine, "/.aeordb-system/config/test.json", b"system config");
+  store_file(&engine, "/.aeordb-system/users/user.json", b"portable user");
+  store_file(&engine, "/.aeordb-system/config/test.json", b"node-local config");
 
   // With include_system=false
   let diff = compute_sync_diff(&engine, None, None, false).unwrap();
@@ -125,11 +125,131 @@ fn test_compute_diff_excludes_system() {
   // With include_system=true
   let diff_all = compute_sync_diff(&engine, None, None, true).unwrap();
   let all_paths: Vec<&str> = diff_all.files_added.iter().map(|f| f.path.as_str()).collect();
-  assert!(
-    all_paths.contains(&"/.aeordb-system/config/test.json"),
-    "system files should be present when include_system=true, got: {:?}",
-    all_paths
-  );
+  assert!(all_paths.contains(&"/.aeordb-system/users/user.json"), "portable peer state should be present, got: {:?}", all_paths);
+  assert!(!all_paths.contains(&"/.aeordb-system/config/test.json"), "node-local peer state must be omitted, got: {:?}", all_paths);
+}
+
+#[test]
+fn peer_sync_applies_registry_policy_to_portable_and_node_local_families() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let included = [
+    "/docs/readme.txt",
+    "/docs/.aeordb-permissions",
+    "/docs/.aeordb-config/indexes.json",
+    "/.aeordb-config/indexes.json",
+    "/.aeordb-system/users/user.json",
+    "/.aeordb-system/groups/group.json",
+    "/.aeordb-system/permissions/root.json",
+    "/.aeordb-system/plugins/plugin.json",
+  ];
+  let omitted = [
+    "/.aeordb-indexes/text.idx",
+    "/.aeordb-logs/index.log",
+    "/docs/.aeordb-indexes/text.idx",
+    "/docs/.aeordb-logs/index.log",
+    "/.aeordb-conflicts/conflict.json",
+    "/.aeordb-system/api-keys/key.json",
+    "/.aeordb-system/config/signing-key.json",
+    "/.aeordb-system/email-config.json",
+    "/.aeordb-system/controls/v1/root-lifecycle/a.ctrl",
+  ];
+  for path in included.iter().chain(omitted.iter()) {
+    store_file(&engine, path, path.as_bytes());
+  }
+
+  let diff = compute_sync_diff(&engine, None, None, true).unwrap();
+  let paths = diff.files_added.iter().map(|entry| entry.path.as_str()).collect::<std::collections::BTreeSet<_>>();
+
+  for path in included {
+    assert!(paths.contains(path), "peer sync omitted required registry family {path}: {paths:?}");
+  }
+  for path in omitted {
+    assert!(!paths.contains(path), "peer sync retained forbidden registry family {path}: {paths:?}");
+  }
+}
+
+#[test]
+fn client_sync_keeps_namespace_metadata_but_omits_protected_and_derived_families() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let included = ["/docs/readme.txt", "/docs/.aeordb-permissions", "/docs/.aeordb-config/indexes.json"];
+  let omitted = [
+    "/.aeordb-config/indexes.json",
+    "/.aeordb-indexes/text.idx",
+    "/.aeordb-logs/index.log",
+    "/.aeordb-system/users/user.json",
+    "/.aeordb-conflicts/conflict.json",
+    "/docs/.aeordb-indexes/text.idx",
+    "/docs/.aeordb-logs/index.log",
+  ];
+  for path in included.iter().chain(omitted.iter()) {
+    store_file(&engine, path, path.as_bytes());
+  }
+
+  let diff = compute_sync_diff(&engine, None, None, false).unwrap();
+  let paths = diff.files_added.iter().map(|entry| entry.path.as_str()).collect::<std::collections::BTreeSet<_>>();
+
+  for path in included {
+    assert!(paths.contains(path), "client sync omitted required namespace family {path}: {paths:?}");
+  }
+  for path in omitted {
+    assert!(!paths.contains(path), "client sync retained forbidden registry family {path}: {paths:?}");
+  }
+}
+
+#[test]
+fn sync_rejects_unknown_protected_directory_before_reading_its_body() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  store_file(&engine, "/.aeordb-future/value.bin", b"unknown");
+  let unknown = DirectoryOps::new(&engine).list_directory("/").unwrap().into_iter().find(|entry| entry.name == ".aeordb-future").unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &unknown.hash, b"not-a-directory").unwrap();
+
+  let error = compute_sync_diff(&engine, None, None, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }), "unexpected error: {error}");
+}
+
+#[test]
+fn peer_sync_rejects_malformed_required_state_but_does_not_read_omitted_secrets() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  store_file(&engine, "/.aeordb-system/email-config.json", b"secret");
+  let email_key = aeordb::engine::directory_ops::file_path_hash("/.aeordb-system/email-config.json", &engine.hash_algo()).unwrap();
+  engine
+    .store_entry_with_flags(EntryType::FileRecord, &email_key, b"not-a-file-record", aeordb::engine::entry_header::FLAG_SYSTEM)
+    .unwrap();
+  compute_sync_diff(&engine, None, None, true).unwrap();
+
+  store_file(&engine, "/.aeordb-system/users/user.json", b"required-user");
+  let user = DirectoryOps::new(&engine)
+    .list_directory("/.aeordb-system/users")
+    .unwrap()
+    .into_iter()
+    .find(|entry| entry.name == "user.json")
+    .unwrap();
+  engine
+    .store_entry_with_flags(EntryType::FileRecord, &user.hash, b"not-a-file-record", aeordb::engine::entry_header::FLAG_SYSTEM)
+    .unwrap();
+
+  let error = compute_sync_diff(&engine, None, None, true).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert!(error.to_string().contains("user.json"), "required-state error lacks path context: {error}");
+}
+
+#[test]
+fn peer_sync_rejects_a_structural_container_stored_as_a_file() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  store_file(&engine, "/ordinary.txt", b"not a directory");
+  let head = engine.head_hash().unwrap();
+  let (header, _key, root_data) = engine.get_entry(&head).unwrap().unwrap();
+  let mut children = deserialize_child_entries(&root_data, engine.hash_algo().hash_length(), header.entry_version).unwrap();
+  let ordinary = children.iter_mut().find(|child| child.name == "ordinary.txt").unwrap();
+  ordinary.name = ".aeordb-system".to_string();
+  let malformed_root = serialize_child_entries(&children, engine.hash_algo().hash_length()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &head, &malformed_root).unwrap();
+
+  let error = compute_sync_diff(&engine, None, None, true).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "system_family_structural_leaf", .. }), "unexpected error: {error}");
 }
 
 // ---------------------------------------------------------------------------

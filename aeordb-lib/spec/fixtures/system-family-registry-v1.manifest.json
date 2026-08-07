@@ -5,11 +5,11 @@
   "registry_magic": "ASFR",
   "registry_schema_version": 1,
   "binary": "system-family-registry-v1.bin",
-  "byte_length": 3060,
-  "sha256": "46bff1cbd780b55533dce05612143e6882098b305c3e88454b67d3945a532f83",
-  "crc32_iso_hdlc": "79732af8",
+  "byte_length": 3155,
+  "sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
+  "crc32_iso_hdlc": "31367981",
   "source_row_count": 46,
-  "descriptor_count": 61,
+  "descriptor_count": 63,
   "family_ids": [
     "0x0001",
     "0x0002",
@@ -108,7 +108,9 @@
     "0x0056:04:08:0900",
     "0x0057:04:08:0a00",
     "0x0057:04:08:0b00",
+    "0x0060:01:02:2f2e61656f7264622d696e64657865732f",
     "0x0060:01:04:0f002e61656f7264622d696e6465786573",
+    "0x0061:01:02:2f2e61656f7264622d6c6f67732f",
     "0x0061:01:04:0c002e61656f7264622d6c6f6773",
     "0x0062:01:01:2f2e61656f7264622d73797374656d2f736e617073686f7473",
     "0x0062:01:02:2f2e61656f7264622d73797374656d2f736e617073686f74732f",
@@ -122,12 +124,12 @@
     "0x0071:05:09:0400"
   ],
   "fingerprints": {
-    "blake3_256": "37596631fd3f66bcf51d20fd0362a9185c647e41607451f81d8098455e7166e3",
-    "sha512": "3787e9a7081b77979638f6cb4e1fd6c5bafb00ed4f8f3629d2c4de2bc6a450bee3e3fed07653d358ca0dc79070d8c73e1f2c704d0d84e60a617e5547968efe29"
+    "blake3_256": "ac7eb8307ac8695695e809132585495fafe5e757b4c2c9eecf93f92c099a3501",
+    "sha512": "5aa6f253365ac18a1bf9f18c7c7c01e3ef87b78ea996564d741e4cf744cdfcd799e140d19ddfe5b7bfc99c50e354f02941aa742413dec489fbf2605e3b0d74bf"
   },
   "semantic_projection_fingerprints": {
-    "blake3_256": "281a92359368fdec709b47f34a12f82fb0b56c73801ddc02aab03c35bf2db649",
-    "sha512": "2c3ca10a8b7cf52f420956570875c16b1da18736357b58fc97186164c1edaf541d2743679ddc4f5fc7c5511db9bea2473b262fcdc1cabe6d09d6c61dee0233d3"
+    "blake3_256": "adc5aa037cb2c38d1a4b53a4091b987950cca2bd7ccd4bf71badef9b487ac398",
+    "sha512": "013e71c4669a208ba1ebad828d5ab6d70a76e5a34a28fd6abb98d4de1c86f318f44ca26806b55312e2d6c8e765a0c3edf8dafe4416e2e95e202246e41da51ad6"
   },
   "operational_control_tags": {
     "1": "legacy_root_and_root_lifecycle_evidence",
@@ -1281,8 +1283,9 @@
     {
       "family_id": "0x0060",
       "label": "legacy_indexes",
-      "matcher_count": 1,
+      "matcher_count": 2,
       "descriptor_keys": [
+        "0x0060:01:02:2f2e61656f7264622d696e64657865732f",
         "0x0060:01:04:0f002e61656f7264622d696e6465786573"
       ],
       "policy": {
@@ -1309,8 +1312,9 @@
     {
       "family_id": "0x0061",
       "label": "nested_logs",
-      "matcher_count": 1,
+      "matcher_count": 2,
       "descriptor_keys": [
+        "0x0061:01:02:2f2e61656f7264622d6c6f67732f",
         "0x0061:01:04:0c002e61656f7264622d6c6f6773"
       ],
       "policy": {

@@ -219,7 +219,7 @@ jq -e --arg source_sha "$(sha256sum "$contract_registry" | awk '{print $1}')" \
   .counts == {
     "formats":21,"fixtures":436,"capability_bits":24,"entry_types":10,"kv_tags":12,
     "shared_enum_scopes":13,"shared_enum_values":134,"system_families":46,
-    "system_family_descriptors":61,"malformed_input_classes":16
+    "system_family_descriptors":63,"malformed_input_classes":16
   } and
   all(.collision_results[]; . == 0) and
   all(.coverage[]; . == true or type == "string") and

@@ -239,14 +239,17 @@ async fn test_client_sync_with_jwt() {
   assert!(paths.contains(&"/public/file.txt".to_string()));
 }
 
-/// Non-root JWT sync excludes /.aeordb-system/ paths.
+/// Non-root JWT sync applies client-sync policy before authorization.
 #[tokio::test]
 async fn test_client_sync_excludes_system() {
   let (_app, jwt_manager, engine, _tmp) = create_node();
 
-  // Store a user-space file and a system file.
   store_file(&engine, "public/file.txt", b"public data");
-  store_file(&engine, ".aeordb-system/config/secret_key", b"secret");
+  store_file(&engine, "public/.aeordb-permissions", b"permissions");
+  store_file(&engine, "public/.aeordb-config/indexes.json", b"index config");
+  store_file(&engine, "public/.aeordb-indexes/text.idx", b"derived index");
+  store_file(&engine, ".aeordb-conflicts/conflict.json", b"conflict");
+  store_file(&engine, ".aeordb-system/users/user.json", b"portable peer state");
 
   let token = non_root_bearer_token(&jwt_manager);
   let app = build_app(&jwt_manager, &engine);
@@ -256,20 +259,25 @@ async fn test_client_sync_excludes_system() {
   assert_eq!(status, StatusCode::OK);
   let paths = extract_all_paths(&json["changes"]);
   assert!(paths.contains(&"/public/file.txt".to_string()), "should include public file, got: {:?}", paths);
-  // No /.aeordb-system/ paths should appear.
-  for path in &paths {
-    assert!(!path.starts_with("/.aeordb-system/"), "system path should be filtered out: {}", path);
-  }
+  assert!(paths.contains(&"/public/.aeordb-permissions".to_string()), "client sync should include namespace permissions: {paths:?}");
+  assert!(
+    paths.contains(&"/public/.aeordb-config/indexes.json".to_string()),
+    "client sync should include namespace index config: {paths:?}"
+  );
+  assert!(!paths.contains(&"/public/.aeordb-indexes/text.idx".to_string()), "client sync exposed derived index: {paths:?}");
+  assert!(!paths.contains(&"/.aeordb-conflicts/conflict.json".to_string()), "client sync exposed conflict state: {paths:?}");
+  assert!(!paths.contains(&"/.aeordb-system/users/user.json".to_string()), "client sync exposed peer-only state: {paths:?}");
 }
 
-/// Peer (sync-scoped root) JWT sync includes /.aeordb-system/ paths.
+/// Peer (sync-scoped root) JWT sync includes portable registry families.
 /// Admin root JWTs without sync scope do NOT — that's a separate test below.
 #[tokio::test]
 async fn test_root_sync_includes_system() {
   let (_app, jwt_manager, engine, _tmp) = create_node();
 
   store_file(&engine, "public/file.txt", b"public data");
-  store_file(&engine, ".aeordb-system/config/secret_key", b"secret");
+  store_file(&engine, ".aeordb-system/users/user.json", b"portable user");
+  store_file(&engine, ".aeordb-system/config/secret_key", b"node-local secret");
 
   let token = peer_bearer_token(&jwt_manager);
   let app = build_app(&jwt_manager, &engine);
@@ -279,8 +287,8 @@ async fn test_root_sync_includes_system() {
   assert_eq!(status, StatusCode::OK);
   let paths = extract_all_paths(&json["changes"]);
   assert!(paths.contains(&"/public/file.txt".to_string()), "should include public file");
-  let has_system = paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
-  assert!(has_system, "peer should see /.aeordb-system/ paths, got: {:?}", paths);
+  assert!(paths.contains(&"/.aeordb-system/users/user.json".to_string()), "peer omitted portable user state: {paths:?}");
+  assert!(!paths.contains(&"/.aeordb-system/config/secret_key".to_string()), "peer exposed node-local secret: {paths:?}");
 }
 
 /// Non-root JWT + paths filter only returns matching paths.
@@ -591,13 +599,14 @@ async fn test_jwt_wrong_signing_key_rejected() {
   assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// Peer JWT sees /.aeordb-system/ paths; non-peer (client) JWT does not.
+/// Peer JWT sees portable peer state; non-peer JWT receives client policy.
 #[tokio::test]
 async fn test_root_vs_client_system_visibility() {
   let (_app, jwt_manager, engine, _tmp) = create_node();
 
   store_file(&engine, "public/file.txt", b"public");
-  store_file(&engine, ".aeordb-system/config/key", b"system data");
+  store_file(&engine, ".aeordb-system/users/user.json", b"portable user");
+  store_file(&engine, ".aeordb-system/config/key", b"node-local secret");
 
   // Peer sync (sync-scoped JWT)
   let peer_token = peer_bearer_token(&jwt_manager);
@@ -613,7 +622,7 @@ async fn test_root_vs_client_system_visibility() {
   assert_eq!(status, StatusCode::OK);
   let client_paths = extract_all_paths(&client_json["changes"]);
 
-  // Peer should have more paths (system entries).
+  // Peer should have more paths because portable peer-only state is present.
   assert!(
     root_paths.len() > client_paths.len(),
     "peer should see more paths than client: peer={:?}, client={:?}",
@@ -625,11 +634,10 @@ async fn test_root_vs_client_system_visibility() {
   assert!(root_paths.contains(&"/public/file.txt".to_string()));
   assert!(client_paths.contains(&"/public/file.txt".to_string()));
 
-  // Only peer should see system entries.
-  let root_has_system = root_paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
-  let client_has_system = client_paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
-  assert!(root_has_system, "root should see /.aeordb-system/");
-  assert!(!client_has_system, "client should NOT see /.aeordb-system/");
+  assert!(root_paths.contains(&"/.aeordb-system/users/user.json".to_string()), "peer omitted portable user state: {root_paths:?}");
+  assert!(!client_paths.contains(&"/.aeordb-system/users/user.json".to_string()), "client exposed peer-only state: {client_paths:?}");
+  assert!(!root_paths.contains(&"/.aeordb-system/config/key".to_string()), "peer exposed node-local secret: {root_paths:?}");
+  assert!(!client_paths.contains(&"/.aeordb-system/config/key".to_string()), "client exposed node-local secret: {client_paths:?}");
 }
 
 /// Scoped key with no matching rule for a path blocks it.
@@ -743,7 +751,7 @@ async fn test_sync_chunks_root_jwt_works() {
   }
 }
 
-/// Peer JWT sync with incremental diff works and includes system.
+/// Peer JWT incremental sync includes current portable state.
 #[tokio::test]
 async fn test_root_incremental_includes_system() {
   let (_app, jwt_manager, engine, _tmp) = create_node();
@@ -751,7 +759,8 @@ async fn test_root_incremental_includes_system() {
   store_file(&engine, "public/file.txt", b"public");
   let since_hash = get_head_hex(&engine);
 
-  store_file(&engine, ".aeordb-system/new_config", b"new system data");
+  store_file(&engine, ".aeordb-system/users/new-user.json", b"new portable user");
+  store_file(&engine, ".aeordb-system/config/new-secret", b"new node-local secret");
   store_file(&engine, "public/new_file.txt", b"new public");
 
   let token = peer_bearer_token(&jwt_manager);
@@ -762,8 +771,8 @@ async fn test_root_incremental_includes_system() {
   assert_eq!(status, StatusCode::OK);
   let paths = extract_all_paths(&json["changes"]);
   assert!(paths.contains(&"/public/new_file.txt".to_string()), "should include new public file");
-  let has_system = paths.iter().any(|p| p.starts_with("/.aeordb-system/"));
-  assert!(has_system, "peer incremental should include new system files");
+  assert!(paths.contains(&"/.aeordb-system/users/new-user.json".to_string()), "peer incremental omitted portable state: {paths:?}");
+  assert!(!paths.contains(&"/.aeordb-system/config/new-secret".to_string()), "peer incremental exposed node-local secret: {paths:?}");
 }
 
 /// H4: Scoped key must NOT receive chunk hashes for files outside its scope.

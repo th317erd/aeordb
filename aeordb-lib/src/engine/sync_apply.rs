@@ -3,11 +3,13 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::merge::MergeOp;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
+use crate::engine::v4::system_family::SystemFamilyTransferOperationV1;
 
 /// Apply merge operations to the local engine.
 ///
 /// NOTE: This is NOT atomic in the database sense. Each operation is applied
-/// individually and durable (per-entry fsync). If operation N fails, operations
+/// individually through the normal durable mutation path. If operation N fails, operations
 /// 1..N-1 are already committed. The caller should NOT save sync state if this
 /// returns an error -- the next sync cycle will re-attempt from the last
 /// successfully saved base hash.
@@ -18,13 +20,14 @@ use crate::engine::storage_engine::StorageEngine;
 ///
 /// Steps:
 /// 1. Verify all required chunks exist locally (pre-flight check)
-/// 2. Apply all add/modify operations
-/// 3. Apply all delete operations
-/// 4. HEAD is updated by the final directory_ops operations
+/// 2. Apply operations in the caller-provided order
+/// 3. HEAD is published by each successful DirectoryOps mutation
 ///
-/// If any step fails, return error. The caller should NOT have modified
-/// HEAD before calling this -- the previous HEAD remains valid on failure.
+/// If any step fails, return an error and do not advance the peer checkpoint.
+/// Earlier successful operations may already have published a new HEAD.
 pub fn apply_merge_operations(engine: &StorageEngine, context: &RequestContext, operations: &[MergeOp]) -> EngineResult<()> {
+  validate_peer_transfer_paths(engine, operations)?;
+
   // Pre-flight: verify all chunks exist for AddFile operations
   verify_chunks_exist(engine, operations)?;
 
@@ -50,6 +53,23 @@ pub fn apply_merge_operations(engine: &StorageEngine, context: &RequestContext, 
     }
   }
 
+  Ok(())
+}
+
+/// Validate the complete mutation set before reading chunks or changing HEAD.
+/// Merge operations are currently a peer-replication-only boundary, so an
+/// omitted, node-local, unknown, or structural-only path is a malformed peer
+/// payload rather than something to skip midway through a batch.
+fn validate_peer_transfer_paths(engine: &StorageEngine, operations: &[MergeOp]) -> EngineResult<()> {
+  let resolver = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
+  for operation in operations {
+    let path = match operation {
+      MergeOp::AddFile { path, .. } | MergeOp::DeleteFile { path } | MergeOp::AddSymlink { path, .. } | MergeOp::DeleteSymlink { path } => {
+        path
+      }
+    };
+    resolver.require_transfer_leaf_path(path, SystemFamilyTransferOperationV1::PeerReplication)?;
+  }
   Ok(())
 }
 

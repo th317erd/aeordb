@@ -308,7 +308,7 @@ fn validate(registry: &Value, system_family: &Value) -> DynResult<()> {
   }
   validate_rust_identifiers("format_hard_cap", formats)?;
 
-  if u64_field(system_family, "source_row_count")? != 46 || u64_field(system_family, "descriptor_count")? != 61 {
+  if u64_field(system_family, "source_row_count")? != 46 || u64_field(system_family, "descriptor_count")? != 63 {
     return Err("SystemFamily manifest count mismatch".into());
   }
   let families = array_at(system_family, &["source_rows"])?;

@@ -1,12 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::directory_entry::deserialize_child_entries;
+use crate::engine::directory_ops::{directory_content_hash, directory_path_hash, file_content_hash, file_path_hash};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::system_family_policy::{SystemFamilyPolicyResolver, TransferPathSelection};
 use crate::engine::symlink_record::SymlinkRecord;
+use crate::engine::v4::system_family::{SystemFamilyClassificationV1, SystemFamilyTransferOperationV1};
 
 const COLLECTION_ENTRY_OVERHEAD: u64 = 64;
 const TREE_SCRATCH_OVERHEAD: u64 = 1024;
@@ -52,7 +55,7 @@ impl VersionTree {
 /// the walk terminates that branch instead of recursing infinitely.
 pub fn walk_version_tree(engine: &StorageEngine, root_hash: &[u8]) -> EngineResult<VersionTree> {
   let mut control = TreeWalkControl::unbounded();
-  walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(true))
+  walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(TransferPathSelection::Include))
 }
 
 pub(crate) fn walk_version_tree_with_budget(
@@ -61,20 +64,35 @@ pub(crate) fn walk_version_tree_with_budget(
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<VersionTree> {
   let mut control = TreeWalkControl::accounted(budget, false);
-  walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(true))
+  walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(TransferPathSelection::Include))
 }
 
-pub(crate) fn walk_version_tree_filtered_with_budget<F>(
+pub(crate) fn walk_version_tree_for_transfer_with_budget(
   engine: &StorageEngine,
   root_hash: &[u8],
+  operation: SystemFamilyTransferOperationV1,
+  include_detached_current_state: bool,
   budget: &mut OperationMemoryBudget,
-  path_filter: &mut F,
-) -> EngineResult<VersionTree>
-where
-  F: FnMut(&str) -> EngineResult<bool>,
-{
+) -> EngineResult<VersionTree> {
+  let resolver = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
   let mut control = TreeWalkControl::accounted(budget, true);
-  walk_version_tree_controlled(engine, root_hash, &mut control, path_filter)
+  walk_version_tree_for_transfer_controlled(engine, root_hash, resolver, operation, include_detached_current_state, &mut control)
+}
+
+fn walk_version_tree_for_transfer_controlled(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  resolver: SystemFamilyPolicyResolver,
+  operation: SystemFamilyTransferOperationV1,
+  include_detached_current_state: bool,
+  control: &mut TreeWalkControl<'_>,
+) -> EngineResult<VersionTree> {
+  let mut path_filter = |path: &str| resolver.transfer_path_selection(path, operation);
+  let mut tree = walk_version_tree_controlled(engine, root_hash, control, &mut path_filter)?;
+  if include_detached_current_state {
+    collect_detached_transfer_paths(engine, &mut tree, resolver, operation, control, &mut path_filter)?;
+  }
+  Ok(tree)
 }
 
 fn walk_version_tree_controlled<F>(
@@ -84,7 +102,7 @@ fn walk_version_tree_controlled<F>(
   path_filter: &mut F,
 ) -> EngineResult<VersionTree>
 where
-  F: FnMut(&str) -> EngineResult<bool>,
+  F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let mut tree = VersionTree::new();
   let hash_length = engine.hash_algo().hash_length();
@@ -92,92 +110,100 @@ where
   Ok(tree)
 }
 
-/// Walk a subtree rooted at a given path. Used for collecting system data
-/// (/.aeordb-system/) which is not reachable from the user-visible HEAD tree
-/// because system paths are not propagated to root.
-///
-/// Adds entries into the provided tree.
+/// Walk a subtree rooted at a given path and add it to an existing tree.
 pub fn walk_subtree(engine: &StorageEngine, start_path: &str, start_dir_hash: &[u8], tree: &mut VersionTree) -> EngineResult<()> {
   let hash_length = engine.hash_algo().hash_length();
   let mut control = TreeWalkControl::unbounded();
-  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut control, &mut |_| Ok(true))
+  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut control, &mut |_| Ok(TransferPathSelection::Include))
 }
 
-pub(crate) fn walk_subtree_filtered_with_budget<F>(
+/// Add registry-selected state that is deliberately detached from HEAD.
+///
+/// Candidate roots come from the immutable registry. Structural ancestors are
+/// inspected so path listings remain coherent, and every descendant is
+/// classified before its FileRecord, symlink, or directory body is read.
+fn collect_detached_transfer_paths<F>(
   engine: &StorageEngine,
-  start_path: &str,
-  start_dir_hash: &[u8],
   tree: &mut VersionTree,
-  budget: &mut OperationMemoryBudget,
+  resolver: SystemFamilyPolicyResolver,
+  operation: SystemFamilyTransferOperationV1,
+  control: &mut TreeWalkControl<'_>,
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
-  F: FnMut(&str) -> EngineResult<bool>,
+  F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
-  let hash_length = engine.hash_algo().hash_length();
-  let mut control = TreeWalkControl::accounted(budget, true);
-  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut control, path_filter)
-}
-
-/// Augment `tree` with `/.aeordb-system/{users,groups,snapshots,config}` and
-/// `/.aeordb-config` subtrees plus the single-file `email-config.json`.
-///
-/// This is what replication peers use to merge system data into a tree the
-/// diff is computed from. `walk_version_tree(HEAD)` deliberately does NOT
-/// include system paths; this function fills the gap.
-///
-/// Credential subdirectories (`api-keys`, `refresh-tokens`, `magic-links`)
-/// are excluded — they're tied to the issuing node's identity and must not
-/// replicate.
-pub fn augment_with_system_subtrees(engine: &crate::engine::StorageEngine, tree: &mut VersionTree) {
-  use crate::engine::directory_ops::{directory_path_hash, file_path_hash};
-  use crate::engine::file_record::FileRecord;
-
-  let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
-
-  let system_dirs =
-    ["/.aeordb-system/users", "/.aeordb-system/groups", "/.aeordb-system/snapshots", "/.aeordb-system/config", "/.aeordb-config"];
-  let system_single_files: &[&str] = &["/.aeordb-system/email-config.json"];
-
-  for sys_path in &system_dirs {
-    let key = match directory_path_hash(sys_path, &algo) {
-      Ok(k) => k,
-      Err(_) => continue,
-    };
-    let raw_value = match engine.get_entry_including_deleted(&key) {
-      Ok(Some((_h, _k, value))) => value,
-      _ => continue,
-    };
-    let sys_dir_hash = if raw_value.len() == hash_length {
-      raw_value
-    } else {
-      match algo.compute_hash(&raw_value) {
-        Ok(h) => h,
-        Err(_) => continue,
+  let mut candidates = std::collections::BTreeMap::<String, bool>::new();
+  for candidate in resolver.included_absolute_paths(operation)? {
+    candidates.entry(candidate.path.clone()).and_modify(|is_prefix| *is_prefix |= candidate.is_prefix).or_insert(candidate.is_prefix);
+    let mut ancestor = candidate.path.as_str();
+    while let Some((parent, _)) = ancestor.rsplit_once('/') {
+      if parent.is_empty() {
+        break;
       }
-    };
-    tree.directories.insert(sys_path.to_string(), (sys_dir_hash.clone(), Vec::new()));
-    let _ = walk_subtree(engine, sys_path, &sys_dir_hash, tree);
+      if matches!(resolver.classify_path(parent)?, SystemFamilyClassificationV1::StructuralContainer) {
+        candidates.entry(parent.to_string()).or_insert(true);
+      }
+      ancestor = parent;
+    }
   }
 
-  for file_path in system_single_files {
-    let key = match file_path_hash(file_path, &algo) {
-      Ok(k) => k,
-      Err(_) => continue,
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  for (path, is_prefix) in candidates {
+    control.record_work(1)?;
+    if !resolver.transfer_path_is_included(&path, operation)? {
+      continue;
+    }
+
+    if !is_prefix && !tree.files.contains_key(&path) {
+      let file_key = file_path_hash(&path, &algorithm)?;
+      if let Some(((header, _key, raw), loaded_charge)) = load_historical_entry(engine, &file_key, control)? {
+        if header.entry_type != EntryType::FileRecord {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("transfer path '{}' resolved to {:?} instead of FileRecord", path, header.entry_type),
+          });
+        }
+        let record = FileRecord::deserialize(&raw, hash_length, header.entry_version).map_err(|error| EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("transfer FileRecord '{}' is malformed: {error}", path),
+        })?;
+        let content_hash = file_content_hash(&raw, &algorithm)?;
+        let retained_bytes = path
+          .len()
+          .checked_add(content_hash.len())
+          .and_then(|bytes| bytes.checked_add(raw.len()))
+          .ok_or_else(|| EngineError::ResourceExhausted("detached transfer file estimate overflow".to_string()))?;
+        control.reserve(collection_charge(retained_bytes, 0)?, "detached transfer file admission failed")?;
+        for chunk_hash in &record.chunk_hashes {
+          if tree.chunks.insert(chunk_hash.clone()) {
+            control.reserve(collection_charge(0, chunk_hash.len())?, "detached transfer chunk set admission failed")?;
+          }
+        }
+        tree.files.insert(path.clone(), (content_hash, record));
+        control.release(loaded_charge, "detached transfer FileRecord buffer release failed")?;
+      }
+    }
+
+    if tree.directories.contains_key(&path) {
+      continue;
+    }
+    let directory_key = directory_path_hash(&path, &algorithm)?;
+    let Some(((header, _key, raw), loaded_charge)) = load_historical_entry(engine, &directory_key, control)? else {
+      continue;
     };
-    let (record, content_hash) = match engine.get_entry_including_deleted(&key) {
-      Ok(Some((header, _key, raw))) => match FileRecord::deserialize(&raw, hash_length, header.entry_version) {
-        Ok(record) => match crate::engine::directory_ops::file_content_hash(&raw, &algo) {
-          Ok(h) => (record, h),
-          Err(_) => continue,
-        },
-        Err(_) => continue,
-      },
-      _ => continue,
-    };
-    tree.files.insert(file_path.to_string(), (content_hash, record));
+    if header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("transfer directory '{}' resolved to {:?} instead of DirectoryIndex", path, header.entry_type),
+      });
+    }
+    let directory_hash = if raw.len() == hash_length { raw.clone() } else { directory_content_hash(&raw, &algorithm)? };
+    control.release(loaded_charge, "detached transfer directory path-entry buffer release failed")?;
+    walk_directory(engine, &directory_hash, &path, hash_length, tree, control, path_filter)?;
   }
+  Ok(())
 }
 
 /// Recursively walk a directory and its children.
@@ -242,7 +268,7 @@ fn walk_directory<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
-  F: FnMut(&str) -> EngineResult<bool>,
+  F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let initial_charge = collection_charge(current_path.len(), dir_hash.len())?;
   control.reserve(initial_charge, "directory frontier admission failed")?;
@@ -316,7 +342,7 @@ fn visit_directory_children<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
-  F: FnMut(&str) -> EngineResult<bool>,
+  F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   if crate::engine::btree::is_btree_format(dir_data) {
     visit_btree_children(engine, current_path, dir_data, hash_length, tree, pending, control, path_filter)
@@ -342,7 +368,7 @@ fn visit_btree_children<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
-  F: FnMut(&str) -> EngineResult<bool>,
+  F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let mut node_hashes: Vec<(Vec<u8>, u64)> = Vec::new();
   let mut visited_node_hashes = HashSet::new();
@@ -411,7 +437,7 @@ fn process_btree_node<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
-  F: FnMut(&str) -> EngineResult<bool>,
+  F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let scratch = scratch_charge(node_data.len())?;
   control.reserve(scratch, "B-tree parse admission failed")?;
@@ -443,15 +469,22 @@ fn process_child<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
-  F: FnMut(&str) -> EngineResult<bool>,
+  F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   control.record_work(1)?;
   let path_len = joined_path_len(current_path, child.name.len())?;
   let child_path = join_child_path(current_path, &child.name);
-  if !path_filter(&child_path)? {
+  let selection = path_filter(&child_path)?;
+  if selection == TransferPathSelection::Omit {
     return Ok(());
   }
   let child_entry_type = EntryType::from_u8(child.entry_type)?;
+  if selection == TransferPathSelection::StructuralContainer && child_entry_type != EntryType::DirectoryIndex {
+    return Err(EngineError::SystemFamilyPolicy {
+      code: "system_family_structural_leaf",
+      reason: format!("transfer traversal uses structural container '{}' as {:?}", child_path, child_entry_type),
+    });
+  }
   match child_entry_type {
     EntryType::DirectoryIndex => {
       let charge = collection_charge(path_len, child.hash.len())?;

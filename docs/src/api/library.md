@@ -270,7 +270,7 @@ let diff = compute_sync_diff(
     &engine,
     Some(&last_known_hash),  // None for full sync
     Some(&["/assets/**".to_string()]),  // path filter
-    false,  // exclude /.system/
+    false,  // client-sync policy (true selects peer-replication policy)
 ).unwrap();
 
 // Get the chunk data for transfer
@@ -279,6 +279,14 @@ let chunks = get_needed_chunks(&engine, &diff.chunk_hashes_needed).unwrap();
 // On the receiving side: store incoming chunks
 let stored = apply_sync_chunks(&engine, &chunks).unwrap();
 ```
+
+The final `compute_sync_diff` argument is retained as a compatibility adapter,
+not a raw system-path switch. `true` selects the registry's peer-replication
+policy; `false` selects client-sync policy. Both modes reject unknown protected
+families. Peer mode includes portable system state but omits node-local secrets,
+credentials, controls, conflicts, logs, and derived indexes. Client mode includes
+ordinary data and required namespace metadata, then HTTP callers receive an
+additional authorization filter.
 
 ### Conflict Management
 
@@ -341,7 +349,7 @@ println!("Reclaimed {} bytes from {} entries", result.reclaimed_bytes, result.ga
 
 ## System Data
 
-System data (users, groups, API keys, config) is stored under `/.system/` and accessed via `system_store`:
+System data (users, groups, API keys, config) is stored under `/.aeordb-system/` and accessed via `system_store`:
 
 ```rust,ignore
 use aeordb::engine::system_store;

@@ -12,10 +12,7 @@ use super::responses::ErrorResponse;
 use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
-use crate::engine::file_record::FileRecord;
-use crate::engine::symlink_record::SymlinkRecord;
-use crate::engine::tree_walker::{diff_trees, walk_version_tree, TreeDiff, VersionTree};
-use crate::engine::version_manager::VersionManager;
+use crate::engine::sync_api::{compute_sync_diff, SyncDiff as EngineSyncDiff};
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -79,22 +76,18 @@ pub struct SyncChunksRequest {
 
 /// Describes who is calling the sync endpoint and what access they have.
 ///
-/// The distinction between `Peer` and `RootUser` matters for system-data
-/// inclusion. A **replication peer** (another cluster node) calls sync
-/// internally with a JWT minted by `SyncEngine::mint_sync_token`, which
-/// has `sub: ROOT_USER_ID` AND `scope: "sync"`. Those calls MUST receive
-/// `/.aeordb-system/` entries — that's how users, groups, refresh tokens,
-/// etc. propagate across the cluster. Anyone else (root admin running
-/// curl, scoped users) does **not** get system data through /sync — they
-/// should use a backup with `--root-key` or path-based APIs.
+/// A replication peer calls with a JWT minted by
+/// `SyncEngine::mint_sync_token`, which has `sub: ROOT_USER_ID` and
+/// `scope: "sync"`. Those calls receive only registry families selected by
+/// peer-replication policy. Everyone else receives client-sync policy before
+/// ordinary path authorization.
 pub enum SyncCaller {
-  /// Replication peer: `sub: ROOT_USER_ID` + `scope: "sync"`. Full
-  /// access INCLUDING `/.aeordb-system/` and `/.aeordb-config/`.
+  /// Replication peer: `sub: ROOT_USER_ID` + `scope: "sync"`.
   Peer,
   /// Root JWT (nil UUID), no sync scope — admin tool, not a peer.
-  /// `/.aeordb-system/` filtered out (use backup instead).
+  /// Receives client-sync policy; use backup for complete protected closure.
   RootUser,
-  /// Non-root JWT — `/.aeordb-system/` filtered out, API key rules applied.
+  /// Non-root JWT — client-sync policy followed by API-key/user rules.
   ScopedUser {
     // TODO: Use for per-user sync audit logging and rate limiting.
     #[allow(dead_code)]
@@ -104,8 +97,7 @@ pub enum SyncCaller {
 }
 
 impl SyncCaller {
-  /// Whether this caller should see /.aeordb-system/ entries.
-  /// Only peer replicas include system data; admin root users do NOT.
+  /// Whether this caller selects registry peer-replication policy.
   fn include_system(&self) -> bool {
     matches!(self, SyncCaller::Peer)
   }
@@ -122,8 +114,8 @@ impl SyncCaller {
 /// Determine the caller identity from request headers.
 /// Verifies JWT Bearer token. Returns 401 if no valid auth is present.
 fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCaller, Response> {
-  // 0. If auth is disabled (dev mode), treat as a peer so dev sync flows
-  //    see system data — matches the pre-auth-disabled behavior.
+  // 0. If auth is disabled (dev mode), select peer-replication policy to
+  //    preserve the pre-auth-disabled sync behavior.
   if !state.auth_provider.is_enabled() {
     return Ok(SyncCaller::Peer);
   }
@@ -148,10 +140,9 @@ fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCa
 
     if crate::engine::user::is_root(&user_id) {
       // A root JWT with `scope: "sync"` is a replication peer
-      // (minted by SyncEngine::mint_sync_token); it MUST receive
-      // system data. A root JWT without that scope is an admin tool
-      // and must NOT receive system data through sync — use a
-      // root-key backup for that purpose.
+      // (minted by SyncEngine::mint_sync_token); it receives registry-approved
+      // portable peer state. A root JWT without that scope is an admin tool and
+      // receives client-sync policy; use a root-key backup for complete closure.
       if claims.scope.as_deref() == Some("sync") {
         return Ok(SyncCaller::Peer);
       }
@@ -210,30 +201,32 @@ fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCa
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: convert tree structures to sync response types
+// Helpers: convert the embedded sync result to the stable HTTP schema
 // ---------------------------------------------------------------------------
 
-fn file_record_to_sync_entry(path: &str, hash: &[u8], record: &FileRecord) -> SyncFileEntry {
-  SyncFileEntry {
-    path: path.to_string(),
-    hash: hex::encode(hash),
-    size: record.total_size,
-    content_type: record.content_type.clone(),
-    chunk_hashes: record.chunk_hashes.iter().map(hex::encode).collect(),
-  }
-}
+fn sync_changes_from_engine(diff: EngineSyncDiff) -> SyncChanges {
+  let convert_file = |entry: crate::engine::sync_api::SyncFileEntry| SyncFileEntry {
+    path: entry.path,
+    hash: hex::encode(entry.hash),
+    size: entry.size,
+    content_type: entry.content_type,
+    chunk_hashes: entry.chunk_hashes.into_iter().map(hex::encode).collect(),
+  };
+  let convert_symlink = |entry: crate::engine::sync_api::SyncSymlinkEntry| SyncSymlinkEntry {
+    path: entry.path,
+    hash: hex::encode(entry.hash),
+    target: entry.target,
+  };
+  let convert_deleted = |entry: crate::engine::sync_api::SyncDeletedEntry| SyncDeletedEntry { path: entry.path };
 
-fn symlink_record_to_sync_entry(path: &str, hash: &[u8], record: &SymlinkRecord) -> SyncSymlinkEntry {
-  SyncSymlinkEntry { path: path.to_string(), hash: hex::encode(hash), target: record.target.clone() }
-}
-
-fn path_matches_filter(path: &str, patterns: &[String]) -> bool {
-  for pattern in patterns {
-    if glob_match::glob_match(pattern, path) {
-      return true;
-    }
+  SyncChanges {
+    files_added: diff.files_added.into_iter().map(convert_file).collect(),
+    files_modified: diff.files_modified.into_iter().map(convert_file).collect(),
+    files_deleted: diff.files_deleted.into_iter().map(convert_deleted).collect(),
+    symlinks_added: diff.symlinks_added.into_iter().map(convert_symlink).collect(),
+    symlinks_modified: diff.symlinks_modified.into_iter().map(convert_symlink).collect(),
+    symlinks_deleted: diff.symlinks_deleted.into_iter().map(convert_deleted).collect(),
   }
-  false
 }
 
 /// Check if a path is readable according to API key rules.
@@ -268,9 +261,8 @@ fn filter_changes_by_key_rules(changes: &mut SyncChanges, rules: &[KeyRule]) {
 /// key rules) would receive the full path list — a metadata leak even
 /// though GET /files/{path} would correctly 403 on the content.
 ///
-/// Also unconditionally drops `/.aeordb-system/` and `/.aeordb-config/`
-/// entries: those are engine-internal and must never reach a user's
-/// filesystem, regardless of permissions.
+/// SystemFamily client-sync policy has already removed ineligible protected,
+/// derived, secret, and node-local entries before this authorization pass.
 fn filter_changes_by_user_permissions(changes: &mut SyncChanges, user_id_str: &str, state: &AppState) {
   use crate::engine::permission_resolver::CrudlifyOp;
 
@@ -289,12 +281,6 @@ fn filter_changes_by_user_permissions(changes: &mut SyncChanges, user_id_str: &s
 
   let permissions = RoutePermissionChecker::for_user(state, user_id);
   let is_allowed = |path: &str| -> bool {
-    if crate::engine::directory_ops::is_system_path(path) {
-      return false;
-    }
-    if crate::engine::directory_ops::is_internal_path(path) {
-      return false;
-    }
     // Use `check_path_permission` so symlink-to-directory events whose
     // path lacks a trailing slash still see grants stored at the
     // directory itself. Same bug pattern as the share-Susan repro
@@ -321,176 +307,6 @@ fn user_has_grant_scope(user_id_str: &str, state: &AppState) -> bool {
   resolver.has_descendant_grants(&user_id, "/").unwrap_or(false)
 }
 
-/// Build a full sync response (no since_root_hash -- everything is "added").
-/// When `include_system` is false, entries under /.aeordb-system/ are excluded.
-fn build_full_sync_response(tree: &VersionTree, path_filter: &Option<Vec<String>>, include_system: bool) -> (SyncChanges, Vec<String>) {
-  let mut files_added = Vec::new();
-  let mut symlinks_added = Vec::new();
-  let mut chunk_hashes: Vec<String> = Vec::new();
-
-  for (path, (hash, record)) in &tree.files {
-    if !include_system && crate::engine::directory_ops::is_system_path(path) {
-      continue;
-    }
-    if let Some(ref patterns) = path_filter {
-      if !path_matches_filter(path, patterns) {
-        continue;
-      }
-    }
-    let entry = file_record_to_sync_entry(path, hash, record);
-    chunk_hashes.extend(entry.chunk_hashes.iter().cloned());
-    files_added.push(entry);
-  }
-
-  for (path, (hash, record)) in &tree.symlinks {
-    if !include_system && crate::engine::directory_ops::is_system_path(path) {
-      continue;
-    }
-    if let Some(ref patterns) = path_filter {
-      if !path_matches_filter(path, patterns) {
-        continue;
-      }
-    }
-    symlinks_added.push(symlink_record_to_sync_entry(path, hash, record));
-  }
-
-  // Sort for deterministic output
-  files_added.sort_by(|a, b| a.path.cmp(&b.path));
-  symlinks_added.sort_by(|a, b| a.path.cmp(&b.path));
-  chunk_hashes.sort();
-  chunk_hashes.dedup();
-
-  let changes = SyncChanges {
-    files_added,
-    files_modified: Vec::new(),
-    files_deleted: Vec::new(),
-    symlinks_added,
-    symlinks_modified: Vec::new(),
-    symlinks_deleted: Vec::new(),
-  };
-
-  (changes, chunk_hashes)
-}
-
-/// Filter entries from a diff source, applying system-path and glob-pattern checks.
-/// Collects converted entries into `dest`. `path_fn` extracts the path from each item,
-/// and `convert_fn` produces the output entry.
-fn filter_and_collect<I, T, O>(
-  source: I,
-  include_system: bool,
-  path_filter: &Option<Vec<String>>,
-  path_fn: impl Fn(&T) -> &str,
-  convert_fn: impl Fn(T) -> O,
-  dest: &mut Vec<O>,
-) where
-  I: Iterator<Item = T>,
-{
-  for item in source {
-    let path = path_fn(&item);
-    if !include_system && crate::engine::directory_ops::is_system_path(path) {
-      continue;
-    }
-    if let Some(ref patterns) = path_filter {
-      if !path_matches_filter(path, patterns) {
-        continue;
-      }
-    }
-    dest.push(convert_fn(item));
-  }
-}
-
-/// Build a diff-based sync response from a TreeDiff.
-/// When `include_system` is false, entries under /.aeordb-system/ are excluded.
-fn build_sync_response_from_diff(
-  diff: &TreeDiff,
-  _current_tree: &VersionTree,
-  path_filter: &Option<Vec<String>>,
-  include_system: bool,
-) -> (SyncChanges, Vec<String>) {
-  let mut files_added = Vec::new();
-  let mut files_modified = Vec::new();
-  let mut files_deleted = Vec::new();
-  let mut symlinks_added = Vec::new();
-  let mut symlinks_modified = Vec::new();
-  let mut symlinks_deleted = Vec::new();
-
-  // Files: added, modified
-  filter_and_collect(
-    diff.added.iter(),
-    include_system,
-    path_filter,
-    |(path, _)| path.as_str(),
-    |(path, (hash, record))| file_record_to_sync_entry(path, hash, record),
-    &mut files_added,
-  );
-  filter_and_collect(
-    diff.modified.iter(),
-    include_system,
-    path_filter,
-    |(path, _)| path.as_str(),
-    |(path, (hash, record))| file_record_to_sync_entry(path, hash, record),
-    &mut files_modified,
-  );
-
-  // Files: deleted
-  filter_and_collect(
-    diff.deleted.iter(),
-    include_system,
-    path_filter,
-    |path| path.as_str(),
-    |path| SyncDeletedEntry { path: path.clone() },
-    &mut files_deleted,
-  );
-
-  // Symlinks: added, modified
-  filter_and_collect(
-    diff.symlinks_added.iter(),
-    include_system,
-    path_filter,
-    |(path, _)| path.as_str(),
-    |(path, (hash, record))| symlink_record_to_sync_entry(path, hash, record),
-    &mut symlinks_added,
-  );
-  filter_and_collect(
-    diff.symlinks_modified.iter(),
-    include_system,
-    path_filter,
-    |(path, _)| path.as_str(),
-    |(path, (hash, record))| symlink_record_to_sync_entry(path, hash, record),
-    &mut symlinks_modified,
-  );
-
-  // Symlinks: deleted
-  filter_and_collect(
-    diff.symlinks_deleted.iter(),
-    include_system,
-    path_filter,
-    |path| path.as_str(),
-    |path| SyncDeletedEntry { path: path.clone() },
-    &mut symlinks_deleted,
-  );
-
-  // Collect chunk hashes from file entries
-  let mut chunk_hashes: Vec<String> = Vec::new();
-  for entry in files_added.iter().chain(files_modified.iter()) {
-    chunk_hashes.extend(entry.chunk_hashes.iter().cloned());
-  }
-
-  // Sort for deterministic output
-  files_added.sort_by(|a, b| a.path.cmp(&b.path));
-  files_modified.sort_by(|a, b| a.path.cmp(&b.path));
-  files_deleted.sort_by(|a, b| a.path.cmp(&b.path));
-  symlinks_added.sort_by(|a, b| a.path.cmp(&b.path));
-  symlinks_modified.sort_by(|a, b| a.path.cmp(&b.path));
-  symlinks_deleted.sort_by(|a, b| a.path.cmp(&b.path));
-  chunk_hashes.sort();
-  chunk_hashes.dedup();
-
-  let changes = SyncChanges { files_added, files_modified, files_deleted, symlinks_added, symlinks_modified, symlinks_deleted };
-
-  (changes, chunk_hashes)
-}
-
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -512,71 +328,27 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
   };
 
   let include_system = caller.include_system();
-
-  let vm = VersionManager::new(&state.engine);
-
-  let head_hash = match vm.get_head_hash() {
-    Ok(hash) => hash,
-    Err(e) => {
-      return ErrorResponse::new(format!("Failed to get HEAD: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
-    }
-  };
-
-  let (mut changes, _unfiltered_chunks) = if let Some(ref since_hex) = payload.since_root_hash {
-    let since_hash = match hex::decode(since_hex) {
-      Ok(h) => h,
+  let since_hash = match payload.since_root_hash.as_deref() {
+    Some(value) => match hex::decode(value) {
+      Ok(hash) => Some(hash),
       Err(_) => {
         return ErrorResponse::new("Invalid since_root_hash: value is not valid hex. Use the root_hash from a previous sync response")
           .with_status(StatusCode::BAD_REQUEST)
           .into_response()
       }
-    };
-
-    let mut base_tree = match walk_version_tree(&state.engine, &since_hash) {
-      Ok(t) => t,
-      Err(e) => {
-        return ErrorResponse::new(format!("Failed to walk base tree: {}", e))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response()
-      }
-    };
-
-    let mut current_tree = match walk_version_tree(&state.engine, &head_hash) {
-      Ok(t) => t,
-      Err(e) => {
-        return ErrorResponse::new(format!("Failed to walk current tree: {}", e))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response()
-      }
-    };
-
-    // For replication peers, system subtrees aren't reachable from the
-    // user-visible HEAD tree (by design — see tree_walker docs). Walk
-    // current state into the current_tree only; base_tree intentionally
-    // does NOT include system data, so the diff treats every system
-    // file as "added" — the receiving peer dedupes by content hash. We
-    // can't accurately reconstruct system state at the historical
-    // `since_root_hash` because system data isn't versioned along
-    // with HEAD.
-    let _ = &mut base_tree; // keep the binding even when we don't augment it
-    if include_system {
-      crate::engine::tree_walker::augment_with_system_subtrees(&state.engine, &mut current_tree);
-    }
-
-    let diff = diff_trees(&base_tree, &current_tree);
-    build_sync_response_from_diff(&diff, &current_tree, &payload.paths, include_system)
-  } else {
-    let mut tree = match walk_version_tree(&state.engine, &head_hash) {
-      Ok(t) => t,
-      Err(e) => {
-        return ErrorResponse::new(format!("Failed to walk tree: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
-      }
-    };
-    if include_system {
-      crate::engine::tree_walker::augment_with_system_subtrees(&state.engine, &mut tree);
-    }
-    build_full_sync_response(&tree, &payload.paths, include_system)
+    },
+    None => None,
   };
+  let diff = match compute_sync_diff(&state.engine, since_hash.as_deref(), payload.paths.as_deref(), include_system) {
+    Ok(diff) => diff,
+    Err(error) => {
+      return ErrorResponse::new(format!("Failed to compute sync diff: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+    }
+  };
+  let root_hash = hex::encode(&diff.root_hash);
+  let mut changes = sync_changes_from_engine(diff);
 
   // Apply API key rule filtering for scoped users.
   filter_changes_by_key_rules(&mut changes, caller.key_rules());
@@ -584,7 +356,7 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
   // Apply user/group permission filtering only for plain JWT callers that
   // actually have grant-scoped access. API-key rules are explicit sync
   // scope and are applied above; non-root JWTs with no grants keep the
-  // existing client-sync contract of seeing non-system files.
+  // existing client-sync contract after registry policy.
   if let SyncCaller::ScopedUser { user_id, key_rules } = &caller {
     if key_rules.is_empty() && user_has_grant_scope(user_id, &state) {
       filter_changes_by_user_permissions(&mut changes, user_id, &state);
@@ -601,7 +373,7 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
     hashes
   };
 
-  let response = SyncDiffResponse { root_hash: hex::encode(&head_hash), changes, chunk_hashes_needed: filtered_chunk_hashes };
+  let response = SyncDiffResponse { root_hash, changes, chunk_hashes_needed: filtered_chunk_hashes };
 
   (StatusCode::OK, Json(response)).into_response()
 }

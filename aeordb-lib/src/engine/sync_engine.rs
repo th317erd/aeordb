@@ -8,13 +8,17 @@ use crate::engine::conflict_store::store_conflict;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::engine_event::{EngineEvent, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED};
 use crate::engine::event_bus::EventBus;
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use crate::engine::merge::three_way_merge;
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::peer_connection::{ConnectionState, PeerConnection, PeerManager};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::sync_apply::apply_merge_operations;
 use crate::engine::system_store;
-use crate::engine::tree_walker::{diff_trees, walk_version_tree, VersionTree};
+use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
+use crate::engine::tree_walker::{diff_trees_with_budget, walk_version_tree_for_transfer_with_budget, VersionTree};
+use crate::engine::v4::system_family::SystemFamilyTransferOperationV1;
 use crate::engine::version_manager::VersionManager;
 use crate::engine::virtual_clock::PeerClockTracker;
 
@@ -189,33 +193,40 @@ impl SyncEngine {
     let local_head = local_vm.get_head_hash().map_err(|e| format!("Failed to get local HEAD: {}", e))?;
     let remote_head = remote_vm.get_head_hash().map_err(|e| format!("Failed to get remote HEAD: {}", e))?;
 
-    // If heads are identical, nothing to do
-    if local_head == remote_head {
-      self.save_sync_state(peer_node_id, &remote_head)?;
-      return Ok(SyncCycleResult { changes_applied: false, conflicts_detected: 0, operations_applied: 0 });
-    }
-
     // Determine the base (common ancestor)
     let base_hash = sync_state.and_then(|s| s.last_synced_root_hash).and_then(|h| hex::decode(&h).ok()).unwrap_or_default();
 
-    // Walk all three trees
-    let local_tree = walk_version_tree(&self.engine, &local_head).map_err(|e| format!("Failed to walk local tree: {}", e))?;
-    let remote_tree = walk_version_tree(remote_engine, &remote_head).map_err(|e| format!("Failed to walk remote tree: {}", e))?;
-
-    // Transfer any chunks from remote that we don't have locally
-    self.transfer_missing_chunks(&remote_tree, remote_engine)?;
+    // Walk all trees through the same peer-replication policy used by the HTTP
+    // producer. Detached portable state participates in each current tree;
+    // historical roots deliberately exclude mutable detached state.
+    let operation = SystemFamilyTransferOperationV1::PeerReplication;
+    let mut local_memory =
+      OperationMemoryBudget::new(&self.engine, "local peer sync", MemoryOwner::StreamingRead, AdmissionClass::Workload, 0, None)
+        .map_err(|error| format!("Failed to admit local peer sync: {error}"))?;
+    let mut remote_memory =
+      OperationMemoryBudget::new(remote_engine, "remote peer sync", MemoryOwner::StreamingRead, AdmissionClass::Workload, 0, None)
+        .map_err(|error| format!("Failed to admit remote peer sync: {error}"))?;
+    let local_tree = walk_version_tree_for_transfer_with_budget(&self.engine, &local_head, operation, true, &mut local_memory)
+      .map_err(|error| format!("Failed to walk local tree: {error}"))?;
+    let remote_tree = walk_version_tree_for_transfer_with_budget(remote_engine, &remote_head, operation, true, &mut remote_memory)
+      .map_err(|error| format!("Failed to walk remote tree: {error}"))?;
 
     let (local_diff, remote_diff) = if base_hash.is_empty() {
       // No common ancestor: treat empty tree as base
       let empty_tree = VersionTree::new();
-      let local_diff = diff_trees(&empty_tree, &local_tree);
-      let remote_diff = diff_trees(&empty_tree, &remote_tree);
+      let local_diff = diff_trees_with_budget(&empty_tree, &local_tree, &mut local_memory)
+        .map_err(|error| format!("Failed to diff local tree: {error}"))?;
+      let remote_diff = diff_trees_with_budget(&empty_tree, &remote_tree, &mut local_memory)
+        .map_err(|error| format!("Failed to diff remote tree: {error}"))?;
       (local_diff, remote_diff)
     } else {
       // Walk the base tree from the local engine (it should have it)
-      let base_tree = walk_version_tree(&self.engine, &base_hash).map_err(|e| format!("Failed to walk base tree: {}", e))?;
-      let local_diff = diff_trees(&base_tree, &local_tree);
-      let remote_diff = diff_trees(&base_tree, &remote_tree);
+      let base_tree = walk_version_tree_for_transfer_with_budget(&self.engine, &base_hash, operation, false, &mut local_memory)
+        .map_err(|error| format!("Failed to walk base tree: {error}"))?;
+      let local_diff = diff_trees_with_budget(&base_tree, &local_tree, &mut local_memory)
+        .map_err(|error| format!("Failed to diff local tree: {error}"))?;
+      let remote_diff = diff_trees_with_budget(&base_tree, &remote_tree, &mut local_memory)
+        .map_err(|error| format!("Failed to diff remote tree: {error}"))?;
       (local_diff, remote_diff)
     };
 
@@ -232,6 +243,11 @@ impl SyncEngine {
     let merge_result = three_way_merge(&local_diff, &remote_diff);
     let operations_count = merge_result.operations.len();
     let conflicts_count = merge_result.conflicts.len();
+
+    // Transfer only chunks selected by registry policy, selective paths, and
+    // merge resolution. File records are reconstructed through DirectoryOps;
+    // copying their old physical entries would add unreferenced KV state.
+    self.transfer_missing_operation_chunks(&merge_result.operations, remote_engine)?;
 
     // Apply merge operations to local engine
     let context = RequestContext::system();
@@ -256,39 +272,29 @@ impl SyncEngine {
     Ok(SyncCycleResult { changes_applied: operations_count > 0, conflicts_detected: conflicts_count, operations_applied: operations_count })
   }
 
-  /// Transfer chunks from a remote tree that we don't have locally.
-  ///
-  /// Iterates all chunks referenced by the remote tree and copies any
-  /// that are missing from the local engine.
-  fn transfer_missing_chunks(&self, remote_tree: &VersionTree, remote_engine: &StorageEngine) -> Result<(), String> {
-    for chunk_hash in &remote_tree.chunks {
-      let has_locally = self.engine.has_entry(chunk_hash).map_err(|e| format!("Failed to check local chunk: {}", e))?;
-
-      if !has_locally {
-        let entry = remote_engine.get_entry(chunk_hash).map_err(|e| format!("Failed to read remote chunk: {}", e))?;
-
-        if let Some((header, _key, value)) = entry {
-          self.engine.store_entry(header.entry_type, chunk_hash, &value).map_err(|e| format!("Failed to store chunk locally: {}", e))?;
+  fn transfer_missing_operation_chunks(
+    &self,
+    operations: &[crate::engine::merge::MergeOp],
+    remote_engine: &StorageEngine,
+  ) -> Result<(), String> {
+    for operation in operations {
+      let crate::engine::merge::MergeOp::AddFile { path, file_record, .. } = operation else {
+        continue;
+      };
+      for chunk_hash in &file_record.chunk_hashes {
+        if self.engine.has_entry(chunk_hash).map_err(|error| format!("Failed to check local chunk: {error}"))? {
+          continue;
         }
+        let chunk_data = remote_engine
+          .read_chunk(chunk_hash)
+          .map_err(|error| format!("Failed to read remote chunk {} for '{}': {error}", hex::encode(chunk_hash), path))?
+          .ok_or_else(|| format!("Remote file '{}' references missing chunk {}", path, hex::encode(chunk_hash)))?;
+        self
+          .engine
+          .store_entry(crate::engine::entry_type::EntryType::Chunk, chunk_hash, &chunk_data)
+          .map_err(|error| format!("Failed to store chunk {} for '{}': {error}", hex::encode(chunk_hash), path))?;
       }
     }
-
-    // Also transfer file records that we might need
-    for (file_hash, _record) in remote_tree.files.values() {
-      let has_locally = self.engine.has_entry(file_hash).map_err(|e| format!("Failed to check local file record: {}", e))?;
-
-      if !has_locally {
-        let entry = remote_engine.get_entry(file_hash).map_err(|e| format!("Failed to read remote file record: {}", e))?;
-
-        if let Some((header, _key, value)) = entry {
-          self
-            .engine
-            .store_entry(header.entry_type, file_hash, &value)
-            .map_err(|e| format!("Failed to store file record locally: {}", e))?;
-        }
-      }
-    }
-
     Ok(())
   }
 
@@ -407,6 +413,8 @@ impl SyncEngine {
 
     // Check if there are any changes to apply
     let changes = &diff_resp["changes"];
+    validate_remote_peer_diff_paths(&self.engine, changes)
+      .map_err(|error| format!("Peer {} returned forbidden sync state: {error}", peer.node_id))?;
     let has_file_changes =
       ["files_added", "files_modified", "files_deleted"].iter().any(|k| changes[k].as_array().is_some_and(|a| !a.is_empty()));
     let has_symlink_changes =
@@ -584,6 +592,22 @@ impl SyncEngine {
     let configs = system_store::get_peer_configs(&self.engine).ok()?;
     configs.into_iter().find(|c| c.node_id == peer_node_id).and_then(|c| c.sync_paths)
   }
+}
+
+fn validate_remote_peer_diff_paths(engine: &StorageEngine, changes: &serde_json::Value) -> Result<(), crate::engine::errors::EngineError> {
+  let resolver = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
+  for category in ["files_added", "files_modified", "files_deleted", "symlinks_added", "symlinks_modified", "symlinks_deleted"] {
+    let Some(entries) = changes[category].as_array() else {
+      continue;
+    };
+    for entry in entries {
+      let Some(path) = entry["path"].as_str().filter(|path| !path.is_empty()) else {
+        continue;
+      };
+      resolver.require_transfer_leaf_path(path, SystemFamilyTransferOperationV1::PeerReplication)?;
+    }
+  }
+  Ok(())
 }
 
 /// Filter a TreeDiff to only include entries matching the given glob patterns.

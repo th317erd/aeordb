@@ -48,7 +48,7 @@ use system_family::SystemFamilyFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p0b2-system-family-v1";
+const TOOL_REVISION: &str = "p0b2-system-family-v1-root-derived-paths";
 const FIXTURE_STAGE: &str = "p0b-2-system-family";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;

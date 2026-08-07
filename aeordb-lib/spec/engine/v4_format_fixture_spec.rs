@@ -2547,7 +2547,7 @@ fn every_system_family_registry_fixture_matches_the_independent_oracle() {
     assert_eq!(registry.summary(), row.expected, "fixture {}", row.id);
     assert_eq!(hex::encode(&registry.operational_fingerprint), row.canonical_key.as_deref().unwrap(), "fixture {}", row.id);
     let descriptors: Vec<_> = registry.iter().collect::<Result<_, _>>().unwrap();
-    assert_eq!(descriptors.len(), 61);
+    assert_eq!(descriptors.len(), 63);
     assert_eq!(descriptors.iter().map(|descriptor| descriptor.family_id).collect::<std::collections::BTreeSet<_>>().len(), 46);
     let fingerprint_name = if row.hash_algorithm == "blake3-256" { "blake3_256" } else { "sha512" };
     assert_eq!(
@@ -2625,7 +2625,7 @@ fn system_family_registry_rejects_bounds_reserves_enums_paths_order_and_policy_d
   );
 
   let descriptor_offsets = system_family_descriptor_offsets(&baseline);
-  assert_eq!(descriptor_offsets.len(), 61);
+  assert_eq!(descriptor_offsets.len(), 63);
   let mut out_of_order = baseline.clone();
   let last = *descriptor_offsets.last().unwrap();
   out_of_order[last..last + 2].copy_from_slice(&1u16.to_le_bytes());

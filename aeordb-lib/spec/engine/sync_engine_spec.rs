@@ -1,12 +1,20 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aeordb::engine::conflict_store::list_conflicts;
+use aeordb::engine::directory_ops::file_path_hash;
+use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::peer_connection::{PeerConfig, PeerManager};
 use aeordb::engine::sync_engine::{PeerSyncState, SyncConfig, SyncEngine};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::virtual_clock::PeerClockTracker;
-use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
+use aeordb::engine::{DirectoryOps, FileRecord, RequestContext, StorageEngine};
 use aeordb::server::create_temp_engine_for_tests;
+use axum::extract::State;
+use axum::routing::post;
+use axum::{Json, Router};
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,9 +29,13 @@ fn make_sync_engine(engine: Arc<StorageEngine>) -> (SyncEngine, Arc<PeerManager>
 }
 
 fn add_active_peer(peer_manager: &PeerManager, node_id: u64) {
+  add_active_peer_at(peer_manager, node_id, format!("http://localhost:{}", 9000 + node_id));
+}
+
+fn add_active_peer_at(peer_manager: &PeerManager, node_id: u64, address: String) {
   peer_manager.add_peer(&PeerConfig {
     node_id,
-    address: format!("http://localhost:{}", 9000 + node_id),
+    address,
     label: Some(format!("peer-{}", node_id)),
     sync_paths: None,
     last_clock_offset_ms: None,
@@ -33,6 +45,50 @@ fn add_active_peer(peer_manager: &PeerManager, node_id: u64) {
   });
   peer_manager.start_honeymoon(node_id, 1000);
   peer_manager.activate_peer(node_id);
+}
+
+#[derive(Clone)]
+struct MaliciousPeerState {
+  chunks_requests: Arc<AtomicUsize>,
+}
+
+async fn malicious_diff() -> Json<Value> {
+  let chunk_hash = "22".repeat(32);
+  Json(json!({
+    "root_hash": "00".repeat(32),
+    "changes": {
+      "files_added": [{
+        "path": "/.aeordb-system/config/secret.json",
+        "chunk_hashes": [chunk_hash.clone()],
+        "content_type": "application/json"
+      }],
+      "files_modified": [],
+      "files_deleted": [],
+      "symlinks_added": [],
+      "symlinks_modified": [],
+      "symlinks_deleted": []
+    },
+    "chunk_hashes_needed": [chunk_hash]
+  }))
+}
+
+async fn malicious_chunks(State(state): State<MaliciousPeerState>) -> Json<Value> {
+  state.chunks_requests.fetch_add(1, Ordering::SeqCst);
+  Json(json!({ "chunks": [] }))
+}
+
+async fn start_malicious_peer() -> (String, Arc<AtomicUsize>, CancellationToken, tokio::task::JoinHandle<()>) {
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let chunks_requests = Arc::new(AtomicUsize::new(0));
+  let state = MaliciousPeerState { chunks_requests: Arc::clone(&chunks_requests) };
+  let cancellation = CancellationToken::new();
+  let shutdown = cancellation.clone();
+  let application = Router::new().route("/sync/diff", post(malicious_diff)).route("/sync/chunks", post(malicious_chunks)).with_state(state);
+  let handle = tokio::spawn(async move {
+    axum::serve(listener, application).with_graceful_shutdown(shutdown.cancelled_owned()).await.unwrap();
+  });
+  (format!("http://{address}"), chunks_requests, cancellation, handle)
 }
 
 fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
@@ -388,6 +444,114 @@ fn test_local_sync_cycle_one_side_empty() {
   assert_eq!(read_file(&engine_a, "/subdir/nested.txt"), b"nested data");
 }
 
+#[test]
+fn local_peer_sync_transfers_only_registry_portable_state_and_its_chunks() {
+  let (engine_a, _temp_a) = create_temp_engine_for_tests();
+  let (engine_b, _temp_b) = create_temp_engine_for_tests();
+  store_file(&engine_b, "/ordinary.txt", b"ordinary");
+  store_file(&engine_b, "/.aeordb-system/users/user.json", b"portable user");
+  store_file(&engine_b, "/.aeordb-system/config/secret.json", b"node-local secret");
+
+  let secret_key = file_path_hash("/.aeordb-system/config/secret.json", &engine_b.hash_algo()).unwrap();
+  let (secret_header, _key, secret_data) = engine_b.get_entry(&secret_key).unwrap().unwrap();
+  let secret_chunks =
+    FileRecord::deserialize(&secret_data, engine_b.hash_algo().hash_length(), secret_header.entry_version).unwrap().chunk_hashes;
+  let (sync_engine_a, _peer_manager) = make_sync_engine(Arc::clone(&engine_a));
+
+  let result = sync_engine_a.sync_with_local_engine(2, &engine_b).unwrap();
+
+  assert!(result.changes_applied);
+  assert!(file_exists(&engine_a, "/ordinary.txt"));
+  let destination_ops = DirectoryOps::new(&engine_a);
+  assert_eq!(destination_ops.read_file_buffered("/.aeordb-system/users/user.json").unwrap(), b"portable user");
+  assert!(destination_ops.read_file_buffered("/.aeordb-system/config/secret.json").is_err());
+  for chunk_hash in secret_chunks {
+    assert!(!engine_a.has_entry(&chunk_hash).unwrap(), "local sync copied a chunk belonging only to omitted node-local state");
+  }
+}
+
+#[test]
+fn local_peer_sync_detects_portable_state_without_an_ordinary_file_change() {
+  let (engine_a, _temp_a) = create_temp_engine_for_tests();
+  let (engine_b, _temp_b) = create_temp_engine_for_tests();
+  store_file(&engine_b, "/.aeordb-system/users/user.json", b"portable user");
+  let (sync_engine_a, _peer_manager) = make_sync_engine(Arc::clone(&engine_a));
+
+  let result = sync_engine_a.sync_with_local_engine(2, &engine_b).unwrap();
+
+  assert!(result.changes_applied);
+  assert_eq!(DirectoryOps::new(&engine_a).read_file_buffered("/.aeordb-system/users/user.json").unwrap(), b"portable user");
+}
+
+#[test]
+fn local_selective_sync_does_not_copy_chunks_outside_the_selected_paths() {
+  let (engine_a, _temp_a) = create_temp_engine_for_tests();
+  let (engine_b, _temp_b) = create_temp_engine_for_tests();
+  store_file(&engine_b, "/included/file.txt", b"included content");
+  store_file(&engine_b, "/omitted/file.txt", b"omitted content");
+  let source_tree = walk_version_tree(&engine_b, &engine_b.head_hash().unwrap()).unwrap();
+  let omitted_chunks = source_tree.files["/omitted/file.txt"].1.chunk_hashes.clone();
+  let peer = PeerConfig {
+    node_id: 2,
+    address: "http://unused.invalid".to_string(),
+    label: None,
+    sync_paths: Some(vec!["/included/**".to_string()]),
+    last_clock_offset_ms: None,
+    last_wire_time_ms: None,
+    last_jitter_ms: None,
+    clock_state_at: None,
+  };
+  aeordb::engine::system_store::store_peer_configs(&engine_a, &RequestContext::system(), &[peer]).unwrap();
+  let (sync_engine_a, _peer_manager) = make_sync_engine(Arc::clone(&engine_a));
+
+  let result = sync_engine_a.sync_with_local_engine(2, &engine_b).unwrap();
+
+  assert!(result.changes_applied);
+  assert!(file_exists(&engine_a, "/included/file.txt"));
+  assert!(!file_exists(&engine_a, "/omitted/file.txt"));
+  for chunk_hash in omitted_chunks {
+    assert!(!engine_a.has_entry(&chunk_hash).unwrap(), "selective sync copied a chunk outside the configured paths");
+  }
+}
+
+#[test]
+fn local_peer_sync_does_not_read_an_omitted_malformed_file_record() {
+  let (engine_a, _temp_a) = create_temp_engine_for_tests();
+  let (engine_b, _temp_b) = create_temp_engine_for_tests();
+  store_file(&engine_b, "/ordinary.txt", b"ordinary");
+  store_file(&engine_b, "/.aeordb-system/config/secret.json", b"node-local secret");
+  let secret = DirectoryOps::new(&engine_b)
+    .list_directory("/.aeordb-system/config")
+    .unwrap()
+    .into_iter()
+    .find(|entry| entry.name == "secret.json")
+    .unwrap();
+  engine_b.store_entry(EntryType::FileRecord, &secret.hash, b"malformed omitted record").unwrap();
+  let (sync_engine_a, _peer_manager) = make_sync_engine(Arc::clone(&engine_a));
+
+  let result = sync_engine_a.sync_with_local_engine(2, &engine_b).unwrap();
+
+  assert!(result.changes_applied);
+  assert!(file_exists(&engine_a, "/ordinary.txt"));
+  assert!(DirectoryOps::new(&engine_a).read_file_buffered("/.aeordb-system/config/secret.json").is_err());
+}
+
+#[test]
+fn local_peer_sync_rejects_unknown_protected_state_before_reading_its_body() {
+  let (engine_a, _temp_a) = create_temp_engine_for_tests();
+  let (engine_b, _temp_b) = create_temp_engine_for_tests();
+  store_file(&engine_b, "/.aeordb-future/value.bin", b"unknown");
+  let unknown =
+    DirectoryOps::new(&engine_b).list_directory("/.aeordb-future").unwrap().into_iter().find(|entry| entry.name == "value.bin").unwrap();
+  engine_b.store_entry(EntryType::FileRecord, &unknown.hash, b"malformed unknown record").unwrap();
+  let (sync_engine_a, _peer_manager) = make_sync_engine(Arc::clone(&engine_a));
+
+  let error = sync_engine_a.sync_with_local_engine(2, &engine_b).unwrap_err();
+
+  assert!(error.contains("unknown_protected_system_family"), "unexpected error: {error}");
+  assert!(DirectoryOps::new(&engine_a).read_file_buffered("/.aeordb-future/value.bin").is_err());
+}
+
 // ---------------------------------------------------------------------------
 // Test: LOCAL sync updates peer sync state
 // ---------------------------------------------------------------------------
@@ -574,6 +738,23 @@ async fn test_remote_sync_returns_connection_error() {
   assert!(result.is_err());
   let err = result.unwrap_err();
   assert!(err.contains("Failed to contact peer"), "Should indicate connection failure, got: {}", err);
+}
+
+#[tokio::test]
+async fn remote_peer_sync_rejects_forbidden_paths_before_requesting_chunks() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let (sync_engine, peer_manager) = make_sync_engine(Arc::clone(&engine));
+  let (address, chunks_requests, cancellation, server) = start_malicious_peer().await;
+  add_active_peer_at(&peer_manager, 70, address);
+
+  let result = sync_engine.sync_with_peer(70).await;
+
+  cancellation.cancel();
+  server.await.unwrap();
+  let error = result.unwrap_err();
+  assert!(error.contains("system_family_transfer_omitted"), "unexpected error: {error}");
+  assert_eq!(chunks_requests.load(Ordering::SeqCst), 0, "forbidden peer diff triggered a chunk request");
+  assert!(DirectoryOps::new(&engine).read_file_buffered("/.aeordb-system/config/secret.json").is_err());
 }
 
 // ---------------------------------------------------------------------------
