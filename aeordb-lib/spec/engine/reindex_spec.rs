@@ -116,6 +116,57 @@ fn store_json_files(engine: &aeordb::engine::storage_engine::StorageEngine, pare
 }
 
 #[test]
+fn ordinary_reindex_accounts_and_releases_retained_path_inventory() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let segment = "long-path-segment".repeat(6);
+  let parent =
+    format!("/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}", segment, segment, segment, segment, segment, segment, segment, segment, segment, segment);
+  store_index_config(&engine, &parent);
+  for index in 0..270 {
+    let path = format!("{parent}/item-{index:04}.json");
+    ops.store_file_buffered(&ctx, &path, b"{\"count\":1}", Some("application/json")).unwrap();
+  }
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": parent, "metadata_only": true})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  assert_eq!(queue.get_task(&task.id).unwrap().unwrap().status, TaskStatus::Completed);
+
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let task_owner = snapshot.owner(MemoryOwner::Task).unwrap();
+  assert!(task_owner.peak_reserved_bytes > 256 * 1024, "retained paths must be admitted beyond scheduler bookkeeping");
+  assert_eq!(task_owner.reserved_bytes, 0);
+  assert_eq!(task_owner.active_reservations, 0);
+}
+
+#[test]
+fn ordinary_reindex_accounts_and_releases_buffered_file_body() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  store_index_config(&engine, "/buffered");
+  let document = serde_json::to_vec(&serde_json::json!({"count": 1, "padding": "x".repeat(2 * 1024 * 1024)})).unwrap();
+  ops.store_file_buffered(&ctx, "/buffered/large.json", &document, Some("application/json")).unwrap();
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/buffered"})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  assert_eq!(queue.get_task(&task.id).unwrap().unwrap().status, TaskStatus::Completed);
+
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let task_owner = snapshot.owner(MemoryOwner::Task).unwrap();
+  assert!(task_owner.peak_reserved_bytes > document.len() as u64, "the full buffered body must remain admitted through parsing");
+  assert_eq!(task_owner.reserved_bytes, 0);
+  assert_eq!(task_owner.active_reservations, 0);
+}
+
+#[test]
 fn test_reindex_removes_stale_index_strategies_after_config_change() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let event_bus = Arc::new(EventBus::new());
@@ -591,8 +642,8 @@ fn test_reindex_cancellation_detected_during_processing() {
   assert!(processed);
 
   let final_task = queue.get_task(&task.id).unwrap().unwrap();
-  assert_eq!(final_task.status, TaskStatus::Failed);
-  assert_eq!(final_task.error.as_deref(), Some("cancelled"));
+  assert_eq!(final_task.status, TaskStatus::Cancelled);
+  assert!(final_task.error.is_none());
 }
 
 #[test]

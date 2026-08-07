@@ -25,8 +25,10 @@ impl OperationMemoryBudget {
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
       return Err(EngineError::Cancelled(operation.to_string()));
     }
-    let reservation = engine
-      .memory_coordinator()
+    let coordinator = engine.memory_coordinator_if_initialized().ok_or_else(|| {
+      EngineError::ResourceExhausted(format!("{operation} workspace admission failed: process memory policy is not initialized"))
+    })?;
+    let reservation = coordinator
       .reserve(owner, minimum_workspace_bytes, class)
       .map_err(|error| operation_memory_error(operation, "workspace admission failed", error))?;
     Ok(Self { operation, reservation, cancellation: cancellation.cloned(), work_since_cancellation_check: 0 })
@@ -74,6 +76,7 @@ impl OperationMemoryBudget {
     if self.work_since_cancellation_check >= CANCELLATION_QUANTUM {
       self.work_since_cancellation_check = 0;
       self.check_cancellation()?;
+      self.reservation.check_admission().map_err(|error| operation_memory_error(self.operation, "continuation admission failed", error))?;
     }
     Ok(())
   }

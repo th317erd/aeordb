@@ -454,6 +454,7 @@ pub struct EngineFileStream<'a> {
   engine: EngineHandle<'a>,
   current_index: usize,
   include_deleted: bool,
+  expected_total_size: Option<u64>,
   _inventory_reservation: StreamingReadReservation,
   legacy_chunk_reservation: Option<StreamingReadReservation>,
 }
@@ -557,6 +558,15 @@ impl<'a> EngineFileStream<'a> {
   }
 
   pub(crate) fn new(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine, include_deleted: bool) -> EngineResult<Self> {
+    Self::new_with_expected_total_size(chunk_hashes, engine, include_deleted, None)
+  }
+
+  fn new_with_expected_total_size(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: &'a StorageEngine,
+    include_deleted: bool,
+    expected_total_size: Option<u64>,
+  ) -> EngineResult<Self> {
     let inventory_bytes = stream_hash_inventory_bytes(&chunk_hashes, chunk_hashes.capacity())?;
     let inventory_reservation = reserve_streaming_read(engine, inventory_bytes, "file stream inventory admission failed")?;
     Ok(EngineFileStream {
@@ -564,6 +574,7 @@ impl<'a> EngineFileStream<'a> {
       engine: EngineHandle::Borrowed(engine),
       current_index: 0,
       include_deleted,
+      expected_total_size,
       _inventory_reservation: inventory_reservation,
       legacy_chunk_reservation: None,
     })
@@ -579,9 +590,40 @@ impl<'a> EngineFileStream<'a> {
   /// whole content (e.g. small config files). Prefer iterating chunks for
   /// arbitrary-size reads.
   pub fn collect_to_vec(self) -> EngineResult<Vec<u8>> {
+    let expected_size = self
+      .expected_total_size
+      .map(|size| {
+        usize::try_from(size)
+          .map_err(|_| EngineError::ResourceExhausted(format!("buffered file size exceeds this platform's address space: {size}")))
+      })
+      .transpose()?;
     let mut result = Vec::new();
+    if let Some(expected_size) = expected_size {
+      result
+        .try_reserve_exact(expected_size)
+        .map_err(|error| EngineError::ResourceExhausted(format!("buffered file allocation failed: {error}")))?;
+    }
     for item in self {
-      result.extend_from_slice(&item?);
+      let chunk = item?;
+      let next_size =
+        result.len().checked_add(chunk.len()).ok_or_else(|| EngineError::ResourceExhausted("buffered file length overflow".to_string()))?;
+      if expected_size.is_some_and(|expected| next_size > expected) {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("decoded file body exceeds declared total size: decoded={next_size}, declared={}", expected_size.unwrap_or(0)),
+        });
+      }
+      result.extend_from_slice(&chunk);
+    }
+    if expected_size.is_some_and(|expected| result.len() != expected) {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!(
+          "decoded file body does not match declared total size: decoded={}, declared={}",
+          result.len(),
+          expected_size.unwrap_or(0)
+        ),
+      });
     }
     Ok(result)
   }
@@ -625,6 +667,7 @@ impl EngineFileStream<'static> {
       engine: EngineHandle::Owned(engine),
       current_index: 0,
       include_deleted,
+      expected_total_size: None,
       _inventory_reservation: inventory_reservation,
       legacy_chunk_reservation: None,
     })
@@ -1238,7 +1281,7 @@ impl<'a> DirectoryOps<'a> {
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(elapsed);
 
-    EngineFileStream::new(file_record.chunk_hashes, self.engine, false)
+    EngineFileStream::new_with_expected_total_size(file_record.chunk_hashes, self.engine, false, Some(file_record.total_size))
   }
 
   /// Read a file's full content into memory.
@@ -1420,6 +1463,76 @@ impl<'a> DirectoryOps<'a> {
       );
     }
     Ok(children)
+  }
+
+  /// Visit live directory children in key order without collecting a complete
+  /// B-tree listing. Flat compatibility directories remain bounded by the
+  /// conversion threshold and retain the existing all-or-empty corruption
+  /// behavior.
+  pub(crate) fn visit_live_directory_children<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&ChildEntry) -> EngineResult<bool>,
+  {
+    let normalized = normalize_path(path);
+    let hash_length = self.engine.hash_algo().hash_length();
+    let Some((header, value)) = self.load_directory_listing_data(&normalized)? else {
+      return Err(EngineError::NotFound(normalized));
+    };
+    if value.is_empty() {
+      return Ok(true);
+    }
+
+    if !crate::engine::btree::is_btree_format(&value) {
+      let mut decoded = Vec::new();
+      let decode_result = Self::visit_bounded_flat_children(&value, hash_length, header.entry_version, |child| {
+        decoded.push(child.clone());
+        Ok(true)
+      });
+      let children = match decode_result {
+        Ok(_) => self.filter_live_children(&normalized, decoded)?,
+        Err(error) => {
+          tracing::warn!(path = %normalized, %error, "Corrupt flat directory index; returning an empty listing");
+          return Ok(true);
+        }
+      };
+      for child in &children {
+        if !visitor(child)? {
+          return Ok(false);
+        }
+      }
+      return Ok(true);
+    }
+
+    let mut visit_live_child = |child: &ChildEntry| -> EngineResult<bool> {
+      if self.is_live_child(&normalized, child)? {
+        return visitor(child);
+      }
+      let child_path = if normalized == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized, child.name) };
+      tracing::warn!(
+        parent = %normalized,
+        child_path = %child_path,
+        entry_type = child.entry_type,
+        "Skipping stale directory child whose path key is not live"
+      );
+      Ok(true)
+    };
+    let result = crate::engine::btree::btree_visit_from_node_with_mode(
+      &value,
+      self.engine,
+      hash_length,
+      false,
+      crate::engine::btree::BTreeWalkMode::BestEffort,
+      &mut visit_live_child,
+    )?;
+    for warning in result.warnings {
+      tracing::warn!(
+        path = %normalized,
+        node_hash = %warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()),
+        reason = %warning.reason,
+        "B-tree directory index partially unreadable; returning partial listing"
+      );
+    }
+    Ok(result.completed)
   }
 
   /// List directory children and return any best-effort B-tree traversal

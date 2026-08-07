@@ -2,10 +2,13 @@ use std::sync::Arc;
 
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::event_bus::EventBus;
+use aeordb::engine::engine_event::{EVENT_TASKS_CANCELLED, EVENT_TASKS_STARTED};
+use aeordb::engine::memory_coordinator::{HostMemorySample, MemoryOwner};
 use aeordb::engine::request_context::RequestContext;
 use aeordb::engine::task_queue::{TaskQueue, TaskStatus};
-use aeordb::engine::task_worker::process_next_task;
+use aeordb::engine::task_worker::{process_next_task, process_next_task_with_pre_execute_hook};
 use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::{backup, EngineError};
 use aeordb::plugins::PluginManager;
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -289,4 +292,82 @@ fn test_backup_task_empty_engine_succeeds() {
 
   let finished = queue.get_task(&task.id).unwrap().expect("task should exist");
   assert_eq!(finished.status, TaskStatus::Completed);
+}
+
+#[test]
+fn active_backup_defers_on_new_host_pressure_and_removes_partial_artifacts() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  populate_engine(&engine);
+  let output = temp.path().join("pressure-backup.aeordb");
+  let output_string = output.to_string_lossy().into_owned();
+  let coordinator = engine.memory_coordinator().clone();
+  let soft_limit = coordinator.snapshot().unwrap().policy.unwrap().soft_limit_bytes;
+
+  let error = backup::export_snapshot_with_post_admission_hook(&engine, None, &output_string, false, move || {
+    coordinator
+      .update_host_sample(HostMemorySample { rss_bytes: soft_limit, host_available_bytes: Some(u64::MAX), ..HostMemorySample::default() })
+      .unwrap();
+  })
+  .expect_err("an active backup must defer when host pressure rises");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)));
+  assert!(!output.exists(), "a deferred backup must never publish its destination");
+  let artifacts = std::fs::read_dir(temp.path())
+    .unwrap()
+    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+    .filter(|name| name.starts_with("pressure-backup.aeordb.part-"))
+    .collect::<Vec<_>>();
+  assert!(artifacts.is_empty(), "deferred backup left partial artifacts: {artifacts:?}");
+
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::BackupRestore).unwrap();
+  assert!(owner.deferrals >= 1);
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn backup_task_defers_before_creating_destination_under_new_host_pressure() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let backup_dir = temp.path().join("deferred-task-backups");
+  let task = queue.enqueue("backup", serde_json::json!({"backup_dir": backup_dir.to_string_lossy()})).unwrap();
+  let coordinator = engine.memory_coordinator().clone();
+  let soft_limit = coordinator.snapshot().unwrap().policy.unwrap().soft_limit_bytes;
+
+  assert!(process_next_task_with_pre_execute_hook(&queue, &engine, &plugin_manager, &event_bus, move || {
+    coordinator
+      .update_host_sample(HostMemorySample { rss_bytes: soft_limit, host_available_bytes: Some(u64::MAX), ..HostMemorySample::default() })
+      .unwrap();
+  })
+  .unwrap());
+
+  let pending = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(pending.status, TaskStatus::Pending);
+  assert!(!backup_dir.exists(), "deferred backup must not create its destination directory");
+}
+
+#[test]
+fn running_backup_cancellation_reaches_export_and_publishes_no_artifact() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  populate_engine(&engine);
+  let event_bus = Arc::new(EventBus::new());
+  let mut events = event_bus.subscribe();
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let backup_dir = temp.path().join("cancelled-backup");
+  let task = queue.enqueue("backup", serde_json::json!({"backup_dir": backup_dir.to_string_lossy()})).unwrap();
+
+  assert!(
+    process_next_task_with_pre_execute_hook(&queue, &engine, &plugin_manager, &event_bus, || queue.cancel(&task.id).unwrap()).unwrap()
+  );
+  let cancelled = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(cancelled.status, TaskStatus::Cancelled);
+  assert!(cancelled.error.is_none());
+  assert_eq!(events.try_recv().unwrap().event_type, EVENT_TASKS_STARTED);
+  assert_eq!(events.try_recv().unwrap().event_type, EVENT_TASKS_CANCELLED);
+  assert!(events.try_recv().is_err());
+  let published = std::fs::read_dir(&backup_dir).map(|entries| entries.count()).unwrap_or(0);
+  assert_eq!(published, 0, "a cancelled running backup must not publish any artifact");
 }

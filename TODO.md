@@ -227,8 +227,16 @@
           - [x] Stream hot-tail and dirty-index spill components instead of materializing complete encoded copies.
           - [x] Reserve spill snapshots, component scratch, WAL windows, manifests, and diagnostics through `EmergencySpill` critical headroom.
           - [x] Reserve shutdown orchestration and bounded flush scratch through `Shutdown` critical headroom, including hard-pressure admission and exact release.
-      - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
-        - [ ] Requeue checkpointed long-running maintenance when pressure rises after dequeue; do not convert an admission deferral into a terminal task failure.
+      - [x] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
+        - [x] Serialize persisted task transitions so cancellation, checkpoints, completion, requeue, pruning, and startup recovery cannot overwrite one another with stale records.
+        - [x] Requeue checkpointed long-running maintenance when pressure rises after dequeue; do not convert an admission deferral into a terminal task failure.
+        - [x] Route user and worker-shutdown cancellation into active reindex, GC, and backup operations while preserving the winning persisted state.
+        - [x] Bound ordinary reindex B-tree traversal, retained path inventory, sort scratch, and full buffered file bodies through task-owned maintenance admission.
+        - [x] Preflight and account persisted task JSON, scan FIFO/recovery records one at a time, and bound task-history pruning workspace.
+        - [x] Requeue checkpointed claims after worker panic and defer backup before destination filesystem side effects.
+        - [x] Fail startup recovery closed on malformed, duplicate, missing, or identity-mismatched task authority.
+        - [x] Persist bounded retry eligibility for deferred tasks so sustained pressure does not churn task records/SSE or block newer eligible maintenance.
+        - [x] Run broad, cross-platform, and live disk-backed pressure/restart evidence before closing the maintenance-pressure slice.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
       - [ ] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.

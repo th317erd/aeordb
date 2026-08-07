@@ -13,7 +13,7 @@ use tower::ServiceExt;
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
 use aeordb::engine::{
-  spawn_heartbeat, spawn_metrics_pulse, spawn_rate_sampler, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker, TaskStatus,
+  spawn_heartbeat, spawn_metrics_pulse, spawn_rate_sampler, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker,
 };
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
@@ -579,13 +579,13 @@ async fn initialize_server_runtime(
   // Make rate_trackers and db_path available to the stats endpoint via Extension.
   let application = application.layer(axum::Extension(rate_trackers)).layer(axum::Extension(database.clone()));
 
-  // Reset any tasks left in Running state from a previous crash.
-  if let Ok(tasks) = task_queue.list_tasks() {
-    for task in &tasks {
-      if task.status == TaskStatus::Running {
-        let _ = task_queue.update_status(&task.id, TaskStatus::Pending, None);
-      }
-    }
+  // Durably return crash-interrupted tasks to the retry queue. Startup must
+  // not claim success while a malformed registry or failed rewrite strands
+  // persisted work in Running state.
+  let recovered_tasks =
+    task_queue.recover_interrupted_tasks().map_err(|error| format!("failed to recover interrupted background tasks: {error}"))?;
+  if recovered_tasks > 0 {
+    tracing::info!(recovered_tasks, "Recovered interrupted background tasks");
   }
 
   // Write default global index config if it doesn't exist.
@@ -598,7 +598,7 @@ async fn initialize_server_runtime(
       Ok(_) => {
         // Config exists — don't overwrite.
       }
-      Err(_) => {
+      Err(aeordb::engine::EngineError::NotFound(_)) => {
         // Default index config: covers every file (`glob: **/*`) with both
         // virtual metadata fields (`@filename`, `@hash`, ...) and the fields
         // every native parser emits (`text`, `title`, `metadata.format`,
@@ -615,10 +615,13 @@ async fn initialize_server_runtime(
         } else {
           tracing::info!("Created default global index config");
           // Enqueue initial reindex.
-          let _ = task_queue.enqueue("reindex", serde_json::json!({"path": "/"}));
-          tracing::info!("Enqueued initial global reindex");
+          let task = task_queue
+            .enqueue("reindex", serde_json::json!({"path": "/"}))
+            .map_err(|error| format!("created the default index config but failed to durably enqueue its initial reindex: {error}"))?;
+          tracing::info!(task_id = %task.id, "Enqueued initial global reindex");
         }
       }
+      Err(error) => return Err(format!("failed to inspect the default global index config at {config_path}: {error}")),
     }
   }
 

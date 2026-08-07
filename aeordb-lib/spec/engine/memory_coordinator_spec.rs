@@ -115,6 +115,28 @@ fn soft_pressure_defers_cache_and_maintenance_but_not_bounded_workload() {
 }
 
 #[test]
+fn admission_check_observes_new_pressure_without_creating_a_reservation() {
+  let coordinator = MemoryCoordinator::new(policy());
+  coordinator.check_admission(MemoryOwner::GarbageCollection, AdmissionClass::Maintenance).unwrap();
+  let normal = coordinator.snapshot().unwrap();
+  let normal_owner = normal.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(normal_owner.active_reservations, 0);
+  assert_eq!(normal_owner.reserved_bytes, 0);
+
+  let pressure = coordinator.reserve(MemoryOwner::Query, 600, AdmissionClass::Workload).unwrap();
+  assert!(matches!(
+    coordinator.check_admission(MemoryOwner::GarbageCollection, AdmissionClass::Maintenance),
+    Err(MemoryCoordinatorError::SoftPressureDeferred { owner: MemoryOwner::GarbageCollection, .. })
+  ));
+  let deferred = coordinator.snapshot().unwrap();
+  let deferred_owner = deferred.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(deferred_owner.active_reservations, 0);
+  assert_eq!(deferred_owner.reserved_bytes, 0);
+  assert_eq!(deferred_owner.deferrals, 1);
+  drop(pressure);
+}
+
+#[test]
 fn ordinary_work_cannot_consume_emergency_headroom() {
   let coordinator = MemoryCoordinator::new(policy());
   let reservation = coordinator.reserve(MemoryOwner::Query, 700, AdmissionClass::Workload).unwrap();

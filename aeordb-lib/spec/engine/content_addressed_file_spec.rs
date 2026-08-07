@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use aeordb::engine::{DirectoryOps, RequestContext, VersionManager, file_path_hash, file_content_hash, file_identity_hash};
+use aeordb::engine::{DirectoryOps, EntryType, RequestContext, VersionManager, file_path_hash, file_content_hash, file_identity_hash};
+use aeordb::engine::file_record::CURRENT_FILE_RECORD_VERSION;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::gc::run_gc;
 use aeordb::server::create_temp_engine_for_tests;
@@ -80,6 +81,31 @@ fn test_read_file_still_works_via_path_key() {
   // read_file uses path-based key internally — should still work
   let content = ops.read_file_buffered("/readable.txt").unwrap();
   assert_eq!(content, b"read me via path");
+}
+
+#[test]
+fn buffered_read_rejects_file_records_whose_declared_size_disagrees_with_chunks() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let algo = engine.hash_algo();
+
+  for (path, declared_size, expected_reason) in
+    [("/declared-too-small.txt", 4, "exceeds declared total size"), ("/declared-too-large.txt", 6, "does not match declared total size")]
+  {
+    ops.store_file_buffered(&ctx, path, b"12345", Some("text/plain")).unwrap();
+    let mut record = ops.get_metadata(path).unwrap().unwrap();
+    record.total_size = declared_size;
+    let path_key = file_path_hash(path, &algo).unwrap();
+    let serialized = record.serialize(algo.hash_length()).unwrap();
+    engine.store_entry_with_version(EntryType::FileRecord, &path_key, &serialized, CURRENT_FILE_RECORD_VERSION).unwrap();
+
+    let error = ops.read_file_buffered(path).expect_err("dishonest FileRecord size must fail closed");
+    assert!(
+      matches!(&error, aeordb::engine::EngineError::CorruptEntry { reason, .. } if reason.contains(expected_reason)),
+      "unexpected buffered read error: {error:?}"
+    );
+  }
 }
 
 #[test]

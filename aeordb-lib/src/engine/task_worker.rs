@@ -5,7 +5,9 @@ use tokio::time::sleep;
 
 use crate::engine::backup;
 use crate::engine::directory_ops::DirectoryOps;
-use crate::engine::engine_event::{EngineEvent, EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED};
+use crate::engine::engine_event::{
+  EngineEvent, EVENT_TASKS_CANCELLED, EVENT_TASKS_COMPLETED, EVENT_TASKS_DEFERRED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED,
+};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::event_bus::EventBus;
@@ -36,6 +38,34 @@ const ROLLING_AVERAGE_WINDOW: usize = 10;
 /// Scheduler bookkeeping retained while one task is claimed and dispatched.
 /// Individual task implementations reserve their own material work separately.
 const TASK_WORKER_ADMISSION_BYTES: u64 = 256 * 1024;
+const TASK_DEFERRAL_BASE_DELAY_MS: i64 = 5_000;
+const TASK_DEFERRAL_MAX_DELAY_MS: i64 = 5 * 60 * 1_000;
+const REINDEX_RETAINED_PATH_OVERHEAD_BYTES: u64 = std::mem::size_of::<String>() as u64 + 32;
+
+struct RunningTaskRecovery<'a> {
+  queue: &'a TaskQueue,
+  task_id: &'a str,
+  armed: bool,
+}
+
+impl RunningTaskRecovery<'_> {
+  fn disarm(&mut self) {
+    self.armed = false;
+  }
+}
+
+impl Drop for RunningTaskRecovery<'_> {
+  fn drop(&mut self) {
+    if !self.armed {
+      return;
+    }
+    match self.queue.requeue_running(self.task_id) {
+      Ok(true) => tracing::error!(task_id = self.task_id, "task execution unwound unexpectedly; returned task to pending"),
+      Ok(false) => {}
+      Err(error) => tracing::error!(task_id = self.task_id, %error, "task execution unwound and could not restore pending state"),
+    }
+  }
+}
 
 /// Spawn a background task worker that dequeues and executes tasks in a loop.
 ///
@@ -67,7 +97,15 @@ pub fn spawn_task_worker(
 
       // Use spawn_blocking since engine work is CPU-bound.
       let result = tokio::task::spawn_blocking(move || {
-        process_next_task_internal_with_cancel(&queue_clone, &engine_clone, &plugin_manager_clone, &event_bus_clone, &cancel_clone)
+        process_next_task_internal_with_cancel(
+          &queue_clone,
+          &engine_clone,
+          &plugin_manager_clone,
+          &event_bus_clone,
+          &cancel_clone,
+          || {},
+          || {},
+        )
       })
       .await;
 
@@ -80,8 +118,12 @@ pub fn spawn_task_worker(
           // No task found; wait longer before polling again.
           Duration::from_secs(2)
         }
-        Ok(Err(_)) | Err(_) => {
-          // Error occurred; wait before retrying.
+        Ok(Err(error)) => {
+          tracing::error!(%error, "Task worker iteration failed");
+          Duration::from_secs(2)
+        }
+        Err(error) => {
+          tracing::error!(%error, "Task worker blocking execution panicked or was cancelled");
           Duration::from_secs(2)
         }
       };
@@ -110,29 +152,93 @@ pub fn process_next_task(
   // Tests + sync callers without a cancel token get a dummy "never-cancelled"
   // token. Production goes through process_next_task_internal_with_cancel.
   let dummy_cancel = tokio_util::sync::CancellationToken::new();
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel)
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, || {}, || {})
 }
 
-fn process_next_task_internal_with_cancel(
+/// Deterministic scheduler-boundary hook used by integration tests to prove
+/// pressure and cancellation races immediately after a task is claimed.
+#[doc(hidden)]
+pub fn process_next_task_with_post_dequeue_hook<F>(
+  queue: &TaskQueue,
+  engine: &StorageEngine,
+  plugin_manager: &PluginManager,
+  event_bus: &EventBus,
+  post_dequeue_hook: F,
+) -> EngineResult<bool>
+where
+  F: FnOnce(),
+{
+  let dummy_cancel = tokio_util::sync::CancellationToken::new();
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, post_dequeue_hook, || {})
+}
+
+/// Deterministic execution-boundary hook used by integration tests to prove
+/// cancellation after `tasks_started` reaches the real task implementation.
+#[doc(hidden)]
+pub fn process_next_task_with_pre_execute_hook<F>(
+  queue: &TaskQueue,
+  engine: &StorageEngine,
+  plugin_manager: &PluginManager,
+  event_bus: &EventBus,
+  pre_execute_hook: F,
+) -> EngineResult<bool>
+where
+  F: FnOnce(),
+{
+  let dummy_cancel = tokio_util::sync::CancellationToken::new();
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, || {}, pre_execute_hook)
+}
+
+/// Deterministic production-cancellation hook used by integration tests to
+/// prove worker shutdown reaches an already-started task implementation.
+#[doc(hidden)]
+pub fn process_next_task_with_cancel_and_pre_execute_hook<F>(
   queue: &TaskQueue,
   engine: &StorageEngine,
   plugin_manager: &PluginManager,
   event_bus: &EventBus,
   cancel: &tokio_util::sync::CancellationToken,
-) -> EngineResult<bool> {
+  pre_execute_hook: F,
+) -> EngineResult<bool>
+where
+  F: FnOnce(),
+{
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, cancel, || {}, pre_execute_hook)
+}
+
+fn process_next_task_internal_with_cancel<F, G>(
+  queue: &TaskQueue,
+  engine: &StorageEngine,
+  plugin_manager: &PluginManager,
+  event_bus: &EventBus,
+  cancel: &tokio_util::sync::CancellationToken,
+  post_dequeue_hook: F,
+  pre_execute_hook: G,
+) -> EngineResult<bool>
+where
+  F: FnOnce(),
+  G: FnOnce(),
+{
   if cancel.is_cancelled() {
     return Ok(false);
   }
 
-  let _task_workspace =
-    match engine.memory_coordinator().reserve(MemoryOwner::Task, TASK_WORKER_ADMISSION_BYTES, AdmissionClass::Maintenance) {
-      Ok(reservation) => reservation,
-      Err(error @ (MemoryCoordinatorError::SoftPressureDeferred { .. } | MemoryCoordinatorError::HardLimitExceeded { .. })) => {
-        tracing::info!(error = %error, "task worker deferred pending maintenance before dequeue");
-        return Ok(false);
-      }
-      Err(error) => return Err(task_worker_memory_error(error)),
-    };
+  let mut task_workspace = match OperationMemoryBudget::new(
+    engine,
+    "task worker",
+    MemoryOwner::Task,
+    AdmissionClass::Maintenance,
+    TASK_WORKER_ADMISSION_BYTES,
+    Some(cancel),
+  ) {
+    Ok(reservation) => reservation,
+    Err(error @ EngineError::ResourceExhausted(_)) => {
+      tracing::info!(error = %error, "task worker deferred pending maintenance before dequeue");
+      return Ok(false);
+    }
+    Err(EngineError::Cancelled(_)) => return Ok(false),
+    Err(error) => return Err(error),
+  };
 
   if cancel.is_cancelled() {
     return Ok(false);
@@ -140,10 +246,42 @@ fn process_next_task_internal_with_cancel(
 
   // H18: dequeue_next atomically finds the oldest pending task and marks
   // it Running under a lock, preventing double-dequeue.
-  let task = match queue.dequeue_next()? {
-    Some(task) => task,
-    None => return Ok(false),
+  let task = match queue.dequeue_next_with_memory(&mut task_workspace) {
+    Ok(Some(task)) => task,
+    Ok(None) => return Ok(false),
+    Err(error @ EngineError::ResourceExhausted(_)) => {
+      tracing::info!(error = %error, "task worker deferred pending maintenance during bounded dequeue");
+      return Ok(false);
+    }
+    Err(error) => return Err(error),
   };
+  let mut running_recovery = RunningTaskRecovery { queue, task_id: &task.id, armed: true };
+
+  let task_cancellation = queue.register_active_cancellation(&task.id, cancel);
+  post_dequeue_hook();
+
+  if queue.is_cancelled(&task.id) {
+    finish_cancelled_task(queue, &task, event_bus)?;
+    running_recovery.disarm();
+    return finish_task_iteration(queue, &task.id);
+  }
+
+  if task_cancellation.token().is_cancelled() {
+    requeue_running_task(queue, &task, event_bus, "task worker is shutting down")?;
+    running_recovery.disarm();
+    return finish_task_iteration(queue, &task.id);
+  }
+
+  if let Err(error) = engine.memory_coordinator().check_admission(MemoryOwner::Task, AdmissionClass::Maintenance) {
+    match error {
+      MemoryCoordinatorError::SoftPressureDeferred { .. } | MemoryCoordinatorError::HardLimitExceeded { .. } => {
+        defer_running_task_with_backoff(queue, &task, event_bus, &error.to_string())?;
+        running_recovery.disarm();
+        return finish_task_iteration(queue, &task.id);
+      }
+      error => return Err(task_worker_memory_error(error)),
+    }
+  }
 
   // Emit task started event.
   let started_event = EngineEvent::new(
@@ -156,55 +294,150 @@ fn process_next_task_internal_with_cancel(
     }),
   );
   event_bus.emit(started_event);
+  pre_execute_hook();
 
   // Execute based on task type.
   let result = match task.task_type.as_str() {
-    "reindex" => execute_reindex(queue, &task, engine, plugin_manager, cancel),
-    "gc" => execute_gc(queue, &task, engine, cancel),
-    "backup" => execute_backup(&task, engine, cancel),
-    "cleanup" => execute_cleanup(&task, engine, event_bus),
-    unknown => Err(format!("unknown task type: {}", unknown)),
+    "reindex" => execute_reindex(queue, &task, engine, plugin_manager, task_cancellation.token()),
+    "gc" => execute_gc(queue, &task, engine, task_cancellation.token()),
+    "backup" => execute_backup(&task, engine, task_cancellation.token()),
+    "cleanup" => execute_cleanup(&task, engine, event_bus, task_cancellation.token()),
+    unknown => Err(EngineError::InvalidInput(format!("unknown task type: {unknown}"))),
   };
 
   match result {
     Ok(summary) => {
-      queue.update_status(&task.id, TaskStatus::Completed, None)?;
-      let completed_event = EngineEvent::new(
-        EVENT_TASKS_COMPLETED,
-        "system",
-        serde_json::json!({
-            "task_id": task.id,
-            "task_type": task.task_type,
-            "summary": summary,
-        }),
-      );
-      event_bus.emit(completed_event);
+      if queue.finish_running(&task.id, TaskStatus::Completed, None)? {
+        event_bus.emit(EngineEvent::new(
+          EVENT_TASKS_COMPLETED,
+          "system",
+          serde_json::json!({
+              "task_id": task.id,
+              "task_type": task.task_type,
+              "summary": summary,
+          }),
+        ));
+      } else if queue.is_cancelled(&task.id) {
+        emit_cancelled_event(&task, event_bus);
+      }
     }
-    Err(error_message) => {
-      queue.update_status(&task.id, TaskStatus::Failed, Some(error_message.clone()))?;
-      let failed_event = EngineEvent::new(
-        EVENT_TASKS_FAILED,
-        "system",
-        serde_json::json!({
-            "task_id": task.id,
-            "task_type": task.task_type,
-            "error": error_message,
-        }),
-      );
-      event_bus.emit(failed_event);
+    Err(EngineError::Cancelled(_)) if queue.is_cancelled(&task.id) => {
+      finish_cancelled_task(queue, &task, event_bus)?;
+    }
+    Err(error @ EngineError::ResourceExhausted(_)) => {
+      defer_running_task_with_backoff(queue, &task, event_bus, &error.to_string())?;
+    }
+    Err(error @ (EngineError::ShuttingDown | EngineError::Cancelled(_))) => {
+      requeue_running_task(queue, &task, event_bus, &error.to_string())?;
+    }
+    Err(error) => {
+      let error_message = error.to_string();
+      if queue.finish_running(&task.id, TaskStatus::Failed, Some(error_message.clone()))? {
+        event_bus.emit(EngineEvent::new(
+          EVENT_TASKS_FAILED,
+          "system",
+          serde_json::json!({
+              "task_id": task.id,
+              "task_type": task.task_type,
+              "error": error_message,
+          }),
+        ));
+      } else if queue.is_cancelled(&task.id) {
+        emit_cancelled_event(&task, event_bus);
+      }
     }
   }
 
-  // Clear progress and prune old tasks.
-  queue.clear_progress(&task.id);
-  let _ = queue.prune_completed(PRUNE_MAX_AGE_MS, PRUNE_MAX_COUNT);
+  running_recovery.disarm();
+  finish_task_iteration(queue, &task.id)
+}
 
+fn finish_task_iteration(queue: &TaskQueue, task_id: &str) -> EngineResult<bool> {
+  queue.clear_progress(task_id);
+  match queue.prune_completed(PRUNE_MAX_AGE_MS, PRUNE_MAX_COUNT) {
+    Ok(_) => {}
+    Err(EngineError::ResourceExhausted(reason)) => {
+      tracing::info!(%reason, "task history pruning deferred under memory pressure");
+    }
+    Err(error) => return Err(error),
+  }
   Ok(true)
+}
+
+fn task_deferral_delay_ms(deferral_count: u32) -> i64 {
+  let exponent = deferral_count.min(6);
+  TASK_DEFERRAL_BASE_DELAY_MS.saturating_mul(1i64 << exponent).min(TASK_DEFERRAL_MAX_DELAY_MS)
+}
+
+fn defer_running_task_with_backoff(queue: &TaskQueue, task: &TaskRecord, event_bus: &EventBus, reason: &str) -> EngineResult<()> {
+  let retry_after_ms = task_deferral_delay_ms(task.deferral_count);
+  let retry_at = chrono::Utc::now().timestamp_millis().saturating_add(retry_after_ms);
+  if let Some(deferred) = queue.defer_running_until(&task.id, retry_at)? {
+    event_bus.emit(EngineEvent::new(
+      EVENT_TASKS_DEFERRED,
+      "system",
+      serde_json::json!({
+          "task_id": task.id,
+          "task_type": task.task_type,
+          "reason": reason,
+          "retryable": true,
+          "retry_at": retry_at,
+          "retry_after_ms": retry_after_ms,
+          "deferral_count": deferred.deferral_count,
+      }),
+    ));
+  } else if queue.is_cancelled(&task.id) {
+    emit_cancelled_event(task, event_bus);
+  }
+  Ok(())
+}
+
+fn requeue_running_task(queue: &TaskQueue, task: &TaskRecord, event_bus: &EventBus, reason: &str) -> EngineResult<()> {
+  if queue.requeue_running(&task.id)? {
+    event_bus.emit(EngineEvent::new(
+      EVENT_TASKS_DEFERRED,
+      "system",
+      serde_json::json!({
+          "task_id": task.id,
+          "task_type": task.task_type,
+          "reason": reason,
+          "retryable": true,
+          "retry_at": null,
+          "retry_after_ms": 0,
+          "deferral_count": task.deferral_count,
+      }),
+    ));
+  } else if queue.is_cancelled(&task.id) {
+    emit_cancelled_event(task, event_bus);
+  }
+  Ok(())
+}
+
+fn finish_cancelled_task(queue: &TaskQueue, task: &TaskRecord, event_bus: &EventBus) -> EngineResult<()> {
+  let transitioned = queue.finish_running(&task.id, TaskStatus::Cancelled, None)?;
+  if transitioned || queue.is_cancelled(&task.id) {
+    emit_cancelled_event(task, event_bus);
+  }
+  Ok(())
+}
+
+fn emit_cancelled_event(task: &TaskRecord, event_bus: &EventBus) {
+  event_bus.emit(EngineEvent::new(
+    EVENT_TASKS_CANCELLED,
+    "system",
+    serde_json::json!({
+        "task_id": task.id,
+        "task_type": task.task_type,
+    }),
+  ));
 }
 
 fn task_worker_memory_error(error: MemoryCoordinatorError) -> EngineError {
   match error {
-    MemoryCoordinatorError::PolicyUnavailable | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => {
+    MemoryCoordinatorError::PolicyUnavailable
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => {
       EngineError::ResourceExhausted(format!("task worker memory admission failed: {error}"))
     }
     _ => EngineError::IoError(std::io::Error::other(format!("task worker memory admission failed: {error}"))),
@@ -218,16 +451,30 @@ fn execute_reindex(
   engine: &StorageEngine,
   plugin_manager: &PluginManager,
   cancel: &tokio_util::sync::CancellationToken,
-) -> Result<String, String> {
-  let path = task.args.get("path").and_then(|v| v.as_str()).ok_or_else(|| "missing 'path' argument".to_string())?;
+) -> EngineResult<String> {
+  let path = task
+    .args
+    .get("path")
+    .and_then(|value| value.as_str())
+    .ok_or_else(|| EngineError::InvalidInput("missing 'path' argument".to_string()))?;
+  if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
+    return Err(EngineError::Cancelled("reindex".to_string()));
+  }
+  engine.memory_coordinator().check_admission(MemoryOwner::Task, AdmissionClass::Maintenance).map_err(task_worker_memory_error)?;
   let force = task.args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
   let metadata_only = task.args.get("metadata_only").and_then(|v| v.as_bool()).unwrap_or(false);
   let index_flush_options = reindex_index_buffer_options(&task.args);
+  let mut task_memory =
+    OperationMemoryBudget::new(engine, "reindex task", MemoryOwner::Task, AdmissionClass::Maintenance, 0, Some(cancel))?;
   let mut migration_memory = if force {
-    Some(
-      OperationMemoryBudget::new(engine, "forced reindex migration", MemoryOwner::Migration, AdmissionClass::Maintenance, 0, Some(cancel))
-        .map_err(|error| error.to_string())?,
-    )
+    Some(OperationMemoryBudget::new(
+      engine,
+      "forced reindex migration",
+      MemoryOwner::Migration,
+      AdmissionClass::Maintenance,
+      0,
+      Some(cancel),
+    )?)
   } else {
     None
   };
@@ -250,22 +497,11 @@ fn execute_reindex(
       );
       None
     }
-    Ok(None) => return Err(format!("cannot read index config at {}: not found", config_path)),
-    Err(e) if force => {
-      tracing::info!(
-        path = %reindex_root,
-        config_path = %config_path,
-        error = %e,
-        "forced reindex running migration-only because no index config was readable"
-      );
-      None
-    }
-    Err(e) => return Err(format!("cannot read index config at {}: {}", config_path, e)),
+    Ok(None) => return Err(EngineError::NotFound(config_path)),
+    Err(error) => return Err(error),
   };
   let stale_indexes_deleted = if let Some(ref config) = config {
-    let deleted = IndexManager::new(engine)
-      .delete_indexes_not_in_config(&reindex_root, config)
-      .map_err(|error| format!("failed to retire stale indexes for {}: {}", reindex_root, error))?;
+    let deleted = IndexManager::new(engine).delete_indexes_not_in_config(&reindex_root, config)?;
     if deleted > 0 {
       tracing::info!(path = %reindex_root, deleted, "retired stale indexes before reindex");
     }
@@ -280,35 +516,14 @@ fn execute_reindex(
     collect_current_file_record_paths(engine, &reindex_root, migration_memory.as_mut().expect("force creates migration memory"))?
   } else if let Some(ref config) = config {
     if let Some(ref glob_pattern) = config.glob {
-      // Glob mode: recursive listing filtered by glob pattern.
-      let all_entries = crate::engine::directory_listing::list_directory_recursive(engine, &reindex_root, -1, None, None)
-        .map_err(|e| format!("cannot list directory {}: {}", reindex_root, e))?;
-
-      all_entries
-        .into_iter()
-        .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
-        .filter(|entry| !crate::engine::directory_ops::is_internal_path(&entry.path))
-        .filter(|entry| {
-          let relative = entry.path.trim_start_matches(prefix).trim_start_matches('/');
-          glob_matches(glob_pattern, relative)
-        })
-        .map(|entry| entry.path)
-        .collect()
+      collect_recursive_reindex_paths(engine, &reindex_root, prefix, glob_pattern, &mut task_memory)?
     } else {
-      // Non-glob mode: direct children only.
-      let entries = ops.list_directory(&reindex_root).map_err(|e| format!("cannot list directory {}: {}", reindex_root, e))?;
-
-      entries
-        .into_iter()
-        .filter(|entry| entry.entry_type == EntryType::FileRecord.to_u8())
-        .map(|entry| format!("{}/{}", prefix, entry.name))
-        .filter(|path| !crate::engine::directory_ops::is_internal_path(path))
-        .collect()
+      collect_direct_reindex_paths(&ops, &reindex_root, prefix, &mut task_memory)?
     }
   } else {
     Vec::new()
   };
-  file_paths.sort();
+  file_paths.sort_unstable();
 
   // If there's a checkpoint, skip paths at or before it.
   if let Some(ref checkpoint) = task.checkpoint {
@@ -328,16 +543,21 @@ fn execute_reindex(
   let mut migrated_count: usize = 0;
   let mut consecutive_failures: usize = 0;
   let mut batch_times: Vec<Duration> = Vec::new();
+  let mut last_processed_path: Option<&str> = None;
   let start = Instant::now();
 
   // Process in batches.
   for batch in file_paths.chunks(REINDEX_BATCH_SIZE) {
     let batch_start = Instant::now();
-    let mut last_processed_path: Option<&str> = None;
 
     for file_path in batch {
       if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
-        return Err("cancelled".to_string());
+        flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+        return Err(EngineError::Cancelled("reindex".to_string()));
+      }
+      if let Err(error) = engine.memory_coordinator().check_admission(MemoryOwner::Task, AdmissionClass::Maintenance) {
+        flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+        return Err(task_worker_memory_error(error));
       }
 
       if force {
@@ -348,7 +568,10 @@ fn execute_reindex(
             migrated_count += 1;
           }
           Ok(false) => {}
-          Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_))) => return Err(error.to_string()),
+          Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
+            flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+            return Err(error);
+          }
           Err(error) => {
             tracing::warn!(
               path = %file_path,
@@ -357,9 +580,10 @@ fn execute_reindex(
             );
             consecutive_failures += 1;
             if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-              return Err(format!("circuit breaker: {} consecutive indexing failures", CIRCUIT_BREAKER_THRESHOLD));
+              return Err(reindex_circuit_breaker_error());
             }
             indexed_count += 1;
+            last_processed_path = Some(file_path);
             continue;
           }
         }
@@ -375,14 +599,52 @@ fn execute_reindex(
       let index_result = if metadata_only {
         pipeline.run_metadata_only_buffered(&ctx, file_path, &mut index_buffer)
       } else {
+        let metadata = match ops.get_metadata(file_path) {
+          Ok(metadata) => metadata,
+          Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
+            flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+            return Err(error);
+          }
+          Err(error) => {
+            tracing::warn!(path = %file_path, %error, "reindex could not read file metadata");
+            consecutive_failures += 1;
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+              return Err(reindex_circuit_breaker_error());
+            }
+            indexed_count += 1;
+            last_processed_path = Some(file_path);
+            continue;
+          }
+        };
+        let content_type = metadata.as_ref().and_then(|record| record.content_type.clone());
+        let buffered_body_checkpoint = task_memory.checkpoint();
+        let buffered_body_bytes = metadata
+          .as_ref()
+          .map(|record| {
+            record
+              .total_size
+              .checked_add(std::mem::size_of::<Vec<u8>>() as u64 + 64)
+              .ok_or_else(|| EngineError::ResourceExhausted("reindex buffered body estimate overflow".to_string()))
+          })
+          .transpose()?
+          .unwrap_or(0);
+        drop(metadata);
+        task_memory.reserve(buffered_body_bytes, "reindex buffered file body admission failed")?;
         // Read file content only for full parser/content reindexing. Metadata-only
         // reindexing reads the FileRecord header through the pipeline instead.
         let data = match ops.read_file_buffered(file_path) {
           Ok(data) => data,
-          Err(_) => {
+          Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
+            task_memory.release_to(buffered_body_checkpoint, "reindex buffered file body release after read refusal")?;
+            flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+            return Err(error);
+          }
+          Err(error) => {
+            task_memory.release_to(buffered_body_checkpoint, "reindex buffered file body release after read failure")?;
+            tracing::warn!(path = %file_path, %error, "reindex could not read file body");
             consecutive_failures += 1;
             if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-              return Err(format!("circuit breaker: {} consecutive indexing failures", CIRCUIT_BREAKER_THRESHOLD));
+              return Err(reindex_circuit_breaker_error());
             }
             indexed_count += 1;
             last_processed_path = Some(file_path);
@@ -390,19 +652,25 @@ fn execute_reindex(
           }
         };
 
-        let content_type = ops.get_metadata(file_path).ok().flatten().and_then(|record| record.content_type);
-        pipeline.run_buffered_with_cancellation(&ctx, file_path, &data, content_type.as_deref(), &mut index_buffer, cancel)
+        let result = pipeline.run_buffered_with_cancellation(&ctx, file_path, &data, content_type.as_deref(), &mut index_buffer, cancel);
+        drop(data);
+        task_memory.release_to(buffered_body_checkpoint, "reindex buffered file body release after parsing")?;
+        result
       };
 
       match index_result {
         Ok(()) => {
           consecutive_failures = 0;
         }
-        Err(crate::engine::errors::EngineError::Cancelled(_)) => return Err("cancelled".to_string()),
-        Err(_) => {
+        Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
+          flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+          return Err(error);
+        }
+        Err(error) => {
+          tracing::warn!(path = %file_path, %error, "reindex pipeline could not index file");
           consecutive_failures += 1;
           if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-            return Err(format!("circuit breaker: {} consecutive indexing failures", CIRCUIT_BREAKER_THRESHOLD));
+            return Err(reindex_circuit_breaker_error());
           }
         }
       }
@@ -412,10 +680,10 @@ fn execute_reindex(
 
       match index_buffer.flush_if_due() {
         Ok(true) => {
-          let _ = queue.update_checkpoint(&task.id, file_path);
+          queue.update_checkpoint(&task.id, file_path)?;
         }
         Ok(false) => {}
-        Err(error) => return Err(format!("index flush failed: {}", error)),
+        Err(error) => return Err(error),
       }
     }
 
@@ -428,9 +696,9 @@ fn execute_reindex(
     // Only advance the checkpoint past buffered index mutations after they have
     // been flushed. If there are no pending index mutations, all completed work
     // is durable and the batch checkpoint is safe.
-    if index_buffer.stats().map_err(|error| format!("index buffer stats failed: {error}"))?.pending_mutations == 0 {
+    if index_buffer.stats()?.pending_mutations == 0 {
       if let Some(last_path) = last_processed_path {
-        let _ = queue.update_checkpoint(&task.id, last_path);
+        queue.update_checkpoint(&task.id, last_path)?;
       }
     }
 
@@ -438,7 +706,7 @@ fn execute_reindex(
     let progress = indexed_count as f64 / total_count as f64;
     let eta_ms = compute_eta(&batch_times, total_count, indexed_count);
 
-    let index_stats = index_buffer.stats().map_err(|error| format!("index buffer stats failed: {error}"))?;
+    let index_stats = index_buffer.stats()?;
     queue.set_progress(
       &task.id,
       ProgressInfo {
@@ -468,17 +736,18 @@ fn execute_reindex(
     // outer cancel covers graceful shutdown — without polling it here the
     // worker can't exit during a long reindex.
     if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
-      return Err("cancelled".to_string());
+      flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+      return Err(EngineError::Cancelled("reindex".to_string()));
     }
   }
 
-  let flushed_indexes = index_buffer.flush_all().map_err(|error| format!("final index flush failed: {}", error))?;
+  let flushed_indexes = index_buffer.flush_all()?;
   if let Some(last_path) = file_paths.last() {
-    let _ = queue.update_checkpoint(&task.id, last_path);
+    queue.update_checkpoint(&task.id, last_path)?;
   }
 
   let elapsed_ms = start.elapsed().as_millis();
-  let index_stats = index_buffer.stats().map_err(|error| format!("index buffer stats failed: {error}"))?;
+  let index_stats = index_buffer.stats()?;
   let index_summary = format!(
     ", metadata_only={}, stale_indexes_deleted={}, index_mutations={}, index_flushes={}, flushed_indexes={} (+{} final), cached_indexes={}",
     metadata_only,
@@ -494,6 +763,166 @@ fn execute_reindex(
   } else {
     Ok(format!("reindexed {} files in {}ms{}", indexed_count, elapsed_ms, index_summary))
   }
+}
+
+fn reindex_circuit_breaker_error() -> EngineError {
+  EngineError::InvalidInput(format!("circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} consecutive indexing failures"))
+}
+
+fn reindex_path_retained_bytes(path: &str) -> EngineResult<u64> {
+  reindex_path_retained_bytes_for_length(path.len())
+}
+
+fn reindex_path_retained_bytes_for_length(path_length: usize) -> EngineResult<u64> {
+  u64::try_from(path_length)
+    .ok()
+    .and_then(|bytes| bytes.checked_add(REINDEX_RETAINED_PATH_OVERHEAD_BYTES))
+    .ok_or_else(|| EngineError::ResourceExhausted("reindex retained path estimate overflow".to_string()))
+}
+
+fn collect_recursive_reindex_paths(
+  engine: &StorageEngine,
+  reindex_root: &str,
+  prefix: &str,
+  glob_pattern: &str,
+  memory: &mut OperationMemoryBudget,
+) -> EngineResult<Vec<String>> {
+  let mut path_count = 0usize;
+  let mut retained_bytes = 0u64;
+  crate::engine::directory_listing::visit_directory_recursive(engine, reindex_root, -1, None, None, |entry| {
+    memory.record_work(1)?;
+    if !reindex_listing_entry_matches(&entry, prefix, glob_pattern) {
+      return Ok(true);
+    }
+    path_count = path_count.checked_add(1).ok_or_else(|| EngineError::ResourceExhausted("reindex path count overflow".to_string()))?;
+    retained_bytes = retained_bytes
+      .checked_add(reindex_path_retained_bytes(&entry.path)?)
+      .ok_or_else(|| EngineError::ResourceExhausted("reindex path inventory estimate overflow".to_string()))?;
+    Ok(true)
+  })?;
+
+  memory.reserve(retained_bytes, "reindex retained path inventory admission failed")?;
+  let mut paths = Vec::new();
+  paths
+    .try_reserve_exact(path_count)
+    .map_err(|error| EngineError::ResourceExhausted(format!("reindex path inventory allocation failed: {error}")))?;
+  let mut populated_bytes = 0u64;
+  crate::engine::directory_listing::visit_directory_recursive(engine, reindex_root, -1, None, None, |entry| {
+    memory.record_work(1)?;
+    if !reindex_listing_entry_matches(&entry, prefix, glob_pattern) {
+      return Ok(true);
+    }
+    let entry_bytes = reindex_path_retained_bytes(&entry.path)?;
+    populated_bytes = populated_bytes
+      .checked_add(entry_bytes)
+      .ok_or_else(|| EngineError::ResourceExhausted("reindex populated path estimate overflow".to_string()))?;
+    if paths.len() >= path_count || populated_bytes > retained_bytes {
+      return Err(EngineError::ResourceExhausted(
+        "reindex namespace grew while its bounded path inventory was being populated; retrying from the durable checkpoint".to_string(),
+      ));
+    }
+    paths.push(entry.path);
+    Ok(true)
+  })?;
+  Ok(paths)
+}
+
+fn reindex_listing_entry_matches(entry: &crate::engine::directory_listing::ListingEntry, prefix: &str, glob_pattern: &str) -> bool {
+  if entry.entry_type != EntryType::FileRecord.to_u8() || crate::engine::directory_ops::is_internal_path(&entry.path) {
+    return false;
+  }
+  let relative = entry.path.trim_start_matches(prefix).trim_start_matches('/');
+  glob_matches(glob_pattern, relative)
+}
+
+fn collect_direct_reindex_paths(
+  ops: &DirectoryOps<'_>,
+  reindex_root: &str,
+  prefix: &str,
+  memory: &mut OperationMemoryBudget,
+) -> EngineResult<Vec<String>> {
+  collect_direct_reindex_paths_with_between_pass_hook(ops, reindex_root, prefix, memory, || {})
+}
+
+fn collect_direct_reindex_paths_with_between_pass_hook<F>(
+  ops: &DirectoryOps<'_>,
+  reindex_root: &str,
+  prefix: &str,
+  memory: &mut OperationMemoryBudget,
+  between_passes: F,
+) -> EngineResult<Vec<String>>
+where
+  F: FnOnce(),
+{
+  let root_is_internal = crate::engine::directory_ops::is_internal_path(reindex_root);
+  let mut retained_bytes = 0u64;
+  let mut path_count = 0usize;
+  ops.visit_live_directory_children(reindex_root, |entry| {
+    memory.record_work(1)?;
+    if !direct_reindex_child_matches(entry, root_is_internal) {
+      return Ok(true);
+    }
+    let path_length = prefix
+      .len()
+      .checked_add(1)
+      .and_then(|length| length.checked_add(entry.name.len()))
+      .ok_or_else(|| EngineError::ResourceExhausted("direct reindex path length overflow".to_string()))?;
+    retained_bytes = retained_bytes
+      .checked_add(reindex_path_retained_bytes_for_length(path_length)?)
+      .ok_or_else(|| EngineError::ResourceExhausted("direct reindex path inventory estimate overflow".to_string()))?;
+    path_count =
+      path_count.checked_add(1).ok_or_else(|| EngineError::ResourceExhausted("direct reindex path count overflow".to_string()))?;
+    Ok(true)
+  })?;
+  memory.reserve(retained_bytes, "direct reindex retained path admission failed")?;
+  between_passes();
+  let mut paths = Vec::new();
+  paths
+    .try_reserve_exact(path_count)
+    .map_err(|error| EngineError::ResourceExhausted(format!("direct reindex path inventory allocation failed: {error}")))?;
+  let mut populated_bytes = 0u64;
+  ops.visit_live_directory_children(reindex_root, |entry| {
+    memory.record_work(1)?;
+    if !direct_reindex_child_matches(entry, root_is_internal) {
+      return Ok(true);
+    }
+    let path_length = prefix
+      .len()
+      .checked_add(1)
+      .and_then(|length| length.checked_add(entry.name.len()))
+      .ok_or_else(|| EngineError::ResourceExhausted("direct reindex path length overflow".to_string()))?;
+    populated_bytes = populated_bytes
+      .checked_add(reindex_path_retained_bytes_for_length(path_length)?)
+      .ok_or_else(|| EngineError::ResourceExhausted("direct reindex populated path estimate overflow".to_string()))?;
+    if paths.len() >= path_count || populated_bytes > retained_bytes {
+      return Err(EngineError::ResourceExhausted(
+        "direct reindex namespace grew while its bounded path inventory was being populated; retrying from the durable checkpoint"
+          .to_string(),
+      ));
+    }
+    paths.push(format!("{prefix}/{}", entry.name));
+    Ok(true)
+  })?;
+  Ok(paths)
+}
+
+fn direct_reindex_child_matches(entry: &crate::engine::directory_entry::ChildEntry, root_is_internal: bool) -> bool {
+  entry.entry_type == EntryType::FileRecord.to_u8()
+    && !root_is_internal
+    && !matches!(entry.name.as_str(), ".aeordb-logs" | ".aeordb-indexes" | ".aeordb-config")
+}
+
+fn flush_reindex_before_retry(
+  queue: &TaskQueue,
+  task: &TaskRecord,
+  index_buffer: &mut IndexWriteBuffer<'_>,
+  last_processed_path: Option<&str>,
+) -> EngineResult<()> {
+  index_buffer.flush_all()?;
+  if let Some(path) = last_processed_path {
+    queue.update_checkpoint(&task.id, path)?;
+  }
+  Ok(())
 }
 
 fn reindex_index_buffer_options(args: &serde_json::Value) -> IndexWriteBufferOptions {
@@ -514,60 +943,60 @@ fn collect_current_file_record_paths(
   engine: &StorageEngine,
   base_path: &str,
   memory: &mut OperationMemoryBudget,
-) -> Result<Vec<String>, String> {
+) -> EngineResult<Vec<String>> {
   let normalized_base = crate::engine::path_utils::normalize_path(base_path);
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
   let snapshot = engine.kv_snapshot.load();
-  let candidate_count = snapshot.count_by_type(crate::engine::KV_TYPE_FILE_RECORD).map_err(|error| error.to_string())?;
+  let candidate_count = snapshot.count_by_type(crate::engine::KV_TYPE_FILE_RECORD)?;
   let vector_bytes = candidate_count
     .checked_mul(std::mem::size_of::<String>())
     .and_then(|bytes| u64::try_from(bytes).ok())
-    .ok_or_else(|| "forced reindex path vector estimate overflow".to_string())?;
-  memory.reserve(vector_bytes, "forced reindex path vector admission failed").map_err(|error| error.to_string())?;
+    .ok_or_else(|| EngineError::ResourceExhausted("forced reindex path vector estimate overflow".to_string()))?;
+  memory.reserve(vector_bytes, "forced reindex path vector admission failed")?;
   let mut paths = Vec::new();
-  paths.try_reserve_exact(candidate_count).map_err(|error| format!("forced reindex path vector allocation failed: {error}"))?;
+  paths
+    .try_reserve_exact(candidate_count)
+    .map_err(|error| EngineError::ResourceExhausted(format!("forced reindex path vector allocation failed: {error}")))?;
 
-  snapshot
-    .visit_by_type(crate::engine::KV_TYPE_FILE_RECORD, |entry| {
-      memory.record_work(1)?;
-      let transient_bytes = u64::from(entry.total_length)
-        .checked_mul(2)
-        .ok_or_else(|| EngineError::ResourceExhausted("forced reindex FileRecord estimate overflow".to_string()))?;
-      memory.reserve(transient_bytes, "forced reindex FileRecord admission failed")?;
-      let read_result = engine.get_entry_including_deleted(&entry.hash);
-      let selected = match read_result {
-        Ok(Some((header, _key, value))) => {
-          match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
-            Ok(record) if path_in_reindex_scope(&normalized_base, &record.path) => {
-              let path_key = crate::engine::directory_ops::file_path_hash(&record.path, &algo)?;
-              if entry.hash == path_key {
-                let retained_bytes = u64::try_from(record.path.capacity())
-                  .map_err(|_| EngineError::ResourceExhausted("forced reindex path estimate overflow".to_string()))?;
-                memory.reserve(retained_bytes, "forced reindex retained path admission failed")?;
-                Some(record.path)
-              } else {
-                None
-              }
+  snapshot.visit_by_type(crate::engine::KV_TYPE_FILE_RECORD, |entry| {
+    memory.record_work(1)?;
+    let transient_bytes = u64::from(entry.total_length)
+      .checked_mul(2)
+      .ok_or_else(|| EngineError::ResourceExhausted("forced reindex FileRecord estimate overflow".to_string()))?;
+    memory.reserve(transient_bytes, "forced reindex FileRecord admission failed")?;
+    let read_result = engine.get_entry_including_deleted(&entry.hash);
+    let selected = match read_result {
+      Ok(Some((header, _key, value))) => {
+        match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
+          Ok(record) if path_in_reindex_scope(&normalized_base, &record.path) => {
+            let path_key = crate::engine::directory_ops::file_path_hash(&record.path, &algo)?;
+            if entry.hash == path_key {
+              let retained_bytes = u64::try_from(record.path.capacity())
+                .map_err(|_| EngineError::ResourceExhausted("forced reindex path estimate overflow".to_string()))?;
+              memory.reserve(retained_bytes, "forced reindex retained path admission failed")?;
+              Some(record.path)
+            } else {
+              None
             }
-            Ok(_) | Err(_) => None,
           }
+          Ok(_) | Err(_) => None,
         }
-        Ok(None) => None,
-        Err(error) => {
-          return match memory.release(transient_bytes, "forced reindex FileRecord release after read failure") {
-            Ok(()) => Err(error),
-            Err(release_error) => Err(release_error),
-          };
-        }
-      };
-      memory.release(transient_bytes, "forced reindex FileRecord release failed")?;
-      if let Some(path) = selected {
-        paths.push(path);
       }
-      Ok(true)
-    })
-    .map_err(|error| error.to_string())?;
+      Ok(None) => None,
+      Err(error) => {
+        return match memory.release(transient_bytes, "forced reindex FileRecord release after read failure") {
+          Ok(()) => Err(error),
+          Err(release_error) => Err(release_error),
+        };
+      }
+    };
+    memory.release(transient_bytes, "forced reindex FileRecord release failed")?;
+    if let Some(path) = selected {
+      paths.push(path);
+    }
+    Ok(true)
+  })?;
   drop(snapshot);
   paths.sort();
   Ok(paths)
@@ -591,11 +1020,11 @@ fn execute_gc(
   task: &TaskRecord,
   engine: &StorageEngine,
   cancel: &tokio_util::sync::CancellationToken,
-) -> Result<String, String> {
+) -> EngineResult<String> {
   let dry_run = task.args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
   let ctx = RequestContext::system();
-  let result = run_gc_with_cancellation(engine, &ctx, dry_run, cancel).map_err(|e| format!("gc failed: {}", e))?;
+  let result = run_gc_with_cancellation(engine, &ctx, dry_run, cancel)?;
 
   Ok(format!(
     "gc completed: {} garbage entries, {} bytes reclaimed, dry_run={}",
@@ -610,15 +1039,22 @@ fn execute_gc(
 /// - `retention_count` (integer) -- keep at most this many `.aeordb` files in
 ///   `backup_dir`. 0 means unlimited. Default: 0.
 /// - `snapshot` (string, optional) -- export a named snapshot instead of HEAD.
-fn execute_backup(task: &TaskRecord, engine: &StorageEngine, cancel: &tokio_util::sync::CancellationToken) -> Result<String, String> {
+fn execute_backup(task: &TaskRecord, engine: &StorageEngine, cancel: &tokio_util::sync::CancellationToken) -> EngineResult<String> {
   let backup_dir = task.args.get("backup_dir").and_then(|v| v.as_str()).unwrap_or("./backups/");
 
   let retention_count = task.args.get("retention_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
   let snapshot_name = task.args.get("snapshot").and_then(|v| v.as_str());
 
+  if cancel.is_cancelled() {
+    return Err(EngineError::Cancelled("backup".to_string()));
+  }
+  engine.memory_coordinator().check_admission(MemoryOwner::BackupRestore, AdmissionClass::Maintenance).map_err(task_worker_memory_error)?;
+
   // Ensure the backup directory exists.
-  std::fs::create_dir_all(backup_dir).map_err(|error| format!("failed to create backup directory '{}': {}", backup_dir, error))?;
+  std::fs::create_dir_all(backup_dir).map_err(|error| {
+    EngineError::IoError(std::io::Error::new(error.kind(), format!("failed to create backup directory '{backup_dir}': {error}")))
+  })?;
 
   // Build a timestamped output filename (with milliseconds to avoid collisions).
   let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
@@ -631,8 +1067,7 @@ fn execute_backup(task: &TaskRecord, engine: &StorageEngine, cancel: &tokio_util
 
   // Run the export. Scheduled backups don't include system data —
   // they're for user data history, not credential rotation.
-  let result = backup::export_snapshot_with_cancellation(engine, snapshot_name, &output_path_string, false, cancel)
-    .map_err(|error| format!("backup export failed: {}", error))?;
+  let result = backup::export_snapshot_with_cancellation(engine, snapshot_name, &output_path_string, false, cancel)?;
 
   // Enforce retention policy if configured.
   if retention_count > 0 {
@@ -655,10 +1090,18 @@ fn execute_backup(task: &TaskRecord, engine: &StorageEngine, cancel: &tokio_util
 
 /// Execute a cleanup task: remove expired refresh tokens and used/expired
 /// magic links from the system store. Intended to run on a default hourly cron.
-fn execute_cleanup(_task: &TaskRecord, engine: &StorageEngine, _event_bus: &EventBus) -> Result<String, String> {
+fn execute_cleanup(
+  _task: &TaskRecord,
+  engine: &StorageEngine,
+  _event_bus: &EventBus,
+  cancellation: &tokio_util::sync::CancellationToken,
+) -> EngineResult<String> {
+  if cancellation.is_cancelled() {
+    return Err(EngineError::Cancelled("expired-token cleanup".to_string()));
+  }
+  engine.memory_coordinator().check_admission(MemoryOwner::Task, AdmissionClass::Maintenance).map_err(task_worker_memory_error)?;
   let ctx = RequestContext::system();
-  let (tokens, links) =
-    crate::engine::system_store::cleanup_expired_tokens(engine, &ctx).map_err(|error| format!("cleanup failed: {}", error))?;
+  let (tokens, links) = crate::engine::system_store::cleanup_expired_tokens(engine, &ctx)?;
   Ok(format!("cleaned {} tokens and {} magic links", tokens, links))
 }
 
@@ -709,4 +1152,35 @@ fn compute_eta(batch_times: &[Duration], total_count: usize, indexed_count: usiz
   let eta_ms = average_batch_ms * remaining_batches as u128;
 
   Some(eta_ms as i64)
+}
+
+#[cfg(test)]
+mod direct_reindex_path_tests {
+  use super::*;
+  use crate::engine::request_context::RequestContext;
+
+  #[test]
+  fn direct_inventory_refuses_namespace_growth_between_bounded_passes() {
+    let (engine, _temp) = crate::server::create_temp_engine_for_tests();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&ctx, "/growth/a.txt", b"a", Some("text/plain")).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut memory = OperationMemoryBudget::new(
+      &engine,
+      "direct reindex inventory test",
+      MemoryOwner::Task,
+      AdmissionClass::Maintenance,
+      0,
+      Some(&cancel),
+    )
+    .unwrap();
+
+    let error = collect_direct_reindex_paths_with_between_pass_hook(&ops, "/growth", "/growth", &mut memory, || {
+      ops.store_file_buffered(&ctx, "/growth/b.txt", b"b", Some("text/plain")).unwrap();
+    })
+    .expect_err("a growing namespace must be retried from its durable task checkpoint");
+
+    assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  }
 }

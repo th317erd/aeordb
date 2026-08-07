@@ -7,8 +7,8 @@ use aeordb::engine::{
 };
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::file_record::FileRecord;
-use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, GcResult};
-use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, run_gc_with_post_start_hook, GcResult};
+use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
 use aeordb::engine::storage_engine::WriteBatch;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::{EngineError, EventBus};
@@ -138,6 +138,33 @@ fn test_gc_cancels_cooperatively_after_started_event_during_mark() {
 
   let snapshot = engine.memory_coordinator().snapshot().unwrap();
   let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_new_host_pressure_after_start_defers_at_the_next_safe_point() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let bus = Arc::new(EventBus::new());
+  let mut events = bus.subscribe();
+  let ctx = RequestContext::with_bus(bus);
+  let coordinator = engine.memory_coordinator().clone();
+  let soft_limit = coordinator.snapshot().unwrap().policy.unwrap().soft_limit_bytes;
+
+  let error = run_gc_with_post_start_hook(&engine, &ctx, true, || {
+    coordinator
+      .update_host_sample(HostMemorySample { rss_bytes: soft_limit, host_available_bytes: Some(u64::MAX), ..HostMemorySample::default() })
+      .unwrap();
+  })
+  .expect_err("GC must pause when host pressure rises after initial admission");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)));
+
+  let started = events.try_recv().expect("GC crossed admission and must report that it started");
+  assert_eq!(started.event_type, aeordb::engine::engine_event::EVENT_GC_STARTED);
+  assert!(events.try_recv().is_err(), "deferred GC must not report completion");
+  let snapshot = engine.memory_coordinator().snapshot().unwrap();
+  let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
+  assert!(owner.deferrals >= 1);
   assert_eq!(owner.reserved_bytes, 0);
   assert_eq!(owner.active_reservations, 0);
 }

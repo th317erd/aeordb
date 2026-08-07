@@ -40,7 +40,7 @@ Optional flush controls:
 The task worker will:
 
 1. Read the `indexes.json` configuration for that path
-2. List all file entries in the directory, or when `force` is true, scan current live FileRecord path keys in the requested subtree
+2. Visit directory B-tree leaves without materializing the complete listing, or when `force` is true, scan current live FileRecord path keys in the requested subtree
 3. If `force` is true, rewrite any older FileRecord payloads to the current version before indexing
 4. Rebuild indexes through either the metadata-only path or the full parser/content pipeline
 5. Buffer index writes in memory and flush them by write count, elapsed time, or final completion
@@ -80,7 +80,7 @@ The response includes progress details:
 
 ```json
 {
-  "tasks": [
+  "items": [
     {
       "id": "abc123",
       "task_type": "reindex",
@@ -115,6 +115,12 @@ Reindex tasks save checkpoints as processed work becomes durable. Because index 
 
 The checkpoint is the name of the last successfully processed file (files are processed in alphabetical order for deterministic ordering).
 
+Ordinary direct and glob-aware reindexing measure the matching path inventory,
+reserve its retained memory, and then populate it in a second leaf-wise pass.
+If the namespace grows beyond the admitted count or bytes between those passes,
+the task returns to `Pending` and retries from its durable checkpoint. Sorting
+uses the admitted path inventory and does not require a second full listing.
+
 ## Cancellation
 
 Cancel a running reindex task:
@@ -124,7 +130,13 @@ curl -X POST http://localhost:6830/system/tasks/{task_id}/cancel \
   -H "Authorization: Bearer $API_KEY"
 ```
 
-The task checks for cancellation after each batch, so it will stop within one batch cycle.
+The task checks for cancellation and newly raised host-memory pressure before
+each file and after each batch. Before returning to `Pending`, it flushes dirty
+index mutations and advances the checkpoint only through the last durable file.
+The resumed task can repeat work after the checkpoint but does not skip
+unflushed index updates. A pressure deferral persists an exponential retry time
+(five seconds initially, capped at five minutes), so an oversized file or
+sustained host pressure does not cause one claim/requeue write per worker poll.
 
 ## Batch Processing
 

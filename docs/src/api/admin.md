@@ -222,6 +222,13 @@ List all tasks with their current progress.
       "task_type": "reindex",
       "status": "running",
       "args": {"path": "/data/"},
+      "created_at": 1775968400000,
+      "started_at": 1775968450000,
+      "completed_at": null,
+      "error": null,
+      "checkpoint": "/data/file-0042.json",
+      "retry_at": null,
+      "deferral_count": 0,
       "progress": 0.45,
       "eta_ms": 1775968500000
     }
@@ -229,7 +236,9 @@ List all tasks with their current progress.
 }
 ```
 
-Each task includes `progress` (0.0-1.0) and `eta_ms` (estimated completion timestamp) if available.
+Each task includes `progress` (0.0-1.0) and `eta_ms` when available. A
+pressure-deferred task remains `pending`, preserves its `checkpoint`, records
+the earliest next claim time in `retry_at`, and increments `deferral_count`.
 
 **Example:**
 
@@ -252,6 +261,13 @@ Get a single task by ID.
   "task_type": "reindex",
   "status": "running",
   "args": {"path": "/data/"},
+  "created_at": 1775968400000,
+  "started_at": 1775968450000,
+  "completed_at": null,
+  "error": null,
+  "checkpoint": "/data/file-0042.json",
+  "retry_at": null,
+  "deferral_count": 0,
   "progress": 0.45,
   "eta_ms": 1775968500000
 }

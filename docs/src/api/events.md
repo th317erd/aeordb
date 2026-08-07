@@ -86,6 +86,11 @@ Each event is a JSON object with:
 | `versions_created` | A new version (snapshot/fork) was created | Version metadata |
 | `permissions_changed` | Permissions were updated for a path | `{"path": "..."}` |
 | `indexes_changed` | Index configuration was updated | `{"path": "..."}` |
+| `tasks_started` | A background task began execution | `{"task_id": "...", "task_type": "...", "args": {...}}` |
+| `tasks_deferred` | A claimed maintenance task was safely returned to `Pending` for retry | `{"task_id": "...", "task_type": "...", "reason": "...", "retryable": true, "retry_at": 1786084780168, "retry_after_ms": 40000, "deferral_count": 4}` |
+| `tasks_completed` | A background task completed | `{"task_id": "...", "task_type": "...", "summary": "..."}` |
+| `tasks_failed` | A background task failed terminally | `{"task_id": "...", "task_type": "...", "error": "..."}` |
+| `tasks_cancelled` | A running task cancellation was observed | `{"task_id": "...", "task_type": "..."}` |
 | `heartbeat` | Clock synchronization pulse (every 15s) | `{"intent_time", "construct_time", "node_id"}` |
 | `metrics` | System metrics snapshot (every 15s) | `{"counts", "sizes", "throughput", "health"}` |
 

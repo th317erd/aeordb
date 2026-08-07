@@ -249,6 +249,152 @@ fn test_update_checkpoint_persists() {
 }
 
 #[test]
+fn requeue_running_preserves_checkpoint_and_clears_execution_state() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine);
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/docs"})).unwrap();
+  queue.dequeue_next().unwrap().expect("task must be claimed");
+  queue.update_checkpoint(&task.id, "/docs/page-0042.json").unwrap();
+
+  assert!(queue.requeue_running(&task.id).unwrap());
+
+  let pending = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(pending.status, TaskStatus::Pending);
+  assert!(pending.started_at.is_none());
+  assert!(pending.completed_at.is_none());
+  assert!(pending.error.is_none());
+  assert_eq!(pending.checkpoint.as_deref(), Some("/docs/page-0042.json"));
+}
+
+#[test]
+fn deferred_oldest_task_is_not_reclaimed_or_allowed_to_block_newer_eligible_work() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine);
+  let oldest = queue.enqueue("reindex", serde_json::json!({"path": "/large"})).unwrap();
+  let newer = queue.enqueue("gc", serde_json::json!({"dry_run": true})).unwrap();
+
+  let claimed = queue.dequeue_next().unwrap().expect("oldest task must be claimed first");
+  assert_eq!(claimed.id, oldest.id);
+  let retry_at = chrono::Utc::now().timestamp_millis() + 60_000;
+  let deferred = queue.defer_running_until(&oldest.id, retry_at).unwrap().expect("running task must be deferred");
+  assert_eq!(deferred.status, TaskStatus::Pending);
+  assert_eq!(deferred.retry_at, Some(retry_at));
+  assert_eq!(deferred.deferral_count, 1);
+
+  let next = queue.dequeue_next().unwrap().expect("newer eligible task must bypass deferred work");
+  assert_eq!(next.id, newer.id);
+  assert!(queue.finish_running(&newer.id, TaskStatus::Completed, None).unwrap());
+  assert!(queue.dequeue_next().unwrap().is_none(), "deferred task must not be rewritten before retry_at");
+
+  let persisted = queue.get_task(&oldest.id).unwrap().unwrap();
+  assert_eq!(persisted.status, TaskStatus::Pending);
+  assert_eq!(persisted.retry_at, Some(retry_at));
+  assert_eq!(persisted.deferral_count, 1);
+}
+
+#[test]
+fn requeue_running_never_overwrites_a_concurrent_cancellation() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine);
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/docs"})).unwrap();
+  queue.dequeue_next().unwrap().expect("task must be claimed");
+  queue.update_checkpoint(&task.id, "/docs/page-0042.json").unwrap();
+  queue.cancel(&task.id).unwrap();
+
+  assert!(!queue.requeue_running(&task.id).unwrap());
+
+  let cancelled = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(cancelled.status, TaskStatus::Cancelled);
+  assert!(cancelled.completed_at.is_some());
+  assert_eq!(cancelled.checkpoint.as_deref(), Some("/docs/page-0042.json"));
+}
+
+#[test]
+fn startup_recovery_requeues_interrupted_tasks_without_losing_checkpoints() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/docs"})).unwrap();
+  queue.dequeue_next().unwrap().expect("task must be claimed");
+  queue.update_checkpoint(&task.id, "/docs/page-0042.json").unwrap();
+  drop(queue);
+
+  let restarted = TaskQueue::new(engine);
+  assert_eq!(restarted.recover_interrupted_tasks().unwrap(), 1);
+  assert_eq!(restarted.recover_interrupted_tasks().unwrap(), 0, "recovery must be idempotent");
+
+  let pending = restarted.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(pending.status, TaskStatus::Pending);
+  assert!(pending.started_at.is_none());
+  assert!(pending.completed_at.is_none());
+  assert!(pending.error.is_none());
+  assert_eq!(pending.checkpoint.as_deref(), Some("/docs/page-0042.json"));
+}
+
+#[test]
+fn worker_completion_never_overwrites_a_persisted_cancellation() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine);
+  let task = queue.enqueue("backup", serde_json::json!({})).unwrap();
+  queue.dequeue_next().unwrap().expect("task must be claimed");
+  queue.cancel(&task.id).unwrap();
+
+  assert!(!queue.finish_running(&task.id, TaskStatus::Completed, None).unwrap());
+  let cancelled = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(cancelled.status, TaskStatus::Cancelled);
+  assert!(cancelled.error.is_none());
+}
+
+#[test]
+fn startup_recovery_fails_closed_on_a_malformed_registry() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+  engine.store_entry(aeordb::engine::EntryType::FileRecord, &registry_key, br#"{"broken":true}"#).unwrap();
+  let queue = TaskQueue::new(engine);
+
+  let error = queue.recover_interrupted_tasks().expect_err("malformed task authority must fail startup recovery");
+  assert!(error.to_string().contains("deserialization error"));
+}
+
+#[test]
+fn startup_recovery_fails_closed_when_registry_task_is_missing() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let task = queue.enqueue("backup", serde_json::json!({})).unwrap();
+  let task_key = blake3::hash(format!("::aeordb:task:{}", task.id).as_bytes()).as_bytes().to_vec();
+  engine.mark_entry_deleted(&task_key).unwrap();
+
+  let error = queue.recover_interrupted_tasks().expect_err("missing registry task must fail startup recovery");
+  assert!(error.to_string().contains("references missing task"));
+}
+
+#[test]
+fn startup_recovery_fails_closed_when_task_id_does_not_match_registry_key() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let task = queue.enqueue("backup", serde_json::json!({})).unwrap();
+  let mut mismatched = queue.get_task(&task.id).unwrap().unwrap();
+  mismatched.id = "different-task-id".to_string();
+  let task_key = blake3::hash(format!("::aeordb:task:{}", task.id).as_bytes()).as_bytes().to_vec();
+  engine.store_entry(aeordb::engine::EntryType::FileRecord, &task_key, &serde_json::to_vec(&mismatched).unwrap()).unwrap();
+
+  let error = queue.recover_interrupted_tasks().expect_err("mismatched registry task must fail startup recovery");
+  assert!(error.to_string().contains("does not match registry id"));
+}
+
+#[test]
+fn startup_recovery_fails_closed_on_duplicate_registry_ids() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let task = queue.enqueue("backup", serde_json::json!({})).unwrap();
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+  let duplicate_registry = serde_json::to_vec(&vec![task.id.clone(), task.id]).unwrap();
+  engine.store_entry(aeordb::engine::EntryType::FileRecord, &registry_key, &duplicate_registry).unwrap();
+
+  let error = queue.recover_interrupted_tasks().expect_err("duplicate task authority must fail startup recovery");
+  assert!(error.to_string().contains("duplicate id"));
+}
+
+#[test]
 fn test_update_status_with_error() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let queue = TaskQueue::new(engine);
@@ -327,6 +473,8 @@ fn test_task_record_serialization_roundtrip() {
     completed_at: None,
     error: None,
     checkpoint: Some("page:5".to_string()),
+    retry_at: Some(3000),
+    deferral_count: 2,
   };
 
   let serialized = serde_json::to_vec(&record).unwrap();
@@ -341,6 +489,28 @@ fn test_task_record_serialization_roundtrip() {
   assert_eq!(deserialized.completed_at, record.completed_at);
   assert_eq!(deserialized.error, record.error);
   assert_eq!(deserialized.checkpoint, record.checkpoint);
+  assert_eq!(deserialized.retry_at, record.retry_at);
+  assert_eq!(deserialized.deferral_count, record.deferral_count);
+}
+
+#[test]
+fn legacy_task_record_without_retry_fields_is_immediately_eligible() {
+  use aeordb::engine::task_queue::TaskRecord;
+
+  let bytes = br#"{
+    "id":"legacy-id",
+    "task_type":"reindex",
+    "args":{"path":"/docs"},
+    "status":"pending",
+    "created_at":1000,
+    "started_at":null,
+    "completed_at":null,
+    "error":null,
+    "checkpoint":null
+  }"#;
+  let record: TaskRecord = serde_json::from_slice(bytes).unwrap();
+  assert_eq!(record.retry_at, None);
+  assert_eq!(record.deferral_count, 0);
 }
 
 #[test]

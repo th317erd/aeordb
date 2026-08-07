@@ -139,18 +139,37 @@ pub fn list_directory_recursive(
   glob_pattern: Option<&str>,
   max_results: Option<usize>,
 ) -> EngineResult<Vec<ListingEntry>> {
+  let mut results = Vec::new();
+  visit_directory_recursive(engine, base_path, depth, glob_pattern, max_results, |entry| {
+    results.push(entry);
+    Ok(true)
+  })?;
+  Ok(results)
+}
+
+/// Visit matching entries without retaining the complete recursive result set.
+/// Returning `false` from the callback stops traversal after the current entry.
+#[doc(hidden)]
+pub fn visit_directory_recursive<F>(
+  engine: &StorageEngine,
+  base_path: &str,
+  depth: i32,
+  glob_pattern: Option<&str>,
+  max_results: Option<usize>,
+  mut visitor: F,
+) -> EngineResult<usize>
+where
+  F: FnMut(ListingEntry) -> EngineResult<bool>,
+{
   let normalized = normalize_path(base_path);
-  let ops = DirectoryOps::new(engine);
-  let children = ops.list_directory(&normalized)?;
 
   // recursive_mode: when depth > 0 or depth == -1, we only return files
   let recursive_mode = depth != 0;
 
-  let mut results = Vec::new();
   let ctx = WalkContext { engine, base_path: normalized.as_str(), recursive_mode, glob_pattern, max_results };
-  walk_listing(&ctx, &children, &normalized, depth, &mut results)?;
-
-  Ok(results)
+  let mut visited = 0usize;
+  visit_listing(&ctx, &normalized, depth, &mut visited, &mut visitor)?;
+  Ok(visited)
 }
 
 /// Walk-invariant arguments shared across every recursive `walk_listing`
@@ -164,22 +183,25 @@ struct WalkContext<'a> {
   max_results: Option<usize>,
 }
 
-fn walk_listing(
+fn visit_listing<F>(
   ctx: &WalkContext<'_>,
-  children: &[crate::engine::directory_entry::ChildEntry],
   current_path: &str,
   remaining_depth: i32,
-  results: &mut Vec<ListingEntry>,
-) -> EngineResult<()> {
+  visited: &mut usize,
+  visitor: &mut F,
+) -> EngineResult<bool>
+where
+  F: FnMut(ListingEntry) -> EngineResult<bool>,
+{
   let engine = ctx.engine;
   let recursive_mode = ctx.recursive_mode;
   let glob_pattern = ctx.glob_pattern;
   let max_results = ctx.max_results;
-  for child in children {
+  DirectoryOps::new(engine).visit_live_directory_children(current_path, |child| {
     // Early-exit when the result cap has been reached
     if let Some(cap) = max_results {
-      if results.len() >= cap {
-        return Ok(());
+      if *visited >= cap {
+        return Ok(false);
       }
     }
     let child_path = if current_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", current_path, child.name) };
@@ -190,10 +212,10 @@ fn walk_listing(
       EntryType::FileRecord => {
         if let Some(pattern) = glob_pattern {
           if !listing_glob_matches(pattern, ctx.base_path, &child_path, &child.name) {
-            continue;
+            return Ok(true);
           }
         }
-        results.push(ListingEntry {
+        let entry = ListingEntry {
           path: child_path,
           name: child.name.clone(),
           entry_type: child.entry_type,
@@ -203,17 +225,21 @@ fn walk_listing(
           updated_at: child.updated_at,
           content_type: child.content_type.clone(),
           target: None,
-        });
+        };
+        *visited = visited.saturating_add(1);
+        if !visitor(entry)? {
+          return Ok(false);
+        }
       }
       EntryType::DirectoryIndex => {
         if !recursive_mode {
           // depth=0 mode: include directories in output, do NOT recurse
           if let Some(pattern) = glob_pattern {
             if !listing_glob_matches(pattern, ctx.base_path, &child_path, &child.name) {
-              continue;
+              return Ok(true);
             }
           }
-          results.push(ListingEntry {
+          let entry = ListingEntry {
             path: child_path,
             name: child.name.clone(),
             entry_type: child.entry_type,
@@ -223,27 +249,31 @@ fn walk_listing(
             updated_at: child.updated_at,
             content_type: child.content_type.clone(),
             target: None,
-          });
+          };
+          *visited = visited.saturating_add(1);
+          if !visitor(entry)? {
+            return Ok(false);
+          }
         } else if remaining_depth > 0 || remaining_depth == -1 {
           // Recursive mode: traverse into subdirectory, do NOT include dir in output
-          let ops = DirectoryOps::new(engine);
-          let sub_children = ops.list_directory(&child_path)?;
           let next_depth = if remaining_depth == -1 { -1 } else { remaining_depth - 1 };
 
-          walk_listing(ctx, &sub_children, &child_path, next_depth, results)?;
+          if !visit_listing(ctx, &child_path, next_depth, visited, visitor)? {
+            return Ok(false);
+          }
         }
         // remaining_depth == 0 in recursive mode: don't include dir, don't recurse
       }
       EntryType::Symlink => {
         if let Some(pattern) = glob_pattern {
           if !listing_glob_matches(pattern, ctx.base_path, &child_path, &child.name) {
-            continue;
+            return Ok(true);
           }
         }
 
-        let target = DirectoryOps::new(engine).get_symlink(&child_path).ok().flatten().map(|record| record.target);
+        let target = DirectoryOps::new(engine).get_symlink(&child_path)?.map(|record| record.target);
 
-        results.push(ListingEntry {
+        let entry = ListingEntry {
           path: child_path,
           name: child.name.clone(),
           entry_type: child.entry_type,
@@ -253,15 +283,18 @@ fn walk_listing(
           updated_at: child.updated_at,
           content_type: child.content_type.clone(),
           target,
-        });
+        };
+        *visited = visited.saturating_add(1);
+        if !visitor(entry)? {
+          return Ok(false);
+        }
       }
       _ => {
         // Skip other entry types
       }
     }
-  }
-
-  Ok(())
+    Ok(true)
+  })
 }
 
 fn listing_glob_matches(pattern: &str, base_path: &str, child_path: &str, child_name: &str) -> bool {

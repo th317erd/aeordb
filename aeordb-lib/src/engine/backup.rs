@@ -185,7 +185,7 @@ pub fn export_snapshot(
   output_path: &str,
   include_system: bool,
 ) -> EngineResult<ExportResult> {
-  export_snapshot_controlled(source, snapshot_name, output_path, include_system, None)
+  export_snapshot_controlled(source, snapshot_name, output_path, include_system, None, || {})
 }
 
 pub fn export_snapshot_with_cancellation(
@@ -195,17 +195,39 @@ pub fn export_snapshot_with_cancellation(
   include_system: bool,
   cancellation: &CancellationToken,
 ) -> EngineResult<ExportResult> {
-  export_snapshot_controlled(source, snapshot_name, output_path, include_system, Some(cancellation))
+  export_snapshot_controlled(source, snapshot_name, output_path, include_system, Some(cancellation), || {})
 }
 
-fn export_snapshot_controlled(
+/// Deterministic operation-boundary hook used to prove pressure changes after
+/// backup workspace admission and before material export work.
+#[doc(hidden)]
+pub fn export_snapshot_with_post_admission_hook<F>(
+  source: &StorageEngine,
+  snapshot_name: Option<&str>,
+  output_path: &str,
+  include_system: bool,
+  post_admission_hook: F,
+) -> EngineResult<ExportResult>
+where
+  F: FnOnce(),
+{
+  export_snapshot_controlled(source, snapshot_name, output_path, include_system, None, post_admission_hook)
+}
+
+fn export_snapshot_controlled<F>(
   source: &StorageEngine,
   snapshot_name: Option<&str>,
   output_path: &str,
   include_system: bool,
   cancellation: Option<&CancellationToken>,
-) -> EngineResult<ExportResult> {
+  post_admission_hook: F,
+) -> EngineResult<ExportResult>
+where
+  F: FnOnce(),
+{
   let mut budget = backup_budget(source, cancellation)?;
+  post_admission_hook();
+  budget.record_work(128)?;
   let snapshot_checkpoint = budget.checkpoint();
   let version_hash = match snapshot_name {
     Some(name) => {

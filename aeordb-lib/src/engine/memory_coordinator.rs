@@ -355,6 +355,12 @@ impl MemoryCoordinator {
     Ok(MemoryReservation { coordinator: self.clone(), owner, class, bytes: requested_bytes, released: false })
   }
 
+  /// Re-evaluate an operation against the current pressure state without
+  /// creating a reservation or changing its accounted byte total.
+  pub fn check_admission(&self, owner: MemoryOwner, class: AdmissionClass) -> Result<(), MemoryCoordinatorError> {
+    self.admit_bytes(owner, 0, class, false)
+  }
+
   fn admit_bytes(
     &self,
     owner: MemoryOwner,
@@ -533,6 +539,10 @@ impl MemoryReservation {
 
   pub const fn bytes(&self) -> u64 {
     self.bytes
+  }
+
+  pub(crate) fn check_admission(&self) -> Result<(), MemoryCoordinatorError> {
+    self.coordinator.check_admission(self.owner, self.class)
   }
 
   pub fn grow(&mut self, additional_bytes: u64) -> Result<(), MemoryCoordinatorError> {

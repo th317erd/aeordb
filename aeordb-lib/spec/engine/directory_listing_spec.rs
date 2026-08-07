@@ -1,4 +1,4 @@
-use aeordb::engine::directory_listing::list_directory_recursive;
+use aeordb::engine::directory_listing::{list_directory_recursive, visit_directory_recursive};
 use aeordb::engine::directory_ops::{DirectoryOps, file_path_hash};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::storage_engine::StorageEngine;
@@ -228,4 +228,89 @@ fn test_list_includes_content_hash() {
   let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
   assert_eq!(entries.len(), 1);
   assert!(!entries[0].hash.is_empty());
+}
+
+#[test]
+fn streaming_visitor_matches_recursive_listing_order_and_filtering() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_file(&engine, "/a.txt", b"a");
+  store_file(&engine, "/nested/b.json", b"{}");
+  store_file(&engine, "/nested/deep/c.txt", b"c");
+
+  let expected =
+    list_directory_recursive(&engine, "/", -1, Some("*.txt"), None).unwrap().into_iter().map(|entry| entry.path).collect::<Vec<_>>();
+  let mut actual = Vec::new();
+  let visited = visit_directory_recursive(&engine, "/", -1, Some("*.txt"), None, |entry| {
+    actual.push(entry.path);
+    Ok(true)
+  })
+  .unwrap();
+
+  assert_eq!(actual, expected);
+  assert_eq!(visited, expected.len());
+}
+
+#[test]
+fn streaming_visitor_stops_without_materializing_remaining_entries() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  for index in 0..10 {
+    store_file(&engine, &format!("/items/{index:02}.txt"), b"value");
+  }
+
+  let mut paths = Vec::new();
+  let visited = visit_directory_recursive(&engine, "/", -1, None, None, |entry| {
+    paths.push(entry.path);
+    Ok(paths.len() < 2)
+  })
+  .unwrap();
+  assert_eq!(visited, 2);
+  assert_eq!(paths.len(), 2);
+}
+
+#[test]
+fn streaming_visitor_propagates_callback_failures() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_file(&engine, "/a.txt", b"a");
+
+  let error = visit_directory_recursive(&engine, "/", -1, None, None, |_entry| {
+    Err(aeordb::engine::EngineError::InvalidInput("visitor refused entry".to_string()))
+  })
+  .expect_err("callback failure must stop traversal");
+  assert!(matches!(error, aeordb::engine::EngineError::InvalidInput(message) if message == "visitor refused entry"));
+}
+
+#[test]
+fn streaming_visitor_preserves_btree_order_and_early_stop() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  for index in 0..300 {
+    store_file(&engine, &format!("/items/{index:04}.txt"), b"value");
+  }
+
+  let expected = DirectoryOps::new(&engine)
+    .list_directory("/items")
+    .unwrap()
+    .into_iter()
+    .map(|entry| format!("/items/{}", entry.name))
+    .collect::<Vec<_>>();
+  let mut actual = Vec::new();
+  let visited = visit_directory_recursive(&engine, "/items", 0, None, None, |entry| {
+    actual.push(entry.path);
+    Ok(true)
+  })
+  .unwrap();
+  assert_eq!(actual, expected);
+  assert_eq!(visited, expected.len());
+
+  let mut first_two = Vec::new();
+  let visited = visit_directory_recursive(&engine, "/items", 0, None, None, |entry| {
+    first_two.push(entry.path);
+    Ok(first_two.len() < 2)
+  })
+  .unwrap();
+  assert_eq!(visited, 2);
+  assert_eq!(first_two, expected[..2]);
 }

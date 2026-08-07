@@ -9,13 +9,16 @@ AeorDB runs long-running operations (reindexing, garbage collection) as backgrou
 | `reindex` | Re-run the indexing pipeline on all files under a directory |
 | `gc` | Run garbage collection (mark-and-sweep) |
 | `backup` | Export HEAD (or a named snapshot) as a timestamped `.aeordb` file |
+| `cleanup` | Remove expired refresh tokens and used or expired magic links |
 
 ## Task Lifecycle
 
 ```
 pending  -->  running  -->  completed
-                       -->  failed
-                       -->  cancelled
+  ^             |      -->  failed
+  |             |      -->  cancelled
+  +-------------+
+    deferred
 ```
 
 1. **Pending**: Task is enqueued and waiting for the worker to pick it up.
@@ -23,8 +26,14 @@ pending  -->  running  -->  completed
 3. **Completed**: Task finished successfully.
 4. **Failed**: Task encountered an error (e.g., circuit breaker tripped, GC failed).
 5. **Cancelled**: Task was cancelled by the user between batch iterations.
+6. **Deferred**: Deferral is an event, not a persisted status. If host-memory
+   pressure rises or the worker begins shutting down after claiming a task,
+   the task returns to `Pending`, clears its execution timestamps and error,
+   and preserves its last durable checkpoint for a later retry. Pressure
+   deferrals set `retry_at` and increment `deferral_count`; shutdown requeues
+   are immediately eligible.
 
-On server startup, any tasks left in `Running` state (from a previous crash) are reset to `Pending` so they can be re-executed.
+On server startup, any tasks left in `Running` state (from a previous crash) are durably reset to `Pending` so they can be re-executed. A worker panic after dequeue also returns the task to `Pending` in the same process. Both paths preserve the last durable checkpoint. A malformed task registry, missing or identity-mismatched task record, or failed recovery write aborts startup instead of silently stranding work.
 
 ## API
 
@@ -38,13 +47,15 @@ curl http://localhost:6830/system/tasks \
 Response:
 ```json
 {
-  "tasks": [
+  "items": [
     {
       "id": "abc123",
       "task_type": "reindex",
       "status": "running",
       "args": {"path": "/data/"},
       "created_at": 1700000000000,
+      "retry_at": null,
+      "deferral_count": 0,
       "progress": {
         "task_id": "abc123",
         "task_type": "reindex",
@@ -93,7 +104,37 @@ curl -X POST http://localhost:6830/system/tasks/{task_id}/cancel \
   -H "Authorization: Bearer $API_KEY"
 ```
 
-Cancellation is cooperative: the task checks for cancellation between batch iterations. It will not interrupt a batch in progress.
+Cancellation is cooperative. Long-running reindex, GC, and backup operations
+check cancellation at bounded safe points; they finish any durability-critical
+publication already in progress before stopping. A cancelled running task is
+not later overwritten as completed or failed by a stale worker transition.
+
+## Memory Pressure And Retry
+
+Maintenance tasks are admitted through the process-wide memory coordinator.
+Soft pressure, the configured host-available-memory floor, and ordinary hard
+pressure keep unclaimed tasks in `Pending`. If pressure appears after dequeue,
+the worker requeues the task and emits `tasks_deferred`. Reindex flushes its
+dirty index buffer before saving the last completed path, so a retry may repeat
+work but cannot skip an acknowledged index mutation.
+
+Pressure-deferred tasks use a durable exponential retry delay starting at five
+seconds and capped at five minutes. While `retry_at` is in the future, FIFO
+selection leaves that task unchanged and may claim newer eligible work. This
+prevents sustained pressure or a task larger than the configured maintenance
+budget from rewriting the same task record and emitting SSE events every worker
+poll. Legacy task records without retry fields remain immediately eligible.
+
+FIFO selection preflights persisted task headers, reserves the encoded and
+decoded task workspace, and scans one record at a time. Startup recovery and
+history pruning use the same bounded reads instead of constructing a second
+copy of the complete task queue. If optional history pruning is deferred by
+memory pressure, task completion remains authoritative and pruning is retried
+after a later task iteration; corruption and I/O failures still surface.
+
+`ResourceExhausted`, worker shutdown, and non-user cancellation are retryable
+deferrals. Invalid arguments, malformed persistent state, circuit-breaker
+failures, and other operation errors remain terminal `failed` outcomes.
 
 ## Progress Tracking
 
@@ -208,7 +249,7 @@ Completed tasks are automatically pruned:
 - Tasks older than 24 hours are removed
 - At most 100 completed tasks are retained
 
-Pruning runs after each task completes.
+Pruning runs after each task iteration when maintenance memory is available.
 
 ## Events
 
@@ -217,8 +258,10 @@ The task system emits events on the event bus:
 | Event | Description |
 |-------|-------------|
 | `tasks_started` | A task has begun execution |
+| `tasks_deferred` | A claimed task returned to `Pending`; payload includes `task_id`, `task_type`, `reason`, `retryable`, `retry_at`, `retry_after_ms`, and `deferral_count` |
 | `tasks_completed` | A task finished successfully |
 | `tasks_failed` | A task encountered an error |
+| `tasks_cancelled` | A running task cancellation was observed by the worker |
 | `gc_started` | GC has begun execution |
 | `gc_completed` | GC-specific completion event with statistics |
 

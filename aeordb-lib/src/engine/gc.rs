@@ -86,7 +86,7 @@ pub fn gc_mark(engine: &StorageEngine) -> EngineResult<GcLiveSet> {
 }
 
 fn gc_mark_internal(engine: &StorageEngine, cancellation: Option<&CancellationToken>) -> EngineResult<HashSet<Vec<u8>>> {
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
   let mut live: HashSet<Vec<u8>> = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
   let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
@@ -104,12 +104,12 @@ fn gc_mark_internal(engine: &StorageEngine, cancellation: Option<&CancellationTo
   let vm = VersionManager::new(engine);
   let snapshots = vm.list_snapshots()?;
   for (index, snapshot) in snapshots.iter().enumerate() {
-    check_gc_quantum(cancellation, index)?;
+    check_gc_quantum(engine, cancellation, index)?;
     roots.push((snapshot.root_hash.clone(), "/".to_string()));
   }
   let forks = vm.list_forks()?;
   for (index, fork) in forks.iter().enumerate() {
-    check_gc_quantum(cancellation, index)?;
+    check_gc_quantum(engine, cancellation, index)?;
     roots.push((fork.root_hash.clone(), "/".to_string()));
   }
 
@@ -169,7 +169,7 @@ fn gc_mark_internal(engine: &StorageEngine, cancellation: Option<&CancellationTo
   let del_mem = PhaseSampler::start("mark.deletion-pass", std::time::Duration::from_millis(50));
   let mut deletion_count = 0usize;
   for (index, entry) in all_entries.iter().enumerate() {
-    check_gc_quantum(cancellation, index)?;
+    check_gc_quantum(engine, cancellation, index)?;
     if entry.entry_type() == KV_TYPE_DELETION {
       live.insert(entry.hash.clone());
       deletion_count += 1;
@@ -195,7 +195,7 @@ fn mark_live_path_file_records(
   let mut marked = 0usize;
 
   for (index, entry) in all_entries.iter().enumerate() {
-    check_gc_quantum(cancellation, index)?;
+    check_gc_quantum(engine, cancellation, index)?;
     if entry.entry_type() != KV_TYPE_FILE_RECORD {
       continue;
     }
@@ -257,7 +257,7 @@ fn walk_versions_bfs(
   let mut total_leaves_skipped = 0u64;
 
   while !frontier.is_empty() {
-    check_gc_cancellation(cancellation)?;
+    check_gc_cancellation(engine, cancellation)?;
     let frontier_size = frontier.len();
     // Stage 1: dedup, mark path-keys for directories, fold in leaf-only entries.
     // Survivors need a disk read; collect them with their KV offset.
@@ -267,7 +267,7 @@ fn walk_versions_bfs(
     let not_in_kv = 0u64;
     let dedup_start = std::time::Instant::now();
     for (index, (hash, path)) in frontier.drain(..).enumerate() {
-      check_gc_quantum(cancellation, index)?;
+      check_gc_quantum(engine, cancellation, index)?;
       if !live.insert(hash.clone()) {
         // Already visited content hash — still mark the path-key for this
         // appearance because the same content can be referenced under
@@ -311,7 +311,7 @@ fn walk_versions_bfs(
     total_reads += read_count as u64;
     let mut next_frontier: Vec<(Vec<u8>, String)> = Vec::new();
     for (index, (hash, path, _offset)) in to_read.into_iter().enumerate() {
-      check_gc_quantum(cancellation, index)?;
+      check_gc_quantum(engine, cancellation, index)?;
       let entry = match engine.get_entry_including_deleted(&hash)? {
         Some(e) => e,
         None => {
@@ -435,7 +435,7 @@ fn collect_btree_children(
   live: &mut HashSet<Vec<u8>>,
   cancellation: Option<&CancellationToken>,
 ) -> EngineResult<Vec<ChildEntry>> {
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
   // TODO: thread the surrounding EntryHeader's entry_version through collect_btree_children
   // when a v1 BTreeNode format ships. Today everything on disk is v0.
   let node = BTreeNode::deserialize(node_data, hash_length, 0)?;
@@ -447,7 +447,7 @@ fn collect_btree_children(
     }
     BTreeNode::Internal(internal) => {
       for (index, child_hash) in internal.children.iter().enumerate() {
-        check_gc_quantum(cancellation, index)?;
+        check_gc_quantum(engine, cancellation, index)?;
         live.insert(child_hash.clone());
         // B-tree internal nodes may be deleted at HEAD but snapshot-referenced.
         let Some((header, _key, child_data)) = engine.get_entry_including_deleted(child_hash)? else {
@@ -489,7 +489,7 @@ fn mark_system_entries(
   let system_prefixes = ["/.aeordb-system", "/.aeordb-config"];
 
   for prefix in &system_prefixes {
-    check_gc_cancellation(cancellation)?;
+    check_gc_cancellation(engine, cancellation)?;
     let dir_hash = engine.compute_hash(format!("dir:{}", prefix).as_bytes())?;
     if engine.get_entry_including_deleted(&dir_hash)?.is_some() {
       mark_entry_recursive(engine, &dir_hash, prefix, hash_length, live, cancellation)?;
@@ -520,7 +520,7 @@ fn mark_entry_recursive(
   live: &mut HashSet<Vec<u8>>,
   cancellation: Option<&CancellationToken>,
 ) -> EngineResult<()> {
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
   let debug = std::env::var("AEORDB_GC_DEBUG_SYSTEM").is_ok();
 
   if !live.insert(hash.to_vec()) {
@@ -589,7 +589,7 @@ fn mark_entry_recursive(
         deserialize_child_entries(&value, hash_length, header.entry_version)?
       };
       for (index, child) in children.iter().enumerate() {
-        check_gc_quantum(cancellation, index)?;
+        check_gc_quantum(engine, cancellation, index)?;
         let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path, child.name) };
         mark_entry_recursive(engine, &child.hash, &child_path, hash_length, live, cancellation)?;
       }
@@ -631,7 +631,7 @@ fn mark_task_entries(engine: &StorageEngine, live: &mut HashSet<Vec<u8>>, cancel
     let ids = serde_json::from_slice::<Vec<String>>(&value)
       .map_err(|error| EngineError::InvalidInput(format!("task registry is malformed during GC mark: {error}")))?;
     for (index, id) in ids.iter().enumerate() {
-      check_gc_quantum(cancellation, index)?;
+      check_gc_quantum(engine, cancellation, index)?;
       let task_key = blake3::hash(format!("::aeordb:task:{}", id).as_bytes()).as_bytes().to_vec();
       live.insert(task_key);
     }
@@ -671,7 +671,7 @@ fn gc_sweep_internal(
   dry_run: bool,
   cancellation: Option<&CancellationToken>,
 ) -> EngineResult<(usize, u64)> {
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
   let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
   let all_entries = engine.iter_kv_entries()?;
 
@@ -681,7 +681,7 @@ fn gc_sweep_internal(
   let mut reclaimed_bytes: u64 = 0;
 
   for (index, entry) in all_entries.iter().enumerate() {
-    check_gc_quantum(cancellation, index)?;
+    check_gc_quantum(engine, cancellation, index)?;
     if live.contains(&entry.hash) {
       continue;
     }
@@ -716,7 +716,7 @@ fn gc_sweep_internal(
   let mut verified_hashes: Vec<Vec<u8>> = Vec::with_capacity(garbage_candidates.len());
   let mut freed_regions: Vec<(u64, u32)> = Vec::with_capacity(garbage_candidates.len());
   for (index, (hash, offset, entry_size)) in garbage_candidates.iter().enumerate() {
-    check_gc_quantum(cancellation, index)?;
+    check_gc_quantum(engine, cancellation, index)?;
     match engine.get_kv_entry(hash)? {
       Some(fresh) if fresh.offset == *offset => {
         if engine.is_current_reusable_range(*offset, *entry_size)? {
@@ -757,7 +757,7 @@ fn gc_sweep_internal(
   // the hot tail flush that follows (which carries the void snapshot, and
   // by the void offsets implies the entries at those offsets are gone).
   let kv_remove_start = std::time::Instant::now();
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
   if !verified_hashes.is_empty() {
     engine.remove_kv_entries_batch(&verified_hashes)?;
   }
@@ -806,7 +806,7 @@ fn gc_sweep_internal(
 ///
 /// GC should not be run concurrently with writes -- see [`gc_sweep`] for details.
 pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> EngineResult<GcResult> {
-  run_gc_internal(engine, ctx, dry_run, None)
+  run_gc_internal(engine, ctx, dry_run, None, || {})
 }
 
 /// Run a complete GC cycle while honoring cooperative cancellation before
@@ -817,18 +817,37 @@ pub fn run_gc_with_cancellation(
   dry_run: bool,
   cancellation: &CancellationToken,
 ) -> EngineResult<GcResult> {
-  run_gc_internal(engine, ctx, dry_run, Some(cancellation))
+  run_gc_internal(engine, ctx, dry_run, Some(cancellation), || {})
 }
 
-fn run_gc_internal(
+/// Deterministic phase-boundary hook used to prove pressure changes that occur
+/// after initial GC admission but before mark work begins.
+#[doc(hidden)]
+pub fn run_gc_with_post_start_hook<F>(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  dry_run: bool,
+  post_start_hook: F,
+) -> EngineResult<GcResult>
+where
+  F: FnOnce(),
+{
+  run_gc_internal(engine, ctx, dry_run, None, post_start_hook)
+}
+
+fn run_gc_internal<F>(
   engine: &StorageEngine,
   ctx: &RequestContext,
   dry_run: bool,
   cancellation: Option<&CancellationToken>,
-) -> EngineResult<GcResult> {
-  check_gc_cancellation(cancellation)?;
+  post_start_hook: F,
+) -> EngineResult<GcResult>
+where
+  F: FnOnce(),
+{
+  check_gc_token(cancellation)?;
   let gc_admission = reserve_gc_workspace(engine)?;
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
 
   let start = std::time::Instant::now();
 
@@ -846,6 +865,8 @@ fn run_gc_internal(
       "dry_run": dry_run,
     }),
   );
+  post_start_hook();
+  check_gc_cancellation(engine, cancellation)?;
 
   // Begin GC recheck tracking before any version-forest reads. From this
   // point on, every successful write hash is recorded so the sweep phase can
@@ -929,11 +950,11 @@ fn run_gc_internal(
   // attribute the multi-GB transient to a specific phase. No-op unless
   // AEORDB_GC_MEM_PROFILE is set.
   let mark_mem = PhaseSampler::start("mark", std::time::Duration::from_millis(50));
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
   let hashes = gc_mark_internal(engine, cancellation)?;
   let mut live = GcLiveSet { hashes, _reservation: gc_admission };
   mark_mem.finish();
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
 
   // Re-check drain: any entry that was written during the mark phase is now in
   // the recheck set. Walk each one and union into `live` so the sweep doesn't
@@ -941,14 +962,14 @@ fn run_gc_internal(
   if !dry_run {
     let drain_mem = PhaseSampler::start("recheck-drain", std::time::Duration::from_millis(50));
     loop {
-      check_gc_cancellation(cancellation)?;
+      check_gc_cancellation(engine, cancellation)?;
       let pending = engine.take_gc_recheck()?;
       if pending.is_empty() {
         break;
       }
       let hash_length = engine.hash_algo().hash_length();
       for (index, hash) in pending.into_iter().enumerate() {
-        check_gc_quantum(cancellation, index)?;
+        check_gc_quantum(engine, cancellation, index)?;
         // Path is unknown for recheck entries — the writer recorded raw hashes
         // only. Every key it wrote (identity, file-path, content) is in the
         // recheck set independently, so they each get marked when their hash
@@ -968,7 +989,7 @@ fn run_gc_internal(
   // don't leave recheck recording on indefinitely.
   let sweep_start = std::time::Instant::now();
   let sweep_mem = PhaseSampler::start("sweep", std::time::Duration::from_millis(50));
-  check_gc_cancellation(cancellation)?;
+  check_gc_cancellation(engine, cancellation)?;
   let (garbage_entries, reclaimed_bytes) = gc_sweep_internal(engine, &live, dry_run, cancellation)?;
   sweep_mem.finish();
   if std::env::var("AEORDB_GC_TIMING").is_ok() {
@@ -1001,16 +1022,22 @@ fn run_gc_internal(
   Ok(result)
 }
 
-fn check_gc_cancellation(cancellation: Option<&CancellationToken>) -> EngineResult<()> {
+fn check_gc_cancellation(engine: &StorageEngine, cancellation: Option<&CancellationToken>) -> EngineResult<()> {
+  check_gc_token(cancellation)?;
+  engine.memory_coordinator().check_admission(MemoryOwner::GarbageCollection, AdmissionClass::Maintenance).map_err(gc_memory_error)?;
+  Ok(())
+}
+
+fn check_gc_token(cancellation: Option<&CancellationToken>) -> EngineResult<()> {
   if cancellation.is_some_and(CancellationToken::is_cancelled) {
     return Err(EngineError::Cancelled("garbage collection".to_string()));
   }
   Ok(())
 }
 
-fn check_gc_quantum(cancellation: Option<&CancellationToken>, index: usize) -> EngineResult<()> {
+fn check_gc_quantum(engine: &StorageEngine, cancellation: Option<&CancellationToken>, index: usize) -> EngineResult<()> {
   if index % 256 == 0 {
-    check_gc_cancellation(cancellation)?;
+    check_gc_cancellation(engine, cancellation)?;
   }
   Ok(())
 }
