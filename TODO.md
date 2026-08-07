@@ -86,6 +86,8 @@
     - [x] Implement bounded A/B/I ControlStore read selection with expected kind/database/identity verification.
     - [ ] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
     - [ ] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.
+      - [x] Repair architecture inventory drift for root-only `/system/runtime`, public `/dashboard.css`, and `operations/observability.md`; restore exact 95-route/38-page closure.
+      - [ ] Execute the native platform/fixture gates on `wyatt-mac` and `win11vm` when both hosts are online.
   - [x] P2a: converge every acknowledged v3 write behind one truthful durability coordinator.
     - [x] P2a-1: freeze the current durability-operation inventory and land the coordinator/ledger shell without changing writers.
       - [x] Refresh raw write/barrier/replace/header/shutdown producer and consumer territory from current source.

@@ -3,7 +3,7 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "source_commit": "a40b0158999650a0e0402011ac41372eff7d4fc2",
   "route_source": "aeordb-lib/src/server/mod.rs:522",
-  "route_registration_count": 93,
+  "route_registration_count": 95,
   "route_groups": [
     {
       "name": "large_upload_routes",
@@ -53,7 +53,7 @@
     },
     {
       "name": "protected_routes_direct",
-      "registration_count": 50,
+      "registration_count": 51,
       "body_limit_bytes": 1048576,
       "authentication": "auth and permission middleware",
       "paths": [
@@ -82,6 +82,7 @@
         "/system/tasks/{id}",
         "/system/cron",
         "/system/cron/{id}",
+        "/system/runtime",
         "/system/lifecycle",
         "/blobs/config",
         "/system/events",
@@ -111,7 +112,7 @@
     },
     {
       "name": "public_routes",
-      "registration_count": 21,
+      "registration_count": 22,
       "body_limit_bytes": 1048576,
       "authentication": "none unless handler states otherwise",
       "paths": [
@@ -124,6 +125,7 @@
         "/app.mjs",
         "/metrics.mjs",
         "/dashboard.mjs",
+        "/dashboard.css",
         "/users.mjs",
         "/groups.mjs",
         "/files.mjs",
@@ -256,6 +258,7 @@
     "docs/src/plugins/default-plugins.md",
     "docs/src/plugins/sdk-reference.md",
     "docs/src/operations/gc.md",
+    "docs/src/operations/observability.md",
     "docs/src/operations/deployment-safety.md",
     "docs/src/operations/reindex.md",
     "docs/src/operations/tasks.md",
