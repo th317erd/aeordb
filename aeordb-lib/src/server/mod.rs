@@ -4,6 +4,7 @@ pub mod backup_routes;
 pub mod blocking;
 pub mod cache_invalidation;
 pub mod cluster_routes;
+pub mod configuration_routes;
 pub mod conflict_routes;
 pub mod cors;
 pub mod docs_routes;
@@ -610,7 +611,14 @@ fn create_app_with_all_and_task_queue_inner(
     .route("/system/tasks/{id}", get(task_routes::get_task).delete(task_routes::cancel_task))
     .route("/system/cron", get(task_routes::list_cron).post(task_routes::create_cron))
     .route("/system/cron/{id}", delete(task_routes::delete_cron).patch(task_routes::update_cron))
-    .route("/system/lifecycle", get(task_routes::get_lifecycle).put(task_routes::put_lifecycle))
+    .route(
+      "/system/runtime",
+      get(configuration_routes::get_runtime).put(configuration_routes::put_runtime).patch(configuration_routes::patch_runtime),
+    )
+    .route(
+      "/system/lifecycle",
+      get(configuration_routes::get_lifecycle).put(configuration_routes::put_lifecycle).patch(configuration_routes::patch_lifecycle),
+    )
     // Blobs: config is small; check/commit are manifest routes with their own limit.
     .route("/blobs/config", get(upload_routes::upload_config))
     // System: SSE event stream

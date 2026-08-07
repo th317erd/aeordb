@@ -1253,7 +1253,7 @@ fn config_u64(value: &ConfigValue) -> Option<u64> {
   }
 }
 
-fn legacy_environment_alias(path: &str) -> Option<&'static str> {
+pub(crate) fn legacy_environment_alias(path: &str) -> Option<&'static str> {
   match path {
     "cache.index_clean_max_bytes" => Some("AEORDB_INDEX_CACHE_MAX_BYTES"),
     "cache.index_clean_ttl_seconds" => Some("AEORDB_INDEX_CACHE_CLEAN_TTL_SECS"),

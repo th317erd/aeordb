@@ -350,6 +350,25 @@ fn startup_shadow_collects_registered_environment_override() {
 
 #[test]
 #[serial]
+fn replacement_never_persists_effective_environment_overrides() {
+  let _environment = EnvironmentGuard::set("AEORDB_INDEX_FLUSH_AFTER_SECONDS", "45");
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let document = br#"{"schema_version":1,"index":{"flush_after_seconds":60}}"#;
+
+  let snapshot = engine.replace_configuration_document(ConfigurationFamily::Runtime, document).unwrap();
+
+  let active = snapshot.active_properties.get("index.flush_after_seconds").unwrap();
+  assert_eq!(active.value, Some(ConfigValue::Unsigned(45)));
+  assert_eq!(active.source, Some(ConfigSource::Environment));
+  let desired = snapshot.desired.resolution.as_ref().unwrap().property("index.flush_after_seconds").unwrap();
+  assert_eq!(desired.value, Some(ConfigValue::Unsigned(45)));
+  assert_eq!(desired.source, Some(ConfigSource::Environment));
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered(RUNTIME_CONFIG_PATH).unwrap(), document);
+}
+
+#[test]
+#[serial]
 fn startup_shadow_ignores_unregistered_environment_names() {
   let _environment = EnvironmentGuard::set("AEORDB_INDEX_FLUSH_AFTER_SECONDZ", "45");
   let directory = tempfile::tempdir().unwrap();

@@ -688,6 +688,17 @@ impl StorageEngine {
     })
   }
 
+  pub fn patch_configuration_document(
+    &self,
+    family: crate::engine::config_resolver::ConfigurationFamily,
+    bytes: &[u8],
+  ) -> EngineResult<Arc<crate::engine::configuration_authority::ConfigurationAuthoritySnapshot>> {
+    let authority = self.configuration_authority();
+    authority.patch_document(family, bytes, |validated, schema_version, prospective| {
+      crate::engine::v4::configuration_controls::publish_configuration_document(self, family, validated, schema_version, prospective)
+    })
+  }
+
   fn configuration_authority(&self) -> Arc<crate::engine::configuration_authority::ConfigurationAuthority> {
     Arc::clone(self.configuration_authority.get().expect("StorageEngine constructors initialize the configuration authority"))
   }

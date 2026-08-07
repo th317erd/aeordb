@@ -163,6 +163,17 @@ fn stable_transition_identity_publishes_controls_and_recovers_lkg_after_current_
   assert_eq!(status.lkg_sequence, Some(2));
   assert_eq!(status.diagnostics_sequence, None);
   assert!(!status.errors.is_empty());
+
+  let patched =
+    engine.patch_configuration_document(ConfigurationFamily::Lifecycle, br#"{"snapshot_retention":{"auto_months":11}}"#).unwrap();
+  assert!(!patched.resolved_boolean("lifecycle.snapshot_writes_enabled").unwrap());
+  assert_eq!(patched.resolved_unsigned("lifecycle.snapshot_retention_auto_months"), Some(11));
+  assert_eq!(patched.resolved_unsigned("lifecycle.snapshot_retention_manual_months"), Some(10));
+  let persisted: serde_json::Value =
+    serde_json::from_slice(&DirectoryOps::new(&engine).read_file_buffered(LIFECYCLE_CONFIG_PATH).unwrap()).unwrap();
+  assert_eq!(persisted["schema_version"], 1);
+  assert_eq!(persisted["snapshot_retention"]["auto_months"], 11);
+  assert_eq!(persisted["snapshot_retention"]["manual_months"], 10);
 }
 
 #[test]

@@ -29,12 +29,16 @@ Administrative endpoints for garbage collection, background tasks, cron scheduli
 | PATCH | `/system/cron/{id}` | Update a cron schedule | Yes |
 | DELETE | `/system/cron/{id}` | Delete a cron schedule | Yes |
 
-### Lifecycle Configuration
+### Runtime And Lifecycle Configuration
 
 | Method | Path | Description | Root Required |
 |--------|------|-------------|---------------|
+| GET | `/system/runtime` | Read complete effective runtime configuration and status | Yes |
+| PUT | `/system/runtime` | Replace persisted runtime configuration | Yes |
+| PATCH | `/system/runtime` | Apply an RFC 7396 patch to persisted runtime configuration | Yes |
 | GET | `/system/lifecycle` | Read lifecycle policy | Yes |
 | PUT | `/system/lifecycle` | Replace lifecycle policy | Yes |
+| PATCH | `/system/lifecycle` | Apply an RFC 7396 patch to lifecycle policy | Yes |
 
 ### Backup & Restore
 
@@ -433,38 +437,70 @@ Delete a cron schedule.
 
 ---
 
-## Lifecycle Configuration
+## Runtime And Lifecycle Configuration
 
-Lifecycle configuration is stored inside the database at `/.aeordb-config/lifecycle.json`. Missing fields use safe defaults, so older databases that only have `snapshot_retention` continue to allow snapshot writes.
+AeorDB stores runtime and lifecycle policy inside the database at `/.aeordb-config/runtime.json` and `/.aeordb-config/lifecycle.json`. These paths are engine-owned and cannot be accessed through `/files` or `/blobs/commit`. Use the root-only system routes instead.
+
+Every successful request returns a normalized envelope. `config` contains the complete active configuration, including defaults and higher-precedence process overrides. `status.sources` identifies the source of every active property. `status.desired_config` and the pending maps expose accepted settings that need restart or owner convergence without claiming they are already active.
+
+An identityless v3 database reports `configuration_recovery_controls` as disabled until it gains a stable transition or v4 database identity. Current configuration remains usable; only durable last-known-good/diagnostic control publication is unavailable.
 
 ### GET /system/lifecycle
 
-Return the current lifecycle policy.
+Return the complete effective lifecycle policy and authority status.
 
 **Response:** `200 OK`
 
 ```json
 {
-  "snapshot_writes_enabled": true,
-  "snapshot_retention": {
-    "auto_months": 0,
-    "manual_months": 0
+  "config": {
+    "schema_version": 1,
+    "snapshot_writes_enabled": true,
+    "snapshot_retention": {
+      "auto_months": 0,
+      "manual_months": 0
+    },
+    "garbage_collection": {
+      "pending_delete_grace_seconds": 86400
+    }
+  },
+  "invariants": {
+    "required_complete_marks": 2
+  },
+  "status": {
+    "generation": 1,
+    "effective_valid": true,
+    "degraded": false,
+    "stored": { "state": "missing" },
+    "sources": {
+      "lifecycle.snapshot_writes_enabled": "default",
+      "lifecycle.snapshot_retention_auto_months": "default",
+      "lifecycle.snapshot_retention_manual_months": "default",
+      "lifecycle.garbage_collection_pending_delete_grace_seconds": "default"
+    },
+    "pending_restart": {},
+    "pending_convergence": {},
+    "disabled_capabilities": ["configuration_recovery_controls"]
   }
 }
 ```
 
 ### PUT /system/lifecycle
 
-Replace the lifecycle policy.
+Replace the persisted lifecycle policy. The bounded body must be a strict JSON object: duplicate keys, unknown fields, invalid types, trailing content, and documents above 1 MiB are rejected before publication. PUT requires `Content-Type: application/json`. New writes require `schema_version: 1`; legacy schema v0 remains read-compatible. Omitted known fields receive registered defaults.
 
 **Request Body:**
 
 ```json
 {
+  "schema_version": 1,
   "snapshot_writes_enabled": false,
   "snapshot_retention": {
     "auto_months": 1,
     "manual_months": 12
+  },
+  "garbage_collection": {
+    "pending_delete_grace_seconds": 86400
   }
 }
 ```
@@ -474,6 +510,36 @@ Replace the lifecycle policy.
 | `snapshot_writes_enabled` | boolean | `true` | Allow creation of new snapshot records. When `false`, existing snapshots can still be listed, read, restored, deleted, exported, and pruned. |
 | `snapshot_retention.auto_months` | integer | `0` | Months after which auto snapshots are eligible for pruning. `0` disables pruning. |
 | `snapshot_retention.manual_months` | integer | `0` | Months after which manual snapshots are eligible for pruning. `0` disables pruning. |
+| `garbage_collection.pending_delete_grace_seconds` | integer | `86400` | Grace captured by newly pending GC candidates. Existing candidates retain their captured grace. |
+
+### PATCH /system/lifecycle
+
+Apply an [RFC 7396 JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396) without resetting sibling policy. PATCH accepts `Content-Type: application/merge-patch+json` or `application/json`. AeorDB merges, upgrades the result to schema v1, validates the complete result, persists it, and only then publishes the new authority generation. PATCH requires a valid current document or a validated last-known-good base. When no document exists, submit a complete PUT first.
+
+```bash
+curl -X PATCH http://localhost:6830/system/lifecycle \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"snapshot_retention":{"auto_months":3}}'
+```
+
+### Runtime Configuration
+
+`GET`, replacement `PUT`, and RFC 7396 `PATCH` at `/system/runtime` use the same envelope, strict validation, publication ordering, and 1 MiB bound. Runtime documents are grouped by the prefix in each property path:
+
+```json
+{
+  "schema_version": 1,
+  "memory": {
+    "hard_limit_bytes": 4294967296
+  },
+  "index": {
+    "flush_after_seconds": 30
+  }
+}
+```
+
+Environment and command-line overrides have higher precedence but are never written back to either JSON document. A startup-bound PUT can therefore return the old value in `config`, the accepted value in `status.desired_config`, and the property/value in `status.pending_restart`.
 
 When `snapshot_writes_enabled` is `false`, manual `POST /versions/snapshots` and snapshot rename requests return `403`. Automatic safety snapshots, such as file-restore and pre-GC snapshots, are skipped; the underlying operation continues when it can safely proceed without writing a new snapshot.
 

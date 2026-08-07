@@ -263,15 +263,30 @@ curl -X PUT http://localhost:6830/system/lifecycle \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
+    "schema_version": 1,
     "snapshot_writes_enabled": false,
     "snapshot_retention": {
       "auto_months": 1,
       "manual_months": 12
+    },
+    "garbage_collection": {
+      "pending_delete_grace_seconds": 86400
     }
   }'
 ```
 
 `snapshot_writes_enabled` defaults to `true`. Set it to `false` to disallow new snapshot writes without removing or breaking existing snapshots. Existing snapshots can still be listed, read, restored, deleted, exported, and pruned. Automatic safety snapshots are skipped while this flag is disabled.
+
+Both `/system/lifecycle` and `/system/runtime` support root-only GET, full-replacement PUT, and RFC 7396 PATCH. GET and successful writes return the complete effective configuration plus per-property sources, stored/LKG status, degradation, and pending activation. PUT requires `Content-Type: application/json`; PATCH accepts `application/merge-patch+json` or `application/json`. Both use strict duplicate-aware validation. Process environment and command-line overrides remain ephemeral and are never copied into the stored JSON. Use PATCH for a partial policy change:
+
+```bash
+curl -X PATCH http://localhost:6830/system/lifecycle \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"snapshot_retention":{"auto_months":3}}'
+```
+
+PATCH requires a valid current document or validated last-known-good policy. On a database with no stored document, initialize it with PUT first. The engine-owned `/.aeordb-config/runtime.json` and `/.aeordb-config/lifecycle.json` paths are deliberately inaccessible through generic file and blob routes.
 
 ## Compression
 
