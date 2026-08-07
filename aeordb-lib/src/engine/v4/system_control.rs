@@ -233,6 +233,63 @@ pub struct EmergencySpillCatalogBodyV1 {
   pub rows: Vec<EmergencySpillCatalogRowV1>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ConfigurationKindV1 {
+  Lifecycle = 1,
+  Runtime = 2,
+}
+
+impl ConfigurationKindV1 {
+  fn from_u16(value: u16) -> FormatResult<Self> {
+    match value {
+      1 => Ok(Self::Lifecycle),
+      2 => Ok(Self::Runtime),
+      _ => Err(kind_error("configuration_kind", "configuration kind is outside the frozen enum")),
+    }
+  }
+
+  fn lkg_control_kind(self) -> SystemControlKindV1 {
+    match self {
+      Self::Lifecycle => SystemControlKindV1::LifecycleLastKnownGood,
+      Self::Runtime => SystemControlKindV1::RuntimeLastKnownGood,
+    }
+  }
+
+  fn diagnostics_control_kind(self) -> SystemControlKindV1 {
+    match self {
+      Self::Lifecycle => SystemControlKindV1::LifecycleDiagnostics,
+      Self::Runtime => SystemControlKindV1::RuntimeDiagnostics,
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigLKGBodyV1 {
+  pub database_id: [u8; 16],
+  pub configuration_kind: ConfigurationKindV1,
+  pub configuration_schema: u16,
+  pub activated_at_ms: i64,
+  pub source_namespace_root: Vec<u8>,
+  pub source_file_content_hash: Vec<u8>,
+  pub policy_fingerprint: [u8; 32],
+  pub canonical_config: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigDiagnosticsBodyV1 {
+  pub database_id: [u8; 16],
+  pub configuration_kind: ConfigurationKindV1,
+  pub aggregate_state: u16,
+  pub observed_at_ms: i64,
+  pub current_file_root: Vec<u8>,
+  pub current_file_content_hash: Vec<u8>,
+  pub effective_policy_fingerprint: [u8; 32],
+  pub source_row_count: u16,
+  pub disabled_capability_count: u16,
+  pub detail: Vec<u8>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CutoverJournalSelectionV1<'a> {
   pub selected_slot: SystemControlSlotV1,
@@ -347,6 +404,44 @@ pub fn decode_emergency_spill_catalog_body(body: &[u8], algorithm: HashAlgorithm
   })
 }
 
+pub fn decode_config_lkg_body(body: &[u8], algorithm: HashAlgorithm) -> FormatResult<ConfigLKGBodyV1> {
+  let configuration_kind = ConfigurationKindV1::from_u16(u16_at(body, 16)?)?;
+  validate_lkg(body, algorithm, configuration_kind as u16)?;
+  let hash_width = algorithm.hash_length();
+  let fixed = 68 + 2 * hash_width;
+  Ok(ConfigLKGBodyV1 {
+    database_id: body[..16].try_into().expect("validated configuration LKG database ID width"),
+    configuration_kind,
+    configuration_schema: u16_at(body, 18)?,
+    activated_at_ms: i64_at(body, 20)?,
+    source_namespace_root: body[28..28 + hash_width].to_vec(),
+    source_file_content_hash: body[28 + hash_width..28 + 2 * hash_width].to_vec(),
+    policy_fingerprint: body[36 + 2 * hash_width..fixed].try_into().expect("validated configuration LKG fingerprint width"),
+    canonical_config: body[fixed..].to_vec(),
+  })
+}
+
+pub fn decode_config_diagnostics_body(body: &[u8], algorithm: HashAlgorithm) -> FormatResult<ConfigDiagnosticsBodyV1> {
+  let configuration_kind = ConfigurationKindV1::from_u16(u16_at(body, 16)?)?;
+  validate_diagnostics(body, algorithm, configuration_kind as u16)?;
+  let hash_width = algorithm.hash_length();
+  let fixed = 68 + 2 * hash_width;
+  Ok(ConfigDiagnosticsBodyV1 {
+    database_id: body[..16].try_into().expect("validated configuration diagnostics database ID width"),
+    configuration_kind,
+    aggregate_state: u16_at(body, 18)?,
+    observed_at_ms: i64_at(body, 20)?,
+    current_file_root: body[28..28 + hash_width].to_vec(),
+    current_file_content_hash: body[28 + hash_width..28 + 2 * hash_width].to_vec(),
+    effective_policy_fingerprint: body[28 + 2 * hash_width..60 + 2 * hash_width]
+      .try_into()
+      .expect("validated configuration diagnostics fingerprint width"),
+    source_row_count: u16_at(body, 60 + 2 * hash_width)?,
+    disabled_capability_count: u16_at(body, 62 + 2 * hash_width)?,
+    detail: body[fixed..].to_vec(),
+  })
+}
+
 pub fn encode_durability_latch_control(sequence: u64, latch: &DurabilityLatchBodyV1, algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
   let hash_width = algorithm.hash_length();
   require_hash_width(&latch.emergency_spill_catalog_payload_hash, hash_width, "durability spill catalog payload hash")?;
@@ -412,6 +507,52 @@ pub fn encode_emergency_spill_catalog_control(
   body.extend_from_slice(&catalog.repair_receipt_hash);
   body.extend_from_slice(&row_bytes);
   encode_system_control(SystemControlKindV1::EmergencySpillCatalog, sequence, &body, algorithm)
+}
+
+pub fn encode_config_lkg_control(sequence: u64, lkg: &ConfigLKGBodyV1, algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+  let hash_width = algorithm.hash_length();
+  require_hash_width(&lkg.source_namespace_root, hash_width, "configuration LKG source namespace root")?;
+  require_hash_width(&lkg.source_file_content_hash, hash_width, "configuration LKG source file content hash")?;
+  let canonical_config_length =
+    u32::try_from(lkg.canonical_config.len()).map_err(|_| overflow_error("configuration LKG payload length"))?;
+  let capacity = checked_add(68 + 2 * hash_width, lkg.canonical_config.len(), "configuration LKG body")?;
+  let mut body = Vec::with_capacity(capacity);
+  body.extend_from_slice(&lkg.database_id);
+  body.extend_from_slice(&(lkg.configuration_kind as u16).to_le_bytes());
+  body.extend_from_slice(&lkg.configuration_schema.to_le_bytes());
+  body.extend_from_slice(&lkg.activated_at_ms.to_le_bytes());
+  body.extend_from_slice(&lkg.source_namespace_root);
+  body.extend_from_slice(&lkg.source_file_content_hash);
+  body.extend_from_slice(&canonical_config_length.to_le_bytes());
+  body.extend_from_slice(&0u32.to_le_bytes());
+  body.extend_from_slice(&lkg.policy_fingerprint);
+  body.extend_from_slice(&lkg.canonical_config);
+  encode_system_control(lkg.configuration_kind.lkg_control_kind(), sequence, &body, algorithm)
+}
+
+pub fn encode_config_diagnostics_control(
+  sequence: u64,
+  diagnostics: &ConfigDiagnosticsBodyV1,
+  algorithm: HashAlgorithm,
+) -> FormatResult<Vec<u8>> {
+  let hash_width = algorithm.hash_length();
+  require_hash_width(&diagnostics.current_file_root, hash_width, "configuration diagnostics current file root")?;
+  require_hash_width(&diagnostics.current_file_content_hash, hash_width, "configuration diagnostics current file content hash")?;
+  let detail_length = u32::try_from(diagnostics.detail.len()).map_err(|_| overflow_error("configuration diagnostics detail length"))?;
+  let capacity = checked_add(68 + 2 * hash_width, diagnostics.detail.len(), "configuration diagnostics body")?;
+  let mut body = Vec::with_capacity(capacity);
+  body.extend_from_slice(&diagnostics.database_id);
+  body.extend_from_slice(&(diagnostics.configuration_kind as u16).to_le_bytes());
+  body.extend_from_slice(&diagnostics.aggregate_state.to_le_bytes());
+  body.extend_from_slice(&diagnostics.observed_at_ms.to_le_bytes());
+  body.extend_from_slice(&diagnostics.current_file_root);
+  body.extend_from_slice(&diagnostics.current_file_content_hash);
+  body.extend_from_slice(&diagnostics.effective_policy_fingerprint);
+  body.extend_from_slice(&diagnostics.source_row_count.to_le_bytes());
+  body.extend_from_slice(&diagnostics.disabled_capability_count.to_le_bytes());
+  body.extend_from_slice(&detail_length.to_le_bytes());
+  body.extend_from_slice(&diagnostics.detail);
+  encode_system_control(diagnostics.configuration_kind.diagnostics_control_kind(), sequence, &body, algorithm)
 }
 
 fn encode_system_control(kind: SystemControlKindV1, sequence: u64, body: &[u8], algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {

@@ -9,10 +9,13 @@ use aeordb::engine::native_durability::{
   preallocate_file, probe_native_durability, sync_directory_native, sync_file_all_native, sync_file_data_native,
 };
 use aeordb::engine::v4::control_store::{ControlStoreReadV1, ControlStoreSlotsV1, select_control_store_read};
+use aeordb::engine::v4::config_value::{CanonicalValueBounds, canonicalize_json, decode_canonical_value, encode_canonical_value};
 use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::v4::system_control::{
-  SystemControlKindV1, SystemControlSlotV1, decode_durability_latch_body, decode_emergency_spill_catalog_body, decode_system_control,
-  encode_durability_latch_control, encode_emergency_spill_catalog_control, system_control_path,
+  ConfigDiagnosticsBodyV1, ConfigLKGBodyV1, ConfigurationKindV1, SystemControlKindV1, SystemControlSlotV1, decode_config_diagnostics_body,
+  decode_config_lkg_body, decode_durability_latch_body, decode_emergency_spill_catalog_body, decode_system_control,
+  encode_config_diagnostics_control, encode_config_lkg_control, encode_durability_latch_control, encode_emergency_spill_catalog_control,
+  system_control_path,
 };
 
 fn fixture_root() -> PathBuf {
@@ -21,6 +24,10 @@ fn fixture_root() -> PathBuf {
 
 fn fixture(name: &str) -> Vec<u8> {
   fs::read(fixture_root().join(name)).unwrap()
+}
+
+fn canonical_fixture(name: &str) -> Vec<u8> {
+  fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/canonical-config-value-v1").join(name)).unwrap()
 }
 
 fn repair_crc(bytes: &mut [u8]) {
@@ -340,6 +347,105 @@ fn production_spill_catalog_encoder_matches_independent_fixtures() {
     assert_eq!(catalog.rows[0].native_path, b"/var/lib/aeordb/spill/hot-tail-0001.bin");
     assert_eq!(encode_emergency_spill_catalog_control(control.sequence, &catalog, algorithm).unwrap(), expected);
   }
+}
+
+#[test]
+fn production_configuration_control_encoders_match_independent_fixtures() {
+  for (algorithm, fixture_prefix) in [(HashAlgorithm::Blake3_256, "blake3-256"), (HashAlgorithm::Sha512, "sha512")] {
+    for (configuration_kind, family) in [(ConfigurationKindV1::Lifecycle, "lifecycle"), (ConfigurationKindV1::Runtime, "runtime")] {
+      let lkg_expected = fixture(&format!("control-{fixture_prefix}-{family}-lkg-valid.bin"));
+      let lkg_control = decode_system_control(&lkg_expected, algorithm).unwrap();
+      let lkg = decode_config_lkg_body(lkg_control.body, algorithm).unwrap();
+      assert_eq!(lkg.configuration_kind, configuration_kind);
+      assert_eq!(lkg.configuration_schema, 1);
+      assert_eq!(lkg.activated_at_ms, 1_700_000_003_000);
+      assert_eq!(encode_config_lkg_control(lkg_control.sequence, &lkg, algorithm).unwrap(), lkg_expected);
+
+      let diagnostics_expected = fixture(&format!("control-{fixture_prefix}-{family}-diagnostics-valid.bin"));
+      let diagnostics_control = decode_system_control(&diagnostics_expected, algorithm).unwrap();
+      let diagnostics = decode_config_diagnostics_body(diagnostics_control.body, algorithm).unwrap();
+      assert_eq!(diagnostics.configuration_kind, configuration_kind);
+      assert_eq!(diagnostics.aggregate_state, 1);
+      assert_eq!(diagnostics.observed_at_ms, 1_700_000_004_000);
+      assert_eq!(encode_config_diagnostics_control(diagnostics_control.sequence, &diagnostics, algorithm).unwrap(), diagnostics_expected);
+    }
+  }
+}
+
+#[test]
+fn production_configuration_control_encoders_reject_invalid_closure() {
+  let lkg_bytes = fixture("control-blake3-256-runtime-lkg-valid.bin");
+  let lkg_control = decode_system_control(&lkg_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let lkg = decode_config_lkg_body(lkg_control.body, HashAlgorithm::Blake3_256).unwrap();
+
+  let mut invalid = ConfigLKGBodyV1 { activated_at_ms: -1, ..lkg.clone() };
+  assert_eq!(
+    encode_config_lkg_control(1, &invalid, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  invalid = ConfigLKGBodyV1 { configuration_schema: 0, ..lkg.clone() };
+  assert_eq!(
+    encode_config_lkg_control(1, &invalid, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+  invalid = ConfigLKGBodyV1 { source_namespace_root: vec![0; 31], ..lkg.clone() };
+  assert_eq!(
+    encode_config_lkg_control(1, &invalid, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::LengthCountOrArithmeticOverflow
+  );
+  invalid = ConfigLKGBodyV1 { canonical_config: vec![0xff], ..lkg };
+  assert_eq!(
+    encode_config_lkg_control(1, &invalid, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::TruncationOrTrailingBytes
+  );
+
+  let diagnostics_bytes = fixture("control-blake3-256-lifecycle-diagnostics-valid.bin");
+  let diagnostics_control = decode_system_control(&diagnostics_bytes, HashAlgorithm::Blake3_256).unwrap();
+  let diagnostics = decode_config_diagnostics_body(diagnostics_control.body, HashAlgorithm::Blake3_256).unwrap();
+  let invalid = ConfigDiagnosticsBodyV1 { aggregate_state: 0, ..diagnostics.clone() };
+  assert_eq!(
+    encode_config_diagnostics_control(1, &invalid, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+  let invalid = ConfigDiagnosticsBodyV1 { detail: vec![0xff], ..diagnostics };
+  assert_eq!(
+    encode_config_diagnostics_control(1, &invalid, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::TruncationOrTrailingBytes
+  );
+}
+
+#[test]
+fn production_canonical_value_codec_matches_every_independent_fixture() {
+  for hash_name in ["blake3-256", "sha512"] {
+    for case in ["all-tags", "maximum-string", "numeric-boundaries"] {
+      let expected = canonical_fixture(&format!("config-{hash_name}-{case}-valid.bin"));
+      let decoded = decode_canonical_value(&expected, CanonicalValueBounds::CONFIG).unwrap();
+      assert_eq!(encode_canonical_value(&decoded, CanonicalValueBounds::CONFIG).unwrap(), expected);
+    }
+  }
+}
+
+#[test]
+fn strict_json_canonicalization_matches_lkg_payloads_and_rejects_noncanonical_input() {
+  for (fixture_name, json) in [
+    ("control-blake3-256-lifecycle-lkg-valid.bin", br#"{"garbage_collection":{"enabled":false}}"#.as_slice()),
+    ("control-blake3-256-runtime-lkg-valid.bin", br#"{"memory":{"maximum_bytes":8589934592}}"#.as_slice()),
+  ] {
+    let expected = fixture(fixture_name);
+    let control = decode_system_control(&expected, HashAlgorithm::Blake3_256).unwrap();
+    let lkg = decode_config_lkg_body(control.body, HashAlgorithm::Blake3_256).unwrap();
+    assert_eq!(canonicalize_json(json, CanonicalValueBounds::AUDIT_VALUE).unwrap(), lkg.canonical_config);
+  }
+
+  assert!(canonicalize_json(br#"{"a":1,"a":2}"#, CanonicalValueBounds::CONFIG).is_err());
+  assert!(canonicalize_json(br#"{"a":-0.0}"#, CanonicalValueBounds::CONFIG).is_err());
+  assert!(canonicalize_json(br#"{"a":1} trailing"#, CanonicalValueBounds::CONFIG).is_err());
+  assert_eq!(
+    canonicalize_json(&vec![b' '; CanonicalValueBounds::CONFIG.maximum_value_length + 1], CanonicalValueBounds::CONFIG)
+      .unwrap_err()
+      .class(),
+    MalformedInputClass::AllocationAmplification
+  );
 }
 
 #[test]
