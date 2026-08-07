@@ -193,6 +193,35 @@ fn startup_shadow_is_immutable_after_runtime_file_changes() {
 
 #[test]
 #[serial]
+fn engine_configuration_authority_retains_startup_evidence_and_one_coherent_active_generation() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = std::sync::Arc::new(create_engine(&directory));
+  let startup = engine.configuration_shadow();
+  let current = engine.configuration_snapshot();
+
+  assert_eq!(current.generation, 1);
+  assert!(std::sync::Arc::ptr_eq(&startup, &current.startup));
+  assert_eq!(current.active_properties.len(), 41);
+  assert_eq!(current.resolved_unsigned("index.flush_after_seconds"), Some(30));
+  assert!(current.pending_restart.is_empty());
+  assert!(current.pending_convergence.is_empty());
+
+  std::thread::scope(|scope| {
+    let mut readers = Vec::new();
+    for _ in 0..16 {
+      let engine = std::sync::Arc::clone(&engine);
+      readers.push(scope.spawn(move || engine.configuration_snapshot()));
+    }
+    for reader in readers {
+      let observed = reader.join().unwrap();
+      assert_eq!(observed.generation, 1);
+      assert!(std::sync::Arc::ptr_eq(&current, &observed));
+    }
+  });
+}
+
+#[test]
+#[serial]
 fn startup_shadow_collects_registered_environment_override() {
   let _environment = EnvironmentGuard::set("AEORDB_INDEX_FLUSH_AFTER_SECONDS", "45");
   let directory = tempfile::tempdir().unwrap();

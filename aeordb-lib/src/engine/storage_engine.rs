@@ -590,7 +590,7 @@ struct GcRecheckState {
 /// appends new entries.
 pub struct StorageEngine {
   database_path: PathBuf,
-  configuration_shadow: OnceLock<Arc<crate::engine::config_resolver::ConfigShadowReport>>,
+  configuration_authority: OnceLock<Arc<crate::engine::configuration_authority::ConfigurationAuthority>>,
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
   operation_tracker: EngineOperationTracker,
   shutdown_started: Arc<AtomicBool>,
@@ -647,7 +647,7 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
-  fn initialize_configuration_shadow(&self) -> EngineResult<()> {
+  fn initialize_configuration_authority(&self) -> EngineResult<()> {
     let report = Arc::new(crate::engine::config_resolver::build_startup_config_shadow(
       self,
       &self.database_path,
@@ -658,15 +658,23 @@ impl StorageEngine {
     let blocking_issues =
       report.resolution.as_ref().map(|resolution| resolution.issues.iter().filter(|issue| issue.blocking).count()).unwrap_or(1);
     self
-      .configuration_shadow
-      .set(report)
-      .map_err(|_| EngineError::InvalidInput("startup configuration shadow was initialized more than once".to_string()))?;
-    tracing::info!(complete, degraded, blocking_issues, "Captured startup configuration shadow diagnostics");
+      .configuration_authority
+      .set(Arc::new(crate::engine::configuration_authority::ConfigurationAuthority::new(report)))
+      .map_err(|_| EngineError::InvalidInput("configuration authority was initialized more than once".to_string()))?;
+    tracing::info!(complete, degraded, blocking_issues, "Initialized configuration authority from startup diagnostics");
     Ok(())
   }
 
   pub fn configuration_shadow(&self) -> Arc<crate::engine::config_resolver::ConfigShadowReport> {
-    Arc::clone(self.configuration_shadow.get().expect("StorageEngine constructors initialize configuration shadow"))
+    self.configuration_authority().startup_report()
+  }
+
+  pub fn configuration_snapshot(&self) -> Arc<crate::engine::configuration_authority::ConfigurationAuthoritySnapshot> {
+    self.configuration_authority().snapshot()
+  }
+
+  fn configuration_authority(&self) -> Arc<crate::engine::configuration_authority::ConfigurationAuthority> {
+    Arc::clone(self.configuration_authority.get().expect("StorageEngine constructors initialize the configuration authority"))
   }
 
   fn initialize_memory_coordinator(&self, inherited: Option<Arc<MemoryCoordinator>>) -> EngineResult<()> {
@@ -722,10 +730,7 @@ impl StorageEngine {
   }
 
   pub(crate) fn resolved_unsigned_config(&self, path: &str) -> Option<u64> {
-    self.configuration_shadow().resolution.as_ref()?.property(path)?.value.as_ref().and_then(|value| match value {
-      crate::engine::config_resolver::ConfigValue::Unsigned(value) => Some(*value),
-      _ => None,
-    })
+    self.configuration_snapshot().resolved_unsigned(path)
   }
 
   fn activate_bounded_clean_caches(&self) -> EngineResult<()> {
@@ -2094,7 +2099,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
-      configuration_shadow: OnceLock::new(),
+      configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -2128,7 +2133,7 @@ impl StorageEngine {
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
     engine.counters.store(initialized);
-    engine.initialize_configuration_shadow()?;
+    engine.initialize_configuration_authority()?;
     engine.initialize_memory_coordinator(inherited_memory)?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
@@ -2315,7 +2320,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
-      configuration_shadow: OnceLock::new(),
+      configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -2388,7 +2393,7 @@ impl StorageEngine {
     // VoidManager state so the next hot tail flush carries it forward.
     engine.sync_voids_to_kv_writer()?;
     engine.refresh_persistent_durability_recovery()?;
-    engine.initialize_configuration_shadow()?;
+    engine.initialize_configuration_authority()?;
     engine.initialize_memory_coordinator(inherited_memory)?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;

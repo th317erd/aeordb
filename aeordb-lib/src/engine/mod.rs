@@ -11,6 +11,7 @@ pub mod cache_loaders;
 pub mod cluster_join;
 pub mod compression;
 pub mod config_resolver;
+pub mod configuration_authority;
 pub mod conflict_store;
 pub mod content_type;
 pub mod cron_scheduler;
@@ -112,6 +113,7 @@ pub use batch_commit::{commit_buffered_files, commit_files, BufferedFile, Commit
 pub use append_writer::AppendWriter;
 pub use compression::{CompressionAlgorithm, compress, decompress, should_compress};
 pub use content_type::detect_content_type;
+pub use configuration_authority::{ActiveConfigProperty, ConfigurationAuthoritySnapshot};
 pub use deletion_record::DeletionRecord;
 pub use directory_entry::{ChildEntry, serialize_child_entries, deserialize_child_entries};
 pub use directory_listing::{ListingEntry, list_directory_recursive};
