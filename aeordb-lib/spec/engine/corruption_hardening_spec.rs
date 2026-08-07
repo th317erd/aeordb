@@ -1758,10 +1758,10 @@ fn kv_expansion_dirty_rebuild_keeps_offsets_out_of_reserved_block() {
     engine.store_entry(EntryType::Chunk, &key, &value).unwrap();
   }
 
-  let expanded_header = active_header(&db_str);
-  assert!(expanded_header.kv_block_stage > 0, "test setup should force at least one KV expansion");
+  assert!(active_header(&db_str).kv_block_stage > 0, "test setup should force at least one KV expansion");
   engine.shutdown().unwrap();
   drop(engine);
+  let expanded_header = active_header(&db_str);
 
   {
     let mut file = OpenOptions::new().read(true).write(true).open(&db_str).unwrap();
@@ -1772,10 +1772,62 @@ fn kv_expansion_dirty_rebuild_keeps_offsets_out_of_reserved_block() {
 
   let reopened = StorageEngine::open(&db_str).unwrap();
   let report = verify::verify(&reopened, &db_str);
+  let rebuilt_header = active_header(&db_str);
 
   assert!(
     report.invalid_kv_offsets.is_empty(),
     "dirty rebuild after expansion must not preserve KV offsets inside the reserved block: {:?}",
     report.invalid_kv_offsets
   );
+  assert_eq!(
+    rebuilt_header.kv_block_length, expanded_header.kv_block_length,
+    "dirty rebuild must preserve the selected boundary-aligned KV span instead of reclassifying reserved slack as WAL"
+  );
+  assert_eq!(
+    report.corrupt_header, 0,
+    "reserved KV slack must not be reported as a corrupt WAL header (expanded_length={}, rebuilt_length={}, skipped={:?})",
+    expanded_header.kv_block_length, rebuilt_header.kv_block_length, report.skipped_regions
+  );
+  assert!(report.skipped_regions.is_empty(), "reserved KV slack must not become a skipped WAL region: {:?}", report.skipped_regions);
+}
+
+#[test]
+fn dirty_recovery_accepts_only_a_contiguous_verified_tail_after_the_durable_frontier() {
+  let (engine, temp) = create_test_db();
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap().to_string();
+  engine.shutdown().unwrap();
+  drop(engine);
+  let selected_tail = active_header(&db_str).hot_tail_offset;
+
+  let recovered_key = vec![0xA5; 32];
+  let recovered_value = b"acknowledged-after-selected-frontier";
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  writer.set_offset(selected_tail);
+  writer.append_entry(EntryType::Chunk, &recovered_key, recovered_value, 0).unwrap();
+  let recovered_end = writer.current_offset();
+  writer.sync().unwrap();
+  drop(writer);
+
+  let stale_key = vec![0x5A; 32];
+  {
+    let mut file = OpenOptions::new().write(true).open(&db_path).unwrap();
+    file.seek(SeekFrom::Start(recovered_end)).unwrap();
+    file.write_all(&[0xFF]).unwrap();
+    file.sync_data().unwrap();
+  }
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  writer.set_offset(recovered_end + 1);
+  writer.append_entry(EntryType::Chunk, &stale_key, b"valid-looking-stale-tail-bytes", 0).unwrap();
+  writer.sync().unwrap();
+  drop(writer);
+
+  let reopened = StorageEngine::open(&db_str).unwrap();
+  assert_eq!(reopened.get_entry(&recovered_key).unwrap().unwrap().2, recovered_value);
+  assert!(
+    reopened.get_entry(&stale_key).unwrap().is_none(),
+    "recovery must not scan past a tail discontinuity into stale valid-looking bytes"
+  );
+  let report = verify::verify_checked(&reopened, &db_str).unwrap();
+  assert!(!report.has_issues(), "dirty recovery must truncate stale tail residue at the last contiguous verified entry: {report:?}");
 }

@@ -233,7 +233,7 @@ impl DiskKVStore {
   }
 
   pub fn create_with_coordinator(
-    mut db_file: File,
+    db_file: File,
     hash_algo: HashAlgorithm,
     kv_block_offset: u64,
     hot_tail_offset: u64,
@@ -243,10 +243,44 @@ impl DiskKVStore {
     let stage = stage.min(KV_STAGE_SIZES.len() - 1);
     let hash_length = hash_algo.hash_length();
     let psize = page_size(hash_length);
-    let (block_size, bucket_count) = stage_params(stage, psize);
-    // kv_block_length is the stage's block size — NOT the distance to hot_tail.
-    // The WAL entries sit between the KV block and the hot tail.
-    let kv_block_length = block_size;
+    let (kv_block_length, _) = stage_params(stage, psize);
+    Self::create_with_layout_and_coordinator(
+      db_file,
+      hash_algo,
+      kv_block_offset,
+      kv_block_length,
+      hot_tail_offset,
+      stage,
+      durability_coordinator,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn create_with_layout_and_coordinator(
+    mut db_file: File,
+    hash_algo: HashAlgorithm,
+    kv_block_offset: u64,
+    kv_block_length: u64,
+    hot_tail_offset: u64,
+    stage: usize,
+    durability_coordinator: Arc<DurabilityCoordinator>,
+  ) -> EngineResult<Self> {
+    let stage = stage.min(KV_STAGE_SIZES.len() - 1);
+    let hash_length = hash_algo.hash_length();
+    let psize = page_size(hash_length);
+    let (minimum_block_size, bucket_count) = stage_params(stage, psize);
+    if kv_block_length < minimum_block_size {
+      return Err(EngineError::InvalidInput(format!(
+        "KV block length {kv_block_length} is smaller than the {minimum_block_size}-byte minimum for stage {stage}"
+      )));
+    }
+    let kv_block_end =
+      kv_block_offset.checked_add(kv_block_length).ok_or_else(|| EngineError::InvalidInput("KV block end overflows u64".to_string()))?;
+    if hot_tail_offset != 0 && hot_tail_offset < kv_block_end {
+      return Err(EngineError::InvalidInput(format!(
+        "hot tail offset {hot_tail_offset} begins before the KV block ends at {kv_block_end}"
+      )));
+    }
 
     tracing::debug!(
       kv_block_offset,
@@ -610,11 +644,15 @@ impl DiskKVStore {
     self.bounded_page_config.as_ref().map(|config| (config.coordinator.clone(), config.max_resident_bytes))
   }
 
-  /// Remove the provider-backed snapshot from publication and wait for every
-  /// previously loaded view to drain before a complete page-layout rewrite.
-  /// A timeout restores a fresh bounded view before returning an error.
-  pub(crate) fn suspend_bounded_pages_for_layout_rewrite(&mut self, timeout: std::time::Duration) -> EngineResult<bool> {
-    let Some(provider) = self.page_provider.take() else {
+  /// Revoke the published provider-backed view and wait for every prior
+  /// snapshot lease to drain while keeping the provider installed. Exclusive
+  /// rebuild owners use this before repeated in-place page replacement: the
+  /// provider still supplies prepare-before-overwrite safety, but no reader
+  /// requires historical page generations to be retained.
+  ///
+  /// A timeout restores a fresh readable view before returning an error.
+  pub(crate) fn quiesce_bounded_page_snapshots_for_exclusive_write(&mut self, timeout: std::time::Duration) -> EngineResult<bool> {
+    let Some(provider) = self.page_provider.clone() else {
       return Ok(false);
     };
     let placeholder = ReadSnapshot::unavailable(
@@ -624,16 +662,35 @@ impl DiskKVStore {
       self.hash_algo,
       self.entry_count,
       self.page_type_counts,
-      "KV page layout is changing",
+      "KV page publication is quiesced for exclusive writes",
     );
     self.snapshot.store(Arc::new(placeholder));
-    if provider.wait_for_no_snapshots(timeout)? {
-      return Ok(true);
+    match provider.wait_for_no_snapshots(timeout) {
+      Ok(true) => return Ok(true),
+      Ok(false) => {}
+      Err(wait_error) => {
+        return match self.publish_full_snapshot() {
+          Ok(()) => Err(wait_error),
+          Err(restore_error) => Err(EngineError::DurabilityFailure(format!(
+            "failed to drain KV snapshots ({wait_error}) and failed to restore publication ({restore_error})"
+          ))),
+        };
+      }
     }
 
-    self.page_provider = Some(provider);
     self.publish_full_snapshot()?;
-    Err(EngineError::InvalidInput("timed out waiting for KV snapshots before page-layout rewrite".to_string()))
+    Err(EngineError::InvalidInput("timed out waiting for KV snapshots before exclusive page writes".to_string()))
+  }
+
+  /// Remove the provider-backed snapshot from publication and wait for every
+  /// previously loaded view to drain before a complete page-layout rewrite.
+  /// A timeout restores a fresh bounded view before returning an error.
+  pub(crate) fn suspend_bounded_pages_for_layout_rewrite(&mut self, timeout: std::time::Duration) -> EngineResult<bool> {
+    if !self.quiesce_bounded_page_snapshots_for_exclusive_write(timeout)? {
+      return Ok(false);
+    }
+    self.page_provider.take();
+    Ok(true)
   }
 
   fn reactivate_bounded_pages_after_layout_rewrite(&mut self) -> EngineResult<bool> {
@@ -1531,9 +1588,100 @@ fn entry_overlaps_void_ranges(entry_start: u64, entry_end: u64, void_ranges: &[(
 }
 
 #[cfg(test)]
-mod hot_void_range_tests {
+mod internal_tests {
   use super::*;
   use crate::engine::hot_tail::VoidRecord;
+  use tempfile::tempdir;
+
+  #[test]
+  fn explicit_layout_creation_refuses_invalid_spans_before_mutation() {
+    let directory = tempdir().unwrap();
+    let minimum = crate::engine::kv_stages::initial_block_size();
+
+    let undersized_path = directory.path().join("undersized.aeordb");
+    let undersized = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&undersized_path).unwrap();
+    let error = match DiskKVStore::create_with_layout_and_coordinator(
+      undersized,
+      HashAlgorithm::Blake3_256,
+      256,
+      minimum - 1,
+      256 + minimum,
+      0,
+      Arc::new(DurabilityCoordinator::new()),
+    ) {
+      Ok(_) => panic!("undersized explicit layout must be rejected"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("smaller than"));
+    assert_eq!(std::fs::metadata(undersized_path).unwrap().len(), 0);
+
+    let overlap_path = directory.path().join("overlap.aeordb");
+    let overlap = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&overlap_path).unwrap();
+    let error = match DiskKVStore::create_with_layout_and_coordinator(
+      overlap,
+      HashAlgorithm::Blake3_256,
+      256,
+      minimum + 4096,
+      256 + minimum,
+      0,
+      Arc::new(DurabilityCoordinator::new()),
+    ) {
+      Ok(_) => panic!("overlapping explicit layout must be rejected"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("before the KV block ends"));
+    assert_eq!(std::fs::metadata(overlap_path).unwrap().len(), 0);
+  }
+
+  #[test]
+  fn exclusive_bulk_rebuild_does_not_retain_historical_page_generations() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("exclusive-bulk-rebuild.aeordb");
+    let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path).unwrap();
+    let stage = 3;
+    let (block_size, _) = stage_params(stage, page_size(HashAlgorithm::Blake3_256.hash_length()));
+    let mut store = DiskKVStore::create(file, HashAlgorithm::Blake3_256, 256, 256 + block_size, stage).unwrap();
+
+    assert!(store.quiesce_bounded_page_snapshots_for_exclusive_write(std::time::Duration::from_secs(1)).unwrap());
+    assert_eq!(store.kv_page_provider_stats().unwrap().unwrap().active_snapshots, 0);
+
+    for index in 0..6_144u64 {
+      let hash = blake3::hash(&index.to_le_bytes()).as_bytes().to_vec();
+      store
+        .bulk_insert(&[KVEntry { type_flags: crate::engine::kv_store::KV_TYPE_CHUNK, hash, offset: index + 1, total_length: 1 }])
+        .unwrap();
+    }
+
+    let stats = store.kv_page_provider_stats().unwrap().unwrap();
+    assert_eq!(stats.active_snapshots, 0);
+    assert_eq!(stats.historical_pages, 0, "exclusive rebuilds have no readers that require historical page generations");
+    assert_eq!(stats.historical_bytes, 0);
+
+    store.flush().unwrap();
+    store.publish_full_snapshot().unwrap();
+    assert_eq!(store.kv_page_provider_stats().unwrap().unwrap().active_snapshots, 1);
+    for index in [0u64, 511, 512, 4_095, 6_143] {
+      let hash = blake3::hash(&index.to_le_bytes()).as_bytes().to_vec();
+      assert_eq!(store.get(&hash).unwrap().unwrap().offset, index + 1);
+    }
+  }
+
+  #[test]
+  fn exclusive_write_quiesce_timeout_restores_readable_publication() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("exclusive-write-timeout.aeordb");
+    let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path).unwrap();
+    let block_size = crate::engine::kv_stages::initial_block_size();
+    let mut store = DiskKVStore::create(file, HashAlgorithm::Blake3_256, 256, 256 + block_size, 0).unwrap();
+    let retained_reader = store.snapshot_handle().load_full();
+
+    let error = store.quiesce_bounded_page_snapshots_for_exclusive_write(std::time::Duration::ZERO).unwrap_err();
+
+    assert!(error.to_string().contains("timed out waiting for KV snapshots"));
+    assert!(store.snapshot_handle().load().bounded_pages().is_some(), "a pre-overwrite timeout must restore a readable provider view");
+    assert!(store.kv_page_provider_stats().unwrap().is_some());
+    drop(retained_reader);
+  }
 
   #[test]
   fn merged_void_ranges_drop_invalid_and_merge_overlaps() {

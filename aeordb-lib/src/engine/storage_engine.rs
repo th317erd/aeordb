@@ -4914,10 +4914,16 @@ impl StorageEngine {
     );
 
     // Read layout info from the file header
-    let (kv_block_offset, file_path, existing_stage, durability_coordinator) = {
+    let (kv_block_offset, existing_block_length, file_path, existing_stage, durability_coordinator) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       let header = writer.file_header();
-      (header.kv_block_offset, writer.file_path().to_path_buf(), header.kv_block_stage as usize, writer.durability_coordinator())
+      (
+        header.kv_block_offset,
+        header.kv_block_length,
+        writer.file_path().to_path_buf(),
+        header.kv_block_stage as usize,
+        writer.durability_coordinator(),
+      )
     };
 
     let hash_length = hash_algo.hash_length();
@@ -4943,8 +4949,16 @@ impl StorageEngine {
 
     let (kv_offset, block_size, hot_offset, rebuild_stage) = if kv_block_offset > 0 {
       // Normal single-file layout: KV at head, hot tail after WAL
-      let (bs, _) = crate::engine::kv_stages::stage_params(existing_stage, psize);
-      (kv_block_offset, bs, wal_end, existing_stage)
+      let (minimum_block_size, _) = crate::engine::kv_stages::stage_params(existing_stage, psize);
+      if existing_block_length < minimum_block_size {
+        return Err(EngineError::CorruptEntry {
+          offset: kv_block_offset,
+          reason: format!(
+            "KV block length {existing_block_length} is smaller than the {minimum_block_size}-byte minimum for stage {existing_stage}"
+          ),
+        });
+      }
+      (kv_block_offset, existing_block_length, wal_end, existing_stage)
     } else {
       // Legacy database (pre single-file refactor): no KV block on disk.
       // Place KV block at the end of the WAL, sized to fit all entries.
@@ -4989,18 +5003,16 @@ impl StorageEngine {
         .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
       let kv_file = OpenOptions::new().read(true).write(true).open(&file_path)?;
-      let mut new_kv = DiskKVStore::create_with_coordinator(
+      let mut new_kv = DiskKVStore::create_with_layout_and_coordinator(
         kv_file,
         hash_algo,
         kv_offset,
+        block_size,
         hot_offset,
         rebuild_stage,
         Arc::clone(&durability_coordinator),
       )?;
-      let configure_bootstrap_after_flush = bounded_page_config.is_none();
-      if let Some((coordinator, max_resident_bytes)) = bounded_page_config {
-        new_kv.activate_bounded_pages(coordinator, max_resident_bytes)?;
-      }
+      new_kv.quiesce_bounded_page_snapshots_for_exclusive_write(std::time::Duration::from_secs(30))?;
 
       // Stream the resolved run through DiskKVStore's
       // prepare-before-overwrite bulk path. The write buffer flushes at its
@@ -5073,8 +5085,8 @@ impl StorageEngine {
       new_kv.set_pending_voids(voids);
       self.counters.load().set_void_stats(void_count, void_bytes);
       new_kv.force_flush_hot_buffer()?;
-      if configure_bootstrap_after_flush {
-        new_kv.activate_bootstrap_page_provider()?;
+      if let Some((coordinator, max_resident_bytes)) = bounded_page_config {
+        new_kv.activate_bounded_pages(coordinator, max_resident_bytes)?;
       }
       new_kv.adopt_snapshot_handle(Arc::clone(&self.kv_snapshot))?;
       Ok(new_kv)
@@ -5108,9 +5120,8 @@ impl StorageEngine {
       let mut writer = self.writer.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       let mut header = writer.file_header().clone();
       let final_stage = kv_lock.stage();
-      let (final_block_size, _) = crate::engine::kv_stages::stage_params(final_stage, psize);
       header.kv_block_offset = kv_offset;
-      header.kv_block_length = final_block_size;
+      header.kv_block_length = block_size;
       // Hot tail goes after the WAL, not after the KV block
       header.hot_tail_offset = wal_end;
       header.entry_count = scanned_count;

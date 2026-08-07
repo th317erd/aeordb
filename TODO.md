@@ -277,6 +277,9 @@
         - [x] Keep the legacy clamped logical/WAL-chunk delta explicit rather than implying current-only dedup, and document the CLI/report contract.
       - [x] After verify accounting, run the remaining P2b-4 focused regressions, full workspace/cross-platform gates, and a disk-backed verification test.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
+      - [x] Quiesce the replacement KV store's bootstrap snapshot during dirty rebuild so exclusive bulk page rewrites cannot retain unbounded historical generations.
+      - [x] Preserve boundary-aligned KV block spans across dirty rebuild so reserved slack never becomes a false corrupt-WAL region.
+      - [ ] Prove serious dirty-rebuild failures can latch, spill, shut down, and refuse restart even before the resolved runtime memory policy is active.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

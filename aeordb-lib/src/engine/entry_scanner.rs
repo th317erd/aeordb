@@ -40,6 +40,11 @@ pub struct EntryScanner {
   pub skipped_regions: Vec<(u64, usize)>,
   skipped_region_count: u64,
   skipped_region_bytes: u64,
+  /// The selected header's durable WAL frontier. Dirty recovery may accept a
+  /// contiguous run of fully verified entries beyond this point, but must
+  /// stop at the first discontinuity so stale hot-tail bytes cannot be
+  /// resynchronized into false WAL records.
+  recovery_tail_start: Option<u64>,
   cancellation: Option<Arc<AtomicBool>>,
 }
 
@@ -96,6 +101,7 @@ impl EntryScanner {
     // to EOF regardless of `hot_tail_offset`; the legacy branch is unaffected
     // because the KV block (not the hot tail) bounds the WAL there.
     let header_end = crate::engine::file_header::HEADER_REGION_SIZE as u64;
+    let standard_layout = header.kv_block_offset == header_end && header.kv_block_length > 0;
     let (start_offset, file_length) = if header.kv_block_offset > 0 && header.kv_block_length > 0 {
       if header.kv_block_offset == header_end {
         // Standard: KV at head, WAL after
@@ -124,6 +130,12 @@ impl EntryScanner {
       };
       (header_end, end)
     };
+    let recovery_tail_start =
+      if dirty_recovery && standard_layout && header.hot_tail_offset >= start_offset && header.hot_tail_offset <= file_length {
+        Some(header.hot_tail_offset)
+      } else {
+        None
+      };
     file.seek(SeekFrom::Start(start_offset))?;
 
     Ok(EntryScanner {
@@ -135,6 +147,7 @@ impl EntryScanner {
       skipped_regions: Vec::new(),
       skipped_region_count: 0,
       skipped_region_bytes: 0,
+      recovery_tail_start,
       cancellation: None,
     })
   }
@@ -226,6 +239,12 @@ impl EntryScanner {
   }
 
   fn recover_after_malformed_header(&mut self, entry_offset: u64) -> EngineResult<()> {
+    if self.is_recovery_tail_offset(entry_offset) {
+      let skipped = self.file_length.saturating_sub(entry_offset);
+      self.record_skipped_region(entry_offset, skipped as usize);
+      self.current_offset = self.file_length;
+      return Ok(());
+    }
     match self.scan_for_next_magic(entry_offset.saturating_add(1))? {
       Some((next_offset, skipped_bytes)) => {
         tracing::warn!(entry_offset, next_offset, skipped_bytes, "Recovered at the next validated entry header");
@@ -239,6 +258,20 @@ impl EntryScanner {
       }
     }
     Ok(())
+  }
+
+  fn is_recovery_tail_offset(&self, offset: u64) -> bool {
+    self.recovery_tail_start.is_some_and(|tail_start| offset >= tail_start)
+  }
+
+  fn stop_after_recovery_tail_error(&mut self, entry_offset: u64, fallback_next: u64) {
+    if self.is_recovery_tail_offset(entry_offset) {
+      let skipped = self.file_length.saturating_sub(entry_offset);
+      self.record_skipped_region(entry_offset, skipped as usize);
+      self.current_offset = self.file_length;
+    } else {
+      self.current_offset = fallback_next;
+    }
   }
 
   fn check_cancelled(&self) -> EngineResult<()> {
@@ -277,7 +310,8 @@ impl EntryScanner {
   /// because rebuild only needs the key/header metadata for those large
   /// records. Mutable metadata records are still read and hash-verified.
   pub(crate) fn next_rebuild_entry(&mut self) -> Option<EngineResult<ScannedRebuildEntry>> {
-    self.next_bounded_entry(false)
+    let verify_recovery_tail = self.is_recovery_tail_offset(self.current_offset);
+    self.next_bounded_entry(verify_recovery_tail)
   }
 
   /// Scan one entry for verification without materializing its value. Every
@@ -365,8 +399,7 @@ impl EntryScanner {
           return Some(Err(error.into()));
         }
         tracing::warn!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
-        self.record_skipped_region(entry_offset, header.total_length as usize);
-        self.current_offset = entry_end;
+        self.stop_after_recovery_tail_error(entry_offset, entry_end);
         if self.report_errors {
           return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading key: {}", error) }));
         }
@@ -384,7 +417,7 @@ impl EntryScanner {
 
       let retain_value = header.entry_type == EntryType::DeletionRecord;
       if retain_value && header.value_length as usize > MAX_DELETION_RECORD_BYTES {
-        self.current_offset = entry_end;
+        self.stop_after_recovery_tail_error(entry_offset, entry_end);
         return Some(Err(EngineError::CorruptEntry {
           offset: entry_offset,
           reason: format!("deletion record value length {} exceeds format maximum {}", header.value_length, MAX_DELETION_RECORD_BYTES),
@@ -417,8 +450,7 @@ impl EntryScanner {
           if error.kind() != std::io::ErrorKind::UnexpectedEof {
             return Some(Err(error.into()));
           }
-          self.record_skipped_region(entry_offset, header.total_length as usize);
-          self.current_offset = entry_end;
+          self.stop_after_recovery_tail_error(entry_offset, entry_end);
           return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading value: {error}") }));
         }
         hasher.update(&buffer[..width]);
@@ -428,7 +460,7 @@ impl EntryScanner {
         remaining -= width;
       }
       if hasher.finalize() != header.hash {
-        self.current_offset = entry_end;
+        self.stop_after_recovery_tail_error(entry_offset, entry_end);
         if self.report_errors {
           return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: "Hash verification failed".to_string() }));
         }
