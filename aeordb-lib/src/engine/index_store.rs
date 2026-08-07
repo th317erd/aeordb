@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
-
-use base64::Engine as _;
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::index_config::{create_converter_from_config, IndexFieldConfig, PathIndexConfig};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::nvt::NormalizedVectorTable;
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::scalar_converter::{
@@ -140,6 +140,13 @@ pub(crate) struct IndexFlushSnapshot {
   deletes: Vec<BufferedIndexKey>,
   mutation_counts: Vec<(BufferedIndexKey, usize)>,
   pending_mutations: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EmergencyIndexSnapshotStats {
+  pub pending_mutations: usize,
+  pub dirty_saves: usize,
+  pub deletes: usize,
 }
 
 #[derive(Clone)]
@@ -897,46 +904,101 @@ impl SharedIndexWriteBuffer {
     evicted
   }
 
-  pub(crate) fn emergency_snapshot_json(&mut self, hash_length: usize) -> EngineResult<serde_json::Value> {
-    let mut saves = Vec::new();
+  pub(crate) fn emergency_snapshot_stats(&self) -> EmergencyIndexSnapshotStats {
+    EmergencyIndexSnapshotStats {
+      pending_mutations: self.pending_mutations,
+      dirty_saves: self.dirty_keys.iter().filter(|key| !self.deleted_keys.contains(*key)).count(),
+      deletes: self.deleted_keys.len(),
+    }
+  }
+
+  pub(crate) fn write_emergency_snapshot<W: Write>(
+    &mut self,
+    writer: &mut W,
+    hash_length: usize,
+    memory: &mut OperationMemoryBudget,
+  ) -> EngineResult<EmergencyIndexSnapshotStats> {
+    let stats = self.emergency_snapshot_stats();
+    writer.write_all(b"{\"format\":\"aeordb-index-buffer-spill-v1\",\"pending_mutations\":")?;
+    serde_json::to_writer(&mut *writer, &stats.pending_mutations)
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("cannot encode emergency index mutation count: {error}"))))?;
+    writer.write_all(b",\"dirty_saves\":[")?;
+
+    let mut first = true;
     for key in &self.dirty_keys {
       if self.deleted_keys.contains(key) {
         continue;
       }
-      if let Some(index) = self.indexes.get_mut(key) {
+      let index = self.indexes.get_mut(key).ok_or_else(|| {
+        EngineError::DurabilityFailure(format!(
+          "dirty emergency index state has no cached index for {}.{} at {}",
+          key.field_name, key.strategy, key.parent
+        ))
+      })?;
+      if index.is_dirty() {
+        memory.reserve(INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES, "emergency index NVT rebuild admission failed")?;
         index.ensure_nvt_current();
-        let data = index.serialize(hash_length);
-        saves.push(serde_json::json!({
-          "parent": &key.parent,
-          "field_name": &key.field_name,
-          "strategy": &key.strategy,
-          "bytes_base64": {
-            "encoding": "base64",
-            "data": base64::engine::general_purpose::STANDARD.encode(data),
-          },
-        }));
+        memory.release(INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES, "emergency index NVT rebuild accounting failed")?;
       }
+
+      let serialized_bytes = u64::try_from(index.serialized_size(hash_length))
+        .map_err(|_| EngineError::ResourceExhausted("emergency index serialized length exceeds u64".to_string()))?;
+      let serialization_workspace = serialized_bytes
+        .checked_add(INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES)
+        .ok_or_else(|| EngineError::ResourceExhausted("emergency index serialization workspace overflow".to_string()))?;
+      memory.reserve(serialization_workspace, "emergency index serialization admission failed")?;
+      let data = index.serialize(hash_length);
+      let write_result = (|| -> EngineResult<()> {
+        if !first {
+          writer.write_all(b",")?;
+        }
+        first = false;
+        writer.write_all(b"{\"parent\":")?;
+        write_emergency_json_string(writer, &key.parent)?;
+        writer.write_all(b",\"field_name\":")?;
+        write_emergency_json_string(writer, &key.field_name)?;
+        writer.write_all(b",\"strategy\":")?;
+        write_emergency_json_string(writer, &key.strategy)?;
+        writer.write_all(b",\"bytes_base64\":{\"encoding\":\"base64\",\"data\":\"")?;
+        {
+          let mut encoder = base64::write::EncoderWriter::new(&mut *writer, &base64::engine::general_purpose::STANDARD);
+          for chunk in data.chunks(16 * 1024) {
+            encoder.write_all(chunk)?;
+          }
+          encoder.finish()?;
+        }
+        writer.write_all(b"\"}}")?;
+        Ok(())
+      })();
+      drop(data);
+      let release_result = memory.release(serialization_workspace, "emergency index serialization accounting failed");
+      write_result?;
+      release_result?;
     }
 
-    let deletes: Vec<serde_json::Value> = self
-      .deleted_keys
-      .iter()
-      .map(|key| {
-        serde_json::json!({
-          "parent": &key.parent,
-          "field_name": &key.field_name,
-          "strategy": &key.strategy,
-        })
-      })
-      .collect();
-
-    Ok(serde_json::json!({
-      "format": "aeordb-index-buffer-spill-v1",
-      "pending_mutations": self.pending_mutations,
-      "dirty_saves": saves,
-      "deletes": deletes,
-    }))
+    writer.write_all(b"],\"deletes\":[")?;
+    first = true;
+    for key in &self.deleted_keys {
+      if !first {
+        writer.write_all(b",")?;
+      }
+      first = false;
+      writer.write_all(b"{\"parent\":")?;
+      write_emergency_json_string(writer, &key.parent)?;
+      writer.write_all(b",\"field_name\":")?;
+      write_emergency_json_string(writer, &key.field_name)?;
+      writer.write_all(b",\"strategy\":")?;
+      write_emergency_json_string(writer, &key.strategy)?;
+      writer.write_all(b"}")?;
+    }
+    writer.write_all(b"]}")?;
+    Ok(stats)
   }
+}
+
+fn write_emergency_json_string<W: Write>(writer: &mut W, value: &str) -> EngineResult<()> {
+  serde_json::to_writer(writer, value)
+    .map_err(|error| EngineError::IoError(std::io::Error::other(format!("cannot encode emergency index identity: {error}"))))
 }
 
 /// Compatibility handle for bulk callers.

@@ -61,6 +61,50 @@ pub struct HotTailPayload {
   pub voids: Vec<VoidRecord>,
 }
 
+/// Write the frozen hot-tail encoding without allocating a second buffer for
+/// the complete payload. Emergency preservation uses this path when memory is
+/// already under pressure.
+pub fn write_hot_tail_payload<W: Write>(writer: &mut W, payload: &HotTailPayload, hash_length: usize) -> EngineResult<()> {
+  let write_count = u32::try_from(payload.writes.len())
+    .map_err(|_| EngineError::ResourceExhausted("hot-tail write count exceeds the v1 format limit".to_string()))?;
+  let void_count = u32::try_from(payload.voids.len())
+    .map_err(|_| EngineError::ResourceExhausted("hot-tail void count exceeds the v1 format limit".to_string()))?;
+  checked_body_size(payload.writes.len(), payload.voids.len(), hash_length)
+    .ok_or_else(|| EngineError::ResourceExhausted("hot-tail serialized size overflow".to_string()))?;
+
+  let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
+  header[..5].copy_from_slice(&HOT_TAIL_MAGIC);
+  header[5] = HOT_TAIL_FORMAT_VERSION;
+  header[6..10].copy_from_slice(&write_count.to_le_bytes());
+  header[10..14].copy_from_slice(&void_count.to_le_bytes());
+  let header_crc = crc32fast::hash(&header[..14]);
+  header[14..18].copy_from_slice(&header_crc.to_le_bytes());
+  writer.write_all(&header)?;
+
+  const ZERO_PADDING: [u8; 64] = [0; 64];
+  for entry in &payload.writes {
+    writer.write_all(&[WRITE_RECORD_VERSION])?;
+    let copy_length = hash_length.min(entry.hash.len());
+    writer.write_all(&entry.hash[..copy_length])?;
+    let mut padding = hash_length - copy_length;
+    while padding > 0 {
+      let width = padding.min(ZERO_PADDING.len());
+      writer.write_all(&ZERO_PADDING[..width])?;
+      padding -= width;
+    }
+    writer.write_all(&[entry.type_flags])?;
+    writer.write_all(&entry.offset.to_le_bytes())?;
+    writer.write_all(&entry.total_length.to_le_bytes())?;
+  }
+
+  for void in &payload.voids {
+    writer.write_all(&[VOID_RECORD_VERSION])?;
+    writer.write_all(&void.offset.to_le_bytes())?;
+    writer.write_all(&void.size.to_le_bytes())?;
+  }
+  Ok(())
+}
+
 /// Serialize the hot tail payload (writes + voids) into a single byte buffer.
 pub fn serialize_hot_tail(payload: &HotTailPayload, hash_length: usize) -> Vec<u8> {
   let total = serialized_size(payload.writes.len(), payload.voids.len(), hash_length);
@@ -168,10 +212,10 @@ pub fn deserialize_hot_tail(data: &[u8], hash_length: usize) -> Option<HotTailPa
 
 /// Write the hot tail payload to a file at the given offset.
 pub fn write_hot_tail<W: Write + Seek>(writer: &mut W, offset: u64, payload: &HotTailPayload, hash_length: usize) -> EngineResult<u64> {
-  let data = serialize_hot_tail(payload, hash_length);
   writer.seek(SeekFrom::Start(offset))?;
-  writer.write_all(&data)?;
-  Ok(offset + data.len() as u64)
+  write_hot_tail_payload(writer, payload, hash_length)?;
+  let length = serialized_size(payload.writes.len(), payload.voids.len(), hash_length);
+  offset.checked_add(length as u64).ok_or_else(|| EngineError::ResourceExhausted("hot-tail end offset overflow".to_string()))
 }
 
 /// Read the hot tail payload from a file at the given offset.
@@ -351,6 +395,26 @@ mod tests {
     fail_at: u64,
   }
 
+  struct FailAfterWriter {
+    written: usize,
+    fail_at: usize,
+  }
+
+  impl std::io::Write for FailAfterWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+      if self.written >= self.fail_at {
+        return Err(std::io::Error::new(std::io::ErrorKind::StorageFull, "injected hot-tail write failure"));
+      }
+      let width = buffer.len().min(self.fail_at - self.written);
+      self.written += width;
+      Ok(width)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+      Ok(())
+    }
+  }
+
   impl std::io::Read for FailAfterCursor {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
       if self.inner.position() >= self.fail_at {
@@ -408,6 +472,33 @@ mod tests {
     let got = deserialize_hot_tail(&data, 32).unwrap();
     assert!(got.writes.is_empty());
     assert!(got.voids.is_empty());
+  }
+
+  #[test]
+  fn streaming_writer_matches_the_frozen_hot_tail_encoding() {
+    let payload = HotTailPayload {
+      writes: vec![make_entry(0x11, 0x02, 1000, 80), make_entry(0x22, 0x03, 2000, 200)],
+      voids: vec![VoidRecord { offset: 8888, size: 64 }],
+    };
+    let expected = serialize_hot_tail(&payload, 32);
+    let mut streamed = Vec::new();
+
+    write_hot_tail_payload(&mut streamed, &payload, 32).unwrap();
+
+    assert_eq!(streamed, expected);
+  }
+
+  #[test]
+  fn streaming_writer_surfaces_destination_failure() {
+    let payload = HotTailPayload {
+      writes: vec![make_entry(0x11, 0x02, 1000, 80), make_entry(0x22, 0x03, 2000, 200)],
+      voids: vec![VoidRecord { offset: 8888, size: 64 }],
+    };
+    let mut writer = FailAfterWriter { written: 0, fail_at: HOT_TAIL_HEADER_SIZE + 5 };
+
+    let error = write_hot_tail_payload(&mut writer, &payload, 32).unwrap_err();
+
+    assert!(matches!(error, EngineError::IoError(ref source) if source.kind() == std::io::ErrorKind::StorageFull));
   }
 
   #[test]

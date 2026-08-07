@@ -327,6 +327,15 @@ impl KvPageProvider {
   }
 
   pub fn begin_update(&self, buckets: &[usize]) -> EngineResult<KvPageUpdate> {
+    self.begin_update_with_admission(buckets, MemoryOwner::KvSnapshotGenerations, AdmissionClass::Workload)
+  }
+
+  pub(crate) fn begin_update_with_admission(
+    &self,
+    buckets: &[usize],
+    owner: MemoryOwner,
+    admission: AdmissionClass,
+  ) -> EngineResult<KvPageUpdate> {
     if buckets.is_empty() {
       return Err(EngineError::InvalidInput("KV page update requires at least one bucket".to_string()));
     }
@@ -364,7 +373,7 @@ impl KvPageProvider {
           remove_cached_page(&mut state, bucket);
         }
         let reservation = coordinator
-          .reserve(MemoryOwner::KvSnapshotGenerations, data.len() as u64, AdmissionClass::Workload)
+          .reserve(owner, data.len() as u64, admission)
           .map_err(|error| EngineError::DurabilityFailure(format!("cannot preserve KV page {bucket} before overwrite: {error}")))?;
         let bucket_generation = self.lock()?.bucket_generations.get(&bucket).copied().unwrap_or(0);
         pages.insert(bucket, PendingPage { old_generation: bucket_generation, data, reservation });

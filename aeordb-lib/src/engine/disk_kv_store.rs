@@ -14,7 +14,7 @@ use crate::engine::kv_page_provider::{KvPageProvider, KvPageProviderStats};
 use crate::engine::kv_snapshot::{KvPageSet, KvTypeCounts, ReadSnapshot};
 use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
-use crate::engine::memory_coordinator::{HostMemorySample, MemoryCoordinator, MemoryPolicy};
+use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, HostMemorySample, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::scalar_converter::HashConverter;
 
@@ -148,6 +148,26 @@ impl DiskKVStore {
       pending_void_bytes: self.pending_voids.capacity().saturating_mul(std::mem::size_of::<crate::engine::hot_tail::VoidRecord>()) as u64,
       mutable_nvt_bytes: self.nvt.estimated_memory_bytes(),
     }
+  }
+
+  pub(crate) fn emergency_hot_tail_payload_memory_bytes(&mut self) -> u64 {
+    self.sanitize_pending_voids("emergency hot-tail memory estimate");
+    let writes = self.write_buffer.values().fold(std::mem::size_of::<Vec<KVEntry>>() as u64, |total, entry| {
+      total.saturating_add(std::mem::size_of::<KVEntry>() as u64).saturating_add(entry.hash.len() as u64)
+    });
+    let voids = (std::mem::size_of::<Vec<crate::engine::hot_tail::VoidRecord>>() as u64)
+      .saturating_add((self.pending_voids.len() as u64).saturating_mul(std::mem::size_of::<crate::engine::hot_tail::VoidRecord>() as u64));
+    writes.saturating_add(voids)
+  }
+
+  pub(crate) fn shutdown_flush_workspace_bytes(&self) -> u64 {
+    let page_bytes = crate::engine::kv_pages::page_size(self.hash_algo.hash_length()) as u64;
+    let modified_pages = (self.write_buffer.len().min(self.bucket_count) as u64).max(1);
+    let memory = self.memory_stats();
+    memory
+      .write_buffer_bytes
+      .saturating_add(memory.pending_void_bytes)
+      .saturating_add(modified_pages.saturating_mul(page_bytes).saturating_mul(3))
   }
 
   fn sync_data_barrier(&self, estimated_bytes: u64) -> EngineResult<()> {
@@ -676,7 +696,12 @@ impl DiskKVStore {
       return Ok(());
     }
     let prepared = self.prepare_page_flush()?;
-    self.apply_prepared_page_flush(prepared, PageFlushDurability::DeferredToBulkCheckpoint)?;
+    self.apply_prepared_page_flush(
+      prepared,
+      PageFlushDurability::DeferredToBulkCheckpoint,
+      MemoryOwner::KvSnapshotGenerations,
+      AdmissionClass::Workload,
+    )?;
     Ok(())
   }
 
@@ -776,9 +801,15 @@ impl DiskKVStore {
     &mut self,
     prepared: PreparedPageFlush,
     durability: PageFlushDurability,
+    generation_owner: MemoryOwner,
+    generation_admission: AdmissionClass,
   ) -> EngineResult<Vec<(usize, Arc<[u8]>)>> {
     let buckets = prepared.replacements.iter().map(|(bucket, _)| *bucket).collect::<Vec<_>>();
-    let mut update = self.page_provider.as_ref().map(|provider| provider.begin_update(&buckets)).transpose()?;
+    let mut update = self
+      .page_provider
+      .as_ref()
+      .map(|provider| provider.begin_update_with_admission(&buckets, generation_owner, generation_admission))
+      .transpose()?;
     let hash_length = self.hash_algo.hash_length();
     let mut overwrite_started = false;
     for (bucket, page) in &prepared.replacements {
@@ -824,6 +855,14 @@ impl DiskKVStore {
 
   /// Flush the write buffer to KV bucket pages.
   pub fn flush(&mut self) -> EngineResult<()> {
+    self.flush_with_generation_admission(MemoryOwner::KvSnapshotGenerations, AdmissionClass::Workload)
+  }
+
+  pub(crate) fn flush_for_shutdown(&mut self) -> EngineResult<()> {
+    self.flush_with_generation_admission(MemoryOwner::Shutdown, AdmissionClass::Critical(CriticalMemoryPurpose::Shutdown))
+  }
+
+  fn flush_with_generation_admission(&mut self, generation_owner: MemoryOwner, generation_admission: AdmissionClass) -> EngineResult<()> {
     if self.write_buffer.is_empty() {
       return Ok(());
     }
@@ -839,7 +878,7 @@ impl DiskKVStore {
 
     let prepared = self.prepare_page_flush()?;
     let overflow_entries = prepared.overflow_entries.clone();
-    let replacements = self.apply_prepared_page_flush(prepared, PageFlushDurability::Immediate)?;
+    let replacements = self.apply_prepared_page_flush(prepared, PageFlushDurability::Immediate, generation_owner, generation_admission)?;
     let modified_buckets = replacements.iter().map(|(bucket, _)| *bucket).collect::<Vec<_>>();
 
     tracing::debug!(overflow_count = overflow_entries.len(), modified_buckets = modified_buckets.len(), "flush: pages written");
@@ -854,7 +893,7 @@ impl DiskKVStore {
         for entry in overflow_entries {
           self.write_buffer.insert(entry.hash.clone(), entry);
         }
-        return self.flush();
+        return self.flush_with_generation_admission(generation_owner, generation_admission);
       } else {
         // Resize blocked (block too small) — keep overflow in write buffer.
         // They're queryable via snapshot and will be persisted in the hot tail.
@@ -1400,13 +1439,15 @@ impl DiskKVStore {
 
     self.sanitize_pending_voids(if force { "force hot-tail dependency" } else { "hot-buffer dependency" });
     let payload = hot_tail::HotTailPayload { writes: self.write_buffer.values().cloned().collect(), voids: self.pending_voids.clone() };
-    let bytes = hot_tail::serialize_hot_tail(&payload, self.hash_algo.hash_length());
     let end = self
       .hot_tail_offset
-      .checked_add(bytes.len() as u64)
+      .checked_add(hot_tail::serialized_size(payload.writes.len(), payload.voids.len(), self.hash_algo.hash_length()) as u64)
       .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "hot-tail end offset overflowed"))?;
     self.db_file.seek(SeekFrom::Start(self.hot_tail_offset))?;
-    self.db_file.write_all(&bytes)?;
+    hot_tail::write_hot_tail_payload(&mut self.db_file, &payload, self.hash_algo.hash_length()).map_err(|error| match error {
+      EngineError::IoError(error) => error,
+      other => std::io::Error::other(other.to_string()),
+    })?;
     self.db_file.set_len(end)?;
     Ok(true)
   }

@@ -223,7 +223,10 @@
             - [x] Replace the pre-single-file no-KV bootstrap path with a crash-recoverable in-file KV migration that never overwrites its legacy WAL.
             - [x] Bound scanner recovery-region diagnostics.
           - [x] Bound pre-open header migration with fixed scratch and prove copy/barrier failure behavior.
-        - [ ] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
+        - [x] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
+          - [x] Stream hot-tail and dirty-index spill components instead of materializing complete encoded copies.
+          - [x] Reserve spill snapshots, component scratch, WAL windows, manifests, and diagnostics through `EmergencySpill` critical headroom.
+          - [x] Reserve shutdown orchestration and bounded flush scratch through `Shutdown` critical headroom, including hard-pressure admission and exact release.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.
         - [ ] Requeue checkpointed long-running maintenance when pressure rises after dequeue; do not convert an admission deferral into a terminal task failure.
       - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.

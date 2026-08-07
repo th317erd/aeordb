@@ -13,7 +13,7 @@ pub const EMERGENCY_SPILL_FORMAT_V2: &str = "aeordb-emergency-spill-v2";
 pub const EMERGENCY_SPILL_PENDING_FORMAT_V2: &str = "aeordb-emergency-spill-pending-v2";
 pub const EMERGENCY_SPILL_APPLIED_FORMAT: &str = "aeordb-emergency-spill-applied-v1";
 pub const EMERGENCY_SPILL_APPLIED_FORMAT_V2: &str = "aeordb-emergency-spill-applied-v2";
-const MANIFEST_SIZE_CAP: u64 = 1024 * 1024;
+pub(crate) const MANIFEST_SIZE_CAP: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmergencySpillFormatVersion {
