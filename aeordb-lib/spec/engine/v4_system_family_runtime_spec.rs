@@ -7,8 +7,9 @@ use aeordb::engine::v4::admission::{AdmissionModeV1, BinaryCapabilityProfileV1, 
 use aeordb::engine::v4::database_header::{SelectedDatabaseHeaderV4, decode_header_region};
 use aeordb::engine::v4::system_family::{
   AbsencePolicyV1, EventPolicyV1, GcPolicyV1, IndexPolicyV1, MigrationPolicyV1, RepairPolicyV1, SemanticRoleV1, SensitivityV1,
-  SpillPolicyV1, SystemFamilyClassificationV1, SystemFamilyPolicyV1, SystemFamilySubjectV1, TransferPolicyV1, UnknownChildPolicyV1,
-  VerifyPolicyV1, classify_system_family, embedded_system_family_registry, require_complete_system_family,
+  SpillPolicyV1, SystemFamilyClassificationV1, SystemFamilyPolicyDecisionV1, SystemFamilyPolicyResolverV1, SystemFamilyPolicyV1,
+  SystemFamilySubjectV1, SystemFamilyTransferOperationV1, TransferPolicyV1, UnknownChildPolicyV1, VerifyPolicyV1, classify_system_family,
+  embedded_system_family_registry, require_complete_system_family,
 };
 use serde::Deserialize;
 
@@ -192,6 +193,77 @@ fn typed_policies_pin_permissions_conflicts_controls_and_secrets() {
   assert_eq!(email.peer_replication_policy, TransferPolicyV1::NodeLocal);
   assert_eq!(email.sensitivity, SensitivityV1::Secret);
   assert_eq!(email.gc_policy, GcPolicyV1::PIN_WHILE_AUTHORITATIVE);
+}
+
+#[test]
+fn every_transfer_operation_selects_the_independent_policy_column() {
+  let oracle = registry_oracle();
+  let registry = embedded_system_family_registry(HashAlgorithm::Blake3_256).unwrap();
+  let expected: BTreeMap<_, _> = oracle.source_rows.iter().map(|row| (family_id(&row.family_id), row)).collect();
+  let operations = [
+    SystemFamilyTransferOperationV1::PhysicalCopy,
+    SystemFamilyTransferOperationV1::LogicalBackup,
+    SystemFamilyTransferOperationV1::DataExport,
+    SystemFamilyTransferOperationV1::PeerReplication,
+    SystemFamilyTransferOperationV1::ClusterJoin,
+    SystemFamilyTransferOperationV1::ClientSync,
+    SystemFamilyTransferOperationV1::Import,
+  ];
+
+  for descriptor in registry.iter() {
+    let descriptor = descriptor.unwrap();
+    let row = expected.get(&descriptor.family_id).unwrap();
+    for operation in operations {
+      assert_eq!(
+        descriptor.policy.transfer_policy(operation).as_u8(),
+        oracle_transfer_policy(row.policy, operation),
+        "{} {operation:?}",
+        row.family_id
+      );
+    }
+  }
+}
+
+fn oracle_transfer_policy(policy: PolicyOracle, operation: SystemFamilyTransferOperationV1) -> u8 {
+  match operation {
+    SystemFamilyTransferOperationV1::PhysicalCopy => policy.physical_copy_policy,
+    SystemFamilyTransferOperationV1::LogicalBackup => policy.logical_backup_policy,
+    SystemFamilyTransferOperationV1::DataExport => policy.data_export_policy,
+    SystemFamilyTransferOperationV1::PeerReplication => policy.peer_replication_policy,
+    SystemFamilyTransferOperationV1::ClusterJoin => policy.cluster_join_policy,
+    SystemFamilyTransferOperationV1::ClientSync => policy.client_sync_policy,
+    SystemFamilyTransferOperationV1::Import => policy.import_policy,
+  }
+}
+
+#[test]
+fn shared_resolver_preserves_structure_and_rejects_unknown_protected_state() {
+  let resolver = SystemFamilyPolicyResolverV1::embedded(HashAlgorithm::Blake3_256).unwrap();
+  assert!(std::ptr::eq(resolver.registry(), embedded_system_family_registry(HashAlgorithm::Blake3_256).unwrap()));
+
+  assert_eq!(
+    resolver.transfer_policy(SystemFamilySubjectV1::Path("/docs/readme.md"), SystemFamilyTransferOperationV1::PeerReplication).unwrap(),
+    SystemFamilyPolicyDecisionV1::Ordinary,
+  );
+  assert_eq!(
+    resolver.transfer_policy(SystemFamilySubjectV1::Path("/.aeordb-system"), SystemFamilyTransferOperationV1::PeerReplication).unwrap(),
+    SystemFamilyPolicyDecisionV1::StructuralContainer,
+  );
+  assert_eq!(
+    resolver
+      .transfer_policy(SystemFamilySubjectV1::Path("/.aeordb-conflicts/item.json"), SystemFamilyTransferOperationV1::PeerReplication)
+      .unwrap(),
+    SystemFamilyPolicyDecisionV1::Known { family_id: 0x001a, policy: TransferPolicyV1::OmitDeclared },
+  );
+  assert_eq!(
+    resolver.index_policy(SystemFamilySubjectV1::Path("/docs/.aeordb-permissions")).unwrap(),
+    SystemFamilyPolicyDecisionV1::Known { family_id: 0x0019, policy: IndexPolicyV1::IncludeUnderOrdinaryScope },
+  );
+
+  let error = resolver
+    .transfer_policy(SystemFamilySubjectV1::Path("/docs/.aeordb-future/value"), SystemFamilyTransferOperationV1::LogicalBackup)
+    .unwrap_err();
+  assert_eq!(error.code(), "unknown_protected_system_family");
 }
 
 fn known_path_policy(registry: &aeordb::engine::v4::system_family::SystemFamilyRegistryV1<'_>, path: &str) -> SystemFamilyPolicyV1 {

@@ -1,7 +1,7 @@
 # Child 03 Progress: Namespace
 
 - **Status:** blocked only by Child 01 native-platform execution
-- **Current landing unit:** P2c-1 registry model and strict-traversal preflight
+- **Current landing unit:** P2c-2 consumer conversion and duplicate-policy removal
 - **Entry commit:** pending native P1c closure; preflight baseline `ff3f95c`
 - **Last green commit:** P2 runtime/recovery closure `e4c8f17`; architecture inventory refresh `ff3f95c`
 - **Owner:** Codex, namespace/semantic authority and integration owner
@@ -35,6 +35,13 @@
 - **Implementation:** added shared `TraversalIntegrity::{Complete, DiagnosticallyPartial, Corrupt}` and `VisitorCompletion::{Exhausted, StoppedByVisitor}` contracts. Best-effort B-tree roots now classify missing, wrong-type, or malformed root authority as corrupt; damage below a valid root merges upward as diagnostically partial; operational I/O, pressure, durability, shutdown, and cancellation errors remain hard `Err` results. Directory traversal now retains flat and B-tree issues in one typed result, and bounded windows report integrity independently from intentional early stop.
 - **Proof:** the focused target passes 5 tests covering a valid tree, missing child, missing root, malformed inline root, malformed flat directory, cycle, and early page completion. Existing strict/best-effort B-tree, B-tree directory, DirectoryOps, and recursive listing targets pass 163 tests unchanged; the complete P2c-adjacent boundary passes 199 tests. Package all-target checking passes with only the historical unused WASM-test macro warning, and the contract gate remains green at 436 fixtures, 95 routes, and 38 documentation pages. The first adjacent command named a nonexistent `recursive_listing_spec`; the corrected registered target is `directory_listing_spec` and passes.
 - **Boundary:** ordinary listing keeps its existing diagnostic best-effort response while no longer destroying flat-corruption evidence in the checked path. Consumer-specific fail-closed conversion for backup, sync, indexing, GC, repair conclusions, and system/plugin enumeration remains the next P2c unit.
+
+## P2c-2 Shared Operation Resolver
+
+- **Red proof:** the focused runtime target failed because no shared resolver, closed transfer-operation selector, or typed ordinary/structural/known operation result existed. Consumers would otherwise have to select raw policy columns independently and repeat unknown-protected handling.
+- **Implementation:** `SystemFamilyPolicyResolverV1` now owns classification through the exact embedded registry and selects complete full, transfer, or index policy without collapsing structural containers into ordinary data. `SystemFamilyTransferOperationV1` closes the seven frozen transfer columns, and `SystemFamilyPolicyDecisionV1` keeps ordinary, structural-container, and known-family decisions distinct. Unknown protected state remains a typed `unknown_protected_system_family` failure.
+- **Proof:** the runtime target passes 6 tests, including every transfer operation over all 46 independent manifest rows. Admission passes 9 tests, persistent formats pass 72, the bounded reader-hardening target passes its 21,364-case corpus, all-target checking is green apart from the historical unused WASM-test macro warning, and the contract gate remains green at 436 fixtures, 95 routes, and 38 documentation pages.
+- **Boundary:** this unit adds the single consumer-facing decision surface but deliberately changes no backup, replication, indexing, authorization, GC, or generic route behavior. Those consumers are converted in the following landing units.
 
 ## P2c Preflight Test Protocol
 

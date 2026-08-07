@@ -146,6 +146,31 @@ policy_enum!(TransferPolicyV1 {
   FailUnknown = 7,
 });
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SystemFamilyTransferOperationV1 {
+  PhysicalCopy,
+  LogicalBackup,
+  DataExport,
+  PeerReplication,
+  ClusterJoin,
+  ClientSync,
+  Import,
+}
+
+impl SystemFamilyTransferOperationV1 {
+  pub const fn name(self) -> &'static str {
+    match self {
+      Self::PhysicalCopy => "physical copy",
+      Self::LogicalBackup => "logical backup",
+      Self::DataExport => "data export",
+      Self::PeerReplication => "peer replication",
+      Self::ClusterJoin => "cluster join",
+      Self::ClientSync => "client sync",
+      Self::Import => "import",
+    }
+  }
+}
+
 policy_enum!(VerifyPolicyV1 {
   StrictIfPresent = 1,
   StrictRequired = 2,
@@ -240,6 +265,18 @@ pub struct SystemFamilyPolicyV1 {
 }
 
 impl SystemFamilyPolicyV1 {
+  pub const fn transfer_policy(self, operation: SystemFamilyTransferOperationV1) -> TransferPolicyV1 {
+    match operation {
+      SystemFamilyTransferOperationV1::PhysicalCopy => self.physical_copy_policy,
+      SystemFamilyTransferOperationV1::LogicalBackup => self.logical_backup_policy,
+      SystemFamilyTransferOperationV1::DataExport => self.data_export_policy,
+      SystemFamilyTransferOperationV1::PeerReplication => self.peer_replication_policy,
+      SystemFamilyTransferOperationV1::ClusterJoin => self.cluster_join_policy,
+      SystemFamilyTransferOperationV1::ClientSync => self.client_sync_policy,
+      SystemFamilyTransferOperationV1::Import => self.import_policy,
+    }
+  }
+
   fn from_bytes(bytes: &[u8]) -> Option<Self> {
     Some(Self {
       semantic_role: SemanticRoleV1::from_u8(*bytes.first()?)?,
@@ -314,6 +351,74 @@ pub enum SystemFamilyClassificationV1 {
   StructuralContainer,
   Known(KnownSystemFamilyV1),
   UnknownProtected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemFamilyPolicyDecisionV1<T> {
+  Ordinary,
+  StructuralContainer,
+  Known { family_id: u16, policy: T },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SystemFamilyPolicyResolverV1 {
+  registry: &'static SystemFamilyRegistryV1<'static>,
+}
+
+impl SystemFamilyPolicyResolverV1 {
+  pub fn embedded(algorithm: HashAlgorithm) -> FormatResult<Self> {
+    Ok(Self { registry: embedded_system_family_registry(algorithm)? })
+  }
+
+  pub const fn registry(self) -> &'static SystemFamilyRegistryV1<'static> {
+    self.registry
+  }
+
+  pub fn classify(self, subject: SystemFamilySubjectV1<'_>) -> FormatResult<SystemFamilyClassificationV1> {
+    classify_system_family(self.registry, subject)
+  }
+
+  pub fn policy(
+    self,
+    subject: SystemFamilySubjectV1<'_>,
+    operation: &'static str,
+  ) -> FormatResult<SystemFamilyPolicyDecisionV1<SystemFamilyPolicyV1>> {
+    let classification = self.classify(subject)?;
+    match require_complete_system_family(classification, operation)? {
+      Some(family) => Ok(SystemFamilyPolicyDecisionV1::Known { family_id: family.family_id, policy: family.policy }),
+      None => match classification {
+        SystemFamilyClassificationV1::Ordinary => Ok(SystemFamilyPolicyDecisionV1::Ordinary),
+        SystemFamilyClassificationV1::StructuralContainer => Ok(SystemFamilyPolicyDecisionV1::StructuralContainer),
+        SystemFamilyClassificationV1::Known(_) | SystemFamilyClassificationV1::UnknownProtected => {
+          unreachable!("complete classification changed within immutable registry")
+        }
+      },
+    }
+  }
+
+  pub fn transfer_policy(
+    self,
+    subject: SystemFamilySubjectV1<'_>,
+    operation: SystemFamilyTransferOperationV1,
+  ) -> FormatResult<SystemFamilyPolicyDecisionV1<TransferPolicyV1>> {
+    Ok(match self.policy(subject, operation.name())? {
+      SystemFamilyPolicyDecisionV1::Ordinary => SystemFamilyPolicyDecisionV1::Ordinary,
+      SystemFamilyPolicyDecisionV1::StructuralContainer => SystemFamilyPolicyDecisionV1::StructuralContainer,
+      SystemFamilyPolicyDecisionV1::Known { family_id, policy } => {
+        SystemFamilyPolicyDecisionV1::Known { family_id, policy: policy.transfer_policy(operation) }
+      }
+    })
+  }
+
+  pub fn index_policy(self, subject: SystemFamilySubjectV1<'_>) -> FormatResult<SystemFamilyPolicyDecisionV1<IndexPolicyV1>> {
+    Ok(match self.policy(subject, "indexing")? {
+      SystemFamilyPolicyDecisionV1::Ordinary => SystemFamilyPolicyDecisionV1::Ordinary,
+      SystemFamilyPolicyDecisionV1::StructuralContainer => SystemFamilyPolicyDecisionV1::StructuralContainer,
+      SystemFamilyPolicyDecisionV1::Known { family_id, policy } => {
+        SystemFamilyPolicyDecisionV1::Known { family_id, policy: policy.index_policy }
+      }
+    })
+  }
 }
 
 impl SystemFamilyClassificationV1 {
