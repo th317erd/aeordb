@@ -516,10 +516,29 @@ fn test_export_memory_pressure_fails_before_creating_output() {
 }
 
 #[test]
-fn test_full_export_rejects_malformed_existing_system_record() {
+fn logical_backup_does_not_read_a_malformed_redacted_secret() {
   let (source, _source_temp) = setup_engine_with_files();
   let key = aeordb::engine::directory_ops::file_path_hash("/.aeordb-system/email-config.json", &source.hash_algo()).unwrap();
   source.store_entry_with_flags(EntryType::FileRecord, &key, b"not-a-file-record", FLAG_SYSTEM).unwrap();
+  let output_temp = tempfile::tempdir().unwrap();
+  let out = output_path(&output_temp);
+
+  export_full(&source, &out, true).unwrap();
+
+  let exported = StorageEngine::open_for_import(&out).unwrap();
+  assert!(DirectoryOps::new(&exported).read_file_buffered("/.aeordb-system/email-config.json").is_err());
+  let report = aeordb::engine::verify::verify_checked(&exported, &out).unwrap();
+  assert!(!report.has_issues(), "redacted-secret export is inconsistent: {report:#?}");
+}
+
+#[test]
+fn logical_backup_rejects_a_malformed_required_system_record() {
+  let context = RequestContext::system();
+  let (source, _source_temp) = setup_engine_with_files();
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&context, "/.aeordb-system/users/user.json", b"required-user", Some("application/json")).unwrap();
+  let user_entry = operations.list_directory("/.aeordb-system/users").unwrap().into_iter().find(|entry| entry.name == "user.json").unwrap();
+  source.store_entry_with_flags(EntryType::FileRecord, &user_entry.hash, b"not-a-file-record", FLAG_SYSTEM).unwrap();
   let output_temp = tempfile::tempdir().unwrap();
   let out = output_path(&output_temp);
 
@@ -762,4 +781,85 @@ fn user_only_full_export_normalizes_a_legacy_btree_head_without_copying_the_syst
   assert!(!exported.has_entry(&system_hash).unwrap(), "excluded system B-tree content leaked into user-only export");
   let report = aeordb::engine::verify::verify_checked(&exported, &output).unwrap();
   assert!(!report.has_issues(), "normalized B-tree export is inconsistent: {report:#?}");
+}
+
+#[test]
+fn logical_backup_applies_registry_policy_to_every_reachable_path() {
+  let context = RequestContext::system();
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let operations = DirectoryOps::new(&source);
+  let included = [
+    ("/docs/readme.txt", b"ordinary".as_slice()),
+    ("/docs/.aeordb-permissions", b"permissions".as_slice()),
+    ("/.aeordb-conflicts/conflict.json", b"conflict".as_slice()),
+    ("/.aeordb-system/users/user.json", b"user".as_slice()),
+    ("/.aeordb-config/lifecycle.json", b"lifecycle".as_slice()),
+  ];
+  let omitted = [
+    ("/docs/.aeordb-indexes/text.idx", b"derived-index".as_slice()),
+    ("/.aeordb-system/api-keys/key.json", b"credential".as_slice()),
+    ("/.aeordb-system/config/signing-key.json", b"secret-config".as_slice()),
+    ("/.aeordb-system/email-config.json", b"email-secret".as_slice()),
+    ("/.aeordb-system/controls/v1/root-lifecycle/a.ctrl", b"node-local-control".as_slice()),
+  ];
+  for (path, body) in included.iter().chain(omitted.iter()) {
+    operations.store_file_buffered(&context, path, body, Some("application/octet-stream")).unwrap();
+  }
+
+  let output_temp = tempfile::tempdir().unwrap();
+  let output = output_path(&output_temp);
+  export_full(&source, &output, true).unwrap();
+  let exported = StorageEngine::open_for_import(&output).unwrap();
+  let exported_operations = DirectoryOps::new(&exported);
+
+  for (path, body) in included {
+    assert_eq!(exported_operations.read_file_buffered(path).unwrap(), body, "logical backup omitted required path {path}");
+  }
+  for (path, _) in omitted {
+    assert!(exported_operations.read_file_buffered(path).is_err(), "logical backup retained forbidden path {path}");
+  }
+  let report = aeordb::engine::verify::verify_checked(&exported, &output).unwrap();
+  assert!(!report.has_issues(), "policy-filtered logical backup is inconsistent: {report:#?}");
+}
+
+#[test]
+fn user_data_export_keeps_permissions_but_omits_protected_and_derived_families() {
+  let context = RequestContext::system();
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&context, "/docs/readme.txt", b"ordinary", Some("text/plain")).unwrap();
+  operations.store_file_buffered(&context, "/docs/.aeordb-permissions", b"permissions", Some("application/json")).unwrap();
+  operations.store_file_buffered(&context, "/docs/.aeordb-indexes/text.idx", b"derived-index", Some("application/octet-stream")).unwrap();
+  operations.store_file_buffered(&context, "/.aeordb-conflicts/conflict.json", b"conflict", Some("application/json")).unwrap();
+
+  let output_temp = tempfile::tempdir().unwrap();
+  let output = output_path(&output_temp);
+  export_version(&source, &source.head_hash().unwrap(), &output, false).unwrap();
+  let exported = StorageEngine::open_for_import(&output).unwrap();
+  let exported_operations = DirectoryOps::new(&exported);
+
+  assert_eq!(exported_operations.read_file_buffered("/docs/readme.txt").unwrap(), b"ordinary");
+  assert_eq!(exported_operations.read_file_buffered("/docs/.aeordb-permissions").unwrap(), b"permissions");
+  assert!(exported_operations.read_file_buffered("/docs/.aeordb-indexes/text.idx").is_err());
+  assert!(exported_operations.read_file_buffered("/.aeordb-conflicts/conflict.json").is_err());
+  let report = aeordb::engine::verify::verify_checked(&exported, &output).unwrap();
+  assert!(!report.has_issues(), "policy-filtered data export is inconsistent: {report:#?}");
+}
+
+#[test]
+fn export_rejects_unknown_protected_directory_before_reading_its_body() {
+  let context = RequestContext::system();
+  let (source, _source_temp) = create_temp_engine_for_tests();
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&context, "/.aeordb-future/value.bin", b"unknown", Some("application/octet-stream")).unwrap();
+  let unknown = operations.list_directory("/").unwrap().into_iter().find(|entry| entry.name == ".aeordb-future").unwrap();
+  source.store_entry(EntryType::DirectoryIndex, &unknown.hash, b"not-a-directory").unwrap();
+  let output_temp = tempfile::tempdir().unwrap();
+  let output = output_path(&output_temp);
+
+  let error = export_version(&source, &source.head_hash().unwrap(), &output, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&output).exists());
+  assert_no_partial_artifacts(&output);
 }

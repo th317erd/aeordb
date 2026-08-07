@@ -539,7 +539,7 @@ fn path_match_score(path: &str, kind: SystemFamilyMatchKindV1, matcher: &[u8]) -
     }
     SystemFamilyMatchKindV1::DescendantReservedSubtree => {
       let segment = decode_segment_matcher(matcher)?;
-      let matched_index = deepest_segment_match(path, segment, |remaining| !remaining.is_empty(), true)?;
+      let matched_index = deepest_segment_match(path, segment, |_| true, true)?;
       matched_index.map(|index| path_specificity(index, matcher.len())).transpose().map(|value| value.map(|specificity| (3, specificity)))
     }
     SystemFamilyMatchKindV1::ReservedPathSegment => {

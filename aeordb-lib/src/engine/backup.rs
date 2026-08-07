@@ -2,15 +2,6 @@ use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::file_record::FileRecord;
 use crate::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
 use crate::engine::directory_ops::{directory_content_hash, directory_path_hash, file_content_hash, file_path_hash, is_system_path};
-
-/// Credential paths are always excluded from backups. Importing credentials
-/// would tie the target's auth state to the source's identity — confusing
-/// at best, security risk at worst. The target uses its own bootstrap key.
-fn is_credential_path(path: &str) -> bool {
-  path.starts_with("/.aeordb-system/api-keys")
-    || path.starts_with("/.aeordb-system/refresh-tokens")
-    || path.starts_with("/.aeordb-system/magic-links")
-}
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
@@ -18,8 +9,13 @@ use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
 use crate::engine::symlink_record::symlink_path_hash;
-use crate::engine::tree_walker::{diff_trees_with_budget, walk_subtree_with_budget, walk_version_tree_with_budget, VersionTree};
+use crate::engine::tree_walker::{
+  diff_trees_with_budget, walk_subtree_filtered_with_budget, walk_version_tree_filtered_with_budget, walk_version_tree_with_budget,
+  VersionTree,
+};
+use crate::engine::v4::system_family::SystemFamilyTransferOperationV1;
 use crate::engine::entry_type::EntryType;
 use crate::engine::version_manager::SnapshotInfo;
 use tokio_util::sync::CancellationToken;
@@ -82,6 +78,100 @@ fn backup_budget(source: &StorageEngine, cancellation: Option<&CancellationToken
   )
 }
 
+fn export_transfer_operation(include_system: bool) -> SystemFamilyTransferOperationV1 {
+  if include_system {
+    SystemFamilyTransferOperationV1::LogicalBackup
+  } else {
+    SystemFamilyTransferOperationV1::DataExport
+  }
+}
+
+/// Add registry-selected state that is deliberately detached from HEAD.
+///
+/// Candidate roots come from the immutable registry rather than a second
+/// protected-path list. Structural ancestors are inspected so exported path
+/// listings remain coherent, while each child is classified before its body is
+/// read by the filtered walker. Direct candidates remain necessary for legacy
+/// databases whose structural parent listing did not retain every system root.
+fn collect_detached_transfer_paths(
+  source: &StorageEngine,
+  tree: &mut VersionTree,
+  resolver: SystemFamilyPolicyResolver,
+  operation: SystemFamilyTransferOperationV1,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<()> {
+  let mut candidates = std::collections::BTreeMap::<String, bool>::new();
+  for candidate in resolver.included_absolute_paths(operation)? {
+    candidates.entry(candidate.path.clone()).and_modify(|is_prefix| *is_prefix |= candidate.is_prefix).or_insert(candidate.is_prefix);
+    let mut ancestor = candidate.path.as_str();
+    while let Some((parent, _)) = ancestor.rsplit_once('/') {
+      if parent.is_empty() {
+        break;
+      }
+      if matches!(resolver.classify_path(parent)?, crate::engine::v4::system_family::SystemFamilyClassificationV1::StructuralContainer) {
+        candidates.entry(parent.to_string()).or_insert(true);
+      }
+      ancestor = parent;
+    }
+  }
+
+  let algorithm = source.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
+  for (path, is_prefix) in candidates {
+    budget.record_work(1)?;
+    if !resolver.transfer_path_is_included(&path, operation)? {
+      continue;
+    }
+
+    if !is_prefix {
+      let file_key = file_path_hash(&path, &algorithm)?;
+      if let Some(((header, _key, raw), loaded_charge)) = load_backup_entry(source, &file_key, budget)? {
+        if header.entry_type != EntryType::FileRecord {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("transfer path '{}' resolved to {:?} instead of FileRecord", path, header.entry_type),
+          });
+        }
+        let record = FileRecord::deserialize(&raw, hash_length, header.entry_version).map_err(|error| EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("transfer FileRecord '{}' is malformed: {error}", path),
+        })?;
+        let content_hash = file_content_hash(&raw, &algorithm)?;
+        let retained_bytes = path
+          .len()
+          .checked_add(content_hash.len())
+          .and_then(|bytes| bytes.checked_add(raw.len()))
+          .ok_or_else(|| EngineError::ResourceExhausted("detached transfer file estimate overflow".to_string()))?;
+        let retained_charge = backup_collection_charge(retained_bytes)?;
+        budget.reserve(retained_charge, "detached transfer file admission failed")?;
+        for chunk_hash in &record.chunk_hashes {
+          if tree.chunks.insert(chunk_hash.clone()) {
+            budget.reserve(backup_collection_charge(chunk_hash.len())?, "detached transfer chunk set admission failed")?;
+          }
+        }
+        tree.files.insert(path.clone(), (content_hash, record));
+        budget.release(loaded_charge, "detached transfer FileRecord buffer release failed")?;
+      }
+    }
+
+    let directory_key = directory_path_hash(&path, &algorithm)?;
+    let Some(((header, _key, raw), loaded_charge)) = load_backup_entry(source, &directory_key, budget)? else {
+      continue;
+    };
+    if header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("transfer directory '{}' resolved to {:?} instead of DirectoryIndex", path, header.entry_type),
+      });
+    }
+    let directory_hash = if raw.len() == hash_length { raw.clone() } else { directory_content_hash(&raw, &algorithm)? };
+    budget.release(loaded_charge, "detached transfer directory path-entry buffer release failed")?;
+    walk_subtree_filtered_with_budget(source, &path, &directory_hash, tree, budget, &mut filter)?;
+  }
+  Ok(())
+}
+
 fn store_file_record_entry_preserving_version(
   engine: &StorageEngine,
   key: &[u8],
@@ -102,12 +192,13 @@ fn store_file_record_entry_preserving_version(
 /// The output database contains only live entries at the given version:
 /// no voids, no deletion records, no stale overwrites, no history.
 /// backup_type = 1 (full export), with base_hash and target_hash set to the
-/// root actually written to the artifact. A user-only export of a historical
-/// root that still names protected system children is normalized, so its
-/// returned root can differ from the requested source hash.
+/// root actually written to the artifact. When operation policy omits any
+/// reachable child, parent directory closure is rebuilt and the returned root
+/// differs from the requested source hash.
 ///
-/// If `include_system` is true, all `/.aeordb-system/` entries (users,
-/// groups, API keys, etc.) are included. Otherwise they are filtered out.
+/// If `include_system` is true, registry-selected logical-backup families are
+/// included. Credentials, secrets, node-local controls, logs, and derived
+/// indexes remain omitted. Otherwise the data-export policy is applied.
 pub fn export_version(source: &StorageEngine, version_hash: &[u8], output_path: &str, include_system: bool) -> EngineResult<ExportResult> {
   export_version_controlled(source, version_hash, output_path, include_system, None)
 }
@@ -142,10 +233,16 @@ fn export_version_with_budget(
 ) -> EngineResult<ExportResult> {
   export_atomic(output_path, |part_path| {
     budget.check_cancellation()?;
-    let tree = walk_version_tree_with_budget(source, version_hash, budget)?;
+    let operation = export_transfer_operation(include_system);
+    let resolver = SystemFamilyPolicyResolver::new(source.hash_algo())?;
+    let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
+    let mut tree = walk_version_tree_filtered_with_budget(source, version_hash, budget, &mut filter)?;
+    if include_system {
+      collect_detached_transfer_paths(source, &mut tree, resolver, operation, budget)?;
+    }
     budget.check_cancellation()?;
     let output = StorageEngine::create_with_memory_coordinator(part_path, source.memory_coordinator())?;
-    let stats = write_tree_to_engine(&tree, source, &output, include_system, budget)?;
+    let stats = write_tree_to_engine(&tree, source, &output, resolver, operation, budget)?;
     budget.check_cancellation()?;
     output.set_backup_info(1, &stats.root_hash, &stats.root_hash)?;
     output.update_head(&stats.root_hash)?;
@@ -261,9 +358,10 @@ where
 /// and all reachable entries are written. Snapshot records themselves are
 /// included so the imported database has the same snapshot history.
 ///
-/// `include_system` controls whether `/.aeordb-system/` entries (users, groups,
-/// API keys) are included. Callers should validate root key authority before
-/// passing `include_system = true`.
+/// `include_system` selects registry-governed logical-backup behavior,
+/// including required portable system families and all named snapshots while
+/// omitting credentials, secrets, node-local controls, logs, and derived
+/// indexes. Callers must validate root-key authority before passing true.
 pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bool) -> EngineResult<ExportResult> {
   let mut budget = backup_budget(source, None)?;
   export_atomic(output_path, |part_path| {
@@ -277,11 +375,17 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
     let mut total_dirs = 0u64;
 
     let mut walked: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let operation = export_transfer_operation(include_system);
+    let resolver = SystemFamilyPolicyResolver::new(source.hash_algo())?;
 
     let head_checkpoint = budget.checkpoint();
     let stats = {
-      let head_tree = walk_version_tree_with_budget(source, &head_hash, &mut budget)?;
-      write_tree_to_engine(&head_tree, source, &output, include_system, &mut budget)?
+      let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
+      let mut head_tree = walk_version_tree_filtered_with_budget(source, &head_hash, &mut budget, &mut filter)?;
+      if include_system {
+        collect_detached_transfer_paths(source, &mut head_tree, resolver, operation, &mut budget)?;
+      }
+      write_tree_to_engine(&head_tree, source, &output, resolver, operation, &mut budget)?
     };
     budget.release_to(head_checkpoint, "HEAD tree release failed")?;
     total_chunks += stats.chunks_written;
@@ -301,8 +405,9 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
       budget.reserve(KV_INVENTORY_ENTRY_BYTES, "walked-version set admission failed")?;
       let tree_checkpoint = budget.checkpoint();
       let stats = {
-        let tree = walk_version_tree_with_budget(source, &snap.root_hash, &mut budget)?;
-        write_tree_to_engine(&tree, source, &output, include_system, &mut budget)?
+        let mut filter = |path: &str| resolver.transfer_path_is_included(path, operation);
+        let tree = walk_version_tree_filtered_with_budget(source, &snap.root_hash, &mut budget, &mut filter)?;
+        write_tree_to_engine(&tree, source, &output, resolver, operation, &mut budget)?
       };
       budget.release_to(tree_checkpoint, "snapshot tree release failed")?;
       total_chunks += stats.chunks_written;
@@ -312,11 +417,6 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
     }
 
     if include_system {
-      let system_checkpoint = budget.checkpoint();
-      let system_stats = export_system_subtree(source, &output, &mut budget)?;
-      total_files += system_stats.0;
-      total_dirs += system_stats.1;
-      budget.release_to(system_checkpoint, "system tree release failed")?;
       copy_snapshot_entries(source, &output, &mut budget)?;
     }
 
@@ -336,45 +436,39 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
 /// Write all entries from a VersionTree into an output engine.
 /// Returns exact write counts and the root identity published by the export.
 ///
-/// SECURITY: All entries under /.aeordb-system/ are filtered out. Exports must
-/// contain only user data, never system internals (JWT keys, API key
-/// hashes, refresh tokens, user records).
+/// The tree has already been classified by the operation-specific registry
+/// policy. Directory indexes are rebuilt as needed so omitted descendants do
+/// not remain reachable through copied parent metadata.
 fn write_tree_to_engine(
   tree: &VersionTree,
   source: &StorageEngine,
   output: &StorageEngine,
-  include_system: bool,
+  resolver: SystemFamilyPolicyResolver,
+  operation: SystemFamilyTransferOperationV1,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<TreeWriteResult> {
   let mut chunks_written = 0u64;
   let mut files_written = 0u64;
-  let mut dirs_written = 0u64;
-  let mut root_hash = None;
 
   // Walk file-owned hashes directly. The destination KV de-duplicates shared
   // chunks, avoiding a second unbounded in-memory set alongside VersionTree.
-  for (path, (_file_hash, record)) in &tree.files {
+  for (_path, (_file_hash, record)) in &tree.files {
     budget.record_work(1)?;
-    if is_credential_path(path) {
-      continue;
-    }
-    if include_system || !is_system_path(path) {
-      for chunk_hash in &record.chunk_hashes {
-        budget.record_work(1)?;
-        if output.has_entry(chunk_hash)? {
-          continue;
-        }
-        let ((header, key, value), charge) = required_backup_entry(source, chunk_hash, "chunk", budget)?;
-        if header.entry_type != EntryType::Chunk {
-          return Err(EngineError::CorruptEntry {
-            offset: 0,
-            reason: format!("backup chunk {} resolved to {:?}", hex::encode(chunk_hash), header.entry_type),
-          });
-        }
-        output.store_entry(EntryType::Chunk, &key, &value)?;
-        budget.release(charge, "chunk copy buffer release failed")?;
-        chunks_written += 1;
+    for chunk_hash in &record.chunk_hashes {
+      budget.record_work(1)?;
+      if output.has_entry(chunk_hash)? {
+        continue;
       }
+      let ((header, key, value), charge) = required_backup_entry(source, chunk_hash, "chunk", budget)?;
+      if header.entry_type != EntryType::Chunk {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("backup chunk {} resolved to {:?}", hex::encode(chunk_hash), header.entry_type),
+        });
+      }
+      output.store_entry(EntryType::Chunk, &key, &value)?;
+      budget.release(charge, "chunk copy buffer release failed")?;
+      chunks_written += 1;
     }
   }
 
@@ -384,108 +478,30 @@ fn write_tree_to_engine(
   let file_algo = output.hash_algo();
   for (path, (file_hash, _record)) in &tree.files {
     budget.record_work(1)?;
-    if is_credential_path(path) {
-      continue;
-    }
-    if !include_system && is_system_path(path) {
-      continue;
-    }
     {
       let ((header, key, value), charge) = required_backup_entry(source, file_hash, "FileRecord", budget)?;
       if header.entry_type != EntryType::FileRecord {
         return Err(EngineError::CorruptEntry { offset: 0, reason: format!("backup file '{}' resolved to {:?}", path, header.entry_type) });
       }
       if !output.has_entry(&key)? {
-        if is_system_path(path) {
-          // System entries need the FLAG_SYSTEM bit set
-          store_file_record_entry_preserving_version(
-            &output,
-            &key,
-            &value,
-            crate::engine::entry_header::FLAG_SYSTEM,
-            header.entry_version,
-          )?;
-        } else {
-          store_file_record_entry_preserving_version(&output, &key, &value, 0, header.entry_version)?;
-        }
+        store_file_record_entry_preserving_version(&output, &key, &value, header.flags, header.entry_version)?;
       }
       // Also write at path-hash key (for read_file lookups)
       let path_key = file_path_hash(path, &file_algo)?;
       if path_key != key && !output.has_entry(&path_key)? {
-        if is_system_path(path) {
-          store_file_record_entry_preserving_version(
-            &output,
-            &path_key,
-            &value,
-            crate::engine::entry_header::FLAG_SYSTEM,
-            header.entry_version,
-          )?;
-        } else {
-          store_file_record_entry_preserving_version(&output, &path_key, &value, 0, header.entry_version)?;
-        }
+        store_file_record_entry_preserving_version(&output, &path_key, &value, header.flags, header.entry_version)?;
       }
       files_written += 1;
       budget.release(charge, "FileRecord copy buffer release failed")?;
     }
   }
 
-  // Write DirectoryIndexes at both content-hash and path-hash keys.
-  let algo = output.hash_algo();
-  for (path, (dir_hash, _data)) in &tree.directories {
-    budget.record_work(1)?;
-    if is_credential_path(path) {
-      continue;
-    }
-    if !include_system && is_system_path(path) {
-      continue;
-    }
-    {
-      let ((header, key, value), charge) = required_backup_entry(source, dir_hash, "DirectoryIndex", budget)?;
-      if header.entry_type != EntryType::DirectoryIndex {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: format!("backup directory '{}' resolved to {:?}", path, header.entry_type),
-        });
-      }
-      let flags = if is_system_path(path) { crate::engine::entry_header::FLAG_SYSTEM } else { 0 };
-      let path_key = directory_path_hash(path, &algo)?;
-      let normalized = if path == "/" && !include_system {
-        normalize_user_export_root(tree, source, &value, header.entry_version, output, budget)?
-      } else {
-        None
-      };
-      let exported_hash = if let Some(normalized_hash) = normalized {
-        normalized_hash
-      } else {
-        if !output.has_entry(&key)? {
-          store_directory_entry_preserving_version(output, &key, &value, flags, header.entry_version)?;
-        }
-        if path_key != key && !output.has_entry(&path_key)? {
-          store_directory_entry_preserving_version(output, &path_key, &value, flags, header.entry_version)?;
-        }
-        if crate::engine::btree::is_btree_format(&value) {
-          copy_reachable_btree_nodes(&value, header.entry_version, source, output, budget, flags)?;
-        }
-        key
-      };
-      if path == "/" {
-        root_hash = Some(exported_hash);
-      }
-      dirs_written += 1;
-      budget.release(charge, "DirectoryIndex copy buffer release failed")?;
-    }
-  }
+  let (dirs_written, root_hash) = write_transfer_directories(tree, source, output, resolver, operation, budget)?;
 
   // Write symlink entries at both content-hash and path-hash keys.
   let symlink_algo = output.hash_algo();
   for (path, (symlink_hash, _record)) in &tree.symlinks {
     budget.record_work(1)?;
-    if is_credential_path(path) {
-      continue;
-    }
-    if !include_system && is_system_path(path) {
-      continue;
-    }
     {
       let ((header, key, value), charge) = required_backup_entry(source, symlink_hash, "Symlink", budget)?;
       if header.entry_type != EntryType::Symlink {
@@ -495,19 +511,248 @@ fn write_tree_to_engine(
         });
       }
       if !output.has_entry(&key)? {
-        output.store_entry(EntryType::Symlink, &key, &value)?;
+        output.store_entry_with_flags_and_version(EntryType::Symlink, &key, &value, header.flags, header.entry_version)?;
       }
       let path_key = symlink_path_hash(path, &symlink_algo)?;
       if path_key != key && !output.has_entry(&path_key)? {
-        output.store_entry(EntryType::Symlink, &path_key, &value)?;
+        output.store_entry_with_flags_and_version(EntryType::Symlink, &path_key, &value, header.flags, header.entry_version)?;
       }
       budget.release(charge, "Symlink copy buffer release failed")?;
     }
   }
 
-  let root_hash = root_hash
-    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "backup version tree does not contain a root directory".to_string() })?;
   Ok(TreeWriteResult { chunks_written, files_written, directories_written: dirs_written, root_hash })
+}
+
+fn write_transfer_directories(
+  tree: &VersionTree,
+  source: &StorageEngine,
+  output: &StorageEngine,
+  resolver: SystemFamilyPolicyResolver,
+  operation: SystemFamilyTransferOperationV1,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<(u64, Vec<u8>)> {
+  let algorithm = output.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let mut paths = tree.directories.keys().collect::<Vec<_>>();
+  paths.sort_by(|left, right| path_depth(right).cmp(&path_depth(left)).then_with(|| left.cmp(right)));
+  let mut written_hashes = std::collections::HashMap::<String, Vec<u8>>::new();
+  let mut directories_written = 0u64;
+
+  for path in paths {
+    budget.record_work(1)?;
+    let checkpoint = budget.checkpoint();
+    let result = (|| {
+      let (source_hash, _) = tree.directories.get(path).expect("directory path came from the same immutable map");
+      let ((header, source_key, source_value), loaded_charge) = required_backup_entry(source, source_hash, "DirectoryIndex", budget)?;
+      if header.entry_type != EntryType::DirectoryIndex {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("backup directory '{}' resolved to {:?}", path, header.entry_type),
+        });
+      }
+
+      let source_is_btree = crate::engine::btree::is_btree_format(&source_value);
+      let mut children = if source_value.is_empty() {
+        Vec::new()
+      } else if source_is_btree {
+        collect_transfer_btree_entries(tree, source, &source_value, header.entry_version, hash_length, budget)?
+      } else {
+        let parse_charge = scaled_backup_charge(source_value.len(), 4, "flat transfer directory parse estimate overflow")?;
+        budget.reserve(parse_charge, "flat transfer directory parse admission failed")?;
+        deserialize_child_entries(&source_value, hash_length, header.entry_version)?
+      };
+      let original_len = children.len();
+      let mut child_hash_changed = false;
+      let mut retained = Vec::with_capacity(children.len());
+      for mut child in children.drain(..) {
+        let child_path = join_transfer_path(path, &child.name);
+        let keep = match EntryType::from_u8(child.entry_type)? {
+          EntryType::DirectoryIndex => match written_hashes.get(&child_path) {
+            Some(written_hash) => {
+              if child.hash != *written_hash {
+                child.hash = written_hash.clone();
+                child_hash_changed = true;
+              }
+              true
+            }
+            None => false,
+          },
+          EntryType::FileRecord => tree.files.contains_key(&child_path),
+          EntryType::Symlink => tree.symlinks.contains_key(&child_path),
+          other => {
+            return Err(EngineError::CorruptEntry {
+              offset: 0,
+              reason: format!("directory '{}' contains unsupported namespace child '{}' of type {:?}", path, child.name, other),
+            });
+          }
+        };
+        if keep {
+          retained.push(child);
+        }
+      }
+      let changed = child_hash_changed || retained.len() != original_len;
+      if path != "/"
+        && retained.is_empty()
+        && matches!(
+          resolver.transfer_policy_for_path(path, operation)?,
+          crate::engine::v4::system_family::SystemFamilyPolicyDecisionV1::StructuralContainer
+        )
+      {
+        budget.release(loaded_charge, "empty structural transfer directory buffer release failed")?;
+        return Ok(());
+      }
+      let flags = header.flags;
+      let exported_hash = if !changed {
+        if !output.has_entry(&source_key)? {
+          store_directory_entry_preserving_version(output, &source_key, &source_value, flags, header.entry_version)?;
+        }
+        if source_is_btree {
+          copy_reachable_btree_nodes(&source_value, header.entry_version, source, output, budget, flags)?;
+        }
+        source_key
+      } else if source_is_btree {
+        let rebuilt_hash = crate::engine::btree::btree_from_entries(output, retained, hash_length, &algorithm)?;
+        let rebuilt_header = output
+          .get_entry_header_including_deleted(&rebuilt_hash)?
+          .ok_or_else(|| EngineError::NotFound(format!("rebuilt transfer directory {} was not stored", hex::encode(&rebuilt_hash))))?;
+        budget.reserve(
+          u64::from(rebuilt_header.value_length)
+            .checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES)
+            .ok_or_else(|| EngineError::ResourceExhausted("rebuilt transfer directory read estimate overflow".to_string()))?,
+          "rebuilt transfer directory read admission failed",
+        )?;
+        let (_, _, rebuilt_value) = output
+          .get_entry_including_deleted_bounded(&rebuilt_hash, rebuilt_header.value_length)?
+          .ok_or_else(|| EngineError::NotFound(format!("rebuilt transfer directory {} disappeared", hex::encode(&rebuilt_hash))))?;
+        store_directory_entry_preserving_version(output, &rebuilt_hash, &rebuilt_value, flags, rebuilt_header.entry_version)?;
+        rebuilt_hash
+      } else {
+        let rebuilt_value = serialize_child_entries(&retained, hash_length)?;
+        let rebuilt_hash = directory_content_hash(&rebuilt_value, &algorithm)?;
+        store_directory_entry_preserving_version(output, &rebuilt_hash, &rebuilt_value, flags, 0)?;
+        rebuilt_hash
+      };
+
+      let path_key = directory_path_hash(path, &algorithm)?;
+      if path_key != exported_hash && !output.has_entry(&path_key)? {
+        let exported_header = output
+          .get_entry_header_including_deleted(&exported_hash)?
+          .ok_or_else(|| EngineError::NotFound(format!("exported directory {} was not stored", hex::encode(&exported_hash))))?;
+        budget.reserve(
+          u64::from(exported_header.value_length)
+            .checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES)
+            .ok_or_else(|| EngineError::ResourceExhausted("exported directory read estimate overflow".to_string()))?,
+          "exported directory read admission failed",
+        )?;
+        let (_, _, exported_value) = output
+          .get_entry_including_deleted_bounded(&exported_hash, exported_header.value_length)?
+          .ok_or_else(|| EngineError::NotFound(format!("exported directory {} disappeared", hex::encode(&exported_hash))))?;
+        store_directory_entry_preserving_version(output, &path_key, &exported_value, flags, exported_header.entry_version)?;
+      }
+      written_hashes.insert(path.clone(), exported_hash);
+      directories_written += 1;
+      budget.release(loaded_charge, "DirectoryIndex copy buffer release failed")?;
+      Ok(())
+    })();
+    let release_result = budget.release_to(checkpoint, "transfer directory workspace release failed");
+    match result {
+      Ok(()) => release_result?,
+      Err(error) => {
+        let _ = release_result;
+        return Err(error);
+      }
+    }
+  }
+
+  let root_hash = written_hashes
+    .remove("/")
+    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "backup version tree does not contain a root directory".to_string() })?;
+  Ok((directories_written, root_hash))
+}
+
+fn collect_transfer_btree_entries(
+  tree: &VersionTree,
+  source: &StorageEngine,
+  root_data: &[u8],
+  root_entry_version: u8,
+  hash_length: usize,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<Vec<ChildEntry>> {
+  let mut entries = Vec::new();
+  let mut frontier = Vec::<(Vec<u8>, u64)>::new();
+  let mut visited = std::collections::HashSet::<Vec<u8>>::new();
+  collect_transfer_btree_node(root_data, root_entry_version, hash_length, budget, &mut frontier, &mut entries)?;
+  while let Some((node_hash, frontier_charge)) = frontier.pop() {
+    budget.release(frontier_charge, "transfer B-tree frontier release failed")?;
+    if !visited.insert(node_hash.clone()) {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("duplicate or cyclic B-tree node {} while rebuilding transfer directory", hex::encode(node_hash)),
+      });
+    }
+    budget.reserve(backup_collection_charge(node_hash.len())?, "transfer B-tree visited-set admission failed")?;
+    let node_data = tree.btree_nodes.get(&node_hash).ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("missing retained B-tree node {} while rebuilding transfer directory", hex::encode(&node_hash)),
+    })?;
+    let node_header = source.get_entry_header_including_deleted(&node_hash)?.ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("missing B-tree node header {} while rebuilding transfer directory", hex::encode(&node_hash)),
+    })?;
+    if node_header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!(
+          "B-tree node {} resolved to {:?} while rebuilding transfer directory",
+          hex::encode(&node_hash),
+          node_header.entry_type
+        ),
+      });
+    }
+    collect_transfer_btree_node(node_data, node_header.entry_version, hash_length, budget, &mut frontier, &mut entries)?;
+  }
+  Ok(entries)
+}
+
+fn collect_transfer_btree_node(
+  node_data: &[u8],
+  entry_version: u8,
+  hash_length: usize,
+  budget: &mut OperationMemoryBudget,
+  frontier: &mut Vec<(Vec<u8>, u64)>,
+  entries: &mut Vec<ChildEntry>,
+) -> EngineResult<()> {
+  let parse_charge = scaled_backup_charge(node_data.len(), 4, "transfer B-tree parse estimate overflow")?;
+  budget.reserve(parse_charge, "transfer B-tree parse admission failed")?;
+  match crate::engine::btree::BTreeNode::deserialize(node_data, hash_length, entry_version)? {
+    crate::engine::btree::BTreeNode::Leaf(leaf) => {
+      for entry in leaf.entries {
+        budget.reserve(child_entry_charge(&entry)?, "transfer B-tree child retention admission failed")?;
+        entries.push(entry);
+      }
+    }
+    crate::engine::btree::BTreeNode::Internal(internal) => {
+      for child_hash in internal.children.into_iter().rev() {
+        let charge = backup_collection_charge(child_hash.len())?;
+        budget.reserve(charge, "transfer B-tree frontier admission failed")?;
+        frontier.push((child_hash, charge));
+      }
+    }
+  }
+  budget.release(parse_charge, "transfer B-tree parse release failed")
+}
+
+fn path_depth(path: &str) -> usize {
+  path.split('/').filter(|segment| !segment.is_empty()).count()
+}
+
+fn join_transfer_path(parent: &str, child: &str) -> String {
+  if parent == "/" {
+    format!("/{child}")
+  } else {
+    format!("{parent}/{child}")
+  }
 }
 
 fn store_directory_entry_preserving_version(
@@ -525,183 +770,6 @@ fn store_directory_entry_preserving_version(
   Ok(())
 }
 
-fn normalize_user_export_root(
-  tree: &VersionTree,
-  source: &StorageEngine,
-  root_data: &[u8],
-  entry_version: u8,
-  output: &StorageEngine,
-  budget: &mut OperationMemoryBudget,
-) -> EngineResult<Option<Vec<u8>>> {
-  if root_data.is_empty() {
-    return Ok(None);
-  }
-
-  let checkpoint = budget.checkpoint();
-  let result = (|| {
-    let hash_length = output.hash_algo().hash_length();
-    let (entries, removed_system_child) = if crate::engine::btree::is_btree_format(root_data) {
-      collect_user_root_btree_entries(tree, source, root_data, entry_version, hash_length, budget)?
-    } else {
-      let parse_charge = scaled_backup_charge(root_data.len(), 4, "flat root normalization estimate overflow")?;
-      budget.reserve(parse_charge, "flat root normalization admission failed")?;
-      let mut entries = deserialize_child_entries(root_data, hash_length, entry_version)?;
-      let original_len = entries.len();
-      entries.retain(|entry| !is_protected_root_child(entry));
-      let removed_system_child = original_len != entries.len();
-      (entries, removed_system_child)
-    };
-
-    if !removed_system_child {
-      return Ok(None);
-    }
-
-    let serialized_bytes = serialized_child_entries_len(&entries, hash_length)?;
-    let build_charge = scaled_backup_charge(serialized_bytes, 3, "root normalization build estimate overflow")?;
-    budget.reserve(build_charge, "root normalization build admission failed")?;
-
-    let normalized_hash = if crate::engine::btree::is_btree_format(root_data) {
-      crate::engine::btree::btree_from_entries(output, entries, hash_length, &output.hash_algo())?
-    } else {
-      let normalized_data = serialize_child_entries(&entries, hash_length)?;
-      let normalized_hash = directory_content_hash(&normalized_data, &output.hash_algo())?;
-      store_directory_entry_preserving_version(output, &normalized_hash, &normalized_data, 0, 0)?;
-      normalized_hash
-    };
-
-    let root_header = output
-      .get_entry_header_including_deleted(&normalized_hash)?
-      .ok_or_else(|| EngineError::NotFound(format!("normalized root {} was not stored", hex::encode(&normalized_hash))))?;
-    let root_charge = u64::from(root_header.value_length)
-      .checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES)
-      .ok_or_else(|| EngineError::ResourceExhausted("normalized root read estimate overflow".to_string()))?;
-    budget.reserve(root_charge, "normalized root read admission failed")?;
-    let (_, _, normalized_data) = output
-      .get_entry_including_deleted_bounded(&normalized_hash, root_header.value_length)?
-      .ok_or_else(|| EngineError::NotFound(format!("normalized root {} disappeared", hex::encode(&normalized_hash))))?;
-    let root_path_key = directory_path_hash("/", &output.hash_algo())?;
-    if root_path_key != normalized_hash {
-      store_directory_entry_preserving_version(output, &root_path_key, &normalized_data, 0, root_header.entry_version)?;
-    }
-    Ok(Some(normalized_hash))
-  })();
-  let release_result = budget.release_to(checkpoint, "root normalization release failed");
-  match result {
-    Ok(result) => {
-      release_result?;
-      Ok(result)
-    }
-    Err(error) => {
-      let _ = release_result;
-      Err(error)
-    }
-  }
-}
-
-fn collect_user_root_btree_entries(
-  tree: &VersionTree,
-  source: &StorageEngine,
-  root_data: &[u8],
-  entry_version: u8,
-  hash_length: usize,
-  budget: &mut OperationMemoryBudget,
-) -> EngineResult<(Vec<ChildEntry>, bool)> {
-  let mut entries = Vec::new();
-  let mut removed_system_child = false;
-  let mut frontier = Vec::<(Vec<u8>, u64)>::new();
-  let mut visited = std::collections::HashSet::<Vec<u8>>::new();
-  let mut visited_charge = 0u64;
-
-  collect_user_root_btree_node(root_data, entry_version, hash_length, budget, &mut frontier, &mut entries, &mut removed_system_child)?;
-  while let Some((node_hash, frontier_charge)) = frontier.pop() {
-    budget.release(frontier_charge, "root B-tree frontier release failed")?;
-    let seen_charge = backup_collection_charge(node_hash.len())?;
-    budget.reserve(seen_charge, "root B-tree visited-set admission failed")?;
-    visited_charge = visited_charge
-      .checked_add(seen_charge)
-      .ok_or_else(|| EngineError::ResourceExhausted("root B-tree visited-set estimate overflow".to_string()))?;
-    if !visited.insert(node_hash.clone()) {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("duplicate or cyclic B-tree node {} while normalizing export root", hex::encode(node_hash)),
-      });
-    }
-    let node_data = tree.btree_nodes.get(&node_hash).ok_or_else(|| EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("missing retained B-tree node {} while normalizing export root", hex::encode(&node_hash)),
-    })?;
-    let node_header = source.get_entry_header_including_deleted(&node_hash)?.ok_or_else(|| EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("missing B-tree node header {} while normalizing export root", hex::encode(&node_hash)),
-    })?;
-    if node_header.entry_type != EntryType::DirectoryIndex {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("B-tree node {} resolved to {:?} while normalizing export root", hex::encode(&node_hash), node_header.entry_type),
-      });
-    }
-    collect_user_root_btree_node(
-      node_data,
-      node_header.entry_version,
-      hash_length,
-      budget,
-      &mut frontier,
-      &mut entries,
-      &mut removed_system_child,
-    )?;
-  }
-  budget.release(visited_charge, "root B-tree visited-set release failed")?;
-  Ok((entries, removed_system_child))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_user_root_btree_node(
-  node_data: &[u8],
-  entry_version: u8,
-  hash_length: usize,
-  budget: &mut OperationMemoryBudget,
-  frontier: &mut Vec<(Vec<u8>, u64)>,
-  entries: &mut Vec<ChildEntry>,
-  removed_system_child: &mut bool,
-) -> EngineResult<()> {
-  let parse_charge = scaled_backup_charge(node_data.len(), 4, "root B-tree parse estimate overflow")?;
-  budget.reserve(parse_charge, "root B-tree parse admission failed")?;
-  let result = (|| {
-    match crate::engine::btree::BTreeNode::deserialize(node_data, hash_length, entry_version)? {
-      crate::engine::btree::BTreeNode::Leaf(leaf) => {
-        for entry in leaf.entries {
-          if is_protected_root_child(&entry) {
-            *removed_system_child = true;
-            continue;
-          }
-          budget.reserve(child_entry_charge(&entry)?, "root child retention admission failed")?;
-          entries.push(entry);
-        }
-      }
-      crate::engine::btree::BTreeNode::Internal(internal) => {
-        for child_hash in internal.children.into_iter().rev() {
-          let charge = backup_collection_charge(child_hash.len())?;
-          budget.reserve(charge, "root B-tree frontier admission failed")?;
-          frontier.push((child_hash, charge));
-        }
-      }
-    }
-    Ok(())
-  })();
-  let release_result = budget.release(parse_charge, "root B-tree parse release failed");
-  match result {
-    Ok(()) => release_result,
-    Err(error) => {
-      let _ = release_result;
-      Err(error)
-    }
-  }
-}
-
-fn is_protected_root_child(entry: &ChildEntry) -> bool {
-  is_system_path(&format!("/{}", entry.name))
-}
-
 fn child_entry_charge(entry: &ChildEntry) -> EngineResult<u64> {
   let content_type_len = entry.content_type.as_ref().map_or(0, String::len);
   entry
@@ -712,18 +780,6 @@ fn child_entry_charge(entry: &ChildEntry) -> EngineResult<u64> {
     .and_then(|bytes| bytes.checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES as usize))
     .and_then(|bytes| u64::try_from(bytes).ok())
     .ok_or_else(|| EngineError::ResourceExhausted("root child retention estimate overflow".to_string()))
-}
-
-fn serialized_child_entries_len(entries: &[ChildEntry], hash_length: usize) -> EngineResult<usize> {
-  entries.iter().try_fold(0usize, |total, entry| {
-    let content_type_len = entry.content_type.as_ref().map_or(0, String::len);
-    45usize
-      .checked_add(hash_length)
-      .and_then(|bytes| bytes.checked_add(entry.name.len()))
-      .and_then(|bytes| bytes.checked_add(content_type_len))
-      .and_then(|bytes| total.checked_add(bytes))
-      .ok_or_else(|| EngineError::ResourceExhausted("serialized root estimate overflow".to_string()))
-  })
 }
 
 fn scaled_backup_charge(bytes: usize, multiplier: u64, context: &'static str) -> EngineResult<u64> {
@@ -801,240 +857,6 @@ fn enqueue_btree_children(
       Err(error)
     }
   }
-}
-
-/// Walk the /.aeordb-system/ subtree(s) and copy all entries.
-///
-/// System paths are not propagated to root, so the regular HEAD walker
-/// can't reach them. Furthermore, individual system subdirectories
-/// (/.aeordb-system/users/, /groups/, etc.) may be orphaned from the
-/// /.aeordb-system/ children list itself — they exist as path-hash
-/// entries but aren't linked. We walk each known system subdirectory
-/// individually to ensure we capture everything.
-///
-/// Returns (file_records_copied, directories_copied).
-fn export_system_subtree(source: &StorageEngine, output: &StorageEngine, budget: &mut OperationMemoryBudget) -> EngineResult<(u64, u64)> {
-  let algo = source.hash_algo();
-  let hash_length = algo.hash_length();
-
-  // List of system subdirectories to include in the backup.
-  // CREDENTIALS (api-keys, refresh-tokens, magic-links) are always excluded —
-  // they're tied to the database identity that issued them. After a restore,
-  // the target's own bootstrap key is the new identity, and api keys are
-  // regenerated per user. Importing credentials would create confusion
-  // (which key is valid? which database authorized this token?) and
-  // doesn't match the encryption model where the root key is the
-  // master key for the database that owns it.
-  //
-  // We also exclude /.aeordb-system itself — the target's own writes
-  // will reconstruct that directory listing as users/groups/etc. land.
-  // Otherwise we'd inherit a listing that references credential subdirs
-  // we deliberately skipped.
-  let system_paths = [
-    "/.aeordb-system/users",
-    "/.aeordb-system/groups",
-    "/.aeordb-system/snapshots",
-    "/.aeordb-system/config",
-    // /.aeordb-config holds cron schedules, webhook configs, parser
-    // registry, per-directory indexes.json, and other non-credential
-    // operational state. Restore must include these — otherwise a
-    // restored cluster has no scheduled jobs, no webhooks, no parsers.
-    "/.aeordb-config",
-  ];
-
-  // Single files under /.aeordb-system/ (not in a subdirectory). These
-  // are individually enumerated because walk_subtree only visits children
-  // of a directory; bare files under /.aeordb-system would otherwise be
-  // skipped.
-  let system_single_files: &[&str] = &["/.aeordb-system/email-config.json"];
-
-  let mut sys_tree = crate::engine::tree_walker::VersionTree::new();
-
-  for sys_path in &system_paths {
-    budget.record_work(1)?;
-    let sys_dir_key = directory_path_hash(sys_path, &algo)?;
-    let (raw_value, path_charge) = match load_backup_entry(source, &sys_dir_key, budget)? {
-      Some(((_header, _key, value), charge)) => (value, charge),
-      None => continue, // subdirectory doesn't exist in this source
-    };
-
-    // Resolve hard link if present
-    let sys_dir_hash = if raw_value.len() == hash_length {
-      raw_value
-    } else {
-      // Inline data — compute content hash to walk it
-      algo.compute_hash(&raw_value)?
-    };
-    budget.release(path_charge, "system directory path-entry buffer release failed")?;
-
-    // Also record the path-hash → content-hash mapping in the tree
-    budget.reserve((sys_path.len() + sys_dir_hash.len() + 128) as u64, "system directory tree admission failed")?;
-    sys_tree.directories.insert(sys_path.to_string(), (sys_dir_hash.clone(), Vec::new()));
-
-    walk_subtree_with_budget(source, sys_path, &sys_dir_hash, &mut sys_tree, budget)?;
-  }
-
-  // Single files under /.aeordb-system/. Each is keyed by path-hash;
-  // resolve to a FileRecord and add it to the tree. The content hash for
-  // the tree key is recomputed from the serialized FileRecord — that's
-  // what the chunk-domain entries use elsewhere in the engine.
-  for file_path in system_single_files {
-    budget.record_work(1)?;
-    let key = crate::engine::directory_ops::file_path_hash(file_path, &algo)?;
-    let (record, content_hash) = match load_backup_entry(source, &key, budget)? {
-      Some(((header, _key, raw), _charge)) => {
-        if header.entry_type != EntryType::FileRecord {
-          return Err(EngineError::CorruptEntry {
-            offset: 0,
-            reason: format!("system file '{}' resolved to {:?} instead of FileRecord", file_path, header.entry_type),
-          });
-        }
-        let record = FileRecord::deserialize(&raw, hash_length, header.entry_version).map_err(|error| EngineError::CorruptEntry {
-          offset: 0,
-          reason: format!("system FileRecord '{}' is malformed: {}", file_path, error),
-        })?;
-        let h = file_content_hash(&raw, &algo)?;
-        (record, h)
-      }
-      None => continue, // file doesn't exist in source — fine
-    };
-    budget.reserve((file_path.len() + content_hash.len() + 128) as u64, "system file tree admission failed")?;
-    sys_tree.files.insert(file_path.to_string(), (content_hash, record));
-  }
-
-  // Write system tree entries with overwrite. Old snapshots may have
-  // included /.aeordb-system/ in their root listings (before the change
-  // that stops system path propagation to root), so a snapshot walk
-  // could have written stale system directory data. We need to overwrite
-  // those with the current state.
-  write_system_tree(&sys_tree, source, output, budget)
-}
-
-/// Like write_tree_to_engine but unconditionally writes system entries
-/// (overwrites instead of skipping if existing). Used when copying the
-/// authoritative current system state.
-fn write_system_tree(
-  tree: &crate::engine::tree_walker::VersionTree,
-  source: &StorageEngine,
-  output: &StorageEngine,
-  budget: &mut OperationMemoryBudget,
-) -> EngineResult<(u64, u64)> {
-  use crate::engine::entry_header::FLAG_SYSTEM;
-  let mut files_written = 0u64;
-  let mut dirs_written = 0u64;
-
-  let algo = output.hash_algo();
-
-  write_btree_nodes(tree, source, output, budget, FLAG_SYSTEM)?;
-
-  // Chunks for system files (system files rarely have chunks, but include them).
-  // Destination lookups de-duplicate without retaining a second hash set.
-  for (_file_hash, record) in tree.files.values() {
-    for ch in &record.chunk_hashes {
-      budget.record_work(1)?;
-      if !output.has_entry(ch)? {
-        let ((header, key, value), charge) = required_backup_entry(source, ch, "system chunk", budget)?;
-        if header.entry_type != EntryType::Chunk {
-          return Err(EngineError::CorruptEntry {
-            offset: 0,
-            reason: format!("system chunk {} resolved to {:?}", hex::encode(ch), header.entry_type),
-          });
-        }
-        output.store_entry(EntryType::Chunk, &key, &value)?;
-        budget.release(charge, "system chunk buffer release failed")?;
-      }
-    }
-  }
-
-  // FileRecords (overwrite to ensure latest system state)
-  for (path, (file_hash, _record)) in &tree.files {
-    budget.record_work(1)?;
-    {
-      let ((header, key, value), charge) = required_backup_entry(source, file_hash, "system FileRecord", budget)?;
-      if header.entry_type != EntryType::FileRecord {
-        return Err(EngineError::CorruptEntry { offset: 0, reason: format!("system file '{}' resolved to {:?}", path, header.entry_type) });
-      }
-      store_file_record_entry_preserving_version(&output, &key, &value, FLAG_SYSTEM, header.entry_version)?;
-      let path_key = file_path_hash(path, &algo)?;
-      if path_key != key {
-        store_file_record_entry_preserving_version(&output, &path_key, &value, FLAG_SYSTEM, header.entry_version)?;
-      }
-      files_written += 1;
-      budget.release(charge, "system FileRecord buffer release failed")?;
-    }
-  }
-
-  // DirectoryIndex (overwrite — this is the critical fix for the api-keys bug)
-  for (path, (dir_hash, _data)) in &tree.directories {
-    budget.record_work(1)?;
-    {
-      let ((header, key, value), charge) = required_backup_entry(source, dir_hash, "system DirectoryIndex", budget)?;
-      if header.entry_type != EntryType::DirectoryIndex {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: format!("system directory '{}' resolved to {:?}", path, header.entry_type),
-        });
-      }
-      output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
-      let path_key = directory_path_hash(path, &algo)?;
-      if path_key != key {
-        output.store_entry(EntryType::DirectoryIndex, &path_key, &value)?;
-      }
-      dirs_written += 1;
-      budget.release(charge, "system DirectoryIndex buffer release failed")?;
-    }
-  }
-
-  // Symlinks
-  for (path, (sym_hash, _record)) in &tree.symlinks {
-    budget.record_work(1)?;
-    {
-      let ((header, key, value), charge) = required_backup_entry(source, sym_hash, "system Symlink", budget)?;
-      if header.entry_type != EntryType::Symlink {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: format!("system symlink '{}' resolved to {:?}", path, header.entry_type),
-        });
-      }
-      output.store_entry_with_flags(EntryType::Symlink, &key, &value, FLAG_SYSTEM)?;
-      let path_key = symlink_path_hash(path, &algo)?;
-      if path_key != key {
-        output.store_entry_with_flags(EntryType::Symlink, &path_key, &value, FLAG_SYSTEM)?;
-      }
-      budget.release(charge, "system Symlink buffer release failed")?;
-    }
-  }
-
-  Ok((files_written, dirs_written))
-}
-
-fn write_btree_nodes(
-  tree: &VersionTree,
-  source: &StorageEngine,
-  output: &StorageEngine,
-  budget: &mut OperationMemoryBudget,
-  flags: u8,
-) -> EngineResult<()> {
-  for node_hash in tree.btree_nodes.keys() {
-    budget.record_work(1)?;
-    if output.has_entry(node_hash)? {
-      continue;
-    }
-    let ((header, key, value), charge) = required_backup_entry(source, node_hash, "B-tree DirectoryIndex", budget)?;
-    if header.entry_type != EntryType::DirectoryIndex {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("B-tree node {} resolved to {:?}", hex::encode(node_hash), header.entry_type),
-      });
-    }
-    if flags == 0 {
-      output.store_entry(EntryType::DirectoryIndex, &key, &value)?;
-    } else {
-      output.store_entry_with_flags(EntryType::DirectoryIndex, &key, &value, flags)?;
-    }
-    budget.release(charge, "B-tree node buffer release failed")?;
-  }
-  Ok(())
 }
 
 /// Copy all Snapshot-type entries from source to output. These represent

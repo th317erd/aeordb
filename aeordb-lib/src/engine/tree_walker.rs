@@ -52,7 +52,7 @@ impl VersionTree {
 /// the walk terminates that branch instead of recursing infinitely.
 pub fn walk_version_tree(engine: &StorageEngine, root_hash: &[u8]) -> EngineResult<VersionTree> {
   let mut control = TreeWalkControl::unbounded();
-  walk_version_tree_controlled(engine, root_hash, &mut control)
+  walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(true))
 }
 
 pub(crate) fn walk_version_tree_with_budget(
@@ -60,14 +60,35 @@ pub(crate) fn walk_version_tree_with_budget(
   root_hash: &[u8],
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<VersionTree> {
-  let mut control = TreeWalkControl::accounted(budget);
-  walk_version_tree_controlled(engine, root_hash, &mut control)
+  let mut control = TreeWalkControl::accounted(budget, false);
+  walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(true))
 }
 
-fn walk_version_tree_controlled(engine: &StorageEngine, root_hash: &[u8], control: &mut TreeWalkControl<'_>) -> EngineResult<VersionTree> {
+pub(crate) fn walk_version_tree_filtered_with_budget<F>(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  budget: &mut OperationMemoryBudget,
+  path_filter: &mut F,
+) -> EngineResult<VersionTree>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
+  let mut control = TreeWalkControl::accounted(budget, true);
+  walk_version_tree_controlled(engine, root_hash, &mut control, path_filter)
+}
+
+fn walk_version_tree_controlled<F>(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  control: &mut TreeWalkControl<'_>,
+  path_filter: &mut F,
+) -> EngineResult<VersionTree>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
   let mut tree = VersionTree::new();
   let hash_length = engine.hash_algo().hash_length();
-  walk_directory(engine, root_hash, "/", hash_length, &mut tree, control)?;
+  walk_directory(engine, root_hash, "/", hash_length, &mut tree, control, path_filter)?;
   Ok(tree)
 }
 
@@ -79,19 +100,23 @@ fn walk_version_tree_controlled(engine: &StorageEngine, root_hash: &[u8], contro
 pub fn walk_subtree(engine: &StorageEngine, start_path: &str, start_dir_hash: &[u8], tree: &mut VersionTree) -> EngineResult<()> {
   let hash_length = engine.hash_algo().hash_length();
   let mut control = TreeWalkControl::unbounded();
-  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut control)
+  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut control, &mut |_| Ok(true))
 }
 
-pub(crate) fn walk_subtree_with_budget(
+pub(crate) fn walk_subtree_filtered_with_budget<F>(
   engine: &StorageEngine,
   start_path: &str,
   start_dir_hash: &[u8],
   tree: &mut VersionTree,
   budget: &mut OperationMemoryBudget,
-) -> EngineResult<()> {
+  path_filter: &mut F,
+) -> EngineResult<()>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
   let hash_length = engine.hash_algo().hash_length();
-  let mut control = TreeWalkControl::accounted(budget);
-  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut control)
+  let mut control = TreeWalkControl::accounted(budget, true);
+  walk_directory(engine, start_dir_hash, start_path, hash_length, tree, &mut control, path_filter)
 }
 
 /// Augment `tree` with `/.aeordb-system/{users,groups,snapshots,config}` and
@@ -162,15 +187,16 @@ pub fn augment_with_system_subtrees(engine: &crate::engine::StorageEngine, tree:
 struct TreeWalkControl<'a> {
   budget: Option<&'a mut OperationMemoryBudget>,
   strict_missing: bool,
+  strict_root: bool,
 }
 
 impl<'a> TreeWalkControl<'a> {
   fn unbounded() -> Self {
-    Self { budget: None, strict_missing: false }
+    Self { budget: None, strict_missing: false, strict_root: false }
   }
 
-  fn accounted(budget: &'a mut OperationMemoryBudget) -> Self {
-    Self { budget: Some(budget), strict_missing: true }
+  fn accounted(budget: &'a mut OperationMemoryBudget, strict_root: bool) -> Self {
+    Self { budget: Some(budget), strict_missing: true, strict_root }
   }
 
   fn reserve(&mut self, bytes: u64, context: &'static str) -> EngineResult<()> {
@@ -206,14 +232,18 @@ enum PendingDirectoryWork {
   Exit { hash: Vec<u8>, active_charge: u64 },
 }
 
-fn walk_directory(
+fn walk_directory<F>(
   engine: &StorageEngine,
   dir_hash: &[u8],
   current_path: &str,
   hash_length: usize,
   tree: &mut VersionTree,
   control: &mut TreeWalkControl<'_>,
-) -> EngineResult<()> {
+  path_filter: &mut F,
+) -> EngineResult<()>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
   let initial_charge = collection_charge(current_path.len(), dir_hash.len())?;
   control.reserve(initial_charge, "directory frontier admission failed")?;
   let mut pending = vec![PendingDirectoryWork::Enter(PendingDirectory {
@@ -253,7 +283,7 @@ fn walk_directory(
       active.remove(&directory.hash);
       control.release(active_charge, "missing directory ancestry release failed")?;
       control.release(directory.retained_charge, "missing directory frontier release failed")?;
-      if control.strict_missing && directory.path != current_path {
+      if control.strict_missing && (control.strict_root || directory.path != current_path) {
         return Err(missing_tree_entry("directory", &directory.path, &directory.hash));
       }
       continue;
@@ -267,7 +297,7 @@ fn walk_directory(
 
     pending.push(PendingDirectoryWork::Exit { hash: directory.hash.clone(), active_charge });
     if !dir_data.is_empty() {
-      visit_directory_children(engine, &directory.path, &dir_data, hash_length, tree, &mut pending, control)?;
+      visit_directory_children(engine, &directory.path, &dir_data, hash_length, tree, &mut pending, control, path_filter)?;
     }
     tree.directories.insert(directory.path, (directory.hash, dir_data));
     let _retained_charge = directory.retained_charge.saturating_add(loaded_charge);
@@ -275,7 +305,7 @@ fn walk_directory(
   Ok(())
 }
 
-fn visit_directory_children(
+fn visit_directory_children<F>(
   engine: &StorageEngine,
   current_path: &str,
   dir_data: &[u8],
@@ -283,21 +313,25 @@ fn visit_directory_children(
   tree: &mut VersionTree,
   pending: &mut Vec<PendingDirectoryWork>,
   control: &mut TreeWalkControl<'_>,
-) -> EngineResult<()> {
+  path_filter: &mut F,
+) -> EngineResult<()>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
   if crate::engine::btree::is_btree_format(dir_data) {
-    visit_btree_children(engine, current_path, dir_data, hash_length, tree, pending, control)
+    visit_btree_children(engine, current_path, dir_data, hash_length, tree, pending, control, path_filter)
   } else {
     let scratch = scratch_charge(dir_data.len())?;
     control.reserve(scratch, "flat directory parse admission failed")?;
     let children = deserialize_child_entries(dir_data, hash_length, 0)?;
     for child in &children {
-      process_child(engine, current_path, child, hash_length, tree, pending, control)?;
+      process_child(engine, current_path, child, hash_length, tree, pending, control, path_filter)?;
     }
     control.release(scratch, "flat directory parse release failed")
   }
 }
 
-fn visit_btree_children(
+fn visit_btree_children<F>(
   engine: &StorageEngine,
   current_path: &str,
   root_data: &[u8],
@@ -305,11 +339,15 @@ fn visit_btree_children(
   tree: &mut VersionTree,
   pending: &mut Vec<PendingDirectoryWork>,
   control: &mut TreeWalkControl<'_>,
-) -> EngineResult<()> {
+  path_filter: &mut F,
+) -> EngineResult<()>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
   let mut node_hashes: Vec<(Vec<u8>, u64)> = Vec::new();
   let mut visited_node_hashes = HashSet::new();
   let mut visited_node_charge = 0u64;
-  process_btree_node(engine, current_path, root_data, 0, hash_length, tree, pending, &mut node_hashes, control)?;
+  process_btree_node(engine, current_path, root_data, 0, hash_length, tree, pending, &mut node_hashes, control, path_filter)?;
   while let Some((node_hash, frontier_charge)) = node_hashes.pop() {
     control.record_work(1)?;
     control.release(frontier_charge, "B-tree frontier release failed")?;
@@ -337,7 +375,18 @@ fn visit_btree_children(
         reason: format!("B-tree node {} resolved to {:?}", hex::encode(&node_hash), header.entry_type),
       });
     }
-    process_btree_node(engine, current_path, &node_data, header.entry_version, hash_length, tree, pending, &mut node_hashes, control)?;
+    process_btree_node(
+      engine,
+      current_path,
+      &node_data,
+      header.entry_version,
+      hash_length,
+      tree,
+      pending,
+      &mut node_hashes,
+      control,
+      path_filter,
+    )?;
     if tree.btree_nodes.contains_key(&node_hash) {
       control.release(loaded_charge, "shared B-tree node buffer release failed")?;
     } else {
@@ -349,7 +398,7 @@ fn visit_btree_children(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_btree_node(
+fn process_btree_node<F>(
   engine: &StorageEngine,
   current_path: &str,
   node_data: &[u8],
@@ -359,13 +408,17 @@ fn process_btree_node(
   pending: &mut Vec<PendingDirectoryWork>,
   node_hashes: &mut Vec<(Vec<u8>, u64)>,
   control: &mut TreeWalkControl<'_>,
-) -> EngineResult<()> {
+  path_filter: &mut F,
+) -> EngineResult<()>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
   let scratch = scratch_charge(node_data.len())?;
   control.reserve(scratch, "B-tree parse admission failed")?;
   match crate::engine::btree::BTreeNode::deserialize(node_data, hash_length, entry_version)? {
     crate::engine::btree::BTreeNode::Leaf(leaf) => {
       for child in &leaf.entries {
-        process_child(engine, current_path, child, hash_length, tree, pending, control)?;
+        process_child(engine, current_path, child, hash_length, tree, pending, control, path_filter)?;
       }
     }
     crate::engine::btree::BTreeNode::Internal(internal) => {
@@ -379,7 +432,7 @@ fn process_btree_node(
   control.release(scratch, "B-tree parse release failed")
 }
 
-fn process_child(
+fn process_child<F>(
   engine: &StorageEngine,
   current_path: &str,
   child: &crate::engine::directory_entry::ChildEntry,
@@ -387,24 +440,27 @@ fn process_child(
   tree: &mut VersionTree,
   pending: &mut Vec<PendingDirectoryWork>,
   control: &mut TreeWalkControl<'_>,
-) -> EngineResult<()> {
+  path_filter: &mut F,
+) -> EngineResult<()>
+where
+  F: FnMut(&str) -> EngineResult<bool>,
+{
   control.record_work(1)?;
   let path_len = joined_path_len(current_path, child.name.len())?;
+  let child_path = join_child_path(current_path, &child.name);
+  if !path_filter(&child_path)? {
+    return Ok(());
+  }
   let child_entry_type = EntryType::from_u8(child.entry_type)?;
   match child_entry_type {
     EntryType::DirectoryIndex => {
       let charge = collection_charge(path_len, child.hash.len())?;
       control.reserve(charge, "directory frontier admission failed")?;
-      pending.push(PendingDirectoryWork::Enter(PendingDirectory {
-        hash: child.hash.clone(),
-        path: join_child_path(current_path, &child.name),
-        retained_charge: charge,
-      }));
+      pending.push(PendingDirectoryWork::Enter(PendingDirectory { hash: child.hash.clone(), path: child_path, retained_charge: charge }));
     }
     EntryType::FileRecord => {
       let map_charge = collection_charge(path_len, child.hash.len())?;
       control.reserve(map_charge, "file tree admission failed")?;
-      let child_path = join_child_path(current_path, &child.name);
       let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(engine, &child.hash, control)? else {
         control.release(map_charge, "missing file tree release failed")?;
         if control.strict_missing {
@@ -418,7 +474,8 @@ fn process_child(
           reason: format!("file '{}' resolved to {:?} instead of FileRecord", child_path, header.entry_type),
         });
       }
-      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)
+        .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("FileRecord '{}' is malformed: {error}", child_path) })?;
       for chunk_hash in &file_record.chunk_hashes {
         if !tree.chunks.contains(chunk_hash) {
           let charge = collection_charge(0, chunk_hash.len())?;
@@ -431,7 +488,6 @@ fn process_child(
     EntryType::Symlink => {
       let map_charge = collection_charge(path_len, child.hash.len())?;
       control.reserve(map_charge, "symlink tree admission failed")?;
-      let child_path = join_child_path(current_path, &child.name);
       let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(engine, &child.hash, control)? else {
         control.release(map_charge, "missing symlink tree release failed")?;
         if control.strict_missing {
@@ -445,7 +501,8 @@ fn process_child(
           reason: format!("symlink '{}' resolved to {:?} instead of Symlink", child_path, header.entry_type),
         });
       }
-      let symlink_record = SymlinkRecord::deserialize(&value, header.entry_version)?;
+      let symlink_record = SymlinkRecord::deserialize(&value, header.entry_version)
+        .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("symlink '{}' is malformed: {error}", child_path) })?;
       tree.symlinks.insert(child_path, (child.hash.clone(), symlink_record));
     }
     _ => {}
@@ -558,7 +615,7 @@ pub(crate) fn diff_trees_with_budget(
   target: &VersionTree,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<TreeDiff> {
-  let mut control = TreeWalkControl::accounted(budget);
+  let mut control = TreeWalkControl::accounted(budget, false);
   diff_trees_controlled(base, target, &mut control)
 }
 

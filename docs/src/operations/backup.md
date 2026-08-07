@@ -11,7 +11,10 @@ AeorDB supports exporting database versions as self-contained `.aeordb` files, c
 
 ## Privileged Backup (`--root-key`)
 
-By default, `aeordb export` includes only user data — the export omits everything under `/.aeordb-system/` (users, groups, snapshot records) and stops at the specified version (HEAD or one named snapshot).
+By default, `aeordb export` applies the data-export policy: ordinary user data
+and namespace permission files are included, while protected operational
+families, conflicts, logs, and derived indexes are omitted. The export stops at
+the specified version (HEAD or one named snapshot).
 
 Modern databases keep protected system trees detached from the user-data
 root. When exporting an older snapshot whose root still names
@@ -20,13 +23,25 @@ relationships and writes a normalized root. In that compatibility case, the
 reported `Version` differs from the requested source hash. The reported hash
 is authoritative: it is also stored as the export's base hash, target hash,
 and `HEAD`, so importing and promoting the artifact never creates a dangling
-system relationship. Ordinary exports preserve their source root hash.
+relationship. An export preserves its source root hash only when policy leaves
+the reachable tree unchanged; filtering any child rebuilds parent closure and
+produces a new authoritative root.
 
-When you supply the source database's **root API key**, the CLI unlocks privileged backup mode:
+When you supply the source database's **root API key**, the CLI unlocks
+registry-governed logical backup mode:
 
-- **System data** is included: `/.aeordb-system/users/`, `/.aeordb-system/groups/`, `/.aeordb-system/snapshots/`, `/.aeordb-system/config/`.
+- **Portable required state** is included, including users, groups, central and
+  namespace permissions, conflicts, portable configuration, plugin state, and
+  other families selected by the embedded SystemFamily registry.
 - **All named snapshots** are walked, not just HEAD. The exported `.aeordb` carries the full snapshot history.
-- **Credentials are NEVER exported**, regardless of the key: `/.aeordb-system/api-keys/`, `/.aeordb-system/refresh-tokens/`, and `/.aeordb-system/magic-links/` are always filtered out. Credentials are tied to the database identity that issued them; importing them would conflict with the target's own bootstrap key.
+- **Credentials and secrets are NEVER exported**, regardless of the key. This
+  includes API keys, refresh tokens, magic links, system signing material, and
+  email credentials. Node-local controls, logs, GC state, and derived indexes
+  are also omitted or rebuilt according to registry policy.
+
+The registry is the authority for each family. Backup traversal classifies a
+path before reading its body, rejects unknown protected families, and rebuilds
+directory indexes when omitted children would otherwise remain reachable.
 
 Supply the key via flag or environment variable:
 
@@ -39,7 +54,9 @@ aeordb export -D source.aeordb -o backup.aeordb \
 AEORDB_ROOT_KEY=aeor_k_… aeordb export -D source.aeordb -o backup.aeordb
 ```
 
-When importing a backup that contains system data, the target database's root key must be provided the same way. This proves ownership of the destination before user/group/snapshot records are merged.
+When importing a backup that contains protected portable state, the target
+database's root key must be provided the same way. This proves ownership of the
+destination before those records are merged.
 
 ## Full Export
 

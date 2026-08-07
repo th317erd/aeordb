@@ -145,12 +145,17 @@ fn strict_ancestors_of_absolute_families_are_runtime_only_structural_containers(
     assert_eq!(require_complete_system_family(classification, "strict traversal").unwrap(), None);
   }
 
-  for path in ["/.aeordb-system/future", "/docs/.aeordb-future/value", "/docs/.aeordb-config"] {
+  for path in ["/.aeordb-system/future", "/docs/.aeordb-future/value"] {
     assert_eq!(
       classify_system_family(registry, SystemFamilySubjectV1::Path(path)).unwrap(),
       SystemFamilyClassificationV1::UnknownProtected,
       "{path}"
     );
+  }
+
+  for (path, family_id) in [("/docs/.aeordb-config", 0x0008), ("/docs/.aeordb-indexes", 0x0060), ("/docs/.aeordb-logs", 0x0061)] {
+    let classification = classify_system_family(registry, SystemFamilySubjectV1::Path(path)).unwrap();
+    assert_eq!(classification.family_id(), Some(family_id), "reserved subtree container {path}");
   }
 }
 
