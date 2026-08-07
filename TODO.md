@@ -121,7 +121,7 @@
         - [x] Cover active, repairing, cleared, external-spill, hot-tail, corrupt, unsupported, and first-upgrade paths.
         - [x] Document checked rollback/install behavior and record live disposable-database evidence.
       - [x] Run fault, restart, repair, broad regression, and real-world v3 evidence gates; commit and push each green slice.
-  - [ ] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
+  - [x] P2b: converge strict per-property configuration and process-wide bounded memory ownership.
     - [x] P2b-1: freeze the complete property registry and strict resolver in diagnostic shadow mode.
       - [x] Extend generated registry metadata with frozen defaults and constraints without changing registry identities.
       - [x] Add strict duplicate-aware runtime v1 and lifecycle v0/v1 document decoders.
@@ -276,10 +276,14 @@
         - [x] Report unique retained FileRecord-version logical bytes and raw serialized FileRecord payload bytes under distinct names.
         - [x] Keep the legacy clamped logical/WAL-chunk delta explicit rather than implying current-only dedup, and document the CLI/report contract.
       - [x] After verify accounting, run the remaining P2b-4 focused regressions, full workspace/cross-platform gates, and a disk-backed verification test.
-    - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
+    - [x] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
       - [x] Quiesce the replacement KV store's bootstrap snapshot during dirty rebuild so exclusive bulk page rewrites cannot retain unbounded historical generations.
       - [x] Preserve boundary-aligned KV block spans across dirty rebuild so reserved slack never becomes a false corrupt-WAL region.
-      - [ ] Prove serious dirty-rebuild failures can latch, spill, shut down, and refuse restart even before the resolved runtime memory policy is active.
+      - [x] Prove serious dirty-rebuild failures can latch, spill, shut down, and refuse restart even before the resolved runtime memory policy is active.
+        - [x] Reproduce a post-marker rebuild failure and preserve its complete external spill incident in disposable storage.
+        - [x] Make fatal initialization errors terminate both TLS and non-TLS listeners promptly and return a nonzero CLI status without unwinding.
+        - [x] Prove ordinary restart refuses the unresolved spill, repair replays it, verification is clean, and the repaired database starts successfully.
+        - [x] Record the focused, broad, cross-platform, and real-world evidence; commit and push the green landing unit.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

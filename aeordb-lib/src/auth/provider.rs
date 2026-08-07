@@ -119,13 +119,19 @@ pub struct FileAuthProvider {
 const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
 
 impl FileAuthProvider {
+  /// Create a provider while preserving initialization failures for callers
+  /// that own process startup and shutdown policy.
+  pub fn try_new(engine: Arc<StorageEngine>) -> std::result::Result<Self, String> {
+    let jwt_manager = load_or_create_jwt_manager(&engine)?;
+    Ok(Self { engine, jwt_manager })
+  }
+
   /// Create a FileAuthProvider backed by the given engine.
   /// Loads or generates the JWT signing key from the engine's system store.
   /// Panics if the JWT signing key cannot be created or persisted -- this is
   /// a server-startup operation and the process cannot continue without it.
   pub fn new(engine: Arc<StorageEngine>) -> Self {
-    let jwt_manager = load_or_create_jwt_manager(&engine).expect("fatal: unable to load or create JWT signing key during initialization");
-    Self { engine, jwt_manager }
+    Self::try_new(engine).expect("fatal: unable to load or create JWT signing key during initialization")
   }
 
   /// Create a FileAuthProvider for a separate identity file.
@@ -147,7 +153,7 @@ impl FileAuthProvider {
     };
 
     let engine = Arc::new(engine);
-    let provider = Self::new(engine.clone());
+    let provider = Self::try_new(engine.clone()).map_err(|error| format!("Failed to initialize identity provider: {error}"))?;
 
     // Bootstrap a root key if none exist.
     let bootstrap_key = crate::auth::bootstrap_root_key(&engine).map_err(|error| format!("Failed to bootstrap root key: {}", error))?;

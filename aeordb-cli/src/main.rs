@@ -339,7 +339,7 @@ async fn main() {
         std::process::exit(1);
       }
 
-      commands::start::run(commands::start::StartConfig {
+      if let Err(error) = commands::start::run(commands::start::StartConfig {
         port: merged_port,
         host: &merged_host,
         database: &merged_database,
@@ -357,7 +357,11 @@ async fn main() {
         advertise_url: advertise_url.as_deref(),
         command_line_overrides,
       })
-      .await;
+      .await
+      {
+        eprintln!("{error}");
+        std::process::exit(1);
+      }
     }
     Commands::Status(arguments) => {
       if let Err(error) = commands::status::run(arguments).await {

@@ -18,7 +18,11 @@ use aeordb::engine::{
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
-use aeordb::server::create_app_with_auth_mode_cancel_progress_and_configuration_overrides;
+use aeordb::server::try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides;
+
+#[cfg(test)]
+#[path = "../../spec/start_internal_spec.rs"]
+mod start_internal_spec;
 
 /// All settings the `start` command needs. Built in `main.rs` by merging the
 /// clap-parsed CLI flags with the optional config file, then passed to
@@ -231,7 +235,28 @@ fn json_response(status: StatusCode, payload: serde_json::Value) -> Response {
     .unwrap_or_else(|_| Response::new(Body::from("{\"status\":\"error\"}")))
 }
 
-pub async fn run(config: StartConfig<'_>) {
+async fn supervise_server_and_initialization<InitializationOutput: Send + 'static>(
+  mut initialization_task: tokio::task::JoinHandle<Result<InitializationOutput, String>>,
+  mut server_task: tokio::task::JoinHandle<Result<(), String>>,
+  cancellation: &CancellationToken,
+) -> (Result<Result<InitializationOutput, String>, tokio::task::JoinError>, Result<Result<(), String>, tokio::task::JoinError>) {
+  tokio::select! {
+    initialization_result = &mut initialization_task => {
+      if !matches!(&initialization_result, Ok(Ok(_))) {
+        cancellation.cancel();
+      }
+      let server_result = server_task.await;
+      (initialization_result, server_result)
+    }
+    server_result = &mut server_task => {
+      cancellation.cancel();
+      let initialization_result = initialization_task.await;
+      (initialization_result, server_result)
+    }
+  }
+}
+
+pub async fn run(config: StartConfig<'_>) -> Result<(), String> {
   let StartConfig {
     port,
     host,
@@ -265,12 +290,10 @@ pub async fn run(config: StartConfig<'_>) {
     (Some(cert), Some(key)) => Some((cert.to_string(), key.to_string())),
     (None, None) => None,
     (Some(_), None) => {
-      eprintln!("Error: --tls-cert requires --tls-key");
-      std::process::exit(1);
+      return Err("Error: --tls-cert requires --tls-key".to_string());
     }
     (None, Some(_)) => {
-      eprintln!("Error: --tls-key requires --tls-cert");
-      std::process::exit(1);
+      return Err("Error: --tls-key requires --tls-cert".to_string());
     }
   };
 
@@ -325,7 +348,7 @@ pub async fn run(config: StartConfig<'_>) {
       eprintln!("    AEORDB_ALLOW_UNAUTHENTICATED_PUBLIC_BIND=1");
       eprintln!();
       eprintln!("Otherwise bind to 127.0.0.1 or enable --auth self.");
-      std::process::exit(1);
+      return Err("refusing unauthenticated startup on a non-loopback address".to_string());
     } else if !is_loopback {
       eprintln!();
       eprintln!("WARNING: auth is disabled and bind address ({host}) is not loopback.");
@@ -351,10 +374,7 @@ pub async fn run(config: StartConfig<'_>) {
   println!();
 
   // Parse the host address into an IP.
-  let bind_address: std::net::IpAddr = host.parse().unwrap_or_else(|_| {
-    eprintln!("Error: invalid host address '{host}'");
-    std::process::exit(1);
-  });
+  let bind_address: std::net::IpAddr = host.parse().map_err(|_| format!("Error: invalid host address '{host}'"))?;
   let address = SocketAddr::from((bind_address, port));
 
   // Create a CancellationToken shared by all background tasks (including
@@ -363,6 +383,43 @@ pub async fn run(config: StartConfig<'_>) {
   let cancel = CancellationToken::new();
   let startup_gate = StartupGateState::new();
   let startup_application = Router::new().fallback(startup_gate_handler).with_state(startup_gate.clone());
+
+  let server_future: std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> =
+    if let Some((cert_path, key_path)) = tls_config {
+      println!("Listening on https://{address}");
+      let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+        .await
+        .map_err(|error| format!("Failed to load TLS certificate/key: {error}\n  cert: {cert_path}\n  key:  {key_path}"))?;
+      let listener = std::net::TcpListener::bind(address).map_err(|error| format!("Failed to bind to {address}: {error}"))?;
+      listener.set_nonblocking(true).map_err(|error| format!("Failed to configure listener at {address}: {error}"))?;
+      let server = axum_server::from_tcp_rustls(listener, rustls_config)
+        .map_err(|error| format!("Failed to configure TLS listener at {address}: {error}"))?;
+      let server_cancel = cancel.clone();
+      Box::pin(async move {
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        let shutdown_cancel = server_cancel.clone();
+        let shutdown_task = tokio::spawn(async move {
+          shutdown_cancel.cancelled().await;
+          shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
+        let result = server.handle(handle).serve(startup_application.into_make_service()).await.map_err(|error| error.to_string());
+        shutdown_task.abort();
+        result
+      })
+    } else {
+      println!("Listening on http://{address}");
+      let listener = tokio::net::TcpListener::bind(address).await.map_err(|error| format!("Failed to bind to {address}: {error}"))?;
+      let server_cancel = cancel.clone();
+      Box::pin(async move {
+        let serve_future = std::future::IntoFuture::into_future(axum::serve(listener, startup_application));
+        tokio::pin!(serve_future);
+        tokio::select! {
+          result = &mut serve_future => result.map_err(|error| error.to_string()),
+          _ = server_cancel.cancelled() => Ok(()),
+        }
+      })
+    };
 
   let init_config = InitConfig {
     database: database.to_string(),
@@ -387,78 +444,29 @@ pub async fn run(config: StartConfig<'_>) {
       }
     }
   });
-
-  let server_result = if let Some((cert_path, key_path)) = tls_config {
-    // TLS path: use axum_server with rustls + Handle for graceful shutdown
-    println!("Listening on https://{address}");
-
-    let rustls_config = match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await {
-      Ok(config) => config,
-      Err(error) => {
-        eprintln!("Failed to load TLS certificate/key: {error}");
-        eprintln!("  cert: {cert_path}");
-        eprintln!("  key:  {key_path}");
-        std::process::exit(1);
-      }
-    };
-
-    let handle = axum_server::Handle::new();
-    let shutdown_handle = handle.clone();
-    let server_cancel = cancel.clone();
-    tokio::spawn(async move {
-      shutdown_signal().await;
-      server_cancel.cancel();
-      shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
-    });
-
-    axum_server::bind_rustls(address, rustls_config)
-      .handle(handle)
-      .serve(startup_application.into_make_service())
-      .await
-      .map_err(|error| format!("{}", error))
-  } else {
-    // Non-TLS path: standard axum::serve
-    println!("Listening on http://{address}");
-
-    let listener = match tokio::net::TcpListener::bind(address).await {
-      Ok(listener) => listener,
-      Err(error) => {
-        eprintln!("Failed to bind to {address}: {error}");
-        std::process::exit(1);
-      }
-    };
-
-    let server_cancel = cancel.clone();
-    let shutdown_fut = async move {
-      shutdown_signal().await;
-      server_cancel.cancel();
-    };
-
-    let serve_fut = axum::serve(listener, startup_application).with_graceful_shutdown(shutdown_fut);
-
-    // axum's graceful shutdown waits for ALL active connections to close,
-    // but long-lived connections (SSE) never close. Once the shutdown
-    // signal fires and the cancellation token is set, drop the serve
-    // future immediately and proceed to cleanup (background tasks +
-    // engine flush). Connections are dropped when the process exits.
+  let server_task = tokio::spawn(server_future);
+  let signal_cancel = cancel.clone();
+  let signal_cancelled = cancel.clone();
+  let signal_task = tokio::spawn(async move {
     tokio::select! {
-      result = serve_fut => result.map_err(|error| format!("{}", error)),
-      _ = cancel.cancelled() => Ok(()),
+      _ = shutdown_signal() => signal_cancel.cancel(),
+      _ = signal_cancelled.cancelled() => {},
     }
-  };
+  });
+
+  let (initialization_result, server_result) = supervise_server_and_initialization(init_task, server_task, &cancel).await;
 
   cancel.cancel();
+  let _ = tokio::time::timeout(std::time::Duration::from_secs(1), signal_task).await;
 
-  let runtime = match init_task.await {
-    Ok(Ok(runtime)) => Some(runtime),
-    Ok(Err(error)) => {
-      eprintln!("Startup error: {error}");
-      None
-    }
-    Err(error) => {
-      eprintln!("Startup task failed: {error}");
-      None
-    }
+  let (runtime, startup_error) = match initialization_result {
+    Ok(Ok(runtime)) => (Some(runtime), None),
+    Ok(Err(error)) => (None, Some(format!("Startup error: {error}"))),
+    Err(error) => (None, Some(format!("Startup task failed: {error}"))),
+  };
+  let server_result = match server_result {
+    Ok(result) => result,
+    Err(error) => Err(format!("server task failed: {error}")),
   };
 
   let mut clean_shutdown = true;
@@ -479,15 +487,18 @@ pub async fn run(config: StartConfig<'_>) {
     tracing::info!(uptime_seconds = uptime, "AeorDB shutting down");
   }
 
+  if let Some(error) = startup_error {
+    return Err(error);
+  }
   if let Err(error) = server_result {
-    eprintln!("Server error: {error}");
-    std::process::exit(1);
+    return Err(format!("Server error: {error}"));
   }
 
   if clean_shutdown {
     println!("Server shut down gracefully.");
+    Ok(())
   } else {
-    eprintln!("Server stopped, but storage shutdown did not complete cleanly.");
+    Err("Server stopped, but storage shutdown did not complete cleanly.".to_string())
   }
 }
 
@@ -533,7 +544,7 @@ async fn initialize_server_runtime(
     apply_engine_startup_progress(&engine_progress_gate, progress);
   });
   let (application, file_bootstrap_key, engine, event_bus, task_queue) =
-    create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
+    try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
       &database,
       &auth_mode,
       Some(hot_dir_ref),
@@ -541,7 +552,7 @@ async fn initialize_server_runtime(
       Some(cancel.clone()),
       Some(engine_progress),
       command_line_overrides,
-    );
+    )?;
   if let Some(recovery) = engine.persistent_durability_recovery().filter(|recovery| recovery.blocks_writes) {
     cancel.cancel();
     return Err(format!(

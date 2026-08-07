@@ -289,6 +289,8 @@ On the next server start, AeorDB scans every spill destination for unresolved ar
 aeordb verify --repair --force-fix-in-place -D /path/to/database.aeordb
 ```
 
+Keep any process override that names a non-default spill root in place for both restart and repair. In particular, if an incident was written under `AEORDB_EMERGENCY_SPILL_DIR`, removing that variable also removes the only configured name for that arbitrary directory. Stored/LKG roots and the OS user-data and temp fallback roots remain discoverable without the environment override.
+
 Repair orders matching artifacts by creation time, oldest first, and prompts before replay unless `--yes` is passed. Replay only copies verified WAL-tail bytes back into the database file. The external `hot-tail.bin` and `index-buffer.json` files are reported as evidence, but are not treated as primary data: after the WAL tail is restored, repair forces a WAL-to-EOF KV rebuild, re-derives reusable gaps with the void gap scanner, and publishes a new hot tail. When verify/repair finishes cleanly, each artifact directory receives an `applied.json` marker and future startups ignore it.
 
 The durability latch, spill catalog, and repair phase are also persistent

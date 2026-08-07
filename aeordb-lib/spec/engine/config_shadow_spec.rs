@@ -105,6 +105,12 @@ fn malformed_lifecycle_state_is_visible_and_fails_snapshot_writes_closed() {
   store_config(&engine, RUNTIME_CONFIG_PATH, b"{");
   store_config(&engine, LIFECYCLE_CONFIG_PATH, b"{");
 
+  let preopen_error = preopen_emergency_spill_locations(&path, &CommandLineConfigOverrides::default()).unwrap_err();
+  assert!(
+    preopen_error.to_string().contains("recovery.emergency_spill_dir is unresolved before database open"),
+    "strict operator spill discovery must fail closed: {preopen_error}"
+  );
+
   let engine = reopen(engine, &path);
   let report = engine.configuration_shadow();
   let resolution = report.resolution.as_ref().unwrap();

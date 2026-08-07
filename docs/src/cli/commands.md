@@ -251,6 +251,8 @@ aeordb verify --repair --force-fix-in-place -D /path/to/database.aeordb
 
 Repair scans all emergency-spill locations, orders matching artifacts oldest-first, prints the hot-tail and WAL-tail files it found, and prompts before replay. `--yes` skips the prompt for automation. Spill replay must run in place because the artifact marker belongs to the original database path.
 
+If `AEORDB_EMERGENCY_SPILL_DIR` or another process override selected a non-default spill root when the incident was written, supply the same override to both `start` and `verify --repair`. AeorDB automatically scans stored/LKG roots and the platform user-data and temp fallbacks, but it cannot rediscover an arbitrary custom directory after the configuration that named it is removed.
+
 WAL-tail bytes are the only spill payload replayed into the database file. `hot-tail.bin` and `index-buffer.json` are preserved and reported, but repair does not trust them as primary data: after WAL-tail replay it forces a WAL rebuild, reconstructs reusable gaps, and publishes a fresh hot tail.
 
 ---

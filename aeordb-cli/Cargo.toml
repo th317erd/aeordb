@@ -77,5 +77,9 @@ path = "spec/deployment_spec.rs"
 name = "status_spec"
 path = "spec/status_spec.rs"
 
+[[test]]
+name = "start_spec"
+path = "spec/start_spec.rs"
+
 [lints]
 workspace = true

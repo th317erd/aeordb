@@ -125,6 +125,10 @@ const EMERGENCY_SPILL_BASE_WORKSPACE_BYTES: u64 = 2 * 1024 * 1024;
 const SHUTDOWN_BASE_WORKSPACE_BYTES: u64 = 256 * 1024;
 const EMERGENCY_SPILL_TEXT_MAX_BYTES: usize = 16 * 1024;
 const EMERGENCY_SPILL_ERROR_MAX_COUNT: usize = 32;
+const BOOTSTRAP_MEMORY_SOFT_LIMIT_BYTES: u64 = 768 * 1024 * 1024;
+const BOOTSTRAP_MEMORY_HARD_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+const BOOTSTRAP_MEMORY_HOST_FLOOR_BYTES: u64 = 256 * 1024 * 1024;
+const BOOTSTRAP_MEMORY_EMERGENCY_RESERVE_BYTES: u64 = 128 * 1024 * 1024;
 
 struct EmergencyComponentWriter<'a> {
   file: &'a mut std::fs::File,
@@ -550,22 +554,21 @@ fn memory_policy_from_config_shadow(report: &crate::engine::config_resolver::Con
     .resolution
     .as_ref()
     .ok_or_else(|| report.context_error.clone().unwrap_or_else(|| "startup configuration resolution is unavailable".to_string()))?;
-  let paths = ["memory.soft_limit_bytes", "memory.hard_limit_bytes", "memory.host_available_floor_bytes", "memory.emergency_reserve_bytes"];
-  let blocking = resolution
-    .issues
-    .iter()
-    .filter(|issue| issue.blocking && issue.property.as_deref().is_some_and(|property| paths.contains(&property)))
-    .map(|issue| issue.message.as_str())
-    .collect::<Vec<_>>();
-  if !blocking.is_empty() {
-    return Err(format!("memory configuration is unresolved: {}", blocking.join("; ")));
-  }
-  let unsigned = |path: &str| match resolution.property(path).and_then(|property| property.value.as_ref()) {
-    Some(crate::engine::config_resolver::ConfigValue::Unsigned(value)) => Ok(*value),
-    Some(value) => Err(format!("{path} resolved to unexpected value {value:?}")),
-    None => Err(format!("{path} has no resolved value")),
-  };
-  MemoryPolicy::new(unsigned(paths[0])?, unsigned(paths[1])?, unsigned(paths[2])?, unsigned(paths[3])?).map_err(|error| error.to_string())
+  memory_policy_from_values(crate::engine::config_resolver::memory_policy_values_from_resolution(resolution)?)
+}
+
+fn memory_policy_from_values(values: [u64; 4]) -> Result<MemoryPolicy, String> {
+  MemoryPolicy::new(values[0], values[1], values[2], values[3]).map_err(|error| error.to_string())
+}
+
+fn conservative_bootstrap_memory_policy() -> MemoryPolicy {
+  MemoryPolicy::new(
+    BOOTSTRAP_MEMORY_SOFT_LIMIT_BYTES,
+    BOOTSTRAP_MEMORY_HARD_LIMIT_BYTES,
+    BOOTSTRAP_MEMORY_HOST_FLOOR_BYTES,
+    BOOTSTRAP_MEMORY_EMERGENCY_RESERVE_BYTES,
+  )
+  .expect("frozen bootstrap memory policy is valid")
 }
 
 fn desired_unsigned_configuration(
@@ -627,6 +630,7 @@ struct GcRecheckState {
 /// appends new entries.
 pub struct StorageEngine {
   database_path: PathBuf,
+  startup_emergency_spill_locations: Vec<crate::engine::emergency_spill::EmergencySpillLocation>,
   configuration_authority: OnceLock<Arc<crate::engine::configuration_authority::ConfigurationAuthority>>,
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
   query_runtime: OnceLock<Arc<QueryRuntime>>,
@@ -903,29 +907,44 @@ impl StorageEngine {
     Arc::clone(self.configuration_authority.get().expect("StorageEngine constructors initialize the configuration authority"))
   }
 
-  fn initialize_memory_coordinator(&self, inherited: Option<Arc<MemoryCoordinator>>) -> EngineResult<()> {
+  fn initialize_bootstrap_memory_coordinator(
+    &self,
+    inherited: Option<Arc<MemoryCoordinator>>,
+    preopen_policy: Result<[u64; 4], String>,
+  ) -> EngineResult<()> {
     let coordinator = match inherited {
       Some(coordinator) => {
         tracing::debug!("Storage engine inherited the process memory coordinator");
         coordinator
       }
-      None => {
-        let report = self.configuration_shadow();
-        Arc::new(match memory_policy_from_config_shadow(&report) {
-          Ok(policy) => MemoryCoordinator::new(policy),
-          Err(reason) => {
-            tracing::warn!(%reason, "Memory coordinator started in observation-only mode");
-            MemoryCoordinator::without_policy_reason(reason)
-          }
-        })
-      }
+      None => Arc::new(match preopen_policy.and_then(memory_policy_from_values) {
+        Ok(policy) => MemoryCoordinator::new(policy),
+        Err(reason) => {
+          tracing::warn!(%reason, "Pre-open memory policy is unresolved; using the conservative bounded-recovery bootstrap policy");
+          MemoryCoordinator::new(conservative_bootstrap_memory_policy())
+        }
+      }),
     };
     self
       .memory_coordinator
       .set(Arc::clone(&coordinator))
       .map_err(|_| EngineError::InvalidInput("memory coordinator was initialized more than once".to_string()))?;
-    self.durability_coordinator.activate_memory_coordinator(coordinator).map_err(durability_coordinator_engine_error)?;
     Ok(())
+  }
+
+  fn finalize_memory_coordinator(&self, inherited: bool) -> EngineResult<()> {
+    let coordinator = self.memory_coordinator();
+    if !inherited {
+      let report = self.configuration_shadow();
+      match memory_policy_from_config_shadow(&report) {
+        Ok(policy) => coordinator.reconfigure_policy(policy).map_err(memory_observation_engine_error)?,
+        Err(reason) => {
+          tracing::warn!(%reason, "Memory coordinator entered observation-only mode after startup configuration remained unresolved");
+          coordinator.disable_policy(reason).map_err(memory_observation_engine_error)?;
+        }
+      }
+    }
+    self.durability_coordinator.activate_memory_coordinator(coordinator).map_err(durability_coordinator_engine_error)
   }
 
   fn initialize_query_runtime(&self) -> EngineResult<()> {
@@ -2045,7 +2064,10 @@ impl StorageEngine {
   }
 
   fn configured_emergency_spill_locations(&self) -> Vec<crate::engine::emergency_spill::EmergencySpillLocation> {
-    let snapshot = self.configuration_snapshot();
+    let Some(authority) = self.configuration_authority.get() else {
+      return self.startup_emergency_spill_locations.clone();
+    };
+    let snapshot = authority.snapshot();
     let configured = snapshot
       .active_properties
       .get("recovery.emergency_spill_dir")
@@ -2415,6 +2437,11 @@ impl StorageEngine {
     inherited_memory: Option<Arc<MemoryCoordinator>>,
     command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
   ) -> EngineResult<Self> {
+    let bootstrap = crate::engine::config_resolver::preopen_engine_bootstrap(Path::new(path), &command_line)?;
+    if let Some(reason) = bootstrap.emergency_spill_resolution_error.as_deref() {
+      tracing::warn!(%reason, "Pre-open emergency spill configuration is unresolved; bounded recovery will use only the discovered fallback locations");
+    }
+    let inherited_memory_supplied = inherited_memory.is_some();
     let lock_path = format!("{}.lock", path);
     let lock_file = Self::acquire_file_lock(&lock_path)?;
 
@@ -2466,6 +2493,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
+      startup_emergency_spill_locations: bootstrap.emergency_spill_locations,
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       query_runtime: OnceLock::new(),
@@ -2499,10 +2527,11 @@ impl StorageEngine {
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
+    engine.initialize_bootstrap_memory_coordinator(inherited_memory, bootstrap.memory_policy_values)?;
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
     engine.counters.store(initialized);
     engine.initialize_configuration_authority(command_line)?;
-    engine.initialize_memory_coordinator(inherited_memory)?;
+    engine.finalize_memory_coordinator(inherited_memory_supplied)?;
     engine.initialize_query_runtime()?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
@@ -2526,6 +2555,11 @@ impl StorageEngine {
     inherited_memory: Option<Arc<MemoryCoordinator>>,
     command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
   ) -> EngineResult<Self> {
+    let bootstrap = crate::engine::config_resolver::preopen_engine_bootstrap(Path::new(path), &command_line)?;
+    if let Some(reason) = bootstrap.emergency_spill_resolution_error.as_deref() {
+      tracing::warn!(%reason, "Pre-open emergency spill configuration is unresolved; bounded recovery will use only the discovered fallback locations");
+    }
+    let inherited_memory_supplied = inherited_memory.is_some();
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {
@@ -2691,6 +2725,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
+      startup_emergency_spill_locations: bootstrap.emergency_spill_locations,
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       query_runtime: OnceLock::new(),
@@ -2724,6 +2759,7 @@ impl StorageEngine {
       gc_recheck: Mutex::new(None),
       _file_lock: lock_file,
     };
+    engine.initialize_bootstrap_memory_coordinator(inherited_memory, bootstrap.memory_policy_values)?;
     // After KV block expansion, rebuild the entire KV index from WAL.
     // The expansion zeroed the KV pages, so only hot tail entries are loaded.
     // A full rebuild repopulates all entries at their new offsets.
@@ -2766,7 +2802,7 @@ impl StorageEngine {
     engine.sync_voids_to_kv_writer()?;
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_authority(command_line)?;
-    engine.initialize_memory_coordinator(inherited_memory)?;
+    engine.finalize_memory_coordinator(inherited_memory_supplied)?;
     engine.initialize_query_runtime()?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
@@ -6172,6 +6208,8 @@ mod tests {
     assert!(report.succeeded, "spill failed: {:?}", report.errors);
     let incident = Path::new(report.spill_directory.as_ref().unwrap());
     assert_eq!(incident.parent(), Some(configured_spill.as_path()));
+    let manifest_bytes = std::fs::read(report.manifest_path.as_ref().unwrap()).unwrap();
+    serde_json::from_slice::<serde_json::Value>(&manifest_bytes).expect("the just-published spill manifest must be complete JSON");
     let discovered = crate::engine::emergency_spill::scan_unapplied_for_database(&engine_path).unwrap();
     assert_eq!(discovered.len(), 1, "the embedded scanner must discover artifacts under the stored startup-bound root");
     assert_eq!(discovered[0].manifest_path, PathBuf::from(report.manifest_path.as_ref().unwrap()));

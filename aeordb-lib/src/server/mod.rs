@@ -21,6 +21,9 @@ pub mod search_locators;
 #[cfg(test)]
 #[path = "../../spec/http/search_locators_internal_spec.rs"]
 mod search_locators_internal_spec;
+#[cfg(test)]
+#[path = "../../spec/http/server_startup_internal_spec.rs"]
+mod server_startup_internal_spec;
 pub mod settings_routes;
 pub mod share_link_routes;
 pub mod share_routes;
@@ -45,7 +48,9 @@ use tower_http::trace::TraceLayer;
 use crate::auth::{AuthProvider, FileAuthProvider, JwtManager, NoAuthProvider};
 use crate::auth::auth_uri::AuthMode;
 use crate::auth::RateLimiter;
-use crate::engine::{DirectoryOps, EngineStartupProgressCallback, EventBus, PeerManager, RequestContext, StorageEngine, TaskQueue};
+use crate::engine::{
+  DirectoryOps, EngineResult, EngineStartupProgressCallback, EventBus, PeerManager, RequestContext, StorageEngine, TaskQueue,
+};
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{GroupLoader, ApiKeyLoader};
 use crate::logging::request_id_middleware;
@@ -57,6 +62,8 @@ use state::AppState;
 pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_config, parse_cors_origins};
 
 const BLOB_MANIFEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
+pub type ServerApplicationParts = (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>);
 
 /// Spawn a 100ms timer that calls `engine.try_flush_hot_buffer()` on every
 /// tick. Without this, KV writes accumulate in `write_buffer` / `hot_buffer`
@@ -202,39 +209,57 @@ pub fn create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
   cancel: Option<tokio_util::sync::CancellationToken>,
   progress_callback: Option<EngineStartupProgressCallback>,
   command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
-) -> (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>) {
-  let engine = create_engine_with_hot_dir_progress_and_configuration_overrides(engine_path, hot_dir, progress_callback, command_line);
-  spawn_hot_buffer_flush_timer(engine.clone(), cancel.clone());
-  spawn_index_buffer_flush_timer(engine.clone(), cancel.clone());
+) -> ServerApplicationParts {
+  try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
+    engine_path,
+    auth_mode,
+    hot_dir,
+    cors_flag,
+    cancel,
+    progress_callback,
+    command_line,
+  )
+  .expect("failed to initialize server application")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
+  engine_path: &str,
+  auth_mode: &AuthMode,
+  hot_dir: Option<&std::path::Path>,
+  cors_flag: Option<&str>,
+  cancel: Option<tokio_util::sync::CancellationToken>,
+  progress_callback: Option<EngineStartupProgressCallback>,
+  command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+) -> Result<ServerApplicationParts, String> {
+  let engine = try_create_engine_with_hot_dir_progress_and_configuration_overrides(engine_path, hot_dir, progress_callback, command_line)
+    .map_err(|error| format!("failed to initialize storage engine at '{engine_path}': {error}"))?;
 
   let event_bus = Arc::new(EventBus::new());
   let (auth_provider, bootstrap_key): (Arc<dyn AuthProvider>, Option<String>) = match auth_mode {
     AuthMode::Disabled => (Arc::new(NoAuthProvider::new()), None),
     AuthMode::SelfContained => {
-      let provider = FileAuthProvider::new(engine.clone());
+      let provider =
+        FileAuthProvider::try_new(engine.clone()).map_err(|error| format!("failed to initialize self-contained auth: {error}"))?;
       (Arc::new(provider), None)
     }
     AuthMode::File(path) => {
-      let (provider, key) = match FileAuthProvider::from_identity_file(path) {
-        Ok(result) => result,
-        Err(error) => {
-          eprintln!("Fatal: failed to create auth provider from identity file '{}': {}", path, error);
-          std::process::exit(1);
-        }
-      };
+      let (provider, key) = FileAuthProvider::from_identity_file(path)
+        .map_err(|error| format!("failed to initialize auth provider from identity file '{path}': {error}"))?;
       (Arc::new(provider), key)
     }
   };
 
   let jwt_manager = Arc::new(
-    JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes()).expect("failed to reconstruct JWT manager from auth provider"),
+    JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes())
+      .map_err(|error| format!("failed to reconstruct JWT manager from auth provider: {}", error.0))?,
   );
   let prometheus_handle = initialize_metrics();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let task_queue = Arc::new(TaskQueue::new(engine.clone()));
   let cors_state = build_cors_state(cors_flag, &engine);
-  let router = match cancel {
+  let router = match cancel.clone() {
     Some(token) => create_app_with_all_and_task_queue_with_cancel(
       auth_provider,
       jwt_manager,
@@ -259,7 +284,9 @@ pub fn create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
       Some(task_queue.clone()),
     ),
   };
-  (router, bootstrap_key, engine, event_bus, task_queue)
+  spawn_hot_buffer_flush_timer(engine.clone(), cancel.clone());
+  spawn_index_buffer_flush_timer(engine.clone(), cancel);
+  Ok((router, bootstrap_key, engine, event_bus, task_queue))
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).
@@ -763,23 +790,31 @@ pub fn create_engine_with_hot_dir_progress_and_configuration_overrides(
   progress_callback: Option<EngineStartupProgressCallback>,
   command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
 ) -> Arc<StorageEngine> {
+  try_create_engine_with_hot_dir_progress_and_configuration_overrides(engine_path, hot_dir, progress_callback, command_line)
+    .expect("failed to initialize storage engine")
+}
+
+pub fn try_create_engine_with_hot_dir_progress_and_configuration_overrides(
+  engine_path: &str,
+  hot_dir: Option<&std::path::Path>,
+  progress_callback: Option<EngineStartupProgressCallback>,
+  command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+) -> EngineResult<Arc<StorageEngine>> {
   let path = std::path::Path::new(engine_path);
   let engine = if path.exists() {
-    StorageEngine::open_with_hot_dir_progress_and_configuration_overrides(engine_path, hot_dir, progress_callback, command_line)
-      .expect("failed to open storage engine")
+    StorageEngine::open_with_hot_dir_progress_and_configuration_overrides(engine_path, hot_dir, progress_callback, command_line)?
   } else {
-    StorageEngine::create_with_hot_dir_and_configuration_overrides(engine_path, hot_dir, command_line)
-      .expect("failed to create storage engine")
+    StorageEngine::create_with_hot_dir_and_configuration_overrides(engine_path, hot_dir, command_line)?
   };
   let engine = Arc::new(engine);
   let ctx = RequestContext::system();
   let directory_ops = DirectoryOps::new(&engine);
-  directory_ops.ensure_root_directory(&ctx).expect("failed to create engine root directory");
+  directory_ops.ensure_root_directory(&ctx)?;
 
   // Run system path migrations (idempotent — safe on every startup).
-  system_store::migrate_system_paths(&engine).expect("failed to run system path migration");
+  system_store::migrate_system_paths(&engine)?;
 
-  engine
+  Ok(engine)
 }
 
 /// Build the application router with a specific JwtManager and engine, returning

@@ -358,6 +358,23 @@ impl MemoryCoordinator {
     Ok(())
   }
 
+  /// Return to observation-only mode after a temporary bootstrap policy.
+  /// This transition is legal only after every reservation has drained; an
+  /// operation admitted under one policy must never outlive that authority.
+  pub(crate) fn disable_policy(&self, reason: impl Into<String>) -> Result<(), MemoryCoordinatorError> {
+    let mut state = self.lock()?;
+    let (_, reserved, _) = state.totals()?;
+    if reserved != 0 || state.owners.values().any(|owner| owner.active_reservations != 0) {
+      return Err(MemoryCoordinatorError::AccountingInvariant {
+        owner: MemoryOwner::HealthStatus,
+        message: "cannot disable the memory policy while reservations are active".to_string(),
+      });
+    }
+    state.policy = None;
+    state.policy_error = Some(reason.into());
+    Ok(())
+  }
+
   pub fn reserve(
     &self,
     owner: MemoryOwner,
@@ -611,5 +628,24 @@ mod tests {
 
     assert_eq!(coordinator.snapshot().unwrap_err(), MemoryCoordinatorError::Poisoned);
     assert!(matches!(coordinator.reserve(MemoryOwner::Query, 1, AdmissionClass::Workload), Err(MemoryCoordinatorError::Poisoned)));
+  }
+
+  #[test]
+  fn bootstrap_policy_can_be_disabled_only_after_every_reservation_drains() {
+    let coordinator = MemoryCoordinator::new(MemoryPolicy::new(600, 800, 200, 100).unwrap());
+    let reservation =
+      coordinator.reserve(MemoryOwner::Repair, 10, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery)).unwrap();
+
+    let error = coordinator.disable_policy("runtime memory configuration is unresolved").unwrap_err();
+    assert!(matches!(error, MemoryCoordinatorError::AccountingInvariant { owner: MemoryOwner::HealthStatus, .. }));
+    assert!(coordinator.snapshot().unwrap().policy.is_some(), "a refused transition must retain its active bootstrap policy");
+
+    drop(reservation);
+    coordinator.disable_policy("runtime memory configuration is unresolved").unwrap();
+    let snapshot = coordinator.snapshot().unwrap();
+    assert!(snapshot.policy.is_none());
+    assert_eq!(snapshot.policy_error.as_deref(), Some("runtime memory configuration is unresolved"));
+    assert_eq!(snapshot.pressure, MemoryPressure::Unconfigured);
+    assert!(matches!(coordinator.reserve(MemoryOwner::Query, 1, AdmissionClass::Workload), Err(MemoryCoordinatorError::PolicyUnavailable)));
   }
 }

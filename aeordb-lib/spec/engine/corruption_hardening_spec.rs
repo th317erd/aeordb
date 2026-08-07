@@ -1831,3 +1831,75 @@ fn dirty_recovery_accepts_only_a_contiguous_verified_tail_after_the_durable_fron
   let report = verify::verify_checked(&reopened, &db_str).unwrap();
   assert!(!report.has_issues(), "dirty recovery must truncate stale tail residue at the last contiguous verified entry: {report:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn dirty_rebuild_post_marker_failure_spills_before_runtime_configuration_is_loaded() {
+  const CHILD_MARKER: &str = "AEORDB_DIRTY_REBUILD_SPILL_CHILD";
+  if std::env::var_os(CHILD_MARKER).is_none() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+      .arg("--exact")
+      .arg("dirty_rebuild_post_marker_failure_spills_before_runtime_configuration_is_loaded")
+      .arg("--nocapture")
+      .env(CHILD_MARKER, "1")
+      .output()
+      .unwrap();
+    assert!(
+      output.status.success(),
+      "isolated dirty-rebuild fault child failed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+    return;
+  }
+
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("dirty-rebuild-spill.aeordb");
+  let spill_path = temp.path().join("spill");
+  let temp_fallback = temp.path().join("tmp");
+  std::fs::create_dir(&temp_fallback).unwrap();
+  unsafe {
+    std::env::set_var("AEORDB_RECOVERY_EMERGENCY_SPILL_DIR", &spill_path);
+    std::env::set_var("XDG_DATA_HOME", temp.path().join("xdg"));
+    std::env::set_var("TMPDIR", temp_fallback);
+  }
+
+  let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+  for index in 0..700u64 {
+    engine.store_entry(EntryType::Chunk, &index.to_le_bytes(), b"dirty rebuild spill fixture").unwrap();
+  }
+  engine.shutdown().unwrap();
+  drop(engine);
+  let header = active_header(db_path.to_str().unwrap());
+  {
+    let mut file = OpenOptions::new().write(true).open(&db_path).unwrap();
+    file.seek(SeekFrom::Start(header.hot_tail_offset)).unwrap();
+    file.write_all(&[0u8; 4]).unwrap();
+    file.sync_all().unwrap();
+  }
+
+  let constrained = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+  let constrained_by_callback = std::sync::Arc::clone(&constrained);
+  let progress = std::sync::Arc::new(move |progress: aeordb::engine::storage_engine::EngineStartupProgress| {
+    if progress.phase == "rebuild_kv_insert" && !constrained_by_callback.swap(true, std::sync::atomic::Ordering::AcqRel) {
+      unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        let mut current = std::mem::zeroed::<libc::rlimit>();
+        assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut current), 0);
+        let limit = libc::rlimit { rlim_cur: (64 * 1024) as libc::rlim_t, rlim_max: current.rlim_max };
+        assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+      }
+    }
+  });
+
+  let error = match StorageEngine::open_with_hot_dir_and_progress(db_path.to_str().unwrap(), None, Some(progress)) {
+    Ok(_) => panic!("the injected post-marker KV page write must abort dirty startup"),
+    Err(error) => error,
+  };
+  assert!(constrained.load(std::sync::atomic::Ordering::Acquire), "fault was not installed after marker publication");
+  assert!(error.to_string().contains("KV rebuild failed after dirty-startup marker publication"), "unexpected open failure: {error}");
+
+  let artifacts = aeordb::engine::emergency_spill::scan_for_database_with_dirs(&db_path, &[spill_path]).unwrap();
+  assert_eq!(artifacts.len(), 1, "post-marker startup failure must leave one restart-blocking spill incident");
+  assert!(artifacts[0].manifest_path.is_file());
+}

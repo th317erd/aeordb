@@ -934,6 +934,13 @@ pub(crate) struct StartupConfigurationState {
   pub inputs: ConfigResolutionInputs,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PreopenEngineBootstrap {
+  pub emergency_spill_locations: Vec<crate::engine::emergency_spill::EmergencySpillLocation>,
+  pub emergency_spill_resolution_error: Option<String>,
+  pub memory_policy_values: Result<[u64; 4], String>,
+}
+
 pub(crate) fn build_startup_configuration(
   engine: &StorageEngine,
   database_path: &Path,
@@ -982,11 +989,32 @@ pub fn preopen_emergency_spill_locations(
   database_path: impl AsRef<Path>,
   command_line: &CommandLineConfigOverrides,
 ) -> EngineResult<Vec<crate::engine::emergency_spill::EmergencySpillLocation>> {
+  let bootstrap = preopen_engine_bootstrap(database_path, command_line)?;
+  match bootstrap.emergency_spill_resolution_error {
+    Some(error) => Err(EngineError::InvalidInput(error)),
+    None => Ok(bootstrap.emergency_spill_locations),
+  }
+}
+
+pub(crate) fn preopen_engine_bootstrap(
+  database_path: impl AsRef<Path>,
+  command_line: &CommandLineConfigOverrides,
+) -> EngineResult<PreopenEngineBootstrap> {
   let database_path = database_path.as_ref();
   let context = detect_context(database_path, crate::engine::directory_ops::DEFAULT_CHUNK_SIZE as u64)
     .map_err(|message| EngineError::InvalidInput(format!("cannot resolve pre-open recovery configuration: {message}")))?;
-  let read_only =
-    crate::engine::v4::deployment_guard::read_runtime_configuration_inputs_read_only(database_path, &ConfigResolver::new(context.clone()))?;
+  let read_only = match crate::engine::v4::deployment_guard::read_runtime_configuration_inputs_read_only(
+    database_path,
+    &ConfigResolver::new(context.clone()),
+  ) {
+    Ok(read_only) => read_only,
+    Err(error) => crate::engine::v4::deployment_guard::ReadOnlyRuntimeConfigurationInputs {
+      current: ConfigDocumentInput::Unreadable(format!("pre-open configuration inspection is unavailable: {error}")),
+      last_known_good: None,
+      history: Vec::new(),
+      history_issues: Vec::new(),
+    },
+  };
   let environment = collect_registered_environment();
   let cli = command_line.clone().into_values();
   let full_inputs = ConfigResolutionInputs {
@@ -999,7 +1027,8 @@ pub fn preopen_emergency_spill_locations(
     ..Default::default()
   };
   let full_resolution = ConfigResolver::new(context.clone()).resolve(full_inputs);
-  let effective = spill_path_from_resolution(&full_resolution).ok_or_else(|| {
+  let effective = spill_path_from_resolution(&full_resolution);
+  let emergency_spill_resolution_error = effective.is_none().then(|| {
     let detail = full_resolution
       .issues
       .iter()
@@ -1007,15 +1036,17 @@ pub fn preopen_emergency_spill_locations(
       .map(|issue| issue.message.as_str())
       .collect::<Vec<_>>()
       .join("; ");
-    EngineError::InvalidInput(format!(
+    format!(
       "recovery.emergency_spill_dir is unresolved before database open{}",
       if detail.is_empty() { String::new() } else { format!(": {detail}") }
-    ))
-  })?;
+    )
+  });
 
   let mut configured = Vec::new();
-  if effective.1 != ConfigSource::Default {
-    configured.push(effective.0);
+  if let Some((path, source)) = effective {
+    if source != ConfigSource::Default {
+      configured.push(path);
+    }
   }
   collect_spill_path_from_source(
     &context,
@@ -1051,7 +1082,30 @@ pub fn preopen_emergency_spill_locations(
     ConfigSource::CommandLine,
     &mut configured,
   );
-  Ok(crate::engine::emergency_spill::emergency_spill_locations_with_configured(configured))
+  Ok(PreopenEngineBootstrap {
+    emergency_spill_locations: crate::engine::emergency_spill::emergency_spill_locations_with_configured(configured),
+    emergency_spill_resolution_error,
+    memory_policy_values: memory_policy_values_from_resolution(&full_resolution),
+  })
+}
+
+pub(crate) fn memory_policy_values_from_resolution(resolution: &ConfigResolution) -> Result<[u64; 4], String> {
+  let paths = ["memory.soft_limit_bytes", "memory.hard_limit_bytes", "memory.host_available_floor_bytes", "memory.emergency_reserve_bytes"];
+  let blocking = resolution
+    .issues
+    .iter()
+    .filter(|issue| issue.blocking && issue.property.as_deref().is_some_and(|property| paths.contains(&property)))
+    .map(|issue| issue.message.as_str())
+    .collect::<Vec<_>>();
+  if !blocking.is_empty() {
+    return Err(format!("memory configuration is unresolved: {}", blocking.join("; ")));
+  }
+  let unsigned = |path: &str| match resolution.property(path).and_then(|property| property.value.as_ref()) {
+    Some(ConfigValue::Unsigned(value)) => Ok(*value),
+    Some(value) => Err(format!("{path} resolved to unexpected value {value:?}")),
+    None => Err(format!("{path} has no resolved value")),
+  };
+  Ok([unsigned(paths[0])?, unsigned(paths[1])?, unsigned(paths[2])?, unsigned(paths[3])?])
 }
 
 pub(crate) fn configuration_history_required(
