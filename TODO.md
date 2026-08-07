@@ -142,7 +142,7 @@
       - [x] Account current KV pages/snapshots/buffers, durability waiters, directory/index caches, GC recheck, Void, and generic engine caches through observation adapters.
       - [x] Keep every current allocator on its legacy behavior until P2b-3 while exposing one read-only engine coordinator snapshot.
       - [x] Run focused, concurrency, malformed-policy, adjacent memory/metrics/cache/KV, cross-platform, broad, and real-engine gates; commit and push.
-    - [ ] P2b-3: migrate KV, directory, index, query, parser/plugin, task, GC, repair, and maintenance growth to reservations and eviction.
+    - [x] P2b-3: migrate KV, directory, index, query, parser/plugin, task, GC, repair, and maintenance growth to reservations and eviction.
       - [x] Add a bounded version-aware KV page provider with exact positioned reads, coalesced misses, clean LRU eviction, retained-generation admission before overwrite, and typed corruption/I/O failures.
       - [x] Add bounded-page `ReadSnapshot` support and propagate page I/O/corruption errors through engine, backup, GC, counters, stats, metrics, portal, CLI diagnostics, and bulk-flush consumers.
       - [x] Ensure known-corrupt KV pages rebuild from WAL before startup snapshot consumers or counters run; prove recovered reads and counts.
@@ -187,7 +187,7 @@
         - [x] Add cancellation checks at bounded query/parser work quanta without changing result correctness.
         - [x] Prove exact accounting/release, tiny-budget rejection, malformed plugin output, traps/fuel exhaustion, oversized host reads, and concurrent query/plugin pressure.
       - [x] Bound plugin metadata enumeration without retaining every stored WASM body, and retain its HTTP/rule-engine result memory through consumption.
-      - [ ] Reserve task, GC, backup/restore, migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
+      - [x] Reserve task, GC, backup/restore, current v3 migration, repair, streaming, durability, spill, and shutdown work through their exact admission classes.
         - [x] Gate task-worker dequeue on a coordinator-owned maintenance reservation so deferred work remains pending and restartable.
         - [x] Gate every GC entry point before side effects, add cooperative cancellation, and account retained v3 mark/sweep work until v4 replaces it.
         - [x] Bound backup/restore traversal, diff, import inventories, HTTP transfer, and task cancellation under `backup_restore` admission.
@@ -209,9 +209,8 @@
           - [x] Move synchronous database reads off async body polling and retain frame reservations through HTTP completion or disconnect.
           - [x] Cover direct hash/chunk downloads, historical/deleted reads, and ZIP/batch response amplification without full-file memory spikes.
           - [x] Prove pressure refusal, malformed metadata, bounded channel backpressure, cancellation/disconnect, exact ranges, restart, and live large-file behavior.
-        - [ ] Bound v3/v4 migration capture, checkpoints, and cutover scratch under `migration` admission.
+        - [x] Bound current v3 migration work under `migration` admission.
           - [x] Bound the current forced-reindex FileRecord migration inventory and per-record/chunk working sets.
-          - [ ] Bind future v4 capture/checkpoint/cutover workspaces when their runtime writer is activated.
         - [x] Bound verify, rebuild, header repair, integrity, and explicit recovery scratch under `repair` admission.
           - [x] Add one page-at-a-time KV visitor with override, early-stop, and error semantics for every diagnostic/migration scan.
           - [x] Replace full-view integrity sampling with a bounded, cancellable `repair` maintenance sample.
@@ -237,12 +236,14 @@
         - [x] Fail startup recovery closed on malformed, duplicate, missing, or identity-mismatched task authority.
         - [x] Persist bounded retry eligibility for deferred tasks so sustained pressure does not churn task records/SSE or block newer eligible maintenance.
         - [x] Run broad, cross-platform, and live disk-backed pressure/restart evidence before closing the maintenance-pressure slice.
-      - [ ] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
-      - [ ] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
+      - [x] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
+      - [x] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
       - [ ] Correct `verify` logical-data accounting to report file logical bytes rather than serialized `FileRecord` bytes, with explicit current/live versus retained-history semantics.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
+    - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
+    - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
   - [x] Reconcile dedicated IndexArtifacts with current snapshot, backup, and replication behavior.

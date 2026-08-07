@@ -1,0 +1,125 @@
+{
+  "schema": "aeordb-v4-p2b3-exit-evidence-v1",
+  "source_commit": "67b3c7e",
+  "captured_at": "2026-08-07T08:06:38Z",
+  "platform": {
+    "os": "linux",
+    "cgroup_memory_max_bytes": 2147483648,
+    "cgroup_swap_max_bytes": 0
+  },
+  "focused_test_matrix": {
+    "passing_tests": 384,
+    "failures": 0,
+    "test_threads": 4,
+    "cargo_jobs": 4,
+    "targets": [
+      "cache_and_hardlinks_spec",
+      "corruption_hardening_spec",
+      "cross_restart_spec",
+      "health_spec",
+      "kv_concurrency_spec",
+      "kv_page_provider_spec",
+      "kv_snapshot_spec",
+      "memory_coordinator_spec",
+      "query_engine_spec",
+      "query_pagination_spec",
+      "reindex_spec",
+      "resilience_features_spec",
+      "stress_test_spec",
+      "task_worker_memory_spec"
+    ],
+    "obligations": {
+      "eviction": [
+        "clean_cache_evicts_lru_before_crossing_its_byte_cap",
+        "pressure_or_a_zero_local_cap_returns_exact_transient_pages_without_retention"
+      ],
+      "snapshot_generations": [
+        "each_live_snapshot_generation_reads_its_exact_page_across_multiple_commits",
+        "committed_updates_preserve_old_snapshot_bytes_until_the_last_old_view_drops"
+      ],
+      "malformed_pages_and_io": [
+        "malformed_and_truncated_pages_fail_without_poisoning_or_reserving_cache_state",
+        "bounded_snapshot_propagates_page_io_failure_instead_of_reporting_a_miss"
+      ],
+      "tiny_budgets": [
+        "history_reservation_failure_happens_before_overwrite_and_leaves_the_file_unchanged",
+        "query_hard_limit_refusal_is_retryable_and_leaks_no_reservation"
+      ],
+      "contention": [
+        "test_no_data_corruption_under_contention",
+        "test_writer_doesnt_corrupt_concurrent_reader_results"
+      ],
+      "cancellation": [
+        "query_honors_explicit_cancellation_before_memory_admission",
+        "test_reindex_cancellation_detected_during_processing"
+      ],
+      "restart_and_verification": [
+        "test_snapshot_tree_walkable_after_restart",
+        "verify_checked_walks_clean_snapshot_roots_without_buffering_snapshot_inventory"
+      ]
+    }
+  },
+  "live_normal_pressure": {
+    "exact_user_writes": 5402,
+    "concurrent_write_failures": 0,
+    "reindex_status": "completed",
+    "gc_status": "completed",
+    "cgroup_memory_peak_bytes": 429309952,
+    "cgroup_swap_peak_bytes": 0,
+    "health_samples": 80,
+    "health_failures": 0,
+    "health_p50_ms": 3.704833,
+    "health_p95_ms": 5.383735,
+    "health_max_ms": 27.0013,
+    "search_samples": 80,
+    "search_failures": 0,
+    "search_p95_ms": 856.187488,
+    "search_max_ms": 989.428679,
+    "verified_entries": 61999,
+    "corrupt_entries": 0,
+    "directory_issues": 0,
+    "kv_issues": 0,
+    "broken_snapshots": 0
+  },
+  "live_forced_eviction": {
+    "index_clean_max_bytes": 16777216,
+    "reindex_status": "completed",
+    "reindex_elapsed_ms": 414743,
+    "cached_indexes_after_reindex": 5,
+    "clean_reserved_bytes_after_reindex": 16072466,
+    "eviction_cycles": 716,
+    "evicted_indexes": 3915,
+    "cumulative_evicted_bytes": 8383707676,
+    "process_rss_bytes_after_reindex": 164978688,
+    "cgroup_memory_peak_bytes": 2147487744,
+    "cgroup_swap_peak_bytes": 0,
+    "health_spot_max_ms": 18.851,
+    "verified_entries": 139291,
+    "corrupt_entries": 0,
+    "directory_issues": 0,
+    "kv_issues": 0,
+    "broken_snapshots": 0,
+    "exact_crlf_hex": "616c7068610d0a626574610d0a",
+    "exact_last_json": {
+      "index": 2999,
+      "wave": 2,
+      "category": "group-31",
+      "text": "concurrent pressure record 2999",
+      "active": false
+    }
+  },
+  "discovered_v3_limitation": {
+    "classification": "whole-index publication write amplification",
+    "trigger": "16 MiB clean index cache with a legal 256-mutation/1-second reindex flush override",
+    "database_size_before_forced_eviction_reindex": "100.2 MB",
+    "database_size_after_forced_eviction_reindex": "7.0 GB",
+    "result": "exact and verified, but operationally unacceptable write amplification",
+    "assigned_phase": "P5",
+    "required_resolution": "replace v0 whole-index blobs with immutable copy-on-write page-addressable derived artifacts and prove bounded publication amplification"
+  },
+  "cleanup": {
+    "scratch_path": "/home/wyatt/.cache/codex/aeordb-tests/p2b3-pressure-evjU4X",
+    "scratch_size_removed": "7.0G",
+    "removed": true
+  }
+}
