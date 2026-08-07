@@ -26,7 +26,14 @@ curl -X POST http://localhost:6830/system/tasks/reindex \
   -d '{"path": "/data/", "metadata_only": true}'
 ```
 
-The `path` argument specifies which directory to reindex. Manual API reindexing defaults to `force: false`, which means index-only reprocessing. Pass `"force": true` only when you deliberately want to migrate older FileRecord payloads while reindexing.
+The `path` argument specifies which directory subtree to reindex. AeorDB uses a
+config stored in that directory when present; otherwise it resolves the nearest
+ancestor glob config using the same ownership rules as ordinary file writes.
+Glob matching and index storage remain relative to that config's owner even
+when the requested reindex scope is narrower. Manual API reindexing defaults to
+`force: false`, which means index-only reprocessing. Pass `"force": true` only
+when you deliberately want to migrate older FileRecord payloads while
+reindexing.
 
 Set `"metadata_only": true` when you only need to rebuild virtual `@` metadata indexes. This skips full file reads, JSON parsing, and parser plugins. Content fields in the config are ignored in metadata-only mode.
 
@@ -39,7 +46,7 @@ Optional flush controls:
 
 The task worker will:
 
-1. Read the `indexes.json` configuration for that path
+1. Resolve the local or inherited glob `indexes.json` configuration governing that path
 2. Visit directory B-tree leaves without materializing the complete listing, or when `force` is true, scan current live FileRecord path keys in the requested subtree
 3. If `force` is true, rewrite any older FileRecord payloads to the current version before indexing
 4. Rebuild indexes through either the metadata-only path or the full parser/content pipeline

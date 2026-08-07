@@ -544,27 +544,30 @@ fn execute_reindex(
   let resolver = IndexConfigResolver::new(engine);
   let reindex_root = normalize_path(path);
 
-  // Verify index config exists and load it to check for glob. Forced
-  // reindex doubles as the schema-migration path, so it must also be able to
-  // run without an indexes.json and simply migrate every file in the subtree.
+  // Resolve the config owner for this scope. A scoped manual reindex may be
+  // governed by an ancestor glob config, just like ordinary file indexing.
+  // Forced reindex doubles as the schema-migration path, so it must also be
+  // able to run without an indexes.json and simply migrate every file in the
+  // subtree.
   let config_path = IndexConfigResolver::config_path_for_directory(&reindex_root);
-  let config = match resolver.load_config(&reindex_root) {
-    Ok(Some(config)) => Some(config),
+  let (config, config_dir) = match resolver.find_config_for_reindex_scope(&reindex_root) {
+    Ok(Some((config, config_dir))) => (Some(config), Some(config_dir)),
     Ok(None) if force => {
       tracing::info!(
         path = %reindex_root,
         config_path = %config_path,
         "forced reindex running migration-only because no index config was found"
       );
-      None
+      (None, None)
     }
     Ok(None) => return Err(EngineError::NotFound(config_path)),
     Err(error) => return Err(error),
   };
   let stale_indexes_deleted = if let Some(ref config) = config {
-    let deleted = IndexManager::new(engine).delete_indexes_not_in_config(&reindex_root, config)?;
+    let config_dir = config_dir.as_deref().expect("resolved config has an owner directory");
+    let deleted = IndexManager::new(engine).delete_indexes_not_in_config(config_dir, config)?;
     if deleted > 0 {
-      tracing::info!(path = %reindex_root, deleted, "retired stale indexes before reindex");
+      tracing::info!(path = %config_dir, requested_scope = %reindex_root, deleted, "retired stale indexes before reindex");
     }
     deleted
   } else {
@@ -577,7 +580,13 @@ fn execute_reindex(
     collect_current_file_record_paths(engine, &reindex_root, migration_memory.as_mut().expect("force creates migration memory"))?
   } else if let Some(ref config) = config {
     if let Some(ref glob_pattern) = config.glob {
-      collect_recursive_reindex_paths(engine, &reindex_root, prefix, glob_pattern, &mut task_memory)?
+      collect_recursive_reindex_paths(
+        engine,
+        &reindex_root,
+        config_dir.as_deref().expect("resolved glob config has an owner directory"),
+        glob_pattern,
+        &mut task_memory,
+      )?
     } else {
       collect_direct_reindex_paths(&ops, &reindex_root, prefix, &mut task_memory)?
     }

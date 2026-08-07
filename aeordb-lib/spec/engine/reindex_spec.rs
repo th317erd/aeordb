@@ -253,6 +253,38 @@ fn test_reindex_indexes_all_files() {
 }
 
 #[test]
+fn scoped_reindex_uses_ancestor_glob_config_and_owner_relative_matching() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/scoped/a.json", br#"{"count":17}"#, Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/outside/b.json", br#"{"count":17}"#, Some("application/json")).unwrap();
+  let config = serde_json::json!({
+      "glob": "scoped/*.json",
+      "indexes": [{"name": "count", "type": "u64", "source": ["count"], "min": 0, "max": 200}]
+  });
+  ops
+    .store_file_buffered(&ctx, "/.aeordb-config/indexes.json", serde_json::to_string(&config).unwrap().as_bytes(), Some("application/json"))
+    .unwrap();
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/scoped"})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Completed, "scoped reindex should use its inherited config: {:?}", completed.error);
+
+  let index = IndexManager::new(&engine)
+    .load_index_by_strategy("/", "count", "u64")
+    .unwrap()
+    .expect("scoped reindex should write to the inherited config owner");
+  let matches = index.lookup_stored_values_exact(&[17u64.to_be_bytes().to_vec()]);
+  assert_eq!(matches, vec![file_path_hash("/scoped/a.json", &engine.hash_algo()).unwrap()]);
+}
+
+#[test]
 fn test_forced_reindex_migrates_legacy_file_record_to_current_version_and_indexes_hash() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let event_bus = Arc::new(EventBus::new());

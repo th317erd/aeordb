@@ -142,6 +142,34 @@ impl<'a> IndexConfigResolver<'a> {
     Ok(None)
   }
 
+  /// Find the config that governs a directory-scoped reindex.
+  ///
+  /// A config stored directly in the requested directory always owns that
+  /// scope. Otherwise, only ancestor glob configs can govern descendants,
+  /// matching the ownership rules used by `find_config_for_path`.
+  pub fn find_config_for_reindex_scope(&self, directory_path: &str) -> EngineResult<Option<(PathIndexConfig, String)>> {
+    let scope = normalize_path(directory_path);
+    if let Some(config) = self.load_config(&scope)? {
+      return Ok(Some((config, scope)));
+    }
+
+    let mut ancestor = parent_path(&scope);
+    while let Some(ref dir) = ancestor {
+      if let Some(config) = self.load_config(dir)? {
+        if config.glob.is_some() {
+          return Ok(Some((config, dir.clone())));
+        }
+      }
+
+      if dir == "/" {
+        break;
+      }
+      ancestor = parent_path(dir);
+    }
+
+    Ok(None)
+  }
+
   pub fn compression_for_path(&self, path: &str, content_type: Option<&str>, data_length: usize) -> CompressionAlgorithm {
     let normalized = normalize_path(path);
     let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
