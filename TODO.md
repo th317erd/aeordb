@@ -253,7 +253,10 @@
         - [x] Prove exact runtime/lifecycle paths cannot be read or mutated through generic file or blob routes.
       - [x] Keep CLI/environment values ephemeral and expose exact per-property source, stored validity, LKG identity, degradation, disabled capability, and pending restart/convergence.
       - [ ] Converge every lifecycle/runtime consumer on the shared authority with frozen dynamic, next-run-captured, and startup-bound activation semantics.
-      - [ ] Add all 41 frozen CLI overrides and prove registry/CLI coverage cannot drift.
+      - [x] Add all 41 frozen CLI overrides and prove registry/CLI coverage cannot drift.
+        - [x] Generate the `start` command's configuration arguments directly from the frozen registry and capture raw OS values without a parallel field list.
+        - [x] Carry validated command-line overrides through every serving-engine create/open path into the shared configuration authority.
+        - [x] Prove exact 41-property coverage, parser failure behavior, precedence, source attribution, and ephemeral storage semantics.
       - [ ] Publish configuration and memory-policy state through metrics, administrative SSE, CLI status, and the Dashboard without storage scans on collection.
       - [ ] Update API, operations, CLI, lifecycle, memory, SSE, and Dashboard documentation and examples.
       - [ ] Correct `verify` logical-data accounting to report file logical bytes rather than serialized `FileRecord` bytes, with explicit current/live versus retained-history semantics.

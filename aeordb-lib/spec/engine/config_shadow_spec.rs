@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 
 use aeordb::engine::config_resolver::{
-  ConfigDocumentStatus, ConfigSource, ConfigValue, ConfigurationFamily, MAX_CONFIG_DOCUMENT_BYTES, RUNTIME_CONFIG_PATH,
+  CommandLineConfigOverrides, ConfigDocumentStatus, ConfigSource, ConfigValue, ConfigurationFamily, MAX_CONFIG_DOCUMENT_BYTES,
+  RUNTIME_CONFIG_PATH,
 };
 use aeordb::engine::compression::{CompressionAlgorithm, compress};
 use aeordb::engine::directory_ops::DirectoryOps;
@@ -346,6 +348,24 @@ fn startup_shadow_collects_registered_environment_override() {
 
   assert_eq!(resolution.property("index.flush_after_seconds").unwrap().value, Some(ConfigValue::Unsigned(45)));
   assert_eq!(resolution.property("index.flush_after_seconds").unwrap().source, Some(ConfigSource::Environment));
+}
+
+#[test]
+#[serial]
+fn serving_engine_command_line_override_wins_environment_and_remains_ephemeral() {
+  let _environment = EnvironmentGuard::set("AEORDB_MEMORY_HARD_LIMIT_BYTES", "3GiB");
+  let directory = tempfile::tempdir().unwrap();
+  let path = database_path(&directory);
+  let overrides =
+    CommandLineConfigOverrides::from_registered(BTreeMap::from([("--memory-hard-limit-bytes".to_string(), OsString::from("4GiB"))]))
+      .unwrap();
+  let engine = StorageEngine::create_with_hot_dir_and_configuration_overrides(&path, None, overrides).unwrap();
+  DirectoryOps::new(&engine).ensure_root_directory(&RequestContext::system()).unwrap();
+  let resolution = engine.configuration_shadow().resolution.as_ref().unwrap().clone();
+
+  assert_eq!(resolution.property("memory.hard_limit_bytes").unwrap().value, Some(ConfigValue::Unsigned(4 * 1024 * 1024 * 1024)));
+  assert_eq!(resolution.property("memory.hard_limit_bytes").unwrap().source, Some(ConfigSource::CommandLine));
+  assert!(DirectoryOps::new(&engine).get_metadata(RUNTIME_CONFIG_PATH).unwrap().is_none());
 }
 
 #[test]

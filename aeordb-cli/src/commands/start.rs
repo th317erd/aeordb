@@ -18,7 +18,7 @@ use aeordb::engine::{
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
-use aeordb::server::create_app_with_auth_mode_cancel_progress;
+use aeordb::server::create_app_with_auth_mode_cancel_progress_and_configuration_overrides;
 
 /// All settings the `start` command needs. Built in `main.rs` by merging the
 /// clap-parsed CLI flags with the optional config file, then passed to
@@ -39,6 +39,7 @@ pub struct StartConfig<'a> {
   pub join_url: Option<&'a str>,
   pub join_token: Option<&'a str>,
   pub advertise_url: Option<&'a str>,
+  pub command_line_overrides: aeordb::engine::config_resolver::CommandLineConfigOverrides,
 }
 
 #[derive(Clone)]
@@ -70,6 +71,7 @@ struct InitConfig {
   join_url: Option<String>,
   join_token: Option<String>,
   advertise_url: Option<String>,
+  command_line_overrides: aeordb::engine::config_resolver::CommandLineConfigOverrides,
 }
 
 impl StartupGateState {
@@ -246,6 +248,7 @@ pub async fn run(config: StartConfig<'_>) {
     join_url,
     join_token,
     advertise_url,
+    command_line_overrides,
   } = config;
   let log_config = LogConfig {
     format: match log_format {
@@ -370,6 +373,7 @@ pub async fn run(config: StartConfig<'_>) {
     join_url: join_url.map(str::to_string),
     join_token: join_token.map(str::to_string),
     advertise_url: advertise_url.map(str::to_string),
+    command_line_overrides,
   };
 
   let init_gate = startup_gate.clone();
@@ -493,7 +497,7 @@ async fn initialize_server_runtime(
   startup_gate: StartupGateState,
   port: u16,
 ) -> Result<ServerRuntime, String> {
-  let InitConfig { database, auth_mode, hot_dir, cors_flag, peers, join_url, join_token, advertise_url } = config;
+  let InitConfig { database, auth_mode, hot_dir, cors_flag, peers, join_url, join_token, advertise_url, command_line_overrides } = config;
   let hot_dir_ref = hot_dir.as_path();
 
   fail_if_unresolved_emergency_spills(&database)?;
@@ -505,14 +509,14 @@ async fn initialize_server_runtime(
   if let Some(join_url) = join_url.as_deref() {
     startup_gate.set_phase("cluster_join", "Joining cluster before opening the serving engine", 0.05, None);
     let token = join_token.as_deref().ok_or_else(|| "--join requires --join-token".to_string())?;
-    perform_cluster_join(&database, hot_dir_ref, join_url, token, port, advertise_url.as_deref()).await?;
+    perform_cluster_join(&database, hot_dir_ref, join_url, token, port, advertise_url.as_deref(), command_line_overrides.clone()).await?;
     println!("Cluster join complete. Adopting shared signing key.");
   }
 
   // Register any --peers URLs into the system store before serving.
   if !peers.is_empty() {
     startup_gate.set_phase("registering_peers", "Registering configured peers before opening the serving engine", 0.10, None);
-    if let Err(e) = register_initial_peers(&database, hot_dir_ref, &peers) {
+    if let Err(e) = register_initial_peers(&database, hot_dir_ref, &peers, command_line_overrides.clone()) {
       tracing::warn!("Failed to register some --peers: {}", e);
       eprintln!("Warning: failed to register some --peers: {}", e);
     } else {
@@ -528,14 +532,16 @@ async fn initialize_server_runtime(
   let engine_progress: aeordb::engine::EngineStartupProgressCallback = Arc::new(move |progress| {
     apply_engine_startup_progress(&engine_progress_gate, progress);
   });
-  let (application, file_bootstrap_key, engine, event_bus, task_queue) = create_app_with_auth_mode_cancel_progress(
-    &database,
-    &auth_mode,
-    Some(hot_dir_ref),
-    cors_flag.as_deref(),
-    Some(cancel.clone()),
-    Some(engine_progress),
-  );
+  let (application, file_bootstrap_key, engine, event_bus, task_queue) =
+    create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
+      &database,
+      &auth_mode,
+      Some(hot_dir_ref),
+      cors_flag.as_deref(),
+      Some(cancel.clone()),
+      Some(engine_progress),
+      command_line_overrides,
+    );
   if let Some(recovery) = engine.persistent_durability_recovery().filter(|recovery| recovery.blocks_writes) {
     cancel.cancel();
     return Err(format!(
@@ -754,6 +760,7 @@ async fn perform_cluster_join(
   join_token: &str,
   local_port: u16,
   advertise_url: Option<&str>,
+  command_line_overrides: aeordb::engine::config_resolver::CommandLineConfigOverrides,
 ) -> Result<(), String> {
   use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
@@ -819,9 +826,16 @@ async fn perform_cluster_join(
 
   // Open the engine, write the signing key + peer, then drop it so the
   // server can re-open it normally.
-  let engine = aeordb::engine::StorageEngine::open_with_hot_dir(database, Some(hot_dir))
-    .or_else(|_| aeordb::engine::StorageEngine::create_with_hot_dir(database, Some(hot_dir)))
-    .map_err(|e| format!("failed to open engine for join: {}", e))?;
+  let engine = aeordb::engine::StorageEngine::open_with_hot_dir_progress_and_configuration_overrides(
+    database,
+    Some(hot_dir),
+    None,
+    command_line_overrides.clone(),
+  )
+  .or_else(|_| {
+    aeordb::engine::StorageEngine::create_with_hot_dir_and_configuration_overrides(database, Some(hot_dir), command_line_overrides)
+  })
+  .map_err(|e| format!("failed to open engine for join: {}", e))?;
 
   let ctx = aeordb::engine::RequestContext::system();
   aeordb::engine::system_store::store_config(&engine, &ctx, "jwt_signing_key", &signing_key)
@@ -849,10 +863,22 @@ async fn perform_cluster_join(
 }
 
 /// Write peer configs for --peers URLs into the engine's system store.
-fn register_initial_peers(database: &str, hot_dir: &std::path::Path, peers: &[String]) -> Result<(), String> {
-  let engine = aeordb::engine::StorageEngine::open_with_hot_dir(database, Some(hot_dir))
-    .or_else(|_| aeordb::engine::StorageEngine::create_with_hot_dir(database, Some(hot_dir)))
-    .map_err(|e| format!("failed to open engine: {}", e))?;
+fn register_initial_peers(
+  database: &str,
+  hot_dir: &std::path::Path,
+  peers: &[String],
+  command_line_overrides: aeordb::engine::config_resolver::CommandLineConfigOverrides,
+) -> Result<(), String> {
+  let engine = aeordb::engine::StorageEngine::open_with_hot_dir_progress_and_configuration_overrides(
+    database,
+    Some(hot_dir),
+    None,
+    command_line_overrides.clone(),
+  )
+  .or_else(|_| {
+    aeordb::engine::StorageEngine::create_with_hot_dir_and_configuration_overrides(database, Some(hot_dir), command_line_overrides)
+  })
+  .map_err(|e| format!("failed to open engine: {}", e))?;
 
   let ctx = aeordb::engine::RequestContext::system();
   let mut peer_configs = aeordb::engine::system_store::get_peer_configs(&engine).unwrap_or_default();

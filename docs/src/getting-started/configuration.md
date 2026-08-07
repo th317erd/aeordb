@@ -1,6 +1,6 @@
 # Configuration
 
-AeorDB is configured through CLI flags, a TOML configuration file, and through configuration files stored inside the database itself. CLI flags always take precedence over config file values.
+AeorDB server settings come from CLI flags and an optional TOML file. Engine runtime and lifecycle policy comes from strict configuration documents stored inside the database, registered environment variables, and the corresponding `aeordb start` flags.
 
 ## Configuration File
 
@@ -10,7 +10,7 @@ AeorDB supports a TOML configuration file for all server settings. Pass it with 
 aeordb start --config aeordb.toml
 ```
 
-Every config key has a 1:1 mapping to a CLI flag. CLI flags override config file values. Omit any key to use the built-in default.
+Every TOML server key has a corresponding CLI flag. CLI flags override TOML values. Omit any key to use the built-in default.
 
 ```toml
 [server]
@@ -55,8 +55,29 @@ aeordb start [OPTIONS]
 | `--log-format` | `pretty` | Log output format: `pretty` or `json` |
 | `--tls-cert` | — | Path to TLS certificate PEM file (requires `--tls-key`) |
 | `--tls-key` | — | Path to TLS private key PEM file (requires `--tls-cert`) |
-| `--jwt-expiry` | `3600` | JWT token lifetime in seconds |
+| `--jwt-expiry` | `604800` | JWT token lifetime in seconds (7 days) |
 | `--chunk-size` | `262144` | Write chunk size in bytes (256 KiB default) |
+
+### Runtime And Lifecycle Overrides
+
+`aeordb start --help` exposes one explicit flag for every property in the frozen runtime/lifecycle registry. These flags use the same value syntax as registered environment variables and have the highest precedence:
+
+1. command-line override;
+2. registered environment override;
+3. valid stored runtime/lifecycle document;
+4. validated last-known-good policy when applicable; then
+5. compiled default.
+
+Process overrides are ephemeral. AeorDB reports their source as `command_line` through `/system/runtime` or `/system/lifecycle`, but never copies them into the stored JSON document.
+
+```bash
+aeordb start -D data.aeordb \
+  --memory-hard-limit-bytes 8GiB \
+  --index-flush-after-seconds 30 \
+  --lifecycle-snapshot-writes-enabled false
+```
+
+Boolean flags require an explicit `true` or `false`. Byte quantities accept exact binary units such as `MiB`, `GiB`, and `TiB`; count/time values are unsigned integers; optional byte values accept `null`; and path values must be absolute. Unknown flags, missing values, and duplicate flags are rejected. See [`aeordb start`](../cli/commands.md#aeordb-start) for the command surface and [Admin API](../api/admin.md#runtime-configuration) for stored policy and status.
 
 ### TLS
 

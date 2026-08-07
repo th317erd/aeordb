@@ -24,11 +24,25 @@ aeordb start [OPTIONS]
 | `--cors-origins` | | (disabled) | CORS allowed origins |
 | `--tls-cert` | | -- | Path to TLS certificate PEM file (requires `--tls-key`) |
 | `--tls-key` | | -- | Path to TLS private key PEM file (requires `--tls-cert`) |
-| `--jwt-expiry` | | `3600` | JWT token lifetime in seconds |
+| `--jwt-expiry` | | `604800` | JWT token lifetime in seconds (7 days) |
 | `--chunk-size` | | `262144` | Write chunk size in bytes (256 KiB) |
 | `--peers` | | -- | Comma-separated peer URLs to register at startup (persisted, idempotent) |
 | `--join` | | -- | URL of an existing cluster member to join (one-shot; fetches the cluster's signing key) |
 | `--join-token` | | -- | Root API key (or bearer token) of the existing cluster member, required with `--join` |
+
+### Runtime And Lifecycle Configuration Flags
+
+The `start` command generates one explicit option for each of the 41 properties in AeorDB's frozen runtime/lifecycle registry. Run `aeordb start --help` to list the exact options. They include the `memory`, `cache`, `index`, `garbage-collection`, `io`, `query`, `durability`, `maintenance`, `recovery`, `shutdown`, `migration`, and `lifecycle` groups.
+
+Each option takes one explicit value. Command-line values override registered environment variables and stored policy but remain process-local; they are reported as `command_line` and are never written into runtime/lifecycle JSON. The resolver performs type, range, path, and cross-property validation after the database context is known.
+
+```bash
+aeordb start -D data.aeordb \
+  --memory-hard-limit-bytes 8GiB \
+  --cache-index-clean-max-bytes 2GiB \
+  --garbage-collection-mark-scratch-max-bytes null \
+  --lifecycle-snapshot-writes-enabled false
+```
 
 ### Auth Modes
 

@@ -647,7 +647,10 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
-  fn initialize_configuration_authority(&self) -> EngineResult<()> {
+  fn initialize_configuration_authority(
+    &self,
+    command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+  ) -> EngineResult<()> {
     let controls = crate::engine::v4::configuration_controls::load_configuration_controls(self);
     let startup_state = crate::engine::config_resolver::build_startup_configuration(
       self,
@@ -655,6 +658,7 @@ impl StorageEngine {
       crate::engine::directory_ops::DEFAULT_CHUNK_SIZE as u64,
       controls.runtime_lkg,
       controls.lifecycle_lkg,
+      command_line,
     );
     let report = &startup_state.report;
     let complete = report.complete();
@@ -2061,7 +2065,7 @@ impl StorageEngine {
   }
 
   pub(crate) fn create_with_memory_coordinator(path: &str, coordinator: Arc<MemoryCoordinator>) -> EngineResult<Self> {
-    Self::create_internal(path, None, Some(coordinator))
+    Self::create_internal(path, None, Some(coordinator), Default::default())
   }
 
   /// Create a new database file at the given path with an optional hot directory
@@ -2070,10 +2074,23 @@ impl StorageEngine {
   /// NOTE: `hot_dir` is ignored — hot data is stored in the hot tail at the end
   /// of the main .aeordb file. The parameter is kept for API backward compat.
   pub fn create_with_hot_dir(path: &str, _hot_dir: Option<&Path>) -> EngineResult<Self> {
-    Self::create_internal(path, _hot_dir, None)
+    Self::create_internal(path, _hot_dir, None, Default::default())
   }
 
-  fn create_internal(path: &str, _hot_dir: Option<&Path>, inherited_memory: Option<Arc<MemoryCoordinator>>) -> EngineResult<Self> {
+  pub fn create_with_hot_dir_and_configuration_overrides(
+    path: &str,
+    hot_dir: Option<&Path>,
+    command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+  ) -> EngineResult<Self> {
+    Self::create_internal(path, hot_dir, None, command_line)
+  }
+
+  fn create_internal(
+    path: &str,
+    _hot_dir: Option<&Path>,
+    inherited_memory: Option<Arc<MemoryCoordinator>>,
+    command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+  ) -> EngineResult<Self> {
     let lock_path = format!("{}.lock", path);
     let lock_file = Self::acquire_file_lock(&lock_path)?;
 
@@ -2159,7 +2176,7 @@ impl StorageEngine {
     };
     let initialized = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
     engine.counters.store(initialized);
-    engine.initialize_configuration_authority()?;
+    engine.initialize_configuration_authority(command_line)?;
     engine.initialize_memory_coordinator(inherited_memory)?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
@@ -2180,6 +2197,7 @@ impl StorageEngine {
     _hot_dir: Option<&Path>,
     progress_callback: Option<EngineStartupProgressCallback>,
     inherited_memory: Option<Arc<MemoryCoordinator>>,
+    command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
   ) -> EngineResult<Self> {
     Self::report_startup_progress(
       &progress_callback,
@@ -2419,7 +2437,7 @@ impl StorageEngine {
     // VoidManager state so the next hot tail flush carries it forward.
     engine.sync_voids_to_kv_writer()?;
     engine.refresh_persistent_durability_recovery()?;
-    engine.initialize_configuration_authority()?;
+    engine.initialize_configuration_authority(command_line)?;
     engine.initialize_memory_coordinator(inherited_memory)?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
@@ -2626,29 +2644,8 @@ impl StorageEngine {
   /// missing or stale. Does not use a hot directory. Refuses to open patch
   /// databases (`backup_type > 1`).
   pub fn open(path: &str) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, None, None, None)?;
-
-    // Guard: refuse to open patch databases as normal databases
-    let header = engine
-      .writer
-      .read()
-      .map_err(|e| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned: {}", e))))?
-      .file_header()
-      .clone();
-    if header.backup_type > 1 {
-      let base = hex::encode(&header.base_hash);
-      let target = hex::encode(&header.target_hash);
-      return Err(EngineError::PatchDatabase(format!(
-        "This is a patch export and cannot be used as a standalone database.\n\n\
-         Base version:   {}\n\
-         Target version: {}\n\n\
-         To apply this patch, import it into a database at the base version:\n\
-         aeordb import --database <your.aeordb> --file {}",
-        base, target, path
-      )));
-    }
-
-    Ok(engine)
+    let engine = Self::open_internal(path, None, None, None, Default::default())?;
+    Self::reject_patch_database(engine, path)
   }
 
   /// Open an existing database with a hot directory for crash recovery.
@@ -2665,8 +2662,23 @@ impl StorageEngine {
     hot_dir: Option<&Path>,
     progress_callback: Option<EngineStartupProgressCallback>,
   ) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, hot_dir, progress_callback, None)?;
+    let engine = Self::open_internal(path, hot_dir, progress_callback, None, Default::default())?;
 
+    Self::reject_patch_database(engine, path)
+  }
+
+  pub fn open_with_hot_dir_progress_and_configuration_overrides(
+    path: &str,
+    hot_dir: Option<&Path>,
+    progress_callback: Option<EngineStartupProgressCallback>,
+    command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+  ) -> EngineResult<Self> {
+    let engine = Self::open_internal(path, hot_dir, progress_callback, None, command_line)?;
+
+    Self::reject_patch_database(engine, path)
+  }
+
+  fn reject_patch_database(engine: Self, path: &str) -> EngineResult<Self> {
     // Guard: refuse to open patch databases as normal databases
     let header = engine
       .writer
@@ -2692,11 +2704,11 @@ impl StorageEngine {
 
   /// Open a database file for import purposes, allowing patch databases.
   pub fn open_for_import(path: &str) -> EngineResult<Self> {
-    Self::open_internal(path, None, None, None)
+    Self::open_internal(path, None, None, None, Default::default())
   }
 
   pub(crate) fn open_for_import_with_memory_coordinator(path: &str, coordinator: Arc<MemoryCoordinator>) -> EngineResult<Self> {
-    Self::open_internal(path, None, None, Some(coordinator))
+    Self::open_internal(path, None, None, Some(coordinator), Default::default())
   }
 
   /// Store an entry: append to file, register in KV store.

@@ -74,6 +74,36 @@ pub struct ConfigResolutionInputs {
   pub cli: BTreeMap<String, OsString>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandLineConfigOverrides {
+  values: BTreeMap<String, OsString>,
+}
+
+impl CommandLineConfigOverrides {
+  pub fn from_registered(values: BTreeMap<String, OsString>) -> Result<Self, String> {
+    if let Some(name) = values.keys().find(|name| !CONFIGURATION_PROPERTIES.iter().any(|property| property.cli == name.as_str())) {
+      return Err(format!("unregistered AeorDB configuration command-line override: {name}"));
+    }
+    Ok(Self { values })
+  }
+
+  pub fn get(&self, name: &str) -> Option<&OsStr> {
+    self.values.get(name).map(OsString::as_os_str)
+  }
+
+  pub fn len(&self) -> usize {
+    self.values.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.values.is_empty()
+  }
+
+  fn into_values(self) -> BTreeMap<String, OsString> {
+    self.values
+  }
+}
+
 impl Default for ConfigResolutionInputs {
   fn default() -> Self {
     Self {
@@ -893,6 +923,7 @@ pub(crate) fn build_startup_configuration(
   chunk_size_bytes: u64,
   runtime_lkg: Option<ConfigFallback>,
   lifecycle_lkg: Option<ConfigFallback>,
+  command_line: CommandLineConfigOverrides,
 ) -> StartupConfigurationState {
   let context = match detect_context(database_path, chunk_size_bytes) {
     Ok(context) => context,
@@ -909,6 +940,7 @@ pub(crate) fn build_startup_configuration(
     runtime_lkg,
     lifecycle_lkg,
     environment: collect_registered_environment(),
+    cli: command_line.into_values(),
     ..Default::default()
   };
   let resolution = ConfigResolver::new(context.clone()).resolve(inputs.clone());

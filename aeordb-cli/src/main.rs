@@ -14,7 +14,7 @@
 
 use aeordb_cli::commands;
 use aeordb_cli::config::{AeorConfig, load_config};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::stress::StressArgs;
 
 #[derive(Parser)]
@@ -258,7 +258,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-  let cli = Cli::parse();
+  let matches = aeordb_cli::configuration_cli::with_configuration_arguments(Cli::command()).get_matches();
+  let command_line_overrides = aeordb_cli::configuration_cli::collect_configuration_overrides(&matches).unwrap_or_else(|error| {
+    eprintln!("Error: {error}");
+    std::process::exit(2);
+  });
+  let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
 
   match cli.command {
     Commands::Start {
@@ -347,6 +352,7 @@ async fn main() {
         join_url: join.as_deref(),
         join_token: join_token.as_deref(),
         advertise_url: advertise_url.as_deref(),
+        command_line_overrides,
       })
       .await;
     }
