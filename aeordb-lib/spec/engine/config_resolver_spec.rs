@@ -212,6 +212,73 @@ fn precedence_is_per_property_and_valid_higher_sources_survive_broken_storage() 
 }
 
 #[test]
+fn derived_defaults_follow_the_effective_hard_limit_from_every_configuration_source() {
+  let mut environment = ConfigResolutionInputs::default();
+  environment.environment.insert("AEORDB_MEMORY_HARD_LIMIT_BYTES".into(), OsString::from("4GiB"));
+  let environment_resolution = resolve(environment);
+  assert!(environment_resolution.complete(), "{:?}", environment_resolution.issues);
+  assert_eq!(u64_value(&environment_resolution, "memory.hard_limit_bytes"), 4 * GIB);
+  assert_eq!(u64_value(&environment_resolution, "memory.soft_limit_bytes"), 3 * GIB);
+  assert_eq!(u64_value(&environment_resolution, "cache.index_clean_max_bytes"), GIB);
+  assert_eq!(u64_value(&environment_resolution, "cache.directory_max_bytes"), 256 * MIB);
+  assert_eq!(u64_value(&environment_resolution, "cache.kv_resident_max_bytes"), GIB);
+  assert_eq!(u64_value(&environment_resolution, "index.mutation_buffer_max_bytes"), 512 * MIB);
+  assert_eq!(u64_value(&environment_resolution, "query.per_request_memory_bytes"), 64 * MIB);
+  assert_eq!(u64_value(&environment_resolution, "query.global_memory_bytes"), 512 * MIB);
+  for path in [
+    "memory.soft_limit_bytes",
+    "cache.index_clean_max_bytes",
+    "cache.directory_max_bytes",
+    "cache.kv_resident_max_bytes",
+    "index.mutation_buffer_max_bytes",
+    "query.per_request_memory_bytes",
+    "query.global_memory_bytes",
+  ] {
+    assert_eq!(environment_resolution.property(path).unwrap().source, Some(ConfigSource::Default), "{path}");
+  }
+
+  let stored = resolve(ConfigResolutionInputs {
+    runtime: runtime(r#"{"schema_version":1,"memory":{"hard_limit_bytes":4294967296}}"#),
+    ..Default::default()
+  });
+  assert!(stored.complete(), "{:?}", stored.issues);
+  assert_eq!(u64_value(&stored, "memory.hard_limit_bytes"), 4 * GIB);
+  assert_eq!(stored.property("memory.hard_limit_bytes").unwrap().source, Some(ConfigSource::StoredRuntimeV1));
+  assert_eq!(u64_value(&stored, "memory.soft_limit_bytes"), 3 * GIB);
+  assert_eq!(u64_value(&stored, "cache.index_clean_max_bytes"), GIB);
+
+  let mut command_line = ConfigResolutionInputs::default();
+  command_line.cli.insert("--memory-hard-limit-bytes".into(), OsString::from("2GiB"));
+  let command_line_resolution = resolve(command_line);
+  assert!(command_line_resolution.complete(), "{:?}", command_line_resolution.issues);
+  assert_eq!(u64_value(&command_line_resolution, "memory.soft_limit_bytes"), 1536 * MIB);
+  assert_eq!(u64_value(&command_line_resolution, "cache.index_clean_max_bytes"), 512 * MIB);
+  assert_eq!(u64_value(&command_line_resolution, "query.per_request_memory_bytes"), 32 * MIB);
+
+  let last_known_good = resolve(ConfigResolutionInputs {
+    runtime: runtime("{"),
+    runtime_lkg: Some(ConfigFallback {
+      bytes: br#"{"schema_version":1,"memory":{"hard_limit_bytes":4294967296}}"#.to_vec(),
+      identity: "runtime-lkg-4g".into(),
+      recorded_at_ms: 100,
+    }),
+    ..Default::default()
+  });
+  assert_eq!(u64_value(&last_known_good, "memory.soft_limit_bytes"), 3 * GIB);
+  assert_eq!(u64_value(&last_known_good, "cache.index_clean_max_bytes"), GIB);
+
+  let mut explicit_soft = ConfigResolutionInputs {
+    runtime: runtime(r#"{"schema_version":1,"memory":{"soft_limit_bytes":2684354560,"hard_limit_bytes":4294967296}}"#),
+    ..Default::default()
+  };
+  explicit_soft.cli.insert("--memory-hard-limit-bytes".into(), OsString::from("5GiB"));
+  let explicit_soft_resolution = resolve(explicit_soft);
+  assert!(explicit_soft_resolution.complete(), "{:?}", explicit_soft_resolution.issues);
+  assert_eq!(u64_value(&explicit_soft_resolution, "memory.soft_limit_bytes"), 2560 * MIB);
+  assert_eq!(explicit_soft_resolution.property("memory.soft_limit_bytes").unwrap().source, Some(ConfigSource::StoredRuntimeV1));
+}
+
+#[test]
 fn invalid_winning_source_never_falls_through_but_invalid_lower_source_is_visible_only() {
   let mut invalid_environment = ConfigResolutionInputs::default();
   invalid_environment.environment.insert("AEORDB_MEMORY_HARD_LIMIT_BYTES".into(), OsString::from("4GB"));

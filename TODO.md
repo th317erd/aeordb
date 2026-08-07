@@ -239,7 +239,17 @@
       - [x] Prove exact results across eviction, snapshot generations, malformed pages, disk errors, tiny budgets, contention, cancellation, restart, and verification.
       - [x] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
+      - [x] Make derived defaults depend on the effective higher-precedence property values, including CLI/environment hard-memory overrides.
+      - [ ] Replace the immutable diagnostic shadow with one configuration authority that retains startup, effective, stored, and activation state.
+      - [ ] Persist and recover validated runtime/lifecycle LKG plus diagnostics through the approved v3 transition ControlStore without emitting v4 authority.
+      - [ ] Add root-only GET, replacement PUT, and RFC 7396 PATCH for both `/system/runtime` and `/system/lifecycle`, validating the complete proposed document before durable publication.
+      - [ ] Keep CLI/environment values ephemeral and expose exact per-property source, stored validity, LKG identity, degradation, disabled capability, and pending restart/convergence.
+      - [ ] Converge every lifecycle/runtime consumer on the shared authority with frozen dynamic, next-run-captured, and startup-bound activation semantics.
+      - [ ] Add all 41 frozen CLI overrides and prove registry/CLI coverage cannot drift.
+      - [ ] Publish configuration and memory-policy state through metrics, administrative SSE, CLI status, and the Dashboard without storage scans on collection.
+      - [ ] Update API, operations, CLI, lifecycle, memory, SSE, and Dashboard documentation and examples.
       - [ ] Correct `verify` logical-data accounting to report file logical bytes rather than serialized `FileRecord` bytes, with explicit current/live versus retained-history semantics.
+      - [ ] Run focused malformed/precedence/concurrency/durability tests, affected regressions, full workspace and cross-platform gates, and a real authenticated disposable-server test.
     - [ ] P2 exit: prove real v3 stress, memory pressure, dirty restart, verify, and deployment readiness.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.

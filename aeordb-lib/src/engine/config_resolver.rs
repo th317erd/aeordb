@@ -217,6 +217,7 @@ impl ConfigResolver {
       &mut resolution,
     );
     self.apply_overrides(&inputs.environment, &inputs.cli, &mut resolution);
+    self.refresh_derived_defaults(&mut resolution);
 
     for property in CONFIGURATION_PROPERTIES {
       if resolution.properties[property.path].value.is_none()
@@ -294,22 +295,12 @@ impl ConfigResolver {
   }
 
   fn apply_current_layer(&self, family: ConfigFamily, layer: ParsedLayer, resolution: &mut ConfigResolution) {
+    let values = self
+      .complete_family_values(family, &layer.values)
+      .expect("a parsed configuration layer has already passed complete-value validation");
     for property in CONFIGURATION_PROPERTIES.iter().filter(|property| family.contains(property)) {
-      let (value, source) = match layer.values.get(property.path) {
-        Some(value) => (Some(value.clone()), Some(layer.source)),
-        None => match self.default_value(property) {
-          Ok(value) => (Some(value), Some(ConfigSource::Default)),
-          Err(message) => {
-            resolution.issues.push(ConfigIssue {
-              property: Some(property.path.to_string()),
-              source: Some(ConfigSource::Default),
-              blocking: true,
-              message,
-            });
-            (None, None)
-          }
-        },
-      };
+      let value = values.get(property.path).cloned();
+      let source = Some(if layer.values.contains_key(property.path) { layer.source } else { ConfigSource::Default });
       let target = resolution.properties.get_mut(property.path).expect("frozen property exists");
       target.value = value;
       target.source = source;
@@ -317,15 +308,17 @@ impl ConfigResolver {
   }
 
   fn apply_default_layer(&self, family: ConfigFamily, source: ConfigSource, resolution: &mut ConfigResolution) {
+    let mut values = BTreeMap::new();
     for property in CONFIGURATION_PROPERTIES.iter().filter(|property| family.contains(property)) {
-      match self.default_value(property) {
+      match self.default_value(property, &values) {
         Ok(value) => {
+          values.insert(property.path.to_string(), value.clone());
           let target = resolution.properties.get_mut(property.path).expect("frozen property exists");
           target.value = Some(value);
           target.source = Some(source);
         }
         Err(message) => {
-          resolution.issues.push(ConfigIssue { property: Some(property.path.to_string()), source: Some(source), blocking: true, message })
+          resolution.issues.push(ConfigIssue { property: Some(property.path.to_string()), source: Some(source), blocking: true, message });
         }
       }
     }
@@ -373,22 +366,11 @@ impl ConfigResolver {
   }
 
   fn apply_validated_fallback(&self, family: ConfigFamily, layer: ParsedLayer, source: ConfigSource, resolution: &mut ConfigResolution) {
+    let values =
+      self.complete_family_values(family, &layer.values).expect("a parsed fallback layer has already passed complete-value validation");
     for property in CONFIGURATION_PROPERTIES.iter().filter(|property| family.contains(property)) {
-      let (value, resolved_source) = match layer.values.get(property.path) {
-        Some(value) => (Some(value.clone()), Some(source)),
-        None => match self.default_value(property) {
-          Ok(value) => (Some(value), Some(ConfigSource::Default)),
-          Err(message) => {
-            resolution.issues.push(ConfigIssue {
-              property: Some(property.path.to_string()),
-              source: Some(ConfigSource::Default),
-              blocking: true,
-              message,
-            });
-            (None, None)
-          }
-        },
-      };
+      let value = values.get(property.path).cloned();
+      let resolved_source = Some(if layer.values.contains_key(property.path) { source } else { ConfigSource::Default });
       let target = resolution.properties.get_mut(property.path).expect("frozen property exists");
       target.value = value;
       target.source = resolved_source;
@@ -453,6 +435,35 @@ impl ConfigResolver {
   fn mark_lower_issues_superseded(path: &str, issues: &mut [ConfigIssue]) {
     for issue in issues.iter_mut().filter(|issue| issue.blocking && issue.property.as_deref() == Some(path)) {
       issue.blocking = false;
+    }
+  }
+
+  fn refresh_derived_defaults(&self, resolution: &mut ConfigResolution) {
+    let mut values = resolution
+      .properties
+      .iter()
+      .filter_map(|(path, property)| property.value.clone().map(|value| (path.clone(), value)))
+      .collect::<BTreeMap<_, _>>();
+    for property in CONFIGURATION_PROPERTIES {
+      let target = resolution.properties.get(property.path).expect("frozen property exists");
+      if target.source != Some(ConfigSource::Default) {
+        continue;
+      }
+      match self.default_value(property, &values) {
+        Ok(value) => {
+          values.insert(property.path.to_string(), value.clone());
+          resolution.properties.get_mut(property.path).expect("frozen property exists").value = Some(value);
+        }
+        Err(message) => {
+          resolution.properties.get_mut(property.path).expect("frozen property exists").value = None;
+          resolution.issues.push(ConfigIssue {
+            property: Some(property.path.to_string()),
+            source: Some(ConfigSource::Default),
+            blocking: true,
+            message,
+          });
+        }
+      }
     }
   }
 
@@ -528,14 +539,7 @@ impl ConfigResolver {
   }
 
   fn validate_document_layer(&self, family: ConfigFamily, layer: &ParsedLayer) -> Result<(), String> {
-    let mut values = BTreeMap::new();
-    for property in CONFIGURATION_PROPERTIES.iter().filter(|property| family.contains(property)) {
-      let value = match layer.values.get(property.path) {
-        Some(value) => value.clone(),
-        None => self.default_value(property)?,
-      };
-      values.insert(property.path.to_string(), value);
-    }
+    let values = self.complete_family_values(family, &layer.values)?;
     let failures = self.cross_property_failures(&values);
     if failures.is_empty() {
       Ok(())
@@ -654,9 +658,25 @@ impl ConfigResolver {
     validate_absolute_path(Path::new(raw)).map(ConfigValue::Path)
   }
 
-  fn default_value(&self, property: &ConfigProperty) -> Result<ConfigValue, String> {
+  fn complete_family_values(
+    &self,
+    family: ConfigFamily,
+    explicit: &BTreeMap<String, ConfigValue>,
+  ) -> Result<BTreeMap<String, ConfigValue>, String> {
+    let mut values = explicit.clone();
+    for property in CONFIGURATION_PROPERTIES.iter().filter(|property| family.contains(property)) {
+      if values.contains_key(property.path) {
+        continue;
+      }
+      let value = self.default_value(property, &values)?;
+      values.insert(property.path.to_string(), value);
+    }
+    Ok(values)
+  }
+
+  fn default_value(&self, property: &ConfigProperty, values: &BTreeMap<String, ConfigValue>) -> Result<ConfigValue, String> {
     let r = self.context.physical_memory_bytes;
-    let h = (r / 2).clamp(GIB, 8 * GIB);
+    let h = values.get("memory.hard_limit_bytes").and_then(config_u64).unwrap_or_else(|| (r / 2).clamp(GIB, 8 * GIB));
     let value = match property.id {
       1 => ConfigValue::Unsigned((h * 3 / 4).max(768 * MIB)),
       2 => ConfigValue::Unsigned(h),
