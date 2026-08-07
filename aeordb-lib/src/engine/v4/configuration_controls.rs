@@ -8,6 +8,7 @@ use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::HashAlgorithm;
 
 use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, canonical_value_to_json, canonicalize_json, decode_canonical_value};
 use super::control_store::V3TransitionControlStore;
@@ -150,8 +151,16 @@ fn load_family(
 }
 
 fn decode_lkg_fallback(engine: &StorageEngine, family: ConfigurationFamily, bytes: &[u8]) -> EngineResult<ConfigFallback> {
-  let control = decode_system_control(bytes, engine.hash_algo()).map_err(format_error)?;
-  let body = decode_config_lkg_body(control.body, engine.hash_algo()).map_err(format_error)?;
+  decode_lkg_fallback_read_only(engine.hash_algo(), family, bytes)
+}
+
+pub(crate) fn decode_lkg_fallback_read_only(
+  hash_algo: HashAlgorithm,
+  family: ConfigurationFamily,
+  bytes: &[u8],
+) -> EngineResult<ConfigFallback> {
+  let control = decode_system_control(bytes, hash_algo).map_err(format_error)?;
+  let body = decode_config_lkg_body(control.body, hash_algo).map_err(format_error)?;
   if body.configuration_kind != configuration_kind(family) {
     return Err(EngineError::InvalidInput("configuration LKG kind does not match requested family".to_string()));
   }

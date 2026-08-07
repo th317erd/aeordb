@@ -161,6 +161,16 @@ fn configuration_envelope(snapshot: &ConfigurationAuthoritySnapshot, family: Con
     .map_or_else(|| json!({"state": "unavailable"}), document_status);
   let effective_valid = active.values().all(|value| value.is_some()) && !issues.iter().any(|issue| issue["blocking"] == true);
   let desired_valid = desired.values().all(|value| value.is_some()) && !issues.iter().any(|issue| issue["blocking"] == true);
+  let mut disabled_capabilities = desired_resolution.map_or_else(Vec::new, |resolution| disabled_owners(resolution, family));
+  if control.capability == ConfigurationControlCapability::UnavailableNoDatabaseIdentity {
+    disabled_capabilities.push("configuration_recovery_controls".to_string());
+  }
+  let convergence_errors = snapshot
+    .convergence_errors
+    .iter()
+    .filter(|(path, _)| property(path).is_some_and(|property| family.contains(property)))
+    .map(|(path, error)| (path.clone(), Value::String(error.clone())))
+    .collect::<Map<_, _>>();
   let degraded = matches!(
     desired_resolution.map(|resolution| match family {
       ConfigurationFamily::Runtime => &resolution.runtime_status,
@@ -168,12 +178,10 @@ fn configuration_envelope(snapshot: &ConfigurationAuthoritySnapshot, family: Con
     }),
     Some(ConfigDocumentStatus::Invalid { .. })
   ) || !issues.is_empty()
+    || !disabled_capabilities.is_empty()
+    || !convergence_errors.is_empty()
     || control.capability == ConfigurationControlCapability::Degraded
     || control.redundancy_degraded;
-  let mut disabled_capabilities = desired_resolution.map_or_else(Vec::new, |resolution| disabled_owners(resolution, family));
-  if control.capability == ConfigurationControlCapability::UnavailableNoDatabaseIdentity {
-    disabled_capabilities.push("configuration_recovery_controls".to_string());
-  }
   let fallback_identities = desired_resolution.map_or_else(Vec::new, |resolution| {
     resolution.fallback_identities.iter().filter(|identity| identity.contains(family.name())).cloned().collect::<Vec<_>>()
   });
@@ -206,6 +214,7 @@ fn configuration_envelope(snapshot: &ConfigurationAuthoritySnapshot, family: Con
     "desired_sources": desired_sources,
     "pending_restart": pending_restart,
     "pending_convergence": pending_convergence,
+    "convergence_errors": convergence_errors,
     "control": control_status(control, family),
     "fallback_identities": fallback_identities,
     "deprecated_aliases": deprecated_aliases,
@@ -330,7 +339,13 @@ fn issue_belongs_to_family(issue: &ConfigIssue, family: ConfigurationFamily) -> 
 
 fn disabled_owners(resolution: &ConfigResolution, family: ConfigurationFamily) -> Vec<String> {
   let owners = family_properties(family).map(|property| property.owner).collect::<BTreeSet<_>>();
-  owners.into_iter().filter(|owner| !resolution.owner_ready(owner)).map(str::to_string).collect()
+  owners
+    .into_iter()
+    .filter(|owner| {
+      !resolution.owner_ready(owner) || crate::engine::configuration_authority::unavailable_configuration_owner_reason(owner).is_some()
+    })
+    .map(str::to_string)
+    .collect()
 }
 
 fn document_status(status: &ConfigDocumentStatus) -> Value {

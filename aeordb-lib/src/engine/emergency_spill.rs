@@ -131,21 +131,24 @@ pub fn os_user_data_emergency_spill_dir() -> Option<PathBuf> {
 }
 
 pub fn emergency_spill_locations() -> Vec<EmergencySpillLocation> {
+  let configured = std::env::var_os("AEORDB_EMERGENCY_SPILL_DIR").filter(|path| !path.is_empty()).map(PathBuf::from);
+  emergency_spill_locations_with_configured(configured)
+}
+
+pub fn emergency_spill_locations_with_configured(configured: impl IntoIterator<Item = PathBuf>) -> Vec<EmergencySpillLocation> {
   let mut locations = Vec::new();
   #[cfg(test)]
   let configured_only = std::env::var_os("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY").is_some();
   #[cfg(not(test))]
   let configured_only = false;
 
+  for path in configured {
+    locations.push(EmergencySpillLocation { class: SpillLocationClass::ConfiguredFallback, path });
+  }
+
   if !configured_only {
     if let Some(path) = os_user_data_emergency_spill_dir() {
       locations.push(EmergencySpillLocation { class: SpillLocationClass::OsUserData, path });
-    }
-  }
-
-  if let Ok(path) = std::env::var("AEORDB_EMERGENCY_SPILL_DIR") {
-    if !path.trim().is_empty() {
-      locations.push(EmergencySpillLocation { class: SpillLocationClass::ConfiguredFallback, path: PathBuf::from(path) });
     }
   }
   if !configured_only {
@@ -156,7 +159,12 @@ pub fn emergency_spill_locations() -> Vec<EmergencySpillLocation> {
 }
 
 pub fn scan_unapplied_for_database(db_path: impl AsRef<Path>) -> EngineResult<Vec<EmergencySpillArtifact>> {
-  scan_for_database_with_locations(db_path, &emergency_spill_locations())
+  let db_path = db_path.as_ref();
+  let locations = crate::engine::config_resolver::preopen_emergency_spill_locations(
+    db_path,
+    &crate::engine::config_resolver::CommandLineConfigOverrides::default(),
+  )?;
+  scan_for_database_with_locations(db_path, &locations)
 }
 
 pub fn scan_for_database_with_dirs(db_path: impl AsRef<Path>, base_dirs: &[PathBuf]) -> EngineResult<Vec<EmergencySpillArtifact>> {

@@ -6,6 +6,7 @@ use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::query_engine::{
   FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryResult, ExplainMode, QueryStrategy, DEFAULT_QUERY_LIMIT,
 };
+use crate::engine::query_runtime::QueryRequestBudget;
 use crate::engine::storage_engine::StorageEngine;
 
 /// A single result from a global search, enriched with source metadata.
@@ -66,6 +67,19 @@ pub fn global_search(
   limit: Option<usize>,
   offset: Option<usize>,
 ) -> EngineResult<SearchResults> {
+  let request_budget = engine.start_query_request_budget()?;
+  global_search_with_budget(engine, base_path, query, where_clause, limit, offset, &request_budget)
+}
+
+pub(crate) fn global_search_with_budget(
+  engine: &StorageEngine,
+  base_path: &str,
+  query: Option<&str>,
+  where_clause: Option<&QueryNode>,
+  limit: Option<usize>,
+  offset: Option<usize>,
+  request_budget: &QueryRequestBudget,
+) -> EngineResult<SearchResults> {
   let index_manager = IndexManager::new(engine);
 
   // Discover all directories that have indexes. Include indexed ancestors so a
@@ -81,10 +95,10 @@ pub fn global_search(
 
   if let Some(query_str) = query {
     // Broad search: search fuzzy-capable indexes in every directory.
-    broad_search(engine, &index_manager, &indexed_dirs, query_str, &mut all_results)?;
+    broad_search(engine, &index_manager, &indexed_dirs, query_str, request_budget, &mut all_results)?;
   } else if let Some(query_node) = where_clause {
     // Structured search: delegate to QueryEngine per directory.
-    structured_search(engine, &indexed_dirs, query_node, &mut all_results)?;
+    structured_search(engine, &indexed_dirs, query_node, request_budget, &mut all_results)?;
   } else {
     // Neither query nor where_clause provided -- nothing to search.
     return Ok(SearchResults { results: Vec::new(), has_more: false, total_count: Some(0) });
@@ -167,9 +181,10 @@ fn broad_search(
   index_manager: &IndexManager,
   indexed_dirs: &[String],
   query_str: &str,
+  request_budget: &QueryRequestBudget,
   out: &mut Vec<SearchResult>,
 ) -> EngineResult<()> {
-  let query_engine = QueryEngine::new(engine);
+  let query_engine = QueryEngine::with_request_budget(engine, request_budget.clone());
 
   for dir in indexed_dirs {
     let indexes = index_manager.list_indexes(dir)?;
@@ -232,9 +247,10 @@ fn structured_search(
   engine: &StorageEngine,
   indexed_dirs: &[String],
   query_node: &QueryNode,
+  request_budget: &QueryRequestBudget,
   out: &mut Vec<SearchResult>,
 ) -> EngineResult<()> {
-  let query_engine = QueryEngine::new(engine);
+  let query_engine = QueryEngine::with_request_budget(engine, request_budget.clone());
   let matched_fields = query_node_field_names(query_node);
 
   for dir in indexed_dirs {

@@ -100,11 +100,17 @@ fn query_results_retain_and_release_their_memory_reservation() {
   let query = retained.owner(MemoryOwner::Query).unwrap();
   assert!(query.reserved_bytes > 0, "returned query results must retain their reservation");
   assert_eq!(query.active_reservations, 1);
+  let runtime_retained = engine.query_runtime_snapshot().unwrap();
+  assert_eq!(runtime_retained.active_requests, 1);
+  assert_eq!(runtime_retained.reserved_bytes, query.reserved_bytes);
 
   drop(results);
   let released = engine.memory_coordinator_snapshot().unwrap();
   assert_eq!(released.owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
   assert_eq!(released.owner(MemoryOwner::Query).unwrap().active_reservations, 0);
+  let runtime_released = engine.query_runtime_snapshot().unwrap();
+  assert_eq!(runtime_released.active_requests, 0);
+  assert_eq!(runtime_released.reserved_bytes, 0);
 }
 
 #[test]

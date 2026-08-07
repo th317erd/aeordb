@@ -18,6 +18,9 @@ pub mod responses;
 pub mod route_permissions;
 pub mod routes;
 pub mod search_locators;
+#[cfg(test)]
+#[path = "../../spec/http/search_locators_internal_spec.rs"]
+mod search_locators_internal_spec;
 pub mod settings_routes;
 pub mod share_link_routes;
 pub mod share_routes;

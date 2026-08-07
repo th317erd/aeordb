@@ -85,6 +85,36 @@ async fn root_get_returns_complete_runtime_and_lifecycle_envelopes() {
   );
   assert_eq!(runtime["status"]["sources"]["memory.hard_limit_bytes"], "default");
   assert_eq!(runtime["status"]["stored"]["state"], "missing");
+  assert_eq!(runtime["status"]["degraded"], true);
+  assert_eq!(runtime["status"]["disabled_capabilities"], json!(["query_plan_cache", "configuration_recovery_controls"]));
+}
+
+#[tokio::test]
+async fn unavailable_dynamic_owner_remains_pending_and_reports_its_error() {
+  let (application, jwt_manager, engine, _temporary_directory) = test_app();
+  let authorization = root_bearer_token(&jwt_manager);
+  let previous = engine.configuration_snapshot().resolved_unsigned("cache.query_plan_max_bytes").unwrap();
+
+  let response = application
+    .oneshot(request(
+      "PUT",
+      "/system/runtime",
+      &authorization,
+      Body::from(r#"{"schema_version":1,"cache":{"query_plan_max_bytes":8388608}}"#),
+    ))
+    .await
+    .expect("runtime response");
+  assert_eq!(response.status(), StatusCode::OK);
+  let runtime = response_json(response).await;
+
+  assert_eq!(runtime["config"]["cache"]["query_plan_max_bytes"], previous);
+  assert_eq!(runtime["status"]["desired_config"]["cache"]["query_plan_max_bytes"], 8_388_608);
+  assert_eq!(runtime["status"]["pending_convergence"]["cache.query_plan_max_bytes"], 8_388_608);
+  assert!(runtime["status"]["convergence_errors"]["cache.query_plan_max_bytes"]
+    .as_str()
+    .unwrap_or("")
+    .contains("query-plan cache owner is not implemented"));
+  assert_eq!(runtime["status"]["degraded"], true);
 }
 
 #[tokio::test]

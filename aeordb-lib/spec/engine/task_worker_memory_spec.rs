@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use aeordb::engine::engine_event::{EVENT_TASKS_CANCELLED, EVENT_TASKS_DEFERRED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED};
 use aeordb::engine::event_bus::EventBus;
+use aeordb::engine::config_resolver::ConfigurationFamily;
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
 use aeordb::engine::task_queue::{TaskQueue, TaskStatus};
 use aeordb::engine::task_worker::{
@@ -11,6 +12,30 @@ use aeordb::engine::task_worker::{
 use aeordb::plugins::PluginManager;
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn running_task_keeps_the_policy_generation_captured_before_dequeue() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let event_bus = Arc::new(EventBus::new());
+  let mut events = event_bus.subscribe();
+  queue.enqueue("unknown-test-task", serde_json::json!({})).unwrap();
+  let captured_generation = engine.configuration_snapshot().generation;
+  let engine_for_hook = engine.clone();
+
+  assert!(process_next_task_with_post_dequeue_hook(&queue, &engine, &plugin_manager, &event_bus, move || {
+    engine_for_hook
+      .replace_configuration_document(ConfigurationFamily::Runtime, br#"{"schema_version":1,"maintenance":{"max_concurrent_tasks":3}}"#)
+      .unwrap();
+  })
+  .unwrap());
+
+  let started = events.try_recv().expect("task must emit a started event");
+  assert_eq!(started.event_type, EVENT_TASKS_STARTED);
+  assert_eq!(started.payload["configuration_generation"], captured_generation);
+  assert!(engine.configuration_snapshot().generation > captured_generation);
+}
 
 #[test]
 fn soft_pressure_defers_before_dequeue_and_retries_after_pressure_clears() {

@@ -500,7 +500,7 @@ async fn initialize_server_runtime(
   let InitConfig { database, auth_mode, hot_dir, cors_flag, peers, join_url, join_token, advertise_url, command_line_overrides } = config;
   let hot_dir_ref = hot_dir.as_path();
 
-  fail_if_unresolved_emergency_spills(&database)?;
+  fail_if_unresolved_emergency_spills(&database, &command_line_overrides)?;
 
   // If --join was supplied, perform the cluster join BEFORE the app opens
   // the engine for serving. The join writes the cluster's JWT signing key
@@ -683,8 +683,13 @@ fn default_global_index_config() -> serde_json::Value {
   })
 }
 
-fn fail_if_unresolved_emergency_spills(database: &str) -> Result<(), String> {
-  let artifacts = aeordb::engine::emergency_spill::scan_unapplied_for_database(database)
+fn fail_if_unresolved_emergency_spills(
+  database: &str,
+  command_line_overrides: &aeordb::engine::config_resolver::CommandLineConfigOverrides,
+) -> Result<(), String> {
+  let locations = aeordb::engine::config_resolver::preopen_emergency_spill_locations(database, command_line_overrides)
+    .map_err(|error| format!("failed to resolve emergency spill locations before startup: {error}"))?;
+  let artifacts = aeordb::engine::emergency_spill::scan_for_database_with_locations(database, &locations)
     .map_err(|error| format!("failed to scan emergency spill locations before startup: {}", error))?;
   if artifacts.is_empty() {
     return Ok(());

@@ -17,6 +17,10 @@ use super::database_header::{ReadOnlyDatabaseHeader, read_database_header_read_o
 use super::durability_recovery::{PersistentDurabilityRecoveryState, classify_persistent_durability_recovery};
 use super::system_control::{SystemControlKindV1, SystemControlSlotV1, system_control_path};
 use crate::engine::compression::CompressionAlgorithm;
+use crate::engine::config_resolver::{
+  ConfigDocumentInput, ConfigFallback, ConfigResolver, ConfigurationFamily, MAX_CONFIG_DOCUMENT_BYTES, RUNTIME_CONFIG_PATH,
+  configuration_history_required,
+};
 use crate::engine::directory_ops::{chunk_content_hash, file_path_hash};
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::entry_header::{EntryHeader, FLAG_SYSTEM};
@@ -37,6 +41,14 @@ pub const TRANSITION_RECOVERY_CAPABILITY_V1: &str = "aeordb.v3-transition-recove
 const HOT_TAIL_HEADER_SIZE: usize = 18;
 const TRANSITION_FILE_RECORD_VALUE_CAP: u32 = 4_096;
 const TRANSITION_CONTENT_CAP: usize = 4_096;
+const CONFIG_FILE_RECORD_VALUE_CAP: u32 = 64 * 1024;
+
+pub(crate) struct ReadOnlyRuntimeConfigurationInputs {
+  pub current: ConfigDocumentInput,
+  pub last_known_good: Option<ConfigFallback>,
+  pub history: Vec<ConfigFallback>,
+  pub history_issues: Vec<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentCapabilitiesV1 {
@@ -119,8 +131,60 @@ pub fn evaluate_deployment_candidate(state: &DeploymentTransitionStateV1, candid
 
 pub fn inspect_deployment_transition_state_read_only(path: impl AsRef<Path>) -> EngineResult<DeploymentTransitionStateV1> {
   let path = path.as_ref();
-  let external_spills = crate::engine::emergency_spill::scan_unapplied_for_database(path)?;
+  let locations = crate::engine::config_resolver::preopen_emergency_spill_locations(
+    path,
+    &crate::engine::config_resolver::CommandLineConfigOverrides::default(),
+  )?;
+  let external_spills = crate::engine::emergency_spill::scan_for_database_with_locations(path, &locations)?;
   inspect_deployment_transition_state_with_external_count(path, external_spills.len())
+}
+
+pub(crate) fn read_runtime_configuration_inputs_read_only(
+  path: impl AsRef<Path>,
+  resolver: &ConfigResolver,
+) -> EngineResult<ReadOnlyRuntimeConfigurationInputs> {
+  let path = path.as_ref();
+  if !path.exists() {
+    return Ok(ReadOnlyRuntimeConfigurationInputs {
+      current: ConfigDocumentInput::Missing,
+      last_known_good: None,
+      history: Vec::new(),
+      history_issues: Vec::new(),
+    });
+  }
+  let mut store = ReadOnlyV3TransitionControlStore::open_for_configuration(path)?;
+  let current = match store.read_file_bounded(RUNTIME_CONFIG_PATH, MAX_CONFIG_DOCUMENT_BYTES) {
+    Ok(Some(bytes)) => ConfigDocumentInput::Bytes(bytes),
+    Ok(None) => ConfigDocumentInput::Missing,
+    Err(error) => ConfigDocumentInput::Unreadable(error.to_string()),
+  };
+  let hash_algo = store.header.hash_algo;
+  let mut history_issues = Vec::new();
+  let last_known_good = match store.discover_mutable(SystemControlKindV1::RuntimeLastKnownGood) {
+    Ok(Some(selected)) => match crate::engine::v4::configuration_controls::decode_lkg_fallback_read_only(
+      hash_algo,
+      ConfigurationFamily::Runtime,
+      &selected.bytes,
+    ) {
+      Ok(fallback) => Some(fallback),
+      Err(error) => {
+        history_issues.push(format!("runtime last-known-good is unusable during pre-open recovery: {error}"));
+        None
+      }
+    },
+    Ok(None) => None,
+    Err(error) => {
+      history_issues.push(format!("runtime last-known-good discovery failed during pre-open recovery: {error}"));
+      None
+    }
+  };
+  let mut history = Vec::new();
+  if configuration_history_required(resolver, ConfigurationFamily::Runtime, &current, last_known_good.as_ref()) {
+    let recovered = store.load_configuration_history(ConfigurationFamily::Runtime);
+    history = recovered.candidates;
+    history_issues.extend(recovered.issues);
+  }
+  Ok(ReadOnlyRuntimeConfigurationInputs { current, last_known_good, history, history_issues })
 }
 
 pub fn acquire_deployment_inspection_lock(path: impl AsRef<Path>) -> EngineResult<DeploymentInspectionLock> {
@@ -179,11 +243,19 @@ struct ReadOnlyV3TransitionControlStore {
   header: FileHeader,
   file_length: u64,
   bucket_count: usize,
-  hot_tail: HotTailLayout,
+  hot_tail: Option<HotTailLayout>,
 }
 
 impl ReadOnlyV3TransitionControlStore {
   fn open(path: &Path) -> EngineResult<Self> {
+    Self::open_with_hot_tail_policy(path, false)
+  }
+
+  fn open_for_configuration(path: &Path) -> EngineResult<Self> {
+    Self::open_with_hot_tail_policy(path, true)
+  }
+
+  fn open_with_hot_tail_policy(path: &Path, tolerate_invalid_hot_tail: bool) -> EngineResult<Self> {
     let mut file = OpenOptions::new().read(true).open(path)?;
     let header = match read_database_header_read_only(&mut file)
       .map_err(|error| EngineError::InvalidInput(format!("deployment database header inspection failed: {error}")))?
@@ -219,7 +291,14 @@ impl ReadOnlyV3TransitionControlStore {
       return Err(EngineError::InvalidInput("v3 hot tail overlaps the KV block".to_string()));
     }
     let file_length = file.metadata()?.len();
-    let hot_tail = Self::read_hot_tail_layout(&mut file, header.hot_tail_offset, hash_length, file_length)?;
+    let hot_tail = match Self::read_hot_tail_layout(&mut file, header.hot_tail_offset, hash_length, file_length) {
+      Ok(hot_tail) => Some(hot_tail),
+      Err(error) if tolerate_invalid_hot_tail => {
+        tracing::warn!(%error, "Pre-open configuration recovery is ignoring an invalid hot tail and reading only durable KV pages");
+        None
+      }
+      Err(error) => return Err(error),
+    };
     Ok(Self { file, header, file_length, bucket_count, hot_tail })
   }
 
@@ -262,6 +341,110 @@ impl ReadOnlyV3TransitionControlStore {
     let latch = self.discover_mutable(SystemControlKindV1::DurabilityLatch)?;
     let catalog = self.discover_mutable(SystemControlKindV1::EmergencySpillCatalog)?;
     classify_persistent_durability_recovery(self.header.hash_algo, latch, catalog)
+  }
+
+  fn read_file_bounded(&mut self, path: &str, maximum_content_length: usize) -> EngineResult<Option<Vec<u8>>> {
+    let key = file_path_hash(path, &self.header.hash_algo)?;
+    let Some(entry) = self.lookup_kv_entry(&key)? else {
+      return Ok(None);
+    };
+    let (header, entry_key, value) = self.read_entry_bounded(&entry, CONFIG_FILE_RECORD_VALUE_CAP)?;
+    if header.entry_type != EntryType::FileRecord
+      || header.flags & FLAG_SYSTEM == 0
+      || header.compression_algo != CompressionAlgorithm::None
+      || entry_key != key
+    {
+      return Err(EngineError::InvalidInput(format!("configuration path {path} is not a canonical system FileRecord")));
+    }
+    let record = FileRecord::deserialize(&value, self.header.hash_algo.hash_length(), header.entry_version)?;
+    if record.path != path {
+      return Err(EngineError::InvalidInput(format!("configuration FileRecord path {} does not match {path}", record.path)));
+    }
+    let content_length = usize::try_from(record.total_size)
+      .map_err(|_| EngineError::InvalidInput(format!("configuration document {path} length does not fit this platform")))?;
+    if content_length > maximum_content_length {
+      return Err(EngineError::InvalidInput(format!(
+        "configuration document {path} length {content_length} exceeds {maximum_content_length} bytes"
+      )));
+    }
+
+    let mut content = Vec::with_capacity(content_length);
+    for chunk_hash in record.chunk_hashes {
+      let remaining = content_length
+        .checked_sub(content.len())
+        .ok_or_else(|| EngineError::InvalidInput(format!("configuration document {path} exceeded its declared length")))?;
+      if remaining == 0 {
+        return Err(EngineError::InvalidInput(format!("configuration document {path} has chunks beyond its declared length")));
+      }
+      let chunk_entry = self
+        .lookup_kv_entry(&chunk_hash)?
+        .ok_or_else(|| EngineError::NotFound(format!("configuration chunk {}", hex::encode(&chunk_hash))))?;
+      let maximum_stored_length = u32::try_from(remaining)
+        .map_err(|_| EngineError::InvalidInput(format!("configuration document {path} remaining length exceeds u32")))?;
+      let (chunk_header, chunk_key, stored) = self.read_entry_bounded(&chunk_entry, maximum_stored_length)?;
+      if chunk_header.entry_type != EntryType::Chunk || chunk_key != chunk_hash {
+        return Err(EngineError::InvalidInput(format!("configuration document {path} references a noncanonical chunk")));
+      }
+      let decoded = crate::engine::compression::decompress_bounded(&stored, chunk_header.compression_algo, remaining)?;
+      if chunk_content_hash(&decoded, &self.header.hash_algo)? != chunk_hash {
+        return Err(EngineError::InvalidInput(format!("configuration document {path} chunk content hash mismatch")));
+      }
+      content.extend_from_slice(&decoded);
+    }
+    if content.len() != content_length {
+      return Err(EngineError::InvalidInput(format!(
+        "configuration document {path} expected {content_length} bytes but read {}",
+        content.len()
+      )));
+    }
+    Ok(Some(content))
+  }
+
+  fn load_configuration_history(&mut self, family: ConfigurationFamily) -> crate::engine::configuration_history::ConfigurationHistoryLoad {
+    let wal_start = match self.header.kv_block_offset.checked_add(self.header.kv_block_length) {
+      Some(wal_start) => wal_start,
+      None => {
+        return crate::engine::configuration_history::ConfigurationHistoryLoad {
+          candidates: Vec::new(),
+          issues: vec![format!("{} append-history WAL start overflows u64", family.name())],
+        };
+      }
+    };
+    let scan = crate::engine::configuration_history::scan_configuration_history_records(
+      &self.file,
+      wal_start,
+      self.header.hot_tail_offset,
+      self.header.hash_algo,
+      family.path(),
+      crate::engine::configuration_history::MAX_HISTORY_SCAN_BYTES,
+      crate::engine::configuration_history::MAX_HISTORY_CANDIDATES,
+    );
+    let scan = match scan {
+      Ok(scan) => scan,
+      Err(error) => {
+        return crate::engine::configuration_history::ConfigurationHistoryLoad {
+          candidates: Vec::new(),
+          issues: vec![format!("{} append-history scan failed during pre-open recovery: {error}", family.name())],
+        };
+      }
+    };
+    let hash_algorithm = self.header.hash_algo;
+    crate::engine::configuration_history::materialize_configuration_history(scan, family, hash_algorithm, |chunk_hash, maximum_length| {
+      let Some(chunk_entry) = self.lookup_kv_entry(chunk_hash)? else {
+        return Ok(None);
+      };
+      let maximum_stored_length = u32::try_from(maximum_length)
+        .map_err(|_| EngineError::ResourceExhausted("historical configuration chunk bound exceeds u32".to_string()))?;
+      let (chunk_header, chunk_key, stored) = self.read_entry_bounded(&chunk_entry, maximum_stored_length)?;
+      if chunk_header.entry_type != EntryType::Chunk || chunk_key != chunk_hash {
+        return Err(EngineError::InvalidInput("historical configuration references a noncanonical chunk".to_string()));
+      }
+      let decoded = crate::engine::compression::decompress_bounded(&stored, chunk_header.compression_algo, maximum_length)?;
+      if chunk_content_hash(&decoded, &hash_algorithm)? != chunk_hash {
+        return Err(EngineError::InvalidInput("historical configuration chunk content hash mismatch".to_string()));
+      }
+      Ok(Some(decoded))
+    })
   }
 
   fn discover_mutable(&mut self, kind: SystemControlKindV1) -> EngineResult<Option<LoadedMutableControlV1>> {
@@ -344,10 +527,16 @@ impl ReadOnlyV3TransitionControlStore {
   }
 
   fn lookup_hot_entry(&mut self, key: &[u8]) -> EngineResult<Option<KVEntry>> {
+    let Some(hot_tail) = self.hot_tail.as_ref() else {
+      return Ok(None);
+    };
+    let offset = hot_tail.offset;
+    let write_record_size = hot_tail.write_record_size;
+    let write_count = hot_tail.write_count;
     let mut matched = None;
-    self.file.seek(SeekFrom::Start(self.hot_tail.offset + HOT_TAIL_HEADER_SIZE as u64))?;
-    let mut record = vec![0u8; self.hot_tail.write_record_size];
-    for _ in 0..self.hot_tail.write_count {
+    self.file.seek(SeekFrom::Start(offset + HOT_TAIL_HEADER_SIZE as u64))?;
+    let mut record = vec![0u8; write_record_size];
+    for _ in 0..write_count {
       self.file.read_exact(&mut record)?;
       if record[0] != WRITE_RECORD_VERSION {
         return Err(EngineError::InvalidInput(format!("unsupported hot tail write-record version {}", record[0])));

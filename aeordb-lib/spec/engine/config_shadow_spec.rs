@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 
 use aeordb::engine::config_resolver::{
   CommandLineConfigOverrides, ConfigDocumentStatus, ConfigSource, ConfigValue, ConfigurationFamily, MAX_CONFIG_DOCUMENT_BYTES,
-  RUNTIME_CONFIG_PATH,
+  RUNTIME_CONFIG_PATH, preopen_emergency_spill_locations,
 };
 use aeordb::engine::compression::{CompressionAlgorithm, compress};
 use aeordb::engine::directory_ops::DirectoryOps;
@@ -111,6 +111,11 @@ fn malformed_lifecycle_state_is_visible_and_fails_snapshot_writes_closed() {
   assert!(matches!(resolution.runtime_status, ConfigDocumentStatus::Invalid { .. }));
   assert!(matches!(resolution.lifecycle_status, ConfigDocumentStatus::Invalid { .. }));
   assert!(!resolution.complete());
+  let query_runtime = engine.query_runtime_snapshot().unwrap();
+  assert!(query_runtime.policy.is_none());
+  assert!(query_runtime.disabled_reason.as_deref().is_some_and(|reason| reason.contains("unresolved")));
+  let durability_grouping = engine.durability_group_policy().unwrap_err();
+  assert!(durability_grouping.to_string().contains("group_commit_max_bytes is unresolved"), "{durability_grouping}");
 
   assert!(!load_lifecycle_config(&engine).snapshot_writes_enabled);
   let ops = DirectoryOps::new(&engine);
@@ -264,6 +269,153 @@ fn replacement_activates_dynamic_values_but_stages_startup_bound_values_for_rest
   );
   assert!(updated.pending_restart.contains("memory.hard_limit_bytes"));
   assert!(!updated.pending_restart.contains("index.flush_after_seconds"));
+}
+
+#[test]
+#[serial]
+fn startup_bound_memory_policy_activates_only_after_restart() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = database_path(&directory);
+  let engine = create_engine(&directory);
+  let before = engine.memory_coordinator_snapshot().unwrap().policy.unwrap();
+  let updated = engine
+    .replace_configuration_document(
+      ConfigurationFamily::Runtime,
+      br#"{"schema_version":1,"memory":{"soft_limit_bytes":2147483648,"hard_limit_bytes":3221225472,"emergency_reserve_bytes":268435456}}"#,
+    )
+    .unwrap();
+
+  assert_eq!(engine.memory_coordinator_snapshot().unwrap().policy.unwrap(), before);
+  assert!(updated.pending_restart.contains("memory.soft_limit_bytes"));
+  assert!(updated.pending_restart.contains("memory.hard_limit_bytes"));
+  assert!(updated.pending_restart.contains("memory.emergency_reserve_bytes"));
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let reopened = StorageEngine::open(&path).unwrap();
+  let active = reopened.configuration_snapshot();
+  let policy = reopened.memory_coordinator_snapshot().unwrap().policy.unwrap();
+  assert_eq!(policy.soft_limit_bytes, 2_147_483_648);
+  assert_eq!(policy.hard_limit_bytes, 3_221_225_472);
+  assert_eq!(policy.emergency_reserve_bytes, 268_435_456);
+  assert!(active.pending_restart.is_empty());
+}
+
+#[test]
+#[serial]
+fn preopen_scan_reads_stored_startup_spill_root_without_mutating_the_database() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = database_path(&directory);
+  let configured_spill = directory.path().join("configured-spill");
+  let engine = create_engine(&directory);
+  let previous_spill = engine.configuration_snapshot().resolved_path("recovery.emergency_spill_dir").unwrap().to_path_buf();
+  let document = serde_json::to_vec(&serde_json::json!({
+    "schema_version": 1,
+    "recovery": {"emergency_spill_dir": configured_spill},
+  }))
+  .unwrap();
+  let pending = engine.replace_configuration_document(ConfigurationFamily::Runtime, &document).unwrap();
+  assert_eq!(pending.resolved_path("recovery.emergency_spill_dir"), Some(previous_spill.as_path()));
+  assert!(pending.pending_restart.contains("recovery.emergency_spill_dir"));
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let before = std::fs::read(&path).unwrap();
+  let locations = preopen_emergency_spill_locations(&path, &CommandLineConfigOverrides::default()).unwrap();
+  let after = std::fs::read(&path).unwrap();
+  assert_eq!(after, before, "pre-open configuration bootstrap must remain read-only");
+  assert!(locations.iter().any(|location| location.path == configured_spill));
+
+  let reopened = StorageEngine::open(&path).unwrap();
+  let active = reopened.configuration_snapshot();
+  assert_eq!(active.resolved_path("recovery.emergency_spill_dir"), Some(configured_spill.as_path()));
+  assert!(!active.pending_restart.contains("recovery.emergency_spill_dir"));
+}
+
+#[test]
+#[serial]
+fn dynamic_replacement_converges_memory_and_index_owners_before_reporting_active() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let before_memory = engine.memory_coordinator_snapshot().unwrap().policy.unwrap();
+  let before_index = engine.index_buffer_stats().unwrap();
+  let host_floor = if before_memory.host_available_floor_bytes == 512 * 1024 * 1024 { 768 * 1024 * 1024 } else { 512 * 1024 * 1024 };
+  let clean_max = if before_index.max_bytes == 64 * 1024 * 1024 { 96 * 1024 * 1024 } else { 64 * 1024 * 1024 };
+  let mutation_max = if before_index.mutation_max_bytes == 32 * 1024 * 1024 { 48 * 1024 * 1024 } else { 32 * 1024 * 1024 };
+  let publication_max = if before_index.publication_batch_max_bytes == 16 * 1024 * 1024 { 24 * 1024 * 1024 } else { 16 * 1024 * 1024 };
+  let document = format!(
+    r#"{{"schema_version":1,"memory":{{"host_available_floor_bytes":{host_floor}}},"cache":{{"index_clean_max_bytes":{clean_max},"index_clean_ttl_seconds":17}},"index":{{"mutation_buffer_max_bytes":{mutation_max},"flush_after_mutations":1234,"flush_after_seconds":19,"publication_batch_max_bytes":{publication_max}}}}}"#
+  );
+
+  let updated = engine.replace_configuration_document(ConfigurationFamily::Runtime, document.as_bytes()).unwrap();
+  let after_memory = engine.memory_coordinator_snapshot().unwrap().policy.unwrap();
+  let after_index = engine.index_buffer_stats().unwrap();
+
+  assert_eq!(updated.resolved_unsigned("memory.host_available_floor_bytes"), Some(host_floor));
+  assert_eq!(after_memory.host_available_floor_bytes, host_floor);
+  assert_eq!(updated.resolved_unsigned("cache.index_clean_max_bytes"), Some(clean_max));
+  assert_eq!(after_index.max_bytes, clean_max);
+  assert_eq!(updated.resolved_unsigned("cache.index_clean_ttl_seconds"), Some(17));
+  assert_eq!(after_index.clean_ttl_ms, 17_000);
+  assert_eq!(updated.resolved_unsigned("index.mutation_buffer_max_bytes"), Some(mutation_max));
+  assert_eq!(after_index.mutation_max_bytes, mutation_max);
+  assert_eq!(updated.resolved_unsigned("index.publication_batch_max_bytes"), Some(publication_max));
+  assert_eq!(after_index.publication_batch_max_bytes, publication_max);
+  assert_eq!(updated.resolved_unsigned("index.flush_after_mutations"), Some(1234));
+  assert_eq!(after_index.flush_after_mutations, 1234);
+  assert_eq!(updated.resolved_unsigned("index.flush_after_seconds"), Some(19));
+  assert_eq!(after_index.flush_after_ms, 19_000);
+  assert!(updated.pending_convergence.is_empty());
+}
+
+#[test]
+#[serial]
+fn dynamic_replacement_converges_directory_kv_and_durability_owners() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let document = br#"{"schema_version":1,"cache":{"directory_max_bytes":33554432,"kv_resident_max_bytes":67108864},"durability":{"group_commit_max_bytes":2097152,"group_commit_max_delay_ms":37}}"#;
+
+  let updated = engine.replace_configuration_document(ConfigurationFamily::Runtime, document).unwrap();
+  let memory = engine.memory_stats().unwrap();
+  let kv = engine.kv_page_provider_stats().unwrap().unwrap();
+  let durability = engine.durability_group_policy().unwrap();
+
+  assert_eq!(updated.resolved_unsigned("cache.directory_max_bytes"), Some(33_554_432));
+  assert_eq!(memory.directory_cache.max_bytes, Some(33_554_432));
+  assert_eq!(updated.resolved_unsigned("cache.kv_resident_max_bytes"), Some(67_108_864));
+  assert_eq!(kv.max_resident_bytes, 67_108_864);
+  assert_eq!(updated.resolved_unsigned("durability.group_commit_max_bytes"), Some(2_097_152));
+  assert_eq!(durability.max_bytes(), 2_097_152);
+  assert_eq!(updated.resolved_unsigned("durability.group_commit_max_delay_ms"), Some(37));
+  assert_eq!(durability.max_delay(), std::time::Duration::from_millis(37));
+  assert!(updated.pending_convergence.is_empty());
+}
+
+#[test]
+#[serial]
+fn dynamic_replacement_converges_query_runtime_before_reporting_active() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let previous_plan_cache = engine.configuration_snapshot().resolved_unsigned("cache.query_plan_max_bytes").unwrap();
+  let document = br#"{"schema_version":1,"cache":{"query_plan_max_bytes":8388608},"query":{"per_request_memory_bytes":16777216,"global_memory_bytes":67108864,"position_scan_buffer_bytes":2097152}}"#;
+
+  let updated = engine.replace_configuration_document(ConfigurationFamily::Runtime, document).unwrap();
+  let runtime = engine.query_runtime_snapshot().unwrap();
+  let policy = runtime.policy.expect("valid query configuration activates the runtime owner");
+
+  assert_eq!(updated.resolved_unsigned("cache.query_plan_max_bytes"), Some(previous_plan_cache));
+  assert_eq!(
+    updated.desired.resolution.as_ref().unwrap().properties["cache.query_plan_max_bytes"].value,
+    Some(aeordb::engine::config_resolver::ConfigValue::Unsigned(8_388_608))
+  );
+  assert_eq!(updated.resolved_unsigned("query.per_request_memory_bytes"), Some(16_777_216));
+  assert_eq!(policy.per_request_memory_bytes, 16_777_216);
+  assert_eq!(updated.resolved_unsigned("query.global_memory_bytes"), Some(67_108_864));
+  assert_eq!(policy.global_memory_bytes, 67_108_864);
+  assert_eq!(updated.resolved_unsigned("query.position_scan_buffer_bytes"), Some(2_097_152));
+  assert_eq!(policy.position_scan_buffer_bytes, 2_097_152);
+  assert_eq!(updated.pending_convergence, std::collections::BTreeSet::from(["cache.query_plan_max_bytes".to_string()]));
+  assert!(updated.convergence_errors["cache.query_plan_max_bytes"].contains("query-plan cache owner is not implemented"));
 }
 
 #[test]

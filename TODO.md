@@ -240,19 +240,25 @@
       - [x] Run a real disk-backed pressure workload with swap-independent bounds and responsive health/status; commit and push each green slice.
     - [ ] P2b-4: activate strict runtime/lifecycle API, CLI, metrics, SSE, Dashboard, and documentation surfaces.
       - [x] Make derived defaults depend on the effective higher-precedence property values, including CLI/environment hard-memory overrides.
-      - [ ] Replace the immutable diagnostic shadow with one configuration authority that retains startup, effective, stored, and activation state.
+      - [x] Replace the immutable diagnostic shadow with one configuration authority that retains startup, effective, stored, and activation state.
         - [x] Add serialized strict embedded replacement with family-isolated generations, durable-before-active ordering, and publication-failure consistency.
         - [x] Converge lifecycle reads and typed saves on the shared authority; malformed unresolved lifecycle state fails snapshot writes closed.
-      - [ ] Persist and recover validated runtime/lifecycle LKG plus diagnostics through the approved v3 transition ControlStore without emitting v4 authority.
+      - [x] Persist and recover validated runtime/lifecycle LKG plus diagnostics through the approved v3 transition ControlStore without emitting v4 authority.
         - [x] Add the production CanonicalConfigValueV1 codec and typed runtime/lifecycle LKG/diagnostic control codecs against independent fixtures.
         - [x] Publish and recover the typed controls through the configuration authority when a validated transition database identity exists.
-        - [ ] Add bounded append-history recovery after invalid/absent LKG without changing valid-current or missing-current precedence.
+        - [x] Add bounded append-history recovery after invalid/absent LKG without changing valid-current or missing-current precedence.
       - [x] Add root-only GET, replacement PUT, and RFC 7396 PATCH for both `/system/runtime` and `/system/lifecycle`, validating the complete proposed document before durable publication.
         - [x] Serialize PATCH base selection, RFC 7396 merge, validation, persistence, and authority publication under the same family update lock.
         - [x] Return complete active and desired family configuration with exact sources, stored/LKG status, degradation, disabled owners, and pending activation state.
         - [x] Prove exact runtime/lifecycle paths cannot be read or mutated through generic file or blob routes.
       - [x] Keep CLI/environment values ephemeral and expose exact per-property source, stored validity, LKG identity, degradation, disabled capability, and pending restart/convergence.
-      - [ ] Converge every lifecycle/runtime consumer on the shared authority with frozen dynamic, next-run-captured, and startup-bound activation semantics.
+      - [x] Converge every lifecycle/runtime consumer on the shared authority with frozen dynamic, next-run-captured, and startup-bound activation semantics.
+        - [x] Publish changed dynamic properties as `pending_convergence` after durable desired-policy publication, and promote them only after their generation-scoped owner succeeds.
+        - [x] Reconfigure memory, directory/index/KV cache, index-buffer, read, query, durability, recovery, shutdown, and lifecycle owners without retaining module-local environment/default readers.
+          - [x] Make each query/search request own one shared per-request memory budget across nested query execution and opt-in locator scans.
+        - [x] Capture GC, maintenance, migration, snapshot-retention, and pending-delete policy once at each new run while preserving an already-running operation's generation.
+        - [x] Apply startup-bound recovery spill roots before pre-open spill discovery and keep startup memory bounds restart-pending after stored changes.
+        - [x] Prove concurrent replacement serialization, owner failure visibility, decrease-before-promotion, next-run immutability, and restart activation.
       - [x] Add all 41 frozen CLI overrides and prove registry/CLI coverage cannot drift.
         - [x] Generate the `start` command's configuration arguments directly from the frozen registry and capture raw OS values without a parallel field list.
         - [x] Carry validated command-line overrides through every serving-engine create/open path into the shared configuration authority.

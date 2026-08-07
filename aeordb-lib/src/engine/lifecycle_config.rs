@@ -138,10 +138,29 @@ fn is_engine_internal(name: &str) -> bool {
 /// Returns the names of pruned snapshots so callers can log/emit them. The
 /// actual reclamation of orphaned data happens in the next GC sweep.
 pub fn prune_expired_snapshots(engine: &StorageEngine, ctx: &RequestContext) -> EngineResult<PruneResult> {
+  prune_expired_snapshots_with_post_capture_hook(engine, ctx, || {})
+}
+
+#[doc(hidden)]
+pub fn prune_expired_snapshots_with_post_capture_hook<F>(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  post_capture_hook: F,
+) -> EngineResult<PruneResult>
+where
+  F: FnOnce(),
+{
   let _mem = crate::engine::rss_sampler::PhaseSampler::start("prune_expired_snapshots", std::time::Duration::from_millis(50));
-  let config = load_lifecycle_config(engine);
-  let auto_months = config.snapshot_retention.auto_months;
-  let manual_months = config.snapshot_retention.manual_months;
+  let run_configuration = engine.capture_snapshot_retention_run_configuration()?;
+  post_capture_hook();
+  let auto_months = run_configuration.auto_months;
+  let manual_months = run_configuration.manual_months;
+  tracing::debug!(
+    configuration_generation = run_configuration.generation,
+    auto_months,
+    manual_months,
+    "Captured snapshot-retention policy"
+  );
 
   if auto_months == 0 && manual_months == 0 {
     return Ok(PruneResult::default());

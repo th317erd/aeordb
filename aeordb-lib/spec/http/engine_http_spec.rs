@@ -263,6 +263,57 @@ async fn full_file_read_obeys_stored_prefetch_and_coalesce_limits_after_restart(
 }
 
 #[tokio::test]
+async fn full_file_read_uses_a_dynamically_converged_read_policy() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  engine
+    .replace_configuration_document(
+      aeordb::engine::config_resolver::ConfigurationFamily::Runtime,
+      br#"{"schema_version":1,"io":{"read_prefetch_bytes":262144,"read_coalesce_max_bytes":262144}}"#,
+    )
+    .unwrap();
+  let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 3).map(|index| (index % 251) as u8).collect();
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/test/dynamic-read-policy.bin")
+        .header("content-type", "application/octet-stream")
+        .header("authorization", &auth)
+        .body(Body::from(data.clone()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri("/files/test/dynamic-read-policy.bin")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let mut frames = 0usize;
+  let mut actual = Vec::new();
+  while let Some(frame) = body.frame().await {
+    let frame = frame.unwrap();
+    if let Some(bytes) = frame.data_ref() {
+      frames += 1;
+      actual.extend_from_slice(bytes);
+    }
+  }
+  assert_eq!(actual, data);
+  assert_eq!(frames, 3, "the next read must capture the newly converged one-chunk policy");
+}
+
+#[tokio::test]
 async fn file_response_backpressure_keeps_only_one_pending_frame() {
   let temp = tempfile::tempdir().unwrap();
   let path = temp.path().join("backpressure-read.aeordb");

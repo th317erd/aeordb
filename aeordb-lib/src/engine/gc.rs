@@ -14,6 +14,7 @@ use crate::engine::kv_store::{
 };
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::request_context::RequestContext;
+use crate::engine::run_configuration::GcRunConfiguration;
 use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::{symlink_path_hash, symlink_content_hash};
@@ -80,7 +81,8 @@ fn is_directory_hard_link(entry_type: EntryType, value: &[u8], hash_length: usiz
 
 /// Collect all reachable hashes from HEAD + all snapshots + all forks.
 pub fn gc_mark(engine: &StorageEngine) -> EngineResult<GcLiveSet> {
-  let reservation = reserve_gc_workspace(engine)?;
+  let run_configuration = engine.capture_gc_run_configuration()?;
+  let reservation = reserve_gc_workspace(engine, &run_configuration)?;
   let hashes = gc_mark_internal(engine, None)?;
   Ok(GcLiveSet { hashes, _reservation: reservation })
 }
@@ -846,7 +848,8 @@ where
   F: FnOnce(),
 {
   check_gc_token(cancellation)?;
-  let gc_admission = reserve_gc_workspace(engine)?;
+  let run_configuration = engine.capture_gc_run_configuration()?;
+  let gc_admission = reserve_gc_workspace(engine, &run_configuration)?;
   check_gc_cancellation(engine, cancellation)?;
 
   let start = std::time::Instant::now();
@@ -863,6 +866,7 @@ where
     EVENT_GC_STARTED,
     serde_json::json!({
       "dry_run": dry_run,
+      "configuration_generation": run_configuration.generation,
     }),
   );
   post_start_hook();
@@ -1042,7 +1046,7 @@ fn check_gc_quantum(engine: &StorageEngine, cancellation: Option<&CancellationTo
   Ok(())
 }
 
-fn reserve_gc_workspace(engine: &StorageEngine) -> EngineResult<MemoryReservation> {
+fn reserve_gc_workspace(engine: &StorageEngine, run_configuration: &GcRunConfiguration) -> EngineResult<MemoryReservation> {
   let mut reservation = engine
     .memory_coordinator()
     .reserve(MemoryOwner::GarbageCollection, GC_ADMISSION_BYTES, AdmissionClass::Maintenance)
@@ -1052,6 +1056,14 @@ fn reserve_gc_workspace(engine: &StorageEngine) -> EngineResult<MemoryReservatio
   let retained_bytes = kv_entries
     .checked_mul(GC_RETAINED_BYTES_PER_KV_ENTRY)
     .ok_or_else(|| EngineError::ResourceExhausted("garbage collection retained workspace estimate overflow".to_string()))?;
+  if retained_bytes > run_configuration.mark_memory_preferred_bytes {
+    tracing::warn!(
+      required_bytes = retained_bytes,
+      preferred_bytes = run_configuration.mark_memory_preferred_bytes,
+      configuration_generation = run_configuration.generation,
+      "Legacy in-memory GC mark exceeds the captured preferred memory budget; the v4 bounded mark pipeline will replace this path"
+    );
+  }
   reservation.grow(retained_bytes).map_err(gc_memory_error)?;
   Ok(reservation)
 }

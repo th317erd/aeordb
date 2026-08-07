@@ -345,6 +345,19 @@ impl MemoryCoordinator {
     Ok(())
   }
 
+  /// Replace the process policy after its dynamic owners have converged.
+  ///
+  /// Startup-bound limits are kept unchanged by the configuration authority;
+  /// the only runtime mutation currently admitted here is the host-available
+  /// floor. Keeping the complete policy replacement atomic prevents readers
+  /// from observing a mixture of generations.
+  pub fn reconfigure_policy(&self, policy: MemoryPolicy) -> Result<(), MemoryCoordinatorError> {
+    let mut state = self.lock()?;
+    state.policy = Some(policy);
+    state.policy_error = None;
+    Ok(())
+  }
+
   pub fn reserve(
     &self,
     owner: MemoryOwner,

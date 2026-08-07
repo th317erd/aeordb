@@ -17,8 +17,8 @@ use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::durability_coordinator::{
-  DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition, DurabilityHardTurn, DurabilityOperation,
-  DurabilityTicket, DurabilityWaiterState, NativeFileBarrierKind, OsErrorClass, RetryClass,
+  DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition, DurabilityGroupPolicy, DurabilityHardTurn,
+  DurabilityOperation, DurabilityTicket, DurabilityWaiterState, NativeFileBarrierKind, OsErrorClass, RetryClass,
 };
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::entry_header::EntryHeader;
@@ -36,6 +36,7 @@ use crate::engine::memory_coordinator::{
 };
 use crate::engine::native_durability::sync_file_all_native;
 use crate::engine::operation_memory::OperationMemoryBudget;
+use crate::engine::query_runtime::{QueryRequestBudget, QueryRuntime, QueryRuntimePolicy, QueryRuntimeSnapshot};
 use serde::Serialize;
 
 use crate::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_FLAG_DELETED};
@@ -506,6 +507,8 @@ pub struct IndexCacheMemoryStats {
   pub mutation_max_bytes: u64,
   pub publication_batch_max_bytes: u64,
   pub clean_ttl_ms: u64,
+  pub flush_after_mutations: usize,
+  pub flush_after_ms: u64,
   pub reservation_owned: bool,
   pub top_cached_indexes: Vec<crate::engine::index_store::CachedIndexMemoryStats>,
 }
@@ -514,6 +517,7 @@ pub struct IndexCacheMemoryStats {
 pub struct DirectoryCacheMemoryStats {
   pub entries: usize,
   pub estimated_bytes: u64,
+  pub max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -544,6 +548,17 @@ fn memory_policy_from_config_shadow(report: &crate::engine::config_resolver::Con
     None => Err(format!("{path} has no resolved value")),
   };
   MemoryPolicy::new(unsigned(paths[0])?, unsigned(paths[1])?, unsigned(paths[2])?, unsigned(paths[3])?).map_err(|error| error.to_string())
+}
+
+fn desired_unsigned_configuration(
+  snapshot: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+  path: &str,
+) -> EngineResult<u64> {
+  match snapshot.desired.resolution.as_ref().and_then(|resolution| resolution.property(path)).and_then(|property| property.value.as_ref()) {
+    Some(crate::engine::config_resolver::ConfigValue::Unsigned(value)) => Ok(*value),
+    Some(value) => Err(EngineError::InvalidInput(format!("{path} resolved to unexpected value {value:?}"))),
+    None => Err(EngineError::InvalidInput(format!("{path} has no desired resolved value"))),
+  }
 }
 
 fn observation_failed(owner: MemoryOwner, message: impl Into<String>) -> MemoryCoordinatorError {
@@ -592,6 +607,7 @@ pub struct StorageEngine {
   database_path: PathBuf,
   configuration_authority: OnceLock<Arc<crate::engine::configuration_authority::ConfigurationAuthority>>,
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
+  query_runtime: OnceLock<Arc<QueryRuntime>>,
   operation_tracker: EngineOperationTracker,
   shutdown_started: Arc<AtomicBool>,
   shutdown_flush_started: AtomicBool,
@@ -687,9 +703,14 @@ impl StorageEngine {
     bytes: &[u8],
   ) -> EngineResult<Arc<crate::engine::configuration_authority::ConfigurationAuthoritySnapshot>> {
     let authority = self.configuration_authority();
-    authority.replace_document(family, bytes, |validated, schema_version, prospective| {
-      crate::engine::v4::configuration_controls::publish_configuration_document(self, family, validated, schema_version, prospective)
-    })
+    authority.replace_document(
+      family,
+      bytes,
+      |validated, schema_version, prospective| {
+        crate::engine::v4::configuration_controls::publish_configuration_document(self, family, validated, schema_version, prospective)
+      },
+      |prospective, changed| self.converge_configuration_owners(prospective, changed),
+    )
   }
 
   pub fn patch_configuration_document(
@@ -698,9 +719,162 @@ impl StorageEngine {
     bytes: &[u8],
   ) -> EngineResult<Arc<crate::engine::configuration_authority::ConfigurationAuthoritySnapshot>> {
     let authority = self.configuration_authority();
-    authority.patch_document(family, bytes, |validated, schema_version, prospective| {
-      crate::engine::v4::configuration_controls::publish_configuration_document(self, family, validated, schema_version, prospective)
-    })
+    authority.patch_document(
+      family,
+      bytes,
+      |validated, schema_version, prospective| {
+        crate::engine::v4::configuration_controls::publish_configuration_document(self, family, validated, schema_version, prospective)
+      },
+      |prospective, changed| self.converge_configuration_owners(prospective, changed),
+    )
+  }
+
+  fn converge_configuration_owners(
+    &self,
+    prospective: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+    changed: &std::collections::BTreeSet<String>,
+  ) -> crate::engine::configuration_authority::ConfigurationConvergenceResult {
+    let mut result = crate::engine::configuration_authority::ConfigurationConvergenceResult::default();
+    let mut owners = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for path in changed {
+      let owner = crate::engine::v4::contract_generated::CONFIGURATION_PROPERTIES
+        .iter()
+        .find(|property| property.path == path)
+        .map(|property| property.owner)
+        .unwrap_or("unknown");
+      owners.entry(owner.to_string()).or_default().push(path.clone());
+    }
+
+    let mut index_paths = owners.remove("index_cache").unwrap_or_default();
+    index_paths.extend(owners.remove("index_runtime").unwrap_or_default());
+    if !index_paths.is_empty() {
+      match self.converge_index_configuration(prospective) {
+        Ok(()) => result.activate(index_paths),
+        Err(error) => result.fail(index_paths, error.to_string()),
+      }
+    }
+
+    let query_paths = owners.remove("query_runtime").unwrap_or_default();
+    if !query_paths.is_empty() {
+      match self.converge_query_configuration(prospective) {
+        Ok(()) => result.activate(query_paths),
+        Err(error) => result.fail(query_paths, error.to_string()),
+      }
+    }
+
+    let query_plan_paths = owners.remove("query_plan_cache").unwrap_or_default();
+    if !query_plan_paths.is_empty() {
+      result.fail(
+        query_plan_paths,
+        crate::engine::configuration_authority::unavailable_configuration_owner_reason("query_plan_cache")
+          .expect("query-plan cache remains unavailable until P6"),
+      );
+    }
+
+    for (owner, paths) in owners {
+      let convergence = match owner.as_str() {
+        "memory_coordinator" => self.converge_memory_configuration(prospective),
+        "directory_cache" => self.converge_directory_cache_configuration(prospective),
+        "kv_residency" => self.converge_kv_configuration(prospective),
+        "durability_coordinator" => self.converge_durability_configuration(prospective),
+        // These owners resolve their immutable request/run policy from the
+        // authority at the operation boundary, so publication is their
+        // convergence point.
+        "read_runtime" | "recovery_runtime" | "shutdown_runtime" | "lifecycle_runtime" => Ok(()),
+        _ => Err(EngineError::InvalidInput(format!("unknown configuration owner {owner}"))),
+      };
+      match convergence {
+        Ok(()) => result.activate(paths),
+        Err(error) => result.fail(paths, error.to_string()),
+      }
+    }
+    result
+  }
+
+  fn converge_memory_configuration(
+    &self,
+    prospective: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+  ) -> EngineResult<()> {
+    let current = self
+      .memory_coordinator()
+      .snapshot()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+      .policy
+      .ok_or_else(|| EngineError::InvalidInput("memory coordinator policy is unavailable".to_string()))?;
+    let host_floor = desired_unsigned_configuration(prospective, "memory.host_available_floor_bytes")?;
+    let policy = MemoryPolicy::new(current.soft_limit_bytes, current.hard_limit_bytes, host_floor, current.emergency_reserve_bytes)
+      .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+    self.memory_coordinator().reconfigure_policy(policy).map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))
+  }
+
+  fn converge_directory_cache_configuration(
+    &self,
+    prospective: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+  ) -> EngineResult<()> {
+    self.dir_content_cache.reconfigure_max_bytes(desired_unsigned_configuration(prospective, "cache.directory_max_bytes")?)
+  }
+
+  fn converge_kv_configuration(
+    &self,
+    prospective: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+  ) -> EngineResult<()> {
+    self
+      .kv_writer
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+      .reconfigure_bounded_pages(desired_unsigned_configuration(prospective, "cache.kv_resident_max_bytes")?)
+  }
+
+  fn converge_index_configuration(
+    &self,
+    prospective: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+  ) -> EngineResult<()> {
+    if self.index_buffer_stats()?.pending_mutations > 0 {
+      self.flush_index_buffer()?;
+    }
+    let coordinator = self.memory_coordinator();
+    let policy = IndexMemoryPolicy::new(
+      (*coordinator).clone(),
+      desired_unsigned_configuration(prospective, "cache.index_clean_max_bytes")?,
+      desired_unsigned_configuration(prospective, "index.mutation_buffer_max_bytes")?,
+      desired_unsigned_configuration(prospective, "index.publication_batch_max_bytes")?,
+      Duration::from_secs(desired_unsigned_configuration(prospective, "cache.index_clean_ttl_seconds")?),
+    );
+    let flush_after_writes = usize::try_from(desired_unsigned_configuration(prospective, "index.flush_after_mutations")?)
+      .map_err(|_| EngineError::InvalidInput("index.flush_after_mutations does not fit this platform".to_string()))?;
+    let options = IndexWriteBufferOptions::new(
+      flush_after_writes,
+      Duration::from_secs(desired_unsigned_configuration(prospective, "index.flush_after_seconds")?),
+    );
+    self
+      .index_write_buffer
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+      .reconfigure_memory_policy(policy, options)
+  }
+
+  fn converge_durability_configuration(
+    &self,
+    prospective: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+  ) -> EngineResult<()> {
+    let policy = DurabilityGroupPolicy::new(
+      desired_unsigned_configuration(prospective, "durability.group_commit_max_bytes")?,
+      Duration::from_millis(desired_unsigned_configuration(prospective, "durability.group_commit_max_delay_ms")?),
+    )
+    .map_err(durability_coordinator_engine_error)?;
+    self.durability_coordinator.reconfigure_group_policy(policy).map_err(durability_coordinator_engine_error)
+  }
+
+  fn converge_query_configuration(
+    &self,
+    prospective: &crate::engine::configuration_authority::ConfigurationAuthoritySnapshot,
+  ) -> EngineResult<()> {
+    let policy = QueryRuntimePolicy::new(
+      desired_unsigned_configuration(prospective, "query.per_request_memory_bytes")?,
+      desired_unsigned_configuration(prospective, "query.global_memory_bytes")?,
+      desired_unsigned_configuration(prospective, "query.position_scan_buffer_bytes")?,
+    )?;
+    self.query_runtime.get().ok_or_else(|| EngineError::InvalidInput("query runtime is not initialized".to_string()))?.reconfigure(policy)
   }
 
   fn configuration_authority(&self) -> Arc<crate::engine::configuration_authority::ConfigurationAuthority> {
@@ -730,6 +904,68 @@ impl StorageEngine {
       .map_err(|_| EngineError::InvalidInput("memory coordinator was initialized more than once".to_string()))?;
     self.durability_coordinator.activate_memory_coordinator(coordinator).map_err(durability_coordinator_engine_error)?;
     Ok(())
+  }
+
+  fn initialize_query_runtime(&self) -> EngineResult<()> {
+    let snapshot = self.configuration_snapshot();
+    let policy = (|| {
+      QueryRuntimePolicy::new(
+        snapshot
+          .resolved_unsigned("query.per_request_memory_bytes")
+          .ok_or_else(|| EngineError::InvalidInput("query.per_request_memory_bytes is unresolved".to_string()))?,
+        snapshot
+          .resolved_unsigned("query.global_memory_bytes")
+          .ok_or_else(|| EngineError::InvalidInput("query.global_memory_bytes is unresolved".to_string()))?,
+        snapshot
+          .resolved_unsigned("query.position_scan_buffer_bytes")
+          .ok_or_else(|| EngineError::InvalidInput("query.position_scan_buffer_bytes is unresolved".to_string()))?,
+      )
+    })();
+    let runtime = match policy {
+      Ok(policy) => QueryRuntime::new(policy),
+      Err(error) => {
+        let reason = error.to_string();
+        tracing::warn!(%reason, "Query runtime started disabled because its configuration owner is unresolved");
+        QueryRuntime::disabled(reason)
+      }
+    };
+    self
+      .query_runtime
+      .set(Arc::new(runtime))
+      .map_err(|_| EngineError::InvalidInput("query runtime was initialized more than once".to_string()))
+  }
+
+  fn initialize_durability_runtime(&self) -> EngineResult<()> {
+    let snapshot = self.configuration_snapshot();
+    let policy = (|| {
+      DurabilityGroupPolicy::new(
+        snapshot
+          .resolved_unsigned("durability.group_commit_max_bytes")
+          .ok_or_else(|| EngineError::InvalidInput("durability.group_commit_max_bytes is unresolved".to_string()))?,
+        Duration::from_millis(
+          snapshot
+            .resolved_unsigned("durability.group_commit_max_delay_ms")
+            .ok_or_else(|| EngineError::InvalidInput("durability.group_commit_max_delay_ms is unresolved".to_string()))?,
+        ),
+      )
+      .map_err(durability_coordinator_engine_error)
+    })();
+    match policy {
+      Ok(policy) => self.durability_coordinator.reconfigure_group_policy(policy).map_err(durability_coordinator_engine_error),
+      Err(error) => {
+        let reason = error.to_string();
+        tracing::warn!(%reason, "Durability group commits started disabled because their configuration owner is unresolved");
+        self.durability_coordinator.disable_grouping(reason).map_err(durability_coordinator_engine_error)
+      }
+    }
+  }
+
+  pub(crate) fn start_query_request_budget(&self) -> EngineResult<QueryRequestBudget> {
+    self.query_runtime.get().ok_or_else(|| EngineError::InvalidInput("query runtime is not initialized".to_string()))?.start_request()
+  }
+
+  pub fn query_runtime_snapshot(&self) -> EngineResult<QueryRuntimeSnapshot> {
+    self.query_runtime.get().ok_or_else(|| EngineError::InvalidInput("query runtime is not initialized".to_string()))?.snapshot()
   }
 
   fn activate_bounded_kv_pages(&self) -> EngineResult<()> {
@@ -818,6 +1054,10 @@ impl StorageEngine {
 
   pub fn memory_coordinator(&self) -> Arc<MemoryCoordinator> {
     self.memory_coordinator_if_initialized().expect("StorageEngine constructors initialize the memory coordinator")
+  }
+
+  pub fn durability_group_policy(&self) -> EngineResult<DurabilityGroupPolicy> {
+    self.durability_coordinator.group_policy().map_err(durability_coordinator_engine_error)
   }
 
   /// Return the process memory coordinator when startup has reached memory
@@ -1417,7 +1657,7 @@ impl StorageEngine {
       uuid::Uuid::new_v4().simple()
     );
 
-    for location in crate::engine::emergency_spill::emergency_spill_locations() {
+    for location in self.configured_emergency_spill_locations() {
       let spill_dir = location.path.join(&dir_name);
       if let Err(error) = crate::engine::emergency_spill::create_private_dir_all(&location.path) {
         Self::push_spill_error(&mut report, format!("failed to create spill base directory {}: {error}", location.path.display()));
@@ -1554,7 +1794,7 @@ impl StorageEngine {
           );
           return self.finish_emergency_spill_manifest(spill_dir, source_location_class, db_path, report, components, &pending_path);
         };
-        match Self::copy_wal_tail_to_file(wal_source, &wal_tail_path, original_start, end) {
+        match Self::copy_wal_tail_to_file(wal_source, &wal_tail_path, original_start, end, self.emergency_wal_spill_max_bytes()) {
           Ok((copy_start, copied, truncated, digest)) => {
             components.push(serde_json::json!({
               "kind": "wal_tail",
@@ -1631,7 +1871,7 @@ impl StorageEngine {
       "wal_tail_end": report.wal_tail_end,
       "wal_tail_bytes": report.wal_tail_bytes,
       "wal_tail_truncated": report.wal_tail_truncated,
-      "wal_tail_max_bytes": Self::emergency_wal_spill_max_bytes(),
+      "wal_tail_max_bytes": self.emergency_wal_spill_max_bytes(),
       "notes": [
         "Best-effort emergency preservation after a serious durability failure.",
         "WAL bytes are copied from the filesystem view available to this process; OS/page-cache state may still determine what was recoverable."
@@ -1700,14 +1940,19 @@ impl StorageEngine {
     crate::engine::durability::sync_parent_dir(path).map_err(|error| error.to_string())
   }
 
-  fn copy_wal_tail_to_file(source: &std::fs::File, destination: &Path, start: u64, end: u64) -> Result<(u64, u64, bool, [u8; 32]), String> {
+  fn copy_wal_tail_to_file(
+    source: &std::fs::File,
+    destination: &Path,
+    start: u64,
+    end: u64,
+    max_bytes: u64,
+  ) -> Result<(u64, u64, bool, [u8; 32]), String> {
     if end <= start {
       Self::write_durable_file(destination, &[])?;
       return Ok((start, 0, false, *blake3::hash(&[]).as_bytes()));
     }
 
     let range = end - start;
-    let max_bytes = Self::emergency_wal_spill_max_bytes();
     let (copy_start, truncated) = if max_bytes > 0 && range > max_bytes { (end - max_bytes, true) } else { (start, false) };
 
     let mut output = crate::engine::emergency_spill::create_new_regular_file_no_follow(destination).map_err(|error| error.to_string())?;
@@ -1728,8 +1973,21 @@ impl StorageEngine {
     Ok((copy_start, copied, truncated, *hasher.finalize().as_bytes()))
   }
 
-  fn emergency_wal_spill_max_bytes() -> u64 {
-    std::env::var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(4 * 1024 * 1024 * 1024)
+  fn emergency_wal_spill_max_bytes(&self) -> u64 {
+    self.resolved_unsigned_config("recovery.emergency_spill_max_bytes").unwrap_or(4 * 1024 * 1024 * 1024)
+  }
+
+  fn configured_emergency_spill_locations(&self) -> Vec<crate::engine::emergency_spill::EmergencySpillLocation> {
+    let snapshot = self.configuration_snapshot();
+    let configured = snapshot
+      .active_properties
+      .get("recovery.emergency_spill_dir")
+      .filter(|property| property.source != Some(crate::engine::config_resolver::ConfigSource::Default))
+      .and_then(|property| match property.value.as_ref() {
+        Some(crate::engine::config_resolver::ConfigValue::Path(path)) => Some(path.clone()),
+        _ => None,
+      });
+    crate::engine::emergency_spill::emergency_spill_locations_with_configured(configured)
   }
 
   fn sanitize_spill_component(component: &str) -> String {
@@ -1751,9 +2009,8 @@ impl StorageEngine {
     self.operation_tracker.snapshot()
   }
 
-  fn shutdown_operation_wait_timeout() -> std::time::Duration {
-    let seconds = std::env::var("AEORDB_SHUTDOWN_OPERATION_WAIT_SECS").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(600);
-    std::time::Duration::from_secs(seconds)
+  fn shutdown_operation_wait_timeout(&self) -> std::time::Duration {
+    std::time::Duration::from_secs(self.resolved_unsigned_config("shutdown.operation_wait_seconds").unwrap_or(600))
   }
 
   pub(crate) fn valid_reusable_range(offset: u64, size: u32, wal_start: u64, wal_end: u64) -> bool {
@@ -1838,7 +2095,7 @@ impl StorageEngine {
       return self.namespace_write_guard();
     }
 
-    let deadline = std::time::Instant::now() + Self::shutdown_operation_wait_timeout();
+    let deadline = std::time::Instant::now() + self.shutdown_operation_wait_timeout();
     loop {
       self.ensure_writable()?;
       let now = std::time::Instant::now();
@@ -2144,6 +2401,7 @@ impl StorageEngine {
       database_path: PathBuf::from(path),
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
+      query_runtime: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
@@ -2178,8 +2436,10 @@ impl StorageEngine {
     engine.counters.store(initialized);
     engine.initialize_configuration_authority(command_line)?;
     engine.initialize_memory_coordinator(inherited_memory)?;
+    engine.initialize_query_runtime()?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
+    engine.initialize_durability_runtime()?;
     Ok(engine)
   }
 
@@ -2366,6 +2626,7 @@ impl StorageEngine {
       database_path: PathBuf::from(path),
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
+      query_runtime: OnceLock::new(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
@@ -2439,8 +2700,10 @@ impl StorageEngine {
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_authority(command_line)?;
     engine.initialize_memory_coordinator(inherited_memory)?;
+    engine.initialize_query_runtime()?;
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
+    engine.initialize_durability_runtime()?;
     Self::report_startup_progress(
       &progress_callback,
       EngineStartupProgress {
@@ -3880,6 +4143,8 @@ impl StorageEngine {
       mutation_max_bytes: index_stats.mutation_max_bytes,
       publication_batch_max_bytes: index_stats.publication_batch_max_bytes,
       clean_ttl_ms: index_stats.clean_ttl_ms,
+      flush_after_mutations: index_stats.flush_after_mutations,
+      flush_after_ms: index_stats.flush_after_ms,
       reservation_owned: index_stats.reservation_owned,
       top_cached_indexes: index_stats.top_cached_indexes,
     };
@@ -3905,7 +4170,7 @@ impl StorageEngine {
 
   fn directory_cache_memory_stats(&self) -> EngineResult<DirectoryCacheMemoryStats> {
     let cache = self.dir_content_cache.stats()?;
-    Ok(DirectoryCacheMemoryStats { entries: cache.entries, estimated_bytes: cache.resident_bytes })
+    Ok(DirectoryCacheMemoryStats { entries: cache.entries, estimated_bytes: cache.resident_bytes, max_bytes: cache.max_bytes })
   }
 
   /// Best-effort O(1) metrics for the in-file KV block.
@@ -5044,7 +5309,7 @@ impl StorageEngine {
   /// 2. Flush the hot file buffer (crash-recovery journal)
   /// 3. Sync the WAL file to ensure all OS-buffered writes are durable
   pub fn shutdown(&self) -> EngineResult<()> {
-    self.shutdown_with_drain_timeout(Self::shutdown_operation_wait_timeout())
+    self.shutdown_with_drain_timeout(self.shutdown_operation_wait_timeout())
   }
 
   fn shutdown_with_drain_timeout(&self, initial_drain_timeout: std::time::Duration) -> EngineResult<()> {
@@ -5434,17 +5699,32 @@ mod tests {
 
   impl SpillTestEnv {
     fn new(spill_dir: &Path) -> Self {
-      let state = Self {
+      let state = Self::capture();
+      state.set_spill_dir(spill_dir);
+      state.activate_test_bounds();
+      state
+    }
+
+    fn configured_locations_only() -> Self {
+      let state = Self::capture();
+      unsafe { std::env::remove_var("AEORDB_EMERGENCY_SPILL_DIR") };
+      state.activate_test_bounds();
+      state
+    }
+
+    fn capture() -> Self {
+      Self {
         spill_dir: std::env::var_os("AEORDB_EMERGENCY_SPILL_DIR"),
         spill_max: std::env::var_os("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES"),
         config_only: std::env::var_os("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY"),
-      };
-      state.set_spill_dir(spill_dir);
+      }
+    }
+
+    fn activate_test_bounds(&self) {
       unsafe {
-        std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", "1048576");
+        std::env::set_var("AEORDB_EMERGENCY_WAL_SPILL_MAX_BYTES", "67108864");
         std::env::set_var("AEORDB_EMERGENCY_SPILL_TEST_CONFIG_ONLY", "1");
       }
-      state
     }
 
     fn set_spill_dir(&self, spill_dir: &Path) {
@@ -5759,6 +6039,65 @@ mod tests {
 
   #[test]
   #[serial]
+  fn dynamic_operation_boundary_controls_read_the_active_authority_generation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let engine_path = temp_dir.path().join("dynamic-operation-controls.aeordb");
+    let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+    let updated = engine
+      .replace_configuration_document(
+        crate::engine::config_resolver::ConfigurationFamily::Runtime,
+        br#"{"schema_version":1,"recovery":{"emergency_spill_max_bytes":67108864},"shutdown":{"operation_wait_seconds":0}}"#,
+      )
+      .unwrap();
+
+    assert_eq!(engine.emergency_wal_spill_max_bytes(), 67_108_864);
+    assert_eq!(engine.shutdown_operation_wait_timeout(), Duration::ZERO);
+    assert_eq!(updated.resolved_unsigned("recovery.emergency_spill_max_bytes"), Some(67_108_864));
+    assert_eq!(updated.resolved_unsigned("shutdown.operation_wait_seconds"), Some(0));
+    assert!(updated.pending_convergence.is_empty());
+  }
+
+  #[test]
+  #[serial]
+  fn emergency_spill_writer_uses_stored_startup_bound_directory_after_restart() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let configured_spill = temp_dir.path().join("stored-spill");
+    let engine_path = temp_dir.path().join("stored-spill-config.aeordb");
+    {
+      let restore = SpillTestEnv::configured_locations_only();
+      let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
+      let document = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "recovery": {"emergency_spill_dir": configured_spill},
+      }))
+      .unwrap();
+      let pending = engine.replace_configuration_document(crate::engine::config_resolver::ConfigurationFamily::Runtime, &document).unwrap();
+      assert!(pending.pending_restart.contains("recovery.emergency_spill_dir"));
+      engine.shutdown().unwrap();
+      drop(engine);
+      drop(restore);
+    }
+
+    let engine = StorageEngine::open(engine_path.to_str().unwrap()).unwrap();
+    let active = engine.configuration_snapshot();
+    assert_eq!(
+      active.active_properties["recovery.emergency_spill_dir"].source,
+      Some(crate::engine::config_resolver::ConfigSource::StoredRuntimeV1)
+    );
+    engine.store_entry(EntryType::Chunk, b"stored-spill-key", b"preserve me").unwrap();
+    engine.record_durability_failure(DurabilityOperation::AuthorityBarrier, "stored spill root proof", "synthetic EIO");
+
+    let report = engine.emergency_spill_report().expect("durability failure must attempt a spill");
+    assert!(report.succeeded, "spill failed: {:?}", report.errors);
+    let incident = Path::new(report.spill_directory.as_ref().unwrap());
+    assert_eq!(incident.parent(), Some(configured_spill.as_path()));
+    let discovered = crate::engine::emergency_spill::scan_unapplied_for_database(&engine_path).unwrap();
+    assert_eq!(discovered.len(), 1, "the embedded scanner must discover artifacts under the stored startup-bound root");
+    assert_eq!(discovered[0].manifest_path, PathBuf::from(report.manifest_path.as_ref().unwrap()));
+  }
+
+  #[test]
+  #[serial]
   fn durability_failure_spill_uses_critical_headroom_under_ordinary_hard_pressure() {
     let temp_dir = tempfile::tempdir().unwrap();
     let spill_dir = temp_dir.path().join("spill");
@@ -6028,7 +6367,7 @@ mod tests {
     let temp_dir = tempfile::tempdir().unwrap();
     let blocked_root = temp_dir.path().join("blocked-root");
     std::fs::write(&blocked_root, b"not a directory").unwrap();
-    let restore = SpillTestEnv::new(&blocked_root);
+    let _restore = SpillTestEnv::new(&blocked_root);
     let engine_path = temp_dir.path().join("spill-retry.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     engine.store_entry(EntryType::Chunk, b"chunk-1", b"hello").unwrap();
@@ -6037,8 +6376,8 @@ mod tests {
     let first_state = engine.durability_failure_state().unwrap();
     assert!(!engine.emergency_spill_report().unwrap().succeeded);
 
-    let recovered_root = temp_dir.path().join("recovered-root");
-    restore.set_spill_dir(&recovered_root);
+    std::fs::remove_file(&blocked_root).unwrap();
+    std::fs::create_dir(&blocked_root).unwrap();
     engine.record_durability_failure(DurabilityOperation::DataBarrier, "second durability failure", "synthetic ENOSPC");
     let latest_state = engine.durability_failure_state().unwrap();
     let report = engine.emergency_spill_report().unwrap();
@@ -6081,7 +6420,7 @@ mod tests {
     std::fs::rename(&database, &original).unwrap();
     std::fs::write(&database, b"BADBAD").unwrap();
 
-    let (_, copied, _, digest) = StorageEngine::copy_wal_tail_to_file(&pinned, &destination, 3, 6).unwrap();
+    let (_, copied, _, digest) = StorageEngine::copy_wal_tail_to_file(&pinned, &destination, 3, 6, u64::MAX).unwrap();
     assert_eq!(copied, 3);
     assert_eq!(std::fs::read(&destination).unwrap(), b"def");
     assert_eq!(digest, *blake3::hash(b"def").as_bytes());

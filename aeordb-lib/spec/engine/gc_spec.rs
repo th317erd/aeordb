@@ -6,6 +6,7 @@ use aeordb::engine::{
   VersionManager,
 };
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
+use aeordb::engine::config_resolver::ConfigurationFamily;
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, run_gc_with_post_start_hook, GcResult};
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
@@ -167,6 +168,31 @@ fn test_gc_new_host_pressure_after_start_defers_at_the_next_safe_point() {
   assert!(owner.deferrals >= 1);
   assert_eq!(owner.reserved_bytes, 0);
   assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
+fn test_gc_run_keeps_the_policy_generation_captured_before_start() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let bus = Arc::new(EventBus::new());
+  let mut events = bus.subscribe();
+  let ctx = RequestContext::with_bus(bus);
+  let captured_generation = engine.configuration_snapshot().generation;
+  let engine_for_hook = engine.clone();
+
+  run_gc_with_post_start_hook(&engine, &ctx, true, move || {
+    engine_for_hook
+      .replace_configuration_document(
+        ConfigurationFamily::Runtime,
+        br#"{"schema_version":1,"garbage_collection":{"checkpoint_after_seconds":60}}"#,
+      )
+      .unwrap();
+  })
+  .unwrap();
+
+  let started = events.try_recv().expect("GC must emit a started event");
+  assert_eq!(started.event_type, aeordb::engine::engine_event::EVENT_GC_STARTED);
+  assert_eq!(started.payload["configuration_generation"], captured_generation);
+  assert!(engine.configuration_snapshot().generation > captured_generation);
 }
 
 #[test]

@@ -147,6 +147,26 @@ where
   K: Eq + Hash + Clone,
   V: Clone,
 {
+  pub fn reconfigure_max_bytes(&self, max_bytes: u64) -> EngineResult<()> {
+    let mut state = self
+      .state
+      .write()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Clean cache write lock poisoned: {error}"))))?;
+    let Some(policy) = state.policy.as_mut() else {
+      return Err(EngineError::InvalidInput("cannot reconfigure an unbounded clean cache".to_string()));
+    };
+    policy.max_bytes = max_bytes;
+    while state.resident_bytes > max_bytes {
+      if !self.evict_lru_locked(&mut state, None) {
+        return Err(EngineError::ResourceExhausted(format!(
+          "clean cache retains {} bytes after applying a {max_bytes}-byte limit",
+          state.resident_bytes
+        )));
+      }
+    }
+    Ok(())
+  }
+
   pub fn get(&self, key: &K) -> EngineResult<Option<V>> {
     let state =
       self.state.read().map_err(|error| EngineError::IoError(std::io::Error::other(format!("Clean cache read lock poisoned: {error}"))))?;

@@ -688,11 +688,22 @@ impl Default for DurabilityGroupPolicy {
   }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurabilityGroupPolicySnapshot {
+  pub policy: Option<DurabilityGroupPolicy>,
+  pub disabled_reason: Option<String>,
+}
+
+enum DurabilityGroupPolicyState {
+  Configured(DurabilityGroupPolicy),
+  Disabled { reason: String },
+}
+
 pub struct DurabilityCoordinator {
   id: uuid::Uuid,
   state: Mutex<CoordinatorState>,
   changed: Condvar,
-  group_policy: DurabilityGroupPolicy,
+  group_policy: RwLock<DurabilityGroupPolicyState>,
   recoverable_file_barrier: Arc<dyn RecoverableFileBarrier>,
   memory_policy: RwLock<Option<DurabilityMemoryPolicy>>,
 }
@@ -750,7 +761,7 @@ impl DurabilityCoordinator {
       id: uuid::Uuid::new_v4(),
       state: Mutex::new(CoordinatorState::new(ledger_capacity)),
       changed: Condvar::new(),
-      group_policy,
+      group_policy: RwLock::new(DurabilityGroupPolicyState::Configured(group_policy)),
       recoverable_file_barrier,
       memory_policy: RwLock::new(None),
     }
@@ -787,6 +798,50 @@ impl DurabilityCoordinator {
     };
     *policy = Some(DurabilityMemoryPolicy { coordinator: memory_coordinator, _ledger_reservation: ledger_reservation });
     Ok(())
+  }
+
+  pub fn group_policy(&self) -> Result<DurabilityGroupPolicy, DurabilityCoordinatorError> {
+    let policy = self.group_policy.read().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    match &*policy {
+      DurabilityGroupPolicyState::Configured(policy) => Ok(*policy),
+      DurabilityGroupPolicyState::Disabled { reason } => {
+        Err(DurabilityCoordinatorError::InvalidConfiguration(format!("durability grouping is disabled: {reason}")))
+      }
+    }
+  }
+
+  pub fn group_policy_snapshot(&self) -> Result<DurabilityGroupPolicySnapshot, DurabilityCoordinatorError> {
+    let policy = self.group_policy.read().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    Ok(match &*policy {
+      DurabilityGroupPolicyState::Configured(policy) => DurabilityGroupPolicySnapshot { policy: Some(*policy), disabled_reason: None },
+      DurabilityGroupPolicyState::Disabled { reason } => {
+        DurabilityGroupPolicySnapshot { policy: None, disabled_reason: Some(reason.clone()) }
+      }
+    })
+  }
+
+  pub fn reconfigure_group_policy(&self, policy: DurabilityGroupPolicy) -> Result<(), DurabilityCoordinatorError> {
+    *self.group_policy.write().map_err(|_| DurabilityCoordinatorError::StateUnavailable)? = DurabilityGroupPolicyState::Configured(policy);
+    self.changed.notify_all();
+    Ok(())
+  }
+
+  pub fn disable_grouping(&self, reason: impl Into<String>) -> Result<(), DurabilityCoordinatorError> {
+    let reason = bounded_failure_message(reason.into());
+    if reason.is_empty() {
+      return Err(DurabilityCoordinatorError::InvalidConfiguration("disabled durability grouping requires a nonempty reason".to_string()));
+    }
+    *self.group_policy.write().map_err(|_| DurabilityCoordinatorError::StateUnavailable)? = DurabilityGroupPolicyState::Disabled { reason };
+    self.changed.notify_all();
+    Ok(())
+  }
+
+  fn group_selection_policy(&self) -> Result<Option<DurabilityGroupPolicy>, DurabilityCoordinatorError> {
+    let policy = self.group_policy.read().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    Ok(match &*policy {
+      DurabilityGroupPolicyState::Configured(policy) => Some(*policy),
+      DurabilityGroupPolicyState::Disabled { .. } => None,
+    })
   }
 
   pub fn admit(&self, plan: DurabilityCommitPlan) -> Result<DurabilityTicket, DurabilityCoordinatorError> {
@@ -973,9 +1028,13 @@ impl DurabilityCoordinator {
         }
 
         let now = Instant::now();
-        let candidates = select_ready_hard_group_locked(&state, self.id, self.group_policy, now, true)?;
+        let group_policy = self.group_selection_policy()?;
+        let candidates = match group_policy {
+          Some(policy) => select_ready_hard_group_locked(&state, self.id, policy, now, true)?,
+          None => select_single_hard_ticket_locked(&state, self.id)?,
+        };
         let first_admitted_at = first_record.admitted_at;
-        let live_delay = self.group_policy.max_delay.min(LIVE_GROUP_DRIVER_DELAY);
+        let live_delay = group_policy.map(|policy| policy.max_delay.min(LIVE_GROUP_DRIVER_DELAY)).unwrap_or_default();
         let elapsed = now.checked_duration_since(first_admitted_at).unwrap_or_default();
         if candidates.len() > 1 || elapsed >= live_delay {
           state.driver_active = true;
@@ -1059,7 +1118,10 @@ impl DurabilityCoordinator {
 
   fn select_ready_hard_group_at(&self, now: Instant, force: bool) -> Result<Vec<DurabilityTicket>, DurabilityCoordinatorError> {
     let state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
-    select_ready_hard_group_locked(&state, self.id, self.group_policy, now, force)
+    match self.group_selection_policy()? {
+      Some(policy) => select_ready_hard_group_locked(&state, self.id, policy, now, force),
+      None => select_single_hard_ticket_locked(&state, self.id),
+    }
   }
 
   fn begin_group_execution(
@@ -1347,6 +1409,20 @@ fn select_ready_hard_group_locked(
   } else {
     Ok(Vec::new())
   }
+}
+
+fn select_single_hard_ticket_locked(
+  state: &CoordinatorState,
+  coordinator_id: uuid::Uuid,
+) -> Result<Vec<DurabilityTicket>, DurabilityCoordinatorError> {
+  let Some(sequence) = state.pending_hard.front().copied() else {
+    return Ok(Vec::new());
+  };
+  let record = state.records.get(&sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+  if !matches!(record.status, CommitStatus::Admitted) {
+    return Ok(Vec::new());
+  }
+  Ok(vec![DurabilityTicket { coordinator_id, sequence }])
 }
 
 fn durability_record_bytes(plan: &DurabilityCommitPlan) -> Result<u64, DurabilityCoordinatorError> {

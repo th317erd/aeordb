@@ -32,6 +32,22 @@ const INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES: u64 = 64 * 1024;
 const INDEX_LOAD_FIXED_OVERHEAD_BYTES: u64 = 8 * 1024 * 1024;
 const INDEX_LOAD_SERIALIZED_AMPLIFICATION: u64 = 8;
 
+pub(crate) trait IndexLoadMemoryAccount {
+  fn grow_index_load(&mut self, bytes: u64, context: &str) -> EngineResult<()>;
+
+  fn shrink_index_load(&mut self, bytes: u64, context: &str) -> EngineResult<()>;
+}
+
+impl IndexLoadMemoryAccount for MemoryReservation {
+  fn grow_index_load(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    self.grow(bytes).map_err(|error| SharedIndexWriteBuffer::memory_error(context, error))
+  }
+
+  fn shrink_index_load(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    self.shrink(bytes).map_err(|error| SharedIndexWriteBuffer::memory_error(context, error))
+  }
+}
+
 /// A single entry in a field index: maps a scalar to a file's hash.
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
@@ -103,6 +119,8 @@ pub struct IndexWriteBufferStats {
   pub mutation_max_bytes: u64,
   pub publication_batch_max_bytes: u64,
   pub clean_ttl_ms: u64,
+  pub flush_after_mutations: usize,
+  pub flush_after_ms: u64,
   pub reservation_owned: bool,
   pub top_cached_indexes: Vec<CachedIndexMemoryStats>,
 }
@@ -244,6 +262,23 @@ impl SharedIndexWriteBuffer {
     {
       return Err(EngineError::InvalidInput("cannot activate index memory policy after index state has been admitted".to_string()));
     }
+    self.options = options;
+    self.memory_policy = Some(policy);
+    Ok(())
+  }
+
+  pub(crate) fn reconfigure_memory_policy(&mut self, policy: IndexMemoryPolicy, options: IndexWriteBufferOptions) -> EngineResult<()> {
+    if !self.flushing_keys.is_empty() || !self.flush_reservations.is_empty() {
+      return Err(EngineError::InvalidInput("cannot reconfigure index memory policy while a flush is in progress".to_string()));
+    }
+    let dirty_bytes = Self::reservation_bytes(&self.dirty_reservations);
+    if dirty_bytes > policy.mutation_max_bytes {
+      return Err(EngineError::ResourceExhausted(format!(
+        "index mutation state holds {dirty_bytes} bytes but the requested limit is {}",
+        policy.mutation_max_bytes
+      )));
+    }
+    self.evict_clean_to_fit(policy.clean_max_bytes, 0, None);
     self.options = options;
     self.memory_policy = Some(policy);
     Ok(())
@@ -451,6 +486,8 @@ impl SharedIndexWriteBuffer {
       mutation_max_bytes: self.memory_policy.as_ref().map_or(u64::MAX, |policy| policy.mutation_max_bytes),
       publication_batch_max_bytes: self.memory_policy.as_ref().map_or(u64::MAX, |policy| policy.publication_batch_max_bytes),
       clean_ttl_ms: self.memory_policy.as_ref().map_or(DEFAULT_INDEX_CACHE_CLEAN_TTL, |policy| policy.clean_ttl).as_millis() as u64,
+      flush_after_mutations: self.options.flush_after_writes,
+      flush_after_ms: self.options.flush_after.as_millis() as u64,
       reservation_owned: self.memory_policy.is_some(),
       top_cached_indexes,
     }
@@ -1096,6 +1133,8 @@ impl<'a> IndexWriteBuffer<'a> {
       mutation_max_bytes: manager_stats.mutation_max_bytes,
       publication_batch_max_bytes: manager_stats.publication_batch_max_bytes,
       clean_ttl_ms: manager_stats.clean_ttl_ms,
+      flush_after_mutations: self.options.flush_after_writes,
+      flush_after_ms: self.options.flush_after.as_millis() as u64,
       reservation_owned: manager_stats.reservation_owned,
       top_cached_indexes: manager_stats.top_cached_indexes,
     })
@@ -1766,19 +1805,19 @@ impl<'a> IndexManager<'a> {
     self.engine.index_flush_guard.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))
   }
 
-  fn grow_accounted_load(reservation: &mut MemoryReservation, bytes: u64, context: &str) -> EngineResult<()> {
-    reservation.grow(bytes).map_err(|error| SharedIndexWriteBuffer::memory_error(context, error))
+  fn grow_accounted_load(reservation: &mut impl IndexLoadMemoryAccount, bytes: u64, context: &str) -> EngineResult<()> {
+    reservation.grow_index_load(bytes, context)
   }
 
-  fn shrink_accounted_load(reservation: &mut MemoryReservation, bytes: u64, context: &str) -> EngineResult<()> {
-    reservation.shrink(bytes).map_err(|error| SharedIndexWriteBuffer::memory_error(context, error))
+  fn shrink_accounted_load(reservation: &mut impl IndexLoadMemoryAccount, bytes: u64, context: &str) -> EngineResult<()> {
+    reservation.shrink_index_load(bytes, context)
   }
 
-  fn buffered_index_clone_accounted(
+  fn buffered_index_clone_accounted<R: IndexLoadMemoryAccount>(
     &self,
     key: &BufferedIndexKey,
     hash_length: usize,
-    reservation: &mut MemoryReservation,
+    reservation: &mut R,
   ) -> EngineResult<Option<FieldIndex>> {
     let mut reserved_for_clone = 0u64;
     loop {
@@ -1811,7 +1850,11 @@ impl<'a> IndexManager<'a> {
     }
   }
 
-  fn disk_index_clone_accounted(&self, index_path: &str, reservation: &mut MemoryReservation) -> EngineResult<Option<FieldIndex>> {
+  fn disk_index_clone_accounted<R: IndexLoadMemoryAccount>(
+    &self,
+    index_path: &str,
+    reservation: &mut R,
+  ) -> EngineResult<Option<FieldIndex>> {
     let ops = DirectoryOps::new(self.engine);
     let Some(record) = ops.get_metadata(index_path)? else {
       return Ok(None);
@@ -1940,6 +1983,15 @@ impl<'a> IndexManager<'a> {
     field_name: &str,
     reservation: &mut MemoryReservation,
   ) -> EngineResult<Option<FieldIndex>> {
+    self.load_index_with_memory_account(path, field_name, reservation)
+  }
+
+  pub(crate) fn load_index_with_memory_account<R: IndexLoadMemoryAccount>(
+    &self,
+    path: &str,
+    field_name: &str,
+    reservation: &mut R,
+  ) -> EngineResult<Option<FieldIndex>> {
     let legacy_path = Self::index_file_path_legacy(path, field_name);
     if let Some(index) = self.disk_index_clone_accounted(&legacy_path, reservation)? {
       return Ok(Some(index));
@@ -1949,7 +2001,7 @@ impl<'a> IndexManager<'a> {
     for index_name in &indexes {
       if index_name.starts_with(&format!("{}.", field_name)) {
         let strategy = index_name.rsplit_once('.').map(|pair| pair.1).unwrap_or("string");
-        return self.load_index_by_strategy_accounted(path, field_name, strategy, reservation);
+        return self.load_index_by_strategy_with_memory_account(path, field_name, strategy, reservation);
       }
     }
     Ok(None)
@@ -1979,6 +2031,16 @@ impl<'a> IndexManager<'a> {
     field_name: &str,
     strategy: &str,
     reservation: &mut MemoryReservation,
+  ) -> EngineResult<Option<FieldIndex>> {
+    self.load_index_by_strategy_with_memory_account(path, field_name, strategy, reservation)
+  }
+
+  pub(crate) fn load_index_by_strategy_with_memory_account<R: IndexLoadMemoryAccount>(
+    &self,
+    path: &str,
+    field_name: &str,
+    strategy: &str,
+    reservation: &mut R,
   ) -> EngineResult<Option<FieldIndex>> {
     let key = Self::buffer_key(path, field_name, strategy);
     let hash_length = self.engine.hash_algo().hash_length();
@@ -2400,6 +2462,15 @@ impl<'a> IndexManager<'a> {
     field_name: &str,
     reservation: &mut MemoryReservation,
   ) -> EngineResult<Vec<FieldIndex>> {
+    self.load_indexes_for_field_with_memory_account(path, field_name, reservation)
+  }
+
+  pub(crate) fn load_indexes_for_field_with_memory_account<R: IndexLoadMemoryAccount>(
+    &self,
+    path: &str,
+    field_name: &str,
+    reservation: &mut R,
+  ) -> EngineResult<Vec<FieldIndex>> {
     let indexes = self.list_indexes(path)?;
     let mut result = Vec::new();
 
@@ -2409,10 +2480,10 @@ impl<'a> IndexManager<'a> {
         continue;
       }
       let strategy = if index_name.contains('.') { index_name.split_once('.').map(|pair| pair.1).unwrap_or("string") } else { "string" };
-      if let Some(index) = self.load_index_by_strategy_accounted(path, field_name, strategy, reservation)? {
+      if let Some(index) = self.load_index_by_strategy_with_memory_account(path, field_name, strategy, reservation)? {
         result.push(index);
       } else if strategy == "string" {
-        if let Some(index) = self.load_index_accounted(path, field_name, reservation)? {
+        if let Some(index) = self.load_index_with_memory_account(path, field_name, reservation)? {
           result.push(index);
         }
       }

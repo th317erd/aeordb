@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner, MemoryReservation};
 use crate::engine::path_utils::file_name;
 use crate::engine::query_engine::{QueryNode, QueryOp};
+use crate::engine::query_runtime::{QueryRequestBudget, QueryRuntimeReservation};
 use crate::engine::storage_engine::StorageEngine;
 
 const DEFAULT_MAX_MATCHES_PER_RESULT: usize = 5;
@@ -199,8 +202,51 @@ pub fn generate_locators(
   terms: &[LocatorTerm],
   options: &LocatorOptions,
 ) -> LocatorGeneration {
+  let request_budget = engine.start_query_request_budget().ok();
+  generate_locators_with_budget(engine, file_record, terms, options, request_budget.as_ref())
+}
+
+pub(crate) fn generate_locators_with_budget(
+  engine: &StorageEngine,
+  file_record: &FileRecord,
+  terms: &[LocatorTerm],
+  options: &LocatorOptions,
+  request_budget: Option<&QueryRequestBudget>,
+) -> LocatorGeneration {
+  generate_locator_attempt(engine, file_record, terms, options, request_budget).generation
+}
+
+pub(crate) fn try_generate_locators_with_budget(
+  engine: &StorageEngine,
+  file_record: &FileRecord,
+  terms: &[LocatorTerm],
+  options: &LocatorOptions,
+  request_budget: &QueryRequestBudget,
+) -> EngineResult<LocatorGeneration> {
+  let attempt = generate_locator_attempt(engine, file_record, terms, options, Some(request_budget));
+  match attempt.failure {
+    Some(error) => Err(error),
+    None => Ok(attempt.generation),
+  }
+}
+
+struct LocatorAttempt {
+  generation: LocatorGeneration,
+  failure: Option<EngineError>,
+}
+
+fn generate_locator_attempt(
+  engine: &StorageEngine,
+  file_record: &FileRecord,
+  terms: &[LocatorTerm],
+  options: &LocatorOptions,
+  request_budget: Option<&QueryRequestBudget>,
+) -> LocatorAttempt {
   if !options.include_matches || terms.is_empty() {
-    return LocatorGeneration { matches: Vec::new(), matches_truncated: false, locator_status: "unsupported" };
+    return LocatorAttempt {
+      generation: LocatorGeneration { matches: Vec::new(), matches_truncated: false, locator_status: "unsupported" },
+      failure: None,
+    };
   }
 
   let mut matches = Vec::new();
@@ -233,13 +279,28 @@ pub fn generate_locators(
       continue;
     }
 
+    let Some(request_budget) = request_budget else {
+      saw_unsupported = true;
+      continue;
+    };
+
     let before = matches.len();
-    matches_truncated |= generate_stored_file_locators(engine, file_record, term, options, &mut matches);
+    match generate_stored_file_locators(engine, file_record, term, options, request_budget, &mut matches) {
+      Ok(truncated) => matches_truncated |= truncated,
+      Err(error @ (EngineError::ResourceExhausted(_) | EngineError::ShuttingDown | EngineError::Cancelled(_))) => {
+        return LocatorAttempt { generation: finish_locator_generation(matches, matches_truncated, true), failure: Some(error) };
+      }
+      Err(_) => saw_unsupported = true,
+    }
     if matches.len() == before {
       saw_unsupported = true;
     }
   }
 
+  LocatorAttempt { generation: finish_locator_generation(matches, matches_truncated, saw_unsupported), failure: None }
+}
+
+fn finish_locator_generation(mut matches: Vec<SearchHitLocator>, matches_truncated: bool, saw_unsupported: bool) -> LocatorGeneration {
   for (index, locator) in matches.iter_mut().enumerate() {
     locator.id = format!("m_{:04}", index + 1);
   }
@@ -340,6 +401,27 @@ fn generate_stored_file_locators(
   file_record: &FileRecord,
   term: &LocatorTerm,
   options: &LocatorOptions,
+  request_budget: &QueryRequestBudget,
+  out: &mut Vec<SearchHitLocator>,
+) -> EngineResult<bool> {
+  if is_json_content_type(file_record.content_type.as_deref()) {
+    let admitted_bytes = file_record
+      .total_size
+      .checked_mul(6)
+      .and_then(|bytes| bytes.checked_add(1024 * 1024))
+      .ok_or_else(|| EngineError::ResourceExhausted("JSON locator scan estimate overflow".to_string()))?;
+    let _memory = reserve_locator_memory(engine, request_budget, admitted_bytes, "JSON locator scan admission failed")?;
+    return Ok(generate_buffered_stored_file_locators(engine, file_record, term, options, out));
+  }
+
+  generate_streaming_stored_file_locators(engine, file_record, term, options, request_budget, out)
+}
+
+fn generate_buffered_stored_file_locators(
+  engine: &StorageEngine,
+  file_record: &FileRecord,
+  term: &LocatorTerm,
+  options: &LocatorOptions,
   out: &mut Vec<SearchHitLocator>,
 ) -> bool {
   let ops = DirectoryOps::new(engine);
@@ -410,6 +492,248 @@ fn generate_stored_file_locators(
     }
   }
   false
+}
+
+struct LocatorScanMemory {
+  _reservation: MemoryReservation,
+  _runtime_reservation: QueryRuntimeReservation,
+}
+
+fn reserve_locator_memory(
+  engine: &StorageEngine,
+  request_budget: &QueryRequestBudget,
+  bytes: u64,
+  context: &str,
+) -> EngineResult<LocatorScanMemory> {
+  let bytes = bytes.max(1);
+  let runtime_reservation = request_budget.reserve(bytes).map_err(|error| locator_runtime_error(context, error))?;
+  let reservation = match engine.memory_coordinator().reserve(MemoryOwner::Query, bytes, AdmissionClass::Workload) {
+    Ok(reservation) => reservation,
+    Err(error) => {
+      drop(runtime_reservation);
+      return Err(EngineError::ResourceExhausted(format!("{context}: {error}")));
+    }
+  };
+  Ok(LocatorScanMemory { _reservation: reservation, _runtime_reservation: runtime_reservation })
+}
+
+fn locator_runtime_error(context: &str, error: EngineError) -> EngineError {
+  match error {
+    EngineError::ResourceExhausted(message) => EngineError::ResourceExhausted(format!("{context}: {message}")),
+    other => other,
+  }
+}
+
+#[derive(Clone, Copy)]
+struct TextPosition {
+  line: u64,
+  column: u64,
+  global_char: u64,
+  pending_cr: bool,
+}
+
+impl TextPosition {
+  const fn start() -> Self {
+    Self { line: 1, column: 0, global_char: 0, pending_cr: false }
+  }
+
+  fn advance(&mut self, text: &str) {
+    for character in text.chars() {
+      if self.pending_cr {
+        self.pending_cr = false;
+        if character == '\n' {
+          continue;
+        }
+      }
+
+      self.global_char = self.global_char.saturating_add(1);
+      if character == '\r' {
+        self.line = self.line.saturating_add(1);
+        self.column = 0;
+        self.pending_cr = true;
+      } else if character == '\n' {
+        self.line = self.line.saturating_add(1);
+        self.column = 0;
+      } else {
+        self.column = self.column.saturating_add(1);
+      }
+    }
+  }
+}
+
+struct StreamingLocatorState {
+  base_byte: u64,
+  base_position: TextPosition,
+  search_byte: u64,
+  seeking_extra_match: bool,
+}
+
+fn generate_streaming_stored_file_locators(
+  engine: &StorageEngine,
+  file_record: &FileRecord,
+  term: &LocatorTerm,
+  options: &LocatorOptions,
+  request_budget: &QueryRequestBudget,
+  out: &mut Vec<SearchHitLocator>,
+) -> EngineResult<bool> {
+  let buffer_limit = usize::try_from(request_budget.position_scan_buffer_bytes())
+    .map_err(|_| EngineError::ResourceExhausted("position scan buffer exceeds this platform's address space".to_string()))?;
+  let context_bytes = options
+    .snippet_chars
+    .checked_mul(4)
+    .and_then(|bytes| bytes.checked_add(term.literal.len()))
+    .and_then(|bytes| bytes.checked_add(8))
+    .ok_or_else(|| EngineError::ResourceExhausted("position scan overlap estimate overflow".to_string()))?;
+  if context_bytes >= buffer_limit {
+    return Err(EngineError::ResourceExhausted(format!(
+      "position scan needs {context_bytes} bytes of overlap but its configured buffer is {buffer_limit} bytes"
+    )));
+  }
+
+  let admitted_bytes = buffer_limit as u64;
+  let _memory = reserve_locator_memory(engine, request_budget, admitted_bytes, "position locator scan admission failed")?;
+  let mut buffer = Vec::new();
+  buffer
+    .try_reserve_exact(usize::try_from(admitted_bytes).unwrap_or(buffer_limit))
+    .map_err(|error| EngineError::ResourceExhausted(format!("position locator scan allocation failed: {error}")))?;
+  let mut state = StreamingLocatorState { base_byte: 0, base_position: TextPosition::start(), search_byte: 0, seeking_extra_match: false };
+  let directory_ops = DirectoryOps::new(engine);
+  let stream = directory_ops.read_file_streaming(&file_record.path)?;
+
+  for chunk in stream {
+    let chunk = chunk?;
+    let mut chunk_offset = 0usize;
+    while chunk_offset < chunk.len() {
+      if buffer.len() == buffer_limit {
+        if let Some(truncated) = scan_locator_window(&buffer, false, file_record, term, options, out, &mut state)? {
+          return Ok(truncated);
+        }
+        drain_locator_window(&mut buffer, context_bytes, &mut state)?;
+      }
+
+      let copy_length = (buffer_limit - buffer.len()).min(chunk.len() - chunk_offset);
+      buffer.extend_from_slice(&chunk[chunk_offset..chunk_offset + copy_length]);
+      chunk_offset += copy_length;
+    }
+  }
+
+  Ok(scan_locator_window(&buffer, true, file_record, term, options, out, &mut state)?.unwrap_or(false))
+}
+
+fn scan_locator_window(
+  buffer: &[u8],
+  final_input: bool,
+  file_record: &FileRecord,
+  term: &LocatorTerm,
+  options: &LocatorOptions,
+  out: &mut Vec<SearchHitLocator>,
+  state: &mut StreamingLocatorState,
+) -> EngineResult<Option<bool>> {
+  let valid_length = valid_utf8_prefix(buffer, final_input)?;
+  let text = std::str::from_utf8(&buffer[..valid_length]).map_err(|error| EngineError::InvalidInput(format!("Invalid UTF-8: {error}")))?;
+  let mut search_from = usize::try_from(state.search_byte.saturating_sub(state.base_byte)).unwrap_or(usize::MAX).min(text.len());
+
+  loop {
+    let Some((start, end)) = find_literal_case_insensitive(text, &term.literal, search_from) else {
+      let overlap = term.literal.len().saturating_sub(1);
+      state.search_byte = state.base_byte.saturating_add(valid_length.saturating_sub(overlap) as u64);
+      return Ok(final_input.then_some(false));
+    };
+
+    if state.seeking_extra_match {
+      return Ok(Some(true));
+    }
+    if !final_input
+      && text[end..].chars().take(options.snippet_chars.saturating_sub(options.snippet_chars / 2)).count()
+        < options.snippet_chars.saturating_sub(options.snippet_chars / 2)
+    {
+      state.search_byte = state.base_byte.saturating_add(start as u64);
+      return Ok(None);
+    }
+
+    let mut position = state.base_position;
+    position.advance(&text[..start]);
+    let match_char_len = text[start..end].chars().count() as u64;
+    let mut snippet = build_snippet(text, start, end, options.snippet_chars);
+    let absolute_snippet_start = state.base_byte.saturating_add(snippet.byte_range.start);
+    let absolute_snippet_end = state.base_byte.saturating_add(snippet.byte_range.end);
+    snippet.snippet.truncated_before = absolute_snippet_start > 0;
+    snippet.snippet.truncated_after = absolute_snippet_end < file_record.total_size;
+    let fetch_line_start = position.line.saturating_sub(options.match_context_lines).max(1);
+    let fetch_line_end = position.line.saturating_add(options.match_context_lines);
+
+    out.push(SearchHitLocator {
+      id: String::new(),
+      query: term.literal.clone(),
+      matched_text: text[start..end].to_string(),
+      score: 1.0,
+      field: term.field.clone(),
+      operator: term.operator.clone(),
+      source: LocatorSource::StoredFile { mime_type: file_record.content_type.clone(), encoding: "utf-8" },
+      range: LocatorRangeSet {
+        byte: Some(ByteRange {
+          start: state.base_byte.saturating_add(start as u64),
+          end: state.base_byte.saturating_add(end as u64),
+          unit: "utf8-byte",
+          basis: "stored-file",
+        }),
+        char: Some(CharRange {
+          start: position.global_char,
+          end: position.global_char.saturating_add(match_char_len),
+          unit: "unicode-scalar",
+          basis: "stored-file-text",
+        }),
+        line: Some(LineRange { start: position.line, end: position.line, unit: "line", basis: "stored-file-text" }),
+        column: Some(ColumnRange {
+          start: position.column,
+          end: position.column.saturating_add(match_char_len),
+          unit: "unicode-scalar",
+          basis: "line",
+        }),
+      },
+      fetch: LocatorFetchHints {
+        byte_range: Some(SimpleRange { start: absolute_snippet_start, end: absolute_snippet_end }),
+        line_range: Some(SimpleRange { start: fetch_line_start, end: fetch_line_end }),
+        json_pointer: None,
+        preferred: "line_range",
+      },
+      snippet: snippet.snippet,
+      confidence: "exact",
+      scan_status: "complete",
+    });
+
+    state.search_byte = state.base_byte.saturating_add(end as u64);
+    search_from = end;
+    if out.len() >= options.max_matches_per_result {
+      state.seeking_extra_match = true;
+    }
+  }
+}
+
+fn drain_locator_window(buffer: &mut Vec<u8>, retained_bytes: usize, state: &mut StreamingLocatorState) -> EngineResult<()> {
+  let valid_length = valid_utf8_prefix(buffer, false)?;
+  let mut drain_bytes = valid_length.saturating_sub(retained_bytes);
+  while drain_bytes > 0 && std::str::from_utf8(&buffer[..valid_length]).is_ok_and(|text| !text.is_char_boundary(drain_bytes)) {
+    drain_bytes -= 1;
+  }
+  if drain_bytes == 0 {
+    return Err(EngineError::ResourceExhausted("position locator scan buffer cannot make forward progress".to_string()));
+  }
+  let drained =
+    std::str::from_utf8(&buffer[..drain_bytes]).map_err(|error| EngineError::InvalidInput(format!("Invalid UTF-8: {error}")))?;
+  state.base_position.advance(drained);
+  state.base_byte = state.base_byte.saturating_add(drain_bytes as u64);
+  state.search_byte = state.search_byte.max(state.base_byte);
+  buffer.drain(..drain_bytes);
+  Ok(())
+}
+
+fn valid_utf8_prefix(bytes: &[u8], final_input: bool) -> EngineResult<usize> {
+  match std::str::from_utf8(bytes) {
+    Ok(_) => Ok(bytes.len()),
+    Err(error) if error.error_len().is_none() && !final_input => Ok(error.valid_up_to()),
+    Err(error) => Err(EngineError::InvalidInput(format!("Invalid UTF-8: {error}"))),
+  }
 }
 
 fn generate_json_field_locators(
@@ -542,9 +866,8 @@ fn find_literal_case_insensitive(text: &str, literal: &str, from: usize) -> Opti
     return None;
   }
 
-  let haystack = text[from..].to_ascii_lowercase();
-  let needle = literal.to_ascii_lowercase();
-  let relative = haystack.find(&needle)?;
+  let needle = literal.as_bytes();
+  let relative = text[from..].as_bytes().windows(needle.len()).position(|candidate| candidate.eq_ignore_ascii_case(needle))?;
   let start = from + relative;
   let end = start + literal.len();
   if text.is_char_boundary(start) && text.is_char_boundary(end) {

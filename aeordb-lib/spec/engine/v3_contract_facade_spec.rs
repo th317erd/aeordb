@@ -917,6 +917,30 @@ fn group_policy_enforces_frozen_bounds_and_selects_only_compatible_prefixes() {
 }
 
 #[test]
+fn disabled_group_policy_preserves_durability_with_immediate_singleton_commits() {
+  let coordinator = DurabilityCoordinator::new();
+  coordinator.disable_grouping("durability.group_commit_max_bytes is unresolved").unwrap();
+  let first = coordinator.admit_sized(header_commit_plan(), 1).unwrap();
+  let second = coordinator.admit_sized(header_commit_plan(), 1).unwrap();
+
+  let disabled = coordinator.group_policy_snapshot().unwrap();
+  assert_eq!(disabled.policy, None);
+  assert_eq!(disabled.disabled_reason.as_deref(), Some("durability.group_commit_max_bytes is unresolved"));
+  assert_eq!(coordinator.select_ready_hard_group(false).unwrap(), vec![first]);
+
+  coordinator.execute(first, &mut RecordingExecutor::default()).unwrap();
+  assert_eq!(coordinator.select_ready_hard_group(false).unwrap(), vec![second]);
+
+  let policy = DurabilityGroupPolicy::new(1024 * 1024, std::time::Duration::ZERO).unwrap();
+  coordinator.reconfigure_group_policy(policy).unwrap();
+  let third = coordinator.admit_sized(header_commit_plan(), 1).unwrap();
+  let enabled = coordinator.group_policy_snapshot().unwrap();
+  assert_eq!(enabled.policy, Some(policy));
+  assert_eq!(enabled.disabled_reason, None);
+  assert_eq!(coordinator.select_ready_hard_group(false).unwrap(), vec![second, third]);
+}
+
+#[test]
 fn oversized_hard_ticket_is_a_singleton_instead_of_an_accidental_write_limit() {
   let policy = DurabilityGroupPolicy::new(1024 * 1024, std::time::Duration::ZERO).unwrap();
   let coordinator = DurabilityCoordinator::with_policy(policy);

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::time::sleep;
-
 use crate::engine::backup;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::engine_event::{
@@ -21,6 +19,7 @@ use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, 
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
+use crate::engine::run_configuration::MaintenanceRunConfiguration;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::task_queue::{ProgressInfo, TaskQueue, TaskRecord, TaskStatus};
 use crate::plugins::PluginManager;
@@ -82,62 +81,118 @@ pub fn spawn_task_worker(
   event_bus: Arc<EventBus>,
   cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-  tokio::spawn(async move {
-    loop {
-      if cancel.is_cancelled() {
-        tracing::info!("Task worker shutting down");
-        break;
+  let capture_engine = Arc::clone(&engine);
+  let runner = Arc::new(move |run_configuration, worker_cancel| {
+    process_next_task_internal_with_cancel(
+      &queue,
+      &engine,
+      &plugin_manager,
+      &event_bus,
+      &worker_cancel,
+      Some(run_configuration),
+      || {},
+      || {},
+    )
+  });
+  tokio::spawn(run_task_scheduler(
+    cancel,
+    move || capture_engine.capture_maintenance_run_configuration(),
+    runner,
+    TaskSchedulerTiming::PRODUCTION,
+  ))
+}
+
+#[derive(Clone, Copy)]
+struct TaskSchedulerTiming {
+  processed_delay: Duration,
+  idle_delay: Duration,
+  failure_delay: Duration,
+}
+
+impl TaskSchedulerTiming {
+  const PRODUCTION: Self =
+    Self { processed_delay: Duration::from_secs(1), idle_delay: Duration::from_secs(2), failure_delay: Duration::from_secs(2) };
+
+  #[cfg(test)]
+  const TEST: Self =
+    Self { processed_delay: Duration::from_millis(1), idle_delay: Duration::from_millis(2), failure_delay: Duration::from_millis(2) };
+}
+
+async fn run_task_scheduler<C, R>(
+  cancel: tokio_util::sync::CancellationToken,
+  capture_configuration: C,
+  run_task: Arc<R>,
+  timing: TaskSchedulerTiming,
+) where
+  C: Fn() -> EngineResult<MaintenanceRunConfiguration> + Send + Sync + 'static,
+  R: Fn(MaintenanceRunConfiguration, tokio_util::sync::CancellationToken) -> EngineResult<bool> + Send + Sync + 'static,
+{
+  let mut workers = tokio::task::JoinSet::new();
+  let mut next_dispatch = tokio::time::Instant::now();
+  loop {
+    while let Some(result) = workers.try_join_next() {
+      next_dispatch = tokio::time::Instant::now() + task_worker_iteration_delay(result, timing);
+    }
+
+    if cancel.is_cancelled() && workers.is_empty() {
+      tracing::info!("Task worker shutting down");
+      break;
+    }
+    if cancel.is_cancelled() {
+      if let Some(result) = workers.join_next().await {
+        let _ = task_worker_iteration_delay(result, timing);
       }
+      continue;
+    }
 
-      let queue_clone = queue.clone();
-      let engine_clone = engine.clone();
-      let plugin_manager_clone = plugin_manager.clone();
-      let event_bus_clone = event_bus.clone();
-      let cancel_clone = cancel.clone();
-
-      // Use spawn_blocking since engine work is CPU-bound.
-      let result = tokio::task::spawn_blocking(move || {
-        process_next_task_internal_with_cancel(
-          &queue_clone,
-          &engine_clone,
-          &plugin_manager_clone,
-          &event_bus_clone,
-          &cancel_clone,
-          || {},
-          || {},
-        )
-      })
-      .await;
-
-      let sleep_duration = match result {
-        Ok(Ok(true)) => {
-          // A task was processed; brief pause before checking for more.
-          Duration::from_secs(1)
-        }
-        Ok(Ok(false)) => {
-          // No task found; wait longer before polling again.
-          Duration::from_secs(2)
-        }
-        Ok(Err(error)) => {
-          tracing::error!(%error, "Task worker iteration failed");
-          Duration::from_secs(2)
+    if tokio::time::Instant::now() >= next_dispatch {
+      match capture_configuration() {
+        Ok(run_configuration) => {
+          let available_slots = run_configuration.max_concurrent_tasks.saturating_sub(workers.len());
+          for _ in 0..available_slots {
+            let run_task = Arc::clone(&run_task);
+            let worker_cancel = cancel.clone();
+            workers.spawn_blocking(move || run_task(run_configuration, worker_cancel));
+          }
+          next_dispatch = tokio::time::Instant::now() + timing.processed_delay;
         }
         Err(error) => {
-          tracing::error!(%error, "Task worker blocking execution panicked or was cancelled");
-          Duration::from_secs(2)
+          tracing::error!(%error, "Task worker cannot capture maintenance policy");
+          next_dispatch = tokio::time::Instant::now() + timing.failure_delay;
         }
-      };
-
-      tokio::select! {
-          _ = cancel.cancelled() => {
-              tracing::info!("Task worker shutting down");
-              break;
-          }
-          _ = sleep(sleep_duration) => {}
       }
     }
-  })
+
+    tokio::select! {
+      _ = cancel.cancelled() => {}
+      result = workers.join_next(), if !workers.is_empty() => {
+        if let Some(result) = result {
+          next_dispatch = tokio::time::Instant::now() + task_worker_iteration_delay(result, timing);
+        }
+      }
+      _ = tokio::time::sleep_until(next_dispatch) => {}
+    }
+  }
 }
+
+fn task_worker_iteration_delay(result: Result<EngineResult<bool>, tokio::task::JoinError>, timing: TaskSchedulerTiming) -> Duration {
+  match result {
+    Ok(Ok(true)) => timing.processed_delay,
+    Ok(Ok(false)) => timing.idle_delay,
+    Ok(Err(error)) => {
+      tracing::error!(%error, "Task worker iteration failed");
+      timing.failure_delay
+    }
+    Err(error) => {
+      tracing::error!(%error, "Task worker blocking execution panicked or was cancelled");
+      timing.failure_delay
+    }
+  }
+}
+
+#[cfg(test)]
+#[path = "../../spec/engine/task_worker_scheduler_internal_spec.rs"]
+mod scheduler_internal_spec;
 
 /// Process the next pending task from the queue. Returns true if a task was processed.
 ///
@@ -152,7 +207,7 @@ pub fn process_next_task(
   // Tests + sync callers without a cancel token get a dummy "never-cancelled"
   // token. Production goes through process_next_task_internal_with_cancel.
   let dummy_cancel = tokio_util::sync::CancellationToken::new();
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, || {}, || {})
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, None, || {}, || {})
 }
 
 /// Deterministic scheduler-boundary hook used by integration tests to prove
@@ -169,7 +224,7 @@ where
   F: FnOnce(),
 {
   let dummy_cancel = tokio_util::sync::CancellationToken::new();
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, post_dequeue_hook, || {})
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, None, post_dequeue_hook, || {})
 }
 
 /// Deterministic execution-boundary hook used by integration tests to prove
@@ -186,7 +241,7 @@ where
   F: FnOnce(),
 {
   let dummy_cancel = tokio_util::sync::CancellationToken::new();
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, || {}, pre_execute_hook)
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, None, || {}, pre_execute_hook)
 }
 
 /// Deterministic production-cancellation hook used by integration tests to
@@ -203,7 +258,7 @@ pub fn process_next_task_with_cancel_and_pre_execute_hook<F>(
 where
   F: FnOnce(),
 {
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, cancel, || {}, pre_execute_hook)
+  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, cancel, None, || {}, pre_execute_hook)
 }
 
 fn process_next_task_internal_with_cancel<F, G>(
@@ -212,6 +267,7 @@ fn process_next_task_internal_with_cancel<F, G>(
   plugin_manager: &PluginManager,
   event_bus: &EventBus,
   cancel: &tokio_util::sync::CancellationToken,
+  captured_run_configuration: Option<MaintenanceRunConfiguration>,
   post_dequeue_hook: F,
   pre_execute_hook: G,
 ) -> EngineResult<bool>
@@ -222,6 +278,10 @@ where
   if cancel.is_cancelled() {
     return Ok(false);
   }
+  let run_configuration = match captured_run_configuration {
+    Some(configuration) => configuration,
+    None => engine.capture_maintenance_run_configuration()?,
+  };
 
   let mut task_workspace = match OperationMemoryBudget::new(
     engine,
@@ -291,6 +351,7 @@ where
         "task_id": task.id,
         "task_type": task.task_type,
         "args": task.args,
+        "configuration_generation": run_configuration.generation,
     }),
   );
   event_bus.emit(started_event);

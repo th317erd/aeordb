@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::lifecycle_config::prune_expired_snapshots_with_post_capture_hook;
 use aeordb::engine::{
   load_lifecycle_config, save_lifecycle_config, prune_expired_snapshots, EngineError, LifecycleConfig, RequestContext, SnapshotRetention,
   SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_MANUAL,
@@ -182,6 +183,34 @@ fn prune_respects_engine_internal_prefix() {
   let result = prune_expired_snapshots(&engine, &ctx).unwrap();
   assert_eq!(result.pruned_count, 0);
   assert!(result.skipped_engine_internal >= 1);
+}
+
+#[test]
+fn retention_run_keeps_the_policy_captured_before_configuration_changes() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let vm = VersionManager::new(&engine);
+  let mut metadata = HashMap::new();
+  metadata.insert(SNAPSHOT_TYPE_KEY.to_string(), SNAPSHOT_TYPE_AUTO.to_string());
+  vm.create_snapshot(&ctx, "_aeordb_capture_proof", metadata).unwrap();
+  save_lifecycle_config(
+    &engine,
+    &LifecycleConfig { snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 1 }, ..LifecycleConfig::default() },
+  )
+  .unwrap();
+
+  let result = prune_expired_snapshots_with_post_capture_hook(&engine, &ctx, || {
+    save_lifecycle_config(&engine, &LifecycleConfig::default()).unwrap();
+  })
+  .unwrap();
+
+  assert_eq!(result.skipped_engine_internal, 1, "the active run must retain its captured nonzero retention policy");
+  assert_eq!(
+    prune_expired_snapshots(&engine, &ctx).unwrap().skipped_engine_internal,
+    0,
+    "the next run must capture the replacement policy"
+  );
 }
 
 #[test]

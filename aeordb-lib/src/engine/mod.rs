@@ -12,6 +12,7 @@ pub mod cluster_join;
 pub mod compression;
 pub mod config_resolver;
 pub mod configuration_authority;
+pub(crate) mod configuration_history;
 pub mod conflict_store;
 pub mod content_type;
 pub mod cron_scheduler;
@@ -78,10 +79,15 @@ pub mod permission_resolver;
 pub mod permissions;
 pub mod phonetic;
 pub mod query_engine;
+pub(crate) mod query_runtime;
+#[cfg(test)]
+#[path = "../../spec/engine/query_runtime_internal_spec.rs"]
+mod query_runtime_internal_spec;
 pub mod range_extract;
 pub mod rate_tracker;
 pub mod request_context;
 pub mod rss_sampler;
+pub(crate) mod run_configuration;
 pub mod scalar_converter;
 pub mod schema_version;
 pub mod search;
@@ -138,6 +144,7 @@ pub use kv_store::{
 };
 pub use nvt::{NVTBucket, NormalizedVectorTable};
 pub use nvt_ops::NVTMask;
+pub use query_runtime::{QueryRuntimePolicy, QueryRuntimeSnapshot};
 pub use scalar_converter::{
   ScalarConverter, HashConverter, U8Converter, U16Converter, U32Converter, U64Converter, I64Converter, F64Converter, StringConverter,
   TimestampConverter, TrigramConverter, PhoneticConverter, PhoneticAlgorithm, serialize_converter, deserialize_converter,

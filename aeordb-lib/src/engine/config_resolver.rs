@@ -13,6 +13,7 @@ use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 
 use crate::engine::directory_ops::file_path_hash;
 use crate::engine::entry_type::EntryType;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::v4::contract_generated::{CONFIGURATION_PROPERTIES, ConfigProperty};
@@ -70,6 +71,8 @@ pub struct ConfigResolutionInputs {
   pub lifecycle_lkg: Option<ConfigFallback>,
   pub runtime_history: Vec<ConfigFallback>,
   pub lifecycle_history: Vec<ConfigFallback>,
+  pub runtime_history_issues: Vec<String>,
+  pub lifecycle_history_issues: Vec<String>,
   pub environment: BTreeMap<String, OsString>,
   pub cli: BTreeMap<String, OsString>,
 }
@@ -113,6 +116,8 @@ impl Default for ConfigResolutionInputs {
       lifecycle_lkg: None,
       runtime_history: Vec::new(),
       lifecycle_history: Vec::new(),
+      runtime_history_issues: Vec::new(),
+      lifecycle_history_issues: Vec::new(),
       environment: BTreeMap::new(),
       cli: BTreeMap::new(),
     }
@@ -243,6 +248,7 @@ impl ConfigResolver {
       &inputs.runtime,
       inputs.runtime_lkg.as_ref(),
       &mut inputs.runtime_history,
+      &inputs.runtime_history_issues,
       &mut resolution,
     );
     self.resolve_family(
@@ -250,6 +256,7 @@ impl ConfigResolver {
       &inputs.lifecycle,
       inputs.lifecycle_lkg.as_ref(),
       &mut inputs.lifecycle_history,
+      &inputs.lifecycle_history_issues,
       &mut resolution,
     );
     self.apply_overrides(&inputs.environment, &inputs.cli, &mut resolution);
@@ -294,6 +301,7 @@ impl ConfigResolver {
     current: &ConfigDocumentInput,
     lkg: Option<&ConfigFallback>,
     history: &mut [ConfigFallback],
+    history_issues: &[String],
     resolution: &mut ConfigResolution,
   ) {
     match current {
@@ -309,7 +317,7 @@ impl ConfigResolver {
           blocking: false,
           message: format!("{} configuration is unreadable: {message}", family.name()),
         });
-        self.apply_fallback_layer(family, lkg, history, resolution);
+        self.apply_fallback_layer(family, lkg, history, history_issues, resolution);
       }
       ConfigDocumentInput::Bytes(bytes) => match self.parse_document(family, bytes) {
         Ok(layer) => {
@@ -324,7 +332,7 @@ impl ConfigResolver {
             blocking: false,
             message: format!("{} configuration is invalid: {message}", family.name()),
           });
-          self.apply_fallback_layer(family, lkg, history, resolution);
+          self.apply_fallback_layer(family, lkg, history, history_issues, resolution);
         }
       },
     }
@@ -372,6 +380,7 @@ impl ConfigResolver {
     family: ConfigurationFamily,
     lkg: Option<&ConfigFallback>,
     history: &mut [ConfigFallback],
+    history_issues: &[String],
     resolution: &mut ConfigResolution,
   ) {
     if let Some(lkg) = lkg {
@@ -390,6 +399,14 @@ impl ConfigResolver {
       }
     }
 
+    for message in history_issues {
+      resolution.issues.push(ConfigIssue {
+        property: None,
+        source: Some(ConfigSource::AppendHistory),
+        blocking: false,
+        message: message.clone(),
+      });
+    }
     history.sort_by(|left, right| right.recorded_at_ms.cmp(&left.recorded_at_ms).then_with(|| right.identity.cmp(&left.identity)));
     for candidate in history {
       match self.parse_document(family, &candidate.bytes) {
@@ -934,7 +951,8 @@ pub(crate) fn build_startup_configuration(
       };
     }
   };
-  let inputs = ConfigResolutionInputs {
+  let resolver = ConfigResolver::new(context.clone());
+  let mut inputs = ConfigResolutionInputs {
     runtime: read_config_document(engine, RUNTIME_CONFIG_PATH),
     lifecycle: read_config_document(engine, crate::engine::lifecycle_config::LIFECYCLE_CONFIG_PATH),
     runtime_lkg,
@@ -943,16 +961,151 @@ pub(crate) fn build_startup_configuration(
     cli: command_line.into_values(),
     ..Default::default()
   };
-  let resolution = ConfigResolver::new(context.clone()).resolve(inputs.clone());
+  if configuration_history_required(&resolver, ConfigurationFamily::Runtime, &inputs.runtime, inputs.runtime_lkg.as_ref()) {
+    let history = crate::engine::configuration_history::load_configuration_history(engine, ConfigurationFamily::Runtime);
+    inputs.runtime_history = history.candidates;
+    inputs.runtime_history_issues = history.issues;
+  }
+  if configuration_history_required(&resolver, ConfigurationFamily::Lifecycle, &inputs.lifecycle, inputs.lifecycle_lkg.as_ref()) {
+    let history = crate::engine::configuration_history::load_configuration_history(engine, ConfigurationFamily::Lifecycle);
+    inputs.lifecycle_history = history.candidates;
+    inputs.lifecycle_history_issues = history.issues;
+  }
+  let resolution = resolver.resolve(inputs.clone());
   StartupConfigurationState {
     report: ConfigShadowReport { context: Some(context), resolution: Some(resolution), context_error: None },
     inputs,
   }
 }
 
+pub fn preopen_emergency_spill_locations(
+  database_path: impl AsRef<Path>,
+  command_line: &CommandLineConfigOverrides,
+) -> EngineResult<Vec<crate::engine::emergency_spill::EmergencySpillLocation>> {
+  let database_path = database_path.as_ref();
+  let context = detect_context(database_path, crate::engine::directory_ops::DEFAULT_CHUNK_SIZE as u64)
+    .map_err(|message| EngineError::InvalidInput(format!("cannot resolve pre-open recovery configuration: {message}")))?;
+  let read_only =
+    crate::engine::v4::deployment_guard::read_runtime_configuration_inputs_read_only(database_path, &ConfigResolver::new(context.clone()))?;
+  let environment = collect_registered_environment();
+  let cli = command_line.clone().into_values();
+  let full_inputs = ConfigResolutionInputs {
+    runtime: read_only.current.clone(),
+    runtime_lkg: read_only.last_known_good.clone(),
+    runtime_history: read_only.history.clone(),
+    runtime_history_issues: read_only.history_issues.clone(),
+    environment: environment.clone(),
+    cli: cli.clone(),
+    ..Default::default()
+  };
+  let full_resolution = ConfigResolver::new(context.clone()).resolve(full_inputs);
+  let effective = spill_path_from_resolution(&full_resolution).ok_or_else(|| {
+    let detail = full_resolution
+      .issues
+      .iter()
+      .filter(|issue| issue.property.as_deref() == Some("recovery.emergency_spill_dir"))
+      .map(|issue| issue.message.as_str())
+      .collect::<Vec<_>>()
+      .join("; ");
+    EngineError::InvalidInput(format!(
+      "recovery.emergency_spill_dir is unresolved before database open{}",
+      if detail.is_empty() { String::new() } else { format!(": {detail}") }
+    ))
+  })?;
+
+  let mut configured = Vec::new();
+  if effective.1 != ConfigSource::Default {
+    configured.push(effective.0);
+  }
+  collect_spill_path_from_source(
+    &context,
+    ConfigResolutionInputs { runtime: read_only.current, ..Default::default() },
+    ConfigSource::StoredRuntimeV1,
+    &mut configured,
+  );
+  if let Some(last_known_good) = read_only.last_known_good {
+    collect_spill_path_from_source(
+      &context,
+      ConfigResolutionInputs { runtime: ConfigDocumentInput::Bytes(last_known_good.bytes), ..Default::default() },
+      ConfigSource::StoredRuntimeV1,
+      &mut configured,
+    );
+  }
+  for historical in read_only.history {
+    collect_spill_path_from_source(
+      &context,
+      ConfigResolutionInputs { runtime: ConfigDocumentInput::Bytes(historical.bytes), ..Default::default() },
+      ConfigSource::StoredRuntimeV1,
+      &mut configured,
+    );
+  }
+  collect_spill_path_from_sources(
+    &context,
+    ConfigResolutionInputs { environment, ..Default::default() },
+    &[ConfigSource::Environment, ConfigSource::DeprecatedEnvironment],
+    &mut configured,
+  );
+  collect_spill_path_from_source(
+    &context,
+    ConfigResolutionInputs { cli, ..Default::default() },
+    ConfigSource::CommandLine,
+    &mut configured,
+  );
+  Ok(crate::engine::emergency_spill::emergency_spill_locations_with_configured(configured))
+}
+
+pub(crate) fn configuration_history_required(
+  resolver: &ConfigResolver,
+  family: ConfigurationFamily,
+  current: &ConfigDocumentInput,
+  last_known_good: Option<&ConfigFallback>,
+) -> bool {
+  match current {
+    ConfigDocumentInput::Missing => false,
+    ConfigDocumentInput::Bytes(bytes) if resolver.validate_document(family, bytes).is_ok() => false,
+    ConfigDocumentInput::Bytes(_) | ConfigDocumentInput::Unreadable(_) => {
+      last_known_good.is_none_or(|fallback| resolver.validate_document(family, &fallback.bytes).is_err())
+    }
+  }
+}
+
+fn collect_spill_path_from_source(
+  context: &ConfigResolutionContext,
+  inputs: ConfigResolutionInputs,
+  source: ConfigSource,
+  configured: &mut Vec<PathBuf>,
+) {
+  collect_spill_path_from_sources(context, inputs, &[source], configured);
+}
+
+fn collect_spill_path_from_sources(
+  context: &ConfigResolutionContext,
+  inputs: ConfigResolutionInputs,
+  sources: &[ConfigSource],
+  configured: &mut Vec<PathBuf>,
+) {
+  let resolution = ConfigResolver::new(context.clone()).resolve(inputs);
+  let Some(property) = resolution.property("recovery.emergency_spill_dir") else {
+    return;
+  };
+  if property.source.is_some_and(|source| sources.contains(&source)) {
+    if let Some(ConfigValue::Path(path)) = property.value.as_ref() {
+      configured.push(path.clone());
+    }
+  }
+}
+
+fn spill_path_from_resolution(resolution: &ConfigResolution) -> Option<(PathBuf, ConfigSource)> {
+  let property = resolution.property("recovery.emergency_spill_dir")?;
+  let source = property.source?;
+  match property.value.as_ref()? {
+    ConfigValue::Path(path) => Some((path.clone(), source)),
+    _ => None,
+  }
+}
+
 fn detect_context(database_path: &Path, chunk_size_bytes: u64) -> Result<ConfigResolutionContext, String> {
-  let database_path = std::fs::canonicalize(database_path)
-    .map_err(|error| format!("cannot canonicalize database path {}: {error}", database_path.display()))?;
+  let database_path = canonical_database_path(database_path)?;
   let filesystem_capacity_bytes = fs2::total_space(&database_path)
     .map_err(|error| format!("cannot detect filesystem capacity for {}: {error}", database_path.display()))?;
   let logical_cpu_count =
@@ -967,6 +1120,18 @@ fn detect_context(database_path: &Path, chunk_size_bytes: u64) -> Result<ConfigR
     default_gc_workspace_root: Some(default_gc_workspace_root),
     default_emergency_spill_dir: crate::engine::emergency_spill::os_user_data_emergency_spill_dir(),
   })
+}
+
+fn canonical_database_path(database_path: &Path) -> Result<PathBuf, String> {
+  if database_path.exists() {
+    return std::fs::canonicalize(database_path)
+      .map_err(|error| format!("cannot canonicalize database path {}: {error}", database_path.display()));
+  }
+  let parent = database_path.parent().ok_or_else(|| format!("database path {} has no parent", database_path.display()))?;
+  let file_name = database_path.file_name().ok_or_else(|| format!("database path {} has no file name", database_path.display()))?;
+  let parent =
+    std::fs::canonicalize(parent).map_err(|error| format!("cannot canonicalize database parent {}: {error}", parent.display()))?;
+  Ok(parent.join(file_name))
 }
 
 fn private_gc_workspace_root(database_path: &Path) -> Result<PathBuf, String> {

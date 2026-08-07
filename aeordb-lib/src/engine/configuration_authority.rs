@@ -12,6 +12,13 @@ use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 use crate::engine::v4::config_value::{CanonicalValueBounds, canonical_value_to_json, canonicalize_json};
 use crate::engine::v4::configuration_controls::ConfigurationControlFamilyStatus;
 
+pub fn unavailable_configuration_owner_reason(owner: &str) -> Option<&'static str> {
+  match owner {
+    "query_plan_cache" => Some("query-plan cache owner is not implemented; P6 activates this capability"),
+    _ => None,
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveConfigProperty {
   pub id: u16,
@@ -31,7 +38,27 @@ pub struct ConfigurationAuthoritySnapshot {
   pub active_properties: BTreeMap<String, ActiveConfigProperty>,
   pub pending_restart: BTreeSet<String>,
   pub pending_convergence: BTreeSet<String>,
+  pub convergence_errors: BTreeMap<String, String>,
   pub control_statuses: BTreeMap<ConfigurationFamily, ConfigurationControlFamilyStatus>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConfigurationConvergenceResult {
+  activated: BTreeSet<String>,
+  failures: BTreeMap<String, String>,
+}
+
+impl ConfigurationConvergenceResult {
+  pub(crate) fn activate(&mut self, paths: impl IntoIterator<Item = String>) {
+    self.activated.extend(paths);
+  }
+
+  pub(crate) fn fail(&mut self, paths: impl IntoIterator<Item = String>, error: impl Into<String>) {
+    let error = error.into();
+    for path in paths {
+      self.failures.insert(path, error.clone());
+    }
+  }
 }
 
 impl ConfigurationAuthoritySnapshot {
@@ -45,6 +72,20 @@ impl ConfigurationAuthoritySnapshot {
   pub fn resolved_boolean(&self, path: &str) -> Option<bool> {
     self.active_properties.get(path)?.value.as_ref().and_then(|value| match value {
       ConfigValue::Boolean(value) => Some(*value),
+      _ => None,
+    })
+  }
+
+  pub fn resolved_optional_bytes(&self, path: &str) -> Option<Option<u64>> {
+    self.active_properties.get(path)?.value.as_ref().and_then(|value| match value {
+      ConfigValue::OptionalBytes(value) => Some(*value),
+      _ => None,
+    })
+  }
+
+  pub fn resolved_path(&self, path: &str) -> Option<&std::path::Path> {
+    self.active_properties.get(path)?.value.as_ref().and_then(|value| match value {
+      ConfigValue::Path(value) => Some(value.as_path()),
       _ => None,
     })
   }
@@ -101,6 +142,7 @@ impl ConfigurationAuthority {
       active_properties,
       pending_restart: BTreeSet::new(),
       pending_convergence: BTreeSet::new(),
+      convergence_errors: BTreeMap::new(),
       control_statuses,
     };
     Self { startup, current: ArcSwap::from_pointee(initial), inputs: Mutex::new(startup_state.inputs) }
@@ -114,27 +156,31 @@ impl ConfigurationAuthority {
     self.current.load_full()
   }
 
-  pub(crate) fn replace_document<F>(
+  pub(crate) fn replace_document<F, C>(
     &self,
     family: ConfigurationFamily,
     bytes: &[u8],
     publish: F,
+    converge: C,
   ) -> EngineResult<Arc<ConfigurationAuthoritySnapshot>>
   where
     F: FnOnce(&[u8], u16, &ConfigurationAuthoritySnapshot) -> EngineResult<ConfigurationControlFamilyStatus>,
+    C: FnOnce(&ConfigurationAuthoritySnapshot, &BTreeSet<String>) -> ConfigurationConvergenceResult,
   {
     let mut inputs = self.inputs.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-    self.replace_document_locked(family, bytes, &mut inputs, publish)
+    self.replace_document_locked(family, bytes, &mut inputs, publish, converge)
   }
 
-  pub(crate) fn patch_document<F>(
+  pub(crate) fn patch_document<F, C>(
     &self,
     family: ConfigurationFamily,
     patch_bytes: &[u8],
     publish: F,
+    converge: C,
   ) -> EngineResult<Arc<ConfigurationAuthoritySnapshot>>
   where
     F: FnOnce(&[u8], u16, &ConfigurationAuthoritySnapshot) -> EngineResult<ConfigurationControlFamilyStatus>,
+    C: FnOnce(&ConfigurationAuthoritySnapshot, &BTreeSet<String>) -> ConfigurationConvergenceResult,
   {
     let canonical_patch = canonicalize_json(patch_bytes, CanonicalValueBounds::AUDIT_VALUE)
       .map_err(|error| EngineError::InvalidInput(format!("invalid {} configuration patch: {error}", family.name())))?;
@@ -162,18 +208,20 @@ impl ConfigurationAuthority {
     root.insert("schema_version".to_string(), serde_json::Value::from(1));
     let merged_bytes = serde_json::to_vec(&merged)
       .map_err(|error| EngineError::InvalidInput(format!("cannot serialize {} configuration patch result: {error}", family.name())))?;
-    self.replace_document_locked(family, &merged_bytes, &mut inputs, publish)
+    self.replace_document_locked(family, &merged_bytes, &mut inputs, publish, converge)
   }
 
-  fn replace_document_locked<F>(
+  fn replace_document_locked<F, C>(
     &self,
     family: ConfigurationFamily,
     bytes: &[u8],
     inputs: &mut ConfigResolutionInputs,
     publish: F,
+    converge: C,
   ) -> EngineResult<Arc<ConfigurationAuthoritySnapshot>>
   where
     F: FnOnce(&[u8], u16, &ConfigurationAuthoritySnapshot) -> EngineResult<ConfigurationControlFamilyStatus>,
+    C: FnOnce(&ConfigurationAuthoritySnapshot, &BTreeSet<String>) -> ConfigurationConvergenceResult,
   {
     let context = self.startup.context.clone().ok_or_else(|| {
       EngineError::InvalidInput(self.startup.context_error.clone().unwrap_or_else(|| "configuration context is unavailable".to_string()))
@@ -211,6 +259,8 @@ impl ConfigurationAuthority {
     let mut active_properties = previous.active_properties.clone();
     let mut pending_restart = previous.pending_restart.clone();
     let mut pending_convergence = previous.pending_convergence.clone();
+    let mut convergence_errors = previous.convergence_errors.clone();
+    let mut changed_dynamic = BTreeSet::new();
     for property in desired.resolution.as_ref().expect("candidate resolution exists").properties.values() {
       let Some(registered) =
         crate::engine::v4::contract_generated::CONFIGURATION_PROPERTIES.iter().find(|registered| registered.path == property.path)
@@ -225,10 +275,20 @@ impl ConfigurationAuthority {
       if !changed {
         pending_restart.remove(&property.path);
         pending_convergence.remove(&property.path);
+        convergence_errors.remove(&property.path);
         continue;
       }
       if registered.activation == "startup_bound" {
         pending_restart.insert(property.path.clone());
+        pending_convergence.remove(&property.path);
+        convergence_errors.remove(&property.path);
+        continue;
+      }
+      if registered.activation == "dynamically_staged" {
+        pending_restart.remove(&property.path);
+        pending_convergence.insert(property.path.clone());
+        convergence_errors.remove(&property.path);
+        changed_dynamic.insert(property.path.clone());
         continue;
       }
       active_properties.insert(
@@ -245,6 +305,7 @@ impl ConfigurationAuthority {
       );
       pending_restart.remove(&property.path);
       pending_convergence.remove(&property.path);
+      convergence_errors.remove(&property.path);
     }
     let mut next = ConfigurationAuthoritySnapshot {
       generation,
@@ -253,15 +314,52 @@ impl ConfigurationAuthority {
       active_properties,
       pending_restart,
       pending_convergence,
+      convergence_errors,
       control_statuses: previous.control_statuses.clone(),
     };
     let control_status = publish(bytes, schema_version, &next)?;
     next.control_statuses.insert(family, control_status);
 
     *inputs = candidate_inputs;
-    let next = Arc::new(next);
-    self.current.store(Arc::clone(&next));
-    Ok(next)
+    let pending = Arc::new(next);
+    self.current.store(Arc::clone(&pending));
+    let convergence = converge(&pending, &changed_dynamic);
+    if changed_dynamic.is_empty() {
+      return Ok(pending);
+    }
+
+    let mut converged = (*pending).clone();
+    let desired_properties = converged.desired.resolution.as_ref().expect("candidate resolution exists");
+    for path in changed_dynamic {
+      if convergence.activated.contains(&path) {
+        let property = desired_properties.properties.get(&path).expect("changed property remains in candidate resolution");
+        let registered = crate::engine::v4::contract_generated::CONFIGURATION_PROPERTIES
+          .iter()
+          .find(|registered| registered.path == property.path)
+          .expect("changed property remains in frozen registry");
+        converged.active_properties.insert(
+          path.clone(),
+          ActiveConfigProperty {
+            id: property.id,
+            path: property.path.clone(),
+            owner: property.owner.clone(),
+            activation: registered.activation.to_string(),
+            value: property.value.clone(),
+            source: property.source,
+            activated_generation: generation,
+          },
+        );
+        converged.pending_convergence.remove(&path);
+        converged.convergence_errors.remove(&path);
+      } else {
+        let error =
+          convergence.failures.get(&path).cloned().unwrap_or_else(|| "configuration owner did not acknowledge convergence".to_string());
+        converged.convergence_errors.insert(path, error);
+      }
+    }
+    let converged = Arc::new(converged);
+    self.current.store(Arc::clone(&converged));
+    Ok(converged)
   }
 }
 
@@ -291,3 +389,7 @@ fn patch_base(family: ConfigurationFamily, inputs: &ConfigResolutionInputs, reso
     family.name()
   )))
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/configuration_authority_internal_spec.rs"]
+mod configuration_authority_internal_spec;

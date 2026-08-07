@@ -15,7 +15,9 @@ use super::blocking::run_engine_blocking;
 use super::cache_invalidation::{evict_caches_for_path, evict_caches_for_paths};
 use super::route_permissions::{reject_share_key, RoutePermissionChecker};
 use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
-use super::search_locators::{broad_query_terms, generate_locators, terms_from_query_node, LocatorOptions, LocatorOptionsRequest, LocatorTerm};
+use super::search_locators::{
+  broad_query_terms, terms_from_query_node, try_generate_locators_with_budget, LocatorOptions, LocatorOptionsRequest, LocatorTerm,
+};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::permission_middleware::ActiveKeyRules;
@@ -1182,7 +1184,8 @@ fn enrich_query_items_with_locators(
   items: &mut [serde_json::Value],
   terms: &[LocatorTerm],
   options: &LocatorOptions,
-) {
+  request_budget: &crate::engine::query_runtime::QueryRequestBudget,
+) -> EngineResult<()> {
   for item in items {
     let Some(path) = json_item_path(item).map(str::to_string) else {
       continue;
@@ -1190,8 +1193,9 @@ fn enrich_query_items_with_locators(
     let Some(result) = query_results.iter().find(|result| result.file_record.path == path) else {
       continue;
     };
-    add_locator_fields(engine, item, &result.file_record, terms, options);
+    add_locator_fields(engine, item, &result.file_record, terms, options, request_budget)?;
   }
+  Ok(())
 }
 
 fn enrich_search_items_with_locators(
@@ -1201,7 +1205,8 @@ fn enrich_search_items_with_locators(
   query: Option<&str>,
   query_node: Option<&QueryNode>,
   options: &LocatorOptions,
-) {
+  request_budget: &crate::engine::query_runtime::QueryRequestBudget,
+) -> EngineResult<()> {
   let structured_terms = query_node.map(terms_from_query_node);
   let ops = DirectoryOps::new(engine);
 
@@ -1219,8 +1224,9 @@ fn enrich_search_items_with_locators(
     let Ok(Some(file_record)) = ops.get_metadata(&path) else {
       continue;
     };
-    add_locator_fields(engine, item, &file_record, &terms, options);
+    add_locator_fields(engine, item, &file_record, &terms, options, request_budget)?;
   }
+  Ok(())
 }
 
 fn add_locator_fields(
@@ -1229,19 +1235,21 @@ fn add_locator_fields(
   file_record: &FileRecord,
   terms: &[LocatorTerm],
   options: &LocatorOptions,
-) {
+  request_budget: &crate::engine::query_runtime::QueryRequestBudget,
+) -> EngineResult<()> {
   let Some(object) = item.as_object_mut() else {
-    return;
+    return Ok(());
   };
 
   if !file_record.content_hash.is_empty() {
     object.insert("content_hash".to_string(), serde_json::json!(file_record.content_hash_hex()));
   }
 
-  let generation = generate_locators(engine, file_record, terms, options);
+  let generation = try_generate_locators_with_budget(engine, file_record, terms, options, request_budget)?;
   object.insert("matches".to_string(), serde_json::to_value(generation.matches).unwrap_or_else(|_| serde_json::Value::Array(Vec::new())));
   object.insert("matches_truncated".to_string(), serde_json::json!(generation.matches_truncated));
   object.insert("locator_status".to_string(), serde_json::json!(generation.locator_status));
+  Ok(())
 }
 
 fn json_item_path(item: &serde_json::Value) -> Option<&str> {
@@ -2303,6 +2311,10 @@ pub async fn query_endpoint(
     Some(v) if v.as_bool().unwrap_or(false) || v == "plan" || v == &serde_json::json!("plan") => ExplainMode::Plan,
     _ => ExplainMode::Off,
   };
+  let request_budget = match state.engine.start_query_request_budget() {
+    Ok(request_budget) => request_budget,
+    Err(error) => return engine_error_response("Query admission failed", &error),
+  };
 
   // Handle EXPLAIN mode -- short-circuits normal response path
   if explain_mode != ExplainMode::Off {
@@ -2330,14 +2342,12 @@ pub async fn query_endpoint(
       explain: explain_mode,
     };
 
-    let query_engine = QueryEngine::new(&state.engine);
+    let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
     match query_engine.execute_explain(&query) {
       Ok(result) => {
         return (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response();
       }
-      Err(e) => {
-        return ErrorResponse::new(format!("Explain failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-      }
+      Err(error) => return engine_error_response("Explain failed", &error),
     }
   }
 
@@ -2367,7 +2377,7 @@ pub async fn query_endpoint(
       explain: ExplainMode::Off,
     };
 
-    let query_engine = QueryEngine::new(&state.engine);
+    let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
     match query_engine.execute_aggregate(&query) {
       Ok(result) => {
         let mut response_value = serde_json::to_value(&result).unwrap();
@@ -2382,6 +2392,9 @@ pub async fn query_endpoint(
       }
       Err(EngineError::NotFound(msg)) => {
         return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response();
+      }
+      Err(error @ (EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_))) => {
+        return engine_error_response("Aggregation failed", &error);
       }
       Err(e) => {
         return ErrorResponse::new(format!("Aggregation failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
@@ -2404,7 +2417,7 @@ pub async fn query_endpoint(
     explain: ExplainMode::Off,
   };
 
-  let query_engine = QueryEngine::new(&state.engine);
+  let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
   match query_engine.execute_paginated(&query) {
     Ok(paginated) => {
       let response_items: Vec<serde_json::Value> = paginated
@@ -2458,7 +2471,16 @@ pub async fn query_endpoint(
       let locator_options = LocatorOptions::from_request(&body.locators);
       if locator_options.include_matches {
         let locator_terms = if is_empty { Vec::new() } else { terms_from_query_node(&query_node) };
-        enrich_query_items_with_locators(state.engine.as_ref(), &paginated.results, &mut response_items, &locator_terms, &locator_options);
+        if let Err(error) = enrich_query_items_with_locators(
+          state.engine.as_ref(),
+          &paginated.results,
+          &mut response_items,
+          &locator_terms,
+          &locator_options,
+          &request_budget,
+        ) {
+          return engine_error_response("Query locator generation failed", &error);
+        }
       }
 
       let mut response = serde_json::json!({
@@ -2510,6 +2532,9 @@ pub async fn query_endpoint(
       ErrorResponse::new(format!("Range query not supported for converter '{}'", converter_name,))
         .with_status(StatusCode::BAD_REQUEST)
         .into_response()
+    }
+    Err(error @ (EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_))) => {
+      engine_error_response("Query failed", &error)
     }
     Err(error) => {
       tracing::error!("Query execution failed: {}", error);
@@ -2926,8 +2951,20 @@ pub async fn global_search_endpoint(
   let base_path = payload.path.as_deref().unwrap_or("/");
   let limit = payload.limit.map(|l| l.min(1000));
   let offset = payload.offset;
+  let request_budget = match state.engine.start_query_request_budget() {
+    Ok(request_budget) => request_budget,
+    Err(error) => return engine_error_response("Search admission failed", &error),
+  };
 
-  match crate::engine::search::global_search(&state.engine, base_path, payload.query.as_deref(), query_node.as_ref(), limit, offset) {
+  match crate::engine::search::global_search_with_budget(
+    &state.engine,
+    base_path,
+    payload.query.as_deref(),
+    query_node.as_ref(),
+    limit,
+    offset,
+    &request_budget,
+  ) {
     Ok(results) => {
       let mut items: Vec<serde_json::Value> = results
         .results
@@ -2956,14 +2993,17 @@ pub async fn global_search_endpoint(
 
       let locator_options = LocatorOptions::from_request(&payload.locators);
       if locator_options.include_matches {
-        enrich_search_items_with_locators(
+        if let Err(error) = enrich_search_items_with_locators(
           state.engine.as_ref(),
           &results.results,
           &mut items,
           payload.query.as_deref(),
           query_node.as_ref(),
           &locator_options,
-        );
+          &request_budget,
+        ) {
+          return engine_error_response("Search locator generation failed", &error);
+        }
       }
 
       let mut response = serde_json::json!({
@@ -2974,6 +3014,9 @@ pub async fn global_search_endpoint(
         response["total_count"] = serde_json::json!(total);
       }
       (StatusCode::OK, Json(response)).into_response()
+    }
+    Err(error @ (EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_))) => {
+      engine_error_response("Search failed", &error)
     }
     Err(error) => {
       tracing::error!("Global search failed: {}", error);

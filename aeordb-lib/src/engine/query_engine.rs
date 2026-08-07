@@ -10,11 +10,12 @@ use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
-use crate::engine::index_store::{FieldIndex, IndexManager};
+use crate::engine::index_store::{FieldIndex, IndexLoadMemoryAccount, IndexManager};
 use crate::engine::json_parser::parse_json_fields;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::nvt_ops::NVTMask;
 use crate::engine::path_utils::{normalize_path, parent_path};
+use crate::engine::query_runtime::{QueryRequestBudget, QueryRuntimeReservation};
 use crate::engine::scalar_converter::{
   ScalarConverter, TrigramConverter, CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64, CONVERTER_TYPE_I64,
   CONVERTER_TYPE_F64, CONVERTER_TYPE_STRING, CONVERTER_TYPE_TIMESTAMP,
@@ -612,17 +613,29 @@ impl QueryResult {
 
 struct QueryMemoryLease {
   reservation: MemoryReservation,
+  runtime_reservation: QueryRuntimeReservation,
 }
 
 impl std::fmt::Debug for QueryMemoryLease {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    formatter.debug_struct("QueryMemoryLease").field("bytes", &self.reservation.bytes()).finish()
+    formatter
+      .debug_struct("QueryMemoryLease")
+      .field("bytes", &self.reservation.bytes())
+      .field("runtime_bytes", &self.runtime_reservation.bytes())
+      .finish()
   }
+}
+
+struct QueryTemporaryMemoryLease {
+  _reservation: MemoryReservation,
+  _runtime_reservation: QueryRuntimeReservation,
 }
 
 struct QueryMemoryBudget {
   coordinator: Arc<MemoryCoordinator>,
   reservation: Option<MemoryReservation>,
+  request_budget: QueryRequestBudget,
+  runtime_reservation: Option<QueryRuntimeReservation>,
   cancellation: Option<CancellationToken>,
   work_since_cancellation_check: usize,
 }
@@ -630,15 +643,27 @@ struct QueryMemoryBudget {
 impl QueryMemoryBudget {
   const MINIMUM_WORKSPACE_BYTES: u64 = 4 * 1024;
 
-  fn new_with_cancellation(engine: &StorageEngine, cancellation: Option<&CancellationToken>) -> EngineResult<Self> {
+  fn new_with_cancellation(
+    engine: &StorageEngine,
+    cancellation: Option<&CancellationToken>,
+    request_budget: QueryRequestBudget,
+  ) -> EngineResult<Self> {
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
       return Err(EngineError::Cancelled("query".to_string()));
     }
+    let runtime_reservation = request_budget.reserve(Self::MINIMUM_WORKSPACE_BYTES)?;
     let coordinator = engine.memory_coordinator();
     let reservation = coordinator
       .reserve(MemoryOwner::Query, Self::MINIMUM_WORKSPACE_BYTES, AdmissionClass::Workload)
       .map_err(|error| query_memory_error("query workspace admission failed", error))?;
-    Ok(Self { coordinator, reservation: Some(reservation), cancellation: cancellation.cloned(), work_since_cancellation_check: 0 })
+    Ok(Self {
+      coordinator,
+      reservation: Some(reservation),
+      request_budget,
+      runtime_reservation: Some(runtime_reservation),
+      cancellation: cancellation.cloned(),
+      work_since_cancellation_check: 0,
+    })
   }
 
   fn check_cancellation(&self) -> EngineResult<()> {
@@ -658,24 +683,65 @@ impl QueryMemoryBudget {
     Ok(())
   }
 
+  fn runtime_reservation_mut(&mut self) -> EngineResult<&mut QueryRuntimeReservation> {
+    self
+      .runtime_reservation
+      .as_mut()
+      .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its runtime reservation")))
+  }
+
+  fn grow_pair(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    if bytes == 0 {
+      return Ok(());
+    }
+    self.check_cancellation()?;
+    self.runtime_reservation_mut()?.grow(bytes).map_err(|error| query_runtime_error(context, error))?;
+    if let Err(error) = self.reservation_mut()?.grow(bytes) {
+      self.runtime_reservation_mut()?.shrink(bytes).map_err(|rollback_error| {
+        EngineError::IoError(std::io::Error::other(format!("{context}: runtime rollback failed: {rollback_error}")))
+      })?;
+      return Err(query_memory_error(context, error));
+    }
+    Ok(())
+  }
+
+  fn shrink_pair(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    if bytes == 0 {
+      return Ok(());
+    }
+    self.reservation_mut()?.shrink(bytes).map_err(|error| query_memory_error(context, error))?;
+    self.runtime_reservation_mut()?.shrink(bytes).map_err(|error| query_runtime_error(context, error))
+  }
+
+  fn resize_retained(&mut self, required: u64, admission_context: &str, accounting_context: &str) -> EngineResult<()> {
+    let current = self.reservation_mut()?.bytes();
+    if required > current {
+      self.grow_pair(required - current, admission_context)
+    } else {
+      self.shrink_pair(current - required, accounting_context)
+    }
+  }
+
+  fn take_lease(&mut self) -> EngineResult<Arc<QueryMemoryLease>> {
+    Ok(Arc::new(QueryMemoryLease {
+      reservation: self
+        .reservation
+        .take()
+        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final reservation")))?,
+      runtime_reservation: self
+        .runtime_reservation
+        .take()
+        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final runtime reservation")))?,
+    }))
+  }
+
   fn retain_results(mut self, results: &mut [QueryResult]) -> EngineResult<()> {
     if results.is_empty() {
       return Ok(());
     }
     let required = results.iter().fold(0u64, |total, result| total.saturating_add(result.estimated_memory_bytes()));
-    let reservation =
-      self.reservation.as_mut().ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its reservation")))?;
-    if required > reservation.bytes() {
-      reservation.grow(required - reservation.bytes()).map_err(|error| query_memory_error("query result admission failed", error))?;
-    } else if required < reservation.bytes() {
-      reservation.shrink(reservation.bytes() - required).map_err(|error| query_memory_error("query result accounting failed", error))?;
-    }
-    let lease = Arc::new(QueryMemoryLease {
-      reservation: self
-        .reservation
-        .take()
-        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final reservation")))?,
-    });
+    self.resize_retained(required, "query result admission failed", "query result accounting failed")?;
+    let lease = self.take_lease()?;
     for result in results {
       result.memory_lease = Some(Arc::clone(&lease));
     }
@@ -684,39 +750,15 @@ impl QueryMemoryBudget {
 
   fn retain_aggregate(mut self, result: &mut AggregateResult) -> EngineResult<()> {
     let required = result.estimated_memory_bytes().max(1);
-    let reservation =
-      self.reservation.as_mut().ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its reservation")))?;
-    if required > reservation.bytes() {
-      reservation.grow(required - reservation.bytes()).map_err(|error| query_memory_error("aggregate result admission failed", error))?;
-    } else if required < reservation.bytes() {
-      reservation
-        .shrink(reservation.bytes() - required)
-        .map_err(|error| query_memory_error("aggregate result accounting failed", error))?;
-    }
-    result.memory_lease = Some(Arc::new(QueryMemoryLease {
-      reservation: self
-        .reservation
-        .take()
-        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final reservation")))?,
-    }));
+    self.resize_retained(required, "aggregate result admission failed", "aggregate result accounting failed")?;
+    result.memory_lease = Some(self.take_lease()?);
     Ok(())
   }
 
   fn retain_explain(mut self, result: &mut ExplainResult) -> EngineResult<()> {
     let required = result.estimated_memory_bytes().max(1);
-    let reservation =
-      self.reservation.as_mut().ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its reservation")))?;
-    if required > reservation.bytes() {
-      reservation.grow(required - reservation.bytes()).map_err(|error| query_memory_error("explain result admission failed", error))?;
-    } else if required < reservation.bytes() {
-      reservation.shrink(reservation.bytes() - required).map_err(|error| query_memory_error("explain result accounting failed", error))?;
-    }
-    result.memory_lease = Some(Arc::new(QueryMemoryLease {
-      reservation: self
-        .reservation
-        .take()
-        .ok_or_else(|| EngineError::IoError(std::io::Error::other("query memory budget lost its final reservation")))?,
-    }));
+    self.resize_retained(required, "explain result admission failed", "explain result accounting failed")?;
+    result.memory_lease = Some(self.take_lease()?);
     Ok(())
   }
 
@@ -725,8 +767,7 @@ impl QueryMemoryBudget {
   }
 
   fn reserve_growth(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
-    self.check_cancellation()?;
-    self.reservation_mut()?.grow(bytes).map_err(|error| query_memory_error(context, error))
+    self.grow_pair(bytes, context)
   }
 
   fn reserve_hash_work(&mut self, entries: usize, hash_length: usize, include_lookup_refs: bool) -> EngineResult<()> {
@@ -833,11 +874,20 @@ impl QueryMemoryBudget {
       .ok_or_else(|| EngineError::ResourceExhausted("query buffered JSON estimate overflow".to_string()))
   }
 
-  fn reserve_temporary(&self, bytes: u64, context: &str) -> EngineResult<MemoryReservation> {
-    self.coordinator.reserve(MemoryOwner::Query, bytes.max(1), AdmissionClass::Workload).map_err(|error| query_memory_error(context, error))
+  fn reserve_temporary(&self, bytes: u64, context: &str) -> EngineResult<QueryTemporaryMemoryLease> {
+    let bytes = bytes.max(1);
+    let runtime_reservation = self.request_budget.reserve(bytes).map_err(|error| query_runtime_error(context, error))?;
+    let reservation = match self.coordinator.reserve(MemoryOwner::Query, bytes, AdmissionClass::Workload) {
+      Ok(reservation) => reservation,
+      Err(error) => {
+        drop(runtime_reservation);
+        return Err(query_memory_error(context, error));
+      }
+    };
+    Ok(QueryTemporaryMemoryLease { _reservation: reservation, _runtime_reservation: runtime_reservation })
   }
 
-  fn reserve_fuzzy_score_scratch(&self, operation: &QueryOp, field_value_bytes: usize) -> EngineResult<MemoryReservation> {
+  fn reserve_fuzzy_score_scratch(&self, operation: &QueryOp, field_value_bytes: usize) -> EngineResult<QueryTemporaryMemoryLease> {
     let query_bytes = match operation {
       QueryOp::Contains(value)
       | QueryOp::Similar(value, _)
@@ -857,6 +907,23 @@ impl QueryMemoryBudget {
       .and_then(|bytes| u64::try_from(bytes).ok())
       .ok_or_else(|| EngineError::ResourceExhausted("fuzzy score scratch estimate overflow".to_string()))?;
     self.reserve_temporary(bytes, "fuzzy score scratch admission failed")
+  }
+}
+
+impl IndexLoadMemoryAccount for QueryMemoryBudget {
+  fn grow_index_load(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    self.grow_pair(bytes, context)
+  }
+
+  fn shrink_index_load(&mut self, bytes: u64, context: &str) -> EngineResult<()> {
+    self.shrink_pair(bytes, context)
+  }
+}
+
+fn query_runtime_error(context: &str, error: EngineError) -> EngineError {
+  match error {
+    EngineError::ResourceExhausted(message) => EngineError::ResourceExhausted(format!("{context}: {message}")),
+    other => other,
   }
 }
 
@@ -1021,11 +1088,23 @@ fn decode_cursor(cursor: &str) -> EngineResult<serde_json::Value> {
 /// (trigram, phonetic, fuzzy), cursor-based pagination, sorting, and aggregation.
 pub struct QueryEngine<'a> {
   engine: &'a StorageEngine,
+  request_budget: Option<QueryRequestBudget>,
 }
 
 impl<'a> QueryEngine<'a> {
   pub fn new(engine: &'a StorageEngine) -> Self {
-    QueryEngine { engine }
+    QueryEngine { engine, request_budget: None }
+  }
+
+  pub(crate) fn with_request_budget(engine: &'a StorageEngine, request_budget: QueryRequestBudget) -> Self {
+    QueryEngine { engine, request_budget: Some(request_budget) }
+  }
+
+  fn request_budget(&self) -> EngineResult<QueryRequestBudget> {
+    match &self.request_budget {
+      Some(request_budget) => Ok(request_budget.clone()),
+      None => self.engine.start_query_request_budget(),
+    }
   }
 
   /// Execute a query and return matching file records, applying the default limit.
@@ -1049,7 +1128,7 @@ impl<'a> QueryEngine<'a> {
   fn execute_with_optional_cancellation(&self, query: &Query, cancellation: Option<&CancellationToken>) -> EngineResult<Vec<QueryResult>> {
     let _operation = self.engine.query_operation_guard()?;
     let timer_start = std::time::Instant::now();
-    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation, self.request_budget()?)?;
     let mut results = self.execute_internal(query, &mut budget)?;
 
     // Apply limit (use DEFAULT_QUERY_LIMIT when no explicit limit).
@@ -1089,7 +1168,7 @@ impl<'a> QueryEngine<'a> {
     let _operation = self.engine.query_operation_guard()?;
     let explicit_limit = query.limit.is_some();
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
-    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation, self.request_budget()?)?;
 
     // Get all results (without limit)
     let mut all_results = self.execute_internal(query, &mut budget)?;
@@ -1174,7 +1253,8 @@ impl<'a> QueryEngine<'a> {
     cancellation: Option<&CancellationToken>,
   ) -> EngineResult<ExplainResult> {
     let _operation = self.engine.query_operation_guard()?;
-    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
+    let request_budget = self.request_budget()?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation, request_budget.clone())?;
     let index_manager = IndexManager::new(self.engine);
 
     // Build the plan by analyzing the query structure
@@ -1190,11 +1270,13 @@ impl<'a> QueryEngine<'a> {
     let start = std::time::Instant::now();
 
     let (results_json, candidate_count, result_count) = if query.aggregate.is_some() {
-      let agg_result = self.execute_aggregate_with_optional_cancellation(query, cancellation)?;
+      let scoped_engine = QueryEngine::with_request_budget(self.engine, request_budget.clone());
+      let agg_result = scoped_engine.execute_aggregate_with_optional_cancellation(query, cancellation)?;
       let count = agg_result.count.unwrap_or(0);
       (Some(serde_json::to_value(&agg_result).unwrap_or_default()), count as usize, count as usize)
     } else {
-      let paginated = self.execute_paginated_with_optional_cancellation(query, cancellation)?;
+      let scoped_engine = QueryEngine::with_request_budget(self.engine, request_budget.clone());
+      let paginated = scoped_engine.execute_paginated_with_optional_cancellation(query, cancellation)?;
       let total = paginated.total_count.unwrap_or(paginated.results.len() as u64);
       let returned = paginated.results.len();
       let results_value = serde_json::json!({
@@ -1293,11 +1375,10 @@ impl<'a> QueryEngine<'a> {
 
         let index_field_name = canonical_virtual_field_name(&fq.field_name).unwrap_or(fq.field_name.as_str());
         let mut index_source = path.to_string();
-        let mut indexes = index_manager.load_indexes_for_field_accounted(path, index_field_name, budget.reservation_mut()?)?;
+        let mut indexes = index_manager.load_indexes_for_field_with_memory_account(path, index_field_name, budget)?;
         if indexes.is_empty() && canonical_virtual_field_name(&fq.field_name).is_some() {
           for ancestor in virtual_index_ancestor_paths(path) {
-            let ancestor_indexes =
-              index_manager.load_indexes_for_field_accounted(&ancestor, index_field_name, budget.reservation_mut()?)?;
+            let ancestor_indexes = index_manager.load_indexes_for_field_with_memory_account(&ancestor, index_field_name, budget)?;
             if !ancestor_indexes.is_empty() {
               index_source = ancestor;
               indexes = ancestor_indexes;
@@ -1437,7 +1518,7 @@ impl<'a> QueryEngine<'a> {
       if sf.field.starts_with('@') {
         sort_fields.push(SortData { values: HashMap::new(), is_virtual: true, field: sf.field.clone(), direction: sf.direction.clone() });
       } else {
-        let indexes = index_manager.load_indexes_for_field_accounted(path, &sf.field, budget.reservation_mut()?)?;
+        let indexes = index_manager.load_indexes_for_field_with_memory_account(path, &sf.field, budget)?;
         let index = indexes.into_iter().find(|idx| idx.converter.is_order_preserving()).ok_or_else(|| {
           EngineError::NotFound(format!(
             "Cannot sort by field '{}' — no order-preserving index found. \
@@ -1584,7 +1665,7 @@ impl<'a> QueryEngine<'a> {
       _ => {}
     }
 
-    let index = index_manager.load_index_accounted(path, &field_query.field_name, budget.reservation_mut()?)?;
+    let index = index_manager.load_index_with_memory_account(path, &field_query.field_name, budget)?;
     let mut index = match index {
       Some(index) => index,
       None => {
@@ -1623,7 +1704,7 @@ impl<'a> QueryEngine<'a> {
     index_manager: &IndexManager,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
-    let mut indexes = index_manager.load_indexes_for_field_accounted(path, field_name, budget.reservation_mut()?)?;
+    let mut indexes = index_manager.load_indexes_for_field_with_memory_account(path, field_name, budget)?;
     if indexes.is_empty() {
       return Err(EngineError::NotFound(format!("Index not found for field '{}' at path '{}'", field_name, path,)));
     }
@@ -1673,9 +1754,9 @@ impl<'a> QueryEngine<'a> {
     for index_name in &field_names {
       budget.record_work(1)?;
       let loaded = if let Some((field_name, strategy)) = index_name.rsplit_once('.') {
-        index_manager.load_index_by_strategy_accounted(path, field_name, strategy, budget.reservation_mut()?)?
+        index_manager.load_index_by_strategy_with_memory_account(path, field_name, strategy, budget)?
       } else {
-        index_manager.load_index_accounted(path, index_name, budget.reservation_mut()?)?
+        index_manager.load_index_with_memory_account(path, index_name, budget)?
       };
       if let Some(index) = loaded {
         budget.reserve_hash_work(index.entries.len(), self.engine.hash_algo().hash_length(), false)?;
@@ -2113,7 +2194,7 @@ impl<'a> QueryEngine<'a> {
     index_manager: &IndexManager,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<bool> {
-    index_manager.load_indexes_for_field_accounted(path, field_name, budget.reservation_mut()?).map(|indexes| !indexes.is_empty())
+    index_manager.load_indexes_for_field_with_memory_account(path, field_name, budget).map(|indexes| !indexes.is_empty())
   }
 
   fn field_has_index_at_path_or_ancestors(
@@ -2145,14 +2226,14 @@ impl<'a> QueryEngine<'a> {
     include_ancestors: bool,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Option<FieldIndex>> {
-    if let Some(index) = index_manager.load_index_by_strategy_accounted(path, field_name, strategy, budget.reservation_mut()?)? {
+    if let Some(index) = index_manager.load_index_by_strategy_with_memory_account(path, field_name, strategy, budget)? {
       return Ok(Some(index));
     }
 
     if include_ancestors {
       for ancestor in virtual_index_ancestor_paths(path) {
         budget.record_work(1)?;
-        if let Some(index) = index_manager.load_index_by_strategy_accounted(&ancestor, field_name, strategy, budget.reservation_mut()?)? {
+        if let Some(index) = index_manager.load_index_by_strategy_with_memory_account(&ancestor, field_name, strategy, budget)? {
           return Ok(Some(index));
         }
       }
@@ -2496,7 +2577,7 @@ impl<'a> QueryEngine<'a> {
     hash_length: usize,
     ops: &DirectoryOps,
     budget: &QueryMemoryBudget,
-  ) -> EngineResult<Option<(FileRecord, Vec<u8>, MemoryReservation)>> {
+  ) -> EngineResult<Option<(FileRecord, Vec<u8>, QueryTemporaryMemoryLease)>> {
     let Some(preflight_header) = self.engine.get_entry_header(file_hash)? else {
       return Ok(None);
     };
@@ -2712,7 +2793,7 @@ impl<'a> QueryEngine<'a> {
   ) -> EngineResult<AggregateResult> {
     let _operation = self.engine.query_operation_guard()?;
     let agg = query.aggregate.as_ref().ok_or_else(|| EngineError::NotFound("No aggregate query specified".to_string()))?;
-    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation, self.request_budget()?)?;
 
     // Run the filter to get matching file hashes
     let result_hashes = self.execute_internal(query, &mut budget)?;
@@ -2749,7 +2830,7 @@ impl<'a> QueryEngine<'a> {
     let mut field_indexes: FieldIndexMap = HashMap::new();
     for field_name in &agg_fields {
       budget.record_work(1)?;
-      let indexes = index_manager.load_indexes_for_field_accounted(&query.path, field_name, budget.reservation_mut()?)?;
+      let indexes = index_manager.load_indexes_for_field_with_memory_account(&query.path, field_name, &mut budget)?;
       let index =
         indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for aggregate field '{}'", field_name)))?;
       let type_tag = index.converter.type_tag();
@@ -2789,7 +2870,7 @@ impl<'a> QueryEngine<'a> {
     let mut group_field_data: GroupFieldEntries = Vec::new();
     for gf in &agg.group_by {
       budget.record_work(1)?;
-      let indexes = index_manager.load_indexes_for_field_accounted(&query.path, gf, budget.reservation_mut()?)?;
+      let indexes = index_manager.load_indexes_for_field_with_memory_account(&query.path, gf, &mut budget)?;
       let index = indexes.into_iter().next().ok_or_else(|| EngineError::NotFound(format!("No index found for group_by field '{}'", gf)))?;
       let type_tag = index.converter.type_tag();
       group_field_data.push((gf.clone(), index.values, type_tag));

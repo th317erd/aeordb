@@ -56,6 +56,7 @@ struct PageCacheState {
 pub struct KvPageProviderStats {
   pub resident_pages: u64,
   pub resident_bytes: u64,
+  pub max_resident_bytes: u64,
   pub hits: u64,
   pub misses: u64,
   pub disk_reads: u64,
@@ -448,6 +449,7 @@ impl KvPageProvider {
     Ok(KvPageProviderStats {
       resident_pages: state.pages.len() as u64,
       resident_bytes: state.resident_bytes,
+      max_resident_bytes: self.inner.max_resident_bytes,
       hits: state.hits,
       misses: state.misses,
       disk_reads: state.disk_reads,

@@ -34,7 +34,17 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   println!("=======================");
   println!();
 
-  let emergency_spills = match emergency_spill::scan_unapplied_for_database(database) {
+  let emergency_spill_locations = match aeordb::engine::config_resolver::preopen_emergency_spill_locations(
+    database,
+    &aeordb::engine::config_resolver::CommandLineConfigOverrides::default(),
+  ) {
+    Ok(locations) => locations,
+    Err(error) => {
+      eprintln!("Error: failed to resolve emergency spill locations: {}", error);
+      process::exit(1);
+    }
+  };
+  let emergency_spills = match emergency_spill::scan_for_database_with_locations(database, &emergency_spill_locations) {
     Ok(artifacts) => artifacts,
     Err(error) => {
       eprintln!("Error: failed to scan emergency spill locations: {}", error);

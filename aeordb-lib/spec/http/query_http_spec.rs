@@ -6,6 +6,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
+use aeordb::engine::config_resolver::ConfigurationFamily;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
@@ -211,6 +212,42 @@ async fn test_query_include_matches_returns_range_locators_and_identity() {
   assert_eq!(locator["fetch"]["preferred"], "json_pointer");
   assert_eq!(locator["fetch"]["json_pointer"], "/name");
   assert!(locator["snippet"]["text"].as_str().unwrap_or("").contains("Alice"), "missing snippet: {}", locator);
+}
+
+#[tokio::test]
+async fn test_query_locator_memory_refusal_returns_service_unavailable() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  engine
+    .replace_configuration_document(ConfigurationFamily::Runtime, br#"{"schema_version":1,"query":{"per_request_memory_bytes":8388608}}"#)
+    .unwrap();
+
+  let mut padding = String::new();
+  padding.try_reserve_exact(1_300_000).unwrap();
+  padding.extend(std::iter::repeat_n('x', 1_300_000));
+  let document = serde_json::to_vec(&serde_json::json!({"name": "Pressure", "padding": padding})).unwrap();
+  DirectoryOps::new(&engine)
+    .store_file_with_indexing(&RequestContext::system(), "/myapp/users/pressure.json", &document, Some("application/json"))
+    .unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let (status, json) = query_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/myapp/users",
+      "where": {"field": "name", "op": "eq", "value": "Pressure"},
+      "include_matches": true
+    }),
+  )
+  .await;
+
+  assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {json}");
+  assert_eq!(json["code"], "SERVICE_UNAVAILABLE");
+  assert!(json["error"].as_str().unwrap_or("").contains("locator"), "body: {json}");
+  assert_eq!(engine.query_runtime_snapshot().unwrap().reserved_bytes, 0);
+  assert_eq!(engine.query_runtime_snapshot().unwrap().active_requests, 0);
 }
 
 #[tokio::test]

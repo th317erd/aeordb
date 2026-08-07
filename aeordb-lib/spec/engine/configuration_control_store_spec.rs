@@ -1,5 +1,8 @@
 use aeordb::engine::HashAlgorithm;
-use aeordb::engine::config_resolver::{ConfigDocumentStatus, ConfigSource, ConfigValue, ConfigurationFamily, RUNTIME_CONFIG_PATH};
+use aeordb::engine::config_resolver::{
+  CommandLineConfigOverrides, ConfigDocumentStatus, ConfigSource, ConfigValue, ConfigurationFamily, RUNTIME_CONFIG_PATH,
+  preopen_emergency_spill_locations,
+};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::durability_coordinator::{DurabilityOperation, OsErrorClass};
 use aeordb::engine::lifecycle_config::{LIFECYCLE_CONFIG_PATH, load_lifecycle_config};
@@ -177,6 +180,61 @@ fn stable_transition_identity_publishes_controls_and_recovers_lkg_after_current_
 }
 
 #[test]
+fn invalid_current_and_unusable_lkg_recover_newest_valid_append_history_revision() {
+  let directory = tempfile::tempdir().unwrap();
+  let (path, engine) = create_engine(&directory);
+  let database_id = [0x67; 16];
+  publish_cleared_identity(&engine, database_id);
+  let engine = reopen(engine, &path);
+  let older = br#"{"schema_version":1,"snapshot_writes_enabled":true,"snapshot_retention":{"auto_months":2,"manual_months":8}}"#;
+  let newest = br#"{"schema_version":1,"snapshot_writes_enabled":false,"snapshot_retention":{"auto_months":4,"manual_months":12}}"#;
+  engine.replace_configuration_document(ConfigurationFamily::Lifecycle, older).unwrap();
+  engine.replace_configuration_document(ConfigurationFamily::Lifecycle, newest).unwrap();
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), LIFECYCLE_CONFIG_PATH, b"{", Some("application/json")).unwrap();
+  for slot in [SystemControlSlotV1::A, SystemControlSlotV1::B] {
+    let lkg_path = system_control_path(SystemControlKindV1::LifecycleLastKnownGood, &[], slot).unwrap();
+    DirectoryOps::new(&engine)
+      .store_file_buffered(&RequestContext::system(), &lkg_path, b"broken", Some("application/octet-stream"))
+      .unwrap();
+  }
+
+  let reopened = reopen(engine, &path);
+  let snapshot = reopened.configuration_snapshot();
+  let resolution = snapshot.desired.resolution.as_ref().unwrap();
+
+  assert!(matches!(resolution.lifecycle_status, ConfigDocumentStatus::Invalid { .. }));
+  assert_eq!(resolution.property("lifecycle.snapshot_writes_enabled").unwrap().source, Some(ConfigSource::AppendHistory));
+  assert_eq!(resolution.property("lifecycle.snapshot_retention_auto_months").unwrap().value, Some(ConfigValue::Unsigned(4)));
+  assert_eq!(resolution.property("lifecycle.snapshot_retention_manual_months").unwrap().value, Some(ConfigValue::Unsigned(12)));
+  assert!(resolution.fallback_identities.iter().any(|identity| identity.contains("append-history")));
+}
+
+#[test]
+fn missing_current_uses_defaults_without_resurrecting_append_history() {
+  let directory = tempfile::tempdir().unwrap();
+  let (path, engine) = create_engine(&directory);
+  let database_id = [0x69; 16];
+  publish_cleared_identity(&engine, database_id);
+  let engine = reopen(engine, &path);
+  let historical = br#"{"schema_version":1,"snapshot_writes_enabled":false}"#;
+  engine.replace_configuration_document(ConfigurationFamily::Lifecycle, historical).unwrap();
+  DirectoryOps::new(&engine).delete_file(&RequestContext::system(), LIFECYCLE_CONFIG_PATH).unwrap();
+  for slot in [SystemControlSlotV1::A, SystemControlSlotV1::B] {
+    let lkg_path = system_control_path(SystemControlKindV1::LifecycleLastKnownGood, &[], slot).unwrap();
+    DirectoryOps::new(&engine)
+      .store_file_buffered(&RequestContext::system(), &lkg_path, b"broken", Some("application/octet-stream"))
+      .unwrap();
+  }
+
+  let reopened = reopen(engine, &path);
+  let resolution = reopened.configuration_snapshot().desired.resolution.as_ref().unwrap().clone();
+
+  assert_eq!(resolution.lifecycle_status, ConfigDocumentStatus::Missing);
+  assert_eq!(resolution.property("lifecycle.snapshot_writes_enabled").unwrap().source, Some(ConfigSource::Default));
+  assert!(resolution.fallback_identities.is_empty());
+}
+
+#[test]
 fn corrupt_lkg_never_blocks_a_valid_current_configuration() {
   let directory = tempfile::tempdir().unwrap();
   let (path, engine) = create_engine(&directory);
@@ -245,6 +303,58 @@ fn runtime_family_uses_its_distinct_controls_and_recovers_after_current_corrupti
   assert!(matches!(resolution.runtime_status, ConfigDocumentStatus::Invalid { .. }));
   assert_eq!(resolution.property("index.flush_after_seconds").unwrap().value, Some(ConfigValue::Unsigned(45)));
   assert_eq!(resolution.property("index.flush_after_seconds").unwrap().source, Some(ConfigSource::LastKnownGood));
+}
+
+#[test]
+fn preopen_spill_scan_recovers_runtime_path_from_lkg_when_current_document_is_corrupt() {
+  let directory = tempfile::tempdir().unwrap();
+  let (path, engine) = create_engine(&directory);
+  let database_id = [0x66; 16];
+  publish_cleared_identity(&engine, database_id);
+  let engine = reopen(engine, &path);
+  let spill_path = directory.path().join("runtime-lkg-spill");
+  let document = serde_json::to_vec(&serde_json::json!({
+    "schema_version": 1,
+    "recovery": {"emergency_spill_dir": spill_path},
+  }))
+  .unwrap();
+  let updated = engine.replace_configuration_document(ConfigurationFamily::Runtime, &document).unwrap();
+  assert_eq!(updated.control_status(ConfigurationFamily::Runtime).lkg_sequence, Some(1));
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), RUNTIME_CONFIG_PATH, b"{", Some("application/json")).unwrap();
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let locations = preopen_emergency_spill_locations(&path, &CommandLineConfigOverrides::default()).unwrap();
+  assert!(locations.iter().any(|location| location.path == spill_path));
+}
+
+#[test]
+fn preopen_spill_scan_recovers_runtime_path_from_append_history_when_lkg_is_unusable() {
+  let directory = tempfile::tempdir().unwrap();
+  let (path, engine) = create_engine(&directory);
+  let database_id = [0x68; 16];
+  publish_cleared_identity(&engine, database_id);
+  let engine = reopen(engine, &path);
+  let spill_path = directory.path().join("runtime-history-spill");
+  let document = serde_json::to_vec(&serde_json::json!({
+    "schema_version": 1,
+    "recovery": {"emergency_spill_dir": spill_path},
+  }))
+  .unwrap();
+  engine.replace_configuration_document(ConfigurationFamily::Runtime, &document).unwrap();
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), RUNTIME_CONFIG_PATH, b"{", Some("application/json")).unwrap();
+  for slot in [SystemControlSlotV1::A, SystemControlSlotV1::B] {
+    let lkg_path = system_control_path(SystemControlKindV1::RuntimeLastKnownGood, &[], slot).unwrap();
+    DirectoryOps::new(&engine)
+      .store_file_buffered(&RequestContext::system(), &lkg_path, b"broken", Some("application/octet-stream"))
+      .unwrap();
+  }
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let locations = preopen_emergency_spill_locations(&path, &CommandLineConfigOverrides::default()).unwrap();
+
+  assert!(locations.iter().any(|location| location.path == spill_path));
 }
 
 #[test]

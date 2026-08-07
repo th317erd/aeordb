@@ -552,6 +552,25 @@ impl DiskKVStore {
     Ok(())
   }
 
+  /// Publish a fresh page provider with a new clean-residency bound.
+  /// Existing snapshots retain their old provider until their leases drain;
+  /// new readers atomically observe the replacement generation.
+  pub fn reconfigure_bounded_pages(&mut self, max_resident_bytes: u64) -> EngineResult<()> {
+    let config =
+      self.bounded_page_config.clone().ok_or_else(|| EngineError::InvalidInput("bounded KV pages are not active".to_string()))?;
+    let provider = KvPageProvider::new(
+      self.db_file.try_clone()?,
+      self.kv_block_offset,
+      self.hash_algo,
+      self.bucket_count,
+      max_resident_bytes,
+      Some(config.coordinator.clone()),
+    )?;
+    self.publish_through_page_provider(provider)?;
+    self.bounded_page_config = Some(BoundedPageConfig { coordinator: config.coordinator, max_resident_bytes });
+    Ok(())
+  }
+
   pub(crate) fn activate_bootstrap_page_provider(&mut self) -> EngineResult<()> {
     if self.page_provider.is_some() {
       return Ok(());
