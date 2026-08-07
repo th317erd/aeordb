@@ -1194,6 +1194,43 @@ fn rebuild_directory_tree_uses_current_path_records_once() {
 }
 
 #[test]
+fn full_directory_repair_preserves_current_symlink_path_records() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/repair/target.txt", b"target", Some("text/plain")).unwrap();
+  ops.store_symlink(&ctx, "/repair/current-link", "/repair/target.txt").unwrap();
+
+  let dirs_written = ops.rebuild_directory_tree(&ctx).unwrap();
+
+  assert_eq!(dirs_written, 2);
+  let children = ops.list_directory("/repair").unwrap();
+  assert!(children.iter().any(|child| child.name == "current-link" && child.entry_type == EntryType::Symlink.to_u8()));
+  assert_eq!(ops.get_symlink("/repair/current-link").unwrap().unwrap().target, "/repair/target.txt");
+}
+
+#[test]
+fn full_directory_repair_rebuilds_every_deep_ancestor_bottom_up() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/repair/a/b/c/deep.txt", b"deep", Some("text/plain")).unwrap();
+  ops.store_symlink(&ctx, "/repair/a/current-link", "/repair/a/b/c/deep.txt").unwrap();
+
+  let dirs_written = ops.rebuild_directory_tree(&ctx).unwrap();
+
+  assert_eq!(dirs_written, 5, "repair must write /repair/a/b/c, each ancestor, and root exactly once");
+  for (path, child) in [("/", "repair"), ("/repair", "a"), ("/repair/a", "b"), ("/repair/a/b", "c"), ("/repair/a/b/c", "deep.txt")] {
+    let children = ops.list_directory(path).unwrap();
+    assert!(children.iter().any(|entry| entry.name == child), "{path} did not contain rebuilt child {child}: {children:?}");
+  }
+  let repair_a = ops.list_directory("/repair/a").unwrap();
+  assert!(repair_a.iter().any(|entry| entry.name == "current-link" && entry.entry_type == EntryType::Symlink.to_u8()));
+  assert_eq!(ops.read_file_buffered("/repair/a/b/c/deep.txt").unwrap(), b"deep");
+  assert_eq!(ops.get_symlink("/repair/a/current-link").unwrap().unwrap().target, "/repair/a/b/c/deep.txt");
+}
+
+#[test]
 fn rebuild_directory_tree_skips_path_records_with_missing_chunks() {
   let (engine, temp) = create_test_db();
   let ctx = RequestContext::system();
@@ -1226,6 +1263,66 @@ fn rebuild_directory_tree_skips_path_records_with_missing_chunks() {
   let root = ops.list_directory("/").unwrap();
   assert!(!root.iter().any(|child| child.name == "broken"), "repair must not re-list a file whose chunks are missing: {:?}", root);
   assert!(ops.read_file_buffered("/broken/dangling.txt").is_err(), "direct read should still report the underlying chunk loss");
+}
+
+#[test]
+fn full_directory_repair_refuses_memory_pressure_before_mutation() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/pressure/full.txt", b"unchanged", Some("text/plain")).unwrap();
+
+  let algo = engine.hash_algo();
+  let root_before = engine.head_hash().unwrap();
+  let pressure_dir_key = directory_path_hash("/pressure", &algo).unwrap();
+  let pressure_dir_before = engine.get_entry(&pressure_dir_key).unwrap().unwrap().2;
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let remaining_critical = policy.emergency_reserve_bytes.checked_sub(snapshot.critical_reserved_bytes).unwrap();
+  let pressure =
+    coordinator.reserve(MemoryOwner::Repair, remaining_critical, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery)).unwrap();
+
+  let error = ops.rebuild_directory_tree(&ctx).unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::ResourceExhausted(_)), "unexpected repair error: {error}");
+  assert_eq!(engine.head_hash().unwrap(), root_before, "failed repair must not advance HEAD");
+  assert_eq!(engine.get_entry(&pressure_dir_key).unwrap().unwrap().2, pressure_dir_before, "failed repair must not rewrite a directory");
+
+  drop(pressure);
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::Repair).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0, "failed repair must release every owned reservation");
+  assert_eq!(ops.read_file_buffered("/pressure/full.txt").unwrap(), b"unchanged");
+}
+
+#[test]
+fn targeted_directory_repair_refuses_memory_pressure_before_mutation() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/pressure/targeted.txt", b"unchanged", Some("text/plain")).unwrap();
+
+  let algo = engine.hash_algo();
+  let pressure_dir_key = directory_path_hash("/pressure", &algo).unwrap();
+  let pressure_dir_before = engine.get_entry(&pressure_dir_key).unwrap().unwrap().2;
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let remaining_critical = policy.emergency_reserve_bytes.checked_sub(snapshot.critical_reserved_bytes).unwrap();
+  let pressure =
+    coordinator.reserve(MemoryOwner::Repair, remaining_critical, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery)).unwrap();
+
+  let error = ops.repair_directory_index_from_path_records("/pressure").unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::ResourceExhausted(_)), "unexpected repair error: {error}");
+  assert_eq!(
+    engine.get_entry(&pressure_dir_key).unwrap().unwrap().2,
+    pressure_dir_before,
+    "failed targeted repair must not rewrite a directory"
+  );
+
+  drop(pressure);
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::Repair).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0, "failed targeted repair must release every owned reservation");
+  assert_eq!(ops.read_file_buffered("/pressure/targeted.txt").unwrap(), b"unchanged");
 }
 
 #[test]

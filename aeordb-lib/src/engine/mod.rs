@@ -18,6 +18,7 @@ pub mod deletion_record;
 pub mod directory_entry;
 pub mod directory_listing;
 pub mod directory_ops;
+pub(crate) mod directory_repair_workspace;
 pub mod disk_kv_store;
 pub mod durability;
 pub mod durability_coordinator;

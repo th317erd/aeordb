@@ -601,4 +601,22 @@ mod tests {
     assert_eq!(recovered.key, second_key);
     assert!(buffered.next().is_none());
   }
+
+  #[test]
+  fn skipped_region_diagnostics_saturate_without_losing_totals() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("bounded-skipped-regions.aeordb");
+    AppendWriter::create(&path).unwrap();
+    let mut scanner = EntryScanner::new_reporting(File::open(path).unwrap()).unwrap();
+    let observed = MAX_RECORDED_SKIPPED_REGIONS + 17;
+
+    for index in 0..observed {
+      scanner.record_skipped_region(index as u64 * 11, 11);
+    }
+
+    assert_eq!(scanner.skipped_regions.len(), MAX_RECORDED_SKIPPED_REGIONS);
+    assert_eq!(scanner.skipped_region_count(), observed as u64);
+    assert_eq!(scanner.skipped_region_bytes(), observed as u64 * 11);
+    assert_eq!(scanner.last_skipped_region, Some(((observed as u64 - 1) * 11, 11)));
+  }
 }

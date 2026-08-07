@@ -212,14 +212,16 @@
         - [ ] Bound v3/v4 migration capture, checkpoints, and cutover scratch under `migration` admission.
           - [x] Bound the current forced-reindex FileRecord migration inventory and per-record/chunk working sets.
           - [ ] Bind future v4 capture/checkpoint/cutover workspaces when their runtime writer is activated.
-        - [ ] Bound verify, rebuild, header repair, integrity, and explicit recovery scratch under `repair` admission.
+        - [x] Bound verify, rebuild, header repair, integrity, and explicit recovery scratch under `repair` admission.
           - [x] Add one page-at-a-time KV visitor with override, early-stop, and error semantics for every diagnostic/migration scan.
           - [x] Replace full-view integrity sampling with a bounded, cancellable `repair` maintenance sample.
-          - [ ] Replace verify/KV comparison and directory-repair inventories with disk-backed or bounded-window working sets.
-          - [ ] Replace dirty-startup/runtime KV rebuild inventories with bounded repair workspace and fail-closed corruption handling.
+          - [x] Replace verify/KV comparison and directory-repair inventories with disk-backed or bounded-window working sets.
+            - [x] Stream full directory repair through checksummed depth spools, bounded external runs, and one bottom-up write per directory.
+            - [x] Bound targeted flat/B-tree repair visitation, retained children, and pre-mutation admission.
+          - [x] Replace dirty-startup/runtime KV rebuild inventories with bounded repair workspace and fail-closed corruption handling.
             - [x] Stream the common dirty-startup/runtime WAL rebuild through checksummed same-filesystem external runs, bounded page writes, and a crash-recoverable missing-hot-tail marker.
             - [x] Replace the pre-single-file no-KV bootstrap path with a crash-recoverable in-file KV migration that never overwrites its legacy WAL.
-            - [ ] Bound scanner recovery-region diagnostics.
+            - [x] Bound scanner recovery-region diagnostics.
           - [x] Bound pre-open header migration with fixed scratch and prove copy/barrier failure behavior.
         - [ ] Bound emergency spill manifests/components and shutdown drain/flush scratch with their reserved critical purposes.
       - [ ] Pause/cancel maintenance at host-floor or soft pressure while preserving health/status, bounded reads, durability, spill, and shutdown headroom.

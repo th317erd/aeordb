@@ -2,6 +2,7 @@ use crate::engine::compression::{compress, CompressionAlgorithm};
 use crate::engine::batch_commit::{commit_buffered_files, BufferedFile, CommitResult};
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
+use crate::engine::directory_repair_workspace::DirectoryRepairWorkspace;
 use crate::engine::entry_header::FLAG_SYSTEM;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -115,6 +116,14 @@ fn immediate_child_under(parent: &str, path: &str) -> Option<(String, bool)> {
   let first = segments.next()?.to_string();
   let direct = segments.next().is_none();
   Some((first, direct))
+}
+
+enum RepairWorkspaceChild {
+  Child { parent: String, child: ChildEntry },
+  SkippedSystem,
+  SkippedNonPath,
+  SkippedDangling,
+  SkippedMalformed,
 }
 
 /// Compute the domain-prefixed hash for a chunk.
@@ -2056,124 +2065,216 @@ impl<'a> DirectoryOps<'a> {
     Ok(())
   }
 
-  /// Rebuild the directory tree by scanning all file records in the KV and
-  /// writing a canonical directory tree bottom-up. Used by `verify --repair`
-  /// when directory indexes are missing or stale after recovery.
+  fn repair_workspace_file_child(
+    &self,
+    entry: &crate::engine::kv_store::KVEntry,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+  ) -> EngineResult<RepairWorkspaceChild> {
+    let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
+      return Ok(RepairWorkspaceChild::SkippedMalformed);
+    };
+    let record = match FileRecord::deserialize(&value, hash_length, header.entry_version) {
+      Ok(record) => record,
+      Err(_) => return Ok(RepairWorkspaceChild::SkippedMalformed),
+    };
+    let path = normalize_path(&record.path);
+    if path == "/" || path.starts_with("/.aeordb-") {
+      return Ok(RepairWorkspaceChild::SkippedSystem);
+    }
+    let path_key = file_path_hash(&path, algo)?;
+    if entry.hash != path_key {
+      return Ok(RepairWorkspaceChild::SkippedNonPath);
+    }
+    if !self.file_record_chunks_live(&record)? {
+      return Ok(RepairWorkspaceChild::SkippedDangling);
+    }
+    let name = file_name(&path).unwrap_or("");
+    if name.is_empty() {
+      return Ok(RepairWorkspaceChild::SkippedMalformed);
+    }
+    let identity_key = file_identity_hash(&path, record.content_type.as_deref(), &record.chunk_hashes, algo)?;
+    let child_hash = if self.engine.has_entry(&identity_key)? { identity_key } else { path_key };
+    let parent = parent_path(&path).unwrap_or_else(|| "/".to_string());
+    Ok(RepairWorkspaceChild::Child {
+      parent,
+      child: ChildEntry {
+        name: name.to_string(),
+        entry_type: EntryType::FileRecord.to_u8(),
+        hash: child_hash,
+        total_size: record.total_size,
+        content_type: record.content_type,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        virtual_time: 0,
+        node_id: 0,
+      },
+    })
+  }
+
+  fn repair_workspace_symlink_child(
+    &self,
+    entry: &crate::engine::kv_store::KVEntry,
+    algo: &HashAlgorithm,
+  ) -> EngineResult<RepairWorkspaceChild> {
+    let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
+      return Ok(RepairWorkspaceChild::SkippedMalformed);
+    };
+    let record = match SymlinkRecord::deserialize(&value, header.entry_version) {
+      Ok(record) => record,
+      Err(_) => return Ok(RepairWorkspaceChild::SkippedMalformed),
+    };
+    let path = normalize_path(&record.path);
+    if path == "/" || path.starts_with("/.aeordb-") {
+      return Ok(RepairWorkspaceChild::SkippedSystem);
+    }
+    let path_key = symlink_path_hash(&path, algo)?;
+    if entry.hash != path_key {
+      return Ok(RepairWorkspaceChild::SkippedNonPath);
+    }
+    let name = file_name(&path).unwrap_or("");
+    if name.is_empty() {
+      return Ok(RepairWorkspaceChild::SkippedMalformed);
+    }
+    let identity_key = symlink_identity_hash(&path, &record.target, algo)?;
+    let child_hash = if self.engine.has_entry(&identity_key)? { identity_key } else { path_key };
+    let parent = parent_path(&path).unwrap_or_else(|| "/".to_string());
+    Ok(RepairWorkspaceChild::Child {
+      parent,
+      child: ChildEntry {
+        name: name.to_string(),
+        entry_type: EntryType::Symlink.to_u8(),
+        hash: child_hash,
+        total_size: 0,
+        content_type: None,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        virtual_time: 0,
+        node_id: 0,
+      },
+    })
+  }
+
+  /// Rebuild the directory tree from current file and symlink path records.
   ///
-  /// This intentionally uses only current path-key FileRecords (`file:{path}`).
-  /// Content-key and identity-key FileRecords are historical/addressable copies;
-  /// rebuilding directories from them can resurrect stale paths and rewrites
-  /// every ancestor repeatedly. A bottom-up rebuild writes each directory once.
+  /// The authoritative path-record scan is page-wise and streams canonical
+  /// children into a same-filesystem external workspace. Directories are then
+  /// grouped and written bottom-up, so database-wide repair memory remains
+  /// bounded without replaying historical content/identity copies.
   pub fn rebuild_directory_tree(&self, _ctx: &RequestContext) -> EngineResult<usize> {
-    let _namespace = self.engine.direct_hard_authority_guard()?;
     let algo = self.engine.hash_algo();
     let hash_length = self.engine.hash_algo().hash_length();
-    let snapshot = self.engine.kv_snapshot.load();
-    let all_entries = snapshot.iter_all()?;
-
-    let mut children_by_dir: std::collections::BTreeMap<String, std::collections::BTreeMap<String, ChildEntry>> =
-      std::collections::BTreeMap::new();
-    let mut all_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    all_dirs.insert("/".to_string());
-
+    let cancellation = self.engine.repair_cancellation();
+    let _namespace = self.engine.direct_hard_authority_guard()?;
+    let mut workspace =
+      DirectoryRepairWorkspace::new(self.engine.database_path(), algo, self.engine.memory_coordinator().as_ref(), cancellation.clone())?;
+    let mut memory = OperationMemoryBudget::new(
+      self.engine,
+      "directory tree repair scan",
+      MemoryOwner::Repair,
+      AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery),
+      0,
+      None,
+    )?;
     let mut file_records_found = 0;
     let mut path_records_found = 0;
+    let mut symlink_records_found = 0;
     let mut skipped_system = 0;
     let mut skipped_non_path_key = 0;
     let mut skipped_dangling = 0;
     let mut skipped_error = 0;
 
-    for entry in &all_entries {
-      let kv_type = entry.type_flags & 0x0F;
-      if kv_type != crate::engine::kv_store::KV_TYPE_FILE_RECORD {
-        continue;
+    self.engine.visit_kv_entries_for_repair(|entry| {
+      if cancellation.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(EngineError::ShuttingDown);
       }
-      file_records_found += 1;
-
-      // Read the file record to get its path
-      match self.engine.get_entry(&entry.hash) {
-        Ok(Some((header, _key, value))) => {
-          match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
-            Ok(record) => {
-              let path = normalize_path(&record.path);
-              if path == "/" || path.starts_with("/.aeordb-") {
-                skipped_system += 1;
-                continue;
+      let entry_type = entry.entry_type();
+      if !matches!(entry_type, crate::engine::kv_store::KV_TYPE_FILE_RECORD | crate::engine::kv_store::KV_TYPE_SYMLINK) {
+        return Ok(true);
+      }
+      let checkpoint = memory.checkpoint();
+      let record_memory = u64::from(entry.total_length)
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(512))
+        .ok_or_else(|| EngineError::ResourceExhausted("directory-repair record estimate overflow".to_string()))?;
+      memory.reserve(record_memory, "directory-repair record admission failed")?;
+      let result = (|| -> EngineResult<()> {
+        match entry_type {
+          crate::engine::kv_store::KV_TYPE_FILE_RECORD => {
+            file_records_found += 1;
+            match self.repair_workspace_file_child(entry, hash_length, &algo)? {
+              RepairWorkspaceChild::Child { parent, child } => {
+                path_records_found += 1;
+                workspace.push_child(&parent, child)?;
               }
-
-              let path_key = file_path_hash(&path, &algo)?;
-              if entry.hash != path_key {
-                skipped_non_path_key += 1;
-                continue;
-              }
-              path_records_found += 1;
-
-              if !self.file_record_chunks_live(&record)? {
-                skipped_dangling += 1;
-                continue;
-              }
-
-              let identity_key = file_identity_hash(&path, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
-              let child_hash = if self.engine.has_entry(&identity_key)? { identity_key } else { path_key };
-              let parent = parent_path(&path).unwrap_or_else(|| "/".to_string());
-              Self::collect_directory_ancestors(&parent, &mut all_dirs);
-
-              let child = ChildEntry {
-                name: crate::engine::path_utils::file_name(&path).unwrap_or("").to_string(),
-                entry_type: crate::engine::entry_type::EntryType::FileRecord.to_u8(),
-                hash: child_hash,
-                total_size: record.total_size,
-                content_type: record.content_type.clone(),
-                created_at: record.created_at,
-                updated_at: record.updated_at,
-                virtual_time: 0,
-                node_id: 0,
-              };
-              children_by_dir.entry(parent).or_default().insert(child.name.clone(), child);
+              RepairWorkspaceChild::SkippedSystem => skipped_system += 1,
+              RepairWorkspaceChild::SkippedNonPath => skipped_non_path_key += 1,
+              RepairWorkspaceChild::SkippedDangling => skipped_dangling += 1,
+              RepairWorkspaceChild::SkippedMalformed => skipped_error += 1,
             }
-            Err(_) => {
-              skipped_error += 1;
-              continue;
-            }
+            Ok(())
           }
+          crate::engine::kv_store::KV_TYPE_SYMLINK => {
+            symlink_records_found += 1;
+            match self.repair_workspace_symlink_child(entry, &algo)? {
+              RepairWorkspaceChild::Child { parent, child } => {
+                path_records_found += 1;
+                workspace.push_child(&parent, child)?;
+              }
+              RepairWorkspaceChild::SkippedSystem => skipped_system += 1,
+              RepairWorkspaceChild::SkippedNonPath => skipped_non_path_key += 1,
+              RepairWorkspaceChild::SkippedDangling => skipped_dangling += 1,
+              RepairWorkspaceChild::SkippedMalformed => skipped_error += 1,
+            }
+            Ok(())
+          }
+          _ => unreachable!("entry type filtered above"),
         }
-        _ => {
-          skipped_error += 1;
-          continue;
-        }
+      })();
+      let release = memory.release_to(checkpoint, "directory-repair record release failed");
+      match (result, release) {
+        (Ok(()), Ok(())) => Ok(true),
+        (Err(error), Ok(())) => Err(error),
+        (_, Err(error)) => Err(error),
       }
-    }
-
-    let mut dirs: Vec<String> = all_dirs.into_iter().collect();
-    dirs.sort_by(|a, b| Self::directory_depth(b).cmp(&Self::directory_depth(a)).then_with(|| b.cmp(a)));
+    })?;
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut dirs_written = 0usize;
-    for dir_path in dirs {
-      let mut children: Vec<ChildEntry> = children_by_dir.remove(&dir_path).unwrap_or_default().into_values().collect();
-      Self::sort_rebuilt_children(&mut children);
-      let (content_key, dir_size) = self.store_rebuilt_directory(&dir_path, children, hash_length, &algo)?;
-      dirs_written += 1;
-
-      if dir_path != "/" {
-        let parent = parent_path(&dir_path).unwrap_or_else(|| "/".to_string());
-        let child = ChildEntry {
-          name: crate::engine::path_utils::file_name(&dir_path).unwrap_or("").to_string(),
-          entry_type: crate::engine::entry_type::EntryType::DirectoryIndex.to_u8(),
-          hash: content_key,
-          total_size: dir_size,
-          content_type: None,
-          created_at: now_ms,
-          updated_at: now_ms,
-          virtual_time: now_ms as u64,
-          node_id: 0,
+    for depth in (0..=workspace.max_depth()).rev() {
+      let mut cursor = workspace.finish_depth(depth)?;
+      while let Some((dir_path, mut children)) = cursor.next_group(&mut workspace)? {
+        Self::sort_rebuilt_children(&mut children);
+        let store_result = self.store_rebuilt_directory(&dir_path, children, hash_length, &algo);
+        let release_result = workspace.release_group();
+        let (content_key, dir_size) = match (store_result, release_result) {
+          (Ok(stored), Ok(())) => stored,
+          (Err(error), Ok(())) => return Err(error),
+          (_, Err(error)) => return Err(error),
         };
-        children_by_dir.entry(parent).or_default().insert(child.name.clone(), child);
+        dirs_written += 1;
+
+        if dir_path != "/" {
+          let parent = parent_path(&dir_path).unwrap_or_else(|| "/".to_string());
+          let child = ChildEntry {
+            name: crate::engine::path_utils::file_name(&dir_path).unwrap_or("").to_string(),
+            entry_type: crate::engine::entry_type::EntryType::DirectoryIndex.to_u8(),
+            hash: content_key,
+            total_size: dir_size,
+            content_type: None,
+            created_at: now_ms,
+            updated_at: now_ms,
+            virtual_time: now_ms as u64,
+            node_id: 0,
+          };
+          workspace.push_child(&parent, child)?;
+        }
       }
     }
 
     tracing::debug!(
       file_records_found,
+      symlink_records_found,
       path_records_found,
       skipped_system,
       skipped_non_path_key,
@@ -2194,12 +2295,19 @@ impl<'a> DirectoryOps<'a> {
   /// by descendant path records, and preserves any readable child directories
   /// already present in the damaged directory.
   pub fn repair_directory_index_from_path_records(&self, path: &str) -> EngineResult<usize> {
-    let _namespace = self.engine.direct_hard_authority_guard()?;
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
-
-    let mut children = self.collect_repair_children_for_directory(&normalized, hash_length, &algo)?;
+    let _namespace = self.engine.direct_hard_authority_guard()?;
+    let mut memory = OperationMemoryBudget::new(
+      self.engine,
+      "targeted directory repair",
+      MemoryOwner::Repair,
+      AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery),
+      256 * 1024,
+      None,
+    )?;
+    let mut children = self.collect_repair_children_for_directory(&normalized, hash_length, &algo, &mut memory)?;
     Self::sort_rebuilt_children(&mut children);
     let (content_key, dir_size) = self.store_rebuilt_directory(&normalized, children, hash_length, &algo)?;
 
@@ -2228,45 +2336,144 @@ impl<'a> DirectoryOps<'a> {
     dir_path: &str,
     hash_length: usize,
     algo: &HashAlgorithm,
+    memory: &mut OperationMemoryBudget,
   ) -> EngineResult<Vec<ChildEntry>> {
-    let snapshot = self.engine.kv_snapshot.load();
-    let all_entries = snapshot.iter_all()?;
     let mut children: std::collections::BTreeMap<String, ChildEntry> = std::collections::BTreeMap::new();
+    self.collect_existing_directory_children_for_repair(dir_path, hash_length, algo, &mut children, memory)?;
 
-    // Preserve readable directory children first. If a damaged B-tree branch is
-    // missing, this keeps empty subdirectories from readable branches instead
-    // of relying only on descendant file/symlink records.
-    if let Ok((existing_children, _warnings)) = self.list_directory_with_btree_warnings(dir_path) {
-      for child in existing_children {
-        if child.entry_type == EntryType::DirectoryIndex.to_u8() {
-          let child_path =
-            if dir_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", dir_path.trim_end_matches('/'), child.name) };
-          if self.directory_child_hash_for_path(&child_path, hash_length, algo)?.is_some() {
-            children.insert(child.name.clone(), child);
-          }
-        }
+    let cancellation = self.engine.repair_cancellation();
+    self.engine.visit_kv_entries_for_repair(|entry| {
+      if cancellation.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(EngineError::ShuttingDown);
       }
-    }
-
-    for entry in &all_entries {
+      let checkpoint = memory.checkpoint();
+      let record_memory = u64::from(entry.total_length)
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(512))
+        .ok_or_else(|| EngineError::ResourceExhausted("targeted directory-repair record estimate overflow".to_string()))?;
       match entry.entry_type() {
         crate::engine::kv_store::KV_TYPE_FILE_RECORD => {
-          let Some(child) = self.repair_child_from_file_record(entry, dir_path, hash_length, algo, &mut children)? else {
-            continue;
-          };
-          children.insert(child.name.clone(), child);
+          memory.reserve(record_memory, "targeted FileRecord repair admission failed")?;
+          let result = self.repair_child_from_file_record(entry, dir_path, hash_length, algo);
+          let release = memory.release_to(checkpoint, "targeted FileRecord repair release failed");
+          match (result, release) {
+            (Ok(Some(child)), Ok(())) => Self::insert_repair_child(&mut children, child, memory)?,
+            (Ok(None), Ok(())) => {}
+            (Err(error), Ok(())) => return Err(error),
+            (_, Err(error)) => return Err(error),
+          }
         }
         crate::engine::kv_store::KV_TYPE_SYMLINK => {
-          let Some(child) = self.repair_child_from_symlink_record(entry, dir_path, algo, &mut children)? else {
-            continue;
-          };
-          children.insert(child.name.clone(), child);
+          memory.reserve(record_memory, "targeted symlink repair admission failed")?;
+          let result = self.repair_child_from_symlink_record(entry, dir_path, algo);
+          let release = memory.release_to(checkpoint, "targeted symlink repair release failed");
+          match (result, release) {
+            (Ok(Some(child)), Ok(())) => Self::insert_repair_child(&mut children, child, memory)?,
+            (Ok(None), Ok(())) => {}
+            (Err(error), Ok(())) => return Err(error),
+            (_, Err(error)) => return Err(error),
+          }
         }
         _ => {}
       }
-    }
+      Ok(true)
+    })?;
 
     Ok(children.into_values().collect())
+  }
+
+  fn collect_existing_directory_children_for_repair(
+    &self,
+    dir_path: &str,
+    hash_length: usize,
+    algo: &HashAlgorithm,
+    children: &mut std::collections::BTreeMap<String, ChildEntry>,
+    memory: &mut OperationMemoryBudget,
+  ) -> EngineResult<()> {
+    let dir_key = directory_path_hash(dir_path, algo)?;
+    let Some(path_entry) = self.engine.get_kv_entry(&dir_key)? else {
+      return Ok(());
+    };
+    let path_memory = u64::from(path_entry.total_length)
+      .checked_mul(3)
+      .ok_or_else(|| EngineError::ResourceExhausted("targeted directory path-record estimate overflow".to_string()))?;
+    memory.reserve(path_memory, "targeted directory path-record admission failed")?;
+    let Some((mut header, _key, mut value)) = self.engine.get_entry(&dir_key)? else {
+      return Ok(());
+    };
+    if value.len() == hash_length {
+      let target_hash = value;
+      let Some(target_entry) = self.engine.get_kv_entry(&target_hash)? else {
+        return Ok(());
+      };
+      let target_memory = u64::from(target_entry.total_length)
+        .checked_mul(3)
+        .ok_or_else(|| EngineError::ResourceExhausted("targeted directory content estimate overflow".to_string()))?;
+      memory.reserve(target_memory, "targeted directory content admission failed")?;
+      let Some((target_header, _target_key, target_value)) = self.engine.get_entry(&target_hash)? else {
+        return Ok(());
+      };
+      header = target_header;
+      value = target_value;
+    }
+
+    let mut preserve = |child: &ChildEntry| -> EngineResult<bool> {
+      if child.entry_type != EntryType::DirectoryIndex.to_u8() {
+        return Ok(true);
+      }
+      let child_path =
+        if dir_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", dir_path.trim_end_matches('/'), child.name) };
+      if self.engine.has_entry(&directory_path_hash(&child_path, algo)?)? {
+        Self::insert_repair_child(children, child.clone(), memory)?;
+      }
+      Ok(true)
+    };
+
+    if !value.is_empty() && crate::engine::btree::is_btree_format(&value) {
+      crate::engine::btree::btree_visit_from_node_with_mode(
+        &value,
+        self.engine,
+        hash_length,
+        false,
+        crate::engine::btree::BTreeWalkMode::BestEffort,
+        &mut preserve,
+      )?;
+      return Ok(());
+    }
+
+    let mut offset = 0usize;
+    while offset < value.len() {
+      let (child, consumed) = match ChildEntry::deserialize(&value[offset..], hash_length, header.entry_version) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(()),
+      };
+      if consumed == 0 {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "directory child decoder made no progress".to_string() });
+      }
+      preserve(&child)?;
+      offset = offset
+        .checked_add(consumed)
+        .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "directory child offset overflow".to_string() })?;
+    }
+    Ok(())
+  }
+
+  fn insert_repair_child(
+    children: &mut std::collections::BTreeMap<String, ChildEntry>,
+    child: ChildEntry,
+    memory: &mut OperationMemoryBudget,
+  ) -> EngineResult<()> {
+    if children.get(&child.name).is_some_and(|existing| existing == &child) {
+      return Ok(());
+    }
+    let bytes = std::mem::size_of::<ChildEntry>()
+      .saturating_add(child.name.len().saturating_mul(3))
+      .saturating_add(child.hash.len().saturating_mul(2))
+      .saturating_add(child.content_type.as_ref().map_or(0, |content_type| content_type.len().saturating_mul(2)))
+      .saturating_add(128);
+    memory.reserve(u64::try_from(bytes).unwrap_or(u64::MAX), "targeted directory child retention failed")?;
+    children.insert(child.name.clone(), child);
+    Ok(())
   }
 
   fn repair_child_from_file_record(
@@ -2275,7 +2482,6 @@ impl<'a> DirectoryOps<'a> {
     dir_path: &str,
     hash_length: usize,
     algo: &HashAlgorithm,
-    children: &mut std::collections::BTreeMap<String, ChildEntry>,
   ) -> EngineResult<Option<ChildEntry>> {
     let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
       return Ok(None);
@@ -2300,8 +2506,7 @@ impl<'a> DirectoryOps<'a> {
       return Ok(None);
     };
     if !direct_child {
-      self.add_implied_directory_child(dir_path, &child_name, algo, hash_length, children)?;
-      return Ok(None);
+      return self.implied_directory_child(dir_path, &child_name, algo, hash_length);
     }
 
     let identity_key = file_identity_hash(&path, record.content_type.as_deref(), &record.chunk_hashes, algo)?;
@@ -2324,7 +2529,6 @@ impl<'a> DirectoryOps<'a> {
     entry: &crate::engine::kv_store::KVEntry,
     dir_path: &str,
     algo: &HashAlgorithm,
-    children: &mut std::collections::BTreeMap<String, ChildEntry>,
   ) -> EngineResult<Option<ChildEntry>> {
     let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
       return Ok(None);
@@ -2346,8 +2550,7 @@ impl<'a> DirectoryOps<'a> {
       return Ok(None);
     };
     if !direct_child {
-      self.add_implied_directory_child(dir_path, &child_name, algo, algo.hash_length(), children)?;
-      return Ok(None);
+      return self.implied_directory_child(dir_path, &child_name, algo, algo.hash_length());
     }
 
     let identity_key = symlink_identity_hash(&path, &record.target, algo)?;
@@ -2365,37 +2568,29 @@ impl<'a> DirectoryOps<'a> {
     }))
   }
 
-  fn add_implied_directory_child(
+  fn implied_directory_child(
     &self,
     dir_path: &str,
     child_name: &str,
     algo: &HashAlgorithm,
     hash_length: usize,
-    children: &mut std::collections::BTreeMap<String, ChildEntry>,
-  ) -> EngineResult<()> {
-    if children.contains_key(child_name) {
-      return Ok(());
-    }
+  ) -> EngineResult<Option<ChildEntry>> {
     let child_path =
       if dir_path == "/" { format!("/{}", child_name) } else { format!("{}/{}", dir_path.trim_end_matches('/'), child_name) };
     let Some((child_hash, total_size, timestamp)) = self.directory_child_hash_for_path(&child_path, hash_length, algo)? else {
-      return Ok(());
+      return Ok(None);
     };
-    children.insert(
-      child_name.to_string(),
-      ChildEntry {
-        name: child_name.to_string(),
-        entry_type: EntryType::DirectoryIndex.to_u8(),
-        hash: child_hash,
-        total_size,
-        content_type: None,
-        created_at: timestamp,
-        updated_at: timestamp,
-        virtual_time: timestamp as u64,
-        node_id: 0,
-      },
-    );
-    Ok(())
+    Ok(Some(ChildEntry {
+      name: child_name.to_string(),
+      entry_type: EntryType::DirectoryIndex.to_u8(),
+      hash: child_hash,
+      total_size,
+      content_type: None,
+      created_at: timestamp,
+      updated_at: timestamp,
+      virtual_time: timestamp as u64,
+      node_id: 0,
+    }))
   }
 
   fn directory_child_hash_for_path(
@@ -2430,25 +2625,6 @@ impl<'a> DirectoryOps<'a> {
       }
     }
     Ok(true)
-  }
-
-  fn collect_directory_ancestors(path: &str, dirs: &mut std::collections::BTreeSet<String>) {
-    let mut current = normalize_path(path);
-    loop {
-      dirs.insert(current.clone());
-      match parent_path(&current) {
-        Some(parent) => current = parent,
-        None => break,
-      }
-    }
-  }
-
-  fn directory_depth(path: &str) -> usize {
-    if path == "/" {
-      0
-    } else {
-      path.split('/').filter(|segment| !segment.is_empty()).count()
-    }
   }
 
   fn sort_rebuilt_children(children: &mut [ChildEntry]) {
@@ -2497,189 +2673,6 @@ impl<'a> DirectoryOps<'a> {
     }
 
     Ok((content_key, dir_value.len() as u64))
-  }
-
-  /// Discover directories by scanning all directory entries in the KV,
-  /// reading their children, and building a path map by brute-force
-  /// trying candidate paths. Then propagate each to its parent.
-  #[allow(dead_code)]
-  fn rebuild_dirs_from_kv(&self, count: &mut usize) {
-    let algo = self.engine.hash_algo();
-    let hash_length = algo.hash_length();
-    let snapshot = self.engine.kv_snapshot.load();
-    let all = match snapshot.iter_all() {
-      Ok(e) => e,
-      Err(_) => return,
-    };
-
-    // Collect all directory entries that have children
-    let mut dir_hashes: std::collections::HashMap<Vec<u8>, Vec<ChildEntry>> = std::collections::HashMap::new();
-    let mut dir_count = 0;
-    let mut dir_empty = 0;
-    let mut dir_read_err = 0;
-    let mut dir_parse_err = 0;
-    for entry in &all {
-      let kv_type = entry.type_flags & 0x0F;
-      if kv_type != crate::engine::kv_store::KV_TYPE_DIRECTORY {
-        continue;
-      }
-      dir_count += 1;
-
-      match self.engine.get_entry(&entry.hash) {
-        Ok(Some((header, _key, value))) => {
-          if value.is_empty() {
-            dir_empty += 1;
-            continue;
-          }
-          let children = if crate::engine::btree::is_btree_format(&value) {
-            crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length, false).ok()
-          } else {
-            crate::engine::directory_entry::deserialize_child_entries(&value, hash_length, header.entry_version).ok()
-          };
-          match children {
-            Some(c) if !c.is_empty() => {
-              dir_hashes.insert(entry.hash.clone(), c);
-            }
-            Some(_) => {
-              dir_empty += 1;
-            }
-            None => {
-              dir_parse_err += 1;
-            }
-          }
-        }
-        Ok(None) => {
-          dir_read_err += 1;
-        }
-        Err(_) => {
-          dir_read_err += 1;
-        }
-      }
-    }
-
-    tracing::debug!(
-      dir_count,
-      dir_empty,
-      dir_read_err,
-      dir_parse_err,
-      dir_with_children = dir_hashes.len(),
-      "rebuild_dirs_from_kv: scanned directory entries"
-    );
-    if dir_hashes.is_empty() {
-      return;
-    }
-
-    // Discover paths: start with "/" and walk children.
-    let mut known: Vec<(String, Vec<ChildEntry>)> = Vec::new();
-
-    // Seed: try root "/"
-    if let Ok(root_hash) = directory_path_hash("/", &algo) {
-      if let Some(children) = dir_hashes.get(&root_hash) {
-        known.push(("/".to_string(), children.clone()));
-      }
-    }
-
-    tracing::debug!(root_found = !known.is_empty(), "rebuild_dirs_from_kv: root check");
-
-    // If root itself is empty/missing, try to discover top-level dirs
-    // by checking ALL child names from ALL directory entries as potential
-    // top-level paths.
-    if known.is_empty() {
-      let mut candidates_tried = 0;
-      let mut candidates_found = 0;
-      for children in dir_hashes.values() {
-        for child in children {
-          if child.entry_type != crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() {
-            continue;
-          }
-          let candidate = format!("/{}", child.name);
-          candidates_tried += 1;
-          if let Ok(candidate_hash) = directory_path_hash(&candidate, &algo) {
-            if dir_hashes.contains_key(&candidate_hash) {
-              candidates_found += 1;
-              tracing::debug!(path = %candidate, "rebuild_dirs_from_kv: discovered top-level dir");
-              if !known.iter().any(|(p, _)| *p == "/") {
-                // We found a top-level dir — seed with a synthetic root
-                known.push(("/".to_string(), Vec::new()));
-              }
-              if let Some(dir_children) = dir_hashes.get(&candidate_hash) {
-                if !known.iter().any(|(p, _)| *p == candidate) {
-                  known.push((candidate, dir_children.clone()));
-                }
-              }
-            }
-          }
-        }
-      }
-      tracing::debug!(candidates_tried, candidates_found, "rebuild_dirs_from_kv: top-level discovery done");
-    }
-
-    tracing::debug!(known_paths = known.len(), "rebuild_dirs_from_kv: before deep walk");
-
-    // Walk deeper
-    let mut depth = 0;
-    loop {
-      let mut found_new = false;
-      depth += 1;
-      if depth > 50 {
-        break;
-      }
-      let snapshot: Vec<(String, Vec<ChildEntry>)> = known.clone();
-      for (parent, children) in &snapshot {
-        for child in children {
-          if child.entry_type != crate::engine::entry_type::EntryType::DirectoryIndex.to_u8() {
-            continue;
-          }
-          let child_path =
-            if *parent == "/" { format!("/{}", child.name) } else { format!("{}/{}", parent.trim_end_matches('/'), child.name) };
-          if known.iter().any(|(p, _)| *p == child_path) {
-            continue;
-          }
-          if let Ok(child_hash) = directory_path_hash(&child_path, &algo) {
-            if let Some(dir_children) = dir_hashes.get(&child_hash) {
-              known.push((child_path, dir_children.clone()));
-              found_new = true;
-            }
-          }
-        }
-      }
-      if !found_new {
-        break;
-      }
-    }
-
-    tracing::debug!(total_known = known.len(), "rebuild_dirs_from_kv: propagating directories");
-    // Propagate each discovered directory to its parent
-    for (dir_path, _children) in &known {
-      if *dir_path == "/" {
-        continue;
-      }
-      tracing::debug!(dir_path = %dir_path, "rebuild_dirs_from_kv: propagating");
-      // Read the actual directory content and propagate as a child entry
-      if let Ok(dir_children) = self.list_directory(dir_path) {
-        if dir_children.is_empty() {
-          continue;
-        }
-      }
-      let now_ms = chrono::Utc::now().timestamp_millis();
-      if let Ok(content_hash) = directory_path_hash(dir_path, &algo) {
-        let dir_name = crate::engine::path_utils::file_name(dir_path).unwrap_or("").to_string();
-        let child = ChildEntry {
-          name: dir_name,
-          entry_type: crate::engine::entry_type::EntryType::DirectoryIndex.to_u8(),
-          hash: content_hash,
-          total_size: 0,
-          content_type: None,
-          created_at: now_ms,
-          updated_at: now_ms,
-          virtual_time: 0,
-          node_id: 0,
-        };
-        if self.update_parent_directories(dir_path, child).is_ok() {
-          *count += 1;
-        }
-      }
-    }
   }
 
   /// Detect the compression algorithm for a file based on its parent's index config.
