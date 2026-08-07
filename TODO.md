@@ -287,6 +287,14 @@
         - [x] Prove ordinary restart refuses the unresolved spill, repair replays it, verification is clean, and the repaired database starts successfully.
         - [x] Record the focused, broad, cross-platform, and real-world evidence; commit and push the green landing unit.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
+    - [ ] P2c: converge protected-state classification and traversal failure boundaries on the frozen SystemFamily registry.
+      - [x] Map every old system/internal predicate, protected-path list, registry producer, and traversal consumer from current source.
+      - [ ] Close P1c by running the native durability/fixture/malformed gates on `wyatt-mac` and `win11vm` when the hosts are online.
+      - [ ] Add failing registry tests for typed policies, exact embedded-registry reuse, structural namespace containers, unknown protected state, and permissions/conflicts/controls contracts.
+      - [ ] Add failing traversal tests for complete, diagnostically partial, and corrupt flat/B-tree outcomes without empty-success conversion.
+      - [ ] Route backup, sync, peer, import, index scope, GC, permissions, plugin host, repair, verify, and generic APIs through operation-specific registry policy.
+      - [ ] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
+      - [ ] Run focused, adjacent, broad, architecture, documentation, and live disposable-database proof; record and land P2c.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
