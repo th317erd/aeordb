@@ -6,7 +6,7 @@
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::append_writer::AppendWriter;
 use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash};
-use aeordb::engine::file_header::read_active_header;
+use aeordb::engine::file_header::{HEADER_REGION_SIZE, read_active_header};
 use aeordb::engine::gc;
 use aeordb::engine::hot_tail::{self, HotTailPayload, VoidRecord};
 use aeordb::engine::kv_pages::{bucket_page_offset, page_size, PAGE_HEADER_SIZE, PAGE_MAGIC};
@@ -121,9 +121,268 @@ fn store_raw_chunk_entry(engine: &StorageEngine, key_byte: u8, value_len: usize)
   (offset, total_length)
 }
 
+fn create_no_kv_wal(db_path: &std::path::Path) -> Vec<(Vec<u8>, Vec<u8>)> {
+  let records = vec![(vec![0x31; 32], vec![0xA1; 48 * 1024]), (vec![0x42; 32], b"legacy-tail-record".to_vec())];
+  let mut writer = AppendWriter::create(db_path).unwrap();
+  for (key, value) in &records {
+    writer.append_entry(EntryType::DirectoryIndex, key, value, 0).unwrap();
+  }
+  writer.sync().unwrap();
+  assert_eq!(writer.file_header().kv_block_offset, 0);
+  assert_eq!(writer.file_header().kv_block_length, 0);
+  assert_eq!(writer.file_header().hot_tail_offset, 0);
+  records
+}
+
 // ============================================================================
 // Test 1: Scanner recovers from corrupt header mid-file
 // ============================================================================
+
+#[test]
+fn opening_no_kv_database_migrates_wal_without_clobbering_and_remains_appendable() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("no-kv.aeordb");
+  let records = create_no_kv_wal(&db_path);
+  let db_str = db_path.to_str().unwrap();
+
+  let engine = StorageEngine::open(db_str).unwrap();
+  for (key, expected) in &records {
+    assert_eq!(engine.get_entry(key).unwrap().unwrap().2, *expected);
+  }
+
+  let migrated = active_header(db_str);
+  assert_eq!(migrated.kv_block_offset, HEADER_REGION_SIZE as u64);
+  assert!(migrated.kv_block_length >= aeordb::engine::kv_stages::initial_block_size());
+  assert!(
+    migrated.hot_tail_offset >= migrated.kv_block_offset + migrated.kv_block_length,
+    "standard layout must place the WAL frontier after the complete KV block"
+  );
+  assert!(!migrated.resize_in_progress);
+  assert_eq!(migrated.resize_target_stage, 0);
+
+  let appended_key = vec![0x53; 32];
+  let appended_value = b"written-after-migration".to_vec();
+  let appended_offset = engine.store_entry(EntryType::DirectoryIndex, &appended_key, &appended_value).unwrap();
+  assert!(appended_offset >= migrated.kv_block_offset + migrated.kv_block_length);
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let reopened = StorageEngine::open(db_str).unwrap();
+  for (key, expected) in &records {
+    assert_eq!(reopened.get_entry(key).unwrap().unwrap().2, *expected);
+  }
+  assert_eq!(reopened.get_entry(&appended_key).unwrap().unwrap().2, appended_value);
+  assert!(!verify::verify_checked(&reopened, db_str).unwrap().has_issues());
+}
+
+#[test]
+fn opening_empty_no_kv_database_creates_a_standard_verified_layout() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("empty-no-kv.aeordb");
+  let mut writer = AppendWriter::create(&db_path).unwrap();
+  writer.sync().unwrap();
+  drop(writer);
+
+  let db_str = db_path.to_str().unwrap();
+  let engine = StorageEngine::open(db_str).unwrap();
+  let migrated = active_header(db_str);
+  assert_eq!(migrated.kv_block_offset, HEADER_REGION_SIZE as u64);
+  assert!(migrated.kv_block_length >= aeordb::engine::kv_stages::initial_block_size());
+  assert!(!migrated.resize_in_progress);
+  assert!(!verify::verify_checked(&engine, db_str).unwrap().has_issues());
+}
+
+#[test]
+fn opening_post_wal_kv_layout_migrates_only_the_authoritative_wal() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("post-wal-kv.aeordb");
+  let records = create_no_kv_wal(&db_path);
+  let db_str = db_path.to_str().unwrap();
+
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  let wal_end = writer.current_offset();
+  let old_kv_length = aeordb::engine::kv_stages::initial_block_size();
+  let mut transitional = writer.file_header().clone();
+  transitional.kv_block_offset = wal_end;
+  transitional.kv_block_length = old_kv_length;
+  transitional.kv_block_stage = 0;
+  transitional.hot_tail_offset = wal_end;
+  writer.update_header(&transitional).unwrap();
+  drop(writer);
+
+  let mut file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  file.seek(SeekFrom::Start(wal_end)).unwrap();
+  file.write_all(&vec![0xA5; old_kv_length as usize]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+
+  let engine = StorageEngine::open(db_str).unwrap();
+  for (key, expected) in &records {
+    assert_eq!(engine.get_entry(key).unwrap().unwrap().2, *expected);
+  }
+  let migrated = active_header(db_str);
+  assert_eq!(migrated.kv_block_offset, HEADER_REGION_SIZE as u64);
+  assert!(migrated.hot_tail_offset >= migrated.kv_block_offset + migrated.kv_block_length);
+  assert!(!verify::verify_checked(&engine, db_str).unwrap().has_issues());
+}
+
+#[test]
+fn truncated_post_wal_kv_layout_is_refused_without_mutation() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("truncated-post-wal-kv.aeordb");
+  create_no_kv_wal(&db_path);
+
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  let wal_end = writer.current_offset();
+  let old_kv_length = aeordb::engine::kv_stages::initial_block_size();
+  let mut transitional = writer.file_header().clone();
+  transitional.kv_block_offset = wal_end;
+  transitional.kv_block_length = old_kv_length;
+  transitional.kv_block_stage = 0;
+  transitional.hot_tail_offset = wal_end;
+  writer.update_header(&transitional).unwrap();
+  drop(writer);
+
+  let file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  file.set_len(wal_end + old_kv_length / 2).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let before = std::fs::read(&db_path).unwrap();
+
+  let error = match StorageEngine::open(db_path.to_str().unwrap()) {
+    Ok(_) => panic!("a truncated post-WAL KV extent must require explicit repair"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("KV block"), "unexpected migration error: {error}");
+  assert_eq!(std::fs::read(&db_path).unwrap(), before);
+}
+
+#[test]
+fn startup_resumes_selected_pre_relocation_initial_kv_marker() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("initial-kv-pre-relocation.aeordb");
+  let records = create_no_kv_wal(&db_path);
+
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  let mut marker = writer.file_header().clone();
+  marker.kv_block_offset = HEADER_REGION_SIZE as u64;
+  marker.kv_block_length = 0;
+  marker.kv_block_stage = 0;
+  marker.hot_tail_offset = writer.current_offset();
+  marker.resize_in_progress = true;
+  marker.resize_target_stage = 0;
+  writer.update_header(&marker).unwrap();
+  drop(writer);
+
+  let engine = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  for (key, expected) in &records {
+    assert_eq!(engine.get_entry(key).unwrap().unwrap().2, *expected);
+  }
+  let recovered = active_header(db_path.to_str().unwrap());
+  assert_eq!(recovered.kv_block_offset, HEADER_REGION_SIZE as u64);
+  assert!(recovered.kv_block_length >= aeordb::engine::kv_stages::initial_block_size());
+  assert!(!recovered.resize_in_progress);
+}
+
+#[test]
+fn startup_resumes_selected_relocation_durable_initial_kv_marker_without_copying_twice() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("initial-kv-relocation-durable.aeordb");
+  let records = create_no_kv_wal(&db_path);
+  let header_end = HEADER_REGION_SIZE as u64;
+  let block_length = aeordb::engine::kv_stages::initial_block_size();
+
+  let writer = AppendWriter::open(&db_path).unwrap();
+  let old_wal_end = writer.current_offset();
+  drop(writer);
+  let old_wal = std::fs::read(&db_path).unwrap()[header_end as usize..old_wal_end as usize].to_vec();
+  let new_wal_start = header_end + block_length;
+  let new_hot_tail = new_wal_start + old_wal.len() as u64;
+  let uncommitted_key = vec![0x77; 32];
+  let uncommitted_path = temp.path().join("uncommitted-entry.aeordb");
+  let mut uncommitted_writer = AppendWriter::create(&uncommitted_path).unwrap();
+  uncommitted_writer.append_entry(EntryType::DirectoryIndex, &uncommitted_key, b"past-selected-frontier", 0).unwrap();
+  uncommitted_writer.sync().unwrap();
+  drop(uncommitted_writer);
+  let uncommitted_bytes = std::fs::read(&uncommitted_path).unwrap()[header_end as usize..].to_vec();
+
+  let mut file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  file.seek(SeekFrom::Start(new_wal_start)).unwrap();
+  file.write_all(&old_wal).unwrap();
+  let physical_end = hot_tail::write_hot_tail(&mut file, new_hot_tail, &HotTailPayload::default(), 32).unwrap();
+  file.seek(SeekFrom::Start(physical_end)).unwrap();
+  file.write_all(&uncommitted_bytes).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  let mut marker = writer.file_header().clone();
+  marker.kv_block_offset = header_end;
+  marker.kv_block_length = block_length;
+  marker.kv_block_stage = 0;
+  marker.hot_tail_offset = new_hot_tail;
+  marker.resize_in_progress = true;
+  marker.resize_target_stage = 0;
+  writer.update_header(&marker).unwrap();
+  drop(writer);
+
+  let engine = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
+  for (key, expected) in &records {
+    assert_eq!(engine.get_entry(key).unwrap().unwrap().2, *expected);
+  }
+  assert!(!engine.has_entry(&uncommitted_key).unwrap(), "expansion rebuild must not index bytes past its selected WAL frontier");
+  let recovered = active_header(db_path.to_str().unwrap());
+  assert_eq!(recovered.hot_tail_offset, new_hot_tail, "relocation-durable recovery must not move the WAL a second time");
+  assert!(!recovered.resize_in_progress);
+}
+
+#[test]
+fn corrupt_no_kv_wal_is_refused_before_migration_mutates_database_bytes() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("corrupt-no-kv.aeordb");
+  create_no_kv_wal(&db_path);
+
+  let mut file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  file.seek(SeekFrom::Start(HEADER_REGION_SIZE as u64)).unwrap();
+  file.write_all(&0xDEADBEEFu32.to_le_bytes()).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let before = std::fs::read(&db_path).unwrap();
+
+  let error = match StorageEngine::open(db_path.to_str().unwrap()) {
+    Ok(_) => panic!("corrupt no-KV WAL must not be migrated"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("WAL") || error.to_string().contains("entry"), "unexpected migration error: {error}");
+  assert_eq!(std::fs::read(&db_path).unwrap(), before, "read-only migration preflight failure must preserve every database byte");
+}
+
+#[test]
+fn ambiguous_no_kv_hot_tail_layout_is_refused_without_mutation() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("ambiguous-no-kv-hot-tail.aeordb");
+  create_no_kv_wal(&db_path);
+
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  let hot_tail_offset = writer.current_offset();
+  let mut file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  let physical_end = hot_tail::write_hot_tail(&mut file, hot_tail_offset, &HotTailPayload::default(), 32).unwrap();
+  file.set_len(physical_end).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let mut header = writer.file_header().clone();
+  header.hot_tail_offset = hot_tail_offset;
+  writer.update_header(&header).unwrap();
+  drop(writer);
+  let before = std::fs::read(&db_path).unwrap();
+
+  let error = match StorageEngine::open(db_path.to_str().unwrap()) {
+    Ok(_) => panic!("ambiguous no-KV hot-tail layout must require explicit repair"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("ambiguous"), "unexpected migration error: {error}");
+  assert_eq!(std::fs::read(&db_path).unwrap(), before);
+}
 
 #[test]
 fn scanner_recovers_from_corrupt_header_mid_file() {
@@ -727,6 +986,69 @@ fn chunk_entries_can_consume_reusable_voids() {
   let (new_offset, _new_size) = store_raw_chunk_entry(&engine, 0x55, 64);
 
   assert_eq!(new_offset, void_offset, "Chunk entries are content-addressed payloads and may reuse reclaimed void space");
+}
+
+#[test]
+fn reusable_void_split_materializes_a_parseable_remainder() {
+  let (engine, temp) = create_test_db();
+  let old_key = vec![0x61; engine.hash_algo().hash_length()];
+  let (void_offset, void_size) = store_raw_chunk_entry(&engine, 0x61, 512);
+  engine.remove_kv_entry(&old_key).unwrap();
+  engine.write_void_at(void_offset, void_size).unwrap();
+
+  let new_key = vec![0x62; engine.hash_algo().hash_length()];
+  let new_value = vec![0xA6; 128];
+  let needed = aeordb::engine::entry_header::EntryHeader::compute_total_length(engine.hash_algo(), new_key.len(), new_value.len()).unwrap();
+  let new_offset = engine.store_entry(EntryType::Chunk, &new_key, &new_value).unwrap();
+  assert_eq!(new_offset, void_offset);
+  let remainder_size = void_size - needed;
+  assert!(remainder_size >= aeordb::engine::void_manager::MINIMUM_USEFUL_VOID_SIZE);
+
+  let remainder = engine.read_entry_header_at(void_offset + needed as u64).unwrap();
+  assert_eq!(remainder.entry_type, EntryType::Void);
+  assert_eq!(remainder.total_length, remainder_size);
+
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap().to_string();
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let reopened = StorageEngine::open(&db_str).unwrap();
+  assert_eq!(reopened.get_entry(&new_key).unwrap().unwrap().2, new_value);
+  let report = verify::verify_checked(&reopened, &db_str).unwrap();
+  assert_eq!(report.corrupt_header, 0);
+  assert!(report.skipped_regions.is_empty());
+}
+
+#[test]
+fn reusable_void_with_unencodable_remainder_is_preserved_and_write_appends() {
+  let (engine, temp) = create_test_db();
+  let old_key = vec![0x63; engine.hash_algo().hash_length()];
+  let (void_offset, void_size) = store_raw_chunk_entry(&engine, 0x63, 256);
+  engine.remove_kv_entry(&old_key).unwrap();
+  engine.write_void_at(void_offset, void_size).unwrap();
+
+  let new_key = vec![0x64; engine.hash_algo().hash_length()];
+  let new_value = vec![0xA7; 232];
+  let needed = aeordb::engine::entry_header::EntryHeader::compute_total_length(engine.hash_algo(), new_key.len(), new_value.len()).unwrap();
+  assert!(void_size - needed < aeordb::engine::void_manager::MINIMUM_USEFUL_VOID_SIZE);
+
+  let new_offset = engine.store_entry(EntryType::Chunk, &new_key, &new_value).unwrap();
+  assert_ne!(new_offset, void_offset, "allocator must not strand an unencodable remainder");
+  let preserved = engine.read_entry_header_at(void_offset).unwrap();
+  assert_eq!(preserved.entry_type, EntryType::Void);
+  assert_eq!(preserved.total_length, void_size);
+
+  let db_path = temp.path().join("test.aeordb");
+  let db_str = db_path.to_str().unwrap().to_string();
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let reopened = StorageEngine::open(&db_str).unwrap();
+  assert_eq!(reopened.get_entry(&new_key).unwrap().unwrap().2, new_value);
+  let report = verify::verify_checked(&reopened, &db_str).unwrap();
+  assert_eq!(report.corrupt_header, 0);
+  assert!(report.skipped_regions.is_empty());
 }
 
 #[test]

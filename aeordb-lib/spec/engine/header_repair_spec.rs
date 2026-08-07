@@ -4,7 +4,7 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use aeordb::engine::file_header::{read_active_header, FILE_HEADER_SIZE, FILE_MAGIC};
+use aeordb::engine::file_header::{FileHeader, read_active_header, FILE_HEADER_SIZE, FILE_MAGIC};
 use aeordb::engine::{inspect_header, repair_header_in_place, DirectoryOps, HashAlgorithm, RequestContext, StorageEngine};
 
 fn make_temp_db() -> (tempfile::TempDir, String) {
@@ -53,6 +53,50 @@ fn write_v2_fixture(path: &str, payload: &[u8]) {
   let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(path).unwrap();
   file.write_all(&header).unwrap();
   file.write_all(payload).unwrap();
+  file.sync_all().unwrap();
+}
+
+fn write_v2_no_kv_fixture(path: &str, source_header: &FileHeader, wal: &[u8]) {
+  let mut header = [0u8; FILE_HEADER_SIZE];
+  header[..4].copy_from_slice(FILE_MAGIC);
+  header[4] = 2;
+  header[5..7].copy_from_slice(&source_header.hash_algo.to_u16().to_le_bytes());
+  let hash_length = source_header.hash_algo.hash_length();
+  let mut pos = 7usize;
+  for value in [source_header.created_at, source_header.updated_at] {
+    header[pos..pos + 8].copy_from_slice(&value.to_le_bytes());
+    pos += 8;
+  }
+  pos += 8; // no in-file KV offset
+  pos += 8; // no in-file KV length
+  header[pos] = source_header.kv_block_version;
+  pos += 1;
+  pos += 8; // nvt_offset
+  pos += 8; // nvt_length
+  header[pos] = source_header.nvt_version;
+  pos += 1;
+  header[pos..pos + hash_length].copy_from_slice(&source_header.head_hash);
+  pos += hash_length;
+  header[pos..pos + 8].copy_from_slice(&source_header.entry_count.to_le_bytes());
+  pos += 8;
+  pos += 1; // resize_in_progress
+  pos += 8; // buffer_kvs_offset
+  pos += 8; // buffer_nvt_offset
+  pos += 8; // no in-file hot-tail checkpoint
+  pos += 1; // kv_block_stage
+  pos += 1; // resize_target_stage
+  header[pos] = source_header.backup_type;
+  pos += 1;
+  header[pos..pos + hash_length].copy_from_slice(&source_header.base_hash);
+  pos += hash_length;
+  header[pos..pos + hash_length].copy_from_slice(&source_header.target_hash);
+  assert!(pos + hash_length <= FILE_HEADER_SIZE - 4);
+  let crc = crc32fast::hash(&header[..FILE_HEADER_SIZE - 4]);
+  header[FILE_HEADER_SIZE - 4..].copy_from_slice(&crc.to_le_bytes());
+
+  let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(path).unwrap();
+  file.write_all(&header).unwrap();
+  file.write_all(wal).unwrap();
   file.sync_all().unwrap();
 }
 
@@ -255,4 +299,42 @@ fn legacy_header_repair_streams_multiple_bounded_copy_windows_exactly() {
   let mut migrated = Vec::new();
   file.read_to_end(&mut migrated).unwrap();
   assert_eq!(migrated, payload);
+}
+
+#[test]
+fn repaired_v2_sidecar_layout_bootstraps_in_file_kv_without_losing_wal() {
+  let (dir, source_path) = make_temp_db();
+  let legacy_path = dir.path().join("legacy-v2.aeordb").to_string_lossy().to_string();
+  {
+    let engine = StorageEngine::create(&source_path).unwrap();
+    let ops = DirectoryOps::new(&engine);
+    let ctx = RequestContext::system();
+    ops.store_file_buffered(&ctx, "/legacy/state.json", br#"{"from":"v2-sidecar","exact":true}"#, Some("application/json")).unwrap();
+    ops.store_file_buffered(&ctx, "/legacy/readme.txt", b"sidecar WAL survived", Some("text/plain")).unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  let mut source = OpenOptions::new().read(true).open(&source_path).unwrap();
+  let (source_header, _) = read_active_header(&mut source).unwrap();
+  let wal_start = source_header.kv_block_offset + source_header.kv_block_length;
+  let wal_length = source_header.hot_tail_offset - wal_start;
+  let mut wal = vec![0u8; wal_length as usize];
+  source.seek(SeekFrom::Start(wal_start)).unwrap();
+  source.read_exact(&mut wal).unwrap();
+  write_v2_no_kv_fixture(&legacy_path, &source_header, &wal);
+
+  assert!(StorageEngine::open(&legacy_path).is_err(), "legacy headers require the explicit repair gate");
+  let repair = repair_header_in_place(&legacy_path).unwrap();
+  assert_eq!(repair.upgraded_version, Some((2, 3)));
+
+  let engine = StorageEngine::open(&legacy_path).unwrap();
+  let ops = DirectoryOps::new(&engine);
+  assert_eq!(ops.read_file_buffered("/legacy/state.json").unwrap(), br#"{"from":"v2-sidecar","exact":true}"#);
+  assert_eq!(ops.read_file_buffered("/legacy/readme.txt").unwrap(), b"sidecar WAL survived");
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let reopened = StorageEngine::open(&legacy_path).unwrap();
+  assert_eq!(DirectoryOps::new(&reopened).read_file_buffered("/legacy/readme.txt").unwrap(), b"sidecar WAL survived");
+  assert!(!aeordb::engine::verify::verify_checked(&reopened, &legacy_path).unwrap().has_issues());
 }

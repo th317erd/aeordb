@@ -16,10 +16,97 @@ use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBar
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::errors::EngineError;
 use crate::engine::errors::EngineResult;
-use crate::engine::file_header::{read_active_header, write_header_to_inactive_slot_coordinated};
+use crate::engine::file_header::{HEADER_REGION_SIZE, read_active_header, write_header_to_inactive_slot_coordinated};
 use crate::engine::hot_tail::{HotTailPayload, VoidRecord};
 use crate::engine::kv_pages::page_size;
 use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
+
+/// Convert a sidecar-era no-KV database, or the short-lived post-WAL KV
+/// repair layout, into the standard `[headers][KV][WAL][hot tail]` layout.
+///
+/// The complete source WAL is validated before the first header mutation.
+/// The existing resize journal then owns crash recovery: its first selected
+/// phase retains the original WAL, and its second selected phase retains the
+/// relocated WAL until the new KV region has been zeroed and finalized.
+pub(crate) fn bootstrap_initial_kv_block(db_path: &str, hash_length: usize) -> EngineResult<(u64, usize, u64)> {
+  let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
+  let coordinator = DurabilityCoordinator::new();
+  let (mut header, active_slot) = read_active_header(&mut file)?;
+  let header_end = HEADER_REGION_SIZE as u64;
+  let physical_end = file.metadata()?.len();
+
+  if hash_length != header.hash_algo.hash_length() {
+    return Err(EngineError::InvalidInput(format!(
+      "KV bootstrap hash length {hash_length} differs from database hash length {}",
+      header.hash_algo.hash_length()
+    )));
+  }
+  if header.resize_in_progress {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: "KV bootstrap cannot replace an existing resize recovery marker".to_string(),
+    });
+  }
+
+  let source_wal_end = if header.kv_block_offset == 0 && header.kv_block_length == 0 {
+    if header.hot_tail_offset != 0 {
+      return Err(EngineError::CorruptEntry {
+        offset: header.hot_tail_offset,
+        reason: "no-KV layout unexpectedly advertises an in-file hot tail; its WAL boundary is ambiguous and requires explicit repair"
+          .to_string(),
+      });
+    }
+    physical_end
+  } else if header.kv_block_offset > header_end && header.kv_block_length > 0 {
+    // The old repair layout placed a disposable KV block after the WAL. Its
+    // offset, rather than its often-inconsistent hot-tail field, is the exact
+    // authoritative WAL frontier.
+    let post_wal_kv_end = header.kv_block_offset.checked_add(header.kv_block_length).ok_or_else(|| EngineError::CorruptEntry {
+      offset: header.kv_block_offset,
+      reason: "post-WAL KV block end overflows u64".to_string(),
+    })?;
+    if post_wal_kv_end > physical_end {
+      return Err(EngineError::CorruptEntry {
+        offset: header.kv_block_offset,
+        reason: format!("post-WAL KV block ends at {post_wal_kv_end}, beyond physical file end {physical_end}"),
+      });
+    }
+    header.kv_block_offset
+  } else {
+    return Err(EngineError::CorruptEntry {
+      offset: header.kv_block_offset,
+      reason: format!(
+        "KV bootstrap requires no KV block or a post-WAL KV block, got offset {} length {}",
+        header.kv_block_offset, header.kv_block_length
+      ),
+    });
+  };
+
+  if source_wal_end < header_end || source_wal_end > physical_end {
+    return Err(EngineError::CorruptEntry {
+      offset: source_wal_end,
+      reason: format!("legacy WAL frontier is outside {header_end}..={physical_end}"),
+    });
+  }
+  let validated_end = strict_relocation_end(&mut file, header_end, source_wal_end, source_wal_end, header.hash_algo)?;
+  if validated_end != source_wal_end {
+    return Err(EngineError::CorruptEntry {
+      offset: validated_end,
+      reason: format!("legacy WAL validation stopped before its frontier {source_wal_end}"),
+    });
+  }
+
+  header.kv_block_offset = header_end;
+  header.kv_block_length = 0;
+  header.kv_block_stage = 0;
+  header.hot_tail_offset = source_wal_end;
+  header.resize_in_progress = true;
+  header.resize_target_stage = 0;
+  write_header_to_inactive_slot_coordinated(&mut file, &mut header, active_slot, &coordinator)?;
+  drop(file);
+
+  expand_kv_block(db_path, 0, hash_length)
+}
 
 /// Expand the KV block in-place by relocating WAL entries forward.
 ///
@@ -39,8 +126,10 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
   let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
   let coordinator = DurabilityCoordinator::new();
   let (mut header, mut active_slot) = read_active_header(&mut file)?;
+  let bootstrap =
+    header.resize_in_progress && target_stage == 0 && header.kv_block_stage == 0 && header.kv_block_offset == HEADER_REGION_SIZE as u64;
 
-  if target_stage <= header.kv_block_stage as usize {
+  if target_stage <= header.kv_block_stage as usize && !bootstrap {
     // Older recovery code cleared resize_target_stage but accidentally left
     // resize_in_progress selected. It had already published the final stage,
     // so clearing that stale boolean is the only mutation required.
@@ -56,7 +145,11 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
   }
 
   let mut relocation_delta = 0u64;
-  if header.resize_in_progress {
+  // A bootstrap's relocation-durable phase keeps resize_in_progress selected
+  // while changing kv_block_length from zero to the complete new block. That
+  // makes the phase distinguishable even though both source and target stage
+  // are zero.
+  if header.resize_in_progress && (!bootstrap || header.kv_block_length == 0) {
     let old_kv_offset = header.kv_block_offset;
     let old_kv_end = old_kv_offset
       .checked_add(header.kv_block_length)
@@ -120,7 +213,7 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
     // durable. From here, recovery must finalize/rebuild, never relocate again.
     header.kv_block_length = new_block_length;
     header.hot_tail_offset = new_hot_tail;
-    header.resize_in_progress = false;
+    header.resize_in_progress = bootstrap;
     write_header_to_inactive_slot_coordinated(&mut file, &mut header, active_slot, &coordinator)?;
     active_slot = 1 - active_slot;
   }

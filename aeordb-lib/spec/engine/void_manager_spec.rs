@@ -24,13 +24,15 @@ fn test_find_void_best_fit() {
   manager.register_void(2000, 200);
   manager.register_void(3000, 800);
 
-  // Request 150 bytes — should find the 200-byte void (smallest fit).
+  // The 200-byte void would leave an unencodable 50-byte remainder, so the
+  // allocator must select the next fit whose remainder can hold a Void entry.
   let result = manager.find_void(150);
   assert!(result.is_some());
 
   let (offset, size) = result.unwrap();
-  assert_eq!(offset, 2000);
-  assert_eq!(size, 200);
+  assert_eq!(offset, 1000);
+  assert_eq!(size, 500);
+  assert_eq!(manager.find_void(200), Some((2000, 200)), "the skipped poor-fit void must remain available");
 }
 
 #[test]
@@ -94,7 +96,7 @@ fn test_register_tracks_all_sizes_including_below_useful_min() {
 }
 
 #[test]
-fn test_find_void_remainder_below_minimum_is_abandoned() {
+fn test_find_void_remainder_below_minimum_keeps_the_original_void() {
   let mut manager = VoidManager::new(HashAlgorithm::Blake3_256);
   let min_useful = manager.minimum_useful_void_size();
 
@@ -103,10 +105,22 @@ fn test_find_void_remainder_below_minimum_is_abandoned() {
   manager.register_void(1000, void_size);
 
   let result = manager.find_void(min_useful);
-  assert!(result.is_some());
+  assert!(result.is_none());
 
-  // Remainder is below useful min, so it should NOT be re-registered.
-  assert_eq!(manager.void_count(), 0);
+  // Consuming this range would strand bytes that cannot encode a physical
+  // Void entry, so the original extent remains intact.
+  assert_eq!(manager.void_count(), 1);
+  assert_eq!(manager.total_void_space(), void_size as u64);
+}
+
+#[test]
+fn test_find_void_skips_a_split_whose_remainder_offset_overflows() {
+  let mut manager = VoidManager::new(HashAlgorithm::Blake3_256);
+  manager.register_void(u64::MAX - 50, 500);
+  manager.register_void(1000, 700);
+
+  assert_eq!(manager.find_void(100), Some((1000, 700)));
+  assert_eq!(manager.void_count(), 2, "the impossible extent and valid remainder must both remain tracked");
 }
 
 #[test]

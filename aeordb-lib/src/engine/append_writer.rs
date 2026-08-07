@@ -453,8 +453,10 @@ impl AppendWriter {
 
   /// Write a void at a specific offset WITHOUT syncing.
   pub fn write_void_at_nosync(&mut self, offset: u64, size: u32) -> EngineResult<()> {
+    const ZERO_CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
+
     let hash_algo = self.file_header.hash_algo;
-    let header_size = 31 + hash_algo.hash_length();
+    let header_size = EntryHeader::FIXED_HEADER_SIZE + hash_algo.hash_length();
 
     if (size as usize) < header_size {
       return Err(EngineError::CorruptEntry {
@@ -463,11 +465,41 @@ impl AppendWriter {
       });
     }
 
-    let key = b"";
     let value_length = size as usize - header_size;
-    let value = vec![0u8; value_length];
+    let total_length = EntryHeader::compute_total_length(hash_algo, 0, value_length)?;
+    debug_assert_eq!(total_length, size);
 
-    self.write_entry_at_nosync(offset, EntryType::Void, key, &value)?;
+    let mut hasher = hash_algo.incremental_hasher()?;
+    hasher.update(&[EntryType::Void.to_u8()]);
+    let mut remaining = value_length;
+    while remaining != 0 {
+      let chunk_length = remaining.min(ZERO_CHUNK.len());
+      hasher.update(&ZERO_CHUNK[..chunk_length]);
+      remaining -= chunk_length;
+    }
+
+    let header = EntryHeader {
+      entry_version: CURRENT_ENTRY_VERSION,
+      entry_type: EntryType::Void,
+      flags: 0,
+      hash_algo,
+      compression_algo: CompressionAlgorithm::None,
+      encryption_algo: 0,
+      key_length: 0,
+      value_length: value_length as u32,
+      timestamp: self.next_entry_timestamp(),
+      total_length,
+      hash: hasher.finalize(),
+    };
+
+    self.file.seek(SeekFrom::Start(offset))?;
+    self.file.write_all(&header.serialize())?;
+    remaining = value_length;
+    while remaining != 0 {
+      let chunk_length = remaining.min(ZERO_CHUNK.len());
+      self.file.write_all(&ZERO_CHUNK[..chunk_length])?;
+      remaining -= chunk_length;
+    }
     Ok(())
   }
 

@@ -82,15 +82,22 @@ impl VoidManager {
     self.by_size.entry(size).or_default().insert(offset);
   }
 
-  /// Find the smallest void that can fit `needed_size` bytes, remove it
-  /// from the manager, and return `(offset, actual_size)`. If the void is
-  /// larger than needed and the remainder is at least `min_useful_size`,
-  /// the remainder is re-registered as a smaller void.
+  /// Find the smallest void that can fit `needed_size` bytes without
+  /// stranding an unencodable remainder, remove it from the manager, and
+  /// return `(offset, actual_size)`. A larger match is split only when its
+  /// remainder can hold a physical Void entry; poor fits remain available
+  /// for a later exact or smaller allocation.
   pub fn find_void(&mut self, needed_size: u32) -> Option<(u64, u32)> {
-    let matching_size = self.by_size.range(needed_size..).find(|(_, offsets)| !offsets.is_empty()).map(|(&size, _)| size)?;
+    let minimum_remainder = self.minimum_useful_void_size();
+    let (matching_size, offset) = self.by_size.range(needed_size..).find_map(|(&size, offsets)| {
+      let remainder = size - needed_size;
+      if remainder != 0 && remainder < minimum_remainder {
+        return None;
+      }
+      offsets.iter().copied().find(|offset| remainder == 0 || offset.checked_add(needed_size as u64).is_some()).map(|offset| (size, offset))
+    })?;
 
     let set = self.by_size.get_mut(&matching_size)?;
-    let &offset = set.iter().next()?;
     set.remove(&offset);
     if set.is_empty() {
       self.by_size.remove(&matching_size);
@@ -99,8 +106,8 @@ impl VoidManager {
 
     // Split remainder into a smaller void if it can hold a real entry.
     let remainder = matching_size - needed_size;
-    if remainder >= self.minimum_useful_void_size() {
-      let remainder_offset = offset + needed_size as u64;
+    if remainder != 0 {
+      let remainder_offset = offset.checked_add(needed_size as u64)?;
       self.register_void(remainder_offset, remainder);
     }
 
