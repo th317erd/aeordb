@@ -773,6 +773,10 @@ name = "v4_admission_spec"
 path = "spec/engine/v4_admission_spec.rs"
 
 [[test]]
+name = "v4_system_family_runtime_spec"
+path = "spec/engine/v4_system_family_runtime_spec.rs"
+
+[[test]]
 name = "v4_platform_probe_spec"
 path = "spec/engine/v4_platform_probe_spec.rs"
 

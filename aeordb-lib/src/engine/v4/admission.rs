@@ -1,21 +1,14 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::sync::OnceLock;
 
 use super::contract_generated::CAPABILITY_BITS;
 use super::database_header::{DatabaseHeaderV4, SelectedDatabaseHeaderV4};
-use super::system_family::{SystemFamilyRegistryV1, decode_system_family_registry};
+use super::system_family::{SystemFamilyRegistryV1, embedded_system_family_registry};
 use crate::engine::HashAlgorithm;
 
 const CAPABILITY_WIDTH: usize = 32;
 const KNOWN_CAPABILITY_COUNT: u16 = 24;
 const SYSTEM_FAMILY_REGISTRY_VERSION: u16 = 1;
-const SYSTEM_FAMILY_REGISTRY_V1_BYTES: &[u8] = include_bytes!("../../../spec/fixtures/system-family-registry-v1.bin");
-static BLAKE3_256_REGISTRY: OnceLock<Result<SystemFamilyRegistryV1<'static>, super::reader::FormatError>> = OnceLock::new();
-static SHA256_REGISTRY: OnceLock<Result<SystemFamilyRegistryV1<'static>, super::reader::FormatError>> = OnceLock::new();
-static SHA512_REGISTRY: OnceLock<Result<SystemFamilyRegistryV1<'static>, super::reader::FormatError>> = OnceLock::new();
-static SHA3_256_REGISTRY: OnceLock<Result<SystemFamilyRegistryV1<'static>, super::reader::FormatError>> = OnceLock::new();
-static SHA3_512_REGISTRY: OnceLock<Result<SystemFamilyRegistryV1<'static>, super::reader::FormatError>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CapabilitySetV1([u8; CAPABILITY_WIDTH]);
@@ -283,7 +276,8 @@ fn load_selected_registry(header: &DatabaseHeaderV4) -> Result<&'static SystemFa
       format!("registry version {} is not embedded", header.system_family_registry_version),
     ));
   }
-  let registry = embedded_registry(header.hash_algorithm)?;
+  let registry = embedded_system_family_registry(header.hash_algorithm)
+    .map_err(|error| V4AdmissionError::new("embedded_system_family_registry_invalid", error.to_string()))?;
   if registry.operational_fingerprint != header.system_family_registry_fingerprint {
     return Err(V4AdmissionError::new(
       "system_family_registry_fingerprint_mismatch",
@@ -291,20 +285,6 @@ fn load_selected_registry(header: &DatabaseHeaderV4) -> Result<&'static SystemFa
     ));
   }
   Ok(registry)
-}
-
-fn embedded_registry(algorithm: HashAlgorithm) -> Result<&'static SystemFamilyRegistryV1<'static>, V4AdmissionError> {
-  let cell = match algorithm {
-    HashAlgorithm::Blake3_256 => &BLAKE3_256_REGISTRY,
-    HashAlgorithm::Sha256 => &SHA256_REGISTRY,
-    HashAlgorithm::Sha512 => &SHA512_REGISTRY,
-    HashAlgorithm::Sha3_256 => &SHA3_256_REGISTRY,
-    HashAlgorithm::Sha3_512 => &SHA3_512_REGISTRY,
-  };
-  cell
-    .get_or_init(|| decode_system_family_registry(SYSTEM_FAMILY_REGISTRY_V1_BYTES, algorithm))
-    .as_ref()
-    .map_err(|error| V4AdmissionError::new("embedded_system_family_registry_invalid", error.to_string()))
 }
 
 fn validate_physical_identity(header: &DatabaseHeaderV4, evidence: Option<PhysicalIdentityEvidenceV1>) -> Result<(), V4AdmissionError> {
@@ -486,7 +466,8 @@ fn validate_peer_registry(peer: &PeerCapabilityViewV1) -> Result<(), V4Admission
       format!("peer names unsupported registry version {}", peer.system_family_registry_version),
     ));
   }
-  let registry = embedded_registry(peer.hash_algorithm)?;
+  let registry = embedded_system_family_registry(peer.hash_algorithm)
+    .map_err(|error| V4AdmissionError::new("embedded_system_family_registry_invalid", error.to_string()))?;
   if registry.operational_fingerprint != peer.system_family_registry_fingerprint {
     return Err(V4AdmissionError::new("peer_system_family_registry_mismatch", "peer does not name the exact embedded registry bytes"));
   }

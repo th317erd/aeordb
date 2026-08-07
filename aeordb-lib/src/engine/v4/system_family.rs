@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::sync::OnceLock;
 
 use super::contract_generated::SYSTEM_FAMILIES;
 use super::hash::digest_parts;
@@ -13,6 +14,12 @@ const CRC_LENGTH: usize = 4;
 const MAX_REGISTRY_LENGTH: usize = 1_048_576;
 const FROZEN_DESCRIPTOR_COUNT: usize = 61;
 const UNKNOWN_PROTECTED_FAMILY_ID: u16 = 0xfffe;
+const SYSTEM_FAMILY_REGISTRY_V1_BYTES: &[u8] = include_bytes!("../../../spec/fixtures/system-family-registry-v1.bin");
+static BLAKE3_256_REGISTRY: OnceLock<FormatResult<SystemFamilyRegistryV1<'static>>> = OnceLock::new();
+static SHA256_REGISTRY: OnceLock<FormatResult<SystemFamilyRegistryV1<'static>>> = OnceLock::new();
+static SHA512_REGISTRY: OnceLock<FormatResult<SystemFamilyRegistryV1<'static>>> = OnceLock::new();
+static SHA3_256_REGISTRY: OnceLock<FormatResult<SystemFamilyRegistryV1<'static>>> = OnceLock::new();
+static SHA3_512_REGISTRY: OnceLock<FormatResult<SystemFamilyRegistryV1<'static>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -68,26 +75,193 @@ impl SystemFamilyMatchKindV1 {
   }
 }
 
+macro_rules! policy_enum {
+  ($name:ident { $($variant:ident = $value:literal),+ $(,)? }) => {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[repr(u8)]
+    pub enum $name {
+      $($variant = $value),+
+    }
+
+    impl $name {
+      pub const fn as_u8(self) -> u8 {
+        self as u8
+      }
+
+      fn from_u8(value: u8) -> Option<Self> {
+        match value {
+          $($value => Some(Self::$variant),)+
+          _ => None,
+        }
+      }
+    }
+  };
+}
+
+policy_enum!(SemanticRoleV1 {
+  None = 0,
+  CanonicalProjection = 1,
+  ExecutableDependency = 2,
+  AuthoritativeSemanticObject = 3,
+  DerivedDisposable = 4,
+});
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GcPolicyV1(u8);
+
+impl GcPolicyV1 {
+  pub const TRACE_EDGES: Self = Self(0x01);
+  pub const PIN_WHILE_AUTHORITATIVE: Self = Self(0x02);
+  pub const QUARANTINE: Self = Self(0x04);
+  pub const DERIVED_REBUILDABLE: Self = Self(0x08);
+  pub const EVIDENCE_RETENTION: Self = Self(0x10);
+  pub const CONSERVATIVE_RETAIN: Self = Self(0x20);
+  const KNOWN_BITS: u8 = Self::TRACE_EDGES.0
+    | Self::PIN_WHILE_AUTHORITATIVE.0
+    | Self::QUARANTINE.0
+    | Self::DERIVED_REBUILDABLE.0
+    | Self::EVIDENCE_RETENTION.0
+    | Self::CONSERVATIVE_RETAIN.0;
+
+  pub const fn bits(self) -> u8 {
+    self.0
+  }
+
+  pub const fn contains(self, policy: Self) -> bool {
+    self.0 & policy.0 == policy.0
+  }
+
+  fn from_bits(bits: u8) -> Option<Self> {
+    (bits != 0 && bits & !Self::KNOWN_BITS == 0).then_some(Self(bits))
+  }
+}
+
+policy_enum!(TransferPolicyV1 {
+  RequiredInclude = 1,
+  OptionalValidated = 2,
+  OmitDeclared = 3,
+  NodeLocal = 4,
+  RedactOmit = 5,
+  NamedSubsetOnly = 6,
+  FailUnknown = 7,
+});
+
+policy_enum!(VerifyPolicyV1 {
+  StrictIfPresent = 1,
+  StrictRequired = 2,
+  Rebuildable = 3,
+  ConservativeUnknown = 4,
+});
+
+policy_enum!(RepairPolicyV1 {
+  DiagnoseOnly = 1,
+  OwnerSpecific = 2,
+  RebuildDerived = 3,
+  RecoveryReplay = 4,
+  ManualRequired = 5,
+});
+
+policy_enum!(MigrationPolicyV1 {
+  RequiredCopy = 1,
+  DestinationLocal = 2,
+  RebuildDestination = 3,
+  OwnerConverter = 4,
+  OmitDeclared = 5,
+  FailUnknown = 6,
+});
+
+policy_enum!(SpillPolicyV1 {
+  Ineligible = 1,
+  HotTailSource = 2,
+  RecoveryArtifact = 3,
+  ResumableWorkspace = 4,
+});
+
+policy_enum!(SensitivityV1 {
+  Internal = 0,
+  Protected = 1,
+  Credential = 2,
+  Secret = 3,
+  PublicMetadata = 4,
+});
+
+policy_enum!(EventPolicyV1 {
+  None = 0,
+  AuthorizedNamespace = 1,
+  SystemAdministrative = 2,
+  OperationalRedacted = 3,
+  SensitiveSuppressed = 4,
+});
+
+policy_enum!(AbsencePolicyV1 {
+  AllowedDefault = 1,
+  AllowedEmpty = 2,
+  DegradedVisible = 3,
+  RebuildRequired = 4,
+  FatalIfAuthoritative = 5,
+  DisableDestructiveGc = 6,
+  LegacyDiagnostic = 7,
+});
+
+policy_enum!(UnknownChildPolicyV1 {
+  NoChildren = 0,
+  Reject = 1,
+  ClassifyByRegistry = 2,
+  RetainAndFailComplete = 3,
+});
+
+policy_enum!(IndexPolicyV1 {
+  NotApplicable = 0,
+  IncludeUnderOrdinaryScope = 1,
+  ExcludeFromAllIndexes = 2,
+  CanonicalProjectionOnly = 3,
+});
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SystemFamilyPolicyV1 {
-  pub semantic_role: u8,
-  pub gc_policy: u8,
-  pub physical_copy_policy: u8,
-  pub logical_backup_policy: u8,
-  pub data_export_policy: u8,
-  pub peer_replication_policy: u8,
-  pub cluster_join_policy: u8,
-  pub client_sync_policy: u8,
-  pub import_policy: u8,
-  pub verify_policy: u8,
-  pub repair_policy: u8,
-  pub migration_policy: u8,
-  pub spill_policy: u8,
-  pub sensitivity: u8,
-  pub event_policy: u8,
-  pub absence_policy: u8,
-  pub unknown_child_policy: u8,
-  pub index_policy: u8,
+  pub semantic_role: SemanticRoleV1,
+  pub gc_policy: GcPolicyV1,
+  pub physical_copy_policy: TransferPolicyV1,
+  pub logical_backup_policy: TransferPolicyV1,
+  pub data_export_policy: TransferPolicyV1,
+  pub peer_replication_policy: TransferPolicyV1,
+  pub cluster_join_policy: TransferPolicyV1,
+  pub client_sync_policy: TransferPolicyV1,
+  pub import_policy: TransferPolicyV1,
+  pub verify_policy: VerifyPolicyV1,
+  pub repair_policy: RepairPolicyV1,
+  pub migration_policy: MigrationPolicyV1,
+  pub spill_policy: SpillPolicyV1,
+  pub sensitivity: SensitivityV1,
+  pub event_policy: EventPolicyV1,
+  pub absence_policy: AbsencePolicyV1,
+  pub unknown_child_policy: UnknownChildPolicyV1,
+  pub index_policy: IndexPolicyV1,
+}
+
+impl SystemFamilyPolicyV1 {
+  fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    Some(Self {
+      semantic_role: SemanticRoleV1::from_u8(*bytes.first()?)?,
+      gc_policy: GcPolicyV1::from_bits(*bytes.get(1)?)?,
+      physical_copy_policy: TransferPolicyV1::from_u8(*bytes.get(2)?)?,
+      logical_backup_policy: TransferPolicyV1::from_u8(*bytes.get(3)?)?,
+      data_export_policy: TransferPolicyV1::from_u8(*bytes.get(4)?)?,
+      peer_replication_policy: TransferPolicyV1::from_u8(*bytes.get(5)?)?,
+      cluster_join_policy: TransferPolicyV1::from_u8(*bytes.get(6)?)?,
+      client_sync_policy: TransferPolicyV1::from_u8(*bytes.get(7)?)?,
+      import_policy: TransferPolicyV1::from_u8(*bytes.get(8)?)?,
+      verify_policy: VerifyPolicyV1::from_u8(*bytes.get(9)?)?,
+      repair_policy: RepairPolicyV1::from_u8(*bytes.get(10)?)?,
+      migration_policy: MigrationPolicyV1::from_u8(*bytes.get(11)?)?,
+      spill_policy: SpillPolicyV1::from_u8(*bytes.get(12)?)?,
+      sensitivity: SensitivityV1::from_u8(*bytes.get(13)?)?,
+      event_policy: EventPolicyV1::from_u8(*bytes.get(14)?)?,
+      absence_policy: AbsencePolicyV1::from_u8(*bytes.get(15)?)?,
+      unknown_child_policy: UnknownChildPolicyV1::from_u8(*bytes.get(16)?)?,
+      index_policy: IndexPolicyV1::from_u8(*bytes.get(17)?)?,
+    })
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +311,7 @@ pub struct KnownSystemFamilyV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemFamilyClassificationV1 {
   Ordinary,
+  StructuralContainer,
   Known(KnownSystemFamilyV1),
   UnknownProtected,
 }
@@ -145,7 +320,7 @@ impl SystemFamilyClassificationV1 {
   pub const fn family_id(self) -> Option<u16> {
     match self {
       Self::Known(family) => Some(family.family_id),
-      Self::Ordinary | Self::UnknownProtected => None,
+      Self::Ordinary | Self::StructuralContainer | Self::UnknownProtected => None,
     }
   }
 }
@@ -175,7 +350,7 @@ pub fn require_complete_system_family(
   operation: &'static str,
 ) -> FormatResult<Option<KnownSystemFamilyV1>> {
   match classification {
-    SystemFamilyClassificationV1::Ordinary => Ok(None),
+    SystemFamilyClassificationV1::Ordinary | SystemFamilyClassificationV1::StructuralContainer => Ok(None),
     SystemFamilyClassificationV1::Known(family) => Ok(Some(family)),
     SystemFamilyClassificationV1::UnknownProtected => {
       Err(closure_error("unknown_protected_system_family", format!("{operation} cannot safely process unrecognized protected state")))
@@ -216,11 +391,36 @@ fn classify_path(registry: &SystemFamilyRegistryV1<'_>, path: &str) -> FormatRes
 
   if let Some((_, _, family)) = winner {
     Ok(SystemFamilyClassificationV1::Known(family))
+  } else if is_absolute_family_structural_container(registry, path)? {
+    Ok(SystemFamilyClassificationV1::StructuralContainer)
   } else if path.split('/').skip(1).any(|segment| segment.starts_with(".aeordb-")) {
     Ok(SystemFamilyClassificationV1::UnknownProtected)
   } else {
     Ok(SystemFamilyClassificationV1::Ordinary)
   }
+}
+
+fn is_absolute_family_structural_container(registry: &SystemFamilyRegistryV1<'_>, path: &str) -> FormatResult<bool> {
+  if path == "/" {
+    return Ok(false);
+  }
+  for descriptor in registry.iter() {
+    let descriptor = descriptor?;
+    if descriptor.domain != StorageDomainV1::Path
+      || !matches!(descriptor.match_kind, SystemFamilyMatchKindV1::AbsolutePathExact | SystemFamilyMatchKindV1::AbsolutePathPrefix)
+    {
+      continue;
+    }
+    let family_path = std::str::from_utf8(descriptor.matcher)
+      .map_err(|_| path_error("system_family_matcher_path_utf8", "absolute matcher path is not UTF-8"))?;
+    let family_path = family_path.strip_suffix('/').unwrap_or(family_path);
+    let is_prefix_root = descriptor.match_kind == SystemFamilyMatchKindV1::AbsolutePathPrefix && family_path == path;
+    let is_strict_ancestor = family_path.starts_with(path) && family_path.as_bytes().get(path.len()) == Some(&b'/');
+    if is_prefix_root || is_strict_ancestor {
+      return Ok(true);
+    }
+  }
+  Ok(false)
 }
 
 fn path_match_score(path: &str, kind: SystemFamilyMatchKindV1, matcher: &[u8]) -> FormatResult<Option<(u8, usize)>> {
@@ -354,6 +554,20 @@ fn protect_unmatched(classification: SystemFamilyClassificationV1) -> SystemFami
   }
 }
 
+pub fn embedded_system_family_registry(algorithm: HashAlgorithm) -> FormatResult<&'static SystemFamilyRegistryV1<'static>> {
+  let cell = match algorithm {
+    HashAlgorithm::Blake3_256 => &BLAKE3_256_REGISTRY,
+    HashAlgorithm::Sha256 => &SHA256_REGISTRY,
+    HashAlgorithm::Sha512 => &SHA512_REGISTRY,
+    HashAlgorithm::Sha3_256 => &SHA3_256_REGISTRY,
+    HashAlgorithm::Sha3_512 => &SHA3_512_REGISTRY,
+  };
+  match cell.get_or_init(|| decode_system_family_registry(SYSTEM_FAMILY_REGISTRY_V1_BYTES, algorithm)) {
+    Ok(registry) => Ok(registry),
+    Err(error) => Err(error.clone()),
+  }
+}
+
 pub struct SystemFamilyDescriptorIterV1<'a> {
   bytes: &'a [u8],
   offset: usize,
@@ -446,7 +660,7 @@ pub fn decode_system_family_registry(bytes: &[u8], algorithm: HashAlgorithm) -> 
     } else if active_policy != Some(descriptor.policy) {
       return Err(closure_error("system_family_registry_policy_drift", "one family has multiple policies"));
     }
-    if descriptor.policy.semantic_role != 0 {
+    if descriptor.policy.semantic_role != SemanticRoleV1::None {
       append_semantic_projection(&mut semantic_projection, &descriptor)?;
     }
     previous = Some(descriptor);
@@ -482,27 +696,8 @@ fn decode_descriptor(bytes: &[u8], offset: usize) -> FormatResult<(SystemFamilyD
     .ok_or_else(|| kind_error("system_family_storage_domain", "storage domain is outside the frozen enum"))?;
   let match_kind = SystemFamilyMatchKindV1::from_u8(bytes[offset + 3])
     .ok_or_else(|| kind_error("system_family_match_kind", "match kind is outside the frozen enum"))?;
-  let policy = SystemFamilyPolicyV1 {
-    semantic_role: bytes[offset + 4],
-    gc_policy: bytes[offset + 5],
-    physical_copy_policy: bytes[offset + 6],
-    logical_backup_policy: bytes[offset + 7],
-    data_export_policy: bytes[offset + 8],
-    peer_replication_policy: bytes[offset + 9],
-    cluster_join_policy: bytes[offset + 10],
-    client_sync_policy: bytes[offset + 11],
-    import_policy: bytes[offset + 12],
-    verify_policy: bytes[offset + 13],
-    repair_policy: bytes[offset + 14],
-    migration_policy: bytes[offset + 15],
-    spill_policy: bytes[offset + 16],
-    sensitivity: bytes[offset + 17],
-    event_policy: bytes[offset + 18],
-    absence_policy: bytes[offset + 19],
-    unknown_child_policy: bytes[offset + 20],
-    index_policy: bytes[offset + 21],
-  };
-  validate_policy(policy)?;
+  let policy = SystemFamilyPolicyV1::from_bytes(&bytes[offset + 4..offset + 22])
+    .ok_or_else(|| kind_error("system_family_descriptor_policy", "descriptor policy contains an unknown enum or bit"))?;
   if bytes[offset + 22..offset + 24].iter().any(|byte| *byte != 0) || u32_at(bytes, offset + 24)? != 0 || u16_at(bytes, offset + 30)? != 0 {
     return Err(reserved_error("system_family_descriptor_reserved", "descriptor flags and reserves must be zero"));
   }
@@ -514,32 +709,6 @@ fn decode_descriptor(bytes: &[u8], offset: usize) -> FormatResult<(SystemFamilyD
   let matcher = &bytes[fixed_end..matcher_end];
   validate_matcher(domain, match_kind, matcher)?;
   Ok((SystemFamilyDescriptorV1 { family_id, domain, match_kind, policy, matcher }, matcher_end))
-}
-
-fn validate_policy(policy: SystemFamilyPolicyV1) -> FormatResult<()> {
-  let valid = policy.semantic_role <= 4
-    && policy.gc_policy != 0
-    && policy.gc_policy & !0x3f == 0
-    && in_range(policy.physical_copy_policy, 1, 7)
-    && in_range(policy.logical_backup_policy, 1, 7)
-    && in_range(policy.data_export_policy, 1, 7)
-    && in_range(policy.peer_replication_policy, 1, 7)
-    && in_range(policy.cluster_join_policy, 1, 7)
-    && in_range(policy.client_sync_policy, 1, 7)
-    && in_range(policy.import_policy, 1, 7)
-    && in_range(policy.verify_policy, 1, 4)
-    && in_range(policy.repair_policy, 1, 5)
-    && in_range(policy.migration_policy, 1, 6)
-    && in_range(policy.spill_policy, 1, 4)
-    && policy.sensitivity <= 4
-    && policy.event_policy <= 4
-    && in_range(policy.absence_policy, 1, 7)
-    && policy.unknown_child_policy <= 3
-    && policy.index_policy <= 3;
-  if !valid {
-    return Err(kind_error("system_family_descriptor_policy", "descriptor policy contains an unknown enum or bit"));
-  }
-  Ok(())
 }
 
 fn validate_matcher(domain: StorageDomainV1, kind: SystemFamilyMatchKindV1, bytes: &[u8]) -> FormatResult<()> {
@@ -664,8 +833,8 @@ fn append_semantic_projection(output: &mut Vec<u8>, descriptor: &SystemFamilyDes
   output.push(descriptor.match_kind as u8);
   output.extend_from_slice(&matcher_length.to_le_bytes());
   output.extend_from_slice(descriptor.matcher);
-  output.push(descriptor.policy.semantic_role);
-  output.push(descriptor.policy.index_policy);
+  output.push(descriptor.policy.semantic_role.as_u8());
+  output.push(descriptor.policy.index_policy.as_u8());
   Ok(())
 }
 
@@ -676,10 +845,6 @@ fn descriptor_key_cmp(left: &SystemFamilyDescriptorV1<'_>, right: &SystemFamilyD
     right.match_kind as u8,
     right.matcher,
   ))
-}
-
-fn in_range(value: u8, minimum: u8, maximum: u8) -> bool {
-  (minimum..=maximum).contains(&value)
 }
 
 fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {

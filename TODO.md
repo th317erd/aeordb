@@ -292,7 +292,10 @@
       - [x] Characterize the current adjacent behavior with 194 green B-tree, tree-walk, backup/import, sync, permission, and GC tests; record the ratified policy differences explicitly.
       - [x] Freeze the P2c red-test protocol, independent policy oracle, traversal-state matrix, consumer proof, and architecture-removal gate.
       - [ ] Close P1c by running the native durability/fixture/malformed gates on `wyatt-mac` and `win11vm` when the hosts are online.
-      - [ ] Add failing registry tests for typed policies, exact embedded-registry reuse, structural namespace containers, unknown protected state, and permissions/conflicts/controls contracts.
+      - [x] Add failing registry tests for typed policies, exact embedded-registry reuse, structural namespace containers, unknown protected state, and permissions/conflicts/controls contracts.
+        - [x] Prove all 46 family policies and 61 descriptors against the independent manifest oracle.
+        - [x] Prove one cached embedded registry per hash algorithm and pointer reuse by v4 admission.
+        - [x] Prove runtime-only structural containers never inherit or invent a persisted family policy.
       - [ ] Add failing traversal tests for complete, diagnostically partial, and corrupt flat/B-tree outcomes without empty-success conversion.
       - [ ] Route backup, sync, peer, import, index scope, GC, permissions, plugin host, repair, verify, and generic APIs through operation-specific registry policy.
       - [ ] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
