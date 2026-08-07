@@ -296,7 +296,10 @@
         - [x] Prove all 46 family policies and 61 descriptors against the independent manifest oracle.
         - [x] Prove one cached embedded registry per hash algorithm and pointer reuse by v4 admission.
         - [x] Prove runtime-only structural containers never inherit or invent a persisted family policy.
-      - [ ] Add failing traversal tests for complete, diagnostically partial, and corrupt flat/B-tree outcomes without empty-success conversion.
+      - [x] Add failing traversal tests for complete, diagnostically partial, and corrupt flat/B-tree outcomes without empty-success conversion.
+        - [x] Separate structural integrity from visitor-requested early completion.
+        - [x] Classify missing/corrupt B-tree roots as corrupt and damaged child branches as diagnostically partial.
+        - [x] Preserve malformed flat-directory evidence instead of returning an unqualified empty success.
       - [ ] Route backup, sync, peer, import, index scope, GC, permissions, plugin host, repair, verify, and generic APIs through operation-specific registry policy.
       - [ ] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
       - [ ] Run focused, adjacent, broad, architecture, documentation, and live disposable-database proof; record and land P2c.

@@ -103,6 +103,7 @@ pub mod sync_engine;
 pub mod system_store;
 pub mod task_queue;
 pub mod task_worker;
+pub mod traversal;
 pub mod tree_walker;
 pub mod user;
 pub mod v4;
@@ -173,10 +174,10 @@ pub use storage_engine::{
   ChunkEntryMetadata, ChunkReadLocation, EngineStartupProgress, EngineStartupProgressCallback, StorageEngine, WriteBatch,
 };
 pub use directory_ops::{
-  DirectoryOps, EngineFileStream, directory_content_hash, directory_path_hash, file_path_hash, file_content_hash, file_identity_hash,
-  symlink_identity_hash, chunk_content_hash, system_chunk_hash, system_file_identity_hash, whole_file_content_hash,
-  whole_file_content_hash_from_chunks, is_system_path, DEFAULT_CHUNK_SIZE, JsonMergeBatchResult, JsonMergeFilePatch, JsonMergeFileResult,
-  JsonMergedFile,
+  DirectoryListWindow, DirectoryOps, DirectoryTraversalResult, EngineFileStream, directory_content_hash, directory_path_hash,
+  file_path_hash, file_content_hash, file_identity_hash, symlink_identity_hash, chunk_content_hash, system_chunk_hash,
+  system_file_identity_hash, whole_file_content_hash, whole_file_content_hash_from_chunks, is_system_path, DEFAULT_CHUNK_SIZE,
+  JsonMergeBatchResult, JsonMergeFilePatch, JsonMergeFileResult, JsonMergedFile,
 };
 pub use indexing_pipeline::IndexingPipeline;
 pub use task_queue::{TaskQueue, TaskRecord, TaskStatus, ProgressInfo};

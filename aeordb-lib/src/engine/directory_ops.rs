@@ -18,6 +18,7 @@ use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
 use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::{StorageEngine, WriteBatch};
+use crate::engine::traversal::{TraversalIntegrity, VisitorCompletion};
 
 /// Default chunk size for splitting file data (256 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
@@ -27,6 +28,15 @@ pub struct DirectoryListWindow {
   pub entries: Vec<ChildEntry>,
   pub has_more: bool,
   pub warnings: Vec<crate::engine::btree::BTreeWalkWarning>,
+  pub integrity: TraversalIntegrity,
+  pub visitor_completion: VisitorCompletion,
+}
+
+/// One directory traversal with explicit structural-integrity evidence.
+pub struct DirectoryTraversalResult {
+  pub entries: Vec<ChildEntry>,
+  pub issues: Vec<crate::engine::btree::BTreeWalkWarning>,
+  pub integrity: TraversalIntegrity,
 }
 
 /// Compute the domain-prefixed hash for a file path.
@@ -1453,16 +1463,16 @@ impl<'a> DirectoryOps<'a> {
   /// an error when the directory genuinely doesn't exist.
   pub fn list_directory(&self, path: &str) -> EngineResult<Vec<ChildEntry>> {
     let normalized = normalize_path(path);
-    let (children, warnings) = self.list_directory_with_btree_warnings(&normalized)?;
-    for warning in warnings {
+    let result = self.list_directory_with_traversal(&normalized)?;
+    for warning in &result.issues {
       tracing::warn!(
         path = %normalized,
         node_hash = %warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()),
         reason = %warning.reason,
-        "B-tree directory index partially unreadable; returning partial listing"
+        "Directory index is not completely readable; returning diagnostic listing result"
       );
     }
-    Ok(children)
+    Ok(result.entries)
   }
 
   /// Visit live directory children in key order without collecting a complete
@@ -1532,17 +1542,11 @@ impl<'a> DirectoryOps<'a> {
         "B-tree directory index partially unreadable; returning partial listing"
       );
     }
-    Ok(result.completed)
+    Ok(result.visitor_completion.is_exhausted())
   }
 
-  /// List directory children and return any best-effort B-tree traversal
-  /// warnings. This is used by verify so damaged B-tree branches are surfaced
-  /// as repairable directory issues instead of disappearing behind the normal
-  /// read-path fallback.
-  pub fn list_directory_with_btree_warnings(
-    &self,
-    path: &str,
-  ) -> EngineResult<(Vec<ChildEntry>, Vec<crate::engine::btree::BTreeWalkWarning>)> {
+  /// List a directory without discarding flat or B-tree corruption evidence.
+  pub fn list_directory_with_traversal(&self, path: &str) -> EngineResult<DirectoryTraversalResult> {
     let normalized = normalize_path(path);
     let hash_length = self.engine.hash_algo().hash_length();
     let read_result = self.load_directory_listing_data(&normalized);
@@ -1557,7 +1561,7 @@ impl<'a> DirectoryOps<'a> {
           );
         }
         if value.is_empty() {
-          return Ok((Vec::new(), Vec::new()));
+          return Ok(DirectoryTraversalResult { entries: Vec::new(), issues: Vec::new(), integrity: TraversalIntegrity::Complete });
         }
         if crate::engine::btree::is_btree_format(&value) {
           let result = crate::engine::btree::btree_list_from_node_with_mode(
@@ -1568,24 +1572,39 @@ impl<'a> DirectoryOps<'a> {
             crate::engine::btree::BTreeWalkMode::BestEffort,
           )?;
           let children = self.filter_live_children(&normalized, result.entries)?;
-          Ok((children, result.warnings))
-        } else {
-          // Flat format
-          match deserialize_child_entries(&value, hash_length, header.entry_version) {
-            Ok(children) => Ok((self.filter_live_children(&normalized, children)?, Vec::new())),
-            Err(e) => {
-              tracing::warn!("Corrupt directory index at '{}': {}. Returning empty listing.", normalized, e);
-              Ok((Vec::new(), Vec::new()))
-            }
-          }
+          return Ok(DirectoryTraversalResult { entries: children, issues: result.warnings, integrity: result.integrity });
+        }
+        match deserialize_child_entries(&value, hash_length, header.entry_version) {
+          Ok(children) => Ok(DirectoryTraversalResult {
+            entries: self.filter_live_children(&normalized, children)?,
+            issues: Vec::new(),
+            integrity: TraversalIntegrity::Complete,
+          }),
+          Err(error) => Ok(DirectoryTraversalResult {
+            entries: Vec::new(),
+            issues: vec![crate::engine::btree::BTreeWalkWarning {
+              node_hash: None,
+              reason: format!("Corrupt flat directory index at {normalized}: {error}"),
+            }],
+            integrity: TraversalIntegrity::Corrupt,
+          }),
         }
       }
       Ok(None) => Err(EngineError::NotFound(normalized)),
-      Err(e) => {
-        tracing::warn!("Error reading directory '{}': {}", normalized, e);
-        Err(e)
-      }
+      Err(error) => Err(error),
     }
+  }
+
+  /// List directory children and return any best-effort B-tree traversal
+  /// warnings. This is used by verify so damaged B-tree branches are surfaced
+  /// as repairable directory issues instead of disappearing behind the normal
+  /// read-path fallback.
+  pub fn list_directory_with_btree_warnings(
+    &self,
+    path: &str,
+  ) -> EngineResult<(Vec<ChildEntry>, Vec<crate::engine::btree::BTreeWalkWarning>)> {
+    let result = self.list_directory_with_traversal(path)?;
+    Ok((result.entries, result.issues))
   }
 
   /// Return a bounded live window without materializing an entire B-tree directory.
@@ -1692,7 +1711,13 @@ impl<'a> DirectoryOps<'a> {
       return Err(EngineError::NotFound(normalized));
     };
     if value.is_empty() {
-      return Ok(DirectoryListWindow { entries: Vec::new(), has_more: false, warnings: Vec::new() });
+      return Ok(DirectoryListWindow {
+        entries: Vec::new(),
+        has_more: false,
+        warnings: Vec::new(),
+        integrity: TraversalIntegrity::Complete,
+        visitor_completion: VisitorCompletion::Exhausted,
+      });
     }
 
     if !crate::engine::btree::is_btree_format(&value) {
@@ -1704,12 +1729,29 @@ impl<'a> DirectoryOps<'a> {
             return Err(error);
           }
           tracing::warn!(path = %normalized, error = %error, "Corrupt flat directory index; returning an empty listing window");
-          Vec::new()
+          let warning = crate::engine::btree::BTreeWalkWarning {
+            node_hash: None,
+            reason: format!("Corrupt flat directory index at {normalized}: {error}"),
+          };
+          return Ok(DirectoryListWindow {
+            entries: Vec::new(),
+            has_more: false,
+            warnings: vec![warning],
+            integrity: TraversalIntegrity::Corrupt,
+            visitor_completion: VisitorCompletion::Exhausted,
+          });
         }
       };
       let start = offset.min(children.len());
       let end = start.saturating_add(limit).min(children.len());
-      return Ok(DirectoryListWindow { entries: children[start..end].to_vec(), has_more: end < children.len(), warnings: Vec::new() });
+      let has_more = end < children.len();
+      return Ok(DirectoryListWindow {
+        entries: children[start..end].to_vec(),
+        has_more,
+        warnings: Vec::new(),
+        integrity: TraversalIntegrity::Complete,
+        visitor_completion: if has_more { VisitorCompletion::StoppedByVisitor } else { VisitorCompletion::Exhausted },
+      });
     }
 
     let mut seen = 0usize;
@@ -1738,7 +1780,13 @@ impl<'a> DirectoryOps<'a> {
       crate::engine::btree::BTreeWalkMode::BestEffort,
       &mut visitor,
     )?;
-    Ok(DirectoryListWindow { entries, has_more, warnings: visit.warnings })
+    Ok(DirectoryListWindow {
+      entries,
+      has_more,
+      warnings: visit.warnings,
+      integrity: visit.integrity,
+      visitor_completion: visit.visitor_completion,
+    })
   }
 
   fn load_directory_listing_data(&self, normalized: &str) -> EngineResult<Option<(crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
