@@ -37,6 +37,30 @@ pub enum NamespaceMutationKind {
   MaintenanceRepair,
 }
 
+impl NamespaceMutationKind {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::FileWrite => "file_write",
+      Self::FileDelete => "file_delete",
+      Self::DirectoryCreate => "directory_create",
+      Self::DirectoryDelete => "directory_delete",
+      Self::SymlinkWrite => "symlink_write",
+      Self::SymlinkDelete => "symlink_delete",
+      Self::Copy => "copy",
+      Self::Rename => "rename",
+      Self::BatchWrite => "batch_write",
+      Self::Merge => "merge",
+      Self::Restore => "restore",
+      Self::Promote => "promote",
+      Self::Import => "import",
+      Self::SyncApply => "sync_apply",
+      Self::SystemWrite => "system_write",
+      Self::PluginWrite => "plugin_write",
+      Self::MaintenanceRepair => "maintenance_repair",
+    }
+  }
+}
+
 /// Exact physical KV incarnation selected for a stable locator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LocatorPhysicalIncarnation {
@@ -80,6 +104,17 @@ pub struct NamespaceMutationAcknowledgement {
   pub root_hash: Vec<u8>,
   pub source_identities: Vec<NamespaceMutationSourceIdentity>,
   pub locator_replacements: Vec<LocatorReplacement>,
+}
+
+impl NamespaceMutationAcknowledgement {
+  pub fn annotate_event_payload(&self, payload: &mut serde_json::Value) -> EngineResult<()> {
+    let object =
+      payload.as_object_mut().ok_or_else(|| EngineError::InvalidInput("namespace mutation event payload must be an object".to_string()))?;
+    object.insert("operation_id".to_string(), serde_json::Value::String(self.operation_id.to_string()));
+    object.insert("publication_sequence".to_string(), serde_json::Value::from(self.publication_sequence));
+    object.insert("mutation_kind".to_string(), serde_json::Value::String(self.kind.as_str().to_string()));
+    Ok(())
+  }
 }
 
 /// Recoverable-soft fanout invoked exactly once after hard namespace authority.
@@ -246,6 +281,7 @@ impl NamespaceMutationBatch {
     }
     if let Some(head_hash) = self.head_hash.as_ref() {
       validate_hash_width(head_hash, hash_length, "HEAD hash")?;
+      self.validate_head_target(engine, head_hash)?;
     }
     for source in &self.source_identities {
       if let Some(entry_type) = source.entry_type {
@@ -260,6 +296,30 @@ impl NamespaceMutationBatch {
     }
     Ok(estimated_dependency_bytes)
   }
+
+  fn validate_head_target(&self, engine: &StorageEngine, head_hash: &[u8]) -> EngineResult<()> {
+    if let Some(dependency) = self.dependencies.iter().find(|dependency| dependency.key == head_hash) {
+      if dependency.entry_type != EntryType::DirectoryIndex {
+        return Err(EngineError::InvalidInput("namespace mutation HEAD dependency must be a DirectoryIndex entry".to_string()));
+      }
+      return Ok(());
+    }
+    validate_existing_namespace_root(engine, head_hash, "namespace mutation HEAD")
+  }
+}
+
+pub(crate) fn validate_existing_namespace_root(engine: &StorageEngine, root_hash: &[u8], role: &str) -> EngineResult<()> {
+  validate_hash_width(root_hash, engine.hash_algo().hash_length(), role)?;
+  let Some((header, stored_key, _)) = engine.get_entry(root_hash)? else {
+    return Err(EngineError::NotFound(format!("{role} root {}", hex::encode(root_hash))));
+  };
+  if header.entry_type != EntryType::DirectoryIndex || stored_key != root_hash {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("{role} root {} is not a DirectoryIndex entry", hex::encode(root_hash)),
+    });
+  }
+  Ok(())
 }
 
 fn validate_locator_entry_type(entry_type: EntryType) -> EngineResult<()> {
@@ -407,8 +467,8 @@ impl<'a> NamespaceMutationCoordinator<'a> {
   }
 
   pub fn execute(&self, batch: NamespaceMutationBatch) -> EngineResult<NamespaceMutationAcknowledgement> {
-    let estimated_dependency_bytes = batch.validate(self.engine)?;
     let namespace = self.engine.namespace_write_guard()?;
+    let estimated_dependency_bytes = batch.validate(self.engine)?;
     self.execute_with_namespace(batch, estimated_dependency_bytes, namespace)
   }
 
@@ -530,7 +590,16 @@ impl<'a> NamespaceMutationCoordinator<'a> {
     let receipt = transaction.commit_top_level_after(namespace)?;
     acknowledgement.publication_sequence = receipt.sequence;
 
-    if catch_unwind(AssertUnwindSafe(|| self.fanout.publish(&acknowledgement))).is_err() {
+    if catch_unwind(AssertUnwindSafe(|| {
+      metrics::counter!(
+        "aeordb_namespace_mutation_acknowledgements_total",
+        "mutation_kind" => acknowledgement.kind.as_str()
+      )
+      .increment(1);
+      self.fanout.publish(&acknowledgement);
+    }))
+    .is_err()
+    {
       tracing::error!(operation_id = %acknowledgement.operation_id, "Post-commit namespace mutation fanout panicked");
     }
 

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::engine_event::{
@@ -7,9 +8,76 @@ use crate::engine::engine_event::{
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::kv_store::{KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
+use crate::engine::namespace_mutation::{
+  NamespaceMutationAcknowledgement, NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind,
+  NamespaceMutationSourceIdentity, validate_existing_namespace_root,
+};
 use crate::engine::request_context::RequestContext;
 use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
+
+#[derive(Debug)]
+enum VersionMutationCounterEffect {
+  None,
+  SnapshotCreated,
+  SnapshotDeleted,
+  ForkCreated,
+  ForkDeleted,
+}
+
+#[derive(Debug)]
+struct VersionMutationEffects {
+  throughput_bytes: u64,
+  counter: VersionMutationCounterEffect,
+  events: Vec<(&'static str, serde_json::Value)>,
+}
+
+impl VersionMutationEffects {
+  fn new(throughput_bytes: u64, counter: VersionMutationCounterEffect) -> Self {
+    Self { throughput_bytes, counter, events: Vec::new() }
+  }
+
+  fn with_event(mut self, event_type: &'static str, payload: serde_json::Value) -> Self {
+    self.events.push((event_type, payload));
+    self
+  }
+}
+
+struct VersionMutationFanout<'a> {
+  engine: &'a StorageEngine,
+  context: Option<&'a RequestContext>,
+  effects: Arc<OnceLock<VersionMutationEffects>>,
+}
+
+impl NamespaceMutationFanout for VersionMutationFanout<'_> {
+  fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
+    let Some(effects) = self.effects.get() else {
+      tracing::error!(operation_id = %acknowledgement.operation_id, "Version mutation committed without post-commit effects");
+      return;
+    };
+
+    self.engine.counters().record_write(effects.throughput_bytes);
+    match effects.counter {
+      VersionMutationCounterEffect::None => {}
+      VersionMutationCounterEffect::SnapshotCreated => self.engine.counters().increment_snapshots(),
+      VersionMutationCounterEffect::SnapshotDeleted => self.engine.counters().decrement_snapshots(),
+      VersionMutationCounterEffect::ForkCreated => self.engine.counters().increment_forks(),
+      VersionMutationCounterEffect::ForkDeleted => self.engine.counters().decrement_forks(),
+    }
+
+    let Some(context) = self.context else {
+      return;
+    };
+    for (event_type, event_payload) in &effects.events {
+      let mut payload = event_payload.clone();
+      if let Err(error) = acknowledgement.annotate_event_payload(&mut payload) {
+        tracing::error!(operation_id = %acknowledgement.operation_id, error = %error, "Version mutation event payload is invalid");
+        continue;
+      }
+      context.emit(event_type, payload);
+    }
+  }
+}
 
 /// Information about a named snapshot (a saved point-in-time reference).
 #[derive(Debug, Clone)]
@@ -249,16 +317,61 @@ impl<'a> VersionManager<'a> {
     self.engine.compute_hash(format!("::aeordb:fork:{}", name).as_bytes())
   }
 
-  /// Persist a deletion to disk by writing a DeletionRecord.
-  /// The `key_string` is the domain-prefixed key (before hashing) so
-  /// that `open_internal` can recompute the hash and replay the deletion.
-  fn persist_deletion(engine: &StorageEngine, key_string: &str) -> EngineResult<()> {
+  fn locator_source_path(family: &str, key: &[u8]) -> String {
+    format!("/.aeordb-system/version-locators/{family}/{}", hex::encode(key))
+  }
+
+  fn read_snapshot_locator(engine: &StorageEngine, key: &[u8], name: &str) -> EngineResult<Option<SnapshotInfo>> {
+    let Some((header, stored_key, value)) = engine.get_entry(key)? else {
+      return Ok(None);
+    };
+    if header.entry_type != EntryType::Snapshot || stored_key != key {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("snapshot locator '{}' does not select a Snapshot entry", name) });
+    }
+    SnapshotInfo::deserialize(&value, engine.hash_algo().hash_length(), header.entry_version).map(Some)
+  }
+
+  fn read_fork_locator(engine: &StorageEngine, key: &[u8], name: &str) -> EngineResult<Option<ForkInfo>> {
+    let Some((header, stored_key, value)) = engine.get_entry(key)? else {
+      return Ok(None);
+    };
+    if header.entry_type != EntryType::Fork || stored_key != key {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("fork locator '{}' does not select a Fork entry", name) });
+    }
+    ForkInfo::deserialize(&value, engine.hash_algo().hash_length(), header.entry_version).map(Some)
+  }
+
+  /// Prepare the durable tombstone needed for deletion replay without writing
+  /// it before the owning namespace transaction is admitted.
+  fn prepare_deletion(engine: &StorageEngine, key_string: &str) -> EngineResult<(Vec<u8>, Vec<u8>)> {
     let deletion = DeletionRecord::new(key_string.to_string(), None);
     let deletion_key = engine.compute_hash(format!("del:{}:{}", key_string, deletion.deleted_at).as_bytes())?;
     let deletion_value = deletion.serialize();
-    engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
-    engine.counters().record_write(0);
-    Ok(())
+    Ok((deletion_key, deletion_value))
+  }
+
+  fn execute_version_mutation<'operation, T, F>(
+    &'operation self,
+    context: Option<&'operation RequestContext>,
+    prepare: F,
+  ) -> EngineResult<T>
+  where
+    F: FnOnce(&StorageEngine) -> EngineResult<(Option<(NamespaceMutationBatch, VersionMutationEffects)>, T)>,
+  {
+    let effects = Arc::new(OnceLock::new());
+    let fanout = Arc::new(VersionMutationFanout { engine: self.engine, context, effects: effects.clone() });
+    let coordinator = NamespaceMutationCoordinator::with_fanout(self.engine, fanout);
+    let (_acknowledgement, output) = coordinator.prepare_and_maybe_execute(|planning_engine| {
+      let (prepared, output) = prepare(planning_engine)?;
+      let Some((batch, planned_effects)) = prepared else {
+        return Ok((None, output));
+      };
+      effects
+        .set(planned_effects)
+        .map_err(|_| EngineError::InvalidInput("version mutation effects were prepared more than once".to_string()))?;
+      Ok((Some(batch), output))
+    })?;
+    Ok(output)
   }
 
   /// Get the current HEAD hash from the file header.
@@ -269,31 +382,16 @@ impl<'a> VersionManager<'a> {
   /// Look up a fork's current root hash by name.
   pub fn get_fork_hash(&self, name: &str) -> EngineResult<Option<Vec<u8>>> {
     let key = self.fork_key(name)?;
-    // get_entry already returns None for deleted entries (snapshot.get filters them)
-    let entry = self.engine.get_entry(&key)?;
-
-    let Some((header, _key, value)) = entry else {
-      return Ok(None);
-    };
-
-    let hash_length = self.engine.hash_algo().hash_length();
-    let fork_info = ForkInfo::deserialize(&value, hash_length, header.entry_version)?;
-    Ok(Some(fork_info.root_hash))
+    Ok(Self::read_fork_locator(self.engine, &key, name)?.map(|fork| fork.root_hash))
   }
 
   /// Look up a snapshot's root hash by name.
   pub fn get_snapshot_hash(&self, name: &str) -> EngineResult<Vec<u8>> {
     let key = self.snapshot_key(name)?;
-    // get_entry already returns None for deleted entries (snapshot.get filters them)
-    let entry = self.engine.get_entry(&key)?;
-
-    let Some((header, _key, value)) = entry else {
+    let Some(snapshot) = Self::read_snapshot_locator(self.engine, &key, name)? else {
       return Err(EngineError::NotFound(format!("Snapshot not found: {}", name)));
     };
-
-    let hash_length = self.engine.hash_algo().hash_length();
-    let snapshot_info = SnapshotInfo::deserialize(&value, hash_length, header.entry_version)?;
-    Ok(snapshot_info.root_hash)
+    Ok(snapshot.root_hash)
   }
 
   /// Resolve a version name to a root hash.
@@ -320,87 +418,85 @@ impl<'a> VersionManager<'a> {
     let _mem = PhaseSampler::start("create_snapshot", std::time::Duration::from_millis(50));
     crate::engine::lifecycle_config::ensure_snapshot_writes_enabled(self.engine)?;
     let key = self.snapshot_key(name)?;
-
-    // Check for duplicate name (only if not deleted)
-    if self.engine.has_entry(&key)? && !self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", name)));
-    }
-
-    let root_hash = self.get_head_hash()?;
     let created_at = chrono::Utc::now().timestamp_millis();
-    let hash_length = self.engine.hash_algo().hash_length();
-
-    // Deduplicate: if an existing snapshot has the same root hash,
-    // HEAD hasn't changed — return the existing snapshot as-is.
-    let existing_snapshots = self.list_snapshots()?;
-    for existing in &existing_snapshots {
-      if existing.root_hash == root_hash {
-        return Ok(existing.clone());
+    let name = name.to_string();
+    self.execute_version_mutation(Some(ctx), move |planning_engine| {
+      if Self::read_snapshot_locator(planning_engine, &key, &name)?.is_some() {
+        return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", name)));
       }
-    }
 
-    // Default snapshot type to "manual" if the caller didn't specify.
-    // Callers creating safety/auto snapshots should set "type" = "auto" so
-    // they're eligible for lifecycle retention pruning.
-    let mut metadata = metadata;
-    metadata
-      .entry(crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string())
-      .or_insert_with(|| crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string());
+      let root_hash = planning_engine.head_hash()?;
+      let existing_snapshots = self.list_snapshots()?;
+      if let Some(existing) = existing_snapshots.into_iter().find(|existing| existing.root_hash == root_hash) {
+        return Ok((None, existing));
+      }
 
-    let snapshot_info = SnapshotInfo { name: name.to_string(), root_hash, created_at, metadata };
+      let mut metadata = metadata;
+      metadata
+        .entry(crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string())
+        .or_insert_with(|| crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string());
+      let snapshot_info = SnapshotInfo { name: name.clone(), root_hash: root_hash.clone(), created_at, metadata };
+      let value = snapshot_info.serialize(planning_engine.hash_algo().hash_length())?;
 
-    let value = snapshot_info.serialize(hash_length)?;
-
-    self.engine.store_entry_typed(EntryType::Snapshot, &key, &value, KV_TYPE_SNAPSHOT)?;
-
-    self.engine.counters().record_write(value.len() as u64);
-    self.engine.counters().increment_snapshots();
-
-    // Emit version created event
-    let version_data = VersionEventData {
-      name: name.to_string(),
-      version_type: Some("snapshot".to_string()),
-      root_hash: hex::encode(&snapshot_info.root_hash),
-      created_at: Some(snapshot_info.created_at),
-    };
-    ctx.emit(EVENT_VERSIONS_CREATED, serde_json::json!({"versions": [version_data]}));
-
-    Ok(snapshot_info)
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      batch.replace_locator(EntryType::Snapshot, key.clone(), value.clone(), 0)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("snapshots", &key),
+        entry_type: Some(EntryType::Snapshot.to_u8()),
+        previous_identity: None,
+        new_identity: Some(root_hash),
+      })?;
+      let version_data = VersionEventData {
+        name: name.clone(),
+        version_type: Some("snapshot".to_string()),
+        root_hash: hex::encode(&snapshot_info.root_hash),
+        created_at: Some(snapshot_info.created_at),
+      };
+      let effects = VersionMutationEffects::new(value.len() as u64, VersionMutationCounterEffect::SnapshotCreated)
+        .with_event(EVENT_VERSIONS_CREATED, serde_json::json!({"versions": [version_data]}));
+      Ok((Some((batch, effects)), snapshot_info))
+    })
   }
 
   /// Restore a named snapshot by rewinding HEAD to its root hash.
   pub fn restore_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
-    let root_hash = self.get_snapshot_hash(name)?;
-    let _namespace = self.engine.direct_hard_authority_guard()?;
-    self.engine.update_head(&root_hash)?;
-    self.engine.counters().record_write(0);
+    let name = name.to_string();
+    self.execute_version_mutation(Some(ctx), move |planning_engine| {
+      let root_hash = self.get_snapshot_hash(&name)?;
+      let previous_root_hash = planning_engine.head_hash()?;
+      if previous_root_hash == root_hash {
+        return Ok((None, ()));
+      }
 
-    // Emit version restored event
-    ctx.emit(
-      EVENT_VERSIONS_RESTORED,
-      serde_json::json!({"versions": [VersionEventData {
-        name: name.to_string(),
-        version_type: Some("snapshot".to_string()),
-        root_hash: hex::encode(&root_hash),
-        created_at: None,
-      }]}),
-    );
-
-    Ok(())
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
+      batch.set_head_hash(root_hash.clone());
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: "/".to_string(),
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity: Some(previous_root_hash),
+        new_identity: Some(root_hash.clone()),
+      })?;
+      let effects = VersionMutationEffects::new(0, VersionMutationCounterEffect::None).with_event(
+        EVENT_VERSIONS_RESTORED,
+        serde_json::json!({"versions": [VersionEventData {
+          name: name.clone(),
+          version_type: Some("snapshot".to_string()),
+          root_hash: hex::encode(&root_hash),
+          created_at: None,
+        }]}),
+      );
+      Ok((Some((batch, effects)), ()))
+    })
   }
 
   /// List all snapshots, sorted by created_at ascending.
   pub fn list_snapshots(&self) -> EngineResult<Vec<SnapshotInfo>> {
     let hash_length = self.engine.hash_algo().hash_length();
-    let entries = self.engine.entries_by_type(KV_TYPE_SNAPSHOT)?;
+    let entries = self.engine.entries_by_type_strict(KV_TYPE_SNAPSHOT)?;
 
     let mut snapshots = Vec::new();
-    for (key, value) in entries {
-      // Skip deleted entries
-      if self.engine.is_entry_deleted(&key)? {
-        continue;
-      }
-      let snapshot = SnapshotInfo::deserialize(&value, hash_length, 0)?;
+    for (header, _key, value) in entries {
+      let snapshot = SnapshotInfo::deserialize(&value, hash_length, header.entry_version)?;
       snapshots.push(snapshot);
     }
 
@@ -423,13 +519,9 @@ impl<'a> VersionManager<'a> {
         return Ok(snap);
       }
     }
-    // Fall back to name lookup
-    let hash_length = self.engine.hash_algo().hash_length();
     let key = self.snapshot_key(identifier)?;
-    match self.engine.get_entry(&key)? {
-      Some((_header, _key, value)) => Ok(SnapshotInfo::deserialize(&value, hash_length, 0)?),
-      None => Err(EngineError::NotFound(format!("Snapshot not found: {}", identifier))),
-    }
+    Self::read_snapshot_locator(self.engine, &key, identifier)?
+      .ok_or_else(|| EngineError::NotFound(format!("Snapshot not found: {}", identifier)))
   }
 
   /// Delete a named snapshot by marking its KV entry as deleted and
@@ -437,75 +529,83 @@ impl<'a> VersionManager<'a> {
   pub fn delete_snapshot(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let _mem = PhaseSampler::start("delete_snapshot", std::time::Duration::from_millis(50));
     let key = self.snapshot_key(name)?;
+    let name = name.to_string();
+    self.execute_version_mutation(Some(ctx), move |planning_engine| {
+      let Some(snapshot) = Self::read_snapshot_locator(planning_engine, &key, &name)? else {
+        return Err(EngineError::NotFound(format!("Snapshot not found: {}", name)));
+      };
+      let key_string = format!("snap:{}", name);
+      let (deletion_key, deletion_value) = Self::prepare_deletion(planning_engine, &key_string)?;
 
-    if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::NotFound(format!("Snapshot not found: {}", name)));
-    }
-
-    self.engine.mark_entry_deleted(&key)?;
-
-    // Persist the deletion to disk so it survives restart.
-    let key_string = format!("snap:{}", name);
-    Self::persist_deletion(self.engine, &key_string)?;
-
-    self.engine.counters().decrement_snapshots();
-
-    // Emit version deleted event
-    ctx.emit(
-      EVENT_VERSIONS_DELETED,
-      serde_json::json!({"versions": [VersionEventData {
-        name: name.to_string(),
-        version_type: Some("snapshot".to_string()),
-        root_hash: hex::encode(&key),
-        created_at: None,
-      }]}),
-    );
-
-    Ok(())
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion_value, 0)?;
+      batch.retire_locator(key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("snapshots", &key),
+        entry_type: Some(EntryType::Snapshot.to_u8()),
+        previous_identity: Some(snapshot.root_hash),
+        new_identity: None,
+      })?;
+      let effects = VersionMutationEffects::new(0, VersionMutationCounterEffect::SnapshotDeleted).with_event(
+        EVENT_VERSIONS_DELETED,
+        serde_json::json!({"versions": [VersionEventData {
+          name: name.clone(),
+          version_type: Some("snapshot".to_string()),
+          root_hash: hex::encode(&key),
+          created_at: None,
+        }]}),
+      );
+      Ok((Some((batch, effects)), ()))
+    })
   }
 
   /// Rename a snapshot. Creates a new snapshot entry with the new name
   /// and the same root hash/metadata, then deletes the old one.
-  pub fn rename_snapshot(&self, _ctx: &RequestContext, old_name: &str, new_name: &str) -> EngineResult<SnapshotInfo> {
+  pub fn rename_snapshot(&self, ctx: &RequestContext, old_name: &str, new_name: &str) -> EngineResult<SnapshotInfo> {
     crate::engine::lifecycle_config::ensure_snapshot_writes_enabled(self.engine)?;
     let old_key = self.snapshot_key(old_name)?;
-    let entry = self.engine.get_entry(&old_key)?;
-    let Some((header, _key, value)) = entry else {
-      return Err(EngineError::NotFound(format!("Snapshot not found: {}", old_name)));
-    };
-
-    let hash_length = self.engine.hash_algo().hash_length();
-    let old_snapshot = SnapshotInfo::deserialize(&value, hash_length, header.entry_version)?;
-
     let new_key = self.snapshot_key(new_name)?;
-    if self.engine.has_entry(&new_key)? && !self.engine.is_entry_deleted(&new_key)? {
-      return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", new_name)));
-    }
+    let old_name = old_name.to_string();
+    let new_name = new_name.to_string();
+    self.execute_version_mutation(Some(ctx), move |planning_engine| {
+      let Some(old_snapshot) = Self::read_snapshot_locator(planning_engine, &old_key, &old_name)? else {
+        return Err(EngineError::NotFound(format!("Snapshot not found: {}", old_name)));
+      };
+      if Self::read_snapshot_locator(planning_engine, &new_key, &new_name)?.is_some() {
+        return Err(EngineError::AlreadyExists(format!("Snapshot already exists: {}", new_name)));
+      }
 
-    // User-initiated rename promotes auto-snapshots to manual: the user has
-    // expressed intent to keep this snapshot, so it shouldn't be pruned by the
-    // auto-retention policy.
-    let mut metadata = old_snapshot.metadata;
-    metadata.insert(
-      crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
-      crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string(),
-    );
+      let hash_length = planning_engine.hash_algo().hash_length();
+      let root_hash = old_snapshot.root_hash.clone();
+      let mut metadata = old_snapshot.metadata;
+      metadata.insert(
+        crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
+        crate::engine::lifecycle_config::SNAPSHOT_TYPE_MANUAL.to_string(),
+      );
+      let new_snapshot =
+        SnapshotInfo { name: new_name.clone(), root_hash: root_hash.clone(), created_at: old_snapshot.created_at, metadata };
+      let new_value = new_snapshot.serialize(hash_length)?;
+      let (deletion_key, deletion_value) = Self::prepare_deletion(planning_engine, &format!("snap:{}", old_name))?;
 
-    let new_snapshot =
-      SnapshotInfo { name: new_name.to_string(), root_hash: old_snapshot.root_hash, created_at: old_snapshot.created_at, metadata };
-
-    let new_value = new_snapshot.serialize(hash_length)?;
-    self.engine.store_entry_typed(
-      crate::engine::entry_type::EntryType::Snapshot,
-      &new_key,
-      &new_value,
-      crate::engine::kv_store::KV_TYPE_SNAPSHOT,
-    )?;
-
-    self.engine.mark_entry_deleted(&old_key)?;
-    self.engine.counters().record_write(new_value.len() as u64);
-
-    Ok(new_snapshot)
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion_value, 0)?;
+      batch.replace_locator(EntryType::Snapshot, new_key.clone(), new_value.clone(), 0)?;
+      batch.retire_locator(old_key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("snapshots", &old_key),
+        entry_type: Some(EntryType::Snapshot.to_u8()),
+        previous_identity: Some(root_hash.clone()),
+        new_identity: None,
+      })?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("snapshots", &new_key),
+        entry_type: Some(EntryType::Snapshot.to_u8()),
+        previous_identity: None,
+        new_identity: Some(root_hash),
+      })?;
+      let effects = VersionMutationEffects::new(new_value.len() as u64, VersionMutationCounterEffect::None);
+      Ok((Some((batch, effects)), new_snapshot))
+    })
   }
 
   /// Create a named fork for isolated writes.
@@ -516,107 +616,126 @@ impl<'a> VersionManager<'a> {
   /// Returns an error if a fork with the given name already exists.
   pub fn create_fork(&self, ctx: &RequestContext, name: &str, base: Option<&str>) -> EngineResult<ForkInfo> {
     let key = self.fork_key(name)?;
-
-    // Check for duplicate fork name
-    if self.engine.has_entry(&key)? && !self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::AlreadyExists(format!("Fork already exists: {}", name)));
-    }
-
-    let root_hash = match base {
-      None | Some("HEAD") => self.get_head_hash()?,
-      Some(snapshot_name) => self.get_snapshot_hash(snapshot_name)?,
-    };
-
     let created_at = chrono::Utc::now().timestamp_millis();
+    let name = name.to_string();
+    let base = base.map(str::to_string);
+    self.execute_version_mutation(Some(ctx), move |planning_engine| {
+      if Self::read_fork_locator(planning_engine, &key, &name)?.is_some() {
+        return Err(EngineError::AlreadyExists(format!("Fork already exists: {}", name)));
+      }
+      let root_hash = match base.as_deref() {
+        None | Some("HEAD") => planning_engine.head_hash()?,
+        Some(snapshot_name) => self.get_snapshot_hash(snapshot_name)?,
+      };
+      let fork_info = ForkInfo { name: name.clone(), root_hash: root_hash.clone(), created_at };
+      let value = fork_info.serialize(planning_engine.hash_algo().hash_length())?;
 
-    let fork_info = ForkInfo { name: name.to_string(), root_hash, created_at };
-
-    let hash_length = self.engine.hash_algo().hash_length();
-    let value = fork_info.serialize(hash_length)?;
-
-    self.engine.store_entry_typed(EntryType::Fork, &key, &value, KV_TYPE_FORK)?;
-
-    self.engine.counters().record_write(value.len() as u64);
-    self.engine.counters().increment_forks();
-
-    // Emit version created event
-    let version_data = VersionEventData {
-      name: name.to_string(),
-      version_type: Some("fork".to_string()),
-      root_hash: hex::encode(&fork_info.root_hash),
-      created_at: Some(fork_info.created_at),
-    };
-    ctx.emit(EVENT_VERSIONS_CREATED, serde_json::json!({"versions": [version_data]}));
-
-    Ok(fork_info)
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      batch.replace_locator(EntryType::Fork, key.clone(), value.clone(), 0)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("forks", &key),
+        entry_type: Some(EntryType::Fork.to_u8()),
+        previous_identity: None,
+        new_identity: Some(root_hash),
+      })?;
+      let version_data = VersionEventData {
+        name: name.clone(),
+        version_type: Some("fork".to_string()),
+        root_hash: hex::encode(&fork_info.root_hash),
+        created_at: Some(fork_info.created_at),
+      };
+      let effects = VersionMutationEffects::new(value.len() as u64, VersionMutationCounterEffect::ForkCreated)
+        .with_event(EVENT_VERSIONS_CREATED, serde_json::json!({"versions": [version_data]}));
+      Ok((Some((batch, effects)), fork_info))
+    })
   }
 
   /// Promote a fork: advance HEAD to the fork's root hash, then delete the fork.
   ///
   /// After promotion, the fork's state becomes the new main-line version.
   pub fn promote_fork(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
-    let fork_hash = self.get_fork_hash(name)?.ok_or_else(|| EngineError::NotFound(format!("Fork not found: {}", name)))?;
+    let key = self.fork_key(name)?;
+    let name = name.to_string();
+    self.execute_version_mutation(Some(ctx), move |planning_engine| {
+      let Some(fork) = Self::read_fork_locator(planning_engine, &key, &name)? else {
+        return Err(EngineError::NotFound(format!("Fork not found: {}", name)));
+      };
+      let previous_root_hash = planning_engine.head_hash()?;
+      let (deletion_key, deletion_value) = Self::prepare_deletion(planning_engine, &format!("::aeordb:fork:{}", name))?;
 
-    let _namespace = self.engine.direct_hard_authority_guard()?;
-    self.engine.update_head(&fork_hash)?;
-    self.engine.counters().record_write(0);
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Promote);
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion_value, 0)?;
+      batch.retire_locator(key.clone())?;
+      batch.set_head_hash(fork.root_hash.clone());
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: "/".to_string(),
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity: Some(previous_root_hash),
+        new_identity: Some(fork.root_hash.clone()),
+      })?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("forks", &key),
+        entry_type: Some(EntryType::Fork.to_u8()),
+        previous_identity: Some(fork.root_hash.clone()),
+        new_identity: None,
+      })?;
 
-    // Emit promote event before abandon (abandon emits its own delete event)
-    ctx.emit(
-      EVENT_VERSIONS_PROMOTED,
-      serde_json::json!({"versions": [VersionEventData {
-        name: name.to_string(),
+      let promoted = VersionEventData {
+        name: name.clone(),
         version_type: Some("fork".to_string()),
-        root_hash: hex::encode(&fork_hash),
+        root_hash: hex::encode(&fork.root_hash),
         created_at: None,
-      }]}),
-    );
-
-    self.abandon_fork(ctx, name)
+      };
+      let deleted =
+        VersionEventData { name: name.clone(), version_type: Some("fork".to_string()), root_hash: hex::encode(&key), created_at: None };
+      let effects = VersionMutationEffects::new(0, VersionMutationCounterEffect::ForkDeleted)
+        .with_event(EVENT_VERSIONS_PROMOTED, serde_json::json!({"versions": [promoted]}))
+        .with_event(EVENT_VERSIONS_DELETED, serde_json::json!({"versions": [deleted]}));
+      Ok((Some((batch, effects)), ()))
+    })
   }
 
   /// Abandon a fork by marking its KV entry as deleted and
   /// writing a DeletionRecord so the deletion survives restart.
   pub fn abandon_fork(&self, ctx: &RequestContext, name: &str) -> EngineResult<()> {
     let key = self.fork_key(name)?;
+    let name = name.to_string();
+    self.execute_version_mutation(Some(ctx), move |planning_engine| {
+      let Some(fork) = Self::read_fork_locator(planning_engine, &key, &name)? else {
+        return Err(EngineError::NotFound(format!("Fork not found: {}", name)));
+      };
+      let (deletion_key, deletion_value) = Self::prepare_deletion(planning_engine, &format!("::aeordb:fork:{}", name))?;
 
-    if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::NotFound(format!("Fork not found: {}", name)));
-    }
-
-    self.engine.mark_entry_deleted(&key)?;
-
-    // Persist the deletion to disk so it survives restart.
-    let key_string = format!("::aeordb:fork:{}", name);
-    Self::persist_deletion(self.engine, &key_string)?;
-
-    self.engine.counters().decrement_forks();
-
-    // Emit version deleted event
-    ctx.emit(
-      EVENT_VERSIONS_DELETED,
-      serde_json::json!({"versions": [VersionEventData {
-        name: name.to_string(),
-        version_type: Some("fork".to_string()),
-        root_hash: hex::encode(&key),
-        created_at: None,
-      }]}),
-    );
-
-    Ok(())
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion_value, 0)?;
+      batch.retire_locator(key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("forks", &key),
+        entry_type: Some(EntryType::Fork.to_u8()),
+        previous_identity: Some(fork.root_hash),
+        new_identity: None,
+      })?;
+      let effects = VersionMutationEffects::new(0, VersionMutationCounterEffect::ForkDeleted).with_event(
+        EVENT_VERSIONS_DELETED,
+        serde_json::json!({"versions": [VersionEventData {
+          name: name.clone(),
+          version_type: Some("fork".to_string()),
+          root_hash: hex::encode(&key),
+          created_at: None,
+        }]}),
+      );
+      Ok((Some((batch, effects)), ()))
+    })
   }
 
   /// List all active forks.
   pub fn list_forks(&self) -> EngineResult<Vec<ForkInfo>> {
     let hash_length = self.engine.hash_algo().hash_length();
-    let entries = self.engine.entries_by_type(KV_TYPE_FORK)?;
+    let entries = self.engine.entries_by_type_strict(KV_TYPE_FORK)?;
 
     let mut forks = Vec::new();
-    for (key, value) in entries {
-      if self.engine.is_entry_deleted(&key)? {
-        continue;
-      }
-      let fork = ForkInfo::deserialize(&value, hash_length, 0)?;
+    for (header, _key, value) in entries {
+      let fork = ForkInfo::deserialize(&value, hash_length, header.entry_version)?;
       forks.push(fork);
     }
 
@@ -627,24 +746,31 @@ impl<'a> VersionManager<'a> {
   /// Update a fork's root hash (used when writing to a fork).
   pub fn update_fork_hash(&self, name: &str, new_root_hash: &[u8]) -> EngineResult<()> {
     let key = self.fork_key(name)?;
+    let name = name.to_string();
+    let new_root_hash = new_root_hash.to_vec();
+    self.execute_version_mutation(None, move |planning_engine| {
+      let Some(existing) = Self::read_fork_locator(planning_engine, &key, &name)? else {
+        return Err(EngineError::NotFound(format!("Fork not found: {}", name)));
+      };
+      let hash_length = planning_engine.hash_algo().hash_length();
+      if existing.root_hash == new_root_hash {
+        return Ok((None, ()));
+      }
+      validate_existing_namespace_root(planning_engine, &new_root_hash, "fork update")?;
+      let previous_root_hash = existing.root_hash;
+      let updated = ForkInfo { name: name.clone(), root_hash: new_root_hash.clone(), created_at: existing.created_at };
+      let value = updated.serialize(hash_length)?;
 
-    if !self.engine.has_entry(&key)? || self.engine.is_entry_deleted(&key)? {
-      return Err(EngineError::NotFound(format!("Fork not found: {}", name)));
-    }
-
-    // Read existing fork info to preserve created_at
-    let entry = self.engine.get_entry(&key)?.ok_or_else(|| EngineError::NotFound(format!("Fork not found: {}", name)))?;
-
-    let hash_length = self.engine.hash_algo().hash_length();
-    let existing = ForkInfo::deserialize(&entry.2, hash_length, entry.0.entry_version)?;
-
-    let updated = ForkInfo { name: name.to_string(), root_hash: new_root_hash.to_vec(), created_at: existing.created_at };
-
-    let value = updated.serialize(hash_length)?;
-
-    self.engine.store_entry_typed(EntryType::Fork, &key, &value, KV_TYPE_FORK)?;
-    self.engine.counters().record_write(value.len() as u64);
-
-    Ok(())
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      batch.replace_locator(EntryType::Fork, key.clone(), value.clone(), 0)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: Self::locator_source_path("forks", &key),
+        entry_type: Some(EntryType::Fork.to_u8()),
+        previous_identity: Some(previous_root_hash),
+        new_identity: Some(new_root_hash),
+      })?;
+      let effects = VersionMutationEffects::new(value.len() as u64, VersionMutationCounterEffect::None);
+      Ok((Some((batch, effects)), ()))
+    })
   }
 }

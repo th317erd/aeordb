@@ -366,8 +366,8 @@
     - [ ] P2e Wave 3: converge version, backup, sync, conflict, and whole-HEAD transition producers on one namespace mutation and locator authority.
       - [ ] Map snapshot restore, fork promotion, version restore, backup import/promote, sync receive/apply, conflict resolution, raw chunk staging, HEAD publication, counters, events, and checkpoint effects.
       - [ ] Add failing operation-ledger, atomicity, malformed/corrupt input, missing chunk, delete-error, acknowledgement, fault, restart, memory-pressure, and architecture tests before production edits.
-      - [ ] Add one bounded whole-HEAD transition plan with explicit source identity and reconciliation evidence; do not materialize an unbounded per-file transaction.
-      - [ ] Route snapshot restore, fork promotion/abandonment, and version restore through one hard acknowledgement with post-commit fanout only.
+      - [x] Add one bounded whole-HEAD transition plan with explicit source identity and reconciliation evidence; do not materialize an unbounded per-file transaction.
+      - [x] Route snapshot restore, fork promotion/abandonment, and version restore through one hard acknowledgement with post-commit fanout only.
       - [ ] Route active-database backup import and HEAD promotion through the shared authority while preserving standalone artifact construction as a separate destination writer.
       - [ ] Route embedded and HTTP sync chunk receive/apply through typed chunk validation and one shared merge authority; reject omitted, malformed, wrong-type, hash-mismatched, or incomplete remote state before checkpoint advancement.
       - [ ] Propagate every sync delete failure except `NotFound`; remove delete-error squelching and prove retries cannot acknowledge partial apply.

@@ -144,6 +144,48 @@ where
   events
 }
 
+async fn assert_one_version_mutation<F>(
+  engine: &StorageEngine,
+  receiver: &mut tokio::sync::broadcast::Receiver<aeordb::engine::EngineEvent>,
+  expected_kind: &str,
+  expected_event_types: &[&str],
+  mutation: F,
+) -> Vec<aeordb::engine::EngineEvent>
+where
+  F: FnOnce(),
+{
+  let durability_before = engine.durability_snapshot().unwrap();
+  let writes_before = engine.counters().snapshot().writes_total;
+  mutation();
+
+  let mut events = Vec::with_capacity(expected_event_types.len());
+  for expected_event_type in expected_event_types {
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+      .await
+      .expect("version mutation event should arrive")
+      .unwrap();
+    assert_eq!(event.event_type, *expected_event_type);
+    events.push(event);
+  }
+
+  let operation_ids: std::collections::HashSet<_> =
+    events.iter().map(|event| assert_namespace_acknowledgement(event, expected_kind)).collect();
+  assert_eq!(operation_ids.len(), 1, "every event from one version mutation must share one operation ID");
+  let publication_sequences: std::collections::HashSet<_> =
+    events.iter().map(|event| event.payload["publication_sequence"].as_u64().unwrap()).collect();
+  assert_eq!(publication_sequences.len(), 1, "every event from one version mutation must share one publication sequence");
+
+  let durability_after = engine.durability_snapshot().unwrap();
+  assert_eq!(durability_after.next_sequence, durability_before.next_sequence + 1);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before + 1, "{expected_kind} must acknowledge one logical write metric");
+  assert_eq!(*publication_sequences.iter().next().unwrap(), durability_after.hard_frontier);
+  assert!(
+    tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv()).await.is_err(),
+    "one logical version mutation emitted an unexpected extra event"
+  );
+  events
+}
+
 #[tokio::test]
 async fn wave_two_batch_and_rename_mutations_emit_one_exact_acknowledgement() {
   let (engine, bus, ctx, _temp) = setup_with_events();
@@ -348,6 +390,54 @@ async fn test_create_directory_emits_entries_created() {
 // ─── Version events: snapshots ──────────────────────────────────────────
 
 #[tokio::test]
+async fn wave_three_version_mutations_emit_one_exact_acknowledgement() {
+  let (engine, bus, ctx, _temp) = setup_with_events();
+  let mut receiver = bus.subscribe();
+  let vm = VersionManager::new(&engine);
+
+  assert_one_version_mutation(&engine, &mut receiver, "system_write", &["versions_created"], || {
+    vm.create_snapshot(&ctx, "wave-three", HashMap::new()).unwrap();
+  })
+  .await;
+
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/wave-three.txt", b"new head", Some("text/plain")).unwrap();
+  assert_one_version_mutation(&engine, &mut receiver, "restore", &["versions_restored"], || {
+    vm.restore_snapshot(&ctx, "wave-three").unwrap();
+  })
+  .await;
+
+  assert_one_version_mutation(&engine, &mut receiver, "system_write", &["versions_deleted"], || {
+    vm.delete_snapshot(&ctx, "wave-three").unwrap();
+  })
+  .await;
+
+  assert_one_version_mutation(&engine, &mut receiver, "system_write", &["versions_created"], || {
+    vm.create_fork(&ctx, "abandon-me", None).unwrap();
+  })
+  .await;
+  assert_one_version_mutation(&engine, &mut receiver, "system_write", &["versions_deleted"], || {
+    vm.abandon_fork(&ctx, "abandon-me").unwrap();
+  })
+  .await;
+
+  let promote_fork = vm.create_fork(&ctx, "promote-me", None).unwrap();
+  let create_event = receiver.recv().await.unwrap();
+  assert_namespace_acknowledgement(&create_event, "system_write");
+  let promoted_root = promote_fork.root_hash;
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/advance-before-promote.txt", b"advance HEAD", Some("text/plain"))
+    .unwrap();
+  assert_ne!(engine.head_hash().unwrap(), promoted_root);
+  assert_one_version_mutation(&engine, &mut receiver, "promote", &["versions_promoted", "versions_deleted"], || {
+    vm.promote_fork(&ctx, "promote-me").unwrap();
+  })
+  .await;
+
+  assert_eq!(engine.head_hash().unwrap(), promoted_root);
+  assert!(vm.get_fork_hash("promote-me").unwrap().is_none());
+}
+
+#[tokio::test]
 async fn test_create_snapshot_emits_version_created() {
   let (engine, bus, ctx, _temp) = setup_with_events();
   let mut rx = bus.subscribe();
@@ -411,6 +501,9 @@ async fn test_restore_snapshot_emits_version_restored() {
   let (engine, bus, ctx, _temp) = setup_with_events();
   let vm = VersionManager::new(&engine);
   vm.create_snapshot(&ctx, "v1", HashMap::new()).unwrap();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/after-snapshot.txt", b"advance HEAD", Some("text/plain"))
+    .unwrap();
 
   let mut rx = bus.subscribe();
   vm.restore_snapshot(&ctx, "v1").unwrap();
@@ -433,6 +526,25 @@ async fn test_restore_nonexistent_snapshot_no_event() {
 
   let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
   assert!(result.is_err(), "should timeout — no events for failed operation");
+}
+
+#[tokio::test]
+async fn test_restore_current_snapshot_is_a_true_no_op() {
+  let (engine, bus, ctx, _temp) = setup_with_events();
+  let vm = VersionManager::new(&engine);
+  vm.create_snapshot(&ctx, "current", HashMap::new()).unwrap();
+
+  let mut rx = bus.subscribe();
+  let durability_before = engine.durability_snapshot().unwrap();
+  let writes_before = engine.counters().snapshot().writes_total;
+  vm.restore_snapshot(&ctx, "current").unwrap();
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, durability_before.next_sequence);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before);
+  assert!(
+    tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await.is_err(),
+    "an unchanged HEAD must not emit a restore acknowledgement"
+  );
 }
 
 // ─── Version events: forks ──────────────────────────────────────────────

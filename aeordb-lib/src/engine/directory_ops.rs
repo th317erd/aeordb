@@ -1270,9 +1270,6 @@ struct DirectoryMutationFanout<'a> {
 
 impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
   fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
-    let mutation_kind = namespace_mutation_kind_name(acknowledgement.kind);
-    metrics::counter!("aeordb_namespace_mutation_acknowledgements_total", "mutation_kind" => mutation_kind).increment(1);
-
     let Some(effects) = self.effects.get() else {
       tracing::error!(operation_id = %acknowledgement.operation_id, "Directory mutation committed without post-commit effects");
       return;
@@ -1357,39 +1354,13 @@ impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
     if let Some(context) = self.context {
       for (event_type, event_payload) in &effects.events {
         let mut payload = event_payload.clone();
-        if let Some(object) = payload.as_object_mut() {
-          object.insert("operation_id".to_string(), serde_json::Value::String(acknowledgement.operation_id.to_string()));
-          object.insert("publication_sequence".to_string(), serde_json::Value::from(acknowledgement.publication_sequence));
-          object.insert("mutation_kind".to_string(), serde_json::Value::String(mutation_kind.to_string()));
-        } else {
-          tracing::error!(operation_id = %acknowledgement.operation_id, "Directory mutation event payload is not an object");
+        if let Err(error) = acknowledgement.annotate_event_payload(&mut payload) {
+          tracing::error!(operation_id = %acknowledgement.operation_id, error = %error, "Directory mutation event payload is invalid");
           continue;
         }
         context.emit(event_type, payload);
       }
     }
-  }
-}
-
-fn namespace_mutation_kind_name(kind: NamespaceMutationKind) -> &'static str {
-  match kind {
-    NamespaceMutationKind::FileWrite => "file_write",
-    NamespaceMutationKind::FileDelete => "file_delete",
-    NamespaceMutationKind::DirectoryCreate => "directory_create",
-    NamespaceMutationKind::DirectoryDelete => "directory_delete",
-    NamespaceMutationKind::SymlinkWrite => "symlink_write",
-    NamespaceMutationKind::SymlinkDelete => "symlink_delete",
-    NamespaceMutationKind::Copy => "copy",
-    NamespaceMutationKind::Rename => "rename",
-    NamespaceMutationKind::BatchWrite => "batch_write",
-    NamespaceMutationKind::Merge => "merge",
-    NamespaceMutationKind::Restore => "restore",
-    NamespaceMutationKind::Promote => "promote",
-    NamespaceMutationKind::Import => "import",
-    NamespaceMutationKind::SyncApply => "sync_apply",
-    NamespaceMutationKind::SystemWrite => "system_write",
-    NamespaceMutationKind::PluginWrite => "plugin_write",
-    NamespaceMutationKind::MaintenanceRepair => "maintenance_repair",
   }
 }
 

@@ -324,6 +324,46 @@ fn no_op_batches_and_dependency_locator_aliases_are_rejected_before_admission() 
 }
 
 #[test]
+fn head_transition_rejects_a_missing_or_wrong_type_root_before_admission() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let fanout = Arc::new(RecordingFanout::default());
+  let coordinator = NamespaceMutationCoordinator::with_fanout(&engine, fanout.clone());
+  let original_head = engine.head_hash().unwrap();
+  let initial_sequence = engine.durability_snapshot().unwrap().next_sequence;
+
+  let missing_root = vec![0xD4; engine.hash_algo().hash_length()];
+  let mut missing = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
+  missing.set_head_hash(missing_root.clone());
+  missing
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path: "/".to_string(),
+      entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+      previous_identity: Some(original_head.clone()),
+      new_identity: Some(missing_root),
+    })
+    .unwrap();
+  assert!(coordinator.execute(missing).is_err());
+
+  let wrong_type_root = vec![0xD5; engine.hash_algo().hash_length()];
+  engine.store_entry(EntryType::FileRecord, &wrong_type_root, b"not a directory root").unwrap();
+  let mut wrong_type = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
+  wrong_type.set_head_hash(wrong_type_root.clone());
+  wrong_type
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path: "/".to_string(),
+      entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+      previous_identity: Some(original_head.clone()),
+      new_identity: Some(wrong_type_root),
+    })
+    .unwrap();
+  assert!(coordinator.execute(wrong_type).is_err());
+
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, initial_sequence);
+  assert!(fanout.acknowledgements().is_empty());
+}
+
+#[test]
 fn dependency_only_batches_and_non_namespace_locator_types_are_rejected_before_admission() {
   let (engine, _temporary) = create_temp_engine_for_tests();
   let fanout = Arc::new(RecordingFanout::default());
@@ -416,7 +456,7 @@ fn soft_fanout_panic_cannot_turn_durably_committed_success_into_failure() {
 }
 
 #[test]
-fn wave_one_activates_only_the_characterized_directory_ops_producer() {
+fn converged_waves_activate_only_characterized_namespace_producers() {
   fn visit(directory: &std::path::Path, violations: &mut Vec<String>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -426,6 +466,7 @@ fn wave_one_activates_only_the_characterized_directory_ops_producer() {
         && path.file_name().and_then(|value| value.to_str()) != Some("namespace_mutation.rs")
         && !path.ends_with("engine/mod.rs")
         && path.file_name().and_then(|value| value.to_str()) != Some("directory_ops.rs")
+        && path.file_name().and_then(|value| value.to_str()) != Some("version_manager.rs")
       {
         let source = std::fs::read_to_string(&path).unwrap();
         if source.contains("NamespaceMutationCoordinator") || source.contains("LocatorReplacementCoordinator") {
@@ -443,10 +484,12 @@ fn wave_one_activates_only_the_characterized_directory_ops_producer() {
 
   let mut violations = Vec::new();
   visit(&package.join("src"), &mut violations);
-  assert!(violations.is_empty(), "P2e Wave 1 must not activate uncharacterized later-wave producers: {}", violations.join(", "));
+  assert!(violations.is_empty(), "P2e must not activate uncharacterized later-wave producers: {}", violations.join(", "));
 
   let directory_ops = std::fs::read_to_string(package.join("src/engine/directory_ops.rs")).unwrap();
   assert!(directory_ops.contains("NamespaceMutationCoordinator"), "the characterized Wave 1 producer must use the shared facade");
+  let version_manager = std::fs::read_to_string(package.join("src/engine/version_manager.rs")).unwrap();
+  assert!(version_manager.contains("NamespaceMutationCoordinator"), "the characterized Wave 3 version producer must use the shared facade");
 }
 
 #[test]
@@ -507,6 +550,60 @@ fn wave_one_entrypoints_cannot_reintroduce_split_namespace_authority() {
     }
     if name != "store_file_internal_inner" {
       assert!(!method.contains(".store_entry"), "Wave 1 entrypoint {name} bypassed dependency planning with a direct entry write");
+    }
+  }
+}
+
+#[test]
+fn wave_three_version_entrypoints_cannot_reintroduce_split_namespace_authority() {
+  fn method_source(source: &str, name: &str) -> String {
+    let marker = format!("fn {name}");
+    let mut collecting = false;
+    let mut lines = Vec::new();
+    for line in source.lines() {
+      if !collecting {
+        if line.contains(&marker) {
+          collecting = true;
+          lines.push(line);
+        }
+        continue;
+      }
+      if line.starts_with("  fn ") || line.starts_with("  pub fn ") || line.starts_with("  pub(crate) fn ") {
+        break;
+      }
+      lines.push(line);
+    }
+    assert!(collecting, "missing VersionManager method {name}");
+    lines.join("\n")
+  }
+
+  let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let source = std::fs::read_to_string(package.join("src/engine/version_manager.rs")).unwrap();
+  let entrypoints = [
+    "create_snapshot",
+    "restore_snapshot",
+    "delete_snapshot",
+    "rename_snapshot",
+    "create_fork",
+    "promote_fork",
+    "abandon_fork",
+    "update_fork_hash",
+  ];
+  let forbidden = [
+    "direct_hard_authority_guard",
+    ".update_head",
+    ".store_entry",
+    ".store_entry_typed",
+    ".mark_entry_deleted",
+    "persist_deletion",
+    "self.abandon_fork",
+  ];
+
+  for name in entrypoints {
+    let method = method_source(&source, name);
+    assert!(method.contains("execute_version_mutation"), "Wave 3 version entrypoint {name} must use the shared namespace authority");
+    for bypass in forbidden {
+      assert!(!method.contains(bypass), "Wave 3 version entrypoint {name} reintroduced split authority through {bypass}");
     }
   }
 }

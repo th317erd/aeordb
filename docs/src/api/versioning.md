@@ -117,6 +117,11 @@ curl http://localhost:6830/versions/snapshots \
 
 Restore a named snapshot, making it the current HEAD. **Requires root.**
 
+The engine validates that the snapshot selects an existing directory root
+before publication. The HEAD transition is acknowledged as one durable
+namespace operation. Restoring the root already selected by HEAD succeeds as a
+no-op and does not emit a version event.
+
 **Request Body:**
 
 ```json
@@ -263,6 +268,12 @@ curl http://localhost:6830/versions/forks \
 ### POST /versions/forks/{name}/promote
 
 Promote a fork's state to HEAD, making it the active version. **Requires root.**
+
+Promotion validates the fork's directory root, publishes HEAD, persists the
+fork deletion record, and retires the fork locator in one durable operation.
+The matching `versions_promoted` and `versions_deleted` SSE events share one
+operation ID and publication sequence; callers cannot observe an acknowledged
+promotion followed by a failed abandonment step.
 
 **Response:** `200 OK`
 

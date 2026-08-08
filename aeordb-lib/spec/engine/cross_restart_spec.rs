@@ -825,6 +825,32 @@ fn test_deleted_snapshot_stays_deleted_across_restart() {
 }
 
 #[test]
+fn test_renamed_snapshot_stays_renamed_across_restart() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+
+  {
+    let engine = create_engine(&dir);
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&ctx, "/rename-source.txt", b"snapshot root", None).unwrap();
+    let vm = VersionManager::new(&engine);
+    let original = vm.create_snapshot(&ctx, "old-name", HashMap::new()).unwrap();
+    let renamed = vm.rename_snapshot(&ctx, "old-name", "new-name").unwrap();
+    assert_eq!(renamed.root_hash, original.root_hash);
+    assert!(vm.get_snapshot_hash("old-name").is_err());
+    assert_eq!(vm.get_snapshot_hash("new-name").unwrap(), original.root_hash);
+  }
+
+  let engine = reopen_engine(&dir);
+  let vm = VersionManager::new(&engine);
+  assert!(vm.get_snapshot_hash("old-name").is_err(), "renamed snapshot source must not reappear after restart");
+  assert!(vm.get_snapshot_hash("new-name").is_ok());
+  let snapshots = vm.list_snapshots().unwrap();
+  assert_eq!(snapshots.len(), 1);
+  assert_eq!(snapshots[0].name, "new-name");
+}
+
+#[test]
 fn test_abandoned_fork_stays_gone_across_restart() {
   let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();

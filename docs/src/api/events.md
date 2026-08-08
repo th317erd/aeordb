@@ -83,7 +83,10 @@ Each event is a JSON object with:
 | `server_ready` | Synthetic first event on ready SSE connections | `{"status": "ready", "version": "...", "startup_time": 1781233139578, "uptime_ms": 6500}` |
 | `entries_created` | Files were created or updated | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 42, "mutation_kind": "file_write"}` |
 | `entries_deleted` | Files were deleted | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 43, "mutation_kind": "file_delete"}` |
-| `versions_created` | A new version (snapshot/fork) was created | Version metadata |
+| `versions_created` | A new version (snapshot/fork) was created | Version metadata plus namespace acknowledgement |
+| `versions_deleted` | A snapshot/fork was deleted or abandoned | Version metadata plus namespace acknowledgement |
+| `versions_restored` | HEAD moved to a retained snapshot root | Version metadata plus namespace acknowledgement |
+| `versions_promoted` | A fork root was promoted to HEAD | Version metadata plus namespace acknowledgement |
 | `permissions_changed` | Permissions were updated for a path | `{"path": "..."}` |
 | `indexes_changed` | Index configuration was updated | `{"path": "..."}` |
 | `tasks_started` | A background task began execution | `{"task_id": "...", "task_type": "...", "args": {...}}` |
@@ -95,18 +98,18 @@ Each event is a JSON object with:
 | `metrics` | Root-only administrative runtime snapshot (every 15s) | `{"counts", "sizes", "throughput", "health", "memory", "durability", "configuration"}` |
 
 Coordinator-owned namespace mutations add these acknowledgement fields to
-`entries_created` and `entries_deleted` payloads only after the exact hard
-publication is durable:
+entry and version relationship payloads only after the exact hard publication
+is durable:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `operation_id` | string | Unique UUID for the logical namespace mutation |
 | `publication_sequence` | integer | Exact durability sequence acknowledged by the engine |
-| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, or `rename` |
+| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, `rename`, `restore`, `promote`, or `system_write` |
 
 AeorDB is migrating producers to this shared acknowledgement path in stages.
-File, directory, symlink, blob/buffered batch, JSON merge, copy, and rename
-producers now use it. Restore/version, sync/import, system/plugin, and
+File, directory, symlink, blob/buffered batch, JSON merge, copy, rename, and
+snapshot/fork producers now use it. Sync/import, other system/plugin, and
 maintenance producers may omit these three fields until their producer wave is
 converted. Clients must therefore treat them as optional during the transition,
 but must not interpret an absent field as a durability failure.
@@ -116,6 +119,12 @@ rename preserve separate `entries_deleted` and `entries_created` events, but
 both events carry the same `operation_id`, `publication_sequence`, and
 `mutation_kind: "rename"`. Batch, merge, and copy operations emit one aggregate
 `entries_created` event after their shared hard acknowledgement.
+
+Fork promotion preserves separate `versions_promoted` and `versions_deleted`
+events for compatibility. Both describe one atomic HEAD transition/fork
+retirement and therefore carry the same operation ID and publication sequence.
+A restore whose snapshot already equals HEAD is a true no-op and emits no
+acknowledgement event.
 
 ---
 

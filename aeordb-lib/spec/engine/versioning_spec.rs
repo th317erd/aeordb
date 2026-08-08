@@ -247,13 +247,20 @@ fn test_fork_isolation() {
   // Create a fork
   let _fork = vm.create_fork(&ctx, "isolated", None).unwrap();
 
-  // Update the fork's hash (simulating a write to the fork)
-  let new_root = engine.compute_hash(b"fake-fork-root").unwrap();
+  // Retain two real namespace roots, restore the first, then point the fork at
+  // the second. Updating the fork must not move current HEAD.
+  ops.store_file_buffered(&ctx, "/head-b.txt", b"head b", None).unwrap();
+  vm.create_snapshot(&ctx, "head-b", HashMap::new()).unwrap();
+  ops.store_file_buffered(&ctx, "/head-c.txt", b"head c", None).unwrap();
+  let new_root = vm.get_head_hash().unwrap();
+  vm.restore_snapshot(&ctx, "head-b").unwrap();
+  let head_before_update = vm.get_head_hash().unwrap();
   vm.update_fork_hash("isolated", &new_root).unwrap();
 
   // HEAD should remain unchanged
   let head_after = vm.get_head_hash().unwrap();
-  assert_eq!(head_before_fork, head_after);
+  assert_eq!(head_before_update, head_after);
+  assert_ne!(head_before_fork, head_after);
 
   // The fork's hash should differ from HEAD
   let fork_hash = vm.get_fork_hash("isolated").unwrap().unwrap();
@@ -268,10 +275,9 @@ fn test_promote_fork() {
   let vm = VersionManager::new(&engine);
 
   vm.create_fork(&ctx, "to-promote", None).unwrap();
-
-  // Update fork hash to something distinct
-  let new_root = engine.compute_hash(b"promoted-root").unwrap();
-  vm.update_fork_hash("to-promote", &new_root).unwrap();
+  let new_root = vm.get_fork_hash("to-promote").unwrap().unwrap();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/after-fork.txt", b"advance HEAD", None).unwrap();
+  assert_ne!(vm.get_head_hash().unwrap(), new_root);
 
   vm.promote_fork(&ctx, "to-promote").unwrap();
 
@@ -297,15 +303,17 @@ fn test_promote_fork_updates_head() {
   let fork = vm.create_fork(&ctx, "update-head", None).unwrap();
   assert_eq!(fork.root_hash, original_head);
 
-  // Simulate a fork diverging by updating its hash
-  let diverged_root = engine.compute_hash(b"diverged-content").unwrap();
-  vm.update_fork_hash("update-head", &diverged_root).unwrap();
+  let diverged_root = fork.root_hash;
+  ops.store_file_buffered(&ctx, "/after-fork.txt", b"advance HEAD", None).unwrap();
+  let advanced_head = vm.get_head_hash().unwrap();
+  assert_ne!(advanced_head, diverged_root);
 
   vm.promote_fork(&ctx, "update-head").unwrap();
 
   let new_head = vm.get_head_hash().unwrap();
   assert_eq!(new_head, diverged_root);
-  assert_ne!(new_head, original_head);
+  assert_eq!(new_head, original_head);
+  assert_ne!(new_head, advanced_head);
 }
 
 #[test]
@@ -547,8 +555,15 @@ fn test_update_fork_hash() {
   let fork = vm.create_fork(&ctx, "mutable", None).unwrap();
   let original_hash = fork.root_hash.clone();
 
-  let new_hash = engine.compute_hash(b"updated-root").unwrap();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/updated-root.txt", b"valid root", None).unwrap();
+  let new_hash = engine.head_hash().unwrap();
+  let durability_before = engine.durability_snapshot().unwrap();
+  let writes_before = engine.counters().snapshot().writes_total;
   vm.update_fork_hash("mutable", &new_hash).unwrap();
+  let durability_after = engine.durability_snapshot().unwrap();
+  assert_eq!(durability_after.next_sequence, durability_before.next_sequence + 1);
+  assert_eq!(durability_after.hard_frontier, durability_before.next_sequence);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before + 1);
 
   let fetched = vm.get_fork_hash("mutable").unwrap().unwrap();
   assert_eq!(fetched, new_hash);
@@ -563,6 +578,64 @@ fn test_update_nonexistent_fork_error() {
 
   let result = vm.update_fork_hash("ghost", &[0u8; 32]);
   assert!(result.is_err());
+}
+
+#[test]
+fn test_update_fork_rejects_missing_or_wrong_type_namespace_roots() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let vm = VersionManager::new(&engine);
+  let original = vm.create_fork(&ctx, "validated", None).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let writes_before = engine.counters().snapshot().writes_total;
+
+  let missing = vec![0xA7; engine.hash_algo().hash_length()];
+  assert!(vm.update_fork_hash("validated", &missing).is_err());
+
+  let wrong_type = vec![0xA8; engine.hash_algo().hash_length()];
+  engine.store_entry(aeordb::engine::EntryType::FileRecord, &wrong_type, b"not a directory").unwrap();
+  assert!(vm.update_fork_hash("validated", &wrong_type).is_err());
+
+  assert_eq!(vm.get_fork_hash("validated").unwrap().unwrap(), original.root_hash);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before);
+}
+
+#[test]
+fn test_version_locators_reject_masquerading_entry_types() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let root_hash = engine.head_hash().unwrap();
+  let hash_length = engine.hash_algo().hash_length();
+
+  let fork_key = engine.compute_hash(b"::aeordb:fork:masquerade").unwrap();
+  let fork_value =
+    aeordb::engine::version_manager::ForkInfo { name: "masquerade".to_string(), root_hash: root_hash.clone(), created_at: 1 }
+      .serialize(hash_length)
+      .unwrap();
+  engine.store_entry_typed(aeordb::engine::EntryType::FileRecord, &fork_key, &fork_value, aeordb::engine::kv_store::KV_TYPE_FORK).unwrap();
+
+  let snapshot_key = engine.compute_hash(b"snap:masquerade").unwrap();
+  let snapshot_value = aeordb::engine::version_manager::SnapshotInfo {
+    name: "masquerade".to_string(),
+    root_hash: root_hash.clone(),
+    created_at: 1,
+    metadata: HashMap::new(),
+  }
+  .serialize(hash_length)
+  .unwrap();
+  engine
+    .store_entry_typed(aeordb::engine::EntryType::FileRecord, &snapshot_key, &snapshot_value, aeordb::engine::kv_store::KV_TYPE_SNAPSHOT)
+    .unwrap();
+
+  let vm = VersionManager::new(&engine);
+  assert!(vm.get_fork_hash("masquerade").is_err());
+  assert!(vm.get_snapshot_hash("masquerade").is_err());
+  let head_before = engine.head_hash().unwrap();
+  assert!(vm.promote_fork(&ctx, "masquerade").is_err());
+  assert_eq!(engine.head_hash().unwrap(), head_before);
 }
 
 #[test]
@@ -651,7 +724,8 @@ fn test_multiple_forks_independent_hashes() {
   assert_eq!(fork_a.root_hash, fork_b.root_hash);
 
   // Update fork-a only
-  let new_hash = engine.compute_hash(b"fork-a-data").unwrap();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/fork-a-data.txt", b"valid root", None).unwrap();
+  let new_hash = engine.head_hash().unwrap();
   vm.update_fork_hash("fork-a", &new_hash).unwrap();
 
   // fork-a changed, fork-b unchanged
@@ -676,7 +750,8 @@ fn test_resolve_prefers_fork_over_snapshot_with_same_name() {
   vm.create_fork(&ctx, "shared", None).unwrap();
 
   // Update fork's hash to something distinct
-  let fork_root = engine.compute_hash(b"fork-wins").unwrap();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/fork-wins.txt", b"valid root", None).unwrap();
+  let fork_root = engine.head_hash().unwrap();
   vm.update_fork_hash("shared", &fork_root).unwrap();
 
   // resolve_root_hash should prefer fork

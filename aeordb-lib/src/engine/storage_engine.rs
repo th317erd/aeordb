@@ -4724,6 +4724,29 @@ impl StorageEngine {
     Ok(results)
   }
 
+  /// Return every live entry for a KV type, propagating any malformed row
+  /// instead of silently omitting it. Authority and migration callers use this
+  /// when an incomplete result would be indistinguishable from success.
+  pub(crate) fn entries_by_type_strict(&self, target_type: u8) -> EngineResult<Vec<EntryData>> {
+    let _operation = self.operation_guard("entries_by_type_strict")?;
+    let entries = self.kv_snapshot.load().iter_by_type(target_type)?;
+    let mut results = Vec::with_capacity(entries.len());
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+
+    for entry in entries {
+      Self::validate_kv_entry_offset(&writer, &entry, &entry.hash, "entries_by_type_strict")?;
+      let (header, key, value) = writer.read_entry_at_shared(entry.offset)?;
+      if key != entry.hash || header.entry_type.to_kv_type() != target_type {
+        return Err(EngineError::CorruptEntry {
+          offset: entry.offset,
+          reason: format!("strict KV type scan found mismatched entry for key {}", hex::encode(&entry.hash)),
+        });
+      }
+      results.push((header, key, value));
+    }
+    Ok(results)
+  }
+
   /// Return aggregate statistics about the database including entry counts
   /// by type, file sizes, void space, and timestamps.
   pub fn stats(&self) -> EngineResult<DatabaseStats> {
