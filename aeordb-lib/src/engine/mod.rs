@@ -69,6 +69,7 @@ pub mod memory_coordinator;
 pub mod merge;
 pub mod merge_patch;
 pub mod metrics_pulse;
+pub mod namespace_mutation;
 pub mod native_durability;
 pub mod native_parsers;
 pub mod nvt;
@@ -173,6 +174,10 @@ pub use path_utils::{normalize_path, parent_path, file_name, path_segments};
 pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE, MINIMUM_USEFUL_VOID_SIZE};
 pub use storage_engine::{
   ChunkEntryMetadata, ChunkReadLocation, EngineStartupProgress, EngineStartupProgressCallback, StorageEngine, WriteBatch,
+};
+pub use namespace_mutation::{
+  LocatorPhysicalIncarnation, LocatorReplacement, LocatorReplacementCoordinator, NamespaceMutationAcknowledgement, NamespaceMutationBatch,
+  NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind, NamespaceMutationSourceIdentity,
 };
 pub use system_family_policy::SystemFamilyPolicyResolver;
 pub use directory_ops::{

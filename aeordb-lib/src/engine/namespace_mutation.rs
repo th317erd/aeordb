@@ -1,0 +1,480 @@
+use std::collections::HashSet;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use serde::Serialize;
+use uuid::Uuid;
+
+use crate::engine::entry_header::EntryHeader;
+use crate::engine::entry_type::EntryType;
+use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::kv_store::KVEntry;
+use crate::engine::storage_engine::{StorageEngine, TransactionGuard};
+
+/// Logical mutation families accepted by the shared namespace authority.
+///
+/// P2d freezes this service contract without changing existing producer
+/// behavior. P2e migrates each producer wave onto these operation families.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceMutationKind {
+  FileWrite,
+  FileDelete,
+  DirectoryCreate,
+  DirectoryDelete,
+  SymlinkWrite,
+  SymlinkDelete,
+  Copy,
+  Rename,
+  BatchWrite,
+  Merge,
+  Restore,
+  Promote,
+  Import,
+  SyncApply,
+  SystemWrite,
+  PluginWrite,
+  MaintenanceRepair,
+}
+
+/// Exact physical KV incarnation selected for a stable locator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LocatorPhysicalIncarnation {
+  pub type_flags: u8,
+  pub offset: u64,
+  pub total_length: u32,
+}
+
+impl From<&KVEntry> for LocatorPhysicalIncarnation {
+  fn from(entry: &KVEntry) -> Self {
+    Self { type_flags: entry.type_flags, offset: entry.offset, total_length: entry.total_length }
+  }
+}
+
+/// One stable-key transition in dependency order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LocatorReplacement {
+  pub ordinal: u32,
+  pub stable_key: Vec<u8>,
+  pub old_incarnation: Option<LocatorPhysicalIncarnation>,
+  pub new_incarnation: Option<LocatorPhysicalIncarnation>,
+}
+
+/// Canonical source identity attached to one logical mutation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NamespaceMutationSourceIdentity {
+  pub path: String,
+  pub entry_type: Option<u8>,
+  pub previous_identity: Option<Vec<u8>>,
+  pub new_identity: Option<Vec<u8>>,
+}
+
+/// One hard-authority acknowledgement produced after the exact durability
+/// waiter has crossed the global frontier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NamespaceMutationAcknowledgement {
+  pub operation_id: Uuid,
+  pub kind: NamespaceMutationKind,
+  pub publication_sequence: u64,
+  pub previous_root_hash: Vec<u8>,
+  pub root_hash: Vec<u8>,
+  pub source_identities: Vec<NamespaceMutationSourceIdentity>,
+  pub locator_replacements: Vec<LocatorReplacement>,
+}
+
+/// Recoverable-soft fanout invoked exactly once after hard namespace authority.
+/// Implementations must reconstruct gaps from authority and therefore cannot
+/// make a committed user mutation fail.
+pub trait NamespaceMutationFanout: Send + Sync {
+  fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement);
+}
+
+#[derive(Debug)]
+struct NoopNamespaceMutationFanout;
+
+impl NamespaceMutationFanout for NoopNamespaceMutationFanout {
+  fn publish(&self, _acknowledgement: &NamespaceMutationAcknowledgement) {}
+}
+
+#[derive(Debug)]
+struct PlannedEntryWrite {
+  entry_type: EntryType,
+  key: Vec<u8>,
+  value: Vec<u8>,
+  flags: u8,
+}
+
+#[derive(Debug)]
+enum PlannedLocatorMutation {
+  Replace(PlannedEntryWrite),
+  Retire { key: Vec<u8> },
+}
+
+impl PlannedLocatorMutation {
+  fn key(&self) -> &[u8] {
+    match self {
+      Self::Replace(write) => &write.key,
+      Self::Retire { key } => key,
+    }
+  }
+}
+
+/// Fully prepared v3 namespace publication.
+///
+/// Construction performs no engine mutation. Duplicate stable locators are
+/// rejected while the batch is still only caller-owned memory.
+#[derive(Debug)]
+pub struct NamespaceMutationBatch {
+  kind: NamespaceMutationKind,
+  dependencies: Vec<PlannedEntryWrite>,
+  locator_mutations: Vec<PlannedLocatorMutation>,
+  write_keys: HashSet<Vec<u8>>,
+  source_identities: Vec<NamespaceMutationSourceIdentity>,
+  head_hash: Option<Vec<u8>>,
+}
+
+impl NamespaceMutationBatch {
+  pub fn new(kind: NamespaceMutationKind) -> Self {
+    Self {
+      kind,
+      dependencies: Vec::new(),
+      locator_mutations: Vec::new(),
+      write_keys: HashSet::new(),
+      source_identities: Vec::new(),
+      head_hash: None,
+    }
+  }
+
+  pub fn store_dependency(&mut self, entry_type: EntryType, key: Vec<u8>, value: Vec<u8>, flags: u8) -> EngineResult<()> {
+    self.reserve_write_key(&key, "dependency")?;
+    self.dependencies.push(PlannedEntryWrite { entry_type, key, value, flags });
+    Ok(())
+  }
+
+  pub fn replace_locator(&mut self, entry_type: EntryType, key: Vec<u8>, value: Vec<u8>, flags: u8) -> EngineResult<()> {
+    validate_locator_entry_type(entry_type)?;
+    self.reserve_write_key(&key, "stable locator")?;
+    self.locator_mutations.push(PlannedLocatorMutation::Replace(PlannedEntryWrite { entry_type, key, value, flags }));
+    Ok(())
+  }
+
+  pub fn retire_locator(&mut self, key: Vec<u8>) -> EngineResult<()> {
+    self.reserve_write_key(&key, "stable locator")?;
+    self.locator_mutations.push(PlannedLocatorMutation::Retire { key });
+    Ok(())
+  }
+
+  pub fn add_source_identity(&mut self, source: NamespaceMutationSourceIdentity) -> EngineResult<()> {
+    if source.path.is_empty() {
+      return Err(EngineError::InvalidInput("namespace mutation source path cannot be empty".to_string()));
+    }
+    if source.path.bytes().any(|byte| byte < 0x20 || byte == 0x7F) {
+      return Err(EngineError::InvalidInput("namespace mutation source path contains control characters".to_string()));
+    }
+    if crate::engine::path_utils::normalize_path(&source.path) != source.path {
+      return Err(EngineError::InvalidInput("namespace mutation source path must be canonical".to_string()));
+    }
+    if source.previous_identity.is_none() && source.new_identity.is_none() {
+      return Err(EngineError::InvalidInput("namespace mutation source must include a previous or new identity".to_string()));
+    }
+    self.source_identities.push(source);
+    Ok(())
+  }
+
+  pub fn set_head_hash(&mut self, head_hash: Vec<u8>) {
+    self.head_hash = Some(head_hash);
+  }
+
+  fn reserve_write_key(&mut self, key: &[u8], role: &str) -> EngineResult<()> {
+    if key.is_empty() {
+      return Err(EngineError::InvalidInput(format!("namespace mutation {role} key cannot be empty")));
+    }
+    if !self.write_keys.insert(key.to_vec()) {
+      return Err(EngineError::InvalidInput(format!("namespace mutation {role} key aliases another dependency or stable locator")));
+    }
+    Ok(())
+  }
+
+  fn validate(&self, engine: &StorageEngine) -> EngineResult<u64> {
+    if self.locator_mutations.is_empty() && self.head_hash.is_none() {
+      return Err(EngineError::InvalidInput("namespace mutation batch contains no namespace authority change".to_string()));
+    }
+    if self.source_identities.is_empty() {
+      return Err(EngineError::InvalidInput("namespace mutation batch contains no source identities".to_string()));
+    }
+    let hash_length = engine.hash_algo().hash_length();
+    let retired_locator_bytes = u64::try_from(hash_length)
+      .ok()
+      .and_then(|length| length.checked_add(14))
+      .ok_or_else(|| EngineError::ResourceExhausted("namespace mutation durability estimate overflow".to_string()))?;
+    let mut estimated_dependency_bytes = 0u64;
+    for dependency in &self.dependencies {
+      validate_hash_width(&dependency.key, hash_length, "dependency key")?;
+      estimated_dependency_bytes = add_entry_estimate(estimated_dependency_bytes, engine, dependency)?;
+    }
+    for locator in &self.locator_mutations {
+      validate_hash_width(locator.key(), hash_length, "stable locator key")?;
+      estimated_dependency_bytes = match locator {
+        PlannedLocatorMutation::Replace(write) => add_entry_estimate(estimated_dependency_bytes, engine, write)?,
+        PlannedLocatorMutation::Retire { .. } => estimated_dependency_bytes
+          .checked_add(retired_locator_bytes)
+          .ok_or_else(|| EngineError::ResourceExhausted("namespace mutation durability estimate overflow".to_string()))?,
+      };
+    }
+    if let Some(head_hash) = self.head_hash.as_ref() {
+      validate_hash_width(head_hash, hash_length, "HEAD hash")?;
+    }
+    for source in &self.source_identities {
+      if let Some(entry_type) = source.entry_type {
+        EntryType::from_u8(entry_type)?;
+      }
+      if let Some(identity) = source.previous_identity.as_ref() {
+        validate_hash_width(identity, hash_length, "previous source identity")?;
+      }
+      if let Some(identity) = source.new_identity.as_ref() {
+        validate_hash_width(identity, hash_length, "new source identity")?;
+      }
+    }
+    Ok(estimated_dependency_bytes)
+  }
+}
+
+fn validate_locator_entry_type(entry_type: EntryType) -> EngineResult<()> {
+  if matches!(entry_type, EntryType::Chunk | EntryType::Void) {
+    return Err(EngineError::InvalidInput(format!(
+      "{} entries are immutable payload or physical-GC state, not stable namespace locators",
+      entry_type.to_u8()
+    )));
+  }
+  Ok(())
+}
+
+fn add_entry_estimate(current: u64, engine: &StorageEngine, write: &PlannedEntryWrite) -> EngineResult<u64> {
+  let entry_bytes = EntryHeader::compute_total_length(engine.hash_algo(), write.key.len(), write.value.len())?;
+  current
+    .checked_add(u64::from(entry_bytes))
+    .ok_or_else(|| EngineError::ResourceExhausted("namespace mutation durability estimate overflow".to_string()))
+}
+
+fn validate_hash_width(value: &[u8], expected: usize, field: &str) -> EngineResult<()> {
+  if value.len() != expected {
+    return Err(EngineError::InvalidInput(format!("namespace mutation {field} must be exactly {expected} bytes")));
+  }
+  Ok(())
+}
+
+/// Applies stable-key replacements while namespace authority and its outer
+/// transaction are held by [`NamespaceMutationCoordinator`].
+pub struct LocatorReplacementCoordinator<'a> {
+  engine: &'a StorageEngine,
+  old_incarnations: Vec<(u32, Option<LocatorPhysicalIncarnation>)>,
+}
+
+impl<'a> LocatorReplacementCoordinator<'a> {
+  fn preflight(engine: &'a StorageEngine, mutations: &[PlannedLocatorMutation]) -> EngineResult<Self> {
+    let mut old_incarnations = Vec::with_capacity(mutations.len());
+    for (index, mutation) in mutations.iter().enumerate() {
+      let ordinal =
+        u32::try_from(index).map_err(|_| EngineError::ResourceExhausted("namespace mutation locator count exceeds u32".to_string()))?;
+      let old = engine.get_kv_entry(mutation.key())?.as_ref().map(LocatorPhysicalIncarnation::from);
+      if matches!(mutation, PlannedLocatorMutation::Retire { .. })
+        && old.as_ref().is_some_and(|incarnation| {
+          matches!(incarnation.type_flags & 0x0F, crate::engine::kv_store::KV_TYPE_CHUNK | crate::engine::kv_store::KV_TYPE_VOID)
+        })
+      {
+        return Err(EngineError::InvalidInput(
+          "immutable payload and physical-GC entries cannot be retired as namespace locators".to_string(),
+        ));
+      }
+      if matches!(mutation, PlannedLocatorMutation::Retire { .. }) && old.is_none() {
+        return Err(EngineError::NotFound(format!("stable locator {}", hex::encode(mutation.key()))));
+      }
+      old_incarnations.push((ordinal, old));
+    }
+    Ok(Self { engine, old_incarnations })
+  }
+
+  fn apply(self, mutations: &[PlannedLocatorMutation]) -> EngineResult<Vec<LocatorReplacement>> {
+    let mut replacements = Vec::with_capacity(mutations.len());
+    for (index, mutation) in mutations.iter().enumerate() {
+      let (ordinal, old_incarnation) = self.old_incarnations[index].clone();
+      let new_incarnation = match mutation {
+        PlannedLocatorMutation::Replace(write) => {
+          let offset = store_planned_entry(self.engine, write)?;
+          let current = self.engine.get_kv_entry(&write.key)?.ok_or_else(|| EngineError::CorruptEntry {
+            offset,
+            reason: "stable locator write did not publish a KV incarnation".to_string(),
+          })?;
+          if current.offset != offset || current.entry_type() != write.entry_type.to_kv_type() {
+            return Err(EngineError::CorruptEntry {
+              offset,
+              reason: "stable locator KV incarnation disagrees with the appended entry".to_string(),
+            });
+          }
+          Some(LocatorPhysicalIncarnation::from(&current))
+        }
+        PlannedLocatorMutation::Retire { key } => {
+          self.engine.mark_entry_deleted(key)?;
+          if self.engine.get_kv_entry(key)?.is_some() {
+            return Err(EngineError::CorruptEntry {
+              offset: old_incarnation.as_ref().map(|incarnation| incarnation.offset).unwrap_or_default(),
+              reason: "retired stable locator remains live in the KV authority".to_string(),
+            });
+          }
+          None
+        }
+      };
+      replacements.push(LocatorReplacement { ordinal, stable_key: mutation.key().to_vec(), old_incarnation, new_incarnation });
+    }
+    Ok(replacements)
+  }
+}
+
+fn store_planned_entry(engine: &StorageEngine, write: &PlannedEntryWrite) -> EngineResult<u64> {
+  if write.flags == 0 {
+    engine.store_entry(write.entry_type, &write.key, &write.value)
+  } else {
+    engine.store_entry_with_flags(write.entry_type, &write.key, &write.value, write.flags)
+  }
+}
+
+/// Shared hard-authority owner for prepared namespace mutations.
+pub struct NamespaceMutationCoordinator<'a> {
+  engine: &'a StorageEngine,
+  fanout: Arc<dyn NamespaceMutationFanout>,
+  #[cfg(test)]
+  test_faults: NamespaceMutationTestFaults,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct NamespaceMutationTestFaults {
+  fail_after_dependency_writes: Option<usize>,
+  fail_hard_before_commit: bool,
+}
+
+impl<'a> NamespaceMutationCoordinator<'a> {
+  pub fn new(engine: &'a StorageEngine) -> Self {
+    Self {
+      engine,
+      fanout: Arc::new(NoopNamespaceMutationFanout),
+      #[cfg(test)]
+      test_faults: NamespaceMutationTestFaults::default(),
+    }
+  }
+
+  pub fn with_fanout<F>(engine: &'a StorageEngine, fanout: Arc<F>) -> Self
+  where
+    F: NamespaceMutationFanout + 'static,
+  {
+    Self {
+      engine,
+      fanout,
+      #[cfg(test)]
+      test_faults: NamespaceMutationTestFaults::default(),
+    }
+  }
+
+  #[cfg(test)]
+  fn with_test_faults<F>(engine: &'a StorageEngine, fanout: Arc<F>, test_faults: NamespaceMutationTestFaults) -> Self
+  where
+    F: NamespaceMutationFanout + 'static,
+  {
+    Self { engine, fanout, test_faults }
+  }
+
+  pub fn execute(&self, batch: NamespaceMutationBatch) -> EngineResult<NamespaceMutationAcknowledgement> {
+    let estimated_dependency_bytes = batch.validate(self.engine)?;
+
+    let namespace = self.engine.namespace_write_guard()?;
+    let previous_root_hash = self.engine.head_hash()?;
+    if batch.dependencies.is_empty()
+      && batch.locator_mutations.is_empty()
+      && batch.head_hash.as_deref() == Some(previous_root_hash.as_slice())
+    {
+      return Err(EngineError::InvalidInput("namespace mutation HEAD already selects the requested root".to_string()));
+    }
+    let locator_coordinator = LocatorReplacementCoordinator::preflight(self.engine, &batch.locator_mutations)?;
+    let transaction = TransactionGuard::new_top_level(self.engine, estimated_dependency_bytes)?;
+
+    let mut mutation_may_have_started = false;
+    let prepared = (|| -> EngineResult<NamespaceMutationAcknowledgement> {
+      #[cfg(test)]
+      let mut dependency_writes = 0usize;
+      for dependency in &batch.dependencies {
+        store_planned_entry(self.engine, dependency)?;
+        mutation_may_have_started = true;
+        #[cfg(test)]
+        {
+          dependency_writes += 1;
+          if self.test_faults.fail_after_dependency_writes == Some(dependency_writes) {
+            return Err(EngineError::InvalidInput("injected failure after namespace dependency append".to_string()));
+          }
+        }
+      }
+      if !batch.locator_mutations.is_empty() {
+        mutation_may_have_started = true;
+      }
+      let locator_replacements = locator_coordinator.apply(&batch.locator_mutations)?;
+      let root_hash = match batch.head_hash.as_ref() {
+        Some(head_hash) if head_hash != &previous_root_hash => {
+          mutation_may_have_started = true;
+          self.engine.update_head(head_hash)?;
+          head_hash.clone()
+        }
+        Some(_) => previous_root_hash.clone(),
+        None => previous_root_hash.clone(),
+      };
+      Ok(NamespaceMutationAcknowledgement {
+        operation_id: Uuid::new_v4(),
+        kind: batch.kind,
+        publication_sequence: 0,
+        previous_root_hash,
+        root_hash,
+        source_identities: batch.source_identities,
+        locator_replacements,
+      })
+    })();
+
+    let mut acknowledgement = match prepared {
+      Ok(acknowledgement) => acknowledgement,
+      Err(error) => {
+        let error = if mutation_may_have_started && !matches!(error, EngineError::PostMutationDurabilityFailure(_)) {
+          EngineError::PostMutationDurabilityFailure(format!("namespace mutation failed after storage mutation may have begun: {error}"))
+        } else {
+          error
+        };
+        let completion = transaction.finish_after::<()>(Err(error), namespace);
+        return match completion {
+          Err(error) => Err(error),
+          Ok(()) => Err(EngineError::DurabilityFailure("failed namespace mutation unexpectedly completed without an error".to_string())),
+        };
+      }
+    };
+
+    #[cfg(test)]
+    if self.test_faults.fail_hard_before_commit {
+      if let Err(error) = transaction.fail_admitted_hard_for_test() {
+        let completion = transaction.finish_after::<NamespaceMutationAcknowledgement>(Err(error), namespace);
+        return match completion {
+          Err(error) => Err(error),
+          Ok(_) => {
+            Err(EngineError::DurabilityFailure("failed hard-publication injection unexpectedly completed without an error".to_string()))
+          }
+        };
+      }
+    }
+    let receipt = transaction.commit_top_level_after(namespace)?;
+    acknowledgement.publication_sequence = receipt.sequence;
+
+    if catch_unwind(AssertUnwindSafe(|| self.fanout.publish(&acknowledgement))).is_err() {
+      tracing::error!(operation_id = %acknowledgement.operation_id, "Post-commit namespace mutation fanout panicked");
+    }
+
+    Ok(acknowledgement)
+  }
+}
+
+#[cfg(test)]
+#[path = "../../spec/engine/namespace_mutation_internal_spec.rs"]
+mod namespace_mutation_internal_spec;

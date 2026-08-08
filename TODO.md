@@ -328,6 +328,19 @@
       - [ ] P2e/Child 06: strictly decode remote sync responses, reject omitted/malformed/hash-mismatched chunks before mutation or checkpoint advancement, and route HTTP receive/apply through the shared merge authority.
       - [ ] P2e: propagate every embedded sync delete failure except `NotFound`; remove the current delete-error squelch with injected-fault coverage.
       - [x] Run focused, adjacent, broad, architecture, documentation, and live disposable-database proof; record and land P2c.
+    - [x] P2d: provide one shared namespace-mutation and stable-locator replacement facade around current v3 bytes.
+      - [x] Map every namespace guard, transaction, HEAD publisher, stable-key replacement, event, counter, index wakeup, and recovery consumer.
+      - [x] Add the red `namespace_mutation_spec` contract before production implementation.
+        - [x] Prove every operation receives one nonzero unique operation ID and exact hard-publication sequence.
+        - [x] Prove stable-locator replacements retain ordered old/new physical incarnations and reject duplicate keys or mismatched publication.
+        - [x] Prove nested top-level mutation admission fails before data mutation.
+        - [x] Prove preflight/admission failure emits no acknowledgement and leaves authority reusable; post-mutation failure emits no acknowledgement and latches read-only for repair.
+        - [x] Prove soft fanout occurs exactly once after durable authority and a fanout panic cannot convert committed success into retryable failure.
+      - [x] Extend v3 transaction completion with an exact durability receipt while preserving every existing caller.
+        - [x] Pre-admit the new top-level transaction's bounded hard waiter before mutation and exclude late legacy transaction joiners.
+      - [x] Implement `NamespaceMutationCoordinator` and `LocatorReplacementCoordinator` without changing persistent bytes or activating producer waves.
+      - [x] Add architecture gates that freeze the facade boundary without falsely claiming P2e producer convergence.
+      - [x] Run focused, adjacent, workspace, documentation, contract, and real-server/reopen verification; record and land the P2d handoff.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

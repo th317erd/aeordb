@@ -85,6 +85,9 @@ pub struct DiskKVStore {
   pub needs_expansion: Option<usize>,
   /// Transaction nesting depth. When > 0, flush() skips clearing the hot tail.
   pub transaction_depth: u32,
+  /// A namespace mutation with a pre-admitted hard ticket owns transaction
+  /// depth exclusively; legacy guards must retry after it completes.
+  pub(crate) pre_admitted_transaction_active: bool,
   /// Current snapshot of the void_manager state, included in every hot tail
   /// flush. The engine syncs this from its VoidManager whenever voids change
   /// (GC sweep, void consumption, etc.). Hot tail load on startup populates
@@ -348,6 +351,7 @@ impl DiskKVStore {
       needs_rebuild: false,
       needs_expansion: None,
       transaction_depth: 0,
+      pre_admitted_transaction_active: false,
       pending_voids: Vec::new(),
     })
   }
@@ -555,6 +559,7 @@ impl DiskKVStore {
       needs_rebuild: detected_page_corruption,
       needs_expansion: None,
       transaction_depth: 0,
+      pre_admitted_transaction_active: false,
       pending_voids: hot_voids,
     })
   }

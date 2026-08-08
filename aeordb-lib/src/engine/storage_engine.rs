@@ -17,8 +17,8 @@ use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::durability_coordinator::{
-  DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition, DurabilityGroupPolicy, DurabilityHardTurn,
-  DurabilityOperation, DurabilityTicket, DurabilityWaiterState, NativeFileBarrierKind, OsErrorClass, RetryClass,
+  DurabilityCommitReceipt, DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition, DurabilityGroupPolicy,
+  DurabilityHardTurn, DurabilityOperation, DurabilityTicket, DurabilityWaiterState, NativeFileBarrierKind, OsErrorClass, RetryClass,
 };
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::entry_header::EntryHeader;
@@ -5194,20 +5194,84 @@ impl StorageEngine {
 
   /// Begin a transaction: increment the KV store's transaction depth so that
   /// `flush()` skips hot-file truncation until the transaction ends.
-  fn begin_transaction(&self) -> EngineResult<()> {
+  fn begin_transaction(&self, require_top_level: bool) -> EngineResult<bool> {
     let mut kv = self
       .kv_writer
       .lock()
       .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to begin transaction: {error}"))))?;
-    kv.transaction_depth += 1;
+    if kv.pre_admitted_transaction_active {
+      return Err(EngineError::ResourceExhausted("an exclusive pre-admitted namespace transaction is already active".to_string()));
+    }
+    let top_level = kv.transaction_depth == 0;
+    if require_top_level && !top_level {
+      return Err(EngineError::InvalidInput("top-level namespace mutation cannot start inside an active transaction".to_string()));
+    }
+    let next_depth =
+      kv.transaction_depth.checked_add(1).ok_or_else(|| EngineError::InvalidInput("transaction nesting depth exhausted".to_string()))?;
+    if require_top_level {
+      kv.pre_admitted_transaction_active = true;
+    }
+    kv.transaction_depth = next_depth;
+    Ok(top_level)
+  }
+
+  fn cancel_top_level_transaction_before_mutation(&self) -> EngineResult<()> {
+    let mut kv = self
+      .kv_writer
+      .lock()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to cancel transaction admission: {error}"))))?;
+    if kv.transaction_depth != 1 || !kv.pre_admitted_transaction_active {
+      return Err(EngineError::DurabilityFailure(format!(
+        "pre-mutation transaction cancellation expected one exclusive depth, found depth {} and exclusive {}",
+        kv.transaction_depth, kv.pre_admitted_transaction_active
+      )));
+    }
+    kv.transaction_depth = 0;
+    kv.pre_admitted_transaction_active = false;
     Ok(())
   }
 
+  fn admit_transaction_ticket(&self, estimated_dependency_bytes: u64) -> EngineResult<DurabilityTicket> {
+    let plan = v3_header_commit_plan().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
+    self
+      .durability_coordinator
+      .admit_sized(plan, estimated_dependency_bytes.saturating_add(FILE_HEADER_SIZE as u64))
+      .map_err(durability_coordinator_engine_error)
+  }
+
+  #[cfg(test)]
   fn prepare_transaction_completion(&self) -> EngineResult<Option<DurabilityTicket>> {
+    self.prepare_transaction_completion_with_ticket(None)
+  }
+
+  fn prepare_transaction_completion_with_ticket(
+    &self,
+    admitted_ticket: Option<DurabilityTicket>,
+  ) -> EngineResult<Option<DurabilityTicket>> {
     let should_commit = match self.kv_writer.lock() {
       Ok(mut kv) => {
-        kv.transaction_depth = kv.transaction_depth.saturating_sub(1);
-        kv.transaction_depth == 0
+        if kv.transaction_depth == 0 {
+          return Err(EngineError::DurabilityFailure("transaction completion observed zero nesting depth".to_string()));
+        }
+        if admitted_ticket.is_some() {
+          if kv.transaction_depth != 1 || !kv.pre_admitted_transaction_active {
+            return Err(EngineError::DurabilityFailure(format!(
+              "pre-admitted transaction completion expected one exclusive depth, found depth {} and exclusive {}",
+              kv.transaction_depth, kv.pre_admitted_transaction_active
+            )));
+          }
+          kv.transaction_depth = 0;
+          kv.pre_admitted_transaction_active = false;
+          true
+        } else {
+          if kv.pre_admitted_transaction_active {
+            return Err(EngineError::DurabilityFailure(
+              "legacy transaction attempted to complete an exclusive pre-admitted transaction".to_string(),
+            ));
+          }
+          kv.transaction_depth -= 1;
+          kv.transaction_depth == 0
+        }
       }
       Err(e) => {
         return Err(EngineError::IoError(std::io::Error::other(format!("Failed to end transaction: {}", e))));
@@ -5225,27 +5289,28 @@ impl StorageEngine {
       }
     }
 
-    let estimated_dependency_bytes = self
-      .kv_writer
-      .lock()
-      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to estimate transaction hot tail: {error}"))))?
-      .pending_hot_tail_bytes();
-    let plan = v3_header_commit_plan().map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
-    let ticket = self
-      .durability_coordinator
-      .admit_sized(plan, estimated_dependency_bytes.saturating_add(FILE_HEADER_SIZE as u64))
-      .map_err(durability_coordinator_engine_error)?;
+    let ticket = match admitted_ticket {
+      Some(ticket) => ticket,
+      None => {
+        let estimated_dependency_bytes = self
+          .kv_writer
+          .lock()
+          .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to estimate transaction hot tail: {error}"))))?
+          .pending_hot_tail_bytes();
+        self.admit_transaction_ticket(estimated_dependency_bytes)?
+      }
+    };
     Ok(Some(ticket))
   }
 
-  fn complete_transaction_ticket(&self, ticket: DurabilityTicket) -> EngineResult<()> {
+  fn complete_transaction_ticket(&self, ticket: DurabilityTicket) -> EngineResult<DurabilityCommitReceipt> {
     let coordinator = Arc::clone(&self.durability_coordinator);
 
     loop {
       match coordinator.wait_for_hard_turn(ticket).map_err(durability_coordinator_engine_error)? {
         DurabilityHardTurn::Complete(_) => {
           return match coordinator.take_waiter_state(ticket).map_err(durability_coordinator_engine_error)? {
-            DurabilityWaiterState::Succeeded(_) => Ok(()),
+            DurabilityWaiterState::Succeeded(receipt) => Ok(receipt),
             DurabilityWaiterState::Failed(failure) => Err(EngineError::DurabilityFailure(failure.message)),
             DurabilityWaiterState::Pending => {
               Err(EngineError::DurabilityFailure("transaction waiter remained pending after completion".to_string()))
@@ -5314,21 +5379,40 @@ impl StorageEngine {
   /// below the proven durability frontier.
   pub fn end_transaction(&self) -> EngineResult<()> {
     let namespace = self.namespace_write_guard()?;
-    self.end_transaction_after(namespace)
+    self.end_transaction_after_with_ticket(namespace, None).map(|_| ())
   }
 
-  fn end_transaction_after(&self, namespace: NamespaceWriteGuard<'_>) -> EngineResult<()> {
-    let prepared = self.prepare_transaction_completion();
+  fn end_transaction_after_with_ticket(
+    &self,
+    namespace: NamespaceWriteGuard<'_>,
+    admitted_ticket: Option<DurabilityTicket>,
+  ) -> EngineResult<Option<DurabilityCommitReceipt>> {
+    let requires_exact_receipt = admitted_ticket.is_some();
+    let prepared = self.prepare_transaction_completion_with_ticket(admitted_ticket);
     drop(namespace);
     match prepared {
       Ok(Some(ticket)) => {
-        if let Err(error) = self.complete_transaction_ticket(ticket) {
-          return Err(self.classify_transaction_completion_error(error));
+        let receipt = self.complete_transaction_ticket(ticket).map_err(|error| self.classify_transaction_completion_error(error))?;
+        if let Err(error) = self.run_ready_kv_expansion() {
+          if !requires_exact_receipt {
+            return Err(error);
+          }
+          tracing::error!(
+            publication_sequence = receipt.sequence,
+            %error,
+            "Post-commit KV expansion failed after exact namespace durability; preserving committed acknowledgement"
+          );
         }
-        self.run_ready_kv_expansion()
+        Ok(Some(receipt))
       }
-      Ok(None) => Ok(()),
-      Err(error) => Err(self.classify_transaction_completion_error(error)),
+      Ok(None) => Ok(None),
+      Err(error) => {
+        let error = match admitted_ticket {
+          Some(ticket) => self.fail_transaction_ticket(&self.durability_coordinator, ticket, error),
+          None => error,
+        };
+        Err(self.classify_transaction_completion_error(error))
+      }
     }
   }
 
@@ -5870,7 +5954,7 @@ mod tests {
 
   fn admit_pending_namespace_transaction(engine: &StorageEngine, key: &[u8]) -> DurabilityTicket {
     let namespace = engine.namespace_write_guard().unwrap();
-    engine.begin_transaction().unwrap();
+    engine.begin_transaction(false).unwrap();
     engine.store_entry(EntryType::Chunk, key, b"pending transaction bytes").unwrap();
     let ticket = engine.prepare_transaction_completion().unwrap().expect("outer transaction must admit a hard-authority ticket");
     drop(namespace);
@@ -6587,7 +6671,7 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let coordinator = engine.writer.read().unwrap().durability_coordinator();
 
-    engine.begin_transaction().unwrap();
+    engine.begin_transaction(false).unwrap();
     let ticket = engine.prepare_transaction_completion().unwrap().expect("hard ticket");
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       let _guard = engine.writer.write().unwrap();
@@ -6607,7 +6691,7 @@ mod tests {
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let coordinator = Arc::clone(&engine.durability_coordinator);
 
-    engine.begin_transaction().unwrap();
+    engine.begin_transaction(false).unwrap();
     let ticket = engine.prepare_transaction_completion().unwrap().expect("hard ticket");
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       let _guard = engine.namespace_write_lock.lock().unwrap();
@@ -6714,24 +6798,76 @@ impl Drop for NamespaceWriteGuard<'_> {
 pub struct TransactionGuard<'a> {
   engine: &'a StorageEngine,
   _operation: EngineOperationGuard<'a>,
+  admitted_ticket: Option<DurabilityTicket>,
+  top_level: bool,
   completed: bool,
 }
 
 impl<'a> TransactionGuard<'a> {
   pub fn new(engine: &'a StorageEngine) -> EngineResult<Self> {
     let operation = engine.operation_guard("namespace_transaction")?;
-    engine.begin_transaction()?;
-    Ok(TransactionGuard { engine, _operation: operation, completed: false })
+    let top_level = engine.begin_transaction(false)?;
+    Ok(TransactionGuard { engine, _operation: operation, admitted_ticket: None, top_level, completed: false })
+  }
+
+  pub(crate) fn new_top_level(engine: &'a StorageEngine, estimated_dependency_bytes: u64) -> EngineResult<Self> {
+    let operation = engine.operation_guard("namespace_mutation_transaction")?;
+    let top_level = engine.begin_transaction(true)?;
+    debug_assert!(top_level);
+    let admitted_ticket = match engine.admit_transaction_ticket(estimated_dependency_bytes) {
+      Ok(ticket) => ticket,
+      Err(error) => {
+        engine.cancel_top_level_transaction_before_mutation()?;
+        return Err(error);
+      }
+    };
+    Ok(TransactionGuard { engine, _operation: operation, admitted_ticket: Some(admitted_ticket), top_level, completed: false })
+  }
+
+  pub fn is_top_level(&self) -> bool {
+    self.top_level
   }
 
   pub fn commit(mut self) -> EngineResult<()> {
+    let namespace = self.engine.namespace_write_guard()?;
     self.completed = true;
-    self.engine.end_transaction()
+    self.engine.end_transaction_after_with_ticket(namespace, self.admitted_ticket.take()).map(|_| ())
   }
 
   pub(crate) fn commit_after(mut self, namespace: NamespaceWriteGuard<'a>) -> EngineResult<()> {
     self.completed = true;
-    self.engine.end_transaction_after(namespace)
+    self.engine.end_transaction_after_with_ticket(namespace, self.admitted_ticket.take()).map(|_| ())
+  }
+
+  pub(crate) fn commit_top_level_after(mut self, namespace: NamespaceWriteGuard<'a>) -> EngineResult<DurabilityCommitReceipt> {
+    if !self.top_level {
+      return Err(EngineError::InvalidInput("exact durability receipt requires a top-level transaction".to_string()));
+    }
+    self.completed = true;
+    self.engine.end_transaction_after_with_ticket(namespace, self.admitted_ticket.take())?.ok_or_else(|| {
+      EngineError::DurabilityFailure("top-level namespace mutation completed without an exact durability receipt".to_string())
+    })
+  }
+
+  #[cfg(test)]
+  pub(crate) fn fail_admitted_hard_for_test(&self) -> EngineResult<()> {
+    if self.admitted_ticket.is_none() {
+      return Err(EngineError::InvalidInput("cannot inject hard failure without an admitted transaction ticket".to_string()));
+    }
+    let failures = self
+      .engine
+      .durability_coordinator
+      .fail_pending_hard(
+        DurabilityOperation::DependencyAppend,
+        "injected namespace hard-publication failure",
+        DurabilityFailureDisposition::serious(OsErrorClass::OtherPersistentIo, RetryClass::AfterRepair),
+        1,
+      )
+      .map_err(durability_coordinator_engine_error)?;
+    if failures.is_empty() {
+      return Err(EngineError::DurabilityFailure("injected hard failure found no pending waiter".to_string()));
+    }
+    Ok(())
   }
 
   pub fn finish<T>(self, result: EngineResult<T>) -> EngineResult<T> {
@@ -6768,8 +6904,16 @@ impl<'a> Drop for TransactionGuard<'a> {
     if self.completed {
       return;
     }
-    if let Err(error) = self.engine.end_transaction() {
+    let completion = self
+      .engine
+      .namespace_write_guard()
+      .and_then(|namespace| self.engine.end_transaction_after_with_ticket(namespace, self.admitted_ticket.take()).map(|_| ()));
+    if let Err(error) = completion {
       tracing::error!("Transaction guard failed to clean up an incomplete operation: {}", error);
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/storage_engine_transaction_admission_internal_spec.rs"]
+mod storage_engine_transaction_admission_internal_spec;

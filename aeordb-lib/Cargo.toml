@@ -801,6 +801,10 @@ name = "v3_contract_facade_spec"
 path = "spec/engine/v3_contract_facade_spec.rs"
 
 [[test]]
+name = "namespace_mutation_spec"
+path = "spec/engine/namespace_mutation_spec.rs"
+
+[[test]]
 name = "config_resolver_spec"
 path = "spec/engine/config_resolver_spec.rs"
 
