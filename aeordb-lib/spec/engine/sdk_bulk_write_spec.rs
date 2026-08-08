@@ -5,6 +5,7 @@ use aeordb::engine::{
   JsonMergeFilePatch, MergeDepth, RequestContext, StorageEngine, CURRENT_FILE_RECORD_VERSION,
 };
 use aeordb::engine::file_header::read_active_header;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::TransactionGuard;
 use serde_json::json;
 
@@ -177,6 +178,61 @@ fn store_files_buffered_batch_publishes_hot_tail_after_large_transaction() {
 }
 
 #[test]
+fn store_files_buffered_batch_builds_and_updates_btree_directories_that_survive_reopen() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("test.aeor");
+
+  {
+    let engine = create_engine(&dir);
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    let files = (0..300)
+      .map(|index| BufferedFile {
+        path: format!("/btree-batch/file-{index:04}.txt"),
+        data: format!("initial-{index}").into_bytes(),
+        content_type: Some("text/plain".to_string()),
+      })
+      .collect();
+    ops.store_files_buffered_batch(&ctx, files).unwrap();
+
+    let directory_key = directory_path_hash("/btree-batch", &engine.hash_algo()).unwrap();
+    let (_path_header, _path_key, content_key) = engine.get_entry(&directory_key).unwrap().unwrap();
+    let (_content_header, _content_key, directory_data) = engine.get_entry(&content_key).unwrap().unwrap();
+    assert!(aeordb::engine::is_btree_format(&directory_data), "a newly published 300-child directory must use the B-tree format");
+
+    ops
+      .store_files_buffered_batch(
+        &ctx,
+        vec![
+          BufferedFile {
+            path: "/btree-batch/file-0007.txt".to_string(),
+            data: b"updated-seven".to_vec(),
+            content_type: Some("text/plain".to_string()),
+          },
+          BufferedFile {
+            path: "/btree-batch/file-0300.txt".to_string(),
+            data: b"new-three-hundred".to_vec(),
+            content_type: Some("text/plain".to_string()),
+          },
+        ],
+      )
+      .unwrap();
+
+    let listing = ops.list_directory_strict("/btree-batch").unwrap();
+    assert_eq!(listing.len(), 301);
+    assert_eq!(listing.first().unwrap().name, "file-0000.txt");
+    assert_eq!(listing.last().unwrap().name, "file-0300.txt");
+    assert_eq!(ops.read_file_buffered("/btree-batch/file-0007.txt").unwrap(), b"updated-seven");
+  }
+
+  let reopened = StorageEngine::open(path.to_str().unwrap()).unwrap();
+  let reopened_ops = DirectoryOps::new(&reopened);
+  let listing = reopened_ops.list_directory_strict("/btree-batch").unwrap();
+  assert_eq!(listing.len(), 301);
+  assert_eq!(reopened_ops.read_file_buffered("/btree-batch/file-0300.txt").unwrap(), b"new-three-hundred");
+}
+
+#[test]
 fn store_file_buffered_rejects_legacy_outer_transaction_without_publishing_head() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -202,43 +258,249 @@ fn store_file_buffered_rejects_legacy_outer_transaction_without_publishing_head(
 }
 
 #[test]
-fn store_files_buffered_batch_defers_durable_head_until_outer_transaction_commits() {
+fn store_files_buffered_batch_rejects_legacy_outer_transaction_without_publishing_head() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
   let initial_disk_head = disk_head_hash(&dir);
+  let initial_memory_head = engine.head_hash().unwrap();
 
   {
     let _outer = TransactionGuard::new(&engine).unwrap();
-    ops
-      .store_files_buffered_batch(
-        &ctx,
-        vec![
-          BufferedFile {
-            path: "/txn/batch/a.json".to_string(),
-            data: br#"{"a":1}"#.to_vec(),
-            content_type: Some("application/json".to_string()),
-          },
-          BufferedFile {
-            path: "/txn/batch/b.json".to_string(),
-            data: br#"{"b":2}"#.to_vec(),
-            content_type: Some("application/json".to_string()),
-          },
-        ],
-      )
-      .unwrap();
-
-    let in_memory_head = engine.head_hash().unwrap();
-    assert_ne!(in_memory_head, initial_disk_head, "the active engine should see the batched HEAD before commit");
+    let message = invalid_message(ops.store_files_buffered_batch(
+      &ctx,
+      vec![
+        BufferedFile {
+          path: "/txn/batch/a.json".to_string(),
+          data: br#"{"a":1}"#.to_vec(),
+          content_type: Some("application/json".to_string()),
+        },
+        BufferedFile {
+          path: "/txn/batch/b.json".to_string(),
+          data: br#"{"b":2}"#.to_vec(),
+          content_type: Some("application/json".to_string()),
+        },
+      ],
+    ));
+    assert!(message.contains("top-level namespace mutation"));
+    assert_eq!(engine.head_hash().unwrap(), initial_memory_head);
+    assert!(ops.get_metadata("/txn/batch/a.json").unwrap().is_none());
+    assert!(ops.get_metadata("/txn/batch/b.json").unwrap().is_none());
 
     engine.try_flush_hot_buffer();
-    assert_eq!(disk_head_hash(&dir), initial_disk_head, "timer hot-tail flushing must not durably publish an in-flight batch HEAD");
+    assert_eq!(disk_head_hash(&dir), initial_disk_head, "a refused batch must not publish HEAD through the outer transaction");
   }
 
-  assert_eq!(disk_head_hash(&dir), engine.head_hash().unwrap(), "outer transaction drop should durably publish batched HEAD");
-  assert_eq!(ops.read_file_buffered("/txn/batch/a.json").unwrap(), br#"{"a":1}"#);
-  assert_eq!(ops.read_file_buffered("/txn/batch/b.json").unwrap(), br#"{"b":2}"#);
+  assert_eq!(disk_head_hash(&dir), initial_disk_head);
+  assert_eq!(engine.head_hash().unwrap(), initial_memory_head);
+  assert!(ops.read_file_buffered("/txn/batch/a.json").is_err());
+  assert!(ops.read_file_buffered("/txn/batch/b.json").is_err());
+}
+
+#[test]
+fn copy_path_recursively_copies_files_empty_directories_and_symlinks() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/copy-source/file.txt", b"payload", Some("text/plain")).unwrap();
+  ops.create_directory(&ctx, "/copy-source/empty").unwrap();
+  ops.store_symlink(&ctx, "/copy-source/link", "/copy-source/file.txt").unwrap();
+
+  let mut copied = ops.copy_path(&ctx, "/copy-source", "/copy-destination").unwrap();
+  copied.sort();
+  assert_eq!(copied, vec!["/copy-destination/file.txt", "/copy-destination/link"]);
+  assert_eq!(ops.read_file_buffered("/copy-destination/file.txt").unwrap(), b"payload");
+  assert!(ops.list_directory_strict("/copy-destination/empty").unwrap().is_empty());
+  let copied_link = ops.get_symlink("/copy-destination/link").unwrap().expect("copied symlink should exist");
+  assert_eq!(copied_link.target, "/copy-source/file.txt");
+}
+
+#[test]
+fn copy_file_rejects_non_file_sources_before_publishing() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  ops.create_directory(&ctx, "/copy-file-source-directory").unwrap();
+  ops.store_file_buffered(&ctx, "/copy-file-target.txt", b"target", Some("text/plain")).unwrap();
+  ops.store_symlink(&ctx, "/copy-file-source-link", "/copy-file-target.txt").unwrap();
+  let original_head = engine.head_hash().unwrap();
+
+  for (source, destination) in
+    [("/copy-file-source-directory", "/copied-as-file-directory"), ("/copy-file-source-link", "/copied-as-file-link")]
+  {
+    let message = invalid_message(ops.copy_file(&ctx, source, destination));
+    assert!(message.contains("file source"), "unexpected copy_file type error: {message}");
+    assert_eq!(engine.head_hash().unwrap(), original_head, "copy_file type rejection must precede HEAD publication");
+    assert!(ops.get_metadata(destination).unwrap().is_none());
+    assert!(ops.get_symlink(destination).unwrap().is_none());
+    assert!(ops.list_directory_strict(destination).is_err());
+  }
+}
+
+#[test]
+fn copy_paths_rejects_self_descendants_before_publishing_any_destination() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/source/file.txt", b"payload", Some("text/plain")).unwrap();
+  let original_head = engine.head_hash().unwrap();
+
+  let message = invalid_message(ops.copy_paths(&ctx, &["/source".to_string()], "/source/nested"));
+  assert!(message.contains("descendant"));
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert!(ops.get_metadata("/source/nested/source/file.txt").unwrap().is_none());
+}
+
+#[test]
+fn copy_planning_memory_refusal_precedes_namespace_publication() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/source/file.txt", b"bounded copy planning", Some("text/plain")).unwrap();
+  let original_head = engine.head_hash().unwrap();
+
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let policy = before.policy.unwrap();
+  let available = policy.ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  assert!(available > 64, "test requires ordinary memory headroom");
+  let pressure = coordinator.reserve(MemoryOwner::Query, available - 64, AdmissionClass::Workload).unwrap();
+
+  let result = ops.copy_path(&ctx, "/source", "/destination");
+  assert!(matches!(result, Err(EngineError::ResourceExhausted(_))), "copy planning must honor the process memory envelope: {result:?}");
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert!(ops.list_directory_strict("/destination").is_err());
+
+  drop(pressure);
+  let after = coordinator.snapshot().unwrap();
+  let owner = after.owner(MemoryOwner::DurabilityWaiters).unwrap();
+  assert_eq!(owner.reserved_bytes, before.owner(MemoryOwner::DurabilityWaiters).unwrap().reserved_bytes);
+  assert_eq!(owner.active_reservations, before.owner(MemoryOwner::DurabilityWaiters).unwrap().active_reservations);
+}
+
+#[test]
+fn failed_recursive_copy_does_not_heal_source_locators_during_planning() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/source/file.txt", b"source", Some("text/plain")).unwrap();
+  poison_directory_path_key_with_empty_hard_link(&engine, "/source");
+
+  let source_key = directory_path_hash("/source", &engine.hash_algo()).unwrap();
+  let stale_target = engine.get_entry(&source_key).unwrap().unwrap().2;
+  let original_head = engine.head_hash().unwrap();
+  let result = ops.copy_paths(&ctx, &["/missing".to_string(), "/source".to_string()], "/destination");
+
+  assert!(matches!(result, Err(EngineError::NotFound(path)) if path == "/missing"));
+  assert_eq!(engine.get_entry(&source_key).unwrap().unwrap().2, stale_target, "validation must not perform a hidden source repair write");
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert!(ops.get_metadata("/destination/source/file.txt").unwrap().is_none());
+}
+
+#[test]
+fn copy_and_rename_upgrade_legacy_v0_file_records_with_exact_content_hashes() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let content: Vec<u8> = (0..300_123).map(|index| (index % 251) as u8).collect();
+
+  ops.store_file_buffered(&ctx, "/legacy/copy.bin", &content, Some("application/octet-stream")).unwrap();
+  let copy_hash = rewrite_file_record_path_as_v0(&engine, "/legacy/copy.bin");
+  ops.copy_file(&ctx, "/legacy/copy.bin", "/current/copied.bin").unwrap();
+  let copied = ops.get_metadata("/current/copied.bin").unwrap().unwrap();
+  assert_eq!(copied.content_hash, copy_hash);
+  assert_eq!(ops.read_file_buffered("/current/copied.bin").unwrap(), content);
+  let copied_key = file_path_hash("/current/copied.bin", &engine.hash_algo()).unwrap();
+  assert_eq!(engine.get_entry(&copied_key).unwrap().unwrap().0.entry_version, CURRENT_FILE_RECORD_VERSION);
+
+  ops.store_file_buffered(&ctx, "/legacy/rename.bin", &content, Some("application/octet-stream")).unwrap();
+  let rename_hash = rewrite_file_record_path_as_v0(&engine, "/legacy/rename.bin");
+  let renamed = ops.rename_file(&ctx, "/legacy/rename.bin", "/current/renamed.bin").unwrap();
+  assert_eq!(renamed.content_hash, rename_hash);
+  assert_eq!(ops.read_file_buffered("/current/renamed.bin").unwrap(), content);
+  assert!(ops.get_metadata("/legacy/rename.bin").unwrap().is_none());
+  let renamed_key = file_path_hash("/current/renamed.bin", &engine.hash_algo()).unwrap();
+  assert_eq!(engine.get_entry(&renamed_key).unwrap().unwrap().0.entry_version, CURRENT_FILE_RECORD_VERSION);
+}
+
+#[test]
+fn rename_rejects_source_records_with_missing_chunks_before_publishing() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/rename-corrupt-source.bin", b"payload", Some("application/octet-stream")).unwrap();
+  let source = ops.get_metadata("/rename-corrupt-source.bin").unwrap().unwrap();
+  engine.mark_entry_deleted(&source.chunk_hashes[0]).unwrap();
+  let original_head = engine.head_hash().unwrap();
+
+  let result = ops.rename_file(&ctx, "/rename-corrupt-source.bin", "/renamed-corrupt-source.bin");
+
+  assert!(matches!(result, Err(EngineError::CorruptEntry { reason, .. }) if reason.contains("missing chunk")));
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert!(ops.get_metadata("/rename-corrupt-source.bin").unwrap().is_some());
+  assert!(ops.get_metadata("/renamed-corrupt-source.bin").unwrap().is_none());
+}
+
+#[test]
+fn legacy_copy_content_hash_backfill_obeys_planning_memory_admission() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let content = vec![0x5a; 300_123];
+  ops.store_file_buffered(&ctx, "/legacy.bin", &content, Some("application/octet-stream")).unwrap();
+  rewrite_file_record_path_as_v0(&engine, "/legacy.bin");
+  let original_head = engine.head_hash().unwrap();
+
+  let coordinator = engine.memory_coordinator();
+  let before = coordinator.snapshot().unwrap();
+  let available = before.policy.unwrap().ordinary_limit_bytes().saturating_sub(before.accounted_bytes);
+  let remaining = 128 * 1024;
+  assert!(available > remaining, "test requires ordinary memory headroom");
+  let pressure = coordinator.reserve(MemoryOwner::Query, available - remaining, AdmissionClass::Workload).unwrap();
+
+  let result = ops.copy_file(&ctx, "/legacy.bin", "/copied.bin");
+  assert!(matches!(result, Err(EngineError::ResourceExhausted(_))), "legacy content-hash backfill bypassed copy admission: {result:?}");
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert!(ops.get_metadata("/copied.bin").unwrap().is_none());
+
+  drop(pressure);
+}
+
+#[test]
+fn batch_and_copy_reject_non_directory_ancestors_without_publishing() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/blocked-file", b"file", Some("text/plain")).unwrap();
+  ops.store_symlink(&ctx, "/blocked-link", "/blocked-file").unwrap();
+  ops.store_file_buffered(&ctx, "/copy-source.txt", b"source", Some("text/plain")).unwrap();
+  let original_head = engine.head_hash().unwrap();
+
+  for blocked_path in ["/blocked-file/child.txt", "/blocked-link/child.txt"] {
+    let result = ops.store_files_buffered_batch(
+      &ctx,
+      vec![BufferedFile { path: blocked_path.to_string(), data: b"child".to_vec(), content_type: Some("text/plain".to_string()) }],
+    );
+    assert!(matches!(result, Err(EngineError::AlreadyExists(_))), "non-directory ancestor should reject {blocked_path}: {result:?}");
+    assert!(ops.get_metadata(blocked_path).unwrap().is_none());
+  }
+
+  let copy_result = ops.copy_paths(&ctx, &["/copy-source.txt".to_string()], "/blocked-file");
+  assert!(matches!(copy_result, Err(EngineError::AlreadyExists(_))), "copy destination file must not become an implicit directory");
+  assert!(ops.get_metadata("/blocked-file/copy-source.txt").unwrap().is_none());
+  assert_eq!(engine.head_hash().unwrap(), original_head);
 }
 
 #[test]
@@ -289,6 +551,15 @@ fn poison_directory_path_key_with_empty_hard_link(engine: &StorageEngine, path: 
   engine.store_entry(EntryType::DirectoryIndex, &empty_content_key, &empty_dir).unwrap();
   let dir_key = directory_path_hash(path, &algo).unwrap();
   engine.store_entry(EntryType::DirectoryIndex, &dir_key, &empty_content_key).unwrap();
+}
+
+fn rewrite_file_record_path_as_v0(engine: &StorageEngine, path: &str) -> Vec<u8> {
+  let record = DirectoryOps::new(engine).get_metadata(path).unwrap().unwrap();
+  let content_hash = record.content_hash.clone();
+  let value = record.serialize_for_version(engine.hash_algo().hash_length(), 0).unwrap();
+  let path_key = file_path_hash(path, &engine.hash_algo()).unwrap();
+  engine.store_entry_with_version(EntryType::FileRecord, &path_key, &value, 0).unwrap();
+  content_hash
 }
 
 #[test]
@@ -383,6 +654,25 @@ fn merge_json_file_creates_and_updates_documents() {
 }
 
 #[test]
+fn merge_json_file_rejects_a_non_chunk_entry_at_a_derived_chunk_key() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let patch = json!({"value": "collision fixture"});
+  let serialized = serde_json::to_vec(&patch).unwrap();
+  let chunk_key = aeordb::engine::chunk_content_hash(&serialized, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &chunk_key, b"wrong entry type").unwrap();
+  let original_head = engine.head_hash().unwrap();
+
+  let result = ops.merge_json_file(&ctx, "/state/collision.json", patch, MergeDepth::Unbounded);
+
+  assert!(matches!(result, Err(EngineError::CorruptEntry { reason, .. }) if reason.contains("non-chunk")));
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert!(ops.get_metadata("/state/collision.json").unwrap().is_none());
+}
+
+#[test]
 fn merge_json_file_honors_depth_and_rejects_invalid_existing_json() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -462,4 +752,40 @@ fn merge_json_files_batch_rejects_invalid_batch_shapes_before_writing() {
   ));
   assert!(duplicate_message.contains("Duplicate batch path"));
   assert!(ops.read_file_buffered("/state/dup.json").is_err());
+}
+
+#[test]
+fn concurrent_json_merges_preserve_every_committed_patch() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = std::sync::Arc::new(create_engine(&dir));
+  let ctx = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/state/concurrent.json", br#"{"base":true}"#, Some("application/json")).unwrap();
+
+  let thread_count = 24usize;
+  let start = std::sync::Arc::new(std::sync::Barrier::new(thread_count));
+  let mut workers = Vec::with_capacity(thread_count);
+  for index in 0..thread_count {
+    let engine = std::sync::Arc::clone(&engine);
+    let start = std::sync::Arc::clone(&start);
+    workers.push(std::thread::spawn(move || {
+      start.wait();
+      DirectoryOps::new(&engine)
+        .merge_json_file(
+          &RequestContext::system(),
+          "/state/concurrent.json",
+          json!({format!("field_{index:02}"): index}),
+          MergeDepth::Unbounded,
+        )
+        .unwrap();
+    }));
+  }
+  for worker in workers {
+    worker.join().unwrap();
+  }
+
+  let merged = read_json(&DirectoryOps::new(&engine), "/state/concurrent.json");
+  assert_eq!(merged["base"], true);
+  for index in 0..thread_count {
+    assert_eq!(merged[format!("field_{index:02}")], index, "committed concurrent patch {index} was lost");
+  }
 }

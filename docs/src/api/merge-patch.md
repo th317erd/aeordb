@@ -22,7 +22,10 @@ This is a problem because:
 - **It's bandwidth-expensive.** A 5 MB record requires 10 MB of transfer to change a 12-byte field.
 - **It's client-side complex.** Every client has to implement parse/mutate/serialize correctly per schema.
 
-Server-side merge fixes all three: only the patch (typically tiny) crosses the wire, and the engine's write path is single-threaded so two concurrent patches to disjoint keys compose correctly.
+Server-side merge fixes all three: only the patch (typically tiny) crosses the
+wire, and the namespace mutation coordinator serializes each authoritative
+read-merge-publish operation so concurrent patches to disjoint keys compose
+correctly.
 
 ---
 
@@ -265,7 +268,12 @@ In practice you should just use `PUT` for this. `?depth=0` exists for callers th
 
 ### Safe by default
 
-The engine's write path is single-threaded — writes are serialized through the write buffer and WAL. Two concurrent merge-patches to the same file are applied **one at a time** by the server. Each merge reads the latest persisted state (including the other writer's prior merge), applies its own patch on top, and writes.
+Two concurrent merge-patches to the same file are applied **one at a time**
+under namespace mutation authority. The existing document is read, parsed, and
+patched only after that authority is held; the resulting FileRecord, path,
+parent directories, and HEAD are then published under one hard durability
+acknowledgement. The next merge therefore reads the latest committed state
+instead of a value captured before it entered the writer queue.
 
 This means:
 

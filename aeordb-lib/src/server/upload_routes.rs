@@ -11,6 +11,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::auth::TokenClaims;
 use crate::engine::batch_commit::{commit_files, CommitFile};
+use crate::engine::directory_ops::validate_existing_chunk_locator;
 use crate::engine::errors::EngineError;
 use crate::engine::RequestContext;
 use crate::engine::EntryType;
@@ -105,10 +106,10 @@ pub async fn upload_check(
     for hash_hex in &body.hashes {
       let hash_bytes = hex::decode(hash_hex).map_err(|_| EngineError::InvalidInput(format!("Invalid hex hash: {}", hash_hex)))?;
 
-      match engine.has_entry(&hash_bytes) {
-        Ok(true) => have.push(hash_hex.clone()),
-        Ok(false) => needed.push(hash_hex.clone()),
-        Err(_) => needed.push(hash_hex.clone()),
+      if validate_existing_chunk_locator(&engine, "blob check", &hash_bytes)? {
+        have.push(hash_hex.clone());
+      } else {
+        needed.push(hash_hex.clone());
       }
     }
 
@@ -211,7 +212,7 @@ pub async fn upload_chunk(
   let body_vec = body.to_vec();
   let engine_store_start = std::time::Instant::now();
   let store_result = run_engine_blocking("upload_chunk", "Failed to store chunk", move || {
-    if engine.has_entry(&computed_bytes)? {
+    if validate_existing_chunk_locator(&engine, "HTTP chunk staging", &computed_bytes)? {
       engine.counters().record_chunk_deduped();
       return Ok("exists");
     }

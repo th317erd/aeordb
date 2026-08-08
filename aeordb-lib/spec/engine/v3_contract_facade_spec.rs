@@ -1162,25 +1162,129 @@ fn production_transaction_guards_require_explicit_fallible_completion() {
 }
 
 #[test]
-fn batch_publication_and_metrics_follow_hard_commit_completion() {
+fn batch_publication_has_one_namespace_authority_and_no_legacy_writer() {
   let source = include_str!("../../src/engine/batch_commit.rs");
-  let finish_start = source.find("fn finish_batch_commit(").unwrap();
-  let finish_end = source[finish_start..].find("\nfn update_directory(").unwrap() + finish_start;
-  let finish_body = &source[finish_start..finish_end];
-  assert!(!finish_body.contains("ctx.emit("), "batch helper published an event before its caller completed hard authority");
-  assert!(!finish_body.contains("record_file_write("), "batch helper changed acknowledged-write counters before hard authority completed");
+  for forbidden in [
+    "fn finish_batch_commit(",
+    "fn update_directory(",
+    "fn propagate_up(",
+    "TransactionGuard",
+    "publish_file_record_entries",
+    "EntryType::FileRecord",
+    "EntryType::DirectoryIndex",
+    ".update_head(",
+    "flush_batch_and_update_head(",
+  ] {
+    assert!(!source.contains(forbidden), "batch_commit.rs retained forbidden namespace-writer token: {forbidden}");
+  }
 
   for (start_marker, end_marker) in [
     ("pub fn commit_files(", "\n/// Atomically commit multiple small files"),
-    ("pub fn commit_buffered_files(", "\nfn finish_batch_commit("),
+    ("pub(crate) fn commit_buffered_files_with_kind(", "\nfn content_type_needs_sniffing("),
   ] {
     let start = source.find(start_marker).unwrap();
     let end = source[start..].find(end_marker).unwrap() + start;
     let body = &source[start..end];
-    let commit = body.find("commit_after(").expect("batch path must await hard completion");
-    let publication = body.find("publish_batch_success(").expect("batch path must publish its event and counters after completion");
-    assert!(commit < publication, "batch event/counter publication preceded hard completion");
+    assert_eq!(
+      body.matches("execute_file_publications(").count(),
+      1,
+      "each batch producer must delegate exactly once to the namespace coordinator"
+    );
   }
+  assert!(
+    !source.contains("read_chunk_data(engine, first_hash)?.unwrap_or_default()"),
+    "blob commit must not convert a vanished first chunk into an empty MIME sample"
+  );
+}
+
+#[test]
+fn wave_two_http_routes_delegate_one_logical_namespace_mutation() {
+  let source = include_str!("../../src/server/engine_routes.rs");
+
+  let copy_start = source.find("pub async fn copy_files(").unwrap();
+  let copy_end = source[copy_start..].find("\n// POST /files/search").unwrap() + copy_start;
+  let copy_body = &source[copy_start..copy_end];
+  assert_eq!(copy_body.matches("ops.copy_paths(").count(), 1, "HTTP copy must publish the full request through one plural operation");
+  assert!(!copy_body.contains("ops.copy_path("), "HTTP copy retained a per-source partial-publication loop");
+
+  let merge_start = source.find("async fn do_merge_patch(").unwrap();
+  let merge_end = source[merge_start..].find("\nasync fn do_rename(").unwrap() + merge_start;
+  let merge_body = &source[merge_start..merge_end];
+  assert_eq!(
+    merge_body.matches("ops.merge_json_file_bounded(").count(),
+    1,
+    "HTTP merge-patch must delegate one coordinator-owned read-modify-write"
+  );
+  for forbidden in ["apply_merge_patch(", "ops.read_file_buffered(", "ops.store_file_buffered("] {
+    assert!(!merge_body.contains(forbidden), "HTTP merge-patch retained handler-local mutation token: {forbidden}");
+  }
+
+  assert!(
+    !source.contains("get_symlink(&path_for_blocking).ok().flatten()"),
+    "HTTP path dispatch must propagate symlink read failures instead of silently reclassifying corrupt entries"
+  );
+}
+
+#[test]
+fn copy_file_returns_the_acknowledged_plan_without_a_post_commit_read() {
+  let source = include_str!("../../src/engine/directory_ops.rs");
+  let start = source.find("pub fn copy_file(").unwrap();
+  let end = source[start..].find("\n  /// Recursively copy a path").unwrap() + start;
+  let body = &source[start..end];
+  assert_eq!(body.matches("execute_copy_mappings(").count(), 1);
+  assert!(!body.contains("get_metadata("), "copy_file must not fail after hard acknowledgement because a follow-up metadata read failed");
+}
+
+#[test]
+fn staged_file_publications_revalidate_chunk_authority_inside_the_namespace_plan() {
+  let source = include_str!("../../src/engine/directory_ops.rs");
+  for (start_marker, end_marker) in [
+    ("fn execute_file_publication(", "\n  pub(crate) fn execute_file_publications("),
+    ("pub(crate) fn execute_file_publications(", "\n  /// Store a file at the given path"),
+    ("pub fn rename_file(", "\n  /// Copy a file to a new path"),
+  ] {
+    let start = source.find(start_marker).unwrap();
+    let end = source[start..].find(end_marker).unwrap() + start;
+    assert!(
+      source[start..end].contains("validate_existing_file_chunks("),
+      "{start_marker} must revalidate staged/referenced chunks while namespace authority is held"
+    );
+  }
+}
+
+#[test]
+fn wave_two_chunk_staging_never_treats_an_arbitrary_kv_row_as_a_chunk() {
+  let directory_ops = include_str!("../../src/engine/directory_ops.rs");
+  for (start_marker, end_marker) in [
+    ("fn execute_json_merge_patches(", "\n  fn prepare_json_merge("),
+    ("pub fn store_chunk(", "\n  /// Finalize a file from pre-stored chunk hashes."),
+    ("pub fn store_file_compressed(", "\n  /// Restore a file from an existing FileRecord"),
+  ] {
+    let start = directory_ops.find(start_marker).unwrap();
+    let end = directory_ops[start..].find(end_marker).unwrap() + start;
+    let body = &directory_ops[start..end];
+    assert!(body.contains("validate_existing_chunk_locator("), "{start_marker} must use typed chunk-locator validation");
+    assert!(!body.contains("has_entry(&chunk_key)"), "{start_marker} must not deduplicate against an untyped KV existence check");
+  }
+
+  let batch_commit = include_str!("../../src/engine/batch_commit.rs");
+  let batch_start = batch_commit.find("fn store_buffered_chunk(").unwrap();
+  let batch_body = &batch_commit[batch_start..];
+  assert!(batch_body.contains("validate_existing_chunk_locator("));
+  assert!(!batch_body.contains("has_entry(&chunk_key)"));
+
+  let upload_routes = include_str!("../../src/server/upload_routes.rs");
+  let check_start = upload_routes.find("pub async fn upload_check(").unwrap();
+  let check_end = upload_routes[check_start..].find("\npub struct CheckRequest").unwrap() + check_start;
+  let check_body = &upload_routes[check_start..check_end];
+  assert!(check_body.contains("validate_existing_chunk_locator("));
+  assert!(!check_body.contains("has_entry(&hash_bytes)"));
+
+  let upload_start = upload_routes.find("pub async fn upload_chunk(").unwrap();
+  let upload_end = upload_routes[upload_start..].find("\npub struct CommitRequest").unwrap() + upload_start;
+  let upload_body = &upload_routes[upload_start..upload_end];
+  assert!(upload_body.contains("validate_existing_chunk_locator("));
+  assert!(!upload_body.contains("has_entry(&computed_bytes)"));
 }
 
 #[test]

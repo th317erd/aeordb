@@ -85,7 +85,7 @@ async fn test_config_returns_hash_algo_and_chunk_size() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_config_no_auth_required() {
+async fn test_config_requires_valid_authentication() {
   let (_app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
 
@@ -97,6 +97,15 @@ async fn test_config_no_auth_required() {
   let json = body_json(response.into_body()).await;
   assert!(json["hash_algorithm"].as_str().is_some());
   assert!(json["chunk_size"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn test_config_rejects_an_unauthenticated_request() {
+  let (app, _jwt_manager, _engine, _temp_dir) = test_app();
+  let request = Request::builder().method("GET").uri("/blobs/config").body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ===========================================================================
@@ -135,6 +144,31 @@ async fn test_check_identifies_existing_chunks() {
   assert_eq!(have.len(), 1);
   assert_eq!(have[0].as_str().unwrap(), chunk_hash);
   assert!(needed.is_empty());
+}
+
+#[tokio::test]
+async fn test_check_rejects_a_non_chunk_entry_at_the_requested_hash() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let chunk_data = b"check collision fixture";
+  let hash_hex = compute_chunk_hash(chunk_data);
+  let chunk_key = hex::decode(&hash_hex).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &chunk_key, b"wrong entry type").unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("POST")
+    .uri("/blobs/check")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(serde_json::json!({"hashes": [hash_hex]}).to_string()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["error"], "Blob check failed");
+  assert_eq!(engine.get_kv_entry(&chunk_key).unwrap().unwrap().entry_type(), EntryType::DirectoryIndex.to_kv_type());
 }
 
 // ===========================================================================
@@ -504,6 +538,30 @@ async fn test_chunk_upload_dedup() {
   let json = body_json(response.into_body()).await;
   assert_eq!(json["status"].as_str().unwrap(), "exists");
   assert_eq!(json["hash"].as_str().unwrap(), hash_hex);
+}
+
+#[tokio::test]
+async fn test_chunk_upload_rejects_a_non_chunk_entry_at_the_content_key() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let chunk_data = b"HTTP chunk collision fixture";
+  let hash_hex = compute_chunk_hash(chunk_data);
+  let chunk_key = hex::decode(&hash_hex).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &chunk_key, b"wrong entry type").unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("PUT")
+    .uri(format!("/blobs/chunks/{hash_hex}"))
+    .header("authorization", &auth)
+    .body(Body::from(chunk_data.to_vec()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["error"], "Failed to store chunk");
+  assert_eq!(engine.get_kv_entry(&chunk_key).unwrap().unwrap().entry_type(), EntryType::DirectoryIndex.to_kv_type());
 }
 
 // ===========================================================================

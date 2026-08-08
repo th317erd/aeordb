@@ -102,13 +102,20 @@ publication is durable:
 |-------|------|-------------|
 | `operation_id` | string | Unique UUID for the logical namespace mutation |
 | `publication_sequence` | integer | Exact durability sequence acknowledged by the engine |
-| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, or `symlink_delete` |
+| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, or `rename` |
 
 AeorDB is migrating producers to this shared acknowledgement path in stages.
-Legacy batch, copy/rename, restore/version, sync/import, system/plugin, and
+File, directory, symlink, blob/buffered batch, JSON merge, copy, and rename
+producers now use it. Restore/version, sync/import, system/plugin, and
 maintenance producers may omit these three fields until their producer wave is
 converted. Clients must therefore treat them as optional during the transition,
 but must not interpret an absent field as a durability failure.
+
+A logical mutation can emit more than one relationship event. File and symlink
+rename preserve separate `entries_deleted` and `entries_created` events, but
+both events carry the same `operation_id`, `publication_sequence`, and
+`mutation_kind: "rename"`. Batch, merge, and copy operations emit one aggregate
+`entries_created` event after their shared hard acknowledgement.
 
 ---
 

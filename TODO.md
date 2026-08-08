@@ -350,6 +350,19 @@
       - [x] Convert FileRecord version migration and directory rebuild without pre-acknowledgement storage, cache, counter, or event side effects.
       - [x] Remove Wave 1 nested/direct authority bypasses and prove exactly one operation ID, durability sequence, event, and metric acknowledgement per success.
       - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, and real-server verification; record and land the Wave 1 handoff.
+    - [x] P2e Wave 2: converge blob, embedded batch, merge, copy, and rename producers on one namespace mutation and locator authority.
+      - [x] Map and characterize chunk-backed commit, buffered batch, JSON merge, streamed-finalize indexing, copy/rename, recursive traversal, routes, counters, events, caches, indexes, parent propagation, and HEAD publication.
+      - [x] Add failing operation-ledger, nested-transaction, recursive-copy, atomic multi-source copy, B-tree batch, fault, acknowledgement, and architecture tests before production edits.
+      - [x] Add a mutation-free multi-directory delta planner and B-tree planned-node overlay so one batch can update shared and large parents without pre-publication writes or whole-tree rebuilding.
+      - [x] Route chunk-backed blob commit and embedded buffered/JSON batches through one coordinator receipt, one aggregate event fanout, and post-commit metadata indexing.
+      - [x] Revalidate staged/referenced chunk locators in memory while namespace authority is held so GC cannot open a check-to-publication race.
+      - [x] Reject wrong-type immutable chunk-key collisions in direct staging, buffered staging, JSON merge deduplication, blob check, and HTTP chunk staging instead of treating any KV row as a chunk.
+      - [x] Route file/symlink rename and file/directory/symlink copy through one coordinator receipt, preserving both relationship events under one operation identity.
+      - [x] Preserve the typed `copy_file` contract before publication and propagate corrupt symlink classification errors through both rename and delete HTTP dispatch.
+      - [x] Make recursive and multi-source copy validate the complete source/destination closure before writing and publish all outputs atomically; reject self-descendant and colliding destinations.
+      - [x] Remove Wave 2 direct FileRecord/path/directory/HEAD writers, legacy transaction ownership, pre-commit indexing, and duplicate parent-propagation helpers with source architecture gates.
+      - [x] Update API/SDK/SSE documentation for atomic copy and acknowledgement behavior.
+      - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 2 handoff.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

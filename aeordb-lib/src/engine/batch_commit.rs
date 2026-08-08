@@ -1,22 +1,16 @@
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::btree;
 use crate::engine::content_type::detect_content_type;
-use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use crate::engine::directory_ops::{
-  chunk_content_hash, directory_content_hash, directory_path_hash, publish_file_record_entries, v0_is_detached_system_path,
-  v0_system_entry_flags, whole_file_content_hash, DirectoryOps, FileRecordPublishInput, DEFAULT_CHUNK_SIZE,
+  chunk_content_hash, v0_system_entry_flags, validate_existing_chunk_locator, whole_file_content_hash, BatchFilePublicationInput,
+  DirectoryOps, FileRecordPublishInput, DEFAULT_CHUNK_SIZE,
 };
-use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_record::FileRecord;
-use crate::engine::index_store::{IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_WRITES};
-use crate::engine::indexing_pipeline::IndexingPipeline;
-use crate::engine::path_utils::{file_name, normalize_path, parent_path};
+use crate::engine::namespace_mutation::NamespaceMutationKind;
+use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_family_policy::GenericDataPathSelection;
@@ -69,18 +63,6 @@ pub struct CommittedFile {
   pub size: u64,
 }
 
-struct BatchFileInfo {
-  normalized_path: String,
-  file_record: FileRecord,
-  child_entry: ChildEntry,
-}
-
-struct BatchWriteMetric {
-  existing_total_size: Option<u64>,
-  total_size: u64,
-  newly_stored_bytes: u64,
-}
-
 struct PreparedCommitFile {
   chunks: Vec<(Vec<u8>, u64)>,
   content_hash: Vec<u8>,
@@ -88,37 +70,6 @@ struct PreparedCommitFile {
   chunk_metadata_lookup_us: u128,
   chunk_body_read_us: u128,
   chunk_body_read_bytes: u64,
-}
-
-#[derive(Default)]
-struct FinishBatchCommitTimings {
-  directories_updated: usize,
-  directory_update_ms: u128,
-  head_update_ms: u128,
-  event_emit_ms: u128,
-  metadata_index_ms: u128,
-  metadata_indexed_files: usize,
-  metadata_index_mutations: usize,
-  metadata_index_pending_mutations: usize,
-  metadata_index_flushes: usize,
-}
-
-fn live_commit_index_buffer_options() -> IndexWriteBufferOptions {
-  IndexWriteBufferOptions::new(DEFAULT_INDEX_BUFFER_FLUSH_WRITES, Duration::from_secs(300))
-}
-
-fn publish_batch_success(
-  engine: &StorageEngine,
-  ctx: &RequestContext,
-  event_entries: Vec<EntryEventData>,
-  write_metrics: Vec<BatchWriteMetric>,
-) -> u128 {
-  for metric in write_metrics {
-    engine.counters().record_file_write(metric.existing_total_size, metric.total_size, metric.newly_stored_bytes);
-  }
-  let event_emit_start = std::time::Instant::now();
-  ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries }));
-  event_emit_start.elapsed().as_millis()
 }
 
 /// Atomically commit multiple files from pre-uploaded chunks.
@@ -205,18 +156,9 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
 
   let validation_elapsed = validation_start.elapsed();
 
-  // Serialize the publish phase so mutable path keys, directory entries, and
-  // HEAD are advanced as one namespace operation relative to other writers.
-  let namespace_wait_start = std::time::Instant::now();
-  let namespace = engine.namespace_write_guard()?;
-  let namespace_wait_ms = namespace_wait_start.elapsed().as_millis();
-  let txn = crate::engine::storage_engine::TransactionGuard::new(engine)?;
-
-  // --- Phase 2: Create FileRecords ---
-  let publish_start = std::time::Instant::now();
-  let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
-  let mut event_entries: Vec<EntryEventData> = Vec::with_capacity(files.len());
-  let mut write_metrics: Vec<BatchWriteMetric> = Vec::with_capacity(files.len());
+  // --- Phase 2: Prepare one coordinator-owned namespace publication ---
+  let prepare_publication_start = std::time::Instant::now();
+  let mut publications = Vec::with_capacity(files.len());
   let mut first_chunk_sniff_reads = 0usize;
   let mut first_chunk_sniff_bytes = 0u64;
   let mut first_chunk_sniff_us = 0u128;
@@ -233,7 +175,10 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
     let first_chunk_bytes = if content_type_needs_sniffing(file.content_type.as_deref()) {
       if let Some(first_hash) = chunk_hashes.first() {
         let sniff_start = std::time::Instant::now();
-        let bytes = read_chunk_data(engine, first_hash)?.unwrap_or_default();
+        let bytes = read_chunk_data(engine, first_hash)?.ok_or_else(|| EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("blob commit first chunk disappeared after validation: {}", hex::encode(first_hash)),
+        })?;
         first_chunk_sniff_us += sniff_start.elapsed().as_micros();
         first_chunk_sniff_reads += 1;
         first_chunk_sniff_bytes = first_chunk_sniff_bytes.saturating_add(bytes.len() as u64);
@@ -246,9 +191,8 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
     };
     let detected_content_type = detect_content_type(&first_chunk_bytes, file.content_type.as_deref());
 
-    let published = publish_file_record_entries(
-      engine,
-      FileRecordPublishInput {
+    publications.push(BatchFilePublicationInput {
+      publication: FileRecordPublishInput {
         normalized_path: normalized,
         content_type: Some(detected_content_type),
         total_size,
@@ -258,23 +202,18 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
         created_at_override: None,
         prefer_existing_created_at: true,
       },
-    )?;
-
-    event_entries.push(published.event_entry.clone());
-    write_metrics.push(BatchWriteMetric { existing_total_size: published.existing_total_size, total_size, newly_stored_bytes: 0 });
-    file_infos.push(BatchFileInfo {
-      normalized_path: published.normalized_path,
-      file_record: published.file_record,
-      child_entry: published.child_entry,
+      throughput_bytes: 0,
     });
   }
-  let publish_file_records_ms = publish_start.elapsed().as_millis();
+  let prepare_publication_ms = prepare_publication_start.elapsed().as_millis();
 
-  let (result, mut finish_timings) = finish_batch_commit(engine, file_infos)?;
-  let transaction_commit_start = std::time::Instant::now();
-  txn.commit_after(namespace)?;
-  let transaction_commit_ms = transaction_commit_start.elapsed().as_millis();
-  finish_timings.event_emit_ms = publish_batch_success(engine, ctx, event_entries, write_metrics);
+  let namespace_publication_start = std::time::Instant::now();
+  let published = DirectoryOps::new(engine).execute_file_publications(ctx, publications, NamespaceMutationKind::BatchWrite)?;
+  let namespace_publication_ms = namespace_publication_start.elapsed().as_millis();
+  let result = CommitResult {
+    committed: published.len(),
+    files: published.into_iter().map(|file| CommittedFile { path: file.normalized_path, size: file.file_record.total_size }).collect(),
+  };
 
   tracing::info!(
     files = file_count,
@@ -290,21 +229,11 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
     chunk_body_read_us,
     chunk_body_read_bytes,
     chunk_validation_ms = validation_elapsed.as_millis(),
-    namespace_wait_ms,
-    publish_file_records_ms,
+    prepare_publication_ms,
     first_chunk_sniff_reads,
     first_chunk_sniff_bytes,
     first_chunk_sniff_us,
-    directories_updated = finish_timings.directories_updated,
-    directory_update_ms = finish_timings.directory_update_ms,
-    head_update_ms = finish_timings.head_update_ms,
-    metadata_indexed_files = finish_timings.metadata_indexed_files,
-    metadata_index_ms = finish_timings.metadata_index_ms,
-    metadata_index_mutations = finish_timings.metadata_index_mutations,
-    metadata_index_pending_mutations = finish_timings.metadata_index_pending_mutations,
-    metadata_index_flushes = finish_timings.metadata_index_flushes,
-    event_emit_ms = finish_timings.event_emit_ms,
-    transaction_commit_ms,
+    namespace_publication_ms,
     total_ms = total_start.elapsed().as_millis(),
     "blob commit completed"
   );
@@ -319,6 +248,15 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
 /// entries, supports trusted/system paths the same way `DirectoryOps` does,
 /// and performs directory propagation in one batch.
 pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<BufferedFile>) -> EngineResult<CommitResult> {
+  commit_buffered_files_with_kind(engine, ctx, files, NamespaceMutationKind::BatchWrite)
+}
+
+pub(crate) fn commit_buffered_files_with_kind(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  files: Vec<BufferedFile>,
+  kind: NamespaceMutationKind,
+) -> EngineResult<CommitResult> {
   if files.is_empty() {
     return Err(EngineError::InvalidInput("No files provided for buffered batch commit".to_string()));
   }
@@ -336,13 +274,8 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
     normalized_paths.push(normalized);
   }
 
-  let namespace = engine.namespace_write_guard()?;
-  let txn = crate::engine::storage_engine::TransactionGuard::new(engine)?;
-
   let algo = engine.hash_algo();
-  let mut file_infos: Vec<BatchFileInfo> = Vec::with_capacity(files.len());
-  let mut event_entries: Vec<EntryEventData> = Vec::with_capacity(files.len());
-  let mut write_metrics: Vec<BatchWriteMetric> = Vec::with_capacity(files.len());
+  let mut publications = Vec::with_capacity(files.len());
 
   for (file, normalized) in files.iter().zip(normalized_paths) {
     let sys_flags = v0_system_entry_flags(&normalized);
@@ -359,9 +292,8 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
       offset = end;
     }
 
-    let published = publish_file_record_entries(
-      engine,
-      FileRecordPublishInput {
+    publications.push(BatchFilePublicationInput {
+      publication: FileRecordPublishInput {
         normalized_path: normalized,
         content_type: Some(detected_content_type),
         total_size,
@@ -371,314 +303,15 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
         created_at_override: None,
         prefer_existing_created_at: true,
       },
-    )?;
-
-    event_entries.push(published.event_entry.clone());
-    write_metrics.push(BatchWriteMetric { existing_total_size: published.existing_total_size, total_size, newly_stored_bytes: total_size });
-    file_infos.push(BatchFileInfo {
-      normalized_path: published.normalized_path,
-      file_record: published.file_record,
-      child_entry: published.child_entry,
+      throughput_bytes: total_size,
     });
   }
 
-  let (result, _timings) = match finish_batch_commit(engine, file_infos) {
-    Ok(value) => value,
-    Err(error) => return txn.finish_after(Err(error), namespace),
-  };
-  txn.commit_after(namespace)?;
-  publish_batch_success(engine, ctx, event_entries, write_metrics);
-  Ok(result)
-}
-
-fn finish_batch_commit(engine: &StorageEngine, file_infos: Vec<BatchFileInfo>) -> EngineResult<(CommitResult, FinishBatchCommitTimings)> {
-  let mut timings = FinishBatchCommitTimings::default();
-  let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
-
-  // --- Phase 3: Single-pass directory propagation ---
-  // Group files by their immediate parent directory.
-  // Key = parent dir path, Value = Vec of ChildEntry for files in that dir.
-  let mut dir_children: HashMap<String, Vec<ChildEntry>> = HashMap::new();
-
-  for info in &file_infos {
-    if let Some(parent) = parent_path(&info.normalized_path) {
-      dir_children.entry(parent).or_default().push(info.child_entry.clone());
-    }
-  }
-
-  // Process directories from deepest to shallowest.
-  // After updating a directory, add it as a child of its parent.
-  // We use a work queue: start with leaf directories, propagate up.
-  let mut pending: Vec<(String, Vec<ChildEntry>)> = dir_children.into_iter().collect();
-
-  // Sort by depth descending (deepest first).
-  pending.sort_by(|a, b| {
-    let depth_a = a.0.matches('/').count();
-    let depth_b = b.0.matches('/').count();
-    depth_b.cmp(&depth_a)
-  });
-
-  // Track directories we've already processed so we merge children
-  // from multiple depths into a single update per directory.
-  // Map: dir_path -> (content_key of the updated directory, serialized data length)
-  let mut updated_dirs: HashMap<String, (Vec<u8>, u64)> = HashMap::new();
-
-  // Also accumulate children for parent dirs that result from propagation.
-  // We'll process level by level.
-  let mut propagated: HashMap<String, Vec<ChildEntry>> = HashMap::new();
-
-  for (dir_path, new_children) in &pending {
-    // Merge with any propagated children from deeper directories
-    let mut all_new_children = new_children.clone();
-    if let Some(extra) = propagated.remove(dir_path) {
-      all_new_children.extend(extra);
-    }
-
-    let directory_update_start = std::time::Instant::now();
-    let (content_key, dir_data_len) = update_directory(engine, dir_path, all_new_children, hash_length, &algo)?;
-    timings.directory_update_ms += directory_update_start.elapsed().as_millis();
-    timings.directories_updated += 1;
-
-    updated_dirs.insert(dir_path.clone(), (content_key.clone(), dir_data_len));
-
-    // If not root, propagate this directory as a child of its parent
-    if dir_path != "/" {
-      let bc_now = chrono::Utc::now().timestamp_millis();
-      let dir_child = ChildEntry {
-        entry_type: EntryType::DirectoryIndex.to_u8(),
-        hash: content_key.clone(),
-        total_size: dir_data_len,
-        created_at: bc_now,
-        updated_at: bc_now,
-        name: file_name(dir_path).unwrap_or("").to_string(),
-        content_type: None,
-        virtual_time: bc_now as u64,
-        node_id: 0,
-      };
-
-      let grandparent = parent_path(dir_path).unwrap_or_else(|| "/".to_string());
-      if should_skip_root_propagation(dir_path, &grandparent) {
-        continue;
-      }
-
-      // Check if grandparent is already in our pending list
-      if updated_dirs.contains_key(&grandparent) {
-        // Already processed — re-update it
-        let directory_update_start = std::time::Instant::now();
-        let (new_content_key, new_len) = update_directory(engine, &grandparent, vec![dir_child], hash_length, &algo)?;
-        timings.directory_update_ms += directory_update_start.elapsed().as_millis();
-        timings.directories_updated += 1;
-        updated_dirs.insert(grandparent.clone(), (new_content_key.clone(), new_len));
-
-        // Continue propagating up from grandparent
-        propagate_up(engine, &grandparent, &new_content_key, new_len, hash_length, &algo, &mut updated_dirs, &mut timings)?;
-      } else {
-        // Grandparent not yet processed — queue it
-        propagated.entry(grandparent).or_default().push(dir_child);
-      }
-    }
-  }
-
-  // Process any remaining propagated directories that weren't in the original set
-  // (parent dirs that had no direct file children).
-  // Sort deepest first again.
-  let mut remaining: Vec<(String, Vec<ChildEntry>)> = propagated.into_iter().collect();
-  remaining.sort_by(|a, b| {
-    let depth_a = a.0.matches('/').count();
-    let depth_b = b.0.matches('/').count();
-    depth_b.cmp(&depth_a)
-  });
-
-  for (dir_path, children) in remaining {
-    let directory_update_start = std::time::Instant::now();
-    let (content_key, dir_data_len) = update_directory(engine, &dir_path, children, hash_length, &algo)?;
-    timings.directory_update_ms += directory_update_start.elapsed().as_millis();
-    timings.directories_updated += 1;
-    updated_dirs.insert(dir_path.clone(), (content_key.clone(), dir_data_len));
-
-    // Propagate up
-    if dir_path != "/" {
-      propagate_up(engine, &dir_path, &content_key, dir_data_len, hash_length, &algo, &mut updated_dirs, &mut timings)?;
-    }
-  }
-
-  // --- Phase 4: Update HEAD ---
-  // The root "/" should have been updated. Use its content hash.
-  if let Some((root_content_key, _)) = updated_dirs.get("/") {
-    let head_update_start = std::time::Instant::now();
-    engine.update_head(root_content_key)?;
-    timings.head_update_ms += head_update_start.elapsed().as_millis();
-  }
-
-  // --- Phase 5: Prepare the result; externally visible publication happens
-  // only after the caller proves hard-authority completion. ---
-  let committed = file_infos.len();
-  let result_files: Vec<CommittedFile> =
-    file_infos.iter().map(|info| CommittedFile { path: info.normalized_path.clone(), size: info.file_record.total_size }).collect();
-
-  let metadata_index_start = std::time::Instant::now();
-  let pipeline = IndexingPipeline::new(engine);
-  let mut index_buffer = IndexWriteBuffer::new(engine, live_commit_index_buffer_options());
-  for info in &file_infos {
-    match pipeline.run_metadata_only_buffered_with_outcome(&info.normalized_path, &mut index_buffer) {
-      Ok(true) => timings.metadata_indexed_files += 1,
-      Ok(false) => {}
-      Err(error) => {
-        tracing::warn!("Metadata indexing failed for '{}': {}", info.normalized_path, error);
-      }
-    }
-    if let Err(error) = index_buffer.flush_if_due() {
-      tracing::warn!("Metadata index flush failed during batch commit for '{}': {}", info.normalized_path, error);
-    }
-  }
-  let index_stats = index_buffer.stats()?;
-  timings.metadata_index_mutations = index_stats.mutations;
-  timings.metadata_index_pending_mutations = index_stats.pending_mutations;
-  timings.metadata_index_flushes = index_stats.flushes;
-  timings.metadata_index_ms = metadata_index_start.elapsed().as_millis();
-
-  Ok((CommitResult { committed, files: result_files }, timings))
-}
-
-/// Update a single directory by merging new children into its existing entries.
-/// Returns (content_hash, data_length) of the updated directory.
-fn update_directory(
-  engine: &StorageEngine,
-  dir_path: &str,
-  new_children: Vec<ChildEntry>,
-  hash_length: usize,
-  algo: &crate::engine::hash_algorithm::HashAlgorithm,
-) -> EngineResult<(Vec<u8>, u64)> {
-  let dir_key = directory_path_hash(dir_path, algo)?;
-
-  // Follow hard links: dir_key may contain a 32-byte content hash pointer
-  let existing = {
-    let ops = DirectoryOps::new(engine);
-    if let Some((header, value)) = ops.recover_directory_data_if_stale(dir_path, &dir_key)? {
-      Some((header, dir_key.clone(), value))
-    } else {
-      let raw = engine.get_entry(&dir_key)?;
-      match raw {
-        Some((_header, _key, value)) if value.len() == hash_length => {
-          // Hard link — follow to actual content
-          engine.get_entry(&value)?
-        }
-        other => other,
-      }
-    }
-  };
-
-  let (dir_value, content_key) = match existing {
-    Some((_header, _key, value)) if !value.is_empty() && btree::is_btree_format(&value) => {
-      // B-tree format: insert each new child into the tree
-      let mut current_data = value;
-      let mut current_hash = Vec::new();
-
-      for child in new_children {
-        let (new_hash, new_data) = btree::btree_insert_batched(engine, &current_data, child, hash_length, algo)?;
-        current_hash = new_hash;
-        current_data = new_data;
-      }
-
-      (current_data, current_hash)
-    }
-    Some((header, _key, value)) => {
-      // Flat format
-      let mut children = if value.is_empty() { Vec::new() } else { deserialize_child_entries(&value, hash_length, header.entry_version)? };
-
-      // Merge new children: update existing by name or append
-      for new_child in new_children {
-        if let Some(existing) = children.iter_mut().find(|c| c.name == new_child.name) {
-          *existing = new_child;
-        } else {
-          children.push(new_child);
-        }
-      }
-
-      // Check if we should convert to B-tree
-      if children.len() >= btree::BTREE_CONVERSION_THRESHOLD {
-        let root_hash = btree::btree_from_entries(engine, children, hash_length, algo)?;
-        let root_entry =
-          engine.get_entry(&root_hash)?.ok_or_else(|| EngineError::NotFound("B-tree root not found after conversion".to_string()))?;
-        (root_entry.2, root_hash)
-      } else {
-        let dir_value = serialize_child_entries(&children, hash_length)?;
-        let content_key = directory_content_hash(&dir_value, algo)?;
-        engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
-        (dir_value, content_key)
-      }
-    }
-    None => {
-      // New directory
-      let dir_value = serialize_child_entries(&new_children, hash_length)?;
-      let content_key = directory_content_hash(&dir_value, algo)?;
-      engine.store_entry(EntryType::DirectoryIndex, &content_key, &dir_value)?;
-      (dir_value, content_key)
-    }
-  };
-
-  // Store a path-key hard link to the content entry, matching
-  // DirectoryOps::update_parent_directories. If a process dies after this
-  // path key lands but before HEAD advances, list_directory can detect the
-  // divergence and serve the canonical HEAD tree instead of stale directory
-  // bytes.
-  engine.store_entry(EntryType::DirectoryIndex, &dir_key, &content_key)?;
-
-  Ok((content_key, dir_value.len() as u64))
-}
-
-/// Propagate a directory update upward to root.
-/// Called when we need to update ancestors that were already processed.
-fn propagate_up(
-  engine: &StorageEngine,
-  dir_path: &str,
-  content_key: &[u8],
-  data_len: u64,
-  hash_length: usize,
-  algo: &crate::engine::hash_algorithm::HashAlgorithm,
-  updated_dirs: &mut HashMap<String, (Vec<u8>, u64)>,
-  timings: &mut FinishBatchCommitTimings,
-) -> EngineResult<()> {
-  if dir_path == "/" {
-    // Already at root, nothing to propagate
-    return Ok(());
-  }
-
-  let grandparent = parent_path(dir_path).unwrap_or_else(|| "/".to_string());
-  if should_skip_root_propagation(dir_path, &grandparent) {
-    return Ok(());
-  }
-
-  let prop_now = chrono::Utc::now().timestamp_millis();
-  let dir_child = ChildEntry {
-    entry_type: EntryType::DirectoryIndex.to_u8(),
-    hash: content_key.to_vec(),
-    total_size: data_len,
-    created_at: prop_now,
-    updated_at: prop_now,
-    name: file_name(dir_path).unwrap_or("").to_string(),
-    content_type: None,
-    virtual_time: prop_now as u64,
-    node_id: 0,
-  };
-
-  let directory_update_start = std::time::Instant::now();
-  let (new_content_key, new_len) = update_directory(engine, &grandparent, vec![dir_child], hash_length, algo)?;
-  timings.directory_update_ms += directory_update_start.elapsed().as_millis();
-  timings.directories_updated += 1;
-
-  updated_dirs.insert(grandparent.clone(), (new_content_key.clone(), new_len));
-
-  if grandparent != "/" {
-    propagate_up(engine, &grandparent, &new_content_key, new_len, hash_length, algo, updated_dirs, timings)?;
-  }
-
-  Ok(())
-}
-
-fn should_skip_root_propagation(dir_path: &str, grandparent: &str) -> bool {
-  grandparent == "/" && v0_is_detached_system_path(dir_path)
+  let published = DirectoryOps::new(engine).execute_file_publications(ctx, publications, kind)?;
+  Ok(CommitResult {
+    committed: published.len(),
+    files: published.into_iter().map(|file| CommittedFile { path: file.normalized_path, size: file.file_record.total_size }).collect(),
+  })
 }
 
 fn content_type_needs_sniffing(content_type: Option<&str>) -> bool {
@@ -864,7 +497,7 @@ fn store_buffered_chunk(engine: &StorageEngine, data: &[u8], flags: u8) -> Engin
   let algo = engine.hash_algo();
   let chunk_key = chunk_content_hash(data, &algo)?;
 
-  if engine.has_entry(&chunk_key)? {
+  if validate_existing_chunk_locator(engine, "buffered chunk staging", &chunk_key)? {
     engine.counters().record_chunk_deduped();
     return Ok(chunk_key);
   }

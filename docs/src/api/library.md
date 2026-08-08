@@ -82,6 +82,11 @@ let ops = DirectoryOps::new(&engine);
 | `read_file_streaming(path)` | Read a file as a streaming iterator of chunks. Bounded memory. Use for arbitrary-size content. |
 | `merge_json_file(ctx, path, patch, depth)` | Apply an RFC 7396 JSON merge patch to one JSON file. Missing files start as `{}` and are created as `application/json`. |
 | `merge_json_files_batch(ctx, patches)` | Apply multiple JSON merge patches, validate/parse every target first, then write the merged documents in one embedded batch. |
+| `copy_file(ctx, from, to)` | Copy one file by reusing its content-addressed chunks. |
+| `copy_path(ctx, from, to)` | Atomically copy one file, directory closure, or symlink to an exact destination. |
+| `copy_paths(ctx, sources, destination)` | Atomically copy multiple source closures into one destination directory. |
+| `rename_file(ctx, from, to)` | Atomically move a file without copying its chunks. |
+| `rename_symlink(ctx, from, to)` | Atomically move a symlink without changing its target. |
 | `delete_file(ctx, path)` | Delete a file |
 | `exists(path)` | Check if a file or directory exists |
 | `get_metadata(path)` | Get file metadata without reading content |
@@ -112,7 +117,15 @@ let result = ops.store_files_buffered_batch(&ctx, vec![
 assert_eq!(result.committed, 2);
 ```
 
-Batch validation rejects empty batches, root writes, and duplicate normalized paths before writing any entries. Unlike the HTTP `/blobs/commit` endpoint, this embedded helper supports internal system paths because any caller with direct `StorageEngine` access is already trusted code.
+Batch validation rejects empty batches, root writes, and duplicate normalized
+paths before writing any namespace entries. Chunk payloads are immutable and
+may be staged before publication, but every FileRecord, path locator, parent
+directory, and HEAD transition is published under one namespace coordinator
+operation and one hard durability acknowledgement. A failure cannot expose only
+part of the requested path set. Metadata indexes, counters, and SSE fanout run
+only after that acknowledgement. Unlike the HTTP `/blobs/commit` endpoint, this
+embedded helper supports internal system paths because any caller with direct
+`StorageEngine` access is already trusted code.
 
 ### JSON Merge Patch
 
@@ -149,7 +162,27 @@ let batch = ops.merge_json_files_batch(&ctx, vec![
 assert_eq!(batch.merged, 1);
 ```
 
-Existing target files must contain valid JSON. If any target in `merge_json_files_batch` is invalid, the batch fails before writing any merged output.
+Existing target files must contain valid JSON. If any target in
+`merge_json_files_batch` is invalid, the batch fails before writing any merged
+output. The authoritative read, RFC 7396 application, and namespace publication
+run while holding the same namespace mutation authority. Concurrent committed
+patches therefore cannot lose disjoint fields: overlapping fields retain normal
+last-applied-writer semantics.
+
+### Copy And Rename
+
+`copy_paths` validates every source and destination, recursively visits large
+directories without collecting each directory into a second full listing, and
+publishes the complete result atomically. It preserves empty directories and
+symlink targets. Planning uses the process memory coordinator; a copy that
+cannot fit its bounded planning workspace returns `ResourceExhausted` before
+publishing a destination.
+
+File and symlink rename operations publish source retirement, destination
+creation, both parent-directory changes, and HEAD under one hard durability
+acknowledgement. Their deleted and created SSE relationship events deliberately
+remain separate for client compatibility, but share one operation ID and
+publication sequence.
 
 ### Directory Listing
 

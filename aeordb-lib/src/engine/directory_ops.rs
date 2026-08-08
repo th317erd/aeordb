@@ -8,6 +8,8 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::index_store::{IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_WRITES};
+use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
@@ -277,6 +279,37 @@ fn ensure_file_record_content_hash_for_migration(
   Ok(())
 }
 
+pub(crate) fn validate_existing_chunk_locator(engine: &StorageEngine, owner: &str, chunk_hash: &[u8]) -> EngineResult<bool> {
+  let hash_length = engine.hash_algo().hash_length();
+  if chunk_hash.len() != hash_length {
+    return Err(EngineError::InvalidInput(format!(
+      "{} references a chunk hash with length {}, expected {}",
+      owner,
+      chunk_hash.len(),
+      hash_length,
+    )));
+  }
+  match engine.get_chunk_metadata(chunk_hash) {
+    Ok(Some(_)) => Ok(true),
+    Ok(None) => Ok(false),
+    Err(EngineError::InvalidInput(_)) => {
+      let offset = engine.get_kv_entry(chunk_hash)?.map_or(0, |entry| entry.offset);
+      Err(EngineError::CorruptEntry { offset, reason: format!("{} references a non-chunk entry {}", owner, hex::encode(chunk_hash)) })
+    }
+    Err(error) => Err(error),
+  }
+}
+
+fn validate_existing_file_chunks(engine: &StorageEngine, path: &str, chunk_hashes: &[Vec<u8>]) -> EngineResult<()> {
+  let owner = format!("file '{path}'");
+  for chunk_hash in chunk_hashes {
+    if !validate_existing_chunk_locator(engine, &owner, chunk_hash)? {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("{owner} references missing chunk {}", hex::encode(chunk_hash)) });
+    }
+  }
+  Ok(())
+}
+
 fn store_file_record_entry(engine: &StorageEngine, key: &[u8], value: &[u8], flags: u8, entry_version: u8) -> EngineResult<()> {
   if flags != 0 {
     engine.store_entry_with_flags_and_version(EntryType::FileRecord, key, value, flags, entry_version)?;
@@ -394,6 +427,12 @@ pub(crate) struct FileRecordPublishResult {
   pub existing_total_size: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BatchFilePublicationInput {
+  pub publication: FileRecordPublishInput,
+  pub throughput_bytes: u64,
+}
+
 #[derive(Debug)]
 struct PreparedFileRecordPublication {
   entries: PreparedFileRecordEntries,
@@ -410,6 +449,7 @@ fn publish_file_record_entries_at_version(
   input: FileRecordPublishInput,
   entry_version: u8,
 ) -> EngineResult<FileRecordPublishResult> {
+  validate_existing_file_chunks(engine, &input.normalized_path, &input.chunk_hashes)?;
   let prepared = prepare_file_record_publication_at_version(engine, input, entry_version)?;
   materialize_prepared_file_record_entries(engine, &prepared.entries)?;
   Ok(prepared.result)
@@ -898,6 +938,20 @@ enum DirectoryMutationCounterEffect {
   DirectoryDelete,
   SymlinkWrite { existed: bool },
   SymlinkDelete,
+  Aggregate(DirectoryMutationCounterDelta),
+}
+
+#[derive(Debug, Default)]
+struct DirectoryMutationCounterDelta {
+  throughput_bytes: u64,
+  file_writes: Vec<(Option<u64>, u64)>,
+  file_delete_sizes: Vec<u64>,
+  chunk_stored_sizes: Vec<u64>,
+  chunks_deduped: u64,
+  directories_created: u64,
+  directories_deleted: u64,
+  symlinks_created: u64,
+  symlinks_deleted: u64,
 }
 
 #[derive(Debug)]
@@ -905,13 +959,307 @@ struct DirectoryMutationEffects {
   counter: DirectoryMutationCounterEffect,
   implicit_directories: u64,
   cache_writes: Vec<(Vec<u8>, Vec<u8>)>,
-  event: Option<(&'static str, serde_json::Value)>,
+  events: Vec<(&'static str, serde_json::Value)>,
+  metadata_index_removal_paths: Vec<String>,
+  metadata_index_paths: Vec<String>,
 }
 
 impl DirectoryMutationEffects {
   fn new(counter: DirectoryMutationCounterEffect) -> Self {
-    Self { counter, implicit_directories: 0, cache_writes: Vec::new(), event: None }
+    Self {
+      counter,
+      implicit_directories: 0,
+      cache_writes: Vec::new(),
+      events: Vec::new(),
+      metadata_index_removal_paths: Vec::new(),
+      metadata_index_paths: Vec::new(),
+    }
   }
+}
+
+#[derive(Debug, Default)]
+struct PlannedDirectoryDelta {
+  ensure_exists: bool,
+  upserts: std::collections::BTreeMap<String, ChildEntry>,
+  removals: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct DirectoryMutationPlanner {
+  deltas: std::collections::BTreeMap<String, PlannedDirectoryDelta>,
+  dependencies: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+#[derive(Debug)]
+enum PreparedCopyKind {
+  File(FileRecord),
+  Directory,
+  Symlink(SymlinkRecord),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopySourceConstraint {
+  Any,
+  FileOnly,
+}
+
+#[derive(Debug)]
+struct PreparedCopyEntry {
+  source_path: String,
+  destination_path: String,
+  source_identity: Vec<u8>,
+  kind: PreparedCopyKind,
+}
+
+#[derive(Debug)]
+struct CopyPublicationResult {
+  copied_paths: Vec<String>,
+  file_records: std::collections::BTreeMap<String, FileRecord>,
+}
+
+impl DirectoryMutationPlanner {
+  fn ensure_directory(&mut self, path: &str) -> EngineResult<()> {
+    let normalized = normalize_path(path);
+    if normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot create root directory through a directory delta".to_string()));
+    }
+    self.deltas.entry(normalized).or_default().ensure_exists = true;
+    Ok(())
+  }
+
+  fn upsert_child(&mut self, child_path: &str, child_entry: ChildEntry) -> EngineResult<()> {
+    let normalized = normalize_path(child_path);
+    let expected_name = file_name(&normalized).unwrap_or("");
+    if expected_name.is_empty() || child_entry.name != expected_name {
+      return Err(EngineError::InvalidInput(format!(
+        "Directory child name '{}' does not match canonical path '{}'",
+        child_entry.name, normalized
+      )));
+    }
+    let parent =
+      parent_path(&normalized).ok_or_else(|| EngineError::InvalidInput(format!("Path '{}' has no parent directory", normalized)))?;
+    let delta = self.deltas.entry(parent).or_default();
+    if delta.removals.contains(expected_name) {
+      return Err(EngineError::InvalidInput(format!("Directory delta both removes and upserts '{}'", normalized)));
+    }
+    if delta.upserts.insert(expected_name.to_string(), child_entry).is_some() {
+      return Err(EngineError::InvalidInput(format!("Directory delta contains duplicate destination '{}'", normalized)));
+    }
+    Ok(())
+  }
+
+  fn remove_child(&mut self, child_path: &str) -> EngineResult<()> {
+    let normalized = normalize_path(child_path);
+    let child_name = file_name(&normalized).unwrap_or("");
+    if child_name.is_empty() {
+      return Err(EngineError::InvalidInput(format!("Path '{}' has no removable child name", normalized)));
+    }
+    let parent =
+      parent_path(&normalized).ok_or_else(|| EngineError::InvalidInput(format!("Path '{}' has no parent directory", normalized)))?;
+    let delta = self.deltas.entry(parent).or_default();
+    if delta.upserts.contains_key(child_name) {
+      return Err(EngineError::InvalidInput(format!("Directory delta both upserts and removes '{}'", normalized)));
+    }
+    if !delta.removals.insert(child_name.to_string()) {
+      return Err(EngineError::InvalidInput(format!("Directory delta contains duplicate removal '{}'", normalized)));
+    }
+    Ok(())
+  }
+
+  fn add_dependency(&mut self, key: Vec<u8>, value: Vec<u8>) -> EngineResult<()> {
+    if let Some(existing) = self.dependencies.get(&key) {
+      if existing != &value {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("planned directory dependency {} has conflicting bytes", hex::encode(key)),
+        });
+      }
+      return Ok(());
+    }
+    self.dependencies.insert(key, value);
+    Ok(())
+  }
+
+  fn finalize(
+    mut self,
+    operations: &DirectoryOps<'_>,
+    batch: &mut NamespaceMutationBatch,
+    effects: &mut DirectoryMutationEffects,
+  ) -> EngineResult<()> {
+    let algorithm = operations.engine.hash_algo();
+    let hash_length = algorithm.hash_length();
+
+    while !self.deltas.is_empty() {
+      let path = self
+        .deltas
+        .keys()
+        .max_by(|left, right| directory_depth(left).cmp(&directory_depth(right)).then_with(|| left.cmp(right)))
+        .cloned()
+        .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "directory delta queue became empty unexpectedly".to_string() })?;
+      let delta = self
+        .deltas
+        .remove(&path)
+        .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("directory delta disappeared for '{path}'") })?;
+      let directory_key = directory_path_hash(&path, &algorithm)?;
+      let existing = match operations.recover_directory_data_if_stale(&path, &directory_key)? {
+        Some(pair) => Some(pair),
+        None => operations.read_directory_data(&directory_key)?,
+      };
+      let directory_was_missing = existing.is_none();
+      if delta.ensure_exists && !directory_was_missing {
+        return Err(EngineError::AlreadyExists(path));
+      }
+
+      let (directory_data, content_key) = match existing {
+        Some((header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+          let root = crate::engine::btree::BTreeNode::deserialize(&value, hash_length, header.entry_version)?;
+          let root_hash = root.content_hash(hash_length, &algorithm)?;
+          for name in &delta.removals {
+            if crate::engine::btree::btree_lookup(operations.engine, &root_hash, name, hash_length, false)?.is_none() {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("directory '{}' does not contain child '{}' selected for removal", path, name),
+              });
+            }
+          }
+          for entry in delta.upserts.values() {
+            if let Some(existing_child) =
+              crate::engine::btree::btree_lookup(operations.engine, &root_hash, &entry.name, hash_length, false)?
+            {
+              if existing_child.entry_type != entry.entry_type {
+                return Err(EngineError::AlreadyExists(format!("{}/{}", path.trim_end_matches('/'), entry.name)));
+              }
+            }
+          }
+          if delta.removals.is_empty() && delta.upserts.is_empty() {
+            (value, root_hash)
+          } else {
+            let mutation = crate::engine::btree::BTreeMutationDelta {
+              removals: delta.removals.into_iter().collect(),
+              upserts: delta.upserts.into_values().collect(),
+            };
+            match crate::engine::btree::btree_plan_apply(operations.engine, &value, mutation, hash_length, &algorithm)? {
+              Some(plan) => {
+                for write in plan.node_writes() {
+                  self.add_dependency(write.key.clone(), write.value.clone())?;
+                }
+                (plan.root_data().to_vec(), plan.root_hash().to_vec())
+              }
+              None => {
+                let data = Vec::new();
+                let key = directory_content_hash(&data, &algorithm)?;
+                self.add_dependency(key.clone(), data.clone())?;
+                (data, key)
+              }
+            }
+          }
+        }
+        Some((header, value)) => {
+          let children = if value.is_empty() { Vec::new() } else { deserialize_child_entries(&value, hash_length, header.entry_version)? };
+          let mut by_name = std::collections::BTreeMap::new();
+          for child in children {
+            let child_name = child.name.clone();
+            if by_name.insert(child_name.clone(), child).is_some() {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("directory '{}' contains duplicate child '{}'", path, child_name),
+              });
+            }
+          }
+          for name in delta.removals {
+            if by_name.remove(&name).is_none() {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("directory '{}' does not contain child '{}' selected for removal", path, name),
+              });
+            }
+          }
+          for (name, entry) in delta.upserts {
+            if by_name.get(&name).is_some_and(|existing_child| existing_child.entry_type != entry.entry_type) {
+              return Err(EngineError::AlreadyExists(format!("{}/{}", path.trim_end_matches('/'), name)));
+            }
+            by_name.insert(name, entry);
+          }
+          let children: Vec<_> = by_name.into_values().collect();
+          if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+            let plan = crate::engine::btree::btree_plan_from_entries(children, hash_length, &algorithm)?;
+            for write in plan.node_writes() {
+              self.add_dependency(write.key.clone(), write.value.clone())?;
+            }
+            (plan.root_data().to_vec(), plan.root_hash().to_vec())
+          } else {
+            let data = serialize_child_entries(&children, hash_length)?;
+            let key = directory_content_hash(&data, &algorithm)?;
+            self.add_dependency(key.clone(), data.clone())?;
+            (data, key)
+          }
+        }
+        None => {
+          if !delta.removals.is_empty() {
+            return Err(EngineError::CorruptEntry {
+              offset: 0,
+              reason: format!("missing directory '{}' cannot satisfy child removals", path),
+            });
+          }
+          let children: Vec<_> = delta.upserts.into_values().collect();
+          if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+            let plan = crate::engine::btree::btree_plan_from_entries(children, hash_length, &algorithm)?;
+            for write in plan.node_writes() {
+              self.add_dependency(write.key.clone(), write.value.clone())?;
+            }
+            (plan.root_data().to_vec(), plan.root_hash().to_vec())
+          } else {
+            let data = serialize_child_entries(&children, hash_length)?;
+            let key = directory_content_hash(&data, &algorithm)?;
+            self.add_dependency(key.clone(), data.clone())?;
+            (data, key)
+          }
+        }
+      };
+
+      if directory_was_missing {
+        effects.implicit_directories = effects
+          .implicit_directories
+          .checked_add(1)
+          .ok_or_else(|| EngineError::ResourceExhausted("implicit directory count overflow".to_string()))?;
+      }
+      effects.cache_writes.push((content_key.clone(), directory_data.clone()));
+      batch.replace_locator(EntryType::DirectoryIndex, directory_key, content_key.clone(), 0)?;
+      if path == "/" {
+        batch.set_head_hash(content_key);
+        continue;
+      }
+
+      let parent = parent_path(&path).ok_or_else(|| EngineError::InvalidInput(format!("Directory '{}' has no parent", path)))?;
+      if parent == "/" && v0_is_detached_system_path(&path) {
+        continue;
+      }
+      let now = chrono::Utc::now().timestamp_millis();
+      self.upsert_child(
+        &path,
+        ChildEntry {
+          entry_type: EntryType::DirectoryIndex.to_u8(),
+          hash: content_key,
+          total_size: directory_data.len() as u64,
+          created_at: now,
+          updated_at: now,
+          name: file_name(&path).unwrap_or("").to_string(),
+          content_type: None,
+          virtual_time: now as u64,
+          node_id: 0,
+        },
+      )?;
+    }
+
+    for (key, value) in self.dependencies {
+      batch.store_dependency(EntryType::DirectoryIndex, key, value, 0)?;
+    }
+    Ok(())
+  }
+}
+
+fn directory_depth(path: &str) -> usize {
+  path.split('/').filter(|segment| !segment.is_empty()).count()
 }
 
 struct DirectoryMutationFanout<'a> {
@@ -939,29 +1287,86 @@ impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
     for _ in 0..effects.implicit_directories {
       self.engine.counters().increment_directories();
     }
-    match effects.counter {
+    match &effects.counter {
       DirectoryMutationCounterEffect::None => {}
       DirectoryMutationCounterEffect::FileWrite { previous_size, new_size, throughput_bytes } => {
-        self.engine.counters().record_file_write(previous_size, new_size, throughput_bytes);
+        self.engine.counters().record_file_write(*previous_size, *new_size, *throughput_bytes);
       }
-      DirectoryMutationCounterEffect::FileDelete { size } => self.engine.counters().record_file_delete(size),
+      DirectoryMutationCounterEffect::FileDelete { size } => self.engine.counters().record_file_delete(*size),
       DirectoryMutationCounterEffect::DirectoryCreate => self.engine.counters().record_directory_create(),
       DirectoryMutationCounterEffect::DirectoryDelete => self.engine.counters().record_directory_delete(),
-      DirectoryMutationCounterEffect::SymlinkWrite { existed } => self.engine.counters().record_symlink_write(existed),
+      DirectoryMutationCounterEffect::SymlinkWrite { existed } => self.engine.counters().record_symlink_write(*existed),
       DirectoryMutationCounterEffect::SymlinkDelete => self.engine.counters().record_symlink_delete(),
+      DirectoryMutationCounterEffect::Aggregate(delta) => {
+        self.engine.counters().record_write(delta.throughput_bytes);
+        for (previous_size, new_size) in &delta.file_writes {
+          match previous_size {
+            None => {
+              self.engine.counters().increment_files();
+              self.engine.counters().add_logical_data_size(*new_size);
+            }
+            Some(old_size) if new_size >= old_size => self.engine.counters().add_logical_data_size(*new_size - *old_size),
+            Some(old_size) => self.engine.counters().sub_logical_data_size(*old_size - *new_size),
+          }
+        }
+        for size in &delta.file_delete_sizes {
+          self.engine.counters().decrement_files();
+          self.engine.counters().sub_logical_data_size(*size);
+        }
+        for size in &delta.chunk_stored_sizes {
+          self.engine.counters().record_chunk_stored(*size);
+        }
+        for _ in 0..delta.chunks_deduped {
+          self.engine.counters().record_chunk_deduped();
+        }
+        for _ in 0..delta.directories_created {
+          self.engine.counters().increment_directories();
+        }
+        for _ in 0..delta.directories_deleted {
+          self.engine.counters().decrement_directories();
+        }
+        for _ in 0..delta.symlinks_created {
+          self.engine.counters().increment_symlinks();
+        }
+        for _ in 0..delta.symlinks_deleted {
+          self.engine.counters().decrement_symlinks();
+        }
+      }
     }
 
-    if let (Some(context), Some((event_type, event_payload))) = (self.context, effects.event.as_ref()) {
-      let mut payload = event_payload.clone();
-      if let Some(object) = payload.as_object_mut() {
-        object.insert("operation_id".to_string(), serde_json::Value::String(acknowledgement.operation_id.to_string()));
-        object.insert("publication_sequence".to_string(), serde_json::Value::from(acknowledgement.publication_sequence));
-        object.insert("mutation_kind".to_string(), serde_json::Value::String(mutation_kind.to_string()));
-      } else {
-        tracing::error!(operation_id = %acknowledgement.operation_id, "Directory mutation event payload is not an object");
-        return;
+    for path in &effects.metadata_index_removal_paths {
+      if let Err(error) = crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, path) {
+        tracing::warn!(operation_id = %acknowledgement.operation_id, path, error = %error, "Post-commit metadata index removal failed");
       }
-      context.emit(event_type, payload);
+    }
+
+    if !effects.metadata_index_paths.is_empty() {
+      let pipeline = IndexingPipeline::new(self.engine);
+      let options = IndexWriteBufferOptions::new(DEFAULT_INDEX_BUFFER_FLUSH_WRITES, std::time::Duration::from_secs(300));
+      let mut index_buffer = IndexWriteBuffer::new(self.engine, options);
+      for path in &effects.metadata_index_paths {
+        if let Err(error) = pipeline.run_metadata_only_buffered_with_outcome(path, &mut index_buffer) {
+          tracing::warn!(operation_id = %acknowledgement.operation_id, path, error = %error, "Post-commit metadata indexing failed");
+        }
+        if let Err(error) = index_buffer.flush_if_due() {
+          tracing::warn!(operation_id = %acknowledgement.operation_id, path, error = %error, "Post-commit metadata index flush failed");
+        }
+      }
+    }
+
+    if let Some(context) = self.context {
+      for (event_type, event_payload) in &effects.events {
+        let mut payload = event_payload.clone();
+        if let Some(object) = payload.as_object_mut() {
+          object.insert("operation_id".to_string(), serde_json::Value::String(acknowledgement.operation_id.to_string()));
+          object.insert("publication_sequence".to_string(), serde_json::Value::from(acknowledgement.publication_sequence));
+          object.insert("mutation_kind".to_string(), serde_json::Value::String(mutation_kind.to_string()));
+        } else {
+          tracing::error!(operation_id = %acknowledgement.operation_id, "Directory mutation event payload is not an object");
+          continue;
+        }
+        context.emit(event_type, payload);
+      }
     }
   }
 }
@@ -1071,9 +1476,11 @@ impl<'a> DirectoryOps<'a> {
     input: FileRecordPublishInput,
     entry_version: u8,
     emit_event: bool,
+    index_metadata: bool,
   ) -> EngineResult<FileRecord> {
-    self.execute_namespace_mutation(Some(context), move |_planning_engine| {
-      let prepared = prepare_file_record_publication_at_version(self.engine, input, entry_version)?;
+    self.execute_namespace_mutation(Some(context), move |planning_engine| {
+      validate_existing_file_chunks(planning_engine, &input.normalized_path, &input.chunk_hashes)?;
+      let prepared = prepare_file_record_publication_at_version(planning_engine, input, entry_version)?;
       let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::FileWrite);
       add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
       batch.add_source_identity(NamespaceMutationSourceIdentity {
@@ -1090,9 +1497,68 @@ impl<'a> DirectoryOps<'a> {
       });
       self.plan_parent_directories(&mut batch, &prepared.result.normalized_path, prepared.result.child_entry.clone(), &mut effects)?;
       if emit_event {
-        effects.event = Some((EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [prepared.result.event_entry.clone()]})));
+        effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [prepared.result.event_entry.clone()]})));
+      }
+      if index_metadata {
+        effects.metadata_index_paths.push(prepared.result.normalized_path.clone());
       }
       Ok((batch, prepared.result.file_record, effects))
+    })
+  }
+
+  pub(crate) fn execute_file_publications(
+    &self,
+    context: &RequestContext,
+    inputs: Vec<BatchFilePublicationInput>,
+    kind: NamespaceMutationKind,
+  ) -> EngineResult<Vec<FileRecordPublishResult>> {
+    if inputs.is_empty() {
+      return Err(EngineError::InvalidInput("No files provided for namespace publication".to_string()));
+    }
+
+    self.execute_namespace_mutation(Some(context), move |planning_engine| {
+      let mut batch = NamespaceMutationBatch::new(kind);
+      let mut planner = DirectoryMutationPlanner::default();
+      let mut counter_delta = DirectoryMutationCounterDelta::default();
+      let mut results = Vec::with_capacity(inputs.len());
+      let mut event_entries = Vec::with_capacity(inputs.len());
+      let mut seen_paths = std::collections::HashSet::with_capacity(inputs.len());
+
+      for input in inputs {
+        let normalized = normalize_path(&input.publication.normalized_path);
+        if normalized == "/" {
+          return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
+        }
+        if !seen_paths.insert(normalized.clone()) {
+          return Err(EngineError::InvalidInput(format!("Duplicate batch path: {normalized}")));
+        }
+
+        let mut publication = input.publication;
+        publication.normalized_path = normalized;
+        validate_existing_file_chunks(planning_engine, &publication.normalized_path, &publication.chunk_hashes)?;
+        let prepared = prepare_file_record_publication_at_version(planning_engine, publication, CURRENT_FILE_RECORD_VERSION)?;
+        add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: prepared.result.normalized_path.clone(),
+          entry_type: Some(EntryType::FileRecord.to_u8()),
+          previous_identity: prepared.previous_identity.clone(),
+          new_identity: Some(prepared.entries.identity_key.clone()),
+        })?;
+        planner.upsert_child(&prepared.result.normalized_path, prepared.result.child_entry.clone())?;
+        counter_delta.throughput_bytes = counter_delta
+          .throughput_bytes
+          .checked_add(input.throughput_bytes)
+          .ok_or_else(|| EngineError::ResourceExhausted("batch write throughput counter overflow".to_string()))?;
+        counter_delta.file_writes.push((prepared.result.existing_total_size, prepared.result.file_record.total_size));
+        event_entries.push(prepared.result.event_entry.clone());
+        results.push(prepared.result);
+      }
+
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(counter_delta));
+      effects.metadata_index_paths.extend(results.iter().map(|result| result.normalized_path.clone()));
+      effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries })));
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((batch, results, effects))
     })
   }
 
@@ -1144,9 +1610,20 @@ impl<'a> DirectoryOps<'a> {
     patch: serde_json::Value,
     depth: MergeDepth,
   ) -> EngineResult<JsonMergeFileResult> {
-    let (serialized, existed) = self.prepare_json_merge(path, patch, depth)?;
-    let file_record = self.store_file_buffered(ctx, path, &serialized, Some("application/json"))?;
-    Ok(JsonMergeFileResult { file_record, created: !existed })
+    self.merge_json_file_bounded(ctx, path, patch, depth, None)
+  }
+
+  pub(crate) fn merge_json_file_bounded(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    patch: serde_json::Value,
+    depth: MergeDepth,
+    maximum_existing_bytes: Option<usize>,
+  ) -> EngineResult<JsonMergeFileResult> {
+    let mut merged =
+      self.execute_json_merge_patches(ctx, vec![JsonMergeFilePatch { path: path.to_string(), patch, depth }], maximum_existing_bytes)?;
+    merged.pop().ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "single JSON merge produced no result".to_string() })
   }
 
   /// Apply JSON merge patches to multiple small JSON files in one write batch.
@@ -1155,12 +1632,30 @@ impl<'a> DirectoryOps<'a> {
   /// starts, so invalid JSON in any existing file prevents every write in the
   /// batch.
   pub fn merge_json_files_batch(&self, ctx: &RequestContext, patches: Vec<JsonMergeFilePatch>) -> EngineResult<JsonMergeBatchResult> {
+    let results = self.execute_json_merge_patches(ctx, patches, None)?;
+    let files = results
+      .iter()
+      .map(|result| JsonMergedFile { path: result.file_record.path.clone(), size: result.file_record.total_size, created: result.created })
+      .collect();
+    Ok(JsonMergeBatchResult { merged: results.len(), files })
+  }
+
+  fn execute_json_merge_patches(
+    &self,
+    ctx: &RequestContext,
+    patches: Vec<JsonMergeFilePatch>,
+    maximum_existing_bytes: Option<usize>,
+  ) -> EngineResult<Vec<JsonMergeFileResult>> {
     if patches.is_empty() {
       return Err(EngineError::InvalidInput("No JSON merge patches provided".to_string()));
     }
 
     let mut seen_paths = std::collections::HashSet::with_capacity(patches.len());
-    for patch in &patches {
+    let mut normalized_patches = Vec::with_capacity(patches.len());
+    for mut patch in patches {
+      if patch.path.bytes().any(|byte| byte < 0x20 || byte == 0x7F) {
+        return Err(EngineError::InvalidInput("JSON merge path contains control characters".to_string()));
+      }
       let normalized = normalize_path(&patch.path);
       if normalized == "/" {
         return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
@@ -1168,24 +1663,106 @@ impl<'a> DirectoryOps<'a> {
       if !seen_paths.insert(normalized.clone()) {
         return Err(EngineError::InvalidInput(format!("Duplicate batch path: {}", normalized)));
       }
+      patch.path = normalized;
+      normalized_patches.push(patch);
     }
 
-    let mut files = Vec::with_capacity(patches.len());
-    let mut merged_files = Vec::with_capacity(patches.len());
+    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
+      let algorithm = planning_engine.hash_algo();
+      let mut chunk_dependencies: std::collections::BTreeMap<Vec<u8>, (Vec<u8>, u8)> = std::collections::BTreeMap::new();
+      let mut counter_delta = DirectoryMutationCounterDelta::default();
+      let mut prepared_merges = Vec::with_capacity(normalized_patches.len());
 
-    for patch in patches {
-      let normalized = normalize_path(&patch.path);
-      let (serialized, existed) = self.prepare_json_merge(&normalized, patch.patch, patch.depth)?;
-      let size = serialized.len() as u64;
-      files.push(BufferedFile { path: normalized.clone(), data: serialized, content_type: Some("application/json".to_string()) });
-      merged_files.push(JsonMergedFile { path: normalized, size, created: !existed });
-    }
+      for patch in normalized_patches {
+        let (serialized, existed) = self.prepare_json_merge(&patch.path, patch.patch, patch.depth, maximum_existing_bytes)?;
+        let flags = v0_system_entry_flags(&patch.path);
+        let chunk_owner = format!("JSON merge '{}'", patch.path);
+        let total_size = serialized.len() as u64;
+        let mut chunk_hashes = Vec::new();
+        for chunk_data in serialized.chunks(DEFAULT_CHUNK_SIZE) {
+          let chunk_key = chunk_content_hash(chunk_data, &algorithm)?;
+          if validate_existing_chunk_locator(planning_engine, &chunk_owner, &chunk_key)? {
+            counter_delta.chunks_deduped = counter_delta
+              .chunks_deduped
+              .checked_add(1)
+              .ok_or_else(|| EngineError::ResourceExhausted("JSON merge deduplicated chunk counter overflow".to_string()))?;
+          } else if let Some((existing_data, existing_flags)) = chunk_dependencies.get_mut(&chunk_key) {
+            if existing_data.as_slice() != chunk_data {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("JSON merge chunk hash collision at {}", hex::encode(&chunk_key)),
+              });
+            }
+            *existing_flags |= flags;
+            counter_delta.chunks_deduped = counter_delta
+              .chunks_deduped
+              .checked_add(1)
+              .ok_or_else(|| EngineError::ResourceExhausted("JSON merge deduplicated chunk counter overflow".to_string()))?;
+          } else {
+            chunk_dependencies.insert(chunk_key.clone(), (chunk_data.to_vec(), flags));
+            counter_delta.chunk_stored_sizes.push(chunk_data.len() as u64);
+          }
+          chunk_hashes.push(chunk_key);
+        }
+        let prepared = prepare_file_record_publication_at_version(
+          planning_engine,
+          FileRecordPublishInput {
+            normalized_path: patch.path,
+            content_type: Some("application/json".to_string()),
+            total_size,
+            chunk_hashes,
+            content_hash: whole_file_content_hash(&serialized, &algorithm)?,
+            flags,
+            created_at_override: None,
+            prefer_existing_created_at: true,
+          },
+          CURRENT_FILE_RECORD_VERSION,
+        )?;
+        counter_delta.throughput_bytes = counter_delta
+          .throughput_bytes
+          .checked_add(total_size)
+          .ok_or_else(|| EngineError::ResourceExhausted("JSON merge throughput counter overflow".to_string()))?;
+        prepared_merges.push((prepared, !existed));
+      }
 
-    let result = self.store_files_buffered_batch(ctx, files)?;
-    Ok(JsonMergeBatchResult { merged: result.committed, files: merged_files })
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Merge);
+      for (chunk_key, (chunk_data, flags)) in chunk_dependencies {
+        batch.store_dependency(EntryType::Chunk, chunk_key, chunk_data, flags)?;
+      }
+      let mut planner = DirectoryMutationPlanner::default();
+      let mut event_entries = Vec::with_capacity(prepared_merges.len());
+      let mut results = Vec::with_capacity(prepared_merges.len());
+      let mut metadata_index_paths = Vec::with_capacity(prepared_merges.len());
+      for (prepared, created) in prepared_merges {
+        add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: prepared.result.normalized_path.clone(),
+          entry_type: Some(EntryType::FileRecord.to_u8()),
+          previous_identity: prepared.previous_identity.clone(),
+          new_identity: Some(prepared.entries.identity_key.clone()),
+        })?;
+        planner.upsert_child(&prepared.result.normalized_path, prepared.result.child_entry.clone())?;
+        counter_delta.file_writes.push((prepared.result.existing_total_size, prepared.result.file_record.total_size));
+        metadata_index_paths.push(prepared.result.normalized_path.clone());
+        event_entries.push(prepared.result.event_entry.clone());
+        results.push(JsonMergeFileResult { file_record: prepared.result.file_record, created });
+      }
+
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(counter_delta));
+      effects.metadata_index_paths = metadata_index_paths;
+      effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries })));
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((batch, results, effects))
+    })
   }
 
-  fn prepare_json_merge(&self, path: &str, patch: serde_json::Value, depth: MergeDepth) -> EngineResult<(Vec<u8>, bool)> {
+  fn prepare_json_merge(
+    &self,
+    path: &str,
+    patch: serde_json::Value,
+    depth: MergeDepth,
+    maximum_existing_bytes: Option<usize>,
+  ) -> EngineResult<(Vec<u8>, bool)> {
     let normalized = normalize_path(path);
     if normalized == "/" {
       return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
@@ -1193,6 +1770,16 @@ impl<'a> DirectoryOps<'a> {
 
     let (mut target, existed) = match self.read_file_buffered(&normalized) {
       Ok(bytes) => {
+        if let Some(maximum) = maximum_existing_bytes {
+          if bytes.len() > maximum {
+            return Err(EngineError::InvalidInput(format!(
+              "stored file at {} is {} bytes, exceeds {} byte merge cap",
+              normalized,
+              bytes.len(),
+              maximum,
+            )));
+          }
+        }
         if bytes.is_empty() {
           (serde_json::Value::Object(serde_json::Map::new()), true)
         } else {
@@ -1265,10 +1852,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let content_hash = content_hasher.finalize();
-    let file_record =
-      self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, &first_bytes, content_hash)?;
-    self.index_metadata_after_streaming_store(ctx, path);
-    Ok(file_record)
+    self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, &first_bytes, content_hash)
   }
 
   /// Store a single data chunk and return its hash. Deduplicates automatically.
@@ -1277,7 +1861,7 @@ impl<'a> DirectoryOps<'a> {
     let _mem = PhaseSampler::start("store_chunk", std::time::Duration::from_millis(50));
     let algo = self.engine.hash_algo();
     let chunk_key = chunk_content_hash(data, &algo)?;
-    if !self.engine.has_entry(&chunk_key)? {
+    if !validate_existing_chunk_locator(self.engine, "chunk staging", &chunk_key)? {
       self.engine.store_entry(EntryType::Chunk, &chunk_key, data)?;
       self.engine.counters().record_chunk_stored(data.len() as u64);
     } else {
@@ -1300,16 +1884,7 @@ impl<'a> DirectoryOps<'a> {
     first_bytes: &[u8],
   ) -> EngineResult<FileRecord> {
     let content_hash = whole_file_content_hash_from_chunks(self.engine, &chunk_hashes)?;
-    let file_record = self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, first_bytes, content_hash)?;
-    self.index_metadata_after_streaming_store(ctx, path);
-    Ok(file_record)
-  }
-
-  fn index_metadata_after_streaming_store(&self, ctx: &RequestContext, path: &str) {
-    let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
-    if let Err(error) = pipeline.run_metadata_only(ctx, path) {
-      tracing::warn!("Metadata indexing failed for streamed file '{}': {}", path, error);
-    }
+    self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, first_bytes, content_hash)
   }
 
   fn finalize_file_with_content_hash(
@@ -1345,6 +1920,7 @@ impl<'a> DirectoryOps<'a> {
         prefer_existing_created_at: true,
       },
       CURRENT_FILE_RECORD_VERSION,
+      true,
       true,
     )?;
 
@@ -1430,7 +2006,7 @@ impl<'a> DirectoryOps<'a> {
         let chunk_key = chunk_content_hash(chunk_data, &algo)?;
 
         // Dedup: only store if not already present
-        if !self.engine.has_entry(&chunk_key)? {
+        if !validate_existing_chunk_locator(self.engine, "compressed file chunk staging", &chunk_key)? {
           let stored_chunk_bytes;
           if compression_algo != CompressionAlgorithm::None {
             let compressed_data = compress(chunk_data, compression_algo)?;
@@ -1472,6 +2048,7 @@ impl<'a> DirectoryOps<'a> {
       },
       file_record_version,
       emit_event,
+      false,
     )
   }
 
@@ -1595,7 +2172,7 @@ impl<'a> DirectoryOps<'a> {
         previous_hash: None,
       };
       let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::FileDelete { size: record.total_size });
-      effects.event = Some((EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]})));
+      effects.events.push((EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]})));
       self.plan_remove_from_parent_directory(&mut batch, &normalized, &mut effects)?;
       Ok((batch, (), effects))
     })
@@ -1634,7 +2211,7 @@ impl<'a> DirectoryOps<'a> {
       })?;
       let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::DirectoryDelete);
       self.plan_remove_from_parent_directory(&mut batch, &normalized, &mut effects)?;
-      effects.event = Some((EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [{"path": normalized, "entry_type": "directory"}]})));
+      effects.events.push((EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [{"path": normalized, "entry_type": "directory"}]})));
       Ok((batch, (), effects))
     })
   }
@@ -1677,20 +2254,28 @@ impl<'a> DirectoryOps<'a> {
   where
     F: FnMut(&ChildEntry) -> EngineResult<bool>,
   {
-    self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::BestEffort, &mut visitor)
+    self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::BestEffort, true, &mut visitor)
   }
 
   pub(crate) fn visit_live_directory_children_strict<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
   where
     F: FnMut(&ChildEntry) -> EngineResult<bool>,
   {
-    self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::Strict, &mut visitor)
+    self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::Strict, true, &mut visitor)
+  }
+
+  fn visit_live_directory_children_strict_no_heal<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&ChildEntry) -> EngineResult<bool>,
+  {
+    self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::Strict, false, &mut visitor)
   }
 
   fn visit_live_directory_children_with_mode<F>(
     &self,
     path: &str,
     mode: crate::engine::btree::BTreeWalkMode,
+    heal_stale: bool,
     visitor: &mut F,
   ) -> EngineResult<bool>
   where
@@ -1698,7 +2283,7 @@ impl<'a> DirectoryOps<'a> {
   {
     let normalized = normalize_path(path);
     let hash_length = self.engine.hash_algo().hash_length();
-    let Some((header, value)) = self.load_directory_listing_data(&normalized)? else {
+    let Some((header, value)) = self.load_directory_listing_data_inner(&normalized, heal_stale)? else {
       return Err(EngineError::NotFound(normalized));
     };
     if value.is_empty() {
@@ -2130,7 +2715,7 @@ impl<'a> DirectoryOps<'a> {
           &mut effects,
         )?;
       }
-      effects.event = Some((
+      effects.events.push((
         EVENT_ENTRIES_CREATED,
         serde_json::json!({"entries": [EntryEventData {
           path: normalized.clone(),
@@ -3008,7 +3593,7 @@ impl<'a> DirectoryOps<'a> {
 
   fn file_record_chunks_live(&self, record: &FileRecord) -> EngineResult<bool> {
     for chunk_hash in &record.chunk_hashes {
-      if !self.engine.has_entry(chunk_hash)? {
+      if !validate_existing_chunk_locator(self.engine, &format!("file '{}'", record.path), chunk_hash)? {
         return Ok(false);
       }
     }
@@ -3757,103 +4342,6 @@ impl<'a> DirectoryOps<'a> {
     Err(EngineError::InvalidInput(format!("Directory depth exceeds maximum of {} levels", Self::MAX_DIRECTORY_DEPTH)))
   }
 
-  /// Remove a child entry from its parent directory and propagate up.
-  /// Handles both flat and B-tree directory formats.
-  fn remove_from_parent_directory(&self, child_path: &str) -> EngineResult<()> {
-    let algo = self.engine.hash_algo();
-    let hash_length = algo.hash_length();
-
-    let parent = match parent_path(child_path) {
-      Some(parent) => parent,
-      None => return Ok(()),
-    };
-
-    let dir_key = directory_path_hash(&parent, &algo)?;
-    let child_name = file_name(child_path).unwrap_or("").to_string();
-
-    let existing = match self.recover_directory_data_if_stale(&parent, &dir_key)? {
-      Some(pair) => Some(pair),
-      None => self.read_directory_data(&dir_key)?,
-    };
-
-    let mut batch = WriteBatch::new();
-
-    let (dir_value, content_key) = match existing {
-      Some((header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
-        // B-tree format: delete from tree
-        let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length, header.entry_version)?;
-        let root_hash = root_node.content_hash(hash_length, &algo)?;
-
-        match crate::engine::btree::btree_delete(self.engine, &root_hash, &child_name, hash_length, &algo)? {
-          Some(new_root_hash) => {
-            let new_root_entry = self
-              .engine
-              .get_entry(&new_root_hash)?
-              .ok_or_else(|| EngineError::NotFound("B-tree root not found after delete".to_string()))?;
-            // Cache the B-tree root data
-            self.engine.cache_dir_content(new_root_hash.clone(), new_root_entry.2.clone())?;
-            (new_root_entry.2, new_root_hash)
-          }
-          None => {
-            // Tree is empty -- store empty flat directory
-            let dir_value = Vec::new();
-            let content_key = directory_content_hash(&dir_value, &algo)?;
-            batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-            self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
-            (dir_value, content_key)
-          }
-        }
-      }
-      Some((header, value)) => {
-        // Flat format
-        let mut children =
-          if value.is_empty() { Vec::new() } else { deserialize_child_entries(&value, hash_length, header.entry_version)? };
-
-        children.retain(|c| c.name != child_name);
-
-        let dir_value = serialize_child_entries(&children, hash_length)?;
-        let content_key = directory_content_hash(&dir_value, &algo)?;
-        batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-        self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
-        (dir_value, content_key)
-      }
-      None => {
-        let dir_value = Vec::new();
-        let content_key = directory_content_hash(&dir_value, &algo)?;
-        batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-        self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
-        (dir_value, content_key)
-      }
-    };
-
-    // Hard link at path-based key: store content hash instead of full data
-    batch.add(EntryType::DirectoryIndex, dir_key, content_key.clone());
-
-    // Propagate up
-    if parent == "/" {
-      self.engine.flush_batch_and_update_head(batch, &content_key)?;
-      return Ok(());
-    }
-
-    // Flush batch before calling update_parent_directories (it creates its own batch)
-    self.engine.flush_batch(batch)?;
-
-    let del_now = chrono::Utc::now().timestamp_millis();
-    let parent_child = ChildEntry {
-      entry_type: EntryType::DirectoryIndex.to_u8(),
-      hash: content_key, // content hash for tree walker
-      total_size: dir_value.len() as u64,
-      created_at: del_now,
-      updated_at: del_now,
-      name: file_name(&parent).unwrap_or("").to_string(),
-      content_type: None,
-      virtual_time: del_now as u64,
-      node_id: 0,
-    };
-
-    self.update_parent_directories(&parent, parent_child)
-  }
-
   /// Store a symlink at the given path pointing to the target path.
   /// If a symlink already exists at the path, updates its target (preserving created_at).
   /// Does NOT validate that the target exists.
@@ -3929,7 +4417,7 @@ impl<'a> DirectoryOps<'a> {
         },
         &mut effects,
       )?;
-      effects.event = Some((
+      effects.events.push((
         EVENT_ENTRIES_CREATED,
         serde_json::json!({"entries": [EntryEventData {
           path: normalized.clone(),
@@ -3983,7 +4471,7 @@ impl<'a> DirectoryOps<'a> {
       })?;
       let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::SymlinkDelete);
       self.plan_remove_from_parent_directory(&mut batch, &normalized, &mut effects)?;
-      effects.event = Some((
+      effects.events.push((
         EVENT_ENTRIES_DELETED,
         serde_json::json!({"entries": [EntryEventData {
           path: normalized.clone(),
@@ -4006,183 +4494,466 @@ impl<'a> DirectoryOps<'a> {
   /// The file's content (chunk_hashes), content_type, total_size, and
   /// created_at are preserved. Only the path and updated_at change.
   pub fn rename_file(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<FileRecord> {
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
-
     let old_normalized = normalize_path(old_path);
     let new_normalized = normalize_path(new_path);
-
-    // Reject root paths
     if old_normalized == "/" || new_normalized == "/" {
       return Err(EngineError::InvalidInput("Cannot rename root path".to_string()));
     }
-
-    // Reject same source/destination
     if old_normalized == new_normalized {
       return Err(EngineError::InvalidInput("Source and destination paths are the same".to_string()));
     }
-
-    // Reject cross-system-boundary renames
-    let old_is_system = v0_is_detached_system_path(&old_normalized);
-    let new_is_system = v0_is_detached_system_path(&new_normalized);
-    if old_is_system != new_is_system {
+    if v0_is_detached_system_path(&old_normalized) != v0_is_detached_system_path(&new_normalized) {
       return Err(EngineError::InvalidInput("Cannot rename across system boundary".to_string()));
     }
 
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
-    let sys_flags = v0_system_entry_flags(&new_normalized);
-
-    // Read the source FileRecord
     let old_file_key = file_path_hash(&old_normalized, &algo)?;
-    let old_record = match self.engine.get_entry(&old_file_key)? {
-      Some((header, _key, value)) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
-      None => return Err(EngineError::NotFound(old_normalized)),
-    };
-
-    // Check destination doesn't already exist (file or symlink)
     let new_file_key = file_path_hash(&new_normalized, &algo)?;
-    if self.engine.has_entry(&new_file_key)? {
-      return Err(EngineError::AlreadyExists(new_normalized));
-    }
     let new_symlink_key = symlink_path_hash(&new_normalized, &algo)?;
-    if self.engine.has_entry(&new_symlink_key)? {
-      return Err(EngineError::AlreadyExists(new_normalized));
-    }
+    let new_directory_key = directory_path_hash(&new_normalized, &algo)?;
+    let mut memory =
+      OperationMemoryBudget::new(self.engine, "file rename planning", MemoryOwner::DurabilityWaiters, AdmissionClass::Workload, 0, None)?;
 
-    // Create a new FileRecord at the new path, preserving content fields
-    let mut new_record =
-      FileRecord::new(new_normalized.clone(), old_record.content_type.clone(), old_record.total_size, old_record.chunk_hashes.clone());
-    new_record.content_hash = old_record.content_hash.clone();
-    ensure_file_record_content_hash(self.engine, &mut new_record)?;
-    new_record.created_at = old_record.created_at;
+    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
+      let (source_header, _source_key, source_value) =
+        planning_engine.get_entry(&old_file_key)?.ok_or_else(|| EngineError::NotFound(old_normalized.clone()))?;
+      let mut old_record = FileRecord::deserialize(&source_value, hash_length, source_header.entry_version)?;
+      ensure_file_record_content_hash_for_migration(planning_engine, &mut old_record, &mut memory)?;
+      validate_existing_file_chunks(planning_engine, &old_normalized, &old_record.chunk_hashes)?;
+      if planning_engine.has_entry(&new_file_key)?
+        || planning_engine.has_entry(&new_symlink_key)?
+        || planning_engine.has_entry(&new_directory_key)?
+      {
+        return Err(EngineError::AlreadyExists(new_normalized.clone()));
+      }
 
-    let keys = materialize_file_record_entries(self.engine, &new_normalized, &mut new_record, sys_flags)?;
-    let child = ChildEntry {
-      entry_type: EntryType::FileRecord.to_u8(),
-      hash: keys.identity_key,
-      total_size: new_record.total_size,
-      created_at: new_record.created_at,
-      updated_at: new_record.updated_at,
-      name: file_name(&new_normalized).unwrap_or("").to_string(),
-      content_type: new_record.content_type.clone(),
-      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
-      node_id: 0,
-    };
-    self.update_parent_directories(&new_normalized, child)?;
+      let old_identity = file_identity_hash(&old_normalized, old_record.content_type.as_deref(), &old_record.chunk_hashes, &algo)?;
+      let prepared = prepare_file_record_publication_at_version(
+        planning_engine,
+        FileRecordPublishInput {
+          normalized_path: new_normalized.clone(),
+          content_type: old_record.content_type.clone(),
+          total_size: old_record.total_size,
+          chunk_hashes: old_record.chunk_hashes.clone(),
+          content_hash: old_record.content_hash.clone(),
+          flags: v0_system_entry_flags(&new_normalized),
+          created_at_override: Some(old_record.created_at),
+          prefer_existing_created_at: false,
+        },
+        CURRENT_FILE_RECORD_VERSION,
+      )?;
+      let deletion = DeletionRecord::new(old_normalized.clone(), None);
+      let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
 
-    // Delete old path: DeletionRecord + mark deleted + remove from parent
-    let deletion = DeletionRecord::new(old_normalized.clone(), None);
-    let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
-    let deletion_value = deletion.serialize();
-    let old_sys_flags = v0_system_entry_flags(&old_normalized);
-    if old_sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, old_sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
-    }
-    self.engine.mark_entry_deleted(&old_file_key)?;
-    self.remove_from_parent_directory(&old_normalized)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Rename);
+      add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&old_normalized))?;
+      batch.retire_locator(old_file_key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: old_normalized.clone(),
+        entry_type: Some(EntryType::FileRecord.to_u8()),
+        previous_identity: Some(old_identity),
+        new_identity: None,
+      })?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: new_normalized.clone(),
+        entry_type: Some(EntryType::FileRecord.to_u8()),
+        previous_identity: None,
+        new_identity: Some(prepared.entries.identity_key.clone()),
+      })?;
 
-    let deleted_event = EntryEventData {
-      path: old_normalized,
-      entry_type: "file".to_string(),
-      content_type: old_record.content_type.clone(),
-      size: old_record.total_size,
-      hash: old_record.content_hash_hex(),
-      created_at: old_record.created_at,
-      updated_at: old_record.updated_at,
-      previous_hash: None,
-    };
-    let created_event = EntryEventData {
-      path: new_normalized,
-      entry_type: "file".to_string(),
-      content_type: new_record.content_type.clone(),
-      size: new_record.total_size,
-      hash: new_record.content_hash_hex(),
-      created_at: new_record.created_at,
-      updated_at: new_record.updated_at,
-      previous_hash: None,
-    };
-    txn.commit_after(namespace)?;
-    self.engine.counters().record_write(0);
-    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
-
-    Ok(new_record)
+      let mut planner = DirectoryMutationPlanner::default();
+      planner.remove_child(&old_normalized)?;
+      planner.upsert_child(&new_normalized, prepared.result.child_entry.clone())?;
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(DirectoryMutationCounterDelta::default()));
+      effects.metadata_index_removal_paths.push(old_normalized.clone());
+      effects.metadata_index_paths.push(new_normalized.clone());
+      effects.events.push((
+        EVENT_ENTRIES_DELETED,
+        serde_json::json!({"entries": [EntryEventData {
+          path: old_normalized.clone(),
+          entry_type: "file".to_string(),
+          content_type: old_record.content_type.clone(),
+          size: old_record.total_size,
+          hash: old_record.content_hash_hex(),
+          created_at: old_record.created_at,
+          updated_at: old_record.updated_at,
+          previous_hash: None,
+        }]}),
+      ));
+      effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [prepared.result.event_entry.clone()]})));
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((batch, prepared.result.file_record, effects))
+    })
   }
 
   /// Copy a file to a new path. Reuses existing chunk hashes (no data duplication).
   pub fn copy_file(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<FileRecord> {
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
-
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
-
-    if from_normalized == "/" || to_normalized == "/" {
-      return Err(EngineError::InvalidInput("Cannot copy root path".to_string()));
-    }
-    if from_normalized == to_normalized {
-      return Err(EngineError::InvalidInput("Source and destination are the same".to_string()));
-    }
-    if v0_is_detached_system_path(&from_normalized) || v0_is_detached_system_path(&to_normalized) {
-      return Err(EngineError::InvalidInput("Cannot copy system paths".to_string()));
-    }
-
-    let algo = self.engine.hash_algo();
-    let hash_length = algo.hash_length();
-
-    // Read the source FileRecord
-    let from_key = file_path_hash(&from_normalized, &algo)?;
-    let source_record = match self.engine.get_entry(&from_key)? {
-      Some((header, _key, value)) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
-      None => return Err(EngineError::NotFound(from_normalized)),
-    };
-
-    // Use restore_file_from_record which handles all 3 keys + parent dirs
-    self.restore_file_from_record(ctx, &to_normalized, &source_record)?;
-
-    // Read back the new record
-    let to_key = file_path_hash(&to_normalized, &algo)?;
-    let result = match self.engine.get_entry(&to_key)? {
-      Some((header, _key, value)) => Ok(FileRecord::deserialize(&value, hash_length, header.entry_version)?),
-      None => Err(EngineError::NotFound(to_normalized)),
-    };
-    txn.finish_after(result, namespace)
+    let mut result = self.execute_copy_mappings(ctx, vec![(from_normalized, to_normalized.clone())], CopySourceConstraint::FileOnly)?;
+    result.file_records.remove(&to_normalized).ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("acknowledged file copy did not return its planned record for '{to_normalized}'"),
+    })
   }
 
   /// Recursively copy a path (file or directory) to a new location.
   pub fn copy_path(&self, ctx: &RequestContext, from_path: &str, to_path: &str) -> EngineResult<Vec<String>> {
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
-
     let from_normalized = normalize_path(from_path);
     let to_normalized = normalize_path(to_path);
-    let mut copied = Vec::new();
+    self.execute_copy_mappings(ctx, vec![(from_normalized, to_normalized)], CopySourceConstraint::Any).map(|result| result.copied_paths)
+  }
 
-    // Check if source is a directory
-    let algo = self.engine.hash_algo();
-    let dir_key = directory_path_hash(&from_normalized, &algo)?;
-    if self.engine.has_entry(&dir_key)? {
-      // Directory — create destination dir and recurse
-      let _ = self.create_directory(ctx, &to_normalized);
-      let children = self.list_directory_strict(&from_normalized)?;
-      for child in &children {
-        let child_from = format!("{}/{}", from_normalized.trim_end_matches('/'), child.name);
-        let child_to = format!("{}/{}", to_normalized.trim_end_matches('/'), child.name);
-        let sub_copied = self.copy_path(ctx, &child_from, &child_to)?;
-        copied.extend(sub_copied);
-      }
-      txn.commit_after(namespace)?;
-      return Ok(copied);
+  /// Atomically copy one or more source paths into a destination directory.
+  pub fn copy_paths(&self, ctx: &RequestContext, from_paths: &[String], destination: &str) -> EngineResult<Vec<String>> {
+    if from_paths.is_empty() {
+      return Err(EngineError::InvalidInput("No source paths provided for copy".to_string()));
+    }
+    let destination = normalize_path(destination);
+    if v0_is_detached_system_path(&destination) {
+      return Err(EngineError::InvalidInput("Cannot copy system paths".to_string()));
     }
 
-    // File
-    self.copy_file(ctx, &from_normalized, &to_normalized)?;
-    copied.push(to_normalized);
-    txn.commit_after(namespace)?;
-    Ok(copied)
+    let mut mappings = Vec::with_capacity(from_paths.len());
+    let mut source_paths = std::collections::HashSet::with_capacity(from_paths.len());
+    let mut destination_paths = std::collections::HashSet::with_capacity(from_paths.len());
+    for from_path in from_paths {
+      let source = normalize_path(from_path);
+      let name = file_name(&source).unwrap_or("");
+      if source == "/" || name.is_empty() {
+        return Err(EngineError::InvalidInput("Cannot copy root path".to_string()));
+      }
+      if v0_is_detached_system_path(&source) {
+        return Err(EngineError::InvalidInput("Cannot copy system paths".to_string()));
+      }
+      if !source_paths.insert(source.clone()) {
+        return Err(EngineError::InvalidInput(format!("Duplicate copy source: {source}")));
+      }
+      let target = if destination == "/" { format!("/{name}") } else { format!("{}/{name}", destination.trim_end_matches('/')) };
+      if !destination_paths.insert(target.clone()) {
+        return Err(EngineError::AlreadyExists(target));
+      }
+      mappings.push((source, target));
+    }
+    self.execute_copy_mappings(ctx, mappings, CopySourceConstraint::Any).map(|result| result.copied_paths)
+  }
+
+  fn execute_copy_mappings(
+    &self,
+    ctx: &RequestContext,
+    mappings: Vec<(String, String)>,
+    source_constraint: CopySourceConstraint,
+  ) -> EngineResult<CopyPublicationResult> {
+    if mappings.is_empty() {
+      return Err(EngineError::InvalidInput("No copy mappings provided".to_string()));
+    }
+    let mut memory = OperationMemoryBudget::new(
+      self.engine,
+      "copy namespace planning",
+      MemoryOwner::DurabilityWaiters,
+      AdmissionClass::Workload,
+      0,
+      None,
+    )?;
+    let mut normalized_mappings = Vec::with_capacity(mappings.len());
+    for (source, destination) in mappings {
+      let mapping_bytes = copy_workspace_bytes(
+        std::mem::size_of::<(String, String, usize)>() + 256,
+        &[source.len(), destination.len()],
+        "copy mapping estimate overflow",
+      )?;
+      memory.reserve(mapping_bytes, "copy mapping admission failed")?;
+      memory.record_work(1)?;
+      let source = normalize_path(&source);
+      let destination = normalize_path(&destination);
+      if source == "/" || destination == "/" {
+        return Err(EngineError::InvalidInput("Cannot copy root path".to_string()));
+      }
+      if source == destination {
+        return Err(EngineError::InvalidInput("Source and destination are the same".to_string()));
+      }
+      if destination.starts_with(&format!("{}/", source.trim_end_matches('/'))) {
+        return Err(EngineError::InvalidInput(format!("Cannot copy '{}' into its own descendant '{}'", source, destination)));
+      }
+      if v0_is_detached_system_path(&source) || v0_is_detached_system_path(&destination) {
+        return Err(EngineError::InvalidInput("Cannot copy system paths".to_string()));
+      }
+      normalized_mappings.push((source, destination));
+    }
+
+    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
+      let prepared_entries = self.prepare_copy_entries(planning_engine, normalized_mappings, source_constraint, &mut memory)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Copy);
+      let mut planner = DirectoryMutationPlanner::default();
+      let mut counter_delta = DirectoryMutationCounterDelta::default();
+      let mut copied_paths = Vec::new();
+      let mut file_records = std::collections::BTreeMap::new();
+      let mut metadata_index_paths = Vec::new();
+      let mut event_entries = Vec::with_capacity(prepared_entries.len());
+
+      for prepared in prepared_entries {
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: prepared.source_path.clone(),
+          entry_type: Some(match &prepared.kind {
+            PreparedCopyKind::File(_) => EntryType::FileRecord.to_u8(),
+            PreparedCopyKind::Directory => EntryType::DirectoryIndex.to_u8(),
+            PreparedCopyKind::Symlink(_) => EntryType::Symlink.to_u8(),
+          }),
+          previous_identity: Some(prepared.source_identity.clone()),
+          new_identity: Some(prepared.source_identity.clone()),
+        })?;
+
+        match prepared.kind {
+          PreparedCopyKind::File(source_record) => {
+            let publication = prepare_file_record_publication_at_version(
+              planning_engine,
+              FileRecordPublishInput {
+                normalized_path: prepared.destination_path.clone(),
+                content_type: source_record.content_type.clone(),
+                total_size: source_record.total_size,
+                chunk_hashes: source_record.chunk_hashes.clone(),
+                content_hash: source_record.content_hash.clone(),
+                flags: 0,
+                created_at_override: Some(source_record.created_at),
+                prefer_existing_created_at: false,
+              },
+              CURRENT_FILE_RECORD_VERSION,
+            )?;
+            add_prepared_file_record_entries(&mut batch, &publication.entries)?;
+            batch.add_source_identity(NamespaceMutationSourceIdentity {
+              path: prepared.destination_path.clone(),
+              entry_type: Some(EntryType::FileRecord.to_u8()),
+              previous_identity: None,
+              new_identity: Some(publication.entries.identity_key.clone()),
+            })?;
+            planner.upsert_child(&prepared.destination_path, publication.result.child_entry.clone())?;
+            counter_delta.file_writes.push((None, publication.result.file_record.total_size));
+            event_entries.push(publication.result.event_entry);
+            metadata_index_paths.push(prepared.destination_path.clone());
+            copied_paths.push(prepared.destination_path.clone());
+            if file_records.insert(prepared.destination_path.clone(), publication.result.file_record).is_some() {
+              return Err(EngineError::InvalidInput(format!("Copy contains duplicate file destination '{}'", prepared.destination_path)));
+            }
+          }
+          PreparedCopyKind::Directory => {
+            planner.ensure_directory(&prepared.destination_path)?;
+            let now = chrono::Utc::now().timestamp_millis();
+            event_entries.push(EntryEventData {
+              path: prepared.destination_path,
+              entry_type: "directory".to_string(),
+              content_type: None,
+              size: 0,
+              hash: hex::encode(prepared.source_identity),
+              created_at: now,
+              updated_at: now,
+              previous_hash: None,
+            });
+          }
+          PreparedCopyKind::Symlink(source_record) => {
+            let mut destination_record = SymlinkRecord::new(prepared.destination_path.clone(), source_record.target.clone());
+            destination_record.created_at = source_record.created_at;
+            let serialized = destination_record.serialize()?;
+            let content_key = symlink_content_hash(&serialized, &planning_engine.hash_algo())?;
+            let identity_key = symlink_identity_hash(&prepared.destination_path, &destination_record.target, &planning_engine.hash_algo())?;
+            let path_key = symlink_path_hash(&prepared.destination_path, &planning_engine.hash_algo())?;
+            batch.store_dependency(EntryType::Symlink, content_key, serialized.clone(), 0)?;
+            batch.store_dependency(EntryType::Symlink, identity_key.clone(), serialized.clone(), 0)?;
+            batch.replace_locator(EntryType::Symlink, path_key, serialized, 0)?;
+            batch.add_source_identity(NamespaceMutationSourceIdentity {
+              path: prepared.destination_path.clone(),
+              entry_type: Some(EntryType::Symlink.to_u8()),
+              previous_identity: None,
+              new_identity: Some(identity_key.clone()),
+            })?;
+            planner.upsert_child(
+              &prepared.destination_path,
+              ChildEntry {
+                entry_type: EntryType::Symlink.to_u8(),
+                hash: identity_key,
+                total_size: 0,
+                created_at: destination_record.created_at,
+                updated_at: destination_record.updated_at,
+                name: file_name(&prepared.destination_path).unwrap_or("").to_string(),
+                content_type: None,
+                virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+                node_id: 0,
+              },
+            )?;
+            counter_delta.symlinks_created = counter_delta
+              .symlinks_created
+              .checked_add(1)
+              .ok_or_else(|| EngineError::ResourceExhausted("copied symlink counter overflow".to_string()))?;
+            event_entries.push(EntryEventData {
+              path: prepared.destination_path.clone(),
+              entry_type: "symlink".to_string(),
+              content_type: None,
+              size: 0,
+              hash: hex::encode(&destination_record.target),
+              created_at: destination_record.created_at,
+              updated_at: destination_record.updated_at,
+              previous_hash: None,
+            });
+            copied_paths.push(prepared.destination_path);
+          }
+        }
+      }
+
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(counter_delta));
+      effects.metadata_index_paths = metadata_index_paths;
+      effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries })));
+      planner.finalize(self, &mut batch, &mut effects)?;
+      copied_paths.sort();
+      Ok((batch, CopyPublicationResult { copied_paths, file_records }, effects))
+    })
+  }
+
+  fn prepare_copy_entries(
+    &self,
+    planning_engine: &StorageEngine,
+    mappings: Vec<(String, String)>,
+    source_constraint: CopySourceConstraint,
+    memory: &mut OperationMemoryBudget,
+  ) -> EngineResult<Vec<PreparedCopyEntry>> {
+    let algorithm = planning_engine.hash_algo();
+    let hash_length = algorithm.hash_length();
+    let mut pending: Vec<(String, String, usize)> = mappings.into_iter().map(|(source, destination)| (source, destination, 0)).collect();
+    let mut prepared = std::collections::BTreeMap::new();
+
+    while let Some((source_path, destination_path, depth)) = pending.pop() {
+      if depth > Self::MAX_DIRECTORY_DEPTH {
+        return Err(EngineError::InvalidInput(format!("Copy depth exceeds maximum of {} levels", Self::MAX_DIRECTORY_DEPTH)));
+      }
+      if prepared.contains_key(&destination_path) {
+        return Err(EngineError::AlreadyExists(destination_path));
+      }
+      if self.path_exists_as_any_entry(planning_engine, &destination_path)? {
+        return Err(EngineError::AlreadyExists(destination_path));
+      }
+
+      let directory_key = directory_path_hash(&source_path, &algorithm)?;
+      let file_key = file_path_hash(&source_path, &algorithm)?;
+      let symlink_key = symlink_path_hash(&source_path, &algorithm)?;
+      let raw_directory = planning_engine.get_kv_entry(&directory_key)?;
+      let raw_file = planning_engine.get_kv_entry(&file_key)?;
+      let raw_symlink = planning_engine.get_kv_entry(&symlink_key)?;
+      let type_count = usize::from(raw_directory.is_some()) + usize::from(raw_file.is_some()) + usize::from(raw_symlink.is_some());
+      if type_count == 0 {
+        return Err(EngineError::NotFound(source_path));
+      }
+      if type_count > 1 {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("copy source '{}' has multiple live path authorities", source_path),
+        });
+      }
+      if source_constraint == CopySourceConstraint::FileOnly && raw_file.is_none() {
+        return Err(EngineError::InvalidInput(format!("copy_file requires a file source: '{source_path}'")));
+      }
+
+      let source_locator = raw_directory.as_ref().or(raw_file.as_ref()).or(raw_symlink.as_ref()).ok_or_else(|| {
+        EngineError::CorruptEntry { offset: 0, reason: format!("copy source '{}' lost its locator during planning", source_path) }
+      })?;
+      let source_workspace = u64::from(source_locator.total_length)
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(512))
+        .ok_or_else(|| EngineError::ResourceExhausted("copy source metadata estimate overflow".to_string()))?;
+      memory.reserve(source_workspace, "copy source metadata admission failed")?;
+      memory.record_work(1)?;
+
+      let entry = if let Some(raw_directory) = raw_directory {
+        if raw_directory.entry_type() != crate::engine::kv_store::KV_TYPE_DIRECTORY {
+          return Err(EngineError::CorruptEntry {
+            offset: raw_directory.offset,
+            reason: format!("copy source directory '{}' locator points to a non-directory entry", source_path),
+          });
+        }
+        let (header, directory_data) = match self.recover_directory_data_if_stale(&source_path, &directory_key)? {
+          Some(pair) => pair,
+          None => self.read_directory_data(&directory_key)?.ok_or_else(|| EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("copy source directory '{}' has no readable content", source_path),
+          })?,
+        };
+        let identity = if !directory_data.is_empty() && crate::engine::btree::is_btree_format(&directory_data) {
+          crate::engine::btree::BTreeNode::deserialize(&directory_data, hash_length, header.entry_version)?
+            .content_hash(hash_length, &algorithm)?
+        } else {
+          directory_content_hash(&directory_data, &algorithm)?
+        };
+        self.visit_live_directory_children_strict_no_heal(&source_path, |child| {
+          if child.name.is_empty() || child.name == "." || child.name == ".." || child.name.contains('/') {
+            return Err(EngineError::CorruptEntry {
+              offset: 0,
+              reason: format!("copy source directory '{}' contains invalid child name '{}'", source_path, child.name),
+            });
+          }
+          let child_workspace = copy_workspace_bytes(
+            std::mem::size_of::<(String, String, usize)>() + 256,
+            &[source_path.len(), destination_path.len(), child.name.len(), child.name.len()],
+            "copy child path estimate overflow",
+          )?;
+          memory.reserve(child_workspace, "copy child path admission failed")?;
+          memory.record_work(1)?;
+          let child_source = format!("{}/{}", source_path.trim_end_matches('/'), child.name);
+          let child_destination = format!("{}/{}", destination_path.trim_end_matches('/'), child.name);
+          pending.push((child_source, child_destination, depth + 1));
+          Ok(true)
+        })?;
+        PreparedCopyEntry { source_path, destination_path, source_identity: identity, kind: PreparedCopyKind::Directory }
+      } else if let Some(raw_file) = raw_file {
+        if raw_file.entry_type() != crate::engine::kv_store::KV_TYPE_FILE_RECORD {
+          return Err(EngineError::CorruptEntry {
+            offset: raw_file.offset,
+            reason: format!("copy source file '{}' locator points to a non-file entry", source_path),
+          });
+        }
+        let (header, _key, value) = planning_engine.get_entry(&file_key)?.ok_or_else(|| EngineError::CorruptEntry {
+          offset: raw_file.offset,
+          reason: format!("copy source file '{}' locator disappeared during planning", source_path),
+        })?;
+        let mut record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+        ensure_file_record_content_hash_for_migration(planning_engine, &mut record, memory)?;
+        validate_existing_file_chunks(planning_engine, &source_path, &record.chunk_hashes)?;
+        for _ in &record.chunk_hashes {
+          memory.record_work(1)?;
+        }
+        let identity = file_identity_hash(&source_path, record.content_type.as_deref(), &record.chunk_hashes, &algorithm)?;
+        PreparedCopyEntry { source_path, destination_path, source_identity: identity, kind: PreparedCopyKind::File(record) }
+      } else if let Some(raw_symlink) = raw_symlink {
+        if raw_symlink.entry_type() != crate::engine::kv_store::KV_TYPE_SYMLINK {
+          return Err(EngineError::CorruptEntry {
+            offset: raw_symlink.offset,
+            reason: format!("copy source symlink '{}' locator points to a non-symlink entry", source_path),
+          });
+        }
+        let (header, _key, value) = planning_engine.get_entry(&symlink_key)?.ok_or_else(|| EngineError::CorruptEntry {
+          offset: raw_symlink.offset,
+          reason: format!("copy source symlink '{}' locator disappeared during planning", source_path),
+        })?;
+        let record = SymlinkRecord::deserialize(&value, header.entry_version)?;
+        let identity = symlink_identity_hash(&source_path, &record.target, &algorithm)?;
+        PreparedCopyEntry { source_path, destination_path, source_identity: identity, kind: PreparedCopyKind::Symlink(record) }
+      } else {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("copy source '{}' lost its live path authority during planning", source_path),
+        });
+      };
+      prepared.insert(entry.destination_path.clone(), entry);
+    }
+
+    Ok(prepared.into_values().collect())
+  }
+
+  fn path_exists_as_any_entry(&self, engine: &StorageEngine, path: &str) -> EngineResult<bool> {
+    let algorithm = engine.hash_algo();
+    Ok(
+      engine.has_entry(&file_path_hash(path, &algorithm)?)?
+        || engine.has_entry(&symlink_path_hash(path, &algorithm)?)?
+        || engine.has_entry(&directory_path_hash(path, &algorithm)?)?,
+    )
   }
 
   /// Rename (move) a symlink from one path to another.
@@ -4191,130 +4962,118 @@ impl<'a> DirectoryOps<'a> {
   /// only its path. created_at is preserved.
   pub fn rename_symlink(&self, ctx: &RequestContext, old_path: &str, new_path: &str) -> EngineResult<SymlinkRecord> {
     let old_normalized = normalize_path(old_path);
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let new_normalized = normalize_path(new_path);
-
-    // Reject root paths
     if old_normalized == "/" || new_normalized == "/" {
       return Err(EngineError::InvalidInput("Cannot rename root path".to_string()));
     }
-
-    // Reject same source/destination
     if old_normalized == new_normalized {
       return Err(EngineError::InvalidInput("Source and destination paths are the same".to_string()));
     }
-
-    // Reject cross-system-boundary renames
-    let old_is_system = v0_is_detached_system_path(&old_normalized);
-    let new_is_system = v0_is_detached_system_path(&new_normalized);
-    if old_is_system != new_is_system {
+    if v0_is_detached_system_path(&old_normalized) != v0_is_detached_system_path(&new_normalized) {
       return Err(EngineError::InvalidInput("Cannot rename across system boundary".to_string()));
     }
 
     let algo = self.engine.hash_algo();
-    let sys_flags = v0_system_entry_flags(&new_normalized);
-
-    // Read the source SymlinkRecord
     let old_symlink_key = symlink_path_hash(&old_normalized, &algo)?;
-    let old_record = match self.engine.get_entry(&old_symlink_key)? {
-      Some((header, _key, value)) => SymlinkRecord::deserialize(&value, header.entry_version)?,
-      None => return Err(EngineError::NotFound(old_normalized)),
-    };
-
-    // Check destination doesn't already exist (file or symlink)
     let new_file_key = file_path_hash(&new_normalized, &algo)?;
-    if self.engine.has_entry(&new_file_key)? {
-      return Err(EngineError::AlreadyExists(new_normalized));
-    }
     let new_symlink_key = symlink_path_hash(&new_normalized, &algo)?;
-    if self.engine.has_entry(&new_symlink_key)? {
-      return Err(EngineError::AlreadyExists(new_normalized));
-    }
+    let new_directory_key = directory_path_hash(&new_normalized, &algo)?;
 
-    // Create new SymlinkRecord at new path with same target, preserving created_at
-    let mut new_record = SymlinkRecord::new(new_normalized.clone(), old_record.target.clone());
-    new_record.created_at = old_record.created_at;
+    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
+      let (source_header, _source_key, source_value) =
+        planning_engine.get_entry(&old_symlink_key)?.ok_or_else(|| EngineError::NotFound(old_normalized.clone()))?;
+      let old_record = SymlinkRecord::deserialize(&source_value, source_header.entry_version)?;
+      if planning_engine.has_entry(&new_file_key)?
+        || planning_engine.has_entry(&new_symlink_key)?
+        || planning_engine.has_entry(&new_directory_key)?
+      {
+        return Err(EngineError::AlreadyExists(new_normalized.clone()));
+      }
 
-    let serialized = new_record.serialize()?;
+      let old_identity = symlink_identity_hash(&old_normalized, &old_record.target, &algo)?;
+      let mut new_record = SymlinkRecord::new(new_normalized.clone(), old_record.target.clone());
+      new_record.created_at = old_record.created_at;
+      let serialized = new_record.serialize()?;
+      let content_key = symlink_content_hash(&serialized, &algo)?;
+      let identity_key = symlink_identity_hash(&new_normalized, &new_record.target, &algo)?;
+      let deletion = DeletionRecord::new(old_normalized.clone(), None);
+      let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
 
-    // Store at content-addressed key
-    let content_key = symlink_content_hash(&serialized, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::Symlink, &content_key, &serialized, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::Symlink, &content_key, &serialized)?;
-    }
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Rename);
+      batch.store_dependency(EntryType::Symlink, content_key, serialized.clone(), v0_system_entry_flags(&new_normalized))?;
+      batch.store_dependency(EntryType::Symlink, identity_key.clone(), serialized.clone(), v0_system_entry_flags(&new_normalized))?;
+      batch.replace_locator(EntryType::Symlink, new_symlink_key.clone(), serialized, v0_system_entry_flags(&new_normalized))?;
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&old_normalized))?;
+      batch.retire_locator(old_symlink_key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: old_normalized.clone(),
+        entry_type: Some(EntryType::Symlink.to_u8()),
+        previous_identity: Some(old_identity),
+        new_identity: None,
+      })?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: new_normalized.clone(),
+        entry_type: Some(EntryType::Symlink.to_u8()),
+        previous_identity: None,
+        new_identity: Some(identity_key.clone()),
+      })?;
 
-    // Store at identity hash
-    let identity_key = symlink_identity_hash(&new_normalized, &new_record.target, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::Symlink, &identity_key, &serialized, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::Symlink, &identity_key, &serialized)?;
-    }
-
-    // Store at path-based key
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::Symlink, &new_symlink_key, &serialized, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::Symlink, &new_symlink_key, &serialized)?;
-    }
-
-    // Build child entry and update parent directories
-    let child = ChildEntry {
-      entry_type: EntryType::Symlink.to_u8(),
-      hash: identity_key,
-      total_size: 0,
-      created_at: new_record.created_at,
-      updated_at: new_record.updated_at,
-      name: file_name(&new_normalized).unwrap_or("").to_string(),
-      content_type: None,
-      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
-      node_id: 0,
-    };
-    self.update_parent_directories(&new_normalized, child)?;
-
-    // Delete old path: DeletionRecord + mark deleted + remove from parent
-    let deletion = DeletionRecord::new(old_normalized.clone(), None);
-    let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
-    let deletion_value = deletion.serialize();
-    let old_sys_flags = v0_system_entry_flags(&old_normalized);
-    if old_sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, old_sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
-    }
-    self.engine.mark_entry_deleted(&old_symlink_key)?;
-    self.remove_from_parent_directory(&old_normalized)?;
-
-    let deleted_event = EntryEventData {
-      path: old_normalized,
-      entry_type: "symlink".to_string(),
-      content_type: None,
-      size: 0,
-      hash: hex::encode(&old_record.target),
-      created_at: old_record.created_at,
-      updated_at: old_record.updated_at,
-      previous_hash: None,
-    };
-    let created_event = EntryEventData {
-      path: new_normalized,
-      entry_type: "symlink".to_string(),
-      content_type: None,
-      size: 0,
-      hash: hex::encode(&new_record.target),
-      created_at: new_record.created_at,
-      updated_at: new_record.updated_at,
-      previous_hash: None,
-    };
-    txn.commit_after(namespace)?;
-    self.engine.counters().record_write(0);
-    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [deleted_event]}));
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [created_event]}));
-
-    Ok(new_record)
+      let mut planner = DirectoryMutationPlanner::default();
+      planner.remove_child(&old_normalized)?;
+      planner.upsert_child(
+        &new_normalized,
+        ChildEntry {
+          entry_type: EntryType::Symlink.to_u8(),
+          hash: identity_key,
+          total_size: 0,
+          created_at: new_record.created_at,
+          updated_at: new_record.updated_at,
+          name: file_name(&new_normalized).unwrap_or("").to_string(),
+          content_type: None,
+          virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+          node_id: 0,
+        },
+      )?;
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(DirectoryMutationCounterDelta::default()));
+      effects.events.push((
+        EVENT_ENTRIES_DELETED,
+        serde_json::json!({"entries": [EntryEventData {
+          path: old_normalized.clone(),
+          entry_type: "symlink".to_string(),
+          content_type: None,
+          size: 0,
+          hash: hex::encode(&old_record.target),
+          created_at: old_record.created_at,
+          updated_at: old_record.updated_at,
+          previous_hash: None,
+        }]}),
+      ));
+      effects.events.push((
+        EVENT_ENTRIES_CREATED,
+        serde_json::json!({"entries": [EntryEventData {
+          path: new_normalized.clone(),
+          entry_type: "symlink".to_string(),
+          content_type: None,
+          size: 0,
+          hash: hex::encode(&new_record.target),
+          created_at: new_record.created_at,
+          updated_at: new_record.updated_at,
+          previous_hash: None,
+        }]}),
+      ));
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((batch, new_record, effects))
+    })
   }
+}
+
+fn copy_workspace_bytes(base: usize, dynamic: &[usize], overflow_message: &str) -> EngineResult<u64> {
+  let bytes = dynamic
+    .iter()
+    .try_fold(base, |total, bytes| total.checked_add(*bytes))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| EngineError::ResourceExhausted(overflow_message.to_string()))?;
+  Ok(bytes)
 }
 
 #[cfg(test)]
@@ -4366,6 +5125,81 @@ mod engine_file_stream_tests {
     let error = DirectoryOps::visit_bounded_flat_children(&oversized, 32, 0, |_child| Ok(true)).unwrap_err();
 
     assert!(matches!(error, EngineError::CorruptEntry { reason, .. } if reason.contains("flat directory exceeds")));
+  }
+
+  #[test]
+  fn batch_file_publication_rejects_missing_chunks_before_namespace_publication() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    ops.ensure_root_directory(&ctx).unwrap();
+    let original_head = engine.head_hash().unwrap();
+    let hash_length = engine.hash_algo().hash_length();
+
+    let result = ops.execute_file_publications(
+      &ctx,
+      vec![BatchFilePublicationInput {
+        publication: FileRecordPublishInput {
+          normalized_path: "/missing-chunk.bin".to_string(),
+          content_type: Some("application/octet-stream".to_string()),
+          total_size: 1,
+          chunk_hashes: vec![vec![0xA5; hash_length]],
+          content_hash: vec![0x5A; hash_length],
+          flags: 0,
+          created_at_override: None,
+          prefer_existing_created_at: true,
+        },
+        throughput_bytes: 0,
+      }],
+      NamespaceMutationKind::BatchWrite,
+    );
+
+    assert!(
+      matches!(&result, Err(EngineError::CorruptEntry { reason, .. }) if reason.contains("missing chunk")),
+      "namespace publication accepted a missing chunk: {result:?}"
+    );
+    assert_eq!(engine.head_hash().unwrap(), original_head);
+    assert!(ops.get_metadata("/missing-chunk.bin").unwrap().is_none());
+  }
+
+  #[test]
+  fn batch_file_publication_rejects_malformed_and_non_chunk_references_before_namespace_publication() {
+    for (case, chunk_hash, install_wrong_type) in [("malformed-width", vec![0xB5; 31], false), ("wrong-entry-type", vec![0xB6; 32], true)] {
+      let (engine, _temp) = create_test_engine();
+      let ctx = RequestContext::system();
+      let ops = DirectoryOps::new(&engine);
+      ops.ensure_root_directory(&ctx).unwrap();
+      if install_wrong_type {
+        engine.store_entry(EntryType::DirectoryIndex, &chunk_hash, b"not a chunk").unwrap();
+      }
+      let original_head = engine.head_hash().unwrap();
+
+      let result = ops.execute_file_publications(
+        &ctx,
+        vec![BatchFilePublicationInput {
+          publication: FileRecordPublishInput {
+            normalized_path: format!("/{case}.bin"),
+            content_type: Some("application/octet-stream".to_string()),
+            total_size: 1,
+            chunk_hashes: vec![chunk_hash],
+            content_hash: vec![0x5A; engine.hash_algo().hash_length()],
+            flags: 0,
+            created_at_override: None,
+            prefer_existing_created_at: true,
+          },
+          throughput_bytes: 0,
+        }],
+        NamespaceMutationKind::BatchWrite,
+      );
+
+      if install_wrong_type {
+        assert!(matches!(&result, Err(EngineError::CorruptEntry { .. })), "namespace publication accepted {case}: {result:?}");
+      } else {
+        assert!(matches!(&result, Err(EngineError::InvalidInput(_))), "namespace publication accepted {case}: {result:?}");
+      }
+      assert_eq!(engine.head_hash().unwrap(), original_head);
+      assert!(ops.get_metadata(&format!("/{case}.bin")).unwrap().is_none());
+    }
   }
 
   #[test]

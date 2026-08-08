@@ -1439,6 +1439,53 @@ async fn copy_files_rejects_unauthorized_destination() {
 }
 
 #[tokio::test]
+async fn copy_files_validates_every_source_before_publishing_any_destination() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  store_test_file(&engine, "/copy-source/valid.txt", b"valid");
+
+  let body = serde_json::json!({
+    "paths": ["/copy-source/valid.txt", "/copy-source/missing.txt"],
+    "destination": "/copy-destination",
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/copy")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+  let response = rebuild_app(&jwt_manager, &engine).oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  assert!(DirectoryOps::new(&engine).get_metadata("/copy-destination/valid.txt").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn copy_files_rejects_colliding_destination_names_without_partial_publication() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  store_test_file(&engine, "/copy-source/a/same.txt", b"a");
+  store_test_file(&engine, "/copy-source/b/same.txt", b"b");
+
+  let body = serde_json::json!({
+    "paths": ["/copy-source/a/same.txt", "/copy-source/b/same.txt"],
+    "destination": "/copy-destination",
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/copy")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+  let response = rebuild_app(&jwt_manager, &engine).oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::CONFLICT);
+  assert!(DirectoryOps::new(&engine).get_metadata("/copy-destination/same.txt").unwrap().is_none());
+}
+
+#[tokio::test]
 async fn restore_deleted_file_requires_delete_permission() {
   let (jwt_manager, engine, _tmp, _user, auth) = setup_user_with_share().await;
 

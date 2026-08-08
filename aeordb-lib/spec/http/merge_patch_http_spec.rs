@@ -319,6 +319,39 @@ async fn merge_patch_existing_returns_200() {
   assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_http_merge_patches_preserve_every_committed_field() {
+  let (_, jwt, engine, _tmp) = test_app();
+  let auth = bearer_token(&jwt);
+  seed_json(&engine, "/concurrent.json", serde_json::json!({"base": true}));
+
+  let request_count = 16usize;
+  let start = Arc::new(tokio::sync::Barrier::new(request_count));
+  let mut requests = Vec::with_capacity(request_count);
+  for index in 0..request_count {
+    let app = rebuild_app(&jwt, &engine);
+    let auth = auth.clone();
+    let start = Arc::clone(&start);
+    requests.push(tokio::spawn(async move {
+      start.wait().await;
+      app
+        .oneshot(patch_req("/files/concurrent.json", &auth, serde_json::json!({format!("field_{index:02}"): index})))
+        .await
+        .unwrap()
+        .status()
+    }));
+  }
+  for request in requests {
+    assert_eq!(request.await.unwrap(), StatusCode::OK);
+  }
+
+  let merged = read_json(&engine, "/concurrent.json");
+  assert_eq!(merged["base"], true);
+  for index in 0..request_count {
+    assert_eq!(merged[format!("field_{index:02}")], index, "HTTP merge patch {index} was lost");
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Validation failures
 // ─────────────────────────────────────────────────────────────────────────

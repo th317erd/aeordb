@@ -55,6 +55,21 @@ fn test_store_and_read_file_roundtrip() {
 }
 
 #[test]
+fn store_chunk_rejects_a_non_chunk_entry_at_the_content_key() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let data = b"chunk collision fixture";
+  let chunk_key = chunk_content_hash(data, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &chunk_key, b"wrong entry type").unwrap();
+
+  let result = ops.store_chunk(data);
+
+  assert!(matches!(result, Err(EngineError::CorruptEntry { reason, .. }) if reason.contains("non-chunk")));
+  assert_eq!(engine.get_kv_entry(&chunk_key).unwrap().unwrap().entry_type(), EntryType::DirectoryIndex.to_kv_type());
+}
+
+#[test]
 fn test_store_file_from_reader_roundtrip_multichunk() {
   // Exercise the streaming write path on data that spans multiple chunks
   // (DEFAULT_CHUNK_SIZE is 256 KB → use 600 KB to force 3 chunks).

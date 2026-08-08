@@ -1794,7 +1794,7 @@ pub async fn engine_delete_file(
   // the async side since it touches Arc'd state.
   let result = tokio::task::spawn_blocking(move || -> EngineResult<&'static str> {
     let ops = DirectoryOps::new(&engine);
-    if ops.get_symlink(&path_for_blocking).ok().flatten().is_some() {
+    if ops.get_symlink(&path_for_blocking)?.is_some() {
       ops.delete_symlink(&ctx, &path_for_blocking)?;
       return Ok("symlink");
     }
@@ -2673,7 +2673,7 @@ async fn do_merge_patch(
   merge_q: MergePatchQuery,
   body: Body,
 ) -> Response {
-  use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
+  use crate::engine::merge_patch::MergeDepth;
 
   if let Err(response) = require_generic_data_path(&state, &path) {
     return response;
@@ -2708,40 +2708,12 @@ async fn do_merge_patch(
   let engine = state.engine.clone();
   let path_for_blocking = path.clone();
 
-  // Read existing → merge → write. Run on a blocking worker so we don't
-  // hold an async runtime thread through the disk-bound parts.
+  // Run the complete read-merge-write operation on one namespace authority
+  // inside a blocking worker so concurrent patches cannot lose updates.
   let result = tokio::task::spawn_blocking(move || -> EngineResult<(FileRecord, bool)> {
     let ops = DirectoryOps::new(&engine);
-
-    // Read existing (if any). Missing file → start from empty object.
-    let (mut target, existed) = match ops.read_file_buffered(&path_for_blocking) {
-      Ok(bytes) => {
-        if bytes.len() > MAX_MERGE_PATCH_BYTES {
-          return Err(EngineError::InvalidInput(format!(
-            "stored file at {} is {} bytes, exceeds {} byte merge cap",
-            path_for_blocking,
-            bytes.len(),
-            MAX_MERGE_PATCH_BYTES
-          )));
-        }
-        if bytes.is_empty() {
-          (serde_json::Value::Object(serde_json::Map::new()), true)
-        } else {
-          let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| EngineError::InvalidInput(format!("stored file at {} is not valid JSON: {}", path_for_blocking, e)))?;
-          (parsed, true)
-        }
-      }
-      Err(EngineError::NotFound(_)) => (serde_json::Value::Object(serde_json::Map::new()), false),
-      Err(e) => return Err(e),
-    };
-
-    apply_merge_patch(&mut target, patch_value, depth);
-
-    let serialized =
-      serde_json::to_vec(&target).map_err(|e| EngineError::InvalidInput(format!("merged document failed to serialize: {}", e)))?;
-    let record = ops.store_file_buffered(&ctx, &path_for_blocking, &serialized, Some("application/json"))?;
-    Ok((record, existed))
+    let merged = ops.merge_json_file_bounded(&ctx, &path_for_blocking, patch_value, depth, Some(MAX_MERGE_PATCH_BYTES))?;
+    Ok((merged.file_record, !merged.created))
   })
   .await;
 
@@ -2832,7 +2804,7 @@ async fn do_rename(
 
   let result = run_engine_blocking("rename", "Rename failed", move || -> EngineResult<&'static str> {
     let ops = DirectoryOps::new(&engine);
-    if ops.get_symlink(&path_for_blocking).ok().flatten().is_some() {
+    if ops.get_symlink(&path_for_blocking)?.is_some() {
       ops.rename_symlink(&ctx, &path_for_blocking, &destination_owned)?;
       Ok("symlink")
     } else {
@@ -2962,38 +2934,21 @@ pub async fn copy_files(
   let paths = payload.paths.clone();
   let dest_for_blocking = dest_normalized.clone();
 
-  // All copies run sequentially on a blocking thread; errors are collected
-  // per-source rather than aborting on the first failure (matches prior behavior).
-  let (copied, errors) = match tokio::task::spawn_blocking(move || {
+  let copied = match tokio::task::spawn_blocking(move || {
     let ops = DirectoryOps::new(&engine);
-    let mut copied = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    for path in &paths {
-      let from_normalized = crate::engine::path_utils::normalize_path(path);
-      let name = crate::engine::path_utils::file_name(&from_normalized).unwrap_or("").to_string();
-      let to_path = format!("{}/{}", dest_for_blocking.trim_end_matches('/'), name);
-      match ops.copy_path(&ctx, &from_normalized, &to_path) {
-        Ok(paths) => copied.extend(paths),
-        Err(error) => errors.push(format!("{}: {}", from_normalized, error)),
-      }
-    }
-    (copied, errors)
+    ops.copy_paths(&ctx, &paths, &dest_for_blocking)
   })
   .await
   {
-    Ok(pair) => pair,
+    Ok(Ok(copied)) => copied,
+    Ok(Err(error)) => return engine_error_response("Copy failed", &error),
     Err(join_error) => {
       tracing::error!("copy task panicked: {}", join_error);
       return ErrorResponse::new("Copy failed: internal task error").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
 
-  let mut response = serde_json::json!({ "copied": copied });
-  if !errors.is_empty() {
-    response["errors"] = serde_json::json!(errors);
-  }
-
-  (StatusCode::OK, Json(response)).into_response()
+  (StatusCode::OK, Json(serde_json::json!({ "copied": copied }))).into_response()
 }
 
 // ---------------------------------------------------------------------------

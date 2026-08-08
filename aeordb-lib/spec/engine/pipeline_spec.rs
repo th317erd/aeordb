@@ -425,6 +425,35 @@ fn test_batch_metadata_indexes_remain_buffered_until_flush() {
 }
 
 #[test]
+fn test_copy_and_rename_update_metadata_indexes_after_hard_publication() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/indexed-mutations", &config);
+  ops.store_file_buffered(&ctx, "/copy-source.json", br#"{"source":true}"#, Some("application/json")).unwrap();
+  ops.store_file_with_indexing(&ctx, "/indexed-mutations/rename-before.json", br#"{"rename":true}"#, Some("application/json")).unwrap();
+
+  ops.copy_file(&ctx, "/copy-source.json", "/indexed-mutations/copied.json").unwrap();
+  ops.rename_file(&ctx, "/indexed-mutations/rename-before.json", "/indexed-mutations/rename-after.json").unwrap();
+
+  let index = IndexManager::new(&engine)
+    .load_index_by_strategy("/indexed-mutations", "@filename", "string")
+    .unwrap()
+    .expect("copy and rename metadata index should be query-visible");
+  assert_eq!(index.lookup_stored_values_exact(&[b"copied.json".to_vec()]).len(), 1);
+  assert_eq!(index.lookup_stored_values_exact(&[b"rename-after.json".to_vec()]).len(), 1);
+  assert!(index.lookup_stored_values_exact(&[b"rename-before.json".to_vec()]).is_empty());
+}
+
+#[test]
 fn test_pipeline_source_path_resolution() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);

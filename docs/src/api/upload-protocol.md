@@ -15,7 +15,7 @@ AeorDB provides a 4-phase upload protocol for efficient, deduplicated file trans
 
 | Method | Path | Description | Auth | Body Limit |
 |--------|------|-------------|------|-----------|
-| GET | `/blobs/config` | Negotiate hash algorithm and chunk size | No | -- |
+| GET | `/blobs/config` | Negotiate hash algorithm and chunk size | Yes | -- |
 | POST | `/blobs/check` | Check which chunks the server already has | Yes | 32 MiB |
 | PUT | `/blobs/chunks/{hash}` | Upload a single chunk | Yes | 10 GB |
 | POST | `/blobs/commit` | Atomic multi-file commit from chunks | Yes | 32 MiB |
@@ -24,7 +24,7 @@ AeorDB provides a 4-phase upload protocol for efficient, deduplicated file trans
 
 ## Phase 1: GET /blobs/config
 
-Retrieve the server's hash algorithm, chunk size, and hash prefix. This endpoint is **public** (no authentication required).
+Retrieve the server's hash algorithm, chunk size, and hash prefix. This endpoint requires a valid bearer token.
 
 ### Response
 
@@ -57,7 +57,8 @@ Clients must use the same formula. The prefix (`"chunk:"`) is prepended to the r
 ### Example
 
 ```bash
-curl http://localhost:6830/blobs/config
+curl http://localhost:6830/blobs/config \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
@@ -118,7 +119,8 @@ curl -X POST http://localhost:6830/blobs/check \
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Invalid hex hash in the list |
+| 400 | Invalid hex or wrong-width hash in the list |
+| 500 | A requested hash resolves to corrupt or unreadable storage metadata |
 
 ---
 
@@ -168,6 +170,9 @@ If the computed hash does not match the URL parameter, the upload is rejected.
 Blob staging stores chunk bytes exactly as uploaded. AeorDB does not blindly
 compress `/blobs/chunks/` payloads because large media files are often already
 compressed, and commit can use raw chunk headers for fast metadata validation.
+Deduplication validates that an existing locator is a live chunk from KV
+metadata; it never treats an arbitrary row at the same hash as a chunk and does
+not load the chunk body merely to prove its type.
 
 ### Example
 
@@ -191,6 +196,12 @@ curl -X PUT http://localhost:6830/blobs/chunks/f6e5d4c3b2a1... \
 ## Phase 4: POST /blobs/commit
 
 Atomically commit multiple files from previously uploaded chunks. Each file specifies its path, content type, and the ordered list of chunk hashes that compose it.
+
+The complete manifest is one logical namespace mutation: either every file is
+published under one durable acknowledgement or no requested path becomes
+visible. Counters, metadata-index updates, and SSE notifications are derived
+only after that hard publication succeeds, and all emitted entries share the
+same operation ID and publication sequence.
 
 The request body is a JSON manifest and is capped at 32 MiB. This is separate
 from the 10 GB raw chunk upload limit because `/blobs/commit` carries paths and
@@ -282,7 +293,8 @@ Here is a complete workflow for uploading a file:
 
 ```bash
 # 1. Get server configuration
-CONFIG=$(curl -s http://localhost:6830/blobs/config)
+CONFIG=$(curl -s http://localhost:6830/blobs/config \
+  -H "Authorization: Bearer $TOKEN")
 CHUNK_SIZE=$(echo $CONFIG | jq -r '.chunk_size')
 
 # 2. Split file into chunks and hash them

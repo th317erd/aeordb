@@ -20,7 +20,7 @@ AeorDB exposes a content-addressable filesystem through its file routes. Every p
 | GET | `/files/share-links?path=` | List active share links for a path | Yes (root) | 200, 403, 500 |
 | DELETE | `/files/share-links/{key_id}` | Revoke a share link | Yes (root) | 200, 403, 404, 500 |
 | GET | `/files/shared-with-me` | List paths shared with the current user | Yes | 200, 403, 500 |
-| POST | `/files/copy` | Copy files or directories | Yes | 200, 400, 404, 500 |
+| POST | `/files/copy` | Atomically copy files or directories | Yes | 200, 400, 403, 404, 409, 503, 500 |
 | POST | `/files/search` | Global cross-directory search | Yes | 200, 400, 500 |
 | PUT | `/links/{path}` | Create or update a symlink | Yes | 201, 400, 500 |
 
@@ -1097,7 +1097,9 @@ Content-Type: application/pdf
 
 ## POST /files/copy
 
-Copy files or directories to a new location. Uses content-addressed deduplication — no data is physically duplicated.
+Atomically copy files, directories, or symlinks to a new location. File content
+uses the existing content-addressed chunks, so copying does not duplicate file
+payload bytes.
 
 ### Request
 
@@ -1115,7 +1117,7 @@ Copy files or directories to a new location. Uses content-addressed deduplicatio
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `paths` | array | Yes | Paths to copy (files or directories) |
+| `paths` | array | Yes | Paths to copy (files, directories, or symlinks) |
 | `destination` | string | Yes | Destination directory |
 
 ### Response
@@ -1128,7 +1130,22 @@ Copy files or directories to a new location. Uses content-addressed deduplicatio
 }
 ```
 
-For directories in the `paths` list, all contents are recursively copied. If any individual copy fails, the error is reported in an `errors` array but other copies continue.
+For directories in the `paths` list, all files, empty directories, and symlinks
+are copied recursively. Symlink targets are preserved rather than followed.
+The `copied` array contains copied file and symlink paths; directory creation is
+implicit in the copied hierarchy.
+
+The entire request is one namespace mutation. AeorDB validates every requested
+source, the complete recursive closure, every destination, and every referenced
+chunk before publishing any destination. A missing source, destination
+collision, malformed tree, invalid path, or memory-admission failure rejects the
+whole request. The endpoint does not return partial success or an `errors`
+array. Immutable dependency records may be left unreachable after a failed hard
+publication and are reclaimed by normal garbage collection, but no destination
+path or new HEAD becomes visible.
+
+The caller needs read/list permission on every source and create permission on
+the destination directory.
 
 ### Example
 
@@ -1141,6 +1158,17 @@ curl -X POST http://localhost:6830/files/copy \
     "destination": "/dst/"
   }'
 ```
+
+### Error Responses
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Empty/duplicate sources, root/system path, self-descendant copy, or another invalid request |
+| `403` | Caller lacks create permission on the destination |
+| `404` | A source is absent or concealed by source permissions |
+| `409` | A destination already exists, two sources collide, or a non-directory blocks an ancestor |
+| `503` | The bounded planning workspace cannot be admitted or the engine is shutting down |
+| `500` | Corrupt source/tree authority or another internal storage failure |
 
 ---
 

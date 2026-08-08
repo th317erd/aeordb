@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 
-use aeordb::engine::{DirectoryOps, EventBus, RequestContext, StorageEngine, VersionManager};
+use aeordb::engine::{BufferedFile, DirectoryOps, EventBus, RequestContext, StorageEngine, VersionManager};
 use aeordb::server::create_temp_engine_for_tests;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -102,6 +102,115 @@ async fn wave_one_entry_mutations_emit_one_exact_acknowledgement_after_hard_publ
   );
 
   assert_eq!(operation_ids.len(), 8);
+}
+
+async fn assert_one_wave_two_mutation<F>(
+  engine: &StorageEngine,
+  receiver: &mut tokio::sync::broadcast::Receiver<aeordb::engine::EngineEvent>,
+  expected_kind: &str,
+  expected_event_types: &[&str],
+  mutation: F,
+) -> Vec<aeordb::engine::EngineEvent>
+where
+  F: FnOnce(),
+{
+  let durability_before = engine.durability_snapshot().unwrap();
+  let writes_before = engine.counters().snapshot().writes_total;
+  mutation();
+
+  let mut events = Vec::with_capacity(expected_event_types.len());
+  for expected_event_type in expected_event_types {
+    let event =
+      tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv()).await.expect("mutation event should arrive").unwrap();
+    assert_eq!(event.event_type, *expected_event_type);
+    events.push(event);
+  }
+
+  let operation_ids: std::collections::HashSet<_> =
+    events.iter().map(|event| assert_namespace_acknowledgement(event, expected_kind)).collect();
+  assert_eq!(operation_ids.len(), 1, "every event from one logical mutation must share one operation ID");
+  let publication_sequences: std::collections::HashSet<_> =
+    events.iter().map(|event| event.payload["publication_sequence"].as_u64().unwrap()).collect();
+  assert_eq!(publication_sequences.len(), 1, "every event from one logical mutation must share one publication sequence");
+
+  let durability_after = engine.durability_snapshot().unwrap();
+  assert_eq!(durability_after.next_sequence, durability_before.next_sequence + 1);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before + 1, "{expected_kind} must acknowledge one logical write metric");
+  assert_eq!(*publication_sequences.iter().next().unwrap(), durability_after.hard_frontier);
+  assert!(
+    tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv()).await.is_err(),
+    "one logical mutation emitted an unexpected extra event"
+  );
+  events
+}
+
+#[tokio::test]
+async fn wave_two_batch_and_rename_mutations_emit_one_exact_acknowledgement() {
+  let (engine, bus, ctx, _temp) = setup_with_events();
+  let ops = DirectoryOps::new(&engine);
+  let system = RequestContext::system();
+  ops.store_symlink(&system, "/wave-two/link", "/wave-two/b.txt").unwrap();
+  ops.store_file_buffered(&system, "/wave-two/copy-source.txt", b"copy", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&system, "/wave-two/merge-single.json", br#"{"base":true}"#, Some("application/json")).unwrap();
+  ops.store_file_buffered(&system, "/wave-two/merge-batch.json", br#"{"base":true}"#, Some("application/json")).unwrap();
+  let mut receiver = bus.subscribe();
+
+  let batch_events = assert_one_wave_two_mutation(&engine, &mut receiver, "batch_write", &["entries_created"], || {
+    ops
+      .store_files_buffered_batch(
+        &ctx,
+        vec![
+          BufferedFile { path: "/wave-two/a.txt".to_string(), data: b"a".to_vec(), content_type: Some("text/plain".to_string()) },
+          BufferedFile { path: "/wave-two/b.txt".to_string(), data: b"b".to_vec(), content_type: Some("text/plain".to_string()) },
+        ],
+      )
+      .unwrap();
+  })
+  .await;
+  assert_eq!(batch_events[0].payload["entries"].as_array().unwrap().len(), 2);
+
+  let rename_events = assert_one_wave_two_mutation(&engine, &mut receiver, "rename", &["entries_deleted", "entries_created"], || {
+    ops.rename_file(&ctx, "/wave-two/a.txt", "/wave-two/renamed.txt").unwrap();
+  })
+  .await;
+  assert_eq!(rename_events[0].payload["entries"][0]["path"], "/wave-two/a.txt");
+  assert_eq!(rename_events[1].payload["entries"][0]["path"], "/wave-two/renamed.txt");
+
+  let symlink_events = assert_one_wave_two_mutation(&engine, &mut receiver, "rename", &["entries_deleted", "entries_created"], || {
+    ops.rename_symlink(&ctx, "/wave-two/link", "/wave-two/renamed-link").unwrap();
+  })
+  .await;
+  assert_eq!(symlink_events[0].payload["entries"][0]["path"], "/wave-two/link");
+  assert_eq!(symlink_events[1].payload["entries"][0]["path"], "/wave-two/renamed-link");
+
+  let copy_events = assert_one_wave_two_mutation(&engine, &mut receiver, "copy", &["entries_created"], || {
+    ops.copy_file(&ctx, "/wave-two/copy-source.txt", "/wave-two/copied.txt").unwrap();
+  })
+  .await;
+  assert_eq!(copy_events[0].payload["entries"][0]["path"], "/wave-two/copied.txt");
+
+  let merge_events = assert_one_wave_two_mutation(&engine, &mut receiver, "merge", &["entries_created"], || {
+    ops
+      .merge_json_file(&ctx, "/wave-two/merge-single.json", serde_json::json!({"single": true}), aeordb::engine::MergeDepth::Unbounded)
+      .unwrap();
+  })
+  .await;
+  assert_eq!(merge_events[0].payload["entries"][0]["path"], "/wave-two/merge-single.json");
+
+  let merge_batch_events = assert_one_wave_two_mutation(&engine, &mut receiver, "merge", &["entries_created"], || {
+    ops
+      .merge_json_files_batch(
+        &ctx,
+        vec![aeordb::engine::JsonMergeFilePatch {
+          path: "/wave-two/merge-batch.json".to_string(),
+          patch: serde_json::json!({"batch": true}),
+          depth: aeordb::engine::MergeDepth::Unbounded,
+        }],
+      )
+      .unwrap();
+  })
+  .await;
+  assert_eq!(merge_batch_events[0].payload["entries"][0]["path"], "/wave-two/merge-batch.json");
 }
 
 // ─── Entry events: store_file ───────────────────────────────────────────

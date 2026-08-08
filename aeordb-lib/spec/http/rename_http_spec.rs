@@ -6,7 +6,8 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
+use aeordb::engine::symlink_record::symlink_path_hash;
+use aeordb::engine::{DirectoryOps, EntryType, RequestContext, StorageEngine};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
@@ -54,6 +55,11 @@ fn store_symlink(engine: &StorageEngine, path: &str, target: &str) {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
   ops.store_symlink(&ctx, path, target).unwrap();
+}
+
+fn corrupt_symlink_locator(engine: &StorageEngine, path: &str) {
+  let key = symlink_path_hash(path, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::Symlink, &key, b"malformed symlink record").unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +309,50 @@ async fn test_rename_symlink_preserves_target() {
 
   let json = body_json(response.into_body()).await;
   assert_eq!(json["target"], "/real-file.txt");
+}
+
+#[tokio::test]
+async fn test_rename_propagates_corrupt_symlink_metadata_without_publishing_destination() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  store_symlink(&engine, "/corrupt-link", "/target.txt");
+  corrupt_symlink_locator(&engine, "/corrupt-link");
+  let original_head = engine.head_hash().unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("PATCH")
+    .uri("/files/corrupt-link")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"to":"/renamed-corrupt-link"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  let ops = DirectoryOps::new(&engine);
+  assert!(ops.get_symlink("/corrupt-link").is_err());
+  assert!(ops.get_symlink("/renamed-corrupt-link").unwrap().is_none());
+  assert!(ops.get_metadata("/renamed-corrupt-link").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_delete_propagates_corrupt_symlink_metadata_without_mutation() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  store_symlink(&engine, "/delete-corrupt-link", "/target.txt");
+  corrupt_symlink_locator(&engine, "/delete-corrupt-link");
+  let original_head = engine.head_hash().unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request =
+    Request::builder().method("DELETE").uri("/files/delete-corrupt-link").header("authorization", &auth).body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert!(DirectoryOps::new(&engine).get_symlink("/delete-corrupt-link").is_err());
 }
 
 // ---------------------------------------------------------------------------
