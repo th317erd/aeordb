@@ -24,6 +24,44 @@ const BTREE_WARNING_OMISSION: &str = "additional B-tree traversal warnings omitt
 pub const BTREE_LEAF_MARKER: u8 = 0x00;
 pub const BTREE_INTERNAL_MARKER: u8 = 0x01;
 
+/// One immutable B-tree node produced by a mutation plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BTreeNodeWrite {
+  pub key: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
+/// A complete, mutation-free B-tree rewrite plan.
+///
+/// Callers decide which hard-authority batch publishes these immutable nodes.
+/// Constructing a plan never writes the engine or updates a stable locator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BTreeMutationPlan {
+  root_hash: Vec<u8>,
+  root_data: Vec<u8>,
+  node_writes: Vec<BTreeNodeWrite>,
+}
+
+impl BTreeMutationPlan {
+  pub fn root_hash(&self) -> &[u8] {
+    &self.root_hash
+  }
+
+  pub fn root_data(&self) -> &[u8] {
+    &self.root_data
+  }
+
+  pub fn node_writes(&self) -> impl Iterator<Item = &BTreeNodeWrite> {
+    self.node_writes.iter()
+  }
+
+  pub fn append_to_batch(&self, batch: &mut WriteBatch) {
+    for write in &self.node_writes {
+      batch.add(EntryType::DirectoryIndex, write.key.clone(), write.value.clone());
+    }
+  }
+}
+
 /// B-tree traversal policy for callers with different safety needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BTreeWalkMode {
@@ -490,78 +528,89 @@ pub fn store_btree_node(engine: &StorageEngine, node: &BTreeNode, hash_length: u
 /// Used for flat -> B-tree conversion.
 pub fn btree_from_entries(
   engine: &StorageEngine,
-  mut entries: Vec<ChildEntry>,
+  entries: Vec<ChildEntry>,
   hash_length: usize,
   algo: &HashAlgorithm,
 ) -> EngineResult<Vec<u8>> {
-  // Sort entries by name
-  entries.sort_by(|a, b| a.name.cmp(&b.name));
-
-  if entries.is_empty() {
-    // Store empty leaf
-    let leaf = BTreeNode::Leaf(LeafNode::new());
-    return store_btree_node(engine, &leaf, hash_length, algo);
-  }
-
-  // Build leaf nodes
-  let mut leaf_hashes = Vec::new();
-  let mut split_keys = Vec::new();
-
-  for chunk in entries.chunks(BTREE_MAX_LEAF_ENTRIES) {
-    let leaf = BTreeNode::Leaf(LeafNode { entries: chunk.to_vec() });
-    let hash = store_btree_node(engine, &leaf, hash_length, algo)?;
-    if !leaf_hashes.is_empty() {
-      split_keys.push(chunk[0].name.clone());
-    }
-    leaf_hashes.push(hash);
-  }
-
-  if leaf_hashes.len() == 1 {
-    return Ok(leaf_hashes.into_iter().next().unwrap());
-  }
-
-  // Build internal nodes bottom-up
-  build_internal_level(engine, leaf_hashes, split_keys, hash_length, algo)
+  let plan = btree_plan_from_entries(entries, hash_length, algo)?;
+  let root_hash = plan.root_hash.clone();
+  let mut batch = WriteBatch::new();
+  plan.append_to_batch(&mut batch);
+  engine.flush_batch(batch)?;
+  Ok(root_hash)
 }
 
-fn build_internal_level(
-  engine: &StorageEngine,
-  children: Vec<Vec<u8>>,
-  keys: Vec<String>,
+#[derive(Debug)]
+struct PlannedBTreeLevelNode {
+  hash: Vec<u8>,
+  data: Vec<u8>,
+  first_key: Option<String>,
+}
+
+fn append_planned_node(
+  node: BTreeNode,
+  first_key: Option<String>,
   hash_length: usize,
   algo: &HashAlgorithm,
-) -> EngineResult<Vec<u8>> {
-  if children.len() == 1 {
-    return Ok(children.into_iter().next().unwrap());
+  writes: &mut Vec<BTreeNodeWrite>,
+) -> EngineResult<PlannedBTreeLevelNode> {
+  let data = node.serialize(hash_length)?;
+  let hash = node.content_hash(hash_length, algo)?;
+  writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+  Ok(PlannedBTreeLevelNode { hash, data, first_key })
+}
+
+/// Build a complete B-tree without writing any node to storage.
+pub fn btree_plan_from_entries(mut entries: Vec<ChildEntry>, hash_length: usize, algo: &HashAlgorithm) -> EngineResult<BTreeMutationPlan> {
+  // Sort entries by name
+  entries.sort_by(|a, b| a.name.cmp(&b.name));
+  let mut node_writes = Vec::new();
+
+  if entries.is_empty() {
+    let root = append_planned_node(BTreeNode::Leaf(LeafNode::new()), None, hash_length, algo, &mut node_writes)?;
+    return Ok(BTreeMutationPlan { root_hash: root.hash, root_data: root.data, node_writes });
   }
 
-  // Group into internal nodes
-  let mut new_children = Vec::new();
-  let mut new_keys = Vec::new();
+  let mut level = Vec::new();
+  for chunk in entries.chunks(BTREE_MAX_LEAF_ENTRIES) {
+    level.push(append_planned_node(
+      BTreeNode::Leaf(LeafNode { entries: chunk.to_vec() }),
+      Some(chunk[0].name.clone()),
+      hash_length,
+      algo,
+      &mut node_writes,
+    )?);
+  }
 
   let max_children = BTREE_MAX_INTERNAL_KEYS + 1;
-  let mut i = 0;
-  while i < children.len() {
-    let end = (i + max_children).min(children.len());
-    let node_children = children[i..end].to_vec();
-    let node_keys: Vec<String> = if i == 0 { keys[..end - 1].to_vec() } else { keys[i - 1..end - 1].to_vec() };
-
-    let internal = BTreeNode::Internal(InternalNode { keys: node_keys, children: node_children });
-    let hash = store_btree_node(engine, &internal, hash_length, algo)?;
-
-    if !new_children.is_empty() && i > 0 && i - 1 < keys.len() {
-      new_keys.push(keys[i - 1].clone());
+  while level.len() > 1 {
+    let mut next_level = Vec::new();
+    for children in level.chunks(max_children) {
+      let keys = children
+        .iter()
+        .skip(1)
+        .map(|child| {
+          child
+            .first_key
+            .clone()
+            .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "planned B-tree child has no first key".to_string() })
+        })
+        .collect::<EngineResult<Vec<_>>>()?;
+      let child_hashes = children.iter().map(|child| child.hash.clone()).collect();
+      let first_key = children.first().and_then(|child| child.first_key.clone());
+      next_level.push(append_planned_node(
+        BTreeNode::Internal(InternalNode { keys, children: child_hashes }),
+        first_key,
+        hash_length,
+        algo,
+        &mut node_writes,
+      )?);
     }
-    new_children.push(hash);
-
-    i = end;
+    level = next_level;
   }
 
-  if new_children.len() == 1 {
-    Ok(new_children.into_iter().next().unwrap())
-  } else {
-    build_internal_level(engine, new_children, new_keys, hash_length, algo)
-  }
+  let root = level.pop().ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "planned B-tree has no root".to_string() })?;
+  Ok(BTreeMutationPlan { root_hash: root.hash, root_data: root.data, node_writes })
 }
 
 /// Look up a single child by name in a B-tree directory.
@@ -915,7 +964,42 @@ pub fn btree_delete(
   hash_length: usize,
   algo: &HashAlgorithm,
 ) -> EngineResult<Option<Vec<u8>>> {
-  let node_data = engine.get_entry(root_hash)?.ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
+  let Some(plan) = btree_plan_delete(engine, root_hash, name, hash_length, algo)? else {
+    return Ok(None);
+  };
+  let root_hash = plan.root_hash.clone();
+  let mut batch = WriteBatch::new();
+  plan.append_to_batch(&mut batch);
+  if !batch.is_empty() {
+    engine.flush_batch(batch)?;
+  }
+  Ok(Some(root_hash))
+}
+
+/// Plan a B-tree deletion without publishing any replacement node.
+pub fn btree_plan_delete(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  name: &str,
+  hash_length: usize,
+  algo: &HashAlgorithm,
+) -> EngineResult<Option<BTreeMutationPlan>> {
+  let mut node_writes = Vec::new();
+  let Some((root_hash, root_data)) = btree_plan_delete_node(engine, root_hash, name, hash_length, algo, &mut node_writes)? else {
+    return Ok(None);
+  };
+  Ok(Some(BTreeMutationPlan { root_hash, root_data, node_writes }))
+}
+
+fn btree_plan_delete_node(
+  engine: &StorageEngine,
+  node_hash: &[u8],
+  name: &str,
+  hash_length: usize,
+  algo: &HashAlgorithm,
+  node_writes: &mut Vec<BTreeNodeWrite>,
+) -> EngineResult<Option<(Vec<u8>, Vec<u8>)>> {
+  let node_data = engine.get_entry(node_hash)?.ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
   let mut node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
 
   match &mut node {
@@ -924,19 +1008,23 @@ pub fn btree_delete(
       if leaf.entries.is_empty() {
         Ok(None) // tree is empty
       } else {
-        let new_hash = store_btree_node(engine, &node, hash_length, algo)?;
-        Ok(Some(new_hash))
+        let data = node.serialize(hash_length)?;
+        let hash = node.content_hash(hash_length, algo)?;
+        node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+        Ok(Some((hash, data)))
       }
     }
     BTreeNode::Internal(ref mut internal) => {
       let child_idx = internal.find_child_index(name);
       let child_hash = internal.children[child_idx].clone();
 
-      match btree_delete(engine, &child_hash, name, hash_length, algo)? {
-        Some(new_child_hash) => {
+      match btree_plan_delete_node(engine, &child_hash, name, hash_length, algo, node_writes)? {
+        Some((new_child_hash, _new_child_data)) => {
           internal.children[child_idx] = new_child_hash;
-          let new_hash = store_btree_node(engine, &node, hash_length, algo)?;
-          Ok(Some(new_hash))
+          let data = node.serialize(hash_length)?;
+          let hash = node.content_hash(hash_length, algo)?;
+          node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+          Ok(Some((hash, data)))
         }
         None => {
           // Child is now empty — remove from internal node
@@ -951,10 +1039,19 @@ pub fn btree_delete(
             Ok(None)
           } else if internal.children.len() == 1 {
             // Collapse: single child becomes the new root
-            Ok(Some(internal.children[0].clone()))
+            let remaining_hash = internal.children[0].clone();
+            let remaining_data = match node_writes.iter().rev().find(|write| write.key == remaining_hash) {
+              Some(write) => write.value.clone(),
+              None => {
+                engine.get_entry(&remaining_hash)?.ok_or_else(|| EngineError::NotFound("B-tree collapse child not found".to_string()))?.2
+              }
+            };
+            Ok(Some((remaining_hash, remaining_data)))
           } else {
-            let new_hash = store_btree_node(engine, &node, hash_length, algo)?;
-            Ok(Some(new_hash))
+            let data = node.serialize(hash_length)?;
+            let hash = node.content_hash(hash_length, algo)?;
+            node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+            Ok(Some((hash, data)))
           }
         }
       }
@@ -975,10 +1072,26 @@ pub fn btree_insert_batched(
   hash_length: usize,
   algo: &HashAlgorithm,
 ) -> EngineResult<(Vec<u8>, Vec<u8>)> {
+  let plan = btree_plan_insert(engine, root_data, entry, hash_length, algo)?;
+  let result = (plan.root_hash.clone(), plan.root_data.clone());
   let mut batch = WriteBatch::new();
+  plan.append_to_batch(&mut batch);
+  engine.flush_batch(batch)?;
+  Ok(result)
+}
+
+/// Plan a B-tree insert without publishing any new node.
+pub fn btree_plan_insert(
+  engine: &StorageEngine,
+  root_data: &[u8],
+  entry: ChildEntry,
+  hash_length: usize,
+  algo: &HashAlgorithm,
+) -> EngineResult<BTreeMutationPlan> {
+  let mut node_writes = Vec::new();
   let root_node = BTreeNode::deserialize(root_data, hash_length, 0)?;
 
-  let result = btree_insert_node_batched(engine, root_node, entry, hash_length, algo, &mut batch)?;
+  let result = btree_plan_insert_node(engine, root_node, entry, hash_length, algo, &mut node_writes)?;
 
   let (new_hash, new_data) = match result {
     InsertResult::Done(hash, data) => (hash, data),
@@ -986,24 +1099,21 @@ pub fn btree_insert_batched(
       let new_root = BTreeNode::Internal(InternalNode { keys: vec![split_key], children: vec![left_hash, right_hash] });
       let new_data = new_root.serialize(hash_length)?;
       let new_hash = new_root.content_hash(hash_length, algo)?;
-      batch.add(EntryType::DirectoryIndex, new_hash.clone(), new_data.clone());
+      node_writes.push(BTreeNodeWrite { key: new_hash.clone(), value: new_data.clone() });
       (new_hash, new_data)
     }
   };
 
-  // Flush all node writes in one batch
-  engine.flush_batch(batch)?;
-
-  Ok((new_hash, new_data))
+  Ok(BTreeMutationPlan { root_hash: new_hash, root_data: new_data, node_writes })
 }
 
-fn btree_insert_node_batched(
+fn btree_plan_insert_node(
   engine: &StorageEngine,
   node: BTreeNode,
   entry: ChildEntry,
   hash_length: usize,
   algo: &HashAlgorithm,
-  batch: &mut WriteBatch,
+  node_writes: &mut Vec<BTreeNodeWrite>,
 ) -> EngineResult<InsertResult> {
   match node {
     BTreeNode::Leaf(mut leaf) => {
@@ -1015,14 +1125,14 @@ fn btree_insert_node_batched(
         let right_node = BTreeNode::Leaf(right);
         let left_hash = left_node.content_hash(hash_length, algo)?;
         let right_hash = right_node.content_hash(hash_length, algo)?;
-        batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length)?);
-        batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length)?);
+        node_writes.push(BTreeNodeWrite { key: left_hash.clone(), value: left_node.serialize(hash_length)? });
+        node_writes.push(BTreeNodeWrite { key: right_hash.clone(), value: right_node.serialize(hash_length)? });
         Ok(InsertResult::Split(left_hash, split_key, right_hash))
       } else {
         let node = BTreeNode::Leaf(leaf);
         let data = node.serialize(hash_length)?;
         let hash = node.content_hash(hash_length, algo)?;
-        batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
+        node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
         Ok(InsertResult::Done(hash, data))
       }
     }
@@ -1036,7 +1146,7 @@ fn btree_insert_node_batched(
         .ok_or_else(|| EngineError::NotFound(format!("B-tree child not found: {}", hex::encode(&child_hash))))?;
       let child_node = BTreeNode::deserialize(&child_data.2, hash_length, child_data.0.entry_version)?;
 
-      let child_result = btree_insert_node_batched(engine, child_node, entry, hash_length, algo, batch)?;
+      let child_result = btree_plan_insert_node(engine, child_node, entry, hash_length, algo, node_writes)?;
 
       match child_result {
         InsertResult::Done(new_child_hash, _) => {
@@ -1044,7 +1154,7 @@ fn btree_insert_node_batched(
           let node = BTreeNode::Internal(internal);
           let data = node.serialize(hash_length)?;
           let hash = node.content_hash(hash_length, algo)?;
-          batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
+          node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
           Ok(InsertResult::Done(hash, data))
         }
         InsertResult::Split(left_hash, split_key, right_hash) => {
@@ -1057,14 +1167,14 @@ fn btree_insert_node_batched(
             let right_node = BTreeNode::Internal(right);
             let left_hash = left_node.content_hash(hash_length, algo)?;
             let right_hash = right_node.content_hash(hash_length, algo)?;
-            batch.add(EntryType::DirectoryIndex, left_hash.clone(), left_node.serialize(hash_length)?);
-            batch.add(EntryType::DirectoryIndex, right_hash.clone(), right_node.serialize(hash_length)?);
+            node_writes.push(BTreeNodeWrite { key: left_hash.clone(), value: left_node.serialize(hash_length)? });
+            node_writes.push(BTreeNodeWrite { key: right_hash.clone(), value: right_node.serialize(hash_length)? });
             Ok(InsertResult::Split(left_hash, parent_split_key, right_hash))
           } else {
             let node = BTreeNode::Internal(internal);
             let data = node.serialize(hash_length)?;
             let hash = node.content_hash(hash_length, algo)?;
-            batch.add(EntryType::DirectoryIndex, hash.clone(), data.clone());
+            node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
             Ok(InsertResult::Done(hash, data))
           }
         }

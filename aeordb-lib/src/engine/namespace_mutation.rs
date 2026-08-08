@@ -102,6 +102,7 @@ struct PlannedEntryWrite {
   key: Vec<u8>,
   value: Vec<u8>,
   flags: u8,
+  entry_version: u8,
 }
 
 #[derive(Debug)]
@@ -146,15 +147,37 @@ impl NamespaceMutationBatch {
   }
 
   pub fn store_dependency(&mut self, entry_type: EntryType, key: Vec<u8>, value: Vec<u8>, flags: u8) -> EngineResult<()> {
+    self.store_dependency_with_version(entry_type, key, value, flags, crate::engine::entry_header::CURRENT_ENTRY_VERSION)
+  }
+
+  pub fn store_dependency_with_version(
+    &mut self,
+    entry_type: EntryType,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    flags: u8,
+    entry_version: u8,
+  ) -> EngineResult<()> {
     self.reserve_write_key(&key, "dependency")?;
-    self.dependencies.push(PlannedEntryWrite { entry_type, key, value, flags });
+    self.dependencies.push(PlannedEntryWrite { entry_type, key, value, flags, entry_version });
     Ok(())
   }
 
   pub fn replace_locator(&mut self, entry_type: EntryType, key: Vec<u8>, value: Vec<u8>, flags: u8) -> EngineResult<()> {
+    self.replace_locator_with_version(entry_type, key, value, flags, crate::engine::entry_header::CURRENT_ENTRY_VERSION)
+  }
+
+  pub fn replace_locator_with_version(
+    &mut self,
+    entry_type: EntryType,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    flags: u8,
+    entry_version: u8,
+  ) -> EngineResult<()> {
     validate_locator_entry_type(entry_type)?;
     self.reserve_write_key(&key, "stable locator")?;
-    self.locator_mutations.push(PlannedLocatorMutation::Replace(PlannedEntryWrite { entry_type, key, value, flags }));
+    self.locator_mutations.push(PlannedLocatorMutation::Replace(PlannedEntryWrite { entry_type, key, value, flags, entry_version }));
     Ok(())
   }
 
@@ -332,16 +355,16 @@ impl<'a> LocatorReplacementCoordinator<'a> {
 
 fn store_planned_entry(engine: &StorageEngine, write: &PlannedEntryWrite) -> EngineResult<u64> {
   if write.flags == 0 {
-    engine.store_entry(write.entry_type, &write.key, &write.value)
+    engine.store_entry_with_version(write.entry_type, &write.key, &write.value, write.entry_version)
   } else {
-    engine.store_entry_with_flags(write.entry_type, &write.key, &write.value, write.flags)
+    engine.store_entry_with_flags_and_version(write.entry_type, &write.key, &write.value, write.flags, write.entry_version)
   }
 }
 
 /// Shared hard-authority owner for prepared namespace mutations.
 pub struct NamespaceMutationCoordinator<'a> {
   engine: &'a StorageEngine,
-  fanout: Arc<dyn NamespaceMutationFanout>,
+  fanout: Arc<dyn NamespaceMutationFanout + 'a>,
   #[cfg(test)]
   test_faults: NamespaceMutationTestFaults,
 }
@@ -365,7 +388,7 @@ impl<'a> NamespaceMutationCoordinator<'a> {
 
   pub fn with_fanout<F>(engine: &'a StorageEngine, fanout: Arc<F>) -> Self
   where
-    F: NamespaceMutationFanout + 'static,
+    F: NamespaceMutationFanout + 'a,
   {
     Self {
       engine,
@@ -378,15 +401,55 @@ impl<'a> NamespaceMutationCoordinator<'a> {
   #[cfg(test)]
   fn with_test_faults<F>(engine: &'a StorageEngine, fanout: Arc<F>, test_faults: NamespaceMutationTestFaults) -> Self
   where
-    F: NamespaceMutationFanout + 'static,
+    F: NamespaceMutationFanout + 'a,
   {
     Self { engine, fanout, test_faults }
   }
 
   pub fn execute(&self, batch: NamespaceMutationBatch) -> EngineResult<NamespaceMutationAcknowledgement> {
     let estimated_dependency_bytes = batch.validate(self.engine)?;
-
     let namespace = self.engine.namespace_write_guard()?;
+    self.execute_with_namespace(batch, estimated_dependency_bytes, namespace)
+  }
+
+  /// Build a mutation plan while holding the same namespace authority that
+  /// will publish it. The preparation closure may read current authority but
+  /// must not mutate storage; all writes belong in the returned batch.
+  pub fn prepare_and_execute<T, F>(&self, prepare: F) -> EngineResult<(NamespaceMutationAcknowledgement, T)>
+  where
+    F: FnOnce(&StorageEngine) -> EngineResult<(NamespaceMutationBatch, T)>,
+  {
+    let (acknowledgement, output) = self.prepare_and_maybe_execute(|planning_engine| {
+      let (batch, output) = prepare(planning_engine)?;
+      Ok((Some(batch), output))
+    })?;
+    let acknowledgement =
+      acknowledgement.ok_or_else(|| EngineError::InvalidInput("required namespace mutation preparation returned no batch".to_string()))?;
+    Ok((acknowledgement, output))
+  }
+
+  /// Prepare a conditional mutation under namespace authority. A `None` batch
+  /// is a proven no-op: it consumes no durability ticket and emits no fanout.
+  pub fn prepare_and_maybe_execute<T, F>(&self, prepare: F) -> EngineResult<(Option<NamespaceMutationAcknowledgement>, T)>
+  where
+    F: FnOnce(&StorageEngine) -> EngineResult<(Option<NamespaceMutationBatch>, T)>,
+  {
+    let namespace = self.engine.namespace_write_guard()?;
+    let (batch, output) = prepare(self.engine)?;
+    let Some(batch) = batch else {
+      return Ok((None, output));
+    };
+    let estimated_dependency_bytes = batch.validate(self.engine)?;
+    let acknowledgement = self.execute_with_namespace(batch, estimated_dependency_bytes, namespace)?;
+    Ok((Some(acknowledgement), output))
+  }
+
+  fn execute_with_namespace(
+    &self,
+    batch: NamespaceMutationBatch,
+    estimated_dependency_bytes: u64,
+    namespace: crate::engine::storage_engine::NamespaceWriteGuard<'a>,
+  ) -> EngineResult<NamespaceMutationAcknowledgement> {
     let previous_root_hash = self.engine.head_hash()?;
     if batch.dependencies.is_empty()
       && batch.locator_mutations.is_empty()

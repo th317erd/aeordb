@@ -59,6 +59,13 @@ Registered root-only paths are represented as `{"redacted":true}` for non-root s
 
 Metrics collection begins after login, before the Dashboard tab is opened. Root sessions use the administrative metrics SSE stream after an initial stats fetch. Non-root sessions poll `/system/stats` every 15 seconds because metrics SSE is root-only. A malformed or failed root SSE stream is closed, surfaced as an error, and replaced with polling.
 
+The Prometheus counter
+`aeordb_namespace_mutation_acknowledgements_total{mutation_kind="..."}`
+increments only after a coordinator-owned namespace mutation reaches its exact
+hard durability sequence. It is an acknowledgement counter, not an attempted
+write counter. During the staged producer migration, only converted mutation
+families contribute to it.
+
 The Dashboard shows:
 
 - current memory pressure and accounting;

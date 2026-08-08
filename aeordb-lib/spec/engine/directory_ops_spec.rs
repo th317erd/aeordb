@@ -1,5 +1,5 @@
 use aeordb::engine::compression::{CompressionAlgorithm, compress};
-use aeordb::engine::directory_ops::{DirectoryOps, chunk_content_hash, directory_path_hash, file_path_hash};
+use aeordb::engine::directory_ops::{DirectoryOps, chunk_content_hash, directory_content_hash, directory_path_hash, file_path_hash};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
@@ -16,6 +16,28 @@ fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let ops = DirectoryOps::new(&engine);
   ops.ensure_root_directory(&ctx).unwrap();
   engine
+}
+
+#[test]
+fn ensure_root_directory_publishes_once_and_is_then_a_true_no_op() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("root-cardinality.aeor");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  let before_create = engine.durability_snapshot().unwrap().next_sequence;
+  ops.ensure_root_directory(&ctx).unwrap();
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before_create + 1);
+  assert_eq!(engine.head_hash().unwrap(), directory_content_hash(&[], &engine.hash_algo()).unwrap());
+
+  let before_no_op = engine.durability_snapshot().unwrap().next_sequence;
+  ops.ensure_root_directory(&ctx).unwrap();
+  assert_eq!(
+    engine.durability_snapshot().unwrap().next_sequence,
+    before_no_op,
+    "an existing root must not consume another durability ticket"
+  );
 }
 
 #[test]

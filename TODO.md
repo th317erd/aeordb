@@ -341,6 +341,15 @@
       - [x] Implement `NamespaceMutationCoordinator` and `LocatorReplacementCoordinator` without changing persistent bytes or activating producer waves.
       - [x] Add architecture gates that freeze the facade boundary without falsely claiming P2e producer convergence.
       - [x] Run focused, adjacent, workspace, documentation, contract, and real-server/reopen verification; record and land the P2d handoff.
+    - [x] P2e Wave 1: converge Core DirectoryOps producers on one namespace mutation and locator authority.
+      - [x] Characterize file, directory, symlink, parent/HEAD, migration, rebuild, event, counter, cache, and B-tree operation ledgers before behavior changes.
+      - [x] Extend the coordinator with mutation-free planning under held namespace authority and version-aware dependency/locator writes.
+      - [x] Replace write-during-planning B-tree helpers with reusable pure mutation plans while preserving legacy callers until their owning waves.
+      - [x] Convert file create/replace/finalize/delete and parent propagation to one hard acknowledgement and one post-commit fanout.
+      - [x] Convert directory and symlink create/update/delete, root initialization, and parent propagation to the same path.
+      - [x] Convert FileRecord version migration and directory rebuild without pre-acknowledgement storage, cache, counter, or event side effects.
+      - [x] Remove Wave 1 nested/direct authority bypasses and prove exactly one operation ID, durability sequence, event, and metric acknowledgement per success.
+      - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, and real-server verification; record and land the Wave 1 handoff.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

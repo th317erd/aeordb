@@ -13,6 +13,97 @@ fn setup_with_events() -> (Arc<StorageEngine>, Arc<EventBus>, RequestContext, te
   (engine, bus, ctx, temp)
 }
 
+fn assert_namespace_acknowledgement(event: &aeordb::engine::EngineEvent, expected_kind: &str) -> uuid::Uuid {
+  let operation_id = uuid::Uuid::parse_str(
+    event.payload["operation_id"].as_str().unwrap_or_else(|| panic!("entry event must carry an operation ID: {}", event.payload)),
+  )
+  .unwrap();
+  assert!(!operation_id.is_nil());
+  assert!(event.payload["publication_sequence"].as_u64().expect("entry event must carry a publication sequence") > 0);
+  assert_eq!(event.payload["mutation_kind"], expected_kind);
+  operation_id
+}
+
+async fn assert_one_wave_one_mutation<F>(
+  engine: &StorageEngine,
+  receiver: &mut tokio::sync::broadcast::Receiver<aeordb::engine::EngineEvent>,
+  expected_kind: &str,
+  mutation: F,
+) -> uuid::Uuid
+where
+  F: FnOnce(),
+{
+  let durability_before = engine.durability_snapshot().unwrap();
+  let writes_before = engine.counters().snapshot().writes_total;
+  mutation();
+  let event = receiver.recv().await.unwrap();
+  let operation_id = assert_namespace_acknowledgement(&event, expected_kind);
+  let durability_after = engine.durability_snapshot().unwrap();
+  assert_eq!(durability_after.next_sequence, durability_before.next_sequence + 1);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before + 1, "{expected_kind} must acknowledge one logical write metric");
+  assert_eq!(event.payload["publication_sequence"].as_u64().unwrap(), durability_after.hard_frontier);
+  operation_id
+}
+
+#[tokio::test]
+async fn wave_one_entry_mutations_emit_one_exact_acknowledgement_after_hard_publication() {
+  let (engine, bus, ctx, _temp) = setup_with_events();
+  let mut receiver = bus.subscribe();
+  let ops = DirectoryOps::new(&engine);
+  let mut operation_ids = std::collections::HashSet::new();
+
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "file_write", || {
+      ops.store_file_buffered(&ctx, "/wave-one/file.txt", b"first", Some("text/plain")).unwrap();
+    })
+    .await,
+  );
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "file_write", || {
+      ops.store_file_buffered(&ctx, "/wave-one/file.txt", b"second", Some("text/plain")).unwrap();
+    })
+    .await,
+  );
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "file_write", || {
+      ops.store_file_buffered(&ctx, "/.aeordb-system/wave-one-delete.txt", b"delete me", Some("text/plain")).unwrap();
+    })
+    .await,
+  );
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "directory_create", || {
+      ops.create_directory(&ctx, "/wave-one/empty").unwrap();
+    })
+    .await,
+  );
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "symlink_write", || {
+      ops.store_symlink(&ctx, "/wave-one/link", "/wave-one/file.txt").unwrap();
+    })
+    .await,
+  );
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "symlink_delete", || {
+      ops.delete_symlink(&ctx, "/wave-one/link").unwrap();
+    })
+    .await,
+  );
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "file_delete", || {
+      ops.delete_file(&ctx, "/.aeordb-system/wave-one-delete.txt").unwrap();
+    })
+    .await,
+  );
+  operation_ids.insert(
+    assert_one_wave_one_mutation(&engine, &mut receiver, "directory_delete", || {
+      ops.delete_directory(&ctx, "/wave-one/empty").unwrap();
+    })
+    .await,
+  );
+
+  assert_eq!(operation_ids.len(), 8);
+}
+
 // ─── Entry events: store_file ───────────────────────────────────────────
 
 #[tokio::test]

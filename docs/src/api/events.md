@@ -61,7 +61,7 @@ The response is an SSE stream. Each event has the standard SSE fields:
 ```
 id: evt-uuid-here
 event: entries_created
-data: {"event_id":"evt-uuid-here","event_type":"entries_created","timestamp":1775968398000,"payload":{"entries":[{"path":"/data/report.pdf"}]}}
+data: {"event_id":"evt-uuid-here","event_type":"entries_created","timestamp":1775968398000,"payload":{"entries":[{"path":"/data/report.pdf"}],"operation_id":"mutation-uuid-here","publication_sequence":42,"mutation_kind":"file_write"}}
 
 ```
 
@@ -81,8 +81,8 @@ Each event is a JSON object with:
 | Event Type | Description | Payload |
 |------------|-------------|---------|
 | `server_ready` | Synthetic first event on ready SSE connections | `{"status": "ready", "version": "...", "startup_time": 1781233139578, "uptime_ms": 6500}` |
-| `entries_created` | Files were created or updated | `{"entries": [{"path": "..."}]}` |
-| `entries_deleted` | Files were deleted | `{"entries": [{"path": "..."}]}` |
+| `entries_created` | Files were created or updated | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 42, "mutation_kind": "file_write"}` |
+| `entries_deleted` | Files were deleted | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 43, "mutation_kind": "file_delete"}` |
 | `versions_created` | A new version (snapshot/fork) was created | Version metadata |
 | `permissions_changed` | Permissions were updated for a path | `{"path": "..."}` |
 | `indexes_changed` | Index configuration was updated | `{"path": "..."}` |
@@ -93,6 +93,22 @@ Each event is a JSON object with:
 | `tasks_cancelled` | A running task cancellation was observed | `{"task_id": "...", "task_type": "..."}` |
 | `heartbeat` | Clock synchronization pulse (every 15s) | `{"intent_time", "construct_time", "node_id"}` |
 | `metrics` | Root-only administrative runtime snapshot (every 15s) | `{"counts", "sizes", "throughput", "health", "memory", "durability", "configuration"}` |
+
+Coordinator-owned namespace mutations add these acknowledgement fields to
+`entries_created` and `entries_deleted` payloads only after the exact hard
+publication is durable:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `operation_id` | string | Unique UUID for the logical namespace mutation |
+| `publication_sequence` | integer | Exact durability sequence acknowledged by the engine |
+| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, or `symlink_delete` |
+
+AeorDB is migrating producers to this shared acknowledgement path in stages.
+Legacy batch, copy/rename, restore/version, sync/import, system/plugin, and
+maintenance producers may omit these three fields until their producer wave is
+converted. Clients must therefore treat them as optional during the transition,
+but must not interpret an absent field as a durability failure.
 
 ---
 

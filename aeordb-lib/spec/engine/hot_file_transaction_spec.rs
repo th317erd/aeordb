@@ -7,6 +7,7 @@
 
 use aeordb::engine::storage_engine::{StorageEngine, TransactionGuard};
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::RequestContext;
 use serial_test::serial;
@@ -58,6 +59,12 @@ fn create_test_db_with_hot_dir() -> (StorageEngine, tempfile::TempDir) {
   (engine, temp)
 }
 
+fn store_transaction_probe(engine: &StorageEngine, discriminator: u8) -> Vec<u8> {
+  let key = vec![discriminator; engine.hash_algo().hash_length()];
+  engine.store_entry(EntryType::Chunk, &key, &[discriminator]).unwrap();
+  key
+}
+
 // =========================================================================
 // Transaction depth management
 // =========================================================================
@@ -69,16 +76,16 @@ fn transaction_guard_increments_and_decrements_depth() {
   // Depth starts at 0
   {
     let _guard = TransactionGuard::new(&engine).unwrap();
-    // Inside transaction -- depth is 1
-    // Store a file -- flush should NOT truncate hot file
-    let ops = DirectoryOps::new(&engine);
-    let ctx = RequestContext::system();
-    ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
+    // Inside transaction -- depth is 1. Raw dependency appends remain valid;
+    // namespace APIs own their own exclusive hard-authority transaction.
+    store_transaction_probe(&engine, 0x11);
   }
   // Guard dropped -- depth back to 0, hot file truncated
 
-  // Verify the file is readable after guard drop (proves no corruption)
+  // Verify namespace authority is reusable after guard drop.
   let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
   let data = ops.read_file_buffered("/test.txt").unwrap();
   assert_eq!(data, b"hello");
 }
@@ -96,10 +103,12 @@ fn transaction_guard_fires_on_error() {
   assert!(result.is_err());
   // Guard should have dropped -- verify we can start a new transaction
   // without deadlocking
-  let _guard2 = TransactionGuard::new(&engine).unwrap();
+  let guard2 = TransactionGuard::new(&engine).unwrap();
   // If this doesn't deadlock, depth management is correct
+  store_transaction_probe(&engine, 0x12);
+  guard2.commit().unwrap();
 
-  // Also verify we can do real work in the new transaction
+  // Also verify namespace authority is reusable after the transaction.
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
   ops.store_file_buffered(&ctx, "/after-error.txt", b"recovered", Some("text/plain")).unwrap();
@@ -145,7 +154,9 @@ fn transaction_guard_fires_on_panic() {
   assert!(result.is_err());
   // Guard should have dropped despite panic
   // Verify depth is back to 0 by successfully starting a new transaction
-  let _guard2 = TransactionGuard::new(&engine).unwrap();
+  let guard2 = TransactionGuard::new(&engine).unwrap();
+  store_transaction_probe(&engine, 0x13);
+  guard2.commit().unwrap();
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
   // This should work -- depth is 0, hot file can truncate
@@ -163,10 +174,7 @@ fn transaction_depth_always_returns_to_zero() {
   // Multiple sequential transactions
   for i in 0..10 {
     let _guard = TransactionGuard::new(&engine).unwrap();
-    let ops = DirectoryOps::new(&engine);
-    let ctx = RequestContext::system();
-    let path = format!("/file_{}.txt", i);
-    ops.store_file_buffered(&ctx, &path, format!("content-{}", i).as_bytes(), Some("text/plain")).unwrap();
+    store_transaction_probe(&engine, 0x20 + i);
   }
 
   // All guards dropped -- depth must be 0
@@ -175,11 +183,10 @@ fn transaction_depth_always_returns_to_zero() {
   let ctx = RequestContext::system();
   ops.store_file_buffered(&ctx, "/final.txt", b"final", Some("text/plain")).unwrap();
 
-  // Verify all files are readable
+  // Verify all raw transaction probes and the final namespace write survived.
   for i in 0..10 {
-    let path = format!("/file_{}.txt", i);
-    let data = ops.read_file_buffered(&path).unwrap();
-    assert_eq!(data, format!("content-{}", i).as_bytes());
+    let key = vec![0x20 + i; engine.hash_algo().hash_length()];
+    assert_eq!(engine.get_entry(&key).unwrap().unwrap().2, vec![0x20 + i]);
   }
   let final_data = ops.read_file_buffered("/final.txt").unwrap();
   assert_eq!(final_data, b"final");
@@ -193,17 +200,17 @@ fn nested_guards_increment_depth_correctly() {
     let _guard1 = TransactionGuard::new(&engine).unwrap();
     {
       let _guard2 = TransactionGuard::new(&engine).unwrap();
-      // Depth is 2 here -- storing a file should work
-      let ops = DirectoryOps::new(&engine);
-      let ctx = RequestContext::system();
-      ops.store_file_buffered(&ctx, "/nested.txt", b"nested", Some("text/plain")).unwrap();
+      // Depth is 2 here -- raw dependency appends remain buffered.
+      store_transaction_probe(&engine, 0x31);
     }
     // Depth is 1 here -- inner guard dropped
   }
   // Depth is 0 here -- outer guard dropped
 
   // Verify we can start fresh transactions
-  let _guard3 = TransactionGuard::new(&engine).unwrap();
+  let guard3 = TransactionGuard::new(&engine).unwrap();
+  store_transaction_probe(&engine, 0x32);
+  guard3.commit().unwrap();
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
   ops.store_file_buffered(&ctx, "/after-nested.txt", b"ok", Some("text/plain")).unwrap();
@@ -216,9 +223,7 @@ fn mixed_success_and_error_transactions() {
   // Successful transaction
   {
     let _guard = TransactionGuard::new(&engine).unwrap();
-    let ops = DirectoryOps::new(&engine);
-    let ctx = RequestContext::system();
-    ops.store_file_buffered(&ctx, "/success1.txt", b"ok", Some("text/plain")).unwrap();
+    store_transaction_probe(&engine, 0x41);
   }
 
   // Failed transaction (error)
@@ -230,9 +235,7 @@ fn mixed_success_and_error_transactions() {
   // Another successful transaction
   {
     let _guard = TransactionGuard::new(&engine).unwrap();
-    let ops = DirectoryOps::new(&engine);
-    let ctx = RequestContext::system();
-    ops.store_file_buffered(&ctx, "/success2.txt", b"ok2", Some("text/plain")).unwrap();
+    store_transaction_probe(&engine, 0x42);
   }
 
   // Panicked transaction
@@ -246,9 +249,9 @@ fn mixed_success_and_error_transactions() {
   let ctx = RequestContext::system();
   ops.store_file_buffered(&ctx, "/success3.txt", b"ok3", Some("text/plain")).unwrap();
 
-  // All successful files should be readable
-  assert_eq!(ops.read_file_buffered("/success1.txt").unwrap(), b"ok");
-  assert_eq!(ops.read_file_buffered("/success2.txt").unwrap(), b"ok2");
+  // Successful dependency transactions and the final namespace write survive.
+  assert_eq!(engine.get_entry(&vec![0x41; engine.hash_algo().hash_length()]).unwrap().unwrap().2, vec![0x41]);
+  assert_eq!(engine.get_entry(&vec![0x42; engine.hash_algo().hash_length()]).unwrap().unwrap().2, vec![0x42]);
   assert_eq!(ops.read_file_buffered("/success3.txt").unwrap(), b"ok3");
 }
 
@@ -484,39 +487,49 @@ fn recovery_after_store_and_delete_across_restart() {
 // =========================================================================
 
 #[test]
-fn empty_file_with_transaction() {
+fn empty_file_uses_its_owned_namespace_transaction() {
   let (engine, _temp) = create_test_db_with_hot_dir();
 
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
 
-  // Store an empty file inside an explicit transaction
-  {
-    let _guard = TransactionGuard::new(&engine).unwrap();
-    ops.store_file_buffered(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
-  }
+  ops.store_file_buffered(&ctx, "/empty.txt", b"", Some("text/plain")).unwrap();
 
   let data = ops.read_file_buffered("/empty.txt").unwrap();
   assert!(data.is_empty(), "empty file should read back as empty");
 }
 
 #[test]
-fn large_file_with_transaction() {
+fn large_file_uses_its_owned_namespace_transaction() {
   let (engine, _temp) = create_test_db_with_hot_dir();
 
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
 
-  // Store a file larger than one chunk (>256KB) inside a transaction
+  // Store a file larger than one chunk (>256KB) through its owned transaction.
   let large_data: Vec<u8> = (0..300_000).map(|i| (i % 256) as u8).collect();
-  {
-    let _guard = TransactionGuard::new(&engine).unwrap();
-    ops.store_file_buffered(&ctx, "/large.bin", &large_data, Some("application/octet-stream")).unwrap();
-  }
+  ops.store_file_buffered(&ctx, "/large.bin", &large_data, Some("application/octet-stream")).unwrap();
 
   let read_back = ops.read_file_buffered("/large.bin").unwrap();
   assert_eq!(read_back.len(), 300_000);
   assert_eq!(read_back, large_data);
+}
+
+#[test]
+fn namespace_write_rejects_a_legacy_outer_transaction_without_publishing_authority() {
+  let (engine, _temp) = create_test_db_with_hot_dir();
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  let initial_head = engine.head_hash().unwrap();
+  let initial_sequence = engine.durability_snapshot().unwrap().next_sequence;
+
+  let guard = TransactionGuard::new(&engine).unwrap();
+  let error = ops.store_file_buffered(&ctx, "/nested-refused.txt", b"refused", Some("text/plain")).unwrap_err();
+  assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("top-level namespace mutation")));
+  assert!(ops.get_metadata("/nested-refused.txt").unwrap().is_none());
+  assert_eq!(engine.head_hash().unwrap(), initial_head);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, initial_sequence);
+  guard.commit().unwrap();
 }
 
 #[test]

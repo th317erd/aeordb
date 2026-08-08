@@ -12,6 +12,10 @@ use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_co
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
+use crate::engine::namespace_mutation::{
+  NamespaceMutationAcknowledgement, NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind,
+  NamespaceMutationSourceIdentity,
+};
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED};
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
@@ -287,6 +291,67 @@ pub(crate) struct FileRecordKeys {
   pub identity_key: Vec<u8>,
 }
 
+#[derive(Debug)]
+struct PreparedFileRecordEntries {
+  content_key: Vec<u8>,
+  identity_key: Vec<u8>,
+  file_key: Vec<u8>,
+  file_value: Vec<u8>,
+  flags: u8,
+  entry_version: u8,
+}
+
+fn prepare_file_record_entries_at_version(
+  engine: &StorageEngine,
+  normalized_path: &str,
+  record: &mut FileRecord,
+  flags: u8,
+  entry_version: u8,
+) -> EngineResult<PreparedFileRecordEntries> {
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+  ensure_file_record_content_hash(engine, record)?;
+  let file_value = record.serialize_for_version(hash_length, entry_version)?;
+  Ok(PreparedFileRecordEntries {
+    content_key: file_content_hash(&file_value, &algo)?,
+    identity_key: file_identity_hash(normalized_path, record.content_type.as_deref(), &record.chunk_hashes, &algo)?,
+    file_key: file_path_hash(normalized_path, &algo)?,
+    file_value,
+    flags,
+    entry_version,
+  })
+}
+
+fn materialize_prepared_file_record_entries(engine: &StorageEngine, prepared: &PreparedFileRecordEntries) -> EngineResult<()> {
+  store_file_record_entry(engine, &prepared.content_key, &prepared.file_value, prepared.flags, prepared.entry_version)?;
+  store_file_record_entry(engine, &prepared.identity_key, &prepared.file_value, prepared.flags, prepared.entry_version)?;
+  store_file_record_entry(engine, &prepared.file_key, &prepared.file_value, prepared.flags, prepared.entry_version)
+}
+
+fn add_prepared_file_record_entries(batch: &mut NamespaceMutationBatch, prepared: &PreparedFileRecordEntries) -> EngineResult<()> {
+  batch.store_dependency_with_version(
+    EntryType::FileRecord,
+    prepared.content_key.clone(),
+    prepared.file_value.clone(),
+    prepared.flags,
+    prepared.entry_version,
+  )?;
+  batch.store_dependency_with_version(
+    EntryType::FileRecord,
+    prepared.identity_key.clone(),
+    prepared.file_value.clone(),
+    prepared.flags,
+    prepared.entry_version,
+  )?;
+  batch.replace_locator_with_version(
+    EntryType::FileRecord,
+    prepared.file_key.clone(),
+    prepared.file_value.clone(),
+    prepared.flags,
+    prepared.entry_version,
+  )
+}
+
 pub(crate) fn materialize_file_record_entries(
   engine: &StorageEngine,
   normalized_path: &str,
@@ -303,20 +368,9 @@ fn materialize_file_record_entries_at_version(
   flags: u8,
   entry_version: u8,
 ) -> EngineResult<FileRecordKeys> {
-  let algo = engine.hash_algo();
-  let hash_length = algo.hash_length();
-  ensure_file_record_content_hash(engine, record)?;
-
-  let file_value = record.serialize_for_version(hash_length, entry_version)?;
-  let content_key = file_content_hash(&file_value, &algo)?;
-  let identity_key = file_identity_hash(normalized_path, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
-  let file_key = file_path_hash(normalized_path, &algo)?;
-
-  store_file_record_entry(engine, &content_key, &file_value, flags, entry_version)?;
-  store_file_record_entry(engine, &identity_key, &file_value, flags, entry_version)?;
-  store_file_record_entry(engine, &file_key, &file_value, flags, entry_version)?;
-
-  Ok(FileRecordKeys { identity_key })
+  let prepared = prepare_file_record_entries_at_version(engine, normalized_path, record, flags, entry_version)?;
+  materialize_prepared_file_record_entries(engine, &prepared)?;
+  Ok(FileRecordKeys { identity_key: prepared.identity_key })
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +394,13 @@ pub(crate) struct FileRecordPublishResult {
   pub existing_total_size: Option<u64>,
 }
 
+#[derive(Debug)]
+struct PreparedFileRecordPublication {
+  entries: PreparedFileRecordEntries,
+  result: FileRecordPublishResult,
+  previous_identity: Option<Vec<u8>>,
+}
+
 pub(crate) fn publish_file_record_entries(engine: &StorageEngine, input: FileRecordPublishInput) -> EngineResult<FileRecordPublishResult> {
   publish_file_record_entries_at_version(engine, input, CURRENT_FILE_RECORD_VERSION)
 }
@@ -349,16 +410,27 @@ fn publish_file_record_entries_at_version(
   input: FileRecordPublishInput,
   entry_version: u8,
 ) -> EngineResult<FileRecordPublishResult> {
+  let prepared = prepare_file_record_publication_at_version(engine, input, entry_version)?;
+  materialize_prepared_file_record_entries(engine, &prepared.entries)?;
+  Ok(prepared.result)
+}
+
+fn prepare_file_record_publication_at_version(
+  engine: &StorageEngine,
+  input: FileRecordPublishInput,
+  entry_version: u8,
+) -> EngineResult<PreparedFileRecordPublication> {
   let normalized = normalize_path(&input.normalized_path);
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
   let file_key = file_path_hash(&normalized, &algo)?;
-  let (existing_created_at, existing_total_size) = match engine.get_entry(&file_key)? {
+  let (existing_created_at, existing_total_size, previous_identity) = match engine.get_entry(&file_key)? {
     Some((header, _key, value)) => {
       let existing = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-      (Some(existing.created_at), Some(existing.total_size))
+      let identity = file_identity_hash(&normalized, existing.content_type.as_deref(), &existing.chunk_hashes, &algo)?;
+      (Some(existing.created_at), Some(existing.total_size), Some(identity))
     }
-    None => (None, None),
+    None => (None, None, None),
   };
 
   let mut file_record = FileRecord::new(normalized.clone(), input.content_type.clone(), input.total_size, input.chunk_hashes);
@@ -374,11 +446,11 @@ fn publish_file_record_entries_at_version(
     file_record.created_at = created_at_override;
   }
 
-  let keys = materialize_file_record_entries_at_version(engine, &normalized, &mut file_record, input.flags, entry_version)?;
+  let entries = prepare_file_record_entries_at_version(engine, &normalized, &mut file_record, input.flags, entry_version)?;
   let content_type = file_record.content_type.clone();
   let child_entry = ChildEntry {
     entry_type: EntryType::FileRecord.to_u8(),
-    hash: keys.identity_key,
+    hash: entries.identity_key.clone(),
     total_size: file_record.total_size,
     created_at: file_record.created_at,
     updated_at: file_record.updated_at,
@@ -398,7 +470,11 @@ fn publish_file_record_entries_at_version(
     previous_hash: None,
   };
 
-  Ok(FileRecordPublishResult { normalized_path: normalized, file_record, child_entry, event_entry, existing_total_size })
+  Ok(PreparedFileRecordPublication {
+    entries,
+    result: FileRecordPublishResult { normalized_path: normalized, file_record, child_entry, event_entry, existing_total_size },
+    previous_identity,
+  })
 }
 
 fn file_record_header_needs_migration(engine: &StorageEngine, key: &[u8]) -> EngineResult<bool> {
@@ -813,6 +889,105 @@ pub struct DirectoryOps<'a> {
   engine: &'a StorageEngine,
 }
 
+#[derive(Debug)]
+enum DirectoryMutationCounterEffect {
+  None,
+  FileWrite { previous_size: Option<u64>, new_size: u64, throughput_bytes: u64 },
+  FileDelete { size: u64 },
+  DirectoryCreate,
+  DirectoryDelete,
+  SymlinkWrite { existed: bool },
+  SymlinkDelete,
+}
+
+#[derive(Debug)]
+struct DirectoryMutationEffects {
+  counter: DirectoryMutationCounterEffect,
+  implicit_directories: u64,
+  cache_writes: Vec<(Vec<u8>, Vec<u8>)>,
+  event: Option<(&'static str, serde_json::Value)>,
+}
+
+impl DirectoryMutationEffects {
+  fn new(counter: DirectoryMutationCounterEffect) -> Self {
+    Self { counter, implicit_directories: 0, cache_writes: Vec::new(), event: None }
+  }
+}
+
+struct DirectoryMutationFanout<'a> {
+  engine: &'a StorageEngine,
+  context: Option<&'a RequestContext>,
+  effects: std::sync::Arc<std::sync::OnceLock<DirectoryMutationEffects>>,
+}
+
+impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
+  fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
+    let mutation_kind = namespace_mutation_kind_name(acknowledgement.kind);
+    metrics::counter!("aeordb_namespace_mutation_acknowledgements_total", "mutation_kind" => mutation_kind).increment(1);
+
+    let Some(effects) = self.effects.get() else {
+      tracing::error!(operation_id = %acknowledgement.operation_id, "Directory mutation committed without post-commit effects");
+      return;
+    };
+
+    for (key, value) in &effects.cache_writes {
+      if let Err(error) = self.engine.cache_dir_content(key.clone(), value.clone()) {
+        tracing::warn!(operation_id = %acknowledgement.operation_id, error = %error, "Post-commit directory cache fill failed");
+      }
+    }
+
+    for _ in 0..effects.implicit_directories {
+      self.engine.counters().increment_directories();
+    }
+    match effects.counter {
+      DirectoryMutationCounterEffect::None => {}
+      DirectoryMutationCounterEffect::FileWrite { previous_size, new_size, throughput_bytes } => {
+        self.engine.counters().record_file_write(previous_size, new_size, throughput_bytes);
+      }
+      DirectoryMutationCounterEffect::FileDelete { size } => self.engine.counters().record_file_delete(size),
+      DirectoryMutationCounterEffect::DirectoryCreate => self.engine.counters().record_directory_create(),
+      DirectoryMutationCounterEffect::DirectoryDelete => self.engine.counters().record_directory_delete(),
+      DirectoryMutationCounterEffect::SymlinkWrite { existed } => self.engine.counters().record_symlink_write(existed),
+      DirectoryMutationCounterEffect::SymlinkDelete => self.engine.counters().record_symlink_delete(),
+    }
+
+    if let (Some(context), Some((event_type, event_payload))) = (self.context, effects.event.as_ref()) {
+      let mut payload = event_payload.clone();
+      if let Some(object) = payload.as_object_mut() {
+        object.insert("operation_id".to_string(), serde_json::Value::String(acknowledgement.operation_id.to_string()));
+        object.insert("publication_sequence".to_string(), serde_json::Value::from(acknowledgement.publication_sequence));
+        object.insert("mutation_kind".to_string(), serde_json::Value::String(mutation_kind.to_string()));
+      } else {
+        tracing::error!(operation_id = %acknowledgement.operation_id, "Directory mutation event payload is not an object");
+        return;
+      }
+      context.emit(event_type, payload);
+    }
+  }
+}
+
+fn namespace_mutation_kind_name(kind: NamespaceMutationKind) -> &'static str {
+  match kind {
+    NamespaceMutationKind::FileWrite => "file_write",
+    NamespaceMutationKind::FileDelete => "file_delete",
+    NamespaceMutationKind::DirectoryCreate => "directory_create",
+    NamespaceMutationKind::DirectoryDelete => "directory_delete",
+    NamespaceMutationKind::SymlinkWrite => "symlink_write",
+    NamespaceMutationKind::SymlinkDelete => "symlink_delete",
+    NamespaceMutationKind::Copy => "copy",
+    NamespaceMutationKind::Rename => "rename",
+    NamespaceMutationKind::BatchWrite => "batch_write",
+    NamespaceMutationKind::Merge => "merge",
+    NamespaceMutationKind::Restore => "restore",
+    NamespaceMutationKind::Promote => "promote",
+    NamespaceMutationKind::Import => "import",
+    NamespaceMutationKind::SyncApply => "sync_apply",
+    NamespaceMutationKind::SystemWrite => "system_write",
+    NamespaceMutationKind::PluginWrite => "plugin_write",
+    NamespaceMutationKind::MaintenanceRepair => "maintenance_repair",
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct JsonMergeFileResult {
   pub file_record: FileRecord,
@@ -843,6 +1018,82 @@ impl<'a> DirectoryOps<'a> {
   /// Create a new `DirectoryOps` handle wrapping the given storage engine.
   pub fn new(engine: &'a StorageEngine) -> Self {
     DirectoryOps { engine }
+  }
+
+  fn execute_namespace_mutation<'operation, T, F>(
+    &'operation self,
+    context: Option<&'operation RequestContext>,
+    prepare: F,
+  ) -> EngineResult<T>
+  where
+    F: FnOnce(&StorageEngine) -> EngineResult<(NamespaceMutationBatch, T, DirectoryMutationEffects)>,
+  {
+    let effects = std::sync::Arc::new(std::sync::OnceLock::new());
+    let fanout = std::sync::Arc::new(DirectoryMutationFanout { engine: self.engine, context, effects: effects.clone() });
+    let coordinator = NamespaceMutationCoordinator::with_fanout(self.engine, fanout);
+    let (_acknowledgement, output) = coordinator.prepare_and_execute(|planning_engine| {
+      let (batch, output, planned_effects) = prepare(planning_engine)?;
+      effects
+        .set(planned_effects)
+        .map_err(|_| EngineError::InvalidInput("directory mutation effects were prepared more than once".to_string()))?;
+      Ok((batch, output))
+    })?;
+    Ok(output)
+  }
+
+  fn execute_optional_namespace_mutation<'operation, T, F>(
+    &'operation self,
+    context: Option<&'operation RequestContext>,
+    prepare: F,
+  ) -> EngineResult<T>
+  where
+    F: FnOnce(&StorageEngine) -> EngineResult<(Option<(NamespaceMutationBatch, DirectoryMutationEffects)>, T)>,
+  {
+    let effects = std::sync::Arc::new(std::sync::OnceLock::new());
+    let fanout = std::sync::Arc::new(DirectoryMutationFanout { engine: self.engine, context, effects: effects.clone() });
+    let coordinator = NamespaceMutationCoordinator::with_fanout(self.engine, fanout);
+    let (_acknowledgement, output) = coordinator.prepare_and_maybe_execute(|planning_engine| {
+      let (prepared, output) = prepare(planning_engine)?;
+      let Some((batch, planned_effects)) = prepared else {
+        return Ok((None, output));
+      };
+      effects
+        .set(planned_effects)
+        .map_err(|_| EngineError::InvalidInput("directory mutation effects were prepared more than once".to_string()))?;
+      Ok((Some(batch), output))
+    })?;
+    Ok(output)
+  }
+
+  fn execute_file_publication(
+    &self,
+    context: &RequestContext,
+    input: FileRecordPublishInput,
+    entry_version: u8,
+    emit_event: bool,
+  ) -> EngineResult<FileRecord> {
+    self.execute_namespace_mutation(Some(context), move |_planning_engine| {
+      let prepared = prepare_file_record_publication_at_version(self.engine, input, entry_version)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::FileWrite);
+      add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: prepared.result.normalized_path.clone(),
+        entry_type: Some(EntryType::FileRecord.to_u8()),
+        previous_identity: prepared.previous_identity.clone(),
+        new_identity: Some(prepared.entries.identity_key.clone()),
+      })?;
+
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::FileWrite {
+        previous_size: prepared.result.existing_total_size,
+        new_size: prepared.result.file_record.total_size,
+        throughput_bytes: prepared.result.file_record.total_size,
+      });
+      self.plan_parent_directories(&mut batch, &prepared.result.normalized_path, prepared.result.child_entry.clone(), &mut effects)?;
+      if emit_event {
+        effects.event = Some((EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [prepared.result.event_entry.clone()]})));
+      }
+      Ok((batch, prepared.result.file_record, effects))
+    })
   }
 
   /// Store a file at the given path from a fully-buffered byte slice.
@@ -1079,14 +1330,10 @@ impl<'a> DirectoryOps<'a> {
       return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
     }
 
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
-
     let sys_flags = v0_system_entry_flags(&normalized);
     let detected_content_type = crate::engine::content_type::detect_content_type(first_bytes, content_type);
-
-    let published = publish_file_record_entries(
-      self.engine,
+    let file_record = self.execute_file_publication(
+      ctx,
       FileRecordPublishInput {
         normalized_path: normalized,
         content_type: Some(detected_content_type),
@@ -1097,17 +1344,14 @@ impl<'a> DirectoryOps<'a> {
         created_at_override: None,
         prefer_existing_created_at: true,
       },
+      CURRENT_FILE_RECORD_VERSION,
+      true,
     )?;
-
-    self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
-    txn.commit_after(namespace)?;
-    self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
 
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::FILE_STORE_DURATION).record(elapsed);
 
-    Ok(published.file_record)
+    Ok(file_record)
   }
 
   /// Store a file with compression at the given path, splitting data into chunks.
@@ -1126,15 +1370,11 @@ impl<'a> DirectoryOps<'a> {
 
   /// Internal file storage with optional compression.
   ///
-  /// **Atomicity (M15)**: This method stores chunks, a FileRecord, and
-  /// updated directory entries as separate append-writer operations. If the
-  /// process crashes mid-way, some chunks or the FileRecord may be written
-  /// to disk without the directory tree pointing to them. These orphaned
-  /// entries are harmless — they consume space but are unreachable — and
-  /// will be reclaimed by the next GC sweep. The hot-file mechanism
-  /// ensures the KV index is recovered on restart, and since the directory
-  /// tree is only updated atomically at the end (single entry write),
-  /// readers will never see a partially-stored file.
+  /// **Atomicity (M15)**: This method stores immutable chunks before one
+  /// coordinated FileRecord, path-locator, parent-directory, and HEAD
+  /// publication. A crash before publication can leave unreachable chunks,
+  /// which normal GC may reclaim, but readers cannot observe a partially
+  /// published namespace mutation.
   fn store_file_internal(
     &self,
     ctx: &RequestContext,
@@ -1217,12 +1457,9 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
-
     let total_size = data.len() as u64;
-    let published = publish_file_record_entries_at_version(
-      self.engine,
+    self.execute_file_publication(
+      ctx,
       FileRecordPublishInput {
         normalized_path: normalized,
         content_type: Some(detected_content_type),
@@ -1234,16 +1471,8 @@ impl<'a> DirectoryOps<'a> {
         prefer_existing_created_at: true,
       },
       file_record_version,
-    )?;
-
-    self.update_parent_directories(&published.normalized_path, published.child_entry.clone())?;
-    txn.commit_after(namespace)?;
-    self.engine.counters().record_file_write(published.existing_total_size, total_size, total_size);
-    if emit_event {
-      ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [published.event_entry.clone()]}));
-    }
-
-    Ok(published.file_record)
+      emit_event,
+    )
   }
 
   /// Restore a file from an existing FileRecord without re-reading chunk data.
@@ -1316,23 +1545,21 @@ impl<'a> DirectoryOps<'a> {
   /// Takes an auto-snapshot before delete (throttled to once per minute).
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
-    let sys_flags = v0_system_entry_flags(&normalized);
 
     // Verify the file exists FIRST — before auto-snapshot or any side-effect.
     // A delete of a nonexistent file must produce zero observable side-effects:
     // no auto-snapshot, no event, no counter changes.
     let file_key = file_path_hash(&normalized, &algo)?;
-    let file_record_opt = match self.engine.get_entry(&file_key)? {
-      Some((header, _key, value)) => Some(FileRecord::deserialize(&value, hash_length, header.entry_version)?),
+    match self.engine.get_entry(&file_key)? {
+      Some((header, _key, value)) => {
+        FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+      }
       None => {
         return Err(EngineError::NotFound(normalized));
       }
-    };
+    }
 
     // File confirmed to exist. Now take an auto-snapshot before mutating
     // (at most once per minute).
@@ -1340,129 +1567,76 @@ impl<'a> DirectoryOps<'a> {
       self.auto_snapshot_before_delete(ctx);
     }
 
-    // Store a DeletionRecord
-    let deletion = DeletionRecord::new(normalized.clone(), None);
-    let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
-    let deletion_value = deletion.serialize();
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
-    }
+    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
+      let (header, _key, value) = planning_engine.get_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
+      let record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+      let previous_identity = file_identity_hash(&normalized, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
+      let sys_flags = v0_system_entry_flags(&normalized);
+      let deletion = DeletionRecord::new(normalized.clone(), None);
+      let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::FileDelete);
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), sys_flags)?;
+      batch.retire_locator(file_key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized.clone(),
+        entry_type: Some(EntryType::FileRecord.to_u8()),
+        previous_identity: Some(previous_identity),
+        new_identity: None,
+      })?;
 
-    // Mark the FileRecord as deleted in the KV store
-    self.engine.mark_entry_deleted(&file_key)?;
-
-    // Remove child from parent directory
-    self.remove_from_parent_directory(&normalized)?;
-
-    let deleted_entry = file_record_opt.map(|record| EntryEventData {
-      path: normalized,
-      entry_type: "file".to_string(),
-      content_type: record.content_type.clone(),
-      size: record.total_size,
-      hash: record.content_hash_hex(),
-      created_at: record.created_at,
-      updated_at: record.updated_at,
-      previous_hash: None,
-    });
-
-    txn.commit_after(namespace)?;
-
-    // Publish process-local side effects only after the hard commit succeeds.
-    if let Some(entry_data) = deleted_entry {
-      self.engine.counters().record_file_delete(entry_data.size);
-      ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]}));
-    }
-
-    Ok(())
+      let entry_data = EntryEventData {
+        path: normalized.clone(),
+        entry_type: "file".to_string(),
+        content_type: record.content_type.clone(),
+        size: record.total_size,
+        hash: record.content_hash_hex(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        previous_hash: None,
+      };
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::FileDelete { size: record.total_size });
+      effects.event = Some((EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]})));
+      self.plan_remove_from_parent_directory(&mut batch, &normalized, &mut effects)?;
+      Ok((batch, (), effects))
+    })
   }
 
   /// Delete an empty directory. Returns an error if the directory has children.
   ///
-  /// **TOCTOU note**: The emptiness check is not fully atomic with the deletion.
-  /// A TransactionGuard documents the atomicity boundary. After mark_entry_deleted
-  /// and remove_from_parent_directory, we re-check the raw directory data for
-  /// children. If a concurrent write sneaked in between the initial check and
-  /// the deletion, those children are now orphaned -- but we log a warning so
-  /// the condition is observable (and GC will eventually reclaim them).
+  /// The emptiness check and deletion plan run under the same namespace
+  /// authority, so a concurrent namespace writer cannot add a child between
+  /// validation and the hard publication.
   pub fn delete_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
-    let sys_flags = v0_system_entry_flags(&normalized);
 
     if normalized == "/" {
       return Err(EngineError::InvalidInput("Cannot delete root directory".to_string()));
     }
-
-    // Verify the directory exists and is empty
-    // Directory deletion retains the v3 compatibility behavior that treats a
-    // stale child with no live path key as absent. P2d's mutation coordinator
-    // will replace this TOCTOU cleanup contract with operation-ledger evidence.
-    let children = self.list_directory(&normalized)?;
-    if !children.is_empty() {
-      return Err(EngineError::InvalidInput(format!("Directory '{}' is not empty ({} children)", normalized, children.len())));
-    }
-
-    let deletion = DeletionRecord::new(normalized.clone(), None);
-    let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
-    let deletion_value = deletion.serialize();
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
-    }
-
-    // Mark the directory index entry as deleted
     let dir_key = directory_path_hash(&normalized, &algo)?;
-    self.engine.mark_entry_deleted(&dir_key)?;
-
-    // Remove from parent listing
-    self.remove_from_parent_directory(&normalized)?;
-
-    // TOCTOU re-check: verify no children were added between our emptiness
-    // check and the deletion. The directory entry is already marked deleted,
-    // so use get_entry_including_deleted to read the raw data at that offset.
-    if let Ok(Some((_header, _key, raw_value))) = self.engine.get_entry_including_deleted(&dir_key) {
-      // Follow hard link if present (value == hash_length bytes)
-      let hash_length = algo.hash_length();
-      let value = if raw_value.len() == hash_length {
-        self.engine.get_entry(&raw_value)?.map(|(_h, _k, v)| v).unwrap_or_default()
-      } else {
-        raw_value
-      };
-      if !value.is_empty() {
-        let recheck_children = if crate::engine::btree::is_btree_format(&value) {
-          crate::engine::btree::btree_list_from_node(&value, self.engine, hash_length, false).unwrap_or_default()
-        } else {
-          deserialize_child_entries(&value, hash_length, 0).unwrap_or_default()
-        };
-        if !recheck_children.is_empty() {
-          tracing::warn!(
-            path = %normalized,
-            orphaned_children = recheck_children.len(),
-            "TOCTOU race in delete_directory: children were added concurrently and are now orphaned"
-          );
-        }
+    self.execute_namespace_mutation(Some(ctx), move |_planning_engine| {
+      let children = self.list_directory(&normalized)?;
+      if !children.is_empty() {
+        return Err(EngineError::InvalidInput(format!("Directory '{}' is not empty ({} children)", normalized, children.len())));
       }
-    }
-
-    txn.commit_after(namespace)?;
-
-    // Update process-local state only after the hard commit succeeds.
-    self.engine.counters().record_directory_delete();
-
-    ctx.emit(
-      EVENT_ENTRIES_DELETED,
-      serde_json::json!({"entries": [{
-        "path": normalized,
-        "entry_type": "directory",
-      }]}),
-    );
-
-    Ok(())
+      let (_header, directory_value) = self.read_directory_data(&dir_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
+      let previous_identity = directory_content_hash(&directory_value, &algo)?;
+      let deletion = DeletionRecord::new(normalized.clone(), None);
+      let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::DirectoryDelete);
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&normalized))?;
+      batch.retire_locator(dir_key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized.clone(),
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity: Some(previous_identity),
+        new_identity: None,
+      })?;
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::DirectoryDelete);
+      self.plan_remove_from_parent_directory(&mut batch, &normalized, &mut effects)?;
+      effects.event = Some((EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [{"path": normalized, "entry_type": "directory"}]})));
+      Ok((batch, (), effects))
+    })
   }
 
   /// List the children of a directory.
@@ -1920,51 +2094,57 @@ impl<'a> DirectoryOps<'a> {
   /// Create an empty directory at the given path.
   pub fn create_directory(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
-
     let dir_key = directory_path_hash(&normalized, &algo)?;
-
-    // Store empty directory index at path-based key
-    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &[])?;
-
-    // Also store at content-addressed key for immutable versioning
     let content_key = directory_content_hash(&[], &algo)?;
-    self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &[])?;
-
-    // Update parent directory if this isn't root
     let now = chrono::Utc::now().timestamp_millis();
-    if normalized != "/" {
-      let child = ChildEntry {
-        entry_type: EntryType::DirectoryIndex.to_u8(),
-        hash: content_key, // content hash for tree walker
-        total_size: 0,
-        created_at: now,
-        updated_at: now,
-        name: file_name(&normalized).unwrap_or("").to_string(),
-        content_type: None,
-        virtual_time: now as u64,
-        node_id: 0,
-      };
-      self.update_parent_directories(&normalized, child)?;
-    }
-
-    let entry_data = EntryEventData {
-      path: normalized,
-      entry_type: "directory".to_string(),
-      content_type: None,
-      size: 0,
-      hash: String::new(),
-      created_at: now,
-      updated_at: now,
-      previous_hash: None,
-    };
-    txn.commit_after(namespace)?;
-    self.engine.counters().record_directory_create();
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
-
-    Ok(())
+    self.execute_namespace_mutation(Some(ctx), move |_planning_engine| {
+      let previous_identity =
+        self.read_directory_data(&dir_key)?.map(|(_header, value)| directory_content_hash(&value, &algo)).transpose()?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::DirectoryCreate);
+      batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), Vec::new(), 0)?;
+      batch.replace_locator(EntryType::DirectoryIndex, dir_key.clone(), content_key.clone(), 0)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized.clone(),
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity,
+        new_identity: Some(content_key.clone()),
+      })?;
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::DirectoryCreate);
+      effects.cache_writes.push((content_key.clone(), Vec::new()));
+      if normalized != "/" {
+        self.plan_parent_directories(
+          &mut batch,
+          &normalized,
+          ChildEntry {
+            entry_type: EntryType::DirectoryIndex.to_u8(),
+            hash: content_key.clone(),
+            total_size: 0,
+            created_at: now,
+            updated_at: now,
+            name: file_name(&normalized).unwrap_or("").to_string(),
+            content_type: None,
+            virtual_time: now as u64,
+            node_id: 0,
+          },
+          &mut effects,
+        )?;
+      }
+      effects.event = Some((
+        EVENT_ENTRIES_CREATED,
+        serde_json::json!({"entries": [EntryEventData {
+          path: normalized.clone(),
+          entry_type: "directory".to_string(),
+          content_type: None,
+          size: 0,
+          hash: String::new(),
+          created_at: now,
+          updated_at: now,
+          previous_hash: None,
+        }]}),
+      ));
+      Ok((batch, (), effects))
+    })
   }
 
   /// Get the FileRecord metadata for a file path.
@@ -2020,51 +2200,53 @@ impl<'a> DirectoryOps<'a> {
       .ok_or_else(|| EngineError::ResourceExhausted("file record migration path estimate overflow".to_string()))?;
     memory.reserve(path_workspace, "file record migration path admission failed")?;
     let normalized = normalize_path(path);
-    let _namespace = self.engine.namespace_write_guard()?;
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let file_key = file_path_hash(&normalized, &algo)?;
+    self.execute_optional_namespace_mutation(None, move |planning_engine| {
+      let path_entry = planning_engine.get_kv_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
+      let record_workspace = u64::from(path_entry.total_length)
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<FileRecord>() as u64))
+        .ok_or_else(|| EngineError::ResourceExhausted("file record migration record estimate overflow".to_string()))?;
+      memory.reserve(record_workspace, "file record migration record admission failed")?;
+      let (path_header, _stored_key, value) =
+        planning_engine.get_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
+      let mut record = FileRecord::deserialize(&value, hash_length, path_header.entry_version)?;
+      let mut needs_migration = path_header.entry_version < CURRENT_FILE_RECORD_VERSION;
+      if record.path != normalized {
+        record.path = normalized.clone();
+        needs_migration = true;
+      }
+      if record.content_hash.len() != hash_length {
+        needs_migration = true;
+      }
+      ensure_file_record_content_hash_for_migration(planning_engine, &mut record, memory)?;
+      let identity_key = file_identity_hash(&normalized, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
+      if file_record_header_needs_migration(planning_engine, &identity_key)? {
+        needs_migration = true;
+      }
+      let file_value = record.serialize(hash_length)?;
+      let content_key = file_content_hash(&file_value, &algo)?;
+      if file_record_header_needs_migration(planning_engine, &content_key)? {
+        needs_migration = true;
+      }
+      if !needs_migration {
+        return Ok((None, false));
+      }
 
-    let path_entry = self.engine.get_kv_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
-    let record_workspace = u64::from(path_entry.total_length)
-      .checked_mul(3)
-      .and_then(|bytes| bytes.checked_add(std::mem::size_of::<FileRecord>() as u64))
-      .ok_or_else(|| EngineError::ResourceExhausted("file record migration record estimate overflow".to_string()))?;
-    memory.reserve(record_workspace, "file record migration record admission failed")?;
-    let (path_header, _stored_key, value) = self.engine.get_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
-    let mut record = FileRecord::deserialize(&value, hash_length, path_header.entry_version)?;
-
-    let mut needs_migration = path_header.entry_version < CURRENT_FILE_RECORD_VERSION;
-    if record.path != normalized {
-      record.path = normalized.clone();
-      needs_migration = true;
-    }
-
-    if record.content_hash.len() != hash_length {
-      needs_migration = true;
-    }
-    ensure_file_record_content_hash_for_migration(self.engine, &mut record, memory)?;
-
-    let identity_key = file_identity_hash(&normalized, record.content_type.as_deref(), &record.chunk_hashes, &algo)?;
-    if file_record_header_needs_migration(self.engine, &identity_key)? {
-      needs_migration = true;
-    }
-
-    let file_value = record.serialize(hash_length)?;
-    let content_key = file_content_hash(&file_value, &algo)?;
-    if file_record_header_needs_migration(self.engine, &content_key)? {
-      needs_migration = true;
-    }
-    drop(file_value);
-    drop(value);
-
-    if !needs_migration {
-      return Ok(false);
-    }
-
-    materialize_file_record_entries(self.engine, &normalized, &mut record, path_header.flags)?;
-
-    Ok(true)
+      let prepared =
+        prepare_file_record_entries_at_version(planning_engine, &normalized, &mut record, path_header.flags, CURRENT_FILE_RECORD_VERSION)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::MaintenanceRepair);
+      add_prepared_file_record_entries(&mut batch, &prepared)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized,
+        entry_type: Some(EntryType::FileRecord.to_u8()),
+        previous_identity: Some(identity_key),
+        new_identity: Some(prepared.identity_key.clone()),
+      })?;
+      Ok((Some((batch, DirectoryMutationEffects::new(DirectoryMutationCounterEffect::None))), true))
+    })
   }
 
   /// Check if a file or directory exists at the given path.
@@ -2244,41 +2426,36 @@ impl<'a> DirectoryOps<'a> {
 
   /// Ensure the root directory exists. Called during database creation.
   pub fn ensure_root_directory(&self, _ctx: &RequestContext) -> EngineResult<()> {
-    let _namespace = self.engine.direct_hard_authority_guard()?;
     let algo = self.engine.hash_algo();
     let dir_key = directory_path_hash("/", &algo)?;
-
-    // If the root directory entry exists, leave it alone — even if it's
-    // unreadable (e.g., dangling hard link). Overwriting an existing root
-    // destroys all directory tree state. A KV rebuild (verify --repair)
-    // is the correct recovery path, not silent recreation.
-    if self.engine.has_entry(&dir_key)? {
-      match self.list_directory("/") {
-        Ok(children) if !children.is_empty() => return Ok(()),
-        Ok(_) => {
-          // Root exists but lists as empty — might be a hard link with
-          // missing target. Log but DO NOT overwrite.
-          tracing::warn!("Root directory exists but appears empty. Run 'aeordb verify --repair' if data is missing.");
-          return Ok(());
-        }
-        Err(e) => {
-          // Root exists but is unreadable — DO NOT overwrite.
-          tracing::warn!("Root directory exists but is unreadable ({}). Run 'aeordb verify --repair' to recover.", e);
-          return Ok(());
-        }
-      }
-    }
-
-    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &[])?;
-
-    // Also store at content-addressed key for immutable versioning
     let content_key = directory_content_hash(&[], &algo)?;
-    self.engine.store_entry(EntryType::DirectoryIndex, &content_key, &[])?;
+    self.execute_optional_namespace_mutation(None, move |planning_engine| {
+      // Existing root state is never replaced here, even when unreadable.
+      // Startup repair owns recovery; silently recreating root would discard
+      // the only authoritative link to a live directory tree.
+      if planning_engine.has_entry(&dir_key)? {
+        match self.list_directory("/") {
+          Ok(children) if !children.is_empty() => {}
+          Ok(_) => tracing::warn!("Root directory exists but appears empty. Run 'aeordb verify --repair' if data is missing."),
+          Err(error) => {
+            tracing::warn!("Root directory exists but is unreadable ({}). Run 'aeordb verify --repair' to recover.", error)
+          }
+        }
+        return Ok((None, ()));
+      }
 
-    // Update HEAD to point to content hash (immutable) instead of path hash
-    self.engine.update_head(&content_key)?;
-
-    Ok(())
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::DirectoryCreate);
+      batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), Vec::new(), 0)?;
+      batch.replace_locator(EntryType::DirectoryIndex, dir_key, Vec::new(), 0)?;
+      batch.set_head_hash(content_key.clone());
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: "/".to_string(),
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity: None,
+        new_identity: Some(content_key),
+      })?;
+      Ok((Some((batch, DirectoryMutationEffects::new(DirectoryMutationCounterEffect::None))), ()))
+    })
   }
 
   fn repair_workspace_file_child(
@@ -2384,7 +2561,7 @@ impl<'a> DirectoryOps<'a> {
     let hash_length = self.engine.hash_algo().hash_length();
     let family_policy = SystemFamilyPolicyResolver::new(algo)?;
     let cancellation = self.engine.repair_cancellation();
-    let _namespace = self.engine.direct_hard_authority_guard()?;
+    let _namespace = self.engine.namespace_write_guard()?;
     let mut workspace =
       DirectoryRepairWorkspace::new(self.engine.database_path(), algo, self.engine.memory_coordinator().as_ref(), cancellation.clone())?;
     let mut memory = OperationMemoryBudget::new(
@@ -2464,7 +2641,7 @@ impl<'a> DirectoryOps<'a> {
       let mut cursor = workspace.finish_depth(depth)?;
       while let Some((dir_path, mut children)) = cursor.next_group(&mut workspace)? {
         Self::sort_rebuilt_children(&mut children);
-        let store_result = self.store_rebuilt_directory(&dir_path, children, hash_length, &algo);
+        let store_result = self.store_rebuilt_directory(&dir_path, children, hash_length, &algo, false);
         let release_result = workspace.release_group();
         let (content_key, dir_size) = match (store_result, release_result) {
           (Ok(stored), Ok(())) => stored,
@@ -2518,7 +2695,7 @@ impl<'a> DirectoryOps<'a> {
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
     let family_policy = SystemFamilyPolicyResolver::new(algo)?;
-    let _namespace = self.engine.direct_hard_authority_guard()?;
+    let _namespace = self.engine.namespace_write_guard()?;
     let mut memory = OperationMemoryBudget::new(
       self.engine,
       "targeted directory repair",
@@ -2529,23 +2706,7 @@ impl<'a> DirectoryOps<'a> {
     )?;
     let mut children = self.collect_repair_children_for_directory(&normalized, hash_length, &algo, family_policy, &mut memory)?;
     Self::sort_rebuilt_children(&mut children);
-    let (content_key, dir_size) = self.store_rebuilt_directory(&normalized, children, hash_length, &algo)?;
-
-    if normalized != "/" {
-      let now_ms = chrono::Utc::now().timestamp_millis();
-      let child = ChildEntry {
-        name: file_name(&normalized).unwrap_or("").to_string(),
-        entry_type: EntryType::DirectoryIndex.to_u8(),
-        hash: content_key,
-        total_size: dir_size,
-        content_type: None,
-        created_at: now_ms,
-        updated_at: now_ms,
-        virtual_time: now_ms as u64,
-        node_id: 0,
-      };
-      self.update_parent_directories(&normalized, child)?;
-    }
+    self.store_rebuilt_directory(&normalized, children, hash_length, &algo, true)?;
 
     tracing::info!(path = %normalized, "Repaired directory index from live path records");
     Ok(1)
@@ -2872,34 +3033,57 @@ impl<'a> DirectoryOps<'a> {
     children: Vec<ChildEntry>,
     hash_length: usize,
     algo: &HashAlgorithm,
+    propagate_parent: bool,
   ) -> EngineResult<(Vec<u8>, u64)> {
-    let dir_key = directory_path_hash(dir_path, algo)?;
-    let mut batch = WriteBatch::new();
+    let normalized = normalize_path(dir_path);
+    let dir_key = directory_path_hash(&normalized, algo)?;
+    self.execute_namespace_mutation(None, move |_planning_engine| {
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::MaintenanceRepair);
+      let (dir_value, content_key) = if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+        let plan = crate::engine::btree::btree_plan_from_entries(children, hash_length, algo)?;
+        Self::add_btree_plan_dependencies(&mut batch, &plan)?;
+        (plan.root_data().to_vec(), plan.root_hash().to_vec())
+      } else {
+        let dir_value = serialize_child_entries(&children, hash_length)?;
+        let content_key = directory_content_hash(&dir_value, algo)?;
+        batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone(), 0)?;
+        (dir_value, content_key)
+      };
+      let dir_size = dir_value.len() as u64;
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::None);
+      effects.cache_writes.push((content_key.clone(), dir_value));
+      batch.replace_locator(EntryType::DirectoryIndex, dir_key, content_key.clone(), 0)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized.clone(),
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity: None,
+        new_identity: Some(content_key.clone()),
+      })?;
 
-    let (dir_value, content_key) = if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
-      let root_hash = crate::engine::btree::btree_from_entries(self.engine, children, hash_length, algo)?;
-      let root_entry = self
-        .engine
-        .get_entry(&root_hash)?
-        .ok_or_else(|| EngineError::NotFound("B-tree root not found after directory rebuild".to_string()))?;
-      self.engine.cache_dir_content(root_hash.clone(), root_entry.2.clone())?;
-      (root_entry.2, root_hash)
-    } else {
-      let dir_value = serialize_child_entries(&children, hash_length)?;
-      let content_key = directory_content_hash(&dir_value, algo)?;
-      batch.add(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone());
-      self.engine.cache_dir_content(content_key.clone(), dir_value.clone())?;
-      (dir_value, content_key)
-    };
+      if normalized == "/" {
+        batch.set_head_hash(content_key.clone());
+      } else if propagate_parent {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.plan_parent_directories(
+          &mut batch,
+          &normalized,
+          ChildEntry {
+            name: file_name(&normalized).unwrap_or("").to_string(),
+            entry_type: EntryType::DirectoryIndex.to_u8(),
+            hash: content_key.clone(),
+            total_size: dir_size,
+            content_type: None,
+            created_at: now_ms,
+            updated_at: now_ms,
+            virtual_time: now_ms as u64,
+            node_id: 0,
+          },
+          &mut effects,
+        )?;
+      }
 
-    batch.add(EntryType::DirectoryIndex, dir_key, content_key.clone());
-    if dir_path == "/" {
-      self.engine.flush_batch_and_update_head(batch, &content_key)?;
-    } else {
-      self.engine.flush_batch(batch)?;
-    }
-
-    Ok((content_key, dir_value.len() as u64))
+      Ok((batch, (content_key, dir_size), effects))
+    })
   }
 
   /// Detect the compression algorithm for a file based on its parent's index config.
@@ -2962,13 +3146,8 @@ impl<'a> DirectoryOps<'a> {
   /// Delete a file and remove its entries from all indexes at that path.
   pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, &normalized)?;
-
-    // Now delete the file itself
-    let result = self.delete_file(ctx, path);
-    txn.finish_after(result, namespace)
+    self.delete_file(ctx, path)
   }
 
   /// Read directory data by path key, following hard links and checking the
@@ -3273,6 +3452,180 @@ impl<'a> DirectoryOps<'a> {
   /// Prevents unbounded looping on pathologically deep paths.
   const MAX_DIRECTORY_DEPTH: usize = 1000;
 
+  fn add_btree_plan_dependencies(batch: &mut NamespaceMutationBatch, plan: &crate::engine::btree::BTreeMutationPlan) -> EngineResult<()> {
+    for write in plan.node_writes() {
+      batch.store_dependency(EntryType::DirectoryIndex, write.key.clone(), write.value.clone(), 0)?;
+    }
+    Ok(())
+  }
+
+  fn plan_parent_directories(
+    &self,
+    batch: &mut NamespaceMutationBatch,
+    child_path: &str,
+    child_entry: ChildEntry,
+    effects: &mut DirectoryMutationEffects,
+  ) -> EngineResult<()> {
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let mut current_child_path = child_path.to_string();
+    let mut current_child_entry = child_entry;
+
+    for _depth in 0..Self::MAX_DIRECTORY_DEPTH {
+      let Some(parent) = parent_path(&current_child_path) else {
+        return Ok(());
+      };
+      if parent == "/" && v0_is_detached_system_path(&current_child_path) {
+        return Ok(());
+      }
+
+      let dir_key = directory_path_hash(&parent, &algo)?;
+      let existing = match self.recover_directory_data_if_stale(&parent, &dir_key)? {
+        Some(pair) => Some(pair),
+        None => self.read_directory_data(&dir_key)?,
+      };
+
+      let (dir_value, content_key) = match existing {
+        Some((_header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+          let plan = crate::engine::btree::btree_plan_insert(self.engine, &value, current_child_entry, hash_length, &algo)?;
+          Self::add_btree_plan_dependencies(batch, &plan)?;
+          (plan.root_data().to_vec(), plan.root_hash().to_vec())
+        }
+        Some((header, value)) => {
+          let mut children =
+            if value.is_empty() { Vec::new() } else { deserialize_child_entries(&value, hash_length, header.entry_version)? };
+          let child_name = &current_child_entry.name;
+          if let Some(existing_child) = children.iter_mut().find(|child| child.name == *child_name) {
+            *existing_child = current_child_entry;
+          } else {
+            children.push(current_child_entry);
+          }
+          if children.len() >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
+            let plan = crate::engine::btree::btree_plan_from_entries(children, hash_length, &algo)?;
+            Self::add_btree_plan_dependencies(batch, &plan)?;
+            (plan.root_data().to_vec(), plan.root_hash().to_vec())
+          } else {
+            let dir_value = serialize_child_entries(&children, hash_length)?;
+            let content_key = directory_content_hash(&dir_value, &algo)?;
+            batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone(), 0)?;
+            (dir_value, content_key)
+          }
+        }
+        None => {
+          effects.implicit_directories = effects
+            .implicit_directories
+            .checked_add(1)
+            .ok_or_else(|| EngineError::ResourceExhausted("implicit directory count overflow".to_string()))?;
+          let dir_value = serialize_child_entries(&[current_child_entry], hash_length)?;
+          let content_key = directory_content_hash(&dir_value, &algo)?;
+          batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone(), 0)?;
+          (dir_value, content_key)
+        }
+      };
+
+      effects.cache_writes.push((content_key.clone(), dir_value.clone()));
+      batch.replace_locator(EntryType::DirectoryIndex, dir_key, content_key.clone(), 0)?;
+      if parent == "/" {
+        batch.set_head_hash(content_key);
+        return Ok(());
+      }
+
+      let now_ms = chrono::Utc::now().timestamp_millis();
+      current_child_entry = ChildEntry {
+        entry_type: EntryType::DirectoryIndex.to_u8(),
+        hash: content_key,
+        total_size: dir_value.len() as u64,
+        created_at: now_ms,
+        updated_at: now_ms,
+        name: file_name(&parent).unwrap_or("").to_string(),
+        content_type: None,
+        virtual_time: now_ms as u64,
+        node_id: 0,
+      };
+      current_child_path = parent;
+    }
+
+    Err(EngineError::InvalidInput(format!("Directory depth exceeds maximum of {} levels", Self::MAX_DIRECTORY_DEPTH)))
+  }
+
+  fn plan_remove_from_parent_directory(
+    &self,
+    batch: &mut NamespaceMutationBatch,
+    child_path: &str,
+    effects: &mut DirectoryMutationEffects,
+  ) -> EngineResult<()> {
+    let algo = self.engine.hash_algo();
+    let hash_length = algo.hash_length();
+    let Some(parent) = parent_path(child_path) else {
+      return Ok(());
+    };
+    let dir_key = directory_path_hash(&parent, &algo)?;
+    let child_name = file_name(child_path).unwrap_or("").to_string();
+    let existing = match self.recover_directory_data_if_stale(&parent, &dir_key)? {
+      Some(pair) => Some(pair),
+      None => self.read_directory_data(&dir_key)?,
+    };
+
+    let (dir_value, content_key) = match existing {
+      Some((header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+        let root_node = crate::engine::btree::BTreeNode::deserialize(&value, hash_length, header.entry_version)?;
+        let root_hash = root_node.content_hash(hash_length, &algo)?;
+        match crate::engine::btree::btree_plan_delete(self.engine, &root_hash, &child_name, hash_length, &algo)? {
+          Some(plan) => {
+            Self::add_btree_plan_dependencies(batch, &plan)?;
+            (plan.root_data().to_vec(), plan.root_hash().to_vec())
+          }
+          None => {
+            let dir_value = Vec::new();
+            let content_key = directory_content_hash(&dir_value, &algo)?;
+            batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone(), 0)?;
+            (dir_value, content_key)
+          }
+        }
+      }
+      Some((header, value)) => {
+        let mut children =
+          if value.is_empty() { Vec::new() } else { deserialize_child_entries(&value, hash_length, header.entry_version)? };
+        children.retain(|child| child.name != child_name);
+        let dir_value = serialize_child_entries(&children, hash_length)?;
+        let content_key = directory_content_hash(&dir_value, &algo)?;
+        batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone(), 0)?;
+        (dir_value, content_key)
+      }
+      None => {
+        let dir_value = Vec::new();
+        let content_key = directory_content_hash(&dir_value, &algo)?;
+        batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), dir_value.clone(), 0)?;
+        (dir_value, content_key)
+      }
+    };
+
+    effects.cache_writes.push((content_key.clone(), dir_value.clone()));
+    batch.replace_locator(EntryType::DirectoryIndex, dir_key, content_key.clone(), 0)?;
+    if parent == "/" {
+      batch.set_head_hash(content_key);
+      return Ok(());
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    self.plan_parent_directories(
+      batch,
+      &parent,
+      ChildEntry {
+        entry_type: EntryType::DirectoryIndex.to_u8(),
+        hash: content_key,
+        total_size: dir_value.len() as u64,
+        created_at: now_ms,
+        updated_at: now_ms,
+        name: file_name(&parent).unwrap_or("").to_string(),
+        content_type: None,
+        virtual_time: now_ms as u64,
+        node_id: 0,
+      },
+      effects,
+    )
+  }
+
   /// Update parent directories after a child is added or modified.
   /// Propagates from the immediate parent up to root, updating HEAD at the end.
   /// For directories with >= BTREE_CONVERSION_THRESHOLD children, uses B-tree
@@ -3517,8 +3870,6 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let normalized = normalize_path(path);
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let normalized_target = normalize_path(target);
 
     // M15: Reject storing at root path — it would create a ghost entry.
@@ -3532,80 +3883,67 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let algo = self.engine.hash_algo();
-    let sys_flags = v0_system_entry_flags(&normalized);
-
-    // Check if symlink already exists (preserve created_at on update)
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
-    let existing_created_at = match self.engine.get_entry(&symlink_key)? {
-      Some((header, _key, value)) => {
-        let existing = SymlinkRecord::deserialize(&value, header.entry_version)?;
-        Some(existing.created_at)
+    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
+      let (existing_created_at, previous_identity) = match planning_engine.get_entry(&symlink_key)? {
+        Some((header, _key, value)) => {
+          let existing = SymlinkRecord::deserialize(&value, header.entry_version)?;
+          let identity = symlink_identity_hash(&normalized, &existing.target, &algo)?;
+          (Some(existing.created_at), Some(identity))
+        }
+        None => (None, None),
+      };
+      let mut record = SymlinkRecord::new(normalized.clone(), normalized_target.clone());
+      if let Some(original_created_at) = existing_created_at {
+        record.created_at = original_created_at;
       }
-      None => None,
-    };
-
-    let mut record = SymlinkRecord::new(normalized.clone(), normalized_target);
-
-    // Preserve original created_at on update
-    if let Some(original_created_at) = existing_created_at {
-      record.created_at = original_created_at;
-    }
-
-    let serialized = record.serialize()?;
-
-    // Content-addressed key (immutable — for KV store entry)
-    let content_key = symlink_content_hash(&serialized, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::Symlink, &content_key, &serialized, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::Symlink, &content_key, &serialized)?;
-    }
-
-    // Identity hash (for ChildEntry.hash — excludes timestamps)
-    let identity_key = symlink_identity_hash(&normalized, &record.target, &algo)?;
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::Symlink, &identity_key, &serialized, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::Symlink, &identity_key, &serialized)?;
-    }
-
-    // Path-based key (mutable — for reads/deletion)
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::Symlink, &symlink_key, &serialized, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::Symlink, &symlink_key, &serialized)?;
-    }
-
-    // Build child entry for parent directory
-    let child = ChildEntry {
-      entry_type: EntryType::Symlink.to_u8(),
-      hash: identity_key,
-      total_size: 0,
-      created_at: record.created_at,
-      updated_at: record.updated_at,
-      name: file_name(&normalized).unwrap_or("").to_string(),
-      content_type: None,
-      virtual_time: chrono::Utc::now().timestamp_millis() as u64,
-      node_id: 0,
-    };
-
-    self.update_parent_directories(&normalized, child)?;
-
-    let entry_data = EntryEventData {
-      path: normalized,
-      entry_type: "symlink".to_string(),
-      content_type: None,
-      size: 0,
-      hash: hex::encode(&record.target),
-      created_at: record.created_at,
-      updated_at: record.updated_at,
-      previous_hash: None,
-    };
-    txn.commit_after(namespace)?;
-    self.engine.counters().record_symlink_write(existing_created_at.is_some());
-    ctx.emit(EVENT_ENTRIES_CREATED, serde_json::json!({"entries": [entry_data]}));
-
-    Ok(record)
+      let serialized = record.serialize()?;
+      let content_key = symlink_content_hash(&serialized, &algo)?;
+      let identity_key = symlink_identity_hash(&normalized, &record.target, &algo)?;
+      let sys_flags = v0_system_entry_flags(&normalized);
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SymlinkWrite);
+      batch.store_dependency(EntryType::Symlink, content_key, serialized.clone(), sys_flags)?;
+      batch.store_dependency(EntryType::Symlink, identity_key.clone(), serialized.clone(), sys_flags)?;
+      batch.replace_locator(EntryType::Symlink, symlink_key.clone(), serialized, sys_flags)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized.clone(),
+        entry_type: Some(EntryType::Symlink.to_u8()),
+        previous_identity,
+        new_identity: Some(identity_key.clone()),
+      })?;
+      let mut effects =
+        DirectoryMutationEffects::new(DirectoryMutationCounterEffect::SymlinkWrite { existed: existing_created_at.is_some() });
+      self.plan_parent_directories(
+        &mut batch,
+        &normalized,
+        ChildEntry {
+          entry_type: EntryType::Symlink.to_u8(),
+          hash: identity_key,
+          total_size: 0,
+          created_at: record.created_at,
+          updated_at: record.updated_at,
+          name: file_name(&normalized).unwrap_or("").to_string(),
+          content_type: None,
+          virtual_time: chrono::Utc::now().timestamp_millis() as u64,
+          node_id: 0,
+        },
+        &mut effects,
+      )?;
+      effects.event = Some((
+        EVENT_ENTRIES_CREATED,
+        serde_json::json!({"entries": [EntryEventData {
+          path: normalized.clone(),
+          entry_type: "symlink".to_string(),
+          content_type: None,
+          size: 0,
+          hash: hex::encode(&record.target),
+          created_at: record.created_at,
+          updated_at: record.updated_at,
+          previous_hash: None,
+        }]}),
+      ));
+      Ok((batch, record, effects))
+    })
   }
 
   /// Read a SymlinkRecord at the given path, or None if not found.
@@ -3625,51 +3963,41 @@ impl<'a> DirectoryOps<'a> {
 
   /// Delete a symlink at the given path.
   pub fn delete_symlink(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
-    let namespace = self.engine.namespace_write_guard()?;
-    let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
-
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
-    let sys_flags = v0_system_entry_flags(&normalized);
-
-    // Verify symlink exists
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
-    let record = match self.engine.get_entry(&symlink_key)? {
-      Some((header, _key, value)) => SymlinkRecord::deserialize(&value, header.entry_version)?,
-      None => return Err(EngineError::NotFound(normalized)),
-    };
-
-    // Store a DeletionRecord
-    let deletion = DeletionRecord::new(normalized.clone(), None);
-    let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
-    let deletion_value = deletion.serialize();
-    if sys_flags != 0 {
-      self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, sys_flags)?;
-    } else {
-      self.engine.store_entry(EntryType::DeletionRecord, &deletion_key, &deletion_value)?;
-    }
-
-    // Mark as deleted in KV store
-    self.engine.mark_entry_deleted(&symlink_key)?;
-
-    // Remove from parent directory
-    self.remove_from_parent_directory(&normalized)?;
-
-    let entry_data = EntryEventData {
-      path: normalized,
-      entry_type: "symlink".to_string(),
-      content_type: None,
-      size: 0,
-      hash: hex::encode(&record.target),
-      created_at: record.created_at,
-      updated_at: record.updated_at,
-      previous_hash: None,
-    };
-    txn.commit_after(namespace)?;
-    self.engine.counters().record_symlink_delete();
-    ctx.emit(EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]}));
-
-    Ok(())
+    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
+      let (header, _key, value) = planning_engine.get_entry(&symlink_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
+      let record = SymlinkRecord::deserialize(&value, header.entry_version)?;
+      let previous_identity = symlink_identity_hash(&normalized, &record.target, &algo)?;
+      let deletion = DeletionRecord::new(normalized.clone(), None);
+      let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SymlinkDelete);
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&normalized))?;
+      batch.retire_locator(symlink_key.clone())?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized.clone(),
+        entry_type: Some(EntryType::Symlink.to_u8()),
+        previous_identity: Some(previous_identity),
+        new_identity: None,
+      })?;
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::SymlinkDelete);
+      self.plan_remove_from_parent_directory(&mut batch, &normalized, &mut effects)?;
+      effects.event = Some((
+        EVENT_ENTRIES_DELETED,
+        serde_json::json!({"entries": [EntryEventData {
+          path: normalized.clone(),
+          entry_type: "symlink".to_string(),
+          content_type: None,
+          size: 0,
+          hash: hex::encode(&record.target),
+          created_at: record.created_at,
+          updated_at: record.updated_at,
+          previous_hash: None,
+        }]}),
+      ));
+      Ok((batch, (), effects))
+    })
   }
 
   /// Rename (move) a file from one path to another.

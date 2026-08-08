@@ -177,26 +177,28 @@ fn store_files_buffered_batch_publishes_hot_tail_after_large_transaction() {
 }
 
 #[test]
-fn store_file_buffered_defers_durable_head_until_outer_transaction_commits() {
+fn store_file_buffered_rejects_legacy_outer_transaction_without_publishing_head() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
   let initial_disk_head = disk_head_hash(&dir);
+  let initial_memory_head = engine.head_hash().unwrap();
 
   {
     let _outer = TransactionGuard::new(&engine).unwrap();
-    ops.store_file_buffered(&ctx, "/txn/a.json", br#"{"a":1}"#, Some("application/json")).unwrap();
-
-    let in_memory_head = engine.head_hash().unwrap();
-    assert_ne!(in_memory_head, initial_disk_head, "the active engine should see the new HEAD before commit");
+    let message = invalid_message(ops.store_file_buffered(&ctx, "/txn/a.json", br#"{"a":1}"#, Some("application/json")));
+    assert!(message.contains("top-level namespace mutation"));
+    assert!(ops.get_metadata("/txn/a.json").unwrap().is_none());
+    assert_eq!(engine.head_hash().unwrap(), initial_memory_head);
 
     engine.try_flush_hot_buffer();
-    assert_eq!(disk_head_hash(&dir), initial_disk_head, "timer hot-tail flushing must not durably publish an in-flight transaction HEAD");
+    assert_eq!(disk_head_hash(&dir), initial_disk_head, "a refused namespace mutation must not publish HEAD through the outer transaction");
   }
 
-  assert_eq!(disk_head_hash(&dir), engine.head_hash().unwrap(), "outer transaction drop should durably publish HEAD");
-  assert_eq!(ops.read_file_buffered("/txn/a.json").unwrap(), br#"{"a":1}"#);
+  assert_eq!(disk_head_hash(&dir), initial_disk_head);
+  assert_eq!(engine.head_hash().unwrap(), initial_memory_head);
+  assert!(ops.read_file_buffered("/txn/a.json").is_err());
 }
 
 #[test]

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use aeordb::engine::btree::{
   BTreeNode, LeafNode, InternalNode, BTREE_MAX_LEAF_ENTRIES, BTREE_MAX_INTERNAL_KEYS, BTREE_LEAF_MARKER, BTREE_INTERNAL_MARKER,
   is_btree_format, btree_insert, btree_insert_batched, btree_lookup, btree_list, btree_list_from_node, btree_delete, btree_from_entries,
-  store_btree_node, btree_list_with_mode, BTreeWalkMode,
+  btree_plan_delete, btree_plan_from_entries, btree_plan_insert, store_btree_node, btree_list_with_mode, BTreeWalkMode,
 };
 use aeordb::engine::WriteBatch;
 use aeordb::engine::directory_entry::ChildEntry;
@@ -982,6 +982,44 @@ fn test_btree_insert_batched_single() {
   let found = btree_lookup(&engine, &new_hash, "alpha", hash_length, false).unwrap();
   assert!(found.is_some());
   assert_eq!(found.unwrap().name, "alpha");
+}
+
+#[test]
+fn btree_mutation_plans_do_not_write_until_explicitly_applied() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let algo = engine.hash_algo();
+  let hash_length = algo.hash_length();
+
+  let build_plan = btree_plan_from_entries(
+    (0..(BTREE_MAX_LEAF_ENTRIES + 5)).map(|index| make_entry(&format!("item_{index:03}"))).collect(),
+    hash_length,
+    &algo,
+  )
+  .unwrap();
+  assert!(engine.get_entry(build_plan.root_hash()).unwrap().is_none());
+  assert!(build_plan.node_writes().all(|write| engine.get_entry(&write.key).unwrap().is_none()));
+  let mut build_batch = WriteBatch::new();
+  build_plan.append_to_batch(&mut build_batch);
+  engine.flush_batch(build_batch).unwrap();
+  assert_eq!(btree_list(&engine, build_plan.root_hash(), hash_length, false).unwrap().len(), BTREE_MAX_LEAF_ENTRIES + 5);
+
+  let insert_plan = btree_plan_insert(&engine, build_plan.root_data(), make_entry("item_new"), hash_length, &algo).unwrap();
+  assert!(engine.get_entry(insert_plan.root_hash()).unwrap().is_none());
+  assert!(btree_lookup(&engine, build_plan.root_hash(), "item_new", hash_length, false).unwrap().is_none());
+  let mut insert_batch = WriteBatch::new();
+  insert_plan.append_to_batch(&mut insert_batch);
+  engine.flush_batch(insert_batch).unwrap();
+  assert!(btree_lookup(&engine, insert_plan.root_hash(), "item_new", hash_length, false).unwrap().is_some());
+
+  let database_path = temp.path().join("test.aeordb");
+  let database_length_before_delete_plan = std::fs::metadata(&database_path).unwrap().len();
+  let delete_plan = btree_plan_delete(&engine, insert_plan.root_hash(), "item_new", hash_length, &algo).unwrap().unwrap();
+  assert_eq!(std::fs::metadata(&database_path).unwrap().len(), database_length_before_delete_plan);
+  assert!(btree_lookup(&engine, insert_plan.root_hash(), "item_new", hash_length, false).unwrap().is_some());
+  let mut delete_batch = WriteBatch::new();
+  delete_plan.append_to_batch(&mut delete_batch);
+  engine.flush_batch(delete_batch).unwrap();
+  assert!(btree_lookup(&engine, delete_plan.root_hash(), "item_new", hash_length, false).unwrap().is_none());
 }
 
 #[test]

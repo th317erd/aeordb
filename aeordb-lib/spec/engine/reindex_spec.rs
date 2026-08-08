@@ -401,6 +401,32 @@ fn file_record_migration_accounts_and_releases_its_working_set() {
 }
 
 #[test]
+fn file_record_migration_no_op_and_rewrite_have_exact_durability_cardinality() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let path = "/migration-cardinality/a.txt";
+  ops.store_file_buffered(&ctx, path, b"migration durability cardinality", Some("text/plain")).unwrap();
+
+  let before_no_op = engine.durability_snapshot().unwrap().next_sequence;
+  assert!(!ops.migrate_file_record_to_current_version(path).unwrap());
+  assert_eq!(
+    engine.durability_snapshot().unwrap().next_sequence,
+    before_no_op,
+    "an already-current FileRecord must not consume a durability ticket"
+  );
+
+  rewrite_file_record_as_v0(&engine, path);
+  let before_rewrite = engine.durability_snapshot().unwrap().next_sequence;
+  assert!(ops.migrate_file_record_to_current_version(path).unwrap());
+  assert_eq!(
+    engine.durability_snapshot().unwrap().next_sequence,
+    before_rewrite + 1,
+    "one legacy FileRecord rewrite must publish through exactly one hard-authority ticket"
+  );
+}
+
+#[test]
 fn test_metadata_only_reindex_indexes_virtual_fields_without_reading_corrupt_bodies() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let event_bus = Arc::new(EventBus::new());

@@ -114,6 +114,69 @@ fn concurrent_mutations_receive_unique_operation_ids_and_hard_publication_sequen
 }
 
 #[test]
+fn concurrent_prepare_and_execute_closures_plan_against_serialized_namespace_authority() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let stable_key = vec![0xA7; engine.hash_algo().hash_length()];
+
+  std::thread::scope(|scope| {
+    let handles: Vec<_> = (0..16)
+      .map(|_| {
+        let engine = Arc::clone(&engine);
+        let stable_key = stable_key.clone();
+        scope.spawn(move || {
+          NamespaceMutationCoordinator::new(&engine).prepare_and_execute(|planning_engine| {
+            let previous = planning_engine
+              .get_entry(&stable_key)?
+              .map(|(_header, _key, value)| u64::from_le_bytes(value.try_into().unwrap()))
+              .unwrap_or_default();
+            let next = previous + 1;
+            let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::FileWrite);
+            batch.replace_locator(EntryType::FileRecord, stable_key.clone(), next.to_le_bytes().to_vec(), 0)?;
+            batch.add_source_identity(NamespaceMutationSourceIdentity {
+              path: "/spec/serialized-plan".to_string(),
+              entry_type: Some(EntryType::FileRecord.to_u8()),
+              previous_identity: Some(stable_key.clone()),
+              new_identity: Some(stable_key.clone()),
+            })?;
+            Ok((batch, next))
+          })
+        })
+      })
+      .collect();
+
+    let mut planned_values = handles.into_iter().map(|handle| handle.join().unwrap().unwrap().1).collect::<Vec<_>>();
+    planned_values.sort_unstable();
+    assert_eq!(planned_values, (1..=16).collect::<Vec<_>>());
+  });
+
+  let (_header, _key, value) = engine.get_entry(&stable_key).unwrap().unwrap();
+  assert_eq!(u64::from_le_bytes(value.try_into().unwrap()), 16);
+}
+
+#[test]
+fn version_aware_plans_preserve_dependency_and_locator_entry_versions() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let dependency_key = vec![0xA8; engine.hash_algo().hash_length()];
+  let locator_key = vec![0xA9; engine.hash_algo().hash_length()];
+  let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::FileWrite);
+  batch.store_dependency_with_version(EntryType::FileRecord, dependency_key.clone(), b"versioned dependency".to_vec(), 0, 1).unwrap();
+  batch.replace_locator_with_version(EntryType::FileRecord, locator_key.clone(), b"versioned locator".to_vec(), 0, 1).unwrap();
+  batch
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path: "/spec/versioned-file".to_string(),
+      entry_type: Some(EntryType::FileRecord.to_u8()),
+      previous_identity: None,
+      new_identity: Some(locator_key.clone()),
+    })
+    .unwrap();
+
+  NamespaceMutationCoordinator::new(&engine).execute(batch).unwrap();
+
+  assert_eq!(engine.get_entry(&dependency_key).unwrap().unwrap().0.entry_version, 1);
+  assert_eq!(engine.get_entry(&locator_key).unwrap().unwrap().0.entry_version, 1);
+}
+
+#[test]
 fn replacement_and_retirement_preserve_ordered_old_and_new_physical_incarnations() {
   let (engine, _temporary) = create_temp_engine_for_tests();
   let coordinator = NamespaceMutationCoordinator::new(&engine);
@@ -353,7 +416,7 @@ fn soft_fanout_panic_cannot_turn_durably_committed_success_into_failure() {
 }
 
 #[test]
-fn facade_boundary_is_present_but_production_producers_remain_unmigrated_until_p2e() {
+fn wave_one_activates_only_the_characterized_directory_ops_producer() {
   fn visit(directory: &std::path::Path, violations: &mut Vec<String>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -362,6 +425,7 @@ fn facade_boundary_is_present_but_production_producers_remain_unmigrated_until_p
       } else if path.extension().and_then(|value| value.to_str()) == Some("rs")
         && path.file_name().and_then(|value| value.to_str()) != Some("namespace_mutation.rs")
         && !path.ends_with("engine/mod.rs")
+        && path.file_name().and_then(|value| value.to_str()) != Some("directory_ops.rs")
       {
         let source = std::fs::read_to_string(&path).unwrap();
         if source.contains("NamespaceMutationCoordinator") || source.contains("LocatorReplacementCoordinator") {
@@ -379,5 +443,70 @@ fn facade_boundary_is_present_but_production_producers_remain_unmigrated_until_p
 
   let mut violations = Vec::new();
   visit(&package.join("src"), &mut violations);
-  assert!(violations.is_empty(), "P2d must not falsely activate producers before their characterized P2e waves: {}", violations.join(", "));
+  assert!(violations.is_empty(), "P2e Wave 1 must not activate uncharacterized later-wave producers: {}", violations.join(", "));
+
+  let directory_ops = std::fs::read_to_string(package.join("src/engine/directory_ops.rs")).unwrap();
+  assert!(directory_ops.contains("NamespaceMutationCoordinator"), "the characterized Wave 1 producer must use the shared facade");
+}
+
+#[test]
+fn wave_one_entrypoints_cannot_reintroduce_split_namespace_authority() {
+  fn method_source(source: &str, name: &str) -> String {
+    let marker = format!("fn {name}");
+    let mut collecting = false;
+    let mut lines = Vec::new();
+    for line in source.lines() {
+      if !collecting {
+        if line.contains(&marker) {
+          collecting = true;
+          lines.push(line);
+        }
+        continue;
+      }
+      if line.starts_with("  fn ") || line.starts_with("  pub fn ") || line.starts_with("  pub(crate) fn ") {
+        break;
+      }
+      lines.push(line);
+    }
+    assert!(collecting, "missing DirectoryOps method {name}");
+    lines.join("\n")
+  }
+
+  let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let source = std::fs::read_to_string(package.join("src/engine/directory_ops.rs")).unwrap();
+  let entrypoints = [
+    ("finalize_file_with_content_hash", "execute_file_publication"),
+    ("store_file_internal_inner", "execute_file_publication"),
+    ("delete_file", "execute_namespace_mutation"),
+    ("delete_directory", "execute_namespace_mutation"),
+    ("create_directory", "execute_namespace_mutation"),
+    ("migrate_file_record_to_current_version_inner", "execute_optional_namespace_mutation"),
+    ("ensure_root_directory", "execute_optional_namespace_mutation"),
+    ("rebuild_directory_tree", "store_rebuilt_directory"),
+    ("repair_directory_index_from_path_records", "store_rebuilt_directory"),
+    ("store_rebuilt_directory", "execute_namespace_mutation"),
+    ("delete_file_with_indexing", "delete_file("),
+    ("store_symlink", "execute_namespace_mutation"),
+    ("delete_symlink", "execute_namespace_mutation"),
+  ];
+  let forbidden = [
+    "direct_hard_authority_guard",
+    "TransactionGuard::new",
+    ".flush_batch",
+    ".update_head",
+    ".mark_entry_deleted",
+    "self.update_parent_directories(",
+    "self.remove_from_parent_directory(",
+  ];
+
+  for (name, required) in entrypoints {
+    let method = method_source(&source, name);
+    assert!(method.contains(required), "Wave 1 entrypoint {name} must route through {required}");
+    for bypass in forbidden {
+      assert!(!method.contains(bypass), "Wave 1 entrypoint {name} reintroduced split authority through {bypass}");
+    }
+    if name != "store_file_internal_inner" {
+      assert!(!method.contains(".store_entry"), "Wave 1 entrypoint {name} bypassed dependency planning with a direct entry write");
+    }
+  }
 }

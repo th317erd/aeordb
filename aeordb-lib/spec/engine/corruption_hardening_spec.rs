@@ -1185,12 +1185,35 @@ fn rebuild_directory_tree_uses_current_path_records_once() {
   }
 
   let before = file_size(db_str);
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
   let dirs_written = ops.rebuild_directory_tree(&ctx).unwrap();
   let after = file_size(db_str);
 
   assert_eq!(dirs_written, 2, "repair should rewrite only /repair and /, not every FileRecord copy");
+  assert_eq!(
+    engine.durability_snapshot().unwrap().next_sequence,
+    sequence_before + dirs_written as u64,
+    "a bounded full rebuild must publish exactly once per rebuilt directory"
+  );
   assert!(after - before < 8192, "directory rebuild should append a small fixed amount, appended {} bytes", after - before);
   assert_eq!(ops.read_file_buffered("/repair/doc.txt").unwrap(), b"version-29");
+}
+
+#[test]
+fn targeted_directory_repair_publishes_rebuilt_directory_and_ancestors_once() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/repair/targeted.txt", b"targeted", Some("text/plain")).unwrap();
+
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  assert_eq!(ops.repair_directory_index_from_path_records("/repair").unwrap(), 1);
+  assert_eq!(
+    engine.durability_snapshot().unwrap().next_sequence,
+    sequence_before + 1,
+    "one targeted repair must publish the repaired directory and every ancestor through one hard-authority ticket"
+  );
+  assert_eq!(ops.read_file_buffered("/repair/targeted.txt").unwrap(), b"targeted");
 }
 
 #[test]
