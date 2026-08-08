@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{StorageEngine, DirectoryOps, RequestContext};
+use aeordb::engine::{DirectoryOps, EntryType, RequestContext, StorageEngine};
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
@@ -102,6 +102,33 @@ async fn test_history_file_added() {
   assert_eq!(history[0]["change_type"], "added");
   assert!(history[0]["size"].is_number());
   assert!(history[0]["content_hash"].is_string());
+}
+
+#[tokio::test]
+async fn history_surfaces_corrupt_snapshot_file_authority_instead_of_reporting_deletion() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  store_file(&engine, "/corrupt-history.txt", b"historical bytes");
+  create_snapshot(&engine, "corrupt-history");
+  let snapshot = VersionManager::new(&engine).list_snapshots().unwrap().into_iter().find(|item| item.name == "corrupt-history").unwrap();
+  let tree = aeordb::engine::tree_walker::walk_version_tree(&engine, &snapshot.root_hash).unwrap();
+  let selected_hash = tree.files["/corrupt-history.txt"].0.clone();
+  engine.store_entry(EntryType::FileRecord, &selected_hash, b"malformed historical FileRecord").unwrap();
+  let app = rebuild_app(&jwt_manager, &engine);
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("GET")
+        .uri("/versions/history/corrupt-history.txt")
+        .header("authorization", &auth)
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]

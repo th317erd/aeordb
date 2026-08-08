@@ -489,6 +489,10 @@ fn batch_and_copy_reject_non_directory_ancestors_without_publishing() {
   let original_head = engine.head_hash().unwrap();
 
   for blocked_path in ["/blocked-file/child.txt", "/blocked-link/child.txt"] {
+    let single_result = ops.store_file_buffered(&ctx, blocked_path, b"child", Some("text/plain"));
+    assert!(matches!(single_result, Err(EngineError::AlreadyExists(_))), "single write accepted non-directory ancestor {blocked_path}");
+    assert_eq!(engine.head_hash().unwrap(), original_head);
+
     let result = ops.store_files_buffered_batch(
       &ctx,
       vec![BufferedFile { path: blocked_path.to_string(), data: b"child".to_vec(), content_type: Some("text/plain".to_string()) }],
@@ -496,6 +500,11 @@ fn batch_and_copy_reject_non_directory_ancestors_without_publishing() {
     assert!(matches!(result, Err(EngineError::AlreadyExists(_))), "non-directory ancestor should reject {blocked_path}: {result:?}");
     assert!(ops.get_metadata(blocked_path).unwrap().is_none());
   }
+
+  let file_to_symlink = ops.store_symlink(&ctx, "/blocked-file", "/copy-source.txt");
+  assert!(matches!(file_to_symlink, Err(EngineError::AlreadyExists(_))), "symlink replaced an authoritative file");
+  let symlink_to_file = ops.store_file_buffered(&ctx, "/blocked-link", b"replacement", Some("text/plain"));
+  assert!(matches!(symlink_to_file, Err(EngineError::AlreadyExists(_))), "file replaced an authoritative symlink");
 
   let copy_result = ops.copy_paths(&ctx, &["/copy-source.txt".to_string()], "/blocked-file");
   assert!(matches!(copy_result, Err(EngineError::AlreadyExists(_))), "copy destination file must not become an implicit directory");

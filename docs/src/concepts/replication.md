@@ -18,10 +18,30 @@ When two nodes sync:
 1. Node A asks Node B: "What changed since the last time we synced?" (tree diff)
 2. Node B computes the differences and responds with a list of added, modified, and deleted files
 3. Node A fetches any missing chunks from Node B
-4. Node A merges the changes into its own tree, detecting conflicts
-5. Node A updates its HEAD to the merged state
+4. Node A computes a three-way merge from the last acknowledged local and remote roots
+5. Node A publishes the complete bounded merge receipt, including local conflict evidence
+6. Node A records both new roots as the next merge checkpoint
 
-Chunk availability and transfer policy are validated before merge operations begin. The current v3 apply path is not a single database transaction: each resulting namespace operation is committed durably in order. If a later operation fails, earlier operations may already be visible; the peer checkpoint is not advanced, so the next cycle retries from the last successful base. The v4 migration campaign replaces whole-tree transitions with bounded reconciliation markers.
+The receiver strictly validates the complete diff envelope before mutation. Paths must be
+canonical and unique; identity hashes, whole-file hashes when present, timestamps, symlink
+targets, and the exact required-chunk closure must agree. Requested chunks are transferred in
+bounded batches and checked for exact hash, decoded size, duplicate, omission, and unexpected
+content. Existing chunk keys must resolve to valid chunks rather than merely occupying a KV
+key.
+
+Immutable chunks may be staged before namespace publication. If a later check fails, those
+unreferenced chunks are recoverable garbage; no path points to them. Files, symlinks,
+deletions, parent closure, local conflict evidence, counters, metadata-index wakeups, and SSE
+relationship events are then planned under one memory-admitted namespace operation and one
+hard durability acknowledgement. Missing delete targets are idempotent, but a wrong-type or
+corrupt target is an error. The peer checkpoint is written only after that receipt succeeds.
+Retrying after a lost checkpoint repeats the merge idempotently rather than exposing a partial
+apply.
+
+Each peer checkpoint stores two roots: the remote root acknowledged from that peer and the
+local post-merge root. These are the two bases needed for a later three-way merge. Legacy
+single-root checkpoints remain readable; when their meaning cannot be proven, AeorDB performs
+a conservative one-time remote comparison instead of inventing deletions.
 
 ### Sync is bidirectional. After Node A pulls from Node B, Node B can pull from Node A to get any changes that originated on Node A.
 
@@ -35,6 +55,18 @@ When two nodes modify the same file independently, AeorDB detects the conflict a
 
 Conflict records are local conflict authority and do not replicate as ordinary peer data. The winning namespace content can converge normally; operators inspect and resolve each node's retained conflict evidence through the typed conflict API.
 
+Conflict evidence is created in the same acknowledged namespace receipt as the selected
+winner. Both file and symlink versions are supported, including modify-versus-delete
+conflicts. Evidence retains exact immutable loser dependencies, and garbage collection treats
+those references as live until the conflict is resolved or dismissed. Malformed evidence
+blocks that GC mark instead of authorizing deletion.
+
+Resolving a conflict verifies the selected immutable record, canonical identity, metadata,
+and every referenced chunk before changing the visible path. Selecting a tombstone performs
+the matching typed deletion. Resolution and evidence cleanup share one receipt, so AeorDB does
+not report success with stale conflict metadata left behind. Dismissal likewise acknowledges
+the evidence deletion rather than squelching cleanup errors.
+
 ### Viewing Conflicts
 
 ```bash
@@ -43,10 +75,14 @@ curl http://localhost:6830/sync/conflicts \
   -H "Authorization: Bearer $TOKEN"
 
 # Resolve a conflict (pick the winner)
-curl -X POST http://localhost:6830/sync/conflicts/assets/logo.psd \
+curl -X POST http://localhost:6830/sync/resolve/assets/logo.psd \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"pick": "winner"}'
+
+# Keep the current auto-winner and discard the retained evidence
+curl -X POST http://localhost:6830/sync/dismiss/assets/logo.psd \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ## Virtual Clock

@@ -184,6 +184,36 @@ acknowledgement. Their deleted and created SSE relationship events deliberately
 remain separate for client compatibility, but share one operation ID and
 publication sequence.
 
+## Embedded Sync
+
+The engine exports the same typed sync primitives used by the HTTP peer
+orchestrator:
+
+| Function | Description |
+|----------|-------------|
+| `compute_sync_diff(engine, since_root_hash, paths_filter, include_system)` | Compute a strict full or incremental diff under client-sync or peer-replication SystemFamily policy. Missing/corrupt roots and protected-state violations fail instead of returning a partial diff. |
+| `get_needed_chunks(engine, hashes)` | Read the requested chunks for an embedded trusted caller. Missing hashes are omitted; storage errors propagate. |
+| `apply_sync_chunks(engine, chunks)` | Validate hash width, bytes, duplicates, and existing chunk authority for the complete input, then store missing immutable chunks in one batch. |
+| `apply_merge_operations(engine, ctx, operations)` | Preflight and publish one bounded set of file, symlink, and typed-delete operations under one namespace receipt. |
+| `list_conflicts_typed(engine)` | Return typed local conflict evidence; malformed evidence fails the listing rather than disappearing. |
+| `SyncEngine::sync_with_local_engine(peer_node_id, remote_engine)` | Perform the complete three-way merge, chunk transfer, conflict receipt, and dual-root checkpoint workflow without HTTP. |
+
+`SyncFileEntry` carries the immutable file identity, optional stored whole-file
+`content_hash`, size, content type, original timestamps, and ordered chunk
+hashes. A legacy FileRecord without `content_hash` is accepted only after the
+validated chunk closure is available, at which point the receiver computes and
+stores the current-format whole-file hash.
+
+Sync is deliberately split into two durability domains. `apply_sync_chunks`
+may leave valid but unreferenced immutable chunks if a later merge fails; this
+does not expose a path and GC may reclaim them. `apply_merge_operations`
+publishes all namespace operations atomically, treats only a genuinely missing
+delete target as an idempotent no-op, and emits post-acknowledgement counters,
+index work, and SSE events. The higher-level `SyncEngine` additionally stores
+conflict evidence in that same receipt and advances `PeerSyncState` only after
+success. `PeerSyncState` v1 records both the remote acknowledged root and local
+post-merge root; its reader also accepts legacy v0 state.
+
 ### Directory Listing
 
 ```rust,ignore

@@ -1,7 +1,8 @@
 use aeordb::engine::conflict_store;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::merge::{ConflictEntry, ConflictType, ConflictVersion};
-use aeordb::engine::sync_api::{apply_sync_chunks, compute_sync_diff, get_needed_chunks, list_conflicts_typed};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use aeordb::engine::sync_api::{apply_sync_chunks, compute_sync_diff, file_history, get_needed_chunks, list_conflicts_typed};
 use aeordb::engine::{EngineError, EntryType, RequestContext, StorageEngine, deserialize_child_entries, serialize_child_entries};
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -47,6 +48,9 @@ fn test_compute_diff_full() {
   let added_paths: Vec<&str> = diff.files_added.iter().map(|f| f.path.as_str()).collect();
   assert!(added_paths.contains(&"/docs/a.txt"));
   assert!(added_paths.contains(&"/docs/b.txt"));
+  for entry in diff.files_added.iter().filter(|entry| entry.path.starts_with("/docs/")) {
+    assert_eq!(entry.content_hash.as_ref().map(Vec::len), Some(engine.hash_algo().hash_length()));
+  }
 
   // No modified or deleted
   assert!(diff.files_modified.is_empty());
@@ -337,6 +341,65 @@ fn test_apply_sync_chunks_dedup() {
   assert_eq!(second, 0, "second apply should store 0 (dedup)");
 }
 
+#[test]
+fn apply_sync_chunks_rejects_claimed_hash_mismatch_before_storing_any_chunk() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let valid_data = b"valid peer chunk".to_vec();
+  let valid_hash = aeordb::engine::chunk_content_hash(&valid_data, &engine.hash_algo()).unwrap();
+  let invalid_data = b"tampered peer chunk".to_vec();
+  let before_chunks = engine.counters().snapshot().chunks;
+
+  let error = aeordb::engine::apply_sync_chunks(
+    &engine,
+    &[
+      aeordb::engine::sync_api::ChunkData { hash: valid_hash.clone(), data: valid_data },
+      aeordb::engine::sync_api::ChunkData { hash: valid_hash.clone(), data: invalid_data },
+    ],
+  )
+  .unwrap_err();
+
+  assert!(matches!(error, aeordb::engine::EngineError::InvalidInput(_)), "unexpected error: {error}");
+  assert!(!engine.has_entry(&valid_hash).unwrap(), "preflight failure must leave every chunk unstored");
+  assert_eq!(engine.counters().snapshot().chunks, before_chunks);
+}
+
+#[test]
+fn apply_sync_chunks_rejects_wrong_type_collision() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let data = b"colliding peer chunk".to_vec();
+  let hash = aeordb::engine::chunk_content_hash(&data, &engine.hash_algo()).unwrap();
+  engine.store_entry(aeordb::engine::EntryType::DirectoryIndex, &hash, b"").unwrap();
+
+  let error = aeordb::engine::apply_sync_chunks(&engine, &[aeordb::engine::sync_api::ChunkData { hash, data }]).unwrap_err();
+
+  assert!(matches!(error, aeordb::engine::EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+}
+
+#[test]
+fn apply_sync_chunks_obeys_memory_admission_before_staging_any_chunk() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let data = vec![0xA5; 8 * 1024];
+  let hash = aeordb::engine::chunk_content_hash(&data, &engine.hash_algo()).unwrap();
+  let counters_before = engine.counters().snapshot();
+  let entries_before = engine.kv_entry_count().unwrap();
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let streaming_before = snapshot.owner(MemoryOwner::StreamingRead).unwrap().clone();
+  let remaining = policy.ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Task, remaining.saturating_sub(4 * 1024), AdmissionClass::Workload).unwrap();
+
+  let error = apply_sync_chunks(&engine, &[aeordb::engine::sync_api::ChunkData { hash: hash.clone(), data }]).unwrap_err();
+
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  assert!(!engine.has_entry(&hash).unwrap());
+  assert_eq!(engine.kv_entry_count().unwrap(), entries_before);
+  assert_eq!(engine.counters().snapshot().writes_total, counters_before.writes_total);
+  let streaming_after = coordinator.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert_eq!(streaming_after.reserved_bytes, streaming_before.reserved_bytes);
+  assert_eq!(streaming_after.active_reservations, streaming_before.active_reservations);
+}
+
 // ---------------------------------------------------------------------------
 // 9. test_list_conflicts_typed
 // ---------------------------------------------------------------------------
@@ -392,6 +455,24 @@ fn test_list_conflicts_typed() {
   assert_eq!(c.loser.node_id, 2);
   assert_eq!(c.winner.virtual_time, 10);
   assert_eq!(c.loser.virtual_time, 5);
+}
+
+#[test]
+fn list_conflicts_typed_surfaces_malformed_authoritative_metadata() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &context,
+      "/.aeordb-conflicts/malformed/.meta",
+      br#"{"path":"/malformed","conflict_type":"ConcurrentModify"}"#,
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let error = list_conflicts_typed(&engine).unwrap_err();
+
+  assert!(matches!(error, aeordb::engine::EngineError::JsonParseError(_)), "unexpected error: {error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +599,9 @@ fn test_compute_diff_with_symlinks() {
 
   // Verify the target is correct
   let link = diff.symlinks_added.iter().find(|s| s.path == "/docs/link").unwrap();
+  let stored = DirectoryOps::new(&engine).get_symlink("/docs/link").unwrap().unwrap();
   assert_eq!(link.target, "/docs/target.txt");
+  assert_eq!((link.created_at, link.updated_at), (stored.created_at, stored.updated_at));
 }
 
 #[test]
@@ -575,6 +658,22 @@ fn test_apply_sync_chunks_empty() {
 }
 
 #[test]
+fn file_history_surfaces_corrupt_snapshot_file_authority() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  store_file(&engine, "/corrupt-history.txt", b"historical bytes");
+  let manager = aeordb::engine::version_manager::VersionManager::new(&engine);
+  manager.create_snapshot(&RequestContext::system(), "corrupt-history", Default::default()).unwrap();
+  let snapshot = manager.list_snapshots().unwrap().into_iter().find(|item| item.name == "corrupt-history").unwrap();
+  let tree = aeordb::engine::tree_walker::walk_version_tree(&engine, &snapshot.root_hash).unwrap();
+  let selected_hash = tree.files["/corrupt-history.txt"].0.clone();
+  engine.store_entry(EntryType::FileRecord, &selected_hash, b"malformed historical FileRecord").unwrap();
+
+  let error = file_history(&engine, "/corrupt-history.txt").unwrap_err();
+
+  assert!(matches!(error, EngineError::UnexpectedEof), "unexpected error: {error}");
+}
+
+#[test]
 fn test_sync_diff_file_entry_has_chunk_hashes() {
   let (engine, _temp) = create_temp_engine_for_tests();
   store_file(&engine, "/docs/hello.txt", b"Hello World");
@@ -586,4 +685,6 @@ fn test_sync_diff_file_entry_has_chunk_hashes() {
   assert!(!hello.chunk_hashes.is_empty(), "file entry should have chunk_hashes");
   assert!(hello.size > 0, "file entry should have non-zero size");
   assert!(!hello.hash.is_empty(), "file entry should have a hash");
+  let stored = DirectoryOps::new(&engine).get_metadata("/docs/hello.txt").unwrap().unwrap();
+  assert_eq!((hello.created_at, hello.updated_at), (stored.created_at, stored.updated_at));
 }

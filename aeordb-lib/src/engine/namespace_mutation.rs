@@ -281,6 +281,22 @@ impl NamespaceMutationBatch {
     let mut estimated_dependency_bytes = 0u64;
     for dependency in &self.dependencies {
       validate_hash_width(&dependency.key, hash_length, "dependency key")?;
+      if let Some((header, stored_key, stored_value)) = engine.get_entry_verified(&dependency.key)? {
+        let same_typed_key = stored_key == dependency.key && header.entry_type == dependency.entry_type;
+        let value_must_be_exact = !matches!(dependency.entry_type, EntryType::FileRecord | EntryType::Symlink);
+        if !same_typed_key
+          || (value_must_be_exact && (header.entry_version != dependency.entry_version || stored_value != dependency.value))
+        {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!(
+              "namespace mutation dependency {} collides with non-identical {:?} authority",
+              hex::encode(&dependency.key),
+              header.entry_type
+            ),
+          });
+        }
+      }
       estimated_dependency_bytes = add_entry_estimate(estimated_dependency_bytes, engine, dependency)?;
     }
     for locator in &self.locator_mutations {

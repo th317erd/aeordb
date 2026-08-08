@@ -1288,6 +1288,70 @@ fn wave_two_chunk_staging_never_treats_an_arbitrary_kv_row_as_a_chunk() {
 }
 
 #[test]
+fn wave_three_sync_receive_has_one_typed_namespace_and_checkpoint_authority() {
+  let sync_apply = include_str!("../../src/engine/sync_apply.rs");
+  assert_eq!(sync_apply.matches(".apply_sync_merge(context, operations)").count(), 1);
+  assert_eq!(sync_apply.matches(".apply_sync_receipt(context, operations, &evidence, &immutable_versions)").count(), 1);
+  assert!(sync_apply.contains("remote_conflict_versions("));
+  for forbidden in ["store_entry(", "store_file_buffered(", "delete_file(", "delete_symlink(", "TransactionGuard"] {
+    assert!(!sync_apply.contains(forbidden), "sync_apply.rs retained forbidden independent writer token: {forbidden}");
+  }
+
+  let sync_engine = include_str!("../../src/engine/sync_engine.rs");
+  let transfer_start = sync_engine.find("  fn transfer_missing_remote_diff_chunks(").unwrap();
+  let transfer_end = sync_engine[transfer_start..].find("\n  /// Load sync state for a peer").unwrap() + transfer_start;
+  let transfer_body = &sync_engine[transfer_start..transfer_end];
+  assert!(transfer_body.contains("apply_sync_chunks("));
+  for forbidden in ["store_entry(", "has_entry("] {
+    assert!(!transfer_body.contains(forbidden), "local sync chunk transfer retained untyped writer token: {forbidden}");
+  }
+
+  assert!(!sync_engine.contains("response.json()"), "remote sync responses must use the bounded typed decoder");
+  let local_apply = sync_engine.find("apply_merge_operations_with_conflicts(").unwrap();
+  let local_checkpoint = sync_engine[local_apply..].find("self.save_sync_state_hex(").unwrap() + local_apply;
+  assert!(local_apply < local_checkpoint, "local sync checkpoint must follow the shared merge acknowledgement");
+  assert!(!sync_engine[local_apply..local_checkpoint].contains("store_conflict("));
+
+  let remote_cycle = sync_engine.find("async fn do_sync_cycle_remote(").unwrap();
+  let remote_apply = sync_engine[remote_cycle..].find("apply_merge_operations_with_conflicts(").unwrap() + remote_cycle;
+  let remote_checkpoint = sync_engine[remote_apply..].find("self.save_sync_state_hex(").unwrap() + remote_apply;
+  assert!(remote_apply < remote_checkpoint, "remote sync checkpoint must follow the shared merge acknowledgement");
+  assert!(sync_engine[remote_cycle..remote_apply].contains("three_way_merge(&local_diff, &remote_diff)"));
+  assert!(sync_engine.contains("last_local_root_hash"));
+  assert!(!sync_engine[remote_cycle..remote_checkpoint].contains("apply_merge_operations(&"));
+  assert_eq!(sync_engine.matches("self.sync_request_context()").count(), 2);
+
+  let server = include_str!("../../src/server/mod.rs");
+  assert!(server.contains(".with_event_bus(Arc::clone(&event_bus))"));
+
+  let sync_routes = include_str!("../../src/server/sync_routes.rs");
+  assert!(sync_routes.contains("compute_sync_diff_accounted_with_cancellation("));
+  assert!(!sync_routes.contains("compute_sync_diff_accounted(&state.engine"));
+  assert!(sync_routes.contains("build_sync_diff_response("));
+  assert!(sync_routes.contains("build_sync_chunks_response("));
+  assert!(sync_routes.matches("ResponseBuildGuard::new()").count() >= 2);
+  assert!(sync_routes.matches("tokio::task::spawn_blocking").count() >= 2);
+  assert!(sync_routes.contains("cancellation.check()?"));
+  assert!(sync_routes.contains("body_from_tempfile(response_file"));
+}
+
+#[test]
+fn wave_three_conflict_resolution_and_cleanup_share_one_receipt() {
+  let source = include_str!("../../src/engine/conflict_store.rs");
+  let resolve_start = source.find("pub fn resolve_conflict(").unwrap();
+  let resolve_end = source[resolve_start..].find("\npub fn dismiss_conflict(").unwrap() + resolve_start;
+  let resolve_body = &source[resolve_start..resolve_end];
+  assert_eq!(resolve_body.matches("ops.apply_sync_merge(").count(), 1);
+  for forbidden in ["store_file_buffered(", "delete_file(", "store_conflict("] {
+    assert!(!resolve_body.contains(forbidden), "conflict resolution retained split writer token: {forbidden}");
+  }
+
+  let dismiss_body = &source[resolve_end..];
+  assert_eq!(dismiss_body.matches("ops.apply_sync_merge(").count(), 1);
+  assert!(!dismiss_body.contains("ops.delete_file("), "conflict dismissal must not acknowledge cleanup through a second writer");
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

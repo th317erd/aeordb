@@ -10,7 +10,8 @@ use uuid::Uuid;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
-use aeordb::engine::{DirectoryOps, EventBus, RequestContext, StorageEngine, VersionManager};
+use aeordb::engine::{DirectoryOps, EntryType, EventBus, RequestContext, StorageEngine, VersionManager};
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
 
@@ -115,9 +116,12 @@ async fn test_sync_diff_full() {
   assert_eq!(user_added[0]["path"], "/hello.txt");
   assert_eq!(user_added[1]["path"], "/subdir/nested.txt");
 
-  // Each file has hash, size, chunk_hashes
+  // Each file has identity, temporal ordering, and content closure.
   assert!(added[0]["hash"].is_string());
+  assert!(added[0]["content_hash"].is_string());
   assert!(added[0]["size"].is_number());
+  assert!(added[0]["created_at"].is_number());
+  assert!(added[0]["updated_at"].is_number());
   assert!(added[0]["chunk_hashes"].is_array());
 
   // No modified or deleted
@@ -127,6 +131,67 @@ async fn test_sync_diff_full() {
   // chunk_hashes_needed present and non-empty
   let chunk_hashes = json["chunk_hashes_needed"].as_array().unwrap();
   assert!(!chunk_hashes.is_empty());
+}
+
+#[tokio::test]
+async fn sync_diff_response_retains_streaming_admission_until_body_consumption() {
+  let (app, jwt, engine, _tmp) = test_app();
+  store_test_file(&engine, "/reserved-diff.txt", b"bounded diff response");
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/diff")
+        .header("content-type", "application/json")
+        .header("authorization", bearer_token(&jwt))
+        .body(Body::from("{}"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::OK);
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations, "sync diff response body lost its streaming reservation");
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["changes"]["files_added"].as_array().unwrap().len(), 1);
+
+  for _ in 0..100 {
+    let released = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    if released.active_reservations == baseline.active_reservations && released.reserved_bytes == baseline.reserved_bytes {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  panic!("sync diff response reservation did not release after body consumption");
+}
+
+#[tokio::test]
+async fn sync_diff_returns_retryable_failure_when_workload_admission_is_exhausted() {
+  let (app, jwt, engine, _tmp) = test_app();
+  store_test_file(&engine, "/diff-admission.txt", &[0x3C; 16 * 1024]);
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let streaming_before = snapshot.owner(MemoryOwner::StreamingRead).unwrap().clone();
+  let remaining = policy.ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Task, remaining.saturating_sub(1024), AdmissionClass::Workload).unwrap();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/diff")
+        .header("content-type", "application/json")
+        .header("authorization", bearer_token(&jwt))
+        .body(Body::from("{}"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  let streaming_after = coordinator.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert_eq!(streaming_after.active_reservations, streaming_before.active_reservations);
+  assert_eq!(streaming_after.reserved_bytes, streaming_before.reserved_bytes);
 }
 
 // ===========================================================================
@@ -388,6 +453,119 @@ async fn test_sync_chunks_returns_data() {
   }
 }
 
+#[tokio::test]
+async fn sync_chunks_response_retains_streaming_admission_until_body_consumption() {
+  let (app, jwt, engine, _tmp) = test_app();
+  store_test_file(&engine, "/reserved-response.bin", &[0xA5; 16 * 1024]);
+  let metadata = DirectoryOps::new(&engine).get_metadata("/reserved-response.bin").unwrap().unwrap();
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/chunks")
+        .header("content-type", "application/json")
+        .header("authorization", bearer_token(&jwt))
+        .body(Body::from(
+          serde_json::to_string(&serde_json::json!({
+              "hashes": metadata.chunk_hashes.iter().map(hex::encode).collect::<Vec<_>>()
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::OK);
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations, "sync response body lost its streaming reservation");
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["chunks"].as_array().unwrap().len(), metadata.chunk_hashes.len());
+
+  for _ in 0..100 {
+    let released = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    if released.active_reservations == baseline.active_reservations && released.reserved_bytes == baseline.reserved_bytes {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  panic!("sync response reservation did not release after body consumption");
+}
+
+#[tokio::test]
+async fn dropping_sync_chunks_response_releases_streaming_admission() {
+  let (app, jwt, engine, _tmp) = test_app();
+  store_test_file(&engine, "/dropped-response.bin", &[0x6B; 128 * 1024]);
+  let metadata = DirectoryOps::new(&engine).get_metadata("/dropped-response.bin").unwrap().unwrap();
+  let baseline = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/chunks")
+        .header("content-type", "application/json")
+        .header("authorization", bearer_token(&jwt))
+        .body(Body::from(
+          serde_json::to_string(&serde_json::json!({
+              "hashes": metadata.chunk_hashes.iter().map(hex::encode).collect::<Vec<_>>()
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::OK);
+  let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert!(held.active_reservations > baseline.active_reservations);
+  drop(response);
+
+  for _ in 0..100 {
+    let released = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    if released.active_reservations == baseline.active_reservations && released.reserved_bytes == baseline.reserved_bytes {
+      return;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+  }
+  panic!("dropped sync response retained streaming admission");
+}
+
+#[tokio::test]
+async fn sync_chunks_returns_retryable_failure_when_streaming_admission_is_exhausted() {
+  let (app, jwt, engine, _tmp) = test_app();
+  store_test_file(&engine, "/admission.bin", &[0x5A; 32 * 1024]);
+  let metadata = DirectoryOps::new(&engine).get_metadata("/admission.bin").unwrap().unwrap();
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let streaming_before = snapshot.owner(MemoryOwner::StreamingRead).unwrap().clone();
+  let remaining = policy.emergency_reserve_bytes.saturating_sub(snapshot.critical_reserved_bytes);
+  let _pressure = coordinator
+    .reserve(MemoryOwner::StreamingRead, remaining.saturating_sub(1024), AdmissionClass::Critical(CriticalMemoryPurpose::StreamingRead))
+    .unwrap();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/chunks")
+        .header("content-type", "application/json")
+        .header("authorization", bearer_token(&jwt))
+        .body(Body::from(
+          serde_json::to_string(&serde_json::json!({
+              "hashes": metadata.chunk_hashes.iter().map(hex::encode).collect::<Vec<_>>()
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  let streaming_after = coordinator.snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+  assert_eq!(streaming_after.active_reservations, streaming_before.active_reservations + 1);
+  assert_eq!(streaming_after.reserved_bytes, streaming_before.reserved_bytes + remaining.saturating_sub(1024));
+}
+
 // ===========================================================================
 // POST /sync/chunks — nonexistent hash → empty result
 // ===========================================================================
@@ -419,6 +597,31 @@ async fn test_sync_chunks_missing_hash() {
   let json = body_json(response.into_body()).await;
   let chunks = json["chunks"].as_array().unwrap();
   assert!(chunks.is_empty(), "nonexistent hash should be skipped");
+}
+
+#[tokio::test]
+async fn test_sync_chunks_surfaces_wrong_type_storage_authority() {
+  let (app, jwt, engine, _tmp) = test_app();
+  let claimed_chunk_hash = engine.compute_hash(b"sync wrong-type storage authority").unwrap();
+  engine.store_entry(EntryType::FileRecord, &claimed_chunk_hash, b"not a chunk").unwrap();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/chunks")
+        .header("content-type", "application/json")
+        .header("authorization", bearer_token(&jwt))
+        .body(Body::from(
+          serde_json::to_string(&serde_json::json!({
+              "hashes": [hex::encode(claimed_chunk_hash)]
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 // ===========================================================================

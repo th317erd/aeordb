@@ -147,6 +147,12 @@ fn gc_mark_internal(engine: &StorageEngine, cancellation: Option<&CancellationTo
     eprintln!("[gc-timing] mark.system: {:?}", sys_start.elapsed());
   }
 
+  let conflict_start = std::time::Instant::now();
+  mark_conflict_gc_entries(engine, hash_length, family_policy, &mut live, cancellation)?;
+  if timing {
+    eprintln!("[gc-timing] mark.conflicts: {:?}", conflict_start.elapsed());
+  }
+
   // Mark task queue entries as live -- task records use deterministic hashes
   // ("::aeordb:task:{id}") that are NOT in the directory tree, so
   // Registry path traversal does not cover them.
@@ -506,6 +512,24 @@ fn mark_registry_gc_entries(
     }
   }
 
+  Ok(())
+}
+
+/// Mark immutable file/symlink versions referenced from unresolved conflict
+/// metadata. The registry walk retains the metadata file itself; this pass
+/// follows its typed JSON edges to the versions a later resolution may select.
+fn mark_conflict_gc_entries(
+  engine: &StorageEngine,
+  hash_length: usize,
+  family_policy: SystemFamilyPolicyResolver,
+  live: &mut HashSet<Vec<u8>>,
+  cancellation: Option<&CancellationToken>,
+) -> EngineResult<()> {
+  let references = crate::engine::conflict_store::retained_conflict_version_references(engine)?;
+  for (index, reference) in references.iter().enumerate() {
+    check_gc_quantum(engine, cancellation, index)?;
+    mark_entry_recursive(engine, &reference.hash, &reference.path, hash_length, family_policy, live, cancellation)?;
+  }
   Ok(())
 }
 

@@ -1,9 +1,9 @@
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::engine::directory_ops::{reserve_streaming_read, ReservedReadChunk};
 use crate::engine::{EngineResult, StorageEngine};
@@ -12,16 +12,20 @@ const RESPONSE_FRAME_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct ResponseBuildCancellation {
-  cancelled: Arc<AtomicBool>,
+  token: CancellationToken,
 }
 
 impl ResponseBuildCancellation {
   pub(crate) fn check(&self) -> EngineResult<()> {
-    if self.cancelled.load(Ordering::Acquire) {
+    if self.token.is_cancelled() {
       Err(crate::engine::EngineError::Cancelled("response construction was cancelled".to_string()))
     } else {
       Ok(())
     }
+  }
+
+  pub(crate) fn token(&self) -> &CancellationToken {
+    &self.token
   }
 }
 
@@ -32,7 +36,7 @@ pub(crate) struct ResponseBuildGuard {
 
 impl ResponseBuildGuard {
   pub(crate) fn new() -> Self {
-    Self { cancellation: ResponseBuildCancellation { cancelled: Arc::new(AtomicBool::new(false)) }, armed: true }
+    Self { cancellation: ResponseBuildCancellation { token: CancellationToken::new() }, armed: true }
   }
 
   pub(crate) fn cancellation(&self) -> ResponseBuildCancellation {
@@ -47,7 +51,7 @@ impl ResponseBuildGuard {
 impl Drop for ResponseBuildGuard {
   fn drop(&mut self) {
     if self.armed {
-      self.cancellation.cancelled.store(true, Ordering::Release);
+      self.cancellation.token.cancel();
     }
   }
 }
@@ -56,6 +60,22 @@ pub(crate) fn tempfile_for_engine(engine: &StorageEngine, prefix: &str) -> std::
   let directory =
     engine.database_path().parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
   tempfile::Builder::new().prefix(&format!(".aeordb-response-{prefix}-")).suffix(".tmp").tempfile_in(directory)
+}
+
+pub(crate) fn json_to_tempfile<T: serde::Serialize>(
+  value: &T,
+  engine: &StorageEngine,
+  prefix: &str,
+) -> EngineResult<tempfile::NamedTempFile> {
+  let mut file = tempfile_for_engine(&engine, prefix)?;
+  serde_json::to_writer(file.as_file_mut(), value).map_err(|error| {
+    if error.is_io() {
+      crate::engine::EngineError::IoError(std::io::Error::other(error.to_string()))
+    } else {
+      crate::engine::EngineError::JsonParseError(error.to_string())
+    }
+  })?;
+  Ok(file)
 }
 
 pub(crate) fn body_from_tempfile(mut file: tempfile::NamedTempFile, engine: Arc<StorageEngine>) -> EngineResult<(Body, u64)> {

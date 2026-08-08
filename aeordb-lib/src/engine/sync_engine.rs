@@ -1,11 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
 use tokio::sync::Mutex;
 
-use crate::engine::conflict_store::store_conflict;
-use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::engine_event::{EngineEvent, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED};
 use crate::engine::event_bus::EventBus;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
@@ -14,7 +12,7 @@ use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::peer_connection::{ConnectionState, PeerConnection, PeerManager};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::sync_apply::apply_merge_operations;
+use crate::engine::sync_apply::apply_merge_operations_with_conflicts;
 use crate::engine::system_store;
 use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
 use crate::engine::tree_walker::{diff_trees_with_budget, walk_version_tree_for_transfer_with_budget, VersionTree};
@@ -31,8 +29,12 @@ pub struct SyncConfig {
 /// Per-peer sync state (persisted in system tables).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeerSyncState {
-  /// Hex-encoded root hash of the last successfully synced state.
+  /// Hex-encoded remote root acknowledged by the last successful sync.
   pub last_synced_root_hash: Option<String>,
+  /// Hex-encoded local post-merge root used as the local side's next
+  /// three-way-merge base. Absent in legacy v0 state.
+  #[serde(default)]
+  pub last_local_root_hash: Option<String>,
   /// Milliseconds since epoch of the last successful sync.
   pub last_sync_at: Option<u64>,
 }
@@ -46,6 +48,80 @@ pub struct SyncCycleResult {
   pub conflicts_detected: usize,
   /// Number of merge operations applied.
   pub operations_applied: usize,
+}
+
+const REMOTE_CHUNK_REQUEST_BATCH: usize = 256;
+const LOCAL_CHUNK_TRANSFER_BATCH: usize = 256;
+const REMOTE_SYNC_DIFF_MAX_BODY_BYTES: u64 = 128 * 1024 * 1024;
+const REMOTE_SYNC_CHUNKS_MAX_BODY_BYTES: u64 = 96 * 1024 * 1024;
+const REMOTE_SYNC_CHUNKS_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
+const REMOTE_SYNC_ERROR_MAX_BODY_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteSyncDiffResponse {
+  root_hash: String,
+  changes: RemoteSyncChanges,
+  chunk_hashes_needed: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteSyncChanges {
+  files_added: Vec<RemoteSyncFileEntry>,
+  files_modified: Vec<RemoteSyncFileEntry>,
+  files_deleted: Vec<RemoteSyncDeletedEntry>,
+  symlinks_added: Vec<RemoteSyncSymlinkEntry>,
+  symlinks_modified: Vec<RemoteSyncSymlinkEntry>,
+  symlinks_deleted: Vec<RemoteSyncDeletedEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteSyncFileEntry {
+  path: String,
+  hash: String,
+  #[serde(default)]
+  content_hash: Option<String>,
+  size: u64,
+  content_type: Option<String>,
+  #[serde(default)]
+  created_at: Option<i64>,
+  #[serde(default)]
+  updated_at: Option<i64>,
+  chunk_hashes: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteSyncSymlinkEntry {
+  path: String,
+  hash: String,
+  target: String,
+  #[serde(default)]
+  created_at: Option<i64>,
+  #[serde(default)]
+  updated_at: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteSyncDeletedEntry {
+  path: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteChunksResponse {
+  chunks: Vec<RemoteChunkEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteChunkEntry {
+  hash: String,
+  data: String,
+  size: u64,
 }
 
 /// The sync engine orchestrates sync cycles between peers.
@@ -73,6 +149,9 @@ pub struct SyncEngine {
   /// cluster shares the same signing key (via /sync/join), so a JWT
   /// signed here is accepted by any peer.
   jwt_manager: Option<Arc<crate::auth::JwtManager>>,
+  /// Receives coordinator-owned namespace acknowledgement events for both
+  /// embedded and HTTP peer sync cycles.
+  event_bus: Option<Arc<EventBus>>,
 }
 
 /// RAII guard that removes a peer ID from the sync lock set on drop.
@@ -112,7 +191,15 @@ impl Drop for SyncLockGuard {
 
 impl SyncEngine {
   pub fn new(engine: Arc<StorageEngine>, peer_manager: Arc<PeerManager>, clock_tracker: Arc<PeerClockTracker>, config: SyncConfig) -> Self {
-    SyncEngine { engine, peer_manager, clock_tracker, config, sync_locks: Arc::new(Mutex::new(HashSet::new())), jwt_manager: None }
+    SyncEngine {
+      engine,
+      peer_manager,
+      clock_tracker,
+      config,
+      sync_locks: Arc::new(Mutex::new(HashSet::new())),
+      jwt_manager: None,
+      event_bus: None,
+    }
   }
 
   /// Provide the JwtManager so peer-to-peer HTTP requests carry an
@@ -123,6 +210,15 @@ impl SyncEngine {
     self
   }
 
+  pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+    self.event_bus = Some(event_bus);
+    self
+  }
+
+  fn sync_request_context(&self) -> RequestContext {
+    self.event_bus.as_ref().map_or_else(RequestContext::system, |event_bus| RequestContext::with_bus(Arc::clone(event_bus)))
+  }
+
   /// Mint a short-lived root JWT for outbound sync requests.
   ///
   /// The token carries `scope: "sync"`. The auth middleware will reject
@@ -130,8 +226,10 @@ impl SyncEngine {
   /// cannot be used to call file or admin APIs even though it has root
   /// `sub`. (The whole cluster shares the signing key, so without this
   /// scope a leaked token would grant full takeover anywhere.)
-  fn mint_sync_token(&self) -> Option<String> {
-    let jwt = self.jwt_manager.as_ref()?;
+  fn mint_sync_token(&self) -> Result<Option<String>, String> {
+    let Some(jwt) = self.jwt_manager.as_ref() else {
+      return Ok(None);
+    };
     let claims = crate::auth::TokenClaims {
       sub: crate::engine::ROOT_USER_ID.to_string(),
       iss: "aeordb".to_string(),
@@ -141,7 +239,7 @@ impl SyncEngine {
       permissions: None,
       key_id: None,
     };
-    jwt.create_token(&claims).ok()
+    jwt.create_token(&claims).map(Some).map_err(|error| format!("Failed to mint peer sync token: {error}"))
   }
 
   /// Run a single sync cycle with a specific peer.
@@ -193,8 +291,11 @@ impl SyncEngine {
     let local_head = local_vm.get_head_hash().map_err(|e| format!("Failed to get local HEAD: {}", e))?;
     let remote_head = remote_vm.get_head_hash().map_err(|e| format!("Failed to get remote HEAD: {}", e))?;
 
-    // Determine the base (common ancestor)
-    let base_hash = sync_state.and_then(|s| s.last_synced_root_hash).and_then(|h| hex::decode(&h).ok()).unwrap_or_default();
+    let remote_base_hash = sync_state
+      .as_ref()
+      .and_then(|state| state.last_synced_root_hash.as_deref())
+      .map(|encoded| decode_persisted_peer_hash(&self.engine, encoded, "remote checkpoint"))
+      .transpose()?;
 
     // Walk all trees through the same peer-replication policy used by the HTTP
     // producer. Detached portable state participates in each current tree;
@@ -206,65 +307,78 @@ impl SyncEngine {
     let mut remote_memory =
       OperationMemoryBudget::new(remote_engine, "remote peer sync", MemoryOwner::StreamingRead, AdmissionClass::Workload, 0, None)
         .map_err(|error| format!("Failed to admit remote peer sync: {error}"))?;
-    let local_tree = walk_version_tree_for_transfer_with_budget(&self.engine, &local_head, operation, true, &mut local_memory)
-      .map_err(|error| format!("Failed to walk local tree: {error}"))?;
     let remote_tree = walk_version_tree_for_transfer_with_budget(remote_engine, &remote_head, operation, true, &mut remote_memory)
       .map_err(|error| format!("Failed to walk remote tree: {error}"))?;
-
-    let (local_diff, remote_diff) = if base_hash.is_empty() {
-      // No common ancestor: treat empty tree as base
-      let empty_tree = VersionTree::new();
-      let local_diff = diff_trees_with_budget(&empty_tree, &local_tree, &mut local_memory)
-        .map_err(|error| format!("Failed to diff local tree: {error}"))?;
-      let remote_diff = diff_trees_with_budget(&empty_tree, &remote_tree, &mut local_memory)
-        .map_err(|error| format!("Failed to diff remote tree: {error}"))?;
-      (local_diff, remote_diff)
+    let remote_diff = if let Some(base_hash) = remote_base_hash.as_deref() {
+      match remote_engine
+        .get_entry_verified(base_hash)
+        .map_err(|error| format!("Failed to inspect persisted remote checkpoint for peer {peer_node_id}: {error}"))?
+      {
+        Some((header, stored_key, _)) if stored_key == base_hash && header.entry_type == crate::engine::EntryType::DirectoryIndex => {
+          let base_tree = walk_version_tree_for_transfer_with_budget(remote_engine, base_hash, operation, false, &mut remote_memory)
+            .map_err(|error| format!("Failed to walk persisted remote checkpoint for peer {peer_node_id}: {error}"))?;
+          diff_trees_with_budget(&base_tree, &remote_tree, &mut remote_memory)
+            .map_err(|error| format!("Failed to diff remote tree for peer {peer_node_id}: {error}"))?
+        }
+        Some((header, _, _)) => {
+          return Err(format!(
+            "Persisted remote checkpoint for peer {peer_node_id} resolves to {:?}, expected DirectoryIndex",
+            header.entry_type
+          ));
+        }
+        None if sync_state.as_ref().is_some_and(|state| state.last_local_root_hash.is_none()) => {
+          // Legacy v0 stored one ambiguous root. If it was the post-merge local
+          // root, the peer cannot resolve it. A one-time full remote diff is
+          // conservative: it may repeat idempotent additions but cannot invent
+          // remote deletions for local-only paths.
+          diff_trees_with_budget(&VersionTree::new(), &remote_tree, &mut remote_memory)
+            .map_err(|error| format!("Failed to diff legacy remote tree for peer {peer_node_id}: {error}"))?
+        }
+        None => return Err(format!("Persisted remote checkpoint for peer {peer_node_id} is missing from the remote engine")),
+      }
     } else {
-      // Walk the base tree from the local engine (it should have it)
-      let base_tree = walk_version_tree_for_transfer_with_budget(&self.engine, &base_hash, operation, false, &mut local_memory)
-        .map_err(|error| format!("Failed to walk base tree: {error}"))?;
-      let local_diff = diff_trees_with_budget(&base_tree, &local_tree, &mut local_memory)
-        .map_err(|error| format!("Failed to diff local tree: {error}"))?;
-      let remote_diff = diff_trees_with_budget(&base_tree, &remote_tree, &mut local_memory)
-        .map_err(|error| format!("Failed to diff remote tree: {error}"))?;
-      (local_diff, remote_diff)
+      diff_trees_with_budget(&VersionTree::new(), &remote_tree, &mut remote_memory)
+        .map_err(|error| format!("Failed to diff initial remote tree for peer {peer_node_id}: {error}"))?
     };
+    let local_diff = self.compute_local_diff_for_remote_sync(
+      &local_head,
+      sync_state.as_ref(),
+      remote_base_hash.as_deref(),
+      sync_paths.as_deref(),
+      &mut local_memory,
+    )?;
+    let remote_diff = if let Some(ref paths) = sync_paths { filter_tree_diff_by_paths(remote_diff, paths) } else { remote_diff };
 
     // If neither side has changes from the base, we're in sync
     if local_diff.is_empty() && remote_diff.is_empty() {
-      self.save_sync_state(peer_node_id, &remote_head)?;
+      self.save_sync_state_hex(peer_node_id, &remote_head, &local_head)?;
       return Ok(SyncCycleResult { changes_applied: false, conflicts_detected: 0, operations_applied: 0 });
     }
-
-    // Apply selective sync path filtering to the remote diff
-    let remote_diff = if let Some(ref paths) = sync_paths { filter_tree_diff_by_paths(remote_diff, paths) } else { remote_diff };
 
     // Three-way merge
     let merge_result = three_way_merge(&local_diff, &remote_diff);
     let operations_count = merge_result.operations.len();
     let conflicts_count = merge_result.conflicts.len();
 
-    // Transfer only chunks selected by registry policy, selective paths, and
-    // merge resolution. File records are reconstructed through DirectoryOps;
+    // Transfer every changed remote file chunk selected by registry policy
+    // and selective paths. Conflict losers need the same immutable closure as
+    // merge winners. File records are reconstructed by the shared merge path;
     // copying their old physical entries would add unreferenced KV state.
-    self.transfer_missing_operation_chunks(&merge_result.operations, remote_engine)?;
+    self.transfer_missing_remote_diff_chunks(&remote_diff, remote_engine)?;
 
-    // Apply merge operations to local engine
-    let context = RequestContext::system();
-    if !merge_result.operations.is_empty() {
-      apply_merge_operations(&self.engine, &context, &merge_result.operations).map_err(|e| format!("Failed to apply merge: {}", e))?;
-    }
-
-    // Store conflicts
-    for conflict in &merge_result.conflicts {
-      store_conflict(&self.engine, &context, conflict).map_err(|e| format!("Failed to store sync conflict: {}", e))?;
+    // Publish selected operations and required local conflict evidence through
+    // one hard namespace receipt.
+    let context = self.sync_request_context();
+    if !merge_result.operations.is_empty() || !merge_result.conflicts.is_empty() {
+      apply_merge_operations_with_conflicts(&self.engine, &context, &merge_result.operations, &merge_result.conflicts, &remote_diff)
+        .map_err(|e| format!("Failed to apply merge and conflict evidence: {}", e))?;
     }
 
     // Get the new local HEAD after merge
     let new_local_head = local_vm.get_head_hash().map_err(|e| format!("Failed to get post-merge HEAD: {}", e))?;
 
     // Update sync state
-    self.save_sync_state(peer_node_id, &new_local_head)?;
+    self.save_sync_state_hex(peer_node_id, &remote_head, &new_local_head)?;
 
     // Update peer manager
     self.peer_manager.update_sync_state(peer_node_id, new_local_head, chrono::Utc::now().timestamp_millis() as u64);
@@ -272,41 +386,40 @@ impl SyncEngine {
     Ok(SyncCycleResult { changes_applied: operations_count > 0, conflicts_detected: conflicts_count, operations_applied: operations_count })
   }
 
-  fn transfer_missing_operation_chunks(
+  fn transfer_missing_remote_diff_chunks(
     &self,
-    operations: &[crate::engine::merge::MergeOp],
+    remote_diff: &crate::engine::tree_walker::TreeDiff,
     remote_engine: &StorageEngine,
   ) -> Result<(), String> {
-    for operation in operations {
-      let crate::engine::merge::MergeOp::AddFile { path, file_record, .. } = operation else {
-        continue;
-      };
+    let mut seen = HashSet::new();
+    let mut chunks = Vec::with_capacity(LOCAL_CHUNK_TRANSFER_BATCH);
+    for (path, (_, file_record)) in remote_diff.added.iter().chain(remote_diff.modified.iter()) {
       for chunk_hash in &file_record.chunk_hashes {
-        if self.engine.has_entry(chunk_hash).map_err(|error| format!("Failed to check local chunk: {error}"))? {
+        if !seen.insert(chunk_hash.clone()) {
+          continue;
+        }
+        let exists = crate::engine::directory_ops::validate_existing_chunk_locator(&self.engine, "local peer sync", chunk_hash)
+          .map_err(|error| format!("Failed to validate local chunk {}: {error}", hex::encode(chunk_hash)))?;
+        if exists {
           continue;
         }
         let chunk_data = remote_engine
           .read_chunk(chunk_hash)
           .map_err(|error| format!("Failed to read remote chunk {} for '{}': {error}", hex::encode(chunk_hash), path))?
           .ok_or_else(|| format!("Remote file '{}' references missing chunk {}", path, hex::encode(chunk_hash)))?;
-        self
-          .engine
-          .store_entry(crate::engine::entry_type::EntryType::Chunk, chunk_hash, &chunk_data)
-          .map_err(|error| format!("Failed to store chunk {} for '{}': {error}", hex::encode(chunk_hash), path))?;
+        chunks.push(crate::engine::sync_api::ChunkData { hash: chunk_hash.clone(), data: chunk_data });
+        if chunks.len() == LOCAL_CHUNK_TRANSFER_BATCH {
+          crate::engine::sync_api::apply_sync_chunks(&self.engine, &chunks)
+            .map_err(|error| format!("Failed to store validated local peer chunks: {error}"))?;
+          chunks.clear();
+        }
       }
     }
+    if !chunks.is_empty() {
+      crate::engine::sync_api::apply_sync_chunks(&self.engine, &chunks)
+        .map_err(|error| format!("Failed to store validated local peer chunks: {error}"))?;
+    }
     Ok(())
-  }
-
-  /// Save sync state for a peer, recording the root hash and current time.
-  fn save_sync_state(&self, peer_node_id: u64, root_hash: &[u8]) -> Result<(), String> {
-    let state = PeerSyncState {
-      last_synced_root_hash: Some(hex::encode(root_hash)),
-      last_sync_at: Some(chrono::Utc::now().timestamp_millis() as u64),
-    };
-    let ctx = RequestContext::system();
-    system_store::store_peer_sync_state(&self.engine, &ctx, peer_node_id, &state)
-      .map_err(|e| format!("Failed to store sync state for peer {}: {}", peer_node_id, e))
   }
 
   /// Load sync state for a peer from system store.
@@ -377,7 +490,12 @@ impl SyncEngine {
     // Load last synced state for this peer
     let sync_state =
       system_store::get_peer_sync_state(&self.engine, peer.node_id).map_err(|e| format!("Failed to load peer sync state: {}", e))?;
-    let since_hash = sync_state.and_then(|s| s.last_synced_root_hash);
+    let remote_base_hash = sync_state
+      .as_ref()
+      .and_then(|state| state.last_synced_root_hash.as_deref())
+      .map(|encoded| decode_persisted_peer_hash(&self.engine, encoded, "remote checkpoint"))
+      .transpose()?;
+    let since_hash = remote_base_hash.as_ref().map(hex::encode);
 
     // Load peer config for selective sync paths
     let sync_paths = self.get_peer_sync_paths(peer.node_id)?;
@@ -393,7 +511,7 @@ impl SyncEngine {
       diff_body["paths"] = serde_json::json!(paths);
     }
 
-    let sync_token = self.mint_sync_token();
+    let sync_token = self.mint_sync_token()?;
     let mut req = client.post(format!("{}/sync/diff", peer.address));
     if let Some(ref tok) = sync_token {
       req = req.bearer_auth(tok);
@@ -402,184 +520,178 @@ impl SyncEngine {
 
     if !response.status().is_success() {
       let status = response.status();
-      let body = response.text().await.unwrap_or_default();
+      let BoundedRemoteText { value: body, _memory: _error_response_memory } =
+        read_bounded_remote_text(&self.engine, response, REMOTE_SYNC_ERROR_MAX_BODY_BYTES, "remote sync error response")
+          .await
+          .map_err(|error| format!("Peer {} returned {status}, but its error response could not be read: {error}", peer.node_id))?;
       return Err(format!("Peer {} returned {}: {}", peer.node_id, status, body));
     }
 
-    let diff_resp: serde_json::Value =
-      response.json().await.map_err(|e| format!("Failed to parse diff response from peer {}: {}", peer.node_id, e))?;
+    let BoundedRemoteJson { value: diff_resp, _memory: _diff_response_memory } = read_bounded_remote_json::<RemoteSyncDiffResponse>(
+      &self.engine,
+      response,
+      REMOTE_SYNC_DIFF_MAX_BODY_BYTES,
+      "remote sync diff response",
+    )
+    .await
+    .map_err(|e| format!("Failed to parse diff response from peer {}: {}", peer.node_id, e))?;
+    let validated = validate_remote_sync_diff(&self.engine, diff_resp)
+      .map_err(|error| format!("Peer {} returned invalid sync state: {error}", peer.node_id))?;
 
-    let peer_root_hex = diff_resp["root_hash"].as_str().unwrap_or("").to_string();
-
-    // Check if there are any changes to apply
-    let changes = &diff_resp["changes"];
-    validate_remote_peer_diff_paths(&self.engine, changes)
-      .map_err(|error| format!("Peer {} returned forbidden sync state: {error}", peer.node_id))?;
-    let has_file_changes =
-      ["files_added", "files_modified", "files_deleted"].iter().any(|k| changes[k].as_array().is_some_and(|a| !a.is_empty()));
-    let has_symlink_changes =
-      ["symlinks_added", "symlinks_modified", "symlinks_deleted"].iter().any(|k| changes[k].as_array().is_some_and(|a| !a.is_empty()));
-
-    if !has_file_changes && !has_symlink_changes {
-      // No remote changes — update sync state and return
-      let peer_root_bytes = hex::decode(&peer_root_hex)
-        .map_err(|e| format!("Peer {} returned unparseable root hash '{}': {}", peer.node_id, peer_root_hex, e))?;
-      self.save_sync_state_hex(peer.node_id, &peer_root_hex)?;
-      self.peer_manager.update_sync_state(peer.node_id, peer_root_bytes, chrono::Utc::now().timestamp_millis() as u64);
-      return Ok(SyncCycleResult { changes_applied: false, conflicts_detected: 0, operations_applied: 0 });
+    self.fetch_and_store_remote_chunks(&client, peer, sync_token.as_deref(), &validated.required_chunks).await?;
+    let (peer_root_bytes, remote_diff) =
+      validated.into_tree_diff(&self.engine).map_err(|error| format!("Peer {} returned unusable sync state: {error}", peer.node_id))?;
+    let mut local_memory =
+      OperationMemoryBudget::new(&self.engine, "remote peer local diff", MemoryOwner::StreamingRead, AdmissionClass::Workload, 0, None)
+        .map_err(|error| format!("Failed to admit local side of peer {} sync: {error}", peer.node_id))?;
+    let local_diff = self.compute_local_diff_for_remote_sync(
+      &our_head,
+      sync_state.as_ref(),
+      remote_base_hash.as_deref(),
+      sync_paths.as_deref(),
+      &mut local_memory,
+    )?;
+    let merge_result = three_way_merge(&local_diff, &remote_diff);
+    let operations_count = merge_result.operations.len();
+    let conflicts_count = merge_result.conflicts.len();
+    if !merge_result.operations.is_empty() || !merge_result.conflicts.is_empty() {
+      apply_merge_operations_with_conflicts(
+        &self.engine,
+        &self.sync_request_context(),
+        &merge_result.operations,
+        &merge_result.conflicts,
+        &remote_diff,
+      )
+      .map_err(|error| format!("Failed to atomically apply sync from peer {}: {error}", peer.node_id))?;
     }
+    let new_local_head = vm.get_head_hash().map_err(|error| format!("Failed to get post-sync HEAD: {error}"))?;
 
-    // Step 2: Fetch needed chunks from the peer
-    let chunk_hashes: Vec<String> = diff_resp["chunk_hashes_needed"]
-      .as_array()
-      .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-      .unwrap_or_default();
-
-    if !chunk_hashes.is_empty() {
-      let mut chunks_req = client.post(format!("{}/sync/chunks", peer.address));
-      if let Some(ref tok) = sync_token {
-        chunks_req = chunks_req.bearer_auth(tok);
-      }
-      let chunks_resp = chunks_req
-        .json(&serde_json::json!({ "hashes": chunk_hashes }))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch chunks from peer {}: {}", peer.node_id, e))?;
-
-      if !chunks_resp.status().is_success() {
-        let status = chunks_resp.status();
-        let body = chunks_resp.text().await.unwrap_or_default();
-        return Err(format!("Peer {} chunks endpoint returned {}: {}", peer.node_id, status, body));
-      }
-
-      let chunks_data: serde_json::Value =
-        chunks_resp.json().await.map_err(|e| format!("Failed to parse chunks response from peer {}: {}", peer.node_id, e))?;
-
-      // Store each received chunk in our local engine
-      if let Some(chunks) = chunks_data["chunks"].as_array() {
-        for chunk in chunks {
-          let hash_hex = chunk["hash"].as_str().unwrap_or("");
-          let data_b64 = chunk["data"].as_str().unwrap_or("");
-          if let (Ok(hash), Ok(data)) = (hex::decode(hash_hex), base64::engine::general_purpose::STANDARD.decode(data_b64)) {
-            let exists = self.engine.has_entry(&hash).map_err(|e| format!("Failed to check local chunk {}: {}", hash_hex, e))?;
-            if !exists {
-              self
-                .engine
-                .store_entry(crate::engine::entry_type::EntryType::Chunk, &hash, &data)
-                .map_err(|e| format!("Failed to store chunk {} from peer {}: {}", hash_hex, peer.node_id, e))?;
-            }
-          }
-        }
-      }
-    }
-
-    // Step 3: Apply changes from the diff response via DirectoryOps
-    let ctx = RequestContext::system();
-    let ops = DirectoryOps::new(&self.engine);
-    let mut operations_count: usize = 0;
-    let conflicts_count: usize = 0;
-
-    // Process file additions and modifications
-    for category in ["files_added", "files_modified"] {
-      if let Some(entries) = changes[category].as_array() {
-        for entry in entries {
-          let path = entry["path"].as_str().unwrap_or("");
-          if path.is_empty() {
-            continue;
-          }
-
-          // Reconstruct file data from chunk hashes
-          let entry_chunk_hashes: Vec<Vec<u8>> = entry["chunk_hashes"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|h| h.as_str().and_then(|s| hex::decode(s).ok())).collect())
-            .unwrap_or_default();
-
-          // Read chunks and assemble file content
-          let mut file_data = Vec::new();
-          let mut all_chunks_available = true;
-          for ch in &entry_chunk_hashes {
-            match self.engine.read_chunk(ch) {
-              Ok(Some(data)) => {
-                file_data.extend_from_slice(&data);
-              }
-              _ => {
-                all_chunks_available = false;
-                tracing::warn!("Missing chunk {} for file {} during sync with peer {}", hex::encode(ch), path, peer.node_id);
-                break;
-              }
-            }
-          }
-
-          if all_chunks_available {
-            let content_type = entry["content_type"].as_str();
-            ops
-              .store_file_buffered(&ctx, path, &file_data, content_type)
-              .map_err(|e| format!("Failed to store synced file '{}' from peer {}: {}", path, peer.node_id, e))?;
-            operations_count += 1;
-          }
-        }
-      }
-    }
-
-    // Process file deletions
-    if let Some(deleted) = changes["files_deleted"].as_array() {
-      for entry in deleted {
-        let path = entry["path"].as_str().unwrap_or("");
-        if !path.is_empty() {
-          if let Err(error) = ops.delete_file(&ctx, path) {
-            if !matches!(&error, crate::engine::errors::EngineError::NotFound(_)) {
-              return Err(format!("Failed to delete synced file '{}' from peer {}: {}", path, peer.node_id, error));
-            }
-          }
-          operations_count += 1;
-        }
-      }
-    }
-
-    // Process symlink additions and modifications
-    for category in ["symlinks_added", "symlinks_modified"] {
-      if let Some(entries) = changes[category].as_array() {
-        for entry in entries {
-          let path = entry["path"].as_str().unwrap_or("");
-          let target = entry["target"].as_str().unwrap_or("");
-          if !path.is_empty() && !target.is_empty() {
-            ops
-              .store_symlink(&ctx, path, target)
-              .map_err(|e| format!("Failed to store synced symlink '{}' from peer {}: {}", path, peer.node_id, e))?;
-            operations_count += 1;
-          }
-        }
-      }
-    }
-
-    // Process symlink deletions
-    if let Some(deleted) = changes["symlinks_deleted"].as_array() {
-      for entry in deleted {
-        let path = entry["path"].as_str().unwrap_or("");
-        if !path.is_empty() {
-          if let Err(error) = ops.delete_symlink(&ctx, path) {
-            if !matches!(&error, crate::engine::errors::EngineError::NotFound(_)) {
-              return Err(format!("Failed to delete synced symlink '{}' from peer {}: {}", path, peer.node_id, error));
-            }
-          }
-          operations_count += 1;
-        }
-      }
-    }
-
-    // Update sync state
-    let peer_root_bytes = hex::decode(&peer_root_hex)
-      .map_err(|e| format!("Peer {} returned unparseable root hash '{}': {}", peer.node_id, peer_root_hex, e))?;
-    self.save_sync_state_hex(peer.node_id, &peer_root_hex)?;
-    self.peer_manager.update_sync_state(peer.node_id, peer_root_bytes, chrono::Utc::now().timestamp_millis() as u64);
+    // The peer checkpoint is the final acknowledgement. It is never advanced
+    // until the complete remote shape, chunk closure, and namespace receipt
+    // have succeeded.
+    self.save_sync_state_hex(peer.node_id, &peer_root_bytes, &new_local_head)?;
+    self.peer_manager.update_sync_state(peer.node_id, new_local_head, chrono::Utc::now().timestamp_millis() as u64);
 
     Ok(SyncCycleResult { changes_applied: operations_count > 0, conflicts_detected: conflicts_count, operations_applied: operations_count })
   }
 
+  fn compute_local_diff_for_remote_sync(
+    &self,
+    local_head: &[u8],
+    sync_state: Option<&PeerSyncState>,
+    legacy_remote_base: Option<&[u8]>,
+    sync_paths: Option<&[String]>,
+    memory: &mut OperationMemoryBudget,
+  ) -> Result<crate::engine::tree_walker::TreeDiff, String> {
+    let operation = SystemFamilyTransferOperationV1::PeerReplication;
+    let local_tree = walk_version_tree_for_transfer_with_budget(&self.engine, local_head, operation, true, memory)
+      .map_err(|error| format!("Failed to walk local tree for remote sync: {error}"))?;
+    let mut local_diff = if let Some(encoded) = sync_state.and_then(|state| state.last_local_root_hash.as_deref()) {
+      let local_base = decode_persisted_peer_hash(&self.engine, encoded, "local merge base")?;
+      let base_tree = walk_version_tree_for_transfer_with_budget(&self.engine, &local_base, operation, false, memory)
+        .map_err(|error| format!("Failed to walk persisted local merge base: {error}"))?;
+      diff_trees_with_budget(&base_tree, &local_tree, memory).map_err(|error| format!("Failed to diff local merge state: {error}"))?
+    } else if sync_state.is_none() {
+      diff_trees_with_budget(&VersionTree::new(), &local_tree, memory)
+        .map_err(|error| format!("Failed to diff initial local merge state: {error}"))?
+    } else if let Some(candidate) = legacy_remote_base {
+      match self.engine.get_entry_verified(candidate).map_err(|error| format!("Failed to inspect legacy peer merge base: {error}"))? {
+        Some((header, stored_key, _)) if stored_key == candidate && header.entry_type == crate::engine::EntryType::DirectoryIndex => {
+          let base_tree = walk_version_tree_for_transfer_with_budget(&self.engine, candidate, operation, false, memory)
+            .map_err(|error| format!("Failed to walk legacy peer merge base: {error}"))?;
+          diff_trees_with_budget(&base_tree, &local_tree, memory)
+            .map_err(|error| format!("Failed to diff legacy local merge state: {error}"))?
+        }
+        Some((header, _, _)) => {
+          return Err(format!("Legacy peer merge base resolves to {:?}, expected DirectoryIndex", header.entry_type));
+        }
+        None => crate::engine::tree_walker::TreeDiff {
+          added: std::collections::HashMap::new(),
+          modified: std::collections::HashMap::new(),
+          deleted: Vec::new(),
+          new_chunks: HashSet::new(),
+          changed_directories: std::collections::HashMap::new(),
+          symlinks_added: std::collections::HashMap::new(),
+          symlinks_modified: std::collections::HashMap::new(),
+          symlinks_deleted: Vec::new(),
+        },
+      }
+    } else {
+      crate::engine::tree_walker::TreeDiff {
+        added: std::collections::HashMap::new(),
+        modified: std::collections::HashMap::new(),
+        deleted: Vec::new(),
+        new_chunks: HashSet::new(),
+        changed_directories: std::collections::HashMap::new(),
+        symlinks_added: std::collections::HashMap::new(),
+        symlinks_modified: std::collections::HashMap::new(),
+        symlinks_deleted: Vec::new(),
+      }
+    };
+    if let Some(paths) = sync_paths {
+      local_diff = filter_tree_diff_by_paths(local_diff, paths);
+    }
+    Ok(local_diff)
+  }
+
+  async fn fetch_and_store_remote_chunks(
+    &self,
+    client: &reqwest::Client,
+    peer: &PeerConnection,
+    sync_token: Option<&str>,
+    required_chunks: &[Vec<u8>],
+  ) -> Result<(), String> {
+    let mut missing = Vec::new();
+    for hash in required_chunks {
+      let exists = crate::engine::directory_ops::validate_existing_chunk_locator(&self.engine, "remote sync", hash)
+        .map_err(|error| format!("Failed to validate local chunk {}: {error}", hex::encode(hash)))?;
+      if !exists {
+        missing.push(hash.clone());
+      }
+    }
+
+    for requested in missing.chunks(REMOTE_CHUNK_REQUEST_BATCH) {
+      let requested_hex = requested.iter().map(hex::encode).collect::<Vec<_>>();
+      let mut request = client.post(format!("{}/sync/chunks", peer.address));
+      if let Some(token) = sync_token {
+        request = request.bearer_auth(token);
+      }
+      let response = request
+        .json(&serde_json::json!({ "hashes": requested_hex }))
+        .send()
+        .await
+        .map_err(|error| format!("Failed to fetch chunks from peer {}: {error}", peer.node_id))?;
+      if !response.status().is_success() {
+        let status = response.status();
+        let BoundedRemoteText { value: body, _memory: _error_response_memory } =
+          read_bounded_remote_text(&self.engine, response, REMOTE_SYNC_ERROR_MAX_BODY_BYTES, "remote sync chunks error response")
+            .await
+            .map_err(|error| {
+              format!("Peer {} chunks endpoint returned {status}, but its error response could not be read: {error}", peer.node_id)
+            })?;
+        return Err(format!("Peer {} chunks endpoint returned {status}: {body}", peer.node_id));
+      }
+      let BoundedRemoteJson { value: response, _memory: _chunk_response_memory } = read_bounded_remote_json::<RemoteChunksResponse>(
+        &self.engine,
+        response,
+        REMOTE_SYNC_CHUNKS_MAX_BODY_BYTES,
+        "remote sync chunks response",
+      )
+      .await
+      .map_err(|error| format!("Failed to parse chunks response from peer {}: {error}", peer.node_id))?;
+      let chunks = validate_remote_chunk_response(&self.engine, requested, response)
+        .map_err(|error| format!("Peer {} returned invalid chunk state: {error}", peer.node_id))?;
+      crate::engine::sync_api::apply_sync_chunks(&self.engine, &chunks)
+        .map_err(|error| format!("Failed to store validated chunks from peer {}: {error}", peer.node_id))?;
+    }
+    Ok(())
+  }
+
   /// Save sync state from a hex-encoded root hash string.
-  fn save_sync_state_hex(&self, peer_node_id: u64, root_hash_hex: &str) -> Result<(), String> {
+  fn save_sync_state_hex(&self, peer_node_id: u64, remote_root_hash: &[u8], local_root_hash: &[u8]) -> Result<(), String> {
     let state = PeerSyncState {
-      last_synced_root_hash: Some(root_hash_hex.to_string()),
+      last_synced_root_hash: Some(hex::encode(remote_root_hash)),
+      last_local_root_hash: Some(hex::encode(local_root_hash)),
       last_sync_at: Some(chrono::Utc::now().timestamp_millis() as u64),
     };
     let ctx = RequestContext::system();
@@ -595,20 +707,406 @@ impl SyncEngine {
   }
 }
 
-fn validate_remote_peer_diff_paths(engine: &StorageEngine, changes: &serde_json::Value) -> Result<(), crate::engine::errors::EngineError> {
-  let resolver = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
-  for category in ["files_added", "files_modified", "files_deleted", "symlinks_added", "symlinks_modified", "symlinks_deleted"] {
-    let Some(entries) = changes[category].as_array() else {
-      continue;
-    };
-    for entry in entries {
-      let Some(path) = entry["path"].as_str().filter(|path| !path.is_empty()) else {
-        continue;
+struct ValidatedRemoteSyncDiff {
+  root_hash: Vec<u8>,
+  files: Vec<ValidatedRemoteFile>,
+  file_deletions: Vec<String>,
+  symlinks: Vec<ValidatedRemoteSymlink>,
+  symlink_deletions: Vec<String>,
+  required_chunks: Vec<Vec<u8>>,
+}
+
+struct ValidatedRemoteFile {
+  path: String,
+  hash: Vec<u8>,
+  content_hash: Option<Vec<u8>>,
+  size: u64,
+  content_type: Option<String>,
+  created_at: Option<i64>,
+  updated_at: Option<i64>,
+  chunk_hashes: Vec<Vec<u8>>,
+  modified: bool,
+}
+
+struct ValidatedRemoteSymlink {
+  path: String,
+  hash: Vec<u8>,
+  target: String,
+  created_at: Option<i64>,
+  updated_at: Option<i64>,
+  modified: bool,
+}
+
+impl ValidatedRemoteSyncDiff {
+  fn into_tree_diff(self, engine: &StorageEngine) -> crate::engine::errors::EngineResult<(Vec<u8>, crate::engine::tree_walker::TreeDiff)> {
+    let mut added = std::collections::HashMap::new();
+    let mut modified = std::collections::HashMap::new();
+    let mut new_chunks = HashSet::new();
+    for file in self.files {
+      let mut record = crate::engine::file_record::FileRecord::new(file.path.clone(), file.content_type, file.size, file.chunk_hashes);
+      if let Some(created_at) = file.created_at {
+        record.created_at = created_at;
+      }
+      if let Some(updated_at) = file.updated_at {
+        record.updated_at = updated_at;
+      }
+      record.content_hash = match file.content_hash {
+        Some(content_hash) => content_hash,
+        None => crate::engine::directory_ops::whole_file_content_hash_from_chunks(engine, &record.chunk_hashes)?,
       };
-      resolver.require_transfer_leaf_path(path, SystemFamilyTransferOperationV1::PeerReplication)?;
+      new_chunks.extend(record.chunk_hashes.iter().cloned());
+      if file.modified {
+        modified.insert(file.path, (file.hash, record));
+      } else {
+        added.insert(file.path, (file.hash, record));
+      }
+    }
+    let mut symlinks_added = std::collections::HashMap::new();
+    let mut symlinks_modified = std::collections::HashMap::new();
+    for symlink in self.symlinks {
+      let mut record = crate::engine::symlink_record::SymlinkRecord::new(symlink.path.clone(), symlink.target);
+      if let Some(created_at) = symlink.created_at {
+        record.created_at = created_at;
+      }
+      if let Some(updated_at) = symlink.updated_at {
+        record.updated_at = updated_at;
+      }
+      if symlink.modified {
+        symlinks_modified.insert(symlink.path, (symlink.hash, record));
+      } else {
+        symlinks_added.insert(symlink.path, (symlink.hash, record));
+      }
+    }
+    Ok((
+      self.root_hash,
+      crate::engine::tree_walker::TreeDiff {
+        added,
+        modified,
+        deleted: self.file_deletions,
+        new_chunks,
+        changed_directories: std::collections::HashMap::new(),
+        symlinks_added,
+        symlinks_modified,
+        symlinks_deleted: self.symlink_deletions,
+      },
+    ))
+  }
+}
+
+fn validate_remote_sync_diff(
+  engine: &StorageEngine,
+  response: RemoteSyncDiffResponse,
+) -> Result<ValidatedRemoteSyncDiff, crate::engine::errors::EngineError> {
+  const MAX_REMOTE_OPERATIONS: usize = 100_000;
+  const MAX_REMOTE_CHUNK_REFERENCES: usize = 1_000_000;
+
+  let hash_length = engine.hash_algo().hash_length();
+  let root_hash = decode_remote_hash(&response.root_hash, hash_length, "root_hash")?;
+  let RemoteSyncChanges { files_added, files_modified, files_deleted, symlinks_added, symlinks_modified, symlinks_deleted } =
+    response.changes;
+  let operation_count = files_added
+    .len()
+    .checked_add(files_modified.len())
+    .and_then(|count| count.checked_add(files_deleted.len()))
+    .and_then(|count| count.checked_add(symlinks_added.len()))
+    .and_then(|count| count.checked_add(symlinks_modified.len()))
+    .and_then(|count| count.checked_add(symlinks_deleted.len()))
+    .ok_or_else(|| crate::engine::errors::EngineError::ResourceExhausted("remote sync operation count overflow".to_string()))?;
+  if operation_count > MAX_REMOTE_OPERATIONS {
+    return Err(crate::engine::errors::EngineError::ResourceExhausted(format!(
+      "remote sync contains {operation_count} operations, maximum is {MAX_REMOTE_OPERATIONS}"
+    )));
+  }
+  let mut file_entries = Vec::with_capacity(files_added.len().saturating_add(files_modified.len()));
+  file_entries.extend(files_added.into_iter().map(|entry| (entry, false)));
+  file_entries.extend(files_modified.into_iter().map(|entry| (entry, true)));
+  let mut symlink_entries = Vec::with_capacity(symlinks_added.len().saturating_add(symlinks_modified.len()));
+  symlink_entries.extend(symlinks_added.into_iter().map(|entry| (entry, false)));
+  symlink_entries.extend(symlinks_modified.into_iter().map(|entry| (entry, true)));
+
+  let resolver = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
+  let mut seen_paths = HashSet::with_capacity(operation_count);
+  let mut required_chunks = BTreeSet::new();
+  let mut chunk_references = 0usize;
+  let mut files = Vec::with_capacity(file_entries.len());
+  for (entry, modified) in file_entries {
+    validate_remote_sync_path(&resolver, &mut seen_paths, &entry.path)?;
+    let hash = decode_remote_hash(&entry.hash, hash_length, "file hash")?;
+    let content_hash =
+      entry.content_hash.as_deref().map(|encoded| decode_remote_hash(encoded, hash_length, "file content_hash")).transpose()?;
+    if entry.content_type.as_ref().is_some_and(|content_type| content_type.len() > u16::MAX as usize) {
+      return Err(crate::engine::errors::EngineError::InvalidInput(format!("remote sync content type is too long for '{}'", entry.path)));
+    }
+    chunk_references = chunk_references
+      .checked_add(entry.chunk_hashes.len())
+      .ok_or_else(|| crate::engine::errors::EngineError::ResourceExhausted("remote sync chunk reference count overflow".to_string()))?;
+    if chunk_references > MAX_REMOTE_CHUNK_REFERENCES {
+      return Err(crate::engine::errors::EngineError::ResourceExhausted(format!(
+        "remote sync contains more than {MAX_REMOTE_CHUNK_REFERENCES} chunk references"
+      )));
+    }
+    let mut chunk_hashes = Vec::with_capacity(entry.chunk_hashes.len());
+    for encoded in entry.chunk_hashes {
+      let hash = decode_remote_hash(&encoded, hash_length, "file chunk hash")?;
+      required_chunks.insert(hash.clone());
+      chunk_hashes.push(hash);
+    }
+    let expected_hash =
+      crate::engine::directory_ops::file_identity_hash(&entry.path, entry.content_type.as_deref(), &chunk_hashes, &engine.hash_algo())?;
+    if hash != expected_hash {
+      return Err(crate::engine::errors::EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("remote sync file '{}' claimed hash does not match its identity", entry.path),
+      });
+    }
+    files.push(ValidatedRemoteFile {
+      path: entry.path,
+      hash,
+      content_hash,
+      size: entry.size,
+      content_type: entry.content_type,
+      created_at: entry.created_at,
+      updated_at: entry.updated_at,
+      chunk_hashes,
+      modified,
+    });
+  }
+
+  let mut file_deletions = Vec::with_capacity(files_deleted.len());
+  for entry in files_deleted {
+    validate_remote_sync_path(&resolver, &mut seen_paths, &entry.path)?;
+    file_deletions.push(entry.path);
+  }
+
+  let mut symlinks = Vec::with_capacity(symlink_entries.len());
+  for (entry, modified) in symlink_entries {
+    validate_remote_sync_path(&resolver, &mut seen_paths, &entry.path)?;
+    let hash = decode_remote_hash(&entry.hash, hash_length, "symlink hash")?;
+    if entry.target.is_empty()
+      || entry.target.len() > u16::MAX as usize
+      || entry.target.bytes().any(|byte| byte < 0x20 || byte == 0x7F)
+      || crate::engine::path_utils::normalize_path(&entry.target) != entry.target
+    {
+      return Err(crate::engine::errors::EngineError::InvalidInput(format!("remote sync symlink '{}' has an invalid target", entry.path)));
+    }
+    let expected_hash = crate::engine::directory_ops::symlink_identity_hash(&entry.path, &entry.target, &engine.hash_algo())?;
+    if hash != expected_hash {
+      return Err(crate::engine::errors::EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("remote sync symlink '{}' claimed hash does not match its identity", entry.path),
+      });
+    }
+    symlinks.push(ValidatedRemoteSymlink {
+      path: entry.path,
+      hash,
+      target: entry.target,
+      created_at: entry.created_at,
+      updated_at: entry.updated_at,
+      modified,
+    });
+  }
+
+  let mut symlink_deletions = Vec::with_capacity(symlinks_deleted.len());
+  for entry in symlinks_deleted {
+    validate_remote_sync_path(&resolver, &mut seen_paths, &entry.path)?;
+    symlink_deletions.push(entry.path);
+  }
+
+  let mut advertised_chunks = BTreeSet::new();
+  for encoded in response.chunk_hashes_needed {
+    let hash = decode_remote_hash(&encoded, hash_length, "chunk_hashes_needed entry")?;
+    if !advertised_chunks.insert(hash) {
+      return Err(crate::engine::errors::EngineError::InvalidInput("remote sync chunk manifest contains a duplicate hash".to_string()));
     }
   }
-  Ok(())
+  if advertised_chunks != required_chunks {
+    return Err(crate::engine::errors::EngineError::InvalidInput(format!(
+      "remote sync chunk manifest is incomplete or contains unrelated hashes: required {}, advertised {}",
+      required_chunks.len(),
+      advertised_chunks.len()
+    )));
+  }
+
+  Ok(ValidatedRemoteSyncDiff {
+    root_hash,
+    files,
+    file_deletions,
+    symlinks,
+    symlink_deletions,
+    required_chunks: required_chunks.into_iter().collect(),
+  })
+}
+
+fn validate_remote_sync_path(
+  resolver: &SystemFamilyPolicyResolver,
+  seen_paths: &mut HashSet<String>,
+  path: &str,
+) -> Result<(), crate::engine::errors::EngineError> {
+  if path.len() > u16::MAX as usize {
+    return Err(crate::engine::errors::EngineError::InvalidInput(format!("remote sync path exceeds 65535 bytes: {}", path.len())));
+  }
+  if path.bytes().any(|byte| byte < 0x20 || byte == 0x7F) {
+    return Err(crate::engine::errors::EngineError::InvalidInput(format!("remote sync path {path:?} contains control characters")));
+  }
+  if path.is_empty() || path == "/" || crate::engine::path_utils::normalize_path(path) != path {
+    return Err(crate::engine::errors::EngineError::InvalidInput(format!("remote sync path '{path}' is not a canonical leaf path")));
+  }
+  if !seen_paths.insert(path.to_string()) {
+    return Err(crate::engine::errors::EngineError::InvalidInput(format!("remote sync repeats mutation path '{path}'")));
+  }
+  resolver.require_transfer_leaf_path(path, SystemFamilyTransferOperationV1::PeerReplication)
+}
+
+fn decode_remote_hash(encoded: &str, hash_length: usize, field: &str) -> Result<Vec<u8>, crate::engine::errors::EngineError> {
+  let hash = hex::decode(encoded)
+    .map_err(|error| crate::engine::errors::EngineError::InvalidInput(format!("remote sync {field} is not valid hex: {error}")))?;
+  if hash.len() != hash_length {
+    return Err(crate::engine::errors::EngineError::InvalidInput(format!(
+      "remote sync {field} is {} bytes, expected {hash_length}",
+      hash.len()
+    )));
+  }
+  Ok(hash)
+}
+
+fn decode_persisted_peer_hash(engine: &StorageEngine, encoded: &str, field: &str) -> Result<Vec<u8>, String> {
+  let hash = hex::decode(encoded).map_err(|error| format!("Persisted peer {field} is not valid hex: {error}"))?;
+  let expected = engine.hash_algo().hash_length();
+  if hash.len() != expected {
+    return Err(format!("Persisted peer {field} is {} bytes, expected {expected}", hash.len()));
+  }
+  Ok(hash)
+}
+
+fn validate_remote_chunk_response(
+  engine: &StorageEngine,
+  requested: &[Vec<u8>],
+  response: RemoteChunksResponse,
+) -> Result<Vec<crate::engine::sync_api::ChunkData>, crate::engine::errors::EngineError> {
+  let expected = requested.iter().cloned().collect::<BTreeSet<_>>();
+  if expected.len() != requested.len() {
+    return Err(crate::engine::errors::EngineError::InvalidInput("local remote-chunk request contains duplicate hashes".to_string()));
+  }
+  if response.chunks.len() != expected.len() {
+    return Err(crate::engine::errors::EngineError::InvalidInput(format!(
+      "remote chunk response returned {} chunks for {} requested hashes",
+      response.chunks.len(),
+      expected.len()
+    )));
+  }
+
+  let hash_length = engine.hash_algo().hash_length();
+  let mut seen = BTreeSet::new();
+  let mut decoded_total = 0u64;
+  let mut chunks = Vec::with_capacity(response.chunks.len());
+  for chunk in response.chunks {
+    let hash = decode_remote_hash(&chunk.hash, hash_length, "chunk response hash")?;
+    if !expected.contains(&hash) {
+      return Err(crate::engine::errors::EngineError::InvalidInput(format!(
+        "remote chunk response contains unrequested hash {}",
+        chunk.hash
+      )));
+    }
+    if !seen.insert(hash.clone()) {
+      return Err(crate::engine::errors::EngineError::InvalidInput(format!("remote chunk response repeats hash {}", chunk.hash)));
+    }
+    decoded_total = decoded_total
+      .checked_add(chunk.size)
+      .ok_or_else(|| crate::engine::errors::EngineError::ResourceExhausted("remote chunk response size overflow".to_string()))?;
+    if decoded_total > REMOTE_SYNC_CHUNKS_MAX_DECODED_BYTES {
+      return Err(crate::engine::errors::EngineError::ResourceExhausted(format!(
+        "remote chunk response exceeds {REMOTE_SYNC_CHUNKS_MAX_DECODED_BYTES} decoded bytes"
+      )));
+    }
+    let data = base64::engine::general_purpose::STANDARD.decode(&chunk.data).map_err(|error| {
+      crate::engine::errors::EngineError::InvalidInput(format!("remote chunk {} has invalid base64: {error}", chunk.hash))
+    })?;
+    if data.len() as u64 != chunk.size {
+      return Err(crate::engine::errors::EngineError::InvalidInput(format!(
+        "remote chunk {} declares {} bytes but decodes to {}",
+        chunk.hash,
+        chunk.size,
+        data.len()
+      )));
+    }
+    if crate::engine::directory_ops::chunk_content_hash(&data, &engine.hash_algo())? != hash {
+      return Err(crate::engine::errors::EngineError::InvalidInput(format!(
+        "remote chunk {} payload does not match its claimed hash",
+        chunk.hash
+      )));
+    }
+    chunks.push(crate::engine::sync_api::ChunkData { hash, data });
+  }
+  if seen != expected {
+    return Err(crate::engine::errors::EngineError::InvalidInput("remote chunk response omitted a requested hash".to_string()));
+  }
+  Ok(chunks)
+}
+
+struct BoundedRemoteJson<T> {
+  value: T,
+  _memory: OperationMemoryBudget,
+}
+
+struct BoundedRemoteText {
+  value: String,
+  _memory: OperationMemoryBudget,
+}
+
+async fn read_bounded_remote_json<T: serde::de::DeserializeOwned>(
+  engine: &StorageEngine,
+  response: reqwest::Response,
+  max_body_bytes: u64,
+  operation: &'static str,
+) -> Result<BoundedRemoteJson<T>, String> {
+  let (body, mut memory) = read_bounded_remote_body(engine, response, max_body_bytes, operation).await?;
+  let parsed_envelope_bytes = u64::try_from(body.len())
+    .ok()
+    .and_then(|bytes| bytes.checked_mul(3))
+    .ok_or_else(|| format!("{operation} parsed-envelope estimate overflow"))?;
+  memory.reserve(parsed_envelope_bytes, "parsed response envelope admission failed").map_err(|error| error.to_string())?;
+  let value = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+  Ok(BoundedRemoteJson { value, _memory: memory })
+}
+
+async fn read_bounded_remote_text(
+  engine: &StorageEngine,
+  response: reqwest::Response,
+  max_body_bytes: u64,
+  operation: &'static str,
+) -> Result<BoundedRemoteText, String> {
+  let (body, mut memory) = read_bounded_remote_body(engine, response, max_body_bytes, operation).await?;
+  let text_envelope_bytes = u64::try_from(body.len())
+    .ok()
+    .and_then(|bytes| bytes.checked_mul(2))
+    .ok_or_else(|| format!("{operation} text-envelope estimate overflow"))?;
+  memory.reserve(text_envelope_bytes, "text response envelope admission failed").map_err(|error| error.to_string())?;
+  let value = String::from_utf8_lossy(&body).into_owned();
+  Ok(BoundedRemoteText { value, _memory: memory })
+}
+
+async fn read_bounded_remote_body(
+  engine: &StorageEngine,
+  mut response: reqwest::Response,
+  max_body_bytes: u64,
+  operation: &'static str,
+) -> Result<(Vec<u8>, OperationMemoryBudget), String> {
+  if response.content_length().is_some_and(|content_length| content_length > max_body_bytes) {
+    return Err(format!("{operation} exceeds {max_body_bytes} bytes"));
+  }
+
+  let mut memory = OperationMemoryBudget::new(engine, operation, MemoryOwner::StreamingRead, AdmissionClass::Workload, 0, None)
+    .map_err(|error| error.to_string())?;
+  let mut body = Vec::new();
+  while let Some(chunk) = response.chunk().await.map_err(|error| format!("failed while reading {operation}: {error}"))? {
+    let new_length = body.len().checked_add(chunk.len()).ok_or_else(|| format!("{operation} length overflow"))?;
+    if new_length as u64 > max_body_bytes {
+      return Err(format!("{operation} exceeds {max_body_bytes} bytes"));
+    }
+    memory.reserve(chunk.len() as u64, "response body growth").map_err(|error| error.to_string())?;
+    body.extend_from_slice(&chunk);
+  }
+  Ok((body, memory))
 }
 
 /// Filter a TreeDiff to only include entries matching the given glob patterns.
@@ -758,4 +1256,20 @@ pub fn spawn_sync_loop(
   })
 }
 
-crate::impl_json_versioned_v0!(PeerSyncState);
+impl crate::engine::schema_version::JsonVersioned for PeerSyncState {
+  const SCHEMA_VERSION: u8 = 1;
+
+  fn serialize_versioned(&self) -> Vec<u8> {
+    crate::engine::schema_version::write_json_with_version(self, Self::SCHEMA_VERSION)
+      .expect("PeerSyncState serialization should never fail")
+  }
+
+  fn deserialize_versioned(data: &[u8]) -> crate::engine::errors::EngineResult<Self> {
+    let version = crate::engine::schema_version::read_json_version(data)?;
+    match version {
+      0 | 1 => serde_json::from_slice(data)
+        .map_err(|error| crate::engine::errors::EngineError::JsonParseError(format!("Failed to deserialize PeerSyncState: {error}"))),
+      _ => Err(crate::engine::errors::EngineError::InvalidEntryVersion(version)),
+    }
+  }
+}

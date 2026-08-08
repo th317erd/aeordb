@@ -106,12 +106,12 @@ is durable:
 |-------|------|-------------|
 | `operation_id` | string | Unique UUID for the logical namespace mutation |
 | `publication_sequence` | integer | Exact durability sequence acknowledged by the engine |
-| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, `rename`, `restore`, `promote`, `import`, or `system_write` |
+| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, `rename`, `restore`, `promote`, `import`, `sync_apply`, or `system_write` |
 
 AeorDB is migrating producers to this shared acknowledgement path in stages.
 File, directory, symlink, blob/buffered batch, JSON merge, copy, rename,
-snapshot/fork, promoted import, and explicit HEAD-promotion producers now use
-it. Sync, other system/plugin, and maintenance producers may omit these three
+snapshot/fork, promoted import, explicit HEAD-promotion, and sync-apply
+producers now use it. Other system/plugin and maintenance producers may omit these three
 fields until their producer wave is converted. An import that does not change
 HEAD, including `promote=false` and same-root no-ops, has no root-mutation
 acknowledgement to attach. Clients must therefore treat the fields as optional
@@ -123,6 +123,12 @@ rename preserve separate `entries_deleted` and `entries_created` events, but
 both events carry the same `operation_id`, `publication_sequence`, and
 `mutation_kind: "rename"`. Batch, merge, and copy operations emit one aggregate
 `entries_created` event after their shared hard acknowledgement.
+
+A sync receipt can emit aggregate `entries_created` and `entries_deleted`
+events. Both carry the same `operation_id`, `publication_sequence`, and
+`mutation_kind: "sync_apply"`, and are emitted only after the complete bounded
+merge and any required local conflict evidence are durable. A no-op retry emits
+no namespace acknowledgement event.
 
 Fork promotion preserves separate `versions_promoted` and `versions_deleted`
 events for compatibility. Both describe one atomic HEAD transition/fork

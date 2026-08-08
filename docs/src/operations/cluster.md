@@ -106,16 +106,30 @@ curl http://localhost:6830/sync/conflicts \
 ### Resolving Conflicts
 
 ```bash
-# Pick the auto-winner (default — higher timestamp)
-curl -X POST http://localhost:6830/sync/conflicts/path/to/file \
-  -H "Authorization: Bearer $TOKEN"
+# Pick the auto-winner (normally the higher virtual timestamp)
+curl -X POST http://localhost:6830/sync/resolve/path/to/file \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pick": "winner"}'
 
 # Pick a specific version
-curl -X POST http://localhost:6830/sync/conflicts/path/to/file \
+curl -X POST http://localhost:6830/sync/resolve/path/to/file \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"pick": "loser"}'
+
+# Accept the current auto-winner and only remove the retained evidence
+curl -X POST http://localhost:6830/sync/dismiss/path/to/file \
+  -H "Authorization: Bearer $TOKEN"
 ```
+
+The selected version may be a file, symlink, or deletion. AeorDB verifies its
+exact immutable identity and, for files, every referenced chunk and whole-file
+hash before publication. The chosen mutation and deletion of the local
+`/.aeordb-conflicts/.../.meta` evidence are one acknowledged operation. Missing
+or corrupt selected data, malformed evidence, and cleanup failure are surfaced;
+they are not converted into successful resolution. Conflict evidence is local
+authority and remains omitted from peer replication.
 
 ## Selective Sync
 
@@ -170,6 +184,37 @@ curl -X POST http://localhost:6830/sync/chunks \
   -H "Content-Type: application/json" \
   -d '{"hashes": ["abc123...", "def456..."]}'
 ```
+
+### Transport And Apply Contract
+
+`POST /sync/diff` returns file identity hashes, optional whole-file
+`content_hash` values for migrated records, original `created_at` and
+`updated_at` timestamps, symlink identities, deletions, and the exact set of
+chunks required by the filtered response. The built-in receiver rejects
+unknown response fields, noncanonical or duplicate paths, invalid hash widths,
+identity mismatches, duplicate or unrelated chunk-manifest entries, more than
+100,000 namespace operations, or more than 1,000,000 file-to-chunk references.
+Its diff response reader is bounded to 128 MiB.
+
+`POST /sync/chunks` accepts at most 10,000 hashes and caps its serialized
+response at 512 MiB. It builds that response in an engine-local temporary file
+and streams memory-admitted 64 KiB frames instead of retaining a second full
+base64/JSON response in memory. Missing, malformed, and inaccessible requested
+hashes are omitted for wire compatibility, but storage corruption or an
+operational read failure fails the request. The built-in peer receiver requests
+at most 256 hashes at a time, accepts at most 96 MiB of JSON and 64 MiB of
+decoded bytes per response, and requires exactly one valid response entry for
+every hash it requested. Memory pressure, shutdown, or cancellation returns a
+retryable `503`; oversized requests/responses must be split and retried.
+
+Chunk publication is content-addressed and may precede namespace authority.
+The namespace merge itself is one memory-admitted hard receipt across files,
+symlinks, deletions, parent directories, and local conflict evidence. A failed
+receipt publishes none of those changes and does not advance the peer
+checkpoint. After success, AeorDB stores both the acknowledged remote root and
+the local post-merge root. Those distinct roots prevent local-only changes from
+being reclassified as remote changes on the next three-way merge. Checkpoint
+save failure is retryable: replaying the same response is idempotent.
 
 ### Scoped API Keys for Sync
 

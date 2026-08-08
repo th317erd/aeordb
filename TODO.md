@@ -365,7 +365,7 @@
       - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 2 handoff.
     - [ ] P2e Wave 3: converge version, backup, sync, conflict, and whole-HEAD transition producers on one namespace mutation and locator authority.
       - [x] Map snapshot restore, fork promotion, version restore, backup import/promote, sync receive/apply, conflict resolution, raw chunk staging, HEAD publication, counters, events, and checkpoint effects.
-      - [ ] Add failing operation-ledger, atomicity, malformed/corrupt input, missing chunk, delete-error, acknowledgement, fault, restart, memory-pressure, and architecture tests before production edits.
+      - [x] Add failing operation-ledger, atomicity, malformed/corrupt input, missing chunk, delete-error, acknowledgement, fault, restart, memory-pressure, and architecture tests before production edits.
       - [x] Add one bounded whole-HEAD transition plan with explicit source identity and reconciliation evidence; do not materialize an unbounded per-file transaction.
       - [x] Route snapshot restore, fork promotion/abandonment, and version restore through one hard acknowledgement with post-commit fanout only.
       - [x] Route active-database backup import and HEAD promotion through the shared authority while preserving standalone artifact construction as a separate destination writer.
@@ -385,12 +385,26 @@
         - [x] Update backup, admin API, SSE, and storage-engine documentation for the new authority and acknowledgement behavior.
         - [x] Preserve fail-closed root-selected FileRecord validation and return HTTP 400 for caller-supplied promotion hashes that resolve to the wrong entry type.
         - [x] Complete broad, restart, documentation, contract, and disposable live-database proof before landing the backup import unit.
-      - [ ] Route embedded and HTTP sync chunk receive/apply through typed chunk validation and one shared merge authority; reject omitted, malformed, wrong-type, hash-mismatched, or incomplete remote state before checkpoint advancement.
-      - [ ] Propagate every sync delete failure except `NotFound`; remove delete-error squelching and prove retries cannot acknowledge partial apply.
-      - [ ] Make conflict resolution fail closed when the chosen FileRecord or any chunk is missing/corrupt, and make conflict cleanup errors observable after authoritative resolution.
-      - [ ] Remove Wave 3 direct mutable locators, direct HEAD writers, premature events/checkpoints, and duplicate restore/import/sync authority paths with source architecture gates.
-      - [ ] Update version, backup, sync, conflict, SSE, and operations documentation for atomic transition and acknowledgement behavior.
-      - [ ] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 3 handoff.
+      - [x] Route embedded and HTTP sync chunk receive/apply through typed chunk validation and one shared merge authority; reject omitted, malformed, wrong-type, hash-mismatched, or incomplete remote state before checkpoint advancement.
+        - [x] Freeze strict typed sync diff/chunk response decoding, bounded collections, exact hash widths, exact required-chunk closure, duplicate/extra rejection, decoded-size proof, and content-hash proof.
+        - [x] Add one memory-admitted `DirectoryOps` sync-merge batch for files, symlinks, deletions, conflict metadata, parent closure, counters, indexes, and SSE acknowledgement; fully prevalidate and stage immutable chunks ahead of authority as recoverable unreferenced content.
+        - [x] Reject a sync/conflict nested write when an ancestor is an authoritative file or symlink; never replace the ancestor with a directory and orphan acknowledged data.
+        - [x] Make embedded and HTTP orchestrators call the same merge batch and advance peer state only after its hard acknowledgement and required conflict evidence.
+        - [x] Make `apply_sync_chunks` reject malformed or colliding entries and publish only fully prevalidated chunk batches.
+      - [x] Propagate every sync delete failure except `NotFound`; remove delete-error squelching and prove retries cannot acknowledge partial apply.
+      - [x] Make conflict resolution fail closed when the chosen FileRecord or any chunk is missing/corrupt, and make conflict cleanup errors observable after authoritative resolution.
+        - [x] Resolve the selected immutable FileRecord and all chunks exactly before the chosen namespace write; reject wrong type, wrong key, wrong path, size/content mismatch, and missing data.
+        - [x] Treat conflict metadata deletion as part of the acknowledged resolution/dismissal result; never return success while cleanup failed.
+      - [x] Remove Wave 3 direct mutable locators, direct HEAD writers, premature events/checkpoints, and duplicate restore/import/sync authority paths with source architecture gates.
+      - [x] Update version, backup, sync, conflict, SSE, and operations documentation for atomic transition and acknowledgement behavior.
+      - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 3 handoff.
+    - [ ] P2e Wave 4: converge system and plugin producers on one namespace mutation and locator authority.
+      - [ ] Prevent detached portable plugin state from producing the same concurrent-create conflict on every peer-sync cycle after checkpoints advance.
+      - [ ] Convert users, groups, keys, permissions, shares, config, plugins, peers, conflicts, tasks, cron, and ControlStore adapters.
+      - [ ] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
+    - [ ] P2e Wave 5: converge maintenance and repair producers on one namespace mutation and locator authority.
+      - [ ] Convert reindex metadata resave, repair, cleanup, GC follow-up, import, and migration source capture.
+      - [ ] Preserve exact partial and corrupt outcomes instead of returning empty success.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

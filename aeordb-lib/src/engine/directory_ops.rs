@@ -13,6 +13,7 @@ use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
+use crate::engine::merge::MergeOp;
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::namespace_mutation::{
   NamespaceMutationAcknowledgement, NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind,
@@ -53,6 +54,14 @@ struct CurrentEntryReference {
   hash: Vec<u8>,
   entry_type: EntryType,
   root_selected: bool,
+}
+
+/// Immutable remote version retained solely so acknowledged conflict evidence
+/// can be resolved later. These records never publish a path locator or child.
+#[derive(Clone, Debug)]
+pub(crate) enum SyncImmutableVersion {
+  File { identity_hash: Vec<u8>, record: FileRecord },
+  Symlink { identity_hash: Vec<u8>, record: SymlinkRecord },
 }
 
 /// Compute the domain-prefixed hash for a file path.
@@ -311,6 +320,88 @@ fn validate_existing_file_chunks(engine: &StorageEngine, path: &str, chunk_hashe
   Ok(())
 }
 
+fn validate_sync_file_record(engine: &StorageEngine, claimed_hash: &[u8], record: &FileRecord) -> EngineResult<()> {
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  if claimed_hash.len() != hash_length {
+    return Err(EngineError::InvalidInput(format!(
+      "sync FileRecord hash length {} does not match expected length {hash_length}",
+      claimed_hash.len()
+    )));
+  }
+  if normalize_path(&record.path) != record.path {
+    return Err(EngineError::InvalidInput(format!("sync FileRecord path '{}' is not canonical", record.path)));
+  }
+
+  let mut hasher = algorithm.incremental_hasher()?;
+  let mut total_size = 0u64;
+  for chunk_hash in &record.chunk_hashes {
+    let chunk = match read_chunk_reserved(engine, chunk_hash, false) {
+      Ok(chunk) => chunk,
+      Err(EngineError::NotFound(_)) => {
+        return Err(EngineError::NotFound(format!("Missing chunk during sync merge for '{}': {}", record.path, hex::encode(chunk_hash))))
+      }
+      Err(error) => return Err(error),
+    };
+    if chunk_content_hash(chunk.as_ref(), &algorithm)? != *chunk_hash {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("sync FileRecord '{}' references a chunk stored under a noncanonical key", record.path),
+      });
+    }
+    total_size = total_size
+      .checked_add(chunk.len() as u64)
+      .ok_or_else(|| EngineError::ResourceExhausted("sync FileRecord size overflow".to_string()))?;
+    hasher.update(chunk.as_ref());
+  }
+  if total_size != record.total_size {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("sync FileRecord '{}' declares {} bytes but its chunks contain {total_size}", record.path, record.total_size),
+    });
+  }
+  let computed_content_hash = hasher.finalize();
+  if !record.content_hash.is_empty() && record.content_hash != computed_content_hash {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("sync FileRecord '{}' whole-file hash does not match its chunks", record.path),
+    });
+  }
+
+  let identity_hash = file_identity_hash(&record.path, record.content_type.as_deref(), &record.chunk_hashes, &algorithm)?;
+  let mut canonical_record = record.clone();
+  canonical_record.content_hash = computed_content_hash;
+  let serialized_hash = file_content_hash(&canonical_record.serialize(hash_length)?, &algorithm)?;
+  if claimed_hash != identity_hash && claimed_hash != serialized_hash {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("sync FileRecord '{}' claimed hash is neither its identity nor serialized-content key", record.path),
+    });
+  }
+  Ok(())
+}
+
+fn validate_sync_symlink(algorithm: &HashAlgorithm, hash_length: usize, claimed_hash: &[u8], record: &SymlinkRecord) -> EngineResult<()> {
+  if claimed_hash.len() != hash_length {
+    return Err(EngineError::InvalidInput(format!(
+      "sync symlink hash length {} does not match expected length {hash_length}",
+      claimed_hash.len()
+    )));
+  }
+  if normalize_path(&record.path) != record.path {
+    return Err(EngineError::InvalidInput(format!("sync symlink path '{}' is not canonical", record.path)));
+  }
+  let identity_hash = symlink_identity_hash(&record.path, &normalize_path(&record.target), algorithm)?;
+  let content_hash = symlink_content_hash(&record.serialize()?, algorithm)?;
+  if claimed_hash != identity_hash && claimed_hash != content_hash {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("sync symlink '{}' claimed hash is neither its identity nor serialized-content key", record.path),
+    });
+  }
+  Ok(())
+}
+
 #[derive(Debug)]
 struct PreparedFileRecordEntries {
   content_key: Vec<u8>,
@@ -375,6 +466,7 @@ pub(crate) struct FileRecordPublishInput {
   pub content_hash: Vec<u8>,
   pub flags: u8,
   pub created_at_override: Option<i64>,
+  pub updated_at_override: Option<i64>,
   pub prefer_existing_created_at: bool,
 }
 
@@ -428,6 +520,9 @@ fn prepare_file_record_publication_at_version(
     }
   } else if let Some(created_at_override) = input.created_at_override {
     file_record.created_at = created_at_override;
+  }
+  if let Some(updated_at_override) = input.updated_at_override {
+    file_record.updated_at = updated_at_override;
   }
 
   let entries = prepare_file_record_entries_at_version(engine, &normalized, &mut file_record, input.flags, entry_version)?;
@@ -1045,6 +1140,11 @@ impl DirectoryMutationPlanner {
         .remove(&path)
         .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("directory delta disappeared for '{path}'") })?;
       let directory_key = directory_path_hash(&path, &algorithm)?;
+      if let Some(reference) = operations.current_entry_reference_from(operations.engine, &path)? {
+        if reference.entry_type != EntryType::DirectoryIndex {
+          return Err(EngineError::AlreadyExists(path));
+        }
+      }
       let existing =
         operations.resolve_current_directory_data_from(operations.engine, &path)?.map(|(_identity, header, value)| (header, value));
       let directory_was_missing = existing.is_none();
@@ -1488,6 +1588,7 @@ impl<'a> DirectoryOps<'a> {
           content_hash: record.content_hash,
           flags,
           created_at_override: Some(record.created_at),
+          updated_at_override: Some(record.updated_at),
           prefer_existing_created_at: true,
         },
         CURRENT_FILE_RECORD_VERSION,
@@ -1549,6 +1650,421 @@ impl<'a> DirectoryOps<'a> {
       effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": event_entries })));
       planner.finalize(self, &mut batch, &mut effects)?;
       Ok((batch, results, effects))
+    })
+  }
+
+  /// Apply one peer merge as a single namespace publication.
+  ///
+  /// Every operation and referenced chunk is validated while namespace
+  /// authority is held. A failure therefore publishes no partial HEAD,
+  /// locator, counter, index, or event state. Missing delete targets are the
+  /// only idempotent no-op; corruption and every other failure are surfaced.
+  pub fn apply_sync_merge(&self, context: &RequestContext, operations: &[MergeOp]) -> EngineResult<()> {
+    self.apply_sync_receipt(context, operations, &[], &[])
+  }
+
+  pub(crate) fn apply_sync_receipt(
+    &self,
+    context: &RequestContext,
+    operations: &[MergeOp],
+    buffered_evidence: &[BufferedFile],
+    immutable_versions: &[SyncImmutableVersion],
+  ) -> EngineResult<()> {
+    if operations.is_empty() && buffered_evidence.is_empty() {
+      return Ok(());
+    }
+
+    let operation_bytes = operations.iter().try_fold(0u64, |total, operation| {
+      let bytes = match operation {
+        MergeOp::AddFile { path, file_hash, file_record } => path
+          .len()
+          .checked_add(file_hash.len())
+          .and_then(|bytes| bytes.checked_add(file_record.path.len()))
+          .and_then(|bytes| bytes.checked_add(file_record.content_type.as_ref().map_or(0, String::len)))
+          .and_then(|bytes| bytes.checked_add(file_record.content_hash.len()))
+          .and_then(|bytes| bytes.checked_add(file_record.chunk_hashes.iter().map(Vec::len).sum::<usize>())),
+        MergeOp::DeleteFile { path } | MergeOp::DeleteSymlink { path } => Some(path.len()),
+        MergeOp::AddSymlink { path, symlink_hash, symlink_record } => path
+          .len()
+          .checked_add(symlink_hash.len())
+          .and_then(|bytes| bytes.checked_add(symlink_record.path.len()))
+          .and_then(|bytes| bytes.checked_add(symlink_record.target.len())),
+      }
+      .and_then(|bytes| bytes.checked_add(512))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("sync merge planning estimate overflow".to_string()))?;
+      total.checked_add(bytes).ok_or_else(|| EngineError::ResourceExhausted("sync merge planning estimate overflow".to_string()))
+    })?;
+    let evidence_bytes = buffered_evidence.iter().try_fold(operation_bytes, |total, file| {
+      let bytes = file
+        .path
+        .len()
+        .checked_add(file.data.len())
+        .and_then(|bytes| bytes.checked_add(file.content_type.as_ref().map_or(0, String::len)))
+        .and_then(|bytes| bytes.checked_add(512))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| EngineError::ResourceExhausted("sync evidence planning estimate overflow".to_string()))?;
+      total.checked_add(bytes).ok_or_else(|| EngineError::ResourceExhausted("sync evidence planning estimate overflow".to_string()))
+    })?;
+    let retained_bytes = immutable_versions.iter().try_fold(evidence_bytes, |total, version| {
+      let bytes = match version {
+        SyncImmutableVersion::File { identity_hash, record } => identity_hash
+          .len()
+          .checked_add(record.path.len())
+          .and_then(|bytes| bytes.checked_add(record.content_type.as_ref().map_or(0, String::len)))
+          .and_then(|bytes| bytes.checked_add(record.metadata.len()))
+          .and_then(|bytes| bytes.checked_add(record.content_hash.len()))
+          .and_then(|bytes| bytes.checked_add(record.chunk_hashes.iter().map(Vec::len).sum::<usize>())),
+        SyncImmutableVersion::Symlink { identity_hash, record } => {
+          identity_hash.len().checked_add(record.path.len()).and_then(|bytes| bytes.checked_add(record.target.len()))
+        }
+      }
+      .and_then(|bytes| bytes.checked_add(512))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("sync immutable-version planning estimate overflow".to_string()))?;
+      total
+        .checked_add(bytes)
+        .ok_or_else(|| EngineError::ResourceExhausted("sync immutable-version planning estimate overflow".to_string()))
+    })?;
+    let mut memory = OperationMemoryBudget::new(
+      self.engine,
+      "sync merge planning",
+      MemoryOwner::DurabilityWaiters,
+      AdmissionClass::Workload,
+      retained_bytes,
+      None,
+    )?;
+
+    self.execute_optional_namespace_mutation(Some(context), move |planning_engine| {
+      let algorithm = planning_engine.hash_algo();
+      let hash_length = algorithm.hash_length();
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SyncApply);
+      let mut planner = DirectoryMutationPlanner::default();
+      let mut counter_delta = DirectoryMutationCounterDelta::default();
+      let mut created_events = Vec::new();
+      let mut deleted_events = Vec::new();
+      let mut metadata_index_paths = Vec::new();
+      let mut metadata_index_removal_paths = Vec::new();
+      let mut seen_paths = std::collections::HashSet::with_capacity(operations.len().saturating_add(buffered_evidence.len()));
+      let mut planned_chunk_keys = std::collections::HashSet::new();
+      let mut changed = false;
+
+      for version in immutable_versions {
+        memory.record_work(1)?;
+        match version {
+          SyncImmutableVersion::File { identity_hash, record } => {
+            validate_sync_file_record(planning_engine, identity_hash, record)?;
+            let expected_identity = file_identity_hash(&record.path, record.content_type.as_deref(), &record.chunk_hashes, &algorithm)?;
+            if *identity_hash != expected_identity {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("sync conflict FileRecord '{}' is not keyed by its canonical identity", record.path),
+              });
+            }
+            let mut canonical_record = record.clone();
+            if canonical_record.content_hash.is_empty() {
+              canonical_record.content_hash = whole_file_content_hash_from_chunks(planning_engine, &canonical_record.chunk_hashes)?;
+            }
+            let serialized = canonical_record.serialize(hash_length)?;
+            let content_key = file_content_hash(&serialized, &algorithm)?;
+            let flags = v0_system_entry_flags(&canonical_record.path);
+            batch.store_dependency_with_version(
+              EntryType::FileRecord,
+              identity_hash.clone(),
+              serialized.clone(),
+              flags,
+              CURRENT_FILE_RECORD_VERSION,
+            )?;
+            if content_key != *identity_hash {
+              batch.store_dependency_with_version(EntryType::FileRecord, content_key, serialized, flags, CURRENT_FILE_RECORD_VERSION)?;
+            }
+          }
+          SyncImmutableVersion::Symlink { identity_hash, record } => {
+            validate_sync_symlink(&algorithm, hash_length, identity_hash, record)?;
+            let expected_identity = symlink_identity_hash(&record.path, &normalize_path(&record.target), &algorithm)?;
+            if *identity_hash != expected_identity {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("sync conflict symlink '{}' is not keyed by its canonical identity", record.path),
+              });
+            }
+            let serialized = record.serialize()?;
+            let content_key = symlink_content_hash(&serialized, &algorithm)?;
+            let flags = v0_system_entry_flags(&record.path);
+            batch.store_dependency(EntryType::Symlink, identity_hash.clone(), serialized.clone(), flags)?;
+            if content_key != *identity_hash {
+              batch.store_dependency(EntryType::Symlink, content_key, serialized, flags)?;
+            }
+          }
+        }
+      }
+
+      for file in buffered_evidence {
+        memory.record_work(1)?;
+        let path = normalize_path(&file.path);
+        if path == "/" {
+          return Err(EngineError::InvalidInput("Sync evidence cannot target the root path".to_string()));
+        }
+        if !seen_paths.insert(path.clone()) {
+          return Err(EngineError::InvalidInput(format!("Sync receipt contains multiple operations for '{path}'")));
+        }
+        let flags = v0_system_entry_flags(&path);
+        let mut chunk_hashes = Vec::new();
+        for chunk_data in file.data.chunks(DEFAULT_CHUNK_SIZE) {
+          let chunk_key = chunk_content_hash(chunk_data, &algorithm)?;
+          if planned_chunk_keys.insert(chunk_key.clone()) && !validate_existing_chunk_locator(planning_engine, "sync evidence", &chunk_key)?
+          {
+            batch.store_dependency(EntryType::Chunk, chunk_key.clone(), chunk_data.to_vec(), flags)?;
+          }
+          chunk_hashes.push(chunk_key);
+        }
+        let detected_content_type = crate::engine::content_type::detect_content_type(&file.data, file.content_type.as_deref());
+        let prepared = prepare_file_record_publication_at_version(
+          planning_engine,
+          FileRecordPublishInput {
+            normalized_path: path.clone(),
+            content_type: Some(detected_content_type),
+            total_size: file.data.len() as u64,
+            chunk_hashes,
+            content_hash: whole_file_content_hash(&file.data, &algorithm)?,
+            flags,
+            created_at_override: None,
+            updated_at_override: None,
+            prefer_existing_created_at: true,
+          },
+          CURRENT_FILE_RECORD_VERSION,
+        )?;
+        add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: path.clone(),
+          entry_type: Some(EntryType::FileRecord.to_u8()),
+          previous_identity: prepared.previous_identity.clone(),
+          new_identity: Some(prepared.entries.identity_key.clone()),
+        })?;
+        planner.upsert_child(&path, prepared.result.child_entry.clone())?;
+        counter_delta.throughput_bytes = counter_delta
+          .throughput_bytes
+          .checked_add(file.data.len() as u64)
+          .ok_or_else(|| EngineError::ResourceExhausted("sync evidence throughput counter overflow".to_string()))?;
+        counter_delta.file_writes.push((prepared.result.existing_total_size, prepared.result.file_record.total_size));
+        metadata_index_paths.push(path);
+        created_events.push(prepared.result.event_entry);
+        changed = true;
+      }
+
+      for operation in operations {
+        memory.record_work(1)?;
+        let path = match operation {
+          MergeOp::AddFile { path, .. }
+          | MergeOp::DeleteFile { path }
+          | MergeOp::AddSymlink { path, .. }
+          | MergeOp::DeleteSymlink { path } => normalize_path(path),
+        };
+        if path == "/" {
+          return Err(EngineError::InvalidInput("Sync merge cannot mutate the root path".to_string()));
+        }
+        if !seen_paths.insert(path.clone()) {
+          return Err(EngineError::InvalidInput(format!("Sync merge contains multiple operations for '{path}'")));
+        }
+
+        match operation {
+          MergeOp::AddFile { file_hash, file_record, .. } => {
+            if file_record.path != path {
+              return Err(EngineError::InvalidInput(format!(
+                "sync FileRecord path '{}' does not match merge path '{path}'",
+                file_record.path
+              )));
+            }
+            validate_sync_file_record(planning_engine, file_hash, file_record)?;
+            let prepared = prepare_file_record_publication_at_version(
+              planning_engine,
+              FileRecordPublishInput {
+                normalized_path: path.clone(),
+                content_type: file_record.content_type.clone(),
+                total_size: file_record.total_size,
+                chunk_hashes: file_record.chunk_hashes.clone(),
+                content_hash: file_record.content_hash.clone(),
+                flags: v0_system_entry_flags(&path),
+                created_at_override: Some(file_record.created_at),
+                updated_at_override: Some(file_record.updated_at),
+                prefer_existing_created_at: true,
+              },
+              CURRENT_FILE_RECORD_VERSION,
+            )?;
+            add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+            batch.add_source_identity(NamespaceMutationSourceIdentity {
+              path: path.clone(),
+              entry_type: Some(EntryType::FileRecord.to_u8()),
+              previous_identity: prepared.previous_identity.clone(),
+              new_identity: Some(prepared.entries.identity_key.clone()),
+            })?;
+            planner.upsert_child(&path, prepared.result.child_entry.clone())?;
+            counter_delta.file_writes.push((prepared.result.existing_total_size, prepared.result.file_record.total_size));
+            metadata_index_paths.push(path);
+            created_events.push(prepared.result.event_entry);
+            changed = true;
+          }
+          MergeOp::DeleteFile { .. } => {
+            if !self.sync_delete_target_matches(planning_engine, &path, EntryType::FileRecord)? {
+              continue;
+            }
+            let Some((previous_identity, record)) = self.resolve_current_file_record_from(planning_engine, &path)? else {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("sync file delete target '{path}' disappeared during authoritative planning"),
+              });
+            };
+            let file_key = file_path_hash(&path, &algorithm)?;
+            let deletion = DeletionRecord::new(path.clone(), None);
+            let deletion_key = deletion_record_hash(&path, deletion.deleted_at, &algorithm)?;
+            batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&path))?;
+            if planning_engine.has_entry(&file_key)? {
+              batch.retire_locator(file_key)?;
+            }
+            batch.add_source_identity(NamespaceMutationSourceIdentity {
+              path: path.clone(),
+              entry_type: Some(EntryType::FileRecord.to_u8()),
+              previous_identity: Some(previous_identity),
+              new_identity: None,
+            })?;
+            planner.remove_child(&path)?;
+            counter_delta.file_delete_sizes.push(record.total_size);
+            metadata_index_removal_paths.push(path.clone());
+            deleted_events.push(EntryEventData {
+              path,
+              entry_type: "file".to_string(),
+              content_type: record.content_type.clone(),
+              size: record.total_size,
+              hash: record.content_hash_hex(),
+              created_at: record.created_at,
+              updated_at: record.updated_at,
+              previous_hash: None,
+            });
+            changed = true;
+          }
+          MergeOp::AddSymlink { symlink_hash, symlink_record, .. } => {
+            if symlink_record.path != path {
+              return Err(EngineError::InvalidInput(format!(
+                "sync symlink path '{}' does not match merge path '{path}'",
+                symlink_record.path
+              )));
+            }
+            validate_sync_symlink(&algorithm, hash_length, symlink_hash, symlink_record)?;
+            let target = normalize_path(&symlink_record.target);
+            if path == target {
+              return Err(EngineError::InvalidInput(format!("Symlink cannot point to itself: {path}")));
+            }
+            let current = self.resolve_current_symlink_record_from(planning_engine, &path)?;
+            let (existing_created_at, previous_identity) = match current {
+              Some((identity, record)) => (Some(record.created_at), Some(identity)),
+              None => (None, None),
+            };
+            let mut record = SymlinkRecord::new(path.clone(), target);
+            record.created_at = existing_created_at.unwrap_or(symlink_record.created_at);
+            record.updated_at = symlink_record.updated_at;
+            let serialized = record.serialize()?;
+            let content_key = symlink_content_hash(&serialized, &algorithm)?;
+            let identity_key = symlink_identity_hash(&path, &record.target, &algorithm)?;
+            let symlink_key = symlink_path_hash(&path, &algorithm)?;
+            let flags = v0_system_entry_flags(&path);
+            batch.store_dependency(EntryType::Symlink, content_key, serialized.clone(), flags)?;
+            batch.store_dependency(EntryType::Symlink, identity_key.clone(), serialized.clone(), flags)?;
+            batch.replace_locator(EntryType::Symlink, symlink_key, serialized, flags)?;
+            batch.add_source_identity(NamespaceMutationSourceIdentity {
+              path: path.clone(),
+              entry_type: Some(EntryType::Symlink.to_u8()),
+              previous_identity,
+              new_identity: Some(identity_key.clone()),
+            })?;
+            planner.upsert_child(
+              &path,
+              ChildEntry {
+                entry_type: EntryType::Symlink.to_u8(),
+                hash: identity_key,
+                total_size: 0,
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+                name: file_name(&path).unwrap_or("").to_string(),
+                content_type: None,
+                virtual_time: record.updated_at.max(0) as u64,
+                node_id: 0,
+              },
+            )?;
+            if existing_created_at.is_none() {
+              counter_delta.symlinks_created = counter_delta
+                .symlinks_created
+                .checked_add(1)
+                .ok_or_else(|| EngineError::ResourceExhausted("sync symlink counter overflow".to_string()))?;
+            }
+            created_events.push(EntryEventData {
+              path,
+              entry_type: "symlink".to_string(),
+              content_type: None,
+              size: 0,
+              hash: hex::encode(&record.target),
+              created_at: record.created_at,
+              updated_at: record.updated_at,
+              previous_hash: None,
+            });
+            changed = true;
+          }
+          MergeOp::DeleteSymlink { .. } => {
+            if !self.sync_delete_target_matches(planning_engine, &path, EntryType::Symlink)? {
+              continue;
+            }
+            let Some((previous_identity, record)) = self.resolve_current_symlink_record_from(planning_engine, &path)? else {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("sync symlink delete target '{path}' disappeared during authoritative planning"),
+              });
+            };
+            let symlink_key = symlink_path_hash(&path, &algorithm)?;
+            let deletion = DeletionRecord::new(path.clone(), None);
+            let deletion_key = deletion_record_hash(&path, deletion.deleted_at, &algorithm)?;
+            batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&path))?;
+            if planning_engine.has_entry(&symlink_key)? {
+              batch.retire_locator(symlink_key)?;
+            }
+            batch.add_source_identity(NamespaceMutationSourceIdentity {
+              path: path.clone(),
+              entry_type: Some(EntryType::Symlink.to_u8()),
+              previous_identity: Some(previous_identity),
+              new_identity: None,
+            })?;
+            planner.remove_child(&path)?;
+            counter_delta.symlinks_deleted = counter_delta
+              .symlinks_deleted
+              .checked_add(1)
+              .ok_or_else(|| EngineError::ResourceExhausted("sync symlink counter overflow".to_string()))?;
+            deleted_events.push(EntryEventData {
+              path,
+              entry_type: "symlink".to_string(),
+              content_type: None,
+              size: 0,
+              hash: hex::encode(&record.target),
+              created_at: record.created_at,
+              updated_at: record.updated_at,
+              previous_hash: None,
+            });
+            changed = true;
+          }
+        }
+      }
+
+      if !changed {
+        return Ok((None, ()));
+      }
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(counter_delta));
+      effects.metadata_index_paths = metadata_index_paths;
+      effects.metadata_index_removal_paths = metadata_index_removal_paths;
+      if !created_events.is_empty() {
+        effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": created_events })));
+      }
+      if !deleted_events.is_empty() {
+        effects.events.push((EVENT_ENTRIES_DELETED, serde_json::json!({ "entries": deleted_events })));
+      }
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((Some((batch, effects)), ()))
     })
   }
 
@@ -1704,6 +2220,7 @@ impl<'a> DirectoryOps<'a> {
             content_hash: whole_file_content_hash(&serialized, &algorithm)?,
             flags,
             created_at_override: None,
+            updated_at_override: None,
             prefer_existing_created_at: true,
           },
           CURRENT_FILE_RECORD_VERSION,
@@ -1907,6 +2424,7 @@ impl<'a> DirectoryOps<'a> {
         content_hash,
         flags: sys_flags,
         created_at_override: None,
+        updated_at_override: None,
         prefer_existing_created_at: true,
       },
       CURRENT_FILE_RECORD_VERSION,
@@ -2035,6 +2553,7 @@ impl<'a> DirectoryOps<'a> {
         content_hash: whole_file_content_hash(data, &algo)?,
         flags: sys_flags,
         created_at_override: None,
+        updated_at_override: None,
         prefer_existing_created_at: true,
       },
       file_record_version,
@@ -3849,10 +4368,26 @@ impl<'a> DirectoryOps<'a> {
       }
 
       let dir_key = directory_path_hash(&parent, &algo)?;
+      if parent != "/" {
+        if let Some(reference) = self.current_entry_reference_from(self.engine, &parent)? {
+          if reference.entry_type != EntryType::DirectoryIndex {
+            return Err(EngineError::AlreadyExists(parent));
+          }
+        }
+      }
       let existing = self.resolve_current_directory_data_from(self.engine, &parent)?.map(|(_identity, header, value)| (header, value));
 
       let (dir_value, content_key) = match existing {
-        Some((_header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+        Some((header, value)) if !value.is_empty() && crate::engine::btree::is_btree_format(&value) => {
+          let root = crate::engine::btree::BTreeNode::deserialize(&value, hash_length, header.entry_version)?;
+          let root_hash = root.content_hash(hash_length, &algo)?;
+          if let Some(existing_child) =
+            crate::engine::btree::btree_lookup(self.engine, &root_hash, &current_child_entry.name, hash_length, false)?
+          {
+            if existing_child.entry_type != current_child_entry.entry_type {
+              return Err(EngineError::AlreadyExists(current_child_path));
+            }
+          }
           let plan = crate::engine::btree::btree_plan_insert(self.engine, &value, current_child_entry, hash_length, &algo)?;
           Self::add_btree_plan_dependencies(batch, &plan)?;
           (plan.root_data().to_vec(), plan.root_hash().to_vec())
@@ -3862,6 +4397,9 @@ impl<'a> DirectoryOps<'a> {
             if value.is_empty() { Vec::new() } else { deserialize_child_entries(&value, hash_length, header.entry_version)? };
           let child_name = &current_child_entry.name;
           if let Some(existing_child) = children.iter_mut().find(|child| child.name == *child_name) {
+            if existing_child.entry_type != current_child_entry.entry_type {
+              return Err(EngineError::AlreadyExists(current_child_path));
+            }
             *existing_child = current_child_entry;
           } else {
             children.push(current_child_entry);
@@ -4215,6 +4753,19 @@ impl<'a> DirectoryOps<'a> {
     }
   }
 
+  fn sync_delete_target_matches(&self, engine: &StorageEngine, normalized: &str, expected: EntryType) -> EngineResult<bool> {
+    let Some(reference) = self.current_entry_reference_from(engine, normalized)? else {
+      return Ok(false);
+    };
+    if reference.entry_type != expected {
+      return Err(EngineError::InvalidInput(format!(
+        "sync delete expected '{}' to be {:?}, but the selected namespace contains {:?}",
+        normalized, expected, reference.entry_type
+      )));
+    }
+    Ok(true)
+  }
+
   fn resolve_current_file_record_from(&self, engine: &StorageEngine, normalized: &str) -> EngineResult<Option<(Vec<u8>, FileRecord)>> {
     let Some(reference) = self.current_entry_reference_from(engine, normalized)? else {
       return Ok(None);
@@ -4397,6 +4948,7 @@ impl<'a> DirectoryOps<'a> {
           content_hash: old_record.content_hash.clone(),
           flags: v0_system_entry_flags(&new_normalized),
           created_at_override: Some(old_record.created_at),
+          updated_at_override: None,
           prefer_existing_created_at: false,
         },
         CURRENT_FILE_RECORD_VERSION,
@@ -4577,6 +5129,7 @@ impl<'a> DirectoryOps<'a> {
                 content_hash: source_record.content_hash.clone(),
                 flags: 0,
                 created_at_override: Some(source_record.created_at),
+                updated_at_override: None,
                 prefer_existing_created_at: false,
               },
               CURRENT_FILE_RECORD_VERSION,
@@ -4951,6 +5504,7 @@ mod engine_file_stream_tests {
           content_hash: vec![0x5A; hash_length],
           flags: 0,
           created_at_override: None,
+          updated_at_override: None,
           prefer_existing_created_at: true,
         },
         throughput_bytes: 0,
@@ -4989,6 +5543,7 @@ mod engine_file_stream_tests {
             content_hash: vec![0x5A; engine.hash_algo().hash_length()],
             flags: 0,
             created_at_override: None,
+            updated_at_override: None,
             prefer_existing_created_at: true,
           },
           throughput_bytes: 0,

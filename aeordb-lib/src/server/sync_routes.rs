@@ -1,17 +1,20 @@
+use std::io::Write;
+
 use axum::{
   extract::State,
-  http::{HeaderMap, StatusCode},
+  http::{header, HeaderMap, StatusCode},
   response::{IntoResponse, Response},
   Json,
 };
 use serde::{Deserialize, Serialize};
 
-use base64::Engine as _;
-
-use super::responses::ErrorResponse;
+use super::responses::{engine_error_response, ErrorResponse};
 use super::state::AppState;
+use super::temp_response::{body_from_tempfile, json_to_tempfile, tempfile_for_engine, ResponseBuildCancellation, ResponseBuildGuard};
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
-use crate::engine::sync_api::{compute_sync_diff, SyncDiff as EngineSyncDiff};
+use crate::engine::directory_ops::read_chunk_reserved;
+use crate::engine::errors::EngineError;
+use crate::engine::sync_api::{compute_sync_diff_accounted_with_cancellation, SyncDiff as EngineSyncDiff};
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -47,8 +50,11 @@ pub struct SyncChanges {
 pub struct SyncFileEntry {
   pub path: String,
   pub hash: String,
+  pub content_hash: Option<String>,
   pub size: u64,
   pub content_type: Option<String>,
+  pub created_at: i64,
+  pub updated_at: i64,
   pub chunk_hashes: Vec<String>,
 }
 
@@ -57,6 +63,8 @@ pub struct SyncSymlinkEntry {
   pub path: String,
   pub hash: String,
   pub target: String,
+  pub created_at: i64,
+  pub updated_at: i64,
 }
 
 #[derive(Serialize)]
@@ -207,14 +215,19 @@ fn sync_changes_from_engine(diff: EngineSyncDiff) -> SyncChanges {
   let convert_file = |entry: crate::engine::sync_api::SyncFileEntry| SyncFileEntry {
     path: entry.path,
     hash: hex::encode(entry.hash),
+    content_hash: entry.content_hash.map(hex::encode),
     size: entry.size,
     content_type: entry.content_type,
+    created_at: entry.created_at,
+    updated_at: entry.updated_at,
     chunk_hashes: entry.chunk_hashes.into_iter().map(hex::encode).collect(),
   };
   let convert_symlink = |entry: crate::engine::sync_api::SyncSymlinkEntry| SyncSymlinkEntry {
     path: entry.path,
     hash: hex::encode(entry.hash),
     target: entry.target,
+    created_at: entry.created_at,
+    updated_at: entry.updated_at,
   };
   let convert_deleted = |entry: crate::engine::sync_api::SyncDeletedEntry| SyncDeletedEntry { path: entry.path };
 
@@ -329,7 +342,6 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
     Err(response) => return response,
   };
 
-  let include_system = caller.include_system();
   let since_hash = match payload.since_root_hash.as_deref() {
     Some(value) => match hex::decode(value) {
       Ok(hash) => Some(hash),
@@ -341,14 +353,56 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
     },
     None => None,
   };
-  let diff = match compute_sync_diff(&state.engine, since_hash.as_deref(), payload.paths.as_deref(), include_system) {
-    Ok(diff) => diff,
+  let build_state = state.clone();
+  let mut build_guard = ResponseBuildGuard::new();
+  let cancellation = build_guard.cancellation();
+  let build =
+    tokio::task::spawn_blocking(move || build_sync_diff_response(&build_state, &payload, &caller, since_hash.as_deref(), &cancellation))
+      .await;
+  build_guard.disarm();
+  let response_file = match build {
+    Ok(Ok(file)) => file,
+    Ok(Err(error)) => return sync_diff_error("Failed to build sync diff response", error),
     Err(error) => {
-      return ErrorResponse::new(format!("Failed to compute sync diff: {error}"))
+      tracing::error!(%error, "/sync/diff response builder panicked");
+      return ErrorResponse::new("Failed to build sync diff response: internal task error")
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
+        .into_response();
     }
   };
+  let (body, content_length) = match body_from_tempfile(response_file, state.engine.clone()) {
+    Ok(response) => response,
+    Err(error) => return sync_diff_error("Failed to stream sync diff response", error),
+  };
+  axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header(header::CONTENT_TYPE, "application/json")
+    .header(header::CONTENT_LENGTH, content_length)
+    .body(body)
+    .unwrap_or_else(|error| {
+      sync_diff_error("Failed to build sync diff response", EngineError::IoError(std::io::Error::other(error.to_string())))
+    })
+}
+
+fn build_sync_diff_response(
+  state: &AppState,
+  payload: &SyncDiffRequest,
+  caller: &SyncCaller,
+  since_hash: Option<&[u8]>,
+  cancellation: &ResponseBuildCancellation,
+) -> Result<tempfile::NamedTempFile, EngineError> {
+  cancellation.check()?;
+  let accounted_diff = compute_sync_diff_accounted_with_cancellation(
+    &state.engine,
+    since_hash,
+    payload.paths.as_deref(),
+    caller.include_system(),
+    Some(cancellation.token()),
+  )?;
+  let (diff, mut diff_memory) = accounted_diff.into_parts();
+  cancellation.check()?;
+  let transformation_bytes = sync_diff_transformation_bytes(&diff)?;
+  diff_memory.reserve(transformation_bytes, "sync diff HTTP transformation admission failed")?;
   let root_hash = hex::encode(&diff.root_hash);
   let mut changes = sync_changes_from_engine(diff);
 
@@ -363,18 +417,10 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
     if key_rules.is_empty() {
       match user_has_grant_scope(user_id, &state) {
         Ok(true) => {
-          if let Err(error) = filter_changes_by_user_permissions(&mut changes, user_id, &state) {
-            return ErrorResponse::new(format!("Failed to apply sync permissions: {error}"))
-              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-              .into_response();
-          }
+          filter_changes_by_user_permissions(&mut changes, user_id, &state)?;
         }
         Ok(false) => {}
-        Err(error) => {
-          return ErrorResponse::new(format!("Failed to resolve sync permission scope: {error}"))
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response();
-        }
+        Err(error) => return Err(error),
       }
     }
   }
@@ -390,8 +436,67 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
   };
 
   let response = SyncDiffResponse { root_hash, changes, chunk_hashes_needed: filtered_chunk_hashes };
+  cancellation.check()?;
+  let file = json_to_tempfile(&response, &state.engine, "sync-diff")?;
+  cancellation.check()?;
+  Ok(file)
+}
 
-  (StatusCode::OK, Json(response)).into_response()
+fn sync_diff_transformation_bytes(diff: &EngineSyncDiff) -> Result<u64, EngineError> {
+  let mut bytes = diff
+    .root_hash
+    .len()
+    .checked_mul(2)
+    .and_then(|value| value.checked_add(std::mem::size_of::<SyncDiffResponse>()))
+    .and_then(|value| value.checked_add(std::mem::size_of::<SyncChanges>()))
+    .and_then(|value| value.checked_add(1024))
+    .ok_or_else(|| EngineError::ResourceExhausted("sync diff HTTP response estimate overflow".to_string()))?;
+
+  for entry in diff.files_added.iter().chain(diff.files_modified.iter()) {
+    let chunk_bytes = entry.chunk_hashes.iter().try_fold(0usize, |total, hash| {
+      hash
+        .len()
+        .checked_mul(4)
+        .and_then(|encoded_and_filtered| encoded_and_filtered.checked_add(2 * std::mem::size_of::<String>()))
+        .and_then(|value| total.checked_add(value))
+    });
+    bytes = bytes
+      .checked_add(std::mem::size_of::<SyncFileEntry>())
+      .and_then(|value| entry.hash.len().checked_mul(2).and_then(|hash| value.checked_add(hash)))
+      .and_then(|value| {
+        entry.content_hash.as_ref().map_or(Some(value), |hash| hash.len().checked_mul(2).and_then(|encoded| value.checked_add(encoded)))
+      })
+      .and_then(|value| chunk_bytes.and_then(|chunks| value.checked_add(chunks)))
+      .ok_or_else(|| EngineError::ResourceExhausted("sync diff HTTP file estimate overflow".to_string()))?;
+  }
+  for entry in diff.symlinks_added.iter().chain(diff.symlinks_modified.iter()) {
+    bytes = bytes
+      .checked_add(std::mem::size_of::<SyncSymlinkEntry>())
+      .and_then(|value| entry.hash.len().checked_mul(2).and_then(|hash| value.checked_add(hash)))
+      .ok_or_else(|| EngineError::ResourceExhausted("sync diff HTTP symlink estimate overflow".to_string()))?;
+  }
+  let deleted_count = diff
+    .files_deleted
+    .len()
+    .checked_add(diff.symlinks_deleted.len())
+    .ok_or_else(|| EngineError::ResourceExhausted("sync diff HTTP deletion count overflow".to_string()))?;
+  bytes = bytes
+    .checked_add(
+      deleted_count
+        .checked_mul(std::mem::size_of::<SyncDeletedEntry>())
+        .ok_or_else(|| EngineError::ResourceExhausted("sync diff HTTP deletion estimate overflow".to_string()))?,
+    )
+    .ok_or_else(|| EngineError::ResourceExhausted("sync diff HTTP response estimate overflow".to_string()))?;
+
+  u64::try_from(bytes).map_err(|_| EngineError::ResourceExhausted("sync diff HTTP response estimate exceeds this platform".to_string()))
+}
+
+fn sync_diff_error(context: &'static str, error: EngineError) -> Response {
+  tracing::error!(%error, context, "/sync/diff failed");
+  if matches!(error, EngineError::ResourceExhausted(_) | EngineError::ShuttingDown | EngineError::Cancelled(_)) {
+    return engine_error_response(context, &error);
+  }
+  ErrorResponse::new(format!("{context}: {error}")).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
 }
 
 /// POST /sync/chunks -- batch chunk transfer.
@@ -401,6 +506,12 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
 /// 413 Payload Too Large; the caller should split the request and retry.
 const SYNC_CHUNKS_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const SYNC_CHUNKS_MAX_HASHES: usize = 10_000;
+
+enum SyncChunkBuildError {
+  Storage { hash: String, error: EngineError },
+  Response(EngineError),
+  TooLarge { chunks_so_far: usize },
+}
 
 pub async fn sync_chunks(State(state): State<AppState>, headers: HeaderMap, Json(payload): Json<SyncChunksRequest>) -> Response {
   if payload.hashes.len() > SYNC_CHUNKS_MAX_HASHES {
@@ -433,53 +544,147 @@ pub async fn sync_chunks(State(state): State<AppState>, headers: HeaderMap, Json
     }
   }
 
-  let mut chunks: Vec<serde_json::Value> = Vec::new();
-  // Track accumulated payload size so we don't OOM building a 3.4 GB JSON
-  // response from a worst-case 10k * 256 KB request. base64 expands 4/3.
-  let mut accumulated_payload: usize = 0;
+  let engine = state.engine.clone();
+  let mut build_guard = ResponseBuildGuard::new();
+  let cancellation = build_guard.cancellation();
+  let build = tokio::task::spawn_blocking(move || build_sync_chunks_response(&engine, &payload.hashes, filter_system, &cancellation)).await;
+  build_guard.disarm();
+  let response_file = match build {
+    Ok(Ok(file)) => file,
+    Ok(Err(error)) => return sync_chunk_build_error_response(error),
+    Err(error) => {
+      tracing::error!(%error, "/sync/chunks response builder panicked");
+      return ErrorResponse::new("Failed to build sync chunk response: internal task error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+  let (body, content_length) = match body_from_tempfile(response_file, state.engine.clone()) {
+    Ok(response) => response,
+    Err(error) => return sync_chunk_response_error(error),
+  };
+  axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header(header::CONTENT_TYPE, "application/json")
+    .header(header::CONTENT_LENGTH, content_length)
+    .body(body)
+    .unwrap_or_else(|error| sync_chunk_response_error(EngineError::IoError(std::io::Error::other(error.to_string()))))
+}
 
-  for hex_hash in &payload.hashes {
+fn build_sync_chunks_response(
+  engine: &crate::engine::StorageEngine,
+  hashes: &[String],
+  filter_system: bool,
+  cancellation: &ResponseBuildCancellation,
+) -> Result<tempfile::NamedTempFile, SyncChunkBuildError> {
+  cancellation.check().map_err(SyncChunkBuildError::Response)?;
+  let mut response_file =
+    tempfile_for_engine(engine, "sync-chunks").map_err(|error| SyncChunkBuildError::Response(EngineError::IoError(error)))?;
+  const RESPONSE_PREFIX: &[u8] = b"{\"chunks\":[";
+  const RESPONSE_SUFFIX: &[u8] = b"]}";
+  response_file.as_file_mut().write_all(RESPONSE_PREFIX).map_err(|error| SyncChunkBuildError::Response(EngineError::IoError(error)))?;
+  let mut response_bytes = RESPONSE_PREFIX.len();
+  let mut included_chunks = 0usize;
+
+  for hex_hash in hashes {
+    cancellation.check().map_err(SyncChunkBuildError::Response)?;
     let hash = match hex::decode(hex_hash) {
       Ok(h) => h,
       Err(_) => continue,
     };
 
-    if let Ok(Some((header, _key, _value))) = state.engine.get_entry_including_deleted(&hash) {
-      // Skip system entries for non-root/non-peer callers.
-      if filter_system && header.is_system_entry() {
-        continue;
-      }
+    let header = match engine.get_entry_header_including_deleted(&hash) {
+      Ok(Some(header)) => header,
+      Ok(None) => continue,
+      Err(error) => return Err(SyncChunkBuildError::Storage { hash: hex_hash.clone(), error }),
+    };
 
-      let data = match state.engine.read_chunk_including_deleted(&hash) {
-        Ok(Some(data)) => data,
-        _ => continue,
-      };
-      state.engine.counters().record_read(data.len() as u64);
-
-      // Project base64-encoded size + JSON overhead. Bail before pushing.
-      let projected = data.len().saturating_mul(4) / 3 + hex_hash.len() + 64;
-      if accumulated_payload.saturating_add(projected) > SYNC_CHUNKS_MAX_RESPONSE_BYTES {
-        return (
-          StatusCode::PAYLOAD_TOO_LARGE,
-          Json(serde_json::json!({
-              "error": format!(
-                  "Response would exceed {} bytes; split the request into smaller batches",
-                  SYNC_CHUNKS_MAX_RESPONSE_BYTES
-              ),
-              "chunks_so_far": chunks.len(),
-          })),
-        )
-          .into_response();
-      }
-      accumulated_payload += projected;
-
-      chunks.push(serde_json::json!({
-          "hash": hex_hash,
-          "data": base64::engine::general_purpose::STANDARD.encode(&data),
-          "size": data.len(),
-      }));
+    // Skip system entries for non-root/non-peer callers.
+    if filter_system && header.is_system_entry() {
+      continue;
     }
+
+    let data = match read_chunk_reserved(engine, &hash, true) {
+      Ok(data) => data,
+      Err(EngineError::NotFound(_)) => continue,
+      Err(error) => return Err(SyncChunkBuildError::Storage { hash: hex_hash.clone(), error }),
+    };
+    engine.counters().record_read(data.len() as u64);
+
+    let encoded_bytes = match data.len().checked_add(2).and_then(|bytes| bytes.checked_div(3)).and_then(|bytes| bytes.checked_mul(4)) {
+      Some(bytes) => bytes,
+      None => return Err(SyncChunkBuildError::Response(EngineError::ResourceExhausted("sync chunk base64 length overflow".to_string()))),
+    };
+    let comma = if included_chunks == 0 { "" } else { "," };
+    let serialized_hash = match serde_json::to_string(hex_hash) {
+      Ok(hash) => hash,
+      Err(error) => return Err(SyncChunkBuildError::Response(EngineError::JsonParseError(error.to_string()))),
+    };
+    let prefix = format!("{comma}{{\"hash\":{serialized_hash},\"data\":\"");
+    let suffix = format!("\",\"size\":{}}}", data.len());
+    let projected = match prefix.len().checked_add(encoded_bytes).and_then(|bytes| bytes.checked_add(suffix.len())) {
+      Some(bytes) => bytes,
+      None => return Err(SyncChunkBuildError::Response(EngineError::ResourceExhausted("sync chunk response length overflow".to_string()))),
+    };
+    let projected_total = response_bytes.saturating_add(projected).saturating_add(RESPONSE_SUFFIX.len());
+    if projected_total > SYNC_CHUNKS_MAX_RESPONSE_BYTES {
+      return Err(SyncChunkBuildError::TooLarge { chunks_so_far: included_chunks });
+    }
+
+    let write_result = (|| -> std::io::Result<()> {
+      response_file.as_file_mut().write_all(prefix.as_bytes())?;
+      {
+        let mut encoder = base64::write::EncoderWriter::new(response_file.as_file_mut(), &base64::engine::general_purpose::STANDARD);
+        encoder.write_all(data.as_ref())?;
+        encoder.finish()?;
+      }
+      response_file.as_file_mut().write_all(suffix.as_bytes())?;
+      Ok(())
+    })();
+    write_result.map_err(|error| SyncChunkBuildError::Response(EngineError::IoError(error)))?;
+    response_bytes = response_bytes.saturating_add(projected);
+    included_chunks = included_chunks.saturating_add(1);
   }
 
-  (StatusCode::OK, Json(serde_json::json!({ "chunks": chunks }))).into_response()
+  cancellation.check().map_err(SyncChunkBuildError::Response)?;
+  response_file.as_file_mut().write_all(RESPONSE_SUFFIX).map_err(|error| SyncChunkBuildError::Response(EngineError::IoError(error)))?;
+  Ok(response_file)
+}
+
+fn sync_chunk_build_error_response(error: SyncChunkBuildError) -> Response {
+  match error {
+    SyncChunkBuildError::Storage { hash, error } => sync_chunk_storage_error(&hash, error),
+    SyncChunkBuildError::Response(error) => sync_chunk_response_error(error),
+    SyncChunkBuildError::TooLarge { chunks_so_far } => (
+      StatusCode::PAYLOAD_TOO_LARGE,
+      Json(serde_json::json!({
+          "error": format!(
+              "Response would exceed {} bytes; split the request into smaller batches",
+              SYNC_CHUNKS_MAX_RESPONSE_BYTES
+          ),
+          "chunks_so_far": chunks_so_far,
+      })),
+    )
+      .into_response(),
+  }
+}
+
+fn sync_chunk_storage_error(hash: &str, error: EngineError) -> Response {
+  tracing::error!(requested_hash = hash, %error, "/sync/chunks failed to read requested storage authority");
+  if matches!(error, EngineError::ResourceExhausted(_) | EngineError::ShuttingDown | EngineError::Cancelled(_)) {
+    return engine_error_response("Failed to read requested chunk", &error);
+  }
+  ErrorResponse::new("Failed to read requested chunk from storage. Check GET /system/health and server diagnostics")
+    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+    .into_response()
+}
+
+fn sync_chunk_response_error(error: EngineError) -> Response {
+  tracing::error!(%error, "/sync/chunks failed to build the bounded response");
+  if matches!(error, EngineError::ResourceExhausted(_) | EngineError::ShuttingDown | EngineError::Cancelled(_)) {
+    return engine_error_response("Failed to build sync chunk response", &error);
+  }
+  ErrorResponse::new("Failed to build sync chunk response. Check GET /system/health and server diagnostics")
+    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+    .into_response()
 }

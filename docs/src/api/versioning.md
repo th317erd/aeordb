@@ -401,6 +401,10 @@ View the change history of a single file across all snapshots. Returns entries o
 | `deleted` | File existed in the previous snapshot but not this one |
 
 If the file has never existed in any snapshot, returns `200` with an empty `history` array.
+Only an actual `NotFound` result is interpreted as absence. A malformed or
+unreadable snapshot/FileRecord authority fails the request instead of silently
+omitting that history entry; HTTP callers receive `500` and should inspect
+server diagnostics rather than treating the returned history as complete.
 
 **Example:**
 

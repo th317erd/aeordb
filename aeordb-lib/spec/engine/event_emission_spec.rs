@@ -1,6 +1,10 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 
+use aeordb::engine::file_record::FileRecord;
+use aeordb::engine::merge::MergeOp;
+use aeordb::engine::symlink_record::SymlinkRecord;
+use aeordb::engine::sync_apply::apply_merge_operations;
 use aeordb::engine::{BufferedFile, DirectoryOps, EventBus, RequestContext, StorageEngine, VersionManager};
 use aeordb::server::create_temp_engine_for_tests;
 
@@ -256,6 +260,50 @@ async fn wave_two_batch_and_rename_mutations_emit_one_exact_acknowledgement() {
 }
 
 // ─── Entry events: store_file ───────────────────────────────────────────
+
+#[tokio::test]
+async fn sync_apply_emits_one_exact_acknowledgement_for_a_mixed_receipt() {
+  let (engine, bus, ctx, _temp) = setup_with_events();
+  let ops = DirectoryOps::new(&engine);
+  let system = RequestContext::system();
+  ops.store_file_buffered(&system, "/sync/source.txt", b"source payload", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&system, "/sync/delete.txt", b"delete payload", Some("text/plain")).unwrap();
+  ops.store_symlink(&system, "/sync/delete-link", "/sync/delete.txt").unwrap();
+
+  let head = engine.head_hash().unwrap();
+  let tree = aeordb::engine::tree_walker::walk_version_tree(&engine, &head).unwrap();
+  let (_, mut file_record): (Vec<u8>, FileRecord) = tree.files["/sync/source.txt"].clone();
+  file_record.path = "/sync/received.txt".to_string();
+  let file_hash = aeordb::engine::file_identity_hash(
+    &file_record.path,
+    file_record.content_type.as_deref(),
+    &file_record.chunk_hashes,
+    &engine.hash_algo(),
+  )
+  .unwrap();
+  let symlink_record =
+    SymlinkRecord { path: "/sync/received-link".to_string(), target: "/sync/received.txt".to_string(), created_at: 1, updated_at: 1 };
+  let symlink_hash = aeordb::engine::symlink_identity_hash(&symlink_record.path, &symlink_record.target, &engine.hash_algo()).unwrap();
+  let operations = vec![
+    MergeOp::AddFile { path: file_record.path.clone(), file_hash, file_record },
+    MergeOp::AddSymlink { path: symlink_record.path.clone(), symlink_hash, symlink_record },
+    MergeOp::DeleteFile { path: "/sync/delete.txt".to_string() },
+    MergeOp::DeleteSymlink { path: "/sync/delete-link".to_string() },
+  ];
+  let mut receiver = bus.subscribe();
+
+  let events = assert_one_wave_two_mutation(&engine, &mut receiver, "sync_apply", &["entries_created", "entries_deleted"], || {
+    apply_merge_operations(&engine, &ctx, &operations).unwrap()
+  })
+  .await;
+
+  let created_paths: std::collections::HashSet<_> =
+    events[0].payload["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+  assert_eq!(created_paths, std::collections::HashSet::from(["/sync/received.txt", "/sync/received-link"]));
+  let deleted_paths: std::collections::HashSet<_> =
+    events[1].payload["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+  assert_eq!(deleted_paths, std::collections::HashSet::from(["/sync/delete.txt", "/sync/delete-link"]));
+}
 
 #[tokio::test]
 async fn test_store_file_emits_entries_created() {

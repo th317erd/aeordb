@@ -538,7 +538,8 @@ fn create_app_with_all_and_task_queue_inner(
       Arc::clone(&clock_tracker),
       crate::engine::SyncConfig { periodic_interval_secs: 30 },
     )
-    .with_jwt_manager(Arc::clone(&jwt_manager)),
+    .with_jwt_manager(Arc::clone(&jwt_manager))
+    .with_event_bus(Arc::clone(&event_bus)),
   );
 
   // Spawn the periodic sync loop. The loop only does work when peers are

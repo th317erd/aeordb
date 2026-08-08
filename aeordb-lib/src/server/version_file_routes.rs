@@ -123,14 +123,7 @@ pub async fn file_history(
           found: true,
         });
       }
-      Err(e) => {
-        tracing::warn!(
-            snapshot = %snapshot.name,
-            root_hash = %hex::encode(&snapshot.root_hash),
-            path = %path,
-            error = %e,
-            "file_history: resolve failed for snapshot"
-        );
+      Err(crate::engine::errors::EngineError::NotFound(_)) => {
         entries.push(FileAtVersion {
           snapshot_id: snapshot.id(),
           snapshot_name: snapshot.name.clone(),
@@ -140,6 +133,16 @@ pub async fn file_history(
           content_type: None,
           found: false,
         });
+      }
+      Err(error) => {
+        tracing::error!(
+            snapshot = %snapshot.name,
+            root_hash = %hex::encode(&snapshot.root_hash),
+            path = %path,
+            %error,
+            "file_history failed to resolve authoritative snapshot state"
+        );
+        return engine_error_response("Failed to resolve file history", &error);
       }
     }
   }

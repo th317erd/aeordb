@@ -431,6 +431,65 @@ fn locator_replacement_cannot_overwrite_an_immutable_payload_key() {
 }
 
 #[test]
+fn dependency_preflight_rejects_an_existing_wrong_type_before_authority_changes() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let dependency_key = vec![0xCA; engine.hash_algo().hash_length()];
+  let locator_key = vec![0xCB; engine.hash_algo().hash_length()];
+  engine.store_entry(EntryType::Chunk, &dependency_key, b"occupied by a chunk").unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SyncApply);
+  batch.store_dependency(EntryType::FileRecord, dependency_key.clone(), b"retained file version".to_vec(), 0).unwrap();
+  batch.replace_locator(EntryType::FileRecord, locator_key.clone(), b"published file".to_vec(), 0).unwrap();
+  batch
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path: "/spec/dependency-collision".to_string(),
+      entry_type: Some(EntryType::FileRecord.to_u8()),
+      previous_identity: None,
+      new_identity: Some(locator_key.clone()),
+    })
+    .unwrap();
+
+  let error = NamespaceMutationCoordinator::new(&engine).execute(batch).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(engine.get_kv_entry(&locator_key).unwrap().is_none());
+  let (header, stored_key, value) = engine.get_entry_verified(&dependency_key).unwrap().unwrap();
+  assert_eq!(header.entry_type, EntryType::Chunk);
+  assert_eq!(stored_key, dependency_key);
+  assert_eq!(value, b"occupied by a chunk");
+}
+
+#[test]
+fn typed_identity_dependencies_may_replace_prior_file_and_symlink_serializations() {
+  for (entry_type, seed) in [(EntryType::FileRecord, 0xCC), (EntryType::Symlink, 0xCE)] {
+    let (engine, _temporary) = create_temp_engine_for_tests();
+    let dependency_key = vec![seed; engine.hash_algo().hash_length()];
+    let locator_key = vec![seed + 1; engine.hash_algo().hash_length()];
+    engine.store_entry_with_version(entry_type, &dependency_key, b"older timestamp serialization", 0).unwrap();
+    let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SyncApply);
+    batch.store_dependency_with_version(entry_type, dependency_key.clone(), b"newer timestamp serialization".to_vec(), 0, 1).unwrap();
+    batch.replace_locator(entry_type, locator_key.clone(), b"published locator".to_vec(), 0).unwrap();
+    batch
+      .add_source_identity(NamespaceMutationSourceIdentity {
+        path: format!("/spec/typed-identity-{}", entry_type.to_u8()),
+        entry_type: Some(entry_type.to_u8()),
+        previous_identity: None,
+        new_identity: Some(locator_key),
+      })
+      .unwrap();
+
+    NamespaceMutationCoordinator::new(&engine).execute(batch).unwrap();
+
+    let (header, stored_key, value) = engine.get_entry_verified(&dependency_key).unwrap().unwrap();
+    assert_eq!(header.entry_type, entry_type);
+    assert_eq!(header.entry_version, 1);
+    assert_eq!(stored_key, dependency_key);
+    assert_eq!(value, b"newer timestamp serialization");
+  }
+}
+
+#[test]
 fn no_op_batches_and_dependency_locator_aliases_are_rejected_before_admission() {
   let (engine, _temporary) = create_temp_engine_for_tests();
   let fanout = Arc::new(RecordingFanout::default());

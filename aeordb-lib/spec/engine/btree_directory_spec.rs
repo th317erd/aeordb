@@ -7,7 +7,7 @@ use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::verify;
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::tree_walker::walk_version_tree;
-use aeordb::engine::RequestContext;
+use aeordb::engine::{EngineError, RequestContext};
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let path = dir.path().join("test.aeor");
@@ -101,6 +101,24 @@ fn test_large_directory_converts_to_btree() {
   let dir_key = directory_path_hash("/large", &algo).unwrap();
   let raw_data = resolve_directory_value(&engine, &dir_key);
   assert!(is_btree_format(&raw_data), "directory with {} entries should be B-tree format", count);
+}
+
+#[test]
+fn btree_parent_rejects_cross_type_child_replacement() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_n_files(&engine, "/typed", BTREE_CONVERSION_THRESHOLD + 1);
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  let path = "/typed/file_00000.json";
+  let original_head = engine.head_hash().unwrap();
+
+  let error = ops.store_symlink(&ctx, path, "/target").expect_err("B-tree insertion must not replace a file with a symlink");
+
+  assert!(matches!(error, EngineError::AlreadyExists(_)), "unexpected error: {error}");
+  assert!(ops.get_metadata(path).unwrap().is_some());
+  assert!(ops.get_symlink(path).unwrap().is_none());
+  assert_eq!(engine.head_hash().unwrap(), original_head);
 }
 
 #[test]
@@ -509,7 +527,7 @@ fn test_root_directory_stays_flat() {
 
   let algo = engine.hash_algo();
   let root_key = directory_path_hash("/", &algo).unwrap();
-  let (_, _, root_data) = engine.get_entry(&root_key).unwrap().unwrap();
+  let root_data = resolve_directory_value(&engine, &root_key);
   assert!(!is_btree_format(&root_data), "root with 5 children should remain flat");
 }
 

@@ -1,6 +1,9 @@
 use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{chunk_content_hash, file_identity_hash, symlink_identity_hash};
+use crate::engine::batch_commit::BufferedFile;
+use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::merge::ConflictEntry;
+use crate::engine::merge::{ConflictEntry, MergeOp};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
@@ -9,15 +12,22 @@ use crate::engine::storage_engine::StorageEngine;
 /// Structure:
 ///   `/.aeordb-conflicts/{path}/.meta` — JSON metadata with winner/loser details
 ///
-/// Since conflicts are stored as normal files in the directory tree,
-/// they automatically sync to peers and are covered by GC (the walk
-/// from HEAD traverses all directories including `/.aeordb-conflicts/`).
+/// Conflict evidence remains local authority: the SystemFamily registry omits
+/// it from peer replication while logical backup and GC retain it.
 pub fn store_conflict(engine: &StorageEngine, ctx: &RequestContext, conflict: &ConflictEntry) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
-  let base_path = format!("/.aeordb-conflicts{}", conflict.path);
+  let file = conflict_metadata_file(conflict)?;
+  ops.store_file_buffered(ctx, &file.path, &file.data, file.content_type.as_deref())?;
+
+  Ok(())
+}
+
+pub(crate) fn conflict_metadata_file(conflict: &ConflictEntry) -> EngineResult<BufferedFile> {
+  let normalized_path = crate::engine::path_utils::normalize_path(&conflict.path);
+  let base_path = format!("/.aeordb-conflicts{normalized_path}");
 
   let meta = serde_json::json!({
-      "path": conflict.path,
+      "path": normalized_path,
       "conflict_type": format!("{:?}", conflict.conflict_type),
       "auto_winner": "winner",
       "created_at": chrono::Utc::now().timestamp_millis(),
@@ -38,9 +48,7 @@ pub fn store_conflict(engine: &StorageEngine, ctx: &RequestContext, conflict: &C
   });
 
   let meta_json = serde_json::to_vec_pretty(&meta).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-  ops.store_file_buffered(ctx, &format!("{}/.meta", base_path), &meta_json, Some("application/json"))?;
-
-  Ok(())
+  Ok(BufferedFile { path: format!("{}/.meta", base_path), data: meta_json, content_type: Some("application/json".to_string()) })
 }
 
 /// List all unresolved conflicts.
@@ -92,49 +100,44 @@ pub fn get_conflict(engine: &StorageEngine, path: &str) -> EngineResult<Option<s
 
 /// Resolve a conflict by picking a version ("winner" or "loser").
 ///
-/// The chosen version's file data is read from the engine by its
-/// identity hash, reconstructed from chunks, and written to the real
-/// path. The conflict entry is then cleaned up.
+/// The chosen file or symlink version is validated by its identity hash and
+/// published at the real path. An empty version hash selects deletion. The
+/// selected mutation and conflict-evidence cleanup share one receipt.
 pub fn resolve_conflict(engine: &StorageEngine, ctx: &RequestContext, path: &str, pick: &str) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
-
-  // Read the conflict metadata
-  let meta_path = format!("/.aeordb-conflicts{}/.meta", path);
-  let meta_data = ops.read_file_buffered(&meta_path)?;
-  let meta: serde_json::Value = serde_json::from_slice(&meta_data).map_err(|e| EngineError::JsonParseError(e.to_string()))?;
+  let normalized_path = crate::engine::path_utils::normalize_path(path);
+  let meta_path = conflict_metadata_path(&normalized_path);
+  let meta = load_conflict_metadata(&ops, &normalized_path, &meta_path)?;
 
   // Validate the pick value
   if pick != "winner" && pick != "loser" {
     return Err(EngineError::InvalidInput(format!("Invalid pick '{}': must be 'winner' or 'loser'", pick)));
   }
 
-  // Get the chosen version's hash
-  let chosen = &meta[pick];
-  let chosen_hash_hex =
-    chosen["hash"].as_str().ok_or_else(|| EngineError::InvalidInput(format!("Invalid pick '{}': no hash found", pick)))?;
-  let chosen_hash = hex::decode(chosen_hash_hex).map_err(|_| EngineError::InvalidInput("Invalid hash hex".to_string()))?;
-
-  // Read the chosen version's FileRecord from the engine by identity hash
-  let hash_length = engine.hash_algo().hash_length();
-  if let Some((header, _key, value)) = engine.get_entry(&chosen_hash)? {
-    let file_record = crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-
-    // Read chunks and reconstruct file data.
-    let mut data = Vec::new();
-    for chunk_hash in &file_record.chunk_hashes {
-      if let Some(chunk_data) = engine.read_chunk(chunk_hash)? {
-        data.extend_from_slice(&chunk_data);
+  let chosen = if pick == "winner" { &meta.winner } else { &meta.loser };
+  let selected_operation = if chosen.hash.is_empty() {
+    validate_conflict_tombstone(chosen)?;
+    let retained = if pick == "winner" { &meta.loser } else { &meta.winner };
+    match load_conflict_version(engine, retained, "retained", &normalized_path)? {
+      LoadedConflictVersion::File(_) => MergeOp::DeleteFile { path: normalized_path },
+      LoadedConflictVersion::Symlink(_) => MergeOp::DeleteSymlink { path: normalized_path },
+    }
+  } else {
+    match load_conflict_version(engine, chosen, "chosen", &normalized_path)? {
+      LoadedConflictVersion::File(mut record) => {
+        record.content_hash = validate_conflict_file_chunks(engine, &record)?;
+        record.path = normalized_path.clone();
+        let identity = file_identity_hash(&normalized_path, record.content_type.as_deref(), &record.chunk_hashes, &engine.hash_algo())?;
+        MergeOp::AddFile { path: normalized_path, file_hash: identity, file_record: record }
+      }
+      LoadedConflictVersion::Symlink(mut record) => {
+        record.path = normalized_path.clone();
+        let identity = symlink_identity_hash(&normalized_path, &record.target, &engine.hash_algo())?;
+        MergeOp::AddSymlink { path: normalized_path, symlink_hash: identity, symlink_record: record }
       }
     }
-
-    // Write the chosen version to the real path
-    ops.store_file_buffered(ctx, path, &data, file_record.content_type.as_deref())?;
-  }
-
-  // Clean up conflict entry
-  let _ = ops.delete_file(ctx, &meta_path);
-
-  Ok(())
+  };
+  ops.apply_sync_merge(ctx, &[selected_operation, MergeOp::DeleteFile { path: meta_path }])
 }
 
 /// Dismiss a conflict (accept the auto-winner, just clean up the conflict entry).
@@ -143,10 +146,10 @@ pub fn resolve_conflict(engine: &StorageEngine, ctx: &RequestContext, path: &str
 /// need to remove the conflict metadata.
 pub fn dismiss_conflict(engine: &StorageEngine, ctx: &RequestContext, path: &str) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
-  let meta_path = format!("/.aeordb-conflicts{}/.meta", path);
+  let normalized_path = crate::engine::path_utils::normalize_path(path);
+  let meta_path = conflict_metadata_path(&normalized_path);
 
-  // Verify the conflict exists before dismissing
-  match ops.read_file_buffered(&meta_path) {
+  match load_conflict_metadata(&ops, &normalized_path, &meta_path) {
     Ok(_) => {}
     Err(EngineError::NotFound(_)) => {
       return Err(EngineError::NotFound(format!("No conflict found for path: {}", path)));
@@ -154,6 +157,227 @@ pub fn dismiss_conflict(engine: &StorageEngine, ctx: &RequestContext, path: &str
     Err(e) => return Err(e),
   }
 
-  let _ = ops.delete_file(ctx, &meta_path);
+  ops.apply_sync_merge(ctx, &[MergeOp::DeleteFile { path: meta_path }])
+}
+
+pub(crate) struct ConflictVersionReference {
+  pub(crate) path: String,
+  pub(crate) hash: Vec<u8>,
+}
+
+/// Resolve every immutable version referenced by unresolved conflict evidence.
+///
+/// Conflict metadata is authoritative local state, so GC must treat these
+/// hashes as edges rather than opaque JSON. Every record is validated against
+/// its metadata path and referenced FileRecord/symlink before any sweep can
+/// begin. A malformed record therefore aborts mark instead of authorizing data
+/// loss.
+pub(crate) fn retained_conflict_version_references(engine: &StorageEngine) -> EngineResult<Vec<ConflictVersionReference>> {
+  let entries =
+    match crate::engine::directory_listing::list_directory_recursive_strict(engine, "/.aeordb-conflicts", -1, Some("*.meta"), None) {
+      Ok(entries) => entries,
+      Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
+      Err(error) => return Err(error),
+    };
+  let operations = DirectoryOps::new(engine);
+  let mut references = Vec::new();
+  for entry in entries {
+    if entry.name != ".meta" {
+      continue;
+    }
+    let relative = entry.path.strip_prefix("/.aeordb-conflicts").ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("Conflict metadata path {:?} is outside the conflict authority", entry.path),
+    })?;
+    let conflict_path = relative.strip_suffix("/.meta").ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("Conflict metadata path {:?} does not end in /.meta", entry.path),
+    })?;
+    if conflict_path.is_empty() || conflict_path == "/" || crate::engine::path_utils::normalize_path(conflict_path) != conflict_path {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("Conflict metadata path {:?} does not identify a canonical file or symlink path", entry.path),
+      });
+    }
+    let metadata = load_conflict_metadata(&operations, conflict_path, &entry.path)?;
+    for (label, version) in [("winner", &metadata.winner), ("loser", &metadata.loser)] {
+      if version.hash.is_empty() {
+        validate_conflict_tombstone(version)?;
+        continue;
+      }
+      let hash = decode_conflict_hash(engine, version, label)?;
+      load_conflict_version(engine, version, label, conflict_path)?;
+      references.push(ConflictVersionReference { path: conflict_path.to_string(), hash });
+    }
+  }
+  Ok(references)
+}
+
+fn conflict_metadata_path(normalized_path: &str) -> String {
+  format!("/.aeordb-conflicts{normalized_path}/.meta")
+}
+
+fn load_conflict_metadata(ops: &DirectoryOps<'_>, normalized_path: &str, meta_path: &str) -> EngineResult<StoredConflictMetadata> {
+  let meta_data = ops.read_file_buffered(meta_path)?;
+  let meta: StoredConflictMetadata = serde_json::from_slice(&meta_data).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+  if meta.path != normalized_path {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("Conflict metadata path {:?} does not match evidence path {normalized_path:?}", meta.path),
+    });
+  }
+
+  let winner_is_deletion = meta.winner.hash.is_empty();
+  let loser_is_deletion = meta.loser.hash.is_empty();
+  match meta.conflict_type.as_str() {
+    "ConcurrentModify" | "ConcurrentCreate" if !winner_is_deletion && !loser_is_deletion => {}
+    "ModifyDelete" if winner_is_deletion != loser_is_deletion => {}
+    "ConcurrentModify" | "ConcurrentCreate" | "ModifyDelete" => {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("Conflict metadata type {} is inconsistent with its versions", meta.conflict_type),
+      });
+    }
+    _ => {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("Unknown conflict metadata type {}", meta.conflict_type) });
+    }
+  }
+
+  Ok(meta)
+}
+
+enum LoadedConflictVersion {
+  File(crate::engine::file_record::FileRecord),
+  Symlink(crate::engine::symlink_record::SymlinkRecord),
+}
+
+fn load_conflict_version(
+  engine: &StorageEngine,
+  version: &StoredConflictVersion,
+  label: &str,
+  expected_path: &str,
+) -> EngineResult<LoadedConflictVersion> {
+  let hash_length = engine.hash_algo().hash_length();
+  let hash = decode_conflict_hash(engine, version, label)?;
+  let (header, stored_key, value) = engine
+    .get_entry_verified(&hash)?
+    .ok_or_else(|| EngineError::NotFound(format!("{label} conflict version {} is missing", version.hash)))?;
+  if stored_key != hash {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("{label} conflict version {} did not resolve to its exact key", version.hash),
+    });
+  }
+
+  match header.entry_type {
+    EntryType::FileRecord => {
+      let record = crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version)?;
+      if record.path != expected_path {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("{label} conflict FileRecord path {:?} does not match evidence path {expected_path:?}", record.path),
+        });
+      }
+      let identity = file_identity_hash(&record.path, record.content_type.as_deref(), &record.chunk_hashes, &engine.hash_algo())?;
+      if identity != hash {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("{label} conflict FileRecord {} is stored under a noncanonical identity", version.hash),
+        });
+      }
+      if version.size != record.total_size || version.content_type != record.content_type {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: format!("{label} conflict metadata does not match its FileRecord") });
+      }
+      Ok(LoadedConflictVersion::File(record))
+    }
+    EntryType::Symlink => {
+      let record = crate::engine::symlink_record::SymlinkRecord::deserialize(&value, header.entry_version)?;
+      if record.path != expected_path {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("{label} conflict symlink path {:?} does not match evidence path {expected_path:?}", record.path),
+        });
+      }
+      let identity = symlink_identity_hash(&record.path, &record.target, &engine.hash_algo())?;
+      if identity != hash {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("{label} conflict symlink {} is stored under a noncanonical identity", version.hash),
+        });
+      }
+      if version.size != 0 || version.content_type.is_some() {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: format!("{label} conflict metadata does not describe a symlink") });
+      }
+      Ok(LoadedConflictVersion::Symlink(record))
+    }
+    entry_type => Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("{label} conflict hash {} resolves to unsupported entry type {entry_type:?}", version.hash),
+    }),
+  }
+}
+
+fn decode_conflict_hash(engine: &StorageEngine, version: &StoredConflictVersion, label: &str) -> EngineResult<Vec<u8>> {
+  let hash_length = engine.hash_algo().hash_length();
+  let hash = hex::decode(&version.hash).map_err(|_| EngineError::InvalidInput(format!("Invalid {label} conflict hash hex")))?;
+  if hash.len() != hash_length {
+    return Err(EngineError::InvalidInput(format!("{label} conflict hash must be exactly {hash_length} bytes")));
+  }
+  Ok(hash)
+}
+
+fn validate_conflict_tombstone(version: &StoredConflictVersion) -> EngineResult<()> {
+  if version.size != 0 || version.content_type.is_some() {
+    return Err(EngineError::CorruptEntry { offset: 0, reason: "Conflict deletion version carries nonempty file metadata".to_string() });
+  }
   Ok(())
+}
+
+fn validate_conflict_file_chunks(engine: &StorageEngine, record: &crate::engine::file_record::FileRecord) -> EngineResult<Vec<u8>> {
+  let mut content_hasher = engine.hash_algo().incremental_hasher()?;
+  let mut total_size = 0u64;
+  for chunk_hash in &record.chunk_hashes {
+    let chunk_data = engine
+      .read_chunk(chunk_hash)?
+      .ok_or_else(|| EngineError::NotFound(format!("Chosen conflict FileRecord references missing chunk {}", hex::encode(chunk_hash))))?;
+    if chunk_content_hash(&chunk_data, &engine.hash_algo())? != *chunk_hash {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("Chosen conflict chunk {} does not match its content-addressed key", hex::encode(chunk_hash)),
+      });
+    }
+    total_size = total_size
+      .checked_add(chunk_data.len() as u64)
+      .ok_or_else(|| EngineError::ResourceExhausted("Chosen conflict file size overflow".to_string()))?;
+    content_hasher.update(&chunk_data);
+  }
+  if total_size != record.total_size {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("Chosen conflict FileRecord declares {} bytes but its chunks contain {} bytes", record.total_size, total_size),
+    });
+  }
+  let computed_content_hash = content_hasher.finalize();
+  if !record.content_hash.is_empty() && computed_content_hash != record.content_hash {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: "Chosen conflict FileRecord whole-file hash does not match its chunks".to_string(),
+    });
+  }
+  Ok(computed_content_hash)
+}
+
+#[derive(serde::Deserialize)]
+struct StoredConflictMetadata {
+  path: String,
+  conflict_type: String,
+  winner: StoredConflictVersion,
+  loser: StoredConflictVersion,
+}
+
+#[derive(serde::Deserialize)]
+struct StoredConflictVersion {
+  hash: String,
+  size: u64,
+  content_type: Option<String>,
 }

@@ -59,7 +59,7 @@ pub async fn get_conflict(State(state): State<AppState>, Extension(claims): Exte
 }
 
 // ---------------------------------------------------------------------------
-// POST /admin/conflict-resolve/{*path} — resolve a conflict by picking a version
+// POST /sync/resolve/{*path} — resolve a conflict by picking a version
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -106,7 +106,7 @@ pub async fn resolve_conflict(
 }
 
 // ---------------------------------------------------------------------------
-// POST /admin/conflict-dismiss/{*path} — dismiss a conflict (accept auto-winner)
+// POST /sync/dismiss/{*path} — dismiss a conflict (accept auto-winner)
 // ---------------------------------------------------------------------------
 
 pub async fn dismiss_conflict(
