@@ -400,8 +400,12 @@
       - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 3 handoff.
     - [ ] P2e Wave 4: converge system and plugin producers on one namespace mutation and locator authority.
       - [ ] Prevent detached portable plugin state from producing the same concurrent-create conflict on every peer-sync cycle after checkpoints advance.
-      - [ ] Convert users, groups, keys, permissions, shares, config, plugins, peers, conflicts, tasks, cron, and ControlStore adapters.
+      - [x] Converge detached task rows and the task registry on one hard-acknowledged stable-locator batch for enqueue, lifecycle transitions, recovery, and pruning.
+      - [ ] Converge compound user/group creation and deletion without best-effort partial authority.
+      - [ ] Convert keys, permissions, shares, config, plugins, peers, conflicts, cron, and legacy system-path migration adapters.
+      - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [ ] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
+      - [ ] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.
     - [ ] P2e Wave 5: converge maintenance and repair producers on one namespace mutation and locator authority.
       - [ ] Convert reindex metadata resave, repair, cleanup, GC follow-up, import, and migration source capture.
       - [ ] Preserve exact partial and corrupt outcomes instead of returning empty success.

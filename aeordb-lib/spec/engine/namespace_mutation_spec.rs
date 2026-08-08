@@ -664,6 +664,7 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
         && path.file_name().and_then(|value| value.to_str()) != Some("directory_ops.rs")
         && path.file_name().and_then(|value| value.to_str()) != Some("version_manager.rs")
         && path.file_name().and_then(|value| value.to_str()) != Some("backup.rs")
+        && path.file_name().and_then(|value| value.to_str()) != Some("task_queue.rs")
       {
         let source = std::fs::read_to_string(&path).unwrap();
         if source.contains("NamespaceMutationCoordinator") || source.contains("LocatorReplacementCoordinator") {
@@ -689,6 +690,19 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
   assert!(version_manager.contains("NamespaceMutationCoordinator"), "the characterized Wave 3 version producer must use the shared facade");
   let backup = std::fs::read_to_string(package.join("src/engine/backup.rs")).unwrap();
   assert!(backup.contains("NamespaceMutationCoordinator"), "the characterized Wave 3 backup producer must use the shared facade");
+  let task_queue = std::fs::read_to_string(package.join("src/engine/task_queue.rs")).unwrap();
+  assert!(task_queue.contains("NamespaceMutationCoordinator"), "the characterized Wave 4 task producer must use the shared facade");
+}
+
+#[test]
+fn wave_four_task_storage_cannot_bypass_shared_locator_authority() {
+  let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let source = std::fs::read_to_string(package.join("src/engine/task_queue.rs")).unwrap();
+
+  assert!(source.contains("NamespaceMutationCoordinator"), "task persistence must use the shared hard-authority coordinator");
+  assert!(source.contains("NamespaceMutationBatch"), "compound task transitions must be planned as one locator batch");
+  assert!(!source.contains("self.engine.store_entry("), "task persistence must not append raw detached rows");
+  assert!(!source.contains("self.engine.mark_entry_deleted("), "task pruning must not retire detached rows outside the shared batch");
 }
 
 #[test]

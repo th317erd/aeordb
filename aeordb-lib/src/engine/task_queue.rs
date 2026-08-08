@@ -7,13 +7,18 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use crate::engine::namespace_mutation::{
+  NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationKind, NamespaceMutationSourceIdentity,
+};
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
 
 const TASK_PREFIX: &str = "::aeordb:task:";
 const TASK_REGISTRY: &str = "::aeordb:task:_registry";
+const TASK_NAMESPACE_ROOT: &str = "/.aeordb-system/tasks";
 const TASK_JSON_ALLOCATION_MULTIPLIER: u64 = 3;
 const TASK_JSON_ALLOCATION_OVERHEAD: u64 = 512;
+const TASK_PRUNE_BATCH_MAXIMUM: usize = 256;
 
 fn task_storage_hash(key: &str) -> Vec<u8> {
   blake3::hash(key.as_bytes()).as_bytes().to_vec()
@@ -184,11 +189,6 @@ impl TaskQueue {
     }
   }
 
-  /// Compute a deterministic hash for a system-table key string.
-  fn hash_key(&self, key_string: &str) -> Vec<u8> {
-    task_storage_hash(key_string)
-  }
-
   /// Create a new task with `status = Pending`, persist it, and add its ID to the registry.
   ///
   /// Returns the created [`TaskRecord`] including the generated UUID.
@@ -212,14 +212,23 @@ impl TaskQueue {
       deferral_count: 0,
     };
 
-    let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
-    let json_bytes = serde_json::to_vec(&record).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
-    self.engine.store_entry(EntryType::FileRecord, &hash, &json_bytes)?;
+    let record_for_plan = record.clone();
+    NamespaceMutationCoordinator::new(&self.engine).prepare_and_execute(|planning_engine| {
+      let mut registry = load_task_registry(planning_engine)?;
+      if registry.iter().any(|existing| existing == &record_for_plan.id) {
+        return Err(EngineError::AlreadyExists(format!("task {}", record_for_plan.id)));
+      }
+      let task_key = task_record_hash(&record_for_plan.id);
+      if validate_task_locator_type(planning_engine, &task_key, &format!("task '{}'", record_for_plan.id))? {
+        return Err(EngineError::AlreadyExists(format!("task {}", record_for_plan.id)));
+      }
+      registry.push(record_for_plan.id.clone());
 
-    // Update registry.
-    let mut registry = self.load_registry()?;
-    registry.push(id);
-    self.save_registry(&registry)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      append_task_replacement(planning_engine, &mut batch, &record_for_plan)?;
+      append_registry_replacement(planning_engine, &mut batch, &registry)?;
+      Ok((batch, ()))
+    })?;
 
     Ok(record)
   }
@@ -235,42 +244,42 @@ impl TaskQueue {
 
   pub(crate) fn dequeue_next_with_memory(&self, memory: &mut OperationMemoryBudget) -> EngineResult<Option<TaskRecord>> {
     let _state_guard = self.lock_state("dequeue")?;
-
-    let (registry, registry_charge) = self.load_registry_with_memory(memory)?;
-    let mut oldest: Option<TaskRecord> = None;
-    let mut oldest_charge = 0u64;
-    let now = chrono::Utc::now().timestamp_millis();
-    for id in &registry {
-      memory.record_work(1)?;
-      let candidate_checkpoint = memory.checkpoint();
-      let (task, task_charge) = self.load_task_with_memory(id, memory)?;
-      let eligible = task.status == TaskStatus::Pending && task.retry_at.is_none_or(|retry_at| retry_at <= now);
-      let replace = eligible && oldest.as_ref().is_none_or(|current| task.created_at < current.created_at);
-      if replace {
-        let previous = oldest.replace(task);
-        drop(previous);
-        memory.release(oldest_charge, "task dequeue replaced retained FIFO candidate")?;
-        oldest_charge = task_charge;
-      } else {
-        drop(task);
-        memory.release_to(candidate_checkpoint, "task dequeue released non-selected record")?;
-      }
-    }
-    drop(registry);
-    memory.release(registry_charge, "task dequeue released registry inventory")?;
-
-    // Atomically mark as Running before returning — no one else can
-    // see this task as Pending while we hold the lock.
-    if let Some(ref mut task) = oldest {
+    let (_acknowledgement, oldest) = NamespaceMutationCoordinator::new(&self.engine).prepare_and_maybe_execute(|planning_engine| {
+      let (registry, registry_charge) = load_task_registry_with_memory(planning_engine, memory)?;
+      let mut oldest: Option<TaskRecord> = None;
+      let mut oldest_charge = 0u64;
       let now = chrono::Utc::now().timestamp_millis();
+      for id in &registry {
+        memory.record_work(1)?;
+        let candidate_checkpoint = memory.checkpoint();
+        let (task, task_charge) = load_task_with_memory(planning_engine, id, memory)?;
+        let eligible = task.status == TaskStatus::Pending && task.retry_at.is_none_or(|retry_at| retry_at <= now);
+        let replace = eligible && oldest.as_ref().is_none_or(|current| task.created_at < current.created_at);
+        if replace {
+          let previous = oldest.replace(task);
+          drop(previous);
+          memory.release(oldest_charge, "task dequeue replaced retained FIFO candidate")?;
+          oldest_charge = task_charge;
+        } else {
+          drop(task);
+          memory.release_to(candidate_checkpoint, "task dequeue released non-selected record")?;
+        }
+      }
+      drop(registry);
+      memory.release(registry_charge, "task dequeue released registry inventory")?;
+
+      let Some(ref mut task) = oldest else {
+        return Ok((None, None));
+      };
       task.status = TaskStatus::Running;
-      task.started_at = Some(now);
+      task.started_at = Some(chrono::Utc::now().timestamp_millis());
       task.completed_at = None;
       task.error = None;
       task.retry_at = None;
-      self.save_task_unlocked(task)?;
-    }
-
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      append_task_replacement(planning_engine, &mut batch, task)?;
+      Ok((Some(batch), oldest))
+    })?;
     Ok(oldest)
   }
 
@@ -283,27 +292,28 @@ impl TaskQueue {
   /// Update the checkpoint field on a task.
   pub fn update_checkpoint(&self, id: &str, checkpoint: &str) -> EngineResult<()> {
     let _state_guard = self.lock_state("checkpoint update")?;
-    let mut record = self.load_task_unlocked(id)?;
-    record.checkpoint = Some(checkpoint.to_string());
-    self.save_task_unlocked(&record)
+    let checkpoint = checkpoint.to_string();
+    self.transition_task_unlocked(id, |record| {
+      record.checkpoint = Some(checkpoint);
+      Ok((true, ()))
+    })
   }
 
   /// Return a running task to the pending queue without losing its durable checkpoint.
   /// A cancellation or terminal transition that won the state lock is never overwritten.
   pub fn requeue_running(&self, id: &str) -> EngineResult<bool> {
     let _state_guard = self.lock_state("task requeue")?;
-    let mut record = self.load_task_unlocked(id)?;
-    if record.status != TaskStatus::Running {
-      return Ok(false);
-    }
-
-    record.status = TaskStatus::Pending;
-    record.started_at = None;
-    record.completed_at = None;
-    record.error = None;
-    record.retry_at = None;
-    self.save_task_unlocked(&record)?;
-    Ok(true)
+    self.transition_task_unlocked(id, |record| {
+      if record.status != TaskStatus::Running {
+        return Ok((false, false));
+      }
+      record.status = TaskStatus::Pending;
+      record.started_at = None;
+      record.completed_at = None;
+      record.error = None;
+      record.retry_at = None;
+      Ok((true, true))
+    })
   }
 
   /// Return a running task to Pending while making it ineligible until the
@@ -311,23 +321,22 @@ impl TaskQueue {
   /// precedence because the transition is serialized by the task state lock.
   pub fn defer_running_until(&self, id: &str, retry_at: i64) -> EngineResult<Option<TaskRecord>> {
     let _state_guard = self.lock_state("task deferral")?;
-    let mut record = self.load_task_unlocked(id)?;
-    if record.status != TaskStatus::Running {
-      return Ok(None);
-    }
-
     let now = chrono::Utc::now().timestamp_millis();
     if retry_at <= now {
       return Err(EngineError::InvalidInput("task retry_at must be in the future".to_string()));
     }
-    record.status = TaskStatus::Pending;
-    record.started_at = None;
-    record.completed_at = None;
-    record.error = None;
-    record.retry_at = Some(retry_at);
-    record.deferral_count = record.deferral_count.saturating_add(1);
-    self.save_task_unlocked(&record)?;
-    Ok(Some(record))
+    self.transition_task_unlocked(id, |record| {
+      if record.status != TaskStatus::Running {
+        return Ok((false, None));
+      }
+      record.status = TaskStatus::Pending;
+      record.started_at = None;
+      record.completed_at = None;
+      record.error = None;
+      record.retry_at = Some(retry_at);
+      record.deferral_count = record.deferral_count.saturating_add(1);
+      Ok((true, Some(record.clone())))
+    })
   }
 
   /// Finish a task only while it is still running. This is the worker's
@@ -339,12 +348,13 @@ impl TaskQueue {
     }
 
     let _state_guard = self.lock_state("task completion")?;
-    let record = self.load_task_unlocked(id)?;
-    if record.status != TaskStatus::Running {
-      return Ok(false);
-    }
-    self.update_status_unlocked(id, status, error)?;
-    Ok(true)
+    self.transition_task_unlocked(id, |record| {
+      if record.status != TaskStatus::Running {
+        return Ok((false, false));
+      }
+      apply_task_status(record, status, error);
+      Ok((true, true))
+    })
   }
 
   /// Recover crash-interrupted tasks without discarding their last durable checkpoint.
@@ -357,19 +367,25 @@ impl TaskQueue {
     for id in &registry {
       memory.record_work(1)?;
       let record_checkpoint = memory.checkpoint();
-      let (mut task, _task_charge) = self.load_task_with_memory(id, &mut memory)?;
+      let (task, _task_charge) = self.load_task_with_memory(id, &mut memory)?;
       if task.status != TaskStatus::Running {
         drop(task);
         memory.release_to(record_checkpoint, "startup task recovery released inactive record")?;
         continue;
       }
-      task.status = TaskStatus::Pending;
-      task.started_at = None;
-      task.completed_at = None;
-      task.error = None;
-      task.retry_at = None;
-      self.save_task_unlocked(&task)?;
-      recovered = recovered.saturating_add(1);
+      if self.transition_task_unlocked(id, |current| {
+        if current.status != TaskStatus::Running {
+          return Ok((false, false));
+        }
+        current.status = TaskStatus::Pending;
+        current.started_at = None;
+        current.completed_at = None;
+        current.error = None;
+        current.retry_at = None;
+        Ok((true, true))
+      })? {
+        recovered = recovered.saturating_add(1);
+      }
       drop(task);
       memory.release_to(record_checkpoint, "startup task recovery released recovered record")?;
     }
@@ -378,9 +394,12 @@ impl TaskQueue {
 
   /// Load a single task by ID.
   pub fn get_task(&self, id: &str) -> EngineResult<Option<TaskRecord>> {
-    let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
-    match self.engine.get_entry(&hash)? {
-      Some((_header, _key, value)) => Ok(Some(decode_task_record(id, &value)?)),
+    let hash = task_record_hash(id);
+    match self.engine.get_entry_verified(&hash)? {
+      Some((header, key, value)) => {
+        validate_task_entry(&hash, &header, &key, id)?;
+        Ok(Some(decode_task_record(id, &value)?))
+      }
       None => Ok(None),
     }
   }
@@ -541,27 +560,25 @@ impl TaskQueue {
       remove[index] = true;
     }
 
-    // Delete the entries and update registry.
-    let pruned = remove.iter().filter(|remove| **remove).count();
-    for (index, id) in registry.iter().enumerate() {
-      if !remove[index] {
+    let mut selected_for_pruning = 0usize;
+    for should_remove in &mut remove {
+      if !*should_remove {
         continue;
       }
-      let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
-      self.engine.mark_entry_deleted(&hash)?;
+      if selected_for_pruning == TASK_PRUNE_BATCH_MAXIMUM {
+        *should_remove = false;
+        continue;
+      }
+      selected_for_pruning += 1;
     }
 
-    {
-      let mut cancelled = self.cancelled.write().unwrap_or_else(|error| {
-        tracing::warn!("cancelled set write lock poisoned, recovering: {}", error);
-        error.into_inner()
-      });
-      for (index, id) in registry.iter().enumerate() {
-        if remove[index] {
-          cancelled.remove(id);
-        }
-      }
+    let pruned = remove.iter().filter(|remove| **remove).count();
+    if pruned == 0 {
+      return Ok(0);
     }
+
+    let expected_registry_digest = task_registry_digest(&registry);
+    let removed_ids = registry.iter().enumerate().filter_map(|(index, id)| remove[index].then_some(id.clone())).collect::<Vec<_>>();
 
     let mut index = 0usize;
     registry.retain(|_| {
@@ -569,7 +586,34 @@ impl TaskQueue {
       index += 1;
       retain
     });
-    self.save_registry(&registry)?;
+    NamespaceMutationCoordinator::new(&self.engine).prepare_and_execute(|planning_engine| {
+      let current_registry = load_task_registry(planning_engine)?;
+      if task_registry_digest(&current_registry) != expected_registry_digest {
+        return Err(EngineError::AlreadyExists("task registry changed while pruning was prepared".to_string()));
+      }
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      for id in &removed_ids {
+        let key = task_record_hash(id);
+        validate_task_locator_type(planning_engine, &key, &format!("task '{id}'"))?;
+        batch.retire_locator(key.clone())?;
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: task_namespace_path(id),
+          entry_type: Some(EntryType::FileRecord.to_u8()),
+          previous_identity: Some(key),
+          new_identity: None,
+        })?;
+      }
+      append_registry_replacement(planning_engine, &mut batch, &registry)?;
+      Ok((batch, ()))
+    })?;
+
+    let mut cancelled = self.cancelled.write().unwrap_or_else(|error| {
+      tracing::warn!("cancelled set write lock poisoned, recovering: {}", error);
+      error.into_inner()
+    });
+    for id in &removed_ids {
+      cancelled.remove(id);
+    }
 
     Ok(pruned)
   }
@@ -579,38 +623,15 @@ impl TaskQueue {
   // -------------------------------------------------------------------------
 
   fn load_registry(&self) -> EngineResult<Vec<String>> {
-    let hash = self.hash_key(TASK_REGISTRY);
-    match self.engine.get_entry(&hash)? {
-      Some((_header, _key, value)) => decode_task_registry(&value),
-      None => Ok(Vec::new()),
-    }
+    load_task_registry(&self.engine)
   }
 
   fn load_registry_with_memory(&self, memory: &mut OperationMemoryBudget) -> EngineResult<(Vec<String>, u64)> {
-    let hash = self.hash_key(TASK_REGISTRY);
-    let Some(header) = self.engine.get_entry_header(&hash)? else {
-      return Ok((Vec::new(), 0));
-    };
-    let charge = task_json_allocation_charge(header.value_length, "task registry")?;
-    memory.reserve(charge, "task registry admission failed")?;
-    let Some((_header, _key, value)) = self.engine.get_entry_verified_bounded(&hash, header.value_length)? else {
-      return Err(EngineError::CorruptEntry { offset: 0, reason: "task registry disappeared during dequeue".to_string() });
-    };
-    Ok((decode_task_registry(&value)?, charge))
+    load_task_registry_with_memory(&self.engine, memory)
   }
 
   fn load_task_with_memory(&self, id: &str, memory: &mut OperationMemoryBudget) -> EngineResult<(TaskRecord, u64)> {
-    let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
-    let header = self
-      .engine
-      .get_entry_header(&hash)?
-      .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("task registry references missing task '{id}'") })?;
-    let charge = task_json_allocation_charge(header.value_length, "task record")?;
-    memory.reserve(charge, "task record admission failed")?;
-    let Some((_header, _key, value)) = self.engine.get_entry_verified_bounded(&hash, header.value_length)? else {
-      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("task registry references missing task '{id}'") });
-    };
-    Ok((decode_task_record(id, &value)?, charge))
+    load_task_with_memory(&self.engine, id, memory)
   }
 
   fn lock_state(&self, operation: &str) -> EngineResult<std::sync::MutexGuard<'_, ()>> {
@@ -620,63 +641,185 @@ impl TaskQueue {
       .map_err(|error| EngineError::IoError(std::io::Error::other(format!("task state lock poisoned during {operation}: {error}"))))
   }
 
-  fn load_task_unlocked(&self, id: &str) -> EngineResult<TaskRecord> {
-    let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
-    let entry = self.engine.get_entry(&hash)?;
-    let (_header, _key, value) = entry.ok_or_else(|| EngineError::NotFound(format!("task {id}")))?;
-    decode_task_record(id, &value)
-  }
-
-  fn save_task_unlocked(&self, record: &TaskRecord) -> EngineResult<()> {
-    let hash = self.hash_key(&format!("{TASK_PREFIX}{}", record.id));
-    let json_bytes = serde_json::to_vec(record).map_err(|error| EngineError::InvalidInput(format!("serialization error: {error}")))?;
-    self.engine.store_entry(EntryType::FileRecord, &hash, &json_bytes)?;
-    Ok(())
-  }
-
   fn list_tasks_unlocked(&self) -> EngineResult<Vec<TaskRecord>> {
     let registry = self.load_registry()?;
     let mut tasks = Vec::new();
     for id in &registry {
-      let hash = self.hash_key(&format!("{TASK_PREFIX}{id}"));
-      let Some((_header, _key, value)) = self.engine.get_entry(&hash)? else {
+      let hash = task_record_hash(id);
+      let Some((header, key, value)) = self.engine.get_entry_verified(&hash)? else {
         return Err(EngineError::CorruptEntry { offset: 0, reason: format!("task registry references missing task '{id}'") });
       };
+      validate_task_entry(&hash, &header, &key, id)?;
       tasks.push(decode_task_record(id, &value)?);
     }
     Ok(tasks)
   }
 
   fn update_status_unlocked(&self, id: &str, status: TaskStatus, error: Option<String>) -> EngineResult<()> {
-    let mut record = self.load_task_unlocked(id)?;
-    let now = chrono::Utc::now().timestamp_millis();
-    match status {
-      TaskStatus::Pending => {
-        record.started_at = None;
-        record.completed_at = None;
-        record.retry_at = None;
-      }
-      TaskStatus::Running => {
-        record.started_at = Some(now);
-        record.completed_at = None;
-        record.retry_at = None;
-      }
-      TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled => {
-        record.completed_at = Some(now);
-        record.retry_at = None;
-      }
-    }
-    record.status = status;
-    record.error = error;
-    self.save_task_unlocked(&record)
+    self.transition_task_unlocked(id, |record| {
+      apply_task_status(record, status, error);
+      Ok((true, ()))
+    })
   }
 
-  fn save_registry(&self, registry: &[String]) -> EngineResult<()> {
-    let hash = self.hash_key(TASK_REGISTRY);
-    let encoded = serde_json::to_vec(registry).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
-    self.engine.store_entry(EntryType::FileRecord, &hash, &encoded)?;
-    Ok(())
+  fn transition_task_unlocked<T, F>(&self, id: &str, transition: F) -> EngineResult<T>
+  where
+    F: FnOnce(&mut TaskRecord) -> EngineResult<(bool, T)>,
+  {
+    let id = id.to_string();
+    let (_acknowledgement, output) = NamespaceMutationCoordinator::new(&self.engine).prepare_and_maybe_execute(|planning_engine| {
+      let mut record = load_task_record(planning_engine, &id)?;
+      let (changed, output) = transition(&mut record)?;
+      if !changed {
+        return Ok((None, output));
+      }
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      append_task_replacement(planning_engine, &mut batch, &record)?;
+      Ok((Some(batch), output))
+    })?;
+    Ok(output)
   }
+}
+
+fn task_record_hash(id: &str) -> Vec<u8> {
+  task_storage_hash(&format!("{TASK_PREFIX}{id}"))
+}
+
+fn task_namespace_path(id: &str) -> String {
+  format!("{TASK_NAMESPACE_ROOT}/{id}")
+}
+
+fn task_registry_digest(registry: &[String]) -> blake3::Hash {
+  let mut hasher = blake3::Hasher::new();
+  for id in registry {
+    hasher.update(&(id.len() as u64).to_le_bytes());
+    hasher.update(id.as_bytes());
+  }
+  hasher.finalize()
+}
+
+fn validate_task_entry(
+  expected_key: &[u8],
+  header: &crate::engine::entry_header::EntryHeader,
+  stored_key: &[u8],
+  role: &str,
+) -> EngineResult<()> {
+  if header.entry_type != EntryType::FileRecord || stored_key != expected_key {
+    return Err(EngineError::CorruptEntry { offset: 0, reason: format!("task {role} locator is not an exact FileRecord") });
+  }
+  Ok(())
+}
+
+fn load_task_registry(engine: &StorageEngine) -> EngineResult<Vec<String>> {
+  let hash = task_storage_hash(TASK_REGISTRY);
+  match engine.get_entry_verified(&hash)? {
+    Some((header, key, value)) => {
+      if header.entry_type != EntryType::FileRecord || key != hash {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "task registry locator is not an exact FileRecord".to_string() });
+      }
+      decode_task_registry(&value)
+    }
+    None => Ok(Vec::new()),
+  }
+}
+
+fn load_task_record(engine: &StorageEngine, id: &str) -> EngineResult<TaskRecord> {
+  let hash = task_record_hash(id);
+  let (header, key, value) = engine.get_entry_verified(&hash)?.ok_or_else(|| EngineError::NotFound(format!("task {id}")))?;
+  validate_task_entry(&hash, &header, &key, id)?;
+  decode_task_record(id, &value)
+}
+
+fn load_task_registry_with_memory(engine: &StorageEngine, memory: &mut OperationMemoryBudget) -> EngineResult<(Vec<String>, u64)> {
+  let hash = task_storage_hash(TASK_REGISTRY);
+  let Some(header) = engine.get_entry_header(&hash)? else {
+    return Ok((Vec::new(), 0));
+  };
+  if header.entry_type != EntryType::FileRecord {
+    return Err(EngineError::CorruptEntry { offset: 0, reason: "task registry locator is not a FileRecord".to_string() });
+  }
+  let charge = task_json_allocation_charge(header.value_length, "task registry")?;
+  memory.reserve(charge, "task registry admission failed")?;
+  let Some((read_header, key, value)) = engine.get_entry_verified_bounded(&hash, header.value_length)? else {
+    return Err(EngineError::CorruptEntry { offset: 0, reason: "task registry disappeared during dequeue".to_string() });
+  };
+  validate_task_entry(&hash, &read_header, &key, "_registry")?;
+  Ok((decode_task_registry(&value)?, charge))
+}
+
+fn load_task_with_memory(engine: &StorageEngine, id: &str, memory: &mut OperationMemoryBudget) -> EngineResult<(TaskRecord, u64)> {
+  let hash = task_record_hash(id);
+  let header = engine
+    .get_entry_header(&hash)?
+    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("task registry references missing task '{id}'") })?;
+  if header.entry_type != EntryType::FileRecord {
+    return Err(EngineError::CorruptEntry { offset: 0, reason: format!("task '{id}' locator is not a FileRecord") });
+  }
+  let charge = task_json_allocation_charge(header.value_length, "task record")?;
+  memory.reserve(charge, "task record admission failed")?;
+  let Some((read_header, key, value)) = engine.get_entry_verified_bounded(&hash, header.value_length)? else {
+    return Err(EngineError::CorruptEntry { offset: 0, reason: format!("task registry references missing task '{id}'") });
+  };
+  validate_task_entry(&hash, &read_header, &key, id)?;
+  Ok((decode_task_record(id, &value)?, charge))
+}
+
+fn apply_task_status(record: &mut TaskRecord, status: TaskStatus, error: Option<String>) {
+  let now = chrono::Utc::now().timestamp_millis();
+  match status {
+    TaskStatus::Pending => {
+      record.started_at = None;
+      record.completed_at = None;
+      record.retry_at = None;
+    }
+    TaskStatus::Running => {
+      record.started_at = Some(now);
+      record.completed_at = None;
+      record.retry_at = None;
+    }
+    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled => {
+      record.completed_at = Some(now);
+      record.retry_at = None;
+    }
+  }
+  record.status = status;
+  record.error = error;
+}
+
+fn validate_task_locator_type(engine: &StorageEngine, key: &[u8], role: &str) -> EngineResult<bool> {
+  let Some(entry) = engine.get_kv_entry(key)? else {
+    return Ok(false);
+  };
+  if entry.entry_type() != EntryType::FileRecord.to_kv_type() {
+    return Err(EngineError::CorruptEntry { offset: entry.offset, reason: format!("{role} locator is not a FileRecord") });
+  }
+  Ok(true)
+}
+
+fn append_task_replacement(engine: &StorageEngine, batch: &mut NamespaceMutationBatch, record: &TaskRecord) -> EngineResult<()> {
+  let key = task_record_hash(&record.id);
+  let existed = validate_task_locator_type(engine, &key, &format!("task '{}'", record.id))?;
+  let bytes = serde_json::to_vec(record).map_err(|error| EngineError::InvalidInput(format!("serialization error: {error}")))?;
+  batch.replace_locator(EntryType::FileRecord, key.clone(), bytes, 0)?;
+  batch.add_source_identity(NamespaceMutationSourceIdentity {
+    path: task_namespace_path(&record.id),
+    entry_type: Some(EntryType::FileRecord.to_u8()),
+    previous_identity: existed.then(|| key.clone()),
+    new_identity: Some(key),
+  })
+}
+
+fn append_registry_replacement(engine: &StorageEngine, batch: &mut NamespaceMutationBatch, registry: &[String]) -> EngineResult<()> {
+  let key = task_storage_hash(TASK_REGISTRY);
+  let existed = validate_task_locator_type(engine, &key, "task registry")?;
+  let bytes = serde_json::to_vec(registry).map_err(|error| EngineError::InvalidInput(format!("serialization error: {error}")))?;
+  batch.replace_locator(EntryType::FileRecord, key.clone(), bytes, 0)?;
+  batch.add_source_identity(NamespaceMutationSourceIdentity {
+    path: format!("{TASK_NAMESPACE_ROOT}/_registry"),
+    entry_type: Some(EntryType::FileRecord.to_u8()),
+    previous_identity: existed.then(|| key.clone()),
+    new_identity: Some(key),
+  })
 }
 
 fn task_json_allocation_charge(value_length: u32, label: &str) -> EngineResult<u64> {

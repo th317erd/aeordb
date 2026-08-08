@@ -1,7 +1,9 @@
 use std::thread;
 use std::time::Duration;
 
-use aeordb::engine::task_queue::{TaskQueue, TaskStatus, ProgressInfo};
+use aeordb::engine::EntryType;
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+use aeordb::engine::task_queue::{ProgressInfo, TaskQueue, TaskRecord, TaskStatus};
 use aeordb::server::create_temp_engine_for_tests;
 
 #[test]
@@ -26,6 +28,130 @@ fn test_enqueue_creates_pending_task() {
   assert_eq!(fetched.status, TaskStatus::Pending);
   assert_eq!(fetched.task_type, "reindex");
   assert_eq!(fetched.args, args);
+}
+
+#[test]
+fn persisted_task_transitions_each_use_one_hard_acknowledgement() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let before_enqueue = engine.durability_snapshot().unwrap();
+
+  let record = queue.enqueue("reindex", serde_json::json!({"path": "/docs"})).unwrap();
+
+  let after_enqueue = engine.durability_snapshot().unwrap();
+  assert_eq!(after_enqueue.next_sequence, before_enqueue.next_sequence + 1);
+  assert!(after_enqueue.hard_frontier > before_enqueue.hard_frontier);
+
+  queue.update_checkpoint(&record.id, "page:2").unwrap();
+
+  let after_checkpoint = engine.durability_snapshot().unwrap();
+  assert_eq!(after_checkpoint.next_sequence, after_enqueue.next_sequence + 1);
+  assert!(after_checkpoint.hard_frontier > after_enqueue.hard_frontier);
+  assert_eq!(queue.get_task(&record.id).unwrap().unwrap().checkpoint.as_deref(), Some("page:2"));
+}
+
+#[test]
+fn shared_task_authority_preserves_the_exact_v3_storage_contract() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let record = queue.enqueue("reindex", serde_json::json!({"path": "/docs"})).unwrap();
+  let task_key = blake3::hash(format!("::aeordb:task:{}", record.id).as_bytes()).as_bytes().to_vec();
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+
+  let (task_header, stored_task_key, task_bytes) = engine.get_entry_verified(&task_key).unwrap().unwrap();
+  assert_eq!(task_header.entry_type, EntryType::FileRecord);
+  assert_eq!(task_header.entry_version, 0);
+  assert_eq!(task_header.flags, 0);
+  assert_eq!(stored_task_key, task_key);
+  assert_eq!(task_bytes, serde_json::to_vec(&record).unwrap());
+
+  let (registry_header, stored_registry_key, registry_bytes) = engine.get_entry_verified(&registry_key).unwrap().unwrap();
+  assert_eq!(registry_header.entry_type, EntryType::FileRecord);
+  assert_eq!(registry_header.entry_version, 0);
+  assert_eq!(registry_header.flags, 0);
+  assert_eq!(stored_registry_key, registry_key);
+  assert_eq!(registry_bytes, serde_json::to_vec(&vec![record.id]).unwrap());
+}
+
+#[test]
+fn task_pruning_retires_rows_and_registry_under_one_hard_acknowledgement() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let first = queue.enqueue("cleanup", serde_json::json!({"ordinal": 1})).unwrap();
+  let second = queue.enqueue("cleanup", serde_json::json!({"ordinal": 2})).unwrap();
+  queue.update_status(&first.id, TaskStatus::Completed, None).unwrap();
+  queue.update_status(&second.id, TaskStatus::Completed, None).unwrap();
+  let before_prune = engine.durability_snapshot().unwrap();
+
+  assert_eq!(queue.prune_completed(0, 0).unwrap(), 2);
+
+  let after_prune = engine.durability_snapshot().unwrap();
+  assert_eq!(after_prune.next_sequence, before_prune.next_sequence + 1);
+  assert!(after_prune.hard_frontier > before_prune.hard_frontier);
+  assert!(queue.list_tasks().unwrap().is_empty());
+  assert!(queue.get_task(&first.id).unwrap().is_none());
+  assert!(queue.get_task(&second.id).unwrap().is_none());
+
+  assert_eq!(queue.prune_completed(0, 0).unwrap(), 0);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, after_prune.next_sequence);
+}
+
+#[test]
+fn task_pruning_refuses_before_changing_rows_or_registry_under_waiter_pressure() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let record = queue.enqueue("cleanup", serde_json::json!({})).unwrap();
+  queue.update_status(&record.id, TaskStatus::Completed, None).unwrap();
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let remaining = snapshot.policy.unwrap().emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+  let pressure = memory
+    .reserve(MemoryOwner::DurabilityWaiters, remaining.saturating_sub(1), AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite))
+    .unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(queue.prune_completed(0, 0).is_err());
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(queue.list_tasks().unwrap().len(), 1);
+  assert!(queue.get_task(&record.id).unwrap().is_some());
+
+  drop(pressure);
+  assert_eq!(queue.prune_completed(0, 0).unwrap(), 1);
+  assert!(queue.list_tasks().unwrap().is_empty());
+}
+
+#[test]
+fn task_pruning_bounds_each_locator_batch_and_leaves_registry_closure_complete() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let mut ids = Vec::new();
+  for ordinal in 0..260 {
+    let id = format!("legacy-{ordinal:04}");
+    let record = TaskRecord {
+      id: id.clone(),
+      task_type: "cleanup".to_string(),
+      args: serde_json::json!({"ordinal": ordinal}),
+      status: TaskStatus::Completed,
+      created_at: 1,
+      started_at: Some(2),
+      completed_at: Some(3),
+      error: None,
+      checkpoint: None,
+      retry_at: None,
+      deferral_count: 0,
+    };
+    let key = blake3::hash(format!("::aeordb:task:{id}").as_bytes()).as_bytes().to_vec();
+    engine.store_entry(EntryType::FileRecord, &key, &serde_json::to_vec(&record).unwrap()).unwrap();
+    ids.push(id);
+  }
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+  engine.store_entry(EntryType::FileRecord, &registry_key, &serde_json::to_vec(&ids).unwrap()).unwrap();
+  let queue = TaskQueue::new(engine.clone());
+
+  assert_eq!(queue.prune_completed(0, 0).unwrap(), 256);
+  assert_eq!(queue.list_tasks().unwrap().len(), 4);
+  assert_eq!(queue.prune_completed(0, 0).unwrap(), 4);
+  assert!(queue.list_tasks().unwrap().is_empty());
 }
 
 #[test]
@@ -342,6 +468,40 @@ fn worker_completion_never_overwrites_a_persisted_cancellation() {
   let cancelled = queue.get_task(&task.id).unwrap().unwrap();
   assert_eq!(cancelled.status, TaskStatus::Cancelled);
   assert!(cancelled.error.is_none());
+}
+
+#[test]
+fn independent_queue_wrappers_serialize_transitions_through_engine_authority() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let queue_a = std::sync::Arc::new(TaskQueue::new(engine.clone()));
+  let queue_b = std::sync::Arc::new(TaskQueue::new(engine.clone()));
+  let task = queue_a.enqueue("backup", serde_json::json!({})).unwrap();
+  queue_a.dequeue_next().unwrap().expect("task must be claimed");
+  let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+  std::thread::scope(|scope| {
+    let barrier_a = barrier.clone();
+    let queue_a = queue_a.clone();
+    let task_id = task.id.clone();
+    let checkpoint = scope.spawn(move || {
+      barrier_a.wait();
+      queue_a.update_checkpoint(&task_id, "archive:0042")
+    });
+    let barrier_b = barrier.clone();
+    let queue_b = queue_b.clone();
+    let task_id = task.id.clone();
+    let cancellation = scope.spawn(move || {
+      barrier_b.wait();
+      queue_b.cancel(&task_id)
+    });
+    barrier.wait();
+    checkpoint.join().unwrap().unwrap();
+    cancellation.join().unwrap().unwrap();
+  });
+
+  let persisted = queue_a.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(persisted.status, TaskStatus::Cancelled);
+  assert_eq!(persisted.checkpoint.as_deref(), Some("archive:0042"));
 }
 
 #[test]
