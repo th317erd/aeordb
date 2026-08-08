@@ -4,16 +4,19 @@ use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use aeordb::engine::backup::{
-  backup_contains_system_data, create_patch, export_full, export_version, import_backup, ExportResult, ImportResult,
+  backup_contains_system_data, create_patch, export_full, export_version, import_backup, import_backup_with_mode, ExportResult, ImportMode,
+  ImportResult,
 };
+use aeordb::engine::deletion_record::DeletionRecord;
+use aeordb::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
 use aeordb::engine::entry_header::FLAG_SYSTEM;
-use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::directory_ops::{file_path_hash, DirectoryOps};
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::kv_store::KV_TYPE_FILE_RECORD;
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
-use aeordb::engine::EntryType;
+use aeordb::engine::{btree_from_entries, btree_list_from_node, directory_path_hash, is_btree_format, EntryType};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::RequestContext;
 use aeordb::engine::VersionManager;
@@ -45,10 +48,60 @@ fn export_to_path(engine: &StorageEngine, path: &str) -> ExportResult {
 
 fn add_file_to_backup(path: &str, file_path: &str, content: &[u8]) {
   let backup = StorageEngine::open_for_import(path).unwrap();
+  let (backup_type, base_hash, _target_hash) = backup.backup_info().unwrap();
   let ops = DirectoryOps::new(&backup);
   ops.store_file_buffered(&RequestContext::system(), file_path, content, Some("application/octet-stream")).unwrap();
   let head = backup.head_hash().unwrap();
-  backup.set_backup_info(1, &head, &head).unwrap();
+  let effective_base = if backup_type == 1 { &head } else { &base_hash };
+  backup.set_backup_info(backup_type, effective_base, &head).unwrap();
+}
+
+fn install_legacy_system_root(source: &StorageEngine) -> Vec<u8> {
+  let clean_root = source.head_hash().unwrap();
+  let clean_root_entry = source.get_entry(&clean_root).unwrap().unwrap();
+  let mut root_children = if is_btree_format(&clean_root_entry.2) {
+    btree_list_from_node(&clean_root_entry.2, source, source.hash_algo().hash_length(), true).unwrap()
+  } else {
+    deserialize_child_entries(&clean_root_entry.2, source.hash_algo().hash_length(), clean_root_entry.0.entry_version).unwrap()
+  };
+  let system_path_hash = directory_path_hash("/.aeordb-system", &source.hash_algo()).unwrap();
+  let system_hash = source.get_entry(&system_path_hash).unwrap().unwrap().2;
+  root_children.push(ChildEntry {
+    entry_type: EntryType::DirectoryIndex.to_u8(),
+    hash: system_hash,
+    total_size: 0,
+    created_at: 1,
+    updated_at: 1,
+    name: ".aeordb-system".to_string(),
+    content_type: None,
+    virtual_time: 1,
+    node_id: 1,
+  });
+
+  let legacy_root = if is_btree_format(&clean_root_entry.2) {
+    btree_from_entries(source, root_children, source.hash_algo().hash_length(), &source.hash_algo()).unwrap()
+  } else {
+    root_children.sort_by(|left, right| left.name.cmp(&right.name));
+    let root_data = serialize_child_entries(&root_children, source.hash_algo().hash_length()).unwrap();
+    let root_hash = aeordb::engine::directory_content_hash(&root_data, &source.hash_algo()).unwrap();
+    source.store_entry(EntryType::DirectoryIndex, &root_hash, &root_data).unwrap();
+    root_hash
+  };
+  source.update_head(&legacy_root).unwrap();
+  legacy_root
+}
+
+fn rewrite_artifact_file_record_path(artifact_path: &str, old_path: &str, new_path: &str) {
+  let artifact = StorageEngine::open_for_import(artifact_path).unwrap();
+  for (key, value) in artifact.entries_by_type(KV_TYPE_FILE_RECORD).unwrap() {
+    let header = artifact.get_entry_header_including_deleted(&key).unwrap().unwrap();
+    let mut record = FileRecord::deserialize(&value, artifact.hash_algo().hash_length(), header.entry_version).unwrap();
+    if record.path == old_path {
+      record.path = new_path.to_string();
+      let rewritten = record.serialize_for_version(artifact.hash_algo().hash_length(), header.entry_version).unwrap();
+      artifact.store_entry_with_flags_and_version(EntryType::FileRecord, &key, &rewritten, header.flags, header.entry_version).unwrap();
+    }
+  }
 }
 
 // ─── 1. test_import_full_export ─────────────────────────────────────────
@@ -154,16 +207,12 @@ fn test_import_with_promote() {
 #[test]
 fn test_import_patch_matching_base() {
   let (source, source_temp) = setup_engine_with_files();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = target.head_hash().unwrap();
 
-  // Create a base hash (bogus), then patch from bogus -> HEAD
-  let bogus = vec![0xDE; 32];
   let head = source.head_hash().unwrap();
   let patch_path = db_path(&source_temp, "patch.aeordb");
-  create_patch(&source, &bogus, &head, &patch_path).unwrap();
-
-  // Create a target whose HEAD matches the bogus base
-  let (target, _target_temp) = create_temp_engine_for_tests();
-  target.update_head(&bogus).unwrap();
+  create_patch(&source, &base, &head, &patch_path).unwrap();
 
   let ctx = RequestContext::system();
   let result = import_backup(&ctx, &target, &patch_path, false, true, false).unwrap();
@@ -177,16 +226,15 @@ fn test_import_patch_matching_base() {
 #[test]
 fn test_import_patch_wrong_base() {
   let (source, source_temp) = setup_engine_with_files();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = target.head_hash().unwrap();
 
-  let bogus = vec![0xDE; 32];
   let head = source.head_hash().unwrap();
   let patch_path = db_path(&source_temp, "patch.aeordb");
-  create_patch(&source, &bogus, &head, &patch_path).unwrap();
+  create_patch(&source, &base, &head, &patch_path).unwrap();
 
-  // Target HEAD is different from the patch base
-  let (target, _target_temp) = create_temp_engine_for_tests();
-  let different_hash = vec![0xFF; 32];
-  target.update_head(&different_hash).unwrap();
+  // Target HEAD is valid but semantically different from the patch base.
+  DirectoryOps::new(&target).store_file_buffered(&RequestContext::system(), "/diverged.txt", b"diverged", Some("text/plain")).unwrap();
 
   let ctx = RequestContext::system();
   let result = import_backup(&ctx, &target, &patch_path, false, false, false);
@@ -201,14 +249,14 @@ fn test_import_patch_wrong_base() {
 #[test]
 fn test_import_patch_wrong_base_force() {
   let (source, source_temp) = setup_engine_with_files();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = target.head_hash().unwrap();
 
-  let bogus = vec![0xDE; 32];
   let head = source.head_hash().unwrap();
   let patch_path = db_path(&source_temp, "patch.aeordb");
-  create_patch(&source, &bogus, &head, &patch_path).unwrap();
+  create_patch(&source, &base, &head, &patch_path).unwrap();
 
   // Target HEAD is different, but we use force=true
-  let (target, _target_temp) = create_temp_engine_for_tests();
   let different_hash = vec![0xFF; 32];
   target.update_head(&different_hash).unwrap();
 
@@ -501,6 +549,30 @@ fn test_import_memory_pressure_fails_before_target_mutation() {
 }
 
 #[test]
+fn test_sparse_patch_memory_pressure_fails_before_target_mutation() {
+  let (source, source_temp) = setup_engine_with_files();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let patch_path = db_path(&source_temp, "pressure-patch-import.aeordb");
+  create_patch(&source, &target.head_hash().unwrap(), &source.head_hash().unwrap(), &patch_path).unwrap();
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+  let coordinator = target.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let policy = snapshot.policy.unwrap();
+  let remaining = policy.ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Task, remaining.saturating_sub(4 * 1024), AdmissionClass::Workload).unwrap();
+
+  let error = import_backup(&RequestContext::system(), &target, &patch_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
+  let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::BackupRestore).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
+}
+
+#[test]
 fn test_import_rejects_unknown_backup_type_before_target_mutation() {
   let (source, source_temp) = setup_engine_with_files();
   let export_path = db_path(&source_temp, "unknown-type.aeordb");
@@ -610,4 +682,302 @@ fn test_privileged_full_import_preserves_portable_state_and_snapshots() {
   let snapshot_tree = walk_version_tree(&target, &snapshot.root_hash).unwrap();
   assert!(snapshot_tree.files.contains_key("/docs/hello.txt"));
   assert!(!snapshot_tree.files.contains_key("/docs/after.txt"));
+}
+
+#[test]
+fn test_sparse_patch_reads_unchanged_entries_from_target_overlay() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let source_ops = DirectoryOps::new(&source);
+  let target_ops = DirectoryOps::new(&target);
+  source_ops.store_file_buffered(&context, "/keep.txt", b"keep", Some("text/plain")).unwrap();
+  let base = source.head_hash().unwrap();
+  let base_export_path = db_path(&source_temp, "overlay-base.aeordb");
+  export_version(&source, &base, &base_export_path, false).unwrap();
+  import_backup(&context, &target, &base_export_path, false, true, false).unwrap();
+  assert_eq!(target.head_hash().unwrap(), base);
+  source_ops.store_file_buffered(&context, "/added.txt", b"added", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "overlay.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+
+  let result = import_backup(&context, &target, &patch_path, false, true, false).unwrap();
+
+  assert!(result.head_promoted);
+  assert_eq!(target_ops.read_file_buffered("/keep.txt").unwrap(), b"keep");
+  assert_eq!(target_ops.read_file_buffered("/added.txt").unwrap(), b"added");
+}
+
+#[test]
+fn test_sparse_patch_accepts_logically_equivalent_base_after_filtered_full_import() {
+  let context = RequestContext::system();
+  let (source, source_temp) = setup_engine_with_files();
+  let source_operations = DirectoryOps::new(&source);
+  source_operations.store_file_buffered(&context, "/.aeordb-system/api-keys/local.json", b"node-local", Some("application/json")).unwrap();
+  let raw_base = install_legacy_system_root(&source);
+  let base_export = db_path(&source_temp, "filtered-patch-base.aeordb");
+  export_version(&source, &raw_base, &base_export, false).unwrap();
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base_import = import_backup(&context, &target, &base_export, false, true, false).unwrap();
+  assert_ne!(base_import.version_hash, raw_base, "filtered export must reproduce the logical/raw root mismatch");
+  assert_eq!(target.head_hash().unwrap(), base_import.version_hash);
+
+  source_operations.store_file_buffered(&context, "/docs/after.txt", b"after", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "filtered-base.patch.aeordb");
+  create_patch(&source, &raw_base, &source.head_hash().unwrap(), &patch_path).unwrap();
+
+  let result = import_backup(&context, &target, &patch_path, false, true, false).unwrap();
+
+  assert!(result.head_promoted);
+  assert_eq!(DirectoryOps::new(&target).read_file_buffered("/docs/hello.txt").unwrap(), b"Hello World");
+  assert_eq!(DirectoryOps::new(&target).read_file_buffered("/docs/after.txt").unwrap(), b"after");
+}
+
+#[test]
+fn test_sparse_patch_deletion_remains_verifiable_after_restart() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let source_operations = DirectoryOps::new(&source);
+  source_operations.store_file_buffered(&context, "/keep.txt", b"keep", Some("text/plain")).unwrap();
+  source_operations.store_file_buffered(&context, "/remove.txt", b"remove", Some("text/plain")).unwrap();
+  let base = source.head_hash().unwrap();
+  let base_export = db_path(&source_temp, "deletion-base.aeordb");
+  export_version(&source, &base, &base_export, false).unwrap();
+
+  let (target, target_temp) = create_temp_engine_for_tests();
+  let target_path = db_path(&target_temp, "test.aeordb");
+  import_backup(&context, &target, &base_export, false, true, false).unwrap();
+  source_operations.delete_file(&context, "/remove.txt").unwrap();
+  let patch_path = db_path(&source_temp, "deletion.patch.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+
+  import_backup(&context, &target, &patch_path, false, true, false).unwrap();
+  assert!(matches!(DirectoryOps::new(&target).read_file_buffered("/remove.txt"), Err(EngineError::NotFound(_))));
+  target.shutdown().unwrap();
+  drop(target);
+
+  let reopened = StorageEngine::open(&target_path).unwrap();
+  let report = aeordb::engine::verify::verify_checked(&reopened, &target_path).unwrap();
+  assert_eq!(report.missing_kv_entries, 0, "patch deletion must leave durable replay evidence");
+  assert!(!report.has_issues(), "reopened patch target must verify cleanly: {report:?}");
+}
+
+#[test]
+fn test_sparse_patch_preserves_namespace_permissions() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  DirectoryOps::new(&source)
+    .store_file_buffered(&context, "/docs/.aeordb-permissions", br#"{"inherit":true}"#, Some("application/json"))
+    .unwrap();
+  let patch_path = db_path(&source_temp, "permissions.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+
+  import_backup(&context, &target, &patch_path, false, true, false).unwrap();
+
+  assert_eq!(DirectoryOps::new(&target).read_file_buffered("/docs/.aeordb-permissions").unwrap(), br#"{"inherit":true}"#);
+}
+
+#[test]
+fn test_sparse_patch_does_not_rewrite_unchanged_overlay_files() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let source_operations = DirectoryOps::new(&source);
+  for index in 0..32 {
+    source_operations
+      .store_file_buffered(&context, &format!("/bulk/file-{index:02}.txt"), format!("value-{index}").as_bytes(), Some("text/plain"))
+      .unwrap();
+  }
+  let base = source.head_hash().unwrap();
+  let base_export = db_path(&source_temp, "sparse-metrics-base.aeordb");
+  export_version(&source, &base, &base_export, false).unwrap();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  import_backup(&context, &target, &base_export, false, true, false).unwrap();
+  source_operations.store_file_buffered(&context, "/bulk/added.txt", b"added", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "sparse-metrics.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  let before = target.counters().snapshot();
+
+  let result = import_backup(&context, &target, &patch_path, false, true, false).unwrap();
+  let after = target.counters().snapshot();
+
+  assert_eq!(result.files_imported, 1, "only the added file should mutate its path alias");
+  let expected_writes = result
+    .chunks_imported
+    .saturating_add(result.files_imported)
+    .saturating_add(result.directories_imported)
+    .saturating_add(result.deletions_applied)
+    .saturating_add(u64::from(result.head_promoted));
+  assert_eq!(after.writes_total - before.writes_total, expected_writes);
+  assert!(expected_writes < 10, "one-file patch unexpectedly rewrote the 32-file base: {expected_writes} writes");
+}
+
+#[test]
+fn test_sparse_patch_omits_rooted_node_local_payload_and_rebuilds_root() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/ordinary.txt", b"ordinary", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "rooted-node-local.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  add_file_to_backup(&patch_path, "/.aeordb-system/api-keys/patch-only.json", b"node-local");
+  let patch = StorageEngine::open_for_import(&patch_path).unwrap();
+  let (_, patch_base, _) = patch.backup_info().unwrap();
+  let legacy_root = install_legacy_system_root(&patch);
+  patch.set_backup_info(2, &patch_base, &legacy_root).unwrap();
+  drop(patch);
+
+  let result = import_backup(&context, &target, &patch_path, false, true, true).unwrap();
+
+  assert!(result.head_promoted);
+  assert_eq!(DirectoryOps::new(&target).read_file_buffered("/ordinary.txt").unwrap(), b"ordinary");
+  assert!(matches!(
+    DirectoryOps::new(&target).read_file_buffered("/.aeordb-system/api-keys/patch-only.json"),
+    Err(EngineError::NotFound(_))
+  ));
+  let tree = walk_version_tree(&target, &target.head_hash().unwrap()).unwrap();
+  assert!(!tree.files.contains_key("/.aeordb-system/api-keys/patch-only.json"));
+}
+
+#[test]
+fn test_sparse_patch_rejects_unknown_leaf_before_target_mutation() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/ordinary.txt", b"ordinary", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "unknown-leaf.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  add_file_to_backup(&patch_path, "/.aeordb-future/unknown.bin", b"unknown");
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup(&context, &target, &patch_path, false, true, true).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { .. }), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
+}
+
+#[test]
+fn test_sparse_patch_rejects_structural_leaf_before_target_mutation() {
+  assert_sparse_patch_rejects_rewritten_record_path("/.aeordb-system", "system_family_structural_leaf");
+}
+
+#[test]
+fn test_sparse_patch_rejects_embedded_path_mismatch_before_target_mutation() {
+  assert_sparse_patch_rejects_rewritten_record_path("/different.txt", "does not match traversed path");
+}
+
+fn assert_sparse_patch_rejects_rewritten_record_path(rewritten_path: &str, expected_error: &str) {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/ordinary.txt", b"ordinary", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "rewritten-record.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  rewrite_artifact_file_record_path(&patch_path, "/ordinary.txt", rewritten_path);
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup(&context, &target, &patch_path, false, true, true).unwrap_err();
+
+  assert!(error.to_string().contains(expected_error), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
+}
+
+#[test]
+fn test_sparse_patch_omits_node_local_deletion() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  let node_local_path = "/.aeordb-system/api-keys/keep-local.json";
+  DirectoryOps::new(&source).store_file_buffered(&context, "/ordinary.txt", b"ordinary", Some("text/plain")).unwrap();
+  DirectoryOps::new(&target).store_file_buffered(&context, node_local_path, b"keep-local", Some("application/json")).unwrap();
+  assert_eq!(target.head_hash().unwrap(), base, "detached node-local state must not alter the namespace root");
+  let patch_path = db_path(&source_temp, "node-local-deletion.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  let patch = StorageEngine::open_for_import(&patch_path).unwrap();
+  let deletion = DeletionRecord::new(node_local_path.to_string(), Some("malicious".to_string()));
+  patch
+    .store_entry(EntryType::DeletionRecord, &file_path_hash(node_local_path, &patch.hash_algo()).unwrap(), &deletion.serialize())
+    .unwrap();
+  drop(patch);
+
+  import_backup(&context, &target, &patch_path, false, true, true).unwrap();
+
+  assert_eq!(DirectoryOps::new(&target).read_file_buffered(node_local_path).unwrap(), b"keep-local");
+}
+
+#[test]
+fn test_sparse_patch_rejects_mismatched_deletion_key_before_target_mutation() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/ordinary.txt", b"ordinary", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "bad-deletion-key.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  let patch = StorageEngine::open_for_import(&patch_path).unwrap();
+  let deletion = DeletionRecord::new("/victim.txt".to_string(), Some("malicious".to_string()));
+  patch.store_entry(EntryType::DeletionRecord, &[0xA5; 32], &deletion.serialize()).unwrap();
+  drop(patch);
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup(&context, &target, &patch_path, false, true, true).unwrap_err();
+
+  assert!(error.to_string().contains("DeletionRecord key does not match"), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
+}
+
+#[test]
+fn test_sparse_patch_rejects_retained_and_deleted_path_before_target_mutation() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  let path = "/ordinary.txt";
+  DirectoryOps::new(&source).store_file_buffered(&context, path, b"ordinary", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "contradictory-deletion.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  let patch = StorageEngine::open_for_import(&patch_path).unwrap();
+  let deletion = DeletionRecord::new(path.to_string(), Some("malicious".to_string()));
+  patch.store_entry(EntryType::DeletionRecord, &file_path_hash(path, &patch.hash_algo()).unwrap(), &deletion.serialize()).unwrap();
+  drop(patch);
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup(&context, &target, &patch_path, false, true, true).unwrap_err();
+
+  assert!(error.to_string().contains("both retains and deletes"), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
+}
+
+#[test]
+fn test_sparse_patch_restore_mode_rejects_nonempty_target_before_mutation() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let base = source.head_hash().unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/incoming.txt", b"incoming", Some("text/plain")).unwrap();
+  let patch_path = db_path(&source_temp, "restore-mode.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+  DirectoryOps::new(&target).store_file_buffered(&context, "/existing.txt", b"existing", Some("text/plain")).unwrap();
+  let head_before = target.head_hash().unwrap();
+  let entries_before = target.kv_entry_count().unwrap();
+
+  let error = import_backup_with_mode(&context, &target, &patch_path, false, true, false, ImportMode::Restore).unwrap_err();
+
+  assert!(error.to_string().contains("target database is not empty"), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), head_before);
+  assert_eq!(target.kv_entry_count().unwrap(), entries_before);
 }

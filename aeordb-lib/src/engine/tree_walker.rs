@@ -5,6 +5,7 @@ use crate::engine::directory_ops::{directory_content_hash, directory_path_hash, 
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_family_policy::{SystemFamilyPolicyResolver, TransferPathSelection};
@@ -13,6 +14,30 @@ use crate::engine::v4::system_family::{SystemFamilyClassificationV1, SystemFamil
 
 const COLLECTION_ENTRY_OVERHEAD: u64 = 64;
 const TREE_SCRATCH_OVERHEAD: u64 = 1024;
+
+pub(crate) trait HistoricalEntrySource {
+  fn hash_algo(&self) -> HashAlgorithm;
+
+  fn historical_entry_header(&self, hash: &[u8]) -> EngineResult<Option<crate::engine::entry_header::EntryHeader>>;
+
+  fn historical_entry_bounded(&self, hash: &[u8], maximum_value_length: u32) -> EngineResult<Option<HistoricalEntry>>;
+}
+
+pub(crate) type HistoricalEntry = (crate::engine::entry_header::EntryHeader, Vec<u8>, Vec<u8>);
+
+impl HistoricalEntrySource for StorageEngine {
+  fn hash_algo(&self) -> HashAlgorithm {
+    StorageEngine::hash_algo(self)
+  }
+
+  fn historical_entry_header(&self, hash: &[u8]) -> EngineResult<Option<crate::engine::entry_header::EntryHeader>> {
+    self.get_entry_header_including_deleted(hash)
+  }
+
+  fn historical_entry_bounded(&self, hash: &[u8], maximum_value_length: u32) -> EngineResult<Option<HistoricalEntry>> {
+    self.get_entry_including_deleted_verified_bounded(hash, maximum_value_length)
+  }
+}
 
 /// The complete tree state at a version: all files, directories, symlinks, and chunk hashes.
 #[derive(Debug, Clone)]
@@ -58,15 +83,6 @@ pub fn walk_version_tree(engine: &StorageEngine, root_hash: &[u8]) -> EngineResu
   walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(TransferPathSelection::Include))
 }
 
-pub(crate) fn walk_version_tree_with_budget(
-  engine: &StorageEngine,
-  root_hash: &[u8],
-  budget: &mut OperationMemoryBudget,
-) -> EngineResult<VersionTree> {
-  let mut control = TreeWalkControl::accounted(budget, false);
-  walk_version_tree_controlled(engine, root_hash, &mut control, &mut |_| Ok(TransferPathSelection::Include))
-}
-
 pub(crate) fn walk_version_tree_for_transfer_with_budget(
   engine: &StorageEngine,
   root_hash: &[u8],
@@ -74,13 +90,23 @@ pub(crate) fn walk_version_tree_for_transfer_with_budget(
   include_detached_current_state: bool,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<VersionTree> {
-  let resolver = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
-  let mut control = TreeWalkControl::accounted(budget, true);
-  walk_version_tree_for_transfer_controlled(engine, root_hash, resolver, operation, include_detached_current_state, &mut control)
+  walk_version_tree_for_transfer_from_source_with_budget(engine, root_hash, operation, include_detached_current_state, budget)
 }
 
-fn walk_version_tree_for_transfer_controlled(
-  engine: &StorageEngine,
+pub(crate) fn walk_version_tree_for_transfer_from_source_with_budget<S: HistoricalEntrySource + ?Sized>(
+  source: &S,
+  root_hash: &[u8],
+  operation: SystemFamilyTransferOperationV1,
+  include_detached_current_state: bool,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<VersionTree> {
+  let resolver = SystemFamilyPolicyResolver::new(source.hash_algo())?;
+  let mut control = TreeWalkControl::accounted(budget, true);
+  walk_version_tree_for_transfer_controlled(source, root_hash, resolver, operation, include_detached_current_state, &mut control)
+}
+
+fn walk_version_tree_for_transfer_controlled<S: HistoricalEntrySource + ?Sized>(
+  source: &S,
   root_hash: &[u8],
   resolver: SystemFamilyPolicyResolver,
   operation: SystemFamilyTransferOperationV1,
@@ -88,25 +114,26 @@ fn walk_version_tree_for_transfer_controlled(
   control: &mut TreeWalkControl<'_>,
 ) -> EngineResult<VersionTree> {
   let mut path_filter = |path: &str| resolver.transfer_path_selection(path, operation);
-  let mut tree = walk_version_tree_controlled(engine, root_hash, control, &mut path_filter)?;
+  let mut tree = walk_version_tree_controlled(source, root_hash, control, &mut path_filter)?;
   if include_detached_current_state {
-    collect_detached_transfer_paths(engine, &mut tree, resolver, operation, control, &mut path_filter)?;
+    collect_detached_transfer_paths(source, &mut tree, resolver, operation, control, &mut path_filter)?;
   }
   Ok(tree)
 }
 
-fn walk_version_tree_controlled<F>(
-  engine: &StorageEngine,
+fn walk_version_tree_controlled<S, F>(
+  source: &S,
   root_hash: &[u8],
   control: &mut TreeWalkControl<'_>,
   path_filter: &mut F,
 ) -> EngineResult<VersionTree>
 where
+  S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let mut tree = VersionTree::new();
-  let hash_length = engine.hash_algo().hash_length();
-  walk_directory(engine, root_hash, "/", hash_length, &mut tree, control, path_filter)?;
+  let hash_length = source.hash_algo().hash_length();
+  walk_directory(source, root_hash, "/", hash_length, &mut tree, control, path_filter)?;
   Ok(tree)
 }
 
@@ -122,8 +149,8 @@ pub fn walk_subtree(engine: &StorageEngine, start_path: &str, start_dir_hash: &[
 /// Candidate roots come from the immutable registry. Structural ancestors are
 /// inspected so path listings remain coherent, and every descendant is
 /// classified before its FileRecord, symlink, or directory body is read.
-fn collect_detached_transfer_paths<F>(
-  engine: &StorageEngine,
+fn collect_detached_transfer_paths<S, F>(
+  source: &S,
   tree: &mut VersionTree,
   resolver: SystemFamilyPolicyResolver,
   operation: SystemFamilyTransferOperationV1,
@@ -131,6 +158,7 @@ fn collect_detached_transfer_paths<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
+  S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let mut candidates = std::collections::BTreeMap::<String, bool>::new();
@@ -148,7 +176,7 @@ where
     }
   }
 
-  let algorithm = engine.hash_algo();
+  let algorithm = source.hash_algo();
   let hash_length = algorithm.hash_length();
   for (path, is_prefix) in candidates {
     control.record_work(1)?;
@@ -158,7 +186,7 @@ where
 
     if !is_prefix && !tree.files.contains_key(&path) {
       let file_key = file_path_hash(&path, &algorithm)?;
-      if let Some(((header, _key, raw), loaded_charge)) = load_historical_entry(engine, &file_key, control)? {
+      if let Some(((header, _key, raw), loaded_charge)) = load_historical_entry(source, &file_key, control)? {
         if header.entry_type != EntryType::FileRecord {
           return Err(EngineError::CorruptEntry {
             offset: 0,
@@ -190,7 +218,7 @@ where
       continue;
     }
     let directory_key = directory_path_hash(&path, &algorithm)?;
-    let Some(((header, _key, raw), loaded_charge)) = load_historical_entry(engine, &directory_key, control)? else {
+    let Some(((header, _key, raw), loaded_charge)) = load_historical_entry(source, &directory_key, control)? else {
       continue;
     };
     if header.entry_type != EntryType::DirectoryIndex {
@@ -201,7 +229,7 @@ where
     }
     let directory_hash = if raw.len() == hash_length { raw.clone() } else { directory_content_hash(&raw, &algorithm)? };
     control.release(loaded_charge, "detached transfer directory path-entry buffer release failed")?;
-    walk_directory(engine, &directory_hash, &path, hash_length, tree, control, path_filter)?;
+    walk_directory(source, &directory_hash, &path, hash_length, tree, control, path_filter)?;
   }
   Ok(())
 }
@@ -258,8 +286,8 @@ enum PendingDirectoryWork {
   Exit { hash: Vec<u8>, active_charge: u64 },
 }
 
-fn walk_directory<F>(
-  engine: &StorageEngine,
+fn walk_directory<S, F>(
+  source: &S,
   dir_hash: &[u8],
   current_path: &str,
   hash_length: usize,
@@ -268,6 +296,7 @@ fn walk_directory<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
+  S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let initial_charge = collection_charge(current_path.len(), dir_hash.len())?;
@@ -305,7 +334,7 @@ where
     control.reserve(active_charge, "directory ancestry admission failed")?;
     active.insert(directory.hash.clone());
 
-    let Some(((header, _key, dir_data), loaded_charge)) = load_historical_entry(engine, &directory.hash, control)? else {
+    let Some(((header, _key, dir_data), loaded_charge)) = load_historical_entry(source, &directory.hash, control)? else {
       active.remove(&directory.hash);
       control.release(active_charge, "missing directory ancestry release failed")?;
       control.release(directory.retained_charge, "missing directory frontier release failed")?;
@@ -323,7 +352,7 @@ where
 
     pending.push(PendingDirectoryWork::Exit { hash: directory.hash.clone(), active_charge });
     if !dir_data.is_empty() {
-      visit_directory_children(engine, &directory.path, &dir_data, hash_length, tree, &mut pending, control, path_filter)?;
+      visit_directory_children(source, &directory.path, &dir_data, hash_length, tree, &mut pending, control, path_filter)?;
     }
     tree.directories.insert(directory.path, (directory.hash, dir_data));
     let _retained_charge = directory.retained_charge.saturating_add(loaded_charge);
@@ -331,8 +360,8 @@ where
   Ok(())
 }
 
-fn visit_directory_children<F>(
-  engine: &StorageEngine,
+fn visit_directory_children<S, F>(
+  source: &S,
   current_path: &str,
   dir_data: &[u8],
   hash_length: usize,
@@ -342,23 +371,24 @@ fn visit_directory_children<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
+  S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   if crate::engine::btree::is_btree_format(dir_data) {
-    visit_btree_children(engine, current_path, dir_data, hash_length, tree, pending, control, path_filter)
+    visit_btree_children(source, current_path, dir_data, hash_length, tree, pending, control, path_filter)
   } else {
     let scratch = scratch_charge(dir_data.len())?;
     control.reserve(scratch, "flat directory parse admission failed")?;
     let children = deserialize_child_entries(dir_data, hash_length, 0)?;
     for child in &children {
-      process_child(engine, current_path, child, hash_length, tree, pending, control, path_filter)?;
+      process_child(source, current_path, child, hash_length, tree, pending, control, path_filter)?;
     }
     control.release(scratch, "flat directory parse release failed")
   }
 }
 
-fn visit_btree_children<F>(
-  engine: &StorageEngine,
+fn visit_btree_children<S, F>(
+  source: &S,
   current_path: &str,
   root_data: &[u8],
   hash_length: usize,
@@ -368,12 +398,13 @@ fn visit_btree_children<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
+  S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let mut node_hashes: Vec<(Vec<u8>, u64)> = Vec::new();
   let mut visited_node_hashes = HashSet::new();
   let mut visited_node_charge = 0u64;
-  process_btree_node(engine, current_path, root_data, 0, hash_length, tree, pending, &mut node_hashes, control, path_filter)?;
+  process_btree_node(source, current_path, root_data, 0, hash_length, tree, pending, &mut node_hashes, control, path_filter)?;
   while let Some((node_hash, frontier_charge)) = node_hashes.pop() {
     control.record_work(1)?;
     control.release(frontier_charge, "B-tree frontier release failed")?;
@@ -392,7 +423,7 @@ where
       .checked_add(seen_charge)
       .ok_or_else(|| EngineError::ResourceExhausted("B-tree visited-set accounting overflow".to_string()))?;
     visited_node_hashes.insert(node_hash.clone());
-    let Some(((header, _key, node_data), loaded_charge)) = load_historical_entry(engine, &node_hash, control)? else {
+    let Some(((header, _key, node_data), loaded_charge)) = load_historical_entry(source, &node_hash, control)? else {
       return Err(missing_tree_entry("B-tree node", current_path, &node_hash));
     };
     if header.entry_type != EntryType::DirectoryIndex {
@@ -402,7 +433,7 @@ where
       });
     }
     process_btree_node(
-      engine,
+      source,
       current_path,
       &node_data,
       header.entry_version,
@@ -424,8 +455,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_btree_node<F>(
-  engine: &StorageEngine,
+fn process_btree_node<S, F>(
+  source: &S,
   current_path: &str,
   node_data: &[u8],
   entry_version: u8,
@@ -437,6 +468,7 @@ fn process_btree_node<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
+  S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   let scratch = scratch_charge(node_data.len())?;
@@ -444,7 +476,7 @@ where
   match crate::engine::btree::BTreeNode::deserialize(node_data, hash_length, entry_version)? {
     crate::engine::btree::BTreeNode::Leaf(leaf) => {
       for child in &leaf.entries {
-        process_child(engine, current_path, child, hash_length, tree, pending, control, path_filter)?;
+        process_child(source, current_path, child, hash_length, tree, pending, control, path_filter)?;
       }
     }
     crate::engine::btree::BTreeNode::Internal(internal) => {
@@ -458,8 +490,8 @@ where
   control.release(scratch, "B-tree parse release failed")
 }
 
-fn process_child<F>(
-  engine: &StorageEngine,
+fn process_child<S, F>(
+  source: &S,
   current_path: &str,
   child: &crate::engine::directory_entry::ChildEntry,
   hash_length: usize,
@@ -469,6 +501,7 @@ fn process_child<F>(
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
+  S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   control.record_work(1)?;
@@ -494,7 +527,7 @@ where
     EntryType::FileRecord => {
       let map_charge = collection_charge(path_len, child.hash.len())?;
       control.reserve(map_charge, "file tree admission failed")?;
-      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(engine, &child.hash, control)? else {
+      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(source, &child.hash, control)? else {
         control.release(map_charge, "missing file tree release failed")?;
         if control.strict_missing {
           return Err(missing_tree_entry("file", &child_path, &child.hash));
@@ -509,6 +542,12 @@ where
       }
       let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)
         .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("FileRecord '{}' is malformed: {error}", child_path) })?;
+      if control.strict_missing && file_record.path != child_path {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("FileRecord path '{}' does not match traversed path '{}'", file_record.path, child_path),
+        });
+      }
       for chunk_hash in &file_record.chunk_hashes {
         if !tree.chunks.contains(chunk_hash) {
           let charge = collection_charge(0, chunk_hash.len())?;
@@ -521,7 +560,7 @@ where
     EntryType::Symlink => {
       let map_charge = collection_charge(path_len, child.hash.len())?;
       control.reserve(map_charge, "symlink tree admission failed")?;
-      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(engine, &child.hash, control)? else {
+      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(source, &child.hash, control)? else {
         control.release(map_charge, "missing symlink tree release failed")?;
         if control.strict_missing {
           return Err(missing_tree_entry("symlink", &child_path, &child.hash));
@@ -536,6 +575,12 @@ where
       }
       let symlink_record = SymlinkRecord::deserialize(&value, header.entry_version)
         .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("symlink '{}' is malformed: {error}", child_path) })?;
+      if control.strict_missing && symlink_record.path != child_path {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("Symlink path '{}' does not match traversed path '{}'", symlink_record.path, child_path),
+        });
+      }
       tree.symlinks.insert(child_path, (child.hash.clone(), symlink_record));
     }
     _ => {}
@@ -545,8 +590,12 @@ where
 
 type AccountedEntry = ((crate::engine::entry_header::EntryHeader, Vec<u8>, Vec<u8>), u64);
 
-fn load_historical_entry(engine: &StorageEngine, hash: &[u8], control: &mut TreeWalkControl<'_>) -> EngineResult<Option<AccountedEntry>> {
-  let Some(header) = engine.get_entry_header_including_deleted(hash)? else {
+fn load_historical_entry<S: HistoricalEntrySource + ?Sized>(
+  source: &S,
+  hash: &[u8],
+  control: &mut TreeWalkControl<'_>,
+) -> EngineResult<Option<AccountedEntry>> {
+  let Some(header) = source.historical_entry_header(hash)? else {
     return Ok(None);
   };
   let charge = u64::from(header.key_length)
@@ -555,7 +604,7 @@ fn load_historical_entry(engine: &StorageEngine, hash: &[u8], control: &mut Tree
     .and_then(|bytes| bytes.checked_add(COLLECTION_ENTRY_OVERHEAD))
     .ok_or_else(|| EngineError::ResourceExhausted("tree entry allocation estimate overflow".to_string()))?;
   control.reserve(charge, "tree entry buffer admission failed")?;
-  match engine.get_entry_including_deleted_bounded(hash, header.value_length) {
+  match source.historical_entry_bounded(hash, header.value_length) {
     Ok(Some(entry)) => Ok(Some((entry, charge))),
     Ok(None) => {
       control.release(charge, "missing tree entry buffer release failed")?;

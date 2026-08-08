@@ -324,13 +324,16 @@ let results = qe.execute(&query).unwrap();
 ## Backup & Export
 
 ```rust,ignore
-use aeordb::engine::{export_version, import_backup};
+use aeordb::engine::{create_patch, export_version, import_backup};
 
 // Export current HEAD as a .aeordb file
 let result = export_version(&engine, &head_hash, "/tmp/backup.aeordb", false).unwrap();
 
 // Import a backup
 let result = import_backup(&ctx, &engine, "/tmp/backup.aeordb", false, false, false).unwrap();
+
+// Patches require real retained roots; missing hashes are not empty trees.
+let patch = create_patch(&engine, &base_hash, &head_hash, "/tmp/change.aeordb").unwrap();
 ```
 
 `result.version_hash` is the root stored in the export. It normally equals
@@ -344,6 +347,12 @@ Full-import counts describe logical objects in each imported root: chunks count
 only newly stored payloads, while files, directories, and symlinks count the
 selected objects processed for HEAD and each imported snapshot. Runtime write
 metrics use the same logical operations and count chunk payload bytes once.
+Patch production and import use the same registry authority. Production omits
+non-transferable families before writing leaves and the complete selected base
+and target directory closures. Import validates a patch-first,
+target-fallback overlay and returns the rebuilt selected root. Unchanged target
+entries are neither copied nor counted as sparse mutations, and deletion replay
+evidence remains durable across restart.
 
 ## Garbage Collection
 

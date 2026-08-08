@@ -133,6 +133,9 @@ aeordb diff --database data.aeordb --output patch.aeordb --from abc123... --to d
 ```
 
 The `--from` and `--to` arguments accept either snapshot names or hex-encoded version hashes. If `--to` is omitted, HEAD is used.
+Both roots must exist and pass strict traversal. A made-up or collected hash is
+reported as corruption/missing state; it is never interpreted as an empty
+version.
 
 ### HTTP API
 
@@ -161,7 +164,14 @@ Patch created.
 - **Added file records**: Files present in the target but not the base
 - **Modified file records**: Files that changed between the two versions
 - **Deletion records**: Files present in the base but removed in the target
-- **Changed directory indexes**: Directory entries that differ between versions
+- **Selected directory closures**: Complete base and target directory routing metadata used to prove both logical roots
+
+Patch production applies the `LogicalBackup` SystemFamily policy before it
+compares leaves or writes either directory closure. Credentials, secrets,
+node-local controls, logs, GC state, and derived indexes are not copied into
+the patch, and unknown protected paths are rejected before an artifact is
+created. A change confined to omitted families returns `No changes visible
+under logical-backup policy`.
 
 ## Import
 
@@ -219,11 +229,15 @@ bypass the limit. Before the first target write, AeorDB validates the artifact
 type and every inventoried entry body and checksum, then admits its inventory
 and transfer workspace under the process memory coordinator. Full exports also
 walk HEAD and every imported snapshot through the selected data-import policy
-before mutation. Import rebuilds directory closure when policy omits a child,
-remaps snapshot roots to that rebuilt closure, and rejects unknown protected or
-structurally invalid paths. The temporary file is removed together with its
-lock sidecar on success, refusal, malformed input, cancellation, or handler
-failure.
+before mutation. Full import rebuilds directory closure when policy omits a
+child and remaps snapshot roots to that rebuilt closure. Sparse patch import
+validates the advertised target as a patch-first, target-fallback overlay,
+rejects contradictory or malformed deletion records, applies only
+policy-selected deletions, and publishes the rebuilt selected root. Both forms
+reject unknown protected, structurally invalid, or embedded-path-mismatched
+leaves before the first target write. The temporary file is removed together
+with its lock sidecar on success, refusal, malformed input, cancellation, or
+handler failure.
 
 For full exports, `entries_imported` counts selected logical objects across
 HEAD and each imported snapshot. `chunks_imported` includes only chunk payloads
@@ -233,7 +247,9 @@ logical mutations, with newly copied chunk payload bytes counted once.
 
 ### Patch Base Version Check
 
-When importing a patch, AeorDB verifies that the target database's current HEAD matches the patch's base version. If they don't match, the import fails:
+When importing a patch, AeorDB verifies that the target database's current HEAD
+is either the exact patch base or semantically equivalent to its selected base
+closure. Otherwise, import fails:
 
 ```
 Target database HEAD (aaa111...) does not match patch base version (bbb222...).
@@ -241,6 +257,17 @@ Use --force to apply anyway.
 ```
 
 Use `--force` to skip this check if you know what you're doing.
+`--force` does not make a patch self-contained: unchanged entries referenced by
+its target root must still be available from the target database. Missing or
+corrupt fallback entries remain hard failures.
+
+The `version_hash` returned by current patch import is the selected target root
+rebuilt in the target. Legacy patches whose headers contain an unfiltered root
+can produce a different selected result after current policy omission. Sparse
+import counts only newly copied chunks, changed path objects, rebuilt
+directories, and applied deletions; unchanged overlay entries are not rewritten
+or counted. Each applied deletion writes durable replay evidence before its
+path alias is tombstoned, so restart and KV rebuild preserve the deletion.
 
 ### Output
 

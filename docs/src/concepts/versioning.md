@@ -192,7 +192,13 @@ aeordb diff --database data.aeordb --from v1.0 --output patch.aeordb
 curl -X POST "http://localhost:6830/versions/diff?from=v1.0&to=v2.0" --output patch.aeordb
 ```
 
-A patch file contains only new/changed chunks, updated FileRecords, and deletion markers. Chunks shared between the two versions are not included, making patches much smaller than full exports.
+A patch file contains only policy-selected new/changed chunks, updated
+FileRecords, deletion markers, and the complete selected base and target
+directory closures needed to prove both logical roots. Unchanged FileRecords
+and chunks are not included, making patches much smaller than full exports.
+Both source version roots must exist; an unknown hash is not treated as an
+empty tree. Node-local, redacted, and rebuildable protected families are
+omitted, while unknown protected paths stop patch creation.
 
 ### Applying a Patch
 
@@ -207,7 +213,13 @@ aeordb import --database target.aeordb --file patch.aeordb --force
 aeordb import --database target.aeordb --file patch.aeordb --promote
 ```
 
-If the target database's HEAD does not match the patch's base version, the import fails unless `--force` is used.
+If the target database's HEAD is neither the exact patch base nor semantically
+equivalent to its selected base closure, import fails unless `--force` is used.
+Import resolves unchanged hashes from the target, validates the complete
+overlay before mutation, rebuilds directory closure after policy omission, and
+returns that rebuilt root. `--force` skips the base-equivalence check only;
+missing fallback entries, malformed deletions, and policy failures are still
+rejected.
 
 ## Promote
 

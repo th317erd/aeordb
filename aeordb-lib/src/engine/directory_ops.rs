@@ -426,7 +426,7 @@ pub fn is_system_path(path: &str) -> bool {
 }
 
 /// Compute the domain-prefixed hash for a deletion record.
-fn deletion_record_hash(path: &str, timestamp: i64, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
+pub(crate) fn deletion_record_hash(path: &str, timestamp: i64, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   algo.compute_hash(format!("del:{}:{}", path, timestamp).as_bytes())
 }
 

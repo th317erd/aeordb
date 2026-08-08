@@ -612,7 +612,10 @@ Create a patch file representing the difference between two versions.
 
 Patch files use the same disk-backed response streaming as full exports. Each
 reference is resolved as an exact snapshot name first and otherwise must be a
-complete hex hash for the database's configured hash algorithm.
+complete hex hash for the database's configured hash algorithm. Both roots
+must exist and pass strict traversal. Patch generation compares
+`LogicalBackup`-selected state, omits node-local/redacted/rebuildable families,
+and rejects unknown protected paths before creating the response artifact.
 
 **Example:**
 
@@ -662,6 +665,16 @@ the operation is active. The limit is enforced against both a declared
   "head_promoted": true
 }
 ```
+
+Before writing the target, full exports validate every selected root and sparse
+patches validate their complete patch-first, target-fallback overlay. Patch
+deletions must name their own file/symlink path key, may not contradict a
+retained leaf, and remain subject to import policy. Current patches carry
+selected base and target roots plus both complete directory closures;
+`version_hash` is the selected target rebuilt in the destination. Legacy
+unfiltered patch roots may produce a different selected result.
+`--force`/`force=true` skips only base equivalence; it does not relax integrity
+or policy checks and does not supply missing unchanged entries.
 
 **Example:**
 

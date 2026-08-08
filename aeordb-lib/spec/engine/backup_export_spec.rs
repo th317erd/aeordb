@@ -675,7 +675,7 @@ fn test_backup_artifacts_preserve_large_directory_btree_nodes() {
   assert_eq!(DirectoryOps::new(&restored).list_directory("/large/").unwrap().len(), BTREE_CONVERSION_THRESHOLD + 8);
 
   let patch_path = output_temp.path().join("large-directory.patch.aeordb").to_string_lossy().into_owned();
-  let empty_hash = vec![0xA3; source.hash_algo().hash_length()];
+  let empty_hash = aeordb::engine::directory_content_hash(&[], &source.hash_algo()).unwrap();
   create_patch(&source, &empty_hash, &source.head_hash().unwrap(), &patch_path).unwrap();
   let patch = StorageEngine::open_for_import(&patch_path).unwrap();
   assert_eq!(DirectoryOps::new(&patch).list_directory("/large/").unwrap().len(), BTREE_CONVERSION_THRESHOLD + 8);

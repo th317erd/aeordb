@@ -2,18 +2,61 @@ use std::collections::HashMap;
 
 use aeordb::engine::backup::{create_patch, create_patch_from_references, create_patch_from_snapshots, PatchResult};
 use aeordb::engine::deletion_record::DeletionRecord;
+use aeordb::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::errors::EngineError;
+use aeordb::engine::file_record::FileRecord;
+use aeordb::engine::kv_store::KV_TYPE_FILE_RECORD;
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::tree_walker::{walk_version_tree, diff_trees};
 use aeordb::engine::version_manager::VersionManager;
-use aeordb::engine::RequestContext;
+use aeordb::engine::{
+  btree_from_entries, btree_list_from_node, directory_content_hash, directory_path_hash, is_btree_format, EntryType, RequestContext,
+};
 use aeordb::server::create_temp_engine_for_tests;
 use tempfile::TempDir;
 
 fn db_path(dir: &TempDir, name: &str) -> String {
   dir.path().join(name).to_str().unwrap().to_string()
+}
+
+fn empty_root_hash(engine: &StorageEngine) -> Vec<u8> {
+  directory_content_hash(&[], &engine.hash_algo()).unwrap()
+}
+
+fn install_legacy_system_root(source: &StorageEngine) -> Vec<u8> {
+  let clean_root = source.head_hash().unwrap();
+  let clean_root_entry = source.get_entry(&clean_root).unwrap().unwrap();
+  let mut root_children = if is_btree_format(&clean_root_entry.2) {
+    btree_list_from_node(&clean_root_entry.2, source, source.hash_algo().hash_length(), true).unwrap()
+  } else {
+    deserialize_child_entries(&clean_root_entry.2, source.hash_algo().hash_length(), clean_root_entry.0.entry_version).unwrap()
+  };
+  let system_path_hash = directory_path_hash("/.aeordb-system", &source.hash_algo()).unwrap();
+  let system_hash = source.get_entry(&system_path_hash).unwrap().unwrap().2;
+  root_children.push(ChildEntry {
+    entry_type: EntryType::DirectoryIndex.to_u8(),
+    hash: system_hash,
+    total_size: 0,
+    created_at: 1,
+    updated_at: 1,
+    name: ".aeordb-system".to_string(),
+    content_type: None,
+    virtual_time: 1,
+    node_id: 1,
+  });
+  let legacy_root = if is_btree_format(&clean_root_entry.2) {
+    btree_from_entries(source, root_children, source.hash_algo().hash_length(), &source.hash_algo()).unwrap()
+  } else {
+    root_children.sort_by(|left, right| left.name.cmp(&right.name));
+    let root_data = serialize_child_entries(&root_children, source.hash_algo().hash_length()).unwrap();
+    let root_hash = directory_content_hash(&root_data, &source.hash_algo()).unwrap();
+    source.store_entry(EntryType::DirectoryIndex, &root_hash, &root_data).unwrap();
+    root_hash
+  };
+  source.update_head(&legacy_root).unwrap();
+  legacy_root
 }
 
 fn assert_no_partial_artifacts(output: &str) {
@@ -29,13 +72,73 @@ fn assert_no_partial_artifacts(output: &str) {
   assert!(artifacts.is_empty(), "partial patch artifacts remain: {artifacts:?}");
 }
 
+#[test]
+fn patch_creation_omits_node_local_leaves() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let base = engine.head_hash().unwrap();
+  let operations = DirectoryOps::new(&engine);
+  operations.store_file_buffered(&RequestContext::system(), "/docs/user.txt", b"user", Some("text/plain")).unwrap();
+  operations
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-system/api-keys/local.json", br#"{"secret":true}"#, Some("application/json"))
+    .unwrap();
+  install_legacy_system_root(&engine);
+  let output = db_path(&temp, "policy-filtered-patch.aeordb");
+
+  create_patch(&engine, &base, &engine.head_hash().unwrap(), &output).unwrap();
+
+  let patch = StorageEngine::open_for_import(&output).unwrap();
+  let paths = patch
+    .entries_by_type(KV_TYPE_FILE_RECORD)
+    .unwrap()
+    .into_iter()
+    .map(|(key, value)| {
+      let header = patch.get_entry_header_including_deleted(&key).unwrap().unwrap();
+      FileRecord::deserialize(&value, patch.hash_algo().hash_length(), header.entry_version).unwrap().path
+    })
+    .collect::<std::collections::HashSet<_>>();
+  assert!(paths.contains("/docs/user.txt"));
+  assert!(!paths.contains("/.aeordb-system/api-keys/local.json"));
+}
+
+#[test]
+fn patch_creation_rejects_unknown_protected_paths_before_artifact_creation() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let base = engine.head_hash().unwrap();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-future/unknown.bin", b"unknown", Some("application/octet-stream"))
+    .unwrap();
+  let output = db_path(&temp, "unknown-protected-patch.aeordb");
+
+  let error = create_patch(&engine, &base, &engine.head_hash().unwrap(), &output).unwrap_err();
+
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { .. }), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&output).exists());
+  assert_no_partial_artifacts(&output);
+}
+
+#[test]
+fn patch_creation_treats_node_local_only_changes_as_noop() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let base = engine.head_hash().unwrap();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-system/api-keys/local-only.json", b"node-local", Some("application/json"))
+    .unwrap();
+  let target = install_legacy_system_root(&engine);
+  let output = db_path(&temp, "node-local-noop.aeordb");
+
+  let error = create_patch(&engine, &base, &target, &output).unwrap_err();
+
+  assert!(matches!(error, EngineError::NotFound(_)), "unexpected error: {error}");
+  assert!(!std::path::Path::new(&output).exists());
+  assert_no_partial_artifacts(&output);
+}
+
 /// AeorDB uses mutable path-based hashing for directories and files.
 /// This means snapshots within the same engine share the same root hash
 /// (hash("dir:/")) and walking from either snapshot yields the current state.
 ///
-/// To properly test diff/patch, we use a bogus "from" hash that doesn't exist
-/// in the engine. walk_version_tree returns an empty tree for unknown hashes,
-/// so diffing empty -> current yields all files as "added".
+/// Empty-to-populated patch tests use the real persisted empty-directory root.
+/// Missing roots are corruption, not an alternate spelling for an empty tree.
 ///
 /// For cross-engine tests, we create two separate engines representing
 /// different states, export one, and diff using tree comparison.
@@ -53,11 +156,10 @@ fn test_patch_added_files() {
   ops.store_file_buffered(&ctx, "/docs/goodbye.txt", b"Goodbye World", Some("text/plain")).unwrap();
 
   let head = engine.head_hash().unwrap();
-  // Use a bogus hash for the "base" — results in empty tree
-  let bogus = vec![0xDE; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_added.aeordb");
 
-  let result = create_patch(&engine, &bogus, &head, &output).unwrap();
+  let result = create_patch(&engine, &empty, &head, &output).unwrap();
   assert_no_partial_artifacts(&output);
   assert_eq!(result.files_added, 2, "should have 2 added files");
   assert_eq!(result.files_deleted, 0);
@@ -146,10 +248,10 @@ fn test_patch_backup_type() {
 
   ops.store_file_buffered(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0xDE; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_type.aeordb");
 
-  create_patch(&engine, &bogus, &head, &output).unwrap();
+  create_patch(&engine, &empty, &head, &output).unwrap();
 
   let patch = StorageEngine::open_for_import(&output).unwrap();
   let (backup_type, _, _) = patch.backup_info().unwrap();
@@ -167,14 +269,14 @@ fn test_patch_base_target_hashes() {
 
   ops.store_file_buffered(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0xDE; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_hashes.aeordb");
 
-  create_patch(&engine, &bogus, &head, &output).unwrap();
+  create_patch(&engine, &empty, &head, &output).unwrap();
 
   let patch = StorageEngine::open_for_import(&output).unwrap();
   let (_, base_hash, target_hash) = patch.backup_info().unwrap();
-  assert_eq!(base_hash, bogus, "base_hash should match from_hash");
+  assert_eq!(base_hash, empty, "base_hash should match from_hash");
   assert_eq!(target_hash, head, "target_hash should match to_hash");
 }
 
@@ -189,10 +291,10 @@ fn test_patch_cannot_be_opened_normally() {
 
   ops.store_file_buffered(&ctx, "/test.txt", b"data", Some("text/plain")).unwrap();
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0xDE; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_no_open.aeordb");
 
-  create_patch(&engine, &bogus, &head, &output).unwrap();
+  create_patch(&engine, &empty, &head, &output).unwrap();
 
   let result = StorageEngine::open(&output);
   assert!(result.is_err(), "StorageEngine::open should reject a patch database");
@@ -214,10 +316,10 @@ fn test_patch_can_be_opened_for_import() {
 
   ops.store_file_buffered(&ctx, "/test.txt", b"data", Some("text/plain")).unwrap();
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0xDE; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_import.aeordb");
 
-  create_patch(&engine, &bogus, &head, &output).unwrap();
+  create_patch(&engine, &empty, &head, &output).unwrap();
 
   let result = StorageEngine::open_for_import(&output);
   assert!(result.is_ok(), "open_for_import should accept a patch database");
@@ -391,10 +493,10 @@ fn test_patch_writes_deletion_records() {
 }
 
 // ============================================================
-// 14. test_patch_from_bogus_to_head_writes_all_entries
+// 14. test_patch_from_empty_to_head_writes_all_entries
 // ============================================================
 #[test]
-fn test_patch_from_bogus_to_head_writes_all_entries() {
+fn test_patch_from_empty_to_head_writes_all_entries() {
   let ctx = RequestContext::system();
   let (engine, temp) = create_temp_engine_for_tests();
   let ops = DirectoryOps::new(&engine);
@@ -404,10 +506,10 @@ fn test_patch_from_bogus_to_head_writes_all_entries() {
   ops.store_file_buffered(&ctx, "/c.txt", b"ccc", Some("text/plain")).unwrap();
 
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0xFF; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_all_entries.aeordb");
 
-  let result = create_patch(&engine, &bogus, &head, &output).unwrap();
+  let result = create_patch(&engine, &empty, &head, &output).unwrap();
 
   assert_eq!(result.files_added, 3, "all 3 files should be added");
   assert_eq!(result.files_deleted, 0);
@@ -427,10 +529,10 @@ fn test_patch_head_equals_target() {
 
   ops.store_file_buffered(&ctx, "/test.txt", b"hello", Some("text/plain")).unwrap();
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0xAB; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_head_target.aeordb");
 
-  create_patch(&engine, &bogus, &head, &output).unwrap();
+  create_patch(&engine, &empty, &head, &output).unwrap();
 
   let patch = StorageEngine::open_for_import(&output).unwrap();
   assert_eq!(patch.head_hash().unwrap(), head, "patch HEAD should equal target hash");
@@ -447,11 +549,11 @@ fn test_patch_result_hash_fields() {
 
   ops.store_file_buffered(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0xCC; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_hash_fields.aeordb");
 
-  let result = create_patch(&engine, &bogus, &head, &output).unwrap();
-  assert_eq!(result.from_hash, bogus);
+  let result = create_patch(&engine, &empty, &head, &output).unwrap();
+  assert_eq!(result.from_hash, empty);
   assert_eq!(result.to_hash, head);
 }
 
@@ -481,10 +583,10 @@ fn test_patch_directories_written() {
   ops.store_file_buffered(&ctx, "/a/b/deep.txt", b"deep content", Some("text/plain")).unwrap();
 
   let head = engine.head_hash().unwrap();
-  let bogus = vec![0x11; 32];
+  let empty = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_dirs.aeordb");
 
-  let result = create_patch(&engine, &bogus, &head, &output).unwrap();
+  let result = create_patch(&engine, &empty, &head, &output).unwrap();
 
   // Should have directories: /, /a, /a/b = at least 3
   assert!(result.directories_written >= 3, "should have at least 3 directories written, got {}", result.directories_written);
@@ -544,7 +646,7 @@ fn test_patch_reference_resolver_accepts_mixed_hash_and_snapshot() {
 
   operations.store_file_buffered(&ctx, "/test.txt", b"content", Some("text/plain")).unwrap();
   versions.create_snapshot(&ctx, "current", HashMap::new()).unwrap();
-  let empty_hash = vec![0xA7; engine.hash_algo().hash_length()];
+  let empty_hash = empty_root_hash(&engine);
   let output = db_path(&temp, "patch_mixed_references.aeordb");
 
   let result = create_patch_from_references(&engine, &hex::encode(&empty_hash), Some("current"), &output).unwrap();
