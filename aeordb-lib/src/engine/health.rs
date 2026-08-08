@@ -133,8 +133,14 @@ pub fn check_sync(peer_manager: &PeerManager) -> SyncHealth {
 /// If it is missing, the node cannot verify JWTs and auth is unhealthy.
 /// In standalone mode, auth is always healthy.
 pub fn check_auth(engine: &StorageEngine) -> AuthHealth {
-  let mode = get_cluster_mode(engine);
   let key_present = has_signing_key(engine);
+  let mode = match get_cluster_mode(engine) {
+    Ok(mode) => mode,
+    Err(error) => {
+      tracing::error!(%error, "auth health could not determine cluster mode");
+      return AuthHealth { status: HealthStatus::Unhealthy, mode: "unknown".to_string(), signing_key_present: key_present };
+    }
+  };
   let is_cluster = mode == "cluster";
 
   let status = if is_cluster && !key_present { HealthStatus::Unhealthy } else { HealthStatus::Healthy };

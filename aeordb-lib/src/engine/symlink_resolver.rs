@@ -67,7 +67,7 @@ pub fn resolve_symlink(engine: &StorageEngine, path: &str) -> EngineResult<Resol
     }
 
     // Check if it's a directory
-    match ops.list_directory(&current_path) {
+    match ops.list_directory_strict(&current_path) {
       Ok(_) => return Ok(ResolvedTarget::Directory(current_path)),
       Err(EngineError::NotFound(_)) => {}
       Err(other) => return Err(other),

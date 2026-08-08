@@ -370,11 +370,11 @@ impl EngineCounters {
         counters.directories.store(metrics.directories, Ordering::Relaxed);
         counters.logical_data_size.store(metrics.logical_data_size, Ordering::Relaxed);
       }
-      Err(err) => {
-        tracing::warn!(
-            error = %err,
-            "measure_live_tree failed at startup; live file/dir/logical counters default to 0"
-        );
+      Err(error) => {
+        // Counters are diagnostic state, not namespace authority. Startup must
+        // remain available for repair when HEAD is damaged, while every
+        // destructive consumer calls `measure_live_tree` directly and fails.
+        tracing::warn!(%error, "live tree counters unavailable; repair is required before authoritative tree accounting");
       }
     }
 

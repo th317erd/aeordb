@@ -9,9 +9,20 @@ use aeordb::auth::auth_uri::{AuthMode, expand_tilde, parse_auth_uri, resolve_aut
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::provider::{AuthProvider, FileAuthProvider, NoAuthProvider};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
-use aeordb::engine::{StorageEngine, ROOT_USER_ID};
+use aeordb::engine::{DirectoryOps, StorageEngine, ROOT_USER_ID};
 use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
+
+#[test]
+fn bootstrap_root_key_rejects_malformed_existing_authority() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/.aeordb-system/api-keys/malformed", b"not json", Some("application/json")).unwrap();
+
+  assert!(bootstrap_root_key(&engine).is_err(), "malformed key authority must not be interpreted as an empty store");
+  assert_eq!(ops.list_directory_strict("/.aeordb-system/api-keys").unwrap().len(), 1, "bootstrap must not append a replacement key");
+}
 
 // ===========================================================================
 // parse_auth_uri tests

@@ -327,6 +327,97 @@ async fn share_endpoint_creates_permissions() {
 }
 
 #[tokio::test]
+async fn share_endpoint_classifies_files_without_loading_content() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "metadata_only_share_target");
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/archive/large.bin", b"payload", Some("application/octet-stream")).unwrap();
+  let record = ops.get_metadata("/archive/large.bin").unwrap().expect("stored file metadata");
+  engine.mark_entry_deleted(record.chunk_hashes.first().expect("stored file chunk")).unwrap();
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "paths": ["/archive/large.bin"],
+            "users": [target_user_id.to_string()],
+            "permissions": ".r..l..."
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::OK);
+  let permissions = PathPermissions::deserialize(&ops.read_file_buffered("/archive/.aeordb-permissions").unwrap()).unwrap();
+  assert!(permissions
+    .links
+    .iter()
+    .any(|link| { link.group == format!("user:{target_user_id}") && link.path_pattern.as_deref() == Some("large.bin") }));
+}
+
+#[tokio::test]
+async fn share_endpoint_rejects_malformed_permission_authority_without_overwriting_it() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "malformed_permission_target");
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  let malformed = b"not permission JSON";
+  ops.store_file_buffered(&ctx, "/docs/readme.txt", b"content", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/.aeordb-permissions", malformed, Some("application/json")).unwrap();
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "paths": ["/docs/readme.txt"],
+            "users": [target_user_id.to_string()],
+            "permissions": ".r..l..."
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(ops.read_file_buffered("/docs/.aeordb-permissions").unwrap(), malformed);
+}
+
+#[tokio::test]
+async fn shared_with_me_surfaces_malformed_permission_authority() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let user_id = create_test_user(&engine, "malformed_grants_user");
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/docs/.aeordb-permissions", b"not permission JSON", Some("application/json"))
+    .unwrap();
+
+  let response = app
+    .oneshot(
+      Request::get("/files/shared-with-me").header("authorization", user_bearer_token(&jwt_manager, &user_id)).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
 async fn share_endpoint_updates_existing() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
@@ -1168,6 +1259,17 @@ fn grants_index_surfaces_malformed_permissions_instead_of_caching_empty_grants()
 
   let error = engine.grants_index_cache.get(&(), &engine).expect_err("malformed permission metadata must fail the grant-index load");
   assert!(error.to_string().contains("JSON parse error"), "unexpected malformed-permissions error: {error}");
+}
+
+#[test]
+fn grants_index_rejects_unknown_protected_traversal() {
+  let (engine, _temp_dir) = test_engine();
+  let ctx = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/docs/.aeordb-future/item.json", b"unknown", Some("application/json")).unwrap();
+  engine.grants_index_cache.evict_all().unwrap();
+
+  let error = engine.grants_index_cache.get(&(), &engine).expect_err("permission authority must reject unknown protected state");
+  assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ use crate::engine::group::Group;
 use crate::engine::json_store::{JsonDoc, JsonStore};
 use crate::engine::peer_connection::PeerConfig;
 use crate::engine::request_context::RequestContext;
+use crate::engine::schema_version::JsonVersioned;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::{User, validate_user_id};
 
@@ -153,7 +154,7 @@ pub fn update_user(engine: &StorageEngine, ctx: &RequestContext, user: &User) ->
 /// Count all users.
 pub fn count_users(engine: &StorageEngine) -> EngineResult<u64> {
   let ops = DirectoryOps::new(engine);
-  let entries = match ops.list_directory("/.aeordb-system/users") {
+  let entries = match ops.list_directory_strict("/.aeordb-system/users") {
     Ok(entries) => entries,
     Err(EngineError::NotFound(_)) => return Ok(0),
     Err(error) => return Err(error),
@@ -307,7 +308,7 @@ pub fn cleanup_expired_tokens(engine: &StorageEngine, ctx: &RequestContext) -> E
   let mut links_cleaned = 0;
 
   // Clean up refresh tokens
-  let token_entries = match ops.list_directory("/.aeordb-system/refresh-tokens") {
+  let token_entries = match ops.list_directory_strict("/.aeordb-system/refresh-tokens") {
     Ok(entries) => entries,
     Err(EngineError::NotFound(_)) => Vec::new(),
     Err(e) => return Err(e),
@@ -315,18 +316,16 @@ pub fn cleanup_expired_tokens(engine: &StorageEngine, ctx: &RequestContext) -> E
 
   for entry in &token_entries {
     let path = format!("/.aeordb-system/refresh-tokens/{}", entry.name);
-    if let Ok(data) = ops.read_file_buffered(&path) {
-      if let Ok(record) = serde_json::from_slice::<RefreshTokenRecord>(&data) {
-        if record.is_revoked || record.expires_at < now {
-          let _ = ops.delete_file(ctx, &path);
-          tokens_cleaned += 1;
-        }
-      }
+    let data = ops.read_file_buffered(&path)?;
+    let record = RefreshTokenRecord::deserialize_versioned(&data)?;
+    if record.is_revoked || record.expires_at < now {
+      ops.delete_file(ctx, &path)?;
+      tokens_cleaned += 1;
     }
   }
 
   // Clean up magic links
-  let link_entries = match ops.list_directory("/.aeordb-system/magic-links") {
+  let link_entries = match ops.list_directory_strict("/.aeordb-system/magic-links") {
     Ok(entries) => entries,
     Err(EngineError::NotFound(_)) => Vec::new(),
     Err(e) => return Err(e),
@@ -334,13 +333,11 @@ pub fn cleanup_expired_tokens(engine: &StorageEngine, ctx: &RequestContext) -> E
 
   for entry in &link_entries {
     let path = format!("/.aeordb-system/magic-links/{}", entry.name);
-    if let Ok(data) = ops.read_file_buffered(&path) {
-      if let Ok(record) = serde_json::from_slice::<MagicLinkRecord>(&data) {
-        if record.is_used || record.expires_at < now {
-          let _ = ops.delete_file(ctx, &path);
-          links_cleaned += 1;
-        }
-      }
+    let data = ops.read_file_buffered(&path)?;
+    let record = MagicLinkRecord::deserialize_versioned(&data)?;
+    if record.is_used || record.expires_at < now {
+      ops.delete_file(ctx, &path)?;
+      links_cleaned += 1;
     }
   }
 
@@ -375,7 +372,7 @@ pub fn get_node_id(engine: &StorageEngine) -> EngineResult<Option<u64>> {
   let ops = DirectoryOps::new(engine);
   match ops.read_file_buffered("/.aeordb-system/cluster/node_id") {
     Ok(data) if data.len() == 8 => Ok(Some(u64::from_le_bytes(data[..8].try_into().unwrap()))),
-    Ok(_) => Ok(None), // wrong length — treat as missing
+    Ok(data) => Err(EngineError::CorruptEntry { offset: 0, reason: format!("cluster node_id has {} bytes; expected 8", data.len()) }),
     Err(EngineError::NotFound(_)) => Ok(None),
     Err(error) => Err(error),
   }
@@ -453,9 +450,8 @@ pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>
     }
     offset = offset.saturating_add(keys.len());
     for key in keys {
-      if let Some(data) = get_plugin(engine, &key)? {
-        results.push((key, data));
-      }
+      let data = get_plugin(engine, &key)?.ok_or_else(|| EngineError::NotFound(format!("plugin disappeared during enumeration: {key}")))?;
+      results.push((key, data));
     }
     if !has_more {
       break;
@@ -467,14 +463,11 @@ pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>
 /// Return one bounded window of decoded plugin keys without reading plugin bodies.
 pub fn list_plugin_keys_window(engine: &StorageEngine, offset: usize, limit: usize) -> EngineResult<(Vec<String>, bool)> {
   let ops = DirectoryOps::new(engine);
-  let window = match ops.list_directory_window("/.aeordb-system/plugins", offset, limit) {
+  let window = match ops.list_directory_window_strict("/.aeordb-system/plugins", offset, limit) {
     Ok(window) => window,
     Err(EngineError::NotFound(_)) => return Ok((Vec::new(), false)),
     Err(error) => return Err(error),
   };
-  for warning in window.warnings {
-    tracing::warn!(reason = %warning.reason, "Plugin directory index is partially unreadable");
-  }
   Ok((window.entries.into_iter().map(|entry| decode_plugin_key(&entry.name)).collect(), window.has_more))
 }
 
@@ -537,7 +530,7 @@ pub fn migrate_system_paths(engine: &StorageEngine) -> EngineResult<()> {
 /// Move all entries from `old_dir` to `new_dir`, preserving filenames.
 /// Skips entries that already exist at the new path (idempotent).
 fn migrate_directory(ops: &DirectoryOps, ctx: &RequestContext, old_dir: &str, new_dir: &str) -> EngineResult<()> {
-  let entries = match ops.list_directory(old_dir) {
+  let entries = match ops.list_directory_strict(old_dir) {
     Ok(entries) => entries,
     Err(EngineError::NotFound(_)) => return Ok(()), // nothing to migrate
     Err(error) => return Err(error),

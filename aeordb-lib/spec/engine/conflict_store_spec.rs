@@ -113,6 +113,18 @@ fn test_list_conflicts() {
   assert!(paths.contains(&"/docs/b.txt"));
 }
 
+#[test]
+fn list_conflicts_rejects_malformed_authoritative_metadata() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&ctx, "/.aeordb-conflicts/docs/broken/.meta", b"not json", Some("application/json"))
+    .unwrap();
+
+  let error = conflict_store::list_conflicts(&engine).expect_err("conflict authority must not omit malformed metadata");
+  assert!(error.to_string().contains("JSON parse error"), "unexpected error: {error}");
+}
+
 // ===========================================================================
 // test_list_no_conflicts
 // ===========================================================================

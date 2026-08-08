@@ -126,6 +126,17 @@ fn test_list_users_empty() {
 }
 
 #[test]
+fn list_users_rejects_malformed_authoritative_records() {
+  let (engine, _dir) = setup();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&test_context(), "/.aeordb-system/users/malformed", b"not a versioned user", Some("application/json"))
+    .unwrap();
+
+  let error = system_store::list_users(&engine).expect_err("authoritative user enumeration must not skip malformed records");
+  assert!(error.to_string().contains("JSON") || error.to_string().contains("version"), "unexpected error: {error}");
+}
+
+#[test]
 fn test_delete_user() {
   let (engine, _dir) = setup();
   let ctx = test_context();
@@ -501,6 +512,26 @@ fn test_node_id_missing() {
   let (engine, _dir) = setup();
   let result = system_store::get_node_id(&engine).unwrap();
   assert!(result.is_none());
+}
+
+#[test]
+fn test_node_id_malformed_is_not_reported_as_absent() {
+  let (engine, _dir) = setup();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&test_context(), "/.aeordb-system/cluster/node_id", b"short", Some("application/octet-stream"))
+    .unwrap();
+
+  assert!(system_store::get_node_id(&engine).is_err());
+}
+
+#[test]
+fn cleanup_rejects_malformed_token_records() {
+  let (engine, _dir) = setup();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&test_context(), "/.aeordb-system/refresh-tokens/malformed", b"not json", Some("application/json"))
+    .unwrap();
+
+  assert!(system_store::cleanup_expired_tokens(&engine, &test_context()).is_err());
 }
 
 #[test]

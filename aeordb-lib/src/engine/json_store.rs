@@ -101,12 +101,11 @@ where
     }
   }
 
-  /// List every value under the prefix. Entries that fail to deserialize
-  /// are silently skipped — they're treated as foreign content from a
-  /// future schema rather than as fatal errors.
+  /// List every value under the prefix. This is authoritative system state,
+  /// so unreadable or unsupported records fail the complete enumeration.
   pub fn list(&self, engine: &StorageEngine) -> EngineResult<Vec<T>> {
     let ops = DirectoryOps::new(engine);
-    let entries = match ops.list_directory(self.prefix) {
+    let entries = match ops.list_directory_strict(self.prefix) {
       Ok(entries) => entries,
       Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
       Err(error) => return Err(error),
@@ -114,11 +113,8 @@ where
     let mut values = Vec::with_capacity(entries.len());
     for entry in &entries {
       let path = self.path_for(&entry.name);
-      if let Ok(data) = ops.read_file_buffered(&path) {
-        if let Ok(value) = T::deserialize_versioned(&data) {
-          values.push(value);
-        }
-      }
+      let data = ops.read_file_buffered(&path)?;
+      values.push(T::deserialize_versioned(&data)?);
     }
     Ok(values)
   }

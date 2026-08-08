@@ -761,23 +761,23 @@ async fn test_crudlify_op_from_http_method() {
   };
 
   // GET file -> Read
-  assert_eq!(http_to_crudlify(&Method::GET, "myapp/data.json", &state), CrudlifyOp::Read);
+  assert_eq!(http_to_crudlify(&Method::GET, "myapp/data.json", &state).unwrap(), CrudlifyOp::Read);
   // GET directory -> List
-  assert_eq!(http_to_crudlify(&Method::GET, "myapp/data/", &state), CrudlifyOp::List);
+  assert_eq!(http_to_crudlify(&Method::GET, "myapp/data/", &state).unwrap(), CrudlifyOp::List);
   // DELETE -> Delete
-  assert_eq!(http_to_crudlify(&Method::DELETE, "myapp/data.json", &state), CrudlifyOp::Delete);
+  assert_eq!(http_to_crudlify(&Method::DELETE, "myapp/data.json", &state).unwrap(), CrudlifyOp::Delete);
   // HEAD -> Read
-  assert_eq!(http_to_crudlify(&Method::HEAD, "myapp/data.json", &state), CrudlifyOp::Read);
+  assert_eq!(http_to_crudlify(&Method::HEAD, "myapp/data.json", &state).unwrap(), CrudlifyOp::Read);
   // PUT to .permissions -> Configure
-  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-permissions", &state), CrudlifyOp::Configure);
+  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-permissions", &state).unwrap(), CrudlifyOp::Configure);
   // PUT to .aeordb-config -> Configure
-  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-config", &state), CrudlifyOp::Configure);
+  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-config", &state).unwrap(), CrudlifyOp::Configure);
   // PUT to .functions -> Deploy
-  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-functions", &state), CrudlifyOp::Deploy);
+  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/.aeordb-functions", &state).unwrap(), CrudlifyOp::Deploy);
   // PUT to new file -> Create (file doesn't exist)
-  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/newfile.json", &state), CrudlifyOp::Create);
+  assert_eq!(http_to_crudlify(&Method::PUT, "myapp/newfile.json", &state).unwrap(), CrudlifyOp::Create);
   // POST to /plugins/{name}/invoke -> Invoke
-  assert_eq!(http_to_crudlify(&Method::POST, "plugins/myfunc/invoke", &state), CrudlifyOp::Invoke);
+  assert_eq!(http_to_crudlify(&Method::POST, "plugins/myfunc/invoke", &state).unwrap(), CrudlifyOp::Invoke);
 }
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
-use aeordb::engine::{EventBus, StorageEngine};
+use aeordb::engine::{DirectoryOps, EventBus, RequestContext, StorageEngine};
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
@@ -89,6 +89,20 @@ async fn test_cluster_status_returns_node_info() {
 }
 
 #[tokio::test]
+async fn test_cluster_status_rejects_malformed_node_authority() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-system/cluster/node_id", b"short", Some("application/octet-stream"))
+    .unwrap();
+
+  let response = app
+    .oneshot(Request::get("/sync/status").header("authorization", root_bearer_token(&jwt_manager)).body(Body::empty()).unwrap())
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
 async fn test_cluster_status_requires_root() {
   let (app, jwt_manager, _engine, _temp_dir) = test_app();
   let token = non_root_bearer_token(&jwt_manager);
@@ -139,6 +153,31 @@ async fn test_add_peer_returns_201() {
   assert_eq!(json["address"], "10.0.0.5:9000");
   assert_eq!(json["label"], "us-west");
   assert_eq!(json["state"], "disconnected");
+}
+
+#[tokio::test]
+async fn test_add_peer_rejects_malformed_persisted_configuration() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/.aeordb-system/cluster/peers",
+      b"not versioned peer configuration",
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/peers")
+        .header("authorization", root_bearer_token(&jwt_manager))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"address":"10.0.0.6:9000"}"#))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]

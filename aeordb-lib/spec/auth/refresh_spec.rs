@@ -63,13 +63,15 @@ async fn body_json(body: Body) -> serde_json::Value {
 fn seed_api_key(engine: &StorageEngine) -> String {
   let ctx = RequestContext::system();
 
+  let user = aeordb::engine::User::new("refresh-token-user", None);
+  system_store::store_user(engine, &ctx, &user).unwrap();
   let key_id = uuid::Uuid::new_v4();
   let plaintext_key = generate_api_key(key_id);
   let key_hash = hash_api_key(&plaintext_key).unwrap();
   let record = ApiKeyRecord {
     key_id,
     key_hash,
-    user_id: Some(uuid::Uuid::new_v4()),
+    user_id: Some(user.user_id),
     created_at: chrono::Utc::now(),
     is_revoked: false,
     expires_at: i64::MAX,

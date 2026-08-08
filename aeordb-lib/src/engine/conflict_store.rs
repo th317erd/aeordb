@@ -37,7 +37,7 @@ pub fn store_conflict(engine: &StorageEngine, ctx: &RequestContext, conflict: &C
       },
   });
 
-  let meta_json = serde_json::to_vec_pretty(&meta).unwrap_or_default();
+  let meta_json = serde_json::to_vec_pretty(&meta).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
   ops.store_file_buffered(ctx, &format!("{}/.meta", base_path), &meta_json, Some("application/json"))?;
 
   Ok(())
@@ -52,7 +52,7 @@ pub fn list_conflicts(engine: &StorageEngine) -> EngineResult<Vec<serde_json::Va
   let mut conflicts = Vec::new();
 
   // Use recursive listing to find all .meta files under /.aeordb-conflicts
-  let entries = match crate::engine::directory_listing::list_directory_recursive(
+  let entries = match crate::engine::directory_listing::list_directory_recursive_strict(
     engine,
     "/.aeordb-conflicts",
     -1,             // unlimited depth
@@ -66,11 +66,9 @@ pub fn list_conflicts(engine: &StorageEngine) -> EngineResult<Vec<serde_json::Va
 
   for entry in &entries {
     if entry.name == ".meta" {
-      if let Ok(data) = ops.read_file_buffered(&entry.path) {
-        if let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&data) {
-          conflicts.push(meta);
-        }
-      }
+      let data = ops.read_file_buffered(&entry.path)?;
+      let meta = serde_json::from_slice::<serde_json::Value>(&data).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+      conflicts.push(meta);
     }
   }
 

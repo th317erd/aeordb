@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::engine::errors::EngineResult;
+use crate::engine::errors::{EngineError, EngineResult};
 
 /// The 8 crudlify flag positions and their canonical letters.
 const CRUDLIFY_LETTERS: [char; 8] = ['c', 'r', 'u', 'd', 'l', 'i', 'f', 'y'];
@@ -26,7 +26,7 @@ pub struct PermissionLink {
   pub path_pattern: Option<String>,
 }
 
-/// Permissions for a directory path, stored as `.permissions` JSON file.
+/// Permissions for a directory path, stored as an `.aeordb-permissions` JSON file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathPermissions {
   pub links: Vec<PermissionLink>,
@@ -42,6 +42,14 @@ impl PathPermissions {
   /// Deserialize from JSON bytes. Reads `"$v"` first and dispatches.
   pub fn deserialize(data: &[u8]) -> EngineResult<Self> {
     <Self as crate::engine::schema_version::JsonVersioned>::deserialize_versioned(data)
+  }
+
+  /// Decode permission bytes that already came from database authority.
+  /// Parse/version failures here describe corrupt stored state, not bad HTTP
+  /// input, and must therefore never be reported as a client-side `400`.
+  pub fn deserialize_stored(data: &[u8], path: &str) -> EngineResult<Self> {
+    Self::deserialize(data)
+      .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("malformed stored permission authority at {path}: {error}") })
   }
 }
 

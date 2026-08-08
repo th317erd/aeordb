@@ -97,6 +97,24 @@ fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
   ops.store_file_buffered(&context, path, data, Some("text/plain")).unwrap();
 }
 
+#[test]
+fn local_sync_rejects_malformed_peer_configuration() {
+  let (local, _local_temp) = create_temp_engine_for_tests();
+  let (remote, _remote_temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&local)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/.aeordb-system/cluster/peers",
+      b"not versioned peer configuration",
+      Some("application/json"),
+    )
+    .unwrap();
+  let (sync_engine, _) = make_sync_engine(local);
+
+  let error = sync_engine.sync_with_local_engine(42, &remote).expect_err("sync must not interpret malformed peer authority as no filter");
+  assert!(error.contains("Failed to load configuration for peer 42"), "unexpected error: {error}");
+}
+
 fn read_file(engine: &StorageEngine, path: &str) -> Vec<u8> {
   let ops = DirectoryOps::new(engine);
   ops.read_file_buffered(path).unwrap()
@@ -265,7 +283,7 @@ fn test_peer_sync_state_persistence() {
   let (sync_engine, _peer_manager) = make_sync_engine(engine);
 
   // No state initially
-  assert!(sync_engine.load_peer_sync_state(42).is_none());
+  assert!(sync_engine.load_peer_sync_state(42).unwrap().is_none());
 
   // After a sync, state should be persisted
   // We test this through system_store directly
@@ -273,11 +291,27 @@ fn test_peer_sync_state_persistence() {
   let state = PeerSyncState { last_synced_root_hash: Some("deadbeef".to_string()), last_sync_at: Some(1234567890) };
   aeordb::engine::system_store::store_peer_sync_state(sync_engine.engine(), &ctx, 42, &state).unwrap();
 
-  let loaded = sync_engine.load_peer_sync_state(42);
+  let loaded = sync_engine.load_peer_sync_state(42).unwrap();
   assert!(loaded.is_some());
   let loaded = loaded.unwrap();
   assert_eq!(loaded.last_synced_root_hash, Some("deadbeef".to_string()));
   assert_eq!(loaded.last_sync_at, Some(1234567890));
+}
+
+#[test]
+fn peer_sync_state_loader_surfaces_malformed_persisted_authority() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let (sync_engine, _peer_manager) = make_sync_engine(engine);
+  DirectoryOps::new(sync_engine.engine())
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/.aeordb-system/sync-peers/42",
+      b"not a versioned peer sync state",
+      Some("application/json"),
+    )
+    .unwrap();
+
+  sync_engine.load_peer_sync_state(42).expect_err("malformed peer sync authority must not become an absent state");
 }
 
 #[test]
@@ -294,7 +328,7 @@ fn test_peer_sync_state_overwrite() {
   let state2 = PeerSyncState { last_synced_root_hash: Some("bbb".to_string()), last_sync_at: Some(200) };
   aeordb::engine::system_store::store_peer_sync_state(sync_engine.engine(), &ctx, 42, &state2).unwrap();
 
-  let loaded = sync_engine.load_peer_sync_state(42).unwrap();
+  let loaded = sync_engine.load_peer_sync_state(42).unwrap().unwrap();
   assert_eq!(loaded.last_synced_root_hash, Some("bbb".to_string()));
   assert_eq!(loaded.last_sync_at, Some(200));
 }
@@ -321,12 +355,12 @@ fn test_peer_sync_state_multiple_peers() {
   )
   .unwrap();
 
-  let state1 = sync_engine.load_peer_sync_state(1).unwrap();
-  let state2 = sync_engine.load_peer_sync_state(2).unwrap();
+  let state1 = sync_engine.load_peer_sync_state(1).unwrap().unwrap();
+  let state2 = sync_engine.load_peer_sync_state(2).unwrap().unwrap();
 
   assert_eq!(state1.last_synced_root_hash, Some("hash1".to_string()));
   assert_eq!(state2.last_synced_root_hash, Some("hash2".to_string()));
-  assert!(sync_engine.load_peer_sync_state(3).is_none());
+  assert!(sync_engine.load_peer_sync_state(3).unwrap().is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -566,12 +600,12 @@ fn test_local_sync_updates_peer_state() {
   let (sync_engine_a, _pm) = make_sync_engine(Arc::clone(&engine_a));
 
   // No state before sync
-  assert!(sync_engine_a.load_peer_sync_state(2).is_none());
+  assert!(sync_engine_a.load_peer_sync_state(2).unwrap().is_none());
 
   sync_engine_a.sync_with_local_engine(2, &engine_b).unwrap();
 
   // State should be recorded after sync
-  let state = sync_engine_a.load_peer_sync_state(2);
+  let state = sync_engine_a.load_peer_sync_state(2).unwrap();
   assert!(state.is_some(), "Sync state should be saved");
   let state = state.unwrap();
   assert!(state.last_synced_root_hash.is_some());

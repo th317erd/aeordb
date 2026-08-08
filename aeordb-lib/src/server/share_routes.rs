@@ -14,6 +14,7 @@ use super::route_permissions::{parse_user_id, reject_share_key, RoutePermissionC
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::permissions::{PathPermissions, PermissionLink};
 use crate::engine::path_utils::{normalize_path, parent_path, file_name};
@@ -32,6 +33,32 @@ pub struct ShareRequest {
   pub users: Option<Vec<String>>,
   pub groups: Option<Vec<String>>,
   pub permissions: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharePathKind {
+  File,
+  Directory,
+}
+
+fn share_path_kind(ops: &DirectoryOps<'_>, path: &str) -> EngineResult<Option<SharePathKind>> {
+  if ops.get_metadata(path)?.is_some() {
+    return Ok(Some(SharePathKind::File));
+  }
+
+  match ops.list_directory_strict(path) {
+    Ok(_) => Ok(Some(SharePathKind::Directory)),
+    Err(EngineError::NotFound(_)) => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+fn load_stored_permissions(ops: &DirectoryOps<'_>, path: &str) -> EngineResult<Option<PathPermissions>> {
+  match ops.read_file_buffered(path) {
+    Ok(data) => PathPermissions::deserialize_stored(&data, path).map(Some),
+    Err(EngineError::NotFound(_)) => Ok(None),
+    Err(error) => Err(error),
+  }
 }
 
 #[derive(Deserialize)]
@@ -163,18 +190,15 @@ pub async fn share(
       Err(error) => return engine_error_response("Failed to classify shared path", &error),
     }
 
-    // Determine whether this is a file or directory.
-    // Try reading as a file first; if NotFound, check as directory.
-    let is_file = ops.read_file_buffered(&normalized).is_ok();
-    let is_dir = if !is_file { ops.list_directory(&normalized).is_ok() } else { false };
-
-    if !is_file && !is_dir {
-      return ErrorResponse::new(format!("Path not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response();
-    }
+    let path_kind = match share_path_kind(&ops, &normalized) {
+      Ok(Some(kind)) => kind,
+      Ok(None) => return ErrorResponse::new(format!("Path not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response(),
+      Err(error) => return engine_error_response("Failed to inspect shared path", &error),
+    };
 
     // For files: store permission on parent dir with path_pattern = filename
     // For dirs:  store permission on the dir itself with no path_pattern
-    let (perm_dir, path_pattern) = if is_file {
+    let (perm_dir, path_pattern) = if path_kind == SharePathKind::File {
       let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
       let fname = file_name(&normalized).unwrap_or("").to_string();
       (parent, Some(fname))
@@ -182,19 +206,17 @@ pub async fn share(
       (normalized.clone(), None)
     };
 
-    // Read existing .permissions or start empty
+    // Read existing .aeordb-permissions or start empty.
     let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
       format!("{}.aeordb-permissions", perm_dir)
     } else {
       format!("{}/.aeordb-permissions", perm_dir)
     };
 
-    let mut perms = match ops.read_file_buffered(&perm_file_path) {
-      Ok(data) => match PathPermissions::deserialize(&data) {
-        Ok(p) => p,
-        Err(_) => PathPermissions { links: Vec::new() },
-      },
-      Err(_) => PathPermissions { links: Vec::new() },
+    let mut perms = match load_stored_permissions(&ops, &perm_file_path) {
+      Ok(Some(permissions)) => permissions,
+      Ok(None) => PathPermissions { links: Vec::new() },
+      Err(error) => return engine_error_response("Failed to load existing permissions", &error),
     };
 
     // Build the list of groups to add links for
@@ -234,7 +256,7 @@ pub async fn share(
       }
     }
 
-    // Write back the .permissions file
+    // Write back the .aeordb-permissions file.
     let serialized = perms.serialize();
     if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
       return ErrorResponse::new(format!("Failed to store permissions: {}", e))
@@ -314,14 +336,24 @@ pub async fn list_shares(
     Ok(permissions) => permissions,
     Err(response) => return response,
   };
-  if !permissions.is_root() && !permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
-    return ErrorResponse::new(format!("Not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response();
+  if !permissions.is_root() {
+    let permitted = match permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
+      Ok(permitted) => permitted,
+      Err(error) => return engine_error_response("Failed to check share-listing permission", &error),
+    };
+    if !permitted {
+      return ErrorResponse::new(format!("Not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response();
+    }
   }
 
   let ops = DirectoryOps::new(&state.engine);
 
-  // Determine perm_dir: if path is a file, look at parent
-  let is_file = ops.read_file_buffered(&normalized).is_ok();
+  // Determine perm_dir: if path is a file, look at parent.
+  let is_file = match share_path_kind(&ops, &normalized) {
+    Ok(Some(SharePathKind::File)) => true,
+    Ok(Some(SharePathKind::Directory)) | Ok(None) => false,
+    Err(error) => return engine_error_response("Failed to inspect shared path", &error),
+  };
   let perm_dir = if is_file { parent_path(&normalized).unwrap_or_else(|| "/".to_string()) } else { normalized.clone() };
 
   let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
@@ -330,12 +362,10 @@ pub async fn list_shares(
     format!("{}/.aeordb-permissions", perm_dir)
   };
 
-  let perms = match ops.read_file_buffered(&perm_file_path) {
-    Ok(data) => match PathPermissions::deserialize(&data) {
-      Ok(p) => p,
-      Err(_) => PathPermissions { links: Vec::new() },
-    },
-    Err(_) => PathPermissions { links: Vec::new() },
+  let perms = match load_stored_permissions(&ops, &perm_file_path) {
+    Ok(Some(permissions)) => permissions,
+    Ok(None) => PathPermissions { links: Vec::new() },
+    Err(error) => return engine_error_response("Failed to load permissions", &error),
   };
 
   // If the query is for a specific file, filter to links with matching path_pattern
@@ -358,7 +388,8 @@ pub async fn list_shares(
       if let Ok(uid) = Uuid::parse_str(uid_str) {
         match crate::engine::system_store::get_user(&state.engine, &uid) {
           Ok(Some(user)) => Some(user.username),
-          _ => None,
+          Ok(None) => None,
+          Err(error) => return engine_error_response("Failed to resolve shared user", &error),
         }
       } else {
         None
@@ -411,7 +442,11 @@ pub async fn unshare(
   let ctx = RequestContext::system();
 
   // Determine perm_dir
-  let is_file = ops.read_file_buffered(&normalized).is_ok();
+  let is_file = match share_path_kind(&ops, &normalized) {
+    Ok(Some(SharePathKind::File)) => true,
+    Ok(Some(SharePathKind::Directory)) | Ok(None) => false,
+    Err(error) => return engine_error_response("Failed to inspect shared path", &error),
+  };
   let perm_dir = if is_file { parent_path(&normalized).unwrap_or_else(|| "/".to_string()) } else { normalized.clone() };
 
   let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
@@ -420,16 +455,10 @@ pub async fn unshare(
     format!("{}/.aeordb-permissions", perm_dir)
   };
 
-  let mut perms = match ops.read_file_buffered(&perm_file_path) {
-    Ok(data) => match PathPermissions::deserialize(&data) {
-      Ok(p) => p,
-      Err(_) => {
-        return ErrorResponse::new("No permissions found for this path").with_status(StatusCode::NOT_FOUND).into_response();
-      }
-    },
-    Err(_) => {
-      return ErrorResponse::new("No permissions found for this path").with_status(StatusCode::NOT_FOUND).into_response();
-    }
+  let mut perms = match load_stored_permissions(&ops, &perm_file_path) {
+    Ok(Some(permissions)) => permissions,
+    Ok(None) => return ErrorResponse::new("No permissions found for this path").with_status(StatusCode::NOT_FOUND).into_response(),
+    Err(error) => return engine_error_response("Failed to load permissions", &error),
   };
 
   let original_len = perms.links.len();
@@ -469,7 +498,7 @@ pub async fn unshare(
 /// Used by the file browser to discover accessible entry points for
 /// non-root users.
 pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
-  // Share tokens don't use .permissions — they have scoped key rules
+  // Share tokens don't use .aeordb-permissions; they have scoped key rules.
   if let Err(response) = reject_share_key(&claims, "Not available for share links") {
     return response;
   }
@@ -487,7 +516,7 @@ pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Ex
   // Get the user's group memberships
   let user_groups = match state.group_cache.get(&caller_id, &state.engine) {
     Ok(groups) => groups,
-    Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
+    Err(error) => return engine_error_response("Failed to load sharing authority", &error),
   };
 
   if user_groups.is_empty() {
@@ -497,7 +526,7 @@ pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Ex
   let ops = DirectoryOps::new(&state.engine);
   let grants_index = match state.engine.grants_index_cache.get(&(), &state.engine) {
     Ok(index) => index,
-    Err(_) => return Json(serde_json::json!({ "paths": [] })).into_response(),
+    Err(error) => return engine_error_response("Failed to load grants authority", &error),
   };
 
   let mut shared_paths: Vec<serde_json::Value> = Vec::new();
@@ -515,14 +544,16 @@ pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Ex
       // placeholder.
       let metadata = if let Some(ref pattern) = grant.path_pattern {
         let file_path = if grant.dir_path == "/" { format!("/{}", pattern) } else { format!("{}/{}", grant.dir_path, pattern) };
-        ops.get_metadata(&file_path).ok().flatten().map(|fr| {
-          serde_json::json!({
+        match ops.get_metadata(&file_path) {
+          Ok(Some(fr)) => Some(serde_json::json!({
               "size": fr.total_size,
               "created_at": fr.created_at,
               "updated_at": fr.updated_at,
               "content_type": fr.content_type,
-          })
-        })
+          })),
+          Ok(None) | Err(EngineError::NotFound(_)) => None,
+          Err(error) => return engine_error_response("Failed to load shared-file metadata", &error),
+        }
       } else {
         None
       };
@@ -563,7 +594,11 @@ async fn send_share_notifications(
   // Load email config — if not configured, silently skip
   let config = match crate::engine::email_config::load_email_config(engine) {
     Ok(Some(c)) => c,
-    _ => return,
+    Ok(None) => return,
+    Err(error) => {
+      tracing::error!("Failed to load share notification email configuration: {error}");
+      return;
+    }
   };
 
   // Build the View-Files link once. Without a resolved public base URL
@@ -590,7 +625,11 @@ async fn send_share_notifications(
     };
     let user = match crate::engine::system_store::get_user(engine, &uid) {
       Ok(Some(u)) => u,
-      _ => continue,
+      Ok(None) => continue,
+      Err(error) => {
+        tracing::error!(user_id = %uid, "Failed to load share notification user: {error}");
+        continue;
+      }
     };
     let email = match user.email {
       Some(ref e) if !e.is_empty() => e.clone(),

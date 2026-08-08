@@ -1210,6 +1210,54 @@ fn full_directory_repair_preserves_current_symlink_path_records() {
 }
 
 #[test]
+fn directory_repairs_rebuild_only_registry_selected_namespace_paths() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/.aeordb-permissions", b"permissions", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-conflicts/item.json", b"conflict", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/repair/ordinary.txt", b"ordinary", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/repair/.aeordb-permissions", b"nested permissions", Some("application/json")).unwrap();
+  ops.store_file_buffered(&ctx, "/repair/.aeordb-indexes/private.idx", b"derived", Some("application/octet-stream")).unwrap();
+
+  ops.rebuild_directory_tree(&ctx).unwrap();
+  let root = ops.list_directory("/").unwrap();
+  assert!(root.iter().any(|child| child.name == ".aeordb-permissions"));
+  assert!(!root.iter().any(|child| child.name == ".aeordb-conflicts"));
+  let repaired = ops.list_directory("/repair").unwrap();
+  assert!(repaired.iter().any(|child| child.name == "ordinary.txt"));
+  assert!(repaired.iter().any(|child| child.name == ".aeordb-permissions"));
+  assert!(!repaired.iter().any(|child| child.name == ".aeordb-indexes"));
+
+  ops.repair_directory_index_from_path_records("/").unwrap();
+  ops.repair_directory_index_from_path_records("/repair").unwrap();
+  let targeted_root = ops.list_directory("/").unwrap();
+  let targeted_repair = ops.list_directory("/repair").unwrap();
+  assert!(targeted_root.iter().any(|child| child.name == ".aeordb-permissions"));
+  assert!(!targeted_root.iter().any(|child| child.name == ".aeordb-conflicts"));
+  assert!(targeted_repair.iter().any(|child| child.name == ".aeordb-permissions"));
+  assert!(!targeted_repair.iter().any(|child| child.name == ".aeordb-indexes"));
+}
+
+#[test]
+fn full_directory_repair_rejects_unknown_protected_paths_before_mutation() {
+  let (engine, _temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/ordinary.txt", b"ordinary", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-future/item.json", b"unknown", Some("application/json")).unwrap();
+  let root_key = directory_path_hash("/", &engine.hash_algo()).unwrap();
+  let root_before = engine.get_entry(&root_key).unwrap().unwrap().2;
+  let head_before = engine.head_hash().unwrap();
+
+  let error = ops.rebuild_directory_tree(&ctx).unwrap_err();
+
+  assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
+  assert_eq!(engine.get_entry(&root_key).unwrap().unwrap().2, root_before);
+  assert_eq!(engine.head_hash().unwrap(), head_before);
+}
+
+#[test]
 fn full_directory_repair_rebuilds_every_deep_ancestor_bottom_up() {
   let (engine, _temp) = create_test_db();
   let ctx = RequestContext::system();
@@ -1263,6 +1311,50 @@ fn rebuild_directory_tree_skips_path_records_with_missing_chunks() {
   let root = ops.list_directory("/").unwrap();
   assert!(!root.iter().any(|child| child.name == "broken"), "repair must not re-list a file whose chunks are missing: {:?}", root);
   assert!(ops.read_file_buffered("/broken/dangling.txt").is_err(), "direct read should still report the underlying chunk loss");
+}
+
+#[test]
+fn verify_uses_registry_policy_for_strict_rebuildable_and_unknown_paths() {
+  let ctx = RequestContext::system();
+
+  let (permissions_engine, permissions_temp) = create_test_db();
+  let permissions_ops = DirectoryOps::new(&permissions_engine);
+  permissions_ops.store_file_buffered(&ctx, "/.aeordb-permissions", b"strict permissions", Some("application/json")).unwrap();
+  let permissions_key = file_path_hash("/.aeordb-permissions", &permissions_engine.hash_algo()).unwrap();
+  let (permissions_header, _, permissions_value) = permissions_engine.get_entry(&permissions_key).unwrap().unwrap();
+  let permissions_record =
+    FileRecord::deserialize(&permissions_value, permissions_engine.hash_algo().hash_length(), permissions_header.entry_version).unwrap();
+  permissions_engine.remove_kv_entry(&permissions_record.chunk_hashes[0]).unwrap();
+  let permissions_report =
+    verify::verify_checked(&permissions_engine, permissions_temp.path().join("test.aeordb").to_str().unwrap()).unwrap();
+  assert!(
+    permissions_report.dangling_file_records.iter().any(|issue| issue.contains("/.aeordb-permissions")),
+    "strict registry family was not verified: {:?}",
+    permissions_report.dangling_file_records
+  );
+
+  let (derived_engine, derived_temp) = create_test_db();
+  let derived_ops = DirectoryOps::new(&derived_engine);
+  let derived_path = "/docs/.aeordb-indexes/text.idx";
+  derived_ops.store_file_buffered(&ctx, derived_path, b"rebuildable index", Some("application/octet-stream")).unwrap();
+  let derived_key = file_path_hash(derived_path, &derived_engine.hash_algo()).unwrap();
+  let (derived_header, _, derived_value) = derived_engine.get_entry(&derived_key).unwrap().unwrap();
+  let derived_record =
+    FileRecord::deserialize(&derived_value, derived_engine.hash_algo().hash_length(), derived_header.entry_version).unwrap();
+  derived_engine.remove_kv_entry(&derived_record.chunk_hashes[0]).unwrap();
+  let derived_report = verify::verify_checked(&derived_engine, derived_temp.path().join("test.aeordb").to_str().unwrap()).unwrap();
+  assert!(
+    !derived_report.dangling_file_records.iter().any(|issue| issue.contains(derived_path)),
+    "rebuildable registry family was promoted to fatal dangling data: {:?}",
+    derived_report.dangling_file_records
+  );
+
+  let (unknown_engine, unknown_temp) = create_test_db();
+  DirectoryOps::new(&unknown_engine)
+    .store_file_buffered(&ctx, "/.aeordb-future/item.json", b"unknown protected", Some("application/json"))
+    .unwrap();
+  let error = verify::verify_checked(&unknown_engine, unknown_temp.path().join("test.aeordb").to_str().unwrap()).unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
 }
 
 #[test]

@@ -9,7 +9,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::StorageEngine;
-use aeordb::engine::RequestContext;
+use aeordb::engine::{RequestContext, ROOT_USER_ID};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::TempDir) {
@@ -26,7 +26,7 @@ fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> ax
 fn bearer_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: "test-admin".to_string(),
+    sub: ROOT_USER_ID.to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
@@ -383,4 +383,46 @@ async fn test_regular_query_still_works_without_aggregate() {
   // Regular query returns "items" array, not aggregation
   assert!(json["items"].is_array(), "regular query should return results array");
   assert_eq!(json["items"].as_array().unwrap().len(), 10);
+}
+
+#[tokio::test]
+async fn test_regular_query_rejects_malformed_user_identity() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_people(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let now = chrono::Utc::now().timestamp();
+  let token = jwt_manager
+    .create_token(&TokenClaims {
+      sub: "not-a-user-uuid".to_string(),
+      iss: "aeordb".to_string(),
+      iat: now,
+      exp: now + DEFAULT_EXPIRY_SECONDS,
+      scope: None,
+      permissions: None,
+      key_id: None,
+    })
+    .expect("create malformed-subject token");
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/query")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "path": "/people",
+            "where": { "field": "age", "op": "gt", "value": 0 }
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  let json = body_json(response.into_body()).await;
+  assert!(json["error"].as_str().unwrap_or_default().contains("invalid user identity"));
 }

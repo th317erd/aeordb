@@ -178,7 +178,7 @@ pub use system_family_policy::SystemFamilyPolicyResolver;
 pub use directory_ops::{
   DirectoryListWindow, DirectoryOps, DirectoryTraversalResult, EngineFileStream, directory_content_hash, directory_path_hash,
   file_path_hash, file_content_hash, file_identity_hash, symlink_identity_hash, chunk_content_hash, system_chunk_hash,
-  system_file_identity_hash, whole_file_content_hash, whole_file_content_hash_from_chunks, is_system_path, DEFAULT_CHUNK_SIZE,
+  system_file_identity_hash, whole_file_content_hash, whole_file_content_hash_from_chunks, v0_system_entry_flags, DEFAULT_CHUNK_SIZE,
   JsonMergeBatchResult, JsonMergeFilePatch, JsonMergeFileResult, JsonMergedFile,
 };
 pub use indexing_pipeline::IndexingPipeline;

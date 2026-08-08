@@ -18,7 +18,9 @@ use crate::engine::run_configuration::GcRunConfiguration;
 use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::{symlink_path_hash, symlink_content_hash};
+use crate::engine::system_family_policy::GcPathSelection;
 use crate::engine::version_manager::VersionManager;
+use crate::engine::SystemFamilyPolicyResolver;
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -91,6 +93,7 @@ fn gc_mark_internal(engine: &StorageEngine, cancellation: Option<&CancellationTo
   check_gc_cancellation(engine, cancellation)?;
   let mut live: HashSet<Vec<u8>> = HashSet::new();
   let hash_length = engine.hash_algo().hash_length();
+  let family_policy = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
   let timing = std::env::var("AEORDB_GC_TIMING").is_ok();
   let mark_start = std::time::Instant::now();
 
@@ -121,7 +124,7 @@ fn gc_mark_internal(engine: &StorageEngine, cancellation: Option<&CancellationTo
 
   let bfs_start = std::time::Instant::now();
   let bfs_mem = PhaseSampler::start("mark.bfs", std::time::Duration::from_millis(50));
-  walk_versions_bfs(engine, roots, hash_length, &mut live, cancellation)?;
+  walk_versions_bfs(engine, roots, hash_length, family_policy, &mut live, cancellation)?;
   bfs_mem.finish();
   if timing {
     eprintln!("[gc-timing] mark.bfs: {:?} (live={})", bfs_start.elapsed(), live.len());
@@ -137,16 +140,16 @@ fn gc_mark_internal(engine: &StorageEngine, cancellation: Option<&CancellationTo
     live.insert(key);
   }
 
-  // Mark system table entries as live
+  // Mark detached registry path families as live.
   let sys_start = std::time::Instant::now();
-  mark_system_entries(engine, hash_length, &mut live, cancellation)?;
+  mark_registry_gc_entries(engine, hash_length, family_policy, &mut live, cancellation)?;
   if timing {
     eprintln!("[gc-timing] mark.system: {:?}", sys_start.elapsed());
   }
 
   // Mark task queue entries as live -- task records use deterministic hashes
   // ("::aeordb:task:{id}") that are NOT in the directory tree, so
-  // mark_system_entries does not cover them.
+  // Registry path traversal does not cover them.
   let task_start = std::time::Instant::now();
   mark_task_entries(engine, &mut live, cancellation)?;
   if timing {
@@ -248,6 +251,7 @@ fn walk_versions_bfs(
   engine: &StorageEngine,
   roots: Vec<(Vec<u8>, String)>,
   hash_length: usize,
+  family_policy: SystemFamilyPolicyResolver,
   live: &mut HashSet<Vec<u8>>,
   cancellation: Option<&CancellationToken>,
 ) -> EngineResult<()> {
@@ -361,6 +365,12 @@ fn walk_versions_bfs(
 
           for child in &children {
             let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path, child.name) };
+            // V3 keeps every currently reachable family, including derived
+            // state. The typed decision still rejects unknown protected paths
+            // and identifies rebuildable state for the v4 GC owner.
+            match family_policy.gc_path_selection(&child_path)? {
+              GcPathSelection::Retain | GcPathSelection::Rebuildable | GcPathSelection::StructuralContainer => {}
+            }
             let child_type = EntryType::from_u8(child.entry_type)?;
             match child_type {
               EntryType::DirectoryIndex | EntryType::FileRecord | EntryType::Symlink => {
@@ -473,28 +483,26 @@ fn collect_btree_children(
   Ok(all_children)
 }
 
-/// Mark system table entries as live.
-///
-/// System data (`/.aeordb-system/...`, `/.aeordb-config/...`) lives outside
-/// the user-visible tree, so `walk_versions_bfs` never sees it. We walk it
-/// here with the same path-aware logic so we mark every key the engine
-/// might use to reach an entry — identity, path, and content — not just
-/// the merkle hash. Missing any of those silently breaks `JsonStore.get`
-/// after the next sweep, which is how every api-key / user / group
-/// disappeared on the prior GC run.
-fn mark_system_entries(
+/// Mark registry-selected detached path families as live.
+fn mark_registry_gc_entries(
   engine: &StorageEngine,
   hash_length: usize,
+  family_policy: SystemFamilyPolicyResolver,
   live: &mut HashSet<Vec<u8>>,
   cancellation: Option<&CancellationToken>,
 ) -> EngineResult<()> {
-  let system_prefixes = ["/.aeordb-system", "/.aeordb-config"];
-
-  for prefix in &system_prefixes {
+  let algo = engine.hash_algo();
+  for path in family_policy.retained_absolute_gc_paths()? {
     check_gc_cancellation(engine, cancellation)?;
-    let dir_hash = engine.compute_hash(format!("dir:{}", prefix).as_bytes())?;
-    if engine.get_entry_including_deleted(&dir_hash)?.is_some() {
-      mark_entry_recursive(engine, &dir_hash, prefix, hash_length, live, cancellation)?;
+    let candidate_keys = [
+      crate::engine::directory_ops::directory_path_hash(&path, &algo)?,
+      crate::engine::directory_ops::file_path_hash(&path, &algo)?,
+      symlink_path_hash(&path, &algo)?,
+    ];
+    for key in candidate_keys {
+      if engine.get_entry_including_deleted(&key)?.is_some() {
+        mark_entry_recursive(engine, &key, &path, hash_length, family_policy, live, cancellation)?;
+      }
     }
   }
 
@@ -509,8 +517,7 @@ fn mark_system_entries(
 /// - FileRecord: mark `file:{path}` path-key + content-key + chunk hashes.
 /// - Symlink: mark `symlink:{path}` path-key + content-key.
 ///
-/// `path` is the absolute path of the entry being marked (e.g.
-/// `"/.aeordb-system/api-keys/abc"`). We need it because directories and
+/// `path` is the absolute path of the entry being marked. We need it because directories and
 /// symlinks don't carry their own path in the stored value, and files use
 /// `file_path_hash(path)` rather than the identity/content hash for path
 /// lookups.
@@ -519,6 +526,7 @@ fn mark_entry_recursive(
   hash: &[u8],
   path: &str,
   hash_length: usize,
+  family_policy: SystemFamilyPolicyResolver,
   live: &mut HashSet<Vec<u8>>,
   cancellation: Option<&CancellationToken>,
 ) -> EngineResult<()> {
@@ -593,7 +601,10 @@ fn mark_entry_recursive(
       for (index, child) in children.iter().enumerate() {
         check_gc_quantum(engine, cancellation, index)?;
         let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path, child.name) };
-        mark_entry_recursive(engine, &child.hash, &child_path, hash_length, live, cancellation)?;
+        match family_policy.gc_path_selection(&child_path)? {
+          GcPathSelection::Retain | GcPathSelection::Rebuildable | GcPathSelection::StructuralContainer => {}
+        }
+        mark_entry_recursive(engine, &child.hash, &child_path, hash_length, family_policy, live, cancellation)?;
       }
     }
     EntryType::FileRecord => {
@@ -965,6 +976,7 @@ where
   // clobber freshly-written data. Loop until the queue is empty for one pass.
   if !dry_run {
     let drain_mem = PhaseSampler::start("recheck-drain", std::time::Duration::from_millis(50));
+    let family_policy = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
     loop {
       check_gc_cancellation(engine, cancellation)?;
       let pending = engine.take_gc_recheck()?;
@@ -981,7 +993,7 @@ where
         // (dir:{path}, file:{path}) computed inside the recursion are wrong,
         // but harmless: the live set is "do not sweep" — extra hashes in it
         // never match a real entry and are simply ignored.
-        mark_entry_recursive(engine, &hash, "", hash_length, &mut live, cancellation)?;
+        mark_entry_recursive(engine, &hash, "", hash_length, family_policy, &mut live, cancellation)?;
       }
     }
     drain_mem.finish();

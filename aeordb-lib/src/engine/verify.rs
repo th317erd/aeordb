@@ -15,8 +15,10 @@ use crate::engine::kv_store::{KV_FLAG_DELETED, KV_TYPE_VOID};
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::system_family_policy::VerifyPathSelection;
 use crate::engine::v4::durability_recovery::DurabilityRepairVerification;
 use crate::engine::v4::hash::digest_parts;
+use crate::engine::SystemFamilyPolicyResolver;
 
 /// Structured B-tree directory issue used by repair logic. The CLI still
 /// renders `btree_directory_issues` as strings for human-readable output.
@@ -802,6 +804,7 @@ fn format_btree_directory_issue(issue: &BTreeDirectoryIssue) -> String {
 fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
   let hash_length = engine.hash_algo().hash_length();
   let algo = engine.hash_algo();
+  let family_policy = SystemFamilyPolicyResolver::new(algo)?;
   let mut memory = OperationMemoryBudget::new(
     engine,
     "FileRecord verification",
@@ -816,7 +819,7 @@ fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) ->
     }
     ensure_repair_active(engine)?;
     let checkpoint = memory.checkpoint();
-    let result = check_path_file_record_entry(engine, entry, hash_length, &algo, report, &mut memory);
+    let result = check_path_file_record_entry(engine, entry, hash_length, &algo, family_policy, report, &mut memory);
     let release = memory.release_to(checkpoint, "FileRecord verification entry release failed");
     match (result, release) {
       (Ok(()), Ok(())) => Ok(true),
@@ -833,6 +836,7 @@ fn check_path_file_record_entry(
   entry: &crate::engine::kv_store::KVEntry,
   hash_length: usize,
   algo: &crate::engine::hash_algorithm::HashAlgorithm,
+  family_policy: SystemFamilyPolicyResolver,
   report: &mut VerifyReport,
   memory: &mut OperationMemoryBudget,
 ) -> EngineResult<()> {
@@ -890,11 +894,16 @@ fn check_path_file_record_entry(
     report.retained_file_versions = report.retained_file_versions.saturating_add(1);
     report.retained_logical_data_size = report.retained_logical_data_size.saturating_add(record.total_size);
   }
-  if normalized == "/" || normalized.starts_with("/.aeordb-") {
-    return Ok(());
-  }
   if entry.hash != path_key {
     return Ok(());
+  }
+  match family_policy.verify_path_selection(&normalized)? {
+    VerifyPathSelection::Strict => {}
+    VerifyPathSelection::Rebuildable => return Ok(()),
+    VerifyPathSelection::StructuralContainer => {
+      record_verification_error(report, format!("FileRecord path {} is a structural SystemFamily container", normalized));
+      return Ok(());
+    }
   }
 
   let mut missing_count = 0usize;

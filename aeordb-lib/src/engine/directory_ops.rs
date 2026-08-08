@@ -18,7 +18,9 @@ use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
 use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::{StorageEngine, WriteBatch};
+use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::traversal::{TraversalIntegrity, VisitorCompletion};
+use crate::engine::SystemFamilyPolicyResolver;
 
 /// Default chunk size for splitting file data (256 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
@@ -39,18 +41,16 @@ pub struct DirectoryTraversalResult {
   pub integrity: TraversalIntegrity,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildPathState {
+  Live,
+  Deleted,
+  Missing,
+}
+
 /// Compute the domain-prefixed hash for a file path.
 pub fn file_path_hash(path: &str, algo: &HashAlgorithm) -> EngineResult<Vec<u8>> {
   algo.compute_hash(format!("file:{}", path).as_bytes())
-}
-
-/// Check if a path targets an internal directory that should not trigger indexing.
-/// Returns true for paths containing `.aeordb-logs/`, `.aeordb-indexes/`, or
-/// `.aeordb-config/` segments.
-pub fn is_internal_path(path: &str) -> bool {
-  let normalized = normalize_path(path);
-  let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
-  segments.iter().any(|s| *s == ".aeordb-logs" || *s == ".aeordb-indexes" || *s == ".aeordb-config")
 }
 
 /// Compute the domain-prefixed hash for a directory path.
@@ -130,7 +130,7 @@ fn immediate_child_under(parent: &str, path: &str) -> Option<(String, bool)> {
 
 enum RepairWorkspaceChild {
   Child { parent: String, child: ChildEntry },
-  SkippedSystem,
+  SkippedProtected,
   SkippedNonPath,
   SkippedDangling,
   SkippedMalformed,
@@ -408,21 +408,31 @@ fn file_record_header_needs_migration(engine: &StorageEngine, key: &[u8]) -> Eng
   }
 }
 
-/// Check if a path is under one of the protected system roots:
-///   - `/.aeordb-system/...` (user/group records, api keys, refresh tokens,
-///     snapshots, internal config like jwt_signing_key)
-///   - `/.aeordb-config/...` (cron schedules, webhook configs, parser
-///     registry, per-directory indexes)
+/// Evaluate the v0 detached-system storage layout used by legacy entry flags.
 ///
-/// Per-directory dotfiles like `.aeordb-permissions` (at any depth) and
-/// `.aeordb-indexes/` (inside a user directory) are user-visible config
-/// and NOT system paths. Only the absolute roots are system.
-pub fn is_system_path(path: &str) -> bool {
+/// This is a byte-layout compatibility rule, not generic authorization or
+/// SystemFamily policy. New policy consumers must use
+/// [`SystemFamilyPolicyResolver`].
+fn v0_path_uses_detached_system_storage(path: &str) -> bool {
   let normalized = crate::engine::path_utils::normalize_path(path);
   normalized == "/.aeordb-system"
     || normalized.starts_with("/.aeordb-system/")
     || normalized == "/.aeordb-config"
     || normalized.starts_with("/.aeordb-config/")
+}
+
+/// Return the legacy entry-header flags required by the v0 storage layout.
+pub fn v0_system_entry_flags(path: &str) -> u8 {
+  if v0_path_uses_detached_system_storage(path) {
+    FLAG_SYSTEM
+  } else {
+    0
+  }
+}
+
+/// Whether v0 namespace propagation treats this path as a detached root.
+pub(crate) fn v0_is_detached_system_path(path: &str) -> bool {
+  v0_path_uses_detached_system_storage(path)
 }
 
 /// Compute the domain-prefixed hash for a deletion record.
@@ -1072,7 +1082,7 @@ impl<'a> DirectoryOps<'a> {
     let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
 
-    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&normalized);
     let detected_content_type = crate::engine::content_type::detect_content_type(first_bytes, content_type);
 
     let published = publish_file_record_entries(
@@ -1159,7 +1169,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let algo = self.engine.hash_algo();
-    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&normalized);
 
     // Detect content type from magic bytes when not explicitly provided
     let detected_content_type = crate::engine::content_type::detect_content_type(data, content_type);
@@ -1311,7 +1321,7 @@ impl<'a> DirectoryOps<'a> {
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
-    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&normalized);
 
     // Verify the file exists FIRST — before auto-snapshot or any side-effect.
     // A delete of a nonexistent file must produce zero observable side-effects:
@@ -1326,7 +1336,7 @@ impl<'a> DirectoryOps<'a> {
 
     // File confirmed to exist. Now take an auto-snapshot before mutating
     // (at most once per minute).
-    if !is_system_path(&normalized) {
+    if v0_system_entry_flags(&normalized) == 0 {
       self.auto_snapshot_before_delete(ctx);
     }
 
@@ -1381,13 +1391,16 @@ impl<'a> DirectoryOps<'a> {
     let namespace = self.engine.namespace_write_guard()?;
     let txn = crate::engine::storage_engine::TransactionGuard::new(self.engine)?;
     let algo = self.engine.hash_algo();
-    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&normalized);
 
     if normalized == "/" {
       return Err(EngineError::InvalidInput("Cannot delete root directory".to_string()));
     }
 
     // Verify the directory exists and is empty
+    // Directory deletion retains the v3 compatibility behavior that treats a
+    // stale child with no live path key as absent. P2d's mutation coordinator
+    // will replace this TOCTOU cleanup contract with operation-ledger evidence.
     let children = self.list_directory(&normalized)?;
     if !children.is_empty() {
       return Err(EngineError::InvalidInput(format!("Directory '{}' is not empty ({} children)", normalized, children.len())));
@@ -1471,11 +1484,41 @@ impl<'a> DirectoryOps<'a> {
     Ok(result.entries)
   }
 
+  /// List every live child, failing if any directory or path-key state needed
+  /// to prove a complete result is malformed, missing, or stale.
+  pub fn list_directory_strict(&self, path: &str) -> EngineResult<Vec<ChildEntry>> {
+    let mut entries = Vec::new();
+    self.visit_live_directory_children_strict(path, |child| {
+      entries.push(child.clone());
+      Ok(true)
+    })?;
+    Ok(entries)
+  }
+
   /// Visit live directory children in key order without collecting a complete
   /// B-tree listing. Flat compatibility directories remain bounded by the
   /// conversion threshold and retain the existing all-or-empty corruption
   /// behavior.
   pub(crate) fn visit_live_directory_children<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&ChildEntry) -> EngineResult<bool>,
+  {
+    self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::BestEffort, &mut visitor)
+  }
+
+  pub(crate) fn visit_live_directory_children_strict<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&ChildEntry) -> EngineResult<bool>,
+  {
+    self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::Strict, &mut visitor)
+  }
+
+  fn visit_live_directory_children_with_mode<F>(
+    &self,
+    path: &str,
+    mode: crate::engine::btree::BTreeWalkMode,
+    visitor: &mut F,
+  ) -> EngineResult<bool>
   where
     F: FnMut(&ChildEntry) -> EngineResult<bool>,
   {
@@ -1495,8 +1538,11 @@ impl<'a> DirectoryOps<'a> {
         Ok(true)
       });
       let children = match decode_result {
-        Ok(_) => self.filter_live_children(&normalized, decoded)?,
+        Ok(_) => self.filter_live_children_with_mode(&normalized, decoded, mode)?,
         Err(error) => {
+          if mode == crate::engine::btree::BTreeWalkMode::Strict {
+            return Err(Self::corrupt_flat_directory_error(&normalized, error));
+          }
           tracing::warn!(path = %normalized, %error, "Corrupt flat directory index; returning an empty listing");
           return Ok(true);
         }
@@ -1510,26 +1556,13 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let mut visit_live_child = |child: &ChildEntry| -> EngineResult<bool> {
-      if self.is_live_child(&normalized, child)? {
+      if self.live_child_for_mode(&normalized, child, mode)? {
         return visitor(child);
       }
-      let child_path = if normalized == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized, child.name) };
-      tracing::warn!(
-        parent = %normalized,
-        child_path = %child_path,
-        entry_type = child.entry_type,
-        "Skipping stale directory child whose path key is not live"
-      );
       Ok(true)
     };
-    let result = crate::engine::btree::btree_visit_from_node_with_mode(
-      &value,
-      self.engine,
-      hash_length,
-      false,
-      crate::engine::btree::BTreeWalkMode::BestEffort,
-      &mut visit_live_child,
-    )?;
+    let result =
+      crate::engine::btree::btree_visit_from_node_with_mode(&value, self.engine, hash_length, false, mode, &mut visit_live_child)?;
     for warning in result.warnings {
       tracing::warn!(
         path = %normalized,
@@ -1605,7 +1638,13 @@ impl<'a> DirectoryOps<'a> {
 
   /// Return a bounded live window without materializing an entire B-tree directory.
   pub fn list_directory_window(&self, path: &str, offset: usize, limit: usize) -> EngineResult<DirectoryListWindow> {
-    self.list_directory_window_inner(path, offset, limit, true, true)
+    self.list_directory_window_inner(path, offset, limit, true, true, crate::engine::btree::BTreeWalkMode::BestEffort)
+  }
+
+  /// Return a bounded live window while rejecting malformed, missing, or stale
+  /// state encountered before the visitor reaches the requested boundary.
+  pub fn list_directory_window_strict(&self, path: &str, offset: usize, limit: usize) -> EngineResult<DirectoryListWindow> {
+    self.list_directory_window_inner(path, offset, limit, true, true, crate::engine::btree::BTreeWalkMode::Strict)
   }
 
   /// Visit every raw child for verification without collecting a complete
@@ -1700,6 +1739,7 @@ impl<'a> DirectoryOps<'a> {
     limit: usize,
     filter_live: bool,
     heal_stale: bool,
+    mode: crate::engine::btree::BTreeWalkMode,
   ) -> EngineResult<DirectoryListWindow> {
     let normalized = normalize_path(path);
     let hash_length = self.engine.hash_algo().hash_length();
@@ -1718,11 +1758,14 @@ impl<'a> DirectoryOps<'a> {
 
     if !crate::engine::btree::is_btree_format(&value) {
       let children = match deserialize_child_entries(&value, hash_length, header.entry_version) {
-        Ok(children) if filter_live => self.filter_live_children(&normalized, children)?,
+        Ok(children) if filter_live => self.filter_live_children_with_mode(&normalized, children, mode)?,
         Ok(children) => children,
         Err(error) => {
           if !filter_live {
             return Err(error);
+          }
+          if mode == crate::engine::btree::BTreeWalkMode::Strict {
+            return Err(Self::corrupt_flat_directory_error(&normalized, error));
           }
           tracing::warn!(path = %normalized, error = %error, "Corrupt flat directory index; returning an empty listing window");
           let warning = crate::engine::btree::BTreeWalkWarning {
@@ -1754,7 +1797,7 @@ impl<'a> DirectoryOps<'a> {
     let mut entries = Vec::with_capacity(limit.min(crate::engine::btree::BTREE_MAX_LEAF_ENTRIES));
     let mut has_more = false;
     let mut visitor = |child: &ChildEntry| -> EngineResult<bool> {
-      if filter_live && !self.is_live_child(&normalized, child)? {
+      if filter_live && !self.live_child_for_mode(&normalized, child, mode)? {
         return Ok(true);
       }
       if seen < offset {
@@ -1768,14 +1811,7 @@ impl<'a> DirectoryOps<'a> {
       has_more = true;
       Ok(false)
     };
-    let visit = crate::engine::btree::btree_visit_from_node_with_mode(
-      &value,
-      self.engine,
-      hash_length,
-      false,
-      crate::engine::btree::BTreeWalkMode::BestEffort,
-      &mut visitor,
-    )?;
+    let visit = crate::engine::btree::btree_visit_from_node_with_mode(&value, self.engine, hash_length, false, mode, &mut visitor)?;
     Ok(DirectoryListWindow {
       entries,
       has_more,
@@ -1817,46 +1853,68 @@ impl<'a> DirectoryOps<'a> {
   }
 
   fn filter_live_children(&self, parent: &str, children: Vec<ChildEntry>) -> EngineResult<Vec<ChildEntry>> {
+    self.filter_live_children_with_mode(parent, children, crate::engine::btree::BTreeWalkMode::BestEffort)
+  }
+
+  fn corrupt_flat_directory_error(path: &str, error: EngineError) -> EngineError {
+    EngineError::CorruptEntry { offset: 0, reason: format!("Corrupt flat directory index at {path}: {error}") }
+  }
+
+  fn filter_live_children_with_mode(
+    &self,
+    parent: &str,
+    children: Vec<ChildEntry>,
+    mode: crate::engine::btree::BTreeWalkMode,
+  ) -> EngineResult<Vec<ChildEntry>> {
     let mut live = Vec::with_capacity(children.len());
 
     for child in children {
-      let child_path = if parent == "/" { format!("/{}", child.name) } else { format!("{}/{}", parent, child.name) };
-      let keep = self.is_live_child(parent, &child)?;
-
-      if keep {
+      if self.live_child_for_mode(parent, &child, mode)? {
         live.push(child);
-      } else {
-        tracing::warn!(
-          parent = %parent,
-          child_path = %child_path,
-          entry_type = child.entry_type,
-          "Skipping stale directory child whose path key is not live"
-        );
       }
     }
 
     Ok(live)
   }
 
-  fn is_live_child(&self, parent: &str, child: &ChildEntry) -> EngineResult<bool> {
+  fn live_child_for_mode(&self, parent: &str, child: &ChildEntry, mode: crate::engine::btree::BTreeWalkMode) -> EngineResult<bool> {
     let algo = self.engine.hash_algo();
     let child_path = if parent == "/" { format!("/{}", child.name) } else { format!("{}/{}", parent, child.name) };
-    match EntryType::from_u8(child.entry_type) {
-      Ok(EntryType::FileRecord) => self.engine.has_entry(&file_path_hash(&child_path, &algo)?),
-      Ok(EntryType::DirectoryIndex) => self.engine.has_entry(&directory_path_hash(&child_path, &algo)?),
-      Ok(EntryType::Symlink) => self.engine.has_entry(&symlink_path_hash(&child_path, &algo)?),
-      Ok(_) => Ok(true),
+    let state = match EntryType::from_u8(child.entry_type) {
+      Ok(EntryType::FileRecord) => self.child_path_state(&file_path_hash(&child_path, &algo)?),
+      Ok(EntryType::DirectoryIndex) => self.child_path_state(&directory_path_hash(&child_path, &algo)?),
+      Ok(EntryType::Symlink) => self.child_path_state(&symlink_path_hash(&child_path, &algo)?),
+      Ok(_) => Ok(ChildPathState::Live),
+      Err(error) => Err(error),
+    };
+    match state {
+      Ok(ChildPathState::Live) => Ok(true),
+      Ok(ChildPathState::Deleted) => {
+        tracing::debug!(parent = %parent, child_path = %child_path, entry_type = child.entry_type, "Skipping directory child with an authoritative deletion tombstone");
+        Ok(false)
+      }
+      Ok(ChildPathState::Missing) if mode == crate::engine::btree::BTreeWalkMode::Strict => Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("directory '{}' contains child '{}' with no path-key authority", parent, child_path),
+      }),
+      Ok(ChildPathState::Missing) => {
+        tracing::warn!(parent = %parent, child_path = %child_path, entry_type = child.entry_type, "Skipping stale directory child whose path key is not live");
+        Ok(false)
+      }
+      Err(error) if mode == crate::engine::btree::BTreeWalkMode::Strict => Err(error),
       Err(error) => {
-        tracing::warn!(
-          parent = %parent,
-          child = %child.name,
-          entry_type = child.entry_type,
-          error = %error,
-          "Skipping directory child with invalid entry type"
-        );
+        tracing::warn!(parent = %parent, child = %child.name, entry_type = child.entry_type, error = %error, "Skipping directory child with invalid entry type");
         Ok(false)
       }
     }
+  }
+
+  fn child_path_state(&self, path_key: &[u8]) -> EngineResult<ChildPathState> {
+    Ok(match self.engine.get_kv_entry(path_key)? {
+      Some(entry) if entry.is_deleted() => ChildPathState::Deleted,
+      Some(_) => ChildPathState::Live,
+      None => ChildPathState::Missing,
+    })
   }
 
   /// Create an empty directory at the given path.
@@ -2028,6 +2086,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn list_deleted(&self, dir_path: &str) -> EngineResult<Vec<crate::engine::deletion_record::DeletionRecord>> {
     let normalized = normalize_path(dir_path);
     let prefix = if normalized == "/" { "/".to_string() } else { format!("{}/", normalized.trim_end_matches('/')) };
+    let family_policy = SystemFamilyPolicyResolver::new(self.engine.hash_algo())?;
 
     let deletion_entries = self.engine.entries_by_type(crate::engine::kv_store::KV_TYPE_DELETION)?;
 
@@ -2037,15 +2096,15 @@ impl<'a> DirectoryOps<'a> {
       // through entries_by_type (it currently exposes only hash+value, not the
       // surrounding EntryHeader). For now every entry on disk is v0.
       if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(value, 0) {
-        if record.path.starts_with("/.aeordb-") {
-          continue;
-        }
         // Check if this deletion is a direct child of the requested directory
         if record.path.starts_with(&prefix) || (normalized == "/" && record.path.starts_with('/')) {
           let remainder = if normalized == "/" { &record.path[1..] } else { &record.path[prefix.len()..] };
           // Direct child: no further slashes in the remainder
           if !remainder.contains('/') && !remainder.is_empty() {
-            results.push(record);
+            match family_policy.generic_data_path_selection(&record.path)? {
+              GenericDataPathSelection::Include => results.push(record),
+              GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer => {}
+            }
           }
         }
       }
@@ -2227,6 +2286,7 @@ impl<'a> DirectoryOps<'a> {
     entry: &crate::engine::kv_store::KVEntry,
     hash_length: usize,
     algo: &HashAlgorithm,
+    family_policy: SystemFamilyPolicyResolver,
   ) -> EngineResult<RepairWorkspaceChild> {
     let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
       return Ok(RepairWorkspaceChild::SkippedMalformed);
@@ -2236,8 +2296,8 @@ impl<'a> DirectoryOps<'a> {
       Err(_) => return Ok(RepairWorkspaceChild::SkippedMalformed),
     };
     let path = normalize_path(&record.path);
-    if path == "/" || path.starts_with("/.aeordb-") {
-      return Ok(RepairWorkspaceChild::SkippedSystem);
+    if path == "/" || !family_policy.generic_data_path_is_visible(&path)? {
+      return Ok(RepairWorkspaceChild::SkippedProtected);
     }
     let path_key = file_path_hash(&path, algo)?;
     if entry.hash != path_key {
@@ -2273,6 +2333,7 @@ impl<'a> DirectoryOps<'a> {
     &self,
     entry: &crate::engine::kv_store::KVEntry,
     algo: &HashAlgorithm,
+    family_policy: SystemFamilyPolicyResolver,
   ) -> EngineResult<RepairWorkspaceChild> {
     let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
       return Ok(RepairWorkspaceChild::SkippedMalformed);
@@ -2282,8 +2343,8 @@ impl<'a> DirectoryOps<'a> {
       Err(_) => return Ok(RepairWorkspaceChild::SkippedMalformed),
     };
     let path = normalize_path(&record.path);
-    if path == "/" || path.starts_with("/.aeordb-") {
-      return Ok(RepairWorkspaceChild::SkippedSystem);
+    if path == "/" || !family_policy.generic_data_path_is_visible(&path)? {
+      return Ok(RepairWorkspaceChild::SkippedProtected);
     }
     let path_key = symlink_path_hash(&path, algo)?;
     if entry.hash != path_key {
@@ -2321,6 +2382,7 @@ impl<'a> DirectoryOps<'a> {
   pub fn rebuild_directory_tree(&self, _ctx: &RequestContext) -> EngineResult<usize> {
     let algo = self.engine.hash_algo();
     let hash_length = self.engine.hash_algo().hash_length();
+    let family_policy = SystemFamilyPolicyResolver::new(algo)?;
     let cancellation = self.engine.repair_cancellation();
     let _namespace = self.engine.direct_hard_authority_guard()?;
     let mut workspace =
@@ -2336,7 +2398,7 @@ impl<'a> DirectoryOps<'a> {
     let mut file_records_found = 0;
     let mut path_records_found = 0;
     let mut symlink_records_found = 0;
-    let mut skipped_system = 0;
+    let mut skipped_protected = 0;
     let mut skipped_non_path_key = 0;
     let mut skipped_dangling = 0;
     let mut skipped_error = 0;
@@ -2359,12 +2421,12 @@ impl<'a> DirectoryOps<'a> {
         match entry_type {
           crate::engine::kv_store::KV_TYPE_FILE_RECORD => {
             file_records_found += 1;
-            match self.repair_workspace_file_child(entry, hash_length, &algo)? {
+            match self.repair_workspace_file_child(entry, hash_length, &algo, family_policy)? {
               RepairWorkspaceChild::Child { parent, child } => {
                 path_records_found += 1;
                 workspace.push_child(&parent, child)?;
               }
-              RepairWorkspaceChild::SkippedSystem => skipped_system += 1,
+              RepairWorkspaceChild::SkippedProtected => skipped_protected += 1,
               RepairWorkspaceChild::SkippedNonPath => skipped_non_path_key += 1,
               RepairWorkspaceChild::SkippedDangling => skipped_dangling += 1,
               RepairWorkspaceChild::SkippedMalformed => skipped_error += 1,
@@ -2373,12 +2435,12 @@ impl<'a> DirectoryOps<'a> {
           }
           crate::engine::kv_store::KV_TYPE_SYMLINK => {
             symlink_records_found += 1;
-            match self.repair_workspace_symlink_child(entry, &algo)? {
+            match self.repair_workspace_symlink_child(entry, &algo, family_policy)? {
               RepairWorkspaceChild::Child { parent, child } => {
                 path_records_found += 1;
                 workspace.push_child(&parent, child)?;
               }
-              RepairWorkspaceChild::SkippedSystem => skipped_system += 1,
+              RepairWorkspaceChild::SkippedProtected => skipped_protected += 1,
               RepairWorkspaceChild::SkippedNonPath => skipped_non_path_key += 1,
               RepairWorkspaceChild::SkippedDangling => skipped_dangling += 1,
               RepairWorkspaceChild::SkippedMalformed => skipped_error += 1,
@@ -2433,7 +2495,7 @@ impl<'a> DirectoryOps<'a> {
       file_records_found,
       symlink_records_found,
       path_records_found,
-      skipped_system,
+      skipped_protected,
       skipped_non_path_key,
       skipped_dangling,
       skipped_error,
@@ -2455,6 +2517,7 @@ impl<'a> DirectoryOps<'a> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
+    let family_policy = SystemFamilyPolicyResolver::new(algo)?;
     let _namespace = self.engine.direct_hard_authority_guard()?;
     let mut memory = OperationMemoryBudget::new(
       self.engine,
@@ -2464,7 +2527,7 @@ impl<'a> DirectoryOps<'a> {
       256 * 1024,
       None,
     )?;
-    let mut children = self.collect_repair_children_for_directory(&normalized, hash_length, &algo, &mut memory)?;
+    let mut children = self.collect_repair_children_for_directory(&normalized, hash_length, &algo, family_policy, &mut memory)?;
     Self::sort_rebuilt_children(&mut children);
     let (content_key, dir_size) = self.store_rebuilt_directory(&normalized, children, hash_length, &algo)?;
 
@@ -2493,10 +2556,11 @@ impl<'a> DirectoryOps<'a> {
     dir_path: &str,
     hash_length: usize,
     algo: &HashAlgorithm,
+    family_policy: SystemFamilyPolicyResolver,
     memory: &mut OperationMemoryBudget,
   ) -> EngineResult<Vec<ChildEntry>> {
     let mut children: std::collections::BTreeMap<String, ChildEntry> = std::collections::BTreeMap::new();
-    self.collect_existing_directory_children_for_repair(dir_path, hash_length, algo, &mut children, memory)?;
+    self.collect_existing_directory_children_for_repair(dir_path, hash_length, algo, family_policy, &mut children, memory)?;
 
     let cancellation = self.engine.repair_cancellation();
     self.engine.visit_kv_entries_for_repair(|entry| {
@@ -2511,7 +2575,7 @@ impl<'a> DirectoryOps<'a> {
       match entry.entry_type() {
         crate::engine::kv_store::KV_TYPE_FILE_RECORD => {
           memory.reserve(record_memory, "targeted FileRecord repair admission failed")?;
-          let result = self.repair_child_from_file_record(entry, dir_path, hash_length, algo);
+          let result = self.repair_child_from_file_record(entry, dir_path, hash_length, algo, family_policy);
           let release = memory.release_to(checkpoint, "targeted FileRecord repair release failed");
           match (result, release) {
             (Ok(Some(child)), Ok(())) => Self::insert_repair_child(&mut children, child, memory)?,
@@ -2522,7 +2586,7 @@ impl<'a> DirectoryOps<'a> {
         }
         crate::engine::kv_store::KV_TYPE_SYMLINK => {
           memory.reserve(record_memory, "targeted symlink repair admission failed")?;
-          let result = self.repair_child_from_symlink_record(entry, dir_path, algo);
+          let result = self.repair_child_from_symlink_record(entry, dir_path, algo, family_policy);
           let release = memory.release_to(checkpoint, "targeted symlink repair release failed");
           match (result, release) {
             (Ok(Some(child)), Ok(())) => Self::insert_repair_child(&mut children, child, memory)?,
@@ -2544,6 +2608,7 @@ impl<'a> DirectoryOps<'a> {
     dir_path: &str,
     hash_length: usize,
     algo: &HashAlgorithm,
+    family_policy: SystemFamilyPolicyResolver,
     children: &mut std::collections::BTreeMap<String, ChildEntry>,
     memory: &mut OperationMemoryBudget,
   ) -> EngineResult<()> {
@@ -2580,6 +2645,9 @@ impl<'a> DirectoryOps<'a> {
       }
       let child_path =
         if dir_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", dir_path.trim_end_matches('/'), child.name) };
+      if !family_policy.generic_data_path_is_visible(&child_path)? {
+        return Ok(true);
+      }
       if self.engine.has_entry(&directory_path_hash(&child_path, algo)?)? {
         Self::insert_repair_child(children, child.clone(), memory)?;
       }
@@ -2639,6 +2707,7 @@ impl<'a> DirectoryOps<'a> {
     dir_path: &str,
     hash_length: usize,
     algo: &HashAlgorithm,
+    family_policy: SystemFamilyPolicyResolver,
   ) -> EngineResult<Option<ChildEntry>> {
     let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
       return Ok(None);
@@ -2648,7 +2717,7 @@ impl<'a> DirectoryOps<'a> {
       Err(_) => return Ok(None),
     };
     let path = normalize_path(&record.path);
-    if path == "/" || path.starts_with("/.aeordb-") {
+    if path == "/" || !family_policy.generic_data_path_is_visible(&path)? {
       return Ok(None);
     }
     let path_key = file_path_hash(&path, algo)?;
@@ -2686,6 +2755,7 @@ impl<'a> DirectoryOps<'a> {
     entry: &crate::engine::kv_store::KVEntry,
     dir_path: &str,
     algo: &HashAlgorithm,
+    family_policy: SystemFamilyPolicyResolver,
   ) -> EngineResult<Option<ChildEntry>> {
     let Some((header, _key, value)) = self.engine.get_entry(&entry.hash)? else {
       return Ok(None);
@@ -2695,7 +2765,7 @@ impl<'a> DirectoryOps<'a> {
       Err(_) => return Ok(None),
     };
     let path = normalize_path(&record.path);
-    if path == "/" || path.starts_with("/.aeordb-") {
+    if path == "/" || !family_policy.generic_data_path_is_visible(&path)? {
       return Ok(None);
     }
     let path_key = symlink_path_hash(&path, algo)?;
@@ -3233,7 +3303,7 @@ impl<'a> DirectoryOps<'a> {
       // Don't propagate system paths (/.aeordb-*) to root — they're accessed
       // directly and listing root would filter them anyway. This prevents
       // system path operations from clobbering a recovered root directory.
-      if parent == "/" && is_system_path(&current_child_path) {
+      if parent == "/" && v0_is_detached_system_path(&current_child_path) {
         if !batch.is_empty() {
           self.engine.flush_batch(batch)?;
         }
@@ -3462,7 +3532,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let algo = self.engine.hash_algo();
-    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&normalized);
 
     // Check if symlink already exists (preserve created_at on update)
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
@@ -3560,7 +3630,7 @@ impl<'a> DirectoryOps<'a> {
 
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
-    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&normalized);
 
     // Verify symlink exists
     let symlink_key = symlink_path_hash(&normalized, &algo)?;
@@ -3625,15 +3695,15 @@ impl<'a> DirectoryOps<'a> {
     }
 
     // Reject cross-system-boundary renames
-    let old_is_system = is_system_path(&old_normalized);
-    let new_is_system = is_system_path(&new_normalized);
+    let old_is_system = v0_is_detached_system_path(&old_normalized);
+    let new_is_system = v0_is_detached_system_path(&new_normalized);
     if old_is_system != new_is_system {
       return Err(EngineError::InvalidInput("Cannot rename across system boundary".to_string()));
     }
 
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
-    let sys_flags = if is_system_path(&new_normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&new_normalized);
 
     // Read the source FileRecord
     let old_file_key = file_path_hash(&old_normalized, &algo)?;
@@ -3677,7 +3747,7 @@ impl<'a> DirectoryOps<'a> {
     let deletion = DeletionRecord::new(old_normalized.clone(), None);
     let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
     let deletion_value = deletion.serialize();
-    let old_sys_flags = if is_system_path(&old_normalized) { FLAG_SYSTEM } else { 0 };
+    let old_sys_flags = v0_system_entry_flags(&old_normalized);
     if old_sys_flags != 0 {
       self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, old_sys_flags)?;
     } else {
@@ -3728,7 +3798,7 @@ impl<'a> DirectoryOps<'a> {
     if from_normalized == to_normalized {
       return Err(EngineError::InvalidInput("Source and destination are the same".to_string()));
     }
-    if is_system_path(&from_normalized) || is_system_path(&to_normalized) {
+    if v0_is_detached_system_path(&from_normalized) || v0_is_detached_system_path(&to_normalized) {
       return Err(EngineError::InvalidInput("Cannot copy system paths".to_string()));
     }
 
@@ -3769,7 +3839,7 @@ impl<'a> DirectoryOps<'a> {
     if self.engine.has_entry(&dir_key)? {
       // Directory — create destination dir and recurse
       let _ = self.create_directory(ctx, &to_normalized);
-      let children = self.list_directory(&from_normalized)?;
+      let children = self.list_directory_strict(&from_normalized)?;
       for child in &children {
         let child_from = format!("{}/{}", from_normalized.trim_end_matches('/'), child.name);
         let child_to = format!("{}/{}", to_normalized.trim_end_matches('/'), child.name);
@@ -3808,14 +3878,14 @@ impl<'a> DirectoryOps<'a> {
     }
 
     // Reject cross-system-boundary renames
-    let old_is_system = is_system_path(&old_normalized);
-    let new_is_system = is_system_path(&new_normalized);
+    let old_is_system = v0_is_detached_system_path(&old_normalized);
+    let new_is_system = v0_is_detached_system_path(&new_normalized);
     if old_is_system != new_is_system {
       return Err(EngineError::InvalidInput("Cannot rename across system boundary".to_string()));
     }
 
     let algo = self.engine.hash_algo();
-    let sys_flags = if is_system_path(&new_normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&new_normalized);
 
     // Read the source SymlinkRecord
     let old_symlink_key = symlink_path_hash(&old_normalized, &algo)?;
@@ -3881,7 +3951,7 @@ impl<'a> DirectoryOps<'a> {
     let deletion = DeletionRecord::new(old_normalized.clone(), None);
     let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algo)?;
     let deletion_value = deletion.serialize();
-    let old_sys_flags = if is_system_path(&old_normalized) { FLAG_SYSTEM } else { 0 };
+    let old_sys_flags = v0_system_entry_flags(&old_normalized);
     if old_sys_flags != 0 {
       self.engine.store_entry_with_flags(EntryType::DeletionRecord, &deletion_key, &deletion_value, old_sys_flags)?;
     } else {

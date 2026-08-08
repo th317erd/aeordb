@@ -34,6 +34,21 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
   format!("Bearer {}", token)
 }
 
+fn user_bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: uuid::Uuid::new_v4().to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
+}
+
 fn store_test_files(engine: &aeordb::engine::StorageEngine) {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
@@ -81,6 +96,34 @@ async fn download_zip_with_valid_paths() {
   let mut content = String::new();
   readme.read_to_string(&mut content).unwrap();
   assert_eq!(content, "# Hello");
+}
+
+#[tokio::test]
+async fn batch_read_routes_surface_malformed_permission_authority() {
+  let (app, jwt_manager, engine, _temp) = test_app();
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/docs/readme.md", b"authority must be readable", Some("text/markdown")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/.aeordb-permissions", b"not permission JSON", Some("application/json")).unwrap();
+  let auth = user_bearer_token(&jwt_manager);
+  let body = serde_json::to_vec(&serde_json::json!({ "paths": ["/docs/readme.md"] })).unwrap();
+
+  for uri in ["/files/fetch", "/files/download"] {
+    let response = app
+      .clone()
+      .oneshot(
+        Request::builder()
+          .method("POST")
+          .uri(uri)
+          .header("content-type", "application/json")
+          .header("authorization", &auth)
+          .body(Body::from(body.clone()))
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{uri} must not convert corrupt permission authority into denial");
+  }
 }
 
 #[tokio::test]

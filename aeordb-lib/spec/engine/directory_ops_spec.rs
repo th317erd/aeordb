@@ -380,6 +380,28 @@ fn test_delete_file() {
 }
 
 #[test]
+fn list_deleted_uses_registry_visibility_and_rejects_unknown_protected_paths() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+
+  for path in ["/.aeordb-permissions", "/.aeordb-conflicts/item.json", "/.aeordb-future/item.json"] {
+    ops.store_file_buffered(&ctx, path, b"deleted", Some("application/octet-stream")).unwrap();
+    ops.delete_file(&ctx, path).unwrap();
+  }
+
+  let root_deletions = ops.list_deleted("/").unwrap();
+  assert!(root_deletions.iter().any(|record| record.path == "/.aeordb-permissions"));
+
+  let conflict_deletions = ops.list_deleted("/.aeordb-conflicts").unwrap();
+  assert!(conflict_deletions.is_empty(), "concealed conflict deletions leaked: {conflict_deletions:?}");
+
+  let error = ops.list_deleted("/.aeordb-future").unwrap_err();
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
+}
+
+#[test]
 fn test_list_directory_omits_deleted_file_child_left_in_parent() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
@@ -491,6 +513,21 @@ fn test_list_empty_directory() {
   ops.create_directory(&ctx, "/empty").unwrap();
   let children = ops.list_directory("/empty").unwrap();
   assert!(children.is_empty());
+}
+
+#[test]
+fn strict_directory_listing_rejects_corruption_that_diagnostic_listing_surfaces() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/strict/file.txt", b"value", Some("text/plain")).unwrap();
+
+  let directory_key = directory_path_hash("/strict", &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &directory_key, b"malformed directory").unwrap();
+
+  assert!(ops.list_directory("/strict").unwrap().is_empty());
+  assert!(matches!(ops.list_directory_strict("/strict"), Err(EngineError::CorruptEntry { .. })));
 }
 
 #[test]

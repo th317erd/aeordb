@@ -21,7 +21,7 @@ pub enum CrudlifyOp {
 }
 
 /// Resolves permissions for a user at a given path by walking the directory
-/// hierarchy and evaluating .permissions files with group membership.
+/// hierarchy and evaluating `.aeordb-permissions` files with group membership.
 pub struct PermissionResolver<'a> {
   engine: &'a StorageEngine,
   group_cache: &'a Cache<GroupLoader>,
@@ -35,7 +35,7 @@ impl<'a> PermissionResolver<'a> {
   /// Check whether a user has permission to perform an operation at a path.
   ///
   /// 1. Root (nil UUID) always gets access.
-  /// 2. Walk from "/" to the target path, evaluating .permissions at each level.
+  /// 2. Walk from "/" to the target path, evaluating `.aeordb-permissions` at each level.
   /// 3. At each level: allow adds permissions, deny removes them. Deny wins at same level.
   /// 4. For Read/List on a directory: if the direct walk denies but the user
   ///    has any grant in a descendant subtree, return true so the user can
@@ -118,7 +118,7 @@ impl<'a> PermissionResolver<'a> {
 
       let permissions = match permissions {
         Some(permissions) => permissions,
-        None => continue, // No .permissions file = no change at this level.
+        None => continue, // No .aeordb-permissions file = no change at this level.
       };
 
       let mut level_allow: [Option<bool>; 8] = [None; 8];
@@ -184,7 +184,7 @@ impl<'a> PermissionResolver<'a> {
   /// True if the user has any permission grant at or below `path`.
   /// Used to allow ancestor navigation: a user who can read `/A/B/C` must
   /// be able to List its ancestors (`/`, `/A`, `/A/B`) even though those
-  /// directories have no `.permissions` link for them.
+  /// directories have no `.aeordb-permissions` link for them.
   pub fn has_descendant_grants(&self, user_id: &Uuid, path: &str) -> EngineResult<bool> {
     if is_root(user_id) {
       return Ok(true);

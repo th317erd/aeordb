@@ -1,4 +1,4 @@
-use aeordb::engine::directory_listing::{list_directory_recursive, visit_directory_recursive};
+use aeordb::engine::directory_listing::{list_directory_recursive, measure_live_tree, visit_directory_recursive};
 use aeordb::engine::directory_ops::{DirectoryOps, file_path_hash};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::storage_engine::StorageEngine;
@@ -152,6 +152,16 @@ fn test_list_empty_directory() {
 
   let entries = list_directory_recursive(&engine, "/", 0, None, None).unwrap();
   assert!(entries.is_empty());
+}
+
+#[test]
+fn live_tree_measurement_rejects_unknown_protected_state() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_file(&engine, "/docs/.aeordb-future/item.json", b"unknown");
+
+  let error = measure_live_tree(&engine).expect_err("authoritative live-tree accounting must not accept unknown protected state");
+  assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
 }
 
 #[test]

@@ -1,10 +1,11 @@
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::entry_type::EntryType;
-use crate::engine::path_utils::normalize_path;
+use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::v4::reader::FormatError;
 use crate::engine::v4::system_family::{
-  IndexPolicyV1, StorageDomainV1, SystemFamilyClassificationV1, SystemFamilyMatchKindV1, SystemFamilyPolicyDecisionV1,
+  GcPolicyV1, IndexPolicyV1, StorageDomainV1, SystemFamilyClassificationV1, SystemFamilyMatchKindV1, SystemFamilyPolicyDecisionV1,
   SystemFamilyPolicyResolverV1, SystemFamilyPolicyV1, SystemFamilySubjectV1, SystemFamilyTransferOperationV1, TransferPolicyV1,
+  VerifyPolicyV1,
 };
 use crate::engine::HashAlgorithm;
 
@@ -40,6 +41,20 @@ pub(crate) enum TransferPathSelection {
 pub enum GenericDataPathSelection {
   Include,
   Conceal,
+  StructuralContainer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VerifyPathSelection {
+  Strict,
+  Rebuildable,
+  StructuralContainer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GcPathSelection {
+  Retain,
+  Rebuildable,
   StructuralContainer,
 }
 
@@ -182,6 +197,89 @@ impl SystemFamilyPolicyResolver {
     let normalized = normalize_path(path);
     self.inner.index_policy(SystemFamilySubjectV1::Path(&normalized)).map_err(system_family_error)
   }
+
+  pub(crate) fn verify_path_selection(self, path: &str) -> EngineResult<VerifyPathSelection> {
+    Ok(match self.policy_for_path(path, "verification")? {
+      SystemFamilyPolicyDecisionV1::Ordinary => VerifyPathSelection::Strict,
+      SystemFamilyPolicyDecisionV1::StructuralContainer => VerifyPathSelection::StructuralContainer,
+      SystemFamilyPolicyDecisionV1::Known { policy, .. } => match policy.verify_policy {
+        VerifyPolicyV1::Rebuildable => VerifyPathSelection::Rebuildable,
+        VerifyPolicyV1::StrictIfPresent | VerifyPolicyV1::StrictRequired | VerifyPolicyV1::ConservativeUnknown => {
+          VerifyPathSelection::Strict
+        }
+      },
+    })
+  }
+
+  pub(crate) fn gc_path_selection(self, path: &str) -> EngineResult<GcPathSelection> {
+    Ok(match self.policy_for_path(path, "garbage collection")? {
+      SystemFamilyPolicyDecisionV1::Ordinary => GcPathSelection::Retain,
+      SystemFamilyPolicyDecisionV1::StructuralContainer => GcPathSelection::StructuralContainer,
+      SystemFamilyPolicyDecisionV1::Known { policy, .. } => {
+        if gc_policy_is_only_rebuildable(policy.gc_policy) {
+          GcPathSelection::Rebuildable
+        } else {
+          GcPathSelection::Retain
+        }
+      }
+    })
+  }
+
+  /// Absolute registry roots that v3 GC must discover outside HEAD.
+  /// Purely derived/rebuildable families are never promoted into detached
+  /// authority by this compatibility traversal.
+  pub(crate) fn retained_absolute_gc_paths(self) -> EngineResult<Vec<String>> {
+    let mut paths = Vec::new();
+    for descriptor in self.inner.registry().iter() {
+      let descriptor = descriptor.map_err(system_family_error)?;
+      if descriptor.domain != StorageDomainV1::Path
+        || !matches!(descriptor.match_kind, SystemFamilyMatchKindV1::AbsolutePathExact | SystemFamilyMatchKindV1::AbsolutePathPrefix)
+        || gc_policy_is_only_rebuildable(descriptor.policy.gc_policy)
+      {
+        continue;
+      }
+      let path = std::str::from_utf8(descriptor.matcher).map_err(|error| EngineError::SystemFamilyPolicy {
+        code: "system_family_matcher_path_utf8",
+        reason: format!("embedded absolute GC path matcher is not UTF-8: {error}"),
+      })?;
+      let path = path.strip_suffix('/').unwrap_or(path).to_string();
+      paths.push(path.clone());
+      let mut ancestor = parent_path(&path);
+      while let Some(current) = ancestor {
+        if current == "/" {
+          break;
+        }
+        if matches!(self.classify_path(&current)?, SystemFamilyClassificationV1::StructuralContainer) {
+          paths.push(current.clone());
+        }
+        ancestor = parent_path(&current);
+      }
+    }
+    paths.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
+    paths.dedup();
+    let mut roots: Vec<String> = Vec::new();
+    for path in paths {
+      if roots.iter().any(|root| path == *root || path.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('/'))) {
+        continue;
+      }
+      roots.push(path);
+    }
+    roots.sort();
+    Ok(roots)
+  }
+}
+
+fn gc_policy_is_only_rebuildable(policy: GcPolicyV1) -> bool {
+  policy.contains(GcPolicyV1::DERIVED_REBUILDABLE)
+    && ![
+      GcPolicyV1::TRACE_EDGES,
+      GcPolicyV1::PIN_WHILE_AUTHORITATIVE,
+      GcPolicyV1::QUARANTINE,
+      GcPolicyV1::EVIDENCE_RETENTION,
+      GcPolicyV1::CONSERVATIVE_RETAIN,
+    ]
+    .into_iter()
+    .any(|retention| policy.contains(retention))
 }
 
 fn transfer_selection(

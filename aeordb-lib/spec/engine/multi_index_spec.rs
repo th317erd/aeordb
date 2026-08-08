@@ -19,6 +19,19 @@ fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   engine
 }
 
+#[test]
+fn index_owner_discovery_rejects_unknown_protected_state() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/docs/.aeordb-future/value.json", b"{}", Some("application/json")).unwrap();
+
+  let error = IndexManager::new(&engine)
+    .discover_indexed_directories("/docs")
+    .expect_err("query index discovery must not return partial owners across unknown protected state");
+  assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
+}
+
 fn store_index_config(engine: &StorageEngine, parent_path: &str, config: &PathIndexConfig) {
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);

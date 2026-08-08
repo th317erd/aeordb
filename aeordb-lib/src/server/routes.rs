@@ -412,11 +412,23 @@ pub async fn auth_token(State(state): State<AppState>, Json(payload): Json<AuthT
   // Check user is active (skip for share keys which have no user_id).
   if let Some(ref uid) = record.user_id {
     if !crate::engine::user::is_root(uid) {
-      if let Ok(Some(user)) = crate::engine::system_store::get_user(&state.engine, uid) {
-        if !user.is_active {
+      match crate::engine::system_store::get_user(&state.engine, uid) {
+        Ok(Some(user)) if !user.is_active => {
           metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "inactive").increment(1);
           return ErrorResponse::new("Account deactivated. Contact your administrator.".to_string())
             .with_status(StatusCode::UNAUTHORIZED)
+            .into_response();
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+          metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "missing_user").increment(1);
+          return ErrorResponse::new(INVALID_KEY_MESSAGE.to_string()).with_status(StatusCode::UNAUTHORIZED).into_response();
+        }
+        Err(error) => {
+          tracing::error!(user_id = %uid, %error, "API-key user authority could not be read");
+          metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "authority_error").increment(1);
+          return ErrorResponse::new("Authentication authority is unavailable".to_string())
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
         }
       }

@@ -508,6 +508,21 @@ fn test_gc_mark_no_snapshots_or_forks() {
 }
 
 #[test]
+fn test_gc_mark_rejects_unknown_protected_descendants() {
+  for path in ["/.aeordb-system/future/item.json", "/docs/.aeordb-future/item.json"] {
+    let (engine, _temp) = create_temp_engine_for_tests();
+    let ctx = RequestContext::system();
+    DirectoryOps::new(&engine).store_file_buffered(&ctx, path, b"unknown protected", Some("application/json")).unwrap();
+
+    let error = gc_mark(&engine).expect_err("GC must not sweep after traversing an unknown protected family");
+    assert!(
+      matches!(error, EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }),
+      "unexpected GC result for {path}: {error}"
+    );
+  }
+}
+
+#[test]
 fn test_gc_mark_preserves_live_path_file_record_when_head_lost_reference() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();

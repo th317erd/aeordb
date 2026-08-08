@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::responses::ErrorResponse;
+use super::responses::{engine_error_response, ErrorResponse};
 use super::route_permissions::{require_generic_data_path, RoutePermissionChecker};
 use super::state::AppState;
 use crate::auth::TokenClaims;
@@ -64,7 +64,11 @@ pub async fn file_history(
     let permissions = RoutePermissionChecker::for_user(&state, user_id);
     if !permissions.is_root() {
       let absolute = if path.starts_with('/') { path.clone() } else { format!("/{}", path) };
-      if !permissions.has_path_permission(&absolute, CrudlifyOp::Read) {
+      let permitted = match permissions.has_path_permission(&absolute, CrudlifyOp::Read) {
+        Ok(permitted) => permitted,
+        Err(error) => return engine_error_response("Failed to check version-history permission", &error),
+      };
+      if !permitted {
         return ErrorResponse::new(format!("Not found: /{}", path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
     }

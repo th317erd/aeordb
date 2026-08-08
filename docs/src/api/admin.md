@@ -1116,7 +1116,7 @@ Create a new user. Requires root.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `username` | string | Yes | Unique username |
-| `email` | string | No | User email address |
+| `email` | string | Yes | User email address |
 | `tags` | array of strings | No | Admin-assigned tags for group membership queries (default: empty) |
 
 **Response:** `201 Created`

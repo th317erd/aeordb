@@ -173,7 +173,15 @@ pub async fn cluster_status(State(state): State<AppState>, Extension(claims): Ex
     Err(response) => return response,
   };
 
-  let node_id = system_store::get_node_id(&state.engine).unwrap_or(None);
+  let node_id = match system_store::get_node_id(&state.engine) {
+    Ok(node_id) => node_id,
+    Err(error) => {
+      tracing::error!(%error, "Failed to read cluster node_id");
+      return ErrorResponse::new(format!("Failed to read cluster node_id: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
 
   let peers: Vec<serde_json::Value> = state.peer_manager.all_peers().iter().map(|peer| peer_to_json(peer, &state.peer_manager)).collect();
 
@@ -217,8 +225,24 @@ pub async fn add_peer(
 
   // Generate a node_id for the new peer that doesn't collide with any
   // existing peer or with our local node_id.
-  let mut peer_configs = system_store::get_peer_configs(&state.engine).unwrap_or_default();
-  let local_node_id = system_store::get_node_id(&state.engine).ok().flatten();
+  let mut peer_configs = match system_store::get_peer_configs(&state.engine) {
+    Ok(configs) => configs,
+    Err(error) => {
+      tracing::error!(%error, "Failed to read persisted peer configuration");
+      return ErrorResponse::new(format!("Failed to read persisted peer configuration: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+  let local_node_id = match system_store::get_node_id(&state.engine) {
+    Ok(node_id) => node_id,
+    Err(error) => {
+      tracing::error!(%error, "Failed to read local node_id");
+      return ErrorResponse::new(format!("Failed to read local node_id: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
   let peer_node_id = fresh_peer_node_id(&peer_configs, local_node_id);
 
   let config = PeerConfig {
@@ -287,20 +311,31 @@ pub async fn remove_peer(
     }
   };
 
-  let removed = state.peer_manager.remove_peer(node_id);
-  if !removed {
+  if !state.peer_manager.all_peers().iter().any(|peer| peer.node_id == node_id) {
     return ErrorResponse::new(format!("Peer not found: {}. Use GET /admin/cluster/peers to list active peers", node_id))
       .with_status(StatusCode::NOT_FOUND)
       .into_response();
   }
 
   // Remove from persisted configs.
-  let mut peer_configs = system_store::get_peer_configs(&state.engine).unwrap_or_default();
+  let mut peer_configs = match system_store::get_peer_configs(&state.engine) {
+    Ok(configs) => configs,
+    Err(error) => {
+      tracing::error!(%error, "Failed to read persisted peer configuration");
+      return ErrorResponse::new(format!("Failed to read persisted peer configuration: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
   peer_configs.retain(|config| config.node_id != node_id);
   let ctx = crate::engine::RequestContext::system();
   if let Err(error) = system_store::store_peer_configs(&state.engine, &ctx, &peer_configs) {
     tracing::error!("Failed to persist peer removal: {}", error);
+    return ErrorResponse::new(format!("Failed to persist peer removal: {error}"))
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
   }
+  state.peer_manager.remove_peer(node_id);
 
   (
     StatusCode::OK,
@@ -412,8 +447,16 @@ pub async fn join_cluster(
   // back to it. The new peer's node_id is random (collision-checked);
   // the joining node will record its own canonical node_id on its end
   // and we'll reconcile via the first sync handshake.
-  let existing_peers = system_store::get_peer_configs(&state.engine).unwrap_or_default();
-  let new_peer_node_id = fresh_peer_node_id(&existing_peers, Some(responding_node_id));
+  let mut peer_configs = match system_store::get_peer_configs(&state.engine) {
+    Ok(configs) => configs,
+    Err(error) => {
+      tracing::error!(%error, "/sync/join: failed to read peer configuration");
+      return ErrorResponse::new(format!("Failed to read peer configuration: {error}"))
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
+  let new_peer_node_id = fresh_peer_node_id(&peer_configs, Some(responding_node_id));
   let config = PeerConfig {
     node_id: new_peer_node_id,
     address: node_url.clone(),
@@ -426,7 +469,6 @@ pub async fn join_cluster(
   };
   state.peer_manager.add_peer(&config);
 
-  let mut peer_configs = system_store::get_peer_configs(&state.engine).unwrap_or_default();
   // Avoid duplicates if the same node URL is already registered.
   peer_configs.retain(|p| p.address != node_url);
   peer_configs.push(config);

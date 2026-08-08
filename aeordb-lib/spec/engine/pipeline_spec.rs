@@ -71,7 +71,7 @@ fn make_config_with_logging(field_name: &str, index_type: &str, logging: bool) -
 fn test_system_path_logs() {
   let ctx = RequestContext::system();
   // .logs paths should be recognized as system paths
-  // We test via store_file_with_indexing behavior since is_system_path is private
+  // Exercise the v0 detached-system layout through the public store behavior.
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ops = DirectoryOps::new(&engine);

@@ -273,6 +273,23 @@ fn test_auth_health_standalone_with_key() {
 }
 
 #[test]
+fn test_auth_health_is_unhealthy_when_peer_authority_is_malformed() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/.aeordb-system/cluster/peers",
+      b"not versioned peer configuration",
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let health = check_auth(&engine);
+  assert_eq!(health.status, HealthStatus::Unhealthy);
+  assert_eq!(health.mode, "unknown");
+}
+
+#[test]
 fn test_auth_health_cluster_no_key_unhealthy() {
   let (engine, _temp) = create_temp_engine_for_tests();
   // Set up cluster mode (store peer configs).

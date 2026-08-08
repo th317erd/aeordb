@@ -29,7 +29,7 @@ use crate::engine::system_store;
 /// Returns `Ok(Some(plaintext_key))` on success, `Ok(None)` if keys already
 /// exist, or `Err` if hashing or storage fails.
 pub fn bootstrap_root_key(engine: &StorageEngine) -> Result<Option<String>, crate::engine::errors::EngineError> {
-  let existing_keys = system_store::list_api_keys(engine).unwrap_or_default();
+  let existing_keys = system_store::list_api_keys(engine)?;
 
   if !existing_keys.is_empty() {
     return Ok(None);

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::engine::cache::CacheLoader;
-use crate::engine::directory_listing::list_directory_recursive;
+use crate::engine::directory_listing::list_directory_recursive_strict;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::EngineResult;
 use crate::engine::permissions::PathPermissions;
@@ -104,13 +104,13 @@ impl CacheLoader for GrantsIndexLoader {
   fn load(&self, _key: &(), engine: &StorageEngine) -> EngineResult<GrantsIndex> {
     let ops = DirectoryOps::new(engine);
 
-    let perm_files = list_directory_recursive(engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES))?;
+    let perm_files = list_directory_recursive_strict(engine, "/", MAX_SCAN_DEPTH, Some(".aeordb-permissions"), Some(MAX_PERM_FILES))?;
 
     let mut by_group: HashMap<String, Vec<GrantRecord>> = HashMap::new();
 
     for entry in &perm_files {
       let data = ops.read_file_buffered(&entry.path)?;
-      let perms = PathPermissions::deserialize(&data)?;
+      let perms = PathPermissions::deserialize_stored(&data, &entry.path)?;
 
       let dir_path = if entry.path.ends_with("/.aeordb-permissions") {
         let stripped = &entry.path[..entry.path.len() - "/.aeordb-permissions".len()];

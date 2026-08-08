@@ -8,7 +8,7 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::{generate_api_key, hash_api_key, ApiKeyRecord};
-use aeordb::engine::{EventBus, StorageEngine};
+use aeordb::engine::{DirectoryOps, EventBus, StorageEngine, ROOT_USER_ID};
 use aeordb::engine::system_store;
 use aeordb::engine::RequestContext;
 use aeordb::plugins::PluginManager;
@@ -83,6 +83,20 @@ fn non_admin_bearer_token(jwt_manager: &JwtManager) -> String {
   format!("Bearer {}", token)
 }
 
+fn keyed_bearer_token(jwt_manager: &JwtManager, key_id: uuid::Uuid, subject: String) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: subject,
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: Some(key_id.to_string()),
+  };
+  format!("Bearer {}", jwt_manager.create_token(&claims).unwrap())
+}
+
 fn expired_bearer_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
@@ -136,6 +150,24 @@ fn seed_revoked_api_key(engine: &StorageEngine) -> String {
     user_id: Some(uuid::Uuid::new_v4()),
     created_at: chrono::Utc::now(),
     is_revoked: true,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
+  };
+  system_store::store_api_key(engine, &ctx, &record).unwrap();
+  plaintext_key
+}
+
+fn seed_api_key_for_user(engine: &StorageEngine, user_id: uuid::Uuid) -> String {
+  let ctx = RequestContext::system();
+  let key_id = uuid::Uuid::new_v4();
+  let plaintext_key = generate_api_key(key_id);
+  let record = ApiKeyRecord {
+    key_id,
+    key_hash: hash_api_key(&plaintext_key).unwrap(),
+    user_id: Some(user_id),
+    created_at: chrono::Utc::now(),
+    is_revoked: false,
     expires_at: i64::MAX,
     label: None,
     rules: vec![],
@@ -228,6 +260,153 @@ async fn test_auth_token_revoked_key_returns_401() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_auth_token_missing_user_authority_returns_401() {
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let api_key = seed_api_key_for_user(&engine, uuid::Uuid::new_v4());
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/auth/token")
+    .header("content-type", "application/json")
+    .body(Body::from(format!(r#"{{"api_key":"{}"}}"#, api_key)))
+    .unwrap();
+  assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_auth_token_malformed_user_authority_returns_500() {
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let user_id = uuid::Uuid::new_v4();
+  let api_key = seed_api_key_for_user(&engine, user_id);
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      &format!("/.aeordb-system/users/{user_id}"),
+      b"not a versioned user",
+      Some("application/json"),
+    )
+    .unwrap();
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
+
+  let request = Request::builder()
+    .method("POST")
+    .uri("/auth/token")
+    .header("content-type", "application/json")
+    .body(Body::from(format!(r#"{{"api_key":"{}"}}"#, api_key)))
+    .unwrap();
+  assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_non_path_route_rejects_revoked_scoped_key() {
+  let (app, jwt_manager, engine, _rate_limiter, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let key_id = uuid::Uuid::new_v4();
+  let record = ApiKeyRecord {
+    key_id,
+    key_hash: hash_api_key(&generate_api_key(key_id)).unwrap(),
+    user_id: Some(ROOT_USER_ID),
+    created_at: chrono::Utc::now(),
+    is_revoked: true,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
+  };
+  system_store::store_api_key_for_bootstrap(&engine, &ctx, &record).unwrap();
+  let token = keyed_bearer_token(&jwt_manager, key_id, ROOT_USER_ID.to_string());
+
+  let response = app
+    .oneshot(
+      Request::post("/files/query")
+        .header("authorization", token)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_non_path_route_rejects_malformed_scoped_key_authority() {
+  let (app, jwt_manager, engine, _rate_limiter, _temp_dir) = test_app();
+  let key_id = uuid::Uuid::new_v4();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      &format!("/.aeordb-system/api-keys/{key_id}"),
+      b"not a versioned API key",
+      Some("application/json"),
+    )
+    .unwrap();
+  let token = keyed_bearer_token(&jwt_manager, key_id, ROOT_USER_ID.to_string());
+
+  let response = app
+    .oneshot(
+      Request::post("/files/query")
+        .header("authorization", token)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_non_path_route_denies_ruleless_share_key() {
+  let (app, jwt_manager, engine, _rate_limiter, _temp_dir) = test_app();
+  let ctx = RequestContext::system();
+  let key_id = uuid::Uuid::new_v4();
+  let record = ApiKeyRecord {
+    key_id,
+    key_hash: hash_api_key(&generate_api_key(key_id)).unwrap(),
+    user_id: None,
+    created_at: chrono::Utc::now(),
+    is_revoked: false,
+    expires_at: i64::MAX,
+    label: Some("share:test".to_string()),
+    rules: vec![],
+  };
+  system_store::store_api_key_for_bootstrap(&engine, &ctx, &record).unwrap();
+  let token = keyed_bearer_token(&jwt_manager, key_id, "share:test".to_string());
+
+  let response = app
+    .oneshot(
+      Request::post("/files/query")
+        .header("authorization", token)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn generic_listings_reject_unknown_protected_children_instead_of_returning_partial_results() {
+  let (app, jwt_manager, engine, _rate_limiter, _temp_dir) = test_app();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/.aeordb-future/unknown.bin",
+      b"future protected state",
+      Some("application/octet-stream"),
+    )
+    .unwrap();
+  let auth = admin_bearer_token(&jwt_manager);
+
+  for uri in ["/files", "/files?depth=2"] {
+    let response = app.clone().oneshot(Request::get(uri).header("authorization", &auth).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{uri} must fail closed on unknown protected traversal");
+  }
 }
 
 // ---------------------------------------------------------------------------

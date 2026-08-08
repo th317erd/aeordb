@@ -358,12 +358,24 @@ async fn merge_patch_stored_not_json_returns_415() {
 }
 
 #[tokio::test]
-async fn merge_patch_system_path_returns_404() {
+async fn merge_patch_known_system_path_returns_404() {
+  let (_, jwt, engine, _tmp) = test_app();
+  let auth = bearer_token(&jwt);
+
+  let resp =
+    rebuild_app(&jwt, &engine).oneshot(patch_req("/files/.aeordb-system/api-keys/key", &auth, serde_json::json!({}))).await.unwrap();
+  assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn merge_patch_unknown_protected_path_returns_500() {
   let (_, jwt, engine, _tmp) = test_app();
   let auth = bearer_token(&jwt);
 
   let resp = rebuild_app(&jwt, &engine).oneshot(patch_req("/files/.aeordb-system/foo", &auth, serde_json::json!({}))).await.unwrap();
-  assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+  assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let json = body_json(resp.into_body()).await;
+  assert_eq!(json["code"], "INTERNAL_ERROR");
 }
 
 // ─────────────────────────────────────────────────────────────────────────

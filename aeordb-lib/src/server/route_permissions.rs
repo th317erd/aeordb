@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::auth::TokenClaims;
 use crate::engine::system_family_policy::GenericDataPathSelection;
+use crate::engine::errors::EngineResult;
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::user::is_root;
 use crate::engine::SystemFamilyPolicyResolver;
@@ -66,20 +67,25 @@ impl<'a> RoutePermissionChecker<'a> {
     is_root(&self.user_id)
   }
 
-  pub fn has_permission(&self, path: &str, operation: CrudlifyOp) -> bool {
-    self.resolver.check_permission(&self.user_id, path, operation).unwrap_or(false)
+  pub fn has_permission(&self, path: &str, operation: CrudlifyOp) -> EngineResult<bool> {
+    self.resolver.check_permission(&self.user_id, path, operation)
   }
 
-  pub fn has_direct_permission(&self, path: &str, operation: CrudlifyOp) -> bool {
-    self.resolver.check_direct_permission(&self.user_id, path, operation).unwrap_or(false)
+  pub fn has_direct_permission(&self, path: &str, operation: CrudlifyOp) -> EngineResult<bool> {
+    self.resolver.check_direct_permission(&self.user_id, path, operation)
   }
 
-  pub fn has_path_permission(&self, path: &str, operation: CrudlifyOp) -> bool {
-    self.resolver.check_path_permission(&self.user_id, path, operation).unwrap_or(false)
+  pub fn has_path_permission(&self, path: &str, operation: CrudlifyOp) -> EngineResult<bool> {
+    self.resolver.check_path_permission(&self.user_id, path, operation)
   }
 
-  pub fn has_any_path_permission(&self, path: &str, operations: &[CrudlifyOp]) -> bool {
-    operations.iter().any(|operation| self.has_path_permission(path, *operation))
+  pub fn has_any_path_permission(&self, path: &str, operations: &[CrudlifyOp]) -> EngineResult<bool> {
+    for operation in operations {
+      if self.has_path_permission(path, *operation)? {
+        return Ok(true);
+      }
+    }
+    Ok(false)
   }
 }
 

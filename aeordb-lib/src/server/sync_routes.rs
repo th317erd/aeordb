@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use base64::Engine as _;
 
 use super::responses::ErrorResponse;
-use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
 use crate::engine::sync_api::{compute_sync_diff, SyncDiff as EngineSyncDiff};
@@ -263,48 +262,51 @@ fn filter_changes_by_key_rules(changes: &mut SyncChanges, rules: &[KeyRule]) {
 ///
 /// SystemFamily client-sync policy has already removed ineligible protected,
 /// derived, secret, and node-local entries before this authorization pass.
-fn filter_changes_by_user_permissions(changes: &mut SyncChanges, user_id_str: &str, state: &AppState) {
+fn filter_changes_by_user_permissions(
+  changes: &mut SyncChanges,
+  user_id_str: &str,
+  state: &AppState,
+) -> crate::engine::errors::EngineResult<()> {
   use crate::engine::permission_resolver::CrudlifyOp;
 
   // Root short-circuits in the resolver, but we want belt-and-suspenders:
   // root callers never reach this path (Peer/RootUser handled separately).
-  let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
-    // Token has a malformed sub — drop everything rather than leak.
-    changes.files_added.clear();
-    changes.files_modified.clear();
-    changes.files_deleted.clear();
-    changes.symlinks_added.clear();
-    changes.symlinks_modified.clear();
-    changes.symlinks_deleted.clear();
-    return;
-  };
+  let user_id = uuid::Uuid::parse_str(user_id_str)
+    .map_err(|error| crate::engine::errors::EngineError::InvalidInput(format!("invalid sync user identity: {error}")))?;
+  let resolver = crate::engine::permission_resolver::PermissionResolver::new(&state.engine, &state.group_cache);
+  let mut allowed = std::collections::HashSet::new();
+  for path in changes
+    .files_added
+    .iter()
+    .map(|entry| entry.path.as_str())
+    .chain(changes.files_modified.iter().map(|entry| entry.path.as_str()))
+    .chain(changes.files_deleted.iter().map(|entry| entry.path.as_str()))
+    .chain(changes.symlinks_added.iter().map(|entry| entry.path.as_str()))
+    .chain(changes.symlinks_modified.iter().map(|entry| entry.path.as_str()))
+    .chain(changes.symlinks_deleted.iter().map(|entry| entry.path.as_str()))
+  {
+    if resolver.check_path_permission(&user_id, path, CrudlifyOp::Read)? {
+      allowed.insert(path.to_string());
+    }
+  }
 
-  let permissions = RoutePermissionChecker::for_user(state, user_id);
-  let is_allowed = |path: &str| -> bool {
-    // Use `check_path_permission` so symlink-to-directory events whose
-    // path lacks a trailing slash still see grants stored at the
-    // directory itself. Same bug pattern as the share-Susan repro
-    // (2026-05-22) — directory-form fallback is needed.
-    permissions.has_path_permission(path, CrudlifyOp::Read)
-  };
-
-  changes.files_added.retain(|e| is_allowed(&e.path));
-  changes.files_modified.retain(|e| is_allowed(&e.path));
-  changes.files_deleted.retain(|e| is_allowed(&e.path));
-  changes.symlinks_added.retain(|e| is_allowed(&e.path));
-  changes.symlinks_modified.retain(|e| is_allowed(&e.path));
-  changes.symlinks_deleted.retain(|e| is_allowed(&e.path));
+  changes.files_added.retain(|entry| allowed.contains(&entry.path));
+  changes.files_modified.retain(|entry| allowed.contains(&entry.path));
+  changes.files_deleted.retain(|entry| allowed.contains(&entry.path));
+  changes.symlinks_added.retain(|entry| allowed.contains(&entry.path));
+  changes.symlinks_modified.retain(|entry| allowed.contains(&entry.path));
+  changes.symlinks_deleted.retain(|entry| allowed.contains(&entry.path));
+  Ok(())
 }
 
-fn user_has_grant_scope(user_id_str: &str, state: &AppState) -> bool {
+fn user_has_grant_scope(user_id_str: &str, state: &AppState) -> crate::engine::errors::EngineResult<bool> {
   use crate::engine::permission_resolver::PermissionResolver;
 
-  let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
-    return true;
-  };
+  let user_id = uuid::Uuid::parse_str(user_id_str)
+    .map_err(|error| crate::engine::errors::EngineError::InvalidInput(format!("invalid sync user identity: {error}")))?;
 
   let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-  resolver.has_descendant_grants(&user_id, "/").unwrap_or(false)
+  resolver.has_descendant_grants(&user_id, "/")
 }
 
 // ---------------------------------------------------------------------------
@@ -358,8 +360,22 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
   // scope and are applied above; non-root JWTs with no grants keep the
   // existing client-sync contract after registry policy.
   if let SyncCaller::ScopedUser { user_id, key_rules } = &caller {
-    if key_rules.is_empty() && user_has_grant_scope(user_id, &state) {
-      filter_changes_by_user_permissions(&mut changes, user_id, &state);
+    if key_rules.is_empty() {
+      match user_has_grant_scope(user_id, &state) {
+        Ok(true) => {
+          if let Err(error) = filter_changes_by_user_permissions(&mut changes, user_id, &state) {
+            return ErrorResponse::new(format!("Failed to apply sync permissions: {error}"))
+              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+              .into_response();
+          }
+        }
+        Ok(false) => {}
+        Err(error) => {
+          return ErrorResponse::new(format!("Failed to resolve sync permission scope: {error}"))
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response();
+        }
+      }
     }
   }
 

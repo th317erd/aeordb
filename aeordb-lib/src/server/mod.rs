@@ -512,12 +512,17 @@ fn create_app_with_all_and_task_queue_inner(
 
   // Load any persisted peer configs (added via /sync/peers, --peers, or
   // --join) into the runtime PeerManager so the sync loop sees them.
-  if let Ok(persisted) = crate::engine::system_store::get_peer_configs(&engine) {
-    for cfg in &persisted {
-      peer_manager.add_peer(cfg);
+  match crate::engine::system_store::get_peer_configs(&engine) {
+    Ok(persisted) => {
+      for cfg in &persisted {
+        peer_manager.add_peer(cfg);
+      }
+      if !persisted.is_empty() {
+        tracing::info!("Loaded {} peer(s) from system store", persisted.len());
+      }
     }
-    if !persisted.is_empty() {
-      tracing::info!("Loaded {} peer(s) from system store", persisted.len());
+    Err(error) => {
+      tracing::error!(%error, "Persisted peer configuration is unreadable; peer synchronization remains disabled");
     }
   }
 

@@ -287,7 +287,7 @@
         - [x] Prove ordinary restart refuses the unresolved spill, repair replays it, verification is clean, and the repaired database starts successfully.
         - [x] Record the focused, broad, cross-platform, and real-world evidence; commit and push the green landing unit.
   - [ ] Execute P2c through P9 in the dependency and landing order frozen by the campaign.
-    - [ ] P2c: converge protected-state classification and traversal failure boundaries on the frozen SystemFamily registry.
+    - [x] P2c: converge protected-state classification and traversal failure boundaries on the frozen SystemFamily registry.
       - [x] Map every old system/internal predicate, protected-path list, registry producer, and traversal consumer from current source.
       - [x] Characterize the current adjacent behavior with 194 green B-tree, tree-walk, backup/import, sync, permission, and GC tests; record the ratified policy differences explicitly.
       - [x] Freeze the P2c red-test protocol, independent policy oracle, traversal-state matrix, consumer proof, and architecture-removal gate.
@@ -300,7 +300,7 @@
         - [x] Separate structural integrity from visitor-requested early completion.
         - [x] Classify missing/corrupt B-tree roots as corrupt and damaged child branches as diagnostically partial.
         - [x] Preserve malformed flat-directory evidence instead of returning an unqualified empty success.
-      - [ ] Route backup, sync, peer, import, index scope, GC, permissions, plugin host, repair, verify, and generic APIs through operation-specific registry policy.
+      - [x] Route backup, sync, peer, import, index scope, GC, permissions, plugin host, repair, verify, and generic APIs through operation-specific registry policy.
         - [x] Freeze and implement one shared runtime resolver plus typed transfer/index operation selectors before converting consumers.
         - [x] Convert live indexing and reindex scope decisions, preserving permission indexing and rejecting unknown protected families.
         - [x] Convert logical backup and user-data export traversal, detached-family discovery, and directory closure rebuilding to registry policy.
@@ -320,11 +320,14 @@
           - [x] Prove structural-leaf, malformed, and node-local patch payloads cannot mutate entries or advance HEAD.
           - [x] Preserve ordinary files, namespace permissions, patch deletion semantics, and restore/merge behavior.
         - [x] Convert generic file, blob, listing, query/aggregate/analyze, download, share, version, symlink, and plugin-host access to registry policy before pagination or mutation.
-      - [ ] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
+      - [x] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
+        - [x] Add explicit strict directory/window/recursive traversal APIs while preserving diagnostic listing behavior.
+        - [x] Convert system metadata, permissions, conflicts, query/index discovery, reindex, backup inspection, and live counters to strict traversal.
+        - [x] Remove malformed-record and partial-enumeration error squelching from authoritative consumers.
       - [ ] Child 06: replace hash-only client chunk authorization with a path/diff-bound transfer capability; chunk `FLAG_SYSTEM` cannot prove that a requested hash belongs to the caller's authorized diff.
       - [ ] P2e/Child 06: strictly decode remote sync responses, reject omitted/malformed/hash-mismatched chunks before mutation or checkpoint advancement, and route HTTP receive/apply through the shared merge authority.
       - [ ] P2e: propagate every embedded sync delete failure except `NotFound`; remove the current delete-error squelch with injected-fault coverage.
-      - [ ] Run focused, adjacent, broad, architecture, documentation, and live disposable-database proof; record and land P2c.
+      - [x] Run focused, adjacent, broad, architecture, documentation, and live disposable-database proof; record and land P2c.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

@@ -311,6 +311,62 @@ fn generic_data_policy_includes_permissions_conceals_protected_state_and_rejects
   assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
 }
 
+#[test]
+fn production_sources_do_not_restore_legacy_generic_path_policy() {
+  fn collect_rust_sources(path: &Path, output: &mut String) {
+    for entry in fs::read_dir(path).unwrap() {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        collect_rust_sources(&path, output);
+      } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+        output.push_str(&fs::read_to_string(path).unwrap());
+      }
+    }
+  }
+
+  let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let mut sources = String::new();
+  collect_rust_sources(&source_root, &mut sources);
+  for forbidden in ["is_system_path", "is_internal_path", "let system_prefixes =", "starts_with(\"/.aeordb-\")"] {
+    assert!(!sources.contains(forbidden), "legacy generic path policy returned to production source: {forbidden}");
+  }
+
+  let directory_ops = fs::read_to_string(source_root.join("engine/directory_ops.rs")).unwrap();
+  assert!(directory_ops.contains("fn v0_path_uses_detached_system_storage"));
+  assert!(directory_ops.contains("pub fn v0_system_entry_flags"));
+  assert!(directory_ops.contains("pub(crate) fn v0_is_detached_system_path"));
+
+  let json_store = fs::read_to_string(source_root.join("engine/json_store.rs")).unwrap();
+  assert!(json_store.contains("list_directory_strict"));
+  assert!(!json_store.contains("silently skipped"));
+  let system_store = fs::read_to_string(source_root.join("engine/system_store.rs")).unwrap();
+  assert!(system_store.contains("list_directory_window_strict"));
+  assert!(!system_store.contains("if let Ok(data)"));
+  let index_store = fs::read_to_string(source_root.join("engine/index_store.rs")).unwrap();
+  assert!(!index_store.contains("partial results are better than a total failure"));
+  let permission_middleware = fs::read_to_string(source_root.join("auth/permission_middleware.rs")).unwrap();
+  assert!(permission_middleware.contains("fn require_active_api_key"));
+  assert!(!permission_middleware.contains("if let Ok(Some(key_record))"));
+  assert!(!permission_middleware.contains("accessible_child_names(&user_uuid, engine_path).unwrap_or_default()"));
+  assert!(!permission_middleware.contains("exists(path).unwrap_or(false)"));
+  let route_permissions = fs::read_to_string(source_root.join("server/route_permissions.rs")).unwrap();
+  assert!(!route_permissions.contains("unwrap_or(false)"));
+  let engine_routes = fs::read_to_string(source_root.join("server/engine_routes.rs")).unwrap();
+  assert!(engine_routes.contains("list_directory_recursive_strict"));
+  assert!(!engine_routes.contains("directory_ops.list_directory("));
+  let share_routes = fs::read_to_string(source_root.join("server/share_routes.rs")).unwrap();
+  assert!(share_routes.contains("PathPermissions::deserialize_stored"));
+  assert!(!share_routes.contains("PathPermissions::deserialize(&data)"));
+  assert!(!share_routes.contains("grants_index_cache.get(&(), &state.engine) {\n    Ok(index) => index,\n    Err(_)"));
+  let wasm_runtime = fs::read_to_string(source_root.join("plugins/wasm_runtime.rs")).unwrap();
+  assert!(wasm_runtime.contains("list_directory_window_strict"));
+  assert!(!wasm_runtime.contains("dir_ops.list_directory_window(&path"));
+  let sync_routes = fs::read_to_string(source_root.join("server/sync_routes.rs")).unwrap();
+  assert!(!sync_routes.contains("has_descendant_grants(&user_id, \"/\").unwrap_or(false)"));
+  let sync_engine = fs::read_to_string(source_root.join("engine/sync_engine.rs")).unwrap();
+  assert!(!sync_engine.contains("get_peer_sync_state(&self.engine, peer_node_id).ok().flatten()"));
+}
+
 fn known_path_policy(registry: &aeordb::engine::v4::system_family::SystemFamilyRegistryV1<'_>, path: &str) -> SystemFamilyPolicyV1 {
   let classification = classify_system_family(registry, SystemFamilySubjectV1::Path(path)).unwrap();
   let SystemFamilyClassificationV1::Known(family) = classification else {

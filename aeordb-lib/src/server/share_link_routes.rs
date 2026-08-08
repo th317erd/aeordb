@@ -124,7 +124,15 @@ pub async fn create_share_link(
   let mut rules: Vec<KeyRule> = Vec::with_capacity(body.paths.len() + 1);
   for path in &body.paths {
     // Detect directories: explicit trailing slash or exists as directory in DB
-    let is_dir = path.ends_with('/') || directory_ops.list_directory(&normalize_path(path)).is_ok();
+    let is_dir = if path.ends_with('/') {
+      true
+    } else {
+      match directory_ops.list_directory_strict(&normalize_path(path)) {
+        Ok(_) => true,
+        Err(crate::engine::errors::EngineError::NotFound(_)) => false,
+        Err(error) => return engine_error_response("Failed to inspect share-link path", &error),
+      }
+    };
     if is_dir {
       let dir_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
       rules.push(KeyRule { glob: format!("{}**", dir_path), permitted: body.permissions.clone() });

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use aeordb::engine::{
-  FLAG_SYSTEM, StorageEngine, chunk_content_hash, system_chunk_hash, system_file_identity_hash, is_system_path, HashAlgorithm,
+  FLAG_SYSTEM, StorageEngine, chunk_content_hash, system_chunk_hash, system_file_identity_hash, v0_system_entry_flags, HashAlgorithm,
 };
 use aeordb::engine::entry_type::EntryType;
 use aeordb::server::create_temp_engine_for_tests;
@@ -57,23 +57,26 @@ fn test_system_file_identity_hash() {
   assert_eq!(hash.len(), algo.hash_length(), "Hash length must match algorithm");
 }
 
-// ─── 5. is_system_path ─────────────────────────────────────────────────────
+// ─── 5. v0 detached-system entry flags ─────────────────────────────────────
 
 #[test]
-fn test_is_system_path() {
+fn test_v0_system_entry_flags() {
   // Positive cases
-  assert!(is_system_path("/.aeordb-system/config/key"), "/.aeordb-system/config/key is a system path");
-  assert!(is_system_path("/.aeordb-system"), "/.system is a system path");
-  assert!(is_system_path("/.aeordb-system/"), "/.aeordb-system/ is a system path");
-  assert!(is_system_path("/.aeordb-system/deeply/nested/path"), "deeply nested system path");
+  assert_eq!(v0_system_entry_flags("/.aeordb-system/config/key"), FLAG_SYSTEM);
+  assert_eq!(v0_system_entry_flags("/.aeordb-system"), FLAG_SYSTEM);
+  assert_eq!(v0_system_entry_flags("/.aeordb-system/"), FLAG_SYSTEM);
+  assert_eq!(v0_system_entry_flags("/.aeordb-system/deeply/nested/path"), FLAG_SYSTEM);
+  assert_eq!(v0_system_entry_flags("/.aeordb-config/parsers.json"), FLAG_SYSTEM);
 
   // Negative cases
-  assert!(!is_system_path("/regular/path"), "/regular/path is not a system path");
-  assert!(!is_system_path("/.systems/"), "/.systems/ is not a system path (note the 's')");
-  assert!(!is_system_path("/.systemic/data"), "/.systemic/data is not a system path");
-  assert!(!is_system_path("/data/.aeordb-system/nested"), "/data/.aeordb-system/nested is not a system path");
-  assert!(!is_system_path("/"), "root is not a system path");
-  assert!(!is_system_path(""), "empty string is not a system path");
+  assert_eq!(v0_system_entry_flags("/regular/path"), 0);
+  assert_eq!(v0_system_entry_flags("/.systems/"), 0);
+  assert_eq!(v0_system_entry_flags("/.systemic/data"), 0);
+  assert_eq!(v0_system_entry_flags("/data/.aeordb-system/nested"), 0);
+  assert_eq!(v0_system_entry_flags("/.aeordb-permissions"), 0);
+  assert_eq!(v0_system_entry_flags("/.aeordb-conflicts/item.json"), 0);
+  assert_eq!(v0_system_entry_flags("/"), 0);
+  assert_eq!(v0_system_entry_flags(""), 0);
 }
 
 // ─── 6. store_entry_with_flags round-trip ───────────────────────────────────
@@ -195,13 +198,13 @@ fn test_system_file_identity_hash_differs_from_user() {
   assert_ne!(user_hash, sys_hash, "System file identity hash must differ from user file identity hash (different domain prefix)");
 }
 
-// ─── 11. is_system_path normalizes before checking ──────────────────────────
+// ─── 11. v0 detached-system flag evaluation normalizes first ────────────────
 
 #[test]
-fn test_is_system_path_normalization() {
+fn test_v0_system_entry_flags_normalization() {
   // Paths with redundant slashes or dots should still be detected
-  assert!(is_system_path("/.aeordb-system/./config"), "normalized dotted path should be system");
-  assert!(is_system_path("/.aeordb-system//double-slash"), "double-slash should normalize");
+  assert_eq!(v0_system_entry_flags("/.aeordb-system/./config"), FLAG_SYSTEM);
+  assert_eq!(v0_system_entry_flags("/.aeordb-system//double-slash"), FLAG_SYSTEM);
 }
 
 // ─── 12. FLAG_SYSTEM is only the lowest bit ─────────────────────────────────

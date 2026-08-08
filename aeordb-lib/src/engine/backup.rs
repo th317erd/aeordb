@@ -1,6 +1,6 @@
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
-use crate::engine::directory_ops::{deletion_record_hash, directory_content_hash, directory_path_hash, file_path_hash, is_system_path};
+use crate::engine::directory_ops::{deletion_record_hash, directory_content_hash, directory_path_hash, file_path_hash};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
@@ -1667,18 +1667,19 @@ fn validate_import_leaf_selection(
 /// `include_system`: when true, system entries (users, groups, keys) from the
 /// backup are imported. The CALLER must verify root-key authority before
 /// passing true. When false, system entries in the backup are silently skipped.
-/// Check whether the target database contains any user data. Considers
-/// system paths (under /.aeordb-system, /.aeordb-config) as empty signal,
-/// since fresh databases initialize those with bootstrap data automatically.
+/// Check whether the target database contains any registry-selected data.
+/// Concealed operational/bootstrap families do not make a fresh target
+/// non-empty, while portable namespace state such as permissions does.
 fn is_target_empty(target: &StorageEngine) -> EngineResult<bool> {
   let ops = crate::engine::DirectoryOps::new(target);
-  let children = match ops.list_directory("/") {
+  let family_policy = SystemFamilyPolicyResolver::new(target.hash_algo())?;
+  let children = match ops.list_directory_strict("/") {
     Ok(c) => c,
     Err(EngineError::NotFound(_)) => return Ok(true),
     Err(other) => return Err(other),
   };
   for child in &children {
-    if !is_system_path(&format!("/{}", child.name)) {
+    if family_policy.generic_data_path_is_visible(&format!("/{}", child.name))? {
       return Ok(false);
     }
   }

@@ -12,6 +12,15 @@ use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_store;
 use crate::engine::user::User;
 
+fn stored_authority_error(path: &str, error: EngineError) -> EngineError {
+  match error {
+    EngineError::JsonParseError(reason) => {
+      EngineError::CorruptEntry { offset: 0, reason: format!("malformed stored authority at {path}: {reason}") }
+    }
+    other => other,
+  }
+}
+
 /// Loads `.aeordb-permissions` files from directory paths.
 pub struct PermissionsLoader;
 
@@ -26,7 +35,7 @@ impl CacheLoader for PermissionsLoader {
 
     match ops.read_file_buffered(&permissions_path) {
       Ok(data) => {
-        let permissions = PathPermissions::deserialize(&data)?;
+        let permissions = PathPermissions::deserialize_stored(&data, &permissions_path)?;
         Ok(Some(permissions))
       }
       Err(EngineError::NotFound(_)) => Ok(None),
@@ -59,12 +68,14 @@ impl CacheLoader for GroupLoader {
   type Value = Vec<String>;
 
   fn load(&self, user_id: &Uuid, engine: &StorageEngine) -> EngineResult<Vec<String>> {
-    let user: User = match system_store::get_user(engine, user_id)? {
+    let user_path = format!("/.aeordb-system/users/{user_id}");
+    let user: User = match system_store::get_user(engine, user_id).map_err(|error| stored_authority_error(&user_path, error))? {
       Some(user) => user,
       None => return Ok(Vec::new()),
     };
 
-    let all_groups: Vec<Group> = system_store::list_groups(engine)?;
+    let all_groups: Vec<Group> =
+      system_store::list_groups(engine).map_err(|error| stored_authority_error("/.aeordb-system/groups", error))?;
 
     let mut member_groups = Vec::new();
     for group in &all_groups {
@@ -97,6 +108,7 @@ impl CacheLoader for ApiKeyLoader {
     };
 
     system_store::get_api_key(engine, key_uuid)
+      .map_err(|error| stored_authority_error(&format!("/.aeordb-system/api-keys/{key_uuid}"), error))
   }
 
   fn estimated_entry_bytes(&self, key_id: &String, value: &Option<ApiKeyRecord>) -> u64 {
@@ -123,7 +135,7 @@ impl CacheLoader for IndexConfigLoader {
     let config_path = IndexConfigResolver::config_path_for_directory(path);
 
     match ops.read_file_buffered(&config_path) {
-      Ok(data) => PathIndexConfig::deserialize(&data).map(Some),
+      Ok(data) => PathIndexConfig::deserialize(&data).map(Some).map_err(|error| stored_authority_error(&config_path, error)),
       Err(EngineError::NotFound(_)) => Ok(None),
       Err(e) => Err(e),
     }

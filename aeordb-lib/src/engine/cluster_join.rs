@@ -36,9 +36,7 @@ pub fn is_ready_for_traffic(engine: &StorageEngine, is_cluster_mode: bool) -> bo
 /// Returns `"cluster"` if any peer configurations exist, otherwise
 /// `"standalone"`. This is a heuristic based on persisted peer state — if
 /// the node was started with `--peers`, those configs will have been stored.
-pub fn get_cluster_mode(engine: &StorageEngine) -> String {
-  match system_store::get_peer_configs(engine) {
-    Ok(peers) if !peers.is_empty() => "cluster".to_string(),
-    _ => "standalone".to_string(),
-  }
+pub fn get_cluster_mode(engine: &StorageEngine) -> crate::engine::errors::EngineResult<String> {
+  let peers = system_store::get_peer_configs(engine)?;
+  Ok(if peers.is_empty() { "standalone".to_string() } else { "cluster".to_string() })
 }

@@ -8,7 +8,9 @@ use axum::{
 use uuid::Uuid;
 
 use crate::auth::jwt::TokenClaims;
+use crate::auth::api_key::ApiKeyRecord;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted, operation_to_flag_char, KeyRule};
+use crate::engine::errors::EngineResult;
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::server::responses::ErrorResponse;
 use crate::server::route_permissions::require_generic_data_path;
@@ -79,12 +81,19 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
       return next.run(request).await;
     }
     // Load and insert key rules for downstream handlers if a scoped key is present.
-    if let Some(ref key_id) = request.extensions().get::<TokenClaims>().and_then(|c| c.key_id.clone()) {
-      if let Ok(Some(key_record)) = state.api_key_cache.get(&key_id.to_string(), &state.engine) {
-        if !key_record.is_revoked && key_record.expires_at > chrono::Utc::now().timestamp_millis() && !key_record.rules.is_empty() {
-          request.extensions_mut().insert(ActiveKeyRules(key_record.rules.clone()));
-        }
+    let claims = request.extensions().get::<TokenClaims>().cloned();
+    if let Some(ref key_id) = claims.as_ref().and_then(|claims| claims.key_id.clone()) {
+      let key_record = match require_active_api_key(&state, key_id) {
+        Ok(record) => record,
+        Err(response) => return response,
+      };
+      if !key_record.rules.is_empty() {
+        request.extensions_mut().insert(ActiveKeyRules(key_record.rules));
       }
+    }
+    if claims.as_ref().is_some_and(|claims| claims.sub.starts_with("share:")) && request.extensions().get::<ActiveKeyRules>().is_none() {
+      return (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Share key has no permission rules".to_string(), code: None }))
+        .into_response();
     }
     return next.run(request).await;
   }
@@ -137,35 +146,23 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   };
 
   // Determine the crudlify operation (needed for both key enforcement and permission check).
-  let operation = http_to_crudlify(request.method(), engine_path, &state);
+  let operation = match http_to_crudlify(request.method(), engine_path, &state) {
+    Ok(operation) => operation,
+    Err(error) => {
+      tracing::error!(path = %engine_path, %error, "Failed to classify permission operation");
+      return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }))
+        .into_response();
+    }
+  };
 
   // --- API Key scope enforcement ---
   // If the JWT was issued from a scoped API key, enforce the key's rules.
   // Denied by key rules = 404 (not 403) — the resource doesn't exist for this key.
   if let Some(ref key_id) = claims.key_id {
-    let key_record = match state.api_key_cache.get(&key_id.to_string(), &state.engine) {
-      Ok(Some(record)) => record,
-      Ok(None) => {
-        // Key not found in DB — token is stale
-        return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key not found".to_string(), code: None })).into_response();
-      }
-      Err(error) => {
-        tracing::error!("Failed to load API key {}: {}", key_id, error);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to verify API key".to_string(), code: None }))
-          .into_response();
-      }
+    let key_record = match require_active_api_key(&state, key_id) {
+      Ok(record) => record,
+      Err(response) => return response,
     };
-
-    // Check if key is revoked.
-    if key_record.is_revoked {
-      return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key has been revoked".to_string(), code: None })).into_response();
-    }
-
-    // Check if key is expired.
-    let now_millis = chrono::Utc::now().timestamp_millis();
-    if key_record.expires_at <= now_millis {
-      return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key expired".to_string(), code: None })).into_response();
-    }
 
     // If key has rules, enforce them.
     if !key_record.rules.is_empty() {
@@ -216,14 +213,9 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   // Skip the user/group permission resolver entirely.
   // Share keys with no rules must be denied — they have no user to fall back on.
   if is_share_key {
-    if let Some(ref key_id) = claims.key_id {
-      let key_record = state.api_key_cache.get(&key_id.to_string(), &state.engine);
-      if let Ok(Some(record)) = key_record {
-        if record.rules.is_empty() {
-          return (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Share key has no permission rules".to_string(), code: None }))
-            .into_response();
-        }
-      }
+    if claims.key_id.is_none() || request.extensions().get::<ActiveKeyRules>().is_none() {
+      return (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Share key has no permission rules".to_string(), code: None }))
+        .into_response();
     }
     return next.run(request).await;
   }
@@ -256,9 +248,23 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   // ancestors so the file browser can walk down to it. Other ops stay
   // strictly 403.
   if matches!(operation, CrudlifyOp::Read | CrudlifyOp::List) {
-    let has_descendant = resolver.has_descendant_grants(&user_uuid, engine_path).unwrap_or(false);
+    let has_descendant = match resolver.has_descendant_grants(&user_uuid, engine_path) {
+      Ok(has_descendant) => has_descendant,
+      Err(error) => {
+        tracing::error!(user_id = %user_uuid, path = %engine_path, %error, "Descendant grant lookup failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }))
+          .into_response();
+      }
+    };
     if has_descendant {
-      let children = resolver.accessible_child_names(&user_uuid, engine_path).unwrap_or_default();
+      let children = match resolver.accessible_child_names(&user_uuid, engine_path) {
+        Ok(children) => children,
+        Err(error) => {
+          tracing::error!(user_id = %user_uuid, path = %engine_path, %error, "Accessible-child lookup failed");
+          return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }))
+            .into_response();
+        }
+      };
       let allowed_children: std::collections::HashSet<String> = children.into_iter().collect();
       request.extensions_mut().insert(FilteredListing { allowed_children });
       return next.run(request).await;
@@ -274,16 +280,41 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Permission denied".to_string(), code: None })).into_response()
 }
 
+fn require_active_api_key(state: &AppState, key_id: &str) -> Result<ApiKeyRecord, Response> {
+  let key_record = match state.api_key_cache.get(&key_id.to_string(), &state.engine) {
+    Ok(Some(record)) => record,
+    Ok(None) => {
+      return Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key not found".to_string(), code: None })).into_response());
+    }
+    Err(error) => {
+      tracing::error!(key_id, %error, "Failed to load API key authority");
+      return Err(
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to verify API key".to_string(), code: None }))
+          .into_response(),
+      );
+    }
+  };
+  if key_record.is_revoked {
+    return Err(
+      (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key has been revoked".to_string(), code: None })).into_response(),
+    );
+  }
+  if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
+    return Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key expired".to_string(), code: None })).into_response());
+  }
+  Ok(key_record)
+}
+
 /// Map an HTTP method and path to a CrudlifyOp.
 ///
-/// - PUT to .config/.aeordb-permissions -> Configure
+/// - PUT to `.aeordb-config` or `.aeordb-permissions` -> Configure
 /// - PUT to .functions -> Deploy
 /// - PUT (new file) -> Create, PUT (existing file) -> Update
 /// - GET on directory (ends with '/') -> List
 /// - GET/HEAD -> Read
 /// - DELETE -> Delete
 /// - POST to /plugins/{name}/invoke -> Invoke
-pub fn http_to_crudlify(method: &Method, path: &str, state: &AppState) -> CrudlifyOp {
+pub fn http_to_crudlify(method: &Method, path: &str, state: &AppState) -> EngineResult<CrudlifyOp> {
   // Check for special file names in the path.
   let file_name = path.rsplit('/').next().unwrap_or("");
 
@@ -291,52 +322,52 @@ pub fn http_to_crudlify(method: &Method, path: &str, state: &AppState) -> Crudli
     // Configure operations.
     for special in CONFIGURE_FILES {
       if file_name == *special || path.contains(&format!("/{}/", special)) {
-        return CrudlifyOp::Configure;
+        return Ok(CrudlifyOp::Configure);
       }
     }
 
     // Deploy operations.
     for special in DEPLOY_FILES {
       if file_name == *special {
-        return CrudlifyOp::Deploy;
+        return Ok(CrudlifyOp::Deploy);
       }
     }
 
     // Check if the file already exists to determine Create vs Update.
     let directory_ops = crate::engine::directory_ops::DirectoryOps::new(&state.engine);
-    if directory_ops.exists(path).unwrap_or(false) {
-      return CrudlifyOp::Update;
+    if directory_ops.exists(path)? {
+      return Ok(CrudlifyOp::Update);
     }
-    return CrudlifyOp::Create;
+    return Ok(CrudlifyOp::Create);
   }
 
   if *method == Method::POST {
     if path.ends_with("/invoke") && path.starts_with("plugins/") {
-      return CrudlifyOp::Invoke;
+      return Ok(CrudlifyOp::Invoke);
     }
     // Default POST to Create.
-    return CrudlifyOp::Create;
+    return Ok(CrudlifyOp::Create);
   }
 
   if *method == Method::GET {
     if path.ends_with('/') {
-      return CrudlifyOp::List;
+      return Ok(CrudlifyOp::List);
     }
-    return CrudlifyOp::Read;
+    return Ok(CrudlifyOp::Read);
   }
 
   if *method == Method::HEAD {
-    return CrudlifyOp::Read;
+    return Ok(CrudlifyOp::Read);
   }
 
   if *method == Method::DELETE {
-    return CrudlifyOp::Delete;
+    return Ok(CrudlifyOp::Delete);
   }
 
   if *method == Method::PATCH {
-    return CrudlifyOp::Update;
+    return Ok(CrudlifyOp::Update);
   }
 
   // Fallback: treat unknown methods as Read.
-  CrudlifyOp::Read
+  Ok(CrudlifyOp::Read)
 }

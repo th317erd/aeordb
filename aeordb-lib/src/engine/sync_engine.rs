@@ -185,7 +185,7 @@ impl SyncEngine {
       system_store::get_peer_sync_state(&self.engine, peer_node_id).map_err(|e| format!("Failed to load peer sync state: {}", e))?;
 
     // Load peer config for selective sync paths
-    let sync_paths = self.get_peer_sync_paths(peer_node_id);
+    let sync_paths = self.get_peer_sync_paths(peer_node_id)?;
 
     let local_vm = VersionManager::new(&self.engine);
     let remote_vm = VersionManager::new(remote_engine);
@@ -310,8 +310,8 @@ impl SyncEngine {
   }
 
   /// Load sync state for a peer from system store.
-  pub fn load_peer_sync_state(&self, peer_node_id: u64) -> Option<PeerSyncState> {
-    system_store::get_peer_sync_state(&self.engine, peer_node_id).ok().flatten()
+  pub fn load_peer_sync_state(&self, peer_node_id: u64) -> crate::engine::errors::EngineResult<Option<PeerSyncState>> {
+    system_store::get_peer_sync_state(&self.engine, peer_node_id)
   }
 
   /// Sync with all active peers.
@@ -380,7 +380,7 @@ impl SyncEngine {
     let since_hash = sync_state.and_then(|s| s.last_synced_root_hash);
 
     // Load peer config for selective sync paths
-    let sync_paths = self.get_peer_sync_paths(peer.node_id);
+    let sync_paths = self.get_peer_sync_paths(peer.node_id)?;
 
     // Step 1: Request diff from peer
     let mut diff_body = serde_json::json!({
@@ -588,9 +588,10 @@ impl SyncEngine {
   }
 
   /// Load sync_paths from the peer config for selective sync.
-  fn get_peer_sync_paths(&self, peer_node_id: u64) -> Option<Vec<String>> {
-    let configs = system_store::get_peer_configs(&self.engine).ok()?;
-    configs.into_iter().find(|c| c.node_id == peer_node_id).and_then(|c| c.sync_paths)
+  fn get_peer_sync_paths(&self, peer_node_id: u64) -> Result<Option<Vec<String>>, String> {
+    let configs = system_store::get_peer_configs(&self.engine)
+      .map_err(|error| format!("Failed to load configuration for peer {peer_node_id}: {error}"))?;
+    Ok(configs.into_iter().find(|config| config.node_id == peer_node_id).and_then(|config| config.sync_paths))
   }
 }
 

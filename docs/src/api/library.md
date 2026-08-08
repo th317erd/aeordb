@@ -85,7 +85,8 @@ let ops = DirectoryOps::new(&engine);
 | `delete_file(ctx, path)` | Delete a file |
 | `exists(path)` | Check if a file or directory exists |
 | `get_metadata(path)` | Get file metadata without reading content |
-| `list_directory(path)` | List immediate children of a directory |
+| `list_directory(path)` | List immediate children for diagnostics, returning readable B-tree branches when other branches are damaged |
+| `list_directory_strict(path)` | List immediate children only when the complete directory and every live child path can be proven valid |
 | `create_directory(ctx, path)` | Create an empty directory |
 
 ### Buffered Batch Writes
@@ -156,17 +157,25 @@ Existing target files must contain valid JSON. If any target in `merge_json_file
 use aeordb::engine::directory_listing::list_directory_recursive;
 
 // List all files recursively
-let entries = list_directory_recursive(&engine, "/assets", -1, None).unwrap();
+let entries = list_directory_recursive(&engine, "/assets", -1, None, None).unwrap();
 
 // List with glob filter
-let psds = list_directory_recursive(&engine, "/assets", -1, Some("*.psd")).unwrap();
+let psds = list_directory_recursive(&engine, "/assets", -1, Some("*.psd"), None).unwrap();
 
 // List with a recursive path-shaped glob under the requested directory
-let frames = list_directory_recursive(&engine, "/sessions", -1, Some("**/frames/*.json")).unwrap();
+let frames = list_directory_recursive(&engine, "/sessions", -1, Some("**/frames/*.json"), None).unwrap();
 
 // List one level deep
-let shallow = list_directory_recursive(&engine, "/assets", 1, None).unwrap();
+let shallow = list_directory_recursive(&engine, "/assets", 1, None, None).unwrap();
 ```
+
+`list_directory` and `list_directory_recursive` are diagnostic, best-effort
+interfaces: a damaged B-tree can return its readable branches while recording
+warnings. Code that will make an authorization, backup, repair, deletion, or
+other authoritative decision must use `list_directory_strict` or the owning
+subsystem's strict traversal service. Strict traversal returns an error for a
+malformed directory, an unexplained missing child, or an unknown protected
+SystemFamily instead of returning a partial result as complete.
 
 ## Symlinks
 

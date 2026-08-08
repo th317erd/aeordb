@@ -5,7 +5,7 @@ use base64::Engine as _;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::directory_listing::list_directory_recursive;
+use crate::engine::directory_listing::list_directory_recursive_strict;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -1857,7 +1857,7 @@ impl<'a> QueryEngine<'a> {
 
     // Collect all files under the query path via recursive directory listing.
     budget.reserve_listing(self.engine.counters().snapshot().files)?;
-    let listing = match list_directory_recursive(self.engine, path, -1, None, None) {
+    let listing = match list_directory_recursive_strict(self.engine, path, -1, None, None) {
       Ok(entries) => entries,
       Err(EngineError::NotFound(_)) => return Ok(HashSet::new()),
       Err(other) => return Err(other),

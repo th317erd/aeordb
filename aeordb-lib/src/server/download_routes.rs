@@ -61,14 +61,20 @@ pub async fn download_zip(
   // any path in the database. 404 (not 403) so callers can't enumerate
   // existence by probing.
   if !claims.sub.starts_with("share:") {
-    if let Ok(user_id) = uuid::Uuid::parse_str(&claims.sub) {
-      let permissions = RoutePermissionChecker::for_user(&state, user_id);
-      if !permissions.is_root() {
-        for raw_path in &body.paths {
-          let normalized = normalize_path(raw_path);
-          if !permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
-            return ErrorResponse::new(format!("Not found: {}", raw_path)).with_status(StatusCode::NOT_FOUND).into_response();
-          }
+    let user_id = match uuid::Uuid::parse_str(&claims.sub) {
+      Ok(user_id) => user_id,
+      Err(_) => return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response(),
+    };
+    let permissions = RoutePermissionChecker::for_user(&state, user_id);
+    if !permissions.is_root() {
+      for raw_path in &body.paths {
+        let normalized = normalize_path(raw_path);
+        let permitted = match permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
+          Ok(permitted) => permitted,
+          Err(error) => return engine_error_response("Failed to check download permission", &error),
+        };
+        if !permitted {
+          return ErrorResponse::new(format!("Not found: {}", raw_path)).with_status(StatusCode::NOT_FOUND).into_response();
         }
       }
     }
@@ -171,8 +177,7 @@ fn build_zip(
             }
           }
         }
-        Err(EngineError::ResourceExhausted(error)) => return Err(ZipBuildError::Engine(EngineError::ResourceExhausted(error))),
-        Err(_) => skipped.push(raw_path.clone()),
+        Err(error) => return Err(ZipBuildError::Engine(error)),
       }
     }
     zip_writer.finish().map_err(|error| ZipBuildError::Write(error.to_string()))?;
@@ -237,7 +242,11 @@ fn add_file_to_zip(walk: &ZipWalk<'_>, path: &str, size: u64, state: &mut ZipSta
 
 fn add_directory_to_zip(walk: &ZipWalk<'_>, dir_path: &str, state: &mut ZipState<'_, '_>) -> Result<(), ZipBuildError> {
   walk.cancellation.check().map_err(ZipBuildError::Engine)?;
-  let entries = walk.ops.list_directory(dir_path).map_err(|_| ZipBuildError::SourceUnavailable)?;
+  let entries = match walk.ops.list_directory_strict(dir_path) {
+    Ok(entries) => entries,
+    Err(EngineError::NotFound(_)) => return Err(ZipBuildError::SourceUnavailable),
+    Err(error) => return Err(ZipBuildError::Engine(error)),
+  };
 
   for entry in entries {
     walk.cancellation.check().map_err(ZipBuildError::Engine)?;

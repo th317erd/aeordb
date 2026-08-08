@@ -7,11 +7,10 @@ use crate::engine::btree;
 use crate::engine::content_type::detect_content_type;
 use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use crate::engine::directory_ops::{
-  chunk_content_hash, directory_content_hash, directory_path_hash, is_system_path, publish_file_record_entries, whole_file_content_hash,
-  DirectoryOps, FileRecordPublishInput, DEFAULT_CHUNK_SIZE,
+  chunk_content_hash, directory_content_hash, directory_path_hash, publish_file_record_entries, v0_is_detached_system_path,
+  v0_system_entry_flags, whole_file_content_hash, DirectoryOps, FileRecordPublishInput, DEFAULT_CHUNK_SIZE,
 };
 use crate::engine::engine_event::{EntryEventData, EVENT_ENTRIES_CREATED};
-use crate::engine::entry_header::FLAG_SYSTEM;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
@@ -346,7 +345,7 @@ pub fn commit_buffered_files(engine: &StorageEngine, ctx: &RequestContext, files
   let mut write_metrics: Vec<BatchWriteMetric> = Vec::with_capacity(files.len());
 
   for (file, normalized) in files.iter().zip(normalized_paths) {
-    let sys_flags = if is_system_path(&normalized) { FLAG_SYSTEM } else { 0 };
+    let sys_flags = v0_system_entry_flags(&normalized);
     let detected_content_type = detect_content_type(&file.data, file.content_type.as_deref());
     let total_size = file.data.len() as u64;
     let mut chunk_hashes = Vec::new();
@@ -679,7 +678,7 @@ fn propagate_up(
 }
 
 fn should_skip_root_propagation(dir_path: &str, grandparent: &str) -> bool {
-  grandparent == "/" && is_system_path(dir_path)
+  grandparent == "/" && v0_is_detached_system_path(dir_path)
 }
 
 fn content_type_needs_sniffing(content_type: Option<&str>) -> bool {

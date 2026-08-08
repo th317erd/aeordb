@@ -879,7 +879,7 @@ fn collect_recursive_reindex_paths(
 ) -> EngineResult<Vec<String>> {
   let mut path_count = 0usize;
   let mut retained_bytes = 0u64;
-  crate::engine::directory_listing::visit_directory_recursive(engine, reindex_root, -1, None, None, |entry| {
+  crate::engine::directory_listing::visit_directory_recursive_strict(engine, reindex_root, -1, None, None, |entry| {
     memory.record_work(1)?;
     if !reindex_listing_entry_matches(&entry, prefix, glob_pattern) {
       return Ok(true);
@@ -897,7 +897,7 @@ fn collect_recursive_reindex_paths(
     .try_reserve_exact(path_count)
     .map_err(|error| EngineError::ResourceExhausted(format!("reindex path inventory allocation failed: {error}")))?;
   let mut populated_bytes = 0u64;
-  crate::engine::directory_listing::visit_directory_recursive(engine, reindex_root, -1, None, None, |entry| {
+  crate::engine::directory_listing::visit_directory_recursive_strict(engine, reindex_root, -1, None, None, |entry| {
     memory.record_work(1)?;
     if !reindex_listing_entry_matches(&entry, prefix, glob_pattern) {
       return Ok(true);
@@ -946,7 +946,7 @@ where
 {
   let mut retained_bytes = 0u64;
   let mut path_count = 0usize;
-  ops.visit_live_directory_children(reindex_root, |entry| {
+  ops.visit_live_directory_children_strict(reindex_root, |entry| {
     memory.record_work(1)?;
     if !direct_reindex_child_matches(entry) {
       return Ok(true);
@@ -970,7 +970,7 @@ where
     .try_reserve_exact(path_count)
     .map_err(|error| EngineError::ResourceExhausted(format!("direct reindex path inventory allocation failed: {error}")))?;
   let mut populated_bytes = 0u64;
-  ops.visit_live_directory_children(reindex_root, |entry| {
+  ops.visit_live_directory_children_strict(reindex_root, |entry| {
     memory.record_work(1)?;
     if !direct_reindex_child_matches(entry) {
       return Ok(true);

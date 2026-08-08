@@ -23,7 +23,7 @@ use crate::auth::TokenClaims;
 use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
 use crate::engine::{DirectoryOps, RequestContext, SearchResult, StorageEngine, TaskStatus, VersionManager, is_root};
-use crate::engine::directory_listing::list_directory_recursive;
+use crate::engine::directory_listing::list_directory_recursive_strict;
 use crate::engine::directory_ops::{
   read_chunk_reserved, reserve_streaming_read, stream_hash_inventory_bytes, streaming_memory_error, file_content_hash, ReservedReadChunk,
 };
@@ -44,36 +44,36 @@ use crate::engine::SystemFamilyPolicyResolver;
 
 /// Check if a file path is deleted and the user lacks delete permission.
 /// Deleted files are invisible/inaccessible to users without 'd' permission.
-fn is_deleted_and_forbidden(state: &AppState, claims: &TokenClaims, path: &str) -> bool {
+fn is_deleted_and_forbidden(state: &AppState, claims: &TokenClaims, path: &str) -> EngineResult<bool> {
   use crate::engine::directory_ops::file_path_hash;
-
-  let user_id = match Uuid::parse_str(&claims.sub) {
-    Ok(id) => id,
-    Err(_) => return false,
-  };
-
-  // Root can see everything
-  if is_root(&user_id) {
-    return false;
-  }
 
   // Check if the file is deleted in the KV store
   let algo = state.engine.hash_algo();
   let normalized = crate::engine::path_utils::normalize_path(path);
-  let file_key = match file_path_hash(&normalized, &algo) {
-    Ok(key) => key,
-    Err(_) => return false,
-  };
+  let file_key = file_path_hash(&normalized, &algo)?;
 
-  let is_deleted = state.engine.is_entry_deleted(&file_key).unwrap_or(false);
+  let is_deleted = state.engine.is_entry_deleted(&file_key)?;
   if !is_deleted {
-    return false;
+    return Ok(false);
+  }
+
+  // Share credentials have no user-level Delete grant. A deleted path is
+  // therefore always concealed even when the key's path rule still matches.
+  if claims.sub.starts_with("share:") {
+    return Ok(true);
+  }
+
+  let user_id = Uuid::parse_str(&claims.sub).map_err(|error| EngineError::InvalidInput(format!("invalid user identity: {error}")))?;
+
+  // Root can see everything.
+  if is_root(&user_id) {
+    return Ok(false);
   }
 
   // File is deleted — check if user has 'd' permission
-  let has_delete = RoutePermissionChecker::for_user(state, user_id).has_permission(&normalized, CrudlifyOp::Delete);
+  let has_delete = RoutePermissionChecker::for_user(state, user_id).has_permission(&normalized, CrudlifyOp::Delete)?;
 
-  !has_delete
+  Ok(!has_delete)
 }
 
 /// Query parameters for GET /files/*path (version access + directory listing).
@@ -251,7 +251,11 @@ pub async fn mkdir(State(state): State<AppState>, Extension(claims): Extension<T
   };
   if !permissions.is_root() {
     let parent = crate::engine::path_utils::parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-    if !permissions.has_path_permission(&parent, CrudlifyOp::Create) {
+    let permitted = match permissions.has_path_permission(&parent, CrudlifyOp::Create) {
+      Ok(permitted) => permitted,
+      Err(error) => return engine_error_response("Failed to check create permission", &error),
+    };
+    if !permitted {
       return ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response();
     }
   }
@@ -1115,33 +1119,37 @@ async fn build_file_streaming_response(
 ///
 /// Each entry is enriched with its full path and, for symlink entries,
 /// the symlink target is included.
-fn build_directory_listing(entries: &[crate::engine::ChildEntry], base_path: &str, directory_ops: &DirectoryOps) -> Vec<serde_json::Value> {
+fn build_directory_listing(
+  entries: &[crate::engine::ChildEntry],
+  base_path: &str,
+  directory_ops: &DirectoryOps,
+) -> EngineResult<Vec<serde_json::Value>> {
   let normalized = crate::engine::path_utils::normalize_path(base_path);
-  entries
-    .iter()
-    .map(|child| {
-      let child_path = if normalized == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized, child.name) };
-      let mut entry_json = serde_json::json!({
-        "path": child_path,
-        "name": child.name,
-        "entry_type": child.entry_type,
-        "hash": hex::encode(&child.hash),
-        "size": child.total_size,
-        "created_at": child.created_at,
-        "updated_at": child.updated_at,
-        "content_type": child.content_type,
-      });
+  let mut listing = Vec::with_capacity(entries.len());
+  for child in entries {
+    let child_path = if normalized == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized, child.name) };
+    let mut entry_json = serde_json::json!({
+      "path": child_path,
+      "name": child.name,
+      "entry_type": child.entry_type,
+      "hash": hex::encode(&child.hash),
+      "size": child.total_size,
+      "created_at": child.created_at,
+      "updated_at": child.updated_at,
+      "content_type": child.content_type,
+    });
 
-      // Include symlink target in listing
-      if child.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
-        if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&child_path) {
-          entry_json["target"] = serde_json::json!(symlink_record.target);
-        }
-      }
+    if child.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
+      let symlink_record = directory_ops.get_symlink(&child_path)?.ok_or_else(|| EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("directory names missing symlink record at {child_path}"),
+      })?;
+      entry_json["target"] = serde_json::json!(symlink_record.target);
+    }
 
-      entry_json
-    })
-    .collect()
+    listing.push(entry_json);
+  }
+  Ok(listing)
 }
 
 /// Apply API key rules and system-path filtering to a listing.
@@ -1159,22 +1167,25 @@ fn filter_results_by_direct_read(
   user_id_str: &str,
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   group_cache: &std::sync::Arc<crate::engine::cache::Cache<crate::engine::cache_loaders::GroupLoader>>,
-) {
+) -> EngineResult<()> {
   use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 
-  let Ok(user_id) = uuid::Uuid::parse_str(user_id_str) else {
-    return;
-  };
+  let user_id = uuid::Uuid::parse_str(user_id_str).map_err(|error| EngineError::InvalidInput(format!("invalid user identity: {error}")))?;
   if crate::engine::is_root(&user_id) {
-    return;
+    return Ok(());
   }
   let resolver = PermissionResolver::new(engine, group_cache);
-  results.retain(|entry| {
+  let mut decisions = Vec::with_capacity(results.len());
+  for entry in results.iter() {
     let Some(path) = entry["path"].as_str() else {
-      return false;
+      decisions.push(false);
+      continue;
     };
-    resolver.check_direct_permission(&user_id, path, CrudlifyOp::Read).unwrap_or(false)
-  });
+    decisions.push(resolver.check_direct_permission(&user_id, path, CrudlifyOp::Read)?);
+  }
+  let mut decisions = decisions.into_iter();
+  results.retain(|_| decisions.next().unwrap_or(false));
+  Ok(())
 }
 
 fn enrich_query_items_with_locators(
@@ -1310,11 +1321,11 @@ fn attach_effective_permissions(
   user_id: &Uuid,
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
   group_cache: &std::sync::Arc<crate::engine::cache::Cache<crate::engine::cache_loaders::GroupLoader>>,
-) {
+) -> EngineResult<()> {
   use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 
   if crate::engine::is_root(user_id) {
-    return;
+    return Ok(());
   }
 
   let resolver = PermissionResolver::new(engine, group_cache);
@@ -1348,7 +1359,7 @@ fn attach_effective_permissions(
 
     let mut flags = ['-'; 8];
     for (i, (ch, op)) in ops.iter().enumerate() {
-      if resolver.check_permission(user_id, &path, *op).unwrap_or(false) {
+      if resolver.check_permission(user_id, &path, *op)? {
         flags[i] = *ch;
       }
     }
@@ -1357,6 +1368,7 @@ fn attach_effective_permissions(
       obj.insert("effective_permissions".to_string(), serde_json::Value::String(perm_str));
     }
   }
+  Ok(())
 }
 
 /// Handle a symlink path: resolve and produce the appropriate file or
@@ -1405,9 +1417,12 @@ async fn handle_symlink_resolution(
         return response;
       }
 
-      match directory_ops.list_directory(&dir_path) {
+      match directory_ops.list_directory_strict(&dir_path) {
         Ok(entries) => {
-          let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
+          let mut listing = match build_directory_listing(&entries, &dir_path, &directory_ops) {
+            Ok(listing) => listing,
+            Err(error) => return engine_error_response("Failed to build resolved directory listing", &error),
+          };
           match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, filtered_listing) {
             Ok(()) => paginated_listing_response(listing, limit, offset, None, None),
             Err(response) => response,
@@ -1469,38 +1484,45 @@ fn handle_recursive_listing(
   let depth = if depth < 0 { -1 } else { depth.min(256) };
   let glob = version_query.glob.as_deref();
 
-  match list_directory_recursive(engine, path, depth, glob, None) {
+  match list_directory_recursive_strict(engine, path, depth, glob, None) {
     Ok(entries) => {
-      let mut listing: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|entry| {
-          let mut entry_json = serde_json::json!({
-            "path": entry.path,
-            "name": entry.name,
-            "entry_type": entry.entry_type,
-            "hash": hex::encode(&entry.hash),
-            "size": entry.total_size,
-            "created_at": entry.created_at,
-            "updated_at": entry.updated_at,
-            "content_type": entry.content_type,
-          });
+      let mut listing = Vec::with_capacity(entries.len());
+      for entry in &entries {
+        let mut entry_json = serde_json::json!({
+          "path": entry.path,
+          "name": entry.name,
+          "entry_type": entry.entry_type,
+          "hash": hex::encode(&entry.hash),
+          "size": entry.total_size,
+          "created_at": entry.created_at,
+          "updated_at": entry.updated_at,
+          "content_type": entry.content_type,
+        });
 
-          // Include symlink target in listing
-          if entry.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
-            if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&entry.path) {
-              entry_json["target"] = serde_json::json!(symlink_record.target);
+        if entry.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
+          let symlink_record = match directory_ops.get_symlink(&entry.path) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+              return engine_error_response(
+                "Failed to build recursive directory listing",
+                &EngineError::CorruptEntry { offset: 0, reason: format!("directory names missing symlink record at {}", entry.path) },
+              )
             }
-          }
+            Err(error) => return engine_error_response("Failed to build recursive directory listing", &error),
+          };
+          entry_json["target"] = serde_json::json!(symlink_record.target);
+        }
 
-          entry_json
-        })
-        .collect();
+        listing.push(entry_json);
+      }
 
       match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, None) {
         Ok(()) => {
           if filtered_listing.is_some() {
             if let Some(st) = state {
-              filter_results_by_direct_read(&mut listing, user_id_str, &st.engine, &st.group_cache);
+              if let Err(error) = filter_results_by_direct_read(&mut listing, user_id_str, &st.engine, &st.group_cache) {
+                return engine_error_response("Failed to filter recursive listing permissions", &error);
+              }
             }
           }
           paginated_listing_response(
@@ -1549,15 +1571,22 @@ fn handle_directory_listing(
   let ListingPagination { limit, offset, sort, order } = pagination;
   let directory_ops = DirectoryOps::new(engine);
 
-  match directory_ops.list_directory(path) {
+  match directory_ops.list_directory_strict(path) {
     Ok(entries) => {
-      let mut listing = build_directory_listing(&entries, path, &directory_ops);
+      let mut listing = match build_directory_listing(&entries, path, &directory_ops) {
+        Ok(listing) => listing,
+        Err(error) => return engine_error_response("Failed to build directory listing", &error),
+      };
       match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, filtered_listing) {
         Ok(()) => {
           // Attach effective_permissions for non-root users
           if let Some(st) = state {
             if let Ok(uid) = uuid::Uuid::parse_str(user_id_str) {
-              attach_effective_permissions(&mut listing, &uid, &st.engine, &st.group_cache);
+              if let Err(error) = attach_effective_permissions(&mut listing, &uid, &st.engine, &st.group_cache) {
+                return engine_error_response("Failed to resolve listing permissions", &error);
+              }
+            } else if !user_id_str.starts_with("share:") {
+              return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
             }
           }
           paginated_listing_response(listing, limit, offset, sort, order)
@@ -1607,8 +1636,10 @@ pub async fn engine_get(
   }
 
   // Deleted files are invisible to users without 'd' permission
-  if is_deleted_and_forbidden(&state, &claims, &path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  match is_deleted_and_forbidden(&state, &claims, &path) {
+    Ok(true) => return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response(),
+    Ok(false) => {}
+    Err(error) => return engine_error_response("Failed to check deleted-file access", &error),
   }
 
   // If snapshot or version query param is present, read from historical version
@@ -1623,7 +1654,11 @@ pub async fn engine_get(
   let directory_ops = DirectoryOps::new(&state.engine);
 
   // Check for symlink first
-  if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&path) {
+  let symlink_record = match directory_ops.get_symlink(&path) {
+    Ok(record) => record,
+    Err(error) => return engine_error_response("Failed to inspect symlink", &error),
+  };
+  if let Some(symlink_record) = symlink_record {
     // nofollow: return symlink metadata without resolving
     if version_query.nofollow == Some(true) {
       return (
@@ -1831,8 +1866,14 @@ pub async fn restore_deleted_file(
     Ok(permissions) => permissions,
     Err(response) => return response,
   };
-  if !permissions.is_root() && !permissions.has_path_permission(&path, CrudlifyOp::Delete) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if !permissions.is_root() {
+    let permitted = match permissions.has_path_permission(&path, CrudlifyOp::Delete) {
+      Ok(permitted) => permitted,
+      Err(error) => return engine_error_response("Failed to check restore permission", &error),
+    };
+    if !permitted {
+      return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+    }
   }
 
   let ctx = crate::engine::RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -1869,15 +1910,21 @@ pub async fn list_deleted_files(
     Ok(permissions) => permissions,
     Err(response) => return response,
   };
-  if !permissions.is_root() && !permissions.has_permission(dir_path, CrudlifyOp::Delete) {
-    return (
-      StatusCode::OK,
-      Json(serde_json::json!({
-        "items": [],
-        "total": 0,
-      })),
-    )
-      .into_response();
+  if !permissions.is_root() {
+    let permitted = match permissions.has_permission(dir_path, CrudlifyOp::Delete) {
+      Ok(permitted) => permitted,
+      Err(error) => return engine_error_response("Failed to check deleted-file listing permission", &error),
+    };
+    if !permitted {
+      return (
+        StatusCode::OK,
+        Json(serde_json::json!({
+          "items": [],
+          "total": 0,
+        })),
+      )
+        .into_response();
+    }
   }
 
   let ops = DirectoryOps::new(&state.engine);
@@ -1917,14 +1964,20 @@ pub async fn engine_head(State(state): State<AppState>, Extension(claims): Exten
   }
 
   // Deleted files are invisible to users without 'd' permission
-  if is_deleted_and_forbidden(&state, &claims, &path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  match is_deleted_and_forbidden(&state, &claims, &path) {
+    Ok(true) => return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response(),
+    Ok(false) => {}
+    Err(error) => return engine_error_response("Failed to check deleted-file access", &error),
   }
 
   let directory_ops = DirectoryOps::new(&state.engine);
 
   // Check symlink first
-  if let Ok(Some(symlink_record)) = directory_ops.get_symlink(&path) {
+  let symlink_record = match directory_ops.get_symlink(&path) {
+    Ok(record) => record,
+    Err(error) => return engine_error_response("Failed to inspect symlink", &error),
+  };
+  if let Some(symlink_record) = symlink_record {
     return axum::http::Response::builder()
       .status(StatusCode::OK)
       .header("X-AeorDB-Type", "symlink")
@@ -1955,7 +2008,7 @@ pub async fn engine_head(State(state): State<AppState>, Extension(claims): Exten
     }
     Ok(None) => {
       // Check if it is a directory
-      match directory_ops.list_directory(&path) {
+      match directory_ops.list_directory_strict(&path) {
         Ok(_) => {
           let safe_path = path.replace(['\n', '\r'], "");
           axum::http::Response::builder()
@@ -1965,7 +2018,8 @@ pub async fn engine_head(State(state): State<AppState>, Extension(claims): Exten
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(EngineError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => engine_error_response("Failed to inspect directory", &error),
       }
     }
     Err(error) => {
@@ -2476,7 +2530,9 @@ pub async fn query_endpoint(
       // Root short-circuits; share keys are handled by the key_rules branch
       // above.
       if !claims.sub.starts_with("share:") {
-        filter_results_by_direct_read(&mut response_items, &claims.sub, &state.engine, &state.group_cache);
+        if let Err(error) = filter_results_by_direct_read(&mut response_items, &claims.sub, &state.engine, &state.group_cache) {
+          return engine_error_response("Failed to filter query permissions", &error);
+        }
       }
 
       let locator_options = LocatorOptions::from_request(&body.locators);
@@ -2884,11 +2940,19 @@ pub async fn copy_files(
     // by a 403 on an unauthorized destination.
     for raw_path in &payload.paths {
       let normalized = crate::engine::path_utils::normalize_path(raw_path);
-      if !permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
+      let permitted = match permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
+        Ok(permitted) => permitted,
+        Err(error) => return engine_error_response("Failed to check copy source permission", &error),
+      };
+      if !permitted {
         return ErrorResponse::new(format!("Not found: {}", raw_path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
     }
-    if !permissions.has_path_permission(&dest_normalized, CrudlifyOp::Create) {
+    let destination_permitted = match permissions.has_path_permission(&dest_normalized, CrudlifyOp::Create) {
+      Ok(permitted) => permitted,
+      Err(error) => return engine_error_response("Failed to check copy destination permission", &error),
+    };
+    if !destination_permitted {
       return ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response();
     }
   }
@@ -3011,7 +3075,9 @@ pub async fn global_search_endpoint(
       // from path-level middleware, so authorization happens here: a user
       // only sees files they have direct Read on (grants + inheritance).
       if !claims.sub.starts_with("share:") {
-        filter_results_by_direct_read(&mut items, &claims.sub, &state.engine, &state.group_cache);
+        if let Err(error) = filter_results_by_direct_read(&mut items, &claims.sub, &state.engine, &state.group_cache) {
+          return engine_error_response("Failed to filter search permissions", &error);
+        }
       }
 
       let locator_options = LocatorOptions::from_request(&payload.locators);

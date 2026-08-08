@@ -534,11 +534,11 @@ async fn test_rename_to_system_blocked_for_root() {
     .uri("/rename/public/test.txt")
     .header("content-type", "application/json")
     .header("authorization", &harness.root_jwt)
-    .body(Body::from(r#"{"to":"/.aeordb-system/stolen-data.txt"}"#))
+    .body(Body::from(r#"{"to":"/.aeordb-system/api-keys/stolen-data.txt"}"#))
     .unwrap();
 
   let response = harness.app().oneshot(request).await.unwrap();
-  assert_eq!(response.status(), StatusCode::NOT_FOUND, "Root renaming TO /.aeordb-system/ should return 404");
+  assert_eq!(response.status(), StatusCode::NOT_FOUND, "Root renaming into a known concealed system family should return 404");
 }
 
 #[tokio::test]

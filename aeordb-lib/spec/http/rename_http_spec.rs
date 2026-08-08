@@ -334,16 +334,15 @@ async fn test_rename_to_same_path_returns_400() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. Rename across system boundary returns 403
+// 10. Rename across protected boundary
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_rename_across_system_boundary_returns_404() {
+async fn test_rename_into_known_system_family_returns_404() {
   let (_app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  // All /.aeordb-system/ paths are invisible via the API — renaming to a
-  // .system/ destination returns 404, never revealing .system/ exists.
+  // Declared concealed paths are invisible via the generic API.
   store_file(&engine, "/user-file.txt", b"user data");
 
   let app = rebuild_app(&jwt_manager, &engine);
@@ -352,12 +351,34 @@ async fn test_rename_across_system_boundary_returns_404() {
     .uri("/files/user-file.txt")
     .header("content-type", "application/json")
     .header("authorization", &auth)
-    .body(Body::from(r#"{"to":"/.aeordb-system/stolen.txt"}"#))
+    .body(Body::from(r#"{"to":"/.aeordb-system/api-keys/stolen.txt"}"#))
     .unwrap();
 
   let response = app.oneshot(request).await.unwrap();
-  // System paths are invisible — returns 404 (not 400 or 403)
   assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_rename_into_unknown_protected_family_returns_500() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  store_file(&engine, "/user-file.txt", b"user data");
+
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder()
+        .method("PATCH")
+        .uri("/files/user-file.txt")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(r#"{"to":"/.aeordb-system/stolen.txt"}"#))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(body_json(response.into_body()).await["code"], "INTERNAL_ERROR");
 }
 
 // ---------------------------------------------------------------------------

@@ -160,6 +160,13 @@ Each entry includes `path`, `hash`, and numeric `entry_type` fields. Symlink ent
 
 Entry types: `2` = file, `3` = directory, `8` = symlink.
 
+HTTP directory listings are strict. If the directory tree, a named child, a
+symlink record, or stored permission authority is malformed or cannot be read,
+the request fails instead of returning a partial listing as complete. Known
+registry-concealed system families return `404`; an unknown protected
+`/.aeordb-*` family returns `500` so operators do not mistake unclassified
+state for ordinary user data.
+
 > **Effective permissions:** When a directory listing is accessed with a scoped API key or as a non-root user, each item in the response includes an `effective_permissions` field -- an 8-character crudlify string indicating what operations the caller can perform on that item. Ancestor directory items (directories leading to the scoped path) receive read+list permissions only.
 
 ```json
@@ -712,7 +719,7 @@ Symlinks are versioned like files. Snapshots capture the symlink's target path a
 
 ## Sharing
 
-AeorDB supports sharing files and directories with specific users and groups. Shares are stored as `.permissions` files in the filesystem — the sharing API is a convenience layer on top of the existing permission system.
+AeorDB supports sharing files and directories with specific users and groups. Shares are stored as `.aeordb-permissions` files in the filesystem -- the sharing API is a convenience layer on top of the existing permission system.
 
 ### POST /files/share
 
@@ -750,9 +757,14 @@ At least one of `users` or `groups` must be non-empty.
 ```
 
 **How it works:**
-- For each file path, a `PermissionLink` is created on the parent directory's `.permissions` file with a `path_pattern` matching the filename — so the permission only applies to that specific file.
+- For each file path, a `PermissionLink` is created on the parent directory's `.aeordb-permissions` file with a `path_pattern` matching the filename — so the permission only applies to that specific file.
 - For each directory path, the link is created with no `path_pattern` — it applies to everything in the directory.
 - If a link for the same group and pattern already exists, it is updated (not duplicated).
+
+File-versus-directory classification reads file metadata only; sharing a large
+file does not buffer its content. Existing permission authority is decoded
+strictly. Malformed or unreadable `.aeordb-permissions` data returns `500` and
+is never replaced with an empty permission set.
 
 **Example:**
 
@@ -862,7 +874,7 @@ curl -X DELETE http://localhost:6830/files/shares \
 | 400 | Empty paths, no users/groups, or invalid permissions string |
 | 403 | Non-root user attempted to share or unshare |
 | 404 | Path not found, or no matching share to revoke |
-| 500 | Internal failure writing permissions |
+| 500 | Internal storage failure or malformed/unreadable permission authority |
 
 ---
 

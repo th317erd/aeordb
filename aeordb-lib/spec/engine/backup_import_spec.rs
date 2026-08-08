@@ -981,3 +981,28 @@ fn test_sparse_patch_restore_mode_rejects_nonempty_target_before_mutation() {
   assert_eq!(target.head_hash().unwrap(), head_before);
   assert_eq!(target.kv_entry_count().unwrap(), entries_before);
 }
+
+#[test]
+fn restore_mode_target_emptiness_uses_registry_data_export_policy() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/incoming.txt", b"incoming", Some("text/plain")).unwrap();
+  let export_path = db_path(&source_temp, "registry-empty-target.aeordb");
+  export_full(&source, &export_path, false).unwrap();
+
+  let (concealed_target, _concealed_temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&concealed_target)
+    .store_file_buffered(&context, "/.aeordb-conflicts/item.json", b"conflict evidence", Some("application/json"))
+    .unwrap();
+  import_backup_with_mode(&context, &concealed_target, &export_path, false, true, false, ImportMode::Restore).unwrap();
+  assert_eq!(DirectoryOps::new(&concealed_target).read_file_buffered("/incoming.txt").unwrap(), b"incoming");
+
+  let (portable_target, _portable_temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&portable_target)
+    .store_file_buffered(&context, "/.aeordb-permissions", br#"{"links":[]}"#, Some("application/json"))
+    .unwrap();
+  let head_before = portable_target.head_hash().unwrap();
+  let error = import_backup_with_mode(&context, &portable_target, &export_path, false, true, false, ImportMode::Restore).unwrap_err();
+  assert!(error.to_string().contains("target database is not empty"), "unexpected error: {error}");
+  assert_eq!(portable_target.head_hash().unwrap(), head_before);
+}

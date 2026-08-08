@@ -520,16 +520,8 @@ impl WasmPluginRuntime {
         let requested_limit = args_json.get("limit").and_then(|value| value.as_u64()).and_then(|value| usize::try_from(value).ok());
         let limit = requested_limit.unwrap_or(capacity_limit).min(capacity_limit);
 
-        match dir_ops.list_directory_window(&path, offset, limit) {
+        match dir_ops.list_directory_window_strict(&path, offset, limit) {
           Ok(window) => {
-            for warning in &window.warnings {
-              tracing::warn!(
-                path = %path,
-                node_hash = %warning.node_hash_hex().unwrap_or_else(|| "inline-root".to_string()),
-                reason = %warning.reason,
-                "Plugin directory listing skipped a damaged B-tree branch"
-              );
-            }
             let mut response_bytes = 64usize;
             let mut entries = Vec::with_capacity(window.entries.len());
             let mut capacity_truncated = false;

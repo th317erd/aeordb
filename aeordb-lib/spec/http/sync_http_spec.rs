@@ -64,6 +64,20 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
   format!("Bearer {}", token)
 }
 
+fn user_bearer_token(jwt_manager: &JwtManager, user_id: Uuid) -> String {
+  let now = Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: user_id.to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  format!("Bearer {}", jwt_manager.create_token(&claims).unwrap())
+}
+
 // ===========================================================================
 // POST /sync/diff — full sync (no since_root_hash)
 // ===========================================================================
@@ -741,7 +755,7 @@ async fn test_sync_diff_filters_to_user_grants() {
   assert!(leaked.is_empty(), "/sync/diff leaked paths outside the user's grant: {:?}", leaked);
 
   // The Harlo subtree (minus the .aeordb-permissions metadata file,
-  // which is filtered by is_internal_path) should still be present.
+  // which is omitted by registry sync policy) should still be present.
   let harlo_paths: Vec<&str> =
     added.iter().map(|e| e["path"].as_str().unwrap()).filter(|p| p.starts_with("/Pictures/Family/Harlo/")).collect();
   assert!(harlo_paths.contains(&"/Pictures/Family/Harlo/photo.jpg"));
@@ -761,6 +775,31 @@ async fn test_sync_diff_filters_to_user_grants() {
     user_chunks.len(),
     root_chunks_count,
   );
+}
+
+#[tokio::test]
+async fn test_sync_diff_rejects_malformed_permission_authority() {
+  use aeordb::engine::{system_store, user::User};
+
+  let (app, jwt, engine, _tmp) = test_app();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let user = User::new("permission-corruption@example.com", Some("permission-corruption"));
+  system_store::store_user(&engine, &ctx, &user).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/readme.txt", b"visible only with valid authority", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/docs/.aeordb-permissions", b"not permission JSON", Some("application/json")).unwrap();
+
+  let response = app
+    .oneshot(
+      Request::post("/sync/diff")
+        .header("content-type", "application/json")
+        .header("authorization", user_bearer_token(&jwt, user.user_id))
+        .body(Body::from("{}"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 /// Helper: call /sync/diff with the given auth and return the

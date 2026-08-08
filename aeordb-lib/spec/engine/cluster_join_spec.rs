@@ -194,28 +194,43 @@ fn test_is_ready_cluster_with_short_key() {
 #[test]
 fn test_get_cluster_mode_standalone() {
   let (engine, _temp) = create_temp_engine_for_tests();
-  assert_eq!(get_cluster_mode(&engine), "standalone");
+  assert_eq!(get_cluster_mode(&engine).unwrap(), "standalone");
 }
 
 #[test]
 fn test_get_cluster_mode_cluster() {
   let (engine, _temp) = create_temp_engine_for_tests();
   store_peer_configs(&engine, &[make_peer_config(2)]);
-  assert_eq!(get_cluster_mode(&engine), "cluster");
+  assert_eq!(get_cluster_mode(&engine).unwrap(), "cluster");
 }
 
 #[test]
 fn test_get_cluster_mode_empty_peers_is_standalone() {
   let (engine, _temp) = create_temp_engine_for_tests();
   store_peer_configs(&engine, &[]);
-  assert_eq!(get_cluster_mode(&engine), "standalone");
+  assert_eq!(get_cluster_mode(&engine).unwrap(), "standalone");
+}
+
+#[test]
+fn test_get_cluster_mode_rejects_malformed_peer_authority() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/.aeordb-system/cluster/peers",
+      b"not versioned peer configuration",
+      Some("application/json"),
+    )
+    .unwrap();
+
+  assert!(get_cluster_mode(&engine).is_err());
 }
 
 #[test]
 fn test_get_cluster_mode_multiple_peers() {
   let (engine, _temp) = create_temp_engine_for_tests();
   store_peer_configs(&engine, &[make_peer_config(2), make_peer_config(3), make_peer_config(4)]);
-  assert_eq!(get_cluster_mode(&engine), "cluster");
+  assert_eq!(get_cluster_mode(&engine).unwrap(), "cluster");
 }
 
 #[test]
@@ -225,11 +240,11 @@ fn test_get_cluster_mode_independent_of_signing_key() {
 
   // Has signing key but no peers -> standalone.
   store_signing_key(&engine);
-  assert_eq!(get_cluster_mode(&engine), "standalone");
+  assert_eq!(get_cluster_mode(&engine).unwrap(), "standalone");
 
   // Add peers -> cluster.
   store_peer_configs(&engine, &[make_peer_config(5)]);
-  assert_eq!(get_cluster_mode(&engine), "cluster");
+  assert_eq!(get_cluster_mode(&engine).unwrap(), "cluster");
 }
 
 // ===========================================================================

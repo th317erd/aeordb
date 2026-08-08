@@ -10,7 +10,7 @@ use aeordb::engine::config_resolver::ConfigurationFamily;
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{StorageEngine, ROOT_USER_ID};
 use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
@@ -31,7 +31,7 @@ fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> ax
 fn bearer_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: "test-admin".to_string(),
+    sub: ROOT_USER_ID.to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,

@@ -16,7 +16,7 @@ use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::auth::TokenClaims;
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules};
 use crate::engine::directory_ops::{reserve_streaming_read, DirectoryOps, EngineFileStream};
-use crate::engine::errors::EngineError;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::path_utils::{file_name, normalize_path};
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::range_extract::{extract_range_from_record, RangeExtractionRequest};
@@ -213,7 +213,7 @@ fn build_batch_fetch_paths(
   for raw_path in paths {
     cancellation.check()?;
     let normalized = normalize_path(raw_path);
-    if !family_policy.generic_data_path_is_visible(&normalized)? || !can_fetch_path(state, claims, key_rules, &normalized) {
+    if !family_policy.generic_data_path_is_visible(&normalized)? || !can_fetch_path(state, claims, key_rules, &normalized)? {
       return Err(FetchBuildError::Response(StatusCode::NOT_FOUND, format!("Not found: {raw_path}")));
     }
     let mut record = match ops.get_metadata(&normalized) {
@@ -510,7 +510,7 @@ fn fetch_one_range_item(
   let normalized = normalize_path(&item.path);
 
   let visible = family_policy.generic_data_path_is_visible(&normalized).map_err(RangeFetchError::Engine)?;
-  if !visible || !can_fetch_path(state, claims, key_rules, &normalized) {
+  if !visible || !can_fetch_path(state, claims, key_rules, &normalized).map_err(RangeFetchError::Engine)? {
     return Err(RangeFetchError::Response(StatusCode::NOT_FOUND, range_error(item, "not_found", format!("Not found: {}", item.path))));
   }
 
@@ -593,26 +593,29 @@ fn range_error_value(item: &BatchFetchItem, status: &'static str, message: Strin
   serde_json::to_value(range_error(item, status, message)).unwrap_or_else(|_| serde_json::json!({"status": status}))
 }
 
-fn can_fetch_path(state: &AppState, claims: &TokenClaims, key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>, path: &str) -> bool {
+fn can_fetch_path(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  path: &str,
+) -> EngineResult<bool> {
   if let Some(rules) = key_rules {
     if !rules.is_empty() {
-      return match match_rules(rules, path) {
+      return Ok(match match_rules(rules, path) {
         Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
         None => false,
-      };
+      });
     }
   }
 
   if claims.sub.starts_with("share:") {
-    return true;
+    return Ok(true);
   }
 
-  let Ok(user_id) = uuid::Uuid::parse_str(&claims.sub) else {
-    return false;
-  };
+  let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|error| EngineError::InvalidInput(format!("invalid user identity: {error}")))?;
   let permissions = RoutePermissionChecker::for_user(state, user_id);
   if permissions.is_root() {
-    return true;
+    return Ok(true);
   }
 
   permissions.has_direct_permission(path, CrudlifyOp::Read)

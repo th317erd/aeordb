@@ -1916,7 +1916,7 @@ impl<'a> IndexManager<'a> {
     let indexes_dir = Self::indexes_dir_path(path);
     let ops = DirectoryOps::new(self.engine);
 
-    match ops.list_directory(&indexes_dir) {
+    match ops.list_directory_strict(&indexes_dir) {
       Ok(children) => {
         let field_names: Vec<String> = children
           .iter()
@@ -2380,7 +2380,7 @@ impl<'a> IndexManager<'a> {
   /// `.aeordb-indexes` segment, and returns a deduplicated, sorted list.
   pub fn discover_indexed_directories(&self, base_path: &str) -> EngineResult<Vec<String>> {
     use std::collections::BTreeSet;
-    use crate::engine::directory_listing::list_directory_recursive;
+    use crate::engine::directory_listing::list_directory_recursive_strict;
 
     let mut indexed_dirs = BTreeSet::new();
 
@@ -2393,30 +2393,21 @@ impl<'a> IndexManager<'a> {
 
     // Recursively list all files. Files inside .aeordb-indexes directories have
     // paths like `/some/dir/.aeordb-indexes/field.trigram.idx`. We extract
-    // `/some/dir` from those paths. If the recursive walk fails (e.g., malformed
-    // directory entry after KV expansion), log the error and return whatever we
-    // found from the base path scan — partial results are better than a total failure.
-    match list_directory_recursive(self.engine, base_path, -1, None, None) {
-      Ok(entries) => {
-        for entry in &entries {
-          if let Some(idx_pos) = entry.path.find("/.aeordb-indexes/") {
-            let parent = &entry.path[..idx_pos];
-            let dir = if parent.is_empty() { "/" } else { parent };
-            indexed_dirs.insert(dir.to_string());
-          }
-        }
-      }
-      Err(e) => {
-        tracing::warn!(base_path, "discover_indexed_directories: recursive scan failed ({}). Returning base-path results only.", e,);
+    // `/some/dir` from those paths. This inventory is query authority, so a
+    // damaged branch must fail instead of becoming a partial owner set.
+    for entry in list_directory_recursive_strict(self.engine, base_path, -1, None, None)? {
+      if let Some(idx_pos) = entry.path.find("/.aeordb-indexes/") {
+        let parent = &entry.path[..idx_pos];
+        let dir = if parent.is_empty() { "/" } else { parent };
+        indexed_dirs.insert(dir.to_string());
       }
     }
 
-    if let Ok(buffer) = self.lock_buffer() {
-      for parent in buffer.indexed_parents() {
-        let normalized_base = crate::engine::path_utils::normalize_path(base_path);
-        if parent == normalized_base || parent.starts_with(&format!("{}/", normalized_base.trim_end_matches('/'))) {
-          indexed_dirs.insert(parent);
-        }
+    let buffer = self.lock_buffer()?;
+    for parent in buffer.indexed_parents() {
+      let normalized_base = crate::engine::path_utils::normalize_path(base_path);
+      if parent == normalized_base || parent.starts_with(&format!("{}/", normalized_base.trim_end_matches('/'))) {
+        indexed_dirs.insert(parent);
       }
     }
 
