@@ -733,7 +733,8 @@ fn wave_one_entrypoints_cannot_reintroduce_split_namespace_authority() {
   let entrypoints = [
     ("finalize_file_with_content_hash", "execute_file_publication"),
     ("store_file_internal_inner", "execute_file_publication"),
-    ("delete_file", "execute_namespace_mutation"),
+    ("delete_file", "delete_files_batch_with_kind"),
+    ("delete_files_batch_with_kind", "execute_optional_namespace_mutation"),
     ("delete_directory", "execute_namespace_mutation"),
     ("create_directory", "execute_namespace_mutation"),
     ("migrate_file_record_to_current_version_inner", "execute_optional_namespace_mutation"),

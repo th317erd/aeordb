@@ -972,7 +972,6 @@ pub struct DirectoryOps<'a> {
 enum DirectoryMutationCounterEffect {
   None,
   FileWrite { previous_size: Option<u64>, new_size: u64, throughput_bytes: u64 },
-  FileDelete { size: u64 },
   DirectoryCreate,
   DirectoryDelete,
   SymlinkWrite { existed: bool },
@@ -1331,7 +1330,6 @@ impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
       DirectoryMutationCounterEffect::FileWrite { previous_size, new_size, throughput_bytes } => {
         self.engine.counters().record_file_write(*previous_size, *new_size, *throughput_bytes);
       }
-      DirectoryMutationCounterEffect::FileDelete { size } => self.engine.counters().record_file_delete(*size),
       DirectoryMutationCounterEffect::DirectoryCreate => self.engine.counters().record_directory_create(),
       DirectoryMutationCounterEffect::DirectoryDelete => self.engine.counters().record_directory_delete(),
       DirectoryMutationCounterEffect::SymlinkWrite { existed } => self.engine.counters().record_symlink_write(*existed),
@@ -1430,6 +1428,36 @@ pub struct JsonMergedFile {
 pub struct JsonMergeBatchResult {
   pub merged: usize,
   pub files: Vec<JsonMergedFile>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FileDeletionRequirement {
+  /// If this file is absent, publish nothing and report an empty result.
+  Primary,
+  /// If this file is absent while the primary is present, fail the operation.
+  Required,
+  /// If this file is absent while the primary is present, continue without it.
+  Optional,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FileDeletionRequest {
+  pub path: String,
+  pub requirement: FileDeletionRequirement,
+}
+
+impl FileDeletionRequest {
+  pub(crate) fn primary(path: impl Into<String>) -> Self {
+    Self { path: path.into(), requirement: FileDeletionRequirement::Primary }
+  }
+
+  pub(crate) fn required(path: impl Into<String>) -> Self {
+    Self { path: path.into(), requirement: FileDeletionRequirement::Required }
+  }
+
+  pub(crate) fn optional(path: impl Into<String>) -> Self {
+    Self { path: path.into(), requirement: FileDeletionRequirement::Optional }
+  }
 }
 
 impl<'a> DirectoryOps<'a> {
@@ -2601,12 +2629,10 @@ impl<'a> DirectoryOps<'a> {
   /// Takes an auto-snapshot before delete (throttled to once per minute).
   pub fn delete_file(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
     let normalized = normalize_path(path);
-    let algo = self.engine.hash_algo();
 
     // Verify the file exists FIRST — before auto-snapshot or any side-effect.
     // A delete of a nonexistent file must produce zero observable side-effects:
     // no auto-snapshot, no event, no counter changes.
-    let file_key = file_path_hash(&normalized, &algo)?;
     if self.resolve_current_file_record_from(self.engine, &normalized)?.is_none() {
       return Err(EngineError::NotFound(normalized));
     }
@@ -2617,38 +2643,127 @@ impl<'a> DirectoryOps<'a> {
       self.auto_snapshot_before_delete(ctx);
     }
 
-    self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
-      let (previous_identity, record) =
-        self.resolve_current_file_record_from(planning_engine, &normalized)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
-      let sys_flags = v0_system_entry_flags(&normalized);
-      let deletion = DeletionRecord::new(normalized.clone(), None);
-      let deletion_key = deletion_record_hash(&normalized, deletion.deleted_at, &algo)?;
-      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::FileDelete);
-      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), sys_flags)?;
-      if planning_engine.has_entry(&file_key)? {
-        batch.retire_locator(file_key.clone())?;
-      }
-      batch.add_source_identity(NamespaceMutationSourceIdentity {
-        path: normalized.clone(),
-        entry_type: Some(EntryType::FileRecord.to_u8()),
-        previous_identity: Some(previous_identity),
-        new_identity: None,
-      })?;
+    let deleted =
+      self.delete_files_batch_with_kind(ctx, vec![FileDeletionRequest::required(normalized.clone())], NamespaceMutationKind::FileDelete)?;
+    if deleted.as_slice() != [normalized.as_str()] {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("single-file delete for '{normalized}' did not report exactly one deleted path"),
+      });
+    }
+    Ok(())
+  }
 
-      let entry_data = EntryEventData {
-        path: normalized.clone(),
-        entry_type: "file".to_string(),
-        content_type: record.content_type.clone(),
-        size: record.total_size,
-        hash: record.content_hash_hex(),
-        created_at: record.created_at,
-        updated_at: record.updated_at,
-        previous_hash: None,
-      };
-      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::FileDelete { size: record.total_size });
-      effects.events.push((EVENT_ENTRIES_DELETED, serde_json::json!({"entries": [entry_data]})));
-      self.plan_remove_from_parent_directory(&mut batch, &normalized, &mut effects)?;
-      Ok((batch, (), effects))
+  /// Delete a related set of files under one namespace acknowledgement.
+  ///
+  /// At most one request may be marked [`FileDeletionRequirement::Primary`].
+  /// If that primary is absent, no companion is inspected or deleted. This is
+  /// useful for compound authorities such as a user and its managed group,
+  /// where an absent owner preserves the existing `false`/no-op contract.
+  pub(crate) fn delete_files_batch_with_kind(
+    &self,
+    context: &RequestContext,
+    requests: Vec<FileDeletionRequest>,
+    kind: NamespaceMutationKind,
+  ) -> EngineResult<Vec<String>> {
+    if requests.is_empty() {
+      return Err(EngineError::InvalidInput("No files provided for batch deletion".to_string()));
+    }
+
+    let primary_count = requests.iter().filter(|request| request.requirement == FileDeletionRequirement::Primary).count();
+    if primary_count > 1 {
+      return Err(EngineError::InvalidInput("Batch deletion accepts at most one primary file".to_string()));
+    }
+
+    let mut normalized_requests = Vec::with_capacity(requests.len());
+    let mut seen_paths = std::collections::HashSet::with_capacity(requests.len());
+    for request in requests {
+      let normalized = normalize_path(&request.path);
+      if normalized == "/" {
+        return Err(EngineError::InvalidInput("Cannot delete the root path as a file".to_string()));
+      }
+      if !seen_paths.insert(normalized.clone()) {
+        return Err(EngineError::InvalidInput(format!("Duplicate batch deletion path: {normalized}")));
+      }
+      normalized_requests.push(FileDeletionRequest { path: normalized, requirement: request.requirement });
+    }
+
+    self.execute_optional_namespace_mutation(Some(context), move |planning_engine| {
+      if let Some(primary) = normalized_requests.iter().find(|request| request.requirement == FileDeletionRequirement::Primary) {
+        let Some(reference) = self.current_entry_reference_from(planning_engine, &primary.path)? else {
+          return Ok((None, Vec::new()));
+        };
+        if reference.entry_type != EntryType::FileRecord {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("batch deletion primary '{}' resolves to {:?} instead of FileRecord", primary.path, reference.entry_type),
+          });
+        }
+      }
+
+      let algorithm = planning_engine.hash_algo();
+      let mut batch = NamespaceMutationBatch::new(kind);
+      let mut planner = DirectoryMutationPlanner::default();
+      let mut counter_delta = DirectoryMutationCounterDelta::default();
+      let mut deleted_paths = Vec::with_capacity(normalized_requests.len());
+      let mut deleted_events = Vec::with_capacity(normalized_requests.len());
+      let mut metadata_index_removal_paths = Vec::with_capacity(normalized_requests.len());
+
+      for request in &normalized_requests {
+        let Some(reference) = self.current_entry_reference_from(planning_engine, &request.path)? else {
+          match request.requirement {
+            FileDeletionRequirement::Required => return Err(EngineError::NotFound(request.path.clone())),
+            FileDeletionRequirement::Primary | FileDeletionRequirement::Optional => continue,
+          }
+        };
+        if reference.entry_type != EntryType::FileRecord {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("batch deletion path '{}' resolves to {:?} instead of FileRecord", request.path, reference.entry_type),
+          });
+        }
+        let (previous_identity, record) =
+          self.resolve_current_file_record_from(planning_engine, &request.path)?.ok_or_else(|| EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("batch deletion FileRecord '{}' disappeared during authoritative planning", request.path),
+          })?;
+        let file_key = file_path_hash(&request.path, &algorithm)?;
+        let deletion = DeletionRecord::new(request.path.clone(), None);
+        let deletion_key = deletion_record_hash(&request.path, deletion.deleted_at, &algorithm)?;
+        batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&request.path))?;
+        if planning_engine.has_entry(&file_key)? {
+          batch.retire_locator(file_key)?;
+        }
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: request.path.clone(),
+          entry_type: Some(EntryType::FileRecord.to_u8()),
+          previous_identity: Some(previous_identity),
+          new_identity: None,
+        })?;
+        planner.remove_child(&request.path)?;
+        counter_delta.file_delete_sizes.push(record.total_size);
+        metadata_index_removal_paths.push(request.path.clone());
+        deleted_events.push(EntryEventData {
+          path: request.path.clone(),
+          entry_type: "file".to_string(),
+          content_type: record.content_type.clone(),
+          size: record.total_size,
+          hash: record.content_hash_hex(),
+          created_at: record.created_at,
+          updated_at: record.updated_at,
+          previous_hash: None,
+        });
+        deleted_paths.push(request.path.clone());
+      }
+
+      if deleted_paths.is_empty() {
+        return Ok((None, deleted_paths));
+      }
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(counter_delta));
+      effects.metadata_index_removal_paths = metadata_index_removal_paths;
+      effects.events.push((EVENT_ENTRIES_DELETED, serde_json::json!({ "entries": deleted_events })));
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((Some((batch, effects)), deleted_paths))
     })
   }
 

@@ -5,7 +5,7 @@ use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::merge::MergeOp;
 use aeordb::engine::symlink_record::SymlinkRecord;
 use aeordb::engine::sync_apply::apply_merge_operations;
-use aeordb::engine::{BufferedFile, DirectoryOps, EventBus, RequestContext, StorageEngine, VersionManager};
+use aeordb::engine::{system_store, BufferedFile, DirectoryOps, EventBus, RequestContext, StorageEngine, User, VersionManager};
 use aeordb::server::create_temp_engine_for_tests;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -106,6 +106,44 @@ async fn wave_one_entry_mutations_emit_one_exact_acknowledgement_after_hard_publ
   );
 
   assert_eq!(operation_ids.len(), 8);
+}
+
+#[tokio::test]
+async fn wave_four_user_and_auto_group_share_one_event_metric_and_acknowledgement() {
+  let (engine, bus, context, _temporary) = setup_with_events();
+  let mut receiver = bus.subscribe();
+  let user = User::new("compound-event", Some("compound-event@example.com"));
+  let user_path = format!("/.aeordb-system/users/{}", user.user_id);
+  let group_path = format!("/.aeordb-system/groups/user:{}", user.user_id);
+  let writes_before_create = engine.counters().snapshot().writes_total;
+  let sequence_before_create = engine.durability_snapshot().unwrap().next_sequence;
+
+  system_store::store_user(&engine, &context, &user).unwrap();
+
+  let created = receiver.recv().await.unwrap();
+  let create_operation_id = assert_namespace_acknowledgement(&created, "system_write");
+  assert_eq!(created.event_type, "entries_created");
+  let created_paths: std::collections::HashSet<_> =
+    created.payload["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+  assert_eq!(created_paths, std::collections::HashSet::from([user_path.as_str(), group_path.as_str()]));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before_create + 1);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before_create + 1);
+  assert!(receiver.try_recv().is_err(), "compound create emitted more than one event");
+
+  let writes_before_delete = engine.counters().snapshot().writes_total;
+  let sequence_before_delete = engine.durability_snapshot().unwrap().next_sequence;
+  assert!(system_store::delete_user(&engine, &context, &user.user_id).unwrap());
+
+  let deleted = receiver.recv().await.unwrap();
+  let delete_operation_id = assert_namespace_acknowledgement(&deleted, "system_write");
+  assert_ne!(delete_operation_id, create_operation_id);
+  assert_eq!(deleted.event_type, "entries_deleted");
+  let deleted_paths: std::collections::HashSet<_> =
+    deleted.payload["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+  assert_eq!(deleted_paths, std::collections::HashSet::from([user_path.as_str(), group_path.as_str()]));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before_delete + 1);
+  assert_eq!(engine.counters().snapshot().writes_total, writes_before_delete + 1);
+  assert!(receiver.try_recv().is_err(), "compound delete emitted more than one event");
 }
 
 async fn assert_one_wave_two_mutation<F>(

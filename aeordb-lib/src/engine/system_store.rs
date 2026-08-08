@@ -12,10 +12,12 @@ use uuid::Uuid;
 use crate::auth::api_key::ApiKeyRecord;
 use crate::auth::magic_link::MagicLinkRecord;
 use crate::auth::refresh::RefreshTokenRecord;
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::batch_commit::{BufferedFile, commit_buffered_files_with_kind};
+use crate::engine::directory_ops::{DirectoryOps, FileDeletionRequest};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
 use crate::engine::json_store::{JsonDoc, JsonStore};
+use crate::engine::namespace_mutation::NamespaceMutationKind;
 use crate::engine::peer_connection::PeerConfig;
 use crate::engine::request_context::RequestContext;
 use crate::engine::schema_version::JsonVersioned;
@@ -118,13 +120,25 @@ static USER_STORE: JsonStore<User> = JsonStore::new("/.aeordb-system/users");
 /// Automatically creates a per-user auto-group `user:{user_id}`.
 pub fn store_user(engine: &StorageEngine, ctx: &RequestContext, user: &User) -> EngineResult<()> {
   validate_user_id(&user.user_id)?;
-  USER_STORE.put(engine, ctx, &user.user_id.to_string(), user)?;
-
-  // Create per-user auto-group.
   let group_name = format!("user:{}", user.user_id);
   let auto_group = Group::new(&group_name, "crudlify", "........", "user_id", "eq", &user.user_id.to_string())?;
-  store_group(engine, ctx, &auto_group)?;
-
+  commit_buffered_files_with_kind(
+    engine,
+    ctx,
+    vec![
+      BufferedFile {
+        path: format!("/.aeordb-system/users/{}", user.user_id),
+        data: user.serialize_versioned(),
+        content_type: Some("application/json".to_string()),
+      },
+      BufferedFile {
+        path: format!("/.aeordb-system/groups/{group_name}"),
+        data: auto_group.serialize_versioned(),
+        content_type: Some("application/json".to_string()),
+      },
+    ],
+    NamespaceMutationKind::SystemWrite,
+  )?;
   Ok(())
 }
 
@@ -166,18 +180,15 @@ pub fn count_users(engine: &StorageEngine) -> EngineResult<u64> {
 /// Returns true if the user existed, false otherwise.
 pub fn delete_user(engine: &StorageEngine, ctx: &RequestContext, user_id: &Uuid) -> EngineResult<bool> {
   let ops = DirectoryOps::new(engine);
-  let path = format!("/.aeordb-system/users/{}", user_id);
-  match ops.delete_file(ctx, &path) {
-    Ok(()) => {}
-    Err(EngineError::NotFound(_)) => return Ok(false),
-    Err(error) => return Err(error),
-  }
-
-  // Delete the auto-group (best-effort).
+  let user_path = format!("/.aeordb-system/users/{}", user_id);
   let group_name = format!("user:{}", user_id);
-  let _ = delete_group(engine, ctx, &group_name);
-
-  Ok(true)
+  let group_path = format!("/.aeordb-system/groups/{group_name}");
+  let deleted_paths = ops.delete_files_batch_with_kind(
+    ctx,
+    vec![FileDeletionRequest::primary(user_path.clone()), FileDeletionRequest::optional(group_path)],
+    NamespaceMutationKind::SystemWrite,
+  )?;
+  Ok(deleted_paths.iter().any(|path| path == &user_path))
 }
 
 // ---------------------------------------------------------------------------

@@ -448,7 +448,7 @@ system_store::store_config(&engine, &ctx, "my_key", b"my_value").unwrap();
 let value = system_store::get_config(&engine, "my_key").unwrap();
 
 // User management
-let user = aeordb::engine::User::new("alice", "alice@example.com");
+let user = aeordb::engine::User::new("alice", Some("alice@example.com"));
 system_store::store_user(&engine, &ctx, &user).unwrap();
 let users = system_store::list_users(&engine).unwrap();
 
@@ -456,6 +456,13 @@ let users = system_store::list_users(&engine).unwrap();
 system_store::store_api_key(&engine, &ctx, &key_record).unwrap();
 let keys = system_store::list_api_keys(&engine).unwrap();
 ```
+
+`store_user` publishes the user and its deterministic `user:{uuid}` automatic
+group under one hard namespace acknowledgement. `delete_user` retires the same
+pair under one acknowledgement; if the user is absent it returns `false` and
+does not delete an orphan companion, while an already-absent automatic group is
+accepted for compatibility. Each successful compound operation emits one
+`system_write` event and counts as one logical write.
 
 ## Virtual Clock
 

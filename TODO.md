@@ -401,7 +401,11 @@
     - [ ] P2e Wave 4: converge system and plugin producers on one namespace mutation and locator authority.
       - [ ] Prevent detached portable plugin state from producing the same concurrent-create conflict on every peer-sync cycle after checkpoints advance.
       - [x] Converge detached task rows and the task registry on one hard-acknowledged stable-locator batch for enqueue, lifecycle transitions, recovery, and pruning.
-      - [ ] Converge compound user/group creation and deletion without best-effort partial authority.
+      - [x] Converge compound user/group creation and deletion without best-effort partial authority.
+        - [x] Prove user plus automatic-group creation and deletion each cross exactly one hard publication frontier while preserving v3 JSON bytes and paths.
+        - [x] Prove hard-waiter pressure and wrong-type/corrupt automatic-group authority leave both members unchanged; an absent optional automatic group still permits user deletion.
+        - [x] Add one coordinator-owned buffered publication and planned file-retirement path, remove the best-effort delete squelch, and source-gate the compound producer.
+        - [x] Run focused user/system/namespace, adjacent auth/permissions/sharing/restart, static, and disposable live restart/verify proof before landing.
       - [ ] Convert keys, permissions, shares, config, plugins, peers, conflicts, cron, and legacy system-path migration adapters.
       - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [ ] Add typed recursion suppression for ControlStore detail records without string-path exceptions.

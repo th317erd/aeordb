@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+use aeordb::engine::schema_version::JsonVersioned;
 use aeordb::engine::{RequestContext, StorageEngine, User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 use aeordb::engine::system_store;
+use aeordb::engine::DirectoryOps;
 use aeordb::server::create_temp_engine_for_tests;
 
 fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
@@ -141,6 +144,107 @@ fn test_store_and_get_user() {
 }
 
 #[test]
+fn store_user_publishes_user_and_auto_group_at_one_hard_frontier() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let user = User::new("one_frontier", Some("one-frontier@example.com"));
+  let before = engine.durability_snapshot().unwrap();
+
+  system_store::store_user(&engine, &context, &user).unwrap();
+
+  let after = engine.durability_snapshot().unwrap();
+  assert_eq!(after.next_sequence, before.next_sequence + 1);
+  assert!(after.hard_frontier > before.hard_frontier);
+  assert!(system_store::get_user(&engine, &user.user_id).unwrap().is_some());
+  assert!(system_store::get_group(&engine, &format!("user:{}", user.user_id)).unwrap().is_some());
+}
+
+#[test]
+fn store_user_preserves_versioned_user_and_group_bytes() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let user = User::new("byte_contract", Some("byte-contract@example.com"));
+
+  system_store::store_user(&engine, &context, &user).unwrap();
+
+  let group_name = format!("user:{}", user.user_id);
+  let group = system_store::get_group(&engine, &group_name).unwrap().unwrap();
+  let operations = DirectoryOps::new(&engine);
+  assert_eq!(operations.read_file_buffered(&format!("/.aeordb-system/users/{}", user.user_id)).unwrap(), user.serialize_versioned());
+  assert_eq!(operations.read_file_buffered(&format!("/.aeordb-system/groups/{group_name}")).unwrap(), group.serialize_versioned());
+}
+
+#[test]
+fn store_user_refuses_before_publishing_either_member_under_waiter_pressure() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let user = User::new("create_pressure", None);
+  let group_name = format!("user:{}", user.user_id);
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let remaining = snapshot.policy.unwrap().emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+  let pressure = memory
+    .reserve(MemoryOwner::DurabilityWaiters, remaining.saturating_sub(1), AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite))
+    .unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(system_store::store_user(&engine, &context, &user).is_err());
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  drop(pressure);
+  assert!(system_store::get_user(&engine, &user.user_id).unwrap().is_none());
+  assert!(system_store::get_group(&engine, &group_name).unwrap().is_none());
+  system_store::store_user(&engine, &context, &user).unwrap();
+}
+
+#[test]
+fn store_user_rejects_wrong_type_auto_group_without_overwriting_user() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let mut user = User::new("original_user", None);
+  let group_name = format!("user:{}", user.user_id);
+  let group_path = format!("/.aeordb-system/groups/{group_name}");
+  system_store::store_user(&engine, &context, &user).unwrap();
+  assert!(system_store::delete_group(&engine, &context, &group_name).unwrap());
+  DirectoryOps::new(&engine).create_directory(&context, &group_path).unwrap();
+  user.username = "must_not_publish".to_string();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(system_store::store_user(&engine, &context, &user).is_err());
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(system_store::get_user(&engine, &user.user_id).unwrap().unwrap().username, "original_user");
+  assert!(DirectoryOps::new(&engine).list_directory_strict(&group_path).is_ok());
+}
+
+#[test]
+fn concurrent_store_and_delete_leave_a_complete_user_pair() {
+  let (engine, _temporary) = setup();
+  let user = User::new("concurrent_pair", Some("concurrent-pair@example.com"));
+
+  std::thread::scope(|scope| {
+    for worker in 0..6 {
+      let engine = Arc::clone(&engine);
+      let user = user.clone();
+      scope.spawn(move || {
+        let context = RequestContext::system();
+        for iteration in 0..12 {
+          if (worker + iteration) % 2 == 0 {
+            system_store::store_user(&engine, &context, &user).unwrap();
+          } else {
+            system_store::delete_user(&engine, &context, &user.user_id).unwrap();
+          }
+        }
+      });
+    }
+  });
+
+  let user_exists = system_store::get_user(&engine, &user.user_id).unwrap().is_some();
+  let group_exists = system_store::get_group(&engine, &format!("user:{}", user.user_id)).unwrap().is_some();
+  assert_eq!(user_exists, group_exists, "concurrent compound operations left a partial user/group pair");
+}
+
+#[test]
 fn test_get_user_not_found() {
   let (engine, _temp_dir) = setup();
 
@@ -227,6 +331,80 @@ fn test_delete_user() {
 
   let result = system_store::get_user(&engine, &user.user_id).expect("get user should not error");
   assert!(result.is_none());
+}
+
+#[test]
+fn delete_user_publishes_user_and_auto_group_at_one_hard_frontier() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let user = User::new("delete_one_frontier", None);
+  system_store::store_user(&engine, &context, &user).unwrap();
+  let before = engine.durability_snapshot().unwrap();
+
+  assert!(system_store::delete_user(&engine, &context, &user.user_id).unwrap());
+
+  let after = engine.durability_snapshot().unwrap();
+  assert_eq!(after.next_sequence, before.next_sequence + 1);
+  assert!(after.hard_frontier > before.hard_frontier);
+  assert!(system_store::get_user(&engine, &user.user_id).unwrap().is_none());
+  assert!(system_store::get_group(&engine, &format!("user:{}", user.user_id)).unwrap().is_none());
+}
+
+#[test]
+fn delete_user_refuses_before_changing_either_member_under_waiter_pressure() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let user = User::new("delete_pressure", None);
+  let group_name = format!("user:{}", user.user_id);
+  system_store::store_user(&engine, &context, &user).unwrap();
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let remaining = snapshot.policy.unwrap().emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+  let pressure = memory
+    .reserve(MemoryOwner::DurabilityWaiters, remaining.saturating_sub(1), AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite))
+    .unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(system_store::delete_user(&engine, &context, &user.user_id).is_err());
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  drop(pressure);
+  assert!(system_store::get_user(&engine, &user.user_id).unwrap().is_some());
+  assert!(system_store::get_group(&engine, &group_name).unwrap().is_some());
+  assert!(system_store::delete_user(&engine, &context, &user.user_id).unwrap());
+}
+
+#[test]
+fn delete_user_rejects_wrong_type_auto_group_before_removing_user() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let user = User::new("wrong_type_group", None);
+  let group_name = format!("user:{}", user.user_id);
+  let group_path = format!("/.aeordb-system/groups/{group_name}");
+  system_store::store_user(&engine, &context, &user).unwrap();
+  assert!(system_store::delete_group(&engine, &context, &group_name).unwrap());
+  DirectoryOps::new(&engine).create_directory(&context, &group_path).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = system_store::delete_user(&engine, &context, &user.user_id).expect_err("wrong-type companion must fail the pair deletion");
+
+  assert!(error.to_string().contains("group") || error.to_string().contains("FileRecord"), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(system_store::get_user(&engine, &user.user_id).unwrap().is_some());
+  assert!(DirectoryOps::new(&engine).list_directory_strict(&group_path).is_ok());
+}
+
+#[test]
+fn delete_user_accepts_an_already_absent_optional_auto_group() {
+  let context = RequestContext::system();
+  let (engine, _temporary) = setup();
+  let user = User::new("missing_optional_group", None);
+  let group_name = format!("user:{}", user.user_id);
+  system_store::store_user(&engine, &context, &user).unwrap();
+  assert!(system_store::delete_group(&engine, &context, &group_name).unwrap());
+
+  assert!(system_store::delete_user(&engine, &context, &user.user_id).unwrap());
+  assert!(system_store::get_user(&engine, &user.user_id).unwrap().is_none());
 }
 
 #[test]
@@ -392,4 +570,31 @@ fn test_delete_nonexistent_user_does_not_error() {
 
   let result = system_store::delete_user(&engine, &ctx, &uuid::Uuid::new_v4());
   assert!(result.is_ok());
+}
+
+#[test]
+fn compound_user_authority_has_no_sequential_or_squelched_storage_path() {
+  fn function_source(source: &str, name: &str) -> String {
+    let marker = format!("pub fn {name}");
+    let start = source.find(&marker).unwrap_or_else(|| panic!("missing system_store function {name}"));
+    let remaining = &source[start + marker.len()..];
+    let end = remaining.find("\npub fn ").unwrap_or(remaining.len());
+    remaining[..end].to_string()
+  }
+
+  let source = include_str!("../../src/engine/system_store.rs");
+  let store_user = function_source(source, "store_user");
+  let delete_user = function_source(source, "delete_user");
+
+  assert!(store_user.contains("commit_buffered_files_with_kind"), "compound user creation must use one buffered namespace batch");
+  assert!(
+    !store_user.contains("USER_STORE.put") && !store_user.contains("store_group("),
+    "user creation must not publish before its group"
+  );
+  assert!(delete_user.contains("delete_files_batch_with_kind"), "compound user deletion must use one planned namespace batch");
+  assert!(
+    !delete_user.contains("delete_group(") && !delete_user.contains("ops.delete_file("),
+    "user deletion must not publish pair members separately"
+  );
+  assert!(!delete_user.contains("let _ ="), "automatic-group deletion failures must not be discarded");
 }
