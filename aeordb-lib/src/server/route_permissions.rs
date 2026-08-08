@@ -5,10 +5,27 @@ use axum::{
 use uuid::Uuid;
 
 use crate::auth::TokenClaims;
+use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::user::is_root;
-use crate::server::responses::ErrorResponse;
+use crate::engine::SystemFamilyPolicyResolver;
+use crate::server::responses::{engine_error_response, ErrorResponse};
 use crate::server::state::AppState;
+
+/// Enforce the registry's generic-data visibility policy while preserving the
+/// public API's concealment contract for known protected state.
+pub fn require_generic_data_path(state: &AppState, path: &str) -> Result<(), Response> {
+  let selection = SystemFamilyPolicyResolver::new(state.engine.hash_algo())
+    .and_then(|resolver| resolver.generic_data_path_selection(path))
+    .map_err(|error| engine_error_response("Failed to classify data path", &error))?;
+
+  match selection {
+    GenericDataPathSelection::Include => Ok(()),
+    GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer => {
+      Err(ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response())
+    }
+  }
+}
 
 pub fn reject_share_key(claims: &TokenClaims, message: &'static str) -> Result<(), Response> {
   if claims.sub.starts_with("share:") {

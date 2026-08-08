@@ -11,6 +11,7 @@ use crate::auth::jwt::TokenClaims;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted, operation_to_flag_char, KeyRule};
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::server::responses::ErrorResponse;
+use crate::server::route_permissions::require_generic_data_path;
 use crate::server::state::AppState;
 
 /// Extension type for passing active API key rules to downstream handlers.
@@ -102,18 +103,18 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
     }
   };
 
-  // System paths (/.aeordb-system/, /.aeordb-config/) are invisible through
-  // the HTTP file APIs for ALL users including root — the system_store
-  // module is the only legitimate access point. Return 404 (not 403) so
-  // callers cannot enumerate which system paths exist.
+  // Registry-concealed state is invisible through ordinary file APIs for all
+  // users, including root. Return 404 so callers cannot enumerate known
+  // protected paths; unknown protected families fail through the typed policy
+  // error path instead of being reinterpreted as user data.
   //
   // engine_path is the post-/files/ remainder, so a request to
   // `/files/.aeordb-system/...` has engine_path = `.aeordb-system/...`
   // (without the leading slash). Construct the canonical absolute form for
   // the check.
   let abs_check_path = if engine_path.starts_with('/') { engine_path.to_string() } else { format!("/{}", engine_path) };
-  if crate::engine::directory_ops::is_system_path(&abs_check_path) {
-    return (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("Not found: /{}", engine_path), code: None })).into_response();
+  if let Err(response) = require_generic_data_path(&state, &abs_check_path) {
+    return response;
   }
 
   // Parse user_id from claims.sub.

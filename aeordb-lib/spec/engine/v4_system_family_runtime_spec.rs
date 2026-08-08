@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aeordb::engine::HashAlgorithm;
+use aeordb::engine::system_family_policy::GenericDataPathSelection;
+use aeordb::engine::{HashAlgorithm, SystemFamilyPolicyResolver};
 use aeordb::engine::v4::admission::{AdmissionModeV1, BinaryCapabilityProfileV1, V4AdmissionResult, admit_v4_header};
 use aeordb::engine::v4::database_header::{SelectedDatabaseHeaderV4, decode_header_region};
 use aeordb::engine::v4::system_family::{
@@ -282,6 +283,32 @@ fn shared_resolver_preserves_structure_and_rejects_unknown_protected_state() {
     .transfer_policy(SystemFamilySubjectV1::Path("/docs/.aeordb-future/value"), SystemFamilyTransferOperationV1::LogicalBackup)
     .unwrap_err();
   assert_eq!(error.code(), "unknown_protected_system_family");
+}
+
+#[test]
+fn generic_data_policy_includes_permissions_conceals_protected_state_and_rejects_unknowns() {
+  let resolver = SystemFamilyPolicyResolver::new(HashAlgorithm::Blake3_256).unwrap();
+
+  for path in ["/docs/readme.md", "/docs/.aeordb-permissions"] {
+    assert_eq!(resolver.generic_data_path_selection(path).unwrap(), GenericDataPathSelection::Include, "{path}");
+    resolver.require_generic_data_leaf_path(path).unwrap();
+  }
+
+  for path in [
+    "/.aeordb-conflicts/item.json",
+    "/.aeordb-system/api-keys/key.json",
+    "/.aeordb-system/controls/v1/index-registry/a.ctrl",
+    "/docs/.aeordb-indexes/text.idx",
+    "/docs/.aeordb-logs/index.log",
+  ] {
+    assert_eq!(resolver.generic_data_path_selection(path).unwrap(), GenericDataPathSelection::Conceal, "{path}");
+    let error = resolver.require_generic_data_leaf_path(path).unwrap_err();
+    assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "system_family_generic_data_concealed", .. }));
+  }
+
+  assert_eq!(resolver.generic_data_path_selection("/.aeordb-system").unwrap(), GenericDataPathSelection::StructuralContainer);
+  let error = resolver.generic_data_path_selection("/docs/.aeordb-future/value").unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
 }
 
 fn known_path_policy(registry: &aeordb::engine::v4::system_family::SystemFamilyRegistryV1<'_>, path: &str) -> SystemFamilyPolicyV1 {

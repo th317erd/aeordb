@@ -240,12 +240,12 @@ async fn test_system_get_returns_404_for_non_root() {
 #[tokio::test]
 async fn test_system_get_returns_404_not_403() {
   let harness = TestHarness::new();
-  harness.store_file_via_engine("/.aeordb-system/secret.bin", b"classified");
+  harness.store_file_via_engine("/.aeordb-system/config/secret.bin", b"classified");
 
   // Root user should get 404, not 403
   let request = Request::builder()
     .method("GET")
-    .uri("/files/.aeordb-system/secret.bin")
+    .uri("/files/.aeordb-system/config/secret.bin")
     .header("authorization", &harness.root_jwt)
     .body(Body::empty())
     .unwrap();
@@ -654,6 +654,55 @@ async fn test_non_system_path_accessible_to_root() {
   assert_eq!(bytes, b"root-data");
 }
 
+#[tokio::test]
+async fn test_namespace_permissions_remain_accessible_through_file_api() {
+  let harness = TestHarness::new();
+  harness.store_file_via_api("docs/.aeordb-permissions", br#"{"links":[]}"#).await;
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/files/docs/.aeordb-permissions")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = harness.app().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK, "namespace permissions are ordinary authorized data through generic APIs");
+  assert_eq!(body_bytes(response.into_body()).await, br#"{"links":[]}"#);
+}
+
+#[tokio::test]
+async fn test_conflicts_are_concealed_through_file_api() {
+  let harness = TestHarness::new();
+  harness.store_file_via_engine("/.aeordb-conflicts/item.json", b"conflict evidence");
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/files/.aeordb-conflicts/item.json")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = harness.app().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND, "conflict state is available only through its typed API");
+}
+
+#[tokio::test]
+async fn test_unknown_protected_family_is_not_treated_as_ordinary_missing_data() {
+  let harness = TestHarness::new();
+  let request = Request::builder()
+    .method("GET")
+    .uri("/files/.aeordb-future/value.json")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = harness.app().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let body = body_json(response.into_body()).await;
+  assert_eq!(body["code"], "INTERNAL_ERROR");
+}
+
 // ===========================================================================
 // 13. Nonexistent .system/ paths return 404 consistently
 // ===========================================================================
@@ -668,7 +717,7 @@ async fn test_system_nonexistent_file_returns_404_for_both() {
   // Non-root accessing nonexistent /.aeordb-system/ file -> 404
   let request = Request::builder()
     .method("GET")
-    .uri("/files/.aeordb-system/does-not-exist.json")
+    .uri("/files/.aeordb-system/config/does-not-exist.json")
     .header("authorization", &non_root_jwt)
     .body(Body::empty())
     .unwrap();
@@ -679,7 +728,7 @@ async fn test_system_nonexistent_file_returns_404_for_both() {
   // Root accessing nonexistent /.aeordb-system/ file -> also 404
   let request = Request::builder()
     .method("GET")
-    .uri("/files/.aeordb-system/does-not-exist.json")
+    .uri("/files/.aeordb-system/config/does-not-exist.json")
     .header("authorization", &harness.root_jwt)
     .body(Body::empty())
     .unwrap();

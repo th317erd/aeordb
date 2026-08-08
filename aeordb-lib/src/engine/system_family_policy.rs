@@ -31,6 +31,18 @@ pub(crate) enum TransferPathSelection {
   StructuralContainer,
 }
 
+/// Visibility of one namespace path through ordinary data APIs.
+///
+/// This deliberately preserves structural containers as a distinct outcome:
+/// callers may traverse them to reach selected children, but may not expose or
+/// mutate them as ordinary leaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenericDataPathSelection {
+  Include,
+  Conceal,
+  StructuralContainer,
+}
+
 impl SystemFamilyPolicyResolver {
   pub fn new(algorithm: HashAlgorithm) -> EngineResult<Self> {
     let inner = SystemFamilyPolicyResolverV1::embedded(algorithm).map_err(system_family_error)?;
@@ -92,6 +104,31 @@ impl SystemFamilyPolicyResolver {
 
   pub fn transfer_path_is_included(self, path: &str, operation: SystemFamilyTransferOperationV1) -> EngineResult<bool> {
     Ok(!matches!(self.transfer_path_selection(path, operation)?, TransferPathSelection::Omit))
+  }
+
+  /// Select one path for an ordinary data API using the registry's frozen
+  /// `DataExport` policy. Unknown protected families remain typed errors.
+  pub fn generic_data_path_selection(self, path: &str) -> EngineResult<GenericDataPathSelection> {
+    match self.transfer_path_selection(path, SystemFamilyTransferOperationV1::DataExport)? {
+      TransferPathSelection::Include => Ok(GenericDataPathSelection::Include),
+      TransferPathSelection::Omit => Ok(GenericDataPathSelection::Conceal),
+      TransferPathSelection::StructuralContainer => Ok(GenericDataPathSelection::StructuralContainer),
+    }
+  }
+
+  /// Require a concrete path to be legal through an ordinary data API.
+  pub fn require_generic_data_leaf_path(self, path: &str) -> EngineResult<()> {
+    match self.generic_data_path_selection(path)? {
+      GenericDataPathSelection::Include => Ok(()),
+      GenericDataPathSelection::Conceal => Err(EngineError::SystemFamilyPolicy {
+        code: "system_family_generic_data_concealed",
+        reason: format!("generic data API conceals path '{}'", normalize_path(path)),
+      }),
+      GenericDataPathSelection::StructuralContainer => Err(EngineError::SystemFamilyPolicy {
+        code: "system_family_structural_leaf",
+        reason: format!("generic data API uses structural container '{}' as a leaf", normalize_path(path)),
+      }),
+    }
   }
 
   /// Require a path to be legal as a concrete file, symlink, or deletion in a
