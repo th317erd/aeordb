@@ -51,6 +51,57 @@ pub(crate) fn conflict_metadata_file(conflict: &ConflictEntry) -> EngineResult<B
   Ok(BufferedFile { path: format!("{}/.meta", base_path), data: meta_json, content_type: Some("application/json".to_string()) })
 }
 
+/// Keep only conflicts that do not already have the exact unresolved evidence.
+///
+/// Detached v3 system families have no historical namespace root. The same
+/// divergent pair can therefore be rediscovered after peer checkpoints move.
+/// Existing evidence is the durable local acknowledgement for that pair, but
+/// it is reusable only after its metadata and immutable versions validate.
+pub(crate) fn unrecorded_conflicts(engine: &StorageEngine, conflicts: &[ConflictEntry]) -> EngineResult<Vec<ConflictEntry>> {
+  let mut unrecorded = Vec::with_capacity(conflicts.len());
+  for conflict in conflicts {
+    if !exact_conflict_is_recorded(engine, conflict)? {
+      unrecorded.push(conflict.clone());
+    }
+  }
+  Ok(unrecorded)
+}
+
+fn exact_conflict_is_recorded(engine: &StorageEngine, conflict: &ConflictEntry) -> EngineResult<bool> {
+  let normalized_path = crate::engine::path_utils::normalize_path(&conflict.path);
+  let metadata_path = conflict_metadata_path(&normalized_path);
+  let operations = DirectoryOps::new(engine);
+  let metadata = match load_conflict_metadata(&operations, &normalized_path, &metadata_path) {
+    Ok(metadata) => metadata,
+    Err(EngineError::NotFound(_)) => return Ok(false),
+    Err(error) => return Err(error),
+  };
+
+  if metadata.conflict_type != format!("{:?}", conflict.conflict_type)
+    || !stored_conflict_version_matches(&metadata.winner, &conflict.winner)
+    || !stored_conflict_version_matches(&metadata.loser, &conflict.loser)
+  {
+    return Ok(false);
+  }
+
+  for (label, version) in [("winner", &metadata.winner), ("loser", &metadata.loser)] {
+    if version.hash.is_empty() {
+      validate_conflict_tombstone(version)?;
+    } else {
+      load_conflict_version(engine, version, label, &normalized_path)?;
+    }
+  }
+  Ok(true)
+}
+
+fn stored_conflict_version_matches(stored: &StoredConflictVersion, expected: &crate::engine::merge::ConflictVersion) -> bool {
+  stored.hash == hex::encode(&expected.hash)
+    && stored.virtual_time == expected.virtual_time
+    && stored.node_id == expected.node_id
+    && stored.size == expected.size
+    && stored.content_type == expected.content_type
+}
+
 /// List all unresolved conflicts.
 ///
 /// Walks the `/.aeordb-conflicts/` directory tree recursively, collecting
@@ -219,7 +270,8 @@ fn conflict_metadata_path(normalized_path: &str) -> String {
 
 fn load_conflict_metadata(ops: &DirectoryOps<'_>, normalized_path: &str, meta_path: &str) -> EngineResult<StoredConflictMetadata> {
   let meta_data = ops.read_file_buffered(meta_path)?;
-  let meta: StoredConflictMetadata = serde_json::from_slice(&meta_data).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+  let meta: StoredConflictMetadata = serde_json::from_slice(&meta_data)
+    .map_err(|error| EngineError::JsonParseError(format!("conflict evidence '{meta_path}' is malformed: {error}")))?;
   if meta.path != normalized_path {
     return Err(EngineError::CorruptEntry {
       offset: 0,
@@ -378,6 +430,8 @@ struct StoredConflictMetadata {
 #[derive(serde::Deserialize)]
 struct StoredConflictVersion {
   hash: String,
+  virtual_time: u64,
+  node_id: u64,
   size: u64,
   content_type: Option<String>,
 }

@@ -21,6 +21,8 @@ pub struct BundledPlugin {
   pub path: &'static str,
   pub version: &'static str,
   pub author: &'static str,
+  /// Canonical release time used for both persistent plugin timestamps.
+  pub released_at_millis: i64,
   pub wasm_bytes: &'static [u8],
 }
 
@@ -33,6 +35,7 @@ pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
     path: "extract",
     version: "0.1.0",
     author: "AeorDB",
+    released_at_millis: 1_780_621_005_000,
     wasm_bytes: include_bytes!("bundled/extract.wasm"),
   },
   BundledPlugin {
@@ -41,6 +44,7 @@ pub const BUNDLED_PLUGINS: &[BundledPlugin] = &[
     path: "jq",
     version: "0.1.0",
     author: "AeorDB",
+    released_at_millis: 1_780_621_005_000,
     wasm_bytes: include_bytes!("bundled/jq.wasm"),
   },
 ];
@@ -243,6 +247,8 @@ impl PluginManager {
     for bundled in BUNDLED_PLUGINS {
       let bundled_plugin_id = bundled.plugin_id.to_string();
       let bundled_checksum = checksum_for_bytes(bundled.wasm_bytes);
+      let bundled_released_at = DateTime::<Utc>::from_timestamp_millis(bundled.released_at_millis)
+        .ok_or_else(|| PluginManagerError::InvalidPlugin(format!("bundled plugin '{}' has an invalid release timestamp", bundled.path)))?;
 
       match self.get_plugin(bundled.path)? {
         Some(existing) => {
@@ -252,7 +258,9 @@ impl PluginManager {
             || existing.version.as_deref() != Some(bundled.version)
             || existing.author.as_deref() != Some(bundled.author)
             || existing.name != bundled.name
-            || existing.plugin_type != PluginType::Wasm;
+            || existing.plugin_type != PluginType::Wasm
+            || existing.created_at != bundled_released_at
+            || existing.updated_at != bundled_released_at;
 
           if is_current_bundled_plugin && version_allows_replace && bytes_or_metadata_differ {
             let record = self.deploy_plugin_with_metadata_and_id(
@@ -263,6 +271,7 @@ impl PluginManager {
               Some(bundled.version.to_string()),
               Some(bundled.author.to_string()),
               Some(bundled_plugin_id),
+              Some(bundled_released_at),
             )?;
             installed_or_updated.push(record.to_metadata());
           } else if !is_current_bundled_plugin
@@ -280,6 +289,7 @@ impl PluginManager {
               Some(bundled.version.to_string()),
               Some(bundled.author.to_string()),
               Some(bundled_plugin_id),
+              Some(bundled_released_at),
             )?;
             installed_or_updated.push(record.to_metadata());
           } else if is_current_bundled_plugin && !version_allows_replace {
@@ -307,6 +317,7 @@ impl PluginManager {
             Some(bundled.version.to_string()),
             Some(bundled.author.to_string()),
             Some(bundled_plugin_id),
+            Some(bundled_released_at),
           )?;
           installed_or_updated.push(record.to_metadata());
         }
@@ -341,7 +352,7 @@ impl PluginManager {
     version: Option<String>,
     author: Option<String>,
   ) -> Result<PluginRecord, PluginManagerError> {
-    self.deploy_plugin_with_metadata_and_id(name, path, plugin_type, wasm_bytes, version, author, None)
+    self.deploy_plugin_with_metadata_and_id(name, path, plugin_type, wasm_bytes, version, author, None, None)
   }
 
   fn deploy_plugin_with_metadata_and_id(
@@ -353,6 +364,7 @@ impl PluginManager {
     version: Option<String>,
     author: Option<String>,
     plugin_id_override: Option<String>,
+    timestamp_override: Option<DateTime<Utc>>,
   ) -> Result<PluginRecord, PluginManagerError> {
     // Validate WASM bytes if this is a WASM plugin.
     let _plugin_memory = if plugin_type == PluginType::Wasm {
@@ -372,20 +384,22 @@ impl PluginManager {
     let plugin_id =
       plugin_id_override.or_else(|| existing.as_ref().map(|record| record.plugin_id.clone())).unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let created_at = existing.as_ref().map(|record| record.created_at);
-
     let now = Utc::now();
+    let (created_at, updated_at) = match timestamp_override {
+      Some(timestamp) => (timestamp, timestamp),
+      None => (existing.as_ref().map(|record| record.created_at).unwrap_or(now), now),
+    };
     let mut record = PluginRecord {
       plugin_id,
       name: name.to_string(),
       path: path.to_string(),
       plugin_type,
       wasm_bytes,
-      created_at: created_at.unwrap_or(now),
+      created_at,
       version,
       author,
       checksum: String::new(),
-      updated_at: now,
+      updated_at,
     };
     record.normalize_metadata();
 

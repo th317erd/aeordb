@@ -358,7 +358,6 @@ impl SyncEngine {
     // Three-way merge
     let merge_result = three_way_merge(&local_diff, &remote_diff);
     let operations_count = merge_result.operations.len();
-    let conflicts_count = merge_result.conflicts.len();
 
     // Transfer every changed remote file chunk selected by registry policy
     // and selective paths. Conflict losers need the same immutable closure as
@@ -369,10 +368,12 @@ impl SyncEngine {
     // Publish selected operations and required local conflict evidence through
     // one hard namespace receipt.
     let context = self.sync_request_context();
-    if !merge_result.operations.is_empty() || !merge_result.conflicts.is_empty() {
+    let conflicts_count = if !merge_result.operations.is_empty() || !merge_result.conflicts.is_empty() {
       apply_merge_operations_with_conflicts(&self.engine, &context, &merge_result.operations, &merge_result.conflicts, &remote_diff)
-        .map_err(|e| format!("Failed to apply merge and conflict evidence: {}", e))?;
-    }
+        .map_err(|e| format!("Failed to apply merge and conflict evidence: {}", e))?
+    } else {
+      0
+    };
 
     // Get the new local HEAD after merge
     let new_local_head = local_vm.get_head_hash().map_err(|e| format!("Failed to get post-merge HEAD: {}", e))?;
@@ -553,8 +554,7 @@ impl SyncEngine {
     )?;
     let merge_result = three_way_merge(&local_diff, &remote_diff);
     let operations_count = merge_result.operations.len();
-    let conflicts_count = merge_result.conflicts.len();
-    if !merge_result.operations.is_empty() || !merge_result.conflicts.is_empty() {
+    let conflicts_count = if !merge_result.operations.is_empty() || !merge_result.conflicts.is_empty() {
       apply_merge_operations_with_conflicts(
         &self.engine,
         &self.sync_request_context(),
@@ -562,8 +562,10 @@ impl SyncEngine {
         &merge_result.conflicts,
         &remote_diff,
       )
-      .map_err(|error| format!("Failed to atomically apply sync from peer {}: {error}", peer.node_id))?;
-    }
+      .map_err(|error| format!("Failed to atomically apply sync from peer {}: {error}", peer.node_id))?
+    } else {
+      0
+    };
     let new_local_head = vm.get_head_hash().map_err(|error| format!("Failed to get post-sync HEAD: {error}"))?;
 
     // The peer checkpoint is the final acknowledgement. It is never advanced

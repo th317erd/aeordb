@@ -8,8 +8,9 @@ use uuid::Uuid;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use aeordb::engine::system_store;
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
-use aeordb::plugins::plugin_manager::BUNDLED_PLUGINS;
+use aeordb::plugins::plugin_manager::{PluginRecord, BUNDLED_PLUGINS};
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
 
@@ -24,6 +25,68 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
 /// Rebuild the app from shared state.
 fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> axum::Router {
   create_app_with_jwt(jwt_manager.clone(), engine.clone())
+}
+
+#[test]
+fn bundled_plugins_serialize_identically_on_independent_nodes() {
+  let (engine_a, _temp_a) = create_temp_engine_for_tests();
+  let (engine_b, _temp_b) = create_temp_engine_for_tests();
+  let manager_a = PluginManager::new(engine_a.clone());
+  let manager_b = PluginManager::new(engine_b.clone());
+
+  manager_a.install_bundled_plugins().expect("install first independent bundle set");
+  std::thread::sleep(std::time::Duration::from_millis(5));
+  manager_b.install_bundled_plugins().expect("install second independent bundle set");
+
+  for bundled in BUNDLED_PLUGINS {
+    let first = system_store::get_plugin(&engine_a, bundled.path).unwrap().expect("first bundled record");
+    let second = system_store::get_plugin(&engine_b, bundled.path).unwrap().expect("second bundled record");
+    assert!(
+      first == second,
+      "bundled plugin '{}' must have one portable content identity ({} != {})",
+      bundled.path,
+      blake3::hash(&first),
+      blake3::hash(&second)
+    );
+  }
+}
+
+#[test]
+fn bundled_plugin_legacy_timestamps_are_canonicalized_once() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  manager.install_bundled_plugins().expect("install canonical bundles");
+  let bundled = BUNDLED_PLUGINS.iter().find(|plugin| plugin.path == "extract").expect("extract bundle metadata");
+
+  let stored = system_store::get_plugin(&engine, bundled.path).unwrap().expect("stored extract bundle");
+  let mut legacy: PluginRecord = serde_json::from_slice(&stored).expect("decode stored bundle");
+  legacy.created_at = chrono::Utc::now();
+  legacy.updated_at = legacy.created_at;
+  system_store::store_plugin(
+    &engine,
+    &RequestContext::system(),
+    bundled.path,
+    &serde_json::to_vec(&legacy).expect("encode legacy bundle metadata"),
+  )
+  .unwrap();
+
+  let before_canonicalization = engine.durability_snapshot().unwrap().next_sequence;
+  let changed = manager.install_bundled_plugins().expect("canonicalize legacy bundle metadata");
+  assert_eq!(changed.len(), 1);
+  assert_eq!(changed[0].plugin_id, bundled.plugin_id);
+  let after_canonicalization = engine.durability_snapshot().unwrap().next_sequence;
+  assert!(after_canonicalization > before_canonicalization);
+
+  let canonical_bytes = system_store::get_plugin(&engine, bundled.path).unwrap().expect("canonical extract bundle");
+  let canonical: PluginRecord = serde_json::from_slice(&canonical_bytes).expect("decode canonical bundle");
+  let released_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(bundled.released_at_millis).unwrap();
+  assert_eq!(canonical.created_at, released_at);
+  assert_eq!(canonical.updated_at, released_at);
+
+  let unchanged = manager.install_bundled_plugins().expect("repeat canonical bundle installation");
+  assert!(unchanged.is_empty());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, after_canonicalization);
+  assert_eq!(system_store::get_plugin(&engine, bundled.path).unwrap().unwrap(), canonical_bytes);
 }
 
 /// Create an admin Bearer token value (including "Bearer " prefix).

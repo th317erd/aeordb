@@ -13,7 +13,7 @@ use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::symlink_record::{SymlinkRecord, symlink_path_hash, symlink_content_hash};
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
-use crate::engine::merge::MergeOp;
+use crate::engine::merge::{ConflictEntry, MergeOp};
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::namespace_mutation::{
   NamespaceMutationAcknowledgement, NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind,
@@ -1687,20 +1687,25 @@ impl<'a> DirectoryOps<'a> {
   /// authority is held. A failure therefore publishes no partial HEAD,
   /// locator, counter, index, or event state. Missing delete targets are the
   /// only idempotent no-op; corruption and every other failure are surfaced.
+  /// Exact unresolved-conflict reuse is decided under the same authority so
+  /// concurrent peers cannot both record or count one winner/loser pair.
   pub fn apply_sync_merge(&self, context: &RequestContext, operations: &[MergeOp]) -> EngineResult<()> {
-    self.apply_sync_receipt(context, operations, &[], &[])
+    self.apply_sync_receipt(context, operations, &[], &[]).map(|_| ())
   }
 
   pub(crate) fn apply_sync_receipt(
     &self,
     context: &RequestContext,
     operations: &[MergeOp],
-    buffered_evidence: &[BufferedFile],
+    conflicts: &[ConflictEntry],
     immutable_versions: &[SyncImmutableVersion],
-  ) -> EngineResult<()> {
-    if operations.is_empty() && buffered_evidence.is_empty() {
-      return Ok(());
+  ) -> EngineResult<usize> {
+    if operations.is_empty() && conflicts.is_empty() {
+      return Ok(0);
     }
+
+    let evidence_candidates =
+      conflicts.iter().map(crate::engine::conflict_store::conflict_metadata_file).collect::<EngineResult<Vec<_>>>()?;
 
     let operation_bytes = operations.iter().try_fold(0u64, |total, operation| {
       let bytes = match operation {
@@ -1723,7 +1728,7 @@ impl<'a> DirectoryOps<'a> {
       .ok_or_else(|| EngineError::ResourceExhausted("sync merge planning estimate overflow".to_string()))?;
       total.checked_add(bytes).ok_or_else(|| EngineError::ResourceExhausted("sync merge planning estimate overflow".to_string()))
     })?;
-    let evidence_bytes = buffered_evidence.iter().try_fold(operation_bytes, |total, file| {
+    let evidence_bytes = evidence_candidates.iter().try_fold(operation_bytes, |total, file| {
       let bytes = file
         .path
         .len()
@@ -1766,6 +1771,27 @@ impl<'a> DirectoryOps<'a> {
     self.execute_optional_namespace_mutation(Some(context), move |planning_engine| {
       let algorithm = planning_engine.hash_algo();
       let hash_length = algorithm.hash_length();
+      let unrecorded_conflicts = crate::engine::conflict_store::unrecorded_conflicts(planning_engine, conflicts)?;
+      let buffered_evidence =
+        unrecorded_conflicts.iter().map(crate::engine::conflict_store::conflict_metadata_file).collect::<EngineResult<Vec<_>>>()?;
+      let mut unrecorded_conflict_paths_by_hash = std::collections::HashMap::new();
+      for conflict in &unrecorded_conflicts {
+        let conflict_path = normalize_path(&conflict.path);
+        for version in [&conflict.winner, &conflict.loser] {
+          if version.hash.is_empty() {
+            continue;
+          }
+          if let Some(existing_path) = unrecorded_conflict_paths_by_hash.insert(version.hash.clone(), conflict_path.clone()) {
+            if existing_path != conflict_path {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("sync conflict identity is assigned to both '{existing_path}' and '{conflict_path}'"),
+              });
+            }
+          }
+        }
+      }
+      let newly_recorded_conflicts = buffered_evidence.len();
       let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SyncApply);
       let mut planner = DirectoryMutationPlanner::default();
       let mut counter_delta = DirectoryMutationCounterDelta::default();
@@ -1779,6 +1805,19 @@ impl<'a> DirectoryOps<'a> {
 
       for version in immutable_versions {
         memory.record_work(1)?;
+        let (identity_hash, version_path) = match version {
+          SyncImmutableVersion::File { identity_hash, record } => (identity_hash, &record.path),
+          SyncImmutableVersion::Symlink { identity_hash, record } => (identity_hash, &record.path),
+        };
+        let Some(conflict_path) = unrecorded_conflict_paths_by_hash.get(identity_hash) else {
+          continue;
+        };
+        if normalize_path(version_path) != *conflict_path {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("sync conflict version path '{version_path}' does not match evidence path '{conflict_path}'"),
+          });
+        }
         match version {
           SyncImmutableVersion::File { identity_hash, record } => {
             validate_sync_file_record(planning_engine, identity_hash, record)?;
@@ -2080,7 +2119,7 @@ impl<'a> DirectoryOps<'a> {
       }
 
       if !changed {
-        return Ok((None, ()));
+        return Ok((None, newly_recorded_conflicts));
       }
       let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(counter_delta));
       effects.metadata_index_paths = metadata_index_paths;
@@ -2092,7 +2131,7 @@ impl<'a> DirectoryOps<'a> {
         effects.events.push((EVENT_ENTRIES_DELETED, serde_json::json!({ "entries": deleted_events })));
       }
       planner.finalize(self, &mut batch, &mut effects)?;
-      Ok((Some((batch, effects)), ()))
+      Ok((Some((batch, effects)), newly_recorded_conflicts))
     })
   }
 

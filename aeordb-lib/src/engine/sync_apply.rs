@@ -26,11 +26,10 @@ pub(crate) fn apply_merge_operations_with_conflicts(
   operations: &[MergeOp],
   conflicts: &[ConflictEntry],
   remote_diff: &TreeDiff,
-) -> EngineResult<()> {
+) -> EngineResult<usize> {
   validate_peer_transfer_paths(engine, operations)?;
-  let evidence = conflicts.iter().map(crate::engine::conflict_store::conflict_metadata_file).collect::<EngineResult<Vec<_>>>()?;
   let immutable_versions = remote_conflict_versions(engine, operations, conflicts, remote_diff)?;
-  DirectoryOps::new(engine).apply_sync_receipt(context, operations, &evidence, &immutable_versions)
+  DirectoryOps::new(engine).apply_sync_receipt(context, operations, conflicts, &immutable_versions)
 }
 
 fn remote_conflict_versions(

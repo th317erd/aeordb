@@ -11,6 +11,8 @@ use aeordb::engine::sync_engine::{PeerSyncState, SyncConfig, SyncEngine};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::virtual_clock::PeerClockTracker;
 use aeordb::engine::{DirectoryOps, EventBus, FileRecord, RequestContext, StorageEngine};
+use aeordb::plugins::plugin_manager::BUNDLED_PLUGINS;
+use aeordb::plugins::{PluginManager, PluginType};
 use aeordb::server::create_temp_engine_for_tests;
 use axum::extract::State;
 use axum::routing::post;
@@ -868,6 +870,131 @@ fn local_peer_sync_detects_portable_state_without_an_ordinary_file_change() {
 }
 
 #[test]
+fn independently_installed_bundled_plugins_do_not_create_peer_conflicts() {
+  let (local, _local_temp) = create_temp_engine_for_tests();
+  let (remote, _remote_temp) = create_temp_engine_for_tests();
+  store_file(&remote, "/checkpoint-base.txt", b"establish ordinary peer roots");
+  let (sync_engine, _peer_manager) = make_sync_engine(Arc::clone(&local));
+  sync_engine.sync_with_local_engine(201, &remote).unwrap();
+
+  PluginManager::new(local.clone()).install_bundled_plugins().expect("install local bundles");
+  std::thread::sleep(std::time::Duration::from_millis(5));
+  PluginManager::new(remote.clone()).install_bundled_plugins().expect("install remote bundles");
+
+  let first = sync_engine.sync_with_local_engine(201, &remote).unwrap();
+  let second = sync_engine.sync_with_local_engine(201, &remote).unwrap();
+
+  assert_eq!(first.conflicts_detected, 0, "equivalent first-party bundles are one portable value");
+  assert_eq!(second.conflicts_detected, 0, "advanced checkpoints must not recreate bundled conflicts");
+  assert!(list_conflicts(&local)
+    .unwrap()
+    .iter()
+    .all(|conflict| !conflict["path"].as_str().is_some_and(|path| path.starts_with("/.aeordb-system/plugins/"))));
+}
+
+#[test]
+fn repeated_detached_custom_plugin_conflict_reuses_exact_evidence() {
+  let (local, local_temp) = create_temp_engine_for_tests();
+  let (remote, _remote_temp) = create_temp_engine_for_tests();
+  store_file(&remote, "/checkpoint-base.txt", b"establish ordinary peer roots");
+  let (sync_engine, _peer_manager) = make_sync_engine(Arc::clone(&local));
+  sync_engine.sync_with_local_engine(202, &remote).unwrap();
+
+  let wasm = BUNDLED_PLUGINS[0].wasm_bytes.to_vec();
+  PluginManager::new(remote.clone()).deploy_plugin("custom", "custom", PluginType::Wasm, wasm.clone()).unwrap();
+  std::thread::sleep(std::time::Duration::from_millis(5));
+  PluginManager::new(local.clone()).deploy_plugin("custom", "custom", PluginType::Wasm, wasm).unwrap();
+
+  let first = sync_engine.sync_with_local_engine(202, &remote).unwrap();
+  assert_eq!(first.conflicts_detected, 1);
+  let conflicts = list_conflicts(&local).unwrap();
+  let plugin_conflict = conflicts
+    .iter()
+    .find(|conflict| conflict["path"].as_str().is_some_and(|path| path.starts_with("/.aeordb-system/plugins/")))
+    .expect("custom plugin conflict evidence");
+  let conflict_path = plugin_conflict["path"].as_str().unwrap();
+  let evidence_path = format!("/.aeordb-conflicts{conflict_path}/.meta");
+  let evidence_before = DirectoryOps::new(&local).read_file_buffered(&evidence_path).unwrap();
+
+  local.shutdown().unwrap();
+  drop(sync_engine);
+  drop(local);
+  let reopened = Arc::new(StorageEngine::open(local_temp.path().join("test.aeordb").to_str().unwrap()).unwrap());
+  let (reopened_sync_engine, _peer_manager) = make_sync_engine(reopened.clone());
+
+  let second = reopened_sync_engine.sync_with_local_engine(202, &remote).unwrap();
+
+  assert_eq!(second.conflicts_detected, 0, "an exact unresolved conflict is not newly detected twice");
+  assert_eq!(second.operations_applied, 0);
+  assert_eq!(DirectoryOps::new(&reopened).read_file_buffered(&evidence_path).unwrap(), evidence_before);
+}
+
+#[test]
+fn concurrent_peers_record_one_exact_detached_conflict() {
+  const PEER_COUNT: u64 = 8;
+  let (local, _local_temp) = create_temp_engine_for_tests();
+  let (remote, _remote_temp) = create_temp_engine_for_tests();
+  store_file(&remote, "/checkpoint-base.txt", b"establish ordinary peer roots");
+  let (sync_engine, _peer_manager) = make_sync_engine(Arc::clone(&local));
+  let sync_engine = Arc::new(sync_engine);
+  for peer_id in 300..300 + PEER_COUNT {
+    sync_engine.sync_with_local_engine(peer_id, &remote).unwrap();
+  }
+
+  let wasm = BUNDLED_PLUGINS[0].wasm_bytes.to_vec();
+  PluginManager::new(remote.clone()).deploy_plugin("custom", "custom", PluginType::Wasm, wasm.clone()).unwrap();
+  std::thread::sleep(std::time::Duration::from_millis(5));
+  PluginManager::new(local.clone()).deploy_plugin("custom", "custom", PluginType::Wasm, wasm).unwrap();
+
+  let barrier = Arc::new(std::sync::Barrier::new(PEER_COUNT as usize));
+  let results = std::thread::scope(|scope| {
+    let mut workers = Vec::new();
+    for peer_id in 300..300 + PEER_COUNT {
+      let sync_engine = Arc::clone(&sync_engine);
+      let remote = Arc::clone(&remote);
+      let barrier = Arc::clone(&barrier);
+      workers.push(scope.spawn(move || {
+        barrier.wait();
+        sync_engine.sync_with_local_engine(peer_id, &remote).unwrap()
+      }));
+    }
+    workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>()
+  });
+
+  assert_eq!(results.iter().map(|result| result.conflicts_detected).sum::<usize>(), 1);
+  assert_eq!(list_conflicts(&local).unwrap().len(), 1);
+}
+
+#[test]
+fn repeated_detached_conflict_rejects_malformed_existing_evidence() {
+  let (local, _local_temp) = create_temp_engine_for_tests();
+  let (remote, _remote_temp) = create_temp_engine_for_tests();
+  store_file(&remote, "/checkpoint-base.txt", b"establish ordinary peer roots");
+  let (sync_engine, _peer_manager) = make_sync_engine(Arc::clone(&local));
+  sync_engine.sync_with_local_engine(203, &remote).unwrap();
+
+  let wasm = BUNDLED_PLUGINS[0].wasm_bytes.to_vec();
+  PluginManager::new(remote.clone()).deploy_plugin("custom", "custom", PluginType::Wasm, wasm.clone()).unwrap();
+  std::thread::sleep(std::time::Duration::from_millis(5));
+  PluginManager::new(local.clone()).deploy_plugin("custom", "custom", PluginType::Wasm, wasm).unwrap();
+  sync_engine.sync_with_local_engine(203, &remote).unwrap();
+  let conflict_path = list_conflicts(&local).unwrap()[0]["path"].as_str().unwrap().to_string();
+  let evidence_path = format!("/.aeordb-conflicts{conflict_path}/.meta");
+  let mut malformed_evidence: serde_json::Value =
+    serde_json::from_slice(&DirectoryOps::new(&local).read_file_buffered(&evidence_path).unwrap()).unwrap();
+  malformed_evidence["winner"].as_object_mut().unwrap().remove("virtual_time");
+  let malformed_evidence = serde_json::to_vec(&malformed_evidence).unwrap();
+  DirectoryOps::new(&local)
+    .store_file_buffered(&RequestContext::system(), &evidence_path, &malformed_evidence, Some("application/json"))
+    .unwrap();
+
+  let error = sync_engine.sync_with_local_engine(203, &remote).expect_err("malformed conflict authority must fail closed");
+
+  assert!(error.contains("conflict evidence"), "unexpected error: {error}");
+  assert_eq!(DirectoryOps::new(&local).read_file_buffered(&evidence_path).unwrap(), malformed_evidence);
+}
+
+#[test]
 fn local_selective_sync_does_not_copy_chunks_outside_the_selected_paths() {
   let (engine_a, _temp_a) = create_temp_engine_for_tests();
   let (engine_b, _temp_b) = create_temp_engine_for_tests();
@@ -1709,13 +1836,22 @@ async fn remote_peer_sync_three_way_merge_retains_and_can_resolve_the_remote_los
 
   let result = sync_engine.sync_with_peer(78).await.unwrap();
 
-  stop_scripted_peer(cancellation, server).await;
   assert!(!result.changes_applied, "the newer local winner must not require a namespace replacement");
   assert_eq!(result.conflicts_detected, 1);
   assert_eq!(DirectoryOps::new(&engine).read_file_buffered(path).unwrap(), b"newer local bytes");
   let conflicts = list_conflicts(&engine).unwrap();
   assert_eq!(conflicts.len(), 1);
   assert_eq!(conflicts[0]["path"], path);
+  let evidence_path = format!("/.aeordb-conflicts{path}/.meta");
+  let evidence_before = DirectoryOps::new(&engine).read_file_buffered(&evidence_path).unwrap();
+
+  DirectoryOps::new(&engine).delete_file(&RequestContext::system(), "/.aeordb-system/sync-peers/78").unwrap();
+  let retry = sync_engine.sync_with_peer(78).await.unwrap();
+
+  stop_scripted_peer(cancellation, server).await;
+  assert_eq!(retry.conflicts_detected, 0, "the HTTP receive path must reuse exact unresolved conflict evidence");
+  assert_eq!(retry.operations_applied, 0);
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered(&evidence_path).unwrap(), evidence_before);
 
   aeordb::engine::conflict_store::resolve_conflict(&engine, &RequestContext::system(), path, "loser").unwrap();
   assert_eq!(DirectoryOps::new(&engine).read_file_buffered(path).unwrap(), b"older remote bytes");

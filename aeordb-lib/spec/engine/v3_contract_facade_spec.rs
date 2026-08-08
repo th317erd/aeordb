@@ -1291,13 +1291,23 @@ fn wave_two_chunk_staging_never_treats_an_arbitrary_kv_row_as_a_chunk() {
 fn wave_three_sync_receive_has_one_typed_namespace_and_checkpoint_authority() {
   let sync_apply = include_str!("../../src/engine/sync_apply.rs");
   assert_eq!(sync_apply.matches(".apply_sync_merge(context, operations)").count(), 1);
-  assert_eq!(sync_apply.matches(".apply_sync_receipt(context, operations, &evidence, &immutable_versions)").count(), 1);
+  assert_eq!(sync_apply.matches(".apply_sync_receipt(context, operations, conflicts, &immutable_versions)").count(), 1);
+  assert!(!sync_apply.contains("unrecorded_conflicts("));
   assert!(sync_apply.contains("remote_conflict_versions("));
   for forbidden in ["store_entry(", "store_file_buffered(", "delete_file(", "delete_symlink(", "TransactionGuard"] {
     assert!(!sync_apply.contains(forbidden), "sync_apply.rs retained forbidden independent writer token: {forbidden}");
   }
 
   let sync_engine = include_str!("../../src/engine/sync_engine.rs");
+  assert_eq!(sync_engine.matches("apply_merge_operations_with_conflicts(").count(), 2);
+
+  let directory_ops = include_str!("../../src/engine/directory_ops.rs");
+  let receipt_start = directory_ops.find("  pub(crate) fn apply_sync_receipt(").unwrap();
+  let receipt_end = directory_ops[receipt_start..].find("\n  /// Store a file at the given path").unwrap() + receipt_start;
+  let receipt = &directory_ops[receipt_start..receipt_end];
+  assert_eq!(receipt.matches("unrecorded_conflicts(planning_engine, conflicts)").count(), 1);
+  assert!(receipt.contains("unrecorded_conflict_paths_by_hash"));
+  assert!(!receipt.contains("unrecorded_conflict_paths ="));
   let transfer_start = sync_engine.find("  fn transfer_missing_remote_diff_chunks(").unwrap();
   let transfer_end = sync_engine[transfer_start..].find("\n  /// Load sync state for a peer").unwrap() + transfer_start;
   let transfer_body = &sync_engine[transfer_start..transfer_end];

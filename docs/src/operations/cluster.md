@@ -131,6 +131,16 @@ or corrupt selected data, malformed evidence, and cleanup failure are surfaced;
 they are not converted into successful resolution. Conflict evidence is local
 authority and remains omitted from peer replication.
 
+Sync results report `conflicts_detected` as the number of newly retained
+winner/loser pairs. Detached portable system families can expose the same pair
+again after peer checkpoints advance; when its exact metadata and immutable
+versions still validate, AeorDB reuses the existing local evidence and reports
+zero new conflicts. That decision and any new evidence publication are
+serialized under namespace authority, so concurrent cycles from different
+peers cannot both count or rewrite one pair. Malformed or incomplete existing
+evidence fails the sync closed instead of being silently replaced or counted as
+a fresh conflict.
+
 ## Selective Sync
 
 Configure per-peer path filters:

@@ -55,6 +55,14 @@ When two nodes modify the same file independently, AeorDB detects the conflict a
 
 Conflict records are local conflict authority and do not replicate as ordinary peer data. The winning namespace content can converge normally; operators inspect and resolve each node's retained conflict evidence through the typed conflict API.
 
+An unresolved record also acknowledges that exact winner/loser pair locally.
+If a detached portable family causes the same pair to be discovered again,
+AeorDB validates and reuses the existing metadata and immutable versions rather
+than rewriting evidence on every sync cycle. A changed pair remains a new
+conflict, and malformed retained evidence stops the receive operation. The
+reuse check and publication share namespace authority, including when different
+peers present the same pair concurrently.
+
 Conflict evidence is created in the same acknowledged namespace receipt as the selected
 winner. Both file and symlink versions are supported, including modify-versus-delete
 conflicts. Evidence retains exact immutable loser dependencies, and garbage collection treats

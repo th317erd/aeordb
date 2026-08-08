@@ -9,6 +9,8 @@ On startup, AeorDB installs these bundled plugins if they are missing. If a plug
 
 This makes checksum drift a signal, not the authority. A stored plugin at the same path with a different plugin ID is treated as user-managed and left untouched. A stored plugin with the bundled ID but a newer version is also left untouched to avoid downgrades.
 
+Bundled records use the plugin release timestamp for both `created_at` and `updated_at`, rather than the local startup time. Independently initialized nodes therefore store the same JSON bytes and content identity for the same bundled release. A current bundled record with legacy node-local timestamps is canonicalized once at startup when the ID and version replacement rules above allow it; later startups do not rewrite it.
+
 | Plugin | Plugin ID | Version | Author | Public invoke path |
 |--------|-----------|---------|--------|--------------------|
 | `extract` | `/org/aeordev/aeordb/plugins/extract` | `0.1.0` | `AeorDB` | `POST /plugins/extract/invoke` |

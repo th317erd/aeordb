@@ -399,7 +399,11 @@
       - [x] Update version, backup, sync, conflict, SSE, and operations documentation for atomic transition and acknowledgement behavior.
       - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 3 handoff.
     - [ ] P2e Wave 4: converge system and plugin producers on one namespace mutation and locator authority.
-      - [ ] Prevent detached portable plugin state from producing the same concurrent-create conflict on every peer-sync cycle after checkpoints advance.
+      - [x] Prevent detached portable plugin state from producing the same concurrent-create conflict on every peer-sync cycle after checkpoints advance.
+        - [x] Canonicalize first-party bundled plugin release metadata so independent installs produce one content identity without changing the PluginRecord schema.
+        - [x] Make the shared embedded/HTTP sync receipt reuse exact validated unresolved conflict evidence instead of rewriting and recounting it.
+        - [x] Decide evidence reuse while namespace authority is held so concurrent syncs from different peers cannot both recount or rewrite one exact pair.
+        - [x] Prove independent bundled installs, genuinely divergent custom plugins, checkpoint retry, restart, and corrupt retained evidence behavior.
       - [x] Converge detached task rows and the task registry on one hard-acknowledged stable-locator batch for enqueue, lifecycle transitions, recovery, and pruning.
       - [x] Converge compound user/group creation and deletion without best-effort partial authority.
         - [x] Prove user plus automatic-group creation and deletion each cross exactly one hard publication frontier while preserving v3 JSON bytes and paths.
