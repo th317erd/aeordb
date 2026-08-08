@@ -362,6 +362,23 @@ fn test_version_access_rejects_symlink_as_file() {
   assert!(result.is_err());
   let err_msg = format!("{}", result.unwrap_err());
   assert!(err_msg.contains("symlink"), "error should mention symlink, got: {}", err_msg);
+  assert!(err_msg.contains("file"), "error should mention the requested file type, got: {}", err_msg);
+}
+
+#[test]
+fn test_version_access_rejects_file_as_symlink() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let vm = VersionManager::new(&engine);
+
+  store_file(&engine, "/file.txt", b"not a symlink");
+  let snap = vm.create_snapshot(&ctx, "snap1", HashMap::new()).unwrap();
+
+  let error = aeordb::engine::version_access::resolve_symlink_at_version(&engine, &snap.root_hash, "/file.txt").unwrap_err();
+  let message = error.to_string();
+  assert!(message.contains("file"), "error should mention the actual file type, got: {message}");
+  assert!(message.contains("symlink"), "error should mention the requested symlink type, got: {message}");
 }
 
 #[test]

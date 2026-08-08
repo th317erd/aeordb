@@ -69,17 +69,48 @@ Chunking provides:
 - **Efficient updates**: Modifying 3 bytes of a 10GB file creates one new chunk, not a new copy of the entire file
 - **Streaming reads**: Read a file by iterating its chunk hashes and fetching each chunk
 
-## Dual-Key FileRecords
+## FileRecord Identities And Locators
 
-FileRecords are stored at two keys to support both current reads and historical versioning:
+Current FileRecords can have three keys with distinct jobs:
 
-1. **Path key** (`file:/path`) -- mutable, always points to the latest version. Used for reads, metadata, indexing, and deletion. O(1) lookup.
+1. **Content key** (`filec:` + serialized record) -- immutable identity for the exact serialized record.
+2. **File identity key** (`fileid:` + path/content type/chunk identities) -- immutable namespace identity selected by the parent directory's `ChildEntry.hash`.
+3. **Path key** (`file:/path`) -- mutable derived locator used by compatibility, maintenance, and deliberately detached system-family state.
 
-2. **Content key** (`filec:` + serialized record) -- immutable, content-addressed. The directory tree's `ChildEntry.hash` points to this key.
+Ordinary current reads, metadata, existence checks, and listings treat HEAD as
+authority. They walk the selected directory root to the file identity instead
+of trusting a mutable path locator that may belong to another retained root.
+Historical reads perform the same bounded root-to-leaf walk from the requested
+snapshot root. Consequently, restoring or promoting a root changes all current
+ordinary reads atomically without rewriting every path key.
 
-When the version manager walks a snapshot's directory tree, it follows `ChildEntry.hash` to the content key, which resolves to the FileRecord as it existed at snapshot time -- not the current version. This is what makes historical reads correct.
+Ordinary mutation planning follows the same authority. Source and destination
+checks, nested parent loads, deleted-file restore, and historical file restore
+plan from HEAD and publish dependencies, derived locators, ancestor roots, and
+the new HEAD through one hard-acknowledged namespace operation. Reads never
+repair locators as a side effect; explicit verification and repair own that
+reconciliation.
 
-Directories use the same pattern: `dir:/path` (mutable) and `dirc:` + data (immutable content key).
+Live file, directory, symlink, and logical-byte counters follow the same HEAD
+authority. Snapshot restore, fork/root promotion, and promoted import reconcile
+those counters from the selected tree only after hard acknowledgement.
+Unpromoted or conflicted imports may stage immutable payloads, but their derived
+locators cannot change live namespace counts. The HEAD walk also applies the
+generic-data SystemFamily policy: ordinary data and visible authority such as
+`.aeordb-permissions` count, concealed derived/system families do not, and
+structural containers are traversed without being counted as user directories.
+
+Some registry-defined system families deliberately live outside HEAD. Their
+stable path locators remain authoritative according to the SystemFamily policy;
+they are not silently folded into the ordinary namespace contract.
+
+Stable-locator replacement and retirement are type checked before admission.
+They cannot replace or retire a physical Chunk or Void key, even if a malformed
+caller supplies that immutable payload key as a locator.
+
+Directories use immutable content/root identities plus mutable `dir:/path`
+locators. Directory listings validate selected child headers without loading
+every FileRecord body.
 
 ## FileRecord Format
 
@@ -111,10 +142,11 @@ When a file is stored or deleted, the change propagates up the directory tree:
 Store /users/alice.json:
 
 1. Store chunks -> [hash_a, hash_b]
-2. Store FileRecord at path key + content key
+2. Store immutable FileRecord content and identity entries
 3. Update /users/ DirectoryIndex (new ChildEntry for alice.json)
 4. Update / root DirectoryIndex (new ChildEntry for users/)
 5. Update HEAD in file header (new root hash)
+6. Publish the derived path locator in the same acknowledged mutation
 ```
 
 Each directory gets a new content hash because one of its children changed. This chain of updates from leaf to root is what maintains the Merkle tree and makes versioning work.

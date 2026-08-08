@@ -4,13 +4,14 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineResult;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
+use crate::engine::system_family_policy::{GenericDataPathSelection, SystemFamilyPolicyResolver};
 
 /// Live tree metrics reachable from HEAD's root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveTreeMetrics {
   pub files: u64,
   pub directories: u64,
+  pub symlinks: u64,
   pub logical_data_size: u64,
 }
 
@@ -31,7 +32,8 @@ pub fn count_live_tree(engine: &StorageEngine) -> EngineResult<(u64, u64)> {
   Ok((metrics.files, metrics.directories))
 }
 
-/// Measure live files, directories, and logical byte size reachable from HEAD.
+/// Measure live files, directories, symlinks, and logical byte size reachable
+/// from HEAD.
 ///
 /// This walks directory entries only. File sizes come from `ChildEntry::total_size`,
 /// so it does not read file payload chunks and is safe to run during startup.
@@ -87,15 +89,26 @@ fn measure_walk(
   };
   for child in &children {
     let child_path = if current_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", current_path, child.name) };
-    family_policy.policy_for_path(&child_path, "live tree accounting")?;
+    let path_selection = family_policy.generic_data_path_selection(&child_path)?;
+    if path_selection == GenericDataPathSelection::Conceal {
+      continue;
+    }
     let entry_type = EntryType::from_u8(child.entry_type)?;
+    if path_selection == GenericDataPathSelection::StructuralContainer && entry_type != EntryType::DirectoryIndex {
+      return Err(crate::engine::errors::EngineError::SystemFamilyPolicy {
+        code: "system_family_structural_leaf",
+        reason: format!("live tree accounting found structural container '{}' as a {:?} leaf", child_path, entry_type),
+      });
+    }
     match entry_type {
       EntryType::FileRecord => {
         metrics.files += 1;
         metrics.logical_data_size = metrics.logical_data_size.saturating_add(child.total_size);
       }
       EntryType::DirectoryIndex => {
-        metrics.directories += 1;
+        if path_selection == GenericDataPathSelection::Include {
+          metrics.directories += 1;
+        }
         let Some((_header, _key, sub_value)) = engine.get_entry(&child.hash)? else {
           return Err(crate::engine::errors::EngineError::CorruptEntry {
             offset: 0,
@@ -106,7 +119,10 @@ fn measure_walk(
           measure_walk(engine, &sub_value, hash_length, &child_path, family_policy, metrics)?;
         }
       }
-      // Symlinks and other types don't contribute to file/dir counts.
+      EntryType::Symlink => {
+        metrics.symlinks += 1;
+      }
+      // Other entity types don't contribute to live namespace counts.
       _ => {}
     }
   }

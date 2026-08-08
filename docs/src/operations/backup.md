@@ -239,6 +239,30 @@ leaves before the first target write. The temporary file is removed together
 with its lock sidecar on success, refusal, malformed input, cancellation, or
 handler failure.
 
+Immutable chunks and entity bodies are staged independently from namespace
+authority. Current path locators are replaced through hard-acknowledged batches
+bounded to 256 locators or 8 MiB of retained state; an individually larger
+record is handled alone. Snapshot trees are copied as historical content and
+cannot overwrite current HEAD locators. Because ordinary reads resolve through
+HEAD, importing without `--promote` does not change the visible namespace.
+An already-occupied immutable hash is accepted as deduplicated content only
+when it resolves through an exact verified entry of the required type. A chunk,
+FileRecord, symlink, directory, B-tree node, or snapshot collision with another
+entity type is corruption and aborts import before HEAD promotion.
+When filtering requires a B-tree rebuild, AeorDB preflights every planned node
+before writing the batch. Existing nodes deduplicate only when their type,
+version, key, and bytes match exactly; one conflict leaves every other new node
+unwritten.
+
+Unless `--force` is present, a promoted import also compares HEAD at final
+publication with the root captured when import began. A concurrent acknowledged
+write therefore causes a conflict instead of being silently overwritten. A
+root-changing `imports_completed` event is emitted only after the durability
+frontier and carries the namespace operation ID and publication sequence.
+Live namespace counters are reconciled from the newly selected HEAD after that
+same acknowledgement. An unpromoted import does not change live file,
+directory, symlink, or logical-byte counts.
+
 For full exports, `entries_imported` counts selected logical objects across
 HEAD and each imported snapshot. `chunks_imported` includes only chunk payloads
 that were not already present; file and directory counts include each selected
@@ -267,7 +291,11 @@ can produce a different selected result after current policy omission. Sparse
 import counts only newly copied chunks, changed path objects, rebuilt
 directories, and applied deletions; unchanged overlay entries are not rewritten
 or counted. Each applied deletion writes durable replay evidence before its
-path alias is tombstoned, so restart and KV rebuild preserve the deletion.
+path alias is tombstoned, so restart and KV rebuild preserve the deletion. Its
+acknowledgement records the entity identity selected by the starting root, not
+the mutable path-key hash. If HEAD already omits the path but a stale live
+locator remains, import validates and retires that derived locator using its
+decoded entity identity.
 
 ### Output
 
@@ -299,7 +327,11 @@ Set a specific version hash as the current HEAD.
 aeordb promote --database data.aeordb --hash abc123def456...
 ```
 
-The command verifies that the hash exists in the database before promoting.
+The command verifies that the hash exists and resolves to a `DirectoryIndex`
+root before promoting. The root must be structurally valid, physically
+verified, and stored under its canonical content hash. The HEAD change is one
+hard-acknowledged namespace transition; arbitrary path locators, malformed
+directories, files, chunks, symlinks, or metadata hashes are rejected.
 
 ### HTTP API
 

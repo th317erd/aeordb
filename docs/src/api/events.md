@@ -87,6 +87,7 @@ Each event is a JSON object with:
 | `versions_deleted` | A snapshot/fork was deleted or abandoned | Version metadata plus namespace acknowledgement |
 | `versions_restored` | HEAD moved to a retained snapshot root | Version metadata plus namespace acknowledgement |
 | `versions_promoted` | A fork root was promoted to HEAD | Version metadata plus namespace acknowledgement |
+| `imports_completed` | A backup/patch import completed | Import counts/root metadata; root-changing promoted imports also include namespace acknowledgement fields |
 | `permissions_changed` | Permissions were updated for a path | `{"path": "..."}` |
 | `indexes_changed` | Index configuration was updated | `{"path": "..."}` |
 | `tasks_started` | A background task began execution | `{"task_id": "...", "task_type": "...", "args": {...}}` |
@@ -105,14 +106,17 @@ is durable:
 |-------|------|-------------|
 | `operation_id` | string | Unique UUID for the logical namespace mutation |
 | `publication_sequence` | integer | Exact durability sequence acknowledged by the engine |
-| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, `rename`, `restore`, `promote`, or `system_write` |
+| `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, `rename`, `restore`, `promote`, `import`, or `system_write` |
 
 AeorDB is migrating producers to this shared acknowledgement path in stages.
-File, directory, symlink, blob/buffered batch, JSON merge, copy, rename, and
-snapshot/fork producers now use it. Sync/import, other system/plugin, and
-maintenance producers may omit these three fields until their producer wave is
-converted. Clients must therefore treat them as optional during the transition,
-but must not interpret an absent field as a durability failure.
+File, directory, symlink, blob/buffered batch, JSON merge, copy, rename,
+snapshot/fork, promoted import, and explicit HEAD-promotion producers now use
+it. Sync, other system/plugin, and maintenance producers may omit these three
+fields until their producer wave is converted. An import that does not change
+HEAD, including `promote=false` and same-root no-ops, has no root-mutation
+acknowledgement to attach. Clients must therefore treat the fields as optional
+during the transition, but must not interpret an absent field as a durability
+failure.
 
 A logical mutation can emit more than one relationship event. File and symlink
 rename preserve separate `entries_deleted` and `entries_created` events, but

@@ -40,6 +40,15 @@ fn directory_value(engine: &StorageEngine, path: &str) -> Vec<u8> {
   }
 }
 
+fn overwrite_selected_root_directory(engine: &StorageEngine, path: &str, value: &[u8]) {
+  let operations = DirectoryOps::new(engine);
+  operations.create_directory(&RequestContext::system(), path).unwrap();
+  let name = path.trim_start_matches('/');
+  let selected =
+    operations.list_directory("/").unwrap().into_iter().find(|entry| entry.name == name).expect("directory must be selected by HEAD");
+  engine.store_entry(EntryType::DirectoryIndex, &selected.hash, value).unwrap();
+}
+
 #[test]
 fn valid_and_damaged_btree_branches_have_distinct_integrity() {
   let directory = tempfile::tempdir().unwrap();
@@ -89,8 +98,7 @@ fn missing_or_malformed_btree_roots_are_corrupt_not_partial_or_empty_complete() 
   assert!(malformed.entries.is_empty());
   assert_eq!(malformed.warnings.len(), 1);
 
-  let path_key = directory_path_hash("/malformed-btree", &engine.hash_algo()).unwrap();
-  engine.store_entry(EntryType::DirectoryIndex, &path_key, &[BTREE_LEAF_MARKER]).unwrap();
+  overwrite_selected_root_directory(&engine, "/malformed-btree", &[BTREE_LEAF_MARKER]);
   let checked = DirectoryOps::new(&engine).list_directory_with_traversal("/malformed-btree").unwrap();
   assert_eq!(checked.integrity, TraversalIntegrity::Corrupt);
   assert!(checked.entries.is_empty());
@@ -101,8 +109,7 @@ fn missing_or_malformed_btree_roots_are_corrupt_not_partial_or_empty_complete() 
 fn malformed_flat_directories_preserve_corruption_evidence() {
   let directory = tempfile::tempdir().unwrap();
   let engine = create_engine(&directory);
-  let path_key = directory_path_hash("/malformed-flat", &engine.hash_algo()).unwrap();
-  engine.store_entry(EntryType::DirectoryIndex, &path_key, &[0x7f]).unwrap();
+  overwrite_selected_root_directory(&engine, "/malformed-flat", &[0x7f]);
 
   let checked = DirectoryOps::new(&engine).list_directory_with_traversal("/malformed-flat").unwrap();
   assert_eq!(checked.integrity, TraversalIntegrity::Corrupt);

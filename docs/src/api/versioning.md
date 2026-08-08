@@ -417,6 +417,14 @@ Restore a single file from a historical version to the current HEAD. **Requires 
 
 Before restoring, an automatic safety snapshot is created to preserve the current state. If lifecycle configuration has `"snapshot_writes_enabled": false`, this safety snapshot is skipped and the restore still proceeds. If snapshot writes are enabled but the safety snapshot cannot be created, the restore is rejected.
 
+AeorDB reuses the historical FileRecord and its existing chunks without
+buffering the file body. It validates the embedded path and every referenced
+chunk while namespace authority is held, then publishes the FileRecord,
+derived path locator, parent directories, and HEAD under one durability
+receipt. The `entries_created` SSE event and metadata indexing run only after
+that receipt is acknowledged and carry `mutation_kind: "restore"` plus the
+operation ID and publication sequence.
+
 **Request Body:**
 
 ```json

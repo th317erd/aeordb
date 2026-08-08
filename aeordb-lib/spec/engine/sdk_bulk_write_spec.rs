@@ -2,7 +2,7 @@ use std::fs::File;
 
 use aeordb::engine::{
   apply_merge_patch, directory_content_hash, directory_path_hash, file_path_hash, BufferedFile, DirectoryOps, EngineError, EntryType,
-  JsonMergeFilePatch, MergeDepth, RequestContext, StorageEngine, CURRENT_FILE_RECORD_VERSION,
+  JsonMergeFilePatch, MergeDepth, RequestContext, StorageEngine, CURRENT_FILE_RECORD_VERSION, resolve_file_at_version,
 };
 use aeordb::engine::file_header::read_active_header;
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
@@ -554,9 +554,10 @@ fn poison_directory_path_key_with_empty_hard_link(engine: &StorageEngine, path: 
 }
 
 fn rewrite_file_record_path_as_v0(engine: &StorageEngine, path: &str) -> Vec<u8> {
-  let record = DirectoryOps::new(engine).get_metadata(path).unwrap().unwrap();
+  let (identity_key, record) = resolve_file_at_version(engine, &engine.head_hash().unwrap(), path).unwrap();
   let content_hash = record.content_hash.clone();
   let value = record.serialize_for_version(engine.hash_algo().hash_length(), 0).unwrap();
+  engine.store_entry_with_version(EntryType::FileRecord, &identity_key, &value, 0).unwrap();
   let path_key = file_path_hash(path, &engine.hash_algo()).unwrap();
   engine.store_entry_with_version(EntryType::FileRecord, &path_key, &value, 0).unwrap();
   content_hash

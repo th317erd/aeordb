@@ -177,7 +177,8 @@ pub use storage_engine::{
 };
 pub use namespace_mutation::{
   LocatorPhysicalIncarnation, LocatorReplacement, LocatorReplacementCoordinator, NamespaceMutationAcknowledgement, NamespaceMutationBatch,
-  NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind, NamespaceMutationSourceIdentity,
+  NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind, NamespaceMutationSourceIdentity, publish_namespace_root,
+  publish_namespace_root_from, publish_namespace_root_from_with_fanout, publish_namespace_root_with_fanout,
 };
 pub use system_family_policy::SystemFamilyPolicyResolver;
 pub use directory_ops::{

@@ -364,11 +364,27 @@
       - [x] Update API/SDK/SSE documentation for atomic copy and acknowledgement behavior.
       - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 2 handoff.
     - [ ] P2e Wave 3: converge version, backup, sync, conflict, and whole-HEAD transition producers on one namespace mutation and locator authority.
-      - [ ] Map snapshot restore, fork promotion, version restore, backup import/promote, sync receive/apply, conflict resolution, raw chunk staging, HEAD publication, counters, events, and checkpoint effects.
+      - [x] Map snapshot restore, fork promotion, version restore, backup import/promote, sync receive/apply, conflict resolution, raw chunk staging, HEAD publication, counters, events, and checkpoint effects.
       - [ ] Add failing operation-ledger, atomicity, malformed/corrupt input, missing chunk, delete-error, acknowledgement, fault, restart, memory-pressure, and architecture tests before production edits.
       - [x] Add one bounded whole-HEAD transition plan with explicit source identity and reconciliation evidence; do not materialize an unbounded per-file transaction.
       - [x] Route snapshot restore, fork promotion/abandonment, and version restore through one hard acknowledgement with post-commit fanout only.
-      - [ ] Route active-database backup import and HEAD promotion through the shared authority while preserving standalone artifact construction as a separate destination writer.
+      - [x] Route active-database backup import and HEAD promotion through the shared authority while preserving standalone artifact construction as a separate destination writer.
+        - [x] Validate and publish imported/explicit roots through the shared whole-HEAD authority, with compare-and-publish conflict protection for non-forced imports.
+        - [x] Publish active import path locators and deletion evidence through bounded coordinator batches; keep historical snapshot transfer content-only.
+        - [x] Publish imported snapshot locators conditionally through namespace authority without overwriting concurrent names.
+        - [x] Make ordinary current reads/listings/metadata/existence root-authoritative while preserving registry-detached SystemFamily locator authority.
+        - [x] Make ordinary mutation source/destination planning and nested directory loads root-authoritative after whole-HEAD transitions; retain path locators only as derived/repair state.
+        - [x] Reject noncanonical, malformed, or physically corrupt requested roots before any HEAD publication.
+        - [x] Converge deleted-file and historical file restore on one root-authoritative coordinator receipt with zero-payload accounting.
+        - [x] Carry the root-selected prior entity identity through sparse deletion batches and surface locator-batch cleanup failures.
+        - [x] Keep live namespace counter reconciliation HEAD-authoritative and run it only after successful root publication; unpromoted or conflicted imports must not expose derived-locator counts.
+        - [x] Apply generic-data SystemFamily selection during live-tree accounting so restart does not count concealed indexes/system state or structural containers.
+        - [x] Reject wrong-type or physically invalid target collisions for imported chunks and immutable entity identities instead of treating any occupied hash as deduplicated content.
+        - [x] Preflight every rebuilt B-tree node before batch publication; accept only byte-exact immutable deduplication and leave all planned nodes absent on collision.
+        - [x] Reject stable-locator replacement or retirement plans that target immutable Chunk or Void authority.
+        - [x] Update backup, admin API, SSE, and storage-engine documentation for the new authority and acknowledgement behavior.
+        - [x] Preserve fail-closed root-selected FileRecord validation and return HTTP 400 for caller-supplied promotion hashes that resolve to the wrong entry type.
+        - [x] Complete broad, restart, documentation, contract, and disposable live-database proof before landing the backup import unit.
       - [ ] Route embedded and HTTP sync chunk receive/apply through typed chunk validation and one shared merge authority; reject omitted, malformed, wrong-type, hash-mismatched, or incomplete remote state before checkpoint advancement.
       - [ ] Propagate every sync delete failure except `NotFound`; remove delete-error squelching and prove retries cannot acknowledge partial apply.
       - [ ] Make conflict resolution fail closed when the chosen FileRecord or any chunk is missing/corrupt, and make conflict cleanup errors observable after authoritative resolution.

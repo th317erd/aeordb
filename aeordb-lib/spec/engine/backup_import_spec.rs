@@ -163,6 +163,95 @@ fn test_import_preserves_content() {
   assert!(tree.files.contains_key("/images/photo.jpg"), "photo.jpg should exist after import");
 }
 
+#[test]
+fn full_import_rejects_a_wrong_type_target_chunk_collision_before_promotion() {
+  let (source, source_temp) = setup_engine_with_files();
+  let source_tree = walk_version_tree(&source, &source.head_hash().unwrap()).unwrap();
+  let chunk_hash = source_tree.files["/docs/hello.txt"].1.chunk_hashes[0].clone();
+  let export_path = db_path(&source_temp, "wrong-target-chunk-export.aeordb");
+  export_to_path(&source, &export_path);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let original_head = target.head_hash().unwrap();
+  target.store_entry(EntryType::DirectoryIndex, &chunk_hash, &[]).unwrap();
+
+  let error = import_backup(&RequestContext::system(), &target, &export_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), original_head);
+  assert!(!DirectoryOps::new(&target).exists("/docs/hello.txt").unwrap());
+}
+
+#[test]
+fn full_import_rejects_a_wrong_type_target_file_identity_before_promotion() {
+  let (source, source_temp) = setup_engine_with_files();
+  let source_tree = walk_version_tree(&source, &source.head_hash().unwrap()).unwrap();
+  let file_identity = source_tree.files["/docs/hello.txt"].0.clone();
+  let export_path = db_path(&source_temp, "wrong-target-file-export.aeordb");
+  export_to_path(&source, &export_path);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let original_head = target.head_hash().unwrap();
+  target.store_entry(EntryType::Chunk, &file_identity, b"not a FileRecord").unwrap();
+
+  let error = import_backup(&RequestContext::system(), &target, &export_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), original_head);
+  assert!(!DirectoryOps::new(&target).exists("/docs/hello.txt").unwrap());
+}
+
+#[test]
+fn full_import_rejects_wrong_type_target_symlink_and_directory_identities() {
+  let context = RequestContext::system();
+  let (source, source_temp) = setup_engine_with_files();
+  DirectoryOps::new(&source).store_symlink(&context, "/hello-link", "/docs/hello.txt").unwrap();
+  let source_tree = walk_version_tree(&source, &source.head_hash().unwrap()).unwrap();
+  let collisions = [source_tree.symlinks["/hello-link"].0.clone(), source_tree.directories["/docs"].0.clone()];
+  let export_path = db_path(&source_temp, "wrong-target-entity-export.aeordb");
+  export_to_path(&source, &export_path);
+
+  for collision in collisions {
+    let (target, _target_temp) = create_temp_engine_for_tests();
+    let original_head = target.head_hash().unwrap();
+    target.store_entry(EntryType::Chunk, &collision, b"wrong entity type").unwrap();
+
+    let error = import_backup(&context, &target, &export_path, false, true, false).unwrap_err();
+
+    assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+    assert_eq!(target.head_hash().unwrap(), original_head);
+  }
+}
+
+#[test]
+fn full_import_rejects_a_wrong_type_target_internal_btree_identity() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let source_ops = DirectoryOps::new(&source);
+  for index in 0..300 {
+    source_ops.store_file_buffered(&context, &format!("/entry-{index:03}.txt"), b"value", Some("text/plain")).unwrap();
+  }
+  let source_tree = walk_version_tree(&source, &source.head_hash().unwrap()).unwrap();
+  let root_hash = &source_tree.directories["/"].0;
+  let internal_hash = source_tree
+    .btree_nodes
+    .keys()
+    .find(|hash| *hash != root_hash)
+    .expect("large root must retain at least one non-root B-tree node")
+    .clone();
+  let export_path = db_path(&source_temp, "wrong-target-btree-export.aeordb");
+  export_to_path(&source, &export_path);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let original_head = target.head_hash().unwrap();
+  target.store_entry(EntryType::Chunk, &internal_hash, b"wrong B-tree type").unwrap();
+
+  let error = import_backup(&context, &target, &export_path, false, true, false).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), original_head);
+}
+
 // ─── 3. test_import_does_not_promote_head ───────────────────────────────
 
 #[test]
@@ -182,6 +271,99 @@ fn test_import_does_not_promote_head() {
   assert_eq!(current_head, original_head, "HEAD should remain unchanged when promote=false");
   // The version hash in the result should be the exported version
   assert_eq!(result.version_hash, export_result.version_hash);
+}
+
+#[test]
+fn import_without_promotion_cannot_change_live_namespace_counters() {
+  let context = RequestContext::system();
+  let (source, source_temp) = setup_engine_with_files();
+  DirectoryOps::new(&source).store_symlink(&context, "/hello-link", "/docs/hello.txt").unwrap();
+  let export_path = db_path(&source_temp, "unpromoted-counter-export.aeordb");
+  export_to_path(&source, &export_path);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let before = target.counters().snapshot();
+
+  let result = import_backup(&context, &target, &export_path, false, false, false).unwrap();
+  let after = target.counters().snapshot();
+
+  assert!(!result.head_promoted);
+  assert_eq!(after.files, before.files);
+  assert_eq!(after.directories, before.directories);
+  assert_eq!(after.symlinks, before.symlinks);
+  assert_eq!(after.logical_data_size, before.logical_data_size);
+}
+
+#[test]
+fn promoted_import_reconciles_all_live_namespace_counters_from_head() {
+  let context = RequestContext::system();
+  let (source, source_temp) = setup_engine_with_files();
+  DirectoryOps::new(&source).store_symlink(&context, "/hello-link", "/docs/hello.txt").unwrap();
+  let expected = source.counters().snapshot();
+  let export_path = db_path(&source_temp, "promoted-counter-export.aeordb");
+  export_to_path(&source, &export_path);
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let result = import_backup(&context, &target, &export_path, false, true, false).unwrap();
+  let actual = target.counters().snapshot();
+
+  assert!(result.head_promoted);
+  assert_eq!(actual.files, expected.files);
+  assert_eq!(actual.directories, expected.directories);
+  assert_eq!(actual.symlinks, expected.symlinks);
+  assert_eq!(actual.logical_data_size, expected.logical_data_size);
+}
+
+#[test]
+fn import_without_promotion_cannot_change_current_namespace_reads() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/same.txt", b"imported", Some("text/plain")).unwrap();
+  let export_path = db_path(&source_temp, "detached-import.aeordb");
+  export_version(&source, &source.head_hash().unwrap(), &export_path, false).unwrap();
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let target_ops = DirectoryOps::new(&target);
+  target_ops.store_file_buffered(&context, "/same.txt", b"current", Some("text/plain")).unwrap();
+  let original_head = target.head_hash().unwrap();
+
+  let result = import_backup(&context, &target, &export_path, false, false, false).unwrap();
+
+  assert!(!result.head_promoted);
+  assert_eq!(target.head_hash().unwrap(), original_head);
+  assert_eq!(target_ops.read_file_buffered("/same.txt").unwrap(), b"current");
+  assert!(target_ops.exists("/same.txt").unwrap());
+}
+
+#[test]
+fn large_import_crosses_the_bounded_locator_batch_boundary() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let source_ops = DirectoryOps::new(&source);
+  for index in 0..300 {
+    source_ops
+      .store_file_buffered(&context, &format!("/bulk/{index:04}.txt"), format!("value-{index}").as_bytes(), Some("text/plain"))
+      .unwrap();
+  }
+  let export_path = db_path(&source_temp, "large-bounded-import.aeordb");
+  export_version(&source, &source.head_hash().unwrap(), &export_path, false).unwrap();
+
+  let (target, target_temp) = create_temp_engine_for_tests();
+  let target_path = db_path(&target_temp, "test.aeordb");
+  let result = import_backup(&context, &target, &export_path, false, true, false).unwrap();
+
+  assert!(result.head_promoted);
+  let imported_tree = walk_version_tree(&target, &target.head_hash().unwrap()).unwrap();
+  assert_eq!(imported_tree.files.len(), 300);
+  assert_eq!(DirectoryOps::new(&target).read_file_buffered("/bulk/0299.txt").unwrap(), b"value-299");
+  target.shutdown().unwrap();
+  drop(target);
+
+  let reopened = StorageEngine::open(&target_path).unwrap();
+  assert_eq!(DirectoryOps::new(&reopened).read_file_buffered("/bulk/0000.txt").unwrap(), b"value-0");
+  assert_eq!(walk_version_tree(&reopened, &reopened.head_hash().unwrap()).unwrap().files.len(), 300);
+  let report = aeordb::engine::verify::verify_checked(&reopened, &target_path).unwrap();
+  assert!(!report.has_issues(), "reopened bounded import must verify cleanly: {report:?}");
 }
 
 // ─── 4. test_import_with_promote ────────────────────────────────────────
@@ -664,8 +846,11 @@ fn test_privileged_full_import_preserves_portable_state_and_snapshots() {
   DirectoryOps::new(&source)
     .store_file_buffered(&context, "/.aeordb-system/users/portable-user.json", br#"{"name":"portable"}"#, Some("application/json"))
     .unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/docs/versioned.txt", b"snapshot", Some("text/plain")).unwrap();
   VersionManager::new(&source).create_snapshot(&context, "before-update", HashMap::new()).unwrap();
   DirectoryOps::new(&source).store_file_buffered(&context, "/docs/after.txt", b"after", Some("text/plain")).unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&context, "/docs/versioned.txt", b"current", Some("text/plain")).unwrap();
+  let current_versioned_hash = DirectoryOps::new(&source).get_metadata("/docs/versioned.txt").unwrap().unwrap().content_hash;
   let export_path = db_path(&source_temp, "portable-full.aeordb");
   export_full(&source, &export_path, true).unwrap();
 
@@ -682,6 +867,47 @@ fn test_privileged_full_import_preserves_portable_state_and_snapshots() {
   let snapshot_tree = walk_version_tree(&target, &snapshot.root_hash).unwrap();
   assert!(snapshot_tree.files.contains_key("/docs/hello.txt"));
   assert!(!snapshot_tree.files.contains_key("/docs/after.txt"));
+
+  let versioned_path_key = file_path_hash("/docs/versioned.txt", &target.hash_algo()).unwrap();
+  let (header, _key, value) = target.get_entry_verified(&versioned_path_key).unwrap().expect("current imported path locator must exist");
+  let current_locator = FileRecord::deserialize(&value, target.hash_algo().hash_length(), header.entry_version).unwrap();
+  assert_eq!(current_locator.content_hash, current_versioned_hash, "imported snapshots must not overwrite current HEAD path locators");
+}
+
+#[test]
+fn privileged_import_rejects_a_malformed_existing_snapshot_locator() {
+  let context = RequestContext::system();
+  let (source, source_temp) = setup_engine_with_files();
+  VersionManager::new(&source).create_snapshot(&context, "collision", HashMap::new()).unwrap();
+  let export_path = db_path(&source_temp, "snapshot-collision-export.aeordb");
+  export_full(&source, &export_path, true).unwrap();
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let original_head = target.head_hash().unwrap();
+  let snapshot_key = target.compute_hash(b"snap:collision").unwrap();
+  target.store_entry(EntryType::Snapshot, &snapshot_key, b"malformed snapshot").unwrap();
+
+  let error = import_backup(&context, &target, &export_path, false, true, true).unwrap_err();
+
+  assert!(matches!(error, EngineError::UnexpectedEof | EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(target.head_hash().unwrap(), original_head);
+}
+
+#[test]
+fn privileged_import_preserves_a_valid_existing_snapshot_with_the_same_name() {
+  let context = RequestContext::system();
+  let (source, source_temp) = setup_engine_with_files();
+  VersionManager::new(&source).create_snapshot(&context, "collision", HashMap::new()).unwrap();
+  let export_path = db_path(&source_temp, "snapshot-name-conflict-export.aeordb");
+  export_full(&source, &export_path, true).unwrap();
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  DirectoryOps::new(&target).store_file_buffered(&context, "/target-only.txt", b"target", Some("text/plain")).unwrap();
+  let existing = VersionManager::new(&target).create_snapshot(&context, "collision", HashMap::new()).unwrap();
+
+  import_backup(&context, &target, &export_path, false, false, true).unwrap();
+
+  assert_eq!(VersionManager::new(&target).get_snapshot_hash("collision").unwrap(), existing.root_hash);
 }
 
 #[test]
@@ -761,6 +987,31 @@ fn test_sparse_patch_deletion_remains_verifiable_after_restart() {
   let report = aeordb::engine::verify::verify_checked(&reopened, &target_path).unwrap();
   assert_eq!(report.missing_kv_entries, 0, "patch deletion must leave durable replay evidence");
   assert!(!report.has_issues(), "reopened patch target must verify cleanly: {report:?}");
+}
+
+#[test]
+fn test_forced_sparse_deletion_retires_a_stale_live_path_locator_when_head_is_already_absent() {
+  let context = RequestContext::system();
+  let (source, source_temp) = create_temp_engine_for_tests();
+  let source_operations = DirectoryOps::new(&source);
+  source_operations.store_file_buffered(&context, "/ghost.txt", b"source", Some("text/plain")).unwrap();
+  let base = source.head_hash().unwrap();
+  source_operations.delete_file(&context, "/ghost.txt").unwrap();
+  let patch_path = db_path(&source_temp, "stale-locator-deletion.patch.aeordb");
+  create_patch(&source, &base, &source.head_hash().unwrap(), &patch_path).unwrap();
+
+  let (target, _target_temp) = create_temp_engine_for_tests();
+  let absent_root = target.head_hash().unwrap();
+  DirectoryOps::new(&target).store_file_buffered(&context, "/ghost.txt", b"stale target", Some("text/plain")).unwrap();
+  let path_key = file_path_hash("/ghost.txt", &target.hash_algo()).unwrap();
+  assert!(target.has_entry(&path_key).unwrap());
+  target.update_head(&absent_root).unwrap();
+  assert!(DirectoryOps::new(&target).get_metadata("/ghost.txt").unwrap().is_none());
+
+  import_backup(&context, &target, &patch_path, true, true, false).unwrap();
+
+  assert!(!target.has_entry(&path_key).unwrap(), "forced sparse deletion must reconcile a stale live path locator");
+  assert!(DirectoryOps::new(&target).get_metadata("/ghost.txt").unwrap().is_none());
 }
 
 #[test]

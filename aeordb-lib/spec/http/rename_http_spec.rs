@@ -62,6 +62,17 @@ fn corrupt_symlink_locator(engine: &StorageEngine, path: &str) {
   engine.store_entry(EntryType::Symlink, &key, b"malformed symlink record").unwrap();
 }
 
+fn corrupt_selected_symlink_record(engine: &StorageEngine, path: &str) {
+  let name = path.trim_start_matches('/');
+  let selected = DirectoryOps::new(engine)
+    .list_directory("/")
+    .unwrap()
+    .into_iter()
+    .find(|entry| entry.name == name)
+    .expect("symlink must be selected by HEAD");
+  engine.store_entry(EntryType::Symlink, &selected.hash, b"malformed symlink record").unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // 1. Rename file — basic rename within same directory
 // ---------------------------------------------------------------------------
@@ -316,7 +327,7 @@ async fn test_rename_propagates_corrupt_symlink_metadata_without_publishing_dest
   let (_app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   store_symlink(&engine, "/corrupt-link", "/target.txt");
-  corrupt_symlink_locator(&engine, "/corrupt-link");
+  corrupt_selected_symlink_record(&engine, "/corrupt-link");
   let original_head = engine.head_hash().unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine);
@@ -342,7 +353,7 @@ async fn test_delete_propagates_corrupt_symlink_metadata_without_mutation() {
   let (_app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   store_symlink(&engine, "/delete-corrupt-link", "/target.txt");
-  corrupt_symlink_locator(&engine, "/delete-corrupt-link");
+  corrupt_selected_symlink_record(&engine, "/delete-corrupt-link");
   let original_head = engine.head_hash().unwrap();
 
   let app = rebuild_app(&jwt_manager, &engine);
@@ -353,6 +364,49 @@ async fn test_delete_propagates_corrupt_symlink_metadata_without_mutation() {
   assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
   assert_eq!(engine.head_hash().unwrap(), original_head);
   assert!(DirectoryOps::new(&engine).get_symlink("/delete-corrupt-link").is_err());
+}
+
+#[tokio::test]
+async fn test_rename_uses_head_and_retires_a_corrupt_derived_symlink_locator() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  store_symlink(&engine, "/stale-link", "/target.txt");
+  corrupt_symlink_locator(&engine, "/stale-link");
+  let stale_key = symlink_path_hash("/stale-link", &engine.hash_algo()).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request = Request::builder()
+    .method("PATCH")
+    .uri("/files/stale-link")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(r#"{"to":"/renamed-stale-link"}"#))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert!(!engine.has_entry(&stale_key).unwrap(), "rename must retire the stale derived locator");
+  let ops = DirectoryOps::new(&engine);
+  assert!(ops.get_symlink("/stale-link").unwrap().is_none());
+  assert_eq!(ops.get_symlink("/renamed-stale-link").unwrap().unwrap().target, "/target.txt");
+}
+
+#[tokio::test]
+async fn test_delete_uses_head_and_retires_a_corrupt_derived_symlink_locator() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  store_symlink(&engine, "/delete-stale-link", "/target.txt");
+  corrupt_symlink_locator(&engine, "/delete-stale-link");
+  let stale_key = symlink_path_hash("/delete-stale-link", &engine.hash_algo()).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let request =
+    Request::builder().method("DELETE").uri("/files/delete-stale-link").header("authorization", &auth).body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert!(!engine.has_entry(&stale_key).unwrap(), "delete must retire the stale derived locator");
+  assert!(DirectoryOps::new(&engine).get_symlink("/delete-stale-link").unwrap().is_none());
 }
 
 // ---------------------------------------------------------------------------

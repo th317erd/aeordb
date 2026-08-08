@@ -5,8 +5,9 @@ use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::engine::namespace_mutation::{
   NamespaceMutationAcknowledgement, NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind,
-  NamespaceMutationSourceIdentity,
+  NamespaceMutationSourceIdentity, publish_namespace_root, publish_namespace_root_from,
 };
+use aeordb::engine::{DirectoryOps, EngineError, RequestContext, directory_content_hash};
 use aeordb::engine::storage_engine::TransactionGuard;
 use aeordb::engine::StorageEngine;
 use aeordb::server::create_temp_engine_for_tests;
@@ -50,6 +51,124 @@ impl NamespaceMutationFanout for PanickingFanout {
   fn publish(&self, _acknowledgement: &NamespaceMutationAcknowledgement) {
     panic!("injected soft-fanout panic");
   }
+}
+
+#[test]
+fn whole_root_publication_rejects_a_changed_expected_head() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let expected_root = engine.head_hash().unwrap();
+  DirectoryOps::new(&engine).create_directory(&RequestContext::system(), "/concurrent").unwrap();
+  let concurrent_root = engine.head_hash().unwrap();
+
+  let error = publish_namespace_root_from(&engine, &expected_root, &expected_root, NamespaceMutationKind::Import).unwrap_err();
+
+  assert!(matches!(error, EngineError::AlreadyExists(message) if message.contains("HEAD changed")));
+  assert_eq!(engine.head_hash().unwrap(), concurrent_root);
+}
+
+#[test]
+fn whole_root_publication_reconciles_live_namespace_counters_after_acknowledgement() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+  operations.store_file_buffered(&context, "/selected.txt", b"selected", Some("text/plain")).unwrap();
+  operations.store_symlink(&context, "/selected-link", "/selected.txt").unwrap();
+  let selected_root = engine.head_hash().unwrap();
+  let expected = engine.counters().snapshot();
+  operations.store_file_buffered(&context, "/later.txt", b"later", Some("text/plain")).unwrap();
+  operations.create_directory(&context, "/later-directory").unwrap();
+
+  publish_namespace_root(&engine, &selected_root, NamespaceMutationKind::Promote).unwrap();
+  let actual = engine.counters().snapshot();
+
+  assert_eq!(actual.files, expected.files);
+  assert_eq!(actual.directories, expected.directories);
+  assert_eq!(actual.symlinks, expected.symlinks);
+  assert_eq!(actual.logical_data_size, expected.logical_data_size);
+}
+
+#[test]
+fn whole_root_publication_rejects_a_noncanonical_directory_key() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let original_head = engine.head_hash().unwrap();
+  let arbitrary_key = vec![0xC4; engine.hash_algo().hash_length()];
+  engine.store_entry(EntryType::DirectoryIndex, &arbitrary_key, &[]).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = publish_namespace_root(&engine, &arbitrary_key, NamespaceMutationKind::Promote).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+}
+
+#[test]
+fn whole_root_publication_rejects_malformed_flat_directory_content() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let original_head = engine.head_hash().unwrap();
+  let malformed = b"malformed directory";
+  let malformed_hash = directory_content_hash(malformed, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &malformed_hash, malformed).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = publish_namespace_root(&engine, &malformed_hash, NamespaceMutationKind::Promote).unwrap_err();
+
+  assert!(matches!(error, EngineError::UnexpectedEof | EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+}
+
+#[test]
+fn same_batch_head_dependency_must_be_a_canonical_directory_root() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let original_head = engine.head_hash().unwrap();
+  let arbitrary_key = vec![0xC7; engine.hash_algo().hash_length()];
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
+  batch.store_dependency(EntryType::DirectoryIndex, arbitrary_key.clone(), Vec::new(), 0).unwrap();
+  batch.set_head_hash(arbitrary_key.clone());
+  batch
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path: "/".to_string(),
+      entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+      previous_identity: Some(original_head.clone()),
+      new_identity: Some(arbitrary_key.clone()),
+    })
+    .unwrap();
+
+  let error = NamespaceMutationCoordinator::new(&engine).execute(batch).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(engine.get_kv_entry(&arbitrary_key).unwrap().is_none());
+}
+
+#[test]
+fn same_batch_head_dependency_must_have_well_formed_directory_content() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let original_head = engine.head_hash().unwrap();
+  let malformed = b"malformed same-batch directory";
+  let malformed_hash = directory_content_hash(malformed, &engine.hash_algo()).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
+  batch.store_dependency(EntryType::DirectoryIndex, malformed_hash.clone(), malformed.to_vec(), 0).unwrap();
+  batch.set_head_hash(malformed_hash.clone());
+  batch
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path: "/".to_string(),
+      entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+      previous_identity: Some(original_head.clone()),
+      new_identity: Some(malformed_hash.clone()),
+    })
+    .unwrap();
+
+  let error = NamespaceMutationCoordinator::new(&engine).execute(batch).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(engine.head_hash().unwrap(), original_head);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(engine.get_kv_entry(&malformed_hash).unwrap().is_none());
 }
 
 fn replacement_batch(stable_key: &[u8], value: &[u8]) -> NamespaceMutationBatch {
@@ -294,6 +413,24 @@ fn malformed_or_duplicate_plans_fail_before_transaction_or_locator_mutation() {
 }
 
 #[test]
+fn locator_replacement_cannot_overwrite_an_immutable_payload_key() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let stable_key = vec![0xC9; engine.hash_algo().hash_length()];
+  engine.store_entry(EntryType::Chunk, &stable_key, b"immutable payload").unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let batch = replacement_batch(&stable_key, b"mutable locator");
+
+  let error = NamespaceMutationCoordinator::new(&engine).execute(batch).unwrap_err();
+
+  assert!(matches!(error, EngineError::InvalidInput(_)), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  let (header, stored_key, value) = engine.get_entry_verified(&stable_key).unwrap().unwrap();
+  assert_eq!(header.entry_type, EntryType::Chunk);
+  assert_eq!(stored_key, stable_key);
+  assert_eq!(value, b"immutable payload");
+}
+
+#[test]
 fn no_op_batches_and_dependency_locator_aliases_are_rejected_before_admission() {
   let (engine, _temporary) = create_temp_engine_for_tests();
   let fanout = Arc::new(RecordingFanout::default());
@@ -467,6 +604,7 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
         && !path.ends_with("engine/mod.rs")
         && path.file_name().and_then(|value| value.to_str()) != Some("directory_ops.rs")
         && path.file_name().and_then(|value| value.to_str()) != Some("version_manager.rs")
+        && path.file_name().and_then(|value| value.to_str()) != Some("backup.rs")
       {
         let source = std::fs::read_to_string(&path).unwrap();
         if source.contains("NamespaceMutationCoordinator") || source.contains("LocatorReplacementCoordinator") {
@@ -490,6 +628,8 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
   assert!(directory_ops.contains("NamespaceMutationCoordinator"), "the characterized Wave 1 producer must use the shared facade");
   let version_manager = std::fs::read_to_string(package.join("src/engine/version_manager.rs")).unwrap();
   assert!(version_manager.contains("NamespaceMutationCoordinator"), "the characterized Wave 3 version producer must use the shared facade");
+  let backup = std::fs::read_to_string(package.join("src/engine/backup.rs")).unwrap();
+  assert!(backup.contains("NamespaceMutationCoordinator"), "the characterized Wave 3 backup producer must use the shared facade");
 }
 
 #[test]
@@ -605,5 +745,77 @@ fn wave_three_version_entrypoints_cannot_reintroduce_split_namespace_authority()
     for bypass in forbidden {
       assert!(!method.contains(bypass), "Wave 3 version entrypoint {name} reintroduced split authority through {bypass}");
     }
+  }
+}
+
+#[test]
+fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
+  let backup = include_str!("../../src/engine/backup.rs");
+  let import_start = backup.find("pub fn import_backup(").unwrap();
+  let import_source = &backup[import_start..];
+  for forbidden in [
+    "target.update_head(",
+    "target.mark_entry_deleted(",
+    "target.store_entry_with_version(EntryType::Snapshot",
+    "target.store_entry_with_flags_and_version(EntryType::Snapshot",
+  ] {
+    assert!(!import_source.contains(forbidden), "active backup import retained split-authority token: {forbidden}");
+  }
+  assert!(import_source.contains("ImportLocatorBatch::new(target)"));
+  assert!(backup.contains("publish_namespace_root_from_with_fanout"));
+  assert!(import_source.contains("NamespaceMutationCoordinator::new(target).prepare_and_maybe_execute"));
+  assert!(import_source.contains("deletion.previous_identity"), "sparse deletion must carry the selected prior entity identity");
+  let locator_batch_start = backup.find("struct ImportLocatorBatch").unwrap();
+  let locator_batch_end = backup[locator_batch_start..].find("fn import_locator_charge").unwrap() + locator_batch_start;
+  let locator_batch_source = &backup[locator_batch_start..locator_batch_end];
+  assert!(!locator_batch_source.contains("let _ ="), "locator-batch cleanup errors must not be silently discarded");
+
+  let server_route = include_str!("../../src/server/backup_routes.rs");
+  let promote_start = server_route.find("pub async fn promote_head(").unwrap();
+  let promote_source = &server_route[promote_start..];
+  assert!(promote_source.contains("publish_namespace_root"));
+  assert!(!promote_source.contains(".update_head("));
+
+  let cli = include_str!("../../../aeordb-cli/src/commands/promote.rs");
+  assert!(cli.contains("publish_namespace_root"));
+  assert!(!cli.contains(".update_head("));
+}
+
+#[test]
+fn wave_three_restore_entrypoints_cannot_reintroduce_split_namespace_authority() {
+  fn method_source(source: &str, name: &str) -> String {
+    let marker = format!("fn {name}");
+    let mut collecting = false;
+    let mut lines = Vec::new();
+    for line in source.lines() {
+      if !collecting {
+        if line.contains(&marker) {
+          collecting = true;
+          lines.push(line);
+        }
+        continue;
+      }
+      if line.starts_with("  fn ") || line.starts_with("  pub fn ") || line.starts_with("  pub(crate) fn ") {
+        break;
+      }
+      lines.push(line);
+    }
+    assert!(collecting, "missing DirectoryOps method {name}");
+    lines.join("\n")
+  }
+
+  let source = include_str!("../../src/engine/directory_ops.rs");
+  for entrypoint in ["restore_file_from_record", "restore_deleted_file"] {
+    let method = method_source(source, entrypoint);
+    assert!(method.contains("execute_file_record_restore"), "Wave 3 restore entrypoint {entrypoint} must use the shared restore planner");
+    for forbidden in ["TransactionGuard::new", "namespace_write_guard", "materialize_file_record_entries", "update_parent_directories"] {
+      assert!(!method.contains(forbidden), "Wave 3 restore entrypoint {entrypoint} retained split authority through {forbidden}");
+    }
+  }
+
+  let helper = method_source(source, "execute_file_record_restore");
+  assert!(helper.contains("execute_file_publication"));
+  for forbidden in ["TransactionGuard::new", "namespace_write_guard", "materialize_file_record_entries", "update_parent_directories"] {
+    assert!(!helper.contains(forbidden), "shared restore planner retained split authority through {forbidden}");
   }
 }

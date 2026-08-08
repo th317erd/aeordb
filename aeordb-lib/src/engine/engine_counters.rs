@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 
 use crate::engine::entry_header::EntryHeader;
-use crate::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_SNAPSHOT, KV_TYPE_FORK, KV_TYPE_SYMLINK};
+use crate::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_SNAPSHOT, KV_TYPE_FORK};
 use crate::engine::storage_engine::StorageEngine;
 
 /// Atomic counters for O(1) database statistics.
@@ -318,11 +318,23 @@ impl EngineCounters {
     self.write_buffer_depth.store(snapshot.write_buffer_depth, Ordering::Relaxed);
   }
 
+  /// Reconcile only the counters whose authority is the namespace selected by
+  /// HEAD. Whole-root transitions call this after their hard acknowledgement;
+  /// staged immutable or locator rows must never change these values early.
+  pub(crate) fn reconcile_live_namespace_from_head(&self, engine: &StorageEngine) -> crate::engine::errors::EngineResult<()> {
+    let metrics = crate::engine::directory_listing::measure_live_tree(engine)?;
+    self.files.store(metrics.files, Ordering::Relaxed);
+    self.directories.store(metrics.directories, Ordering::Relaxed);
+    self.symlinks.store(metrics.symlinks, Ordering::Relaxed);
+    self.logical_data_size.store(metrics.logical_data_size, Ordering::Relaxed);
+    Ok(())
+  }
+
   /// Create a new EngineCounters by scanning the KV snapshot once.
   ///
-  /// This is the one-time O(n) startup cost. Counts entries by type,
-  /// sums file sizes by reading file records from the WAL, and captures
-  /// void space from the void manager.
+  /// This is the one-time O(n) startup cost. Physical entity totals come from
+  /// KV metadata; live namespace counts and logical bytes come from HEAD; void
+  /// space comes from the void manager.
   pub fn initialize_from_kv(engine: &StorageEngine) -> crate::engine::errors::EngineResult<Self> {
     let counters = EngineCounters::new();
 
@@ -345,9 +357,6 @@ impl EngineCounters {
           // new KV entry (parent + ancestors all change). Live count
           // comes from the HEAD walker below.
         }
-        KV_TYPE_SYMLINK => {
-          counters.symlinks.fetch_add(1, Ordering::Relaxed);
-        }
         KV_TYPE_CHUNK => {
           counters.chunks.fetch_add(1, Ordering::Relaxed);
           chunk_size = chunk_size.saturating_add(estimated_chunk_payload_bytes(entry, hash_length));
@@ -368,6 +377,7 @@ impl EngineCounters {
       Ok(metrics) => {
         counters.files.store(metrics.files, Ordering::Relaxed);
         counters.directories.store(metrics.directories, Ordering::Relaxed);
+        counters.symlinks.store(metrics.symlinks, Ordering::Relaxed);
         counters.logical_data_size.store(metrics.logical_data_size, Ordering::Relaxed);
       }
       Err(error) => {

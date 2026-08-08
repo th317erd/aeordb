@@ -3,7 +3,7 @@ use aeordb::engine::directory_ops::{DirectoryOps, chunk_content_hash, directory_
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
-use aeordb::engine::{ChunkReadLocation, RequestContext, DEFAULT_CHUNK_SIZE};
+use aeordb::engine::{ChunkReadLocation, RequestContext, DEFAULT_CHUNK_SIZE, deserialize_child_entries, serialize_child_entries};
 use aeordb::engine::storage_engine::StorageEngine;
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
@@ -439,7 +439,7 @@ fn list_deleted_uses_registry_visibility_and_rejects_unknown_protected_paths() {
 }
 
 #[test]
-fn test_list_directory_omits_deleted_file_child_left_in_parent() {
+fn test_root_reachable_file_survives_a_stale_path_tombstone() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ctx = RequestContext::system();
@@ -451,15 +451,16 @@ fn test_list_directory_omits_deleted_file_child_left_in_parent() {
   let ghost_key = file_path_hash("/docs/ghost.txt", &engine.hash_algo()).unwrap();
   engine.mark_entry_deleted(&ghost_key).unwrap();
 
-  assert!(ops.read_file_buffered("/docs/ghost.txt").is_err(), "direct file read should not see deleted path key");
+  assert_eq!(ops.read_file_buffered("/docs/ghost.txt").unwrap(), b"ghost", "HEAD must remain authoritative over a stale path tombstone");
 
   let children = ops.list_directory("/docs").unwrap();
-  let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
-  assert_eq!(names, vec!["live.txt"]);
+  let mut names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+  names.sort_unstable();
+  assert_eq!(names, vec!["ghost.txt", "live.txt"]);
 }
 
 #[test]
-fn test_list_directory_omits_deleted_directory_child_left_in_parent() {
+fn test_root_reachable_directory_survives_a_stale_path_tombstone() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ctx = RequestContext::system();
@@ -472,12 +473,13 @@ fn test_list_directory_omits_deleted_directory_child_left_in_parent() {
   engine.mark_entry_deleted(&ghost_key).unwrap();
 
   let children = ops.list_directory("/root").unwrap();
-  let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
-  assert_eq!(names, vec!["live"]);
+  let mut names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+  names.sort_unstable();
+  assert_eq!(names, vec!["ghost", "live"]);
 }
 
 #[test]
-fn test_delete_directory_succeeds_when_only_stale_deleted_file_child_remains() {
+fn test_stale_file_path_tombstone_cannot_make_a_root_directory_appear_empty() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let ctx = RequestContext::system();
@@ -488,11 +490,12 @@ fn test_delete_directory_succeeds_when_only_stale_deleted_file_child_remains() {
   let ghost_key = file_path_hash("/root/empty/ghost.txt", &engine.hash_algo()).unwrap();
   engine.mark_entry_deleted(&ghost_key).unwrap();
 
-  ops.delete_directory(&ctx, "/root/empty").unwrap();
+  let error = ops.delete_directory(&ctx, "/root/empty").unwrap_err();
+  assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("not empty")));
 
   let children = ops.list_directory("/root").unwrap();
   let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
-  assert!(!names.contains(&"empty"));
+  assert!(names.contains(&"empty"));
 }
 
 #[test]
@@ -560,8 +563,18 @@ fn strict_directory_listing_rejects_corruption_that_diagnostic_listing_surfaces(
   let ops = DirectoryOps::new(&engine);
   ops.store_file_buffered(&ctx, "/strict/file.txt", b"value", Some("text/plain")).unwrap();
 
-  let directory_key = directory_path_hash("/strict", &engine.hash_algo()).unwrap();
-  engine.store_entry(EntryType::DirectoryIndex, &directory_key, b"malformed directory").unwrap();
+  let malformed = b"malformed directory";
+  let malformed_hash = directory_content_hash(malformed, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &malformed_hash, malformed).unwrap();
+
+  let current_root = engine.head_hash().unwrap();
+  let (root_header, _root_key, root_value) = engine.get_entry(&current_root).unwrap().unwrap();
+  let mut root_children = deserialize_child_entries(&root_value, engine.hash_algo().hash_length(), root_header.entry_version).unwrap();
+  root_children.iter_mut().find(|child| child.name == "strict").unwrap().hash = malformed_hash;
+  let malformed_root = serialize_child_entries(&root_children, engine.hash_algo().hash_length()).unwrap();
+  let malformed_root_hash = directory_content_hash(&malformed_root, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &malformed_root_hash, &malformed_root).unwrap();
+  engine.update_head(&malformed_root_hash).unwrap();
 
   assert!(ops.list_directory("/strict").unwrap().is_empty());
   assert!(matches!(ops.list_directory_strict("/strict"), Err(EngineError::CorruptEntry { .. })));
@@ -900,6 +913,53 @@ fn test_delete_then_recreate() {
   let children = ops.list_directory("/").unwrap();
   let count = children.iter().filter(|c| c.name == "phoenix.txt").count();
   assert_eq!(count, 1, "Should have exactly one entry, not duplicates");
+}
+
+#[test]
+fn restore_deleted_file_uses_one_zero_payload_namespace_publication() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/restore.txt", b"restored payload", Some("text/plain")).unwrap();
+  ops.delete_file(&ctx, "/restore.txt").unwrap();
+  let before = engine.counters().snapshot();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  ops.restore_deleted_file(&ctx, "/restore.txt").unwrap();
+
+  let after = engine.counters().snapshot();
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+  assert_eq!(after.writes_total, before.writes_total + 1);
+  assert_eq!(after.bytes_written_total, before.bytes_written_total);
+  assert_eq!(after.files, before.files + 1);
+  assert_eq!(after.logical_data_size, before.logical_data_size + 16);
+  assert_eq!(ops.read_file_buffered("/restore.txt").unwrap(), b"restored payload");
+}
+
+#[test]
+fn restore_deleted_file_rejects_an_embedded_path_mismatch_before_publication() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/victim.txt", b"victim", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/other.txt", b"other", Some("text/plain")).unwrap();
+  ops.delete_file(&ctx, "/victim.txt").unwrap();
+
+  let other = ops.get_metadata("/other.txt").unwrap().unwrap();
+  let victim_key = file_path_hash("/victim.txt", &engine.hash_algo()).unwrap();
+  let other_value = other.serialize(engine.hash_algo().hash_length()).unwrap();
+  engine.store_entry_with_version(EntryType::FileRecord, &victim_key, &other_value, CURRENT_FILE_RECORD_VERSION).unwrap();
+  engine.mark_entry_deleted(&victim_key).unwrap();
+  let head_before = engine.head_hash().unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = ops.restore_deleted_file(&ctx, "/victim.txt").unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert_eq!(engine.head_hash().unwrap(), head_before);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
 }
 
 #[test]

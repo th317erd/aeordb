@@ -71,14 +71,14 @@ fn test_child_entry_uses_identity_hash_not_path_hash() {
 }
 
 #[test]
-fn test_read_file_still_works_via_path_key() {
+fn test_read_file_resolves_the_selected_namespace_entry() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
 
   ops.store_file_buffered(&ctx, "/readable.txt", b"read me via path", Some("text/plain")).unwrap();
 
-  // read_file uses path-based key internally — should still work
+  // The ordinary read resolves the selected namespace before loading content.
   let content = ops.read_file_buffered("/readable.txt").unwrap();
   assert_eq!(content, b"read me via path");
 }
@@ -96,9 +96,11 @@ fn buffered_read_rejects_file_records_whose_declared_size_disagrees_with_chunks(
     ops.store_file_buffered(&ctx, path, b"12345", Some("text/plain")).unwrap();
     let mut record = ops.get_metadata(path).unwrap().unwrap();
     record.total_size = declared_size;
-    let path_key = file_path_hash(path, &algo).unwrap();
+    let head = engine.head_hash().unwrap();
+    let tree = walk_version_tree(&engine, &head).unwrap();
+    let record_key = tree.files.get(path).expect("stored file must be reachable from HEAD").0.clone();
     let serialized = record.serialize(algo.hash_length()).unwrap();
-    engine.store_entry_with_version(EntryType::FileRecord, &path_key, &serialized, CURRENT_FILE_RECORD_VERSION).unwrap();
+    engine.store_entry_with_version(EntryType::FileRecord, &record_key, &serialized, CURRENT_FILE_RECORD_VERSION).unwrap();
 
     let error = ops.read_file_buffered(path).expect_err("dishonest FileRecord size must fail closed");
     assert!(

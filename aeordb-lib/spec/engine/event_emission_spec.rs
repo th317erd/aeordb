@@ -438,6 +438,33 @@ async fn wave_three_version_mutations_emit_one_exact_acknowledgement() {
 }
 
 #[tokio::test]
+async fn wave_three_file_restores_emit_one_exact_acknowledgement() {
+  let (engine, bus, ctx, _temp) = setup_with_events();
+  let operations = DirectoryOps::new(&engine);
+  let system = RequestContext::system();
+
+  operations.store_file_buffered(&system, "/historical.txt", b"old", Some("text/plain")).unwrap();
+  let historical = operations.get_metadata("/historical.txt").unwrap().unwrap();
+  operations.store_file_buffered(&system, "/historical.txt", b"new", Some("text/plain")).unwrap();
+  let mut receiver = bus.subscribe();
+  let historical_events = assert_one_wave_two_mutation(&engine, &mut receiver, "restore", &["entries_created"], || {
+    operations.restore_file_from_record(&ctx, "/historical.txt", &historical).unwrap();
+  })
+  .await;
+  assert_eq!(historical_events[0].payload["entries"][0]["path"], "/historical.txt");
+  assert_eq!(operations.read_file_buffered("/historical.txt").unwrap(), b"old");
+
+  operations.store_file_buffered(&system, "/deleted.txt", b"deleted", Some("text/plain")).unwrap();
+  operations.delete_file(&system, "/deleted.txt").unwrap();
+  let deleted_events = assert_one_wave_two_mutation(&engine, &mut receiver, "restore", &["entries_created"], || {
+    operations.restore_deleted_file(&ctx, "/deleted.txt").unwrap();
+  })
+  .await;
+  assert_eq!(deleted_events[0].payload["entries"][0]["path"], "/deleted.txt");
+  assert_eq!(operations.read_file_buffered("/deleted.txt").unwrap(), b"deleted");
+}
+
+#[tokio::test]
 async fn test_create_snapshot_emits_version_created() {
   let (engine, bus, ctx, _temp) = setup_with_events();
   let mut rx = bus.subscribe();
@@ -666,6 +693,7 @@ async fn test_import_backup_emits_imports_completed() {
   let event = rx.recv().await.unwrap();
   assert_eq!(event.event_type, "imports_completed");
   assert_eq!(event.user_id, "importer");
+  assert_namespace_acknowledgement(&event, "import");
 
   let imports = event.payload["imports"].as_array().unwrap();
   assert_eq!(imports.len(), 1);

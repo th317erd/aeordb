@@ -6,7 +6,7 @@ AeorDB is an append-only database: writes, overwrites, and deletes all append ne
 
 GC uses a **mark-and-sweep** algorithm:
 
-1. **Mark phase**: Starting from HEAD, all snapshots, and all forks, GC walks every reachable directory tree. It marks every entry that is still live: directory indexes, file records, content chunks, system tables, task queue records, and deletion records. GC also treats current path-key FileRecords (`file:{path}`) as roots for their chunks, so a stale directory HEAD cannot cause a file that is still readable by path to lose its chunk data.
+1. **Mark phase**: Starting from HEAD, all snapshots, and all forks, GC walks every reachable directory tree. It marks every entry that is still live: directory indexes, file records, content chunks, system tables, task queue records, and deletion records. GC also retains current path-key FileRecords (`file:{path}`) and their chunks as repair evidence. An ordinary path absent from the selected HEAD remains invisible even when this derived locator is retained.
 
 2. **Sweep phase**: GC iterates all entries in the key-value store. Any entry whose hash is not in the live set is garbage. Non-live entries are overwritten in-place with DeletionRecord or Void entries, then removed from the KV index.
 
@@ -25,7 +25,7 @@ GC uses a **mark-and-sweep** algorithm:
 - Registry-classified system and namespace state (`/.aeordb-system`, `/.aeordb-config`, and descendant namespace metadata)
 - Task queue records (registry + individual task entries)
 - DeletionRecord entries (needed for KV rebuild from `.aeordb` scan)
-- Chunks referenced by a live path-key FileRecord, even if a directory index is temporarily stale
+- Live path-key FileRecords and their chunks as repair evidence, even when the selected root no longer references that path
 
 ## Running GC
 

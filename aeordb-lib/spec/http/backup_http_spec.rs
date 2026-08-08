@@ -261,6 +261,49 @@ async fn test_promote_nonexistent_hash() {
   assert!(json["error"].as_str().unwrap().contains("not found"), "error should mention not found");
 }
 
+#[tokio::test]
+async fn test_promote_rejects_existing_non_directory_hash() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let head_before = engine.head_hash().unwrap();
+  let chunk_key = engine.compute_hash(b"not a namespace root").unwrap();
+  engine.store_entry(aeordb::engine::EntryType::Chunk, &chunk_key, b"payload").unwrap();
+
+  let request = Request::builder()
+    .method("POST")
+    .uri(format!("/versions/promote?hash={}", hex::encode(&chunk_key)))
+    .header("authorization", bearer_token(&jwt_manager))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  assert_eq!(engine.head_hash().unwrap(), head_before, "wrong-type promotion must not move HEAD");
+}
+
+#[tokio::test]
+async fn test_promote_rejects_a_noncanonical_directory_locator_as_corrupt_storage() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let head_before = engine.head_hash().unwrap();
+  let noncanonical_key = vec![0xB4; engine.hash_algo().hash_length()];
+  engine.store_entry(aeordb::engine::EntryType::DirectoryIndex, &noncanonical_key, &[]).unwrap();
+
+  let request = Request::builder()
+    .method("POST")
+    .uri(format!("/versions/promote?hash={}", hex::encode(&noncanonical_key)))
+    .header("authorization", bearer_token(&jwt_manager))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let body = body_json(response.into_body()).await;
+  assert_eq!(body["error"], "Promote failed", "corruption details must remain server-side");
+  assert_eq!(body["code"], "INTERNAL_ERROR");
+  assert_eq!(engine.head_hash().unwrap(), head_before, "noncanonical promotion must not move HEAD");
+}
+
 // ─── 8. test_import_without_auth_fails ──────────────────────────────────
 
 #[tokio::test]

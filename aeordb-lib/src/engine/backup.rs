@@ -1,11 +1,17 @@
 use crate::engine::deletion_record::DeletionRecord;
 use crate::engine::directory_entry::{deserialize_child_entries, serialize_child_entries, ChildEntry};
-use crate::engine::directory_ops::{deletion_record_hash, directory_content_hash, directory_path_hash, file_path_hash};
+use crate::engine::directory_ops::{
+  DirectoryOps, deletion_record_hash, directory_content_hash, directory_path_hash, file_path_hash, validate_existing_chunk_locator,
+};
 use crate::engine::engine_event::{ImportEventData, EVENT_IMPORTS_COMPLETED};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SYMLINK};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
+use crate::engine::namespace_mutation::{
+  NamespaceMutationAcknowledgement, NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind,
+  NamespaceMutationSourceIdentity, publish_namespace_root_from_with_fanout, publish_namespace_root_with_fanout,
+};
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
@@ -20,10 +26,13 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::version_manager::SnapshotInfo;
 use tokio_util::sync::CancellationToken;
 use std::path::Path;
+use std::sync::Arc;
 
 const BACKUP_MINIMUM_WORKSPACE_BYTES: u64 = 4 * 1024;
 const KV_INVENTORY_ENTRY_BYTES: u64 = std::mem::size_of::<crate::engine::kv_store::KVEntry>() as u64 + 96;
 const BACKUP_COLLECTION_OVERHEAD_BYTES: u64 = 96;
+const IMPORT_LOCATOR_BATCH_MAX_ENTRIES: usize = 256;
+const IMPORT_LOCATOR_BATCH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 struct TreeWriteResult {
   chunks_written: u64,
@@ -34,6 +43,62 @@ struct TreeWriteResult {
   symlinks_written: u64,
   symlinks_mutated: u64,
   root_hash: Vec<u8>,
+}
+
+struct ImportHeadFanout<'a> {
+  target: &'a StorageEngine,
+  context: RequestContext,
+  payload: serde_json::Value,
+}
+
+impl NamespaceMutationFanout for ImportHeadFanout<'_> {
+  fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
+    self.target.counters().record_write(0);
+    if let Err(error) = self.target.counters().reconcile_live_namespace_from_head(self.target) {
+      tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Imported root could not reconcile live namespace counters");
+    }
+    let mut payload = self.payload.clone();
+    if let Err(error) = acknowledgement.annotate_event_payload(&mut payload) {
+      tracing::error!(operation_id = %acknowledgement.operation_id, error = %error, "Import event payload is invalid");
+      return;
+    }
+    self.context.emit(EVENT_IMPORTS_COMPLETED, payload);
+  }
+}
+
+fn finish_import_head(
+  context: &RequestContext,
+  target: &StorageEngine,
+  root_hash: &[u8],
+  promote: bool,
+  backup_type: &str,
+  entries_imported: u64,
+  expected_root_hash: Option<&[u8]>,
+) -> EngineResult<bool> {
+  let event_payload = |head_promoted| {
+    serde_json::json!({"imports": [ImportEventData {
+      backup_type: backup_type.to_string(),
+      version_hash: hex::encode(root_hash),
+      entries_imported,
+      head_promoted,
+    }]})
+  };
+  if promote {
+    let fanout = Arc::new(ImportHeadFanout { target, context: context.clone(), payload: event_payload(true) });
+    let acknowledgement = match expected_root_hash {
+      Some(expected_root) => {
+        publish_namespace_root_from_with_fanout(target, expected_root, root_hash, NamespaceMutationKind::Import, fanout)?
+      }
+      None => publish_namespace_root_with_fanout(target, root_hash, NamespaceMutationKind::Import, fanout)?,
+    };
+    if acknowledgement.is_some() {
+      return Ok(true);
+    }
+    context.emit(EVENT_IMPORTS_COMPLETED, event_payload(true));
+    return Ok(true);
+  }
+  context.emit(EVENT_IMPORTS_COMPLETED, event_payload(false));
+  Ok(false)
 }
 
 struct PartialBackupArtifact {
@@ -352,6 +417,7 @@ pub fn export_full(source: &StorageEngine, output_path: &str, include_system: bo
 enum TransferDestinationMode {
   Artifact,
   FullImport,
+  HistoricalImport,
   SparseImport,
 }
 
@@ -359,6 +425,195 @@ impl TransferDestinationMode {
   fn records_runtime_metrics(self) -> bool {
     self != Self::Artifact
   }
+
+  fn coordinates_active_locators(self) -> bool {
+    matches!(self, Self::FullImport | Self::SparseImport)
+  }
+}
+
+struct ImportLocatorBatch<'a> {
+  output: &'a StorageEngine,
+  budget: OperationMemoryBudget,
+  batch: NamespaceMutationBatch,
+  entry_count: usize,
+  retained_bytes: u64,
+}
+
+fn preserve_import_primary_error(primary: EngineError, cleanup: EngineResult<()>, context: &str) -> EngineError {
+  if let Err(cleanup_error) = cleanup {
+    tracing::error!(error = %cleanup_error, primary_error = %primary, "{context}");
+  }
+  primary
+}
+
+impl<'a> ImportLocatorBatch<'a> {
+  fn new(output: &'a StorageEngine) -> EngineResult<Self> {
+    Ok(Self {
+      output,
+      budget: backup_budget(output, None)?,
+      batch: NamespaceMutationBatch::new(NamespaceMutationKind::MaintenanceRepair),
+      entry_count: 0,
+      retained_bytes: 0,
+    })
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn replace(
+    &mut self,
+    entry_type: EntryType,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    flags: u8,
+    entry_version: u8,
+    path: String,
+    new_identity: Vec<u8>,
+  ) -> EngineResult<()> {
+    let charge = import_locator_charge(&key, &value, &path, Some(&new_identity), None)?;
+    self.flush_before(charge)?;
+    self.budget.reserve(charge, "import locator batch admission failed")?;
+    if let Err(error) = self.batch.replace_locator_with_version(entry_type, key, value, flags, entry_version) {
+      return Err(preserve_import_primary_error(
+        error,
+        self.budget.release(charge, "failed import locator batch release failed"),
+        "Import locator planning failed and reservation cleanup also failed",
+      ));
+    }
+    if let Err(error) = self.batch.add_source_identity(NamespaceMutationSourceIdentity {
+      path,
+      entry_type: Some(entry_type.to_u8()),
+      previous_identity: None,
+      new_identity: Some(new_identity),
+    }) {
+      return Err(preserve_import_primary_error(
+        error,
+        self.budget.release(charge, "failed import locator identity release failed"),
+        "Import locator identity planning failed and reservation cleanup also failed",
+      ));
+    }
+    self.entry_count += 1;
+    self.retained_bytes = self
+      .retained_bytes
+      .checked_add(charge)
+      .ok_or_else(|| EngineError::ResourceExhausted("import locator batch retained-byte count overflow".to_string()))?;
+    if self.entry_count >= IMPORT_LOCATOR_BATCH_MAX_ENTRIES || self.retained_bytes >= IMPORT_LOCATOR_BATCH_MAX_BYTES {
+      self.flush()?;
+    }
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn retire_with_dependency(
+    &mut self,
+    dependency_type: EntryType,
+    dependency_key: Vec<u8>,
+    dependency_value: Vec<u8>,
+    dependency_flags: u8,
+    dependency_version: u8,
+    locator_key: Vec<u8>,
+    path: String,
+    previous_identity: Vec<u8>,
+  ) -> EngineResult<()> {
+    let dependency_charge = dependency_key
+      .len()
+      .checked_mul(2)
+      .and_then(|bytes| bytes.checked_add(BACKUP_COLLECTION_OVERHEAD_BYTES as usize))
+      .and_then(|bytes| u64::try_from(bytes).ok())
+      .ok_or_else(|| EngineError::ResourceExhausted("import deletion batch estimate overflow".to_string()))?;
+    let charge = import_locator_charge(&locator_key, &dependency_value, &path, Some(&previous_identity), None)?
+      .checked_add(dependency_charge)
+      .ok_or_else(|| EngineError::ResourceExhausted("import deletion batch estimate overflow".to_string()))?;
+    self.flush_before(charge)?;
+    self.budget.reserve(charge, "import deletion batch admission failed")?;
+    if let Err(error) =
+      self.batch.store_dependency_with_version(dependency_type, dependency_key, dependency_value, dependency_flags, dependency_version)
+    {
+      return Err(preserve_import_primary_error(
+        error,
+        self.budget.release(charge, "failed import deletion dependency release failed"),
+        "Import deletion dependency planning failed and reservation cleanup also failed",
+      ));
+    }
+    if let Err(error) = self.batch.retire_locator(locator_key) {
+      return Err(preserve_import_primary_error(
+        error,
+        self.budget.release(charge, "failed import deletion locator release failed"),
+        "Import deletion locator planning failed and reservation cleanup also failed",
+      ));
+    }
+    if let Err(error) = self.batch.add_source_identity(NamespaceMutationSourceIdentity {
+      path,
+      entry_type: None,
+      previous_identity: Some(previous_identity),
+      new_identity: None,
+    }) {
+      return Err(preserve_import_primary_error(
+        error,
+        self.budget.release(charge, "failed import deletion identity release failed"),
+        "Import deletion identity planning failed and reservation cleanup also failed",
+      ));
+    }
+    self.entry_count += 1;
+    self.retained_bytes = self
+      .retained_bytes
+      .checked_add(charge)
+      .ok_or_else(|| EngineError::ResourceExhausted("import deletion batch retained-byte count overflow".to_string()))?;
+    if self.entry_count >= IMPORT_LOCATOR_BATCH_MAX_ENTRIES || self.retained_bytes >= IMPORT_LOCATOR_BATCH_MAX_BYTES {
+      self.flush()?;
+    }
+    Ok(())
+  }
+
+  fn flush_before(&mut self, next_charge: u64) -> EngineResult<()> {
+    if self.entry_count > 0
+      && (self.entry_count >= IMPORT_LOCATOR_BATCH_MAX_ENTRIES
+        || self.retained_bytes.checked_add(next_charge).is_none_or(|total| total > IMPORT_LOCATOR_BATCH_MAX_BYTES))
+    {
+      self.flush()?;
+    }
+    Ok(())
+  }
+
+  fn flush(&mut self) -> EngineResult<()> {
+    if self.entry_count == 0 {
+      return Ok(());
+    }
+    let batch = std::mem::replace(&mut self.batch, NamespaceMutationBatch::new(NamespaceMutationKind::MaintenanceRepair));
+    let entry_count = std::mem::take(&mut self.entry_count);
+    let retained_bytes = std::mem::take(&mut self.retained_bytes);
+    let result = NamespaceMutationCoordinator::new(self.output).execute(batch);
+    let release_result = self.budget.release(retained_bytes, "import locator batch release failed");
+    match result {
+      Ok(_) => {
+        release_result?;
+        for _ in 0..entry_count {
+          self.output.counters().record_write(0);
+        }
+        Ok(())
+      }
+      Err(error) => {
+        Err(preserve_import_primary_error(error, release_result, "Import locator publication failed and reservation cleanup also failed"))
+      }
+    }
+  }
+}
+
+fn import_locator_charge(
+  key: &[u8],
+  value: &[u8],
+  path: &str,
+  previous_identity: Option<&[u8]>,
+  new_identity: Option<&[u8]>,
+) -> EngineResult<u64> {
+  key
+    .len()
+    .checked_mul(2)
+    .and_then(|bytes| bytes.checked_add(value.len()))
+    .and_then(|bytes| bytes.checked_add(path.len()))
+    .and_then(|bytes| bytes.checked_add(previous_identity.map_or(0, <[u8]>::len)))
+    .and_then(|bytes| bytes.checked_add(new_identity.map_or(0, <[u8]>::len)))
+    .and_then(|bytes| bytes.checked_add((BACKUP_COLLECTION_OVERHEAD_BYTES as usize) * 4))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| EngineError::ResourceExhausted("import locator batch estimate overflow".to_string()))
 }
 
 fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
@@ -373,6 +628,7 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
   let mut chunks_written = 0u64;
   let mut files_written = 0u64;
   let mut files_mutated = 0u64;
+  let mut locator_batch = destination_mode.coordinates_active_locators().then(|| ImportLocatorBatch::new(output)).transpose()?;
 
   // Walk file-owned hashes directly. The destination KV de-duplicates shared
   // chunks, avoiding a second unbounded in-memory set alongside VersionTree.
@@ -380,7 +636,7 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
     budget.record_work(1)?;
     for chunk_hash in &record.chunk_hashes {
       budget.record_work(1)?;
-      if output.has_entry(chunk_hash)? {
+      if validate_existing_chunk_locator(output, "backup import", chunk_hash)? {
         continue;
       }
       let ((header, key, value), charge) = required_backup_entry(source, chunk_hash, "chunk", budget)?;
@@ -400,9 +656,9 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
     }
   }
 
-  // Write FileRecords at both content-hash and path-hash keys.
-  // The tree walker stores content hashes as file_hash, but read_file
-  // looks up by path hash, so both must be present in the exported database.
+  // Write immutable FileRecords plus stable path locators. Active imports
+  // publish locator replacements in bounded hard-authority batches; artifact
+  // databases still materialize their standalone path index directly.
   let file_algo = output.hash_algo();
   for (path, (file_hash, _record)) in &tree.files {
     budget.record_work(1)?;
@@ -412,7 +668,8 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
         return Err(EngineError::CorruptEntry { offset: 0, reason: format!("backup file '{}' resolved to {:?}", path, header.entry_type) });
       }
       let mut mutated = false;
-      if !output.has_entry(&key)? {
+      let mut locator_staged = false;
+      if !validate_existing_transfer_entry(output, &key, EntryType::FileRecord, "backup FileRecord identity", budget)? {
         store_file_record_entry_preserving_version(output, &key, &value, header.flags, header.entry_version)?;
         mutated = true;
       }
@@ -430,10 +687,23 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
           budget,
         )?
       {
-        store_file_record_entry_preserving_version(output, &path_key, &value, header.flags, header.entry_version)?;
+        if destination_mode.coordinates_active_locators() {
+          locator_batch.as_mut().expect("active import mode creates a locator batch").replace(
+            EntryType::FileRecord,
+            path_key,
+            value.clone(),
+            header.flags,
+            header.entry_version,
+            path.clone(),
+            file_hash.clone(),
+          )?;
+          locator_staged = true;
+        } else {
+          store_file_record_entry_preserving_version(output, &path_key, &value, header.flags, header.entry_version)?;
+        }
         mutated = true;
       }
-      if destination_mode.records_runtime_metrics() && mutated {
+      if destination_mode.records_runtime_metrics() && mutated && !locator_staged {
         output.counters().record_write(0);
       }
       files_written += 1;
@@ -443,7 +713,7 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
   }
 
   let (dirs_written, dirs_mutated, root_hash) =
-    write_transfer_directories(tree, source, output, resolver, operation, destination_mode, budget)?;
+    write_transfer_directories(tree, source, output, resolver, operation, destination_mode, locator_batch.as_mut(), budget)?;
 
   // Write symlink entries at both content-hash and path-hash keys.
   let symlink_algo = output.hash_algo();
@@ -459,7 +729,8 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
         });
       }
       let mut mutated = false;
-      if !output.has_entry(&key)? {
+      let mut locator_staged = false;
+      if !validate_existing_transfer_entry(output, &key, EntryType::Symlink, "backup symlink identity", budget)? {
         output.store_entry_with_flags_and_version(EntryType::Symlink, &key, &value, header.flags, header.entry_version)?;
         mutated = true;
       }
@@ -476,15 +747,31 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
           budget,
         )?
       {
-        output.store_entry_with_flags_and_version(EntryType::Symlink, &path_key, &value, header.flags, header.entry_version)?;
+        if destination_mode.coordinates_active_locators() {
+          locator_batch.as_mut().expect("active import mode creates a locator batch").replace(
+            EntryType::Symlink,
+            path_key,
+            value.clone(),
+            header.flags,
+            header.entry_version,
+            path.clone(),
+            symlink_hash.clone(),
+          )?;
+          locator_staged = true;
+        } else {
+          output.store_entry_with_flags_and_version(EntryType::Symlink, &path_key, &value, header.flags, header.entry_version)?;
+        }
         mutated = true;
       }
-      if destination_mode.records_runtime_metrics() && mutated {
+      if destination_mode.records_runtime_metrics() && mutated && !locator_staged {
         output.counters().record_write(0);
       }
       symlinks_mutated += u64::from(mutated);
       budget.release(charge, "Symlink copy buffer release failed")?;
     }
+  }
+  if let Some(locator_batch) = locator_batch.as_mut() {
+    locator_batch.flush()?;
   }
 
   Ok(TreeWriteResult {
@@ -506,6 +793,7 @@ fn write_transfer_directories<S: HistoricalEntrySource + ?Sized>(
   resolver: SystemFamilyPolicyResolver,
   operation: SystemFamilyTransferOperationV1,
   destination_mode: TransferDestinationMode,
+  locator_batch: Option<&mut ImportLocatorBatch<'_>>,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(u64, u64, Vec<u8>)> {
   let checkpoint = budget.checkpoint();
@@ -528,7 +816,7 @@ fn write_transfer_directories<S: HistoricalEntrySource + ?Sized>(
       .and_then(|bytes| bytes.checked_add(retained_path_bytes))
       .ok_or_else(|| EngineError::ResourceExhausted("transfer directory workspace estimate overflow".to_string()))?;
     budget.reserve(workspace_charge, "transfer directory routing workspace admission failed")?;
-    write_transfer_directories_admitted(tree, source, output, resolver, operation, destination_mode, budget)
+    write_transfer_directories_admitted(tree, source, output, resolver, operation, destination_mode, locator_batch, budget)
   })();
   let release_result = budget.release_to(checkpoint, "transfer directory routing workspace release failed");
   match result {
@@ -537,8 +825,7 @@ fn write_transfer_directories<S: HistoricalEntrySource + ?Sized>(
       Ok(result)
     }
     Err(error) => {
-      let _ = release_result;
-      Err(error)
+      Err(preserve_import_primary_error(error, release_result, "Transfer directory routing failed and workspace cleanup also failed"))
     }
   }
 }
@@ -550,6 +837,7 @@ fn write_transfer_directories_admitted<S: HistoricalEntrySource + ?Sized>(
   resolver: SystemFamilyPolicyResolver,
   operation: SystemFamilyTransferOperationV1,
   destination_mode: TransferDestinationMode,
+  mut locator_batch: Option<&mut ImportLocatorBatch<'_>>,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(u64, u64, Vec<u8>)> {
   let algorithm = output.hash_algo();
@@ -625,8 +913,9 @@ fn write_transfer_directories_admitted<S: HistoricalEntrySource + ?Sized>(
       }
       let flags = header.flags;
       let mut mutated = false;
+      let mut locator_staged = false;
       let exported_hash = if !changed {
-        if !output.has_entry(&source_key)? {
+        if !validate_existing_transfer_entry(output, &source_key, EntryType::DirectoryIndex, "backup directory identity", budget)? {
           store_directory_entry_preserving_version(output, &source_key, &source_value, flags, header.entry_version)?;
           mutated = true;
         }
@@ -683,11 +972,24 @@ fn write_transfer_directories_admitted<S: HistoricalEntrySource + ?Sized>(
           destination_mode,
           budget,
         )? {
-          store_directory_entry_preserving_version(output, &path_key, &exported_value, flags, exported_header.entry_version)?;
+          if destination_mode.coordinates_active_locators() {
+            locator_batch.as_deref_mut().expect("active import mode creates a locator batch").replace(
+              EntryType::DirectoryIndex,
+              path_key,
+              exported_value,
+              flags,
+              exported_header.entry_version,
+              path.clone(),
+              exported_hash.clone(),
+            )?;
+            locator_staged = true;
+          } else {
+            store_directory_entry_preserving_version(output, &path_key, &exported_value, flags, exported_header.entry_version)?;
+          }
           mutated = true;
         }
       }
-      if destination_mode.records_runtime_metrics() && mutated {
+      if destination_mode.records_runtime_metrics() && mutated && !locator_staged {
         output.counters().record_write(0);
       }
       written_hashes.insert(path.clone(), exported_hash);
@@ -700,8 +1002,11 @@ fn write_transfer_directories_admitted<S: HistoricalEntrySource + ?Sized>(
     match result {
       Ok(()) => release_result?,
       Err(error) => {
-        let _ = release_result;
-        return Err(error);
+        return Err(preserve_import_primary_error(
+          error,
+          release_result,
+          "Transfer directory copy failed and workspace cleanup also failed",
+        ));
       }
     }
   }
@@ -724,8 +1029,11 @@ fn should_store_transfer_alias(
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<bool> {
   match mode {
-    TransferDestinationMode::Artifact => return Ok(!output.has_entry(key)?),
+    TransferDestinationMode::Artifact => {
+      return Ok(!validate_existing_transfer_entry(output, key, expected_type, "backup artifact alias", budget)?);
+    }
     TransferDestinationMode::FullImport => return Ok(true),
+    TransferDestinationMode::HistoricalImport => return Ok(false),
     TransferDestinationMode::SparseImport => {}
   }
 
@@ -742,8 +1050,11 @@ fn should_store_transfer_alias(
     Ok(Some((_header, _key, value))) => value == expected_value,
     Ok(None) => false,
     Err(error) => {
-      let _ = budget.release(charge, "failed sparse import alias comparison release failed");
-      return Err(error);
+      return Err(preserve_import_primary_error(
+        error,
+        budget.release(charge, "failed sparse import alias comparison release failed"),
+        "Sparse import alias comparison failed and reservation cleanup also failed",
+      ));
     }
   };
   budget.release(charge, "sparse import alias comparison release failed")?;
@@ -890,7 +1201,7 @@ fn copy_reachable_btree_nodes<S: HistoricalEntrySource + ?Sized>(
   while let Some((node_hash, frontier_charge)) = frontier.pop() {
     budget.record_work(1)?;
     budget.release(frontier_charge, "B-tree copy frontier release failed")?;
-    if output.has_entry(&node_hash)? {
+    if validate_existing_transfer_entry(output, &node_hash, EntryType::DirectoryIndex, "backup B-tree node", budget)? {
       continue;
     }
     let ((header, key, value), charge) = required_backup_entry(source, &node_hash, "B-tree DirectoryIndex", budget)?;
@@ -932,8 +1243,7 @@ fn enqueue_btree_children(
   match result {
     Ok(()) => release_result,
     Err(error) => {
-      let _ = release_result;
-      Err(error)
+      Err(preserve_import_primary_error(error, release_result, "B-tree copy parsing failed and reservation cleanup also failed"))
     }
   }
 }
@@ -947,7 +1257,7 @@ fn copy_snapshot_entries(source: &StorageEngine, output: &StorageEngine, budget:
   let (snapshot_entries, inventory_charge) = load_type_inventory(source, KV_TYPE_SNAPSHOT, budget, "snapshot inventory admission failed")?;
   for entry in snapshot_entries {
     budget.record_work(1)?;
-    if !output.has_entry(&entry.hash)? {
+    if !validate_existing_transfer_entry(output, &entry.hash, EntryType::Snapshot, "backup snapshot identity", budget)? {
       let ((header, key, value), charge) = required_backup_entry(source, &entry.hash, "Snapshot", budget)?;
       if header.entry_type != EntryType::Snapshot {
         return Err(EngineError::CorruptEntry {
@@ -999,8 +1309,75 @@ fn required_backup_entry<S: HistoricalEntrySource + ?Sized>(
   kind: &str,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(BackupEntry, u64)> {
-  load_backup_entry(source, hash, budget)?
-    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("backup references missing {kind} entry {}", hex::encode(hash)) })
+  let (entry, charge) = load_backup_entry(source, hash, budget)?.ok_or_else(|| EngineError::CorruptEntry {
+    offset: 0,
+    reason: format!("backup references missing {kind} entry {}", hex::encode(hash)),
+  })?;
+  if entry.1 != hash {
+    let error = EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("backup {kind} lookup {} returned stored key {}", hex::encode(hash), hex::encode(&entry.1)),
+    };
+    return Err(preserve_import_primary_error(
+      error,
+      budget.release(charge, "mismatched backup entry buffer release failed"),
+      "Backup key validation failed and reservation cleanup also failed",
+    ));
+  }
+  Ok((entry, charge))
+}
+
+fn validate_existing_transfer_entry(
+  output: &StorageEngine,
+  key: &[u8],
+  expected_type: EntryType,
+  context: &str,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<bool> {
+  let Some(kv_entry) = output.get_kv_entry(key)? else {
+    return Ok(false);
+  };
+  if kv_entry.is_deleted() {
+    return Ok(false);
+  }
+  if kv_entry.entry_type() != expected_type.to_kv_type() {
+    return Err(EngineError::CorruptEntry {
+      offset: kv_entry.offset,
+      reason: format!("{context} {} collides with {:?}", hex::encode(key), kv_entry.entry_type()),
+    });
+  }
+
+  let header = output.get_entry_header(key)?.ok_or_else(|| EngineError::CorruptEntry {
+    offset: kv_entry.offset,
+    reason: format!("{context} {} disappeared during validation", hex::encode(key)),
+  })?;
+  let charge = backup_entry_charge(&header)?;
+  budget.reserve(charge, "existing transfer entry validation admission failed")?;
+  let result = output.get_entry_verified_bounded(key, header.value_length).and_then(|entry| {
+    let (stored_header, stored_key, _value) = entry.ok_or_else(|| EngineError::CorruptEntry {
+      offset: kv_entry.offset,
+      reason: format!("{context} {} disappeared during verified read", hex::encode(key)),
+    })?;
+    if stored_key != key || stored_header.entry_type != expected_type {
+      return Err(EngineError::CorruptEntry {
+        offset: kv_entry.offset,
+        reason: format!("{context} {} does not resolve to an exact {expected_type:?} entry", hex::encode(key)),
+      });
+    }
+    Ok(true)
+  });
+  let release_result = budget.release(charge, "existing transfer entry validation release failed");
+  match result {
+    Ok(exists) => {
+      release_result?;
+      Ok(exists)
+    }
+    Err(error) => Err(preserve_import_primary_error(
+      error,
+      release_result,
+      "Existing transfer entry validation failed and reservation cleanup also failed",
+    )),
+  }
 }
 
 fn load_type_inventory(
@@ -1173,6 +1550,7 @@ fn create_patch_inner(
     resolver,
     SystemFamilyTransferOperationV1::LogicalBackup,
     TransferDestinationMode::Artifact,
+    None,
     budget,
   )?;
   let (_, _, logical_target_hash) = write_transfer_directories(
@@ -1182,6 +1560,7 @@ fn create_patch_inner(
     resolver,
     SystemFamilyTransferOperationV1::LogicalBackup,
     TransferDestinationMode::Artifact,
+    None,
     budget,
   )?;
   output.set_backup_info(2, &logical_base_hash, &logical_target_hash)?;
@@ -1615,17 +1994,22 @@ fn validate_import_leaf_policies(
     let record = DeletionRecord::deserialize(&value, header.entry_version)?;
     let file_key = file_path_hash(&record.path, &backup.hash_algo())?;
     let symlink_key = symlink_path_hash(&record.path, &backup.hash_algo())?;
-    if key != file_key && key != symlink_key {
+    let entry_type = if key == file_key {
+      EntryType::FileRecord
+    } else if key == symlink_key {
+      EntryType::Symlink
+    } else {
       return Err(EngineError::CorruptEntry {
         offset: entry.offset,
         reason: format!("DeletionRecord key does not match file or symlink path '{}'", record.path),
       });
-    }
+    };
     if validate_import_leaf_selection(resolver, &record.path, EntryType::DeletionRecord, operation)? {
       let retained_bytes = key
         .len()
         .checked_add(record.path.len())
         .and_then(|bytes| bytes.checked_add(record.reason.as_ref().map_or(0, String::len)))
+        .and_then(|bytes| bytes.checked_add(hash_length))
         .ok_or_else(|| EngineError::ResourceExhausted("selected patch deletion estimate overflow".to_string()))?;
       let retained_charge = backup_collection_charge(retained_bytes)?;
       budget.reserve(retained_charge, "selected patch deletion admission failed")?;
@@ -1634,6 +2018,9 @@ fn validate_import_leaf_policies(
         record,
         flags: header.flags,
         entry_version: header.entry_version,
+        entry_type,
+        previous_identity: None,
+        retire_locator: false,
         retained_charge,
       });
     }
@@ -1756,6 +2143,9 @@ struct SelectedPatchDeletion {
   record: DeletionRecord,
   flags: u8,
   entry_version: u8,
+  entry_type: EntryType,
+  previous_identity: Option<Vec<u8>>,
+  retire_locator: bool,
   retained_charge: u64,
 }
 
@@ -1782,6 +2172,7 @@ pub fn import_backup_with_mode(
   let mut budget = backup_budget(target, None)?;
   let backup = StorageEngine::open_for_import_with_memory_coordinator(backup_path, target.memory_coordinator())?;
   let (backup_type, base_hash, target_hash) = backup.backup_info()?;
+  let starting_root_hash = target.head_hash()?;
   if !matches!(backup_type, 1 | 2) {
     return Err(EngineError::InvalidInput(format!("import requires backup type 1 (export) or 2 (patch), found {}", backup_type)));
   }
@@ -1853,7 +2244,7 @@ pub fn import_backup_with_mode(
   budget.release(deletion_inventory_charge, "deletion import inventory release failed")?;
 
   if backup_type == 1 {
-    import_full_export_with_policy(ctx, target, &backup, &target_hash, include_system, promote, &mut budget)
+    import_full_export_with_policy(ctx, target, &backup, &target_hash, include_system, force, promote, &starting_root_hash, &mut budget)
   } else {
     import_sparse_patch_with_policy(
       ctx,
@@ -1865,6 +2256,7 @@ pub fn import_backup_with_mode(
       selected_deletions,
       force,
       promote,
+      &starting_root_hash,
       &mut budget,
     )
   }
@@ -1878,9 +2270,10 @@ fn import_sparse_patch_with_policy(
   base_hash: &[u8],
   target_hash: &[u8],
   operation: SystemFamilyTransferOperationV1,
-  selected_deletions: Vec<SelectedPatchDeletion>,
+  mut selected_deletions: Vec<SelectedPatchDeletion>,
   force: bool,
   promote: bool,
+  starting_root_hash: &[u8],
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<ImportResult> {
   let overlay = PatchOverlaySource::new(patch, target)?;
@@ -1930,8 +2323,24 @@ fn import_sparse_patch_with_policy(
     drop(current_tree);
     changed
   };
-  let effective_deletion =
-    selected_deletions.iter().try_fold(false, |found, deletion| Ok::<_, EngineError>(found || target.has_entry(&deletion.path_key)?))?;
+  let current_operations = DirectoryOps::new(target);
+  for deletion in &mut selected_deletions {
+    budget.record_work(1)?;
+    let selected_identity = match current_operations.resolve_current_entry_identity_from(target, &deletion.record.path)? {
+      Some((entry_type, identity)) if entry_type == deletion.entry_type => Some(identity),
+      Some((entry_type, _identity)) if !force => {
+        return Err(EngineError::AlreadyExists(format!(
+          "Patch deletes {:?} path '{}' but the target currently selects {:?}",
+          deletion.entry_type, deletion.record.path, entry_type
+        )));
+      }
+      Some(_) | None => None,
+    };
+    let locator_identity = current_operations.resolve_live_locator_identity_from(target, &deletion.record.path, deletion.entry_type)?;
+    deletion.retire_locator = locator_identity.is_some();
+    deletion.previous_identity = selected_identity.or(locator_identity);
+  }
+  let effective_deletion = selected_deletions.iter().any(|deletion| deletion.retire_locator);
   drop(target_tree);
   budget.release_to(validation_checkpoint, "sparse patch validation tree release failed")?;
 
@@ -1956,48 +2365,40 @@ fn import_sparse_patch_with_policy(
   budget.release_to(write_checkpoint, "sparse patch write tree release failed")?;
 
   let mut deletions_applied = 0u64;
+  let mut deletion_batch = ImportLocatorBatch::new(target)?;
   for deletion in &selected_deletions {
     budget.record_work(1)?;
-    if target.has_entry(&deletion.path_key)? {
+    if deletion.retire_locator {
+      let previous_identity = deletion.previous_identity.clone().ok_or_else(|| EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("Patch deletion '{}' lost its selected prior identity", deletion.record.path),
+      })?;
       let value = deletion.record.serialize();
       let deletion_key = deletion_record_hash(&deletion.record.path, deletion.record.deleted_at, &target.hash_algo())?;
-      target.store_entry_with_flags_and_version(
+      deletion_batch.retire_with_dependency(
         EntryType::DeletionRecord,
-        &deletion_key,
-        &value,
+        deletion_key,
+        value,
         deletion.flags,
         deletion.entry_version,
+        deletion.path_key.clone(),
+        deletion.record.path.clone(),
+        previous_identity,
       )?;
-      target.mark_entry_deleted(&deletion.path_key)?;
-      target.counters().record_write(0);
       deletions_applied = deletions_applied.saturating_add(1);
     }
   }
+  deletion_batch.flush()?;
   release_selected_patch_deletions(selected_deletions, budget)?;
 
-  let current_head = target.head_hash()?;
-  let head_promoted = promote && current_head != stats.root_hash;
-  if head_promoted {
-    target.update_head(&stats.root_hash)?;
-    target.counters().record_write(0);
-  }
-
-  target.reconcile_counters_from_kv()?;
   let entries_imported = stats
     .chunks_written
     .saturating_add(stats.files_mutated)
     .saturating_add(stats.directories_mutated)
     .saturating_add(stats.symlinks_mutated)
     .saturating_add(deletions_applied);
-  ctx.emit(
-    EVENT_IMPORTS_COMPLETED,
-    serde_json::json!({"imports": [ImportEventData {
-      backup_type: "patch".to_string(),
-      version_hash: hex::encode(&stats.root_hash),
-      entries_imported,
-      head_promoted,
-    }]}),
-  );
+  let expected_root_hash = if force { None } else { Some(starting_root_hash) };
+  let head_promoted = finish_import_head(ctx, target, &stats.root_hash, promote, "patch", entries_imported, expected_root_hash)?;
 
   Ok(ImportResult {
     backup_type: 2,
@@ -2064,7 +2465,9 @@ fn import_full_export_with_policy(
   backup: &StorageEngine,
   target_hash: &[u8],
   include_system: bool,
+  force: bool,
   promote: bool,
+  starting_root_hash: &[u8],
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<ImportResult> {
   let operation = if include_system { SystemFamilyTransferOperationV1::Import } else { SystemFamilyTransferOperationV1::DataExport };
@@ -2098,7 +2501,7 @@ fn import_full_export_with_policy(
   for mut snapshot in snapshots {
     let tree_checkpoint = budget.checkpoint();
     let tree = walk_version_tree_for_transfer_with_budget(backup, &snapshot.root_hash, operation, false, budget)?;
-    let stats = write_tree_to_engine(&tree, backup, target, resolver, operation, TransferDestinationMode::FullImport, budget)?;
+    let stats = write_tree_to_engine(&tree, backup, target, resolver, operation, TransferDestinationMode::HistoricalImport, budget)?;
     drop(tree);
     budget.release_to(tree_checkpoint, "imported snapshot tree release failed")?;
 
@@ -2113,33 +2516,17 @@ fn import_full_export_with_policy(
 
     snapshot.root_hash = stats.root_hash;
     let snapshot_key = target.compute_hash(format!("snap:{}", snapshot.name).as_bytes())?;
-    if !target.has_entry(&snapshot_key)? {
-      let value = snapshot.serialize(target.hash_algo().hash_length())?;
-      target.store_entry_with_version(EntryType::Snapshot, &snapshot_key, &value, 0)?;
+    let value = snapshot.serialize(target.hash_algo().hash_length())?;
+    if import_snapshot_locator(target, snapshot_key, &snapshot, value.clone(), budget)? {
       target.counters().record_write(value.len() as u64);
+      target.counters().increment_snapshots();
       entries_imported = entries_imported.saturating_add(1);
     }
   }
   budget.release_to(snapshots_checkpoint, "imported snapshot inventory release failed")?;
 
-  let head_promoted = if promote {
-    target.update_head(&head_stats.root_hash)?;
-    target.counters().record_write(0);
-    true
-  } else {
-    false
-  };
-
-  target.reconcile_counters_from_kv()?;
-  ctx.emit(
-    EVENT_IMPORTS_COMPLETED,
-    serde_json::json!({"imports": [ImportEventData {
-      backup_type: "export".to_string(),
-      version_hash: hex::encode(&head_stats.root_hash),
-      entries_imported,
-      head_promoted,
-    }]}),
-  );
+  let expected_root_hash = if force { None } else { Some(starting_root_hash) };
+  let head_promoted = finish_import_head(ctx, target, &head_stats.root_hash, promote, "export", entries_imported, expected_root_hash)?;
 
   Ok(ImportResult {
     backup_type: 1,
@@ -2151,6 +2538,72 @@ fn import_full_export_with_policy(
     version_hash: head_stats.root_hash,
     head_promoted,
   })
+}
+
+fn import_snapshot_locator(
+  target: &StorageEngine,
+  snapshot_key: Vec<u8>,
+  snapshot: &SnapshotInfo,
+  value: Vec<u8>,
+  budget: &mut OperationMemoryBudget,
+) -> EngineResult<bool> {
+  let source_path = format!("/.aeordb-system/version-locators/snapshots/{}", hex::encode(&snapshot_key));
+  let root_hash = snapshot.root_hash.clone();
+  let (acknowledgement, ()) = NamespaceMutationCoordinator::new(target).prepare_and_maybe_execute(|planning_engine| {
+    if let Some(header) = planning_engine.get_entry_header(&snapshot_key)? {
+      if header.entry_type != EntryType::Snapshot {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("imported snapshot locator {} resolves to {:?}", hex::encode(&snapshot_key), header.entry_type),
+        });
+      }
+      let charge = backup_entry_charge(&header)?;
+      budget.reserve(charge, "existing imported snapshot validation admission failed")?;
+      let validation = planning_engine.get_entry_verified_bounded(&snapshot_key, header.value_length).and_then(|entry| {
+        let (stored_header, stored_key, stored_value) = entry.ok_or_else(|| EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("imported snapshot locator {} disappeared during validation", hex::encode(&snapshot_key)),
+        })?;
+        if stored_key != snapshot_key || stored_header.entry_type != EntryType::Snapshot {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("imported snapshot locator {} does not resolve to an exact Snapshot entry", hex::encode(&snapshot_key)),
+          });
+        }
+        let stored = SnapshotInfo::deserialize(&stored_value, planning_engine.hash_algo().hash_length(), stored_header.entry_version)?;
+        if stored.name != snapshot.name {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("imported snapshot locator key names '{}' but its record names '{}'", snapshot.name, stored.name),
+          });
+        }
+        Ok(())
+      });
+      let release_result = budget.release(charge, "existing imported snapshot validation release failed");
+      match validation {
+        Ok(()) => release_result?,
+        Err(error) => {
+          return Err(preserve_import_primary_error(
+            error,
+            release_result,
+            "Imported snapshot validation failed and reservation cleanup also failed",
+          ));
+        }
+      }
+      return Ok((None, ()));
+    }
+
+    let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Import);
+    batch.replace_locator_with_version(EntryType::Snapshot, snapshot_key.clone(), value.clone(), 0, 0)?;
+    batch.add_source_identity(NamespaceMutationSourceIdentity {
+      path: source_path.clone(),
+      entry_type: Some(EntryType::Snapshot.to_u8()),
+      previous_identity: None,
+      new_identity: Some(root_hash.clone()),
+    })?;
+    Ok((Some(batch), ()))
+  })?;
+  Ok(acknowledgement.is_some())
 }
 
 fn validate_full_import_tree(

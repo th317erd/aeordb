@@ -676,6 +676,31 @@ unfiltered patch roots may produce a different selected result.
 `--force`/`force=true` skips only base equivalence; it does not relax integrity
 or policy checks and does not supply missing unchanged entries.
 
+Active imports stage immutable chunks and entity bodies first. Mutable path
+locators are published through bounded hard-authority batches (at most 256
+locators or 8 MiB of retained batch state; a single larger record is admitted
+alone). Imported historical snapshot trees never replace current path
+locators. Ordinary reads remain bound to the currently selected HEAD, so an
+import with `promote=false` cannot change the visible namespace.
+Existing target hashes count as deduplicated immutable content only when they
+resolve to exact verified entries of the expected type. Wrong-type chunk,
+FileRecord, symlink, directory, B-tree-node, or snapshot collisions fail the
+import rather than publishing an unreadable namespace.
+Filtered B-tree rebuilds preflight the complete planned node set before batch
+publication. Existing nodes must match the planned type, version, key, and
+bytes exactly; any collision fails without publishing the other planned nodes.
+
+When `promote=true` and `force=false`, final publication compares the HEAD that
+was current when import began. If another acknowledged namespace mutation
+changed HEAD while the backup was being staged, import returns `409 Conflict`
+instead of overwriting that mutation. `force=true` explicitly disables this
+compare-and-publish guard. A successful root-changing import emits
+`imports_completed` only after hard publication and includes `operation_id`,
+`publication_sequence`, and `mutation_kind: "import"`.
+Live file, directory, symlink, and logical-byte counters are reconciled from the
+new HEAD after the same acknowledgement; unpromoted and conflicted imports do
+not expose staged locator counts.
+
 **Example:**
 
 ```bash
@@ -689,6 +714,7 @@ curl -X POST "http://localhost:6830/versions/import?promote=true" \
 | Status | Condition |
 |--------|-----------|
 | 400 | Empty, invalid, corrupt, unsupported, or malformed backup file |
+| 409 | HEAD changed while a non-forced promoted import was staging |
 | 403 | Non-root user |
 | 413 | Upload exceeds 10 GiB |
 | 503 | Backup/restore memory admission or cancellation prevents the operation |
@@ -697,7 +723,13 @@ curl -X POST "http://localhost:6830/versions/import?promote=true" \
 
 ### POST /versions/promote
 
-Promote an arbitrary version hash to HEAD.
+Promote an existing `DirectoryIndex` root hash to HEAD. Missing hashes are
+rejected, and a hash belonging to a chunk, file, symlink, or other entry type
+cannot become namespace authority. Publication uses the same hard durability
+coordinator as snapshot/fork restore. The selected record must also pass its
+physical checksum, parse as a valid flat or B-tree directory root, and be
+stored under its canonical content hash; a mutable directory path locator
+cannot be promoted as if it were a version root.
 
 **Query Parameters:**
 
@@ -726,7 +758,9 @@ curl -X POST "http://localhost:6830/versions/promote?hash=a1b2c3d4e5f6..." \
 | Status | Condition |
 |--------|-----------|
 | 400 | Invalid hash format |
+| 400 | Hash exists but is not a directory root |
 | 404 | Version hash not found in storage |
+| 500 | Stored root fails checksum, structural, or canonical-key validation |
 
 ---
 
@@ -735,6 +769,12 @@ curl -X POST "http://localhost:6830/versions/promote?hash=a1b2c3d4e5f6..." \
 ### GET /system/stats
 
 System statistics endpoint. Returns counters plus one bounded runtime-observability snapshot. Collection reads in-memory authority, cache, memory-coordinator, durability, and recovery state plus bounded operating-system probes. It does not scan the WAL, KV store, file bodies, or index files.
+
+The live file, directory, symlink, and logical-data counters describe the
+namespace selected by HEAD after generic-data SystemFamily policy. Visible
+authority such as `.aeordb-permissions` counts; concealed derived indexes,
+credentials, logs, and structural containers do not. Startup reconstruction
+and whole-root transition reconciliation use this same definition.
 
 Authentication is required. Share-link tokens are rejected. Root callers receive administrative paths and repair commands; non-root callers receive explicit `{"redacted":true}` markers for those values while retaining the bounded operational state.
 

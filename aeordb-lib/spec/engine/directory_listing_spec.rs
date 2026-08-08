@@ -1,5 +1,6 @@
 use aeordb::engine::directory_listing::{list_directory_recursive, measure_live_tree, visit_directory_recursive};
-use aeordb::engine::directory_ops::{DirectoryOps, file_path_hash};
+use aeordb::engine::directory_entry::{ChildEntry, serialize_child_entries};
+use aeordb::engine::directory_ops::{DirectoryOps, directory_content_hash, file_path_hash};
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
@@ -124,7 +125,7 @@ fn test_recursive_glob_matches_relative_path() {
 }
 
 #[test]
-fn test_recursive_listing_skips_deleted_path_key_child() {
+fn test_recursive_listing_uses_root_over_stale_path_tombstone() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
 
@@ -136,13 +137,17 @@ fn test_recursive_listing_skips_deleted_path_key_child() {
   engine.mark_entry_deleted(&ghost_key).unwrap();
 
   let ops = DirectoryOps::new(&engine);
-  assert!(ops.read_file_buffered("/dir/sub/ghost.txt").is_err(), "direct read should agree that the file path key is deleted");
+  assert_eq!(ops.read_file_buffered("/dir/sub/ghost.txt").unwrap(), b"ghost");
 
   let entries = list_directory_recursive(&engine, "/dir", -1, None, None).unwrap();
   let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
 
   assert!(paths.contains(&"/dir/sub/live.txt"));
-  assert!(!paths.contains(&"/dir/sub/ghost.txt"), "recursive listing must not expose a child whose live path key is deleted: {:?}", paths,);
+  assert!(
+    paths.contains(&"/dir/sub/ghost.txt"),
+    "recursive listing must follow the selected HEAD root even when a derived path locator is stale: {:?}",
+    paths,
+  );
 }
 
 #[test]
@@ -162,6 +167,52 @@ fn live_tree_measurement_rejects_unknown_protected_state() {
 
   let error = measure_live_tree(&engine).expect_err("authoritative live-tree accounting must not accept unknown protected state");
   assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }));
+}
+
+#[test]
+fn live_tree_measurement_excludes_concealed_system_families() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  store_file(&engine, "/docs/user.txt", b"user");
+  store_file(&engine, "/docs/.aeordb-permissions", b"permissions");
+  store_file(&engine, "/docs/.aeordb-indexes/text.idx", b"derived-index");
+  store_file(&engine, "/.aeordb-system/api-keys/key.json", b"secret");
+
+  let metrics = measure_live_tree(&engine).unwrap();
+
+  assert_eq!(metrics.files, 2, "ordinary files and visible permission authority are logical data");
+  assert_eq!(metrics.directories, 1, "concealed families and structural containers are not user directories");
+  assert_eq!(metrics.symlinks, 0);
+  assert_eq!(metrics.logical_data_size, 15, "concealed payload bytes are not logical user data");
+}
+
+#[test]
+fn live_tree_measurement_rejects_a_structural_container_leaf() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let hash_length = engine.hash_algo().hash_length();
+  let root_value = serialize_child_entries(
+    &[ChildEntry {
+      entry_type: EntryType::FileRecord.to_u8(),
+      hash: vec![0xA5; hash_length],
+      total_size: 15,
+      created_at: 1,
+      updated_at: 1,
+      name: ".aeordb-system".to_string(),
+      content_type: Some("application/octet-stream".to_string()),
+      virtual_time: 1,
+      node_id: 1,
+    }],
+    hash_length,
+  )
+  .unwrap();
+  let root_hash = directory_content_hash(&root_value, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &root_hash, &root_value).unwrap();
+  engine.update_head(&root_hash).unwrap();
+
+  let error = measure_live_tree(&engine).expect_err("a structural container cannot be persisted as a namespace leaf");
+
+  assert!(matches!(error, aeordb::engine::EngineError::SystemFamilyPolicy { code: "system_family_structural_leaf", .. }));
 }
 
 #[test]

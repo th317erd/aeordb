@@ -602,8 +602,41 @@ pub fn btree_from_entries(
   let plan = btree_plan_from_entries(entries, hash_length, algo)?;
   let root_hash = plan.root_hash.clone();
   let mut batch = WriteBatch::new();
-  plan.append_to_batch(&mut batch);
-  engine.flush_batch(batch)?;
+  for write in plan.node_writes() {
+    let Some(existing_header) = engine.get_entry_header(&write.key)? else {
+      batch.add(EntryType::DirectoryIndex, write.key.clone(), write.value.clone());
+      continue;
+    };
+    let planned_value_length = u32::try_from(write.value.len())
+      .map_err(|_| EngineError::ResourceExhausted("planned B-tree node exceeds u32 value length".to_string()))?;
+    if existing_header.entry_type != EntryType::DirectoryIndex
+      || existing_header.entry_version != 0
+      || existing_header.value_length != planned_value_length
+    {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("planned B-tree node {} collides with incompatible immutable authority", hex::encode(&write.key)),
+      });
+    }
+    let (stored_header, stored_key, stored_value) =
+      engine.get_entry_verified_bounded(&write.key, planned_value_length)?.ok_or_else(|| EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("planned B-tree node {} disappeared during immutable preflight", hex::encode(&write.key)),
+      })?;
+    if stored_header.entry_type != EntryType::DirectoryIndex
+      || stored_header.entry_version != 0
+      || stored_key != write.key
+      || stored_value != write.value
+    {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("planned B-tree node {} does not match existing immutable authority", hex::encode(&write.key)),
+      });
+    }
+  }
+  if !batch.is_empty() {
+    engine.flush_batch(batch)?;
+  }
   Ok(root_hash)
 }
 

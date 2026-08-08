@@ -523,7 +523,7 @@ fn test_gc_mark_rejects_unknown_protected_descendants() {
 }
 
 #[test]
-fn test_gc_mark_preserves_live_path_file_record_when_head_lost_reference() {
+fn test_gc_mark_preserves_path_file_record_as_repair_evidence_when_head_lost_reference() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(&engine);
@@ -548,7 +548,12 @@ fn test_gc_mark_preserves_live_path_file_record_when_head_lost_reference() {
   assert!(live.contains(&chunk_hash), "chunks referenced by a live path-key FileRecord must be marked");
 
   run_gc(&engine, &ctx, false).unwrap();
-  assert_eq!(ops.read_file_buffered("/head-lost.txt").unwrap(), body);
+  assert!(engine.get_entry(&path_key).unwrap().is_some(), "GC must retain the derived path locator as repair evidence");
+  assert!(engine.get_entry(&chunk_hash).unwrap().is_some(), "GC must retain chunks needed by repair evidence");
+  assert!(
+    matches!(ops.read_file_buffered("/head-lost.txt"), Err(EngineError::NotFound(_))),
+    "repair evidence outside the selected root must not become visible current data"
+  );
 }
 
 #[test]

@@ -56,6 +56,12 @@ impl NamespaceMutationFanout for VersionMutationFanout<'_> {
       return;
     };
 
+    if acknowledgement.previous_root_hash != acknowledgement.root_hash {
+      if let Err(error) = self.engine.counters().reconcile_live_namespace_from_head(self.engine) {
+        tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Version root transition could not reconcile live namespace counters");
+      }
+    }
+
     self.engine.counters().record_write(effects.throughput_bytes);
     match effects.counter {
       VersionMutationCounterEffect::None => {}

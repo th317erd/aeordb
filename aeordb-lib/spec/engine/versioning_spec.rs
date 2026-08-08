@@ -121,6 +121,167 @@ fn test_restore_snapshot_rolls_back_state() {
 }
 
 #[test]
+fn restored_head_is_authoritative_for_current_file_reads() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/restored.txt", b"snapshot bytes", Some("text/plain")).unwrap();
+  let expected = ops.get_metadata("/restored.txt").unwrap().unwrap();
+  vm.create_snapshot(&ctx, "file-version", HashMap::new()).unwrap();
+  ops.store_file_buffered(&ctx, "/restored.txt", b"newer bytes", Some("text/plain")).unwrap();
+
+  vm.restore_snapshot(&ctx, "file-version").unwrap();
+
+  assert_eq!(ops.read_file_buffered("/restored.txt").unwrap(), b"snapshot bytes");
+  assert_eq!(ops.get_metadata("/restored.txt").unwrap().unwrap().content_hash, expected.content_hash);
+}
+
+#[test]
+fn restored_head_is_authoritative_for_current_symlink_reads() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_symlink(&ctx, "/restored-link", "/first-target").unwrap();
+  vm.create_snapshot(&ctx, "symlink-version", HashMap::new()).unwrap();
+  ops.store_symlink(&ctx, "/restored-link", "/second-target").unwrap();
+
+  vm.restore_snapshot(&ctx, "symlink-version").unwrap();
+
+  assert_eq!(ops.get_symlink("/restored-link").unwrap().unwrap().target, "/first-target");
+}
+
+#[test]
+fn restored_head_reconciles_all_live_namespace_counters() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/selected.txt", b"selected", Some("text/plain")).unwrap();
+  ops.store_symlink(&ctx, "/selected-link", "/selected.txt").unwrap();
+  let expected = engine.counters().snapshot();
+  vm.create_snapshot(&ctx, "counter-version", HashMap::new()).unwrap();
+  ops.store_file_buffered(&ctx, "/later.txt", b"later", Some("text/plain")).unwrap();
+  ops.create_directory(&ctx, "/later-directory").unwrap();
+
+  vm.restore_snapshot(&ctx, "counter-version").unwrap();
+  let actual = engine.counters().snapshot();
+
+  assert_eq!(actual.files, expected.files);
+  assert_eq!(actual.directories, expected.directories);
+  assert_eq!(actual.symlinks, expected.symlinks);
+  assert_eq!(actual.logical_data_size, expected.logical_data_size);
+}
+
+#[test]
+fn restored_head_is_authoritative_for_exists() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/before.txt", b"before", Some("text/plain")).unwrap();
+  ops.create_directory(&ctx, "/before-directory").unwrap();
+  vm.create_snapshot(&ctx, "exists-version", HashMap::new()).unwrap();
+
+  ops.delete_file(&ctx, "/before.txt").unwrap();
+  ops.delete_directory(&ctx, "/before-directory").unwrap();
+  ops.store_file_buffered(&ctx, "/after.txt", b"after", Some("text/plain")).unwrap();
+  ops.create_directory(&ctx, "/after-directory").unwrap();
+
+  vm.restore_snapshot(&ctx, "exists-version").unwrap();
+
+  assert!(ops.exists("/before.txt").unwrap());
+  assert!(ops.exists("/before-directory").unwrap());
+  assert!(!ops.exists("/after.txt").unwrap());
+  assert!(!ops.exists("/after-directory").unwrap());
+}
+
+#[test]
+fn restored_head_is_authoritative_for_nested_listing_without_a_live_path_locator() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/nested/snapshot.txt", b"snapshot", Some("text/plain")).unwrap();
+  vm.create_snapshot(&ctx, "nested-version", HashMap::new()).unwrap();
+  ops.store_file_buffered(&ctx, "/nested/newer.txt", b"newer", Some("text/plain")).unwrap();
+  vm.restore_snapshot(&ctx, "nested-version").unwrap();
+
+  let locator = aeordb::engine::directory_path_hash("/nested", &engine.hash_algo()).unwrap();
+  engine.mark_entry_deleted(&locator).unwrap();
+
+  let children = ops.list_directory("/nested").expect("HEAD-selected directory must not depend on its derived locator");
+  assert_eq!(children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(), vec!["snapshot.txt"]);
+}
+
+#[test]
+fn restored_head_is_authoritative_for_file_rename_and_copy_sources() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/rename-source.txt", b"snapshot rename", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/copy-source.txt", b"snapshot copy", Some("text/plain")).unwrap();
+  vm.create_snapshot(&ctx, "source-version", HashMap::new()).unwrap();
+  ops.store_file_buffered(&ctx, "/rename-source.txt", b"newer rename", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/copy-source.txt", b"newer copy", Some("text/plain")).unwrap();
+  vm.restore_snapshot(&ctx, "source-version").unwrap();
+
+  ops.rename_file(&ctx, "/rename-source.txt", "/renamed.txt").unwrap();
+  ops.copy_file(&ctx, "/copy-source.txt", "/copied.txt").unwrap();
+
+  assert_eq!(ops.read_file_buffered("/renamed.txt").unwrap(), b"snapshot rename");
+  assert_eq!(ops.read_file_buffered("/copied.txt").unwrap(), b"snapshot copy");
+}
+
+#[test]
+fn restored_head_is_authoritative_for_rename_destination_existence() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_file_buffered(&ctx, "/source.txt", b"source", Some("text/plain")).unwrap();
+  vm.create_snapshot(&ctx, "destination-version", HashMap::new()).unwrap();
+  ops.store_file_buffered(&ctx, "/future.txt", b"not selected", Some("text/plain")).unwrap();
+  vm.restore_snapshot(&ctx, "destination-version").unwrap();
+
+  ops.rename_file(&ctx, "/source.txt", "/future.txt").expect("a derived locator from a newer root must not reserve an absent destination");
+  assert_eq!(ops.read_file_buffered("/future.txt").unwrap(), b"source");
+}
+
+#[test]
+fn restored_head_is_authoritative_for_symlink_rename_source() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+
+  ops.store_symlink(&ctx, "/source-link", "/snapshot-target").unwrap();
+  vm.create_snapshot(&ctx, "symlink-rename-version", HashMap::new()).unwrap();
+  ops.store_symlink(&ctx, "/source-link", "/newer-target").unwrap();
+  vm.restore_snapshot(&ctx, "symlink-rename-version").unwrap();
+
+  ops.rename_symlink(&ctx, "/source-link", "/renamed-link").unwrap();
+  assert_eq!(ops.get_symlink("/renamed-link").unwrap().unwrap().target, "/snapshot-target");
+}
+
+#[test]
 fn test_list_snapshots() {
   let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();

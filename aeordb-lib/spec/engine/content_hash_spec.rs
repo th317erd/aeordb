@@ -577,21 +577,15 @@ fn test_content_hash_entry_immutable() {
   assert_eq!(data_1, data_1_after, "old content hash entry data must not change");
 }
 
-// ─── 26. List_directory heals stale dir_key ancestors after snapshot restore ─
+// ─── 26. List_directory ignores stale dir_key ancestors after snapshot restore ─
 
 /// Regression for the 2026-05-20 overnight S2 soak finding (P1).
 ///
-/// After `snapshot_restore` moves HEAD, dir_key hard-links can be stale
-/// relative to HEAD's canonical content. Commit 1bdda9c's read-path
-/// recovery serves canonical content but did not persist the heal for
-/// ancestor dir_keys — only the leaf path being queried got fixed (via
-/// subsequent writes to it), so ancestors like `/`, `/Documents`,
-/// `/Documents/sub` accumulated stale dir_key entries indefinitely.
-///
-/// This test reproduces that exact pattern and asserts the heal now
-/// propagates up the chain when ANY descendant is read.
+/// After `snapshot_restore` moves HEAD, derived dir_key hard-links can be stale
+/// relative to HEAD's canonical content. Ordinary reads must use HEAD without
+/// mutating those locators; explicit verification/repair owns reconciliation.
 #[test]
-fn test_list_directory_heals_ancestor_dir_keys_after_snapshot_restore() {
+fn test_list_directory_uses_head_without_mutating_stale_dir_keys_after_snapshot_restore() {
   use aeordb::engine::directory_path_hash;
 
   let ctx = RequestContext::system();
@@ -616,16 +610,16 @@ fn test_list_directory_heals_ancestor_dir_keys_after_snapshot_restore() {
   ops.store_file_buffered(&ctx, "/a/b/c/d/different.txt", b"distractor2", None).unwrap();
   vm.restore_snapshot(&ctx, "before").unwrap();
 
-  // Capture pre-heal dir_key hard-links for /, /a, /a/b, /a/b/c, /a/b/c/d.
+  // Capture stale dir_key hard-links for /, /a, /a/b, /a/b/c, /a/b/c/d.
   // Each should be a hash_length hard-link entry.
   let hash_length = algo.hash_length();
   let paths = ["/", "/a", "/a/b", "/a/b/c", "/a/b/c/d"];
-  let mut pre_heal: Vec<Vec<u8>> = Vec::new();
+  let mut before_read: Vec<Vec<u8>> = Vec::new();
   let mut stale_count = 0;
   for p in &paths {
     let key = directory_path_hash(p, &algo).unwrap();
     let (_h, _k, v) = engine.get_entry(&key).unwrap().expect("dir_key entry must exist");
-    pre_heal.push(v.clone());
+    before_read.push(v.clone());
     // Compare against canonical for that path.
     let canonical = ops.canonical_directory_content_hash(p).unwrap().expect("canonical must be reachable from HEAD");
     if v.len() == hash_length && v != canonical {
@@ -636,17 +630,14 @@ fn test_list_directory_heals_ancestor_dir_keys_after_snapshot_restore() {
   // We need at least one stale ancestor for this test to be meaningful.
   assert!(stale_count >= 1, "expected at least one stale ancestor dir_key after restore; got 0 (test setup didn't reproduce the bug)");
 
-  // Now trigger the heal by listing the DEEPEST descendant. The new
-  // ancestor-walk heal should fix /, /a, /a/b, /a/b/c, /a/b/c/d in one shot.
-  let _ = ops.list_directory("/a/b/c/d").unwrap();
+  let children = ops.list_directory("/a/b/c/d").unwrap();
+  assert_eq!(children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(), vec!["file.txt"]);
 
-  // Every dir_key along the chain must now point at canonical.
-  for p in &paths {
+  // Reads are side-effect free: stale locators remain repair evidence until
+  // the explicit verification/repair path reconciles them.
+  for (index, p) in paths.iter().enumerate() {
     let key = directory_path_hash(p, &algo).unwrap();
-    let (_h, _k, v) = engine.get_entry(&key).unwrap().expect("dir_key entry must exist post-heal");
-    if v.len() == hash_length {
-      let canonical = ops.canonical_directory_content_hash(p).unwrap().expect("canonical reachable post-heal");
-      assert_eq!(v, canonical, "ancestor {} dir_key must point at canonical after list_directory heal", p);
-    }
+    let (_h, _k, value) = engine.get_entry(&key).unwrap().expect("dir_key entry must remain available after read");
+    assert_eq!(value, before_read[index], "listing must not rewrite derived locator {p}");
   }
 }

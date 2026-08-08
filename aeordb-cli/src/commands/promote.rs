@@ -21,21 +21,8 @@ pub fn run(database: &str, hash: &str) {
     }
   };
 
-  // Verify the hash exists (it should be a directory entry)
-  match engine.has_entry(&hash_bytes) {
-    Ok(true) => {}
-    Ok(false) => {
-      eprintln!("Error: version hash {} not found in database.", hash);
-      process::exit(1);
-    }
-    Err(e) => {
-      eprintln!("Error checking hash: {}", e);
-      process::exit(1);
-    }
-  }
-
-  match engine.update_head(&hash_bytes) {
-    Ok(()) => println!("HEAD promoted to {}", hash),
+  match aeordb::engine::publish_namespace_root(&engine, &hash_bytes, aeordb::engine::NamespaceMutationKind::Promote) {
+    Ok(_) => println!("HEAD promoted to {}", hash),
     Err(e) => {
       eprintln!("Promote failed: {}", e);
       process::exit(1);

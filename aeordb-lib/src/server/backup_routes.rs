@@ -21,7 +21,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner, MemoryReservation};
 use crate::engine::operation_memory::OperationMemoryBudget;
-use crate::engine::{EngineError, RequestContext, StorageEngine};
+use crate::engine::{EngineError, NamespaceMutationKind, RequestContext, StorageEngine, publish_namespace_root};
 
 const BACKUP_STREAM_BUFFER_BYTES: u64 = 64 * 1024;
 pub(super) const BACKUP_UPLOAD_LIMIT_BYTES: usize = 10 * 1024 * 1024 * 1024;
@@ -441,25 +441,8 @@ pub async fn promote_head(
     Err(e) => return ErrorResponse::new(format!("Invalid hash: {}", e)).with_status(StatusCode::BAD_REQUEST).into_response(),
   };
 
-  match state.engine.has_entry(&hash_bytes) {
-    Ok(true) => {}
-    Ok(false) => {
-      return ErrorResponse::new(format!(
-        "Version hash '{}' not found. Use GET /versions/snapshots to find valid version hashes",
-        params.hash
-      ))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response()
-    }
-    Err(e) => {
-      return ErrorResponse::new(format!("Failed to verify version hash '{}': {}", params.hash, e))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response()
-    }
-  }
-
-  match state.engine.update_head(&hash_bytes) {
-    Ok(()) => (
+  match publish_namespace_root(&state.engine, &hash_bytes, NamespaceMutationKind::Promote) {
+    Ok(_) => (
       StatusCode::OK,
       Json(serde_json::json!({
           "status": "success",
@@ -467,7 +450,15 @@ pub async fn promote_head(
       })),
     )
       .into_response(),
-    Err(e) => ErrorResponse::new(format!("Promote failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response(),
+    Err(EngineError::NotFound(_)) => {
+      ErrorResponse::new(format!("Version hash '{}' not found. Use GET /versions/snapshots to find valid version hashes", params.hash))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response()
+    }
+    Err(error) => {
+      tracing::error!(requested_root = %params.hash, %error, "namespace-root promotion failed");
+      engine_error_response("Promote failed", &error)
+    }
   }
 }
 

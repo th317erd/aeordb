@@ -9,6 +9,7 @@ use aeordb::engine::btree::{
 use aeordb::engine::WriteBatch;
 use aeordb::engine::directory_entry::ChildEntry;
 use aeordb::engine::entry_type::EntryType;
+use aeordb::engine::errors::EngineError;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::server::create_temp_engine_for_tests;
@@ -558,6 +559,70 @@ fn test_btree_from_entries() {
   for i in 0..100 {
     let found = btree_lookup(&engine, &root, &format!("entry_{:04}", i), hl, false).unwrap();
     assert!(found.is_some(), "Could not find entry_{:04} after bulk build", i);
+  }
+}
+
+#[test]
+fn btree_from_entries_rejects_an_immutable_node_collision_before_writing_other_nodes() {
+  let (engine, _dir) = setup_engine();
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let entries: Vec<ChildEntry> = (0..300).map(|index| make_entry(&format!("entry_{index:04}"))).collect();
+  let plan = btree_plan_from_entries(entries.clone(), hash_length, &algorithm).unwrap();
+  let planned_nodes = plan.node_writes().cloned().collect::<Vec<_>>();
+  let collision = planned_nodes[planned_nodes.len() / 2].clone();
+  engine.store_entry(EntryType::Chunk, &collision.key, b"wrong immutable type").unwrap();
+
+  let error = btree_from_entries(&engine, entries, hash_length, &algorithm).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  let (header, stored_key, value) = engine.get_entry_verified(&collision.key).unwrap().unwrap();
+  assert_eq!(header.entry_type, EntryType::Chunk);
+  assert_eq!(stored_key, collision.key);
+  assert_eq!(value, b"wrong immutable type");
+  for node in planned_nodes {
+    if node.key != collision.key {
+      assert!(engine.get_entry(&node.key).unwrap().is_none(), "preflight failure must not publish another planned node");
+    }
+  }
+}
+
+#[test]
+fn btree_from_entries_rejects_same_type_noncanonical_node_bytes() {
+  let (engine, _dir) = setup_engine();
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let entries: Vec<ChildEntry> = (0..100).map(|index| make_entry(&format!("entry_{index:04}"))).collect();
+  let plan = btree_plan_from_entries(entries.clone(), hash_length, &algorithm).unwrap();
+  let collision = plan.node_writes().next().unwrap().clone();
+  let mut wrong_value = collision.value.clone();
+  let last = wrong_value.len() - 1;
+  wrong_value[last] ^= 0xFF;
+  engine.store_entry(EntryType::DirectoryIndex, &collision.key, &wrong_value).unwrap();
+
+  let error = btree_from_entries(&engine, entries, hash_length, &algorithm).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  let (_, _, stored_value) = engine.get_entry_verified(&collision.key).unwrap().unwrap();
+  assert_eq!(stored_value, wrong_value);
+}
+
+#[test]
+fn btree_from_entries_deduplicates_byte_exact_existing_nodes() {
+  let (engine, _dir) = setup_engine();
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let entries: Vec<ChildEntry> = (0..100).map(|index| make_entry(&format!("entry_{index:04}"))).collect();
+  let root_hash = btree_from_entries(&engine, entries.clone(), hash_length, &algorithm).unwrap();
+  let plan = btree_plan_from_entries(entries.clone(), hash_length, &algorithm).unwrap();
+  let before =
+    plan.node_writes().map(|node| (node.key.clone(), engine.get_kv_entry(&node.key).unwrap().unwrap().offset)).collect::<Vec<_>>();
+
+  let second_root_hash = btree_from_entries(&engine, entries, hash_length, &algorithm).unwrap();
+
+  assert_eq!(second_root_hash, root_hash);
+  for (key, original_offset) in before {
+    assert_eq!(engine.get_kv_entry(&key).unwrap().unwrap().offset, original_offset);
   }
 }
 

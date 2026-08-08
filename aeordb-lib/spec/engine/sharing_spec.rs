@@ -1562,7 +1562,7 @@ async fn list_shares_allows_own_subtree() {
 }
 
 #[tokio::test]
-async fn snapshot_restore_then_gc_leaves_stale_dir_keys_but_listing_recovers() {
+async fn snapshot_restore_then_gc_reads_head_without_healing_stale_dir_keys() {
   use aeordb::engine::{gc as gc_mod, VersionManager};
 
   let (app, jwt_manager, engine, _temp_dir) = test_app();
@@ -1628,10 +1628,8 @@ async fn snapshot_restore_then_gc_leaves_stale_dir_keys_but_listing_recovers() {
     report_pre_list
   );
 
-  // Direct GET on /A/B should still work — via runtime recovery fallback —
-  // AND, post-P1 fix, must also persistently heal the dir_key (and any
-  // stale ancestors along the chain) so subsequent verifies see no
-  // staleness without needing a manual `--repair` pass.
+  // Direct GET on /A/B follows HEAD and must not mutate derived locators as a
+  // read side effect.
   let req = Request::builder().method("GET").uri("/files/A/B/").header("authorization", &auth).body(Body::empty()).unwrap();
   let resp = rebuild_app(&jwt_manager, &engine).oneshot(req).await.unwrap();
   assert_eq!(resp.status(), StatusCode::OK, "GET on stale-dir_key directory must succeed via runtime recovery");
@@ -1641,15 +1639,20 @@ async fn snapshot_restore_then_gc_leaves_stale_dir_keys_but_listing_recovers() {
   assert!(names.contains(&"file_v1_b.txt".to_string()));
   assert!(!names.contains(&"file_v2.txt".to_string()), "Restored snapshot should not show post-mutation file");
 
-  // After the listing, the online heal must have rewritten the dir_key
-  // for /A/B and (if applicable) its ancestors. No `verify --repair`
-  // pass needed.
+  // The stale locator remains repair evidence until an explicit repair owns
+  // the write.
   let report_after = aeordb::engine::verify::verify(&engine, "<test>");
   assert!(
-    !report_after.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
-    "list_directory must auto-heal the stale dir_key for /A/B. \
-         Still stale: {:?}",
+    report_after.stale_dir_path_keys.iter().any(|p| p == "/A/B"),
+    "ordinary listing must not auto-heal the stale dir_key for /A/B: {:?}",
     report_after.stale_dir_path_keys,
+  );
+
+  let repaired = aeordb::engine::verify::verify_and_repair_checked(&engine, "<test>").unwrap();
+  assert!(
+    !repaired.stale_dir_path_keys.iter().any(|path| path == "/A/B"),
+    "explicit repair must reconcile the stale dir_key: {:?}",
+    repaired.stale_dir_path_keys,
   );
 }
 

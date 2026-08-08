@@ -131,6 +131,19 @@ impl NamespaceMutationFanout for NoopNamespaceMutationFanout {
   fn publish(&self, _acknowledgement: &NamespaceMutationAcknowledgement) {}
 }
 
+struct RootPublicationFanout<'a> {
+  engine: &'a StorageEngine,
+}
+
+impl NamespaceMutationFanout for RootPublicationFanout<'_> {
+  fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
+    self.engine.counters().record_write(0);
+    if let Err(error) = self.engine.counters().reconcile_live_namespace_from_head(self.engine) {
+      tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not reconcile live namespace counters");
+    }
+  }
+}
+
 #[derive(Debug)]
 struct PlannedEntryWrite {
   entry_type: EntryType,
@@ -302,21 +315,75 @@ impl NamespaceMutationBatch {
       if dependency.entry_type != EntryType::DirectoryIndex {
         return Err(EngineError::InvalidInput("namespace mutation HEAD dependency must be a DirectoryIndex entry".to_string()));
       }
-      return Ok(());
+      return validate_namespace_root_value(
+        engine,
+        head_hash,
+        "namespace mutation HEAD dependency",
+        &dependency.value,
+        dependency.entry_version,
+      );
     }
     validate_existing_namespace_root(engine, head_hash, "namespace mutation HEAD")
   }
 }
 
 pub(crate) fn validate_existing_namespace_root(engine: &StorageEngine, root_hash: &[u8], role: &str) -> EngineResult<()> {
+  validate_namespace_root_with(engine, root_hash, role, |reason| EngineError::CorruptEntry { offset: 0, reason })
+}
+
+fn validate_requested_namespace_root(engine: &StorageEngine, root_hash: &[u8], role: &str) -> EngineResult<()> {
+  validate_namespace_root_with(engine, root_hash, role, EngineError::InvalidInput)
+}
+
+fn validate_namespace_root_with<F>(engine: &StorageEngine, root_hash: &[u8], role: &str, wrong_type: F) -> EngineResult<()>
+where
+  F: FnOnce(String) -> EngineError,
+{
   validate_hash_width(root_hash, engine.hash_algo().hash_length(), role)?;
-  let Some((header, stored_key, _)) = engine.get_entry(root_hash)? else {
+  let Some((header, stored_key, value)) = engine.get_entry_verified(root_hash)? else {
     return Err(EngineError::NotFound(format!("{role} root {}", hex::encode(root_hash))));
   };
   if header.entry_type != EntryType::DirectoryIndex || stored_key != root_hash {
+    return Err(wrong_type(format!("{role} root {} is not a DirectoryIndex entry", hex::encode(root_hash))));
+  }
+  validate_namespace_root_value(engine, root_hash, role, &value, header.entry_version)
+}
+
+fn validate_namespace_root_value(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  role: &str,
+  value: &[u8],
+  entry_version: u8,
+) -> EngineResult<()> {
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let canonical_hash = if !value.is_empty() && crate::engine::btree::is_btree_format(&value) {
+    crate::engine::btree::BTreeNode::deserialize(value, hash_length, entry_version)
+      .and_then(|node| node.content_hash(hash_length, &algorithm))
+      .map_err(|error| EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("{role} root {} has malformed B-tree content: {error}", hex::encode(root_hash)),
+      })?
+  } else {
+    if !value.is_empty() {
+      crate::engine::directory_entry::deserialize_child_entries(value, hash_length, entry_version).map_err(|error| {
+        EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("{role} root {} has malformed flat-directory content: {error}", hex::encode(root_hash)),
+        }
+      })?;
+    }
+    crate::engine::directory_ops::directory_content_hash(value, &algorithm)?
+  };
+  if canonical_hash != root_hash {
     return Err(EngineError::CorruptEntry {
       offset: 0,
-      reason: format!("{role} root {} is not a DirectoryIndex entry", hex::encode(root_hash)),
+      reason: format!(
+        "{role} root {} is stored under a noncanonical key; expected {}",
+        hex::encode(root_hash),
+        hex::encode(canonical_hash)
+      ),
     });
   }
   Ok(())
@@ -360,13 +427,11 @@ impl<'a> LocatorReplacementCoordinator<'a> {
       let ordinal =
         u32::try_from(index).map_err(|_| EngineError::ResourceExhausted("namespace mutation locator count exceeds u32".to_string()))?;
       let old = engine.get_kv_entry(mutation.key())?.as_ref().map(LocatorPhysicalIncarnation::from);
-      if matches!(mutation, PlannedLocatorMutation::Retire { .. })
-        && old.as_ref().is_some_and(|incarnation| {
-          matches!(incarnation.type_flags & 0x0F, crate::engine::kv_store::KV_TYPE_CHUNK | crate::engine::kv_store::KV_TYPE_VOID)
-        })
-      {
+      if old.as_ref().is_some_and(|incarnation| {
+        matches!(incarnation.type_flags & 0x0F, crate::engine::kv_store::KV_TYPE_CHUNK | crate::engine::kv_store::KV_TYPE_VOID)
+      }) {
         return Err(EngineError::InvalidInput(
-          "immutable payload and physical-GC entries cannot be retired as namespace locators".to_string(),
+          "immutable payload and physical-GC entries cannot be replaced or retired as namespace locators".to_string(),
         ));
       }
       if matches!(mutation, PlannedLocatorMutation::Retire { .. }) && old.is_none() {
@@ -605,6 +670,96 @@ impl<'a> NamespaceMutationCoordinator<'a> {
 
     Ok(acknowledgement)
   }
+}
+
+/// Publish a validated whole-namespace root through the shared hard authority.
+///
+/// The transition is constant-memory: the selected root is the reconciliation
+/// boundary, so callers must stage its immutable closure before invoking this
+/// function rather than expanding every descendant into one transaction.
+pub fn publish_namespace_root(
+  engine: &StorageEngine,
+  root_hash: &[u8],
+  kind: NamespaceMutationKind,
+) -> EngineResult<Option<NamespaceMutationAcknowledgement>> {
+  publish_namespace_root_checked(engine, None, root_hash, kind, Arc::new(RootPublicationFanout { engine }))
+}
+
+/// Publish a namespace root only if HEAD still matches the caller's captured
+/// root. Long-running import/sync producers use this to avoid overwriting an
+/// acknowledged mutation that completed while immutable dependencies staged.
+pub fn publish_namespace_root_from(
+  engine: &StorageEngine,
+  expected_root_hash: &[u8],
+  root_hash: &[u8],
+  kind: NamespaceMutationKind,
+) -> EngineResult<Option<NamespaceMutationAcknowledgement>> {
+  publish_namespace_root_checked(engine, Some(expected_root_hash), root_hash, kind, Arc::new(RootPublicationFanout { engine }))
+}
+
+pub fn publish_namespace_root_with_fanout<'a, F>(
+  engine: &'a StorageEngine,
+  root_hash: &[u8],
+  kind: NamespaceMutationKind,
+  fanout: Arc<F>,
+) -> EngineResult<Option<NamespaceMutationAcknowledgement>>
+where
+  F: NamespaceMutationFanout + 'a,
+{
+  publish_namespace_root_checked(engine, None, root_hash, kind, fanout)
+}
+
+pub fn publish_namespace_root_from_with_fanout<'a, F>(
+  engine: &'a StorageEngine,
+  expected_root_hash: &[u8],
+  root_hash: &[u8],
+  kind: NamespaceMutationKind,
+  fanout: Arc<F>,
+) -> EngineResult<Option<NamespaceMutationAcknowledgement>>
+where
+  F: NamespaceMutationFanout + 'a,
+{
+  publish_namespace_root_checked(engine, Some(expected_root_hash), root_hash, kind, fanout)
+}
+
+fn publish_namespace_root_checked<'a, F>(
+  engine: &'a StorageEngine,
+  expected_root_hash: Option<&[u8]>,
+  root_hash: &[u8],
+  kind: NamespaceMutationKind,
+  fanout: Arc<F>,
+) -> EngineResult<Option<NamespaceMutationAcknowledgement>>
+where
+  F: NamespaceMutationFanout + 'a,
+{
+  let requested_root = root_hash.to_vec();
+  let expected_root = expected_root_hash.map(<[u8]>::to_vec);
+  NamespaceMutationCoordinator::with_fanout(engine, fanout)
+    .prepare_and_maybe_execute(|planning_engine| {
+      validate_requested_namespace_root(planning_engine, &requested_root, "requested namespace")?;
+      let previous_root = planning_engine.head_hash()?;
+      if expected_root.as_ref().is_some_and(|expected| expected != &previous_root) {
+        return Err(EngineError::AlreadyExists(format!(
+          "namespace HEAD changed from {} to {} while the transition was staging",
+          hex::encode(expected_root.as_ref().expect("checked above")),
+          hex::encode(&previous_root)
+        )));
+      }
+      if previous_root == requested_root {
+        return Ok((None, ()));
+      }
+
+      let mut batch = NamespaceMutationBatch::new(kind);
+      batch.set_head_hash(requested_root.clone());
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: "/".to_string(),
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity: Some(previous_root),
+        new_identity: Some(requested_root.clone()),
+      })?;
+      Ok((Some(batch), ()))
+    })
+    .map(|(acknowledgement, ())| acknowledgement)
 }
 
 #[cfg(test)]

@@ -217,17 +217,18 @@ fn test_btree_directory_listing_best_effort_with_missing_child_node() {
 fn btree_cycle_is_bounded_for_lookup_and_best_effort_listing() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
+  let cycle_path = "/.aeordb-system/cycle";
   let cycle_hash = engine.compute_hash(b"btree-cycle-node").unwrap();
   let node = BTreeNode::Internal(InternalNode { keys: Vec::new(), children: vec![cycle_hash.clone()] });
   let node_data = node.serialize(engine.hash_algo().hash_length()).unwrap();
   engine.store_entry(EntryType::DirectoryIndex, &cycle_hash, &node_data).unwrap();
-  let path_key = directory_path_hash("/cycle", &engine.hash_algo()).unwrap();
+  let path_key = directory_path_hash(cycle_path, &engine.hash_algo()).unwrap();
   engine.store_entry(EntryType::DirectoryIndex, &path_key, &cycle_hash).unwrap();
 
   let lookup_error = btree_lookup(&engine, &cycle_hash, "anything", engine.hash_algo().hash_length(), false).unwrap_err();
   assert!(lookup_error.to_string().contains("cycle"), "unexpected lookup error: {lookup_error}");
 
-  let (entries, warnings) = DirectoryOps::new(&engine).list_directory_with_btree_warnings("/cycle").unwrap();
+  let (entries, warnings) = DirectoryOps::new(&engine).list_directory_with_btree_warnings(cycle_path).unwrap();
   assert!(entries.is_empty());
   assert!(warnings.iter().any(|warning| warning.reason.contains("cycle")), "cycle produced no bounded warning: {warnings:?}");
 }

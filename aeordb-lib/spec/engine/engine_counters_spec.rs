@@ -981,6 +981,31 @@ fn test_live_counters_initialized_on_reopen() {
 }
 
 #[test]
+fn reopened_live_counters_exclude_concealed_system_families() {
+  let context = RequestContext::system();
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("test.aeor");
+  let path_str = path.to_str().unwrap();
+
+  {
+    let engine = StorageEngine::create(path_str).unwrap();
+    let operations = DirectoryOps::new(&engine);
+    operations.ensure_root_directory(&context).unwrap();
+    operations.store_file_buffered(&context, "/docs/user.txt", b"user", None).unwrap();
+    operations.store_file_buffered(&context, "/docs/.aeordb-permissions", b"permissions", None).unwrap();
+    operations.store_file_buffered(&context, "/docs/.aeordb-indexes/text.idx", b"derived-index", None).unwrap();
+    operations.store_file_buffered(&context, "/.aeordb-system/api-keys/key.json", b"secret", None).unwrap();
+  }
+
+  let engine = StorageEngine::open(path_str).unwrap();
+  let snapshot = engine.counters().snapshot();
+
+  assert_eq!(snapshot.files, 2);
+  assert_eq!(snapshot.directories, 1);
+  assert_eq!(snapshot.logical_data_size, 15);
+}
+
+#[test]
 fn test_live_counters_empty_file_store() {
   let ctx = RequestContext::system();
   let directory = tempfile::tempdir().unwrap();
