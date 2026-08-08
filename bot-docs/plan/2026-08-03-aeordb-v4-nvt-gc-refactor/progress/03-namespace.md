@@ -1,15 +1,15 @@
 # Child 03 Progress: Namespace
 
 - **Status:** P2d shared mutation and locator facade is Linux-green; Child 01 native-platform execution remains open
-- **Current landing unit:** P2d exit and handoff into the characterized P2e producer waves
+- **Current landing unit:** P2e Wave 1 Core DirectoryOps producer convergence
 - **Entry commit:** `6a3ec86`
-- **Last green commit:** P2c strict-authority and consumer exit `b9bbbd0`
+- **Last green commit:** P2d shared mutation and stable-locator facade `730b51a`
 - **Owner:** Codex, namespace/semantic authority and integration owner
 - **Start gate:** Child 02 is green; Child 01 is code-complete and Linux-green, but native `wyatt-mac` and `win11vm` execution remains required
 - **Plan:** [Child 03](../children/03-namespace-semantic-roots-and-system-families.md)
 - **Owned files:** this ledger; `engine/v4/system_family.rs`; the embedded registry loader currently in `engine/v4/admission.rs`; strict directory/B-tree traversal result APIs; P2c consumers in backup, sync, peer, import, indexing, GC, permissions, plugin host, repair, verify, and generic data adapters; focused P2c specs and architecture gates
 - **Forbidden/hotspot files:** P2d mutation/locator behavior before P2c lands; v4 persistent registry bytes or generated IDs; index page/NVT/query behavior; physical GC eligibility/sweep/Void allocation; route response schemas; migration cutover; evidence or production databases; unrelated user artifacts
-- **Hotspot handoff commit:** `b9bbbd0` from P2c into P2d
+- **Hotspot handoff commit:** `730b51a` from P2d into P2e Wave 1
 - **Narrow gate:** P2c-focused registry/traversal target first; campaign root target remains `timeout 15m cargo test -j 4 -p aeordb --test v4_root_migration_spec -- --test-threads=4`
 - **Broad gate:** green for P2c exit: 4,887 tests across 196 suites, zero failures and seven ignored; workspace/all-target check, formatting, docs, and v4 contract gate are green
 - **Drift/risks:** the frozen registry has no persisted family for structural parent directories such as `/.aeordb-system`; runtime traversal must recognize only strict ancestors of known path descriptors without granting those containers a persisted family policy. Existing flat-directory parse failures can become empty/complete results, best-effort B-tree warnings are discarded by several wrappers, peer/system augmentation silently skips every error, and hard-coded path lists disagree with the 46-family registry. P2 retains the old v3 system-flag predicate only as an explicitly named v0 byte-layout evaluator.
