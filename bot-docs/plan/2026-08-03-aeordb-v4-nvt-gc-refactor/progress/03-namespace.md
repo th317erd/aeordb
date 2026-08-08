@@ -3,18 +3,18 @@
 - **Status:** P2c implementation and Linux gates are green; Child 01 native-platform execution remains open
 - **Current landing unit:** P2d-1 shared mutation and locator facade after P2c handoff
 - **Entry commit:** `6a3ec86`
-- **Last green commit:** P2c-4 generic-data convergence `6a3ec86`; P2c-5 strict-authority landing is green and awaiting its handoff commit
+- **Last green commit:** P2c strict-authority and consumer exit `b9bbbd0`
 - **Owner:** Codex, namespace/semantic authority and integration owner
 - **Start gate:** Child 02 is green; Child 01 is code-complete and Linux-green, but native `wyatt-mac` and `win11vm` execution remains required
 - **Plan:** [Child 03](../children/03-namespace-semantic-roots-and-system-families.md)
 - **Owned files:** this ledger; `engine/v4/system_family.rs`; the embedded registry loader currently in `engine/v4/admission.rs`; strict directory/B-tree traversal result APIs; P2c consumers in backup, sync, peer, import, indexing, GC, permissions, plugin host, repair, verify, and generic data adapters; focused P2c specs and architecture gates
 - **Forbidden/hotspot files:** P2d mutation/locator behavior before P2c lands; v4 persistent registry bytes or generated IDs; index page/NVT/query behavior; physical GC eligibility/sweep/Void allocation; route response schemas; migration cutover; evidence or production databases; unrelated user artifacts
-- **Hotspot handoff commit:** none
+- **Hotspot handoff commit:** `b9bbbd0` from P2c into P2d
 - **Narrow gate:** P2c-focused registry/traversal target first; campaign root target remains `timeout 15m cargo test -j 4 -p aeordb --test v4_root_migration_spec -- --test-threads=4`
 - **Broad gate:** green for P2c exit: 4,887 tests across 196 suites, zero failures and seven ignored; workspace/all-target check, formatting, docs, and v4 contract gate are green
 - **Drift/risks:** the frozen registry has no persisted family for structural parent directories such as `/.aeordb-system`; runtime traversal must recognize only strict ancestors of known path descriptors without granting those containers a persisted family policy. Existing flat-directory parse failures can become empty/complete results, best-effort B-tree warnings are discarded by several wrappers, peer/system augmentation silently skips every error, and hard-coded path lists disagree with the 46-family registry. P2 retains the old v3 system-flag predicate only as an explicitly named v0 byte-layout evaluator.
 - **Evidence:** exhaustive source searches found the old predicates in DirectoryOps/batch v3 flags, auth, backup, sync, indexing, task, plugin, download/fetch/symlink/version/engine routes, plus hard-coded protected roots in GC, backup, and tree walking. Traversal consumers include backup/import, peer and embedded sync, directory accounting, reindex, verify, and route sync. The current registry decoder exposes eighteen raw policy bytes and its five-algorithm embedded cache is private to admission. A 194-test P2c-adjacent characterization gate passed across B-tree directories, tree walking, backup/import, sync, permissions, and GC. Existing peer tests require node-local `/.aeordb-system/config/secret_key` replication and backup tests inspect secret email configuration, directly characterizing behavior the ratified registry intentionally corrects; `V4-SYSTEM-FAMILY-POLICY` now records that approved divergence. Both native hosts remained unavailable at `ff3f95c` (`wyatt-mac`: no route; `win11vm`: forwarded port refused).
-- **Next action:** land the P2c-5 handoff commit, then begin the P2d-1 shared mutation and locator facade while continuing to retry the exact P1c native gates when both hosts are online
+- **Next action:** begin the P2d-1 shared mutation and locator facade while continuing to retry the exact P1c native gates when both hosts are online
 
 ## 2026-08-06 Context Recovery
 
