@@ -42,6 +42,73 @@ pub struct BTreeMutationPlan {
   node_writes: Vec<BTreeNodeWrite>,
 }
 
+/// A set of name-level changes to apply to one B-tree root.
+///
+/// Names must be unique across both collections. Callers must resolve
+/// contradictory remove/upsert intent before asking the B-tree to plan it.
+#[derive(Debug, Clone, Default)]
+pub struct BTreeMutationDelta {
+  pub upserts: Vec<ChildEntry>,
+  pub removals: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct PlannedNodeOverlay {
+  writes: Vec<BTreeNodeWrite>,
+  positions: std::collections::HashMap<Vec<u8>, usize>,
+}
+
+impl PlannedNodeOverlay {
+  fn insert(&mut self, write: BTreeNodeWrite) -> EngineResult<()> {
+    if let Some(position) = self.positions.get(&write.key).copied() {
+      if self.writes[position].value != write.value {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("planned B-tree hash {} has conflicting bytes", hex::encode(&write.key)),
+        });
+      }
+      return Ok(());
+    }
+    self.positions.insert(write.key.clone(), self.writes.len());
+    self.writes.push(write);
+    Ok(())
+  }
+
+  fn value(&self, key: &[u8]) -> Option<&[u8]> {
+    self.positions.get(key).map(|position| self.writes[*position].value.as_slice())
+  }
+
+  fn reachable_writes(&self, root_hash: &[u8], hash_length: usize) -> EngineResult<Vec<BTreeNodeWrite>> {
+    let mut visited = std::collections::HashSet::new();
+    let mut reachable = Vec::new();
+    self.visit_reachable(root_hash, hash_length, &mut visited, &mut reachable)?;
+    Ok(reachable)
+  }
+
+  fn visit_reachable(
+    &self,
+    hash: &[u8],
+    hash_length: usize,
+    visited: &mut std::collections::HashSet<Vec<u8>>,
+    reachable: &mut Vec<BTreeNodeWrite>,
+  ) -> EngineResult<()> {
+    let Some(position) = self.positions.get(hash).copied() else {
+      return Ok(());
+    };
+    if !visited.insert(hash.to_vec()) {
+      return Ok(());
+    }
+    let write = &self.writes[position];
+    if let BTreeNode::Internal(internal) = BTreeNode::deserialize(&write.value, hash_length, 0)? {
+      for child_hash in internal.children {
+        self.visit_reachable(&child_hash, hash_length, visited, reachable)?;
+      }
+    }
+    reachable.push(write.clone());
+    Ok(())
+  }
+}
+
 impl BTreeMutationPlan {
   pub fn root_hash(&self) -> &[u8] {
     &self.root_hash
@@ -957,6 +1024,14 @@ fn append_bounded_warnings(target: &mut Vec<BTreeWalkWarning>, mut source: Vec<B
 /// the tree can have near-empty leaf nodes, degrading lookup from O(log N)
 /// toward O(N). For now, this is acceptable -- a full reindex rebuilds the tree.
 /// Future: implement sibling borrowing and node merging on underflow.
+fn load_planned_btree_node(engine: &StorageEngine, overlay: &PlannedNodeOverlay, node_hash: &[u8]) -> EngineResult<(Vec<u8>, u8)> {
+  if let Some(value) = overlay.value(node_hash) {
+    return Ok((value.to_vec(), 0));
+  }
+  let (header, _key, value) = engine.get_entry(node_hash)?.ok_or_else(|| EngineError::NotFound("B-tree node not found".to_string()))?;
+  Ok((value, header.entry_version))
+}
+
 pub fn btree_delete(
   engine: &StorageEngine,
   root_hash: &[u8],
@@ -984,23 +1059,28 @@ pub fn btree_plan_delete(
   hash_length: usize,
   algo: &HashAlgorithm,
 ) -> EngineResult<Option<BTreeMutationPlan>> {
-  let mut node_writes = Vec::new();
-  let Some((root_hash, root_data)) = btree_plan_delete_node(engine, root_hash, name, hash_length, algo, &mut node_writes)? else {
+  let mut overlay = PlannedNodeOverlay::default();
+  let Some((root_hash, root_data)) = btree_plan_delete_node(engine, root_hash, None, name, hash_length, algo, &mut overlay)? else {
     return Ok(None);
   };
+  let node_writes = overlay.reachable_writes(&root_hash, hash_length)?;
   Ok(Some(BTreeMutationPlan { root_hash, root_data, node_writes }))
 }
 
 fn btree_plan_delete_node(
   engine: &StorageEngine,
   node_hash: &[u8],
+  supplied_node_data: Option<&[u8]>,
   name: &str,
   hash_length: usize,
   algo: &HashAlgorithm,
-  node_writes: &mut Vec<BTreeNodeWrite>,
+  overlay: &mut PlannedNodeOverlay,
 ) -> EngineResult<Option<(Vec<u8>, Vec<u8>)>> {
-  let node_data = engine.get_entry(node_hash)?.ok_or_else(|| EngineError::NotFound("B-tree root not found".to_string()))?;
-  let mut node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
+  let (node_data, entry_version) = match supplied_node_data {
+    Some(data) => (data.to_vec(), 0),
+    None => load_planned_btree_node(engine, overlay, node_hash)?,
+  };
+  let mut node = BTreeNode::deserialize(&node_data, hash_length, entry_version)?;
 
   match &mut node {
     BTreeNode::Leaf(ref mut leaf) => {
@@ -1010,7 +1090,7 @@ fn btree_plan_delete_node(
       } else {
         let data = node.serialize(hash_length)?;
         let hash = node.content_hash(hash_length, algo)?;
-        node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+        overlay.insert(BTreeNodeWrite { key: hash.clone(), value: data.clone() })?;
         Ok(Some((hash, data)))
       }
     }
@@ -1018,12 +1098,12 @@ fn btree_plan_delete_node(
       let child_idx = internal.find_child_index(name);
       let child_hash = internal.children[child_idx].clone();
 
-      match btree_plan_delete_node(engine, &child_hash, name, hash_length, algo, node_writes)? {
+      match btree_plan_delete_node(engine, &child_hash, None, name, hash_length, algo, overlay)? {
         Some((new_child_hash, _new_child_data)) => {
           internal.children[child_idx] = new_child_hash;
           let data = node.serialize(hash_length)?;
           let hash = node.content_hash(hash_length, algo)?;
-          node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+          overlay.insert(BTreeNodeWrite { key: hash.clone(), value: data.clone() })?;
           Ok(Some((hash, data)))
         }
         None => {
@@ -1040,17 +1120,12 @@ fn btree_plan_delete_node(
           } else if internal.children.len() == 1 {
             // Collapse: single child becomes the new root
             let remaining_hash = internal.children[0].clone();
-            let remaining_data = match node_writes.iter().rev().find(|write| write.key == remaining_hash) {
-              Some(write) => write.value.clone(),
-              None => {
-                engine.get_entry(&remaining_hash)?.ok_or_else(|| EngineError::NotFound("B-tree collapse child not found".to_string()))?.2
-              }
-            };
+            let (remaining_data, _entry_version) = load_planned_btree_node(engine, overlay, &remaining_hash)?;
             Ok(Some((remaining_hash, remaining_data)))
           } else {
             let data = node.serialize(hash_length)?;
             let hash = node.content_hash(hash_length, algo)?;
-            node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+            overlay.insert(BTreeNodeWrite { key: hash.clone(), value: data.clone() })?;
             Ok(Some((hash, data)))
           }
         }
@@ -1088,10 +1163,23 @@ pub fn btree_plan_insert(
   hash_length: usize,
   algo: &HashAlgorithm,
 ) -> EngineResult<BTreeMutationPlan> {
-  let mut node_writes = Vec::new();
+  let mut overlay = PlannedNodeOverlay::default();
+  let (new_hash, new_data) = btree_plan_insert_with_overlay(engine, root_data, entry, hash_length, algo, &mut overlay)?;
+  let node_writes = overlay.reachable_writes(&new_hash, hash_length)?;
+  Ok(BTreeMutationPlan { root_hash: new_hash, root_data: new_data, node_writes })
+}
+
+fn btree_plan_insert_with_overlay(
+  engine: &StorageEngine,
+  root_data: &[u8],
+  entry: ChildEntry,
+  hash_length: usize,
+  algo: &HashAlgorithm,
+  overlay: &mut PlannedNodeOverlay,
+) -> EngineResult<(Vec<u8>, Vec<u8>)> {
   let root_node = BTreeNode::deserialize(root_data, hash_length, 0)?;
 
-  let result = btree_plan_insert_node(engine, root_node, entry, hash_length, algo, &mut node_writes)?;
+  let result = btree_plan_insert_node(engine, root_node, entry, hash_length, algo, overlay)?;
 
   let (new_hash, new_data) = match result {
     InsertResult::Done(hash, data) => (hash, data),
@@ -1099,12 +1187,66 @@ pub fn btree_plan_insert(
       let new_root = BTreeNode::Internal(InternalNode { keys: vec![split_key], children: vec![left_hash, right_hash] });
       let new_data = new_root.serialize(hash_length)?;
       let new_hash = new_root.content_hash(hash_length, algo)?;
-      node_writes.push(BTreeNodeWrite { key: new_hash.clone(), value: new_data.clone() });
+      overlay.insert(BTreeNodeWrite { key: new_hash.clone(), value: new_data.clone() })?;
       (new_hash, new_data)
     }
   };
+  Ok((new_hash, new_data))
+}
 
-  Ok(BTreeMutationPlan { root_hash: new_hash, root_data: new_data, node_writes })
+/// Apply many name-level changes through one unpublished planned-node overlay.
+///
+/// The returned plan contains only newly planned nodes reachable from the
+/// final root. `None` means the mutations removed every entry.
+pub fn btree_plan_apply(
+  engine: &StorageEngine,
+  root_data: &[u8],
+  mut delta: BTreeMutationDelta,
+  hash_length: usize,
+  algo: &HashAlgorithm,
+) -> EngineResult<Option<BTreeMutationPlan>> {
+  if delta.upserts.is_empty() && delta.removals.is_empty() {
+    return Err(EngineError::InvalidInput("B-tree mutation delta is empty".to_string()));
+  }
+
+  let mut names = std::collections::HashSet::with_capacity(delta.upserts.len() + delta.removals.len());
+  for name in &delta.removals {
+    if !names.insert(name.clone()) {
+      return Err(EngineError::InvalidInput(format!("Duplicate B-tree mutation name: {name}")));
+    }
+  }
+  for entry in &delta.upserts {
+    if !names.insert(entry.name.clone()) {
+      return Err(EngineError::InvalidInput(format!("Conflicting B-tree mutation name: {}", entry.name)));
+    }
+  }
+  delta.removals.sort();
+  delta.upserts.sort_by(|left, right| left.name.cmp(&right.name));
+
+  let root_node = BTreeNode::deserialize(root_data, hash_length, 0)?;
+  let mut current = Some((root_node.content_hash(hash_length, algo)?, root_data.to_vec()));
+  let mut overlay = PlannedNodeOverlay::default();
+
+  for name in delta.removals {
+    let Some((root_hash, root_data)) = current.take() else {
+      continue;
+    };
+    current = btree_plan_delete_node(engine, &root_hash, Some(&root_data), &name, hash_length, algo, &mut overlay)?;
+  }
+
+  for entry in delta.upserts {
+    let root_data = match current.as_ref() {
+      Some((_root_hash, root_data)) => root_data.clone(),
+      None => BTreeNode::Leaf(LeafNode::new()).serialize(hash_length)?,
+    };
+    current = Some(btree_plan_insert_with_overlay(engine, &root_data, entry, hash_length, algo, &mut overlay)?);
+  }
+
+  let Some((root_hash, root_data)) = current else {
+    return Ok(None);
+  };
+  let node_writes = overlay.reachable_writes(&root_hash, hash_length)?;
+  Ok(Some(BTreeMutationPlan { root_hash, root_data, node_writes }))
 }
 
 fn btree_plan_insert_node(
@@ -1113,7 +1255,7 @@ fn btree_plan_insert_node(
   entry: ChildEntry,
   hash_length: usize,
   algo: &HashAlgorithm,
-  node_writes: &mut Vec<BTreeNodeWrite>,
+  overlay: &mut PlannedNodeOverlay,
 ) -> EngineResult<InsertResult> {
   match node {
     BTreeNode::Leaf(mut leaf) => {
@@ -1125,14 +1267,14 @@ fn btree_plan_insert_node(
         let right_node = BTreeNode::Leaf(right);
         let left_hash = left_node.content_hash(hash_length, algo)?;
         let right_hash = right_node.content_hash(hash_length, algo)?;
-        node_writes.push(BTreeNodeWrite { key: left_hash.clone(), value: left_node.serialize(hash_length)? });
-        node_writes.push(BTreeNodeWrite { key: right_hash.clone(), value: right_node.serialize(hash_length)? });
+        overlay.insert(BTreeNodeWrite { key: left_hash.clone(), value: left_node.serialize(hash_length)? })?;
+        overlay.insert(BTreeNodeWrite { key: right_hash.clone(), value: right_node.serialize(hash_length)? })?;
         Ok(InsertResult::Split(left_hash, split_key, right_hash))
       } else {
         let node = BTreeNode::Leaf(leaf);
         let data = node.serialize(hash_length)?;
         let hash = node.content_hash(hash_length, algo)?;
-        node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+        overlay.insert(BTreeNodeWrite { key: hash.clone(), value: data.clone() })?;
         Ok(InsertResult::Done(hash, data))
       }
     }
@@ -1141,12 +1283,10 @@ fn btree_plan_insert_node(
       let child_hash = internal.children[child_idx].clone();
 
       // Read child node (still needs disk read)
-      let child_data = engine
-        .get_entry(&child_hash)?
-        .ok_or_else(|| EngineError::NotFound(format!("B-tree child not found: {}", hex::encode(&child_hash))))?;
-      let child_node = BTreeNode::deserialize(&child_data.2, hash_length, child_data.0.entry_version)?;
+      let (child_data, entry_version) = load_planned_btree_node(engine, overlay, &child_hash)?;
+      let child_node = BTreeNode::deserialize(&child_data, hash_length, entry_version)?;
 
-      let child_result = btree_plan_insert_node(engine, child_node, entry, hash_length, algo, node_writes)?;
+      let child_result = btree_plan_insert_node(engine, child_node, entry, hash_length, algo, overlay)?;
 
       match child_result {
         InsertResult::Done(new_child_hash, _) => {
@@ -1154,7 +1294,7 @@ fn btree_plan_insert_node(
           let node = BTreeNode::Internal(internal);
           let data = node.serialize(hash_length)?;
           let hash = node.content_hash(hash_length, algo)?;
-          node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+          overlay.insert(BTreeNodeWrite { key: hash.clone(), value: data.clone() })?;
           Ok(InsertResult::Done(hash, data))
         }
         InsertResult::Split(left_hash, split_key, right_hash) => {
@@ -1167,14 +1307,14 @@ fn btree_plan_insert_node(
             let right_node = BTreeNode::Internal(right);
             let left_hash = left_node.content_hash(hash_length, algo)?;
             let right_hash = right_node.content_hash(hash_length, algo)?;
-            node_writes.push(BTreeNodeWrite { key: left_hash.clone(), value: left_node.serialize(hash_length)? });
-            node_writes.push(BTreeNodeWrite { key: right_hash.clone(), value: right_node.serialize(hash_length)? });
+            overlay.insert(BTreeNodeWrite { key: left_hash.clone(), value: left_node.serialize(hash_length)? })?;
+            overlay.insert(BTreeNodeWrite { key: right_hash.clone(), value: right_node.serialize(hash_length)? })?;
             Ok(InsertResult::Split(left_hash, parent_split_key, right_hash))
           } else {
             let node = BTreeNode::Internal(internal);
             let data = node.serialize(hash_length)?;
             let hash = node.content_hash(hash_length, algo)?;
-            node_writes.push(BTreeNodeWrite { key: hash.clone(), value: data.clone() });
+            overlay.insert(BTreeNodeWrite { key: hash.clone(), value: data.clone() })?;
             Ok(InsertResult::Done(hash, data))
           }
         }

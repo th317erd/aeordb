@@ -3,7 +3,8 @@ use std::sync::Arc;
 use aeordb::engine::btree::{
   BTreeNode, LeafNode, InternalNode, BTREE_MAX_LEAF_ENTRIES, BTREE_MAX_INTERNAL_KEYS, BTREE_LEAF_MARKER, BTREE_INTERNAL_MARKER,
   is_btree_format, btree_insert, btree_insert_batched, btree_lookup, btree_list, btree_list_from_node, btree_delete, btree_from_entries,
-  btree_plan_delete, btree_plan_from_entries, btree_plan_insert, store_btree_node, btree_list_with_mode, BTreeWalkMode,
+  btree_plan_apply, btree_plan_delete, btree_plan_from_entries, btree_plan_insert, store_btree_node, btree_list_with_mode,
+  BTreeMutationDelta, BTreeWalkMode,
 };
 use aeordb::engine::WriteBatch;
 use aeordb::engine::directory_entry::ChildEntry;
@@ -1020,6 +1021,65 @@ fn btree_mutation_plans_do_not_write_until_explicitly_applied() {
   delete_plan.append_to_batch(&mut delete_batch);
   engine.flush_batch(delete_batch).unwrap();
   assert!(btree_lookup(&engine, delete_plan.root_hash(), "item_new", hash_length, false).unwrap().is_none());
+}
+
+#[test]
+fn btree_multi_mutation_plan_uses_an_unpublished_overlay_and_emits_only_reachable_nodes() {
+  let (engine, temporary_directory) = create_temp_engine_for_tests();
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let initial_entries: Vec<ChildEntry> = (0..300).map(|index| make_entry_with_hash(&format!("item-{index:03}"), index as u8)).collect();
+  let initial_root = btree_from_entries(&engine, initial_entries, hash_length, &algorithm).unwrap();
+  let initial_root_data = engine.get_entry(&initial_root).unwrap().unwrap().2;
+  let database_path = temporary_directory.path().join("test.aeordb");
+  let database_length_before_plan = std::fs::metadata(&database_path).unwrap().len();
+
+  let delta = BTreeMutationDelta {
+    removals: vec!["item-001".to_string(), "item-127".to_string(), "item-299".to_string()],
+    upserts: vec![
+      make_entry_with_hash("item-050", 0xE1),
+      make_entry_with_hash("item-150", 0xE2),
+      make_entry_with_hash("item-300", 0xE3),
+      make_entry_with_hash("item-301", 0xE4),
+    ],
+  };
+  let plan = btree_plan_apply(&engine, &initial_root_data, delta, hash_length, &algorithm).unwrap().unwrap();
+
+  assert_eq!(std::fs::metadata(&database_path).unwrap().len(), database_length_before_plan);
+  assert!(engine.get_entry(plan.root_hash()).unwrap().is_none());
+  let node_keys: std::collections::HashSet<Vec<u8>> = plan.node_writes().map(|write| write.key.clone()).collect();
+  assert_eq!(node_keys.len(), plan.node_writes().count(), "planned node writes must be deduplicated");
+
+  let mut write_batch = WriteBatch::new();
+  plan.append_to_batch(&mut write_batch);
+  engine.flush_batch(write_batch).unwrap();
+
+  let listed = btree_list(&engine, plan.root_hash(), hash_length, false).unwrap();
+  assert_eq!(listed.len(), 299);
+  for removed in ["item-001", "item-127", "item-299"] {
+    assert!(btree_lookup(&engine, plan.root_hash(), removed, hash_length, false).unwrap().is_none());
+  }
+  for (name, expected_hash) in [("item-050", 0xE1), ("item-150", 0xE2), ("item-300", 0xE3), ("item-301", 0xE4)] {
+    let entry = btree_lookup(&engine, plan.root_hash(), name, hash_length, false).unwrap().unwrap();
+    assert_eq!(entry.hash, vec![expected_hash; hash_length]);
+  }
+}
+
+#[test]
+fn btree_multi_mutation_plan_rejects_ambiguous_names_before_writing() {
+  let (engine, temporary_directory) = create_temp_engine_for_tests();
+  let algorithm = engine.hash_algo();
+  let hash_length = algorithm.hash_length();
+  let initial_root = btree_from_entries(&engine, vec![make_entry("one")], hash_length, &algorithm).unwrap();
+  let initial_root_data = engine.get_entry(&initial_root).unwrap().unwrap().2;
+  let database_path = temporary_directory.path().join("test.aeordb");
+  let database_length_before_plan = std::fs::metadata(&database_path).unwrap().len();
+
+  let duplicate = BTreeMutationDelta { removals: Vec::new(), upserts: vec![make_entry("two"), make_entry("two")] };
+  assert!(btree_plan_apply(&engine, &initial_root_data, duplicate, hash_length, &algorithm).is_err());
+  let contradictory = BTreeMutationDelta { removals: vec!["one".to_string()], upserts: vec![make_entry("one")] };
+  assert!(btree_plan_apply(&engine, &initial_root_data, contradictory, hash_length, &algorithm).is_err());
+  assert_eq!(std::fs::metadata(&database_path).unwrap().len(), database_length_before_plan);
 }
 
 #[test]
