@@ -898,6 +898,32 @@ async fn test_commit_rejects_system_path_aeordb_config() {
 }
 
 #[tokio::test]
+async fn test_commit_rejects_registry_concealed_conflict_path() {
+  let (_app, jwt, engine, _tmp) = test_app();
+  let token = root_bearer_token(&jwt);
+  let commit_body = serde_json::json!({
+      "files": [{
+          "path": "/.aeordb-conflicts/item.json",
+          "chunks": [],
+          "content_type": "application/json"
+      }]
+  });
+
+  let resp = rebuild_app(&jwt, &engine)
+    .oneshot(
+      Request::post("/blobs/commit")
+        .header("Authorization", &token)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&commit_body).unwrap()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+  assert!(DirectoryOps::new(&engine).get_metadata("/.aeordb-conflicts/item.json").unwrap().is_none());
+}
+
+#[tokio::test]
 async fn test_commit_rejects_system_path_in_mixed_batch() {
   // Even one system path in a batch must reject the whole commit (atomic).
   let (_app, jwt, engine, _tmp) = test_app();

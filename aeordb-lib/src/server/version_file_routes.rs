@@ -8,12 +8,12 @@ use axum::{
 use serde::Deserialize;
 
 use super::responses::ErrorResponse;
-use super::route_permissions::RoutePermissionChecker;
+use super::route_permissions::{require_generic_data_path, RoutePermissionChecker};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::version_access::resolve_file_at_version;
 use crate::engine::version_manager::VersionManager;
-use crate::engine::directory_ops::{DirectoryOps, is_system_path};
+use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::request_context::RequestContext;
 use crate::engine::user::is_root;
@@ -48,10 +48,8 @@ pub async fn file_history(
   AxumQuery(query): AxumQuery<HistoryQuery>,
 ) -> Response {
   let max_snapshots = query.limit.unwrap_or(200).min(1000);
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   // User/group permission check: /versions/history/* is exempt from
@@ -210,10 +208,8 @@ pub async fn file_restore(
   Path(path): Path<String>,
   Json(payload): Json<RestoreRequest>,
 ) -> Response {
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   // Auth: Restore requires root (snapshot permission)

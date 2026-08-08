@@ -116,6 +116,10 @@ impl SystemFamilyPolicyResolver {
     }
   }
 
+  pub fn generic_data_path_is_visible(self, path: &str) -> EngineResult<bool> {
+    Ok(matches!(self.generic_data_path_selection(path)?, GenericDataPathSelection::Include))
+  }
+
   /// Require a concrete path to be legal through an ordinary data API.
   pub fn require_generic_data_leaf_path(self, path: &str) -> EngineResult<()> {
     match self.generic_data_path_selection(path)? {

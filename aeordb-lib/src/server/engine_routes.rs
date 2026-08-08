@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::blocking::run_engine_blocking;
 use super::cache_invalidation::{evict_caches_for_path, evict_caches_for_paths};
-use super::route_permissions::{reject_share_key, RoutePermissionChecker};
+use super::route_permissions::{reject_share_key, require_generic_data_engine_path, require_generic_data_path, RoutePermissionChecker};
 use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
 use super::search_locators::{
   broad_query_terms, terms_from_query_node, try_generate_locators_with_budget, LocatorOptions, LocatorOptionsRequest, LocatorTerm,
@@ -25,8 +25,7 @@ use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
 use crate::engine::{DirectoryOps, RequestContext, SearchResult, StorageEngine, TaskStatus, VersionManager, is_root};
 use crate::engine::directory_listing::list_directory_recursive;
 use crate::engine::directory_ops::{
-  is_system_path, read_chunk_reserved, reserve_streaming_read, stream_hash_inventory_bytes, streaming_memory_error, file_content_hash,
-  ReservedReadChunk,
+  read_chunk_reserved, reserve_streaming_read, stream_hash_inventory_bytes, streaming_memory_error, file_content_hash, ReservedReadChunk,
 };
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -39,7 +38,9 @@ use crate::engine::query_engine::{
   parse_where_clause, AggregateQuery, ExplainMode, Query, QueryEngine, QueryMeta, QueryNode, QueryResult, QueryStrategy, SortDirection,
   SortField, DEFAULT_QUERY_LIMIT,
 };
+use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
+use crate::engine::SystemFamilyPolicyResolver;
 
 /// Check if a file path is deleted and the user lacks delete permission.
 /// Deleted files are invisible/inaccessible to users without 'd' permission.
@@ -227,8 +228,8 @@ pub struct MkdirRequest {
 pub async fn mkdir(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Json(body): Json<MkdirRequest>) -> Response {
   let normalized = crate::engine::path_utils::normalize_path(&body.path);
 
-  if is_system_path(&normalized) {
-    return ErrorResponse::new(format!("Not found: {}", body.path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &normalized) {
+    return response;
   }
 
   if normalized == "/" {
@@ -292,10 +293,8 @@ pub async fn engine_store_file(
   headers: HeaderMap,
   body: Body,
 ) -> Response {
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   // Stream the body in 256KB chunks — each chunk is stored to disk as it
@@ -1257,6 +1256,7 @@ fn json_item_path(item: &serde_json::Value) -> Option<&str> {
 }
 
 fn apply_listing_filters(
+  engine: &StorageEngine,
   listing: &mut Vec<serde_json::Value>,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   _user_id_str: &str,
@@ -1268,12 +1268,7 @@ fn apply_listing_filters(
     }
   }
 
-  // Filter /.aeordb-system/ from ALL listings — system data is invisible through
-  // the API for all users, including root.
-  listing.retain(|entry| {
-    let path = entry["path"].as_str().unwrap_or("");
-    !path.starts_with("/.aeordb-")
-  });
+  filter_generic_data_items(engine, listing).map_err(|error| engine_error_response("Failed to classify listing paths", &error))?;
 
   // Ancestor-navigation filter: when the user reached this directory by
   // virtue of having a grant somewhere below, only show the children that
@@ -1285,6 +1280,25 @@ fn apply_listing_filters(
     });
   }
 
+  Ok(())
+}
+
+fn filter_generic_data_items(engine: &StorageEngine, items: &mut Vec<serde_json::Value>) -> EngineResult<()> {
+  let resolver = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
+  let mut retained = Vec::with_capacity(items.len());
+
+  for item in items.drain(..) {
+    let Some(path) = item.get("path").and_then(|value| value.as_str()) else {
+      retained.push(item);
+      continue;
+    };
+    match resolver.generic_data_path_selection(path)? {
+      GenericDataPathSelection::Include => retained.push(item),
+      GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer => {}
+    }
+  }
+
+  *items = retained;
   Ok(())
 }
 
@@ -1362,10 +1376,8 @@ async fn handle_symlink_resolution(
 
   match resolve_symlink(engine, path) {
     Ok(ResolvedTarget::File(file_record)) => {
-      // Block ALL access to symlinks resolving to /.aeordb-system/ paths — system
-      // data is invisible through the API for all users, including root.
-      if is_system_path(&file_record.path) {
-        return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+      if let Err(response) = require_generic_data_engine_path(engine, &file_record.path) {
+        return response;
       }
 
       // Check if the resolved target path is allowed by API key rules
@@ -1389,16 +1401,14 @@ async fn handle_symlink_resolution(
       build_file_streaming_response(engine, file_record, Some(symlink_target), request_headers, false, &[]).await
     }
     Ok(ResolvedTarget::Directory(dir_path)) => {
-      // Block ALL access to symlinks resolving to /.aeordb-system/ directories —
-      // system data is invisible through the API for all users, including root.
-      if is_system_path(&dir_path) {
-        return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+      if let Err(response) = require_generic_data_engine_path(engine, &dir_path) {
+        return response;
       }
 
       match directory_ops.list_directory(&dir_path) {
         Ok(entries) => {
           let mut listing = build_directory_listing(&entries, &dir_path, &directory_ops);
-          match apply_listing_filters(&mut listing, key_rules, user_id_str, filtered_listing) {
+          match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, filtered_listing) {
             Ok(()) => paginated_listing_response(listing, limit, offset, None, None),
             Err(response) => response,
           }
@@ -1486,7 +1496,7 @@ fn handle_recursive_listing(
         })
         .collect();
 
-      match apply_listing_filters(&mut listing, key_rules, user_id_str, None) {
+      match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, None) {
         Ok(()) => {
           if filtered_listing.is_some() {
             if let Some(st) = state {
@@ -1542,7 +1552,7 @@ fn handle_directory_listing(
   match directory_ops.list_directory(path) {
     Ok(entries) => {
       let mut listing = build_directory_listing(&entries, path, &directory_ops);
-      match apply_listing_filters(&mut listing, key_rules, user_id_str, filtered_listing) {
+      match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, filtered_listing) {
         Ok(()) => {
           // Attach effective_permissions for non-root users
           if let Some(st) = state {
@@ -1592,10 +1602,8 @@ pub async fn engine_get(
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   // Deleted files are invisible to users without 'd' permission
@@ -1738,10 +1746,8 @@ pub async fn engine_delete_file(
   Extension(claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -1811,8 +1817,8 @@ pub async fn restore_deleted_file(
     }
   };
 
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   // User/group permission check: /files/restore is exempt from path-aware
@@ -1854,8 +1860,8 @@ pub async fn list_deleted_files(
 ) -> Response {
   let dir_path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
 
-  if is_system_path(dir_path) {
-    return ErrorResponse::new(format!("Not found: {}", dir_path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, dir_path) {
+    return response;
   }
 
   // Deleted files require 'd' permission — check on the directory
@@ -1906,8 +1912,8 @@ pub async fn list_deleted_files(
 }
 
 pub async fn engine_head(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(path): Path<String>) -> Response {
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   // Deleted files are invisible to users without 'd' permission
@@ -2276,6 +2282,14 @@ pub async fn query_endpoint(
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   Json(body): Json<QueryRequest>,
 ) -> Response {
+  if let Err(response) = require_generic_data_path(&state, &body.path) {
+    return response;
+  }
+  let family_policy = match SystemFamilyPolicyResolver::new(state.engine.hash_algo()) {
+    Ok(policy) => policy,
+    Err(error) => return engine_error_response("Failed to load generic data policy", &error),
+  };
+
   // Parse the where clause into a QueryNode tree.
   let query_node = match parse_where_clause(&body.r#where) {
     Ok(node) => node,
@@ -2343,7 +2357,7 @@ pub async fn query_endpoint(
     };
 
     let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
-    match query_engine.execute_explain(&query) {
+    match query_engine.execute_explain_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
       Ok(result) => {
         return (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response();
       }
@@ -2378,7 +2392,7 @@ pub async fn query_endpoint(
     };
 
     let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
-    match query_engine.execute_aggregate(&query) {
+    match query_engine.execute_aggregate_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
       Ok(result) => {
         let mut response_value = serde_json::to_value(&result).unwrap();
         // Apply projection if select is specified
@@ -2418,14 +2432,11 @@ pub async fn query_endpoint(
   };
 
   let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
-  match query_engine.execute_paginated(&query) {
+  match query_engine.execute_paginated_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
     Ok(paginated) => {
       let response_items: Vec<serde_json::Value> = paginated
         .results
         .iter()
-        // Filter /.aeordb-system/ paths from query results — system data is invisible
-        // through the API for all users, including root.
-        .filter(|result| !is_system_path(&result.file_record.path))
         .map(|result| {
           serde_json::json!({
             "path": result.file_record.path,
@@ -2608,8 +2619,8 @@ async fn do_merge_patch(
 ) -> Response {
   use crate::engine::merge_patch::{apply_merge_patch, MergeDepth};
 
-  if is_system_path(&path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
   }
 
   let depth = match merge_q.depth {
@@ -2751,10 +2762,11 @@ async fn do_rename(
     }
   };
 
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
-  if is_system_path(&path) || is_system_path(destination) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &path) {
+    return response;
+  }
+  if let Err(response) = require_generic_data_path(&state, destination) {
+    return response;
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -2847,8 +2859,13 @@ pub async fn copy_files(
 ) -> Response {
   let dest_normalized = crate::engine::path_utils::normalize_path(&payload.destination);
 
-  if is_system_path(&dest_normalized) {
-    return ErrorResponse::new("Not found").with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &dest_normalized) {
+    return response;
+  }
+  for path in &payload.paths {
+    if let Err(response) = require_generic_data_path(&state, path) {
+      return response;
+    }
   }
 
   // User/group permission check: /files/copy is exempt from path-aware
@@ -2949,6 +2966,9 @@ pub async fn global_search_endpoint(
   };
 
   let base_path = payload.path.as_deref().unwrap_or("/");
+  if let Err(response) = require_generic_data_path(&state, base_path) {
+    return response;
+  }
   let limit = payload.limit.map(|l| l.min(1000));
   let offset = payload.offset;
   let request_budget = match state.engine.start_query_request_budget() {
@@ -2969,7 +2989,6 @@ pub async fn global_search_endpoint(
       let mut items: Vec<serde_json::Value> = results
         .results
         .iter()
-        .filter(|r| !is_system_path(&r.path))
         .map(|r| {
           serde_json::json!({
             "path": r.path,
@@ -2983,6 +3002,10 @@ pub async fn global_search_endpoint(
           })
         })
         .collect();
+
+      if let Err(error) = filter_generic_data_items(&state.engine, &mut items) {
+        return engine_error_response("Failed to classify search results", &error);
+      }
 
       // Filter search results by user/group permissions. Search is exempt
       // from path-level middleware, so authorization happens here: a user

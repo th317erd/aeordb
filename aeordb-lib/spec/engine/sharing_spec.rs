@@ -768,6 +768,30 @@ async fn share_nonexistent_path_returns_404() {
 }
 
 #[tokio::test]
+async fn share_rejects_nested_registry_concealed_path() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  store_test_file(&engine, "/docs/.aeordb-indexes/private.idx", b"derived index");
+  let target_user = create_test_user(&engine, "concealed_share_target");
+  let share_body = serde_json::json!({
+      "paths": ["/docs/.aeordb-indexes/private.idx"],
+      "users": [target_user.to_string()],
+      "permissions": ".r..l..."
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/share")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&share_body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  assert!(DirectoryOps::new(&engine).read_file_buffered("/docs/.aeordb-permissions").is_err());
+}
+
+#[tokio::test]
 async fn unshare_requires_root() {
   let (_app, jwt_manager, engine, _temp_dir) = test_app();
 

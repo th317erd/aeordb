@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::cache_invalidation::evict_caches_for_path;
-use super::responses::ErrorResponse;
+use super::responses::{engine_error_response, ErrorResponse};
 use super::route_permissions::{parse_user_id, reject_share_key, RoutePermissionChecker};
 use super::state::AppState;
 use crate::auth::TokenClaims;
@@ -19,6 +19,8 @@ use crate::engine::permissions::{PathPermissions, PermissionLink};
 use crate::engine::path_utils::{normalize_path, parent_path, file_name};
 use crate::engine::request_context::RequestContext;
 use crate::engine::user::is_root;
+use crate::engine::system_family_policy::GenericDataPathSelection;
+use crate::engine::SystemFamilyPolicyResolver;
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -142,6 +144,10 @@ pub async fn share(
 
   let ops = DirectoryOps::new(&state.engine);
   let ctx = RequestContext::system();
+  let family_policy = match SystemFamilyPolicyResolver::new(state.engine.hash_algo()) {
+    Ok(policy) => policy,
+    Err(error) => return engine_error_response("Failed to classify shared paths", &error),
+  };
 
   let mut shared_count = 0usize;
   let mut shared_paths: Vec<String> = Vec::new();
@@ -149,8 +155,12 @@ pub async fn share(
   for raw_path in &body.paths {
     let normalized = normalize_path(raw_path);
 
-    if normalized.starts_with("/.aeordb-") {
-      return ErrorResponse::new("Cannot share system paths").with_status(StatusCode::BAD_REQUEST).into_response();
+    match family_policy.generic_data_path_selection(&normalized) {
+      Ok(GenericDataPathSelection::Include) => {}
+      Ok(GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer) => {
+        return ErrorResponse::new("Cannot share owner-specific paths").with_status(StatusCode::BAD_REQUEST).into_response();
+      }
+      Err(error) => return engine_error_response("Failed to classify shared path", &error),
     }
 
     // Determine whether this is a file or directory.

@@ -611,6 +611,32 @@ impl QueryResult {
   }
 }
 
+type QueryResultFilter<'a> = dyn FnMut(&QueryResult) -> EngineResult<bool> + 'a;
+
+fn include_all_query_results(_result: &QueryResult) -> EngineResult<bool> {
+  Ok(true)
+}
+
+fn retain_query_results(results: &mut Vec<QueryResult>, filter: &mut QueryResultFilter<'_>) -> EngineResult<()> {
+  let mut filter_error = None;
+  results.retain(|result| {
+    if filter_error.is_some() {
+      return true;
+    }
+    match filter(result) {
+      Ok(include) => include,
+      Err(error) => {
+        filter_error = Some(error);
+        true
+      }
+    }
+  });
+  match filter_error {
+    Some(error) => Err(error),
+    None => Ok(()),
+  }
+}
+
 struct QueryMemoryLease {
   reservation: MemoryReservation,
   runtime_reservation: QueryRuntimeReservation,
@@ -1153,17 +1179,29 @@ impl<'a> QueryEngine<'a> {
   /// using a streaming/lazy iterator would avoid this, but requires significant refactoring
   /// of the index evaluation pipeline.
   pub fn execute_paginated(&self, query: &Query) -> EngineResult<PaginatedResult> {
-    self.execute_paginated_with_optional_cancellation(query, None)
+    self.execute_paginated_with_optional_filter(query, None, &mut include_all_query_results)
+  }
+
+  /// Execute a paginated query after applying an authority-owned result filter.
+  ///
+  /// Filtering occurs before sorting, counts, cursors, offsets, and limits so
+  /// callers cannot leak or paginate over rows outside their namespace.
+  pub fn execute_paginated_filtered<F>(&self, query: &Query, mut filter: F) -> EngineResult<PaginatedResult>
+  where
+    F: FnMut(&QueryResult) -> EngineResult<bool>,
+  {
+    self.execute_paginated_with_optional_filter(query, None, &mut filter)
   }
 
   pub fn execute_paginated_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<PaginatedResult> {
-    self.execute_paginated_with_optional_cancellation(query, Some(cancellation))
+    self.execute_paginated_with_optional_filter(query, Some(cancellation), &mut include_all_query_results)
   }
 
-  fn execute_paginated_with_optional_cancellation(
+  fn execute_paginated_with_optional_filter(
     &self,
     query: &Query,
     cancellation: Option<&CancellationToken>,
+    filter: &mut QueryResultFilter<'_>,
   ) -> EngineResult<PaginatedResult> {
     let _operation = self.engine.query_operation_guard()?;
     let explicit_limit = query.limit.is_some();
@@ -1172,6 +1210,7 @@ impl<'a> QueryEngine<'a> {
 
     // Get all results (without limit)
     let mut all_results = self.execute_internal(query, &mut budget)?;
+    retain_query_results(&mut all_results, filter)?;
 
     // Sort if order_by specified
     if !query.order_by.is_empty() {
@@ -1240,17 +1279,27 @@ impl<'a> QueryEngine<'a> {
 
   /// Execute an EXPLAIN query, returning plan info and optionally execution metrics + results.
   pub fn execute_explain(&self, query: &Query) -> EngineResult<ExplainResult> {
-    self.execute_explain_with_optional_cancellation(query, None)
+    self.execute_explain_with_optional_filter(query, None, &mut include_all_query_results)
+  }
+
+  /// Execute EXPLAIN/ANALYZE with the same authority filter used by ordinary
+  /// pagination and aggregation. Plan-only requests do not enumerate rows.
+  pub fn execute_explain_filtered<F>(&self, query: &Query, mut filter: F) -> EngineResult<ExplainResult>
+  where
+    F: FnMut(&QueryResult) -> EngineResult<bool>,
+  {
+    self.execute_explain_with_optional_filter(query, None, &mut filter)
   }
 
   pub fn execute_explain_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<ExplainResult> {
-    self.execute_explain_with_optional_cancellation(query, Some(cancellation))
+    self.execute_explain_with_optional_filter(query, Some(cancellation), &mut include_all_query_results)
   }
 
-  fn execute_explain_with_optional_cancellation(
+  fn execute_explain_with_optional_filter(
     &self,
     query: &Query,
     cancellation: Option<&CancellationToken>,
+    filter: &mut QueryResultFilter<'_>,
   ) -> EngineResult<ExplainResult> {
     let _operation = self.engine.query_operation_guard()?;
     let request_budget = self.request_budget()?;
@@ -1271,12 +1320,12 @@ impl<'a> QueryEngine<'a> {
 
     let (results_json, candidate_count, result_count) = if query.aggregate.is_some() {
       let scoped_engine = QueryEngine::with_request_budget(self.engine, request_budget.clone());
-      let agg_result = scoped_engine.execute_aggregate_with_optional_cancellation(query, cancellation)?;
+      let agg_result = scoped_engine.execute_aggregate_with_optional_filter(query, cancellation, filter)?;
       let count = agg_result.count.unwrap_or(0);
       (Some(serde_json::to_value(&agg_result).unwrap_or_default()), count as usize, count as usize)
     } else {
       let scoped_engine = QueryEngine::with_request_budget(self.engine, request_budget.clone());
-      let paginated = scoped_engine.execute_paginated_with_optional_cancellation(query, cancellation)?;
+      let paginated = scoped_engine.execute_paginated_with_optional_filter(query, cancellation, filter)?;
       let total = paginated.total_count.unwrap_or(paginated.results.len() as u64);
       let returned = paginated.results.len();
       let results_value = serde_json::json!({
@@ -2779,24 +2828,36 @@ impl<'a> QueryEngine<'a> {
   /// Execute an aggregation query, computing statistics (count, sum, avg, min, max)
   /// over the matching result set, optionally grouped by one or more fields.
   pub fn execute_aggregate(&self, query: &Query) -> EngineResult<AggregateResult> {
-    self.execute_aggregate_with_optional_cancellation(query, None)
+    self.execute_aggregate_with_optional_filter(query, None, &mut include_all_query_results)
+  }
+
+  /// Execute aggregation after applying an authority-owned result filter.
+  /// Counts, groups, and numeric aggregates are computed only from retained
+  /// rows.
+  pub fn execute_aggregate_filtered<F>(&self, query: &Query, mut filter: F) -> EngineResult<AggregateResult>
+  where
+    F: FnMut(&QueryResult) -> EngineResult<bool>,
+  {
+    self.execute_aggregate_with_optional_filter(query, None, &mut filter)
   }
 
   pub fn execute_aggregate_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<AggregateResult> {
-    self.execute_aggregate_with_optional_cancellation(query, Some(cancellation))
+    self.execute_aggregate_with_optional_filter(query, Some(cancellation), &mut include_all_query_results)
   }
 
-  fn execute_aggregate_with_optional_cancellation(
+  fn execute_aggregate_with_optional_filter(
     &self,
     query: &Query,
     cancellation: Option<&CancellationToken>,
+    filter: &mut QueryResultFilter<'_>,
   ) -> EngineResult<AggregateResult> {
     let _operation = self.engine.query_operation_guard()?;
     let agg = query.aggregate.as_ref().ok_or_else(|| EngineError::NotFound("No aggregate query specified".to_string()))?;
     let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation, self.request_budget()?)?;
 
     // Run the filter to get matching file hashes
-    let result_hashes = self.execute_internal(query, &mut budget)?;
+    let mut result_hashes = self.execute_internal(query, &mut budget)?;
+    retain_query_results(&mut result_hashes, filter)?;
     budget.reserve_hash_work(result_hashes.len(), self.engine.hash_algo().hash_length(), false)?;
     let result_hash_set: HashSet<Vec<u8>> = result_hashes.iter().map(|r| r.file_hash.clone()).collect();
 

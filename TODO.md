@@ -319,6 +319,7 @@
             - [x] Persist imported deletion replay evidence before tombstoning target path aliases.
           - [x] Prove structural-leaf, malformed, and node-local patch payloads cannot mutate entries or advance HEAD.
           - [x] Preserve ordinary files, namespace permissions, patch deletion semantics, and restore/merge behavior.
+        - [x] Convert generic file, blob, listing, query/aggregate/analyze, download, share, version, symlink, and plugin-host access to registry policy before pagination or mutation.
       - [ ] Retain the old system-path predicate only as a named v0 on-disk flag evaluator and delete competing policy lists with an architecture gate.
       - [ ] Child 06: replace hash-only client chunk authorization with a path/diff-bound transfer capability; chunk `FLAG_SYSTEM` cannot prove that a requested hash belongs to the caller's authorized diff.
       - [ ] P2e/Child 06: strictly decode remote sync responses, reject omitted/malformed/hash-mismatched chunks before mutation or checkpoint advancement, and route HTTP receive/apply through the shared merge authority.

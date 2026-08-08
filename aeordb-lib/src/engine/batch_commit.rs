@@ -20,6 +20,8 @@ use crate::engine::indexing_pipeline::IndexingPipeline;
 use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::system_family_policy::GenericDataPathSelection;
+use crate::engine::SystemFamilyPolicyResolver;
 
 /// A file to commit as part of a batch, with pre-uploaded chunk hashes.
 #[derive(Debug, Clone, Deserialize)]
@@ -138,25 +140,26 @@ pub fn commit_files(engine: &StorageEngine, ctx: &RequestContext, files: Vec<Com
   let supplied_content_hash_files = files.iter().filter(|file| file.content_hash.is_some()).count();
   let supplied_size_files = files.iter().filter(|file| file.size.is_some()).count();
 
-  // Reject any path under /.aeordb-system/ or /.aeordb-config/. System data
-  // is written exclusively through dedicated APIs (system_store, directory_ops
-  // with FLAG_SYSTEM) — never through user-facing batch commit. Without this
-  // check, an authenticated user could overwrite /.aeordb-system/api-keys/<uuid>
-  // and mint themselves a root key.
+  let algo = engine.hash_algo();
+  let family_policy = SystemFamilyPolicyResolver::new(algo)?;
+
+  // Generic blob commit may only write registry-selected ordinary data.
+  // Dedicated owners remain the sole mutation path for concealed families.
   for file in &files {
     let normalized = normalize_path(&file.path);
     if normalized == "/" {
       return Err(EngineError::InvalidInput("Cannot store at root path".to_string()));
     }
-    if is_system_path(&normalized) {
-      return Err(EngineError::InvalidInput(format!(
-        "Path '{}' is reserved for internal system data and cannot be written through this endpoint",
-        file.path
-      )));
+    match family_policy.generic_data_path_selection(&normalized)? {
+      GenericDataPathSelection::Include => {}
+      GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer => {
+        return Err(EngineError::InvalidInput(format!(
+          "Path '{}' is reserved for owner-specific data and cannot be written through this endpoint",
+          file.path
+        )));
+      }
     }
   }
-
-  let algo = engine.hash_algo();
 
   // --- Phase 1: Validate all chunk hashes exist ---
   let validation_start = std::time::Instant::now();

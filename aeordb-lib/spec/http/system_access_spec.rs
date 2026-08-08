@@ -313,6 +313,23 @@ async fn test_root_listing_hides_system_directory() {
   }
 }
 
+#[tokio::test]
+async fn test_root_listing_uses_registry_policy_for_permissions_and_conflicts() {
+  let harness = TestHarness::new();
+  harness.set_permissions("/", serde_json::json!([])).await;
+  harness.store_file_via_engine("/.aeordb-conflicts/item.json", b"conflict evidence");
+
+  let request = Request::builder().method("GET").uri("/files/").header("authorization", &harness.root_jwt).body(Body::empty()).unwrap();
+  let response = harness.app().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let json = body_json(response.into_body()).await;
+  let paths: Vec<&str> =
+    json["items"].as_array().expect("listing should have items").iter().filter_map(|item| item["path"].as_str()).collect();
+  assert!(paths.contains(&"/.aeordb-permissions"), "namespace permissions must remain visible: {paths:?}");
+  assert!(!paths.iter().any(|path| path.starts_with("/.aeordb-conflicts")), "conflicts must remain concealed: {paths:?}");
+}
+
 // ===========================================================================
 // 4. PUT /files/.aeordb-system/* blocked for ALL users
 // ===========================================================================
@@ -450,6 +467,22 @@ async fn test_symlink_to_system_blocked_for_root() {
 }
 
 #[tokio::test]
+async fn test_symlink_to_conflict_state_blocked_for_root() {
+  let harness = TestHarness::new();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/links/conflict-link")
+    .header("content-type", "application/json")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::from(r#"{"target":"/.aeordb-conflicts/item.json"}"#))
+    .unwrap();
+
+  let response = harness.app().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND, "generic symlink APIs must conceal typed conflict state");
+}
+
+#[tokio::test]
 async fn test_symlink_to_system_blocked_for_non_root() {
   let harness = TestHarness::new();
   harness.setup_open_permissions().await;
@@ -533,6 +566,8 @@ async fn test_rename_from_system_blocked_for_root() {
 async fn test_query_results_exclude_system_paths() {
   let harness = TestHarness::new();
   harness.store_file_via_engine("/.aeordb-system/config/key.json", b"secret-key");
+  harness.store_file_via_engine("/.aeordb-conflicts/item.json", b"conflict evidence");
+  harness.set_permissions("/", serde_json::json!([])).await;
   harness.store_file_via_api("data/public.txt", b"public-data").await;
 
   // Query with @size gt 0 -- should match both files but only return public one
@@ -554,10 +589,89 @@ async fn test_query_results_exclude_system_paths() {
 
   let json = body_json(response.into_body()).await;
   let items = json["items"].as_array().expect("should have items array");
+  let paths: Vec<&str> = items.iter().filter_map(|item| item["path"].as_str()).collect();
+  assert!(paths.contains(&"/.aeordb-permissions"), "query omitted namespace permissions: {paths:?}");
   for item in items {
     let path = item["path"].as_str().unwrap_or("");
-    assert!(!path.starts_with("/.aeordb-system"), "Query results should not contain /.system paths, found: {}", path);
+    assert!(
+      !path.starts_with("/.aeordb-system") && !path.starts_with("/.aeordb-conflicts"),
+      "Query results should not contain concealed paths, found: {}",
+      path
+    );
   }
+}
+
+#[tokio::test]
+async fn test_query_pagination_and_aggregates_exclude_registry_concealed_paths() {
+  let harness = TestHarness::new();
+  harness.store_file_via_engine("/.aeordb-system/config/key.json", b"secret-key");
+  harness.store_file_via_engine("/.aeordb-conflicts/item.json", b"conflict evidence");
+  harness.set_permissions("/", serde_json::json!([])).await;
+  harness.store_file_via_api("data/public.txt", b"public-data").await;
+
+  let page_body = serde_json::json!({
+      "path": "/",
+      "where": [{"field": "@size", "op": "gt", "value": "0"}],
+      "order_by": [{"field": "@path", "direction": "asc"}],
+      "limit": 1,
+      "include_total": true
+  });
+  let page_request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::from(serde_json::to_vec(&page_body).unwrap()))
+    .unwrap();
+  let page_response = harness.app().oneshot(page_request).await.unwrap();
+  assert_eq!(page_response.status(), StatusCode::OK);
+
+  let page = body_json(page_response.into_body()).await;
+  assert_eq!(page["total"], serde_json::json!(2), "only permissions and ordinary data are visible");
+  assert_eq!(page["items"].as_array().unwrap().len(), 1);
+  assert_eq!(page["has_more"], serde_json::json!(true));
+  assert!(page["next_cursor"].is_string());
+
+  let aggregate_body = serde_json::json!({
+      "path": "/",
+      "where": [{"field": "@size", "op": "gt", "value": "0"}],
+      "aggregate": {"count": true}
+  });
+  let aggregate_request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::from(serde_json::to_vec(&aggregate_body).unwrap()))
+    .unwrap();
+  let aggregate_response = harness.app().oneshot(aggregate_request).await.unwrap();
+  assert_eq!(aggregate_response.status(), StatusCode::OK);
+
+  let aggregate = body_json(aggregate_response.into_body()).await;
+  assert_eq!(aggregate["count"], serde_json::json!(2), "concealed rows must not affect aggregate results");
+
+  let explain_body = serde_json::json!({
+      "path": "/",
+      "where": [{"field": "@size", "op": "gt", "value": "0"}],
+      "include_total": true,
+      "explain": "analyze"
+  });
+  let explain_request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::from(serde_json::to_vec(&explain_body).unwrap()))
+    .unwrap();
+  let explain_response = harness.app().oneshot(explain_request).await.unwrap();
+  assert_eq!(explain_response.status(), StatusCode::OK);
+
+  let explain = body_json(explain_response.into_body()).await;
+  assert_eq!(explain["execution"]["candidates_generated"], serde_json::json!(2));
+  let explained_paths: Vec<&str> = explain["items"]["items"].as_array().unwrap().iter().filter_map(|item| item["path"].as_str()).collect();
+  assert_eq!(explained_paths.len(), 2);
+  assert!(explained_paths.contains(&"/.aeordb-permissions"));
+  assert!(explained_paths.contains(&"/data/public.txt"));
 }
 
 // ===========================================================================
@@ -772,6 +886,21 @@ async fn test_file_history_blocked_for_system_path() {
 
   let response = harness.app().oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::NOT_FOUND, "File history for .system/ path should return 404");
+}
+
+#[tokio::test]
+async fn test_file_history_blocked_for_conflict_path() {
+  let harness = TestHarness::new();
+
+  let request = Request::builder()
+    .method("GET")
+    .uri("/versions/history/.aeordb-conflicts/item.json")
+    .header("authorization", &harness.root_jwt)
+    .body(Body::empty())
+    .unwrap();
+
+  let response = harness.app().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND, "generic version APIs must conceal typed conflict state");
 }
 
 // ===========================================================================

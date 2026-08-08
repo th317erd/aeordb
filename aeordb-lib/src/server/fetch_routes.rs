@@ -15,11 +15,12 @@ use super::temp_response::{body_from_tempfile, tempfile_for_engine, ResponseBuil
 use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::auth::TokenClaims;
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules};
-use crate::engine::directory_ops::{is_system_path, reserve_streaming_read, DirectoryOps, EngineFileStream};
+use crate::engine::directory_ops::{reserve_streaming_read, DirectoryOps, EngineFileStream};
 use crate::engine::errors::EngineError;
 use crate::engine::path_utils::{file_name, normalize_path};
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::range_extract::{extract_range_from_record, RangeExtractionRequest};
+use crate::engine::SystemFamilyPolicyResolver;
 
 const MAX_BATCH_FETCH_FILES: usize = 10_000;
 const MAX_BATCH_FETCH_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
@@ -203,6 +204,7 @@ fn build_batch_fetch_paths(
 ) -> Result<tempfile::NamedTempFile, FetchBuildError> {
   cancellation.check()?;
   let ops = DirectoryOps::new(&state.engine);
+  let family_policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())?;
   let mut file = tempfile_for_engine(&state.engine, "fetch").map_err(|error| FetchBuildError::Io(error.to_string()))?;
   file.write_all(b"{").map_err(fetch_io)?;
   let mut cumulative_size = 0u64;
@@ -211,7 +213,7 @@ fn build_batch_fetch_paths(
   for raw_path in paths {
     cancellation.check()?;
     let normalized = normalize_path(raw_path);
-    if is_system_path(&normalized) || !can_fetch_path(state, claims, key_rules, &normalized) {
+    if !family_policy.generic_data_path_is_visible(&normalized)? || !can_fetch_path(state, claims, key_rules, &normalized) {
       return Err(FetchBuildError::Response(StatusCode::NOT_FOUND, format!("Not found: {raw_path}")));
     }
     let mut record = match ops.get_metadata(&normalized) {
@@ -265,6 +267,7 @@ fn build_batch_fetch_ranges(
 ) -> Result<tempfile::NamedTempFile, FetchBuildError> {
   cancellation.check()?;
   let ops = DirectoryOps::new(&state.engine);
+  let family_policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())?;
   let mut file = tempfile_for_engine(&state.engine, "fetch-range").map_err(|error| FetchBuildError::Io(error.to_string()))?;
   file.write_all(b"{\"items\":[").map_err(fetch_io)?;
   let mut cumulative_size = 0u64;
@@ -275,7 +278,7 @@ fn build_batch_fetch_ranges(
     if index > 0 {
       file.write_all(b",").map_err(fetch_io)?;
     }
-    match fetch_one_range_item(state, claims, key_rules, &ops, item) {
+    match fetch_one_range_item(state, claims, key_rules, &ops, family_policy, item) {
       Ok(value) => {
         let content_len = value.content_len();
         if cumulative_size.saturating_add(content_len) > max_response_bytes {
@@ -501,11 +504,13 @@ fn fetch_one_range_item(
   claims: &TokenClaims,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   ops: &DirectoryOps<'_>,
+  family_policy: SystemFamilyPolicyResolver,
   item: &BatchFetchItem,
 ) -> Result<FetchedRangeItem, RangeFetchError> {
   let normalized = normalize_path(&item.path);
 
-  if is_system_path(&normalized) || !can_fetch_path(state, claims, key_rules, &normalized) {
+  let visible = family_policy.generic_data_path_is_visible(&normalized).map_err(RangeFetchError::Engine)?;
+  if !visible || !can_fetch_path(state, claims, key_rules, &normalized) {
     return Err(RangeFetchError::Response(StatusCode::NOT_FOUND, range_error(item, "not_found", format!("Not found: {}", item.path))));
   }
 

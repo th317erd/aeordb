@@ -9,13 +9,18 @@ use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::user::is_root;
 use crate::engine::SystemFamilyPolicyResolver;
+use crate::engine::StorageEngine;
 use crate::server::responses::{engine_error_response, ErrorResponse};
 use crate::server::state::AppState;
 
 /// Enforce the registry's generic-data visibility policy while preserving the
 /// public API's concealment contract for known protected state.
 pub fn require_generic_data_path(state: &AppState, path: &str) -> Result<(), Response> {
-  let selection = SystemFamilyPolicyResolver::new(state.engine.hash_algo())
+  require_generic_data_engine_path(&state.engine, path)
+}
+
+pub fn require_generic_data_engine_path(engine: &StorageEngine, path: &str) -> Result<(), Response> {
+  let selection = SystemFamilyPolicyResolver::new(engine.hash_algo())
     .and_then(|resolver| resolver.generic_data_path_selection(path))
     .map_err(|error| engine_error_response("Failed to classify data path", &error))?;
 

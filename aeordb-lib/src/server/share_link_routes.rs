@@ -9,7 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::cache_invalidation::evict_caches_for_path;
-use super::responses::ErrorResponse;
+use super::responses::{engine_error_response, ErrorResponse};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::api_key::{generate_api_key, hash_api_key, ApiKeyRecord, NO_EXPIRY_SENTINEL, MAX_EXPIRY_DAYS};
@@ -17,6 +17,8 @@ use crate::engine::api_key_rules::KeyRule;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::user::is_root;
+use crate::engine::system_family_policy::GenericDataPathSelection;
+use crate::engine::SystemFamilyPolicyResolver;
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -98,11 +100,20 @@ pub async fn create_share_link(
       .into_response();
   }
 
-  // 2b. Block sharing of system paths.
+  let family_policy = match SystemFamilyPolicyResolver::new(state.engine.hash_algo()) {
+    Ok(policy) => policy,
+    Err(error) => return engine_error_response("Failed to classify share-link paths", &error),
+  };
+
+  // 2b. Block owner-specific paths from generic share links.
   for raw_path in &body.paths {
     let normalized = normalize_path(raw_path);
-    if normalized.starts_with("/.aeordb-") {
-      return ErrorResponse::new("Cannot share system paths").with_status(StatusCode::BAD_REQUEST).into_response();
+    match family_policy.generic_data_path_selection(&normalized) {
+      Ok(GenericDataPathSelection::Include) => {}
+      Ok(GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer) => {
+        return ErrorResponse::new("Cannot share owner-specific paths").with_status(StatusCode::BAD_REQUEST).into_response();
+      }
+      Err(error) => return engine_error_response("Failed to classify share-link path", &error),
     }
   }
 

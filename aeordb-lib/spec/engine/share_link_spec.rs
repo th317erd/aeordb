@@ -514,6 +514,18 @@ async fn share_link_invalid_permissions_returns_400() {
   assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn share_link_rejects_nested_registry_concealed_path() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  store_file(&engine, "/docs/.aeordb-indexes/private.idx", b"derived index");
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let (status, _) = create_share_link(app, &auth, vec!["/docs/.aeordb-indexes/private.idx"], ".r......", Some(7)).await;
+
+  assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 /// Revoking a nonexistent share link should return 404.
 #[tokio::test]
 async fn revoke_nonexistent_share_link_returns_404() {

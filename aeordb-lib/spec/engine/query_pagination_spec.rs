@@ -1,4 +1,5 @@
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::errors::EngineError;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::query_engine::{
   QueryEngine, QueryBuilder, Query, QueryNode, FieldQuery, QueryOp, QueryStrategy, SortField, SortDirection, DEFAULT_QUERY_LIMIT,
@@ -122,6 +123,32 @@ fn test_default_limit_applied_when_no_limit() {
   assert_eq!(paginated.results.len(), DEFAULT_QUERY_LIMIT);
   assert!(paginated.has_more);
   assert!(paginated.default_limit_hit);
+}
+
+#[test]
+fn result_filter_precedes_pagination_and_analyze_metadata_and_propagates_errors() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_30_people(&dir);
+  let query_engine = QueryEngine::new(&engine);
+  let mut query = make_query_all_people();
+  query.limit = Some(5);
+  query.include_total = true;
+  query.order_by = vec![SortField { field: "@path".to_string(), direction: SortDirection::Asc }];
+
+  let page = query_engine.execute_paginated_filtered(&query, |result| Ok(result.file_record.path.contains("person_2"))).unwrap();
+  assert_eq!(page.total_count, Some(10));
+  assert_eq!(page.results.len(), 5);
+  assert!(page.has_more);
+  assert!(page.results.iter().all(|result| result.file_record.path.contains("person_2")));
+
+  query.explain = ExplainMode::Analyze;
+  let explain = query_engine.execute_explain_filtered(&query, |result| Ok(result.file_record.path.contains("person_2"))).unwrap();
+  assert_eq!(explain.execution.as_ref().unwrap()["candidates_generated"], serde_json::json!(10));
+  assert_eq!(explain.execution.as_ref().unwrap()["results_returned"], serde_json::json!(5));
+
+  let error =
+    query_engine.execute_paginated_filtered(&query, |_result| Err(EngineError::InvalidInput("filter failed".to_string()))).unwrap_err();
+  assert!(matches!(error, EngineError::InvalidInput(message) if message == "filter failed"));
 }
 
 #[test]

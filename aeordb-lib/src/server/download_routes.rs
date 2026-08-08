@@ -13,11 +13,12 @@ use super::route_permissions::RoutePermissionChecker;
 use super::state::AppState;
 use super::temp_response::{body_from_tempfile, tempfile_for_engine, ResponseBuildCancellation, ResponseBuildGuard};
 use crate::auth::TokenClaims;
-use crate::engine::directory_ops::{DirectoryOps, is_system_path};
+use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::EngineError;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::permission_resolver::CrudlifyOp;
+use crate::engine::SystemFamilyPolicyResolver;
 
 #[derive(Deserialize)]
 pub struct DownloadRequest {
@@ -138,6 +139,7 @@ fn build_zip(
 ) -> Result<ZipBuildOutput, ZipBuildError> {
   cancellation.check().map_err(ZipBuildError::Engine)?;
   let ops = DirectoryOps::new(engine);
+  let family_policy = SystemFamilyPolicyResolver::new(engine.hash_algo()).map_err(ZipBuildError::Engine)?;
   let mut file = tempfile_for_engine(engine, "zip").map_err(|error| ZipBuildError::Write(error.to_string()))?;
   let mut skipped = Vec::new();
   let mut cumulative_size = 0u64;
@@ -147,19 +149,19 @@ fn build_zip(
     for raw_path in paths {
       cancellation.check().map_err(ZipBuildError::Engine)?;
       let normalized = normalize_path(raw_path);
-      if is_system_path(&normalized) {
+      if !family_policy.generic_data_path_is_visible(&normalized).map_err(ZipBuildError::Engine)? {
         skipped.push(raw_path.clone());
         continue;
       }
 
       match ops.get_metadata(&normalized) {
         Ok(Some(record)) => {
-          let walk = ZipWalk { ops: &ops, common_prefix, options, max_size, cancellation };
+          let walk = ZipWalk { ops: &ops, family_policy, common_prefix, options, max_size, cancellation };
           let mut state = ZipState { writer: &mut zip_writer, skipped: &mut skipped, cumulative_size: &mut cumulative_size };
           add_file_to_zip(&walk, &normalized, record.total_size, &mut state)?;
         }
         Ok(None) | Err(EngineError::NotFound(_)) => {
-          let walk = ZipWalk { ops: &ops, common_prefix, options, max_size, cancellation };
+          let walk = ZipWalk { ops: &ops, family_policy, common_prefix, options, max_size, cancellation };
           let mut state = ZipState { writer: &mut zip_writer, skipped: &mut skipped, cumulative_size: &mut cumulative_size };
           if let Err(error) = add_directory_to_zip(&walk, &normalized, &mut state) {
             if matches!(error, ZipBuildError::SourceUnavailable) {
@@ -181,6 +183,7 @@ fn build_zip(
 /// Walk-invariant arguments for the recursive ZIP builder.
 struct ZipWalk<'a> {
   ops: &'a DirectoryOps<'a>,
+  family_policy: SystemFamilyPolicyResolver,
   common_prefix: &'a str,
   options: zip::write::SimpleFileOptions,
   max_size: u64,
@@ -242,7 +245,7 @@ fn add_directory_to_zip(walk: &ZipWalk<'_>, dir_path: &str, state: &mut ZipState
 
     let normalized = normalize_path(&child_path);
 
-    if is_system_path(&normalized) {
+    if !walk.family_policy.generic_data_path_is_visible(&normalized).map_err(ZipBuildError::Engine)? {
       state.skipped.push(child_path);
       continue;
     }

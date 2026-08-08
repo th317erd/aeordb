@@ -216,6 +216,32 @@ fn test_echo_plugin_reads_file() {
 }
 
 #[test]
+fn generic_plugin_host_access_uses_system_family_policy_even_for_system_context() {
+  let (engine, pm, _temp) = setup();
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/.aeordb-permissions", br#"{"links":[]}"#, Some("application/json")).expect("store namespace permissions");
+  ops
+    .store_file_buffered(&ctx, "/.aeordb-conflicts/item.json", b"conflict evidence", Some("application/json"))
+    .expect("store conflict evidence");
+
+  let permissions = invoke_raw(&pm, &engine, "read", b"/.aeordb-permissions");
+  assert_eq!(permissions["status_code"], 200, "namespace permissions must remain available to generic plugin data tools");
+
+  let conflict = invoke_raw(&pm, &engine, "read", b"/.aeordb-conflicts/item.json");
+  assert_eq!(conflict["status_code"], 404, "generic plugin data tools must not bypass concealed-family policy");
+  assert!(extract_body_string(&conflict).contains("Permission denied"));
+
+  let listing = invoke_raw(&pm, &engine, "list", b"/");
+  assert_eq!(listing["status_code"], 200, "plugin listing failed: {}", extract_body_string(&listing));
+  let listing = extract_body_json(&listing);
+  let names: Vec<&str> =
+    listing["entries"].as_array().expect("plugin listing entries").iter().filter_map(|entry| entry["name"].as_str()).collect();
+  assert!(names.contains(&".aeordb-permissions"), "plugin listing omitted namespace permissions: {names:?}");
+  assert!(!names.contains(&".aeordb-conflicts"), "plugin listing exposed conflict state: {names:?}");
+}
+
+#[test]
 fn read_file_host_function_rejects_oversized_response_before_buffering() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let manager = PluginManager::new(engine.clone());

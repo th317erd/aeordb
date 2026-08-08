@@ -208,9 +208,12 @@ async fn download_zip_includes_folder_contents() {
 async fn download_zip_skips_system_paths() {
   let (app, jwt_manager, engine, _temp) = test_app();
   store_test_files(&engine);
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-conflicts/item.json", b"conflict evidence", Some("application/json"))
+    .unwrap();
   let auth = bearer_token(&jwt_manager);
 
-  let body = serde_json::json!({ "paths": ["/docs/readme.md", "/.aeordb-system/config"] });
+  let body = serde_json::json!({ "paths": ["/docs/readme.md", "/.aeordb-system/config", "/.aeordb-conflicts/item.json"] });
   let request = Request::builder()
     .method("POST")
     .uri("/files/download")
@@ -225,7 +228,7 @@ async fn download_zip_skips_system_paths() {
   let bytes = response.into_body().collect().await.unwrap().to_bytes();
   let reader = std::io::Cursor::new(bytes.to_vec());
   let archive = zip::ZipArchive::new(reader).expect("valid ZIP");
-  assert_eq!(archive.len(), 1, "should skip .system/ path");
+  assert_eq!(archive.len(), 1, "should skip every registry-concealed path");
 }
 
 #[tokio::test]
@@ -347,6 +350,28 @@ async fn batch_fetch_system_path_returns_404() {
   let auth = bearer_token(&jwt_manager);
 
   let body = serde_json::json!({ "paths": ["/docs/readme.md", "/.aeordb-system/config"] });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/fetch")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn batch_fetch_conflict_path_returns_404() {
+  let (app, jwt_manager, engine, _temp) = test_app();
+  store_test_files(&engine);
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-conflicts/item.json", b"conflict evidence", Some("application/json"))
+    .unwrap();
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({ "paths": ["/docs/readme.md", "/.aeordb-conflicts/item.json"] });
   let request = Request::builder()
     .method("POST")
     .uri("/files/fetch")

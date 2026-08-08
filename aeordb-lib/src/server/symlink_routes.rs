@@ -8,9 +8,10 @@ use axum::{
 use serde::Deserialize;
 
 use super::responses::ErrorResponse;
+use super::route_permissions::require_generic_data_path;
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::directory_ops::{DirectoryOps, is_system_path};
+use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 
@@ -37,17 +38,14 @@ pub async fn create_symlink(
     }
   };
 
-  // Block ALL users from creating symlinks that point to /.aeordb-system/ paths —
-  // system data is invisible through the API for all users, including root.
   let normalized_target = normalize_path(target);
-  if is_system_path(&normalized_target) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &normalized_target) {
+    return response;
   }
 
-  // Block ALL users from creating symlinks under /.aeordb-system/ paths
   let normalized_path = normalize_path(&path);
-  if is_system_path(&normalized_path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &normalized_path) {
+    return response;
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -76,11 +74,9 @@ pub async fn create_symlink(
 
 /// GET /links/{*path} — read symlink metadata without following it.
 pub async fn get_symlink(State(state): State<AppState>, Extension(_claims): Extension<TokenClaims>, Path(path): Path<String>) -> Response {
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
   let normalized_path = normalize_path(&path);
-  if is_system_path(&normalized_path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &normalized_path) {
+    return response;
   }
 
   let ops = DirectoryOps::new(&state.engine);
@@ -113,11 +109,9 @@ pub async fn delete_symlink(
   Extension(_claims): Extension<TokenClaims>,
   Path(path): Path<String>,
 ) -> Response {
-  // Block ALL access to /.aeordb-system/ via API — system data is only accessible
-  // through the internal system_store module, never through HTTP endpoints.
   let normalized_path = normalize_path(&path);
-  if is_system_path(&normalized_path) {
-    return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
+  if let Err(response) = require_generic_data_path(&state, &normalized_path) {
+    return response;
   }
 
   let ctx = RequestContext::from_claims(&_claims.sub, state.event_bus.clone());

@@ -110,6 +110,19 @@ fn test_count() {
 }
 
 #[test]
+fn aggregate_result_filter_precedes_count_and_grouping() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = setup_people_engine(&dir);
+  let query_engine = QueryEngine::new(&engine);
+  let query = make_all_people_query(AggregateQuery { count: true, group_by: vec!["department".to_string()], ..Default::default() }, None);
+
+  let result = query_engine.execute_aggregate_filtered(&query, |item| Ok(item.file_record.path.contains("person_1"))).unwrap();
+  assert_eq!(result.count, Some(10));
+  let groups = result.groups.unwrap();
+  assert_eq!(groups.iter().map(|group| group.count).sum::<u64>(), 10);
+}
+
+#[test]
 fn aggregate_results_retain_and_release_their_query_memory_reservation() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_people_engine(&dir);

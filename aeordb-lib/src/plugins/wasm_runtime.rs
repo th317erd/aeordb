@@ -15,6 +15,7 @@ use crate::engine::query_engine::{
 use crate::engine::range_extract::{extract_range_by_path, RangeExtractionRequest, RangeMode};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::SystemFamilyPolicyResolver;
 
 /// Default maximum memory in bytes (16 MB).
 pub(crate) const DEFAULT_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -508,6 +509,11 @@ impl WasmPluginRuntime {
         }
 
         let dir_ops = DirectoryOps::new(&engine);
+        let family_policy = match SystemFamilyPolicyResolver::new(engine.hash_algo()) {
+          Ok(policy) => policy,
+          Err(error) => return write_error_response(&mut caller, &format!("System family policy failed: {error}")),
+        };
+        let normalized_directory = crate::engine::path_utils::normalize_path(&path);
         let response_capacity = host_response_capacity(&caller);
         let offset = args_json.get("offset").and_then(|value| value.as_u64()).and_then(|value| usize::try_from(value).ok()).unwrap_or(0);
         let capacity_limit = response_capacity.saturating_sub(256) / 128;
@@ -526,9 +532,20 @@ impl WasmPluginRuntime {
             }
             let mut response_bytes = 64usize;
             let mut entries = Vec::with_capacity(window.entries.len());
+            let mut capacity_truncated = false;
             for child in &window.entries {
+              let child_path =
+                if normalized_directory == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized_directory, child.name) };
+              match family_policy.generic_data_path_is_visible(&child_path) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                  return write_error_response(&mut caller, &format!("System family policy failed for '{}': {}", child_path, error));
+                }
+              }
               let estimated = child.name.len().saturating_mul(6).saturating_add(96);
               if response_bytes.saturating_add(estimated) > response_capacity {
+                capacity_truncated = true;
                 break;
               }
               response_bytes = response_bytes.saturating_add(estimated);
@@ -539,7 +556,7 @@ impl WasmPluginRuntime {
                 "size": child.total_size,
               }));
             }
-            let has_more = window.has_more || entries.len() < window.entries.len();
+            let has_more = window.has_more || capacity_truncated;
             if requested_limit.is_none() && has_more {
               return write_error_response(
                 &mut caller,
@@ -585,15 +602,22 @@ impl WasmPluginRuntime {
         let response_item_limit = (response_capacity.saturating_sub(512) / 256).max(1);
         query.limit = Some(query.limit.unwrap_or(response_item_limit).min(response_item_limit));
 
+        let family_policy = match SystemFamilyPolicyResolver::new(engine.hash_algo()) {
+          Ok(policy) => policy,
+          Err(error) => return write_error_response(&mut caller, &format!("System family policy failed: {error}")),
+        };
         let query_engine = QueryEngine::new(&engine);
-        match query_engine.execute_paginated(&query) {
+        match query_engine.execute_paginated_filtered(&query, |result| {
+          if !family_policy.generic_data_path_is_visible(&result.file_record.path)? {
+            return Ok(false);
+          }
+          Ok(authorize_plugin_path(&caller, &result.file_record.path, CrudlifyOp::Read).is_ok())
+        }) {
           Ok(paginated) => {
             let mut result_items = Vec::new();
             let mut response_bytes = 256usize;
+            let mut capacity_truncated = false;
             for result in &paginated.results {
-              if authorize_plugin_path(&caller, &result.file_record.path, CrudlifyOp::Read).is_err() {
-                continue;
-              }
               let matched_bytes = result.matched_by.iter().fold(0usize, |total, value| total.saturating_add(value.len().saturating_mul(6)));
               let estimated = result
                 .file_record
@@ -604,6 +628,7 @@ impl WasmPluginRuntime {
                 .saturating_add(matched_bytes)
                 .saturating_add(256);
               if response_bytes.saturating_add(estimated) > response_capacity {
+                capacity_truncated = true;
                 break;
               }
               response_bytes = response_bytes.saturating_add(estimated);
@@ -617,11 +642,10 @@ impl WasmPluginRuntime {
                 "matched_by": result.matched_by,
               }));
             }
-            let visible_count = result_items.len();
 
             let mut response = serde_json::json!({
               "items": result_items,
-              "has_more": paginated.has_more || visible_count < paginated.results.len(),
+              "has_more": paginated.has_more || capacity_truncated,
             });
 
             if is_unrestricted_plugin_context(&caller) {
@@ -671,8 +695,13 @@ impl WasmPluginRuntime {
           return write_error_response(&mut caller, "Aggregate host function requires root or system context");
         }
 
+        let family_policy = match SystemFamilyPolicyResolver::new(engine.hash_algo()) {
+          Ok(policy) => policy,
+          Err(error) => return write_error_response(&mut caller, &format!("System family policy failed: {error}")),
+        };
         let query_engine = QueryEngine::new(&engine);
-        match query_engine.execute_aggregate(&query) {
+        match query_engine.execute_aggregate_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path))
+        {
           Ok(result) => match serde_json::to_value(&result) {
             Ok(v) => write_json_response(&mut caller, &v),
             Err(e) => write_error_response(&mut caller, &format!("Serialization failed: {}", e)),
@@ -776,14 +805,16 @@ fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: 
   let engine = caller.data().engine.as_ref().ok_or_else(|| "Database access not available in this plugin context".to_string())?;
   let ctx = caller.data().request_context.as_ref().ok_or_else(|| "Request context not available in this plugin context".to_string())?;
 
-  if ctx.user_id == "system" {
-    return Ok(());
+  let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
+  let visible = SystemFamilyPolicyResolver::new(engine.hash_algo())
+    .and_then(|resolver| resolver.generic_data_path_is_visible(&normalized))
+    .map_err(|error| format!("System family policy failed for '{}': {}", normalized, error))?;
+  if !visible {
+    return Err(format!("Permission denied: {}", normalized));
   }
 
-  let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
-
-  if crate::engine::directory_ops::is_system_path(&normalized) {
-    return Err(format!("Permission denied: {}", normalized));
+  if ctx.user_id == "system" {
+    return Ok(());
   }
 
   if let Some(key_id) = ctx.key_id.as_ref() {
