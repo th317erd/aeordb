@@ -531,11 +531,10 @@ pub async fn create_api_key(
   Extension(claims): Extension<TokenClaims>,
   Json(payload): Json<CreateApiKeyRequest>,
 ) -> Response {
-  if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
-    return ErrorResponse::new("root access required. Only the root user can create admin API keys via POST /admin/api-keys".to_string())
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response();
-  }
+  let caller_user_id = match require_root(&claims) {
+    Ok(user_id) => user_id,
+    Err(response) => return response,
+  };
 
   // Determine which user this key is for.
   let target_user_id = match payload.user_id {
@@ -547,17 +546,7 @@ pub async fn create_api_key(
           .into_response();
       }
     },
-    None => {
-      // Default to the calling user's identity.
-      match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
-        Err(_) => {
-          return ErrorResponse::new("Invalid sub claim in JWT: token 'sub' is not a valid UUID".to_string())
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response();
-        }
-      }
-    }
+    None => caller_user_id,
   };
 
   let key_id = Uuid::new_v4();
@@ -613,10 +602,8 @@ pub async fn create_api_key(
 
 /// GET /admin/api-keys -- list all API key metadata (no secrets).
 pub async fn list_api_keys(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
-  if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
-    return ErrorResponse::new("root access required. Only the root user can list admin API keys via GET /admin/api-keys".to_string())
-      .with_status(StatusCode::FORBIDDEN)
-      .into_response();
+  if let Err(response) = require_root(&claims) {
+    return response;
   }
 
   match state.auth_provider.list_api_keys() {
@@ -674,12 +661,8 @@ pub async fn revoke_api_key(
   Extension(claims): Extension<TokenClaims>,
   Path(key_id): Path<String>,
 ) -> Response {
-  if !crate::engine::is_root(&Uuid::parse_str(&claims.sub).unwrap_or(Uuid::new_v4())) {
-    return ErrorResponse::new(
-      "root access required. Only the root user can revoke admin API keys via DELETE /admin/api-keys/:key_id".to_string(),
-    )
-    .with_status(StatusCode::FORBIDDEN)
-    .into_response();
+  if let Err(response) = require_root(&claims) {
+    return response;
   }
 
   let parsed_key_id = match Uuid::parse_str(&key_id) {

@@ -83,6 +83,21 @@ fn non_admin_bearer_token(jwt_manager: &JwtManager) -> String {
   format!("Bearer {}", token)
 }
 
+fn malformed_subject_bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: "not-a-user-uuid".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
+}
+
 fn keyed_bearer_token(jwt_manager: &JwtManager, key_id: uuid::Uuid, subject: String) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
@@ -456,6 +471,35 @@ async fn test_revoke_api_key_requires_admin_role() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_api_key_routes_reject_malformed_subjects_without_inventing_an_identity() {
+  let (app, jwt_manager, _, _, _temp_dir) = test_app();
+  let malformed_auth = malformed_subject_bearer_token(&jwt_manager);
+  let requests = [
+    Request::builder()
+      .method("POST")
+      .uri("/auth/keys/admin")
+      .header("content-type", "application/json")
+      .header("authorization", &malformed_auth)
+      .body(Body::from(r#"{}"#))
+      .unwrap(),
+    Request::builder().method("GET").uri("/auth/keys/admin").header("authorization", &malformed_auth).body(Body::empty()).unwrap(),
+    Request::builder()
+      .method("DELETE")
+      .uri("/auth/keys/admin/00000000-0000-0000-0000-000000000000")
+      .header("authorization", &malformed_auth)
+      .body(Body::empty())
+      .unwrap(),
+  ];
+
+  for request in requests {
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let json = body_json(response.into_body()).await;
+    assert_eq!(json["error"], "Invalid user identity: token 'sub' claim is not a valid UUID");
+  }
 }
 
 #[tokio::test]
