@@ -24,7 +24,7 @@ pending  -->  running  -->  completed
 1. **Pending**: Task is enqueued and waiting for the worker to pick it up.
 2. **Running**: Worker has dequeued the task and is executing it.
 3. **Completed**: Task finished successfully.
-4. **Failed**: Task encountered an error (e.g., circuit breaker tripped, GC failed).
+4. **Failed**: Task encountered an error (e.g., an exact partial reindex result, circuit breaker, or GC failure).
 5. **Cancelled**: Task was cancelled by the user between batch iterations.
 6. **Deferred**: Deferral is an event, not a persisted status. If host-memory
    pressure rises or the worker begins shutting down after claiming a task,
@@ -63,7 +63,7 @@ Response:
         "eta_ms": 8000,
         "indexed_count": 650,
         "total_count": 1000,
-        "message": "indexed 650/1000 files"
+        "message": "processed 650/1000 files, completed 650, failed 0, migrated 0"
       }
     },
     {
@@ -135,6 +135,12 @@ after a later task iteration; corruption and I/O failures still surface.
 `ResourceExhausted`, worker shutdown, and non-user cancellation are retryable
 deferrals. Invalid arguments, malformed persistent state, circuit-breaker
 failures, and other operation errors remain terminal `failed` outcomes.
+Reindex failures include exact completed/failed counts with bounded diagnostic
+samples. Their checkpoint never advances beyond the first incomplete path,
+even when later files finish successfully before the task becomes terminal or
+is deferred. A later index-flush or checkpoint-publication failure retains
+those earlier partial results instead of replacing them with only the final
+authority error.
 
 ## Progress Tracking
 

@@ -117,7 +117,7 @@ The response includes progress details:
         "eta_ms": 12000,
         "indexed_count": 450,
         "total_count": 1000,
-        "message": "indexed 450/1000 files"
+        "message": "processed 450/1000 files, completed 448, failed 2, migrated 12"
       }
     }
   ]
@@ -126,10 +126,23 @@ The response includes progress details:
 
 ## Circuit Breaker
 
-If 10 consecutive files fail to index, the reindex task trips a circuit breaker and fails with an error:
+Any file that cannot be migrated, read, parsed, or indexed makes the final task
+status `failed`; AeorDB never reports a partially successful reindex as
+`completed`. The task error retains an exact completed-file count and an exact
+failed-outcome count, plus up to eight bounded path/phase/error samples and an
+explicit omitted-sample count. Valid files after a damaged file may still be
+processed, but they do not hide the partial result.
+
+If a later index flush, buffer-state read, or checkpoint publication fails,
+the terminal error also retains the prior exact file outcomes. The authority
+failure is added to the bounded samples instead of replacing evidence about
+files that had already failed, and counts as one additional failed outcome.
+
+If 10 consecutive files fail, the reindex task stops early and marks the same
+exact partial result as a circuit-breaker failure:
 
 ```
-circuit breaker: 10 consecutive indexing failures
+Partial operation 'reindex': completed=0 failed=10; circuit breaker tripped; samples=[...]; omitted=2
 ```
 
 This prevents runaway error loops when the index configuration or parser is fundamentally broken. Fix the underlying issue and trigger a new reindex.
@@ -138,7 +151,12 @@ This prevents runaway error loops when the index configuration or parser is fund
 
 Reindex tasks save checkpoints as processed work becomes durable. Because index writes are buffered in memory during reindexing, AeorDB only advances the checkpoint past buffered index mutations after those mutations have been flushed to storage. If the server crashes before a buffer flush, the resumed task may repeat some already-scanned files, but it will not skip unflushed index updates.
 
-The checkpoint is the name of the last successfully processed file (files are processed in alphabetical order for deterministic ordering).
+The checkpoint is the name of the last file in the contiguous successfully
+processed prefix (files are processed in alphabetical order for deterministic
+ordering). Once a file fails, later independent successes cannot advance the
+checkpoint past it. This also applies if host pressure or shutdown defers the
+same task after a partial pass: the retry revisits the earliest incomplete
+path instead of silently skipping it.
 
 Ordinary direct and glob-aware reindexing measure the matching path inventory,
 reserve its retained memory, and then populate it in a second leaf-wise pass.
@@ -171,7 +189,7 @@ After a flush succeeds, those cached indexes are clean and recoverable from disk
 
 After each batch, the task:
 
-1. Advances the checkpoint when all prior index mutations are durable
+1. Advances the checkpoint when all prior paths succeeded and their index mutations are durable
 2. Computes progress percentage and ETA (using a rolling average of the last 10 batch times)
 3. Checks for cancellation
 

@@ -19,6 +19,12 @@ pub enum EngineError {
   ReservedUserId,
   UnsafeQueryField(String),
   PatchDatabase(String),
+  PartialOperation {
+    operation: String,
+    completed: usize,
+    failed: usize,
+    evidence: String,
+  },
   SystemFamilyPolicy {
     code: &'static str,
     reason: String,
@@ -63,6 +69,9 @@ impl fmt::Display for EngineError {
       EngineError::ReservedUserId => write!(formatter, "Cannot use the nil UUID (root user ID) for regular users or API keys"),
       EngineError::UnsafeQueryField(field) => write!(formatter, "Unsafe query field: '{}' is not allowed in group queries", field),
       EngineError::PatchDatabase(msg) => write!(formatter, "Patch database: {}", msg),
+      EngineError::PartialOperation { operation, completed, failed, evidence } => {
+        write!(formatter, "Partial operation '{operation}': completed={completed} failed={failed}; {evidence}")
+      }
       EngineError::SystemFamilyPolicy { code, reason } => write!(formatter, "System family policy failure ({code}): {reason}"),
       EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
       EngineError::ResourceExhausted(msg) => write!(formatter, "Resource exhausted: {}", msg),

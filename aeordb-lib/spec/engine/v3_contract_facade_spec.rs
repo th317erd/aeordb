@@ -1636,6 +1636,33 @@ fn wave_four_touched_system_and_plugin_failures_have_explicit_direction() {
 }
 
 #[test]
+fn wave_five_reindex_retains_exact_partial_outcomes_and_a_contiguous_checkpoint() {
+  let task_worker = include_str!("../../src/engine/task_worker.rs");
+  let errors = include_str!("../../src/engine/errors.rs");
+
+  assert!(errors.contains("PartialOperation {"), "maintenance partial outcomes lost their typed error contract");
+  assert!(task_worker.contains("ReindexFailureSummary"));
+  assert!(task_worker.contains("failures.into_error(completed_count, false)"));
+  assert!(task_worker.contains("failures.into_error(completed_count, true)"));
+  assert!(task_worker.contains("checkpoint_path"));
+  assert!(!task_worker.contains("last_processed_path"), "reindex can again checkpoint paths that were merely attempted");
+  assert!(!task_worker.contains("fn reindex_circuit_breaker_error"), "circuit breaker again discards exact prior failure evidence");
+  assert!(!task_worker.contains("index_buffer.flush_all()?"), "reindex flush failure can erase prior partial evidence");
+  assert!(!task_worker.contains("index_buffer.stats()?"), "reindex buffer-state failure can erase prior partial evidence");
+  assert!(!task_worker.contains("queue.update_checkpoint(&task.id, path)?"), "reindex checkpoint failure can erase prior partial evidence");
+  for serious_failure in [
+    "EngineError::IoError(_)",
+    "EngineError::InvalidMagic",
+    "EngineError::PartialOperation { .. }",
+    "EngineError::SystemFamilyPolicy { .. }",
+    "EngineError::DurabilityFailure(_)",
+    "EngineError::PostMutationDurabilityFailure(_)",
+  ] {
+    assert!(task_worker.contains(serious_failure), "reindex serious-failure guard lost {serious_failure}");
+  }
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

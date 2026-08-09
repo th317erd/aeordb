@@ -32,6 +32,11 @@ const PRUNE_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000; // 24 hours
 const REINDEX_BATCH_SIZE: usize = 50;
 /// Number of consecutive indexing failures before the circuit breaker trips.
 const CIRCUIT_BREAKER_THRESHOLD: usize = 10;
+/// Retain enough exact examples for diagnosis without allowing task records to
+/// grow with the number or size of failed files.
+const REINDEX_FAILURE_SAMPLE_LIMIT: usize = 8;
+const REINDEX_FAILURE_PATH_LIMIT_BYTES: usize = 768;
+const REINDEX_FAILURE_ERROR_LIMIT_BYTES: usize = 512;
 /// Number of recent batch times to keep for ETA calculation.
 const ROLLING_AVERAGE_WINDOW: usize = 10;
 /// Scheduler bookkeeping retained while one task is claimed and dispatched.
@@ -40,6 +45,95 @@ const TASK_WORKER_ADMISSION_BYTES: u64 = 256 * 1024;
 const TASK_DEFERRAL_BASE_DELAY_MS: i64 = 5_000;
 const TASK_DEFERRAL_MAX_DELAY_MS: i64 = 5 * 60 * 1_000;
 const REINDEX_RETAINED_PATH_OVERHEAD_BYTES: u64 = std::mem::size_of::<String>() as u64 + 32;
+
+#[derive(Clone)]
+struct ReindexFailureSample {
+  phase: &'static str,
+  path: String,
+  error: String,
+}
+
+#[derive(Clone, Default)]
+struct ReindexFailureSummary {
+  count: usize,
+  samples: Vec<ReindexFailureSample>,
+}
+
+fn preserve_reindex_partial_on_terminal<T>(
+  result: EngineResult<T>,
+  failures: &ReindexFailureSummary,
+  completed: usize,
+  phase: &'static str,
+  path: &str,
+) -> EngineResult<T> {
+  result.map_err(|error| failures.clone().into_terminal_error(completed, phase, path, error))
+}
+
+impl ReindexFailureSummary {
+  fn is_empty(&self) -> bool {
+    self.count == 0
+  }
+
+  fn record(&mut self, phase: &'static str, path: &str, error: &EngineError) {
+    self.count += 1;
+    if self.samples.len() >= REINDEX_FAILURE_SAMPLE_LIMIT {
+      return;
+    }
+    self.samples.push(ReindexFailureSample {
+      phase,
+      path: bounded_reindex_failure_text(path, REINDEX_FAILURE_PATH_LIMIT_BYTES),
+      error: bounded_reindex_failure_text(&error.to_string(), REINDEX_FAILURE_ERROR_LIMIT_BYTES),
+    });
+  }
+
+  fn into_error(self, completed: usize, circuit_breaker_tripped: bool) -> EngineError {
+    let omitted = self.count - self.samples.len();
+    let samples =
+      self.samples.into_iter().map(|sample| format!("{} {}: {}", sample.phase, sample.path, sample.error)).collect::<Vec<_>>().join(" | ");
+    let breaker = if circuit_breaker_tripped { "circuit breaker tripped; " } else { "" };
+    EngineError::PartialOperation {
+      operation: "reindex".to_string(),
+      completed,
+      failed: self.count,
+      evidence: format!("{breaker}samples=[{samples}]; omitted={omitted}"),
+    }
+  }
+
+  fn into_terminal_error(mut self, completed: usize, phase: &'static str, path: &str, error: EngineError) -> EngineError {
+    if completed == 0 && self.is_empty() {
+      return error;
+    }
+    self.record(phase, path, &error);
+    self.into_error(completed, false)
+  }
+}
+
+fn bounded_reindex_failure_text(value: &str, maximum_bytes: usize) -> String {
+  if value.len() <= maximum_bytes {
+    return value.to_string();
+  }
+
+  let mut boundary = maximum_bytes.saturating_sub(3);
+  while boundary > 0 && !value.is_char_boundary(boundary) {
+    boundary -= 1;
+  }
+  format!("{}...", &value[..boundary])
+}
+
+fn reindex_error_requires_immediate_failure(error: &EngineError) -> bool {
+  matches!(
+    error,
+    EngineError::IoError(_)
+      | EngineError::InvalidMagic
+      | EngineError::InvalidHashAlgorithm(_)
+      | EngineError::PartialOperation { .. }
+      | EngineError::SystemFamilyPolicy { .. }
+      | EngineError::DurabilityFailure(_)
+      | EngineError::PostMutationDurabilityFailure(_)
+      | EngineError::ShuttingDown
+      | EngineError::Cancelled(_)
+  )
+}
 
 struct RunningTaskRecovery<'a> {
   queue: &'a TaskQueue,
@@ -610,11 +704,25 @@ fn execute_reindex(
   let mut index_buffer = IndexWriteBuffer::new(engine, index_flush_options);
 
   let mut indexed_count: usize = 0;
+  let mut completed_count: usize = 0;
   let mut migrated_count: usize = 0;
   let mut consecutive_failures: usize = 0;
+  let mut failures = ReindexFailureSummary::default();
   let mut batch_times: Vec<Duration> = Vec::new();
-  let mut last_processed_path: Option<&str> = None;
+  let mut checkpoint_path: Option<&str> = None;
   let start = Instant::now();
+
+  macro_rules! flush_before_reindex_exit {
+    ($phase:expr, $path:expr) => {
+      preserve_reindex_partial_on_terminal(
+        flush_reindex_before_retry(queue, task, &mut index_buffer, checkpoint_path),
+        &failures,
+        completed_count,
+        $phase,
+        $path,
+      )?
+    };
+  }
 
   // Process in batches.
   for batch in file_paths.chunks(REINDEX_BATCH_SIZE) {
@@ -622,19 +730,19 @@ fn execute_reindex(
 
     for file_path in batch {
       if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
-        flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+        flush_before_reindex_exit!("flush-before-cancel", file_path);
         return Err(EngineError::Cancelled("reindex".to_string()));
       }
       if let Err(error) = engine.memory_coordinator().check_admission(MemoryOwner::Task, AdmissionClass::Maintenance) {
-        flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+        flush_before_reindex_exit!("flush-before-pressure", file_path);
         return Err(task_worker_memory_error(error));
       }
 
       let indexable = match pipeline.path_is_indexable(file_path) {
         Ok(indexable) => indexable,
         Err(error) => {
-          flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
-          return Err(error);
+          flush_before_reindex_exit!("flush-before-policy-failure", file_path);
+          return Err(failures.into_terminal_error(completed_count, "policy", file_path, error));
         }
       };
 
@@ -647,8 +755,12 @@ fn execute_reindex(
           }
           Ok(false) => {}
           Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
-            flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+            flush_before_reindex_exit!("flush-before-migration-deferral", file_path);
             return Err(error);
+          }
+          Err(error) if reindex_error_requires_immediate_failure(&error) => {
+            flush_before_reindex_exit!("flush-before-migration-failure", file_path);
+            return Err(failures.into_terminal_error(completed_count, "migration-authority", file_path, error));
           }
           Err(error) => {
             tracing::warn!(
@@ -656,12 +768,13 @@ fn execute_reindex(
               error = %error,
               "forced reindex could not migrate FileRecord"
             );
+            failures.record("migration", file_path, &error);
             consecutive_failures += 1;
-            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-              return Err(reindex_circuit_breaker_error());
-            }
             indexed_count += 1;
-            last_processed_path = Some(file_path);
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+              flush_before_reindex_exit!("flush-before-circuit-breaker", file_path);
+              return Err(failures.into_error(completed_count, true));
+            }
             continue;
           }
         }
@@ -669,7 +782,10 @@ fn execute_reindex(
         if config.is_none() || !indexable {
           consecutive_failures = 0;
           indexed_count += 1;
-          last_processed_path = Some(file_path);
+          completed_count += 1;
+          if failures.is_empty() {
+            checkpoint_path = Some(file_path);
+          }
           continue;
         }
       }
@@ -677,7 +793,10 @@ fn execute_reindex(
       if !indexable {
         consecutive_failures = 0;
         indexed_count += 1;
-        last_processed_path = Some(file_path);
+        completed_count += 1;
+        if failures.is_empty() {
+          checkpoint_path = Some(file_path);
+        }
         continue;
       }
 
@@ -687,17 +806,22 @@ fn execute_reindex(
         let metadata = match ops.get_metadata(file_path) {
           Ok(metadata) => metadata,
           Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
-            flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+            flush_before_reindex_exit!("flush-before-metadata-deferral", file_path);
             return Err(error);
+          }
+          Err(error) if reindex_error_requires_immediate_failure(&error) => {
+            flush_before_reindex_exit!("flush-before-metadata-failure", file_path);
+            return Err(failures.into_terminal_error(completed_count, "metadata-authority", file_path, error));
           }
           Err(error) => {
             tracing::warn!(path = %file_path, %error, "reindex could not read file metadata");
+            failures.record("metadata", file_path, &error);
             consecutive_failures += 1;
-            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-              return Err(reindex_circuit_breaker_error());
-            }
             indexed_count += 1;
-            last_processed_path = Some(file_path);
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+              flush_before_reindex_exit!("flush-before-circuit-breaker", file_path);
+              return Err(failures.into_error(completed_count, true));
+            }
             continue;
           }
         };
@@ -721,18 +845,24 @@ fn execute_reindex(
           Ok(data) => data,
           Err(error @ (EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown)) => {
             task_memory.release_to(buffered_body_checkpoint, "reindex buffered file body release after read refusal")?;
-            flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+            flush_before_reindex_exit!("flush-before-body-deferral", file_path);
             return Err(error);
+          }
+          Err(error) if reindex_error_requires_immediate_failure(&error) => {
+            task_memory.release_to(buffered_body_checkpoint, "reindex buffered file body release after immediate failure")?;
+            flush_before_reindex_exit!("flush-before-body-failure", file_path);
+            return Err(failures.into_terminal_error(completed_count, "body-authority", file_path, error));
           }
           Err(error) => {
             task_memory.release_to(buffered_body_checkpoint, "reindex buffered file body release after read failure")?;
             tracing::warn!(path = %file_path, %error, "reindex could not read file body");
+            failures.record("body", file_path, &error);
             consecutive_failures += 1;
-            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-              return Err(reindex_circuit_breaker_error());
-            }
             indexed_count += 1;
-            last_processed_path = Some(file_path);
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+              flush_before_reindex_exit!("flush-before-circuit-breaker", file_path);
+              return Err(failures.into_error(completed_count, true));
+            }
             continue;
           }
         };
@@ -743,37 +873,48 @@ fn execute_reindex(
         result
       };
 
-      match index_result {
+      let indexed_successfully = match index_result {
         Ok(()) => {
           consecutive_failures = 0;
+          true
         }
-        Err(
-          error @ (EngineError::ResourceExhausted(_)
-          | EngineError::Cancelled(_)
-          | EngineError::ShuttingDown
-          | EngineError::SystemFamilyPolicy { .. }),
-        ) => {
-          flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
-          return Err(error);
+        Err(error) if matches!(error, EngineError::ResourceExhausted(_)) || reindex_error_requires_immediate_failure(&error) => {
+          flush_before_reindex_exit!("flush-before-index-failure", file_path);
+          if matches!(error, EngineError::ResourceExhausted(_) | EngineError::Cancelled(_) | EngineError::ShuttingDown) {
+            return Err(error);
+          }
+          return Err(failures.into_terminal_error(completed_count, "index-authority", file_path, error));
         }
         Err(error) => {
           tracing::warn!(path = %file_path, %error, "reindex pipeline could not index file");
+          failures.record("index", file_path, &error);
           consecutive_failures += 1;
           if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-            return Err(reindex_circuit_breaker_error());
+            flush_before_reindex_exit!("flush-before-circuit-breaker", file_path);
+            return Err(failures.into_error(completed_count, true));
           }
+          false
+        }
+      };
+
+      indexed_count += 1;
+      if indexed_successfully {
+        completed_count += 1;
+        if failures.is_empty() {
+          checkpoint_path = Some(file_path);
         }
       }
 
-      indexed_count += 1;
-      last_processed_path = Some(file_path);
-
       match index_buffer.flush_if_due() {
         Ok(true) => {
-          queue.update_checkpoint(&task.id, file_path)?;
+          if let Some(path) = checkpoint_path {
+            preserve_reindex_partial_on_terminal(queue.update_checkpoint(&task.id, path), &failures, completed_count, "checkpoint", path)?;
+          }
         }
         Ok(false) => {}
-        Err(error) => return Err(error),
+        Err(error) => {
+          return Err(failures.clone().into_terminal_error(completed_count, "index-flush", file_path, error));
+        }
       }
     }
 
@@ -786,9 +927,11 @@ fn execute_reindex(
     // Only advance the checkpoint past buffered index mutations after they have
     // been flushed. If there are no pending index mutations, all completed work
     // is durable and the batch checkpoint is safe.
-    if index_buffer.stats()?.pending_mutations == 0 {
-      if let Some(last_path) = last_processed_path {
-        queue.update_checkpoint(&task.id, last_path)?;
+    let pending_stats =
+      preserve_reindex_partial_on_terminal(index_buffer.stats(), &failures, completed_count, "index-stats", &reindex_root)?;
+    if pending_stats.pending_mutations == 0 {
+      if let Some(path) = checkpoint_path {
+        preserve_reindex_partial_on_terminal(queue.update_checkpoint(&task.id, path), &failures, completed_count, "checkpoint", path)?;
       }
     }
 
@@ -796,7 +939,7 @@ fn execute_reindex(
     let progress = indexed_count as f64 / total_count as f64;
     let eta_ms = compute_eta(&batch_times, total_count, indexed_count);
 
-    let index_stats = index_buffer.stats()?;
+    let index_stats = preserve_reindex_partial_on_terminal(index_buffer.stats(), &failures, completed_count, "index-stats", &reindex_root)?;
     queue.set_progress(
       &task.id,
       ProgressInfo {
@@ -809,9 +952,11 @@ fn execute_reindex(
         total_count,
         stale_since: None,
         message: Some(format!(
-          "indexed {}/{} files, migrated {}, metadata_only={}, index_mutations={}, pending_index_mutations={}, index_flushes={}, cached_indexes={}",
+          "processed {}/{} files, completed {}, failed {}, migrated {}, metadata_only={}, index_mutations={}, pending_index_mutations={}, index_flushes={}, cached_indexes={}",
           indexed_count,
           total_count,
+          completed_count,
+          failures.count,
           migrated_count,
           metadata_only,
           index_stats.mutations,
@@ -826,18 +971,23 @@ fn execute_reindex(
     // outer cancel covers graceful shutdown — without polling it here the
     // worker can't exit during a long reindex.
     if queue.is_cancelled(&task.id) || cancel.is_cancelled() {
-      flush_reindex_before_retry(queue, task, &mut index_buffer, last_processed_path)?;
+      flush_before_reindex_exit!("flush-before-cancel", &reindex_root);
       return Err(EngineError::Cancelled("reindex".to_string()));
     }
   }
 
-  let flushed_indexes = index_buffer.flush_all()?;
-  if let Some(last_path) = file_paths.last() {
-    queue.update_checkpoint(&task.id, last_path)?;
+  let flushed_indexes =
+    preserve_reindex_partial_on_terminal(index_buffer.flush_all(), &failures, completed_count, "final-index-flush", &reindex_root)?;
+  if let Some(path) = checkpoint_path {
+    preserve_reindex_partial_on_terminal(queue.update_checkpoint(&task.id, path), &failures, completed_count, "final-checkpoint", path)?;
+  }
+  if !failures.is_empty() {
+    return Err(failures.into_error(completed_count, false));
   }
 
   let elapsed_ms = start.elapsed().as_millis();
-  let index_stats = index_buffer.stats()?;
+  let index_stats =
+    preserve_reindex_partial_on_terminal(index_buffer.stats(), &failures, completed_count, "final-index-stats", &reindex_root)?;
   let index_summary = format!(
     ", metadata_only={}, stale_indexes_deleted={}, index_mutations={}, index_flushes={}, flushed_indexes={} (+{} final), cached_indexes={}",
     metadata_only,
@@ -853,10 +1003,6 @@ fn execute_reindex(
   } else {
     Ok(format!("reindexed {} files in {}ms{}", indexed_count, elapsed_ms, index_summary))
   }
-}
-
-fn reindex_circuit_breaker_error() -> EngineError {
-  EngineError::InvalidInput(format!("circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} consecutive indexing failures"))
 }
 
 fn reindex_path_retained_bytes(path: &str) -> EngineResult<u64> {
@@ -1003,11 +1149,13 @@ fn flush_reindex_before_retry(
   queue: &TaskQueue,
   task: &TaskRecord,
   index_buffer: &mut IndexWriteBuffer<'_>,
-  last_processed_path: Option<&str>,
+  checkpoint_path: Option<&str>,
 ) -> EngineResult<()> {
-  index_buffer.flush_all()?;
-  if let Some(path) = last_processed_path {
-    queue.update_checkpoint(&task.id, path)?;
+  if let Err(error) = index_buffer.flush_all() {
+    return Err(error);
+  }
+  if let Some(path) = checkpoint_path {
+    return queue.update_checkpoint(&task.id, path);
   }
   Ok(())
 }

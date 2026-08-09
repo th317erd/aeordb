@@ -136,6 +136,21 @@ fn test_display_resource_exhausted() {
   assert_eq!(format!("{}", engine_error), "Resource exhausted: index mutation memory limit reached");
 }
 
+#[test]
+fn test_display_partial_operation_retains_exact_counts_and_bounded_evidence() {
+  let engine_error = EngineError::PartialOperation {
+    operation: "reindex".to_string(),
+    completed: 7,
+    failed: 2,
+    evidence: "samples=[migration /docs/a.json: corrupt]; omitted=1".to_string(),
+  };
+
+  assert_eq!(
+    format!("{}", engine_error),
+    "Partial operation 'reindex': completed=7 failed=2; samples=[migration /docs/a.json: corrupt]; omitted=1"
+  );
+}
+
 // --- Additional coverage for std::error::Error impl ---
 
 #[test]
@@ -166,6 +181,7 @@ fn test_error_source_non_io_variants_return_none() {
     EngineError::ReservedUserId,
     EngineError::UnsafeQueryField("x".into()),
     EngineError::PatchDatabase("x".into()),
+    EngineError::PartialOperation { operation: "x".into(), completed: 1, failed: 1, evidence: "x".into() },
     EngineError::ResourceExhausted("x".into()),
     EngineError::ShuttingDown,
   ];

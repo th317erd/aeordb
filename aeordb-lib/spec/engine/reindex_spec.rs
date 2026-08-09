@@ -355,6 +355,77 @@ fn test_forced_reindex_migrates_legacy_file_record_to_current_version_and_indexe
 }
 
 #[test]
+fn forced_reindex_reports_partial_migration_instead_of_completing_successfully() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+
+  let corrupt_path = "/partial-migration/a-corrupt.txt";
+  let valid_path = "/partial-migration/b-valid.txt";
+  operations.store_file_buffered(&context, corrupt_path, b"corrupt legacy body", Some("text/plain")).unwrap();
+  operations.store_file_buffered(&context, valid_path, b"valid legacy body", Some("text/plain")).unwrap();
+  rewrite_file_record_as_v0(&engine, corrupt_path);
+  rewrite_file_record_as_v0(&engine, valid_path);
+  let corrupt_chunk = operations.get_metadata(corrupt_path).unwrap().unwrap().chunk_hashes[0].clone();
+  engine.mark_entry_deleted(&corrupt_chunk).unwrap();
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/partial-migration", "force": true})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Failed, "a partial migration must never be reported as complete");
+  let error = completed.error.expect("partial migration must retain exact failure evidence");
+  assert!(error.contains("completed=1"), "partial result must include the exact completion count: {error}");
+  assert!(error.contains("failed=1"), "partial result must include the exact failure count: {error}");
+  assert!(error.contains(corrupt_path), "partial result must identify the failed path: {error}");
+  assert!(completed.checkpoint.is_none(), "the checkpoint must not advance past the first failed path");
+
+  let algo = engine.hash_algo();
+  let (corrupt_header, _, _) = engine.get_entry(&file_path_hash(corrupt_path, &algo).unwrap()).unwrap().unwrap();
+  let (valid_header, _, _) = engine.get_entry(&file_path_hash(valid_path, &algo).unwrap()).unwrap().unwrap();
+  assert_eq!(corrupt_header.entry_version, 0, "the corrupt FileRecord remains explicit repair evidence");
+  assert_eq!(valid_header.entry_version, CURRENT_FILE_RECORD_VERSION, "independent valid migration work may still complete");
+}
+
+#[test]
+fn forced_reindex_bounds_partial_migration_evidence_without_losing_exact_counts() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+
+  for pair in 0..12 {
+    let corrupt_path = format!("/bounded-partial/item-{:03}-corrupt.txt", pair * 2);
+    let valid_path = format!("/bounded-partial/item-{:03}-valid.txt", pair * 2 + 1);
+    let corrupt_body = format!("corrupt legacy body {pair}");
+    let valid_body = format!("valid legacy body {pair}");
+    operations.store_file_buffered(&context, &corrupt_path, corrupt_body.as_bytes(), Some("text/plain")).unwrap();
+    operations.store_file_buffered(&context, &valid_path, valid_body.as_bytes(), Some("text/plain")).unwrap();
+    rewrite_file_record_as_v0(&engine, &corrupt_path);
+    rewrite_file_record_as_v0(&engine, &valid_path);
+    let corrupt_chunk = operations.get_metadata(&corrupt_path).unwrap().unwrap().chunk_hashes[0].clone();
+    engine.mark_entry_deleted(&corrupt_chunk).unwrap();
+  }
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/bounded-partial", "force": true})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Failed);
+  let error = completed.error.expect("partial migration must retain bounded failure evidence");
+  assert!(error.contains("completed=12"), "partial result must retain the exact completion count: {error}");
+  assert!(error.contains("failed=12"), "partial result must retain the exact failure count: {error}");
+  assert!(error.contains("omitted=4"), "partial result must disclose omitted bounded samples: {error}");
+  assert!(error.len() < 16 * 1024, "partial evidence must remain bounded, got {} bytes", error.len());
+  assert!(completed.checkpoint.is_none(), "no checkpoint may advance past the first failed path");
+}
+
+#[test]
 fn file_record_migration_defers_before_rewrite_under_soft_pressure() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();

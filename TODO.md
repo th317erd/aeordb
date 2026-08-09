@@ -456,6 +456,13 @@
     - [ ] P2e Wave 5: converge maintenance and repair producers on one namespace mutation and locator authority.
       - [ ] Convert reindex metadata resave, repair, cleanup, GC follow-up, import, and migration source capture.
       - [ ] Preserve exact partial and corrupt outcomes instead of returning empty success.
+      - [x] Make forced migration and ordinary reindex file failures terminal exact partial outcomes with bounded evidence and a checkpoint frozen before the first incomplete path.
+      - [x] Preserve prior reindex partial evidence when a later index flush, buffer-state read, or checkpoint publication fails.
+      - [ ] Replace sequential credential cleanup deletes with one preflighted maintenance mutation or an exact typed partial result under concurrent changes.
+      - [ ] Preserve targeted/full directory repair outcomes, stale-locator repairs, and durability publication as exact acknowledged maintenance evidence.
+      - [ ] Make GC recheck teardown explicit and non-squelched without allowing cleanup failure to erase the primary GC result.
+      - [ ] Re-audit the already-converged backup import locator/HEAD authority and source-gate the Wave 5 exit invariant.
+      - [ ] Keep migration source capture classified as unavailable until the P7 runtime writer activates, then bind it to the shared migration authority and memory owner.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
