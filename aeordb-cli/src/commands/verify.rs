@@ -504,7 +504,13 @@ fn run_repair_pass(
     let psize = aeordb::engine::kv_pages::page_size(hash_length);
     let needed_stage = aeordb::engine::kv_pages::stage_for_count(initial.valid_entries as usize, hash_length);
     let (needed_size, _) = aeordb::engine::kv_stages::stage_params(needed_stage, psize);
-    let current_size = engine.writer_read_lock().map(|writer| writer.file_header().kv_block_length).unwrap_or(0);
+    let current_size = match engine.writer_read_lock() {
+      Ok(writer) => writer.file_header().kv_block_length,
+      Err(error) => {
+        eprintln!("Repair cannot inspect the current KV block layout: {}", error);
+        process::exit(1);
+      }
+    };
     if needed_size > current_size && current_size > 0 {
       if let Err(error) = engine.shutdown() {
         eprintln!("Failed to durably close the database before KV expansion: {}", error);

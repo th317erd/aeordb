@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use crate::engine::durability::{rename_durable, sync_parent_dir};
 use crate::engine::errors::{EngineError, EngineResult};
@@ -187,7 +187,7 @@ pub fn scan_for_database_with_locations(
     let manifest_paths = manifest_paths_in_base_dir(&location.path)?;
     let mut complete_directories = HashSet::new();
     for manifest_path in manifest_paths {
-      let directory = manifest_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+      let directory = required_parent(&manifest_path, "emergency spill manifest")?.to_path_buf();
       match manifest_matches_database(&manifest_path, db_path)? {
         Some(false) => {
           complete_directories.insert(directory);
@@ -200,7 +200,7 @@ pub fn scan_for_database_with_locations(
         continue;
       };
       complete_directories.insert(artifact.directory.clone());
-      if !artifact_matches_database(&artifact, db_path) {
+      if !artifact_matches_database(&artifact, db_path)? {
         continue;
       }
       if artifact_applied(&artifact)? {
@@ -210,7 +210,7 @@ pub fn scan_for_database_with_locations(
       artifacts.push(artifact);
     }
     for pending_path in pending_paths_in_base_dir(&location.path)? {
-      let directory = pending_path.parent().unwrap_or_else(|| Path::new("."));
+      let directory = required_parent(&pending_path, "emergency spill pending record")?;
       if complete_directories.contains(directory) {
         continue;
       }
@@ -481,7 +481,7 @@ fn pending_matches_database(pending_path: &Path, source_location_class: SpillLoc
     .map_err(|_| EngineError::InvalidInput("emergency spill pending path encoding overflows u16".to_string()))?;
   let db_path_native = required_hex_bytes(&pending, "db_path_bytes")?;
   let pending_database_path = path_from_native_bytes(path_encoding, &db_path_native)?;
-  if !paths_equivalent(&pending_database_path, db_path) {
+  if !paths_equivalent(&pending_database_path, db_path)? {
     return Ok(false);
   }
   let database_id = required_hex_array::<16>(&pending, "database_id")?;
@@ -512,15 +512,16 @@ fn manifest_matches_database(manifest_path: &Path, db_path: &Path) -> EngineResu
   let bytes = read_small_file_no_follow(manifest_path, MANIFEST_SIZE_CAP)?;
   let manifest: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
   match manifest.get("format").and_then(|value| value.as_str()) {
-    Some(EMERGENCY_SPILL_FORMAT) => {
-      Ok(Some(manifest.get("db_path").and_then(|value| value.as_str()).is_some_and(|path| paths_equivalent(Path::new(path), db_path))))
-    }
+    Some(EMERGENCY_SPILL_FORMAT) => match manifest.get("db_path").and_then(|value| value.as_str()) {
+      Some(path) => Ok(Some(paths_equivalent(Path::new(path), db_path)?)),
+      None => Ok(Some(false)),
+    },
     Some(EMERGENCY_SPILL_FORMAT_V2) => {
       let path_encoding = u16::try_from(required_u64(&manifest, "path_encoding")?)
         .map_err(|_| EngineError::InvalidInput("emergency spill manifest path encoding overflows u16".to_string()))?;
       let native = required_hex_bytes(&manifest, "db_path_bytes")?;
       let declared_path = path_from_native_bytes(path_encoding, &native)?;
-      Ok(Some(paths_equivalent(&declared_path, db_path)))
+      Ok(Some(paths_equivalent(&declared_path, db_path)?))
     }
     _ => Ok(None),
   }
@@ -536,10 +537,15 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
     _ => return Ok(None),
   };
 
-  let directory = manifest_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+  let directory = required_parent(manifest_path, "emergency spill manifest")?.to_path_buf();
   reject_symlink(&directory, "emergency spill artifact directory")?;
   let attempted_at = manifest.get("attempted_at").and_then(|value| value.as_str()).map(str::to_string);
-  let sort_millis = attempted_at.as_deref().and_then(parse_rfc3339_millis).or_else(|| modified_millis(manifest_path).ok()).unwrap_or(0);
+  let sort_millis = match attempted_at.as_deref() {
+    Some(value) => parse_rfc3339_millis(value).ok_or_else(|| {
+      EngineError::InvalidInput(format!("emergency spill manifest {} has an invalid attempted_at timestamp", manifest_path.display()))
+    })?,
+    None => modified_millis(manifest_path)?,
+  };
   let db_path = manifest.get("db_path").and_then(|value| value.as_str()).map(str::to_string);
   let context = manifest.get("context").and_then(|value| value.as_str()).map(str::to_string);
   let failure = manifest.get("failure").and_then(|value| value.as_str()).map(str::to_string);
@@ -723,7 +729,7 @@ fn path_from_manifest_or_default(
 ) -> EngineResult<Option<PathBuf>> {
   if let Some(path) = manifest.get(field).and_then(|value| value.as_str()).filter(|path| !path.trim().is_empty()) {
     let path = PathBuf::from(path);
-    if !paths_equivalent(path.parent().unwrap_or_else(|| Path::new(".")), directory)
+    if !paths_equivalent(required_parent(&path, "legacy emergency spill component")?, directory)?
       || path.file_name().and_then(|name| name.to_str()) != Some(fallback_name)
     {
       return Err(EngineError::InvalidInput(format!("legacy emergency spill {field} escapes its artifact directory")));
@@ -751,16 +757,15 @@ fn artifact_applied(artifact: &EmergencySpillArtifact) -> EngineResult<bool> {
     .map_err(|error| EngineError::InvalidInput(format!("invalid emergency spill applied marker {}: {error}", marker_path.display())))?;
   let valid = match artifact.format_version {
     EmergencySpillFormatVersion::V1 => {
-      marker.get("format").and_then(|value| value.as_str()) == Some(EMERGENCY_SPILL_APPLIED_FORMAT)
-        && marker
-          .get("manifest_path")
-          .and_then(|value| value.as_str())
-          .is_some_and(|path| paths_equivalent(Path::new(path), &artifact.manifest_path))
-        && marker
-          .get("db_path")
-          .and_then(|value| value.as_str())
-          .zip(artifact.db_path.as_deref())
-          .is_some_and(|(left, right)| paths_equivalent(Path::new(left), Path::new(right)))
+      let manifest_matches = match marker.get("manifest_path").and_then(|value| value.as_str()) {
+        Some(path) => paths_equivalent(Path::new(path), &artifact.manifest_path)?,
+        None => false,
+      };
+      let database_matches = match marker.get("db_path").and_then(|value| value.as_str()).zip(artifact.db_path.as_deref()) {
+        Some((left, right)) => paths_equivalent(Path::new(left), Path::new(right))?,
+        None => false,
+      };
+      marker.get("format").and_then(|value| value.as_str()) == Some(EMERGENCY_SPILL_APPLIED_FORMAT) && manifest_matches && database_matches
     }
     EmergencySpillFormatVersion::V2 => {
       marker.get("format").and_then(|value| value.as_str()) == Some(EMERGENCY_SPILL_APPLIED_FORMAT_V2)
@@ -776,32 +781,47 @@ fn artifact_applied(artifact: &EmergencySpillArtifact) -> EngineResult<bool> {
   Ok(true)
 }
 
-fn artifact_matches_database(artifact: &EmergencySpillArtifact, db_path: &Path) -> bool {
+fn artifact_matches_database(artifact: &EmergencySpillArtifact, db_path: &Path) -> EngineResult<bool> {
   if let Some(native) = artifact.db_path_native.as_deref() {
-    return path_from_native_bytes(artifact.path_encoding, native).is_ok_and(|manifest_path| paths_equivalent(&manifest_path, db_path));
+    let manifest_path = path_from_native_bytes(artifact.path_encoding, native)?;
+    return paths_equivalent(&manifest_path, db_path);
   }
   let Some(manifest_db_path) = artifact.db_path.as_deref() else {
-    return false;
+    return Ok(false);
   };
   paths_equivalent(Path::new(manifest_db_path), db_path)
 }
 
-fn paths_equivalent(left: &Path, right: &Path) -> bool {
+fn paths_equivalent(left: &Path, right: &Path) -> EngineResult<bool> {
   if left == right {
-    return true;
+    return Ok(true);
   }
-  absolute_path(left) == absolute_path(right)
+  Ok(absolute_path(left)? == absolute_path(right)?)
 }
 
-fn absolute_path(path: &Path) -> PathBuf {
+fn absolute_path(path: &Path) -> EngineResult<PathBuf> {
+  absolute_path_with_current_dir(path, std::env::current_dir)
+}
+
+fn absolute_path_with_current_dir<F>(path: &Path, current_dir: F) -> EngineResult<PathBuf>
+where
+  F: FnOnce() -> std::io::Result<PathBuf>,
+{
   if let Ok(canonical) = path.canonicalize() {
-    return canonical;
+    return Ok(canonical);
   }
   if path.is_absolute() {
-    path.to_path_buf()
+    Ok(path.to_path_buf())
   } else {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
+    Ok(current_dir()?.join(path))
   }
+}
+
+fn required_parent<'a>(path: &'a Path, context: &str) -> EngineResult<&'a Path> {
+  path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+    .ok_or_else(|| EngineError::InvalidInput(format!("{context} path {} has no containing directory", path.display())))
 }
 
 fn parse_v2_components(manifest: &serde_json::Value, directory: &Path) -> EngineResult<Vec<EmergencySpillComponent>> {
@@ -1095,8 +1115,11 @@ fn parse_rfc3339_millis(value: &str) -> Option<i64> {
 }
 
 fn modified_millis(path: &Path) -> std::io::Result<i64> {
-  let modified = path.metadata()?.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-  let duration = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
+  let modified = path.metadata()?.modified()?;
+  let duration = match modified.duration_since(UNIX_EPOCH) {
+    Ok(duration) => duration,
+    Err(_) => std::time::Duration::ZERO,
+  };
   Ok(duration.as_millis().min(i64::MAX as u128) as i64)
 }
 
@@ -1110,6 +1133,10 @@ fn dedupe_locations(locations: Vec<EmergencySpillLocation>) -> Vec<EmergencySpil
   }
   deduped
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/emergency_spill_path_internal_spec.rs"]
+mod emergency_spill_path_internal_spec;
 
 #[cfg(test)]
 mod tests {

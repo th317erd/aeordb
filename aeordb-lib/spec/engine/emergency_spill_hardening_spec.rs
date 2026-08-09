@@ -164,6 +164,24 @@ fn v2_scan_rejects_partial_typed_failure_evidence() {
 }
 
 #[test]
+fn matching_spill_with_malformed_attempt_timestamp_fails_closed() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let directory = write_v2_artifact(&base, "artifact", &database, [0x3a; 16], 1_700_000_000_000, 1, b"def");
+  let manifest_path = directory.join("manifest.json");
+  let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+  manifest["attempted_at"] = serde_json::json!("not-a-timestamp");
+  fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+  let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
+
+  assert!(error.to_string().contains("attempted_at"), "{error}");
+}
+
+#[test]
 fn v2_scan_and_replay_fail_closed_when_component_changes() {
   let temp = tempfile::tempdir().unwrap();
   let database = temp.path().join("test.aeordb");

@@ -661,6 +661,7 @@ pub struct StorageEngine {
   shutdown_started: Arc<AtomicBool>,
   shutdown_flush_started: AtomicBool,
   shutdown_complete: AtomicBool,
+  durability_state_poisoned: AtomicBool,
   durability_failure: Mutex<Option<DurabilityFailureState>>,
   persistent_durability_recovery: Mutex<Option<crate::engine::v4::durability_recovery::PersistentDurabilityRecoveryState>>,
   durability_repair_owner: Mutex<Option<std::thread::ThreadId>>,
@@ -1396,22 +1397,46 @@ impl StorageEngine {
   }
 
   pub fn durability_failure(&self) -> Option<String> {
-    let runtime_failure = self
-      .durability_failure
-      .lock()
-      .unwrap_or_else(|poisoned| poisoned.into_inner())
-      .as_ref()
-      .map(|failure| failure.latest_failure.clone());
-    runtime_failure
-      .or_else(|| self.persistent_durability_recovery().filter(|recovery| recovery.blocks_writes).map(|recovery| recovery.reason))
+    if self.durability_state_poisoned.load(Ordering::Acquire) {
+      return Some(Self::durability_state_poison_reason().to_string());
+    }
+    let runtime_failure = match self.durability_failure.lock() {
+      Ok(failure) => failure.as_ref().map(|failure| failure.latest_failure.clone()),
+      Err(_) => {
+        self.latch_durability_state_poison("runtime failure authority");
+        return Some(Self::durability_state_poison_reason().to_string());
+      }
+    };
+    if runtime_failure.is_some() {
+      return runtime_failure;
+    }
+    match self.persistent_durability_recovery.lock() {
+      Ok(recovery) => recovery.as_ref().filter(|recovery| recovery.blocks_writes).map(|recovery| recovery.reason.clone()),
+      Err(_) => {
+        self.latch_durability_state_poison("persistent recovery authority");
+        Some(Self::durability_state_poison_reason().to_string())
+      }
+    }
   }
 
   pub fn durability_failure_state(&self) -> Option<DurabilityFailureState> {
-    self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    match self.durability_failure.lock() {
+      Ok(failure) => failure.clone(),
+      Err(poisoned) => {
+        self.latch_durability_state_poison("runtime failure authority");
+        poisoned.into_inner().clone()
+      }
+    }
   }
 
   pub fn persistent_durability_recovery(&self) -> Option<crate::engine::v4::durability_recovery::PersistentDurabilityRecoveryState> {
-    self.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    match self.persistent_durability_recovery.lock() {
+      Ok(recovery) => recovery.clone(),
+      Err(poisoned) => {
+        self.latch_durability_state_poison("persistent recovery authority");
+        poisoned.into_inner().clone()
+      }
+    }
   }
 
   pub fn begin_explicit_durability_repair(&self) -> EngineResult<crate::engine::v4::durability_recovery::ExplicitDurabilityRepair<'_>> {
@@ -1427,7 +1452,11 @@ impl StorageEngine {
 
   pub(crate) fn refresh_persistent_durability_recovery(&self) -> EngineResult<()> {
     let recovery = crate::engine::v4::durability_recovery::inspect_persistent_durability_recovery(self)?;
-    *self.persistent_durability_recovery.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = recovery;
+    let mut persistent = self.persistent_durability_recovery.lock().map_err(|_| {
+      self.latch_durability_state_poison("persistent recovery authority");
+      EngineError::DurabilityFailure(Self::durability_state_poison_reason().to_string())
+    })?;
+    *persistent = recovery;
     Ok(())
   }
 
@@ -1441,9 +1470,13 @@ impl StorageEngine {
     Ok(DurabilityRepairAuthorityGuard { engine: self, owner })
   }
 
-  fn current_thread_has_durability_repair_authority(&self) -> bool {
+  fn current_thread_has_durability_repair_authority(&self) -> EngineResult<bool> {
     let owner = std::thread::current().id();
-    self.durability_repair_owner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() == Some(&owner)
+    let active = self.durability_repair_owner.lock().map_err(|_| {
+      self.latch_durability_state_poison("durability repair authority");
+      EngineError::DurabilityFailure(Self::durability_state_poison_reason().to_string())
+    })?;
+    Ok(active.as_ref() == Some(&owner))
   }
 
   pub fn durability_snapshot(&self) -> EngineResult<crate::engine::durability_coordinator::DurabilityCoordinatorSnapshot> {
@@ -1451,23 +1484,51 @@ impl StorageEngine {
   }
 
   pub fn emergency_spill_report(&self) -> Option<EmergencySpillReport> {
-    self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    match self.emergency_spill.lock() {
+      Ok(spill) => spill.clone(),
+      Err(poisoned) => {
+        self.latch_durability_state_poison("emergency spill evidence");
+        poisoned.into_inner().clone()
+      }
+    }
   }
 
   pub(crate) fn ensure_writable(&self) -> EngineResult<()> {
-    let has_repair_authority = self.current_thread_has_durability_repair_authority();
-    if let Some(recovery) = self.persistent_durability_recovery() {
+    if self.durability_state_poisoned.load(Ordering::Acquire) {
+      return Err(EngineError::DurabilityFailure(Self::durability_state_poison_reason().to_string()));
+    }
+    let has_repair_authority = self.current_thread_has_durability_repair_authority()?;
+    let persistent_recovery = self.persistent_durability_recovery.lock().map_err(|_| {
+      self.latch_durability_state_poison("persistent recovery authority");
+      EngineError::DurabilityFailure(Self::durability_state_poison_reason().to_string())
+    })?;
+    if let Some(recovery) = persistent_recovery.as_ref() {
       if recovery.blocks_writes && !has_repair_authority {
         return Err(EngineError::DurabilityFailure(format!("database is read-only until explicit repair completes: {}", recovery.reason)));
       }
     }
-    if let Some(failure) = self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+    let runtime_failure = self.durability_failure.lock().map_err(|_| {
+      self.latch_durability_state_poison("runtime failure authority");
+      EngineError::DurabilityFailure(Self::durability_state_poison_reason().to_string())
+    })?;
+    if let Some(failure) = runtime_failure.as_ref() {
       return Err(EngineError::DurabilityFailure(format!(
         "database is read-only after serious durability failure: {}",
         failure.latest_failure
       )));
     }
     Ok(())
+  }
+
+  fn durability_state_poison_reason() -> &'static str {
+    "database is read-only because in-memory durability authority was poisoned"
+  }
+
+  fn latch_durability_state_poison(&self, lock_name: &'static str) {
+    let first = !self.durability_state_poisoned.swap(true, Ordering::AcqRel);
+    if first {
+      tracing::error!(lock_name, "In-memory durability authority was poisoned; database latched read-only");
+    }
   }
 
   fn record_durability_failure(&self, operation: DurabilityOperation, context: &str, error: impl std::fmt::Display) -> EngineError {
@@ -1503,7 +1564,13 @@ impl StorageEngine {
     let candidate_database_id = uuid::Uuid::new_v4().into_bytes();
     let candidate_incident_id = uuid::Uuid::new_v4().into_bytes();
     let (first_failure, failure_state) = {
-      let mut failure = self.durability_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+      let mut failure = match self.durability_failure.lock() {
+        Ok(failure) => failure,
+        Err(poisoned) => {
+          self.latch_durability_state_poison("runtime failure authority");
+          poisoned.into_inner()
+        }
+      };
       match failure.as_mut() {
         Some(state) => {
           state.latest_failure_at_ms = state.latest_failure_at_ms.max(failure_at_ms);
@@ -1549,7 +1616,15 @@ impl StorageEngine {
         failure_state.last_durable_write_sequence,
         failure_state.last_durable_publication_sequence,
       );
-      *self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spill.clone());
+      let mut emergency_spill = match self.emergency_spill.lock() {
+        Ok(emergency_spill) => emergency_spill,
+        Err(poisoned) => {
+          self.latch_durability_state_poison("emergency spill evidence");
+          poisoned.into_inner()
+        }
+      };
+      *emergency_spill = Some(spill.clone());
+      drop(emergency_spill);
       if spill.succeeded {
         tracing::error!(
           context,
@@ -1569,12 +1644,13 @@ impl StorageEngine {
         );
       }
     } else {
-      let manifest_path = self
-        .emergency_spill
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-        .and_then(|report| report.manifest_path.clone());
+      let manifest_path = match self.emergency_spill.lock() {
+        Ok(emergency_spill) => emergency_spill.as_ref().and_then(|report| report.manifest_path.clone()),
+        Err(poisoned) => {
+          self.latch_durability_state_poison("emergency spill evidence");
+          poisoned.into_inner().as_ref().and_then(|report| report.manifest_path.clone())
+        }
+      };
       if let Some(manifest_path) = manifest_path {
         let update = crate::engine::emergency_spill::update_v2_manifest_latest(
           Path::new(&manifest_path),
@@ -1583,7 +1659,13 @@ impl StorageEngine {
           failure_state.latest_failure_at_ms,
           &failure_state.latest_failure,
         );
-        let mut spill = self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut spill = match self.emergency_spill.lock() {
+          Ok(spill) => spill,
+          Err(poisoned) => {
+            self.latch_durability_state_poison("emergency spill evidence");
+            poisoned.into_inner()
+          }
+        };
         if let Some(report) = spill.as_mut() {
           match update {
             Ok(()) => {
@@ -1609,7 +1691,14 @@ impl StorageEngine {
           failure_state.last_durable_write_sequence,
           failure_state.last_durable_publication_sequence,
         );
-        *self.emergency_spill.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(retry);
+        let mut emergency_spill = match self.emergency_spill.lock() {
+          Ok(emergency_spill) => emergency_spill,
+          Err(poisoned) => {
+            self.latch_durability_state_poison("emergency spill evidence");
+            poisoned.into_inner()
+          }
+        };
+        *emergency_spill = Some(retry);
       }
       tracing::error!(context, error = %message, "Critical durability failure");
     }
@@ -2552,6 +2641,7 @@ impl StorageEngine {
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
+      durability_state_poisoned: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
       persistent_durability_recovery: Mutex::new(None),
       durability_repair_owner: Mutex::new(None),
@@ -2787,6 +2877,7 @@ impl StorageEngine {
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
       shutdown_complete: AtomicBool::new(false),
+      durability_state_poisoned: AtomicBool::new(false),
       durability_failure: Mutex::new(None),
       persistent_durability_recovery: Mutex::new(None),
       durability_repair_owner: Mutex::new(None),
@@ -5921,6 +6012,10 @@ mod operation_tracker_internal_spec;
 mod hot_tail_timer_poison_internal_spec;
 
 #[cfg(test)]
+#[path = "../../spec/engine/durability_state_poison_internal_spec.rs"]
+mod durability_state_poison_internal_spec;
+
+#[cfg(test)]
 mod tests {
   use super::*;
   use serial_test::serial;
@@ -7025,7 +7120,13 @@ pub(crate) struct DurabilityRepairAuthorityGuard<'a> {
 
 impl Drop for DurabilityRepairAuthorityGuard<'_> {
   fn drop(&mut self) {
-    let mut active = self.engine.durability_repair_owner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut active = match self.engine.durability_repair_owner.lock() {
+      Ok(active) => active,
+      Err(_) => {
+        self.engine.latch_durability_state_poison("durability repair authority");
+        return;
+      }
+    };
     if active.as_ref() == Some(&self.owner) {
       *active = None;
     }

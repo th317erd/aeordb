@@ -488,7 +488,7 @@ impl KvPageUpdate {
     }
     let mut replacement_pages = HashMap::with_capacity(replacements.len());
     for (bucket, data) in replacements {
-      self.provider.page_offset(bucket)?;
+      let offset = self.provider.page_offset(bucket)?;
       if data.len() != self.provider.inner.page_size {
         return Err(EngineError::InvalidInput(format!(
           "KV replacement page {bucket} has {} bytes; expected {}",
@@ -497,9 +497,7 @@ impl KvPageUpdate {
         )));
       }
       live_type_counts_in_page(&data, self.provider.inner.hash_length).map_err(|error| match error {
-        EngineError::CorruptEntry { reason, .. } => {
-          EngineError::CorruptEntry { offset: self.provider.page_offset(bucket).unwrap_or(0), reason }
-        }
+        EngineError::CorruptEntry { reason, .. } => EngineError::CorruptEntry { offset, reason },
         other => other,
       })?;
       if replacement_pages.insert(bucket, data).is_some() {
