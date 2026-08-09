@@ -312,6 +312,27 @@ async fn test_verify_invalid_code_returns_401() {
 }
 
 #[tokio::test]
+async fn corrupt_magic_link_authority_returns_500_instead_of_credential_rejection() {
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let code = generate_magic_link_code();
+  let code_hash = hash_magic_link_code(&code);
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      &format!("/.aeordb-system/magic-links/{code_hash}"),
+      b"{not valid versioned JSON",
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
+  let request = Request::builder().uri(format!("/auth/magic-link/verify?code={code}")).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
 async fn test_verify_code_is_single_use() {
   let ctx = RequestContext::system();
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
@@ -347,6 +368,47 @@ async fn test_verify_code_is_single_use() {
   let request = Request::builder().uri(format!("/auth/magic-link/verify?code={}", code)).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_magic_link_verification_has_exactly_one_winner() {
+  let ctx = RequestContext::system();
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let user = aeordb::engine::User::new("concurrent-link@example.com", Some("concurrent-link@example.com"));
+  system_store::store_user(&engine, &ctx, &user).unwrap();
+
+  let code = generate_magic_link_code();
+  let code_hash = hash_magic_link_code(&code);
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &aeordb::auth::magic_link::MagicLinkRecord {
+      code_hash,
+      email: "concurrent-link@example.com".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+      is_used: false,
+    },
+  )
+  .unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
+  let mut workers = Vec::new();
+  for _ in 0..8 {
+    let worker_app = app.clone();
+    let worker_code = code.clone();
+    workers.push(tokio::spawn(async move {
+      let request = Request::builder().uri(format!("/auth/magic-link/verify?code={worker_code}")).body(Body::empty()).unwrap();
+      worker_app.oneshot(request).await.unwrap().status()
+    }));
+  }
+  let mut statuses = Vec::new();
+  for worker in workers {
+    statuses.push(worker.await.unwrap());
+  }
+
+  assert_eq!(statuses.iter().filter(|status| **status == StatusCode::OK).count(), 1);
+  assert_eq!(statuses.iter().filter(|status| **status == StatusCode::UNAUTHORIZED).count(), 7);
 }
 
 #[tokio::test]

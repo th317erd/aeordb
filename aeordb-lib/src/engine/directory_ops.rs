@@ -1327,7 +1327,7 @@ impl DirectoryMutationPlanner {
       effects.cache_writes.push((content_key.clone(), directory_data.clone()));
       batch.replace_locator(EntryType::DirectoryIndex, directory_key, content_key.clone(), 0)?;
       if path == "/" {
-        batch.set_head_hash(content_key);
+        batch.set_incremental_head_hash(content_key);
         continue;
       }
 
@@ -3693,7 +3693,7 @@ impl<'a> DirectoryOps<'a> {
       let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::DirectoryCreate);
       batch.store_dependency(EntryType::DirectoryIndex, content_key.clone(), Vec::new(), 0)?;
       batch.replace_locator(EntryType::DirectoryIndex, dir_key, Vec::new(), 0)?;
-      batch.set_head_hash(content_key.clone());
+      batch.set_incremental_head_hash(content_key.clone());
       batch.add_source_identity(NamespaceMutationSourceIdentity {
         path: "/".to_string(),
         entry_type: Some(EntryType::DirectoryIndex.to_u8()),
@@ -4307,7 +4307,7 @@ impl<'a> DirectoryOps<'a> {
       })?;
 
       if normalized == "/" {
-        batch.set_head_hash(content_key.clone());
+        batch.set_incremental_head_hash(content_key.clone());
       } else if propagate_parent {
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.plan_parent_directories(
@@ -4707,7 +4707,7 @@ impl<'a> DirectoryOps<'a> {
       effects.cache_writes.push((content_key.clone(), dir_value.clone()));
       batch.replace_locator(EntryType::DirectoryIndex, dir_key, content_key.clone(), 0)?;
       if parent == "/" {
-        batch.set_head_hash(content_key);
+        batch.set_incremental_head_hash(content_key);
         return Ok(());
       }
 
@@ -4781,7 +4781,7 @@ impl<'a> DirectoryOps<'a> {
     effects.cache_writes.push((content_key.clone(), dir_value.clone()));
     batch.replace_locator(EntryType::DirectoryIndex, dir_key, content_key.clone(), 0)?;
     if parent == "/" {
-      batch.set_head_hash(content_key);
+      batch.set_incremental_head_hash(content_key);
       return Ok(());
     }
 

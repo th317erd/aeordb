@@ -24,6 +24,12 @@ The default. Users, API keys, and tokens are all stored within the AeorDB engine
 
 Identity is loaded from an external file at the specified path. On first startup, a bootstrap API key is printed to stdout so you can authenticate and set up additional users.
 
+The identity engine owns JWT signing material, API-key records, and its bounded
+API-key cache. Users, groups, permissions, and ordinary files remain in the
+main data engine. Every API-key check, including HTTP middleware, SSE, sync,
+and plugin host authorization, uses the selected identity engine rather than
+accidentally reading the data database.
+
 ---
 
 ## Endpoint Summary
@@ -37,6 +43,7 @@ Identity is loaded from an external file at the specified path. On first startup
 | POST | `/auth/keys/admin` | Create an API key | Yes (root) |
 | GET | `/auth/keys/admin` | List API keys | Yes (root) |
 | DELETE | `/auth/keys/admin/{key_id}` | Revoke an API key | Yes (root) |
+| PATCH | `/auth/keys/admin/{key_id}` | Update an API-key label | Yes (root) |
 | POST | `/auth/keys` | Create an API key (self-service) | Yes |
 | GET | `/auth/keys` | List your own API keys | Yes |
 | DELETE | `/auth/keys/{key_id}` | Revoke your own API key | Yes |
@@ -206,6 +213,20 @@ curl "http://localhost:6830/auth/magic-link/verify?code=abc123..."
 
 Exchange a refresh token for a new JWT and a new refresh token. Implements **token rotation** -- the old refresh token is revoked and cannot be reused.
 
+Refresh-token records remain in the data database, while their issuing API key
+is revalidated through the configured authentication authority. This includes
+a separate engine selected by `--auth file://...`; revoking that issuing key
+there prevents every subsequent refresh. A rotated JWT retains the issuing
+`key_id`, so middleware also rejects that access token immediately after the
+key is revoked; rotation cannot silently turn a key-bound session into an
+unbound legacy session.
+
+Magic-link consumption and refresh-token rotation are single-winner
+transitions. Concurrent requests may all submit the same secret, but only the
+request that atomically changes its stored state can mint new credentials;
+later or losing requests receive `401`. Missing, expired, and already-consumed
+credentials do not create another storage write.
+
 ### Request Body
 
 ```json
@@ -315,6 +336,10 @@ The `/auth/keys/admin` endpoints listed in the endpoint summary are for root adm
 
 Any authenticated user can create, list, and revoke their own API keys. Root users can additionally create keys for other users.
 
+An authenticated root may also create additional root-owned keys for rotation
+or separate services. These writes use explicit root authority; the initial
+bootstrap escape hatch is not reused by HTTP routes.
+
 ### POST /auth/keys
 
 Create an API key for yourself.
@@ -404,6 +429,11 @@ Revoke one of your own API keys. Root users can revoke anyone's key.
   "key_id": "a1b2c3d4-..."
 }
 ```
+
+Ownership validation and revocation occur in one atomic authority operation;
+the server does not list keys and then race a separate update. Repeating a
+successful revocation is idempotent. Share-link revocation uses the same typed
+operation with a share-key policy, so it cannot revoke a user-owned key.
 
 ---
 

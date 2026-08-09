@@ -327,6 +327,32 @@ let (auto_snap, size) = file_restore_from_version(
 
 If lifecycle configuration has `snapshot_writes_enabled` set to `false`, `file_restore_from_version` skips the auto-safety snapshot and returns an empty `auto_snap` string while still restoring the file.
 
+## Authentication Authority
+
+Embedded servers that provide a custom `AuthProvider` must implement the
+complete authority contract. In particular, `authority_engine` identifies the
+engine that owns API-key records, `store_api_key_with_root_authority` is the
+explicit authenticated-root creation path, and API-key label and revocation
+changes run through the provider's typed transition methods. There is no
+default fallback from authenticated root creation to the initial bootstrap
+escape hatch. Router construction rejects an enabled provider that does not
+expose an authority engine; only disabled authentication uses the data engine as
+its inert cache context. With `FileAuthProvider`, `--auth=self` returns the data
+engine and `--auth=file://...` returns the separate identity engine.
+
+One-time credential changes are also available as typed embedded operations:
+
+| Function | Outcomes |
+|----------|----------|
+| `system_store::consume_magic_link(engine, ctx, code_hash, now)` | `Consumed(record)`, `AlreadyUsed`, `Expired`, or `NotFound` |
+| `system_store::claim_refresh_token_rotation(engine, ctx, token_hash, now)` | `Claimed(record)`, `AlreadyRevoked`, `Expired`, or `NotFound` |
+
+Each operation reads and conditionally replaces its bounded versioned record
+under one namespace authority window. Exactly one concurrent caller can receive
+the record and mint replacement credentials. Missing, expired, and already-used
+or revoked outcomes perform no write. Malformed, wrong-type, or oversized stored
+authority is an error rather than an ordinary authentication miss.
+
 ## Sync / Replication
 
 The library exposes the same sync primitives as the HTTP endpoints, enabling embedded clients to replicate without HTTP overhead.
@@ -456,6 +482,17 @@ let users = system_store::list_users(&engine).unwrap();
 system_store::store_api_key(&engine, &ctx, &key_record).unwrap();
 let keys = system_store::list_api_keys(&engine).unwrap();
 ```
+
+Credential state transitions use bounded typed operations rather than a split
+read/replace sequence. `revoke_api_key_with_policy` accepts `Any`, `OwnedBy`,
+or `ShareLink`; `update_api_key_label`, `mark_magic_link_used`, and
+`revoke_refresh_token` read, validate, and optionally replace one versioned
+record under the namespace authority lock. Missing, policy-mismatched, and
+already-applied outcomes perform no write. Malformed, unsupported, or records
+above the bounded transition limit fail before publication and preserve the
+stored bytes. Credential creation enforces the same 1 MiB serialized-record
+ceiling, preventing a newly stored key, magic link, or refresh token from
+becoming too large for its later typed transition.
 
 `store_user` publishes the user and its deterministic `user:{uuid}` automatic
 group under one hard namespace acknowledgement. `delete_user` retires the same

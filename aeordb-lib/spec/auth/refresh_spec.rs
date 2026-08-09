@@ -252,6 +252,50 @@ async fn test_old_refresh_token_rejected_after_rotation() {
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_refresh_rotation_has_exactly_one_winner() {
+  let ctx = RequestContext::system();
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let refresh_token = generate_refresh_token();
+  let token_hash = hash_refresh_token(&refresh_token);
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &aeordb::auth::refresh::RefreshTokenRecord {
+      token_hash,
+      user_subject: "concurrent-refresh-user".to_string(),
+      created_at: chrono::Utc::now(),
+      expires_at: chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_REFRESH_EXPIRY_SECONDS),
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
+  let mut workers = Vec::new();
+  for _ in 0..8 {
+    let worker_app = app.clone();
+    let worker_token = refresh_token.clone();
+    workers.push(tokio::spawn(async move {
+      let request = Request::builder()
+        .method("POST")
+        .uri("/auth/refresh")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"refresh_token":"{worker_token}"}}"#)))
+        .unwrap();
+      worker_app.oneshot(request).await.unwrap().status()
+    }));
+  }
+  let mut statuses = Vec::new();
+  for worker in workers {
+    statuses.push(worker.await.unwrap());
+  }
+
+  assert_eq!(statuses.iter().filter(|status| **status == StatusCode::OK).count(), 1);
+  assert_eq!(statuses.iter().filter(|status| **status == StatusCode::UNAUTHORIZED).count(), 7);
+}
+
 #[tokio::test]
 async fn test_expired_refresh_token_rejected() {
   let ctx = RequestContext::system();
@@ -330,7 +374,10 @@ async fn test_full_refresh_flow_from_api_key() {
   assert_eq!(response.status(), StatusCode::OK);
 
   let json = body_json(response.into_body()).await;
+  let initial_jwt = json["token"].as_str().unwrap().to_string();
   let initial_refresh_token = json["refresh_token"].as_str().unwrap().to_string();
+  let initial_claims = jwt_manager.verify_token(&initial_jwt).expect("initial JWT should be valid");
+  assert!(initial_claims.key_id.is_some(), "API-key exchange must bind the JWT to its issuing key");
 
   // Step 2: Use refresh token to get new JWT.
   let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
@@ -350,8 +397,23 @@ async fn test_full_refresh_flow_from_api_key() {
 
   assert_ne!(new_refresh_token, initial_refresh_token);
 
-  let claims = jwt_manager.verify_token(&new_jwt);
-  assert!(claims.is_ok(), "new JWT should be valid");
+  let claims = jwt_manager.verify_token(&new_jwt).expect("new JWT should be valid");
+  assert_eq!(claims.key_id, initial_claims.key_id, "refresh rotation must preserve the issuing API-key identity");
+
+  let app = rebuild_app(&jwt_manager, &engine, &rate_limiter);
+  let warm_request =
+    Request::builder().method("GET").uri("/auth/keys").header("authorization", format!("Bearer {new_jwt}")).body(Body::empty()).unwrap();
+  let warm_response = app.clone().oneshot(warm_request).await.unwrap();
+  assert_eq!(warm_response.status(), StatusCode::OK);
+
+  let key_id = uuid::Uuid::parse_str(claims.key_id.as_deref().expect("issuing key ID")).unwrap();
+  system_store::revoke_api_key(&engine, &RequestContext::system(), key_id).unwrap();
+  let revoked_request =
+    Request::builder().method("GET").uri("/auth/keys").header("authorization", format!("Bearer {new_jwt}")).body(Body::empty()).unwrap();
+  let revoked_response = app.oneshot(revoked_request).await.unwrap();
+  assert_eq!(revoked_response.status(), StatusCode::UNAUTHORIZED);
+  let revoked_json = body_json(revoked_response.into_body()).await;
+  assert!(revoked_json["error"].as_str().is_some_and(|error| error.contains("revoked")));
 }
 
 #[tokio::test]

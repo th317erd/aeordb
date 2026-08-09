@@ -2,7 +2,6 @@ pub mod admin_routes;
 pub mod api_key_self_service_routes;
 pub mod backup_routes;
 pub mod blocking;
-pub mod cache_invalidation;
 pub mod cluster_routes;
 pub mod configuration_routes;
 pub mod conflict_routes;
@@ -51,8 +50,6 @@ use crate::auth::RateLimiter;
 use crate::engine::{
   DirectoryOps, EngineResult, EngineStartupProgressCallback, EventBus, PeerManager, RequestContext, StorageEngine, TaskQueue,
 };
-use crate::engine::cache::Cache;
-use crate::engine::cache_loaders::{GroupLoader, ApiKeyLoader};
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
 use crate::metrics::initialize_metrics;
@@ -477,13 +474,18 @@ fn create_app_with_all_and_task_queue_inner(
   task_queue: Option<Arc<TaskQueue>>,
   cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Router {
+  let auth_engine = match auth_provider.authority_engine() {
+    Some(auth_engine) => auth_engine,
+    None if !auth_provider.is_enabled() => engine.clone(),
+    None => panic!("enabled AuthProvider must expose its authority engine"),
+  };
+
   if let Err(error) = plugin_manager.install_bundled_plugins() {
     tracing::warn!("Failed to install bundled plugins: {}", error);
   }
 
-  let memory_coordinator = engine.memory_coordinator();
-  let group_cache = Arc::new(Cache::new_bounded(GroupLoader, (*memory_coordinator).clone(), u64::MAX));
-  let api_key_cache = Arc::new(Cache::new_bounded(ApiKeyLoader, (*memory_coordinator).clone(), u64::MAX));
+  let group_cache = engine.group_cache.clone();
+  let api_key_cache = auth_engine.api_key_cache.clone();
   let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));
   let peer_manager = Arc::new(PeerManager::new());
 
@@ -559,6 +561,7 @@ fn create_app_with_all_and_task_queue_inner(
     rate_limiter,
     prometheus_handle,
     engine,
+    auth_engine,
     event_bus,
     group_cache,
     api_key_cache,

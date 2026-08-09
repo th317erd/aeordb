@@ -158,23 +158,7 @@ pub async fn snapshot_restore(
   };
 
   match version_manager.restore_snapshot(&ctx, &snapshot.name) {
-    Ok(()) => {
-      let invalidation = state
-        .engine
-        .permissions_cache
-        .evict_all()
-        .and_then(|()| state.engine.index_config_cache.evict_all())
-        .and_then(|()| state.engine.grants_index_cache.evict_all())
-        .and_then(|()| state.group_cache.evict_all())
-        .and_then(|()| state.api_key_cache.evict_all())
-        .and_then(|()| state.engine.clear_dir_content_cache());
-      if let Err(error) = invalidation {
-        return ErrorResponse::new(format!("Snapshot restored but cache invalidation failed: {error}"))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
-      }
-      (StatusCode::OK, Json(serde_json::json!({ "restored": true, "id": snapshot.id(), "name": snapshot.name }))).into_response()
-    }
+    Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "restored": true, "id": snapshot.id(), "name": snapshot.name }))).into_response(),
     Err(error) => {
       tracing::error!("Engine: failed to restore snapshot '{}': {}", snapshot.name, error);
       ErrorResponse::new(format!("Failed to restore snapshot: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()

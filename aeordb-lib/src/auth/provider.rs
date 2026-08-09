@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::auth::api_key::ApiKeyRecord;
+use crate::auth::api_key::{ApiKeyRecord, ApiKeyRevokePolicy, ApiKeyRevokeResult};
 use crate::auth::jwt::JwtManager;
 use crate::engine::{RequestContext, StorageEngine, ROOT_USER_ID};
 use crate::engine::system_store;
@@ -36,11 +36,27 @@ pub trait AuthProvider: Send + Sync {
   /// Store a new API key for bootstrap (allows nil UUID).
   fn store_api_key_for_bootstrap(&self, record: &ApiKeyRecord) -> Result<()>;
 
+  /// Store a root-owned API key after the caller has authenticated root
+  /// authority. Every provider must implement this explicitly and enforce
+  /// that the record is actually root-owned.
+  fn store_api_key_with_root_authority(&self, record: &ApiKeyRecord) -> Result<()>;
+
   /// List all API keys (metadata only).
   fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>>;
 
-  /// Revoke an API key by key_id.
-  fn revoke_api_key(&self, key_id: uuid::Uuid) -> Result<bool>;
+  /// Return the engine that owns authentication authority, when one exists.
+  fn authority_engine(&self) -> Option<Arc<StorageEngine>>;
+
+  /// Update one API-key label inside the provider's authority transaction.
+  fn update_api_key_label(&self, key_id: uuid::Uuid, label: Option<String>) -> Result<Option<ApiKeyRecord>>;
+
+  /// Revoke an API key only when it matches the caller's explicit policy.
+  fn revoke_api_key_with_policy(&self, key_id: uuid::Uuid, policy: ApiKeyRevokePolicy) -> Result<ApiKeyRevokeResult>;
+
+  /// Revoke an API key by key_id without an ownership restriction.
+  fn revoke_api_key(&self, key_id: uuid::Uuid) -> Result<bool> {
+    Ok(self.revoke_api_key_with_policy(key_id, ApiKeyRevokePolicy::Any)?.is_revoked())
+  }
 
   /// Whether this provider allows auth operations (false for NoAuth).
   fn is_enabled(&self) -> bool {
@@ -93,12 +109,24 @@ impl AuthProvider for NoAuthProvider {
     Ok(())
   }
 
+  fn store_api_key_with_root_authority(&self, _record: &ApiKeyRecord) -> Result<()> {
+    Ok(())
+  }
+
   fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
     Ok(Vec::new())
   }
 
-  fn revoke_api_key(&self, _key_id: uuid::Uuid) -> Result<bool> {
-    Ok(false)
+  fn authority_engine(&self) -> Option<Arc<StorageEngine>> {
+    None
+  }
+
+  fn update_api_key_label(&self, _key_id: uuid::Uuid, _label: Option<String>) -> Result<Option<ApiKeyRecord>> {
+    Ok(None)
+  }
+
+  fn revoke_api_key_with_policy(&self, _key_id: uuid::Uuid, _policy: ApiKeyRevokePolicy) -> Result<ApiKeyRevokeResult> {
+    Ok(ApiKeyRevokeResult::NotFound)
   }
 
   fn is_enabled(&self) -> bool {
@@ -181,13 +209,27 @@ impl AuthProvider for FileAuthProvider {
     Ok(system_store::store_api_key_for_bootstrap(&self.engine, &ctx, record)?)
   }
 
+  fn store_api_key_with_root_authority(&self, record: &ApiKeyRecord) -> Result<()> {
+    let ctx = RequestContext::system();
+    Ok(system_store::store_api_key_with_root_authority(&self.engine, &ctx, record)?)
+  }
+
   fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
     Ok(system_store::list_api_keys(&self.engine)?)
   }
 
-  fn revoke_api_key(&self, key_id: uuid::Uuid) -> Result<bool> {
+  fn authority_engine(&self) -> Option<Arc<StorageEngine>> {
+    Some(self.engine.clone())
+  }
+
+  fn update_api_key_label(&self, key_id: uuid::Uuid, label: Option<String>) -> Result<Option<ApiKeyRecord>> {
     let ctx = RequestContext::system();
-    Ok(system_store::revoke_api_key(&self.engine, &ctx, key_id)?)
+    Ok(system_store::update_api_key_label(&self.engine, &ctx, key_id, label)?)
+  }
+
+  fn revoke_api_key_with_policy(&self, key_id: uuid::Uuid, policy: ApiKeyRevokePolicy) -> Result<ApiKeyRevokeResult> {
+    let ctx = RequestContext::system();
+    Ok(system_store::revoke_api_key_with_policy(&self.engine, &ctx, key_id, policy)?)
   }
 }
 

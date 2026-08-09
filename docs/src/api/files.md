@@ -973,7 +973,9 @@ curl "http://localhost:6830/files/share-links?path=/photos/vacation" \
 
 ### DELETE /files/share-links/{key_id}
 
-Revoke a share link. This deletes the underlying scoped API key and invalidates the JWT.
+Revoke a share link. This atomically marks the underlying scoped API key as
+revoked and invalidates subsequent use of its JWT. The policy-checked operation
+refuses user-owned API keys even if their IDs are supplied to this route.
 
 **Auth:** Root only.
 

@@ -5,9 +5,11 @@ use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::engine::namespace_mutation::{
   NamespaceMutationAcknowledgement, NamespaceMutationBatch, NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind,
-  NamespaceMutationSourceIdentity, publish_namespace_root, publish_namespace_root_from,
+  NamespaceMutationSourceIdentity, publish_namespace_root, publish_namespace_root_from, publish_namespace_root_with_fanout,
 };
-use aeordb::engine::{DirectoryOps, EngineError, RequestContext, directory_content_hash};
+use aeordb::auth::api_key::ApiKeyRecord;
+use aeordb::engine::{DirectoryOps, EngineError, RequestContext, directory_content_hash, file_path_hash};
+use aeordb::engine::system_store;
 use aeordb::engine::storage_engine::TransactionGuard;
 use aeordb::engine::StorageEngine;
 use aeordb::server::create_temp_engine_for_tests;
@@ -88,6 +90,132 @@ fn whole_root_publication_reconciles_live_namespace_counters_after_acknowledgeme
 }
 
 #[test]
+fn whole_root_publication_invalidates_every_engine_owned_authority_cache() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let selected_root = engine.head_hash().unwrap();
+  DirectoryOps::new(&engine).create_directory(&RequestContext::system(), "/later").unwrap();
+
+  engine.permissions_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.index_config_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.grants_index_cache.get(&(), &engine).unwrap();
+  engine.group_cache.get(&uuid::Uuid::new_v4(), &engine).unwrap();
+  engine.api_key_cache.get(&uuid::Uuid::new_v4().to_string(), &engine).unwrap();
+  assert_eq!(engine.permissions_cache.len(), 1);
+  assert_eq!(engine.index_config_cache.len(), 1);
+  assert_eq!(engine.grants_index_cache.len(), 1);
+  assert_eq!(engine.group_cache.len(), 1);
+  assert_eq!(engine.api_key_cache.len(), 1);
+  assert!(engine.engine_cache_sizes().2 > 0);
+
+  publish_namespace_root(&engine, &selected_root, NamespaceMutationKind::Promote).unwrap().expect("root should change");
+
+  assert_eq!(engine.permissions_cache.len(), 0);
+  assert_eq!(engine.index_config_cache.len(), 0);
+  assert_eq!(engine.grants_index_cache.len(), 0);
+  assert_eq!(engine.group_cache.len(), 0);
+  assert_eq!(engine.api_key_cache.len(), 0);
+  assert_eq!(engine.engine_cache_sizes().2, 0);
+}
+
+#[test]
+fn whole_root_publication_requires_an_exact_root_source_transition() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let selected_root = engine.head_hash().unwrap();
+  DirectoryOps::new(&engine).create_directory(&RequestContext::system(), "/later").unwrap();
+  let current_root = engine.head_hash().unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let fanout = Arc::new(RecordingFanout::default());
+  let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Import);
+  batch.set_whole_root_hash(selected_root.clone());
+  batch
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path: "/not-the-root".to_string(),
+      entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+      previous_identity: Some(current_root.clone()),
+      new_identity: Some(selected_root),
+    })
+    .unwrap();
+
+  let error = NamespaceMutationCoordinator::with_fanout(&engine, fanout.clone()).execute(batch).unwrap_err();
+
+  assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("canonical '/' DirectoryIndex")));
+  assert_eq!(engine.head_hash().unwrap(), current_root);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(fanout.acknowledgements().is_empty());
+}
+
+#[test]
+fn custom_whole_root_fanout_cannot_bypass_engine_owned_authority_cache_invalidation() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let selected_root = engine.head_hash().unwrap();
+  let selected_counts = engine.counters().snapshot();
+  DirectoryOps::new(&engine).create_directory(&RequestContext::system(), "/later").unwrap();
+
+  engine.permissions_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.index_config_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.grants_index_cache.get(&(), &engine).unwrap();
+  engine.group_cache.get(&uuid::Uuid::new_v4(), &engine).unwrap();
+  engine.api_key_cache.get(&uuid::Uuid::new_v4().to_string(), &engine).unwrap();
+  let fanout = Arc::new(RecordingFanout::default());
+
+  publish_namespace_root_with_fanout(&engine, &selected_root, NamespaceMutationKind::Import, fanout.clone())
+    .unwrap()
+    .expect("root should change");
+
+  assert_eq!(fanout.acknowledgements().len(), 1);
+  assert_eq!(engine.permissions_cache.len(), 0);
+  assert_eq!(engine.index_config_cache.len(), 0);
+  assert_eq!(engine.grants_index_cache.len(), 0);
+  assert_eq!(engine.group_cache.len(), 0);
+  assert_eq!(engine.api_key_cache.len(), 0);
+  let published_counts = engine.counters().snapshot();
+  assert_eq!(published_counts.files, selected_counts.files);
+  assert_eq!(published_counts.directories, selected_counts.directories);
+  assert_eq!(published_counts.symlinks, selected_counts.symlinks);
+  assert_eq!(published_counts.logical_data_size, selected_counts.logical_data_size);
+}
+
+#[test]
+fn custom_locator_fanout_cannot_bypass_path_derived_authority_cache_invalidation() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  let record = ApiKeyRecord {
+    key_id: uuid::Uuid::new_v4(),
+    key_hash: "namespace-cache-invalidation".to_string(),
+    user_id: Some(uuid::Uuid::nil()),
+    created_at: chrono::Utc::now(),
+    is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: Vec::new(),
+  };
+  system_store::store_api_key_for_bootstrap(&engine, &context, &record).unwrap();
+  engine.api_key_cache.get(&record.key_id.to_string(), &engine).unwrap();
+  assert_eq!(engine.api_key_cache.len(), 1);
+
+  let path = format!("/.aeordb-system/api-keys/{}", record.key_id);
+  let locator_key = file_path_hash(&path, &engine.hash_algo()).unwrap();
+  let (header, stored_key, stored_value) = engine.get_entry_verified(&locator_key).unwrap().expect("API-key FileRecord locator");
+  assert_eq!(stored_key, locator_key);
+  let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+  batch.replace_locator_with_version(header.entry_type, locator_key.clone(), stored_value, header.flags, header.entry_version).unwrap();
+  batch
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path,
+      entry_type: Some(EntryType::FileRecord.to_u8()),
+      previous_identity: Some(locator_key.clone()),
+      new_identity: Some(locator_key),
+    })
+    .unwrap();
+  let fanout = Arc::new(RecordingFanout::default());
+
+  NamespaceMutationCoordinator::with_fanout(&engine, fanout.clone()).execute(batch).unwrap();
+
+  assert_eq!(fanout.acknowledgements().len(), 1);
+  assert_eq!(engine.api_key_cache.len(), 0);
+}
+
+#[test]
 fn whole_root_publication_rejects_a_noncanonical_directory_key() {
   let (engine, _temporary) = create_temp_engine_for_tests();
   let original_head = engine.head_hash().unwrap();
@@ -126,7 +254,7 @@ fn same_batch_head_dependency_must_be_a_canonical_directory_root() {
   let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
   let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
   batch.store_dependency(EntryType::DirectoryIndex, arbitrary_key.clone(), Vec::new(), 0).unwrap();
-  batch.set_head_hash(arbitrary_key.clone());
+  batch.set_whole_root_hash(arbitrary_key.clone());
   batch
     .add_source_identity(NamespaceMutationSourceIdentity {
       path: "/".to_string(),
@@ -153,7 +281,7 @@ fn same_batch_head_dependency_must_have_well_formed_directory_content() {
   let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
   let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
   batch.store_dependency(EntryType::DirectoryIndex, malformed_hash.clone(), malformed.to_vec(), 0).unwrap();
-  batch.set_head_hash(malformed_hash.clone());
+  batch.set_whole_root_hash(malformed_hash.clone());
   batch
     .add_source_identity(NamespaceMutationSourceIdentity {
       path: "/".to_string(),
@@ -397,7 +525,7 @@ fn malformed_or_duplicate_plans_fail_before_transaction_or_locator_mutation() {
   assert!(duplicate.replace_locator(EntryType::FileRecord, stable_key.clone(), b"duplicate".to_vec(), 0).is_err());
 
   let mut malformed_head = NamespaceMutationBatch::new(NamespaceMutationKind::FileWrite);
-  malformed_head.set_head_hash(vec![0x01]);
+  malformed_head.set_whole_root_hash(vec![0x01]);
   malformed_head
     .add_source_identity(NamespaceMutationSourceIdentity {
       path: "/spec/malformed-head".to_string(),
@@ -500,7 +628,7 @@ fn no_op_batches_and_dependency_locator_aliases_are_rejected_before_admission() 
   assert!(coordinator.execute(NamespaceMutationBatch::new(NamespaceMutationKind::FileWrite)).is_err());
 
   let mut unchanged_head = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
-  unchanged_head.set_head_hash(engine.head_hash().unwrap());
+  unchanged_head.set_whole_root_hash(engine.head_hash().unwrap());
   unchanged_head
     .add_source_identity(NamespaceMutationSourceIdentity {
       path: "/".to_string(),
@@ -529,7 +657,7 @@ fn head_transition_rejects_a_missing_or_wrong_type_root_before_admission() {
 
   let missing_root = vec![0xD4; engine.hash_algo().hash_length()];
   let mut missing = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
-  missing.set_head_hash(missing_root.clone());
+  missing.set_whole_root_hash(missing_root.clone());
   missing
     .add_source_identity(NamespaceMutationSourceIdentity {
       path: "/".to_string(),
@@ -543,7 +671,7 @@ fn head_transition_rejects_a_missing_or_wrong_type_root_before_admission() {
   let wrong_type_root = vec![0xD5; engine.hash_algo().hash_length()];
   engine.store_entry(EntryType::FileRecord, &wrong_type_root, b"not a directory root").unwrap();
   let mut wrong_type = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
-  wrong_type.set_head_hash(wrong_type_root.clone());
+  wrong_type.set_whole_root_hash(wrong_type_root.clone());
   wrong_type
     .add_source_identity(NamespaceMutationSourceIdentity {
       path: "/".to_string(),

@@ -11,7 +11,64 @@ use aeordb::auth::provider::{AuthProvider, FileAuthProvider, NoAuthProvider};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::engine::{DirectoryOps, StorageEngine, ROOT_USER_ID};
 use aeordb::engine::RequestContext;
+use aeordb::engine::system_store;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
+
+struct EnabledProviderWithoutAuthority {
+  fallback: NoAuthProvider,
+}
+
+impl EnabledProviderWithoutAuthority {
+  fn new() -> Self {
+    Self { fallback: NoAuthProvider::new() }
+  }
+}
+
+impl AuthProvider for EnabledProviderWithoutAuthority {
+  fn get_api_key_by_prefix(&self, key_id_prefix: &str) -> aeordb::auth::provider::Result<Option<ApiKeyRecord>> {
+    self.fallback.get_api_key_by_prefix(key_id_prefix)
+  }
+
+  fn jwt_manager(&self) -> &JwtManager {
+    self.fallback.jwt_manager()
+  }
+
+  fn store_api_key(&self, record: &ApiKeyRecord) -> aeordb::auth::provider::Result<()> {
+    self.fallback.store_api_key(record)
+  }
+
+  fn store_api_key_for_bootstrap(&self, record: &ApiKeyRecord) -> aeordb::auth::provider::Result<()> {
+    self.fallback.store_api_key_for_bootstrap(record)
+  }
+
+  fn store_api_key_with_root_authority(&self, record: &ApiKeyRecord) -> aeordb::auth::provider::Result<()> {
+    self.fallback.store_api_key_with_root_authority(record)
+  }
+
+  fn list_api_keys(&self) -> aeordb::auth::provider::Result<Vec<ApiKeyRecord>> {
+    self.fallback.list_api_keys()
+  }
+
+  fn authority_engine(&self) -> Option<Arc<StorageEngine>> {
+    None
+  }
+
+  fn update_api_key_label(&self, key_id: uuid::Uuid, label: Option<String>) -> aeordb::auth::provider::Result<Option<ApiKeyRecord>> {
+    self.fallback.update_api_key_label(key_id, label)
+  }
+
+  fn revoke_api_key_with_policy(
+    &self,
+    key_id: uuid::Uuid,
+    policy: aeordb::auth::api_key::ApiKeyRevokePolicy,
+  ) -> aeordb::auth::provider::Result<aeordb::auth::api_key::ApiKeyRevokeResult> {
+    self.fallback.revoke_api_key_with_policy(key_id, policy)
+  }
+
+  fn is_enabled(&self) -> bool {
+    true
+  }
+}
 
 #[test]
 fn bootstrap_root_key_rejects_malformed_existing_authority() {
@@ -217,6 +274,25 @@ fn test_no_auth_provider_is_not_enabled() {
   assert!(!provider.is_enabled());
 }
 
+#[tokio::test]
+#[should_panic(expected = "enabled AuthProvider must expose its authority engine")]
+async fn enabled_provider_without_authority_engine_is_rejected_during_router_construction() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let provider: Arc<dyn AuthProvider> = Arc::new(EnabledProviderWithoutAuthority::new());
+  let jwt_manager = Arc::new(JwtManager::from_bytes(&provider.jwt_manager().to_bytes()).unwrap());
+
+  let _app = create_app_with_all(
+    provider,
+    jwt_manager,
+    Arc::new(aeordb::plugins::PluginManager::new(engine.clone())),
+    Arc::new(aeordb::auth::RateLimiter::default_config()),
+    make_prometheus_handle(),
+    engine,
+    Arc::new(aeordb::engine::EventBus::new()),
+    CorsState { default_origins: None, rules: vec![] },
+  );
+}
+
 #[test]
 fn test_no_auth_provider_allows_everything() {
   let provider = NoAuthProvider::new();
@@ -245,6 +321,7 @@ fn test_no_auth_provider_store_is_noop() {
   };
   assert!(provider.store_api_key(&record).is_ok());
   assert!(provider.store_api_key_for_bootstrap(&record).is_ok());
+  assert!(provider.store_api_key_with_root_authority(&record).is_ok());
 }
 
 #[test]
@@ -403,6 +480,8 @@ fn test_file_auth_provider_from_identity_file() {
   let keys = provider.list_api_keys().unwrap();
   assert_eq!(keys.len(), 1);
   assert_eq!(keys[0].user_id, Some(ROOT_USER_ID));
+  let authority = provider.authority_engine().expect("file auth provider exposes its backing authority engine");
+  assert_eq!(system_store::get_api_key(&authority, keys[0].key_id).unwrap().unwrap().key_id, keys[0].key_id);
 }
 
 #[test]
@@ -593,4 +672,116 @@ async fn test_file_auth_provider_token_exchange_works() {
   let json = body_json(response.into_body()).await;
   assert!(json["token"].is_string(), "response should contain a token");
   assert_eq!(json["expires_in"], DEFAULT_EXPIRY_SECONDS);
+}
+
+#[tokio::test]
+async fn separate_identity_file_drives_http_api_key_cache_and_revocation() {
+  let (main_engine, _main_temporary) = create_temp_engine_for_tests();
+  let (identity_engine, _identity_temporary) = create_temp_engine_for_tests();
+  let provider = Arc::new(FileAuthProvider::new(identity_engine.clone()));
+  let jwt_manager = Arc::new(JwtManager::from_bytes(&provider.jwt_manager().to_bytes()).unwrap());
+  let root_key = bootstrap_root_key(&identity_engine).unwrap().expect("separate identity authority should bootstrap");
+  let key_id = provider.list_api_keys().unwrap()[0].key_id;
+  assert!(system_store::get_api_key(&main_engine, key_id).unwrap().is_none());
+
+  let app = create_app_with_all(
+    provider.clone() as Arc<dyn AuthProvider>,
+    jwt_manager,
+    Arc::new(aeordb::plugins::PluginManager::new(main_engine.clone())),
+    Arc::new(aeordb::auth::RateLimiter::default_config()),
+    make_prometheus_handle(),
+    main_engine,
+    Arc::new(aeordb::engine::EventBus::new()),
+    CorsState { default_origins: None, rules: vec![] },
+  );
+
+  let token_response = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/auth/token")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"api_key":"{}","include_refresh":true}}"#, root_key)))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(token_response.status(), StatusCode::OK);
+  let token_body = body_json(token_response.into_body()).await;
+  let token = token_body["token"].as_str().unwrap().to_string();
+  let first_refresh = token_body["refresh_token"].as_str().unwrap().to_string();
+
+  let refresh_response = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/auth/refresh")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, first_refresh)))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(refresh_response.status(), StatusCode::OK, "refresh must resolve its issuing key through the identity engine");
+  let rotated_refresh = body_json(refresh_response.into_body()).await["refresh_token"].as_str().unwrap().to_string();
+
+  let reused_refresh = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/auth/refresh")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, first_refresh)))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(reused_refresh.status(), StatusCode::UNAUTHORIZED);
+
+  let authorized = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/external-auth.txt")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "text/plain")
+        .body(Body::from("separate authority"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(authorized.status(), StatusCode::CREATED);
+
+  assert!(provider.revoke_api_key(key_id).unwrap());
+  let revoked_refresh = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/auth/refresh")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"refresh_token":"{}"}}"#, rotated_refresh)))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(revoked_refresh.status(), StatusCode::UNAUTHORIZED);
+
+  let revoked = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/revoked-external-auth.txt")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "text/plain")
+        .body(Body::from("must be rejected"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
 }

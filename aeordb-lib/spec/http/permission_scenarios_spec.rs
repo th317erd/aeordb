@@ -686,32 +686,14 @@ async fn scenario_security_nil_uuid_via_http() {
 }
 
 #[tokio::test]
-async fn scenario_security_nil_uuid_api_key() {
+async fn scenario_security_root_can_rotate_its_api_key_with_explicit_authority() {
   let harness = TestHarness::new();
-
-  // Try to create an API key for the nil UUID (root) via the admin endpoint.
-  // store_api_key validates user_id != nil UUID.
   let nil_uuid = "00000000-0000-0000-0000-000000000000";
-  let body = format!(r#"{{"user_id":"{}"}}"#, nil_uuid);
+  let root_api_key = harness.create_api_key_for_user(nil_uuid).await;
+  let bearer = harness.get_jwt_for_user(&root_api_key).await;
+  let claims = harness.jwt_manager.verify_token(bearer.strip_prefix("Bearer ").unwrap()).unwrap();
 
-  let request = Request::builder()
-    .method("POST")
-    .uri("/auth/keys/admin")
-    .header("content-type", "application/json")
-    .header("authorization", &harness.root_jwt)
-    .body(Body::from(body))
-    .unwrap();
-
-  let response = harness.app().oneshot(request).await.unwrap();
-  // The store_api_key call should reject nil UUID, returning 500 (engine error).
-  assert_ne!(response.status(), StatusCode::CREATED, "Should NOT be able to create API key for nil UUID",);
-  assert!(
-    response.status() == StatusCode::INTERNAL_SERVER_ERROR
-      || response.status() == StatusCode::BAD_REQUEST
-      || response.status() == StatusCode::FORBIDDEN,
-    "Expected error status for nil UUID API key creation, got: {}",
-    response.status(),
-  );
+  assert_eq!(claims.sub, nil_uuid);
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use aeordb::engine::{
   CrudlifyOp, DirectoryOps, PathPermissions, PermissionLink, PermissionResolver, StorageEngine, merge_flags, parse_crudlify_flags,
-  path_levels, Cache, GroupLoader, PermissionsLoader, ApiKeyLoader,
+  path_levels, Cache, GroupLoader, PermissionsLoader,
 };
 use aeordb::engine::system_store;
 use aeordb::engine::group::Group;
@@ -719,6 +719,32 @@ fn test_permissions_cache_evict_reloads() {
   assert_eq!(result.unwrap().links[0].group, "updated");
 }
 
+#[test]
+fn acknowledged_permission_write_invalidates_engine_owned_cache() {
+  let (engine, _temp_dir) = test_engine();
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link("original", ".r......", "........")] });
+  assert_eq!(engine.permissions_cache.get(&"/".to_string(), &engine).unwrap().unwrap().links[0].group, "original");
+
+  write_permissions(&engine, "/", &PathPermissions { links: vec![member_link("updated", "crudlify", "........")] });
+
+  assert_eq!(engine.permissions_cache.get(&"/".to_string(), &engine).unwrap().unwrap().links[0].group, "updated");
+}
+
+#[test]
+fn acknowledged_group_write_invalidates_engine_owned_membership_cache() {
+  let (engine, _temp_dir) = test_engine();
+  let ctx = RequestContext::system();
+  let user = User::new("cache-member", None);
+  let user_id = user.user_id;
+  system_store::store_user(&engine, &ctx, &user).unwrap();
+  let initial = engine.group_cache.get(&user_id, &engine).unwrap();
+  assert!(!initial.contains(&"new-members".to_string()));
+
+  create_test_group(&engine, "new-members", "user_id", "eq", &user_id.to_string());
+
+  assert!(engine.group_cache.get(&user_id, &engine).unwrap().contains(&"new-members".to_string()));
+}
+
 // ---------------------------------------------------------------------------
 // Task 12: CrudlifyOp from HTTP method
 // ---------------------------------------------------------------------------
@@ -737,7 +763,8 @@ async fn test_crudlify_op_from_http_method() {
   let prometheus_handle = aeordb::metrics::initialize_metrics();
   let plugin_manager = Arc::new(aeordb::plugins::PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(aeordb::auth::RateLimiter::default_config());
-  let group_cache = Arc::new(Cache::new(GroupLoader));
+  let group_cache = engine.group_cache.clone();
+  let api_key_cache = engine.api_key_cache.clone();
 
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(aeordb::auth::FileAuthProvider::new(engine.clone()));
   let state = AppState {
@@ -747,10 +774,11 @@ async fn test_crudlify_op_from_http_method() {
     rate_limiter,
     prometheus_handle,
     engine: engine.clone(),
+    auth_engine: engine.clone(),
     event_bus: Arc::new(aeordb::engine::EventBus::new()),
     group_cache,
     task_queue: None,
-    api_key_cache: Arc::new(Cache::new(ApiKeyLoader)),
+    api_key_cache,
     peer_manager: Arc::new(aeordb::engine::PeerManager::new()),
     sync_engine: None,
     index_cleanup: aeordb::engine::index_cleanup::spawn_index_cleanup_worker(engine),

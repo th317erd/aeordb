@@ -8,7 +8,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::cache_invalidation::evict_caches_for_path;
 use super::responses::{engine_error_response, ErrorResponse};
 use super::route_permissions::{parse_user_id, reject_share_key, RoutePermissionChecker};
 use super::state::AppState;
@@ -264,12 +263,6 @@ pub async fn share(
         .into_response();
     }
 
-    if let Err(error) = evict_caches_for_path(&state, &perm_file_path) {
-      return ErrorResponse::new(format!("Permissions stored but cache invalidation failed: {error}"))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-
     shared_count += 1;
     shared_paths.push(normalized);
   }
@@ -472,13 +465,6 @@ pub async fn unshare(
   let serialized = perms.serialize();
   if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
     return ErrorResponse::new(format!("Failed to update permissions: {}", e))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
-  }
-
-  // Evict cache
-  if let Err(error) = evict_caches_for_path(&state, &perm_file_path) {
-    return ErrorResponse::new(format!("Permissions updated but cache invalidation failed: {error}"))
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
   }

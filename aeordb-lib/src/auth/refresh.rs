@@ -27,6 +27,14 @@ pub struct RefreshTokenRecord {
   pub key_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum RefreshTokenRotationResult {
+  Claimed(RefreshTokenRecord),
+  AlreadyRevoked,
+  Expired,
+  NotFound,
+}
+
 /// Generate a cryptographically random refresh token with the `aeor_r_` prefix.
 pub fn generate_refresh_token() -> String {
   let mut bytes = [0u8; 32];

@@ -45,18 +45,13 @@ struct TreeWriteResult {
   root_hash: Vec<u8>,
 }
 
-struct ImportHeadFanout<'a> {
-  target: &'a StorageEngine,
+struct ImportHeadFanout {
   context: RequestContext,
   payload: serde_json::Value,
 }
 
-impl NamespaceMutationFanout for ImportHeadFanout<'_> {
+impl NamespaceMutationFanout for ImportHeadFanout {
   fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
-    self.target.counters().record_write(0);
-    if let Err(error) = self.target.counters().reconcile_live_namespace_from_head(self.target) {
-      tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Imported root could not reconcile live namespace counters");
-    }
     let mut payload = self.payload.clone();
     if let Err(error) = acknowledgement.annotate_event_payload(&mut payload) {
       tracing::error!(operation_id = %acknowledgement.operation_id, error = %error, "Import event payload is invalid");
@@ -84,7 +79,7 @@ fn finish_import_head(
     }]})
   };
   if promote {
-    let fanout = Arc::new(ImportHeadFanout { target, context: context.clone(), payload: event_payload(true) });
+    let fanout = Arc::new(ImportHeadFanout { context: context.clone(), payload: event_payload(true) });
     let acknowledgement = match expected_root_hash {
       Some(expected_root) => {
         publish_namespace_root_from_with_fanout(target, expected_root, root_hash, NamespaceMutationKind::Import, fanout)?

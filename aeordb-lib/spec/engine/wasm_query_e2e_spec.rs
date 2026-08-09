@@ -104,6 +104,39 @@ fn invoke_raw_with_context(
   serde_json::from_slice(&response_bytes).expect("failed to parse PluginResponse JSON")
 }
 
+fn invoke_raw_with_authority_engines(
+  plugin_manager: &PluginManager,
+  data_engine: &Arc<StorageEngine>,
+  api_key_engine: &Arc<StorageEngine>,
+  context: RequestContext,
+  function_name: &str,
+  body: &[u8],
+) -> serde_json::Value {
+  let request = serde_json::json!({
+      "arguments": body.to_vec(),
+      "metadata": {
+          "function_name": function_name,
+          "path": format!("/test/echo/plugin/{}", function_name),
+          "plugin_path": "test/echo/plugin"
+      }
+  });
+  let request_bytes = serde_json::to_vec(&request).unwrap();
+
+  let response_bytes = plugin_manager
+    .invoke_wasm_plugin_with_authority_engines(
+      "test/echo/plugin",
+      &request_bytes,
+      data_engine.clone(),
+      api_key_engine.clone(),
+      context,
+      data_engine.group_cache.clone(),
+      api_key_engine.api_key_cache.clone(),
+    )
+    .expect("invoke_wasm_plugin_with_authority_engines failed");
+
+  serde_json::from_slice(&response_bytes).expect("failed to parse PluginResponse JSON")
+}
+
 fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {
   let ctx = RequestContext::system();
   let user = User::new(username, None);
@@ -425,6 +458,41 @@ fn test_plugin_read_host_function_enforces_scoped_api_key_rules() {
 
   let denied = invoke_raw_with_context(&pm, &engine, ctx, "read", b"/denied/key-secret.txt");
   assert_ne!(denied["status_code"], 200, "plugin read must enforce scoped API key path rules");
+}
+
+#[test]
+fn plugin_scoped_api_key_rules_load_from_a_separate_authority_engine() {
+  let (data_engine, plugin_manager, _data_temporary) = setup();
+  let (api_key_engine, _identity_temporary) = create_temp_engine_for_tests();
+  let context = scoped_api_key_context(
+    &api_key_engine,
+    vec![
+      KeyRule { glob: "/allowed/**".to_string(), permitted: "crudlify".to_string() },
+      KeyRule { glob: "/**".to_string(), permitted: "--------".to_string() },
+    ],
+  );
+  let operations = DirectoryOps::new(&data_engine);
+  let system = RequestContext::system();
+  operations
+    .store_file_buffered(&system, "/allowed/external-key-visible.txt", b"visible", Some("text/plain"))
+    .expect("store externally scoped visible file");
+  operations
+    .store_file_buffered(&system, "/denied/external-key-secret.txt", b"secret", Some("text/plain"))
+    .expect("store externally scoped secret file");
+
+  let allowed = invoke_raw_with_authority_engines(
+    &plugin_manager,
+    &data_engine,
+    &api_key_engine,
+    context.clone(),
+    "read",
+    b"/allowed/external-key-visible.txt",
+  );
+  assert_eq!(allowed["status_code"], 200);
+
+  let denied =
+    invoke_raw_with_authority_engines(&plugin_manager, &data_engine, &api_key_engine, context, "read", b"/denied/external-key-secret.txt");
+  assert_ne!(denied["status_code"], 200, "plugin read must enforce rules loaded from external API-key authority");
 }
 
 #[test]

@@ -514,6 +514,34 @@ async fn test_create_api_key_with_user_id() {
 }
 
 #[tokio::test]
+async fn test_admin_api_key_creation_defaults_to_authenticated_root_authority() {
+  let (app, jwt_manager, engine, _, _temp_dir) = test_app();
+  let auth = admin_bearer_token(&jwt_manager);
+
+  for body in [r#"{}"#, r#"{"user_id":"00000000-0000-0000-0000-000000000000"}"#] {
+    let response = app
+      .clone()
+      .oneshot(
+        Request::builder()
+          .method("POST")
+          .uri("/auth/keys/admin")
+          .header("content-type", "application/json")
+          .header("authorization", &auth)
+          .body(Body::from(body))
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED, "body {body} must use explicit authenticated root authority");
+    assert_eq!(body_json(response.into_body()).await["user_id"], uuid::Uuid::nil().to_string());
+  }
+
+  let keys = system_store::list_api_keys(&engine).unwrap();
+  assert_eq!(keys.len(), 2);
+  assert!(keys.iter().all(|record| record.user_id == Some(uuid::Uuid::nil())));
+}
+
+#[tokio::test]
 async fn test_list_api_keys_returns_stored_keys() {
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
   let auth = admin_bearer_token(&jwt_manager);

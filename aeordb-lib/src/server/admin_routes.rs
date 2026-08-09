@@ -8,7 +8,6 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::cache_invalidation::evict_caches_for_path;
 use super::responses::{ErrorResponse, GroupResponse, UserResponse, require_root};
 use super::state::AppState;
 use crate::engine::{Group, RequestContext, User};
@@ -454,49 +453,18 @@ pub async fn update_api_key(
     }
   };
 
-  let ops = crate::engine::DirectoryOps::new(&state.engine);
-  let path = format!("/.aeordb-system/api-keys/{}", key_uuid);
-  let data = match ops.read_file_buffered(&path) {
-    Ok(data) => data,
-    Err(crate::engine::EngineError::NotFound(_)) => {
-      return ErrorResponse::new(format!("API key not found: {}", key_id_string)).with_status(StatusCode::NOT_FOUND).into_response();
-    }
-    Err(error) => {
-      return ErrorResponse::new(format!("Failed to read API key: {}", error))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
-
-  let mut record: crate::auth::api_key::ApiKeyRecord = match serde_json::from_slice(&data) {
-    Ok(r) => r,
-    Err(e) => {
-      return ErrorResponse::new(format!("Corrupt API key record: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-    }
-  };
-
-  if let Some(label) = payload.get("label").and_then(|v| v.as_str()) {
-    record.label = Some(label.to_string());
-  }
-
-  let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
-  match system_store::store_api_key(&state.engine, &ctx, &record) {
-    Ok(()) => {
-      if let Err(error) = evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", key_id_string)) {
-        return ErrorResponse::new(format!("API key updated but cache invalidation failed: {error}"))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
-      }
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({
-          "updated": true,
-          "key_id": key_id_string,
-          "label": record.label,
-        })),
-      )
-        .into_response()
-    }
+  let label = payload.get("label").and_then(|value| value.as_str()).map(str::to_string);
+  match state.auth_provider.update_api_key_label(key_uuid, label) {
+    Ok(Some(record)) => (
+      StatusCode::OK,
+      Json(serde_json::json!({
+        "updated": true,
+        "key_id": key_id_string,
+        "label": record.label,
+      })),
+    )
+      .into_response(),
+    Ok(None) => ErrorResponse::new(format!("API key not found: {}", key_id_string)).with_status(StatusCode::NOT_FOUND).into_response(),
     Err(error) => {
       ErrorResponse::new(format!("Failed to update API key: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
     }

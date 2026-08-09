@@ -8,11 +8,12 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::cache_invalidation::evict_caches_for_path;
 use super::responses::ErrorResponse;
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::auth::api_key::{generate_api_key, hash_api_key, ApiKeyRecord, DEFAULT_EXPIRY_DAYS, MAX_EXPIRY_DAYS};
+use crate::auth::api_key::{
+  ApiKeyRecord, ApiKeyRevokePolicy, ApiKeyRevokeResult, DEFAULT_EXPIRY_DAYS, MAX_EXPIRY_DAYS, generate_api_key, hash_api_key,
+};
 use crate::engine::api_key_rules::{parse_rules_from_json, validate_rules};
 use crate::engine::user::is_root;
 
@@ -116,9 +117,9 @@ pub async fn create_own_key(
     rules: rules.clone(),
   };
 
-  // Root users need the bootstrap path to bypass nil-UUID validation.
+  // Root users require explicit root authority to bypass nil-UUID validation.
   let store_result = if is_root(&target_user_id) {
-    state.auth_provider.store_api_key_for_bootstrap(&record)
+    state.auth_provider.store_api_key_with_root_authority(&record)
   } else {
     state.auth_provider.store_api_key(&record)
   };
@@ -221,55 +222,29 @@ pub async fn revoke_own_key(
     }
   };
 
-  // Load all keys and find the matching one to verify ownership.
-  let keys = match state.auth_provider.list_api_keys() {
-    Ok(keys) => keys,
+  let policy = if is_root(&caller_id) { ApiKeyRevokePolicy::Any } else { ApiKeyRevokePolicy::OwnedBy(caller_id) };
+  match state.auth_provider.revoke_api_key_with_policy(parsed_key_id, policy) {
+    Ok(ApiKeyRevokeResult::Revoked | ApiKeyRevokeResult::AlreadyRevoked) => (
+      StatusCode::OK,
+      Json(serde_json::json!({
+        "revoked": true,
+        "key_id": parsed_key_id,
+      })),
+    )
+      .into_response(),
+    Ok(ApiKeyRevokeResult::NotFound) => {
+      ErrorResponse::new(format!("API key not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response()
+    }
+    Ok(ApiKeyRevokeResult::PolicyMismatch) => ErrorResponse::new("Cannot revoke another user's key. You can only revoke keys you own")
+      .with_status(StatusCode::FORBIDDEN)
+      .into_response(),
     Err(error) => {
-      tracing::error!("Failed to list API keys: {}", error);
-      return ErrorResponse::new(
-        "Failed to look up API key: could not read from storage. If this persists, check GET /system/health for system status",
+      tracing::error!("Failed to revoke API key: {}", error);
+      ErrorResponse::new(
+        "Failed to revoke API key: could not persist revocation to storage. If this persists, check GET /system/health for system status",
       )
       .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
-    }
-  };
-
-  let target_key = keys.iter().find(|record| record.key_id == parsed_key_id);
-
-  match target_key {
-    None => ErrorResponse::new(format!("API key not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response(),
-    Some(record) => {
-      // Non-root users can only revoke their own keys.
-      if record.user_id != Some(caller_id) && !is_root(&caller_id) {
-        return ErrorResponse::new("Cannot revoke another user's key. You can only revoke keys you own")
-          .with_status(StatusCode::FORBIDDEN)
-          .into_response();
-      }
-
-      match state.auth_provider.revoke_api_key(parsed_key_id) {
-        Ok(true) => {
-          if let Err(error) = evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id)) {
-            return ErrorResponse::new(format!("API key revoked but cache invalidation failed: {error}"))
-              .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-              .into_response();
-          }
-          (
-            StatusCode::OK,
-            Json(serde_json::json!({
-              "revoked": true,
-              "key_id": parsed_key_id,
-            })),
-          )
-            .into_response()
-        }
-        Ok(false) => ErrorResponse::new(format!("API key not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response(),
-        Err(error) => {
-          tracing::error!("Failed to revoke API key: {}", error);
-          ErrorResponse::new("Failed to revoke API key: could not persist revocation to storage. If this persists, check GET /system/health for system status")
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response()
-        }
-      }
+      .into_response()
     }
   }
 }

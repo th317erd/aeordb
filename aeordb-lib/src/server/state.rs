@@ -24,6 +24,7 @@ pub struct AppState {
   pub rate_limiter: Arc<RateLimiter>,
   pub prometheus_handle: PrometheusHandle,
   pub engine: Arc<StorageEngine>,
+  pub auth_engine: Arc<StorageEngine>,
   pub event_bus: Arc<EventBus>,
   pub group_cache: Arc<Cache<GroupLoader>>,
   pub api_key_cache: Arc<Cache<ApiKeyLoader>>,

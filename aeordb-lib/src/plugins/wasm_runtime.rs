@@ -79,6 +79,9 @@ struct HostState {
   memory: Option<Memory>,
   /// Storage engine for database operations (set for query plugins, None for parsers).
   engine: Option<Arc<StorageEngine>>,
+  /// Storage engine that owns API-key authority. This can differ from the
+  /// database engine when the server uses `file://` authentication.
+  api_key_engine: Option<Arc<StorageEngine>>,
   /// Request context for permission-checked operations.
   request_context: Option<RequestContext>,
   /// Group cache for request-scoped permission checks.
@@ -127,7 +130,7 @@ impl WasmPluginRuntime {
   ///     packed i64: high 32 bits = response pointer, low 32 bits = response length.
   ///   - The host reads the response bytes from the guest's memory.
   pub fn call_handle(&self, request_bytes: &[u8]) -> Result<Vec<u8>, WasmRuntimeError> {
-    self.call_handle_inner(request_bytes, None, None, None, None)
+    self.call_handle_inner(request_bytes, None, None, None, None, None)
   }
 
   /// Invoke the plugin's exported `handle` function with engine access.
@@ -143,20 +146,34 @@ impl WasmPluginRuntime {
     group_cache: Arc<Cache<GroupLoader>>,
     api_key_cache: Arc<Cache<ApiKeyLoader>>,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
-    self.call_handle_inner(request_bytes, Some(engine), Some(ctx), Some(group_cache), Some(api_key_cache))
+    self.call_handle_with_authority_engines(request_bytes, engine.clone(), engine, ctx, group_cache, api_key_cache)
+  }
+
+  /// Invoke with separate data and API-key authority engines.
+  pub fn call_handle_with_authority_engines(
+    &self,
+    request_bytes: &[u8],
+    engine: Arc<StorageEngine>,
+    api_key_engine: Arc<StorageEngine>,
+    ctx: RequestContext,
+    group_cache: Arc<Cache<GroupLoader>>,
+    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+  ) -> Result<Vec<u8>, WasmRuntimeError> {
+    self.call_handle_inner(request_bytes, Some(engine), Some(api_key_engine), Some(ctx), Some(group_cache), Some(api_key_cache))
   }
 
   fn call_handle_inner(
     &self,
     request_bytes: &[u8],
     engine: Option<Arc<StorageEngine>>,
+    api_key_engine: Option<Arc<StorageEngine>>,
     request_context: Option<RequestContext>,
     group_cache: Option<Arc<Cache<GroupLoader>>>,
     api_key_cache: Option<Arc<Cache<ApiKeyLoader>>>,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
     let mut store = Store::new(
       &self.engine,
-      HostState { memory: None, engine, request_context, group_cache, api_key_cache, limits: self.store_limits() },
+      HostState { memory: None, engine, api_key_engine, request_context, group_cache, api_key_cache, limits: self.store_limits() },
     );
     store.limiter(|state| &mut state.limits);
     store.set_fuel(self.fuel_limit).map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
@@ -812,8 +829,10 @@ fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: 
   if let Some(key_id) = ctx.key_id.as_ref() {
     let api_key_cache =
       caller.data().api_key_cache.as_ref().ok_or_else(|| "API key cache not available in this plugin context".to_string())?;
+    let api_key_engine =
+      caller.data().api_key_engine.as_ref().ok_or_else(|| "API key authority not available in this plugin context".to_string())?;
     let key_record = api_key_cache
-      .get(key_id, engine)
+      .get(key_id, api_key_engine)
       .map_err(|error| format!("Failed to verify API key: {}", error))?
       .ok_or_else(|| "API key not found".to_string())?;
 

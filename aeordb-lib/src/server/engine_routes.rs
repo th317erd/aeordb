@@ -12,7 +12,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use super::blocking::run_engine_blocking;
-use super::cache_invalidation::{evict_caches_for_path, evict_caches_for_paths};
 use super::route_permissions::{reject_share_key, require_generic_data_engine_path, require_generic_data_path, RoutePermissionChecker};
 use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
 use super::search_locators::{
@@ -429,10 +428,6 @@ pub async fn engine_store_file(
   };
   if let Ok(content_hash) = file_content_hash(&file_value, &algo) {
     response_body.hash = Some(hex::encode(&content_hash));
-  }
-
-  if let Err(error) = evict_caches_for_path(&state, &path) {
-    return engine_error_response("File stored but cache invalidation failed", &error);
   }
 
   (StatusCode::CREATED, Json(response_body)).into_response()
@@ -1790,8 +1785,7 @@ pub async fn engine_delete_file(
   let path_for_blocking = path.clone();
 
   // Dispatch + delete all happen on a blocking thread. The kind ("symlink" /
-  // "file" / "directory") flows back to the response. Cache eviction stays on
-  // the async side since it touches Arc'd state.
+  // "file" / "directory") flows back to the response.
   let result = tokio::task::spawn_blocking(move || -> EngineResult<&'static str> {
     let ops = DirectoryOps::new(&engine);
     if ops.get_symlink(&path_for_blocking)?.is_some() {
@@ -1811,9 +1805,6 @@ pub async fn engine_delete_file(
 
   match result {
     Ok(Ok(kind)) => {
-      if let Err(error) = evict_caches_for_path(&state, &path) {
-        return engine_error_response("Path deleted but cache invalidation failed", &error);
-      }
       if kind == "file" {
         state.index_cleanup.queue(path.clone());
       }
@@ -2740,10 +2731,6 @@ async fn do_merge_patch(
     }
   };
 
-  if let Err(error) = evict_caches_for_path(&state, &path) {
-    return engine_error_response("File merged but cache invalidation failed", &error);
-  }
-
   let mut response_body = EngineFileResponse::from(&file_record);
   let algo = state.engine.hash_algo();
   let hash_length = algo.hash_length();
@@ -2816,9 +2803,6 @@ async fn do_rename(
 
   match result {
     Ok(kind) => {
-      if let Err(error) = evict_caches_for_paths(&state, [path.as_str(), destination]) {
-        return engine_error_response("Path renamed but cache invalidation failed", &error);
-      }
       let from_normalized = crate::engine::path_utils::normalize_path(&path);
       let to_normalized = crate::engine::path_utils::normalize_path(destination);
       (

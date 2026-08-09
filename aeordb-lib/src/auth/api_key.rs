@@ -37,6 +37,37 @@ pub struct ApiKeyRecord {
   pub rules: Vec<KeyRule>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyRevokePolicy {
+  Any,
+  OwnedBy(Uuid),
+  ShareLink,
+}
+
+impl ApiKeyRevokePolicy {
+  pub(crate) fn accepts(self, record: &ApiKeyRecord) -> bool {
+    match self {
+      Self::Any => true,
+      Self::OwnedBy(user_id) => record.user_id == Some(user_id),
+      Self::ShareLink => record.user_id.is_none(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyRevokeResult {
+  Revoked,
+  AlreadyRevoked,
+  NotFound,
+  PolicyMismatch,
+}
+
+impl ApiKeyRevokeResult {
+  pub fn is_revoked(self) -> bool {
+    matches!(self, Self::Revoked | Self::AlreadyRevoked)
+  }
+}
+
 /// Generate a new API key with the format `aeor_k_{key_id_prefix}_{random_hex}`
 /// where key_id_prefix is the first 16 hex chars of the key_id UUID (no dashes).
 pub fn generate_api_key(key_id: Uuid) -> String {

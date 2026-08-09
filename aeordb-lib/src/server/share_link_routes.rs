@@ -8,11 +8,12 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::cache_invalidation::evict_caches_for_path;
 use super::responses::{engine_error_response, ErrorResponse};
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::auth::api_key::{generate_api_key, hash_api_key, ApiKeyRecord, NO_EXPIRY_SENTINEL, MAX_EXPIRY_DAYS};
+use crate::auth::api_key::{
+  ApiKeyRecord, ApiKeyRevokePolicy, ApiKeyRevokeResult, MAX_EXPIRY_DAYS, NO_EXPIRY_SENTINEL, generate_api_key, hash_api_key,
+};
 use crate::engine::api_key_rules::KeyRule;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::path_utils::normalize_path;
@@ -364,51 +365,21 @@ pub async fn revoke_share_link(
     }
   };
 
-  // 3. Verify it is a share key (user_id is None).
-  let all_keys = match state.auth_provider.list_api_keys() {
-    Ok(keys) => keys,
-    Err(error) => {
-      tracing::error!("Failed to list API keys: {}", error);
-      return ErrorResponse::new("Failed to revoke share link: could not read from storage")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+  match state.auth_provider.revoke_api_key_with_policy(parsed_key_id, ApiKeyRevokePolicy::ShareLink) {
+    Ok(ApiKeyRevokeResult::Revoked | ApiKeyRevokeResult::AlreadyRevoked) => (
+      StatusCode::OK,
+      Json(serde_json::json!({
+          "revoked": true,
+          "key_id": parsed_key_id,
+      })),
+    )
+      .into_response(),
+    Ok(ApiKeyRevokeResult::NotFound) => {
+      ErrorResponse::new(format!("Share link not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response()
     }
-  };
-
-  let target = all_keys.iter().find(|k| k.key_id == parsed_key_id);
-  match target {
-    None => {
-      return ErrorResponse::new(format!("Share link not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response();
-    }
-    Some(record) => {
-      if record.user_id.is_some() {
-        return ErrorResponse::new("This key is not a share link; use DELETE /auth/keys/{key_id} instead")
-          .with_status(StatusCode::BAD_REQUEST)
-          .into_response();
-      }
-    }
-  }
-
-  // 4. Revoke.
-  match state.auth_provider.revoke_api_key(parsed_key_id) {
-    Ok(true) => {
-      // 5. Invalidate cache.
-      if let Err(error) = evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id)) {
-        return ErrorResponse::new(format!("Share link revoked but cache invalidation failed: {error}"))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
-      }
-
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "revoked": true,
-            "key_id": parsed_key_id,
-        })),
-      )
-        .into_response()
-    }
-    Ok(false) => ErrorResponse::new(format!("Share link not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response(),
+    Ok(ApiKeyRevokeResult::PolicyMismatch) => ErrorResponse::new("This key is not a share link; use DELETE /auth/keys/{key_id} instead")
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response(),
     Err(error) => {
       tracing::error!("Failed to revoke share link: {}", error);
       ErrorResponse::new("Failed to revoke share link: could not persist revocation to storage")

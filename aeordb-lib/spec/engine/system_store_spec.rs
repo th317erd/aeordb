@@ -4,11 +4,14 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use aeordb::auth::api_key::ApiKeyRecord;
-use aeordb::auth::magic_link::MagicLinkRecord;
-use aeordb::auth::refresh::RefreshTokenRecord;
+use aeordb::auth::api_key::{ApiKeyRevokePolicy, ApiKeyRevokeResult};
+use aeordb::auth::magic_link::{MagicLinkConsumeResult, MagicLinkRecord};
+use aeordb::auth::refresh::{RefreshTokenRecord, RefreshTokenRotationResult};
 use aeordb::engine::group::Group;
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::engine::peer_connection::PeerConfig;
 use aeordb::engine::request_context::RequestContext;
+use aeordb::engine::schema_version::JsonVersioned;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::system_store;
 use aeordb::engine::user::{ROOT_USER_ID, User};
@@ -355,6 +358,18 @@ fn test_bootstrap_api_key_allows_root() {
 }
 
 #[test]
+fn test_root_authorized_api_key_storage_accepts_only_root_records() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let root_record = make_api_key_record(ROOT_USER_ID);
+  system_store::store_api_key_with_root_authority(&engine, &ctx, &root_record).unwrap();
+
+  let non_root_record = make_api_key_record(Uuid::new_v4());
+  assert!(system_store::store_api_key_with_root_authority(&engine, &ctx, &non_root_record).is_err());
+  assert!(system_store::get_api_key(&engine, non_root_record.key_id).unwrap().is_none());
+}
+
+#[test]
 fn test_revoked_key_not_returned_by_prefix_lookup() {
   let (engine, _dir) = setup();
   let ctx = test_context();
@@ -370,6 +385,232 @@ fn test_revoked_key_not_returned_by_prefix_lookup() {
   let found = system_store::get_api_key_by_prefix(&engine, prefix).unwrap();
   assert!(found.is_some(), "revoked key is returned by prefix lookup (caller checks is_revoked)");
   assert!(found.unwrap().is_revoked, "returned key should be marked as revoked");
+}
+
+#[test]
+fn typed_api_key_revocation_is_atomic_idempotent_and_policy_checked() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let owner = Uuid::new_v4();
+  let record = make_api_key_record(owner);
+  let key_id = record.key_id;
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let mismatch = system_store::revoke_api_key_with_policy(&engine, &ctx, key_id, ApiKeyRevokePolicy::OwnedBy(Uuid::new_v4())).unwrap();
+  assert_eq!(mismatch, ApiKeyRevokeResult::PolicyMismatch);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+
+  let revoked = system_store::revoke_api_key_with_policy(&engine, &ctx, key_id, ApiKeyRevokePolicy::OwnedBy(owner)).unwrap();
+  assert_eq!(revoked, ApiKeyRevokeResult::Revoked);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
+
+  let repeated = system_store::revoke_api_key_with_policy(&engine, &ctx, key_id, ApiKeyRevokePolicy::OwnedBy(owner)).unwrap();
+  assert_eq!(repeated, ApiKeyRevokeResult::AlreadyRevoked);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
+}
+
+#[test]
+fn concurrent_api_key_label_and_revocation_preserve_both_changes() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let record = make_api_key_record(Uuid::new_v4());
+  let key_id = record.key_id;
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  let barrier = Arc::new(std::sync::Barrier::new(2));
+
+  std::thread::scope(|scope| {
+    let update_engine = engine.clone();
+    let update_barrier = barrier.clone();
+    scope.spawn(move || {
+      update_barrier.wait();
+      system_store::update_api_key_label(&update_engine, &RequestContext::system(), key_id, Some("concurrent-label".to_string()))
+        .unwrap()
+        .expect("key exists");
+    });
+    let revoke_engine = engine.clone();
+    scope.spawn(move || {
+      barrier.wait();
+      assert!(matches!(
+        system_store::revoke_api_key_with_policy(&revoke_engine, &RequestContext::system(), key_id, ApiKeyRevokePolicy::Any).unwrap(),
+        ApiKeyRevokeResult::Revoked | ApiKeyRevokeResult::AlreadyRevoked
+      ));
+    });
+  });
+
+  let stored = system_store::get_api_key(&engine, key_id).unwrap().unwrap();
+  assert!(stored.is_revoked);
+  assert_eq!(stored.label.as_deref(), Some("concurrent-label"));
+}
+
+#[test]
+fn api_key_label_updates_are_bounded_and_noop_when_unchanged() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let record = make_api_key_record(Uuid::new_v4());
+  let key_id = record.key_id;
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  let initial_sequence = engine.durability_snapshot().unwrap().next_sequence;
+
+  let unchanged = system_store::update_api_key_label(&engine, &ctx, key_id, None).unwrap().unwrap();
+  assert_eq!(unchanged.label, record.label);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, initial_sequence);
+
+  system_store::update_api_key_label(&engine, &ctx, key_id, Some("bounded-label".to_string())).unwrap();
+  let updated_sequence = engine.durability_snapshot().unwrap().next_sequence;
+  assert_eq!(updated_sequence, initial_sequence + 1);
+
+  system_store::update_api_key_label(&engine, &ctx, key_id, Some("bounded-label".to_string())).unwrap();
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, updated_sequence);
+
+  let oversized = "x".repeat(1024 * 1024);
+  system_store::update_api_key_label(&engine, &ctx, key_id, Some(oversized)).expect_err("serialized replacement must honor the bound");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, updated_sequence);
+  assert_eq!(system_store::get_api_key(&engine, key_id).unwrap().unwrap().label.as_deref(), Some("bounded-label"));
+}
+
+#[test]
+fn malformed_api_key_authority_blocks_typed_transition_without_write() {
+  let (engine, _dir) = setup();
+  let key_id = Uuid::new_v4();
+  let path = format!("/.aeordb-system/api-keys/{key_id}");
+  DirectoryOps::new(&engine).store_file_buffered(&test_context(), &path, b"not-versioned-json", Some("application/json")).unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = system_store::revoke_api_key_with_policy(&engine, &test_context(), key_id, ApiKeyRevokePolicy::Any)
+    .expect_err("malformed authority must fail closed");
+
+  assert!(error.to_string().contains("JSON") || error.to_string().contains("version"), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered(&path).unwrap(), b"not-versioned-json");
+}
+
+#[test]
+fn oversized_api_key_authority_fails_before_publication_and_preserves_bytes() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let mut record = make_api_key_record(Uuid::new_v4());
+  record.label = Some("x".repeat(1024 * 1024));
+  let stored = record.serialize_versioned();
+  let path = format!("/.aeordb-system/api-keys/{}", record.key_id);
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, &path, &stored, Some("application/json")).unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = system_store::revoke_api_key_with_policy(&engine, &ctx, record.key_id, ApiKeyRevokePolicy::Any)
+    .expect_err("oversized authority must fail before entering the typed transition");
+
+  assert!(error.to_string().contains("exceeds") || error.to_string().contains("limit"), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered(&path).unwrap(), stored);
+}
+
+#[test]
+fn credential_creation_rejects_records_that_cannot_be_transitioned_safely() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let initial_sequence = engine.durability_snapshot().unwrap().next_sequence;
+  let oversized_value = "x".repeat(1024 * 1024);
+
+  let mut api_key = make_api_key_record(Uuid::new_v4());
+  api_key.label = Some(oversized_value.clone());
+  system_store::store_api_key(&engine, &ctx, &api_key).expect_err("oversized API-key creation must fail before publication");
+
+  let magic_link = MagicLinkRecord {
+    code_hash: "oversized-magic-link".to_string(),
+    email: oversized_value.clone(),
+    created_at: Utc::now(),
+    expires_at: Utc::now() + chrono::Duration::minutes(10),
+    is_used: false,
+  };
+  system_store::store_magic_link(&engine, &ctx, &magic_link).expect_err("oversized magic-link creation must fail before publication");
+
+  let refresh_token = RefreshTokenRecord {
+    token_hash: "oversized-refresh-token".to_string(),
+    user_subject: oversized_value,
+    created_at: Utc::now(),
+    expires_at: Utc::now() + chrono::Duration::days(1),
+    is_revoked: false,
+    key_id: None,
+  };
+  system_store::store_refresh_token(&engine, &ctx, &refresh_token)
+    .expect_err("oversized refresh-token creation must fail before publication");
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, initial_sequence);
+  assert!(system_store::get_api_key(&engine, api_key.key_id).unwrap().is_none());
+  assert!(system_store::get_magic_link(&engine, &magic_link.code_hash).unwrap().is_none());
+  assert!(system_store::get_refresh_token(&engine, &refresh_token.token_hash).unwrap().is_none());
+}
+
+#[test]
+fn credential_transition_refuses_memory_pressure_before_publication_or_mutation() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let record = make_api_key_record(Uuid::new_v4());
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let remaining = snapshot.policy.unwrap().emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+  let pressure = memory
+    .reserve(MemoryOwner::DurabilityWaiters, remaining.saturating_sub(1), AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite))
+    .unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  system_store::revoke_api_key_with_policy(&engine, &ctx, record.key_id, ApiKeyRevokePolicy::Any)
+    .expect_err("credential transition must refuse hard memory pressure");
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  drop(pressure);
+  assert!(!system_store::get_api_key(&engine, record.key_id).unwrap().unwrap().is_revoked);
+}
+
+#[test]
+fn typed_credential_transitions_survive_clean_restart() {
+  let temporary = tempfile::tempdir().unwrap();
+  let database_path = temporary.path().join("credential-restart.aeordb");
+  let key = make_api_key_record(Uuid::new_v4());
+  {
+    let engine = StorageEngine::create(database_path.to_str().unwrap()).unwrap();
+    let ctx = test_context();
+    system_store::store_api_key(&engine, &ctx, &key).unwrap();
+    system_store::store_magic_link(
+      &engine,
+      &ctx,
+      &MagicLinkRecord {
+        code_hash: "restart-link".to_string(),
+        email: "restart@example.com".to_string(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::minutes(10),
+        is_used: false,
+      },
+    )
+    .unwrap();
+    system_store::store_refresh_token(
+      &engine,
+      &ctx,
+      &RefreshTokenRecord {
+        token_hash: "restart-refresh".to_string(),
+        user_subject: Uuid::new_v4().to_string(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::days(1),
+        is_revoked: false,
+        key_id: Some(key.key_id.to_string()),
+      },
+    )
+    .unwrap();
+    system_store::update_api_key_label(&engine, &ctx, key.key_id, Some("after restart".to_string())).unwrap();
+    system_store::revoke_api_key_with_policy(&engine, &ctx, key.key_id, ApiKeyRevokePolicy::Any).unwrap();
+    system_store::mark_magic_link_used(&engine, &ctx, "restart-link").unwrap();
+    system_store::revoke_refresh_token(&engine, &ctx, "restart-refresh").unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  let reopened = StorageEngine::open(database_path.to_str().unwrap()).unwrap();
+  let stored_key = system_store::get_api_key(&reopened, key.key_id).unwrap().unwrap();
+  assert_eq!(stored_key.label.as_deref(), Some("after restart"));
+  assert!(stored_key.is_revoked);
+  assert!(system_store::get_magic_link(&reopened, "restart-link").unwrap().unwrap().is_used);
+  assert!(system_store::get_refresh_token(&reopened, "restart-refresh").unwrap().unwrap().is_revoked);
+  reopened.shutdown().unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +732,159 @@ fn test_revoke_refresh_token_not_found() {
   let ctx = test_context();
   let revoked = system_store::revoke_refresh_token(&engine, &ctx, "ghost").unwrap();
   assert!(!revoked);
+}
+
+#[test]
+fn magic_link_and_refresh_token_transitions_are_single_acknowledgement_noops_when_repeated() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &MagicLinkRecord {
+      code_hash: "atomic-link".to_string(),
+      email: "atomic@example.com".to_string(),
+      created_at: Utc::now(),
+      expires_at: Utc::now() + chrono::Duration::minutes(10),
+      is_used: false,
+    },
+  )
+  .unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &RefreshTokenRecord {
+      token_hash: "atomic-refresh".to_string(),
+      user_subject: Uuid::new_v4().to_string(),
+      created_at: Utc::now(),
+      expires_at: Utc::now() + chrono::Duration::days(1),
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  system_store::mark_magic_link_used(&engine, &ctx, "atomic-link").unwrap();
+  assert!(system_store::revoke_refresh_token(&engine, &ctx, "atomic-refresh").unwrap());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 2);
+
+  system_store::mark_magic_link_used(&engine, &ctx, "atomic-link").unwrap();
+  assert!(system_store::revoke_refresh_token(&engine, &ctx, "atomic-refresh").unwrap());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 2);
+}
+
+#[test]
+fn one_time_credential_claims_have_exactly_one_concurrent_winner() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let now = Utc::now();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &MagicLinkRecord {
+      code_hash: "single-winner-link".to_string(),
+      email: "single-winner@example.com".to_string(),
+      created_at: now,
+      expires_at: now + chrono::Duration::minutes(10),
+      is_used: false,
+    },
+  )
+  .unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &RefreshTokenRecord {
+      token_hash: "single-winner-refresh".to_string(),
+      user_subject: Uuid::new_v4().to_string(),
+      created_at: now,
+      expires_at: now + chrono::Duration::days(1),
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
+  let sequence_before_claims = engine.durability_snapshot().unwrap().next_sequence;
+
+  let barrier = Arc::new(std::sync::Barrier::new(3));
+  let mut workers = Vec::new();
+  for _ in 0..2 {
+    let worker_engine = engine.clone();
+    let worker_barrier = barrier.clone();
+    workers.push(std::thread::spawn(move || {
+      worker_barrier.wait();
+      system_store::consume_magic_link(&worker_engine, &RequestContext::system(), "single-winner-link", now).unwrap()
+    }));
+  }
+  barrier.wait();
+  let link_results = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
+  assert_eq!(link_results.iter().filter(|result| matches!(result, MagicLinkConsumeResult::Consumed(_))).count(), 1);
+  assert_eq!(link_results.iter().filter(|result| matches!(result, MagicLinkConsumeResult::AlreadyUsed)).count(), 1);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before_claims + 1);
+
+  let barrier = Arc::new(std::sync::Barrier::new(3));
+  let mut workers = Vec::new();
+  for _ in 0..2 {
+    let worker_engine = engine.clone();
+    let worker_barrier = barrier.clone();
+    workers.push(std::thread::spawn(move || {
+      worker_barrier.wait();
+      system_store::claim_refresh_token_rotation(&worker_engine, &RequestContext::system(), "single-winner-refresh", now).unwrap()
+    }));
+  }
+  barrier.wait();
+  let refresh_results = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
+  assert_eq!(refresh_results.iter().filter(|result| matches!(result, RefreshTokenRotationResult::Claimed(_))).count(), 1);
+  assert_eq!(refresh_results.iter().filter(|result| matches!(result, RefreshTokenRotationResult::AlreadyRevoked)).count(), 1);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before_claims + 2);
+}
+
+#[test]
+fn one_time_credential_claims_preserve_missing_and_expired_records_without_writes() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let now = Utc::now();
+  system_store::store_magic_link(
+    &engine,
+    &ctx,
+    &MagicLinkRecord {
+      code_hash: "expired-link".to_string(),
+      email: "expired@example.com".to_string(),
+      created_at: now - chrono::Duration::hours(2),
+      expires_at: now - chrono::Duration::hours(1),
+      is_used: false,
+    },
+  )
+  .unwrap();
+  system_store::store_refresh_token(
+    &engine,
+    &ctx,
+    &RefreshTokenRecord {
+      token_hash: "expired-refresh".to_string(),
+      user_subject: Uuid::new_v4().to_string(),
+      created_at: now - chrono::Duration::days(2),
+      expires_at: now - chrono::Duration::days(1),
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(matches!(system_store::consume_magic_link(&engine, &ctx, "missing-link", now).unwrap(), MagicLinkConsumeResult::NotFound));
+  assert!(matches!(system_store::consume_magic_link(&engine, &ctx, "expired-link", now).unwrap(), MagicLinkConsumeResult::Expired));
+  assert!(matches!(
+    system_store::claim_refresh_token_rotation(&engine, &ctx, "missing-refresh", now).unwrap(),
+    RefreshTokenRotationResult::NotFound
+  ));
+  assert!(matches!(
+    system_store::claim_refresh_token_rotation(&engine, &ctx, "expired-refresh", now).unwrap(),
+    RefreshTokenRotationResult::Expired
+  ));
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(!system_store::get_magic_link(&engine, "expired-link").unwrap().unwrap().is_used);
+  assert!(!system_store::get_refresh_token(&engine, "expired-refresh").unwrap().unwrap().is_revoked);
 }
 
 // ---------------------------------------------------------------------------

@@ -9,20 +9,32 @@
 
 use uuid::Uuid;
 
-use crate::auth::api_key::ApiKeyRecord;
-use crate::auth::magic_link::MagicLinkRecord;
-use crate::auth::refresh::RefreshTokenRecord;
+use crate::auth::api_key::{ApiKeyRecord, ApiKeyRevokePolicy, ApiKeyRevokeResult};
+use crate::auth::magic_link::{MagicLinkConsumeResult, MagicLinkRecord};
+use crate::auth::refresh::{RefreshTokenRecord, RefreshTokenRotationResult};
 use crate::engine::batch_commit::{BufferedFile, commit_buffered_files_with_kind};
 use crate::engine::directory_ops::{DirectoryOps, FileDeletionRequest};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
-use crate::engine::json_store::{JsonDoc, JsonStore};
+use crate::engine::json_store::{JsonDoc, JsonStore, JsonStoreMutation};
 use crate::engine::namespace_mutation::NamespaceMutationKind;
 use crate::engine::peer_connection::PeerConfig;
 use crate::engine::request_context::RequestContext;
 use crate::engine::schema_version::JsonVersioned;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::user::{User, validate_user_id};
+use crate::engine::user::{ROOT_USER_ID, User, validate_user_id};
+
+const CREDENTIAL_RECORD_MAX_BYTES: u64 = 1024 * 1024;
+
+fn ensure_credential_record_bounded<T: JsonVersioned>(record: &T, role: &str) -> EngineResult<()> {
+  let serialized_bytes = record.serialize_versioned().len() as u64;
+  if serialized_bytes > CREDENTIAL_RECORD_MAX_BYTES {
+    return Err(EngineError::ResourceExhausted(format!(
+      "{role} record is {serialized_bytes} bytes, exceeding the {CREDENTIAL_RECORD_MAX_BYTES}-byte credential limit"
+    )));
+  }
+  Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -51,9 +63,8 @@ pub fn get_config(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<
 // API Keys
 // ---------------------------------------------------------------------------
 
-/// Store an API key record.
-/// SECURITY: Validates that user_id is not the nil UUID (root).
-/// Use `store_api_key_for_bootstrap` for the root bootstrap key only.
+/// Store a non-root user or share-link API key record.
+/// Root-owned keys require an explicitly root-authorized caller.
 pub fn store_api_key(engine: &StorageEngine, ctx: &RequestContext, record: &ApiKeyRecord) -> EngineResult<()> {
   if let Some(ref uid) = record.user_id {
     validate_user_id(uid)?;
@@ -61,10 +72,20 @@ pub fn store_api_key(engine: &StorageEngine, ctx: &RequestContext, record: &ApiK
   store_api_key_unchecked(engine, ctx, record)
 }
 
-/// SECURITY WARNING: This method allows storing an API key with the nil UUID
-/// (root user_id). It exists SOLELY for the bootstrap process that creates
-/// the initial root API key. NEVER expose this method to any external
-/// interface (HTTP, WASM plugins, native plugins, admin paths).
+/// Store a root-owned API key after the caller has authenticated root
+/// authority. This rejects non-root records so the bypass cannot accidentally
+/// weaken ordinary user-ID validation.
+pub fn store_api_key_with_root_authority(engine: &StorageEngine, ctx: &RequestContext, record: &ApiKeyRecord) -> EngineResult<()> {
+  if record.user_id != Some(ROOT_USER_ID) {
+    return Err(EngineError::InvalidInput("root-authorized API-key storage requires the root user ID".to_string()));
+  }
+  store_api_key_unchecked(engine, ctx, record)
+}
+
+/// Compatibility entry point for initial database bootstrap and legacy
+/// internal fixture/setup callers. This preserves its historical unchecked
+/// behavior; authenticated routes are source-gated onto
+/// `store_api_key_with_root_authority` instead.
 pub fn store_api_key_for_bootstrap(engine: &StorageEngine, ctx: &RequestContext, record: &ApiKeyRecord) -> EngineResult<()> {
   store_api_key_unchecked(engine, ctx, record)
 }
@@ -73,6 +94,7 @@ static API_KEY_STORE: JsonStore<ApiKeyRecord> = JsonStore::new("/.aeordb-system/
 
 /// Internal: store an API key record without user_id validation.
 fn store_api_key_unchecked(engine: &StorageEngine, ctx: &RequestContext, record: &ApiKeyRecord) -> EngineResult<()> {
+  ensure_credential_record_bounded(record, "API key")?;
   API_KEY_STORE.put(engine, ctx, &record.key_id.to_string(), record)
 }
 
@@ -101,13 +123,54 @@ pub fn list_api_keys(engine: &StorageEngine) -> EngineResult<Vec<ApiKeyRecord>> 
 /// Revoke an API key by setting is_revoked = true.
 /// Returns true if the key was found, false otherwise.
 pub fn revoke_api_key(engine: &StorageEngine, ctx: &RequestContext, key_id: Uuid) -> EngineResult<bool> {
-  let mut record = match API_KEY_STORE.get(engine, &key_id.to_string())? {
-    Some(record) => record,
-    None => return Ok(false),
-  };
-  record.is_revoked = true;
-  API_KEY_STORE.put(engine, ctx, &key_id.to_string(), &record)?;
-  Ok(true)
+  Ok(revoke_api_key_with_policy(engine, ctx, key_id, ApiKeyRevokePolicy::Any)?.is_revoked())
+}
+
+/// Revoke one key only when the stored record matches the caller's explicit
+/// policy. Lookup, policy validation, idempotence, and replacement share one
+/// namespace authority window.
+pub fn revoke_api_key_with_policy(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  key_id: Uuid,
+  policy: ApiKeyRevokePolicy,
+) -> EngineResult<ApiKeyRevokeResult> {
+  API_KEY_STORE.transform(engine, ctx, &key_id.to_string(), CREDENTIAL_RECORD_MAX_BYTES, move |current| {
+    let Some(mut record) = current else {
+      return Ok(JsonStoreMutation::Keep(ApiKeyRevokeResult::NotFound));
+    };
+    if !policy.accepts(&record) {
+      return Ok(JsonStoreMutation::Keep(ApiKeyRevokeResult::PolicyMismatch));
+    }
+    if record.is_revoked {
+      return Ok(JsonStoreMutation::Keep(ApiKeyRevokeResult::AlreadyRevoked));
+    }
+    record.is_revoked = true;
+    Ok(JsonStoreMutation::Replace { value: record, output: ApiKeyRevokeResult::Revoked })
+  })
+}
+
+/// Update one API-key label through typed versioned authority.
+/// `None` preserves the current label and performs no write.
+pub fn update_api_key_label(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  key_id: Uuid,
+  label: Option<String>,
+) -> EngineResult<Option<ApiKeyRecord>> {
+  API_KEY_STORE.transform(engine, ctx, &key_id.to_string(), CREDENTIAL_RECORD_MAX_BYTES, move |current| {
+    let Some(mut record) = current else {
+      return Ok(JsonStoreMutation::Keep(None));
+    };
+    let Some(label) = label else {
+      return Ok(JsonStoreMutation::Keep(Some(record)));
+    };
+    if record.label.as_ref() == Some(&label) {
+      return Ok(JsonStoreMutation::Keep(Some(record)));
+    }
+    record.label = Some(label);
+    Ok(JsonStoreMutation::Replace { value: record.clone(), output: Some(record) })
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +320,7 @@ static MAGIC_LINK_STORE: JsonStore<MagicLinkRecord> = JsonStore::new("/.aeordb-s
 
 /// Store a magic link record.
 pub fn store_magic_link(engine: &StorageEngine, ctx: &RequestContext, record: &MagicLinkRecord) -> EngineResult<()> {
+  ensure_credential_record_bounded(record, "magic link")?;
   MAGIC_LINK_STORE.put(engine, ctx, &record.code_hash, record)
 }
 
@@ -267,12 +331,41 @@ pub fn get_magic_link(engine: &StorageEngine, code_hash: &str) -> EngineResult<O
 
 /// Mark a magic link as used.
 pub fn mark_magic_link_used(engine: &StorageEngine, ctx: &RequestContext, code_hash: &str) -> EngineResult<()> {
-  let mut record = match get_magic_link(engine, code_hash)? {
-    Some(record) => record,
-    None => return Err(EngineError::NotFound(format!("magic link not found: {}", code_hash))),
-  };
-  record.is_used = true;
-  store_magic_link(engine, ctx, &record)
+  let requested_hash = code_hash.to_string();
+  MAGIC_LINK_STORE.transform(engine, ctx, code_hash, CREDENTIAL_RECORD_MAX_BYTES, move |current| {
+    let Some(mut record) = current else {
+      return Err(EngineError::NotFound(format!("magic link not found: {requested_hash}")));
+    };
+    if record.is_used {
+      return Ok(JsonStoreMutation::Keep(()));
+    }
+    record.is_used = true;
+    Ok(JsonStoreMutation::Replace { value: record, output: () })
+  })
+}
+
+/// Atomically consume an active magic link. Only the caller that changes the
+/// stored record from unused to used receives `Consumed`; concurrent or later
+/// callers receive `AlreadyUsed` without another write.
+pub fn consume_magic_link(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  code_hash: &str,
+  now: chrono::DateTime<chrono::Utc>,
+) -> EngineResult<MagicLinkConsumeResult> {
+  MAGIC_LINK_STORE.transform(engine, ctx, code_hash, CREDENTIAL_RECORD_MAX_BYTES, move |current| {
+    let Some(mut record) = current else {
+      return Ok(JsonStoreMutation::Keep(MagicLinkConsumeResult::NotFound));
+    };
+    if record.is_used {
+      return Ok(JsonStoreMutation::Keep(MagicLinkConsumeResult::AlreadyUsed));
+    }
+    if record.expires_at < now {
+      return Ok(JsonStoreMutation::Keep(MagicLinkConsumeResult::Expired));
+    }
+    record.is_used = true;
+    Ok(JsonStoreMutation::Replace { value: record.clone(), output: MagicLinkConsumeResult::Consumed(record) })
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +376,7 @@ static REFRESH_TOKEN_STORE: JsonStore<RefreshTokenRecord> = JsonStore::new("/.ae
 
 /// Store a refresh token record.
 pub fn store_refresh_token(engine: &StorageEngine, ctx: &RequestContext, record: &RefreshTokenRecord) -> EngineResult<()> {
+  ensure_credential_record_bounded(record, "refresh token")?;
   REFRESH_TOKEN_STORE.put(engine, ctx, &record.token_hash, record)
 }
 
@@ -294,13 +388,39 @@ pub fn get_refresh_token(engine: &StorageEngine, token_hash: &str) -> EngineResu
 /// Revoke a refresh token by setting is_revoked = true.
 /// Returns true if the token was found, false otherwise.
 pub fn revoke_refresh_token(engine: &StorageEngine, ctx: &RequestContext, token_hash: &str) -> EngineResult<bool> {
-  let mut record = match REFRESH_TOKEN_STORE.get(engine, token_hash)? {
-    Some(record) => record,
-    None => return Ok(false),
-  };
-  record.is_revoked = true;
-  REFRESH_TOKEN_STORE.put(engine, ctx, token_hash, &record)?;
-  Ok(true)
+  REFRESH_TOKEN_STORE.transform(engine, ctx, token_hash, CREDENTIAL_RECORD_MAX_BYTES, |current| {
+    let Some(mut record) = current else {
+      return Ok(JsonStoreMutation::Keep(false));
+    };
+    if record.is_revoked {
+      return Ok(JsonStoreMutation::Keep(true));
+    }
+    record.is_revoked = true;
+    Ok(JsonStoreMutation::Replace { value: record, output: true })
+  })
+}
+
+/// Atomically claim an active refresh token for rotation. Exactly one caller
+/// can change the token from active to revoked and receive its record.
+pub fn claim_refresh_token_rotation(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  token_hash: &str,
+  now: chrono::DateTime<chrono::Utc>,
+) -> EngineResult<RefreshTokenRotationResult> {
+  REFRESH_TOKEN_STORE.transform(engine, ctx, token_hash, CREDENTIAL_RECORD_MAX_BYTES, move |current| {
+    let Some(mut record) = current else {
+      return Ok(JsonStoreMutation::Keep(RefreshTokenRotationResult::NotFound));
+    };
+    if record.is_revoked {
+      return Ok(JsonStoreMutation::Keep(RefreshTokenRotationResult::AlreadyRevoked));
+    }
+    if record.expires_at < now {
+      return Ok(JsonStoreMutation::Keep(RefreshTokenRotationResult::Expired));
+    }
+    record.is_revoked = true;
+    Ok(JsonStoreMutation::Replace { value: record.clone(), output: RefreshTokenRotationResult::Claimed(record) })
+  })
 }
 
 // ---------------------------------------------------------------------------

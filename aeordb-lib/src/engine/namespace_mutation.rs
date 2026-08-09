@@ -131,19 +131,6 @@ impl NamespaceMutationFanout for NoopNamespaceMutationFanout {
   fn publish(&self, _acknowledgement: &NamespaceMutationAcknowledgement) {}
 }
 
-struct RootPublicationFanout<'a> {
-  engine: &'a StorageEngine,
-}
-
-impl NamespaceMutationFanout for RootPublicationFanout<'_> {
-  fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
-    self.engine.counters().record_write(0);
-    if let Err(error) = self.engine.counters().reconcile_live_namespace_from_head(self.engine) {
-      tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not reconcile live namespace counters");
-    }
-  }
-}
-
 #[derive(Debug)]
 struct PlannedEntryWrite {
   entry_type: EntryType,
@@ -180,6 +167,7 @@ pub struct NamespaceMutationBatch {
   write_keys: HashSet<Vec<u8>>,
   source_identities: Vec<NamespaceMutationSourceIdentity>,
   head_hash: Option<Vec<u8>>,
+  whole_root_publication: bool,
 }
 
 impl NamespaceMutationBatch {
@@ -191,6 +179,7 @@ impl NamespaceMutationBatch {
       write_keys: HashSet::new(),
       source_identities: Vec::new(),
       head_hash: None,
+      whole_root_publication: false,
     }
   }
 
@@ -252,8 +241,19 @@ impl NamespaceMutationBatch {
     Ok(())
   }
 
-  pub fn set_head_hash(&mut self, head_hash: Vec<u8>) {
+  /// Publish a HEAD rebuilt incrementally from the current namespace. This is
+  /// crate-private because external callers cannot prove which targeted cache
+  /// entries their planner changed.
+  pub(crate) fn set_incremental_head_hash(&mut self, head_hash: Vec<u8>) {
     self.head_hash = Some(head_hash);
+  }
+
+  /// Select an already-materialized namespace root rather than publishing an
+  /// incrementally rebuilt HEAD. The coordinator owns the complete cache
+  /// invalidation that must follow this kind of root replacement.
+  pub fn set_whole_root_hash(&mut self, head_hash: Vec<u8>) {
+    self.head_hash = Some(head_hash);
+    self.whole_root_publication = true;
   }
 
   fn reserve_write_key(&mut self, key: &[u8], role: &str) -> EngineResult<()> {
@@ -321,6 +321,22 @@ impl NamespaceMutationBatch {
       }
       if let Some(identity) = source.new_identity.as_ref() {
         validate_hash_width(identity, hash_length, "new source identity")?;
+      }
+    }
+    if self.whole_root_publication {
+      let head_hash =
+        self.head_hash.as_ref().ok_or_else(|| EngineError::InvalidInput("whole-root publication requires a HEAD hash".to_string()))?;
+      let previous_root_hash = engine.head_hash()?;
+      let has_canonical_root_identity = self.source_identities.iter().any(|source| {
+        source.path == "/"
+          && source.entry_type == Some(EntryType::DirectoryIndex.to_u8())
+          && source.previous_identity.as_deref() == Some(previous_root_hash.as_slice())
+          && source.new_identity.as_deref() == Some(head_hash.as_slice())
+      });
+      if !has_canonical_root_identity {
+        return Err(EngineError::InvalidInput(
+          "whole-root publication requires a canonical '/' DirectoryIndex source transition".to_string(),
+        ));
       }
     }
     Ok(estimated_dependency_bytes)
@@ -591,6 +607,7 @@ impl<'a> NamespaceMutationCoordinator<'a> {
     estimated_dependency_bytes: u64,
     namespace: crate::engine::storage_engine::NamespaceWriteGuard<'a>,
   ) -> EngineResult<NamespaceMutationAcknowledgement> {
+    let whole_root_publication = batch.whole_root_publication;
     let previous_root_hash = self.engine.head_hash()?;
     if batch.dependencies.is_empty()
       && batch.locator_mutations.is_empty()
@@ -677,6 +694,22 @@ impl<'a> NamespaceMutationCoordinator<'a> {
         "mutation_kind" => acknowledgement.kind.as_str()
       )
       .increment(1);
+      if whole_root_publication && acknowledgement.previous_root_hash != acknowledgement.root_hash {
+        if let Err(error) = self.engine.invalidate_all_authority_caches() {
+          tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not invalidate authority caches");
+        }
+        if let Err(error) = self.engine.clear_dir_content_cache() {
+          tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not clear the directory-content cache");
+        }
+        self.engine.counters().record_write(0);
+        if let Err(error) = self.engine.counters().reconcile_live_namespace_from_head(self.engine) {
+          tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not reconcile live namespace counters");
+        }
+      } else if let Err(error) =
+        self.engine.invalidate_caches_for_paths(acknowledgement.source_identities.iter().map(|identity| &identity.path))
+      {
+        tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Acknowledged namespace mutation could not invalidate authority caches");
+      }
       self.fanout.publish(&acknowledgement);
     }))
     .is_err()
@@ -698,7 +731,7 @@ pub fn publish_namespace_root(
   root_hash: &[u8],
   kind: NamespaceMutationKind,
 ) -> EngineResult<Option<NamespaceMutationAcknowledgement>> {
-  publish_namespace_root_checked(engine, None, root_hash, kind, Arc::new(RootPublicationFanout { engine }))
+  publish_namespace_root_checked(engine, None, root_hash, kind, Arc::new(NoopNamespaceMutationFanout))
 }
 
 /// Publish a namespace root only if HEAD still matches the caller's captured
@@ -710,7 +743,7 @@ pub fn publish_namespace_root_from(
   root_hash: &[u8],
   kind: NamespaceMutationKind,
 ) -> EngineResult<Option<NamespaceMutationAcknowledgement>> {
-  publish_namespace_root_checked(engine, Some(expected_root_hash), root_hash, kind, Arc::new(RootPublicationFanout { engine }))
+  publish_namespace_root_checked(engine, Some(expected_root_hash), root_hash, kind, Arc::new(NoopNamespaceMutationFanout))
 }
 
 pub fn publish_namespace_root_with_fanout<'a, F>(
@@ -766,7 +799,7 @@ where
       }
 
       let mut batch = NamespaceMutationBatch::new(kind);
-      batch.set_head_hash(requested_root.clone());
+      batch.set_whole_root_hash(requested_root.clone());
       batch.add_source_identity(NamespaceMutationSourceIdentity {
         path: "/".to_string(),
         entry_type: Some(EntryType::DirectoryIndex.to_u8()),

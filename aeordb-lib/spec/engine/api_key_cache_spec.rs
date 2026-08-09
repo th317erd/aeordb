@@ -285,15 +285,15 @@ fn concurrent_evict_all_and_get_do_not_panic() {
 }
 
 // ===========================================================================
-// Revoked key is still cached (cache doesn't check revocation)
+// Engine-owned authority cache follows acknowledged mutations
 // ===========================================================================
 
 #[test]
-fn revoked_key_is_still_returned_from_cache() {
+fn acknowledged_api_key_update_invalidates_engine_owned_cache() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let mut record = store_test_key(&engine);
 
-  let cache = Cache::new(ApiKeyLoader);
+  let cache = engine.api_key_cache.clone();
   let key_str = record.key_id.to_string();
 
   // Load into cache.
@@ -304,12 +304,30 @@ fn revoked_key_is_still_returned_from_cache() {
   let ctx = RequestContext::system();
   system_store::store_api_key(&engine, &ctx, &record).unwrap();
 
-  // Cache still holds the old (non-revoked) version until evicted.
+  // Namespace acknowledgement invalidates the authority cache before the
+  // mutation returns, so the next lookup must observe the new record.
   let cached = cache.get(&key_str, &engine).unwrap().unwrap();
-  assert!(!cached.is_revoked, "cached version should still show non-revoked until evicted");
+  assert!(cached.is_revoked, "acknowledged update must not leave stale API-key authority cached");
+}
 
-  // After explicit eviction, next fetch sees the revoked version.
-  cache.evict(&key_str).unwrap();
-  let refreshed = cache.get(&key_str, &engine).unwrap().unwrap();
-  assert!(refreshed.is_revoked, "after eviction, should see revoked=true");
+#[test]
+fn acknowledged_api_key_create_invalidates_negative_engine_owned_cache() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let key_id = Uuid::new_v4();
+  let key_string = key_id.to_string();
+  assert!(engine.api_key_cache.get(&key_string, &engine).unwrap().is_none());
+
+  let record = ApiKeyRecord {
+    key_id,
+    key_hash: hash_api_key("new-key").unwrap(),
+    user_id: Some(Uuid::new_v4()),
+    created_at: Utc::now(),
+    is_revoked: false,
+    expires_at: Utc::now().timestamp_millis() + 86_400_000,
+    label: None,
+    rules: vec![],
+  };
+  system_store::store_api_key(&engine, &RequestContext::system(), &record).unwrap();
+
+  assert_eq!(engine.api_key_cache.get(&key_string, &engine).unwrap().unwrap().key_id, key_id);
 }

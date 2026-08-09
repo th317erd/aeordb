@@ -160,18 +160,40 @@ Write /users/alice.json
 
 Each directory gets a new content hash because its contents changed. This is how the Merkle tree works -- a change at any leaf creates new hashes all the way to the root. The root hash (HEAD) uniquely identifies the complete state of the database.
 
-## Unified Cache
+## Unified Authority Caches
 
-AeorDB uses an eviction-based cache (no TTL) for frequently accessed metadata:
+Every storage engine owns bounded, memory-coordinator-accounted caches for
+frequently accessed authority and metadata:
 
-| Cached Data | Evicted On |
-|-------------|------------|
-| Permissions | Write, delete, or rename of `.aeordb-permissions` files |
-| Index configs | Write or delete of `.aeordb-config/indexes.json` |
-| Groups | Group membership changes |
-| API keys | Key creation, revocation, or expiration |
+| Cached Data | Invalidated On |
+|-------------|----------------|
+| Permissions and grants index | Acknowledged write, delete, or rename of `.aeordb-permissions` files |
+| Index configs | Acknowledged write, delete, or rename of `.aeordb-config/indexes.json` |
+| Groups | Acknowledged user or group authority change |
+| API keys | Acknowledged API-key creation, update, or revocation |
 
-Cache entries live indefinitely until explicitly evicted by a write, delete, or rename that affects the underlying data. This avoids stale-read windows that TTL-based caches introduce -- the cache is always consistent with the storage layer.
+Invalidation is a post-acknowledgement coordinator responsibility, not
+route-local or producer-specific fanout cleanup. For ordinary mutations the
+coordinator derives targeted invalidations from the acknowledged canonical
+source paths; a whole-root publication clears every authority cache. Embedded,
+HTTP, plugin, sync, restore, and custom-fanout producers therefore converge on
+the same behavior. If invalidation itself fails, AeorDB logs the failure and
+subsequent access to a poisoned cache fails closed; the already durable mutation
+is never converted into a retryable HTTP failure.
+
+Whole-root replacement is an explicit namespace-batch contract. The shared
+coordinator validates the exact `/` root transition and performs complete
+authority and directory-content cache invalidation after hard publication,
+before any caller-specific counter or event fanout. Incremental HEAD updates
+remain crate-private to the directory planner, so import, restore, plugin, and
+embedded callers cannot accidentally bypass whole-root invalidation with a
+custom fanout.
+
+Clean entries are admitted through the process memory coordinator and may be
+evicted under pressure. Cache correctness never depends on retention: a miss
+reloads the current stored authority. With `--auth file://...`, the main data
+engine owns permission/group authority while the separate identity engine owns
+the API-key cache and API-key records.
 
 ### KV Type Index
 

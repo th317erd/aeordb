@@ -281,7 +281,7 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
 }
 
 fn require_active_api_key(state: &AppState, key_id: &str) -> Result<ApiKeyRecord, Response> {
-  let key_record = match state.api_key_cache.get(&key_id.to_string(), &state.engine) {
+  let key_record = match state.api_key_cache.get(&key_id.to_string(), &state.auth_engine) {
     Ok(Some(record)) => record,
     Ok(None) => {
       return Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key not found".to_string(), code: None })).into_response());

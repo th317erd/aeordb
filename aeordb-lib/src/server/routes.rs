@@ -12,7 +12,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use uuid::Uuid;
 
-use super::cache_invalidation::evict_caches_for_path;
 use super::responses::{require_root, ErrorResponse};
 use super::state::AppState;
 use crate::engine::RequestContext;
@@ -22,7 +21,9 @@ use crate::auth::{
   hash_magic_link_code, generate_refresh_token, hash_refresh_token,
 };
 use crate::auth::magic_link::MagicLinkRecord;
-use crate::auth::refresh::{RefreshTokenRecord, DEFAULT_REFRESH_EXPIRY_SECONDS};
+use crate::auth::magic_link::MagicLinkConsumeResult;
+use crate::auth::api_key::{ApiKeyRevokePolicy, ApiKeyRevokeResult};
+use crate::auth::refresh::{DEFAULT_REFRESH_EXPIRY_SECONDS, RefreshTokenRecord, RefreshTokenRotationResult};
 use crate::engine::system_store;
 
 pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
@@ -191,6 +192,7 @@ pub async fn invoke_plugin(
     &plugin_path,
     &request_bytes,
     state.engine.clone(),
+    state.auth_engine.clone(),
     ctx,
     state.group_cache.clone(),
     state.api_key_cache.clone(),
@@ -574,7 +576,12 @@ pub async fn create_api_key(
     rules: vec![],
   };
 
-  if let Err(error) = state.auth_provider.store_api_key(&record) {
+  let store_result = if crate::engine::is_root(&target_user_id) {
+    state.auth_provider.store_api_key_with_root_authority(&record)
+  } else {
+    state.auth_provider.store_api_key(&record)
+  };
+  if let Err(error) = store_result {
     tracing::error!("Failed to store API key: {}", error);
     return ErrorResponse::new(
       "Failed to store API key: could not persist to storage. If this persists, check GET /system/health for system status".to_string(),
@@ -675,23 +682,22 @@ pub async fn revoke_api_key(
     }
   };
 
-  match state.auth_provider.revoke_api_key(parsed_key_id) {
-    Ok(true) => {
-      if let Err(error) = evict_caches_for_path(&state, &format!("/.aeordb-system/api-keys/{}", parsed_key_id)) {
-        return ErrorResponse::new(format!("API key revoked but cache invalidation failed: {error}"))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response();
-      }
-      (
-        StatusCode::OK,
-        Json(serde_json::json!({
-          "revoked": true,
-          "key_id": parsed_key_id,
-        })),
-      )
-        .into_response()
+  match state.auth_provider.revoke_api_key_with_policy(parsed_key_id, ApiKeyRevokePolicy::Any) {
+    Ok(ApiKeyRevokeResult::Revoked | ApiKeyRevokeResult::AlreadyRevoked) => (
+      StatusCode::OK,
+      Json(serde_json::json!({
+        "revoked": true,
+        "key_id": parsed_key_id,
+      })),
+    )
+      .into_response(),
+    Ok(ApiKeyRevokeResult::NotFound) => {
+      ErrorResponse::new(format!("API key not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response()
     }
-    Ok(false) => ErrorResponse::new(format!("API key not found: {}", parsed_key_id)).with_status(StatusCode::NOT_FOUND).into_response(),
+    Ok(ApiKeyRevokeResult::PolicyMismatch) => {
+      tracing::error!(%parsed_key_id, "Unrestricted API-key revocation reported a policy mismatch");
+      ErrorResponse::new("API key authority policy failed").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
+    }
     Err(error) => {
       tracing::error!("Failed to revoke API key: {}", error);
       ErrorResponse::new(
@@ -935,47 +941,36 @@ mod magic_link_route_tests {
 /// On success, returns a JWT. On any failure, returns 401.
 pub async fn verify_magic_link(State(state): State<AppState>, Query(query): Query<VerifyMagicLinkQuery>) -> Response {
   let code_hash = hash_magic_link_code(&query.code);
-
-  let record = match system_store::get_magic_link(&state.engine, &code_hash) {
-    Ok(Some(record)) => record,
-    Ok(None) => {
+  let ctx = RequestContext::with_bus(state.event_bus.clone());
+  let record = match system_store::consume_magic_link(&state.engine, &ctx, &code_hash, chrono::Utc::now()) {
+    Ok(MagicLinkConsumeResult::Consumed(record)) => record,
+    Ok(MagicLinkConsumeResult::NotFound) => {
       return ErrorResponse::new("Invalid or expired magic link. Request a new one via POST /auth/magic-link".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
-    Err(error) => {
-      tracing::error!("Failed to look up magic link: {}", error);
-      return ErrorResponse::new("Failed to verify magic link. Request a new one via POST /auth/magic-link".to_string())
+    Ok(MagicLinkConsumeResult::AlreadyUsed) => {
+      return ErrorResponse::new(
+        "Magic link already used. Each link can only be used once — request a new one via POST /auth/magic-link".to_string(),
+      )
+      .with_status(StatusCode::UNAUTHORIZED)
+      .into_response();
+    }
+    Ok(MagicLinkConsumeResult::Expired) => {
+      return ErrorResponse::new("Magic link expired. Request a new one via POST /auth/magic-link".to_string())
         .with_status(StatusCode::UNAUTHORIZED)
         .into_response();
     }
-  };
-
-  if record.is_used {
-    return ErrorResponse::new(
-      "Magic link already used. Each link can only be used once — request a new one via POST /auth/magic-link".to_string(),
-    )
-    .with_status(StatusCode::UNAUTHORIZED)
-    .into_response();
-  }
-
-  if record.expires_at < chrono::Utc::now() {
-    return ErrorResponse::new("Magic link expired. Request a new one via POST /auth/magic-link".to_string())
-      .with_status(StatusCode::UNAUTHORIZED)
+    Err(error) => {
+      tracing::error!("Failed to consume magic link: {}", error);
+      return ErrorResponse::new(
+        "An unexpected error occurred while processing the magic link. If this persists, check GET /system/health for system status"
+          .to_string(),
+      )
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
       .into_response();
-  }
-
-  // Mark as used.
-  let ctx = RequestContext::with_bus(state.event_bus.clone());
-  if let Err(error) = system_store::mark_magic_link_used(&state.engine, &ctx, &code_hash) {
-    tracing::error!("Failed to mark magic link as used: {}", error);
-    return ErrorResponse::new(
-      "An unexpected error occurred while processing the magic link. If this persists, check GET /system/health for system status"
-        .to_string(),
-    )
-    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    .into_response();
-  }
+    }
+  };
 
   // Issue a JWT for this email.
   // Look up the user by email so we can use their UUID as `sub`.
@@ -1093,7 +1088,7 @@ pub async fn refresh_token(State(state): State<AppState>, Json(payload): Json<Re
   // (issued by this version) carry their key_id and get strict validation.
   if let Some(ref key_id_str) = record.key_id {
     match uuid::Uuid::parse_str(key_id_str) {
-      Ok(kid) => match system_store::get_api_key(&state.engine, kid) {
+      Ok(kid) => match state.api_key_cache.get(&kid.to_string(), &state.auth_engine) {
         Ok(Some(api_key)) => {
           if api_key.is_revoked {
             return ErrorResponse::new("API key has been revoked. Re-authenticate via POST /auth/token".to_string())
@@ -1127,17 +1122,37 @@ pub async fn refresh_token(State(state): State<AppState>, Json(payload): Json<Re
     }
   }
 
-  // Revoke the old refresh token (rotation).
+  // Claim the old refresh token for rotation. The earlier read supports API-key
+  // validation, but only the request that wins this atomic transition may mint
+  // replacement credentials.
   let ctx = RequestContext::with_bus(state.event_bus.clone());
-  if let Err(error) = system_store::revoke_refresh_token(&state.engine, &ctx, &old_token_hash) {
-    tracing::error!("Failed to revoke old refresh token: {}", error);
-    return ErrorResponse::new(
-      "An unexpected error occurred while rotating the refresh token. If this persists, check GET /system/health for system status"
-        .to_string(),
-    )
-    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    .into_response();
-  }
+  let record = match system_store::claim_refresh_token_rotation(&state.engine, &ctx, &old_token_hash, chrono::Utc::now()) {
+    Ok(RefreshTokenRotationResult::Claimed(record)) => record,
+    Ok(RefreshTokenRotationResult::NotFound) => {
+      return ErrorResponse::new("Invalid refresh token: no matching token found. Re-authenticate via POST /auth/token".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+    Ok(RefreshTokenRotationResult::AlreadyRevoked) => {
+      return ErrorResponse::new("Refresh token has been revoked. Re-authenticate via POST /auth/token".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+    Ok(RefreshTokenRotationResult::Expired) => {
+      return ErrorResponse::new("Refresh token expired. Re-authenticate via POST /auth/token".to_string())
+        .with_status(StatusCode::UNAUTHORIZED)
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!("Failed to claim old refresh token for rotation: {}", error);
+      return ErrorResponse::new(
+        "An unexpected error occurred while rotating the refresh token. If this persists, check GET /system/health for system status"
+          .to_string(),
+      )
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
+    }
+  };
 
   // Issue a new JWT.
   let now = chrono::Utc::now().timestamp();
@@ -1148,7 +1163,7 @@ pub async fn refresh_token(State(state): State<AppState>, Json(payload): Json<Re
     exp: now + crate::auth::jwt::DEFAULT_EXPIRY_SECONDS,
     scope: None,
     permissions: None,
-    key_id: None,
+    key_id: record.key_id.clone(),
   };
 
   let token = match state.jwt_manager.create_token(&claims) {

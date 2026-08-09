@@ -13,7 +13,7 @@ use arc_swap::ArcSwap;
 
 use crate::engine::append_writer::{read_span_at, AppendWriter};
 use crate::engine::cache::{Cache, CleanCache};
-use crate::engine::cache_loaders::{PermissionsLoader, IndexConfigLoader};
+use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader, IndexConfigLoader, PermissionsLoader};
 use crate::engine::compression::CompressionAlgorithm;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::durability_coordinator::{
@@ -36,6 +36,7 @@ use crate::engine::memory_coordinator::{
 };
 use crate::engine::native_durability::sync_file_all_native;
 use crate::engine::operation_memory::OperationMemoryBudget;
+use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::query_runtime::{QueryRequestBudget, QueryRuntime, QueryRuntimePolicy, QueryRuntimeSnapshot};
 use serde::Serialize;
 
@@ -538,6 +539,8 @@ pub struct EngineCacheMemoryStats {
   pub permissions_entries: usize,
   pub index_config_entries: usize,
   pub grants_index_entries: usize,
+  pub group_entries: usize,
+  pub api_key_entries: usize,
 }
 
 struct EngineMemoryInputs {
@@ -547,6 +550,8 @@ struct EngineMemoryInputs {
   permissions: crate::engine::cache::CleanCacheStats,
   index_config: crate::engine::cache::CleanCacheStats,
   grants: crate::engine::cache::CleanCacheStats,
+  groups: crate::engine::cache::CleanCacheStats,
+  api_keys: crate::engine::cache::CleanCacheStats,
 }
 
 fn memory_policy_from_config_shadow(report: &crate::engine::config_resolver::ConfigShadowReport) -> Result<MemoryPolicy, String> {
@@ -668,6 +673,8 @@ pub struct StorageEngine {
   pub permissions_cache: Arc<Cache<PermissionsLoader>>,
   pub index_config_cache: Arc<Cache<IndexConfigLoader>>,
   pub grants_index_cache: Arc<Cache<crate::engine::grants_index::GrantsIndexLoader>>,
+  pub group_cache: Arc<Cache<GroupLoader>>,
+  pub api_key_cache: Arc<Cache<ApiKeyLoader>>,
   pub(crate) last_auto_snapshot_delete: std::sync::atomic::AtomicI64,
   pub(crate) last_auto_snapshot_restore: std::sync::atomic::AtomicI64,
   pub(crate) last_manual_snapshot: std::sync::atomic::AtomicI64,
@@ -1060,6 +1067,8 @@ impl StorageEngine {
     self.permissions_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
     self.index_config_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
     self.grants_index_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
+    self.group_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
+    self.api_key_cache.activate_bounded((*coordinator).clone(), server_cache_max_bytes)?;
     self.activate_bounded_index_cache()?;
     Ok(())
   }
@@ -1140,7 +1149,9 @@ impl StorageEngine {
     let permissions = self.permissions_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
     let index_config = self.index_config_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
     let grants = self.grants_index_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
-    Ok(EngineMemoryInputs { process, index, directory, permissions, index_config, grants })
+    let groups = self.group_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    let api_keys = self.api_key_cache.stats().map_err(|error| observation_failed(MemoryOwner::ServerCaches, error.to_string()))?;
+    Ok(EngineMemoryInputs { process, index, directory, permissions, index_config, grants, groups, api_keys })
   }
 
   fn memory_coordinator_snapshot_from_inputs(
@@ -1305,8 +1316,12 @@ impl StorageEngine {
     let permission_cache = &inputs.permissions;
     let index_config_cache = &inputs.index_config;
     let grants_cache = &inputs.grants;
-    let server_cache_bytes = [&permission_cache, &index_config_cache, &grants_cache]
-      .into_iter()
+    let group_cache = &inputs.groups;
+    let api_key_cache = &inputs.api_keys;
+    let server_caches = [permission_cache, index_config_cache, grants_cache, group_cache, api_key_cache];
+    let server_cache_bytes = server_caches
+      .iter()
+      .copied()
       .filter(|cache| cache.max_bytes.is_none())
       .fold(0u64, |total, cache| total.saturating_add(cache.resident_bytes));
     observations.insert(
@@ -1315,10 +1330,10 @@ impl StorageEngine {
         resident_bytes: server_cache_bytes,
         clean_bytes: server_cache_bytes,
         evictable_bytes: server_cache_bytes,
-        items: permission_cache.entries.saturating_add(index_config_cache.entries).saturating_add(grants_cache.entries) as u64,
-        hits: permission_cache.hits.saturating_add(index_config_cache.hits).saturating_add(grants_cache.hits),
-        misses: permission_cache.misses.saturating_add(index_config_cache.misses).saturating_add(grants_cache.misses),
-        evictions: permission_cache.evictions.saturating_add(index_config_cache.evictions).saturating_add(grants_cache.evictions),
+        items: server_caches.iter().fold(0usize, |total, cache| total.saturating_add(cache.entries)) as u64,
+        hits: server_caches.iter().fold(0u64, |total, cache| total.saturating_add(cache.hits)),
+        misses: server_caches.iter().fold(0u64, |total, cache| total.saturating_add(cache.misses)),
+        evictions: server_caches.iter().fold(0u64, |total, cache| total.saturating_add(cache.evictions)),
         ..Default::default()
       },
     );
@@ -2518,6 +2533,8 @@ impl StorageEngine {
       permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
       index_config_cache: Arc::new(Cache::new(IndexConfigLoader)),
       grants_index_cache: Arc::new(Cache::new(crate::engine::grants_index::GrantsIndexLoader)),
+      group_cache: Arc::new(Cache::new(GroupLoader)),
+      api_key_cache: Arc::new(Cache::new(ApiKeyLoader)),
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
@@ -2750,6 +2767,8 @@ impl StorageEngine {
       permissions_cache: Arc::new(Cache::new(PermissionsLoader)),
       index_config_cache: Arc::new(Cache::new(IndexConfigLoader)),
       grants_index_cache: Arc::new(Cache::new(crate::engine::grants_index::GrantsIndexLoader)),
+      group_cache: Arc::new(Cache::new(GroupLoader)),
+      api_key_cache: Arc::new(Cache::new(ApiKeyLoader)),
       last_auto_snapshot_delete: std::sync::atomic::AtomicI64::new(0),
       last_auto_snapshot_restore: std::sync::atomic::AtomicI64::new(0),
       last_manual_snapshot: std::sync::atomic::AtomicI64::new(0),
@@ -4200,9 +4219,96 @@ impl StorageEngine {
     self.dir_content_cache.clear()
   }
 
-  /// Best-effort sizes of the engine's in-memory caches. Returns
-  /// (permissions, index_config, dir_content) entry counts. Used by
-  /// soak-test instrumentation to attribute RSS growth to specific caches.
+  /// Invalidate authority-derived caches for acknowledged namespace paths.
+  /// This runs only after durable publication, so a failure is observable but
+  /// must never turn the committed mutation into a retryable caller error.
+  pub(crate) fn invalidate_caches_for_paths<I, P>(&self, paths: I) -> EngineResult<()>
+  where
+    I: IntoIterator<Item = P>,
+    P: AsRef<str>,
+  {
+    let mut permission_directories = HashSet::new();
+    let mut index_config_directories = HashSet::new();
+    let mut api_key_ids = HashSet::new();
+    let mut invalidate_grants = false;
+    let mut invalidate_groups = false;
+
+    for path in paths {
+      let normalized = normalize_path(path.as_ref());
+      if normalized == "/.aeordb-permissions" || normalized.ends_with("/.aeordb-permissions") {
+        permission_directories.insert(parent_path(&normalized).unwrap_or_else(|| "/".to_string()));
+        invalidate_grants = true;
+      }
+
+      if let Some(directory) = normalized.strip_suffix("/.aeordb-config/indexes.json") {
+        index_config_directories.insert(if directory.is_empty() { "/".to_string() } else { directory.to_string() });
+      }
+
+      if normalized.starts_with("/.aeordb-system/api-keys/") {
+        if let Some(key_id) = file_name(&normalized) {
+          api_key_ids.insert(key_id.to_string());
+        }
+      }
+
+      if normalized.starts_with("/.aeordb-system/groups/") || normalized.starts_with("/.aeordb-system/users/") {
+        invalidate_groups = true;
+      }
+    }
+
+    let mut failures = Vec::new();
+    for directory in permission_directories {
+      if let Err(error) = self.permissions_cache.evict(&directory) {
+        failures.push(format!("permissions cache '{directory}': {error}"));
+      }
+    }
+    for directory in index_config_directories {
+      if let Err(error) = self.index_config_cache.evict(&directory) {
+        failures.push(format!("index-config cache '{directory}': {error}"));
+      }
+    }
+    for key_id in api_key_ids {
+      if let Err(error) = self.api_key_cache.evict(&key_id) {
+        failures.push(format!("API-key cache '{key_id}': {error}"));
+      }
+    }
+    if invalidate_grants {
+      if let Err(error) = self.grants_index_cache.evict_all() {
+        failures.push(format!("grants-index cache: {error}"));
+      }
+    }
+    if invalidate_groups {
+      if let Err(error) = self.group_cache.evict_all() {
+        failures.push(format!("group cache: {error}"));
+      }
+    }
+    if !failures.is_empty() {
+      return Err(EngineError::IoError(std::io::Error::other(format!("authority-cache invalidation failed: {}", failures.join("; ")))));
+    }
+    Ok(())
+  }
+
+  /// Clear every cache whose contents are derived from mutable namespace
+  /// authority after a whole-root replacement.
+  pub(crate) fn invalidate_all_authority_caches(&self) -> EngineResult<()> {
+    let invalidations = [
+      ("permissions", self.permissions_cache.evict_all()),
+      ("index-config", self.index_config_cache.evict_all()),
+      ("grants-index", self.grants_index_cache.evict_all()),
+      ("groups", self.group_cache.evict_all()),
+      ("API keys", self.api_key_cache.evict_all()),
+    ];
+    let failures =
+      invalidations.into_iter().filter_map(|(name, result)| result.err().map(|error| format!("{name}: {error}"))).collect::<Vec<_>>();
+    if failures.is_empty() {
+      Ok(())
+    } else {
+      Err(EngineError::IoError(std::io::Error::other(format!("whole-root authority-cache invalidation failed: {}", failures.join("; ")))))
+    }
+  }
+
+  /// Best-effort sizes of this engine's in-memory caches. Used by soak-test
+  /// instrumentation and runtime diagnostics to attribute RSS growth to
+  /// specific owners.
   pub fn engine_cache_sizes(&self) -> (usize, usize, usize) {
     let perms = self.permissions_cache.len();
     let idx = self.index_config_cache.len();
@@ -4224,6 +4330,8 @@ impl StorageEngine {
       permissions_entries: inputs.permissions.entries,
       index_config_entries: inputs.index_config.entries,
       grants_index_entries: inputs.grants.entries,
+      group_entries: inputs.groups.entries,
+      api_key_entries: inputs.api_keys.entries,
     };
     let index_cache = IndexCacheMemoryStats {
       cached_indexes: index_stats.cached_indexes,

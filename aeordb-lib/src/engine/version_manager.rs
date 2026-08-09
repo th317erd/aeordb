@@ -56,13 +56,9 @@ impl NamespaceMutationFanout for VersionMutationFanout<'_> {
       return;
     };
 
-    if acknowledgement.previous_root_hash != acknowledgement.root_hash {
-      if let Err(error) = self.engine.counters().reconcile_live_namespace_from_head(self.engine) {
-        tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Version root transition could not reconcile live namespace counters");
-      }
+    if acknowledgement.previous_root_hash == acknowledgement.root_hash {
+      self.engine.counters().record_write(effects.throughput_bytes);
     }
-
-    self.engine.counters().record_write(effects.throughput_bytes);
     match effects.counter {
       VersionMutationCounterEffect::None => {}
       VersionMutationCounterEffect::SnapshotCreated => self.engine.counters().increment_snapshots(),
@@ -475,7 +471,7 @@ impl<'a> VersionManager<'a> {
       }
 
       let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Restore);
-      batch.set_head_hash(root_hash.clone());
+      batch.set_whole_root_hash(root_hash.clone());
       batch.add_source_identity(NamespaceMutationSourceIdentity {
         path: "/".to_string(),
         entry_type: Some(EntryType::DirectoryIndex.to_u8()),
@@ -672,7 +668,7 @@ impl<'a> VersionManager<'a> {
       let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::Promote);
       batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion_value, 0)?;
       batch.retire_locator(key.clone())?;
-      batch.set_head_hash(fork.root_hash.clone());
+      batch.set_whole_root_hash(fork.root_hash.clone());
       batch.add_source_identity(NamespaceMutationSourceIdentity {
         path: "/".to_string(),
         entry_type: Some(EntryType::DirectoryIndex.to_u8()),

@@ -13,8 +13,9 @@
 
 use std::marker::PhantomData;
 
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps};
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::namespace_mutation::NamespaceMutationKind;
 use crate::engine::request_context::RequestContext;
 use crate::engine::schema_version::JsonVersioned;
 use crate::engine::storage_engine::StorageEngine;
@@ -35,6 +36,11 @@ pub struct JsonStore<T> {
 pub struct JsonDoc<T> {
   path: &'static str,
   _phantom: PhantomData<T>,
+}
+
+pub(crate) enum JsonStoreMutation<T, O> {
+  Keep(O),
+  Replace { value: T, output: O },
 }
 
 impl<T> JsonDoc<T>
@@ -88,6 +94,34 @@ where
     let json = value.serialize_versioned();
     ops.store_file_buffered(ctx, &path, &json, Some("application/json"))?;
     Ok(())
+  }
+
+  /// Atomically read, decode, transform, and optionally replace one bounded
+  /// versioned document under namespace authority.
+  ///
+  /// Callers must expose typed operations around this internal callback. The
+  /// callback runs while namespace authority is held and must not perform I/O
+  /// or re-enter the engine.
+  pub(crate) fn transform<O, F>(
+    &self,
+    engine: &StorageEngine,
+    ctx: &RequestContext,
+    id: &str,
+    maximum_bytes: u64,
+    transform: F,
+  ) -> EngineResult<O>
+  where
+    F: FnOnce(Option<T>) -> EngineResult<JsonStoreMutation<T, O>>,
+  {
+    let ops = DirectoryOps::new(engine);
+    let path = self.path_for(id);
+    ops.transform_file_buffered(ctx, &path, Some("application/json"), maximum_bytes, NamespaceMutationKind::SystemWrite, move |existing| {
+      let current = existing.map(T::deserialize_versioned).transpose()?;
+      match transform(current)? {
+        JsonStoreMutation::Keep(output) => Ok(BufferedFileTransform::Keep(output)),
+        JsonStoreMutation::Replace { value, output } => Ok(BufferedFileTransform::Replace { data: value.serialize_versioned(), output }),
+      }
+    })
   }
 
   /// Retrieve the value at `<prefix>/<id>`. Returns `Ok(None)` if not found.

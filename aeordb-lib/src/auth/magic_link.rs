@@ -16,6 +16,14 @@ pub struct MagicLinkRecord {
   pub is_used: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum MagicLinkConsumeResult {
+  Consumed(MagicLinkRecord),
+  AlreadyUsed,
+  Expired,
+  NotFound,
+}
+
 /// Generate a cryptographically random magic link code (32 bytes, hex encoded).
 pub fn generate_magic_link_code() -> String {
   let mut bytes = [0u8; 32];

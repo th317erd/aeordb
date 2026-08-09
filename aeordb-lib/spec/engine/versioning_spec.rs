@@ -95,6 +95,60 @@ fn test_restore_snapshot() {
 }
 
 #[test]
+fn restore_snapshot_invalidates_every_engine_owned_authority_cache() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+  vm.create_snapshot(&ctx, "before-change", HashMap::new()).unwrap();
+  ops.create_directory(&ctx, "/later").unwrap();
+
+  engine.permissions_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.index_config_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.grants_index_cache.get(&(), &engine).unwrap();
+  engine.group_cache.get(&uuid::Uuid::new_v4(), &engine).unwrap();
+  engine.api_key_cache.get(&uuid::Uuid::new_v4().to_string(), &engine).unwrap();
+  assert!(engine.engine_cache_sizes().2 > 0);
+
+  vm.restore_snapshot(&ctx, "before-change").unwrap();
+
+  assert_eq!(engine.permissions_cache.len(), 0);
+  assert_eq!(engine.index_config_cache.len(), 0);
+  assert_eq!(engine.grants_index_cache.len(), 0);
+  assert_eq!(engine.group_cache.len(), 0);
+  assert_eq!(engine.api_key_cache.len(), 0);
+  assert_eq!(engine.engine_cache_sizes().2, 0);
+}
+
+#[test]
+fn snapshot_creation_does_not_invalidate_namespace_authority_caches() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let vm = VersionManager::new(&engine);
+  ops.create_directory(&ctx, "/data").unwrap();
+
+  engine.permissions_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.index_config_cache.get(&"/".to_string(), &engine).unwrap();
+  engine.grants_index_cache.get(&(), &engine).unwrap();
+  engine.group_cache.get(&uuid::Uuid::new_v4(), &engine).unwrap();
+  engine.api_key_cache.get(&uuid::Uuid::new_v4().to_string(), &engine).unwrap();
+  let directory_cache_entries = engine.engine_cache_sizes().2;
+  assert!(directory_cache_entries > 0);
+
+  vm.create_snapshot(&ctx, "cache-characterization", HashMap::new()).unwrap();
+
+  assert_eq!(engine.permissions_cache.len(), 1);
+  assert_eq!(engine.index_config_cache.len(), 1);
+  assert_eq!(engine.grants_index_cache.len(), 1);
+  assert_eq!(engine.group_cache.len(), 1);
+  assert_eq!(engine.api_key_cache.len(), 1);
+  assert_eq!(engine.engine_cache_sizes().2, directory_cache_entries);
+}
+
+#[test]
 fn test_restore_snapshot_rolls_back_state() {
   let ctx = RequestContext::system();
   let dir = tempfile::tempdir().unwrap();

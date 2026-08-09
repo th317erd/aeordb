@@ -363,7 +363,7 @@
       - [x] Remove Wave 2 direct FileRecord/path/directory/HEAD writers, legacy transaction ownership, pre-commit indexing, and duplicate parent-propagation helpers with source architecture gates.
       - [x] Update API/SDK/SSE documentation for atomic copy and acknowledgement behavior.
       - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 2 handoff.
-    - [ ] P2e Wave 3: converge version, backup, sync, conflict, and whole-HEAD transition producers on one namespace mutation and locator authority.
+    - [x] P2e Wave 3: converge version, backup, sync, conflict, and whole-HEAD transition producers on one namespace mutation and locator authority.
       - [x] Map snapshot restore, fork promotion, version restore, backup import/promote, sync receive/apply, conflict resolution, raw chunk staging, HEAD publication, counters, events, and checkpoint effects.
       - [x] Add failing operation-ledger, atomicity, malformed/corrupt input, missing chunk, delete-error, acknowledgement, fault, restart, memory-pressure, and architecture tests before production edits.
       - [x] Add one bounded whole-HEAD transition plan with explicit source identity and reconciliation evidence; do not materialize an unbounded per-file transaction.
@@ -414,6 +414,18 @@
         - [x] Converge cron configuration CRUD on one strict, atomic namespace mutation path without lost read-modify-write updates.
         - [x] Make scheduler config, task-list, expression, and enqueue failures observable and fail closed for the affected tick.
         - [x] Prove malformed storage, concurrent CRUD, task deduplication, restart, architecture, and live HTTP behavior.
+        - [x] Converge credential transitions and authorization-cache invalidation on engine authority.
+          - [x] Make each storage engine own its permission, group, grants, index-config, and API-key caches while preserving separate `file://` auth authority.
+          - [x] Invalidate affected caches from every coordinator acknowledgement and all caches from whole-root publication; remove route-local post-commit `500` paths.
+            - [x] Prove a custom fanout cannot bypass whole-root invalidation or live-counter reconciliation.
+            - [x] Prove a custom fanout cannot bypass path-derived cache invalidation for ordinary locator publication.
+          - [x] Add bounded atomic typed JSON transforms for API-key, magic-link, and refresh-token state transitions.
+          - [x] Make magic-link consumption and refresh-token rotation single-winner operations under concurrent requests.
+          - [x] Replace API-key list/check/revoke races with typed policy-based revocation and typed label update through `AuthProvider`.
+          - [x] Make whole-root cache invalidation coordinator-owned so custom import/version fanouts cannot bypass it.
+          - [x] Validate refresh-token issuing keys against the selected authentication engine, including separate `file://` identity authority and revocation after rotation.
+          - [x] Make authenticated root API-key creation use an explicit root-authority policy instead of misusing the initial-bootstrap escape hatch or returning `500`.
+          - [x] Prove embedded, HTTP, separate-auth-engine, malformed, oversized, concurrent, no-op, restart, and architecture behavior.
         - [ ] Correct the startup empty-root diagnostic so a database containing only concealed system state is not reported as possibly missing data; retain the warning for genuinely inconsistent roots.
       - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [ ] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
@@ -424,6 +436,7 @@
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
+    - [ ] P8: expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
   - [x] Reconcile dedicated IndexArtifacts with current snapshot, backup, and replication behavior.

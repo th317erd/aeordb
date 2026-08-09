@@ -898,7 +898,9 @@ Authentication is required. Share-link tokens are rejected. Root callers receive
     "caches": {
       "permissions_entries": 128,
       "index_config_entries": 16,
-      "grants_index_entries": 4
+      "grants_index_entries": 4,
+      "group_entries": 64,
+      "api_key_entries": 32
     },
     "estimated_engine_owned_bytes": 767557632
   },
@@ -920,6 +922,12 @@ Authentication is required. Share-link tokens are rejected. Root callers receive
   }
 }
 ```
+
+The `memory` object currently describes the primary data engine. With
+`--auth file://...`, API-key authority and its bounded cache live in a separate
+identity engine, so `memory.caches.api_key_entries` does not include that
+secondary engine yet. A future additive observability field will report it
+without double-counting `--auth self`.
 
 **Response sections:**
 
@@ -1079,7 +1087,11 @@ Create a new API key. The plaintext key is returned **only once** -- store it se
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `user_id` | string (UUID) | No | User to create the key for (defaults to the calling user) |
+| `user_id` | string (UUID) | No | User to create the key for (defaults to the authenticated root caller) |
+
+Omitting `user_id`, or supplying the nil/root UUID, creates another root-owned
+key through an explicit root-authority policy. This is distinct from initial
+database bootstrap: the route already requires an authenticated root token.
 
 **Response:** `201 Created`
 
@@ -1100,6 +1112,14 @@ curl -X POST http://localhost:6830/auth/keys/admin \
   -H "Content-Type: application/json" \
   -d '{"user_id": "550e8400-e29b-41d4-a716-446655440000"}'
 ```
+
+**Error Responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Malformed `user_id` |
+| 403 | Caller is not root |
+| 500 | Key hashing or storage authority failed |
 
 ---
 
@@ -1143,6 +1163,27 @@ Revoke an API key. Revoked keys cannot be used to obtain tokens. Requires root.
 |--------|-----------|
 | 400 | Invalid key ID format |
 | 404 | API key not found |
+
+Revocation is atomic and idempotent. The authority policy check and stored
+record update share one namespace transaction, and cache invalidation follows
+the hard acknowledgement. A cache failure cannot turn an already committed
+revocation into a retryable `500` response.
+
+---
+
+### PATCH /auth/keys/admin/{key_id}
+
+Update an API key's display label. Requires root.
+
+```json
+{
+  "label": "build service"
+}
+```
+
+The typed update reads and replaces the versioned key record atomically and
+preserves concurrent revocation state. A missing `label` leaves the current
+label unchanged without publishing another write.
 
 ---
 

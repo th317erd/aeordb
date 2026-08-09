@@ -304,7 +304,9 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
     "caches": {
       "permissions_entries": 128,
       "index_config_entries": 16,
-      "grants_index_entries": 4
+      "grants_index_entries": 4,
+      "group_entries": 64,
+      "api_key_entries": 32
     },
     "estimated_engine_owned_bytes": 767557632
   },
@@ -321,6 +323,10 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
   }
 }
 ```
+
+The metrics event's `memory` snapshot is for the primary data engine. A
+separate identity engine selected by `--auth file://...` owns its own bounded
+API-key cache and is not yet included in this object.
 
 `memory.process` is sampled from the operating system. Optional fields are `null` when unsupported. The index `estimated_*` fields and owner observations remain bounded estimates, while coordinator reservations are exact. Dirty reservations exclude flush scratch, so the `index_dirty_buffers` owner reconciles to `dirty_reserved_bytes + flush_reserved_bytes`. Clean index cache entries are evicted after the resolved idle TTL or cache cap; dirty and flushing generations remain reserved and non-evictable until publication succeeds or their exact state is restored after failure.
 

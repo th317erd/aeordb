@@ -1393,6 +1393,69 @@ fn wave_four_cron_uses_strict_atomic_config_and_observable_task_errors() {
 }
 
 #[test]
+fn wave_four_credentials_use_engine_owned_cache_fanout_and_typed_transitions() {
+  let storage = include_str!("../../src/engine/storage_engine.rs");
+  assert!(storage.contains("pub group_cache: Arc<Cache<GroupLoader>>"));
+  assert!(storage.contains("pub api_key_cache: Arc<Cache<ApiKeyLoader>>"));
+
+  let directory = include_str!("../../src/engine/directory_ops.rs");
+  assert!(!directory.contains("invalidate_caches_for_paths"));
+  let namespace = include_str!("../../src/engine/namespace_mutation.rs");
+  assert!(namespace.contains("invalidate_caches_for_paths"));
+  assert!(namespace.contains("invalidate_all_authority_caches"));
+  assert!(namespace.contains("reconcile_live_namespace_from_head"));
+  assert!(namespace.contains("pub(crate) fn set_incremental_head_hash"));
+  assert!(namespace.contains("pub fn set_whole_root_hash"));
+  assert!(namespace.contains("whole_root_publication && acknowledgement.previous_root_hash != acknowledgement.root_hash"));
+  assert!(directory.contains("set_incremental_head_hash"));
+  let version_manager = include_str!("../../src/engine/version_manager.rs");
+  let backup = include_str!("../../src/engine/backup.rs");
+  assert!(!version_manager.contains("set_incremental_head_hash"));
+  assert!(!backup.contains("set_incremental_head_hash"));
+  assert!(!version_manager.contains("reconcile_live_namespace_from_head"));
+  assert!(!backup.contains("reconcile_live_namespace_from_head"));
+
+  let system = include_str!("../../src/engine/system_store.rs");
+  assert!(system.contains("API_KEY_STORE.transform"));
+  assert!(system.contains("MAGIC_LINK_STORE.transform"));
+  assert!(system.contains("REFRESH_TOKEN_STORE.transform"));
+  let auth_provider = include_str!("../../src/auth/provider.rs");
+  assert!(
+    !auth_provider.contains("self.store_api_key_for_bootstrap(record)"),
+    "root authority must not default to the bootstrap escape hatch"
+  );
+
+  let server = include_str!("../../src/server/mod.rs");
+  assert!(server.contains("auth_engine"));
+  assert!(!server.contains("Cache::new_bounded(GroupLoader"));
+  assert!(!server.contains("Cache::new_bounded(ApiKeyLoader"));
+  let plugin_manager = include_str!("../../src/plugins/plugin_manager.rs");
+  assert!(plugin_manager.contains("pub fn invoke_wasm_plugin_with_auth("));
+  assert!(plugin_manager.contains("pub fn invoke_wasm_plugin_with_authority_engines("));
+  let wasm_runtime = include_str!("../../src/plugins/wasm_runtime.rs");
+  assert!(wasm_runtime.contains("pub fn call_handle_with_context("));
+  assert!(wasm_runtime.contains("pub fn call_handle_with_authority_engines("));
+
+  for source in [
+    include_str!("../../src/server/routes.rs"),
+    include_str!("../../src/server/admin_routes.rs"),
+    include_str!("../../src/server/api_key_self_service_routes.rs"),
+    include_str!("../../src/server/share_link_routes.rs"),
+    include_str!("../../src/server/share_routes.rs"),
+    include_str!("../../src/server/engine_routes.rs"),
+    include_str!("../../src/server/version_routes.rs"),
+  ] {
+    assert!(!source.contains("evict_caches_for_path"), "routes must not own post-commit cache invalidation");
+  }
+  let admin = include_str!("../../src/server/admin_routes.rs");
+  assert!(!admin.contains("ops.read_file_buffered(&path)"), "API-key update must not manually deserialize outside authority");
+  for source in [include_str!("../../src/server/routes.rs"), include_str!("../../src/server/api_key_self_service_routes.rs")] {
+    assert!(!source.contains("store_api_key_for_bootstrap"), "authenticated routes must not masquerade as initial bootstrap");
+    assert!(source.contains("store_api_key_with_root_authority"));
+  }
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);
