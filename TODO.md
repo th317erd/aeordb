@@ -439,7 +439,7 @@
         - [ ] Converge legacy configuration, email configuration, and system-path migration authority.
           - [x] Validate and bound legacy config keys/values and make JWT first initialization single-winner.
           - [x] Bound email authority and remove serialization error squelching.
-          - [ ] Replace split copy/delete migration with atomic per-entry moves, reject divergent canonical collisions, and preserve content metadata.
+          - [x] Replace split copy/delete migration with atomic per-entry moves, reject divergent canonical collisions, and preserve content metadata.
         - [ ] Classify every remaining swallowed system/plugin persistence failure as fatal, acknowledged soft evidence, or deferred Wave 5 work, and source-gate the approved direction.
       - [x] Converge multi-path share and unshare permission authority.
           - [x] Reject invalid, protected, over-expanded, corrupt, and later-failing requests before any permission publication.

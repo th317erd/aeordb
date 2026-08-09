@@ -86,6 +86,7 @@ fn sync_apply_preserves_remote_file_timestamps_for_merge_ordering() {
   file_record.path = "/timestamp-received.txt".to_string();
   file_record.created_at = 1_000;
   file_record.updated_at = 2_000;
+  file_record.metadata = b"remote-file-record-metadata".to_vec();
   let file_hash = aeordb::engine::file_identity_hash(
     &file_record.path,
     file_record.content_type.as_deref(),
@@ -99,6 +100,7 @@ fn sync_apply_preserves_remote_file_timestamps_for_merge_ordering() {
   let stored = DirectoryOps::new(&engine).get_metadata("/timestamp-received.txt").unwrap().unwrap();
   assert_eq!(stored.created_at, 1_000);
   assert_eq!(stored.updated_at, 2_000);
+  assert_eq!(stored.metadata, b"remote-file-record-metadata");
 }
 
 #[test]

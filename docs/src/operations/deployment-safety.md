@@ -85,6 +85,22 @@ For a first upgrade from a binary too old to inspect transition state, the
 compatible candidate performs the read-only inspection. For a downgrade, the
 installed compatible binary performs it on behalf of the old candidate.
 
+## Legacy System Path Migration
+
+During startup, AeorDB migrates the legacy `/.aeordb-system/apikeys/` and
+`/.aeordb-system/cluster/sync/` file families to their canonical
+`/.aeordb-system/api-keys/` and `/.aeordb-system/sync-peers/` paths. Each file
+move is one hard-acknowledged namespace transition. The engine reuses the
+existing chunks and preserves content type, size, timestamps, opaque metadata,
+content hash, and ordered chunk hashes.
+
+If both aliases exist with identical FileRecord authority, startup retires the
+legacy alias in one transition. If they differ, startup fails without changing
+either file and reports both paths for operator inspection. AeorDB does not
+guess which credential or peer state should win. Legacy FileRecord bodies are
+read through a 1 MiB bound and memory admission; an oversized or unadmittable
+record likewise fails before publication.
+
 ## Local Installation
 
 Pass every local database that the installed binary may open:

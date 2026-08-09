@@ -15,8 +15,9 @@ use aeordb::engine::schema_version::JsonVersioned;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::system_store;
 use aeordb::engine::user::{ROOT_USER_ID, User};
-use aeordb::engine::DirectoryOps;
-use aeordb::engine::EngineError;
+use aeordb::engine::{DirectoryOps, EngineError, EntryType};
+use aeordb::engine::directory_ops::{file_content_hash, file_identity_hash, file_path_hash, v0_system_entry_flags};
+use aeordb::engine::file_record::{CURRENT_FILE_RECORD_VERSION, FileRecord};
 use aeordb::server::create_temp_engine_for_tests;
 
 fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
@@ -37,6 +38,20 @@ fn make_api_key_record(user_id: Uuid) -> ApiKeyRecord {
     expires_at: Utc::now().timestamp_millis() + 86_400_000,
     label: Some("test key".to_string()),
     rules: Vec::new(),
+  }
+}
+
+fn replace_file_record_for_test(engine: &StorageEngine, record: &FileRecord) {
+  let algorithm = engine.hash_algo();
+  let serialized = record.serialize(algorithm.hash_length()).unwrap();
+  let keys = [
+    file_content_hash(&serialized, &algorithm).unwrap(),
+    file_identity_hash(&record.path, record.content_type.as_deref(), &record.chunk_hashes, &algorithm).unwrap(),
+    file_path_hash(&record.path, &algorithm).unwrap(),
+  ];
+  let flags = v0_system_entry_flags(&record.path);
+  for key in keys {
+    engine.store_entry_with_flags_and_version(EntryType::FileRecord, &key, &serialized, flags, CURRENT_FILE_RECORD_VERSION).unwrap();
   }
 }
 
@@ -1422,16 +1437,26 @@ fn test_migrate_apikeys_to_api_keys() {
   let old_path = format!("/.aeordb-system/apikeys/{}", key_id);
   ops.store_file_buffered(&ctx, &old_path, &json, Some("application/json")).unwrap();
 
+  let mut expected = ops.get_metadata(&old_path).unwrap().unwrap();
+  expected.created_at = 1_700_000_000_001;
+  expected.updated_at = 1_700_000_000_777;
+  expected.metadata = b"preserve-system-record-metadata".to_vec();
+  replace_file_record_for_test(&engine, &expected);
+
   // Verify old path exists before migration.
   assert!(ops.read_file_buffered(&old_path).is_ok());
 
   // Run migration.
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
   system_store::migrate_system_paths(&engine).unwrap();
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
 
   // Verify data now lives at the new path.
   let new_path = format!("/.aeordb-system/api-keys/{}", key_id);
   let migrated_data = ops.read_file_buffered(&new_path).unwrap();
   assert_eq!(migrated_data, json);
+  expected.path = new_path.clone();
+  assert_eq!(ops.get_metadata(&new_path).unwrap().unwrap(), expected);
 
   // Verify old path is gone.
   assert!(ops.read_file_buffered(&old_path).is_err());
@@ -1498,16 +1523,18 @@ fn test_migration_is_idempotent() {
 #[test]
 fn test_migration_skips_when_no_old_paths_exist() {
   let (engine, _dir) = setup();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
 
   // No old paths exist. Migration should succeed with no errors.
   system_store::migrate_system_paths(&engine).unwrap();
 
   // Running again should also be fine.
   system_store::migrate_system_paths(&engine).unwrap();
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
 }
 
 #[test]
-fn test_migration_preserves_existing_new_path_data() {
+fn test_migration_rejects_divergent_existing_new_path_without_writing() {
   let (engine, _dir) = setup();
   let ctx = test_context();
   let ops = DirectoryOps::new(&engine);
@@ -1524,12 +1551,129 @@ fn test_migration_preserves_existing_new_path_data() {
   let old_path = format!("/.aeordb-system/apikeys/{}", key_id);
   ops.store_file_buffered(&ctx, &old_path, old_data, Some("application/octet-stream")).unwrap();
 
-  // Run migration — should skip this entry because new path already exists.
+  let old_record = ops.get_metadata(&old_path).unwrap().unwrap();
+  let new_record = ops.get_metadata(&new_path).unwrap().unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  // Divergent aliases are ambiguous authority and must fail closed.
+  let error = system_store::migrate_system_paths(&engine).unwrap_err();
+  assert!(matches!(error, EngineError::CorruptEntry { reason, .. } if reason.contains("divergent system path aliases")));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+
+  assert_eq!(ops.read_file_buffered(&new_path).unwrap(), new_data.to_vec());
+  assert_eq!(ops.read_file_buffered(&old_path).unwrap(), old_data.to_vec());
+  assert_eq!(ops.get_metadata(&new_path).unwrap().unwrap(), new_record);
+  assert_eq!(ops.get_metadata(&old_path).unwrap().unwrap(), old_record);
+}
+
+#[test]
+fn test_migration_retires_an_identical_legacy_alias_in_one_sequence() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let ops = DirectoryOps::new(&engine);
+  let key_id = Uuid::new_v4();
+  let old_path = format!("/.aeordb-system/apikeys/{}", key_id);
+  let new_path = format!("/.aeordb-system/api-keys/{}", key_id);
+  let data = b"identical-authority";
+
+  ops.store_file_buffered(&ctx, &old_path, data, Some("application/json")).unwrap();
+  let old_record = ops.get_metadata(&old_path).unwrap().unwrap();
+  ops.store_file_buffered(&ctx, &new_path, data, Some("application/json")).unwrap();
+  let mut identical_new_record = old_record.clone();
+  identical_new_record.path = new_path.clone();
+  replace_file_record_for_test(&engine, &identical_new_record);
+
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
   system_store::migrate_system_paths(&engine).unwrap();
 
-  // The new path should retain its original data (not overwritten).
-  let result = ops.read_file_buffered(&new_path).unwrap();
-  assert_eq!(result, new_data.to_vec());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+  assert!(matches!(ops.read_file_buffered(&old_path), Err(EngineError::NotFound(_))));
+  assert_eq!(ops.read_file_buffered(&new_path).unwrap(), data);
+  assert_eq!(ops.get_metadata(&new_path).unwrap().unwrap(), identical_new_record);
+}
+
+#[test]
+fn test_migration_rejects_oversized_file_record_before_publication() {
+  let (engine, _dir) = setup();
+  let context = test_context();
+  let operations = DirectoryOps::new(&engine);
+  let key_id = Uuid::new_v4();
+  let old_path = format!("/.aeordb-system/apikeys/{key_id}");
+  let new_path = format!("/.aeordb-system/api-keys/{key_id}");
+  let data = b"bounded-migration-authority";
+
+  let mut oversized = operations.store_file_buffered(&context, &old_path, data, Some("application/json")).unwrap();
+  oversized.metadata = vec![0x5a; 1024 * 1024];
+  replace_file_record_for_test(&engine, &oversized);
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = system_store::migrate_system_paths(&engine).unwrap_err();
+
+  assert!(matches!(&error, EngineError::ResourceExhausted(_)), "unexpected oversized migration error: {error:?}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(operations.read_file_buffered(&old_path).unwrap(), data);
+  assert!(matches!(operations.read_file_buffered(&new_path), Err(EngineError::NotFound(_))));
+}
+
+#[test]
+fn test_migration_refuses_memory_pressure_before_publication() {
+  let (engine, _dir) = setup();
+  let context = test_context();
+  let operations = DirectoryOps::new(&engine);
+  let key_id = Uuid::new_v4();
+  let old_path = format!("/.aeordb-system/apikeys/{key_id}");
+  let new_path = format!("/.aeordb-system/api-keys/{key_id}");
+  let data = b"memory-bounded-migration";
+  operations.store_file_buffered(&context, &old_path, data, Some("application/json")).unwrap();
+
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let remaining = snapshot.policy.unwrap().emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+  let pressure = memory
+    .reserve(MemoryOwner::DurabilityWaiters, remaining.saturating_sub(1), AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite))
+    .unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = system_store::migrate_system_paths(&engine).unwrap_err();
+
+  assert!(matches!(error, EngineError::ResourceExhausted(_)));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  drop(pressure);
+  assert_eq!(operations.read_file_buffered(&old_path).unwrap(), data);
+  assert!(matches!(operations.read_file_buffered(&new_path), Err(EngineError::NotFound(_))));
+}
+
+#[test]
+fn test_concurrent_system_path_migrations_publish_one_winner() {
+  let (engine, _dir) = setup();
+  let context = test_context();
+  let operations = DirectoryOps::new(&engine);
+  let key_id = Uuid::new_v4();
+  let old_path = format!("/.aeordb-system/apikeys/{key_id}");
+  let new_path = format!("/.aeordb-system/api-keys/{key_id}");
+  let data = b"concurrent-migration-authority";
+  operations.store_file_buffered(&context, &old_path, data, Some("application/json")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let barrier = Arc::new(std::sync::Barrier::new(8));
+
+  std::thread::scope(|scope| {
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+      let engine = engine.clone();
+      let barrier = barrier.clone();
+      handles.push(scope.spawn(move || {
+        barrier.wait();
+        system_store::migrate_system_paths(&engine)
+      }));
+    }
+    for handle in handles {
+      handle.join().unwrap().unwrap();
+    }
+  });
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+  assert!(matches!(operations.read_file_buffered(&old_path), Err(EngineError::NotFound(_))));
+  assert_eq!(operations.read_file_buffered(&new_path).unwrap(), data);
 }
 
 #[test]
@@ -1548,8 +1692,10 @@ fn test_migration_handles_multiple_entries() {
     expected_data.insert(key_id, data);
   }
 
-  // Run migration.
+  // Run migration. Each independent entry is one acknowledged transition.
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
   system_store::migrate_system_paths(&engine).unwrap();
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + expected_data.len() as u64);
 
   // Verify all entries exist at new paths.
   for (key_id, data) in &expected_data {

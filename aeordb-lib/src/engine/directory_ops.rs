@@ -34,6 +34,8 @@ use crate::engine::SystemFamilyPolicyResolver;
 
 /// Default chunk size for splitting file data (256 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
+const SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES: u32 = 1024 * 1024;
+const SYSTEM_FILE_ALIAS_WORKSPACE_BYTES: u64 = SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES as u64 * 8;
 
 /// One bounded, live window from a directory listing.
 pub struct DirectoryListWindow {
@@ -322,6 +324,16 @@ fn validate_existing_file_chunks(engine: &StorageEngine, path: &str, chunk_hashe
   Ok(())
 }
 
+fn file_records_are_identical_aliases(left: &FileRecord, right: &FileRecord) -> bool {
+  left.content_type == right.content_type
+    && left.total_size == right.total_size
+    && left.created_at == right.created_at
+    && left.updated_at == right.updated_at
+    && left.metadata == right.metadata
+    && left.content_hash == right.content_hash
+    && left.chunk_hashes == right.chunk_hashes
+}
+
 fn validate_sync_file_record(engine: &StorageEngine, claimed_hash: &[u8], record: &FileRecord) -> EngineResult<()> {
   let algorithm = engine.hash_algo();
   let hash_length = algorithm.hash_length();
@@ -464,6 +476,7 @@ pub(crate) struct FileRecordPublishInput {
   pub normalized_path: String,
   pub content_type: Option<String>,
   pub total_size: u64,
+  pub metadata: Vec<u8>,
   pub chunk_hashes: Vec<Vec<u8>>,
   pub content_hash: Vec<u8>,
   pub flags: u8,
@@ -490,6 +503,13 @@ pub(crate) struct BatchFilePublicationInput {
 pub(crate) enum BufferedFileTransform<T> {
   Keep(T),
   Replace { data: Vec<u8>, output: T },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SystemFileAliasMigrationOutcome {
+  SourceMissing,
+  Moved,
+  IdenticalAliasRetired,
 }
 
 #[derive(Debug)]
@@ -543,6 +563,7 @@ fn prepare_buffered_file_publication(
       normalized_path,
       content_type: Some(content_type),
       total_size: data.len() as u64,
+      metadata: Vec::new(),
       chunk_hashes,
       content_hash: whole_file_content_hash(data, &algorithm)?,
       flags,
@@ -572,6 +593,7 @@ fn prepare_file_record_publication_at_version(
   };
 
   let mut file_record = FileRecord::new(normalized.clone(), input.content_type.clone(), input.total_size, input.chunk_hashes);
+  file_record.metadata = input.metadata;
   file_record.content_hash = input.content_hash;
 
   if input.prefer_existing_created_at {
@@ -1674,6 +1696,7 @@ impl<'a> DirectoryOps<'a> {
           normalized_path: normalized,
           content_type: record.content_type,
           total_size: record.total_size,
+          metadata: record.metadata,
           chunk_hashes: record.chunk_hashes,
           content_hash: record.content_hash,
           flags,
@@ -1954,6 +1977,7 @@ impl<'a> DirectoryOps<'a> {
             normalized_path: path.clone(),
             content_type: Some(detected_content_type),
             total_size: file.data.len() as u64,
+            metadata: Vec::new(),
             chunk_hashes,
             content_hash: whole_file_content_hash(&file.data, &algorithm)?,
             flags,
@@ -2011,6 +2035,7 @@ impl<'a> DirectoryOps<'a> {
                 normalized_path: path.clone(),
                 content_type: file_record.content_type.clone(),
                 total_size: file_record.total_size,
+                metadata: file_record.metadata.clone(),
                 chunk_hashes: file_record.chunk_hashes.clone(),
                 content_hash: file_record.content_hash.clone(),
                 flags: v0_system_entry_flags(&path),
@@ -2600,6 +2625,7 @@ impl<'a> DirectoryOps<'a> {
         normalized_path: normalized,
         content_type: Some(detected_content_type),
         total_size,
+        metadata: Vec::new(),
         chunk_hashes,
         content_hash,
         flags: sys_flags,
@@ -2729,6 +2755,7 @@ impl<'a> DirectoryOps<'a> {
         normalized_path: normalized,
         content_type: Some(detected_content_type),
         total_size,
+        metadata: Vec::new(),
         chunk_hashes,
         content_hash: whole_file_content_hash(data, &algo)?,
         flags: sys_flags,
@@ -5060,18 +5087,34 @@ impl<'a> DirectoryOps<'a> {
   }
 
   fn resolve_current_file_record_from(&self, engine: &StorageEngine, normalized: &str) -> EngineResult<Option<(Vec<u8>, FileRecord)>> {
+    self.resolve_current_file_record_from_bounded(engine, normalized, u32::MAX)
+  }
+
+  fn resolve_current_file_record_from_bounded(
+    &self,
+    engine: &StorageEngine,
+    normalized: &str,
+    maximum_value_length: u32,
+  ) -> EngineResult<Option<(Vec<u8>, FileRecord)>> {
     let Some(reference) = self.current_entry_reference_from(engine, normalized)? else {
       return Ok(None);
     };
     if reference.entry_type != EntryType::FileRecord {
       return Ok(None);
     }
-    let entry = if reference.root_selected {
-      engine.get_entry_verified_including_deleted(&reference.hash)?
+    let entry_result = if reference.root_selected {
+      engine.get_entry_including_deleted_verified_bounded(&reference.hash, maximum_value_length)
     } else {
-      engine.get_entry_verified(&reference.hash)?
-    }
-    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("current file '{normalized}' lost its selected record") })?;
+      engine.get_entry_verified_bounded(&reference.hash, maximum_value_length)
+    };
+    let entry = entry_result
+      .map_err(|error| match error {
+        EngineError::InvalidInput(reason) if reason.contains("exceeds caller bound") => {
+          EngineError::ResourceExhausted(format!("FileRecord '{normalized}' exceeds the {maximum_value_length}-byte read bound: {reason}"))
+        }
+        other => other,
+      })?
+      .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("current file '{normalized}' lost its selected record") })?;
     let (header, stored_key, value) = entry;
     if stored_key != reference.hash || header.entry_type != EntryType::FileRecord {
       return Err(EngineError::CorruptEntry { offset: 0, reason: format!("current file '{normalized}' resolved to the wrong record") });
@@ -5198,6 +5241,140 @@ impl<'a> DirectoryOps<'a> {
     })
   }
 
+  /// Atomically move one legacy detached-system file to its canonical alias.
+  /// Exact duplicate aliases converge by retiring only the legacy locator;
+  /// divergent aliases fail without publishing either side.
+  pub(crate) fn migrate_system_file_alias(
+    &self,
+    context: &RequestContext,
+    old_path: &str,
+    new_path: &str,
+  ) -> EngineResult<SystemFileAliasMigrationOutcome> {
+    let old_normalized = normalize_path(old_path);
+    let new_normalized = normalize_path(new_path);
+    if old_normalized == "/" || new_normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot migrate the root path as a system file".to_string()));
+    }
+    if old_normalized == new_normalized {
+      return Err(EngineError::InvalidInput("Legacy and canonical system paths are the same".to_string()));
+    }
+    if !v0_is_detached_system_path(&old_normalized) || !v0_is_detached_system_path(&new_normalized) {
+      return Err(EngineError::InvalidInput("System file alias migration requires two detached system paths".to_string()));
+    }
+
+    let algorithm = self.engine.hash_algo();
+    let old_file_key = file_path_hash(&old_normalized, &algorithm)?;
+    let mut memory = OperationMemoryBudget::new(
+      self.engine,
+      "system file alias migration planning",
+      MemoryOwner::DurabilityWaiters,
+      AdmissionClass::Workload,
+      0,
+      None,
+    )?;
+
+    self.execute_optional_namespace_mutation(Some(context), move |planning_engine| {
+      let Some(old_reference) = self.current_entry_reference_from(planning_engine, &old_normalized)? else {
+        return Ok((None, SystemFileAliasMigrationOutcome::SourceMissing));
+      };
+      if old_reference.entry_type != EntryType::FileRecord {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("legacy system path '{old_normalized}' resolves to {:?} instead of FileRecord", old_reference.entry_type),
+        });
+      }
+      memory.reserve(SYSTEM_FILE_ALIAS_WORKSPACE_BYTES, "system FileRecord alias migration admission failed")?;
+      let (old_identity, mut old_record) = self
+        .resolve_current_file_record_from_bounded(planning_engine, &old_normalized, SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES)?
+        .ok_or_else(|| EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("legacy system FileRecord '{old_normalized}' disappeared during authoritative migration planning"),
+        })?;
+      ensure_file_record_content_hash_for_migration(planning_engine, &mut old_record, &mut memory)?;
+      validate_existing_file_chunks(planning_engine, &old_normalized, &old_record.chunk_hashes)?;
+
+      let destination = self.current_entry_reference_from(planning_engine, &new_normalized)?;
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::SystemWrite);
+      let deletion = DeletionRecord::new(old_normalized.clone(), None);
+      let deletion_key = deletion_record_hash(&old_normalized, deletion.deleted_at, &algorithm)?;
+      batch.store_dependency(EntryType::DeletionRecord, deletion_key, deletion.serialize(), v0_system_entry_flags(&old_normalized))?;
+      if planning_engine.has_entry(&old_file_key)? {
+        batch.retire_locator(old_file_key.clone())?;
+      }
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: old_normalized.clone(),
+        entry_type: Some(EntryType::FileRecord.to_u8()),
+        previous_identity: Some(old_identity),
+        new_identity: None,
+      })?;
+
+      let mut planner = DirectoryMutationPlanner::default();
+      planner.remove_child(&old_normalized)?;
+      let outcome = if let Some(destination_reference) = destination {
+        if destination_reference.entry_type != EntryType::FileRecord {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!(
+              "canonical system path '{new_normalized}' resolves to {:?} instead of FileRecord",
+              destination_reference.entry_type
+            ),
+          });
+        }
+        let (destination_identity, mut destination_record) = self
+          .resolve_current_file_record_from_bounded(planning_engine, &new_normalized, SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES)?
+          .ok_or_else(|| EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("canonical system FileRecord '{new_normalized}' disappeared during authoritative migration planning"),
+          })?;
+        ensure_file_record_content_hash_for_migration(planning_engine, &mut destination_record, &mut memory)?;
+        validate_existing_file_chunks(planning_engine, &new_normalized, &destination_record.chunk_hashes)?;
+        if !file_records_are_identical_aliases(&old_record, &destination_record) {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("divergent system path aliases '{old_normalized}' and '{new_normalized}' require operator repair"),
+          });
+        }
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: new_normalized.clone(),
+          entry_type: Some(EntryType::FileRecord.to_u8()),
+          previous_identity: Some(destination_identity.clone()),
+          new_identity: Some(destination_identity),
+        })?;
+        SystemFileAliasMigrationOutcome::IdenticalAliasRetired
+      } else {
+        let prepared = prepare_file_record_publication_at_version(
+          planning_engine,
+          FileRecordPublishInput {
+            normalized_path: new_normalized.clone(),
+            content_type: old_record.content_type.clone(),
+            total_size: old_record.total_size,
+            metadata: old_record.metadata.clone(),
+            chunk_hashes: old_record.chunk_hashes.clone(),
+            content_hash: old_record.content_hash.clone(),
+            flags: v0_system_entry_flags(&new_normalized),
+            created_at_override: Some(old_record.created_at),
+            updated_at_override: Some(old_record.updated_at),
+            prefer_existing_created_at: false,
+          },
+          CURRENT_FILE_RECORD_VERSION,
+        )?;
+        add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+        batch.add_source_identity(NamespaceMutationSourceIdentity {
+          path: new_normalized.clone(),
+          entry_type: Some(EntryType::FileRecord.to_u8()),
+          previous_identity: None,
+          new_identity: Some(prepared.entries.identity_key.clone()),
+        })?;
+        planner.upsert_child(&new_normalized, prepared.result.child_entry)?;
+        SystemFileAliasMigrationOutcome::Moved
+      };
+
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::None);
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((Some((batch, effects)), outcome))
+    })
+  }
+
   /// Rename (move) a file from one path to another.
   ///
   /// This is a metadata-only operation — no chunk data is copied.
@@ -5237,6 +5414,7 @@ impl<'a> DirectoryOps<'a> {
           normalized_path: new_normalized.clone(),
           content_type: old_record.content_type.clone(),
           total_size: old_record.total_size,
+          metadata: old_record.metadata.clone(),
           chunk_hashes: old_record.chunk_hashes.clone(),
           content_hash: old_record.content_hash.clone(),
           flags: v0_system_entry_flags(&new_normalized),
@@ -5418,6 +5596,7 @@ impl<'a> DirectoryOps<'a> {
                 normalized_path: prepared.destination_path.clone(),
                 content_type: source_record.content_type.clone(),
                 total_size: source_record.total_size,
+                metadata: source_record.metadata.clone(),
                 chunk_hashes: source_record.chunk_hashes.clone(),
                 content_hash: source_record.content_hash.clone(),
                 flags: 0,
@@ -5793,6 +5972,7 @@ mod engine_file_stream_tests {
           normalized_path: "/missing-chunk.bin".to_string(),
           content_type: Some("application/octet-stream".to_string()),
           total_size: 1,
+          metadata: Vec::new(),
           chunk_hashes: vec![vec![0xA5; hash_length]],
           content_hash: vec![0x5A; hash_length],
           flags: 0,
@@ -5832,6 +6012,7 @@ mod engine_file_stream_tests {
             normalized_path: format!("/{case}.bin"),
             content_type: Some("application/octet-stream".to_string()),
             total_size: 1,
+            metadata: Vec::new(),
             chunk_hashes: vec![chunk_hash],
             content_hash: vec![0x5A; engine.hash_algo().hash_length()],
             flags: 0,

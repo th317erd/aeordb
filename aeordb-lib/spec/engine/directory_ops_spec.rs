@@ -915,6 +915,25 @@ fn test_dedup_identical_chunks() {
 }
 
 #[test]
+fn restore_copy_and_rename_preserve_file_record_metadata() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+
+  let mut source = operations.store_file_buffered(&context, "/metadata-source.bin", b"metadata payload", None).unwrap();
+  source.metadata = b"opaque-file-record-metadata".to_vec();
+  operations.restore_file_from_record(&context, "/metadata-source.bin", &source).unwrap();
+  assert_eq!(operations.get_metadata("/metadata-source.bin").unwrap().unwrap().metadata, source.metadata);
+
+  operations.copy_file(&context, "/metadata-source.bin", "/metadata-copy.bin").unwrap();
+  operations.rename_file(&context, "/metadata-source.bin", "/metadata-renamed.bin").unwrap();
+
+  assert_eq!(operations.get_metadata("/metadata-copy.bin").unwrap().unwrap().metadata, source.metadata);
+  assert_eq!(operations.get_metadata("/metadata-renamed.bin").unwrap().unwrap().metadata, source.metadata);
+}
+
+#[test]
 fn test_store_empty_file() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);

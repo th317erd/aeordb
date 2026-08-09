@@ -1562,6 +1562,25 @@ fn wave_four_email_config_is_bounded_and_never_squelches_masking_failure() {
 }
 
 #[test]
+fn wave_four_legacy_system_path_migration_uses_one_atomic_file_transition() {
+  let system_store = include_str!("../../src/engine/system_store.rs");
+  let directory_operations = include_str!("../../src/engine/directory_ops.rs");
+  let server = include_str!("../../src/server/mod.rs");
+
+  let start = system_store.find("fn migrate_directory(").unwrap();
+  let body = &system_store[start..];
+  assert!(body.contains("migrate_system_file_alias"));
+  assert!(!body.contains("read_file_buffered("), "system migration retained split source reads");
+  assert!(!body.contains("store_file_buffered("), "system migration retained split destination writes");
+  assert!(!body.contains("delete_file("), "system migration retained split source deletion");
+  assert!(directory_operations.contains("pub(crate) fn migrate_system_file_alias"));
+  assert!(directory_operations.contains("SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES"));
+  assert!(directory_operations.contains("resolve_current_file_record_from_bounded"));
+  assert!(directory_operations.contains("NamespaceMutationKind::SystemWrite"));
+  assert!(server.contains("system_store::migrate_system_paths(&engine)?"));
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

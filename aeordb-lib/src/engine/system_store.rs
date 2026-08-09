@@ -13,7 +13,7 @@ use crate::auth::api_key::{ApiKeyRecord, ApiKeyRevokePolicy, ApiKeyRevokeResult}
 use crate::auth::magic_link::{MagicLinkConsumeResult, MagicLinkRecord};
 use crate::auth::refresh::{RefreshTokenRecord, RefreshTokenRotationResult};
 use crate::engine::batch_commit::{BufferedFile, commit_buffered_files_with_kind};
-use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps, FileDeletionRequest};
+use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps, FileDeletionRequest, SystemFileAliasMigrationOutcome};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
 use crate::engine::json_store::{JsonDoc, JsonStore, JsonStoreMutation};
@@ -1028,8 +1028,9 @@ pub fn get_peer_sync_state(engine: &StorageEngine, peer_node_id: u64) -> EngineR
 ///   `/.aeordb-system/apikeys/`       -> `/.aeordb-system/api-keys/`
 ///   `/.aeordb-system/cluster/sync/`  -> `/.aeordb-system/sync-peers/`
 ///
-/// This function is idempotent: if the old path does not exist (or is empty),
-/// it is silently skipped. Safe to call on every startup.
+/// This function is idempotent: absent legacy paths are skipped and exact
+/// duplicate aliases converge to the canonical path. Divergent aliases fail
+/// startup without changing either file.
 pub fn migrate_system_paths(engine: &StorageEngine) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
   let ctx = RequestContext::system();
@@ -1040,8 +1041,8 @@ pub fn migrate_system_paths(engine: &StorageEngine) -> EngineResult<()> {
   Ok(())
 }
 
-/// Move all entries from `old_dir` to `new_dir`, preserving filenames.
-/// Skips entries that already exist at the new path (idempotent).
+/// Move all entries from `old_dir` to `new_dir`, preserving filenames and
+/// complete FileRecord metadata.
 fn migrate_directory(ops: &DirectoryOps, ctx: &RequestContext, old_dir: &str, new_dir: &str) -> EngineResult<()> {
   let entries = match ops.list_directory_strict(old_dir) {
     Ok(entries) => entries,
@@ -1063,30 +1064,17 @@ fn migrate_directory(ops: &DirectoryOps, ctx: &RequestContext, old_dir: &str, ne
   for entry in &entries {
     let old_path = format!("{}/{}", old_dir, entry.name);
     let new_path = format!("{}/{}", new_dir, entry.name);
-
-    // Skip if the entry already exists at the new path (idempotent).
-    match ops.read_file_buffered(&new_path) {
-      Ok(_) => {
-        tracing::info!(
-            old = %old_path,
-            new = %new_path,
-            "Entry already exists at new path, skipping",
-        );
-        continue;
+    match ops.migrate_system_file_alias(ctx, &old_path, &new_path)? {
+      SystemFileAliasMigrationOutcome::SourceMissing => {
+        tracing::debug!(old = %old_path, new = %new_path, "Legacy system entry disappeared before migration authority was acquired");
       }
-      Err(EngineError::NotFound(_)) => {} // expected — proceed with migration
-      Err(error) => return Err(error),
+      SystemFileAliasMigrationOutcome::Moved => {
+        tracing::info!(old = %old_path, new = %new_path, "Migrated system entry");
+      }
+      SystemFileAliasMigrationOutcome::IdenticalAliasRetired => {
+        tracing::info!(old = %old_path, new = %new_path, "Retired identical legacy system entry alias");
+      }
     }
-
-    let data = ops.read_file_buffered(&old_path)?;
-    ops.store_file_buffered(ctx, &new_path, &data, Some("application/octet-stream"))?;
-    ops.delete_file(ctx, &old_path)?;
-
-    tracing::info!(
-        old = %old_path,
-        new = %new_path,
-        "Migrated system entry",
-    );
   }
 
   Ok(())
