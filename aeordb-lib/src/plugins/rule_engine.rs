@@ -46,9 +46,8 @@ impl<'a> RuleEngine<'a> {
   /// Returns the combined decision: if any rule says Deny, the result is Deny.
   /// If no rules exist, the default is Allow.
   ///
-  /// For now this is a stub that collects applicable rules and combines
-  /// their decisions. Actual WASM execution of rule plugins will use the
-  /// existing WasmPluginRuntime with a "evaluate_rule" entry point in the future.
+  /// Any deployed rule that cannot execute or return a valid decision fails
+  /// the evaluation. A broken authorization rule must never become Allow.
   pub fn evaluate(&self, scope_path: &str, context: &RuleContext) -> Result<RuleDecision, PluginManagerError> {
     let applicable_rule_paths = self.collect_applicable_rules(scope_path)?;
 
@@ -56,26 +55,18 @@ impl<'a> RuleEngine<'a> {
       return Ok(RuleDecision::Allow);
     }
 
-    // Evaluate each rule. For now, we attempt to invoke each rule plugin
-    // with the serialized context. If invocation fails (e.g., the WASM module
-    // doesn't have the right entry point yet), we default to Allow for that rule.
     let context_bytes = serde_json::to_vec(context).map_err(|error| PluginManagerError::ExecutionFailed(error.to_string()))?;
 
     let mut most_restrictive = RuleDecision::Allow;
 
     for rule_path in &applicable_rule_paths {
-      let decision = match self.plugin_manager.invoke_wasm_plugin(rule_path, &context_bytes) {
-        Ok(response_bytes) => {
-          // Try to parse the response as a RuleDecision.
-          serde_json::from_slice::<RuleDecision>(&response_bytes).unwrap_or(RuleDecision::Allow)
-        }
-        Err(_) => {
-          // If the plugin can't be invoked, default to Allow.
-          // This allows deploying rule plugin metadata before the WASM
-          // implementation is ready.
-          RuleDecision::Allow
-        }
-      };
+      let response_bytes = self
+        .plugin_manager
+        .invoke_wasm_plugin(rule_path, &context_bytes)
+        .map_err(|error| PluginManagerError::ExecutionFailed(format!("rule plugin '{rule_path}' invocation failed: {error}")))?;
+      let decision = serde_json::from_slice::<RuleDecision>(&response_bytes).map_err(|error| {
+        PluginManagerError::ExecutionFailed(format!("rule plugin '{rule_path}' returned an invalid rule response: {error}"))
+      })?;
 
       most_restrictive = combine_decisions(most_restrictive, decision);
     }

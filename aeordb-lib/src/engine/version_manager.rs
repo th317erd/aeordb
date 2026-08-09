@@ -123,7 +123,7 @@ pub struct ForkInfo {
 ///   metadata_json: [u8; metadata_json_length]
 impl SnapshotInfo {
   pub fn serialize(&self, hash_length: usize) -> EngineResult<Vec<u8>> {
-    let metadata_json = serde_json::to_vec(&self.metadata).unwrap_or_default();
+    let metadata_json = serde_json::to_vec(&self.metadata).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     let name_bytes = self.name.as_bytes();
 
     if name_bytes.len() > u16::MAX as usize {

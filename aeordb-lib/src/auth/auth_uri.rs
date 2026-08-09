@@ -42,27 +42,27 @@ pub fn parse_auth_uri(uri: &str) -> Result<AuthMode, String> {
 /// 2. AEORDB_AUTH environment variable
 /// 3. Default identity file at ~/.aeordb-config/aeordb/identity
 /// 4. Fallback: SelfContained
-pub fn resolve_auth_mode(cli_flag: Option<&str>) -> AuthMode {
+pub fn resolve_auth_mode(cli_flag: Option<&str>) -> Result<AuthMode, String> {
   // 1. CLI flag (highest priority)
   if let Some(flag) = cli_flag {
-    return parse_auth_uri(flag).unwrap_or(AuthMode::SelfContained);
+    return parse_auth_uri(flag);
   }
 
   // 2. AEORDB_AUTH environment variable
   if let Ok(env_val) = std::env::var("AEORDB_AUTH") {
     if !env_val.is_empty() {
-      return parse_auth_uri(&env_val).unwrap_or(AuthMode::SelfContained);
+      return parse_auth_uri(&env_val);
     }
   }
 
   // 3. Check for ~/.aeordb-config/aeordb/identity
   let default_identity = expand_tilde("~/.aeordb-config/aeordb/identity");
   if std::path::Path::new(&default_identity).exists() {
-    return AuthMode::File(default_identity);
+    return Ok(AuthMode::File(default_identity));
   }
 
   // 4. Fallback: self-contained
-  AuthMode::SelfContained
+  Ok(AuthMode::SelfContained)
 }
 
 /// Expand a leading `~` or `~/` to the user's home directory.

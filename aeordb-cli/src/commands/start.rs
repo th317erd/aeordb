@@ -297,7 +297,7 @@ pub async fn run(config: StartConfig<'_>) -> Result<(), String> {
     }
   };
 
-  let auth_mode = resolve_auth_mode(auth_flag);
+  let auth_mode = resolve_auth_mode(auth_flag).map_err(|error| format!("Error: invalid authentication configuration: {error}"))?;
 
   let auth_mode_str = match &auth_mode {
     AuthMode::Disabled => "disabled (dev mode)".to_string(),

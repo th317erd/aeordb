@@ -21,8 +21,7 @@ fn sample_context() -> RuleContext {
   }
 }
 
-/// A minimal valid WASM module (does nothing useful — will fail invocation
-/// but the rule engine gracefully handles that).
+/// A minimal valid WASM module that returns an empty, invalid rule response.
 fn dummy_wasm_bytes() -> Vec<u8> {
   wat::parse_str(
     r#"
@@ -136,18 +135,19 @@ fn test_evaluate_with_no_rules_returns_allow() {
 }
 
 #[test]
-fn test_evaluate_with_deployed_rules_does_not_crash() {
+fn malformed_rule_output_fails_closed_instead_of_becoming_allow() {
   let (plugin_manager, _temp_dir) = test_manager();
 
-  // Deploy a rule that returns an empty response (which defaults to Allow).
   plugin_manager.deploy_plugin("eval-rule", "mydb/public", PluginType::Rule, dummy_wasm_bytes()).unwrap();
 
   let engine = RuleEngine::new(&plugin_manager);
   let context = sample_context();
 
-  // The dummy WASM returns 0 (empty response), so the engine defaults to Allow.
-  let decision = engine.evaluate("mydb/public/users", &context).unwrap();
-  assert_eq!(decision, RuleDecision::Allow);
+  let error = engine.evaluate("mydb/public/users", &context).unwrap_err();
+  assert!(
+    matches!(&error, aeordb::plugins::plugin_manager::PluginManagerError::ExecutionFailed(message) if message.contains("rule") && (message.contains("invocation") || message.contains("response"))),
+    "unexpected fail-closed rule error: {error:?}"
+  );
 }
 
 #[test]

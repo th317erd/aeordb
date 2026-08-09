@@ -216,7 +216,7 @@ fn test_resolve_auth_mode_cli_flag_wins() {
   let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   // CLI flag should always win, even if env var is set.
   std::env::set_var("AEORDB_AUTH", "false");
-  let result = resolve_auth_mode(Some("self"));
+  let result = resolve_auth_mode(Some("self")).unwrap();
   assert_eq!(result, AuthMode::SelfContained);
   std::env::remove_var("AEORDB_AUTH");
 }
@@ -224,7 +224,7 @@ fn test_resolve_auth_mode_cli_flag_wins() {
 #[test]
 fn test_resolve_auth_mode_cli_false() {
   let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-  let result = resolve_auth_mode(Some("false"));
+  let result = resolve_auth_mode(Some("false")).unwrap();
   assert_eq!(result, AuthMode::Disabled);
 }
 
@@ -232,7 +232,7 @@ fn test_resolve_auth_mode_cli_false() {
 fn test_resolve_auth_mode_env_var() {
   let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   std::env::set_var("AEORDB_AUTH", "false");
-  let result = resolve_auth_mode(None);
+  let result = resolve_auth_mode(None).unwrap();
   assert_eq!(result, AuthMode::Disabled);
   std::env::remove_var("AEORDB_AUTH");
 }
@@ -241,7 +241,7 @@ fn test_resolve_auth_mode_env_var() {
 fn test_resolve_auth_mode_env_var_file() {
   let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   std::env::set_var("AEORDB_AUTH", "file:///tmp/test-identity");
-  let result = resolve_auth_mode(None);
+  let result = resolve_auth_mode(None).unwrap();
   assert_eq!(result, AuthMode::File("/tmp/test-identity".to_string()));
   std::env::remove_var("AEORDB_AUTH");
 }
@@ -251,17 +251,26 @@ fn test_resolve_auth_mode_default_self() {
   let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
   // Remove env var, ensure no default identity file exists.
   std::env::remove_var("AEORDB_AUTH");
-  let result = resolve_auth_mode(None);
+  let result = resolve_auth_mode(None).unwrap();
   // Should be SelfContained (unless ~/.aeordb-config/aeordb/identity exists).
   // We don't create that file in tests, so this should be SelfContained.
   assert!(result == AuthMode::SelfContained || matches!(result, AuthMode::File(_)), "Expected SelfContained or File, got {:?}", result);
 }
 
 #[test]
-fn test_resolve_auth_mode_invalid_cli_flag_falls_back() {
-  // Invalid URI should fall back to SelfContained.
-  let result = resolve_auth_mode(Some("not-valid"));
-  assert_eq!(result, AuthMode::SelfContained);
+fn test_resolve_auth_mode_invalid_cli_flag_is_rejected() {
+  let error = resolve_auth_mode(Some("not-valid")).unwrap_err();
+  assert!(error.contains("Unknown auth URI"));
+}
+
+#[test]
+fn test_resolve_auth_mode_invalid_environment_value_is_rejected() {
+  let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+  std::env::set_var("AEORDB_AUTH", "not-valid");
+  let result = resolve_auth_mode(None);
+  std::env::remove_var("AEORDB_AUTH");
+
+  assert!(matches!(result, Err(error) if error.contains("Unknown auth URI")));
 }
 
 // ===========================================================================

@@ -1117,6 +1117,11 @@ pub struct QueryEngine<'a> {
   request_budget: Option<QueryRequestBudget>,
 }
 
+fn decode_virtual_query_string<'a>(field_name: &str, query_bytes: &'a [u8]) -> EngineResult<&'a str> {
+  std::str::from_utf8(query_bytes)
+    .map_err(|error| EngineError::InvalidInput(format!("query value for virtual field {field_name} is not valid UTF-8: {error}")))
+}
+
 impl<'a> QueryEngine<'a> {
   pub fn new(engine: &'a StorageEngine) -> Self {
     QueryEngine { engine, request_budget: None }
@@ -2007,23 +2012,23 @@ impl<'a> QueryEngine<'a> {
   /// Check whether a single FileRecord matches a virtual field operation.
   fn virtual_field_matches(&self, field_name: &str, file_record: &FileRecord, operation: &QueryOp) -> EngineResult<bool> {
     match field_name {
-      "@path" => self.virtual_string_matches(&file_record.path, operation),
+      "@path" => self.virtual_string_matches("@path", &file_record.path, operation),
       "@filename" => {
         let filename = file_record.path.rsplit('/').next().unwrap_or("");
-        self.virtual_string_matches(filename, operation)
+        self.virtual_string_matches("@filename", filename, operation)
       }
       "@extension" => {
         let filename = file_record.path.rsplit('/').next().unwrap_or("");
         let extension = filename.rsplit('.').next().unwrap_or("");
         // If there's no dot, rsplit returns the full filename — treat as no extension.
         let extension = if extension == filename { "" } else { extension };
-        self.virtual_string_matches(extension, operation)
+        self.virtual_string_matches("@extension", extension, operation)
       }
       "@content_type" => {
         let content_type = file_record.content_type.as_deref().unwrap_or("");
-        self.virtual_string_matches(content_type, operation)
+        self.virtual_string_matches("@content_type", content_type, operation)
       }
-      "@hash" => self.virtual_string_matches(&file_record.content_hash_hex(), operation),
+      "@hash" => self.virtual_string_matches("@hash", &file_record.content_hash_hex(), operation),
       "@size" => self.virtual_u64_matches(file_record.total_size, operation),
       "@created_at" => self.virtual_i64_matches(file_record.created_at, operation),
       "@updated_at" => self.virtual_i64_matches(file_record.updated_at, operation),
@@ -2051,16 +2056,16 @@ impl<'a> QueryEngine<'a> {
 
   /// Apply a query operation against a string value (for virtual fields).
   /// Supports Eq (exact match), Contains (substring), and In (set membership).
-  fn virtual_string_matches(&self, value: &str, operation: &QueryOp) -> EngineResult<bool> {
+  fn virtual_string_matches(&self, field_name: &str, value: &str, operation: &QueryOp) -> EngineResult<bool> {
     match operation {
       QueryOp::Eq(query_bytes) => {
-        let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+        let query_str = decode_virtual_query_string(field_name, query_bytes)?;
         Ok(value == query_str)
       }
       QueryOp::Contains(query_str) => Ok(value.contains(query_str.as_str())),
       QueryOp::In(values) => {
         for query_bytes in values {
-          let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+          let query_str = decode_virtual_query_string(field_name, query_bytes)?;
           if value == query_str {
             return Ok(true);
           }
@@ -2068,11 +2073,11 @@ impl<'a> QueryEngine<'a> {
         Ok(false)
       }
       QueryOp::Gt(query_bytes) => {
-        let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+        let query_str = decode_virtual_query_string(field_name, query_bytes)?;
         Ok(value > query_str)
       }
       QueryOp::Lt(query_bytes) => {
-        let query_str = std::str::from_utf8(query_bytes).unwrap_or("");
+        let query_str = decode_virtual_query_string(field_name, query_bytes)?;
         Ok(value < query_str)
       }
       QueryOp::Similar(query_str, threshold) => {

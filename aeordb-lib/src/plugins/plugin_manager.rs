@@ -119,7 +119,7 @@ fn bundled_version_can_replace(bundled_version: &str, current_version: Option<&s
   };
 
   match current_version {
-    Some(current_version) => Version::parse(current_version).map(|current| bundled >= current).unwrap_or(true),
+    Some(current_version) => Version::parse(current_version).map(|current| bundled >= current).unwrap_or(false),
     None => true,
   }
 }

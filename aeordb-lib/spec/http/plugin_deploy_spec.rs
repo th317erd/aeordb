@@ -96,6 +96,26 @@ fn bundled_plugin_legacy_timestamps_are_canonicalized_once() {
   assert_eq!(read_raw_plugin(&engine, bundled.path), canonical_bytes);
 }
 
+#[test]
+fn malformed_stored_bundled_version_is_not_overwritten() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  manager.install_bundled_plugins().expect("install canonical bundles");
+  let bundled = BUNDLED_PLUGINS.iter().find(|plugin| plugin.path == "extract").expect("extract bundle metadata");
+
+  let mut malformed: PluginRecord = serde_json::from_slice(&read_raw_plugin(&engine, bundled.path)).expect("decode stored bundle");
+  malformed.version = Some("not-semver".to_string());
+  let malformed_bytes = serde_json::to_vec(&malformed).expect("encode malformed-version fixture");
+  store_raw_plugin(&engine, bundled.path, &malformed_bytes);
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let changed = manager.install_bundled_plugins().expect("evaluate malformed stored version");
+
+  assert!(changed.is_empty());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(read_raw_plugin(&engine, bundled.path), malformed_bytes);
+}
+
 /// Create an admin Bearer token value (including "Bearer " prefix).
 fn bearer_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();

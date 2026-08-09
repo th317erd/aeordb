@@ -639,6 +639,31 @@ fn test_query_node_tree() {
   assert!(paths.contains(&"/users/bob.json"));
 }
 
+#[test]
+fn invalid_utf8_virtual_field_query_is_rejected_instead_of_becoming_empty() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/docs/file.txt", b"body", Some("text/plain")).unwrap();
+  let query = Query {
+    path: "/docs".to_string(),
+    field_queries: Vec::new(),
+    node: Some(QueryNode::Field(FieldQuery { field_name: "@path".to_string(), operation: QueryOp::Eq(vec![0xFF]) })),
+    limit: None,
+    offset: None,
+    order_by: Vec::new(),
+    after: None,
+    before: None,
+    include_total: false,
+    strategy: QueryStrategy::Full,
+    aggregate: None,
+    explain: ExplainMode::Off,
+  };
+
+  let error = QueryEngine::new(&engine).execute(&query).unwrap_err();
+
+  assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("UTF-8") && message.contains("@path")));
+}
+
 // ===========================================================================
 // Task 9: Query strategy
 // ===========================================================================
