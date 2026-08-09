@@ -299,6 +299,44 @@ fn durability_waiter_admission_is_bounded_before_sequence_or_queue_mutation() {
 }
 
 #[test]
+fn failed_hard_ticket_is_failed_and_retired_by_one_coordinator_transition() {
+  let (memory, coordinator) = memory_bounded_durability_coordinator(256 * 1024);
+  let baseline = durability_reserved_bytes(&memory);
+  let ticket = coordinator.admit(header_commit_plan()).unwrap();
+  assert!(durability_reserved_bytes(&memory) > baseline);
+
+  let waiter = coordinator
+    .fail_pending_hard_and_take(
+      ticket,
+      DurabilityOperation::DependencyAppend,
+      "injected grouped transaction failure",
+      DurabilityFailureDisposition::serious(OsErrorClass::OtherPersistentIo, RetryClass::AfterRepair),
+      1,
+    )
+    .unwrap();
+
+  let DurabilityWaiterState::Failed(failure) = waiter else {
+    panic!("failed ticket did not return terminal failure evidence");
+  };
+  assert_eq!(failure.sequence, ticket.sequence());
+  assert!(failure.message.contains("injected grouped transaction failure"));
+  let snapshot = coordinator.snapshot().unwrap();
+  assert_eq!(snapshot.pending_hard, 0);
+  assert_eq!(snapshot.failed, 0, "the exact failed ticket must be retired before returning");
+  assert_eq!(durability_reserved_bytes(&memory), baseline);
+  assert!(matches!(
+    coordinator.fail_pending_hard_and_take(
+      ticket,
+      DurabilityOperation::DependencyAppend,
+      "duplicate cleanup",
+      DurabilityFailureDisposition::serious(OsErrorClass::OtherPersistentIo, RetryClass::AfterRepair),
+      1,
+    ),
+    Err(aeordb::engine::durability_coordinator::DurabilityCoordinatorError::UnknownTicket)
+  ));
+}
+
+#[test]
 fn durability_waiter_reservation_survives_success_failure_and_unwind_until_retirement() {
   let (memory, coordinator) = memory_bounded_durability_coordinator(256 * 1024);
   let baseline = durability_reserved_bytes(&memory);

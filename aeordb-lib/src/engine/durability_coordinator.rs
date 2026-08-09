@@ -1043,6 +1043,38 @@ impl DurabilityCoordinator {
     Ok(failures)
   }
 
+  /// Fail every pending hard-authority waiter and retire one exact caller
+  /// ticket under the same coordinator lock. This prevents cleanup from
+  /// acknowledging only half of the terminal state transition.
+  pub fn fail_pending_hard_and_take(
+    &self,
+    ticket: DurabilityTicket,
+    operation: DurabilityOperation,
+    message: impl Into<String>,
+    disposition: DurabilityFailureDisposition,
+    attempts: u8,
+  ) -> Result<DurabilityWaiterState, DurabilityCoordinatorError> {
+    self.validate_ticket(ticket)?;
+    let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;
+    let record = state.records.get(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+    if record.plan.class != CommitClass::HardAuthority {
+      return Err(DurabilityCoordinatorError::InvalidPlan(
+        "only a hard-authority ticket can be retired by a hard failure transition".to_string(),
+      ));
+    }
+
+    fail_pending_hard_locked(&mut state, operation, message.into(), disposition, attempts);
+    let waiter_state = waiter_state_locked(&state, ticket)?;
+    if matches!(waiter_state, DurabilityWaiterState::Pending) {
+      return Err(DurabilityCoordinatorError::InvalidPlan("hard failure transition left the selected waiter pending".to_string()));
+    }
+    let retired = state.records.remove(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+    drop(state);
+    drop(retired);
+    self.changed.notify_all();
+    Ok(waiter_state)
+  }
+
   pub fn wait_for_hard_turn(&self, ticket: DurabilityTicket) -> Result<DurabilityHardTurn<'_>, DurabilityCoordinatorError> {
     self.validate_ticket(ticket)?;
     let mut state = self.state.lock().map_err(|_| DurabilityCoordinatorError::StateUnavailable)?;

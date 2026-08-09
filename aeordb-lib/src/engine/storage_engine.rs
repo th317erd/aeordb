@@ -5511,14 +5511,25 @@ impl StorageEngine {
   }
 
   fn fail_transaction_ticket(&self, coordinator: &DurabilityCoordinator, ticket: DurabilityTicket, error: EngineError) -> EngineError {
-    let _ = coordinator.fail_pending_hard(
+    let cleanup = coordinator.fail_pending_hard_and_take(
+      ticket,
       DurabilityOperation::DependencyAppend,
       error.to_string(),
       DurabilityFailureDisposition::serious(OsErrorClass::OtherPersistentIo, RetryClass::AfterRepair),
       1,
     );
-    let _ = coordinator.take_waiter_state(ticket);
-    error
+    let terminal_evidence = match cleanup {
+      Ok(DurabilityWaiterState::Failed(failure)) => {
+        format!("{}; failed durability ticket {}: {}", error, failure.sequence, failure.message)
+      }
+      Ok(other) => format!("{error}; hard failure cleanup returned unexpected waiter state {other:?}"),
+      Err(cleanup_error) => format!("{error}; hard failure cleanup also failed: {cleanup_error}"),
+    };
+    self.record_durability_failure(
+      DurabilityOperation::DependencyAppend,
+      "Transaction hard-authority publication failed",
+      terminal_evidence,
+    )
   }
 
   /// End a transaction and wait until its exact hard-authority ticket is at or
@@ -6811,8 +6822,10 @@ mod tests {
   }
 
   #[test]
+  #[serial]
   fn grouped_driver_setup_failure_halts_its_admitted_waiter() {
     let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
     let engine_path = temp_dir.path().join("grouped-driver-setup-failure.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let coordinator = engine.writer.read().unwrap().durability_coordinator();
@@ -6824,15 +6837,20 @@ mod tests {
       panic!("poison grouped writer authority");
     }));
 
-    assert!(engine.complete_transaction_ticket(ticket).is_err());
+    let error = engine.complete_transaction_ticket(ticket).expect_err("poisoned writer authority must fail the exact ticket");
+    assert!(matches!(error, EngineError::DurabilityFailure(_)));
+    assert!(engine.durability_failure().is_some(), "serious grouped failure must latch the database read-only");
+    assert!(matches!(engine.ensure_writable(), Err(EngineError::DurabilityFailure(_))));
     let snapshot = coordinator.snapshot().unwrap();
     assert_eq!(snapshot.pending_hard, 0);
     assert_eq!(snapshot.failed, 0, "the failed driver must retire its own terminal waiter record");
   }
 
   #[test]
+  #[serial]
   fn grouped_namespace_setup_failure_halts_and_retires_its_waiter() {
     let temp_dir = tempfile::tempdir().unwrap();
+    let _restore = SpillTestEnv::new(&temp_dir.path().join("spill"));
     let engine_path = temp_dir.path().join("grouped-namespace-setup-failure.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
     let coordinator = Arc::clone(&engine.durability_coordinator);
@@ -6844,7 +6862,10 @@ mod tests {
       panic!("poison grouped namespace authority");
     }));
 
-    assert!(engine.complete_transaction_ticket(ticket).is_err());
+    let error = engine.complete_transaction_ticket(ticket).expect_err("poisoned namespace authority must fail the exact ticket");
+    assert!(matches!(error, EngineError::DurabilityFailure(_)));
+    assert!(engine.durability_failure().is_some(), "serious grouped failure must latch the database read-only");
+    assert!(matches!(engine.ensure_writable(), Err(EngineError::DurabilityFailure(_))));
     let snapshot = coordinator.snapshot().unwrap();
     assert_eq!(snapshot.pending_hard, 0);
     assert_eq!(snapshot.failed, 0, "the failed driver must retire its own terminal waiter record");
