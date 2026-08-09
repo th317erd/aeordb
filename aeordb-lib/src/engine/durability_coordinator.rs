@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -723,6 +724,7 @@ pub struct DurabilityCoordinator {
   group_policy: RwLock<DurabilityGroupPolicyState>,
   recoverable_file_barrier: Arc<dyn RecoverableFileBarrier>,
   memory_policy: RwLock<Option<DurabilityMemoryPolicy>>,
+  state_poison_reported: AtomicBool,
 }
 
 struct DurabilityMemoryPolicy {
@@ -781,7 +783,26 @@ impl DurabilityCoordinator {
       group_policy: RwLock::new(DurabilityGroupPolicyState::Configured(group_policy)),
       recoverable_file_barrier,
       memory_policy: RwLock::new(None),
+      state_poison_reported: AtomicBool::new(false),
     }
+  }
+
+  fn release_drive_permit(&self) {
+    match self.state.lock() {
+      Ok(mut state) => state.driver_active = false,
+      Err(poisoned) => {
+        if !self.state_poison_reported.swap(true, Ordering::AcqRel) {
+          crate::metrics::record_system_soft_failure(
+            "durability_coordinator",
+            "permit_release_after_poison",
+            self.id,
+            "coordinator state lock was poisoned; normal coordinator APIs remain unavailable",
+          );
+        }
+        poisoned.into_inner().driver_active = false;
+      }
+    }
+    self.changed.notify_all();
   }
 
   pub(crate) fn activate_memory_coordinator(&self, memory_coordinator: Arc<MemoryCoordinator>) -> Result<(), DurabilityCoordinatorError> {
@@ -1431,11 +1452,8 @@ impl DurabilityDrivePermit<'_> {
     if !self.active {
       return;
     }
-    if let Ok(mut state) = self.coordinator.state.lock() {
-      state.driver_active = false;
-    }
+    self.coordinator.release_drive_permit();
     self.active = false;
-    self.coordinator.changed.notify_all();
   }
 }
 
@@ -1704,6 +1722,10 @@ fn advance_hard_frontier(state: &mut CoordinatorState) {
     state.pending_hard.pop_front();
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/durability_coordinator_internal_spec.rs"]
+mod durability_coordinator_internal_spec;
 
 #[cfg(test)]
 mod tests {
