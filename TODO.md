@@ -453,9 +453,9 @@
       - [x] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [x] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
       - [x] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.
-    - [ ] P2e Wave 5: converge maintenance and repair producers on one namespace mutation and locator authority.
-      - [ ] Convert reindex metadata resave, repair, cleanup, GC follow-up, import, and migration source capture.
-      - [ ] Preserve exact partial and corrupt outcomes instead of returning empty success.
+    - [x] P2e Wave 5: converge maintenance and repair producers on one namespace mutation and locator authority.
+      - [x] Convert existing reindex metadata resave, repair, cleanup, and GC follow-up producers; audit import and defer the unavailable migration source runtime to P7 without activating a duplicate writer.
+      - [x] Preserve exact partial and corrupt outcomes instead of returning empty success.
       - [x] Make forced migration and ordinary reindex file failures terminal exact partial outcomes with bounded evidence and a checkpoint frozen before the first incomplete path.
       - [x] Preserve prior reindex partial evidence when a later index flush, buffer-state read, or checkpoint publication fails.
       - [x] Replace sequential credential cleanup deletes with one preflighted maintenance mutation or an exact typed partial result under concurrent changes.
@@ -476,8 +476,11 @@
         - [x] Replace Drop-only normal completion with explicit primary-result/teardown-result combination while retaining unwind cleanup.
         - [x] Recover a poisoned recheck lock so a cleanup incident cannot permanently disable later GC runs.
         - [x] Surface recovered teardown incidents in the successful GC result/event and visible telemetry; preserve an existing primary error unchanged.
-      - [ ] Re-audit the already-converged backup import locator/HEAD authority and source-gate the Wave 5 exit invariant.
-      - [ ] Keep migration source capture classified as unavailable until the P7 runtime writer activates, then bind it to the shared migration authority and memory owner.
+      - [x] Re-audit the already-converged backup import locator/HEAD authority and source-gate the Wave 5 exit invariant.
+        - [x] Freeze active full/sparse import locator routing through bounded maintenance batches and import HEAD/snapshot publication through the shared coordinator.
+        - [x] Preserve direct destination writes only for immutable identities and standalone artifact construction; historical imports must not publish current path locators.
+      - [x] Keep migration source capture classified as unavailable until the P7 runtime writer activates, then bind it to the shared migration authority and memory owner.
+        - [x] Prove migration configuration and persistent-format readers have no runtime capture caller, migration module, or lease/progress control writer.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.

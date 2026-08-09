@@ -960,6 +960,39 @@ fn wave_three_version_entrypoints_cannot_reintroduce_split_namespace_authority()
 #[test]
 fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
   let backup = include_str!("../../src/engine/backup.rs");
+  let mode_start = backup.find("impl TransferDestinationMode").unwrap();
+  let mode_end = backup[mode_start..].find("struct ImportLocatorBatch").unwrap() + mode_start;
+  let mode_source = &backup[mode_start..mode_end];
+  assert!(
+    mode_source.contains("matches!(self, Self::FullImport | Self::SparseImport)"),
+    "only active full/sparse imports may coordinate current path locators"
+  );
+
+  let locator_batch_start = backup.find("struct ImportLocatorBatch").unwrap();
+  let locator_batch_end = backup[locator_batch_start..].find("fn import_locator_charge").unwrap() + locator_batch_start;
+  let locator_batch_source = &backup[locator_batch_start..locator_batch_end];
+  assert!(
+    locator_batch_source.contains("NamespaceMutationBatch::new(NamespaceMutationKind::MaintenanceRepair)"),
+    "derived import path locators must retain their maintenance-reconciliation classification"
+  );
+  assert!(locator_batch_source.contains("NamespaceMutationCoordinator::new(self.output).execute(batch)"));
+  assert!(!locator_batch_source.contains("let _ ="), "locator-batch cleanup errors must not be silently discarded");
+
+  let tree_writer_start = backup.find("fn write_tree_to_engine").unwrap();
+  let tree_writer_end = backup[tree_writer_start..].find("fn write_transfer_directories").unwrap() + tree_writer_start;
+  let tree_writer_source = &backup[tree_writer_start..tree_writer_end];
+  assert!(tree_writer_source.contains("destination_mode.coordinates_active_locators()"));
+  assert!(tree_writer_source.contains("locator_batch.as_mut().expect(\"active import mode creates a locator batch\").replace("));
+  assert!(tree_writer_source.contains("locator_batch.flush()?"));
+
+  let alias_policy_start = backup.find("fn should_store_transfer_alias").unwrap();
+  let alias_policy_end = backup[alias_policy_start..].find("fn collect_transfer_btree_entries").unwrap() + alias_policy_start;
+  let alias_policy_source = &backup[alias_policy_start..alias_policy_end];
+  assert!(
+    alias_policy_source.contains("TransferDestinationMode::HistoricalImport => return Ok(false)"),
+    "historical snapshot imports must remain immutable-content-only and never publish current path locators"
+  );
+
   let import_start = backup.find("pub fn import_backup(").unwrap();
   let import_source = &backup[import_start..];
   for forbidden in [
@@ -974,10 +1007,6 @@ fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
   assert!(backup.contains("publish_namespace_root_from_with_fanout"));
   assert!(import_source.contains("NamespaceMutationCoordinator::new(target).prepare_and_maybe_execute"));
   assert!(import_source.contains("deletion.previous_identity"), "sparse deletion must carry the selected prior entity identity");
-  let locator_batch_start = backup.find("struct ImportLocatorBatch").unwrap();
-  let locator_batch_end = backup[locator_batch_start..].find("fn import_locator_charge").unwrap() + locator_batch_start;
-  let locator_batch_source = &backup[locator_batch_start..locator_batch_end];
-  assert!(!locator_batch_source.contains("let _ ="), "locator-batch cleanup errors must not be silently discarded");
 
   let server_route = include_str!("../../src/server/backup_routes.rs");
   let promote_start = server_route.find("pub async fn promote_head(").unwrap();
@@ -988,6 +1017,62 @@ fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
   let cli = include_str!("../../../aeordb-cli/src/commands/promote.rs");
   assert!(cli.contains("publish_namespace_root"));
   assert!(!cli.contains(".update_head("));
+}
+
+#[test]
+fn wave_five_exit_keeps_v4_migration_source_capture_unactivated_until_p7() {
+  fn visit_rust_sources(directory: &std::path::Path, sources: &mut Vec<(std::path::PathBuf, String)>) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        visit_rust_sources(&path, sources);
+      } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+        sources.push((path.clone(), std::fs::read_to_string(path).unwrap()));
+      }
+    }
+  }
+
+  let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let mut sources = Vec::new();
+  visit_rust_sources(&package.join("src"), &mut sources);
+
+  let capture_callers = sources
+    .iter()
+    .flat_map(|(path, source)| source.match_indices("capture_migration_run_configuration(").map(move |_| path))
+    .collect::<Vec<_>>();
+  assert_eq!(capture_callers.len(), 1, "P7 migration configuration capture acquired a premature runtime caller: {capture_callers:?}");
+  assert_eq!(capture_callers[0].file_name().and_then(|value| value.to_str()), Some("run_configuration.rs"));
+
+  let run_configuration = sources
+    .iter()
+    .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("run_configuration.rs"))
+    .map(|(_, source)| source)
+    .unwrap();
+  assert!(run_configuration.contains("Called when the P7 v4 migration state machine is activated"));
+  assert!(run_configuration.contains("#[allow(dead_code)]"));
+
+  let premature_control_writers = sources
+    .iter()
+    .filter(|(path, source)| {
+      path.file_name().and_then(|value| value.to_str()) != Some("system_control.rs")
+        && (source.contains("SystemControlKindV1::MigrationLease") || source.contains("SystemControlKindV1::MigrationProgress"))
+    })
+    .map(|(path, _)| path.display().to_string())
+    .collect::<Vec<_>>();
+  assert!(
+    premature_control_writers.is_empty(),
+    "P7 migration lease/progress controls acquired a premature runtime writer: {}",
+    premature_control_writers.join(", ")
+  );
+
+  let v4_module = std::fs::read_to_string(package.join("src/engine/v4/mod.rs")).unwrap();
+  assert!(!v4_module.contains("mod migration"), "P7 migration runtime module was activated before its owning phase");
+  assert!(
+    !sources.iter().any(|(path, _)| {
+      matches!(path.file_name().and_then(|value| value.to_str()), Some("migration.rs" | "migration_runtime.rs" | "migration_capture.rs"))
+    }),
+    "P7 migration runtime source exists without Wave 5/P7 authority review"
+  );
 }
 
 #[test]
