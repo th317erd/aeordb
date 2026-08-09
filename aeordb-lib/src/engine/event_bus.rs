@@ -23,7 +23,9 @@ impl EventBus {
   /// Emit an event to all subscribers. Fire-and-forget — returns immediately.
   /// If no subscribers exist, the event is silently dropped.
   pub fn emit(&self, event: EngineEvent) {
-    let _ = self.sender.send(event); // ignore error (no receivers)
+    if self.sender.send(event).is_err() {
+      debug_assert_eq!(self.sender.receiver_count(), 0, "broadcast send only fails when no receivers remain");
+    }
   }
 
   /// Subscribe to events. Returns a broadcast Receiver.

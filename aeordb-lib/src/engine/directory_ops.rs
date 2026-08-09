@@ -3723,7 +3723,7 @@ impl<'a> DirectoryOps<'a> {
   /// Take an auto-snapshot before a destructive operation.
   /// Uses a per-lane AtomicI64 so delete/restore/manual snapshots
   /// don't block each other. Each lane throttles independently.
-  fn auto_snapshot_throttled(&self, ctx: &RequestContext, lane: &std::sync::atomic::AtomicI64, throttle_ms: i64, prefix: &str) {
+  fn auto_snapshot_throttled(&self, lane: &std::sync::atomic::AtomicI64, throttle_ms: i64, prefix: &str) {
     if !crate::engine::lifecycle_config::snapshot_writes_enabled(self.engine) {
       tracing::debug!("Auto-snapshot ({}) skipped because snapshot writes are disabled", prefix);
       return;
@@ -3763,7 +3763,6 @@ impl<'a> DirectoryOps<'a> {
     // version mutation. The caller's own event (entries_deleted etc.)
     // remains the observable signal.
     let sys_ctx = crate::engine::request_context::RequestContext::system();
-    let _ = ctx; // Keep ctx parameter for future use (currently unused after the suppression above)
     let mut metadata = std::collections::HashMap::new();
     metadata.insert(
       crate::engine::lifecycle_config::SNAPSHOT_TYPE_KEY.to_string(),
@@ -3781,13 +3780,13 @@ impl<'a> DirectoryOps<'a> {
   }
 
   /// Auto-snapshot before delete — own lane, 60s throttle.
-  fn auto_snapshot_before_delete(&self, ctx: &RequestContext) {
-    self.auto_snapshot_throttled(ctx, &self.engine.last_auto_snapshot_delete, 60_000, "auto-pre-delete");
+  fn auto_snapshot_before_delete(&self, _ctx: &RequestContext) {
+    self.auto_snapshot_throttled(&self.engine.last_auto_snapshot_delete, 60_000, "auto-pre-delete");
   }
 
   /// Auto-snapshot before restore — own lane, 60s throttle.
-  pub fn auto_snapshot_before_restore(&self, ctx: &RequestContext) {
-    self.auto_snapshot_throttled(ctx, &self.engine.last_auto_snapshot_restore, 60_000, "auto-pre-restore");
+  pub fn auto_snapshot_before_restore(&self, _ctx: &RequestContext) {
+    self.auto_snapshot_throttled(&self.engine.last_auto_snapshot_restore, 60_000, "auto-pre-restore");
   }
 
   /// Restore a deleted file by un-marking it in the KV and re-adding

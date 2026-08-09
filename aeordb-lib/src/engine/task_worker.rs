@@ -234,7 +234,7 @@ async fn run_task_scheduler<C, R>(
     }
     if cancel.is_cancelled() {
       if let Some(result) = workers.join_next().await {
-        let _ = task_worker_iteration_delay(result, timing);
+        let _unused_delay = task_worker_iteration_delay(result, timing);
       }
       continue;
     }

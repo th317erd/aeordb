@@ -95,7 +95,9 @@ pub(crate) fn body_from_tempfile(mut file: tempfile::NamedTempFile, engine: Arc<
         None => match reserve_streaming_read(&engine, admitted_bytes, "temporary response frame admission failed") {
           Ok(reservation) => reservation,
           Err(error) => {
-            let _ = sender.blocking_send(Err(std::io::Error::other(error.to_string())));
+            if sender.blocking_send(Err(std::io::Error::other(error.to_string()))).is_err() {
+              tracing::debug!("Temporary response receiver disconnected before an admission failure could be delivered");
+            }
             break;
           }
         },
@@ -112,7 +114,9 @@ pub(crate) fn body_from_tempfile(mut file: tempfile::NamedTempFile, engine: Arc<
         Ok(0) => break,
         Ok(read) => read,
         Err(error) => {
-          let _ = sender.blocking_send(Err(error));
+          if sender.blocking_send(Err(error)).is_err() {
+            tracing::debug!("Temporary response receiver disconnected before a read failure could be delivered");
+          }
           break;
         }
       };
