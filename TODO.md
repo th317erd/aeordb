@@ -438,7 +438,7 @@
           - [x] Bound and strictly validate plugin records, then prove concurrent deploy/remove, malformed state, pressure, restart, and invocation behavior.
         - [ ] Converge legacy configuration, email configuration, and system-path migration authority.
           - [x] Validate and bound legacy config keys/values and make JWT first initialization single-winner.
-          - [ ] Bound email authority and remove serialization error squelching.
+          - [x] Bound email authority and remove serialization error squelching.
           - [ ] Replace split copy/delete migration with atomic per-entry moves, reject divergent canonical collisions, and preserve content metadata.
         - [ ] Classify every remaining swallowed system/plugin persistence failure as fatal, acknowledged soft evidence, or deferred Wave 5 work, and source-gate the approved direction.
       - [x] Converge multi-path share and unshare permission authority.

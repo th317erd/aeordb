@@ -245,6 +245,79 @@ async fn save_oauth_config() {
 }
 
 #[tokio::test]
+async fn save_config_rejects_invalid_and_oversized_documents_without_writing() {
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let invalid_config = serde_json::json!({
+      "provider": "smtp",
+      "host": "",
+      "port": 587,
+      "username": "user",
+      "password": "secret",
+      "from_address": "test@example.com",
+      "from_name": "Test",
+      "tls": "starttls"
+  });
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/system/email-config")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&invalid_config).unwrap()))
+    .unwrap();
+  let response = rebuild_app(&jwt_manager, &engine, &rate_limiter).oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+  let oversized_config = serde_json::json!({
+      "provider": "smtp",
+      "host": "smtp.example.com",
+      "port": 587,
+      "username": "user",
+      "password": "x".repeat(16 * 1024 + 1),
+      "from_address": "test@example.com",
+      "from_name": "Test",
+      "tls": "starttls"
+  });
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/system/email-config")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&oversized_config).unwrap()))
+    .unwrap();
+  let response = rebuild_app(&jwt_manager, &engine, &rate_limiter).oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  let error = aeordb::engine::DirectoryOps::new(&engine).read_file_buffered("/.aeordb-system/email-config.json").unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn get_config_surfaces_corrupt_persisted_authority() {
+  let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  aeordb::engine::DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &aeordb::engine::RequestContext::system(),
+      "/.aeordb-system/email-config.json",
+      b"{not-json",
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let request = Request::builder().method("GET").uri("/system/email-config").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = rebuild_app(&jwt_manager, &engine, &rate_limiter).oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let json = body_json(response.into_body()).await;
+  let error = json["error"].as_str().expect("error response string");
+  assert!(error.starts_with("Failed to load email config: JSON parse error:"), "unexpected error response: {error}");
+}
+
+#[tokio::test]
 async fn get_config_masks_secrets() {
   let (_, jwt_manager, engine, rate_limiter, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);

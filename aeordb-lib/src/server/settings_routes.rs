@@ -11,6 +11,7 @@ use super::responses::{ErrorResponse, require_root};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::engine::email_config::{EmailConfig, load_email_config, save_email_config};
+use crate::engine::EngineError;
 
 // ---------------------------------------------------------------------------
 // GET /system/email-config
@@ -25,7 +26,13 @@ pub async fn get_email_config(State(state): State<AppState>, Extension(claims): 
   };
 
   match load_email_config(&state.engine) {
-    Ok(Some(config)) => Json(config.masked()).into_response(),
+    Ok(Some(config)) => match config.masked() {
+      Ok(masked) => Json(masked).into_response(),
+      Err(error) => {
+        tracing::error!(%error, "Failed to mask email config");
+        ErrorResponse::new("Failed to serialize masked email config").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
+      }
+    },
     Ok(None) => Json(serde_json::json!({ "configured": false })).into_response(),
     Err(e) => {
       tracing::error!("Failed to load email config: {}", e);
@@ -51,9 +58,12 @@ pub async fn put_email_config(
 
   if let Err(e) = save_email_config(&state.engine, &config) {
     tracing::error!("Failed to save email config: {}", e);
-    return ErrorResponse::new(format!("Failed to save email config: {}", e))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+    let status = match &e {
+      EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+      EngineError::ResourceExhausted(_) => StatusCode::PAYLOAD_TOO_LARGE,
+      _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    return ErrorResponse::new(format!("Failed to save email config: {e}")).with_status(status).into_response();
   }
 
   Json(serde_json::json!({

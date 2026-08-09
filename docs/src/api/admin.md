@@ -1431,6 +1431,11 @@ AeorDB supports sending email notifications (e.g., when files are shared via `PO
 
 Retrieve the current email configuration. Sensitive fields (passwords, client secrets, refresh tokens) are masked as `"--------"` in the response, and a `"configured": true` field is added.
 
+AeorDB reads the persisted configuration through a 128 KiB bound. A malformed,
+invalid, or oversized stored configuration is treated as failed configuration
+authority and returns `500 Internal Server Error`; it is never presented as an
+unconfigured or empty successful response.
+
 **Auth:** Root only.
 
 **Response:** `200 OK`
@@ -1454,6 +1459,13 @@ Retrieve the current email configuration. Sensitive fields (passwords, client se
 ### PUT /system/email-config
 
 Save email configuration. Supports two provider types: SMTP and OAuth.
+
+The complete encoded configuration is limited to 128 KiB, and every string
+field is limited to 16 KiB. Host, sender identity, provider identity, TLS mode,
+and OAuth endpoint fields reject control characters. Required identity fields
+must be nonempty, the SMTP port must be nonzero, and OAuth secrets must be
+nonempty. SMTP username and password values may be empty for servers that do
+not require authentication.
 
 **Auth:** Root only.
 
@@ -1506,8 +1518,16 @@ Save email configuration. Supports two provider types: SMTP and OAuth.
 | `refresh_token` | string | Yes | OAuth refresh token |
 | `from_address` | string | Yes | Sender email address |
 | `from_name` | string | No | Sender display name |
+| `token_url` | string or null | No | Custom OAuth token endpoint |
+| `send_url` | string or null | No | Custom provider message-send endpoint |
 
 **Response:** `200 OK`
+
+| Status | Condition |
+|--------|-----------|
+| 400 | A required field is empty, the SMTP port is zero, or an identity field contains control characters |
+| 413 | A string field exceeds 16 KiB or the encoded configuration exceeds 128 KiB |
+| 500 | The validated configuration could not be serialized or durably stored |
 
 ---
 

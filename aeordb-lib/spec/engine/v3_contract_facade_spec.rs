@@ -1548,6 +1548,20 @@ fn wave_four_jwt_initialization_has_one_bounded_persistent_winner() {
 }
 
 #[test]
+fn wave_four_email_config_is_bounded_and_never_squelches_masking_failure() {
+  let email_config = include_str!("../../src/engine/email_config.rs");
+  let settings_routes = include_str!("../../src/server/settings_routes.rs");
+
+  assert!(email_config.contains("EMAIL_CONFIG_DOCUMENT_MAX_BYTES"));
+  assert!(email_config.contains("EMAIL_CONFIG_FIELD_MAX_BYTES"));
+  assert!(email_config.contains("read_file_buffered_bounded(EMAIL_CONFIG_PATH, EMAIL_CONFIG_DOCUMENT_MAX_BYTES)"));
+  assert!(email_config.contains("pub fn masked(&self) -> EngineResult<serde_json::Value>"));
+  assert!(!email_config.contains("serde_json::to_value(self).unwrap_or_default()"));
+  assert!(settings_routes.contains("EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST"));
+  assert!(settings_routes.contains("EngineError::ResourceExhausted(_) => StatusCode::PAYLOAD_TOO_LARGE"));
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

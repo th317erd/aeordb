@@ -737,6 +737,10 @@ name = "share_link_spec"
 path = "spec/engine/share_link_spec.rs"
 
 [[test]]
+name = "email_config_spec"
+path = "spec/engine/email_config_spec.rs"
+
+[[test]]
 name = "email_notification_spec"
 path = "spec/engine/email_notification_spec.rs"
 

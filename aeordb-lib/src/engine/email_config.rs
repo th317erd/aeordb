@@ -6,6 +6,8 @@ use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 
 const EMAIL_CONFIG_PATH: &str = "/.aeordb-system/email-config.json";
+const EMAIL_CONFIG_DOCUMENT_MAX_BYTES: u64 = 128 * 1024;
+const EMAIL_CONFIG_FIELD_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "provider")]
@@ -65,8 +67,9 @@ impl EmailConfig {
     }
   }
 
-  pub fn masked(&self) -> serde_json::Value {
-    let mut val = serde_json::to_value(self).unwrap_or_default();
+  pub fn masked(&self) -> EngineResult<serde_json::Value> {
+    let mut val =
+      serde_json::to_value(self).map_err(|error| EngineError::JsonParseError(format!("Email config masking failed: {error}")))?;
     if let Some(obj) = val.as_object_mut() {
       for key in ["password", "client_secret", "refresh_token"] {
         if obj.contains_key(key) {
@@ -75,16 +78,87 @@ impl EmailConfig {
       }
       obj.insert("configured".to_string(), serde_json::json!(true));
     }
-    val
+    Ok(val)
+  }
+
+  fn validate(&self) -> EngineResult<()> {
+    match self {
+      EmailConfig::Smtp(config) => {
+        validate_identity_field("host", &config.host, false)?;
+        if config.port == 0 {
+          return Err(EngineError::InvalidInput("email config port must not be zero".to_string()));
+        }
+        validate_identity_field("username", &config.username, true)?;
+        validate_secret_field("password", &config.password, true)?;
+        validate_identity_field("from_address", &config.from_address, false)?;
+        validate_identity_field("from_name", &config.from_name, false)?;
+        validate_identity_field("tls", &config.tls, false)?;
+      }
+      EmailConfig::OAuth(config) => {
+        validate_identity_field("oauth_provider", &config.oauth_provider, false)?;
+        validate_identity_field("client_id", &config.client_id, false)?;
+        validate_secret_field("client_secret", &config.client_secret, false)?;
+        validate_secret_field("refresh_token", &config.refresh_token, false)?;
+        validate_identity_field("from_address", &config.from_address, false)?;
+        validate_identity_field("from_name", &config.from_name, false)?;
+        validate_optional_identity_field("token_url", config.token_url.as_deref())?;
+        validate_optional_identity_field("send_url", config.send_url.as_deref())?;
+      }
+    }
+    Ok(())
+  }
+}
+
+fn validate_field_size(field: &str, value: &str) -> EngineResult<()> {
+  if value.len() > EMAIL_CONFIG_FIELD_MAX_BYTES {
+    return Err(EngineError::ResourceExhausted(format!(
+      "email config {field} is {} bytes, exceeding the {EMAIL_CONFIG_FIELD_MAX_BYTES}-byte limit",
+      value.len(),
+    )));
+  }
+  Ok(())
+}
+
+fn validate_identity_field(field: &str, value: &str, allow_empty: bool) -> EngineResult<()> {
+  validate_field_size(field, value)?;
+  if !allow_empty && value.is_empty() {
+    return Err(EngineError::InvalidInput(format!("email config {field} must not be empty")));
+  }
+  if value.chars().any(char::is_control) {
+    return Err(EngineError::InvalidInput(format!("email config {field} contains control characters")));
+  }
+  Ok(())
+}
+
+fn validate_secret_field(field: &str, value: &str, allow_empty: bool) -> EngineResult<()> {
+  validate_field_size(field, value)?;
+  if !allow_empty && value.is_empty() {
+    return Err(EngineError::InvalidInput(format!("email config {field} must not be empty")));
+  }
+  Ok(())
+}
+
+fn validate_optional_identity_field(field: &str, value: Option<&str>) -> EngineResult<()> {
+  if let Some(value) = value {
+    validate_identity_field(field, value, false)?;
+  }
+  Ok(())
+}
+
+fn validate_persisted_email_config(config: &EmailConfig) -> EngineResult<()> {
+  match config.validate() {
+    Err(EngineError::InvalidInput(reason)) => Err(EngineError::CorruptEntry { offset: 0, reason }),
+    result => result,
   }
 }
 
 pub fn load_email_config(engine: &StorageEngine) -> EngineResult<Option<EmailConfig>> {
   let ops = DirectoryOps::new(engine);
-  match ops.read_file_buffered(EMAIL_CONFIG_PATH) {
+  match ops.read_file_buffered_bounded(EMAIL_CONFIG_PATH, EMAIL_CONFIG_DOCUMENT_MAX_BYTES) {
     Ok(data) => {
       let config: EmailConfig =
         serde_json::from_slice(&data).map_err(|e| EngineError::JsonParseError(format!("Invalid email config: {}", e)))?;
+      validate_persisted_email_config(&config)?;
       Ok(Some(config))
     }
     Err(EngineError::NotFound(_)) => Ok(None),
@@ -93,9 +167,16 @@ pub fn load_email_config(engine: &StorageEngine) -> EngineResult<Option<EmailCon
 }
 
 pub fn save_email_config(engine: &StorageEngine, config: &EmailConfig) -> EngineResult<()> {
+  config.validate()?;
   let ops = DirectoryOps::new(engine);
   let ctx = RequestContext::system();
   let data = serde_json::to_vec_pretty(config).map_err(|e| EngineError::JsonParseError(e.to_string()))?;
+  if data.len() as u64 > EMAIL_CONFIG_DOCUMENT_MAX_BYTES {
+    return Err(EngineError::ResourceExhausted(format!(
+      "email config document is {} bytes, exceeding the {EMAIL_CONFIG_DOCUMENT_MAX_BYTES}-byte limit",
+      data.len(),
+    )));
+  }
   ops.store_file_buffered(&ctx, EMAIL_CONFIG_PATH, &data, Some("application/json"))?;
   Ok(())
 }
@@ -155,7 +236,7 @@ mod tests {
       tls: "starttls".to_string(),
     });
 
-    let masked = config.masked();
+    let masked = config.masked().unwrap();
     assert_eq!(masked["password"], "--------");
     assert_eq!(masked["configured"], true);
     // Non-secret fields should be preserved
@@ -176,7 +257,7 @@ mod tests {
       send_url: None,
     });
 
-    let masked = config.masked();
+    let masked = config.masked().unwrap();
     assert_eq!(masked["client_secret"], "--------");
     assert_eq!(masked["refresh_token"], "--------");
     assert_eq!(masked["configured"], true);
