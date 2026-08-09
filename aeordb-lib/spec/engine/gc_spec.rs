@@ -835,6 +835,7 @@ fn test_gc_result_serializes_to_json() {
     reclaimed_bytes: 47185920,
     duration_ms: 1200,
     dry_run: false,
+    cleanup_warnings: Vec::new(),
   };
 
   let json = serde_json::to_value(&result).unwrap();
@@ -844,6 +845,26 @@ fn test_gc_result_serializes_to_json() {
   assert_eq!(json["reclaimed_bytes"], 47185920u64);
   assert_eq!(json["duration_ms"], 1200);
   assert_eq!(json["dry_run"], false);
+  assert!(json.get("cleanup_warnings").is_none(), "normal GC compatibility response must omit empty cleanup warnings");
+
+  let mut recovered = result;
+  recovered.cleanup_warnings.push("recovered teardown".to_string());
+  let recovered_json = serde_json::to_value(&recovered).unwrap();
+  assert_eq!(recovered_json["cleanup_warnings"][0], "recovered teardown");
+}
+
+#[test]
+fn gc_recheck_normal_completion_cannot_return_to_drop_only_teardown() {
+  let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let gc_source = std::fs::read_to_string(package.join("src/engine/gc.rs")).unwrap();
+  let storage_source = std::fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
+
+  assert!(gc_source.contains("guard.finish(primary_result)"), "normal GC completion must explicitly combine primary and teardown results");
+  assert!(
+    gc_source.contains("GC recheck teardown also failed; preserving the primary GC error"),
+    "teardown failure must retain primary-error precedence"
+  );
+  assert!(storage_source.contains("self.gc_recheck.clear_poison()"), "recovered recheck teardown must leave later GC runs usable");
 }
 
 #[test]

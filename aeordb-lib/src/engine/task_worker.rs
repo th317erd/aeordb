@@ -1257,10 +1257,14 @@ fn execute_gc(
   let ctx = RequestContext::system();
   let result = run_gc_with_cancellation(engine, &ctx, dry_run, cancel)?;
 
-  Ok(format!(
+  let mut message = format!(
     "gc completed: {} garbage entries, {} bytes reclaimed, dry_run={}",
     result.garbage_entries, result.reclaimed_bytes, result.dry_run
-  ))
+  );
+  if !result.cleanup_warnings.is_empty() {
+    message.push_str(&format!(", cleanup_warnings={}", result.cleanup_warnings.len()));
+  }
+  Ok(message)
 }
 
 /// Execute a backup task: export HEAD (or a named snapshot) to a timestamped `.aeordb` file.

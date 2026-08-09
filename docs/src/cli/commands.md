@@ -229,6 +229,15 @@ aeordb verify --repair --force-fix-in-place --yes --database data.aeordb
 
 When `--repair` is used, B-tree directory issues are repaired by first rebuilding only the affected B-tree directory from current live path records. If targeted repair cannot recover the issue, repair falls back to rebuilding the live directory tree from path-key FileRecords.
 
+Each targeted directory publication, full-rebuild directory publication, and
+stale directory-locator replacement uses the shared maintenance authority.
+If a later repair, final verification, or durability publication fails,
+`verify --repair` exits nonzero with a bounded `Partial operation 'verify and
+repair'` error. Its `completed` count includes only maintenance actions that
+crossed their acknowledgement boundary; nested rebuild and failed-attempt
+counts remain explicit in the evidence. A staged Void snapshot is not counted
+until the hard hot-tail publication succeeds.
+
 ### Storage Accounting
 
 The verification report separates namespace, retention, and physical WAL accounting:

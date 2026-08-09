@@ -85,6 +85,31 @@ Response:
 }
 ```
 
+The normal response omits `cleanup_warnings`. If the mark/sweep result is
+complete but AeorDB has to recover a GC recheck teardown failure, the primary
+result remains successful and the response includes one bounded warning:
+
+```json
+{
+  "versions_scanned": 3,
+  "live_entries": 1247,
+  "garbage_entries": 89,
+  "reclaimed_bytes": 1258291,
+  "duration_ms": 312,
+  "dry_run": false,
+  "cleanup_warnings": [
+    "GC recheck teardown recovered: IO error: GC recheck lock is poisoned"
+  ]
+}
+```
+
+The same warning is included in the `gc_completed` SSE payload and printed by
+the CLI. AeorDB increments
+`aeordb_gc_recheck_teardown_failures_total`, clears recovered poison, and
+leaves later GC runs usable. If GC already had a primary error, that error is
+returned unchanged and the teardown incident is retained in logs and the
+metric instead of replacing the primary diagnosis.
+
 **Background GC (returns immediately, runs as a task):**
 
 ```bash
@@ -120,6 +145,10 @@ curl -X POST http://localhost:6830/system/cron \
 Non-dry-run GC takes AeorDB's namespace write barrier before it starts mark-and-sweep. Reads can continue, but namespace writes that publish path keys, directory indexes, or HEAD wait until the GC run completes. This prevents GC from seeing a half-published B-tree directory update and sweeping nodes that are about to become reachable.
 
 The sweep phase still re-verifies each candidate against the current KV state before overwriting, and write paths record successful write hashes in the GC recheck set while GC is active. Batch writes and HEAD updates participate in this recheck path.
+
+Recheck teardown is explicit on every normal success and error path. A Drop
+guard remains only for panic unwinding, so ordinary completion cannot silently
+discard teardown failures.
 
 Before a non-dry-run GC, AeorDB normally creates an engine-internal `_aeordb_pre_gc_*` snapshot as a safety net. If lifecycle configuration has `"snapshot_writes_enabled": false`, GC skips that safety snapshot and continues with the mark-and-sweep run. Existing snapshots are still honored as live roots either way.
 

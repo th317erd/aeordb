@@ -869,6 +869,7 @@ fn wave_one_entrypoints_cannot_reintroduce_split_namespace_authority() {
     ("ensure_root_directory", "execute_optional_namespace_mutation"),
     ("rebuild_directory_tree", "store_rebuilt_directory"),
     ("repair_directory_index_from_path_records", "store_rebuilt_directory"),
+    ("repair_stale_dir_key", "execute_optional_namespace_mutation"),
     ("store_rebuilt_directory", "execute_namespace_mutation"),
     ("delete_file_with_indexing", "delete_file("),
     ("store_symlink", "execute_namespace_mutation"),
@@ -894,6 +895,12 @@ fn wave_one_entrypoints_cannot_reintroduce_split_namespace_authority() {
       assert!(!method.contains(".store_entry"), "Wave 1 entrypoint {name} bypassed dependency planning with a direct entry write");
     }
   }
+
+  let stale_locator_repair = method_source(&source, "repair_stale_dir_key");
+  assert!(
+    !stale_locator_repair.contains("self.engine.store_entry("),
+    "stale directory-locator repair must not bypass shared maintenance authority"
+  );
 }
 
 #[test]

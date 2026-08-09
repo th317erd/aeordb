@@ -3415,9 +3415,24 @@ impl StorageEngine {
       Err(poisoned) => {
         let mut guard = poisoned.into_inner();
         *guard = None;
+        drop(guard);
+        self.gc_recheck.clear_poison();
         Err(EngineError::IoError(std::io::Error::other("GC recheck lock is poisoned")))
       }
     }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn poison_gc_recheck_for_test(&self) {
+    std::thread::scope(|scope| {
+      let result = scope
+        .spawn(|| {
+          let _guard = self.gc_recheck.lock().unwrap();
+          panic!("inject GC recheck lock poison");
+        })
+        .join();
+      assert!(result.is_err(), "GC recheck poison injection unexpectedly returned");
+    });
   }
 
   /// Retrieve an entry by its hash key via a lock-free snapshot read.

@@ -34,6 +34,9 @@ pub fn run(database: &str, dry_run: bool) {
         println!("Reclaimed:        {}", format_bytes(result.reclaimed_bytes));
         println!("Duration:         {:.1}s", result.duration_ms as f64 / 1000.0);
       }
+      for warning in &result.cleanup_warnings {
+        eprintln!("Warning: {warning}");
+      }
     }
     Err(e) => {
       eprintln!("GC failed: {}", e);

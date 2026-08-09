@@ -36,6 +36,8 @@ use crate::engine::SystemFamilyPolicyResolver;
 pub const DEFAULT_CHUNK_SIZE: usize = 262_144;
 const SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES: u32 = 1024 * 1024;
 const SYSTEM_FILE_ALIAS_WORKSPACE_BYTES: u64 = SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES as u64 * 8;
+const DIRECTORY_REPAIR_FAILURE_PATH_BYTES: usize = 768;
+const DIRECTORY_REPAIR_FAILURE_ERROR_BYTES: usize = 512;
 
 /// One bounded, live window from a directory listing.
 pub struct DirectoryListWindow {
@@ -154,6 +156,67 @@ enum RepairWorkspaceChild {
   SkippedNonPath,
   SkippedDangling,
   SkippedMalformed,
+}
+
+#[cfg(test)]
+std::thread_local! {
+  static DIRECTORY_REPAIR_TEST_FAILURE_AFTER_ACKNOWLEDGEMENTS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct DirectoryRepairTestFaultGuard {
+  previous: Option<usize>,
+}
+
+#[cfg(test)]
+impl DirectoryRepairTestFaultGuard {
+  fn fail_after_acknowledgements(completed: usize) -> Self {
+    let previous = DIRECTORY_REPAIR_TEST_FAILURE_AFTER_ACKNOWLEDGEMENTS.with(|value| value.replace(Some(completed)));
+    Self { previous }
+  }
+}
+
+#[cfg(test)]
+impl Drop for DirectoryRepairTestFaultGuard {
+  fn drop(&mut self) {
+    DIRECTORY_REPAIR_TEST_FAILURE_AFTER_ACKNOWLEDGEMENTS.with(|value| value.set(self.previous));
+  }
+}
+
+fn bounded_directory_repair_text(value: &str, maximum_bytes: usize) -> String {
+  if value.len() <= maximum_bytes {
+    return value.to_string();
+  }
+
+  let mut boundary = maximum_bytes.saturating_sub(3);
+  while boundary > 0 && !value.is_char_boundary(boundary) {
+    boundary -= 1;
+  }
+  format!("{}...", &value[..boundary])
+}
+
+fn directory_repair_failure(error: EngineError, completed: usize, phase: &'static str, path: &str) -> EngineError {
+  if completed == 0 || matches!(&error, EngineError::PartialOperation { operation, .. } if operation == "directory tree repair") {
+    return error;
+  }
+
+  let path = bounded_directory_repair_text(path, DIRECTORY_REPAIR_FAILURE_PATH_BYTES);
+  let error = bounded_directory_repair_text(&error.to_string(), DIRECTORY_REPAIR_FAILURE_ERROR_BYTES);
+  EngineError::PartialOperation {
+    operation: "directory tree repair".to_string(),
+    completed,
+    failed: 1,
+    evidence: format!("directories_written={completed}; phase={phase}; path={path}; error={error}"),
+  }
+}
+
+#[cfg(test)]
+fn inject_directory_repair_failure(completed: usize) -> EngineResult<()> {
+  let should_fail = DIRECTORY_REPAIR_TEST_FAILURE_AFTER_ACKNOWLEDGEMENTS.with(|value| value.get() == Some(completed));
+  if should_fail {
+    return Err(EngineError::InvalidInput("injected full-directory repair failure after acknowledgement".to_string()));
+  }
+  Ok(())
 }
 
 /// Compute the domain-prefixed hash for a chunk.
@@ -3952,17 +4015,39 @@ impl<'a> DirectoryOps<'a> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut dirs_written = 0usize;
     for depth in (0..=workspace.max_depth()).rev() {
-      let mut cursor = workspace.finish_depth(depth)?;
-      while let Some((dir_path, mut children)) = cursor.next_group(&mut workspace)? {
+      let mut cursor = workspace
+        .finish_depth(depth)
+        .map_err(|error| directory_repair_failure(error, dirs_written, "finish_depth", &format!("depth:{depth}")))?;
+      loop {
+        let next_group = cursor
+          .next_group(&mut workspace)
+          .map_err(|error| directory_repair_failure(error, dirs_written, "read_group", &format!("depth:{depth}")))?;
+        let Some((dir_path, mut children)) = next_group else {
+          break;
+        };
         Self::sort_rebuilt_children(&mut children);
         let store_result = self.store_rebuilt_directory(&dir_path, children, hash_length, &algo, false);
         let release_result = workspace.release_group();
-        let (content_key, dir_size) = match (store_result, release_result) {
-          (Ok(stored), Ok(())) => stored,
-          (Err(error), Ok(())) => return Err(error),
-          (_, Err(error)) => return Err(error),
+        let (content_key, dir_size) = match store_result {
+          Ok(stored) => {
+            dirs_written += 1;
+            if let Err(error) = release_result {
+              return Err(directory_repair_failure(error, dirs_written, "release_group", &dir_path));
+            }
+            stored
+          }
+          Err(error) => {
+            if let Err(cleanup_error) = release_result {
+              metrics::counter!("aeordb_directory_repair_cleanup_failures_total").increment(1);
+              tracing::error!(path = %dir_path, %cleanup_error, "Directory repair group cleanup also failed after the primary publication failure");
+            }
+            return Err(directory_repair_failure(error, dirs_written, "publish_directory", &dir_path));
+          }
         };
-        dirs_written += 1;
+
+        #[cfg(test)]
+        inject_directory_repair_failure(dirs_written)
+          .map_err(|error| directory_repair_failure(error, dirs_written, "post_publication", &dir_path))?;
 
         if dir_path != "/" {
           let parent = parent_path(&dir_path).unwrap_or_else(|| "/".to_string());
@@ -3977,7 +4062,7 @@ impl<'a> DirectoryOps<'a> {
             virtual_time: now_ms as u64,
             node_id: 0,
           };
-          workspace.push_child(&parent, child)?;
+          workspace.push_child(&parent, child).map_err(|error| directory_repair_failure(error, dirs_written, "queue_parent", &parent))?;
         }
       }
     }
@@ -4516,33 +4601,38 @@ impl<'a> DirectoryOps<'a> {
   /// (post-GC) and diverged-target (alive but != HEAD) scenarios.
   /// Returns Ok(true) if a write happened, Ok(false) otherwise.
   pub fn repair_stale_dir_key(&self, path: &str) -> EngineResult<bool> {
-    let _namespace = self.engine.namespace_write_guard()?;
-    let algo = self.engine.hash_algo();
-    let dir_key = directory_path_hash(path, &algo)?;
-    // Skip if dir_key isn't a hard-link entry at all.
-    let raw = match self.engine.get_entry(&dir_key)? {
-      Some(e) => e,
-      None => return Ok(false),
-    };
-    if raw.2.len() != algo.hash_length() {
-      return Ok(false);
+    let normalized = normalize_path(path);
+    let log_path = normalized.clone();
+    let repaired = self.execute_optional_namespace_mutation(None, move |planning_engine| {
+      let algo = planning_engine.hash_algo();
+      let dir_key = directory_path_hash(&normalized, &algo)?;
+      let Some((_header, _key, current_target)) = planning_engine.get_entry(&dir_key)? else {
+        return Ok((None, false));
+      };
+      if current_target.len() != algo.hash_length() {
+        return Ok((None, false));
+      }
+      let Some(canonical_target) = self.canonical_directory_content_hash(&normalized)? else {
+        return Ok((None, false));
+      };
+      if canonical_target == current_target {
+        return Ok((None, false));
+      }
+
+      let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::MaintenanceRepair);
+      batch.replace_locator(EntryType::DirectoryIndex, dir_key, canonical_target.clone(), 0)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized,
+        entry_type: Some(EntryType::DirectoryIndex.to_u8()),
+        previous_identity: Some(current_target),
+        new_identity: Some(canonical_target),
+      })?;
+      Ok((Some((batch, DirectoryMutationEffects::new(DirectoryMutationCounterEffect::None))), true))
+    })?;
+    if repaired {
+      tracing::info!(path = %log_path, "Repaired stale dir_key hard-link through maintenance authority");
     }
-    let canonical = match self.canonical_directory_content_hash(path)? {
-      Some(h) => h,
-      None => return Ok(false),
-    };
-    // Already pointing at HEAD's canonical — nothing to do.
-    if canonical == raw.2 {
-      return Ok(false);
-    }
-    self.engine.store_entry(EntryType::DirectoryIndex, &dir_key, &canonical)?;
-    tracing::info!(
-      path = %path,
-      stale_target = %hex::encode(&raw.2),
-      canonical_target = %hex::encode(&canonical),
-      "Repaired stale dir_key hard-link"
-    );
-    Ok(true)
+    Ok(repaired)
   }
 
   /// If `dir_key` is a hard-link whose target is either dead OR diverged
@@ -5942,6 +6032,26 @@ mod engine_file_stream_tests {
     let path = temp.path().join("test.aeordb");
     let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
     (engine, temp)
+  }
+
+  #[test]
+  fn full_directory_repair_preserves_every_acknowledgement_before_a_later_failure() {
+    let (engine, _temp) = create_test_engine();
+    let context = RequestContext::system();
+    let operations = DirectoryOps::new(&engine);
+    operations.store_file_buffered(&context, "/repair/a/b/file.txt", b"body", Some("text/plain")).unwrap();
+    let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+    let _fault = DirectoryRepairTestFaultGuard::fail_after_acknowledgements(1);
+
+    let error = operations.rebuild_directory_tree(&context).expect_err("the second repair step must fail after one acknowledgement");
+    let EngineError::PartialOperation { operation, completed, failed, evidence } = error else {
+      panic!("full repair erased prior acknowledgement evidence: {error}");
+    };
+    assert_eq!(operation, "directory tree repair");
+    assert_eq!(completed, 1);
+    assert_eq!(failed, 1);
+    assert!(evidence.contains("phase=post_publication"), "missing failure phase: {evidence}");
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
   }
 
   /// Build a payload big enough to span several 256 KB chunks so we can

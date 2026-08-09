@@ -113,6 +113,7 @@ async fn test_gc_root_user_succeeds() {
   assert!(json.get("live_entries").is_some());
   assert!(json.get("garbage_entries").is_some());
   assert!(json.get("reclaimed_bytes").is_some());
+  assert!(json.get("cleanup_warnings").is_none(), "ordinary GC responses must preserve the existing response shape");
   assert!(json.get("duration_ms").is_some());
   assert_eq!(json["dry_run"], false);
 }

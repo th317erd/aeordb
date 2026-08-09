@@ -31,6 +31,124 @@ pub struct BTreeDirectoryIssue {
 
 const MAX_VERIFY_DETAILS: usize = 20;
 const MAX_VERIFY_DIAGNOSTICS: usize = 1024;
+const REPAIR_FAILURE_PATH_BYTES: usize = 768;
+const REPAIR_FAILURE_ERROR_BYTES: usize = 512;
+const REPAIR_FAILURE_SAMPLE_LIMIT: usize = 8;
+
+#[derive(Clone, Debug)]
+struct RepairFailureSample {
+  phase: &'static str,
+  path: String,
+  error: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RepairProgress {
+  kv_rebuilds: usize,
+  targeted_directories: usize,
+  rebuilt_directories: usize,
+  stale_locators: usize,
+  void_publications: usize,
+  failed_attempts: usize,
+  failure_samples: Vec<RepairFailureSample>,
+}
+
+impl RepairProgress {
+  fn completed(&self) -> usize {
+    [self.kv_rebuilds, self.targeted_directories, self.rebuilt_directories, self.stale_locators, self.void_publications]
+      .into_iter()
+      .fold(0usize, usize::saturating_add)
+  }
+
+  fn counts(&self) -> String {
+    format!(
+      "kv_rebuilds={}; targeted_directories={}; rebuilt_directories={}; stale_locators={}; void_publications={}; failed_attempts={}",
+      self.kv_rebuilds,
+      self.targeted_directories,
+      self.rebuilt_directories,
+      self.stale_locators,
+      self.void_publications,
+      self.failed_attempts
+    )
+  }
+
+  fn record_failed_attempt(&mut self, phase: &'static str, path: &str, error: &EngineError) {
+    self.failed_attempts = self.failed_attempts.saturating_add(1);
+    if self.failure_samples.len() >= REPAIR_FAILURE_SAMPLE_LIMIT {
+      return;
+    }
+    self.failure_samples.push(RepairFailureSample {
+      phase,
+      path: bounded_repair_text(path, REPAIR_FAILURE_PATH_BYTES),
+      error: bounded_repair_text(&error.to_string(), REPAIR_FAILURE_ERROR_BYTES),
+    });
+  }
+
+  fn failed_attempt_evidence(&self) -> String {
+    let samples = self
+      .failure_samples
+      .iter()
+      .map(|sample| format!("{} {}: {}", sample.phase, sample.path, sample.error))
+      .collect::<Vec<_>>()
+      .join(" | ");
+    let omitted = self.failed_attempts.saturating_sub(self.failure_samples.len());
+    format!("failed_samples=[{samples}]; failed_samples_omitted={omitted}")
+  }
+
+  fn preserve_error(&self, error: EngineError, phase: &'static str, path: &str) -> EngineError {
+    let prior_completed = self.completed();
+    let path = bounded_repair_text(path, REPAIR_FAILURE_PATH_BYTES);
+    match error {
+      EngineError::PartialOperation { operation, completed, failed, evidence } => {
+        let total_completed = prior_completed.saturating_add(completed);
+        let total_failed = self.failed_attempts.saturating_add(failed);
+        let nested_evidence = bounded_repair_text(&evidence, REPAIR_FAILURE_ERROR_BYTES);
+        EngineError::PartialOperation {
+          operation: "verify and repair".to_string(),
+          completed: total_completed,
+          failed: total_failed,
+          evidence: format!(
+            "{}; {}; phase={phase}; path={path}; nested_operation={}; nested_completed={completed}; nested_failed={failed}; nested_evidence={}",
+            self.counts(),
+            self.failed_attempt_evidence(),
+            bounded_repair_text(&operation, REPAIR_FAILURE_PATH_BYTES),
+            nested_evidence
+          ),
+        }
+      }
+      error if prior_completed == 0 && self.failed_attempts == 0 => error,
+      error => EngineError::PartialOperation {
+        operation: "verify and repair".to_string(),
+        completed: prior_completed,
+        failed: self.failed_attempts.saturating_add(1),
+        evidence: format!(
+          "{}; {}; phase={phase}; path={path}; error={}",
+          self.counts(),
+          self.failed_attempt_evidence(),
+          bounded_repair_text(&error.to_string(), REPAIR_FAILURE_ERROR_BYTES)
+        ),
+      },
+    }
+  }
+}
+
+#[derive(Debug)]
+struct RepairOutcome {
+  messages: Vec<String>,
+  progress: RepairProgress,
+}
+
+fn bounded_repair_text(value: &str, maximum_bytes: usize) -> String {
+  if value.len() <= maximum_bytes {
+    return value.to_string();
+  }
+
+  let mut boundary = maximum_bytes.saturating_sub(3);
+  while boundary > 0 && !value.is_char_boundary(boundary) {
+    boundary -= 1;
+  }
+  format!("{}...", &value[..boundary])
+}
 
 /// Result of a full database integrity check.
 #[derive(Debug, Clone)]
@@ -300,23 +418,26 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
 
 pub fn verify_and_repair_checked(engine: &StorageEngine, db_path: &str) -> EngineResult<VerifyReport> {
   let report = verify_checked(engine, db_path)?;
-  let repairs = repair_verified_report(engine, &report)?;
-  if repairs.is_empty() {
+  let outcome = repair_verified_report(engine, &report)?;
+  if outcome.messages.is_empty() {
     return Ok(report);
   }
 
-  let mut final_report = verify_checked(engine, db_path)?;
-  final_report.repairs = repairs;
+  let mut final_report =
+    verify_checked(engine, db_path).map_err(|error| outcome.progress.preserve_error(error, "final_verification", db_path))?;
+  final_report.repairs = outcome.messages;
   Ok(final_report)
 }
 
-fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> EngineResult<Vec<String>> {
+fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> EngineResult<RepairOutcome> {
   let mut repairs = Vec::new();
+  let mut progress = RepairProgress::default();
   let mut mutated = false;
 
   // Repair 1: Rebuild KV if there are missing or stale entries
   if report.missing_kv_entries > 0 || report.stale_kv_entries > 0 {
-    engine.rebuild_kv()?;
+    engine.rebuild_kv().map_err(|error| progress.preserve_error(error, "kv_rebuild", engine.database_path().to_string_lossy().as_ref()))?;
+    progress.kv_rebuilds = progress.kv_rebuilds.saturating_add(1);
     mutated = true;
     repairs
       .push(format!("KV index rebuilt ({} missing + {} stale entries recovered)", report.missing_kv_entries, report.stale_kv_entries,));
@@ -351,11 +472,15 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
           Ok(count) => {
             targeted_repair_succeeded = true;
             mutated |= count > 0;
+            progress.targeted_directories = progress.targeted_directories.saturating_add(count);
             repairs.push(format!("B-tree directory repaired from path records: {} ({} directory written)", path, count));
           }
-          Err(error) if is_operational_verification_error(&error) => return Err(error),
+          Err(error) if is_operational_verification_error(&error) => {
+            return Err(progress.preserve_error(error, "targeted_directory_repair", &path));
+          }
           Err(error) => {
             targeted_repair_failed = true;
+            progress.record_failed_attempt("targeted_directory_repair", &path, &error);
             repairs.push(format!("B-tree directory targeted repair failed for {}: {}; falling back to full rebuild", path, error));
           }
         }
@@ -364,8 +489,9 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
 
     let missing_kv_needs_full_rebuild = report.missing_kv_entries > 0 && report.file_records > 0 && !targeted_repair_succeeded;
     if targeted_repair_failed || !report.missing_children.is_empty() || missing_kv_needs_full_rebuild {
-      let count = ops.rebuild_directory_tree(&ctx)?;
+      let count = ops.rebuild_directory_tree(&ctx).map_err(|error| progress.preserve_error(error, "full_directory_rebuild", "/"))?;
       mutated |= count > 0;
+      progress.rebuilt_directories = progress.rebuilt_directories.saturating_add(count);
       repairs.push(format!("Directory tree rebuilt ({} directories written)", count));
     }
   }
@@ -381,32 +507,45 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
     let ops = DirectoryOps::new(engine);
     let mut repaired = 0usize;
     for path in &report.stale_dir_path_keys {
-      if ops.repair_stale_dir_key(path)? {
+      let changed = ops.repair_stale_dir_key(path).map_err(|error| progress.preserve_error(error, "stale_directory_locator", path))?;
+      if changed {
         repaired = repaired.saturating_add(1);
+        progress.stale_locators = progress.stale_locators.saturating_add(1);
       }
     }
     mutated |= repaired > 0;
     repairs.push(format!("Stale dir_keys rewritten: {} fixed", repaired));
   }
 
-  if !report.invalid_hot_tail_voids.is_empty() {
-    engine.sync_voids_to_kv_writer()?;
+  let void_snapshot_staged = !report.invalid_hot_tail_voids.is_empty();
+  if void_snapshot_staged {
+    engine
+      .sync_voids_to_kv_writer()
+      .map_err(|error| progress.preserve_error(error, "stage_void_snapshot", engine.database_path().to_string_lossy().as_ref()))?;
     mutated = true;
     repairs.push(format!("Hot-tail void snapshot republished after {} invalid diagnostic(s)", report.invalid_hot_tail_voids.len()));
   }
 
   if mutated {
-    engine.force_hot_tail_flush()?;
+    engine
+      .force_hot_tail_flush()
+      .map_err(|error| progress.preserve_error(error, "durability_publication", engine.database_path().to_string_lossy().as_ref()))?;
+    if void_snapshot_staged {
+      progress.void_publications = progress.void_publications.saturating_add(1);
+    }
     repairs.push("Repairs durably published.".to_string());
   }
 
-  Ok(repairs)
+  Ok(RepairOutcome { messages: repairs, progress })
 }
 
 #[cfg(test)]
 mod repair_tests {
   use super::*;
+  use crate::engine::directory_ops::{directory_path_hash, DirectoryOps};
+  use crate::engine::entry_type::EntryType;
   use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+  use crate::engine::request_context::RequestContext;
   use crate::server::create_temp_engine_for_tests;
 
   #[test]
@@ -430,6 +569,114 @@ mod repair_tests {
     let key = engine.compute_hash(b"repair-pressure-released").unwrap();
     engine.store_entry(EntryType::Chunk, &key, b"still-writable").unwrap();
     assert!(engine.has_entry(&key).unwrap());
+  }
+
+  #[test]
+  fn checked_repair_preserves_an_acknowledged_stale_locator_when_a_later_repair_fails() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    let context = RequestContext::system();
+    let operations = DirectoryOps::new(&engine);
+    operations.store_file_buffered(&context, "/good/file.txt", b"body", Some("text/plain")).unwrap();
+
+    let hash_algorithm = engine.hash_algo();
+    let hash_length = hash_algorithm.hash_length();
+    let root_key = directory_path_hash("/", &hash_algorithm).unwrap();
+    let bad_key = directory_path_hash("/bad", &hash_algorithm).unwrap();
+    let root_hash = engine.head_hash().unwrap();
+    let stale_target = vec![0x5a; hash_length];
+    engine.store_entry(EntryType::DirectoryIndex, &root_key, &stale_target).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &bad_key, &stale_target).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &root_hash, b"malformed directory bytes").unwrap();
+
+    let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+    let mut report = VerifyReport::new(temp.path().join("test.aeordb").to_str().unwrap());
+    report.stale_dir_path_keys = vec!["/".to_string(), "/bad".to_string()];
+
+    let error = repair_verified_report(&engine, &report).expect_err("the later corrupt canonical walk must fail");
+    let EngineError::PartialOperation { operation, completed, failed, evidence } = error else {
+      panic!("acknowledged repair evidence was erased: {error}");
+    };
+    assert_eq!(operation, "verify and repair");
+    assert_eq!(completed, 1);
+    assert_eq!(failed, 1);
+    assert!(evidence.contains("stale_locators=1"), "missing exact repair class: {evidence}");
+    assert!(evidence.contains("phase=stale_directory_locator"), "missing failure phase: {evidence}");
+    assert!(evidence.contains("path=/bad"), "missing bounded failing path: {evidence}");
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+    assert_eq!(engine.get_entry(&root_key).unwrap().unwrap().2, root_hash);
+  }
+
+  #[test]
+  fn repair_progress_merges_collectable_and_nested_partial_cardinality() {
+    let mut progress = RepairProgress { targeted_directories: 2, ..RepairProgress::default() };
+    progress.record_failed_attempt(
+      "targeted_directory_repair",
+      "/damaged",
+      &EngineError::CorruptEntry { offset: 17, reason: "damaged node".to_string() },
+    );
+    let error = progress.preserve_error(
+      EngineError::PartialOperation {
+        operation: "directory tree repair".to_string(),
+        completed: 3,
+        failed: 2,
+        evidence: "directories_written=3".to_string(),
+      },
+      "full_directory_rebuild",
+      "/",
+    );
+
+    let EngineError::PartialOperation { operation, completed, failed, evidence } = error else {
+      panic!("nested partial outcome was not retained: {error}");
+    };
+    assert_eq!(operation, "verify and repair");
+    assert_eq!(completed, 5);
+    assert_eq!(failed, 3);
+    assert!(evidence.contains("failed_attempts=1"));
+    assert!(evidence.contains("targeted_directory_repair /damaged"));
+    assert!(evidence.contains("nested_completed=3"));
+    assert!(evidence.contains("nested_failed=2"));
+  }
+
+  #[test]
+  fn repair_progress_preserves_prior_acknowledgements_across_a_durability_failure() {
+    let progress = RepairProgress { stale_locators: 2, ..RepairProgress::default() };
+
+    let error = progress.preserve_error(
+      EngineError::PostMutationDurabilityFailure("forced publication failed".to_string()),
+      "durability_publication",
+      "/database.aeordb",
+    );
+
+    let EngineError::PartialOperation { completed, failed, evidence, .. } = error else {
+      panic!("durability failure erased prior repair acknowledgements: {error}");
+    };
+    assert_eq!(completed, 2);
+    assert_eq!(failed, 1);
+    assert!(evidence.contains("stale_locators=2"));
+    assert!(evidence.contains("phase=durability_publication"));
+    assert!(evidence.contains("Post-mutation durability failure"));
+  }
+
+  #[test]
+  fn void_snapshot_staging_failure_does_not_claim_a_publication() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    std::thread::scope(|scope| {
+      let result = scope
+        .spawn(|| {
+          let _guard = engine.void_manager.write().unwrap();
+          panic!("inject void-manager poison before repair staging");
+        })
+        .join();
+      assert!(result.is_err());
+    });
+    let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+    let mut report = VerifyReport::new(temp.path().join("test.aeordb").to_str().unwrap());
+    report.invalid_hot_tail_voids.push("invalid void".to_string());
+
+    let error = repair_verified_report(&engine, &report).expect_err("Void staging must surface its authority read failure");
+
+    assert!(!matches!(error, EngineError::PartialOperation { .. }), "unpublished Void state must not count as completed");
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
   }
 }
 
@@ -971,6 +1218,10 @@ fn is_operational_verification_error(error: &EngineError) -> bool {
   matches!(
     error,
     EngineError::IoError(_)
+      | EngineError::InvalidMagic
+      | EngineError::InvalidHashAlgorithm(_)
+      | EngineError::PartialOperation { .. }
+      | EngineError::SystemFamilyPolicy { .. }
       | EngineError::ResourceExhausted(_)
       | EngineError::DurabilityFailure(_)
       | EngineError::PostMutationDurabilityFailure(_)

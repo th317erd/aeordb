@@ -517,6 +517,11 @@ let result = run_gc(&engine, &ctx, false).unwrap();
 println!("Reclaimed {} bytes from {} entries", result.reclaimed_bytes, result.garbage_entries);
 ```
 
+`GcResult.cleanup_warnings` is empty during ordinary operation and is omitted
+from serialized JSON. A bounded warning is retained there only when the
+mark/sweep result succeeded but explicit GC recheck teardown required recovery.
+An existing primary GC error always keeps precedence.
+
 ## System Data
 
 System data (users, groups, API keys, config) is stored under `/.aeordb-system/` and accessed via `system_store`:

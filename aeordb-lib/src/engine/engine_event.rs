@@ -144,6 +144,8 @@ pub struct GcEventData {
   pub reclaimed_bytes: u64,
   pub duration_ms: u64,
   pub dry_run: bool,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub cleanup_warnings: Vec<String>,
 }
 
 // --- Event type constants ---

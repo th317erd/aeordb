@@ -47,6 +47,67 @@ pub struct GcResult {
   pub duration_ms: u64,
   /// True if this was a dry run (no entries were actually swept).
   pub dry_run: bool,
+  /// Bounded optional-cleanup incidents recovered after the primary GC result
+  /// was known. The primary result remains authoritative.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub cleanup_warnings: Vec<String>,
+}
+
+struct GcRecheckGuard<'a> {
+  engine: &'a StorageEngine,
+  armed: bool,
+}
+
+impl<'a> GcRecheckGuard<'a> {
+  fn active(engine: &'a StorageEngine) -> Self {
+    Self { engine, armed: true }
+  }
+
+  fn finish(mut self, primary_result: EngineResult<GcResult>) -> EngineResult<GcResult> {
+    self.armed = false;
+    let cleanup_result = self.engine.end_gc_recheck();
+    match (primary_result, cleanup_result) {
+      (result, Ok(())) => result,
+      (Ok(mut result), Err(cleanup_error)) => {
+        metrics::counter!("aeordb_gc_recheck_teardown_failures_total").increment(1);
+        let warning = bounded_gc_cleanup_warning(&cleanup_error.to_string());
+        tracing::warn!(%cleanup_error, "GC recheck teardown recovered after primary success");
+        result.cleanup_warnings.push(warning);
+        Ok(result)
+      }
+      (Err(primary_error), Err(cleanup_error)) => {
+        metrics::counter!("aeordb_gc_recheck_teardown_failures_total").increment(1);
+        tracing::error!(%primary_error, %cleanup_error, "GC recheck teardown also failed; preserving the primary GC error");
+        Err(primary_error)
+      }
+    }
+  }
+}
+
+impl Drop for GcRecheckGuard<'_> {
+  fn drop(&mut self) {
+    if !self.armed {
+      return;
+    }
+    if let Err(error) = self.engine.end_gc_recheck() {
+      metrics::counter!("aeordb_gc_recheck_teardown_failures_total").increment(1);
+      tracing::error!(%error, "GC recheck teardown recovered during unwind");
+    }
+  }
+}
+
+fn bounded_gc_cleanup_warning(error: &str) -> String {
+  const MAXIMUM_BYTES: usize = 512;
+  const PREFIX: &str = "GC recheck teardown recovered: ";
+  let available = MAXIMUM_BYTES.saturating_sub(PREFIX.len());
+  if error.len() <= available {
+    return format!("{PREFIX}{error}");
+  }
+  let mut boundary = available.saturating_sub(3);
+  while boundary > 0 && !error.is_char_boundary(boundary) {
+    boundary -= 1;
+  }
+  format!("{PREFIX}{}...", &error[..boundary])
 }
 
 /// Reachability set returned by the low-level mark API. Its coordinator
@@ -843,7 +904,7 @@ fn gc_sweep_internal(
 ///
 /// GC should not be run concurrently with writes -- see [`gc_sweep`] for details.
 pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> EngineResult<GcResult> {
-  run_gc_internal(engine, ctx, dry_run, None, || {})
+  run_gc_internal(engine, ctx, dry_run, None, || {}, || {})
 }
 
 /// Run a complete GC cycle while honoring cooperative cancellation before
@@ -854,7 +915,7 @@ pub fn run_gc_with_cancellation(
   dry_run: bool,
   cancellation: &CancellationToken,
 ) -> EngineResult<GcResult> {
-  run_gc_internal(engine, ctx, dry_run, Some(cancellation), || {})
+  run_gc_internal(engine, ctx, dry_run, Some(cancellation), || {}, || {})
 }
 
 /// Deterministic phase-boundary hook used to prove pressure changes that occur
@@ -869,18 +930,20 @@ pub fn run_gc_with_post_start_hook<F>(
 where
   F: FnOnce(),
 {
-  run_gc_internal(engine, ctx, dry_run, None, post_start_hook)
+  run_gc_internal(engine, ctx, dry_run, None, post_start_hook, || {})
 }
 
-fn run_gc_internal<F>(
+fn run_gc_internal<F, G>(
   engine: &StorageEngine,
   ctx: &RequestContext,
   dry_run: bool,
   cancellation: Option<&CancellationToken>,
   post_start_hook: F,
+  pre_teardown_hook: G,
 ) -> EngineResult<GcResult>
 where
   F: FnOnce(),
+  G: FnOnce(),
 {
   check_gc_token(cancellation)?;
   let run_configuration = engine.capture_gc_run_configuration()?;
@@ -910,154 +973,150 @@ where
   // Begin GC recheck tracking before any version-forest reads. From this
   // point on, every successful write hash is recorded so the sweep phase can
   // spare entries that arrived after the mark snapshot was captured. See
-  // bot-docs/plan/gc-mark-sweep.md. The RAII guard ensures we always call
-  // end_gc_recheck on exit, even on `?`-propagated errors.
-  struct RecheckGuard<'a>(&'a StorageEngine, bool);
-  impl<'a> Drop for RecheckGuard<'a> {
-    fn drop(&mut self) {
-      if self.1 {
-        if let Err(error) = self.0.end_gc_recheck() {
-          tracing::error!(%error, "GC recheck cleanup failed");
-        }
-      }
-    }
-  }
+  // bot-docs/plan/gc-mark-sweep.md. Normal completion combines the primary
+  // result with explicit teardown; Drop remains only as unwind protection.
   if !dry_run {
     engine.begin_gc_recheck()?;
   }
-  let _recheck_guard = RecheckGuard(engine, !dry_run);
+  let recheck_guard = if dry_run { None } else { Some(GcRecheckGuard::active(engine)) };
 
-  let vm = VersionManager::new(engine);
+  let primary_result = (|| -> EngineResult<GcResult> {
+    let vm = VersionManager::new(engine);
 
-  // Auto-snapshot before GC — safety net in case sweep removes something needed
-  if !dry_run {
-    if crate::engine::lifecycle_config::snapshot_writes_enabled(engine) {
-      let snapshot_name = format!("_aeordb_pre_gc_{}_{}", chrono::Utc::now().timestamp_millis(), uuid::Uuid::new_v4().simple());
+    // Auto-snapshot before GC — safety net in case sweep removes something needed
+    if !dry_run {
+      if crate::engine::lifecycle_config::snapshot_writes_enabled(engine) {
+        let snapshot_name = format!("_aeordb_pre_gc_{}_{}", chrono::Utc::now().timestamp_millis(), uuid::Uuid::new_v4().simple());
 
-      match vm.create_snapshot(ctx, &snapshot_name, std::collections::HashMap::new()) {
-        Ok(_) => {
-          tracing::info!("Created pre-GC snapshot: {}", snapshot_name);
+        match vm.create_snapshot(ctx, &snapshot_name, std::collections::HashMap::new()) {
+          Ok(_) => {
+            tracing::info!("Created pre-GC snapshot: {}", snapshot_name);
+          }
+          Err(e) => {
+            return Err(e);
+          }
         }
-        Err(e) => {
-          return Err(e);
+      } else {
+        tracing::info!("Skipping pre-GC snapshot because snapshot writes are disabled");
+      }
+
+      // Clean up old pre-GC snapshots — keep last 3
+      if let Ok(snapshots) = vm.list_snapshots() {
+        let mut pre_gc_snapshots: Vec<String> =
+          snapshots.iter().filter(|s| s.name.starts_with("_aeordb_pre_gc_")).map(|s| s.name.clone()).collect();
+        pre_gc_snapshots.sort();
+        pre_gc_snapshots.reverse(); // newest first (timestamp suffix sorts lexicographically)
+
+        for old_name in pre_gc_snapshots.iter().skip(3) {
+          if let Err(e) = vm.delete_snapshot(ctx, old_name) {
+            tracing::warn!("Failed to delete old pre-GC snapshot {}: {}", old_name, e);
+          }
         }
       }
-    } else {
-      tracing::info!("Skipping pre-GC snapshot because snapshot writes are disabled");
+
+      // Apply user-configured retention to non-engine snapshots before the
+      // mark phase. Snapshots deleted here have their orphaned data swept in
+      // this same GC cycle.
+      let prune_start = std::time::Instant::now();
+      let _gc_timing = std::env::var("AEORDB_GC_TIMING").is_ok();
+      match crate::engine::lifecycle_config::prune_expired_snapshots(engine, ctx) {
+        Ok(result) if result.pruned_count > 0 => {
+          tracing::info!(
+            pruned = result.pruned_count,
+            names = ?result.pruned_names,
+            "Lifecycle retention pruned snapshots",
+          );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Lifecycle retention pruning failed: {}", e),
+      }
+      if _gc_timing {
+        eprintln!("[gc-timing] prune: {:?}", prune_start.elapsed());
+      }
     }
 
-    // Clean up old pre-GC snapshots — keep last 3
-    if let Ok(snapshots) = vm.list_snapshots() {
-      let mut pre_gc_snapshots: Vec<String> =
-        snapshots.iter().filter(|s| s.name.starts_with("_aeordb_pre_gc_")).map(|s| s.name.clone()).collect();
-      pre_gc_snapshots.sort();
-      pre_gc_snapshots.reverse(); // newest first (timestamp suffix sorts lexicographically)
+    let snapshot_count = vm.list_snapshots()?.len();
+    let fork_count = vm.list_forks()?.len();
+    let versions_scanned = 1 + snapshot_count + fork_count;
 
-      for old_name in pre_gc_snapshots.iter().skip(3) {
-        if let Err(e) = vm.delete_snapshot(ctx, old_name) {
-          tracing::warn!("Failed to delete old pre-GC snapshot {}: {}", old_name, e);
+    // RSS sampling: bracket mark, recheck-drain, and sweep separately so we can
+    // attribute the multi-GB transient to a specific phase. No-op unless
+    // AEORDB_GC_MEM_PROFILE is set.
+    let mark_mem = PhaseSampler::start("mark", std::time::Duration::from_millis(50));
+    check_gc_cancellation(engine, cancellation)?;
+    let hashes = gc_mark_internal(engine, cancellation)?;
+    let mut live = GcLiveSet { hashes, _reservation: gc_admission };
+    mark_mem.finish();
+    check_gc_cancellation(engine, cancellation)?;
+
+    // Re-check drain: any entry that was written during the mark phase is now in
+    // the recheck set. Walk each one and union into `live` so the sweep doesn't
+    // clobber freshly-written data. Loop until the queue is empty for one pass.
+    if !dry_run {
+      let drain_mem = PhaseSampler::start("recheck-drain", std::time::Duration::from_millis(50));
+      let family_policy = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
+      loop {
+        check_gc_cancellation(engine, cancellation)?;
+        let pending = engine.take_gc_recheck()?;
+        if pending.is_empty() {
+          break;
+        }
+        let hash_length = engine.hash_algo().hash_length();
+        for (index, hash) in pending.into_iter().enumerate() {
+          check_gc_quantum(engine, cancellation, index)?;
+          // Path is unknown for recheck entries — the writer recorded raw hashes
+          // only. Every key it wrote (identity, file-path, content) is in the
+          // recheck set independently, so they each get marked when their hash
+          // shows up in this loop. The empty path means path-derived keys
+          // (dir:{path}, file:{path}) computed inside the recursion are wrong,
+          // but harmless: the live set is "do not sweep" — extra hashes in it
+          // never match a real entry and are simply ignored.
+          mark_entry_recursive(engine, &hash, "", hash_length, family_policy, &mut live, cancellation)?;
         }
       }
+      drain_mem.finish();
     }
 
-    // Apply user-configured retention to non-engine snapshots before the
-    // mark phase. Snapshots deleted here have their orphaned data swept in
-    // this same GC cycle.
-    let prune_start = std::time::Instant::now();
-    let _gc_timing = std::env::var("AEORDB_GC_TIMING").is_ok();
-    match crate::engine::lifecycle_config::prune_expired_snapshots(engine, ctx) {
-      Ok(result) if result.pruned_count > 0 => {
-        tracing::info!(
-          pruned = result.pruned_count,
-          names = ?result.pruned_names,
-          "Lifecycle retention pruned snapshots",
-        );
-      }
-      Ok(_) => {}
-      Err(e) => tracing::warn!("Lifecycle retention pruning failed: {}", e),
+    let live_entries = live.len();
+
+    let sweep_start = std::time::Instant::now();
+    let sweep_mem = PhaseSampler::start("sweep", std::time::Duration::from_millis(50));
+    check_gc_cancellation(engine, cancellation)?;
+    let (garbage_entries, reclaimed_bytes) = gc_sweep_internal(engine, &live, dry_run, cancellation)?;
+    sweep_mem.finish();
+    if std::env::var("AEORDB_GC_TIMING").is_ok() {
+      eprintln!("[gc-timing] sweep: {:?} (garbage={}, reclaimed_bytes={})", sweep_start.elapsed(), garbage_entries, reclaimed_bytes);
     }
-    if _gc_timing {
-      eprintln!("[gc-timing] prune: {:?}", prune_start.elapsed());
+
+    // Reconcile counters from authoritative KV state after sweep
+    if !dry_run {
+      let authoritative = build_authoritative_snapshot(engine)?;
+      engine.counters().reconcile(&authoritative);
     }
-  }
 
-  let snapshot_count = vm.list_snapshots()?.len();
-  let fork_count = vm.list_forks()?.len();
-  let versions_scanned = 1 + snapshot_count + fork_count;
+    let duration_ms = start.elapsed().as_millis() as u64;
 
-  // RSS sampling: bracket mark, recheck-drain, and sweep separately so we can
-  // attribute the multi-GB transient to a specific phase. No-op unless
-  // AEORDB_GC_MEM_PROFILE is set.
-  let mark_mem = PhaseSampler::start("mark", std::time::Duration::from_millis(50));
-  check_gc_cancellation(engine, cancellation)?;
-  let hashes = gc_mark_internal(engine, cancellation)?;
-  let mut live = GcLiveSet { hashes, _reservation: gc_admission };
-  mark_mem.finish();
-  check_gc_cancellation(engine, cancellation)?;
+    Ok(GcResult { versions_scanned, live_entries, garbage_entries, reclaimed_bytes, duration_ms, dry_run, cleanup_warnings: Vec::new() })
+  })();
 
-  // Re-check drain: any entry that was written during the mark phase is now in
-  // the recheck set. Walk each one and union into `live` so the sweep doesn't
-  // clobber freshly-written data. Loop until the queue is empty for one pass.
-  if !dry_run {
-    let drain_mem = PhaseSampler::start("recheck-drain", std::time::Duration::from_millis(50));
-    let family_policy = SystemFamilyPolicyResolver::new(engine.hash_algo())?;
-    loop {
-      check_gc_cancellation(engine, cancellation)?;
-      let pending = engine.take_gc_recheck()?;
-      if pending.is_empty() {
-        break;
-      }
-      let hash_length = engine.hash_algo().hash_length();
-      for (index, hash) in pending.into_iter().enumerate() {
-        check_gc_quantum(engine, cancellation, index)?;
-        // Path is unknown for recheck entries — the writer recorded raw hashes
-        // only. Every key it wrote (identity, file-path, content) is in the
-        // recheck set independently, so they each get marked when their hash
-        // shows up in this loop. The empty path means path-derived keys
-        // (dir:{path}, file:{path}) computed inside the recursion are wrong,
-        // but harmless: the live set is "do not sweep" — extra hashes in it
-        // never match a real entry and are simply ignored.
-        mark_entry_recursive(engine, &hash, "", hash_length, family_policy, &mut live, cancellation)?;
-      }
-    }
-    drain_mem.finish();
-  }
-
-  let live_entries = live.len();
-
-  // The RAII guard above calls end_gc_recheck on scope exit so failure paths
-  // don't leave recheck recording on indefinitely.
-  let sweep_start = std::time::Instant::now();
-  let sweep_mem = PhaseSampler::start("sweep", std::time::Duration::from_millis(50));
-  check_gc_cancellation(engine, cancellation)?;
-  let (garbage_entries, reclaimed_bytes) = gc_sweep_internal(engine, &live, dry_run, cancellation)?;
-  sweep_mem.finish();
-  if std::env::var("AEORDB_GC_TIMING").is_ok() {
-    eprintln!("[gc-timing] sweep: {:?} (garbage={}, reclaimed_bytes={})", sweep_start.elapsed(), garbage_entries, reclaimed_bytes);
-  }
-
-  // Reconcile counters from authoritative KV state after sweep
-  if !dry_run {
-    let authoritative = build_authoritative_snapshot(engine)?;
-    engine.counters().reconcile(&authoritative);
-  }
-
-  let duration_ms = start.elapsed().as_millis() as u64;
-
-  let result = GcResult { versions_scanned, live_entries, garbage_entries, reclaimed_bytes, duration_ms, dry_run };
+  pre_teardown_hook();
+  let result = match recheck_guard {
+    Some(guard) => guard.finish(primary_result),
+    None => primary_result,
+  }?;
 
   // Emit GC event
-  ctx.emit(
-    EVENT_GC_COMPLETED,
-    serde_json::json!({
-      "versions_scanned": result.versions_scanned,
-      "live_entries": result.live_entries,
-      "garbage_entries": result.garbage_entries,
-      "reclaimed_bytes": result.reclaimed_bytes,
-      "duration_ms": result.duration_ms,
-      "dry_run": result.dry_run,
-    }),
-  );
+  let mut completion_payload = serde_json::Map::new();
+  completion_payload.insert("versions_scanned".to_string(), serde_json::json!(result.versions_scanned));
+  completion_payload.insert("live_entries".to_string(), serde_json::json!(result.live_entries));
+  completion_payload.insert("garbage_entries".to_string(), serde_json::json!(result.garbage_entries));
+  completion_payload.insert("reclaimed_bytes".to_string(), serde_json::json!(result.reclaimed_bytes));
+  completion_payload.insert("duration_ms".to_string(), serde_json::json!(result.duration_ms));
+  completion_payload.insert("dry_run".to_string(), serde_json::json!(result.dry_run));
+  if !result.cleanup_warnings.is_empty() {
+    completion_payload.insert("cleanup_warnings".to_string(), serde_json::json!(&result.cleanup_warnings));
+  }
+  ctx.emit(EVENT_GC_COMPLETED, serde_json::Value::Object(completion_payload));
 
   Ok(result)
 }
@@ -1073,6 +1132,83 @@ fn check_gc_token(cancellation: Option<&CancellationToken>) -> EngineResult<()> 
     return Err(EngineError::Cancelled("garbage collection".to_string()));
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod recheck_teardown_tests {
+  use super::*;
+  use crate::engine::directory_ops::DirectoryOps;
+  use crate::engine::event_bus::EventBus;
+  use std::sync::Arc;
+
+  fn create_test_engine() -> (StorageEngine, tempfile::TempDir) {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("gc-recheck-teardown.aeordb");
+    let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+    (engine, temporary)
+  }
+
+  fn successful_result() -> GcResult {
+    GcResult {
+      versions_scanned: 1,
+      live_entries: 2,
+      garbage_entries: 3,
+      reclaimed_bytes: 4,
+      duration_ms: 5,
+      dry_run: false,
+      cleanup_warnings: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn explicit_recheck_teardown_preserves_success_and_surfaces_recovered_cleanup_failure() {
+    let (engine, _temporary) = create_test_engine();
+    engine.begin_gc_recheck().unwrap();
+    engine.poison_gc_recheck_for_test();
+    let guard = GcRecheckGuard::active(&engine);
+
+    let result = guard.finish(Ok(successful_result())).expect("optional teardown failure must preserve primary success");
+
+    assert_eq!(result.cleanup_warnings.len(), 1);
+    assert!(result.cleanup_warnings[0].contains("recheck"));
+    engine.begin_gc_recheck().expect("recovered teardown must leave later GC usable");
+    engine.end_gc_recheck().unwrap();
+  }
+
+  #[test]
+  fn explicit_recheck_teardown_preserves_the_primary_error() {
+    let (engine, _temporary) = create_test_engine();
+    engine.begin_gc_recheck().unwrap();
+    engine.poison_gc_recheck_for_test();
+    let guard = GcRecheckGuard::active(&engine);
+
+    let error =
+      guard.finish(Err(EngineError::Cancelled("primary gc failure".to_string()))).expect_err("the primary GC error must remain terminal");
+
+    assert!(matches!(error, EngineError::Cancelled(message) if message == "primary gc failure"));
+    engine.begin_gc_recheck().expect("failed primary plus recovered teardown must leave later GC usable");
+    engine.end_gc_recheck().unwrap();
+  }
+
+  #[test]
+  fn complete_gc_run_returns_and_emits_a_recovered_teardown_warning() {
+    let (engine, _temporary) = create_test_engine();
+    let event_bus = Arc::new(EventBus::new());
+    let mut events = event_bus.subscribe();
+    let context = RequestContext::with_bus(event_bus);
+    DirectoryOps::new(&engine).store_file_buffered(&context, "/gc/live.txt", b"live", Some("text/plain")).unwrap();
+
+    let result = run_gc_internal(&engine, &context, false, None, || {}, || engine.poison_gc_recheck_for_test())
+      .expect("the primary GC result must survive recovered teardown failure");
+
+    assert_eq!(result.cleanup_warnings.len(), 1);
+    let completed = std::iter::from_fn(|| events.try_recv().ok())
+      .find(|event| event.event_type == EVENT_GC_COMPLETED)
+      .expect("GC completion event must follow explicit teardown");
+    assert_eq!(completed.payload["cleanup_warnings"].as_array().map(Vec::len), Some(1));
+    engine.begin_gc_recheck().expect("the completed run must leave later GC usable");
+    engine.end_gc_recheck().unwrap();
+  }
 }
 
 fn check_gc_quantum(engine: &StorageEngine, cancellation: Option<&CancellationToken>, index: usize) -> EngineResult<()> {

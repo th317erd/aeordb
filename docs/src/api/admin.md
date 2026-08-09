@@ -110,6 +110,9 @@ Run garbage collection synchronously. Identifies and removes orphaned entries no
 **Response:** `200 OK`
 
 The response contains GC statistics (entries scanned, reclaimed bytes, etc.).
+`cleanup_warnings` is omitted normally. It is present only when the primary GC
+run completed and AeorDB recovered a bounded optional recheck-teardown
+incident. Such a warning does not invalidate the reported mark/sweep result.
 
 **Example:**
 
