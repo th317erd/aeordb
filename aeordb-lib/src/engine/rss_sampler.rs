@@ -391,23 +391,26 @@ impl PhaseSampler {
     let stop = Arc::new(AtomicBool::new(false));
     let peak_for_thread = Arc::clone(&peak_kb);
     let stop_for_thread = Arc::clone(&stop);
-    let handle = thread::Builder::new()
-      .name(format!("rss-sampler-{}", label))
-      .spawn(move || {
-        while !stop_for_thread.load(Ordering::Relaxed) {
-          let rss = read_rss_kb();
-          // Race-free max update.
-          let mut cur = peak_for_thread.load(Ordering::Relaxed);
-          while rss > cur {
-            match peak_for_thread.compare_exchange_weak(cur, rss, Ordering::Relaxed, Ordering::Relaxed) {
-              Ok(_) => break,
-              Err(observed) => cur = observed,
-            }
+    let handle = match thread::Builder::new().name(format!("rss-sampler-{}", label)).spawn(move || {
+      while !stop_for_thread.load(Ordering::Relaxed) {
+        let rss = read_rss_kb();
+        // Race-free max update.
+        let mut cur = peak_for_thread.load(Ordering::Relaxed);
+        while rss > cur {
+          match peak_for_thread.compare_exchange_weak(cur, rss, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => cur = observed,
           }
-          thread::sleep(interval);
         }
-      })
-      .ok();
+        thread::sleep(interval);
+      }
+    }) {
+      Ok(handle) => Some(handle),
+      Err(error) => {
+        eprintln!("[gc-mem] {label}: failed to spawn RSS sampler thread: {error}");
+        None
+      }
+    };
     Self { label, baseline_kb, baseline_hwm_kb, peak_kb, stop, handle, start: std::time::Instant::now() }
   }
 
@@ -421,8 +424,10 @@ impl PhaseSampler {
       return;
     }
     self.stop.store(true, Ordering::Relaxed);
-    if let Some(h) = self.handle.take() {
-      let _ = h.join();
+    if let Some(handle) = self.handle.take() {
+      if handle.join().is_err() {
+        eprintln!("[gc-mem] {}: RSS sampler thread panicked", self.label);
+      }
     }
     let end_kb = read_rss_kb();
     let end_hwm_kb = read_hwm_kb();
