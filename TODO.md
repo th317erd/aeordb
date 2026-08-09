@@ -458,7 +458,14 @@
       - [ ] Preserve exact partial and corrupt outcomes instead of returning empty success.
       - [x] Make forced migration and ordinary reindex file failures terminal exact partial outcomes with bounded evidence and a checkpoint frozen before the first incomplete path.
       - [x] Preserve prior reindex partial evidence when a later index flush, buffer-state read, or checkpoint publication fails.
-      - [ ] Replace sequential credential cleanup deletes with one preflighted maintenance mutation or an exact typed partial result under concurrent changes.
+      - [x] Replace sequential credential cleanup deletes with one preflighted maintenance mutation or an exact typed partial result under concurrent changes.
+        - [x] Reproduce split hard acknowledgements, first-batch partial deletion, ignored memory pressure, and lost later-failure cardinality.
+        - [x] Add expected-identity conditional deletion under shared namespace authority.
+        - [x] Stream and memory-account strict credential scans into bounded mixed-family batches.
+        - [x] Preserve exact acknowledged token/link counts, metrics, events, no-op cardinality, and concurrent replacement safety.
+        - [x] Project cleanup and other batched SSE paths per subscriber so protected or denied sibling paths cannot leak.
+        - [x] Require ordinary SSE path events to satisfy current user/group permissions and active API-key authority; reject malformed identities, exclude recipient-addressed events from the global stream, classify administrative events as root-only, and fail closed after authority revocation.
+        - [ ] Run focused, affected, broad, live HTTP/restart, and offline integrity gates; commit and push.
       - [ ] Preserve targeted/full directory repair outcomes, stale-locator repairs, and durability publication as exact acknowledged maintenance evidence.
       - [ ] Make GC recheck teardown explicit and non-squelched without allowing cleanup failure to erase the primary GC result.
       - [ ] Re-audit the already-converged backup import locator/HEAD authority and source-gate the Wave 5 exit invariant.

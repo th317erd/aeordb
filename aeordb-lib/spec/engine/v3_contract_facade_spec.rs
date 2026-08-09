@@ -1663,6 +1663,53 @@ fn wave_five_reindex_retains_exact_partial_outcomes_and_a_contiguous_checkpoint(
 }
 
 #[test]
+fn wave_five_cleanup_uses_bounded_conditional_namespace_authority() {
+  let system_store = include_str!("../../src/engine/system_store.rs");
+  let task_worker = include_str!("../../src/engine/task_worker.rs");
+  let task_routes = include_str!("../../src/server/task_routes.rs");
+  let sse_routes = include_str!("../../src/server/sse_routes.rs");
+  let start = system_store.find("trait CredentialCleanupRecord").expect("cleanup implementation");
+  let end = system_store[start..]
+    .find("// ---------------------------------------------------------------------------\n// Cluster / Replication")
+    .expect("cleanup section")
+    + start;
+  let cleanup = &system_store[start..end];
+
+  assert!(cleanup.contains("OperationMemoryBudget"), "cleanup scan lost process-wide maintenance admission");
+  assert!(cleanup.contains("visit_live_directory_children_strict"), "cleanup again materializes a complete credential directory");
+  assert!(cleanup.contains("delete_files_batch_with_kind"), "cleanup no longer uses one conditional namespace batch");
+  assert!(cleanup.contains("optional_matching_identity"), "cleanup can delete a credential replaced after scan");
+  assert!(cleanup.contains("NamespaceMutationKind::MaintenanceRepair"));
+  assert!(!cleanup.contains("ops.delete_file("), "cleanup again acknowledges one delete per credential");
+  assert!(!cleanup.contains("list_directory_strict("), "cleanup again retains an unbounded full listing");
+
+  let task_start = task_worker.find("fn execute_cleanup(").expect("cleanup task adapter");
+  let task_end = task_worker[task_start..].find("/// Remove oldest").expect("cleanup task adapter end") + task_start;
+  let cleanup_task = &task_worker[task_start..task_end];
+  assert!(cleanup_task.contains("RequestContext::with_bus"), "queued cleanup again discards acknowledged deletion events");
+  assert!(!cleanup_task.contains("RequestContext::system()"), "queued cleanup uses an eventless request context");
+
+  let route_start = task_routes.find("pub async fn trigger_cleanup(").expect("cleanup HTTP adapter");
+  let route_end = task_routes[route_start..].find("/// GET /admin/tasks/{id}").expect("cleanup HTTP adapter end") + route_start;
+  let cleanup_route = &task_routes[route_start..route_end];
+  assert!(cleanup_route.contains("engine_error_response"), "cleanup HTTP errors no longer retain typed retry direction");
+  assert!(
+    cleanup_route.contains("EngineError::PartialOperation"),
+    "root cleanup HTTP no longer retains exact acknowledged partial evidence"
+  );
+  assert!(cleanup_route.contains("error_codes::INTERNAL_ERROR"));
+  assert!(!cleanup_route.contains("Err(e) =>"), "cleanup HTTP adapter again flattens every failure into one untyped response");
+
+  assert!(sse_routes.contains("project_event_for_subscriber"), "batched cleanup events are no longer projected per subscriber");
+  assert!(sse_routes.contains("SystemFamilyPolicyResolver"), "protected cleanup paths can leak through non-root SSE subscriptions");
+  assert!(sse_routes.contains("PermissionResolver"), "ordinary SSE paths can bypass current user/group authority");
+  assert!(sse_routes.contains("current_key_rules"), "long-lived SSE streams can retain stale API-key authority");
+  assert!(sse_routes.contains("event.recipient_user_id.is_some()"), "recipient-addressed events can leak through the global SSE stream");
+  assert!(sse_routes.contains("NonRootEventVisibility::RootOnly"), "administrative SSE payloads can leak to non-root subscribers");
+  assert!(!sse_routes.contains("any_path_allowed_by_rules"), "one allowed batch member again exposes denied sibling paths");
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

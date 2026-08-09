@@ -14,10 +14,13 @@ use crate::auth::magic_link::{MagicLinkConsumeResult, MagicLinkRecord};
 use crate::auth::refresh::{RefreshTokenRecord, RefreshTokenRotationResult};
 use crate::engine::batch_commit::{BufferedFile, commit_buffered_files_with_kind};
 use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps, FileDeletionRequest, SystemFileAliasMigrationOutcome};
+use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
 use crate::engine::json_store::{JsonDoc, JsonStore, JsonStoreMutation};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use crate::engine::namespace_mutation::NamespaceMutationKind;
+use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::peer_connection::PeerConfig;
 use crate::engine::request_context::RequestContext;
 use crate::engine::schema_version::JsonVersioned;
@@ -25,6 +28,12 @@ use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::{ROOT_USER_ID, User, validate_user_id};
 
 const CREDENTIAL_RECORD_MAX_BYTES: u64 = 1024 * 1024;
+const CREDENTIAL_CLEANUP_BATCH_SIZE: usize = 128;
+const CREDENTIAL_CLEANUP_PLAN_BYTES_PER_CANDIDATE: u64 = 64 * 1024;
+const CREDENTIAL_CLEANUP_FAILURE_PATH_BYTES: usize = 768;
+const CREDENTIAL_CLEANUP_FAILURE_ERROR_BYTES: usize = 512;
+const CREDENTIAL_CLEANUP_BASE_WORKSPACE_BYTES: u64 =
+  CREDENTIAL_RECORD_MAX_BYTES * 2 + 64 * 1024 + (std::mem::size_of::<CredentialCleanupCandidate>() * CREDENTIAL_CLEANUP_BATCH_SIZE) as u64;
 const LEGACY_CONFIG_KEY_MAX_BYTES: usize = 255;
 const LEGACY_CONFIG_VALUE_MAX_BYTES: u64 = 1024 * 1024;
 const JWT_SIGNING_KEY_BYTES: usize = 32;
@@ -492,63 +501,298 @@ pub fn claim_refresh_token_rotation(
 // Cleanup: Expired Tokens & Used/Expired Magic Links
 // ---------------------------------------------------------------------------
 
+trait CredentialCleanupRecord: JsonVersioned {
+  const DIRECTORY: &'static str;
+
+  fn identifier(&self) -> &str;
+  fn should_cleanup(&self, now: &chrono::DateTime<chrono::Utc>) -> bool;
+}
+
+impl CredentialCleanupRecord for RefreshTokenRecord {
+  const DIRECTORY: &'static str = "/.aeordb-system/refresh-tokens";
+
+  fn identifier(&self) -> &str {
+    &self.token_hash
+  }
+
+  fn should_cleanup(&self, now: &chrono::DateTime<chrono::Utc>) -> bool {
+    self.is_revoked || self.expires_at < *now
+  }
+}
+
+impl CredentialCleanupRecord for MagicLinkRecord {
+  const DIRECTORY: &'static str = "/.aeordb-system/magic-links";
+
+  fn identifier(&self) -> &str {
+    &self.code_hash
+  }
+
+  fn should_cleanup(&self, now: &chrono::DateTime<chrono::Utc>) -> bool {
+    self.is_used || self.expires_at < *now
+  }
+}
+
+struct CredentialCleanupCandidate {
+  path: String,
+  expected_identity: Vec<u8>,
+}
+
+#[derive(Default)]
+struct CredentialCleanupProgress {
+  tokens_cleaned: usize,
+  links_cleaned: usize,
+}
+
+impl CredentialCleanupProgress {
+  fn completed(&self) -> usize {
+    self.tokens_cleaned + self.links_cleaned
+  }
+
+  fn preserve_error(&self, error: EngineError, phase: &'static str, path: &str) -> EngineError {
+    if self.completed() == 0 || matches!(&error, EngineError::PartialOperation { operation, .. } if operation == "credential cleanup") {
+      return error;
+    }
+    let path = bounded_credential_cleanup_text(path, CREDENTIAL_CLEANUP_FAILURE_PATH_BYTES);
+    let error = bounded_credential_cleanup_text(&error.to_string(), CREDENTIAL_CLEANUP_FAILURE_ERROR_BYTES);
+    EngineError::PartialOperation {
+      operation: "credential cleanup".to_string(),
+      completed: self.completed(),
+      failed: 1,
+      evidence: format!(
+        "tokens_cleaned={}; links_cleaned={}; phase={phase}; path={path}; error={error}",
+        self.tokens_cleaned, self.links_cleaned
+      ),
+    }
+  }
+
+  fn record_deleted_paths(&mut self, paths: &[String]) -> EngineResult<(usize, usize)> {
+    let mut token_batch = 0usize;
+    let mut link_batch = 0usize;
+    for path in paths {
+      if path.starts_with("/.aeordb-system/refresh-tokens/") {
+        token_batch += 1;
+      } else if path.starts_with("/.aeordb-system/magic-links/") {
+        link_batch += 1;
+      } else {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("credential cleanup batch returned an unexpected path '{path}'"),
+        });
+      }
+    }
+    self.tokens_cleaned += token_batch;
+    self.links_cleaned += link_batch;
+    Ok((token_batch, link_batch))
+  }
+}
+
+fn bounded_credential_cleanup_text(value: &str, maximum_bytes: usize) -> String {
+  if value.len() <= maximum_bytes {
+    return value.to_string();
+  }
+  let mut boundary = maximum_bytes.saturating_sub(3);
+  while boundary > 0 && !value.is_char_boundary(boundary) {
+    boundary -= 1;
+  }
+  format!("{}...", &value[..boundary])
+}
+
+fn credential_cleanup_candidate_bytes(path: &str, expected_identity: &[u8]) -> EngineResult<u64> {
+  std::mem::size_of::<CredentialCleanupCandidate>()
+    .checked_add(path.len())
+    .and_then(|bytes| bytes.checked_add(expected_identity.len()))
+    .and_then(|bytes| bytes.checked_add(CREDENTIAL_CLEANUP_PLAN_BYTES_PER_CANDIDATE as usize))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .ok_or_else(|| EngineError::ResourceExhausted("credential cleanup candidate memory estimate overflow".to_string()))
+}
+
+fn flush_credential_cleanup_candidates(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  candidates: &mut Vec<CredentialCleanupCandidate>,
+  retained_bytes: &mut u64,
+  memory: &mut OperationMemoryBudget,
+  progress: &mut CredentialCleanupProgress,
+) -> EngineResult<()> {
+  if candidates.is_empty() {
+    return Ok(());
+  }
+
+  memory.check_cancellation().map_err(|error| progress.preserve_error(error, "batch-cancellation", "credential cleanup batch"))?;
+  let candidate_count = candidates.len();
+  let requests = candidates
+    .drain(..)
+    .map(|candidate| FileDeletionRequest::optional_matching_identity(candidate.path, candidate.expected_identity))
+    .collect();
+  let deleted = DirectoryOps::new(engine)
+    .delete_files_batch_with_kind(ctx, requests, NamespaceMutationKind::MaintenanceRepair)
+    .map_err(|error| progress.preserve_error(error, "batch-publication", "credential cleanup batch"))?;
+  let (token_batch, link_batch) = progress
+    .record_deleted_paths(&deleted)
+    .map_err(|error| progress.preserve_error(error, "batch-accounting", "credential cleanup batch"))?;
+
+  metrics::counter!(crate::metrics::definitions::CLEANUP_TOKENS_TOTAL).increment(token_batch as u64);
+  metrics::counter!(crate::metrics::definitions::CLEANUP_LINKS_TOTAL).increment(link_batch as u64);
+  tracing::debug!(
+    token_batch,
+    link_batch,
+    changed_or_missing = candidate_count.saturating_sub(deleted.len()),
+    "Published credential cleanup batch"
+  );
+
+  let release_bytes = std::mem::take(retained_bytes);
+  memory
+    .release(release_bytes, "credential cleanup candidate release failed")
+    .map_err(|error| progress.preserve_error(error, "workspace-release", "credential cleanup batch"))?;
+  Ok(())
+}
+
+fn scan_credential_cleanup_family<T: CredentialCleanupRecord>(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  now: &chrono::DateTime<chrono::Utc>,
+  candidates: &mut Vec<CredentialCleanupCandidate>,
+  retained_bytes: &mut u64,
+  memory: &mut OperationMemoryBudget,
+  progress: &mut CredentialCleanupProgress,
+) -> EngineResult<()> {
+  let ops = DirectoryOps::new(engine);
+  let visit_result = ops.visit_live_directory_children_strict(T::DIRECTORY, |entry| {
+    let path = format!("{}/{}", T::DIRECTORY, entry.name);
+    memory.record_work(1).map_err(|error| progress.preserve_error(error, "scan-admission", &path))?;
+    if entry.entry_type != EntryType::FileRecord.to_u8() {
+      return Err(progress.preserve_error(
+        EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("credential path '{path}' contains entry type {} instead of FileRecord", entry.entry_type),
+        },
+        "record-type",
+        &path,
+      ));
+    }
+    let (expected_identity, data) = match ops.read_file_buffered_bounded_with_identity(&path, CREDENTIAL_RECORD_MAX_BYTES) {
+      Ok(current) => current,
+      Err(EngineError::NotFound(_)) => return Ok(true),
+      Err(error) => return Err(progress.preserve_error(error, "record-read", &path)),
+    };
+    let record = T::deserialize_versioned(&data).map_err(|error| progress.preserve_error(error, "record-decode", &path))?;
+    if record.identifier() != entry.name {
+      return Err(progress.preserve_error(
+        EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("credential record identifier '{}' does not match path child '{}'", record.identifier(), entry.name),
+        },
+        "record-identity",
+        &path,
+      ));
+    }
+    if !record.should_cleanup(now) {
+      return Ok(true);
+    }
+
+    let candidate_bytes = credential_cleanup_candidate_bytes(&path, &expected_identity)
+      .map_err(|error| progress.preserve_error(error, "candidate-estimate", &path))?;
+    memory
+      .reserve(candidate_bytes, "credential cleanup candidate admission failed")
+      .map_err(|error| progress.preserve_error(error, "candidate-admission", &path))?;
+    *retained_bytes = retained_bytes.checked_add(candidate_bytes).ok_or_else(|| {
+      progress.preserve_error(
+        EngineError::ResourceExhausted("credential cleanup retained-byte overflow".to_string()),
+        "candidate-accounting",
+        &path,
+      )
+    })?;
+    candidates.push(CredentialCleanupCandidate { path, expected_identity });
+    if candidates.len() == CREDENTIAL_CLEANUP_BATCH_SIZE {
+      flush_credential_cleanup_candidates(engine, ctx, candidates, retained_bytes, memory, progress)?;
+    }
+    Ok(true)
+  });
+
+  match visit_result {
+    Ok(_) | Err(EngineError::NotFound(_)) => Ok(()),
+    Err(error) => Err(progress.preserve_error(error, "directory-scan", T::DIRECTORY)),
+  }
+}
+
 /// Clean up expired/revoked refresh tokens and used/expired magic links.
 /// Returns `(tokens_cleaned, links_cleaned)`.
 ///
-/// This function is idempotent and safe to run concurrently — each iteration
-/// independently scans the directory and deletes qualifying entries.
+/// This function is idempotent and safe to run concurrently. Qualifying
+/// records are deleted only if their FileRecord identity still matches the
+/// bounded scan, so a refresh or replacement wins over stale cleanup work.
 pub fn cleanup_expired_tokens(engine: &StorageEngine, ctx: &RequestContext) -> EngineResult<(usize, usize)> {
-  let ops = DirectoryOps::new(engine);
+  cleanup_expired_tokens_with_cancellation(engine, ctx, None)
+}
+
+pub(crate) fn cleanup_expired_tokens_with_cancellation(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> EngineResult<(usize, usize)> {
   let now = chrono::Utc::now();
-  let mut tokens_cleaned = 0;
-  let mut links_cleaned = 0;
+  let mut memory = OperationMemoryBudget::new(
+    engine,
+    "credential cleanup",
+    MemoryOwner::Task,
+    AdmissionClass::Maintenance,
+    CREDENTIAL_CLEANUP_BASE_WORKSPACE_BYTES,
+    cancellation,
+  )?;
+  let mut candidates = Vec::with_capacity(CREDENTIAL_CLEANUP_BATCH_SIZE);
+  let mut retained_bytes = 0u64;
+  let mut progress = CredentialCleanupProgress::default();
 
-  // Clean up refresh tokens
-  let token_entries = match ops.list_directory_strict("/.aeordb-system/refresh-tokens") {
-    Ok(entries) => entries,
-    Err(EngineError::NotFound(_)) => Vec::new(),
-    Err(e) => return Err(e),
-  };
+  scan_credential_cleanup_family::<RefreshTokenRecord>(
+    engine,
+    ctx,
+    &now,
+    &mut candidates,
+    &mut retained_bytes,
+    &mut memory,
+    &mut progress,
+  )?;
+  scan_credential_cleanup_family::<MagicLinkRecord>(engine, ctx, &now, &mut candidates, &mut retained_bytes, &mut memory, &mut progress)?;
+  flush_credential_cleanup_candidates(engine, ctx, &mut candidates, &mut retained_bytes, &mut memory, &mut progress)?;
 
-  for entry in &token_entries {
-    let path = format!("/.aeordb-system/refresh-tokens/{}", entry.name);
-    let data = ops.read_file_buffered(&path)?;
-    let record = RefreshTokenRecord::deserialize_versioned(&data)?;
-    if record.is_revoked || record.expires_at < now {
-      ops.delete_file(ctx, &path)?;
-      tokens_cleaned += 1;
-    }
-  }
-
-  // Clean up magic links
-  let link_entries = match ops.list_directory_strict("/.aeordb-system/magic-links") {
-    Ok(entries) => entries,
-    Err(EngineError::NotFound(_)) => Vec::new(),
-    Err(e) => return Err(e),
-  };
-
-  for entry in &link_entries {
-    let path = format!("/.aeordb-system/magic-links/{}", entry.name);
-    let data = ops.read_file_buffered(&path)?;
-    let record = MagicLinkRecord::deserialize_versioned(&data)?;
-    if record.is_used || record.expires_at < now {
-      ops.delete_file(ctx, &path)?;
-      links_cleaned += 1;
-    }
-  }
-
-  if tokens_cleaned > 0 || links_cleaned > 0 {
+  if progress.completed() > 0 {
     tracing::info!(
-      tokens_cleaned = tokens_cleaned,
-      links_cleaned = links_cleaned,
+      tokens_cleaned = progress.tokens_cleaned,
+      links_cleaned = progress.links_cleaned,
       "Cleaned up expired tokens and used/expired magic links",
     );
   }
+  Ok((progress.tokens_cleaned, progress.links_cleaned))
+}
 
-  metrics::counter!(crate::metrics::definitions::CLEANUP_TOKENS_TOTAL).increment(tokens_cleaned as u64);
-  metrics::counter!(crate::metrics::definitions::CLEANUP_LINKS_TOTAL).increment(links_cleaned as u64);
+#[cfg(test)]
+mod credential_cleanup_internal_tests {
+  use super::*;
 
-  Ok((tokens_cleaned, links_cleaned))
+  #[test]
+  fn cancelled_cleanup_refuses_before_publication() {
+    let temporary = tempfile::tempdir().unwrap();
+    let database_path = temporary.path().join("cancelled-cleanup.aeordb");
+    let engine = StorageEngine::create(database_path.to_str().unwrap()).unwrap();
+    let context = RequestContext::system();
+    let record = RefreshTokenRecord {
+      token_hash: "cancelled-expired".to_string(),
+      user_subject: "test-user".to_string(),
+      created_at: chrono::Utc::now() - chrono::Duration::hours(2),
+      expires_at: chrono::Utc::now() - chrono::Duration::hours(1),
+      is_revoked: false,
+      key_id: None,
+    };
+    store_refresh_token(&engine, &context, &record).unwrap();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    let before = engine.durability_snapshot().unwrap().next_sequence;
+
+    let error = cleanup_expired_tokens_with_cancellation(&engine, &context, Some(&cancellation)).unwrap_err();
+    assert!(matches!(error, EngineError::Cancelled(_)));
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+    assert!(get_refresh_token(&engine, &record.token_hash).unwrap().is_some());
+  }
 }
 
 // ---------------------------------------------------------------------------

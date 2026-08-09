@@ -1324,15 +1324,15 @@ fn execute_backup(task: &TaskRecord, engine: &StorageEngine, cancel: &tokio_util
 fn execute_cleanup(
   _task: &TaskRecord,
   engine: &StorageEngine,
-  _event_bus: &EventBus,
+  event_bus: &EventBus,
   cancellation: &tokio_util::sync::CancellationToken,
 ) -> EngineResult<String> {
   if cancellation.is_cancelled() {
     return Err(EngineError::Cancelled("expired-token cleanup".to_string()));
   }
   engine.memory_coordinator().check_admission(MemoryOwner::Task, AdmissionClass::Maintenance).map_err(task_worker_memory_error)?;
-  let ctx = RequestContext::system();
-  let (tokens, links) = crate::engine::system_store::cleanup_expired_tokens(engine, &ctx)?;
+  let ctx = RequestContext::with_bus(Arc::new(event_bus.clone()));
+  let (tokens, links) = crate::engine::system_store::cleanup_expired_tokens_with_cancellation(engine, &ctx, Some(cancellation))?;
   Ok(format!("cleaned {} tokens and {} magic links", tokens, links))
 }
 

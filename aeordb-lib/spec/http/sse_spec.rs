@@ -14,7 +14,9 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::api_key_rules::KeyRule;
-use aeordb::engine::{EngineEvent, EventBus, RequestContext, StorageEngine, EVENT_METRICS, EVENT_SERVER_READY};
+use aeordb::engine::{
+  DirectoryOps, EngineEvent, EventBus, PermissionStore, RequestContext, StorageEngine, User, EVENT_METRICS, EVENT_SERVER_READY,
+};
 use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
 use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
@@ -47,7 +49,7 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<EventBu
 fn bearer_token(jwt_manager: &JwtManager) -> String {
   let now = chrono::Utc::now().timestamp();
   let claims = TokenClaims {
-    sub: "test-admin".to_string(),
+    sub: Uuid::nil().to_string(),
     iss: "aeordb".to_string(),
     iat: now,
     exp: now + DEFAULT_EXPIRY_SECONDS,
@@ -56,6 +58,21 @@ fn bearer_token(jwt_manager: &JwtManager) -> String {
     key_id: None,
   };
   let token = jwt_manager.create_token(&claims).expect("create token");
+  format!("Bearer {}", token)
+}
+
+fn invalid_identity_bearer_token(jwt_manager: &JwtManager) -> String {
+  let now = chrono::Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: "test-admin".to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create invalid-identity token");
   format!("Bearer {}", token)
 }
 
@@ -72,6 +89,52 @@ fn expired_bearer_token(jwt_manager: &JwtManager) -> String {
   };
   let token = jwt_manager.create_token(&claims).expect("create token");
   format!("Bearer {}", token)
+}
+
+fn user_bearer_token(jwt_manager: &JwtManager, user_id: Uuid) -> String {
+  let now = Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: user_id.to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: None,
+  };
+  let token = jwt_manager.create_token(&claims).expect("create user token");
+  format!("Bearer {}", token)
+}
+
+fn keyed_bearer_token(jwt_manager: &JwtManager, subject: &str, key_id: Uuid) -> String {
+  let now = Utc::now().timestamp();
+  let claims = TokenClaims {
+    sub: subject.to_string(),
+    iss: "aeordb".to_string(),
+    iat: now,
+    exp: now + DEFAULT_EXPIRY_SECONDS,
+    scope: None,
+    permissions: None,
+    key_id: Some(key_id.to_string()),
+  };
+  let token = jwt_manager.create_token(&claims).expect("create keyed token");
+  format!("Bearer {}", token)
+}
+
+fn create_test_user(engine: &StorageEngine, username: &str) -> Uuid {
+  let user = User::new(username, None);
+  let user_id = user.user_id;
+  system_store::store_user(engine, &RequestContext::system(), &user).expect("store SSE test user");
+  user_id
+}
+
+fn grant_user_read(engine: &StorageEngine, user_id: Uuid, path: &str) {
+  DirectoryOps::new(engine)
+    .store_file_buffered(&RequestContext::system(), path, b"SSE authority fixture", Some("text/plain"))
+    .expect("store SSE permission target");
+  PermissionStore::new(engine)
+    .grant_paths(&RequestContext::system(), vec![path.to_string()], vec![format!("user:{user_id}")], ".r..l...".to_string())
+    .expect("grant SSE test read permission");
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +182,38 @@ async fn test_sse_rejects_wrong_scheme() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_sse_rejects_authenticated_non_uuid_user_identity() {
+  let (app, jwt_manager, _, _, _temp) = test_app();
+  let auth = invalid_identity_bearer_token(&jwt_manager);
+
+  let request = Request::builder().method("GET").uri("/system/events").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_sse_rejects_api_key_identity_mismatch() {
+  let (app, jwt_manager, engine, _, _temp) = test_app();
+  let owner_id = create_test_user(&engine, "sse_key_owner");
+  let other_user_id = create_test_user(&engine, "sse_wrong_key_user");
+  let rules = vec![KeyRule { glob: "/allowed/**".to_string(), permitted: "-r--l---".to_string() }];
+  let (_owner_auth, key_id) = create_scoped_key_and_token(&jwt_manager, &engine, owner_id, rules);
+
+  let wrong_user_auth = keyed_bearer_token(&jwt_manager, &other_user_id.to_string(), key_id);
+  let request =
+    Request::builder().method("GET").uri("/system/events").header("authorization", &wrong_user_auth).body(Body::empty()).unwrap();
+  let response = app.clone().oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+  let wrong_share_auth = keyed_bearer_token(&jwt_manager, &format!("share:{key_id}"), key_id);
+  let request =
+    Request::builder().method("GET").uri("/system/events").header("authorization", &wrong_share_auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,8 +321,9 @@ async fn read_first_sse_frame(mut body: Body) -> String {
 
 #[tokio::test]
 async fn test_metrics_events_are_administrative_and_root_only() {
-  let (app, jwt_manager, _engine, event_bus, _temp) = test_app();
-  let auth = bearer_token(&jwt_manager);
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_non_root_metrics");
+  let auth = user_bearer_token(&jwt_manager, user_id);
   let request =
     Request::builder().method("GET").uri("/system/events?events=metrics").header("authorization", &auth).body(Body::empty()).unwrap();
   let response = app.oneshot(request).await.unwrap();
@@ -675,19 +771,349 @@ fn create_scoped_key_and_token(jwt_manager: &JwtManager, engine: &StorageEngine,
   (format!("Bearer {}", token), key_id)
 }
 
-fn root_bearer_token(jwt_manager: &JwtManager) -> String {
-  let now = Utc::now().timestamp();
+fn create_share_key_and_token(jwt_manager: &JwtManager, engine: &StorageEngine, rules: Vec<KeyRule>) -> (String, Uuid) {
+  let key_id = Uuid::new_v4();
+  let plaintext = generate_api_key(key_id);
+  let key_hash = hash_api_key(&plaintext).unwrap();
+  let now = Utc::now();
+  let record = ApiKeyRecord {
+    key_id,
+    key_hash,
+    user_id: None,
+    created_at: now,
+    is_revoked: false,
+    expires_at: now.timestamp_millis() + (365 * 86400 * 1000),
+    label: Some("test-sse-share-key".to_string()),
+    rules,
+  };
+  system_store::store_api_key_for_bootstrap(engine, &RequestContext::system(), &record).unwrap();
+
+  let timestamp = now.timestamp();
   let claims = TokenClaims {
-    sub: Uuid::nil().to_string(),
+    sub: format!("share:{key_id}"),
     iss: "aeordb".to_string(),
-    iat: now,
-    exp: now + DEFAULT_EXPIRY_SECONDS,
+    iat: timestamp,
+    exp: timestamp + DEFAULT_EXPIRY_SECONDS,
     scope: None,
     permissions: None,
-    key_id: None,
+    key_id: Some(key_id.to_string()),
   };
-  let token = jwt_manager.create_token(&claims).expect("create root token");
-  format!("Bearer {}", token)
+  let token = jwt_manager.create_token(&claims).unwrap();
+  (format!("Bearer {}", token), key_id)
+}
+
+fn root_bearer_token(jwt_manager: &JwtManager) -> String {
+  bearer_token(jwt_manager)
+}
+
+#[tokio::test]
+async fn test_sse_direct_user_projects_paths_through_current_permissions() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_direct_authority");
+  grant_user_read(&engine, user_id, "/allowed/readme.txt");
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "entries_created",
+    "admin",
+    serde_json::json!({
+      "entries": [
+        {"path": "/allowed/readme.txt"},
+        {"path": "/private/secret.txt"},
+      ],
+    }),
+  ));
+
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("permitted event was not delivered")
+    .expect("SSE stream ended")
+    .expect("SSE frame failed")
+    .into_data()
+    .expect("SSE event frame must contain data");
+  let body = String::from_utf8_lossy(&frame);
+  assert!(body.contains("/allowed/readme.txt"), "permitted path was removed: {body}");
+  assert!(!body.contains("/private/secret.txt"), "ungranted path leaked: {body}");
+}
+
+#[tokio::test]
+async fn test_sse_user_owned_key_requires_both_key_scope_and_user_permission() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_ungranted_key_owner");
+  let rules = vec![
+    KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new("entries_created", "admin", serde_json::json!({"entries": [{"path": "/docs/readme.md"}]})));
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "a key rule must not grant authority absent the owning user's permission"
+  );
+}
+
+#[tokio::test]
+async fn test_sse_scoped_root_key_remains_constrained_by_its_rules() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let rules = vec![
+    KeyRule { glob: "/allowed/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::nil(), rules);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "entries_created",
+    "admin",
+    serde_json::json!({
+      "entries": [
+        {"path": "/allowed/visible.txt"},
+        {"path": "/private/hidden.txt"},
+      ],
+    }),
+  ));
+
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("scoped root event was not delivered")
+    .expect("SSE stream ended")
+    .expect("SSE frame failed")
+    .into_data()
+    .expect("SSE event frame must contain data");
+  let body = String::from_utf8_lossy(&frame);
+  assert!(body.contains("/allowed/visible.txt"), "allowed root-key path was removed: {body}");
+  assert!(!body.contains("/private/hidden.txt"), "scoped root key leaked a denied path: {body}");
+}
+
+#[tokio::test]
+async fn test_sse_scoped_root_key_drops_batch_members_without_an_authorizable_path() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let rules = vec![
+    KeyRule { glob: "/allowed/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::nil(), rules);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "entries_created",
+    "admin",
+    serde_json::json!({
+      "entries": [
+        {"path": "/allowed/visible.txt"},
+        {"name": "unscoped-secret.txt", "content_type": "application/x-secret"},
+      ],
+    }),
+  ));
+
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("scoped root event was not delivered")
+    .expect("SSE stream ended")
+    .expect("SSE frame failed")
+    .into_data()
+    .expect("SSE event frame must contain data");
+  let body = String::from_utf8_lossy(&frame);
+  assert!(body.contains("/allowed/visible.txt"), "allowed root-key path was removed: {body}");
+  assert!(!body.contains("unscoped-secret.txt"), "scoped root key received a member without an authorizable path: {body}");
+}
+
+#[tokio::test]
+async fn test_sse_share_key_uses_key_rules_without_user_permission_authority() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let rules = vec![
+    KeyRule { glob: "/shared/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, _key_id) = create_share_key_and_token(&jwt_manager, &engine, rules);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new("entries_created", "admin", serde_json::json!({"entries": [{"path": "/shared/readme.txt"}]})));
+
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("share-key event was not delivered")
+    .expect("SSE stream ended")
+    .expect("SSE frame failed")
+    .into_data()
+    .expect("SSE event frame must contain data");
+  let body = String::from_utf8_lossy(&frame);
+  assert!(body.contains("/shared/readme.txt"), "share-key path was removed: {body}");
+}
+
+#[tokio::test]
+async fn test_sse_stops_path_delivery_after_api_key_revocation() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_revoked_key_owner");
+  grant_user_read(&engine, user_id, "/docs/readme.md");
+  let rules = vec![
+    KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  assert!(system_store::revoke_api_key(&engine, &RequestContext::system(), key_id).unwrap());
+  event_bus.emit(EngineEvent::new("entries_created", "admin", serde_json::json!({"entries": [{"path": "/docs/readme.md"}]})));
+
+  assert!(tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(), "revoked API key continued receiving path events");
+}
+
+#[tokio::test]
+async fn test_sse_stops_path_delivery_after_user_permission_revocation() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_revoked_permission_user");
+  let path = "/docs/revoked.md";
+  grant_user_read(&engine, user_id, path);
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_deleted")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  let group = format!("user:{user_id}");
+  PermissionStore::new(&engine)
+    .revoke_path(&RequestContext::system(), path, &group, Some("revoked.md"))
+    .expect("revoke SSE test permission");
+  event_bus.emit(EngineEvent::new("entries_deleted", "admin", serde_json::json!({"entries": [{"path": path}]})));
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "revoked user permission continued receiving path events"
+  );
+}
+
+#[tokio::test]
+async fn test_sse_global_stream_excludes_recipient_addressed_events() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let subscriber_id = create_test_user(&engine, "sse_global_recipient_observer");
+  let recipient_id = create_test_user(&engine, "sse_private_recipient");
+  grant_user_read(&engine, subscriber_id, "/shared/private-notice.txt");
+  let auth = user_bearer_token(&jwt_manager, subscriber_id);
+  let request =
+    Request::builder().method("GET").uri("/system/events?events=files_shared").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::for_user(
+    "files_shared",
+    "admin",
+    &recipient_id.to_string(),
+    serde_json::json!({"path": "/shared/private-notice.txt", "permissions": ".r..l..."}),
+  ));
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "global SSE stream leaked an event addressed to another user"
+  );
+}
+
+#[tokio::test]
+async fn test_sse_non_root_subscriber_cannot_observe_task_path_arguments() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_non_root_task_observer");
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request =
+    Request::builder().method("GET").uri("/system/events?events=tasks_started").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "tasks_started",
+    "system",
+    serde_json::json!({"task_id": "task-secret", "task_type": "reindex", "args": {"path": "/private/secret"}}),
+  ));
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "non-root SSE stream leaked root-only task arguments"
+  );
+}
+
+#[tokio::test]
+async fn test_sse_non_root_path_required_event_without_path_fails_closed() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_malformed_path_event_user");
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "entries_created",
+    "system",
+    serde_json::json!({"entries": [{"name": "secret.txt"}], "path_hint": "/private/secret.txt"}),
+  ));
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "non-root SSE stream accepted a path-required event without an authorized path"
+  );
 }
 
 #[tokio::test]
@@ -709,15 +1135,56 @@ async fn test_sse_root_user_receives_all_events() {
 }
 
 #[tokio::test]
+async fn test_sse_non_root_user_cannot_observe_registry_concealed_paths() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_non_root_concealment");
+  grant_user_read(&engine, user_id, "/ordinary/file.txt");
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_deleted")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "entries_deleted",
+    "system",
+    serde_json::json!({
+      "entries": [{"path": "/.aeordb-system/refresh-tokens/secret-token-hash"}],
+      "mutation_kind": "maintenance_repair",
+    }),
+  ));
+  event_bus.emit(EngineEvent::new("entries_deleted", "system", serde_json::json!({"entries": [{"path": "/ordinary/file.txt"}]})));
+
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("ordinary event was not delivered")
+    .expect("SSE stream ended")
+    .expect("SSE frame failed")
+    .into_data()
+    .expect("SSE event frame must contain data");
+  let body = String::from_utf8_lossy(&frame);
+
+  assert!(!body.contains("secret-token-hash"), "protected credential paths must not leak to non-root SSE subscribers: {body}");
+  assert!(body.contains("/ordinary/file.txt"), "ordinary path event should remain visible: {body}");
+}
+
+#[tokio::test]
 async fn test_sse_scoped_key_receives_events_for_allowed_paths() {
   let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_allowed");
+  grant_user_read(&engine, user_id, "/docs/readme.md");
 
   // Create a scoped key that can only read /docs/**
   let rules = vec![
     KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
     KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
   ];
-  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
 
   let events = vec![EngineEvent::new("entries_created", "admin", serde_json::json!({"entries": [{"path": "/docs/readme.md"}]}))];
 
@@ -730,15 +1197,60 @@ async fn test_sse_scoped_key_receives_events_for_allowed_paths() {
 }
 
 #[tokio::test]
+async fn test_sse_scoped_key_projects_mixed_batch_to_allowed_paths() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_mixed_batch");
+  grant_user_read(&engine, user_id, "/docs/readme.md");
+  let rules = vec![
+    KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "entries_created",
+    "admin",
+    serde_json::json!({
+      "entries": [
+        {"path": "/docs/readme.md"},
+        {"path": "/private/secret.txt"},
+      ],
+    }),
+  ));
+
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("allowed batch projection was not delivered")
+    .expect("SSE stream ended")
+    .expect("SSE frame failed")
+    .into_data()
+    .expect("SSE event frame must contain data");
+  let body = String::from_utf8_lossy(&frame);
+  assert!(body.contains("/docs/readme.md"), "allowed entry was removed: {body}");
+  assert!(!body.contains("/private/secret.txt"), "denied entry leaked through mixed batch projection: {body}");
+}
+
+#[tokio::test]
 async fn test_sse_scoped_key_blocks_events_for_disallowed_paths() {
   let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_denied");
+  grant_user_read(&engine, user_id, "/secret/passwords.txt");
 
   // Create a scoped key that can only read /docs/**
   let rules = vec![
     KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
     KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
   ];
-  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
 
   let events = vec![EngineEvent::new("entries_created", "admin", serde_json::json!({"entries": [{"path": "/secret/passwords.txt"}]}))];
 
@@ -751,13 +1263,14 @@ async fn test_sse_scoped_key_blocks_events_for_disallowed_paths() {
 #[tokio::test]
 async fn test_sse_scoped_key_receives_system_events_without_paths() {
   let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_system_events");
 
   // Create a scoped key with restricted access
   let rules = vec![
     KeyRule { glob: "/docs/**".to_string(), permitted: "-r--l---".to_string() },
     KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
   ];
-  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
 
   let events = vec![EngineEvent::new("heartbeat", "system", serde_json::json!({"node_id": 1, "intent_time": 1000}))];
 
@@ -772,13 +1285,16 @@ async fn test_sse_scoped_key_receives_system_events_without_paths() {
 #[tokio::test]
 async fn test_sse_scoped_key_mixed_allowed_and_blocked() {
   let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_mixed_events");
+  grant_user_read(&engine, user_id, "/public/info.txt");
+  grant_user_read(&engine, user_id, "/private/secret.txt");
 
   // Create a scoped key that can only read /public/**
   let rules = vec![
     KeyRule { glob: "/public/**".to_string(), permitted: "-r--l---".to_string() },
     KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
   ];
-  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
 
   let events = vec![
     // Allowed: /public/ path
@@ -798,13 +1314,15 @@ async fn test_sse_scoped_key_mixed_allowed_and_blocked() {
 #[tokio::test]
 async fn test_sse_scoped_key_blocks_top_level_path_field() {
   let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_top_level_denied");
+  grant_user_read(&engine, user_id, "/forbidden/stuff");
 
   // Scoped to /allowed/** only
   let rules = vec![
     KeyRule { glob: "/allowed/**".to_string(), permitted: "-r--l---".to_string() },
     KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
   ];
-  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, Uuid::new_v4(), rules);
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
 
   // Event with top-level "path" field (permissions_changed style)
   let events =
@@ -816,17 +1334,19 @@ async fn test_sse_scoped_key_blocks_top_level_path_field() {
 }
 
 #[tokio::test]
-async fn test_sse_user_without_key_rules_receives_all_events() {
-  // A non-root user authenticated directly (no API key) should get all events
-  let (app, jwt_manager, _, event_bus, _temp) = test_app();
-  let auth = bearer_token(&jwt_manager); // Uses "test-admin" sub, no key_id
+async fn test_sse_user_without_key_rules_receives_permitted_events() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_direct_permitted");
+  grant_user_read(&engine, user_id, "/any/path.txt");
+  let auth = user_bearer_token(&jwt_manager, user_id);
 
   let events = vec![EngineEvent::new("entries_created", "someone", serde_json::json!({"entries": [{"path": "/any/path.txt"}]}))];
 
   let body = collect_sse_with_events(app, &auth, "/system/events", &event_bus, events).await;
 
-  // User without key rules should see everything
+  // A direct user token has no additional key bound, but normal path
+  // permission authority still applies.
   if !body.is_empty() {
-    assert!(body.contains("path.txt"), "user without key rules should see all events");
+    assert!(body.contains("path.txt"), "user without key rules should see permitted events");
   }
 }

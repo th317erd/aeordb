@@ -54,6 +54,27 @@ curl -N "http://localhost:6830/system/events?events=entries_created&path_prefix=
   -H "Authorization: Bearer $TOKEN"
 ```
 
+Path-bearing events are projected for each subscriber before serialization.
+A direct root JWT receives complete global events. A scoped root API key still
+applies its key rules to path-bearing events. For normal users, every path must
+be readable under current user/group permissions; user-owned API-key rules are
+an additional bound, while share keys use their active rules as their sole path
+authority. Non-root subscribers never receive paths concealed by the
+SystemFamily registry, including credential and other engine authority records.
+These checks and `path_prefix` are applied to every member of
+`payload.entries`; a mixed batch keeps its visible entries and omits denied
+siblings. A single-path event is omitted when its path is not visible, and a
+batch is omitted when no entries remain.
+
+The stream rechecks mutable user/group and API-key authority as events arrive.
+Revoked, expired, removed, or identity-mismatched keys stop receiving events
+without requiring a reconnect. Recipient-addressed events are never published
+on this global channel; they are available only through `/events/me` to the
+matching recipient. For non-root subscribers, only `server_ready`, `heartbeat`,
+and path-required relationship events are eligible. Task, GC, version, import,
+sync, metrics, unknown, and other administrative events are root-only. A
+malformed path-required event with no path fails closed for non-root streams.
+
 ### Response Format
 
 The response is an SSE stream. Each event has the standard SSE fields:

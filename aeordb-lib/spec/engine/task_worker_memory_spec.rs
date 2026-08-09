@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use aeordb::engine::engine_event::{EVENT_TASKS_CANCELLED, EVENT_TASKS_DEFERRED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED};
+use aeordb::auth::refresh::RefreshTokenRecord;
+use aeordb::engine::engine_event::{
+  EVENT_ENTRIES_DELETED, EVENT_TASKS_CANCELLED, EVENT_TASKS_COMPLETED, EVENT_TASKS_DEFERRED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED,
+};
 use aeordb::engine::event_bus::EventBus;
 use aeordb::engine::config_resolver::ConfigurationFamily;
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
@@ -9,6 +12,7 @@ use aeordb::engine::task_worker::{
   process_next_task, process_next_task_with_cancel_and_pre_execute_hook, process_next_task_with_post_dequeue_hook,
   process_next_task_with_pre_execute_hook,
 };
+use aeordb::engine::{RequestContext, system_store};
 use aeordb::plugins::PluginManager;
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
@@ -126,6 +130,48 @@ fn dequeue_accounts_large_task_records_instead_of_hiding_them_behind_fixed_works
   assert!(task_owner.peak_reserved_bytes > 512 * 1024, "task record body must be reserved before dequeue deserializes it");
   assert_eq!(task_owner.reserved_bytes, 0);
   assert_eq!(task_owner.active_reservations, 0);
+}
+
+#[test]
+fn queued_cleanup_emits_one_batched_deletion_event_between_task_lifecycle_events() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let event_bus = Arc::new(EventBus::new());
+  let context = RequestContext::system();
+  for token_hash in ["expired-a", "expired-b"] {
+    system_store::store_refresh_token(
+      &engine,
+      &context,
+      &RefreshTokenRecord {
+        token_hash: token_hash.to_string(),
+        user_subject: "task-user".to_string(),
+        created_at: chrono::Utc::now() - chrono::Duration::hours(2),
+        expires_at: chrono::Utc::now() - chrono::Duration::hours(1),
+        is_revoked: false,
+        key_id: None,
+      },
+    )
+    .unwrap();
+  }
+  let mut events = event_bus.subscribe();
+  let task = queue.enqueue("cleanup", serde_json::json!({})).unwrap();
+
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  assert_eq!(queue.get_task(&task.id).unwrap().unwrap().status, TaskStatus::Completed);
+
+  assert_eq!(events.try_recv().unwrap().event_type, EVENT_TASKS_STARTED);
+  let deleted = events.try_recv().expect("queued cleanup must publish its acknowledged namespace event");
+  assert_eq!(deleted.event_type, EVENT_ENTRIES_DELETED);
+  assert_eq!(deleted.payload["mutation_kind"], "maintenance_repair");
+  let deleted_paths: std::collections::HashSet<_> =
+    deleted.payload["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+  assert_eq!(
+    deleted_paths,
+    std::collections::HashSet::from(["/.aeordb-system/refresh-tokens/expired-a", "/.aeordb-system/refresh-tokens/expired-b",])
+  );
+  assert_eq!(events.try_recv().unwrap().event_type, EVENT_TASKS_COMPLETED);
+  assert!(events.try_recv().is_err(), "one cleanup batch must not emit duplicate deletion events");
 }
 
 #[test]

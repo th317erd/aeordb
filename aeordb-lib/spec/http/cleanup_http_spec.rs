@@ -9,8 +9,9 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::magic_link::MagicLinkRecord;
 use aeordb::auth::refresh::RefreshTokenRecord;
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
 use aeordb::engine::system_store;
-use aeordb::engine::{RequestContext, StorageEngine, TaskQueue};
+use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine, TaskQueue};
 use aeordb::server::{create_app_with_jwt_engine_and_task_queue, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine and task queue support.
@@ -232,4 +233,74 @@ async fn test_cleanup_endpoint_idempotent() {
   let json = body_json(response.into_body()).await;
   assert_eq!(json["tokens_cleaned"], 0, "second cleanup should find nothing");
   assert_eq!(json["links_cleaned"], 0);
+}
+
+#[tokio::test]
+async fn cleanup_memory_pressure_returns_retryable_service_unavailable() {
+  let (app, jwt_manager, engine, _task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let context = RequestContext::system();
+  let expired_token = RefreshTokenRecord {
+    token_hash: "cleanup-pressure".to_string(),
+    user_subject: "test-user".to_string(),
+    created_at: Utc::now() - Duration::hours(2),
+    expires_at: Utc::now() - Duration::hours(1),
+    is_revoked: false,
+    key_id: None,
+  };
+  system_store::store_refresh_token(&engine, &context, &expired_token).unwrap();
+  let coordinator = engine.memory_coordinator();
+  let snapshot = coordinator.snapshot().unwrap();
+  let pressure_bytes = snapshot.policy.unwrap().soft_limit_bytes.saturating_sub(snapshot.accounted_bytes);
+  let _pressure = coordinator.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let request = Request::builder().method("POST").uri("/system/tasks/cleanup").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["code"], "SERVICE_UNAVAILABLE");
+  assert!(system_store::get_refresh_token(&engine, &expired_token.token_hash).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn cleanup_http_preserves_exact_bounded_partial_evidence_for_root() {
+  let (app, jwt_manager, engine, _task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let context = RequestContext::system();
+  for index in 0..128 {
+    system_store::store_refresh_token(
+      &engine,
+      &context,
+      &RefreshTokenRecord {
+        token_hash: format!("a-http-expired-{index:03}"),
+        user_subject: "test-user".to_string(),
+        created_at: Utc::now() - Duration::hours(2),
+        expires_at: Utc::now() - Duration::hours(1),
+        is_revoked: false,
+        key_id: None,
+      },
+    )
+    .unwrap();
+  }
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &context,
+      "/.aeordb-system/refresh-tokens/z-http-malformed",
+      br#"{"$v":0,"token_hash":"z-http-malformed""#,
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let request = Request::builder().method("POST").uri("/system/tasks/cleanup").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let json = body_json(response.into_body()).await;
+  assert_eq!(json["code"], "INTERNAL_ERROR");
+  let error = json["error"].as_str().expect("root cleanup error text");
+  assert!(error.contains("completed=128"), "exact completed count was hidden: {error}");
+  assert!(error.contains("failed=1"), "exact failed count was hidden: {error}");
+  assert!(error.contains("tokens_cleaned=128"), "exact token count was hidden: {error}");
+  assert!(error.contains("z-http-malformed"), "bounded failure path was hidden: {error}");
 }

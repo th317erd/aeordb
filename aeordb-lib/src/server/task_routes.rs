@@ -7,10 +7,10 @@ use serde::Deserialize;
 use crate::auth::TokenClaims;
 use crate::engine::{
   create_cron_schedule, delete_cron_schedule, load_cron_config, update_cron_schedule, validate_cron_expression, CronSchedule,
-  CronScheduleUpdate, RequestContext,
+  CronScheduleUpdate, EngineError, RequestContext,
 };
 use crate::engine::system_store;
-use crate::server::responses::{ErrorResponse, error_codes, require_root};
+use crate::server::responses::{ErrorResponse, engine_error_response, error_codes, require_root};
 use crate::server::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -176,7 +176,11 @@ pub async fn trigger_cleanup(State(state): State<AppState>, Extension(claims): E
       })),
     )
       .into_response(),
-    Err(e) => ErrorResponse::new(format!("Cleanup failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response(),
+    Err(error @ EngineError::PartialOperation { .. }) => ErrorResponse::new(format!("Cleanup failed: {error}"))
+      .with_code(error_codes::INTERNAL_ERROR)
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response(),
+    Err(error) => engine_error_response("Cleanup failed", &error),
   }
 }
 

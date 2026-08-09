@@ -5,6 +5,7 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 
 /// Central event bus for distributing engine events to subscribers.
 /// Uses tokio::broadcast for fire-and-forget delivery.
+#[derive(Clone)]
 pub struct EventBus {
   sender: broadcast::Sender<EngineEvent>,
 }

@@ -97,6 +97,43 @@ curl -X POST http://localhost:6830/system/tasks/gc \
   -H "Authorization: Bearer $API_KEY"
 ```
 
+**Credential Cleanup:**
+```bash
+curl -X POST http://localhost:6830/system/tasks/cleanup \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+The root-only cleanup endpoint runs inline and returns exact acknowledged
+deletion counts:
+
+```json
+{
+  "tokens_cleaned": 14,
+  "links_cleaned": 3
+}
+```
+
+Scheduled cleanup tasks use the same engine operation. AeorDB strictly scans
+the refresh-token and magic-link authorities without constructing a complete
+directory listing, bounds each persisted credential body to 1 MiB, and retains
+at most 128 deletion candidates at a time. Each candidate is deleted only when
+its immutable FileRecord identity still matches the record observed during the
+scan. A concurrently refreshed, replaced, or already-removed credential is a
+safe no-op rather than a stale deletion.
+
+Each non-empty batch is one `maintenance_repair` durability acknowledgement,
+one `entries_deleted` SSE event containing the exact deleted paths for root
+subscribers, and one logical write metric. The SSE adapter projects batch
+members per subscriber and never serializes protected credential paths to
+non-root callers. Cleanup counters advance only after that acknowledgement.
+Empty or entirely changed batches publish nothing. If a later scan or batch
+fails after earlier batches were acknowledged, the operation fails with an
+exact partial result containing the acknowledged token/link counts and bounded
+failure evidence; it does not report the completed prefix as either total
+success or total failure. Maintenance-memory pressure refuses before mutation
+and the HTTP endpoint returns retryable `503 SERVICE_UNAVAILABLE` rather than
+misclassifying pressure as an internal server error.
+
 ### Cancel a Task
 
 ```bash
@@ -105,9 +142,10 @@ curl -X POST http://localhost:6830/system/tasks/{task_id}/cancel \
 ```
 
 Cancellation is cooperative. Long-running reindex, GC, and backup operations
-check cancellation at bounded safe points; they finish any durability-critical
-publication already in progress before stopping. A cancelled running task is
-not later overwritten as completed or failed by a stale worker transition.
+check cancellation at bounded safe points. Credential cleanup checks before
+each batch publication. Tasks finish any durability-critical publication
+already in progress before stopping. A cancelled running task is not later
+overwritten as completed or failed by a stale worker transition.
 
 ## Memory Pressure And Retry
 
@@ -274,7 +312,9 @@ Pruning runs after each task iteration when maintenance memory is available.
 
 ## Events
 
-The task system emits events on the event bus:
+The task system emits events on the event bus. These events are administrative
+and are delivered through `/system/events` only to root subscribers; task
+arguments, summaries, and failures can contain paths or operational details.
 
 | Event | Description |
 |-------|-------------|

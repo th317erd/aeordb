@@ -7,7 +7,9 @@ use serial_test::serial;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::StorageEngine;
+use aeordb::auth::magic_link::MagicLinkRecord;
+use aeordb::auth::refresh::RefreshTokenRecord;
+use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine, system_store};
 use aeordb::metrics::initialize_metrics;
 use aeordb::server::{create_app_with_jwt_and_metrics, create_temp_engine_for_tests};
 
@@ -79,6 +81,16 @@ async fn body_bytes(body: Body) -> Vec<u8> {
 /// Collect response body into a string.
 async fn body_string(body: Body) -> String {
   String::from_utf8(body_bytes(body).await).expect("valid utf8")
+}
+
+fn counter_value(rendered: &str, name: &str) -> f64 {
+  rendered
+    .lines()
+    .find_map(|line| {
+      let mut fields = line.split_whitespace();
+      (fields.next() == Some(name)).then(|| fields.next().and_then(|value| value.parse().ok())).flatten()
+    })
+    .unwrap_or(0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +212,77 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
     "aeordb_index_publication_batch_max_bytes",
   ] {
     assert!(output.contains(metric), "metrics should contain {metric}, got:\n{output}");
+  }
+}
+
+#[tokio::test]
+#[serial]
+async fn cleanup_metrics_count_only_acknowledged_deletions() {
+  let (_app, _jwt_manager, prometheus, engine, _temp_dir) = test_app_global();
+  let context = RequestContext::system();
+  let now = chrono::Utc::now();
+  system_store::store_refresh_token(
+    &engine,
+    &context,
+    &RefreshTokenRecord {
+      token_hash: "metrics-expired-token".to_string(),
+      user_subject: "metrics-user".to_string(),
+      created_at: now - chrono::Duration::hours(2),
+      expires_at: now - chrono::Duration::hours(1),
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
+  system_store::store_magic_link(
+    &engine,
+    &context,
+    &MagicLinkRecord {
+      code_hash: "metrics-used-link".to_string(),
+      email: "metrics@example.com".to_string(),
+      created_at: now - chrono::Duration::hours(1),
+      expires_at: now + chrono::Duration::minutes(10),
+      is_used: true,
+    },
+  )
+  .unwrap();
+  let before = prometheus.render();
+  let tokens_before = counter_value(&before, aeordb::metrics::definitions::CLEANUP_TOKENS_TOTAL);
+  let links_before = counter_value(&before, aeordb::metrics::definitions::CLEANUP_LINKS_TOTAL);
+
+  assert_eq!(system_store::cleanup_expired_tokens(&engine, &context).unwrap(), (1, 1));
+
+  let acknowledged = prometheus.render();
+  assert_eq!(counter_value(&acknowledged, aeordb::metrics::definitions::CLEANUP_TOKENS_TOTAL), tokens_before + 1.0);
+  assert_eq!(counter_value(&acknowledged, aeordb::metrics::definitions::CLEANUP_LINKS_TOTAL), links_before + 1.0);
+
+  let operations = DirectoryOps::new(&engine);
+  system_store::store_refresh_token(
+    &engine,
+    &context,
+    &RefreshTokenRecord {
+      token_hash: "a-metrics-expired".to_string(),
+      user_subject: "metrics-user".to_string(),
+      created_at: now - chrono::Duration::hours(2),
+      expires_at: now - chrono::Duration::hours(1),
+      is_revoked: false,
+      key_id: None,
+    },
+  )
+  .unwrap();
+  operations
+    .store_file_buffered(
+      &context,
+      "/.aeordb-system/refresh-tokens/z-metrics-malformed",
+      br#"{"$v":0,"token_hash":"z-metrics-malformed""#,
+      Some("application/json"),
+    )
+    .unwrap();
+  let before_rejection = prometheus.render();
+  assert!(system_store::cleanup_expired_tokens(&engine, &context).is_err());
+  let after_rejection = prometheus.render();
+  for metric in [aeordb::metrics::definitions::CLEANUP_TOKENS_TOTAL, aeordb::metrics::definitions::CLEANUP_LINKS_TOTAL] {
+    assert_eq!(counter_value(&after_rejection, metric), counter_value(&before_rejection, metric));
   }
 }
 

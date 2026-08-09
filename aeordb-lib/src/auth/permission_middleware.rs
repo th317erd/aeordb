@@ -280,7 +280,7 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Permission denied".to_string(), code: None })).into_response()
 }
 
-fn require_active_api_key(state: &AppState, key_id: &str) -> Result<ApiKeyRecord, Response> {
+pub(crate) fn require_active_api_key(state: &AppState, key_id: &str) -> Result<ApiKeyRecord, Response> {
   let key_record = match state.api_key_cache.get(&key_id.to_string(), &state.auth_engine) {
     Ok(Some(record)) => record,
     Ok(None) => {

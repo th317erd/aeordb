@@ -1528,19 +1528,26 @@ pub(crate) enum FileDeletionRequirement {
 pub(crate) struct FileDeletionRequest {
   pub path: String,
   pub requirement: FileDeletionRequirement,
+  expected_identity: Option<Vec<u8>>,
 }
 
 impl FileDeletionRequest {
   pub(crate) fn primary(path: impl Into<String>) -> Self {
-    Self { path: path.into(), requirement: FileDeletionRequirement::Primary }
+    Self { path: path.into(), requirement: FileDeletionRequirement::Primary, expected_identity: None }
   }
 
   pub(crate) fn required(path: impl Into<String>) -> Self {
-    Self { path: path.into(), requirement: FileDeletionRequirement::Required }
+    Self { path: path.into(), requirement: FileDeletionRequirement::Required, expected_identity: None }
   }
 
   pub(crate) fn optional(path: impl Into<String>) -> Self {
-    Self { path: path.into(), requirement: FileDeletionRequirement::Optional }
+    Self { path: path.into(), requirement: FileDeletionRequirement::Optional, expected_identity: None }
+  }
+
+  /// Delete only if the current FileRecord still has the identity observed by
+  /// the caller. Absence or replacement is a successful no-op.
+  pub(crate) fn optional_matching_identity(path: impl Into<String>, expected_identity: Vec<u8>) -> Self {
+    Self { path: path.into(), requirement: FileDeletionRequirement::Optional, expected_identity: Some(expected_identity) }
   }
 }
 
@@ -2806,9 +2813,19 @@ impl<'a> DirectoryOps<'a> {
 
   /// Read a small file only after its declared size passes the caller's bound.
   pub(crate) fn read_file_buffered_bounded(&self, path: &str, maximum_bytes: u64) -> EngineResult<Vec<u8>> {
+    self.read_file_buffered_bounded_with_identity(path, maximum_bytes).map(|(_identity, data)| data)
+  }
+
+  /// Resolve one current FileRecord once, then read its immutable chunks under
+  /// a declared body bound. The returned identity can be rechecked by a later
+  /// conditional namespace mutation without coupling the caller to FileRecord
+  /// serialization details.
+  pub(crate) fn read_file_buffered_bounded_with_identity(&self, path: &str, maximum_bytes: u64) -> EngineResult<(Vec<u8>, Vec<u8>)> {
     let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
-    let file_record = self.resolve_current_file_record(&normalized)?;
+    let (identity, file_record) = self
+      .resolve_current_file_record_from_bounded(self.engine, &normalized, SYSTEM_FILE_ALIAS_RECORD_MAX_BYTES)?
+      .ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
     if file_record.total_size > maximum_bytes {
       return Err(EngineError::ResourceExhausted(format!(
         "buffered read for '{normalized}' declares {} bytes, exceeding the {maximum_bytes}-byte limit",
@@ -2817,8 +2834,9 @@ impl<'a> DirectoryOps<'a> {
     }
     self.engine.counters().record_read(file_record.total_size);
     metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(timer_start.elapsed().as_secs_f64());
-    EngineFileStream::new_with_expected_total_size(file_record.chunk_hashes, self.engine, false, Some(file_record.total_size))?
-      .collect_to_vec()
+    let data = EngineFileStream::new_with_expected_total_size(file_record.chunk_hashes, self.engine, false, Some(file_record.total_size))?
+      .collect_to_vec()?;
+    Ok((identity, data))
   }
 
   /// Delete a file, storing a DeletionRecord and updating parent directories.
@@ -2881,7 +2899,11 @@ impl<'a> DirectoryOps<'a> {
       if !seen_paths.insert(normalized.clone()) {
         return Err(EngineError::InvalidInput(format!("Duplicate batch deletion path: {normalized}")));
       }
-      normalized_requests.push(FileDeletionRequest { path: normalized, requirement: request.requirement });
+      normalized_requests.push(FileDeletionRequest {
+        path: normalized,
+        requirement: request.requirement,
+        expected_identity: request.expected_identity,
+      });
     }
 
     self.execute_optional_namespace_mutation(Some(context), move |planning_engine| {
@@ -2923,6 +2945,9 @@ impl<'a> DirectoryOps<'a> {
             offset: 0,
             reason: format!("batch deletion FileRecord '{}' disappeared during authoritative planning", request.path),
           })?;
+        if request.expected_identity.as_ref().is_some_and(|expected| expected != &previous_identity) {
+          continue;
+        }
         let file_key = file_path_hash(&request.path, &algorithm)?;
         let deletion = DeletionRecord::new(request.path.clone(), None);
         let deletion_key = deletion_record_hash(&request.path, deletion.deleted_at, &algorithm)?;
@@ -5954,6 +5979,31 @@ mod engine_file_stream_tests {
     let error = DirectoryOps::visit_bounded_flat_children(&oversized, 32, 0, |_child| Ok(true)).unwrap_err();
 
     assert!(matches!(error, EngineError::CorruptEntry { reason, .. } if reason.contains("flat directory exceeds")));
+  }
+
+  #[test]
+  fn conditional_batch_delete_skips_a_replaced_file_identity() {
+    let (engine, _temp) = create_test_engine();
+    let ctx = RequestContext::system();
+    let ops = DirectoryOps::new(&engine);
+    let path = "/.aeordb-system/refresh-tokens/conditional.json";
+    ops.store_file_buffered(&ctx, path, b"old expired authority", Some("application/json")).unwrap();
+    let (expected_identity, old_body) = ops.read_file_buffered_bounded_with_identity(path, 1024).unwrap();
+    assert_eq!(old_body, b"old expired authority");
+
+    ops.store_file_buffered(&ctx, path, b"new valid authority", Some("application/json")).unwrap();
+    let before = engine.durability_snapshot().unwrap().next_sequence;
+    let deleted = ops
+      .delete_files_batch_with_kind(
+        &ctx,
+        vec![FileDeletionRequest::optional_matching_identity(path, expected_identity)],
+        NamespaceMutationKind::MaintenanceRepair,
+      )
+      .unwrap();
+
+    assert!(deleted.is_empty(), "a stale cleanup candidate must not delete replacement authority");
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before, "all-changed conditional batch must publish nothing");
+    assert_eq!(ops.read_file_buffered(path).unwrap(), b"new valid authority");
   }
 
   #[test]
