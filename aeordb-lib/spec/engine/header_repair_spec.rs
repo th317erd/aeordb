@@ -160,8 +160,7 @@ fn repair_recovers_data_after_hot_tail_past_eof() {
 
   poison_hot_tail_offset_past_eof(&path);
 
-  // Open via low-level repair, which should reset hot_tail_offset to 0
-  // and let dirty startup rebuild from WAL
+  // Low-level repair should recover the exact terminal hot-tail boundary.
   let report = repair_header_in_place(&path).unwrap();
   assert!(report.repaired);
   assert!(report.hot_tail_past_eof.is_some());
@@ -173,6 +172,32 @@ fn repair_recovers_data_after_hot_tail_past_eof() {
   assert_eq!(recovered, b"hello world");
   let recovered_nested = ops.read_file_buffered("/dir/nested.txt").unwrap();
   assert_eq!(recovered_nested, b"nested");
+}
+
+#[test]
+fn repair_refuses_to_hide_corrupt_durable_wal_behind_a_recovered_hot_tail_boundary() {
+  let (_dir, path) = make_temp_db();
+  let key = [0xA4; 32];
+  let entry_offset;
+  let value_offset;
+  {
+    let engine = StorageEngine::create(&path).unwrap();
+    entry_offset = engine.store_entry(aeordb::engine::EntryType::Chunk, &key, b"durable payload").unwrap();
+    let header = engine.read_entry_header_at(entry_offset).unwrap();
+    value_offset = entry_offset + header.header_size() as u64 + header.key_length as u64;
+    engine.shutdown().unwrap();
+  }
+
+  {
+    let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(value_offset)).unwrap();
+    file.write_all(&[0xFF]).unwrap();
+    file.sync_all().unwrap();
+  }
+  poison_hot_tail_offset_past_eof(&path);
+
+  let error = repair_header_in_place(&path).expect_err("repair must verify the durable WAL before selecting a recovered hot-tail boundary");
+  assert!(matches!(error, aeordb::engine::EngineError::CorruptEntry { offset, .. } if offset == entry_offset));
 }
 
 #[test]

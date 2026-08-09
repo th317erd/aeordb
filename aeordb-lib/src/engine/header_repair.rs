@@ -9,8 +9,7 @@
 //! For real-world recovery we need to make the file openable WITHOUT trusting
 //! every header field. This module reads the raw header bytes, identifies
 //! recoverable conditions, applies the minimal fixes needed to let
-//! `StorageEngine::open` proceed (which then triggers dirty startup), and
-//! writes a new v3 header back to disk.
+//! `StorageEngine::open` proceed, and writes a new v3 header back to disk.
 //!
 //! For v1 and v2 files, the data region also needs to shift forward 256 bytes
 //! to make room for slot B. `repair_header_in_place` handles that shift
@@ -20,6 +19,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBarrierKind};
+use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_header::{write_initial_header_coordinated, FileHeader, FILE_HEADER_SIZE, FILE_MAGIC, SUPPORTED_HEADER_VERSION};
 use crate::engine::hash_algorithm::HashAlgorithm;
@@ -107,10 +107,10 @@ pub fn inspect_header(db_path: &str) -> EngineResult<HeaderRepairReport> {
   Ok(report)
 }
 
-/// Repair the header in place. Reads it as v1/v2, applies fixes, writes a
-/// fresh v2 header back to disk with the safe fsync ordering. After this
-/// returns successfully, `StorageEngine::open` on the same path will succeed
-/// (triggering dirty startup to rebuild the KV from a full WAL scan).
+/// Repair the header in place. Reads the supported legacy/current layouts,
+/// applies recoverable fixes, and writes a fresh v3 header with safe fsync
+/// ordering. After this returns successfully, `StorageEngine::open` on the
+/// same path can validate and recover the remaining engine state normally.
 ///
 /// Caller MUST close any open handle to the file before invoking this.
 /// Returns `(report, repaired_header)` so the caller can decide what to do
@@ -209,16 +209,21 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
     }
   }
 
-  // Apply the fix: if hot_tail_offset points past EOF, reset it to the
-  // current file size. The reset uses the POST-shift file size when we're
-  // also migrating versions, since the shift adds 256 bytes to the file.
+  // Apply the fix: if hot_tail_offset points past EOF, recover the exact
+  // terminal hot-tail boundary on v3 instead of treating hot-tail bytes as
+  // durable WAL. Legacy layouts retain their post-shift EOF behavior because
+  // their data region is relocated below before the v3 reader can inspect it.
   if let Some(ref mismatch) = report.hot_tail_past_eof {
-    let target_size = if needs_data_shift { mismatch.actual_file_size + FILE_HEADER_SIZE as u64 } else { mismatch.actual_file_size };
+    let target_size = if needs_data_shift {
+      mismatch.actual_file_size + FILE_HEADER_SIZE as u64
+    } else {
+      recover_terminal_v3_hot_tail_offset(&file, mismatch.actual_file_size, hash_length)?
+    };
     tracing::warn!(
       recorded = mismatch.recorded_offset,
       file_size = mismatch.actual_file_size,
       past_eof = mismatch.bytes_past_eof,
-      "hot_tail_offset is past EOF — resetting to {} to trigger dirty startup",
+      "hot_tail_offset is past EOF — restoring verified terminal boundary {}",
       target_size,
     );
     hot_tail_offset = target_size;
@@ -269,6 +274,31 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
 
   report.repaired = true;
   Ok(report)
+}
+
+fn recover_terminal_v3_hot_tail_offset(file: &std::fs::File, file_size: u64, hash_length: usize) -> EngineResult<u64> {
+  let mut scanner = EntryScanner::new_reporting_to(file.try_clone()?, file_size, None)?;
+  while let Some(result) = scanner.next_verify_entry() {
+    match result {
+      Ok(_) => {}
+      Err(entry_error @ EngineError::CorruptEntry { offset, .. }) => {
+        let mut hot_tail_reader = file.try_clone()?;
+        match crate::engine::hot_tail::visit_hot_tail_voids(&mut hot_tail_reader, offset, hash_length, None, |_index, _void| Ok(())) {
+          Ok(_) => {
+            let hot_tail_end = hot_tail_reader.stream_position()?;
+            if hot_tail_end == file_size {
+              return Ok(offset);
+            }
+            return Err(entry_error);
+          }
+          Err(error) if crate::engine::hot_tail::is_rebuildable_hot_tail_error(&error) => return Err(entry_error),
+          Err(error) => return Err(error),
+        }
+      }
+      Err(error) => return Err(error),
+    }
+  }
+  Ok(file_size)
 }
 
 /// Shift `[FILE_HEADER_SIZE..file_size]` forward by `shift` bytes. The file
