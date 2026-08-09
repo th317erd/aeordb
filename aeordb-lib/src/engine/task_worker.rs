@@ -411,7 +411,7 @@ where
   };
   let mut running_recovery = RunningTaskRecovery { queue, task_id: &task.id, armed: true };
 
-  let task_cancellation = queue.register_active_cancellation(&task.id, cancel);
+  let task_cancellation = queue.register_active_cancellation(&task.id, cancel)?;
   post_dequeue_hook();
 
   if queue.is_cancelled(&task.id) {

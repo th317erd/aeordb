@@ -168,12 +168,15 @@ impl ActiveTaskCancellation<'_> {
 
 impl Drop for ActiveTaskCancellation<'_> {
   fn drop(&mut self) {
-    let mut active = self.queue.active_cancellations.write().unwrap_or_else(|error| {
-      tracing::warn!("active task cancellation write lock poisoned, recovering: {}", error);
-      error.into_inner()
-    });
-    if active.get(&self.task_id).is_some_and(|current| Arc::ptr_eq(current, &self.token)) {
-      active.remove(&self.task_id);
+    match self.queue.active_cancellations.write() {
+      Ok(mut active) => {
+        if active.get(&self.task_id).is_some_and(|current| Arc::ptr_eq(current, &self.token)) {
+          active.remove(&self.task_id);
+        }
+      }
+      Err(error) => {
+        crate::metrics::record_system_soft_failure("task_queue", "active_cancellation_drop", &self.task_id, error);
+      }
     }
   }
 }
@@ -414,16 +417,14 @@ impl TaskQueue {
     let _state_guard = self.lock_state("task cancellation")?;
     self.update_status_unlocked(id, TaskStatus::Cancelled, None)?;
     {
-      let mut cancelled = self.cancelled.write().unwrap_or_else(|e| {
-        tracing::warn!("cancelled set write lock poisoned, recovering: {}", e);
-        e.into_inner()
-      });
+      let mut cancelled = self.cancelled.write().map_err(|error| {
+        EngineError::IoError(std::io::Error::other(format!("task cancellation authority is poisoned during cancellation: {error}")))
+      })?;
       cancelled.insert(id.to_string());
     }
-    let active = self.active_cancellations.read().unwrap_or_else(|error| {
-      tracing::warn!("active task cancellation read lock poisoned, recovering: {}", error);
-      error.into_inner()
-    });
+    let active = self.active_cancellations.read().map_err(|error| {
+      EngineError::IoError(std::io::Error::other(format!("active task cancellation authority is poisoned during cancellation: {error}")))
+    })?;
     if let Some(token) = active.get(id) {
       token.cancel();
     }
@@ -432,20 +433,24 @@ impl TaskQueue {
 
   /// Mark a task as cancelled in memory only (without updating persisted status).
   /// Useful for testing mid-execution cancellation detection.
-  pub fn mark_cancelled_in_memory(&self, id: &str) {
-    let mut cancelled = self.cancelled.write().unwrap_or_else(|e| {
-      tracing::warn!("cancelled set write lock poisoned, recovering: {}", e);
-      e.into_inner()
-    });
-    cancelled.insert(id.to_string());
-    drop(cancelled);
-    let active = self.active_cancellations.read().unwrap_or_else(|error| {
-      tracing::warn!("active task cancellation read lock poisoned, recovering: {}", error);
-      error.into_inner()
-    });
+  pub fn mark_cancelled_in_memory(&self, id: &str) -> EngineResult<()> {
+    {
+      let mut cancelled = self.cancelled.write().map_err(|error| {
+        EngineError::IoError(std::io::Error::other(format!(
+          "task cancellation authority is poisoned during in-memory cancellation: {error}"
+        )))
+      })?;
+      cancelled.insert(id.to_string());
+    }
+    let active = self.active_cancellations.read().map_err(|error| {
+      EngineError::IoError(std::io::Error::other(format!(
+        "active task cancellation authority is poisoned during in-memory cancellation: {error}"
+      )))
+    })?;
     if let Some(token) = active.get(id) {
       token.cancel();
     }
+    Ok(())
   }
 
   /// Check if a task has been cancelled (in-memory check for speed).
@@ -459,45 +464,54 @@ impl TaskQueue {
     }
   }
 
-  pub(crate) fn register_active_cancellation<'a>(&'a self, id: &str, parent: &CancellationToken) -> ActiveTaskCancellation<'a> {
+  pub(crate) fn register_active_cancellation<'a>(
+    &'a self,
+    id: &str,
+    parent: &CancellationToken,
+  ) -> EngineResult<ActiveTaskCancellation<'a>> {
     let token = Arc::new(parent.child_token());
     {
-      let mut active = self.active_cancellations.write().unwrap_or_else(|error| {
-        tracing::warn!("active task cancellation write lock poisoned, recovering: {}", error);
-        error.into_inner()
-      });
+      let mut active = self.active_cancellations.write().map_err(|error| {
+        EngineError::IoError(std::io::Error::other(format!("active task cancellation authority is poisoned during registration: {error}")))
+      })?;
       active.insert(id.to_string(), Arc::clone(&token));
     }
     if self.is_cancelled(id) {
       token.cancel();
     }
-    ActiveTaskCancellation { queue: self, task_id: id.to_string(), token }
+    Ok(ActiveTaskCancellation { queue: self, task_id: id.to_string(), token })
   }
 
   /// Set in-memory progress info for a task.
   pub fn set_progress(&self, id: &str, info: ProgressInfo) {
-    let mut progress = self.progress.write().unwrap_or_else(|e| {
-      tracing::warn!("progress map write lock poisoned, recovering: {}", e);
-      e.into_inner()
-    });
-    progress.insert(id.to_string(), info);
+    match self.progress.write() {
+      Ok(mut progress) => {
+        progress.insert(id.to_string(), info);
+      }
+      Err(error) => crate::metrics::record_system_soft_failure("task_queue", "progress_write", id, error),
+    }
   }
 
   /// Get in-memory progress info for a task.
   pub fn get_progress(&self, id: &str) -> Option<ProgressInfo> {
-    let progress = self.progress.read().unwrap_or_else(|e| {
-      tracing::warn!("progress map read lock poisoned, recovering: {}", e);
-      e.into_inner()
-    });
-    progress.get(id).cloned()
+    match self.progress.read() {
+      Ok(progress) => progress.get(id).cloned(),
+      Err(error) => {
+        crate::metrics::record_system_soft_failure("task_queue", "progress_read", id, error);
+        None
+      }
+    }
   }
 
   /// Find any running reindex task whose args.path is a prefix of the given path.
   pub fn get_reindex_progress_for_path(&self, path: &str) -> Option<ProgressInfo> {
-    let progress = self.progress.read().unwrap_or_else(|e| {
-      tracing::warn!("progress map read lock poisoned, recovering: {}", e);
-      e.into_inner()
-    });
+    let progress = match self.progress.read() {
+      Ok(progress) => progress,
+      Err(error) => {
+        crate::metrics::record_system_soft_failure("task_queue", "reindex_progress_read", path, error);
+        return None;
+      }
+    };
     for info in progress.values() {
       if info.task_type == "reindex" {
         if let Some(task_path) = info.args.get("path").and_then(|v| v.as_str()) {
@@ -512,11 +526,12 @@ impl TaskQueue {
 
   /// Remove in-memory progress info for a task.
   pub fn clear_progress(&self, id: &str) {
-    let mut progress = self.progress.write().unwrap_or_else(|e| {
-      tracing::warn!("progress map write lock poisoned, recovering: {}", e);
-      e.into_inner()
-    });
-    progress.remove(id);
+    match self.progress.write() {
+      Ok(mut progress) => {
+        progress.remove(id);
+      }
+      Err(error) => crate::metrics::record_system_soft_failure("task_queue", "progress_clear", id, error),
+    }
   }
 
   /// Remove completed/failed/cancelled tasks exceeding age or count limits.
@@ -609,12 +624,13 @@ impl TaskQueue {
       Ok((batch, ()))
     })?;
 
-    let mut cancelled = self.cancelled.write().unwrap_or_else(|error| {
-      tracing::warn!("cancelled set write lock poisoned, recovering: {}", error);
-      error.into_inner()
-    });
-    for id in &removed_ids {
-      cancelled.remove(id);
+    match self.cancelled.write() {
+      Ok(mut cancelled) => {
+        for id in &removed_ids {
+          cancelled.remove(id);
+        }
+      }
+      Err(error) => crate::metrics::record_system_soft_failure("task_queue", "prune_cancellation_cleanup", removed_ids.len(), error),
     }
 
     Ok(pruned)

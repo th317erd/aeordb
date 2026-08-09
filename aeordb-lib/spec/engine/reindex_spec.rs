@@ -796,7 +796,7 @@ fn test_reindex_cancellation_detected_during_processing() {
   let task = queue.enqueue("reindex", serde_json::json!({"path": "/data"})).unwrap();
 
   // Mark it as cancelled in memory only (keep persisted status as Pending).
-  queue.mark_cancelled_in_memory(&task.id);
+  queue.mark_cancelled_in_memory(&task.id).unwrap();
 
   let processed = process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
   assert!(processed);
