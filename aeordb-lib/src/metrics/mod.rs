@@ -23,6 +23,19 @@ pub fn initialize_metrics() -> PrometheusHandle {
     .clone()
 }
 
+/// Record a non-authoritative follow-up failure without changing the outcome
+/// of an already-acknowledged mutation. Subsystem and operation must be fixed
+/// call-site constants so Prometheus label cardinality remains bounded.
+pub fn record_system_soft_failure(
+  subsystem: &'static str,
+  operation: &'static str,
+  context: impl std::fmt::Display,
+  error: impl std::fmt::Display,
+) {
+  tracing::warn!(subsystem, operation, context = %context, error = %error, "Derived system follow-up failed; authoritative mutation outcome is unchanged");
+  metrics::counter!(definitions::SYSTEM_SOFT_FAILURES_TOTAL, "subsystem" => subsystem, "operation" => operation).increment(1);
+}
+
 pub fn record_memory_metrics(memory: &EngineMemoryStats) {
   metrics::gauge!(definitions::PROCESS_RSS_BYTES).set(memory.process.rss_bytes as f64);
   metrics::gauge!(definitions::PROCESS_PEAK_RSS_BYTES).set(memory.process.peak_rss_bytes as f64);

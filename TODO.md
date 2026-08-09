@@ -398,7 +398,7 @@
       - [x] Remove Wave 3 direct mutable locators, direct HEAD writers, premature events/checkpoints, and duplicate restore/import/sync authority paths with source architecture gates.
       - [x] Update version, backup, sync, conflict, SSE, and operations documentation for atomic transition and acknowledgement behavior.
       - [x] Run focused, adjacent, broad, fault, restart, architecture, documentation, contract, and real-server verification; record and land the Wave 3 handoff.
-    - [ ] P2e Wave 4: converge system and plugin producers on one namespace mutation and locator authority.
+    - [x] P2e Wave 4: converge system and plugin producers on one namespace mutation and locator authority.
       - [x] Prevent detached portable plugin state from producing the same concurrent-create conflict on every peer-sync cycle after checkpoints advance.
         - [x] Canonicalize first-party bundled plugin release metadata so independent installs produce one content identity without changing the PluginRecord schema.
         - [x] Make the shared embedded/HTTP sync receipt reuse exact validated unresolved conflict evidence instead of rewriting and recounting it.
@@ -410,7 +410,7 @@
         - [x] Prove hard-waiter pressure and wrong-type/corrupt automatic-group authority leave both members unchanged; an absent optional automatic group still permits user deletion.
         - [x] Add one coordinator-owned buffered publication and planned file-retirement path, remove the best-effort delete squelch, and source-gate the compound producer.
         - [x] Run focused user/system/namespace, adjacent auth/permissions/sharing/restart, static, and disposable live restart/verify proof before landing.
-      - [ ] Convert keys, permissions, shares, config, plugins, peers, conflicts, cron, and legacy system-path migration adapters.
+      - [x] Convert keys, permissions, shares, config, plugins, peers, conflicts, cron, and legacy system-path migration adapters.
         - [x] Converge cron configuration CRUD on one strict, atomic namespace mutation path without lost read-modify-write updates.
         - [x] Make scheduler config, task-list, expression, and enqueue failures observable and fail closed for the affected tick.
         - [x] Prove malformed storage, concurrent CRUD, task deduplication, restart, architecture, and live HTTP behavior.
@@ -436,19 +436,23 @@
           - [x] Decide bundled version/identity replacement while storage authority is held and preserve exact first-party metadata semantics.
           - [x] Bind compiled-cache identity to the stored plugin checksum so concurrent or external managers cannot execute stale bytes after acknowledgement.
           - [x] Bound and strictly validate plugin records, then prove concurrent deploy/remove, malformed state, pressure, restart, and invocation behavior.
-        - [ ] Converge legacy configuration, email configuration, and system-path migration authority.
+        - [x] Converge legacy configuration, email configuration, and system-path migration authority.
           - [x] Validate and bound legacy config keys/values and make JWT first initialization single-winner.
           - [x] Bound email authority and remove serialization error squelching.
           - [x] Replace split copy/delete migration with atomic per-entry moves, reject divergent canonical collisions, and preserve content metadata.
-        - [ ] Classify every remaining swallowed system/plugin persistence failure as fatal, acknowledged soft evidence, or deferred Wave 5 work, and source-gate the approved direction.
+        - [x] Classify every remaining swallowed system/plugin persistence failure as fatal, acknowledged soft evidence, or deferred Wave 5 work, and source-gate the approved direction.
+          - [x] Fail plugin invocation requests explicitly when request-envelope serialization fails.
+          - [x] Replace parser/index diagnostic-log read/overwrite with one bounded atomic transform and metered soft-failure evidence.
+          - [x] Meter every post-commit automatic-reindex list, cancel, config-read/decode, enqueue, and unavailable-queue failure.
+          - [x] Document the acknowledgement boundary and run focused, architecture, broad, and live proof.
       - [x] Converge multi-path share and unshare permission authority.
           - [x] Reject invalid, protected, over-expanded, corrupt, and later-failing requests before any permission publication.
           - [x] Serialize grant/revoke read-modify-write operations and publish all changed permission files through one hard-acknowledged batch.
           - [x] Emit recipient notifications only after the shared permission authority acknowledges success.
           - [x] Prove one-sequence success, zero-sequence failure/no-op, concurrency, restart, architecture, and live HTTP behavior.
-      - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
+      - [x] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [x] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
-      - [ ] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.
+      - [x] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.
     - [ ] P2e Wave 5: converge maintenance and repair producers on one namespace mutation and locator authority.
       - [ ] Convert reindex metadata resave, repair, cleanup, GC follow-up, import, and migration source capture.
       - [ ] Preserve exact partial and corrupt outcomes instead of returning empty success.

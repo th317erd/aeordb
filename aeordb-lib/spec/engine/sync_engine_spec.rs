@@ -1012,7 +1012,7 @@ fn local_selective_sync_does_not_copy_chunks_outside_the_selected_paths() {
     last_jitter_ms: None,
     clock_state_at: None,
   };
-  aeordb::engine::system_store::store_peer_configs(&engine_a, &RequestContext::system(), &[peer]).unwrap();
+  aeordb::engine::system_store::PeerConfigStore::new(&engine_a).replace_all(&RequestContext::system(), vec![peer]).unwrap();
   let (sync_engine_a, _peer_manager) = make_sync_engine(Arc::clone(&engine_a));
 
   let result = sync_engine_a.sync_with_local_engine(2, &engine_b).unwrap();

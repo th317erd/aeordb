@@ -1,10 +1,11 @@
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::index_store::{IndexManager, IndexWriteBuffer};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
+use crate::engine::namespace_mutation::NamespaceMutationKind;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::source_resolver::resolve_sources;
@@ -16,6 +17,10 @@ use crate::plugins::PluginManager;
 use tokio_util::sync::CancellationToken;
 
 pub use crate::engine::index_config_resolver::glob_matches;
+
+const INDEX_DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1024 * 1024;
+const INDEX_DIAGNOSTIC_ENTRY_MAX_BYTES: usize = 16 * 1024;
+const INDEX_DIAGNOSTIC_LOG_WORKSPACE_BYTES: u64 = INDEX_DIAGNOSTIC_LOG_MAX_BYTES * 8;
 
 fn canonical_metadata_field_name(field_name: &str) -> Option<&'static str> {
   match field_name {
@@ -685,15 +690,55 @@ impl<'a> IndexingPipeline<'a> {
       format!("{}/.aeordb-logs/system/{}", parent, log_name)
     };
 
+    let mut message_end = message.len().min(INDEX_DIAGNOSTIC_ENTRY_MAX_BYTES);
+    while !message.is_char_boundary(message_end) {
+      message_end -= 1;
+    }
+    let truncated = message_end < message.len();
+    let suffix = if truncated { " [truncated]" } else { "" };
     let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-    let entry = format!("{} WARN  {}\n", timestamp, message);
+    let entry = format!("{} WARN  {}{}\n", timestamp, &message[..message_end], suffix).into_bytes();
 
-    let ops = DirectoryOps::new(self.engine);
-    let existing = ops.read_file_buffered(&log_path).unwrap_or_default();
-    let mut combined = existing;
-    combined.extend_from_slice(entry.as_bytes());
+    let reservation = match self.engine.memory_coordinator().reserve(
+      MemoryOwner::IndexDirtyBuffers,
+      INDEX_DIAGNOSTIC_LOG_WORKSPACE_BYTES,
+      AdmissionClass::Workload,
+    ) {
+      Ok(reservation) => reservation,
+      Err(error) => {
+        crate::metrics::record_system_soft_failure("indexing_diagnostics", "append", &log_path, error);
+        return;
+      }
+    };
 
-    let ctx = RequestContext::system();
-    let _ = ops.store_file_buffered(&ctx, &log_path, &combined, Some("text/plain"));
+    let operations = DirectoryOps::new(self.engine);
+    let context = RequestContext::system();
+    let append_result = operations.transform_file_buffered(
+      &context,
+      &log_path,
+      Some("text/plain"),
+      INDEX_DIAGNOSTIC_LOG_MAX_BYTES,
+      NamespaceMutationKind::SystemWrite,
+      move |current| {
+        let mut combined = current.unwrap_or_default().to_vec();
+        let maximum = INDEX_DIAGNOSTIC_LOG_MAX_BYTES as usize;
+        if combined.len().saturating_add(entry.len()) > maximum {
+          let mut retained_start = combined.len().saturating_add(entry.len()).saturating_sub(maximum).min(combined.len());
+          while retained_start < combined.len() && combined[retained_start] != b'\n' {
+            retained_start += 1;
+          }
+          if retained_start < combined.len() {
+            retained_start += 1;
+          }
+          combined.drain(..retained_start);
+        }
+        combined.extend_from_slice(&entry);
+        Ok(BufferedFileTransform::Replace { data: combined, output: () })
+      },
+    );
+    drop(reservation);
+    if let Err(error) = append_result {
+      crate::metrics::record_system_soft_failure("indexing_diagnostics", "append", &log_path, error);
+    }
   }
 }

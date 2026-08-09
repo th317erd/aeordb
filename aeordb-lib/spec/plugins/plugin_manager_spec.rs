@@ -1,11 +1,24 @@
 use std::sync::{Arc, Barrier};
 
-use aeordb::engine::system_store;
-use aeordb::engine::RequestContext;
+use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
 use aeordb::plugins::plugin_manager::{PLUGIN_BINARY_MAX_BYTES, PluginManager, PluginManagerError};
 use aeordb::plugins::types::PluginType;
 use aeordb::server::create_temp_engine_for_tests;
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
+
+fn raw_plugin_path(key: &str) -> String {
+  format!("/.aeordb-system/plugins/{}", key.replace('/', "::"))
+}
+
+fn read_raw_plugin(engine: &StorageEngine, key: &str) -> Vec<u8> {
+  DirectoryOps::new(engine).read_file_buffered(&raw_plugin_path(key)).expect("stored plugin record")
+}
+
+fn store_raw_plugin(engine: &StorageEngine, key: &str, encoded: &[u8]) {
+  DirectoryOps::new(engine)
+    .store_file_buffered(&RequestContext::system(), &raw_plugin_path(key), encoded, Some("application/octet-stream"))
+    .expect("store raw plugin fixture");
+}
 
 /// Compile a minimal valid WASM module for testing.
 fn minimal_wasm_bytes() -> Vec<u8> {
@@ -354,10 +367,10 @@ fn stored_plugin_checksum_mismatch_fails_closed() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
   let manager = PluginManager::new(engine.clone());
   manager.deploy_plugin("checksum", "strict/checksum", PluginType::Wasm, minimal_wasm_bytes()).unwrap();
-  let encoded = system_store::get_plugin(&engine, "strict/checksum").unwrap().unwrap();
+  let encoded = read_raw_plugin(&engine, "strict/checksum");
   let mut record: aeordb::plugins::PluginRecord = serde_json::from_slice(&encoded).unwrap();
   record.checksum = format!("blake3:{}", "0".repeat(64));
-  system_store::store_plugin(&engine, &RequestContext::system(), "strict/checksum", &serde_json::to_vec(&record).unwrap()).unwrap();
+  store_raw_plugin(&engine, "strict/checksum", &serde_json::to_vec(&record).unwrap());
 
   let error = manager.get_plugin("strict/checksum").unwrap_err();
   assert!(error.to_string().contains("checksum"), "unexpected checksum-corruption error: {error}");
@@ -385,18 +398,18 @@ fn legacy_empty_checksum_is_derived_without_rewriting_the_record() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
   let manager = PluginManager::new(engine.clone());
   manager.deploy_plugin("legacy", "strict/legacy", PluginType::Wasm, minimal_wasm_bytes()).unwrap();
-  let encoded = system_store::get_plugin(&engine, "strict/legacy").unwrap().unwrap();
+  let encoded = read_raw_plugin(&engine, "strict/legacy");
   let mut record: aeordb::plugins::PluginRecord = serde_json::from_slice(&encoded).unwrap();
   record.checksum.clear();
   let legacy_encoded = serde_json::to_vec(&record).unwrap();
-  system_store::store_plugin(&engine, &RequestContext::system(), "strict/legacy", &legacy_encoded).unwrap();
+  store_raw_plugin(&engine, "strict/legacy", &legacy_encoded);
   let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
 
   let loaded = manager.get_plugin("strict/legacy").unwrap().unwrap();
 
   assert_eq!(loaded.checksum, format!("blake3:{}", blake3::hash(&loaded.wasm_bytes).to_hex()));
   assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
-  assert_eq!(system_store::get_plugin(&engine, "strict/legacy").unwrap().unwrap(), legacy_encoded);
+  assert_eq!(read_raw_plugin(&engine, "strict/legacy"), legacy_encoded);
 }
 
 #[test]

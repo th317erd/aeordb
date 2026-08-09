@@ -378,32 +378,6 @@ pub fn delete_group(engine: &StorageEngine, ctx: &RequestContext, name: &str) ->
 }
 
 // ---------------------------------------------------------------------------
-// Permissions
-// ---------------------------------------------------------------------------
-
-/// Store permissions for a path. The path is BLAKE3-hashed to avoid nested
-/// directory issues from arbitrary path strings.
-pub fn store_permissions(engine: &StorageEngine, ctx: &RequestContext, path: &str, permissions_json: &[u8]) -> EngineResult<()> {
-  let ops = DirectoryOps::new(engine);
-  let path_hash = blake3::hash(path.as_bytes());
-  let store_path = format!("/.aeordb-system/permissions/{}", path_hash.to_hex());
-  ops.store_file_buffered(ctx, &store_path, permissions_json, Some("application/json"))?;
-  Ok(())
-}
-
-/// Retrieve permissions for a path.
-pub fn get_permissions(engine: &StorageEngine, path: &str) -> EngineResult<Option<Vec<u8>>> {
-  let ops = DirectoryOps::new(engine);
-  let path_hash = blake3::hash(path.as_bytes());
-  let store_path = format!("/.aeordb-system/permissions/{}", path_hash.to_hex());
-  match ops.read_file_buffered(&store_path) {
-    Ok(data) => Ok(Some(data)),
-    Err(EngineError::NotFound(_)) => Ok(None),
-    Err(error) => Err(error),
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Magic Links
 // ---------------------------------------------------------------------------
 
@@ -580,15 +554,6 @@ pub fn cleanup_expired_tokens(engine: &StorageEngine, ctx: &RequestContext) -> E
 // ---------------------------------------------------------------------------
 // Cluster / Replication
 // ---------------------------------------------------------------------------
-
-/// Persist this node's unique identifier.
-pub fn store_node_id(engine: &StorageEngine, ctx: &RequestContext, node_id: u64) -> EngineResult<()> {
-  let selected = initialize_node_id(engine, ctx, node_id)?;
-  if selected != node_id {
-    return Err(EngineError::AlreadyExists(format!("cluster node_id is already initialized as {selected}")));
-  }
-  Ok(())
-}
 
 /// Initialize this node's stable identifier exactly once.
 ///
@@ -903,11 +868,6 @@ fn fresh_peer_node_id(existing_peers: &[PeerConfig], local_node_id: Option<u64>)
   }
 }
 
-/// Persist the full set of peer configurations.
-pub fn store_peer_configs(engine: &StorageEngine, ctx: &RequestContext, peers: &[PeerConfig]) -> EngineResult<()> {
-  PeerConfigStore::new(engine).replace_all(ctx, peers.to_vec()).map(|_| ())
-}
-
 /// Load persisted peer configurations.
 pub fn get_peer_configs(engine: &StorageEngine) -> EngineResult<Vec<PeerConfig>> {
   PeerConfigStore::new(engine).list()
@@ -933,46 +893,6 @@ pub(crate) fn plugin_storage_path(key: &str) -> String {
   format!("/.aeordb-system/plugins/{}", encode_plugin_key(key))
 }
 
-pub fn store_plugin(engine: &StorageEngine, ctx: &RequestContext, key: &str, encoded: &[u8]) -> EngineResult<()> {
-  let ops = DirectoryOps::new(engine);
-  let path = plugin_storage_path(key);
-  ops.store_file_buffered(ctx, &path, encoded, Some("application/octet-stream"))?;
-  Ok(())
-}
-
-/// Retrieve a plugin by key.
-pub fn get_plugin(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<u8>>> {
-  let ops = DirectoryOps::new(engine);
-  let path = plugin_storage_path(key);
-  match ops.read_file_buffered(&path) {
-    Ok(data) => Ok(Some(data)),
-    Err(EngineError::NotFound(_)) => Ok(None),
-    Err(error) => Err(error),
-  }
-}
-
-/// List all plugins, returning (key, encoded_bytes) for each.
-/// Plugin keys are encoded with '::' replacing '/' for flat storage.
-pub fn list_plugins(engine: &StorageEngine) -> EngineResult<Vec<(String, Vec<u8>)>> {
-  let mut results = Vec::new();
-  let mut offset = 0usize;
-  loop {
-    let (keys, has_more) = list_plugin_keys_window(engine, offset, 64)?;
-    if keys.is_empty() {
-      break;
-    }
-    offset = offset.saturating_add(keys.len());
-    for key in keys {
-      let data = get_plugin(engine, &key)?.ok_or_else(|| EngineError::NotFound(format!("plugin disappeared during enumeration: {key}")))?;
-      results.push((key, data));
-    }
-    if !has_more {
-      break;
-    }
-  }
-  Ok(results)
-}
-
 /// Return one bounded window of decoded plugin keys without reading plugin bodies.
 pub fn list_plugin_keys_window(engine: &StorageEngine, offset: usize, limit: usize) -> EngineResult<(Vec<String>, bool)> {
   let ops = DirectoryOps::new(engine);
@@ -982,19 +902,6 @@ pub fn list_plugin_keys_window(engine: &StorageEngine, offset: usize, limit: usi
     Err(error) => return Err(error),
   };
   Ok((window.entries.into_iter().map(|entry| decode_plugin_key(&entry.name)).collect(), window.has_more))
-}
-
-/// Remove a plugin by key.
-/// Returns true if the plugin existed, false otherwise.
-pub fn remove_plugin(engine: &StorageEngine, ctx: &RequestContext, key: &str) -> EngineResult<bool> {
-  let ops = DirectoryOps::new(engine);
-  let safe_key = encode_plugin_key(key);
-  let path = format!("/.aeordb-system/plugins/{}", safe_key);
-  match ops.delete_file(ctx, &path) {
-    Ok(()) => Ok(true),
-    Err(EngineError::NotFound(_)) => Ok(false),
-    Err(error) => Err(error),
-  }
 }
 
 // ---------------------------------------------------------------------------

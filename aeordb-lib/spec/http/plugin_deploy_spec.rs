@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryOwner};
-use aeordb::engine::system_store;
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
 use aeordb::plugins::plugin_manager::{PluginRecord, BUNDLED_PLUGINS};
 use aeordb::plugins::PluginManager;
@@ -27,6 +26,20 @@ fn rebuild_app(jwt_manager: &Arc<JwtManager>, engine: &Arc<StorageEngine>) -> ax
   create_app_with_jwt(jwt_manager.clone(), engine.clone())
 }
 
+fn raw_plugin_path(key: &str) -> String {
+  format!("/.aeordb-system/plugins/{}", key.replace('/', "::"))
+}
+
+fn read_raw_plugin(engine: &StorageEngine, key: &str) -> Vec<u8> {
+  DirectoryOps::new(engine).read_file_buffered(&raw_plugin_path(key)).expect("stored plugin record")
+}
+
+fn store_raw_plugin(engine: &StorageEngine, key: &str, encoded: &[u8]) {
+  DirectoryOps::new(engine)
+    .store_file_buffered(&RequestContext::system(), &raw_plugin_path(key), encoded, Some("application/octet-stream"))
+    .expect("store raw plugin fixture");
+}
+
 #[test]
 fn bundled_plugins_serialize_identically_on_independent_nodes() {
   let (engine_a, _temp_a) = create_temp_engine_for_tests();
@@ -39,8 +52,8 @@ fn bundled_plugins_serialize_identically_on_independent_nodes() {
   manager_b.install_bundled_plugins().expect("install second independent bundle set");
 
   for bundled in BUNDLED_PLUGINS {
-    let first = system_store::get_plugin(&engine_a, bundled.path).unwrap().expect("first bundled record");
-    let second = system_store::get_plugin(&engine_b, bundled.path).unwrap().expect("second bundled record");
+    let first = read_raw_plugin(&engine_a, bundled.path);
+    let second = read_raw_plugin(&engine_b, bundled.path);
     assert!(
       first == second,
       "bundled plugin '{}' must have one portable content identity ({} != {})",
@@ -58,17 +71,11 @@ fn bundled_plugin_legacy_timestamps_are_canonicalized_once() {
   manager.install_bundled_plugins().expect("install canonical bundles");
   let bundled = BUNDLED_PLUGINS.iter().find(|plugin| plugin.path == "extract").expect("extract bundle metadata");
 
-  let stored = system_store::get_plugin(&engine, bundled.path).unwrap().expect("stored extract bundle");
+  let stored = read_raw_plugin(&engine, bundled.path);
   let mut legacy: PluginRecord = serde_json::from_slice(&stored).expect("decode stored bundle");
   legacy.created_at = chrono::Utc::now();
   legacy.updated_at = legacy.created_at;
-  system_store::store_plugin(
-    &engine,
-    &RequestContext::system(),
-    bundled.path,
-    &serde_json::to_vec(&legacy).expect("encode legacy bundle metadata"),
-  )
-  .unwrap();
+  store_raw_plugin(&engine, bundled.path, &serde_json::to_vec(&legacy).expect("encode legacy bundle metadata"));
 
   let before_canonicalization = engine.durability_snapshot().unwrap().next_sequence;
   let changed = manager.install_bundled_plugins().expect("canonicalize legacy bundle metadata");
@@ -77,7 +84,7 @@ fn bundled_plugin_legacy_timestamps_are_canonicalized_once() {
   let after_canonicalization = engine.durability_snapshot().unwrap().next_sequence;
   assert!(after_canonicalization > before_canonicalization);
 
-  let canonical_bytes = system_store::get_plugin(&engine, bundled.path).unwrap().expect("canonical extract bundle");
+  let canonical_bytes = read_raw_plugin(&engine, bundled.path);
   let canonical: PluginRecord = serde_json::from_slice(&canonical_bytes).expect("decode canonical bundle");
   let released_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(bundled.released_at_millis).unwrap();
   assert_eq!(canonical.created_at, released_at);
@@ -86,7 +93,7 @@ fn bundled_plugin_legacy_timestamps_are_canonicalized_once() {
   let unchanged = manager.install_bundled_plugins().expect("repeat canonical bundle installation");
   assert!(unchanged.is_empty());
   assert_eq!(engine.durability_snapshot().unwrap().next_sequence, after_canonicalization);
-  assert_eq!(system_store::get_plugin(&engine, bundled.path).unwrap().unwrap(), canonical_bytes);
+  assert_eq!(read_raw_plugin(&engine, bundled.path), canonical_bytes);
 }
 
 /// Create an admin Bearer token value (including "Bearer " prefix).

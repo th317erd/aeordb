@@ -1581,6 +1581,61 @@ fn wave_four_legacy_system_path_migration_uses_one_atomic_file_transition() {
 }
 
 #[test]
+fn wave_four_touched_system_and_plugin_failures_have_explicit_direction() {
+  let system_store = include_str!("../../src/engine/system_store.rs");
+  let plugin_routes = include_str!("../../src/server/routes.rs");
+  let indexing_pipeline = include_str!("../../src/engine/indexing_pipeline.rs");
+  let engine_routes = include_str!("../../src/server/engine_routes.rs");
+  let metric_definitions = include_str!("../../src/metrics/definitions.rs");
+
+  for obsolete_writer in
+    ["pub fn store_permissions(", "pub fn store_node_id(", "pub fn store_peer_configs(", "pub fn store_plugin(", "pub fn remove_plugin("]
+  {
+    assert!(!system_store.contains(obsolete_writer), "legacy system-store writer remains: {obsolete_writer}");
+  }
+  assert!(!system_store.contains("pub fn get_permissions("), "the removed raw permission writer retained its duplicate reader API");
+  assert!(!system_store.contains("pub fn get_plugin("), "plugin records must be read through PluginManager validation");
+  assert!(!system_store.contains("pub fn list_plugins("), "plugin records must be enumerated through PluginManager validation");
+  let plugin_manager = include_str!("../../src/plugins/plugin_manager.rs");
+  for (owner, source) in [("system store", system_store), ("plugin manager", plugin_manager)] {
+    for raw_bypass in [".store_entry(", ".store_entry_typed(", ".mark_entry_deleted(", "TransactionGuard"] {
+      assert!(!source.contains(raw_bypass), "{owner} retained raw namespace-authority bypass {raw_bypass}");
+    }
+  }
+
+  let invoke_start = plugin_routes.find("pub async fn invoke_plugin(").unwrap();
+  let invoke_end = plugin_routes[invoke_start..].find("/// GET /plugins").unwrap() + invoke_start;
+  let invoke = &plugin_routes[invoke_start..invoke_end];
+  assert!(!invoke.contains("serde_json::to_vec(&plugin_request).unwrap_or_default()"));
+  assert!(invoke.contains("request_serialization_failed"));
+  assert!(invoke.contains("StatusCode::INTERNAL_SERVER_ERROR"));
+
+  let log_start = indexing_pipeline.find("fn log_system(").unwrap();
+  let log = &indexing_pipeline[log_start..];
+  assert!(log.contains("transform_file_buffered"));
+  assert!(log.contains("record_system_soft_failure"));
+  assert!(!log.contains("read_file_buffered(&log_path).unwrap_or_default()"));
+  assert!(!log.contains("let _ = ops.store_file_buffered"));
+
+  let scheduling_start = engine_routes.find("// Auto-trigger reindex when indexes.json is stored").unwrap();
+  let scheduling_end = engine_routes[scheduling_start..].find("let mut response_body").unwrap() + scheduling_start;
+  let scheduling = &engine_routes[scheduling_start..scheduling_end];
+  assert!(scheduling.contains("tokio::task::spawn_blocking"));
+  assert!(scheduling.contains("schedule_automatic_reindex_after_commit"));
+  assert!(scheduling.contains("\"worker_join\""));
+  let orchestration_start = engine_routes.find("fn schedule_automatic_reindex_after_commit(").unwrap();
+  let orchestration_end = engine_routes[orchestration_start..].find("// engine_get helper functions").unwrap() + orchestration_start;
+  let orchestration = &engine_routes[orchestration_start..orchestration_end];
+  assert!(orchestration.contains("record_system_soft_failure"));
+  assert!(!orchestration.contains("if let Ok(tasks) = queue.list_tasks()"));
+  assert!(!orchestration.contains("let _ = queue.cancel"));
+  assert!(!orchestration.contains(".read_file_buffered(config_path)\n        .ok()"));
+  assert!(!orchestration.contains("PathIndexConfig::deserialize(&data).ok()"));
+  assert!(!orchestration.contains("let _ = queue.enqueue"));
+  assert!(metric_definitions.contains("SYSTEM_SOFT_FAILURES_TOTAL"));
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

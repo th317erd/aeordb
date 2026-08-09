@@ -677,29 +677,6 @@ fn typed_credential_transitions_survive_clean_restart() {
 }
 
 // ---------------------------------------------------------------------------
-// Permissions
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_store_and_get_permissions() {
-  let (engine, _dir) = setup();
-  let ctx = test_context();
-
-  let permissions_json = br#"{"allow": "crudlify"}"#;
-  system_store::store_permissions(&engine, &ctx, "/data/records", permissions_json).unwrap();
-
-  let result = system_store::get_permissions(&engine, "/data/records").unwrap();
-  assert_eq!(result, Some(permissions_json.to_vec()));
-}
-
-#[test]
-fn test_get_permissions_missing() {
-  let (engine, _dir) = setup();
-  let result = system_store::get_permissions(&engine, "/nonexistent").unwrap();
-  assert!(result.is_none());
-}
-
-// ---------------------------------------------------------------------------
 // Magic Links
 // ---------------------------------------------------------------------------
 
@@ -959,7 +936,7 @@ fn test_node_id_persistence() {
   let (engine, _dir) = setup();
   let ctx = test_context();
 
-  system_store::store_node_id(&engine, &ctx, 42).unwrap();
+  assert_eq!(system_store::initialize_node_id(&engine, &ctx, 42).unwrap(), 42);
   let result = system_store::get_node_id(&engine).unwrap();
   assert_eq!(result, Some(42));
 }
@@ -1025,7 +1002,7 @@ fn node_id_initialization_is_single_winner_and_cannot_be_overwritten() {
   assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
 
   let replacement = if selected[0] == 99 { 100 } else { 99 };
-  system_store::store_node_id(&engine, &test_context(), replacement).expect_err("node identity must be create-once");
+  assert_eq!(system_store::initialize_node_id(&engine, &test_context(), replacement).unwrap(), selected[0]);
   assert_eq!(system_store::get_node_id(&engine).unwrap(), Some(selected[0]));
   assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
 }
@@ -1068,7 +1045,7 @@ fn test_peer_configs_persistence() {
     },
   ];
 
-  system_store::store_peer_configs(&engine, &ctx, &peers).unwrap();
+  system_store::PeerConfigStore::new(&engine).replace_all(&ctx, peers).unwrap();
   let result = system_store::get_peer_configs(&engine).unwrap();
 
   assert_eq!(result.len(), 2);
@@ -1278,45 +1255,13 @@ fn oversized_peer_authority_is_rejected_before_buffering_for_list() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_store_and_get_plugin() {
-  let (engine, _dir) = setup();
-  let ctx = test_context();
-
-  system_store::store_plugin(&engine, &ctx, "my-plugin", b"wasm-bytes-here").unwrap();
-  let result = system_store::get_plugin(&engine, "my-plugin").unwrap();
-  assert_eq!(result, Some(b"wasm-bytes-here".to_vec()));
-}
-
-#[test]
-fn test_get_plugin_missing() {
-  let (engine, _dir) = setup();
-  let result = system_store::get_plugin(&engine, "nonexistent").unwrap();
-  assert!(result.is_none());
-}
-
-#[test]
-fn test_list_plugins() {
-  let (engine, _dir) = setup();
-  let ctx = test_context();
-
-  system_store::store_plugin(&engine, &ctx, "plugin-a", b"data-a").unwrap();
-  system_store::store_plugin(&engine, &ctx, "plugin-b", b"data-b").unwrap();
-
-  let plugins = system_store::list_plugins(&engine).unwrap();
-  assert_eq!(plugins.len(), 2);
-
-  let keys: Vec<String> = plugins.iter().map(|(k, _)| k.clone()).collect();
-  assert!(keys.contains(&"plugin-a".to_string()));
-  assert!(keys.contains(&"plugin-b".to_string()));
-}
-
-#[test]
 fn plugin_key_windows_page_without_loading_plugin_bodies() {
   let (engine, _dir) = setup();
   let ctx = test_context();
-  system_store::store_plugin(&engine, &ctx, "plugin-a", b"large-body-a").unwrap();
-  system_store::store_plugin(&engine, &ctx, "plugin-b", b"large-body-b").unwrap();
-  system_store::store_plugin(&engine, &ctx, "plugin-c", b"large-body-c").unwrap();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/.aeordb-system/plugins/plugin-a", b"large-body-a", Some("application/octet-stream")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-system/plugins/plugin-b", b"large-body-b", Some("application/octet-stream")).unwrap();
+  ops.store_file_buffered(&ctx, "/.aeordb-system/plugins/plugin-c", b"large-body-c", Some("application/octet-stream")).unwrap();
 
   let (first, has_more) = system_store::list_plugin_keys_window(&engine, 0, 2).unwrap();
   assert_eq!(first, vec!["plugin-a", "plugin-b"]);
@@ -1325,27 +1270,6 @@ fn plugin_key_windows_page_without_loading_plugin_bodies() {
   let (second, has_more) = system_store::list_plugin_keys_window(&engine, 2, 2).unwrap();
   assert_eq!(second, vec!["plugin-c"]);
   assert!(!has_more);
-}
-
-#[test]
-fn test_remove_plugin() {
-  let (engine, _dir) = setup();
-  let ctx = test_context();
-
-  system_store::store_plugin(&engine, &ctx, "doomed", b"data").unwrap();
-  let removed = system_store::remove_plugin(&engine, &ctx, "doomed").unwrap();
-  assert!(removed);
-
-  let result = system_store::get_plugin(&engine, "doomed").unwrap();
-  assert!(result.is_none());
-}
-
-#[test]
-fn test_remove_plugin_nonexistent() {
-  let (engine, _dir) = setup();
-  let ctx = test_context();
-  let removed = system_store::remove_plugin(&engine, &ctx, "ghost").unwrap();
-  assert!(!removed);
 }
 
 // ---------------------------------------------------------------------------

@@ -183,7 +183,16 @@ pub async fn invoke_plugin(
       meta
     },
   };
-  let request_bytes = serde_json::to_vec(&plugin_request).unwrap_or_default();
+  let request_bytes = match serde_json::to_vec(&plugin_request) {
+    Ok(bytes) => bytes,
+    Err(error) => {
+      tracing::error!(plugin_path = %plugin_path, error = %error, "Failed to serialize plugin invocation request");
+      metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "request_serialization_failed").increment(1);
+      return ErrorResponse::new("Failed to serialize plugin invocation request")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response();
+    }
+  };
 
   // Create a RequestContext from the authenticated caller's claims.
   let ctx = RequestContext::from_claims_with_key(&claims.sub, claims.key_id.clone(), state.event_bus.clone());

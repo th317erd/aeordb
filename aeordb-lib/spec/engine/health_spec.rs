@@ -31,7 +31,7 @@ fn store_raw_signing_key(engine: &StorageEngine, key_bytes: &[u8]) {
 
 fn store_peer_configs(engine: &StorageEngine, peers: &[PeerConfig]) {
   let ctx = RequestContext::system();
-  system_store::store_peer_configs(engine, &ctx, peers).expect("failed to store peer configs");
+  system_store::PeerConfigStore::new(engine).replace_all(&ctx, peers.to_vec()).expect("failed to store peer configs");
 }
 
 fn make_peer_config(node_id: u64) -> PeerConfig {

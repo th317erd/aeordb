@@ -26,6 +26,10 @@ pub const HTTP_REQUEST_DURATION: &str = "aeordb_http_request_duration_seconds";
 pub const HTTP_REQUEST_BYTES: &str = "aeordb_http_request_bytes_total";
 pub const HTTP_RESPONSE_BYTES: &str = "aeordb_http_response_bytes_total";
 
+// Derived/background follow-up failures that cannot roll back an already
+// acknowledged authority mutation. Labels are bounded call-site constants.
+pub const SYSTEM_SOFT_FAILURES_TOTAL: &str = "aeordb_system_soft_failures_total";
+
 // Auth
 pub const AUTH_VALIDATIONS_TOTAL: &str = "aeordb_auth_validations_total";
 pub const AUTH_TOKEN_EXCHANGES_TOTAL: &str = "aeordb_auth_token_exchanges_total";

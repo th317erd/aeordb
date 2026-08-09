@@ -192,7 +192,7 @@ curl -X POST http://localhost:6830/plugins/my-plugin/invoke \
 |--------|-----------|
 | 404 | Plugin not found |
 | 503 | Invocation memory or record-size limit refused the request |
-| 500 | Plugin invocation failure (runtime error, panic, etc.) |
+| 500 | Request-envelope serialization or plugin invocation failure (runtime error, panic, etc.) |
 
 ---
 

@@ -3,11 +3,13 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use serial_test::serial;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
-use aeordb::engine::{RequestContext, StorageEngine, TaskQueue};
+use aeordb::engine::{EntryType, RequestContext, StorageEngine, TaskQueue};
+use aeordb::metrics::initialize_metrics;
 use aeordb::server::{create_app_with_jwt_engine_and_task_queue, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine and task queue support.
@@ -622,4 +624,76 @@ async fn test_auto_trigger_cancels_existing_reindex() {
     })
     .collect();
   assert_eq!(active_reindex.len(), 1, "should have exactly one pending reindex task");
+}
+
+#[tokio::test]
+#[serial]
+async fn auto_reindex_follow_up_failures_are_metered_without_lying_about_the_committed_config() {
+  let metrics = initialize_metrics();
+  let (_app, jwt_manager, engine, task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let context = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&context, "/failure/data.json", b"{}", Some("application/json")).unwrap();
+
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+  engine.store_entry(EntryType::FileRecord, &registry_key, br#"{"broken":true}"#).unwrap();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/failure/.aeordb-config/indexes.json")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"fields":[]}"#))
+    .unwrap();
+  let response = rebuild_app(&jwt_manager, &engine, &task_queue).oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::CREATED, "the FileRecord was committed before derived scheduling began");
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered("/failure/.aeordb-config/indexes.json").unwrap(), br#"{"fields":[]}"#,);
+  assert!(task_queue.list_tasks().is_err(), "the malformed task authority remains visible for repair");
+
+  let rendered = metrics.render();
+  for operation in ["task_list", "task_enqueue"] {
+    assert!(
+      rendered.lines().any(|line| {
+        line.starts_with("aeordb_system_soft_failures_total")
+          && line.contains("subsystem=\"automatic_reindex\"")
+          && line.contains(&format!("operation=\"{operation}\""))
+      }),
+      "missing automatic-reindex {operation} failure metric:\n{rendered}",
+    );
+  }
+}
+
+#[tokio::test]
+#[serial]
+async fn malformed_committed_index_config_uses_full_reindex_and_records_decode_evidence() {
+  let metrics = initialize_metrics();
+  let (_app, jwt_manager, engine, task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let context = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&context, "/decode/data.json", b"{}", Some("application/json")).unwrap();
+
+  let request = Request::builder()
+    .method("PUT")
+    .uri("/files/decode/.aeordb-config/indexes.json")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from("not-json"))
+    .unwrap();
+  let response = rebuild_app(&jwt_manager, &engine, &task_queue).oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+
+  let tasks = task_queue.list_tasks().unwrap();
+  let task = tasks
+    .iter()
+    .find(|task| task.task_type == "reindex" && task.args.get("path").and_then(serde_json::Value::as_str) == Some("/decode"))
+    .expect("malformed config still receives conservative full reindex follow-up");
+  assert_eq!(task.args["metadata_only"], false);
+
+  let rendered = metrics.render();
+  assert!(rendered.lines().any(|line| {
+    line.starts_with("aeordb_system_soft_failures_total")
+      && line.contains("subsystem=\"automatic_reindex\"")
+      && line.contains("operation=\"config_decode\"")
+  }));
 }

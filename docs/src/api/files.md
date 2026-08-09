@@ -57,7 +57,7 @@ Store a file at the given path. Parent directories are created automatically. If
 
 ### Side Effects
 
-- If the path matches `/.aeordb-config/indexes.json` (or a nested variant like `/data/.aeordb-config/indexes.json`), a reindex task is automatically enqueued for the parent directory. Any existing pending or running reindex for that path is cancelled first. Configs containing only virtual `@` metadata fields use metadata-only reindexing automatically.
+- If the path matches `/.aeordb-config/indexes.json` (or a nested variant like `/data/.aeordb-config/indexes.json`), AeorDB attempts to cancel any pending/running reindex and enqueue a replacement for the parent directory. Configs containing only virtual `@` metadata fields use metadata-only reindexing automatically. The `201` acknowledges the file write; scheduling is post-commit derived work. Scheduling failures are logged and counted by `aeordb_system_soft_failures_total{subsystem="automatic_reindex",operation="..."}` so a durable config write is never falsely returned as a retryable failure.
 - Triggers `entries_created` events on the event bus.
 - Runs any deployed store-phase plugins.
 

@@ -15,6 +15,17 @@ Changing `indexes.json` via the API automatically triggers a background reindex 
 
 If every configured field is a virtual metadata field (`@filename`, `@hash`, `@size`, and so on), the automatic task uses metadata-only reindexing. That path reads FileRecord metadata only and does not read or parse file bodies. Mixed configs that include content fields still use the full parser/content indexing path.
 
+The `201 Created` response acknowledges the `indexes.json` FileRecord and its
+namespace publication. Cancelling an older task and enqueueing the replacement
+happen afterward, because a task failure cannot roll back an already-durable
+configuration write. AeorDB logs and increments
+`aeordb_system_soft_failures_total{subsystem="automatic_reindex",operation="..."}`
+when task listing, cancellation, config read/decoding, or enqueue fails. Check
+`GET /system/tasks` after such an alert and enqueue a manual reindex after the
+task/config authority is repaired. Malformed config uses a conservative full
+reindex attempt and records `operation="config_decode"` rather than silently
+claiming metadata-only scheduling.
+
 ## Manual Reindexing
 
 ### HTTP API
@@ -54,6 +65,13 @@ The task worker will:
 6. Track progress and update checkpoints
 
 Automatic reindexing triggered by `indexes.json` changes is index-only. Forced reindexing is the deliberate migration path: if a FileRecord is older than the current payload version, AeorDB rewrites the path, identity, and current content-addressed FileRecord entries using the current writer while preserving the file's timestamps, metadata, chunks, and parent directory entry. For FileRecord v0, this backfills the stored whole-file `content_hash` used by `@hash`.
+
+Parser and field-index diagnostics are derived operational state under
+`.aeordb-logs/system/`. Each log is capped at 1 MiB and appended through one
+atomic namespace transform, so concurrent failures cannot overwrite each
+other. A corrupt, oversized, memory-refused, or unwritable diagnostic log is
+left untouched; indexing retains its existing result and emits
+`aeordb_system_soft_failures_total{subsystem="indexing_diagnostics",operation="append"}`.
 
 Forced migration includes live path-key records under internal system/config paths such as `/.aeordb-system` and `/.aeordb-config`. Those records can be migrated, but internal/system files are still skipped by the indexing pipeline.
 

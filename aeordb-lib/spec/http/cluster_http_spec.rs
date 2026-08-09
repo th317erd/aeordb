@@ -109,22 +109,22 @@ fn server_construction_refuses_malformed_required_system_authority() {
 fn server_construction_refuses_local_and_peer_node_id_collision() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();
-  aeordb::engine::system_store::store_node_id(&engine, &ctx, 42).unwrap();
-  aeordb::engine::system_store::store_peer_configs(
-    &engine,
-    &ctx,
-    &[aeordb::engine::PeerConfig {
-      node_id: 42,
-      address: "http://peer:6830".to_string(),
-      label: None,
-      sync_paths: None,
-      last_clock_offset_ms: None,
-      last_wire_time_ms: None,
-      last_jitter_ms: None,
-      clock_state_at: None,
-    }],
-  )
-  .unwrap();
+  assert_eq!(aeordb::engine::system_store::initialize_node_id(&engine, &ctx, 42).unwrap(), 42);
+  aeordb::engine::system_store::PeerConfigStore::new(&engine)
+    .replace_all(
+      &ctx,
+      vec![aeordb::engine::PeerConfig {
+        node_id: 42,
+        address: "http://peer:6830".to_string(),
+        label: None,
+        sync_paths: None,
+        last_clock_offset_ms: None,
+        last_wire_time_ms: None,
+        last_jitter_ms: None,
+        clock_state_at: None,
+      }],
+    )
+    .unwrap();
 
   let error = match try_test_app(engine) {
     Ok(_) => panic!("server construction accepted a local/peer node_id collision"),

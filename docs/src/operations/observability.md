@@ -66,6 +66,15 @@ hard durability sequence. It is an acknowledgement counter, not an attempted
 write counter. During the staged producer migration, only converted mutation
 families contribute to it.
 
+`aeordb_system_soft_failures_total{subsystem="...",operation="..."}` counts
+bounded, named follow-up failures that cannot reverse an already-acknowledged
+authority mutation. Current producers are automatic reindex scheduling and
+derived indexing diagnostics. Error text and paths are written to structured
+logs, never Prometheus labels, so cardinality remains bounded. A rising counter
+means the primary mutation outcome is unchanged but operator follow-up is
+required; it is not a successful-health signal and is not a durability-latch
+counter.
+
 The Dashboard shows:
 
 - current memory pressure and accounting;

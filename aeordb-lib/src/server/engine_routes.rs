@@ -381,34 +381,19 @@ pub async fn engine_store_file(
     Err(response) => return response,
   };
 
-  // Auto-trigger reindex when indexes.json is stored
+  // Auto-trigger reindex when indexes.json is stored. The file mutation is
+  // already durably acknowledged, so follow-up failures are soft evidence and
+  // must never turn the committed write into a retryable HTTP failure.
   if path.ends_with("/.aeordb-config/indexes.json") {
-    if let Some(ref queue) = state.task_queue {
-      let parent = path.trim_end_matches("/.aeordb-config/indexes.json");
-      let parent = if parent.is_empty() { "/" } else { parent };
-      let reindex_path = format!("/{}", parent.trim_start_matches('/'));
-
-      // Cancel any existing reindex for this path
-      if let Ok(tasks) = queue.list_tasks() {
-        for task in &tasks {
-          if task.task_type == "reindex"
-            && task.args.get("path").and_then(|v| v.as_str()) == Some(&reindex_path)
-            && (task.status == TaskStatus::Pending || task.status == TaskStatus::Running)
-          {
-            let _ = queue.cancel(&task.id);
-          }
-        }
-      }
-
-      let metadata_only = DirectoryOps::new(&state.engine)
-        .read_file_buffered(&path)
-        .ok()
-        .and_then(|data| PathIndexConfig::deserialize(&data).ok())
-        .map(|config| config.indexes.iter().all(|field| field.name.starts_with('@')))
-        .unwrap_or(false);
-
-      // Enqueue new reindex
-      let _ = queue.enqueue("reindex", serde_json::json!({"path": reindex_path, "metadata_only": metadata_only}));
+    let scheduling_engine = state.engine.clone();
+    let scheduling_queue = state.task_queue.clone();
+    let scheduling_path = path.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+      schedule_automatic_reindex_after_commit(&scheduling_engine, scheduling_queue.as_deref(), &scheduling_path);
+    })
+    .await
+    {
+      crate::metrics::record_system_soft_failure("automatic_reindex", "worker_join", &path, error);
     }
   }
 
@@ -431,6 +416,56 @@ pub async fn engine_store_file(
   }
 
   (StatusCode::CREATED, Json(response_body)).into_response()
+}
+
+fn schedule_automatic_reindex_after_commit(engine: &StorageEngine, queue: Option<&crate::engine::TaskQueue>, config_path: &str) {
+  let Some(queue) = queue else {
+    crate::metrics::record_system_soft_failure("automatic_reindex", "queue_unavailable", config_path, "task queue is unavailable");
+    return;
+  };
+
+  let parent = config_path.trim_end_matches("/.aeordb-config/indexes.json");
+  let parent = if parent.is_empty() { "/" } else { parent };
+  let reindex_path = format!("/{}", parent.trim_start_matches('/'));
+
+  match queue.list_tasks() {
+    Ok(tasks) => {
+      for task in tasks {
+        if task.task_type == "reindex"
+          && task.args.get("path").and_then(serde_json::Value::as_str) == Some(&reindex_path)
+          && (task.status == TaskStatus::Pending || task.status == TaskStatus::Running)
+        {
+          if let Err(error) = queue.cancel(&task.id) {
+            crate::metrics::record_system_soft_failure(
+              "automatic_reindex",
+              "task_cancel",
+              format_args!("config={config_path}, task={}", task.id),
+              error,
+            );
+          }
+        }
+      }
+    }
+    Err(error) => crate::metrics::record_system_soft_failure("automatic_reindex", "task_list", config_path, error),
+  }
+
+  let metadata_only = match DirectoryOps::new(engine).read_file_buffered(config_path) {
+    Ok(data) => match PathIndexConfig::deserialize(&data) {
+      Ok(config) => config.indexes.iter().all(|field| field.name.starts_with('@')),
+      Err(error) => {
+        crate::metrics::record_system_soft_failure("automatic_reindex", "config_decode", config_path, error);
+        false
+      }
+    },
+    Err(error) => {
+      crate::metrics::record_system_soft_failure("automatic_reindex", "config_read", config_path, error);
+      false
+    }
+  };
+
+  if let Err(error) = queue.enqueue("reindex", serde_json::json!({"path": reindex_path, "metadata_only": metadata_only})) {
+    crate::metrics::record_system_soft_failure("automatic_reindex", "task_enqueue", config_path, error);
+  }
 }
 
 // ---------------------------------------------------------------------------

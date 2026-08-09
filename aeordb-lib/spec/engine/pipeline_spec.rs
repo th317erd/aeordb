@@ -6,7 +6,7 @@ use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::indexing_pipeline::{IndexingPipeline, glob_matches};
 use aeordb::engine::query_engine::QueryBuilder;
 use aeordb::engine::storage_engine::StorageEngine;
-use aeordb::engine::{EngineError, RequestContext};
+use aeordb::engine::{EngineError, EntryType, RequestContext};
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let ctx = RequestContext::system();
@@ -638,6 +638,91 @@ fn test_pipeline_logging_creates_log_on_error() {
     log_content
   );
   assert!(log_content.contains("/logged/bad.bin"), "Log should reference the file path");
+}
+
+#[test]
+fn diagnostic_logging_never_overwrites_corrupt_existing_evidence() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let config = make_config_with_logging("name", "string", true);
+  store_index_config(&engine, "/logged-corrupt", &config);
+
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+  let log_path = "/logged-corrupt/.aeordb-logs/system/parsing.log";
+  operations.store_file_buffered(&context, log_path, b"retain this diagnostic evidence\n", Some("text/plain")).unwrap();
+  let corrupt_record = operations.get_metadata(log_path).unwrap().unwrap();
+  for chunk_hash in &corrupt_record.chunk_hashes {
+    engine.store_entry(EntryType::DirectoryIndex, chunk_hash, b"wrong-type chunk locator").unwrap();
+  }
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  IndexingPipeline::new(&engine)
+    .run(&context, "/logged-corrupt/bad.bin", &[0xff, 0xfe, 0x00, 0x80], Some("application/octet-stream"))
+    .unwrap();
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(operations.get_metadata(log_path).unwrap().unwrap(), corrupt_record);
+  assert!(operations.read_file_buffered(log_path).is_err(), "corrupt diagnostic evidence must not be replaced by an empty log");
+}
+
+#[test]
+fn diagnostic_logging_caps_the_file_and_retains_the_newest_complete_entry() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let config = make_config_with_logging("name", "string", true);
+  store_index_config(&engine, "/logged-bounded", &config);
+
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+  let log_path = "/logged-bounded/.aeordb-logs/system/parsing.log";
+  operations.store_file_buffered(&context, log_path, &vec![b'x'; 1024 * 1024 - 1], Some("text/plain")).unwrap();
+
+  IndexingPipeline::new(&engine)
+    .run(&context, "/logged-bounded/newest.bin", &[0xff, 0xfe, 0x00, 0x80], Some("application/octet-stream"))
+    .unwrap();
+
+  let log = operations.read_file_buffered(log_path).unwrap();
+  assert!(log.len() <= 1024 * 1024);
+  let log = String::from_utf8(log).unwrap();
+  assert!(log.contains("/logged-bounded/newest.bin"));
+  assert!(log.ends_with('\n'));
+}
+
+#[test]
+fn concurrent_diagnostic_logging_retains_every_acknowledged_append() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let config = make_config_with_logging("name", "string", true);
+  store_index_config(&engine, "/logged-concurrent", &config);
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  std::thread::scope(|scope| {
+    let mut handles = Vec::new();
+    for index in 0..12 {
+      let engine = &engine;
+      handles.push(scope.spawn(move || {
+        IndexingPipeline::new(engine)
+          .run(
+            &RequestContext::system(),
+            &format!("/logged-concurrent/failure-{index}.bin"),
+            &[0xff, 0xfe, 0x00, 0x80],
+            Some("application/octet-stream"),
+          )
+          .unwrap();
+      }));
+    }
+    for handle in handles {
+      handle.join().unwrap();
+    }
+  });
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 12);
+  let log = String::from_utf8(DirectoryOps::new(&engine).read_file_buffered("/logged-concurrent/.aeordb-logs/system/parsing.log").unwrap())
+    .unwrap();
+  for index in 0..12 {
+    assert!(log.contains(&format!("/logged-concurrent/failure-{index}.bin")), "missing concurrent diagnostic append {index}");
+  }
 }
 
 #[test]
