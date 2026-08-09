@@ -283,6 +283,16 @@ The hot tail is the durability boundary for both the KV and the void set. Period
 
 If the hot tail's header CRC fails, the magic doesn't match, or the recorded offset points past the file boundary, the engine logs a warning and triggers a **dirty startup**: a WAL metadata scan (via `scan_entries_dirty_recovery`) rebuilds the KV from scratch and `recover_voids_via_gap_scan` re-derives the void set from gaps in the rebuilt KV. The scan reads and verifies mutable metadata records, but skips large chunk and void payload bodies because rebuild only needs their headers and keys. Normal file reads and explicit verification tooling still validate chunk contents. No data is lost -- the WAL is the source of truth; the hot tail is a fast-path index plus a void snapshot.
 
+After opening an existing database, startup performs a bounded strict probe of
+the authoritative root before deciding whether to report a repair warning. A
+complete root with no ordinary children is valid, including a database that
+contains only detached, concealed system state. An uninitialized database may
+create its first empty root, but a nonzero HEAD with a missing root locator is
+preserved for repair rather than replaced. AeorDB recommends `aeordb verify
+--repair` only when initialized root authority is missing, malformed,
+wrong-typed, or otherwise not completely readable; zero user-visible files
+alone is not an integrity signal.
+
 A magic-byte version bump is enough on its own to invalidate older hot tails: the next open with newer code sees a magic mismatch, falls into dirty startup, and rebuilds correctly. That makes the format safely evolvable without a migration tool.
 
 ## fsync Strategy

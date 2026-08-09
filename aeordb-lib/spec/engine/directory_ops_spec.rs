@@ -5,9 +5,40 @@ use aeordb::engine::errors::EngineError;
 use aeordb::engine::file_record::{FileRecord, CURRENT_FILE_RECORD_VERSION};
 use aeordb::engine::{ChunkReadLocation, RequestContext, DEFAULT_CHUNK_SIZE, deserialize_child_entries, serialize_child_entries};
 use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::system_store;
 use std::collections::HashSet;
-use std::sync::{Arc, Barrier};
+use std::io::Write;
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
+
+#[derive(Clone)]
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLogWriter {
+  fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+    self.0.lock().unwrap().extend_from_slice(buffer);
+    Ok(buffer.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+fn capture_warning_logs(action: impl FnOnce()) -> String {
+  let output = Arc::new(Mutex::new(Vec::new()));
+  let writer_output = output.clone();
+  let subscriber = tracing_subscriber::fmt()
+    .without_time()
+    .with_ansi(false)
+    .with_target(false)
+    .with_max_level(tracing::Level::WARN)
+    .with_writer(move || CapturedLogWriter(writer_output.clone()))
+    .finish();
+  tracing::subscriber::with_default(subscriber, action);
+  let bytes = output.lock().unwrap().clone();
+  String::from_utf8(bytes).unwrap()
+}
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
   let path = dir.path().join("test.aeor");
@@ -37,6 +68,71 @@ fn ensure_root_directory_publishes_once_and_is_then_a_true_no_op() {
     engine.durability_snapshot().unwrap().next_sequence,
     before_no_op,
     "an existing root must not consume another durability ticket"
+  );
+}
+
+#[test]
+fn ensure_root_directory_does_not_warn_for_a_valid_system_only_database() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("system-only-root.aeor");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.ensure_root_directory(&ctx).unwrap();
+  system_store::store_config(&engine, &ctx, "system-only", b"retained").unwrap();
+  assert!(ops.list_directory("/").unwrap().is_empty(), "detached system state must not fabricate an ordinary root child");
+
+  let warnings = capture_warning_logs(|| ops.ensure_root_directory(&ctx).unwrap());
+
+  assert!(!warnings.contains("verify --repair"), "a complete empty ordinary namespace is not evidence of missing data: {warnings}");
+}
+
+#[test]
+fn ensure_root_directory_preserves_a_nonempty_head_when_the_root_locator_is_missing() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("missing-root-locator.aeor");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.ensure_root_directory(&ctx).unwrap();
+  ops.store_file_buffered(&ctx, "/retained.txt", b"must remain reachable", Some("text/plain")).unwrap();
+
+  let root_locator = directory_path_hash("/", &engine.hash_algo()).unwrap();
+  let authoritative_head = engine.head_hash().unwrap();
+  engine.mark_entry_deleted(&root_locator).unwrap();
+  assert!(!engine.has_entry(&root_locator).unwrap());
+
+  let before_probe = engine.durability_snapshot().unwrap().next_sequence;
+  let warnings = capture_warning_logs(|| ops.ensure_root_directory(&ctx).unwrap());
+
+  assert_eq!(engine.head_hash().unwrap(), authoritative_head, "startup diagnostics must not replace surviving namespace authority");
+  assert!(!engine.has_entry(&root_locator).unwrap(), "startup repair, not root initialization, owns a missing locator");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before_probe, "diagnostics must not publish replacement state");
+  assert!(
+    warnings.contains("Root directory locator is missing") && warnings.contains("aeordb verify --repair"),
+    "missing root authority in an existing namespace must remain actionable: {warnings}"
+  );
+}
+
+#[test]
+fn ensure_root_directory_retains_a_repair_warning_for_a_malformed_head_root() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("malformed-root.aeor");
+  let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.ensure_root_directory(&ctx).unwrap();
+
+  let malformed_root = vec![0xff];
+  let malformed_hash = directory_content_hash(&malformed_root, &engine.hash_algo()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &malformed_hash, &malformed_root).unwrap();
+  engine.update_head(&malformed_hash).unwrap();
+
+  let warnings = capture_warning_logs(|| ops.ensure_root_directory(&ctx).unwrap());
+
+  assert!(
+    warnings.contains("Root directory exists but is not completely readable") && warnings.contains("aeordb verify --repair"),
+    "a malformed authoritative root must retain an actionable startup warning: {warnings}"
   );
 }
 

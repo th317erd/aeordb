@@ -3680,13 +3680,22 @@ impl<'a> DirectoryOps<'a> {
       // Startup repair owns recovery; silently recreating root would discard
       // the only authoritative link to a live directory tree.
       if planning_engine.has_entry(&dir_key)? {
-        match self.list_directory("/") {
-          Ok(children) if !children.is_empty() => {}
-          Ok(_) => tracing::warn!("Root directory exists but appears empty. Run 'aeordb verify --repair' if data is missing."),
-          Err(error) => {
-            tracing::warn!("Root directory exists but is unreadable ({}). Run 'aeordb verify --repair' to recover.", error)
-          }
+        match self.list_directory_window_strict("/", 0, 1) {
+          Ok(_) => {}
+          Err(error) => tracing::warn!(
+            %error,
+            "Root directory exists but is not completely readable. Run 'aeordb verify --repair' to recover."
+          ),
         }
+        return Ok((None, ()));
+      }
+
+      let head_hash = planning_engine.head_hash()?;
+      if !head_hash.is_empty() && !head_hash.iter().all(|byte| *byte == 0) {
+        tracing::warn!(
+          head_hash = %hex::encode(&head_hash),
+          "Root directory locator is missing while namespace authority remains. Run 'aeordb verify --repair' to recover."
+        );
         return Ok((None, ()));
       }
 

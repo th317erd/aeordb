@@ -426,7 +426,7 @@
           - [x] Validate refresh-token issuing keys against the selected authentication engine, including separate `file://` identity authority and revocation after rotation.
           - [x] Make authenticated root API-key creation use an explicit root-authority policy instead of misusing the initial-bootstrap escape hatch or returning `500`.
           - [x] Prove embedded, HTTP, separate-auth-engine, malformed, oversized, concurrent, no-op, restart, and architecture behavior.
-        - [ ] Correct the startup empty-root diagnostic so a database containing only concealed system state is not reported as possibly missing data; retain the warning for genuinely inconsistent roots.
+        - [x] Correct the startup empty-root diagnostic so a database containing only concealed system state is not reported as possibly missing data; retain the warning for genuinely inconsistent roots.
       - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [ ] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
       - [ ] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.
