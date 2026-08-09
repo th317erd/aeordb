@@ -17,6 +17,18 @@ use crate::auth::api_key::{
 use crate::engine::api_key_rules::{parse_rules_from_json, validate_rules};
 use crate::engine::user::is_root;
 
+fn resolve_caller_username(state: &AppState, caller_id: &Uuid) -> Result<String, Response> {
+  match crate::engine::system_store::get_user(&state.engine, caller_id) {
+    Ok(Some(user)) => Ok(user.username),
+    Ok(None) if is_root(caller_id) => Ok("root".to_string()),
+    Ok(None) => Ok(caller_id.to_string()),
+    Err(error) => {
+      tracing::error!(user_id = %caller_id, %error, "Failed to resolve API-key caller identity");
+      Err(ErrorResponse::new("Failed to resolve caller identity").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response())
+    }
+  }
+}
+
 #[derive(Deserialize)]
 pub struct CreateKeyRequest {
   pub label: Option<String>,
@@ -163,11 +175,10 @@ pub async fn list_own_keys(State(state): State<AppState>, Extension(claims): Ext
   match state.auth_provider.list_api_keys() {
     Ok(keys) => {
       // Resolve caller's username once
-      let caller_username = crate::engine::system_store::get_user(&state.engine, &caller_id)
-        .ok()
-        .flatten()
-        .map(|u| u.username)
-        .unwrap_or_else(|| if crate::engine::user::is_root(&caller_id) { "root".to_string() } else { caller_id.to_string() });
+      let caller_username = match resolve_caller_username(&state, &caller_id) {
+        Ok(username) => username,
+        Err(response) => return response,
+      };
 
       let own_keys: Vec<serde_json::Value> = keys
         .iter()
@@ -294,11 +305,10 @@ pub async fn list_key_assignable_users(State(state): State<AppState>, Extension(
     }
   } else {
     // Non-root sees only themselves
-    let username = crate::engine::system_store::get_user(&state.engine, &caller_id)
-      .ok()
-      .flatten()
-      .map(|u| u.username)
-      .unwrap_or_else(|| caller_id.to_string());
+    let username = match resolve_caller_username(&state, &caller_id) {
+      Ok(username) => username,
+      Err(response) => return response,
+    };
 
     (
       StatusCode::OK,

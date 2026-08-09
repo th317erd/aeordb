@@ -8,7 +8,7 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::system_store;
 use aeordb::auth::api_key::{DEFAULT_EXPIRY_DAYS, MAX_EXPIRY_DAYS};
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -300,6 +300,54 @@ async fn test_list_keys_filters_by_user() {
   let json = body_json(response.into_body()).await;
   assert_eq!(json.as_array().unwrap().len(), 1);
   assert_eq!(json[0]["label"], "a-key");
+}
+
+#[tokio::test]
+async fn list_own_keys_rejects_a_corrupt_caller_record() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let caller_id = uuid::Uuid::new_v4();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      &format!("/.aeordb-system/users/{caller_id}"),
+      b"not a user record",
+      Some("application/json"),
+    )
+    .unwrap();
+  let request = Request::builder()
+    .method("GET")
+    .uri("/auth/keys")
+    .header("authorization", user_bearer_token(&jwt_manager, caller_id))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = rebuild_app(&jwt_manager, &engine).oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn assignable_users_rejects_a_corrupt_caller_record() {
+  let (_app, jwt_manager, engine, _temp_dir) = test_app();
+  let caller_id = uuid::Uuid::new_v4();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      &format!("/.aeordb-system/users/{caller_id}"),
+      b"not a user record",
+      Some("application/json"),
+    )
+    .unwrap();
+  let request = Request::builder()
+    .method("GET")
+    .uri("/auth/keys/users")
+    .header("authorization", user_bearer_token(&jwt_manager, caller_id))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = rebuild_app(&jwt_manager, &engine).oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 // ---------------------------------------------------------------------------
