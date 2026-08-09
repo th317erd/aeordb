@@ -1,5 +1,7 @@
 use std::process;
 
+use super::remove_failed_artifact;
+
 pub fn run(database: &str, output: &str, from: &str, to: Option<&str>) {
   println!("AeorDB Diff");
   println!("Source: {}", database);
@@ -26,7 +28,9 @@ pub fn run(database: &str, output: &str, from: &str, to: Option<&str>) {
     Ok(result) => println!("\n{}", result),
     Err(e) => {
       eprintln!("Diff failed: {}", e);
-      let _ = std::fs::remove_file(output);
+      if let Err(cleanup_error) = remove_failed_artifact(output) {
+        eprintln!("Diff cleanup also failed for '{}': {}. The partial artifact may require manual removal.", output, cleanup_error);
+      }
       process::exit(1);
     }
   }

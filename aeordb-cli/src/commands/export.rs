@@ -1,5 +1,7 @@
 use std::process;
 
+use super::remove_failed_artifact;
+
 pub fn run(database: &str, output: &str, snapshot: Option<&str>, hash: Option<&str>, root_key: Option<&str>) {
   println!("AeorDB Export");
   println!("Source: {}", database);
@@ -103,7 +105,9 @@ pub fn run(database: &str, output: &str, snapshot: Option<&str>, hash: Option<&s
     Err(e) => {
       eprintln!("Export failed: {}", e);
       // Clean up the partial .part file — it has no use.
-      let _ = std::fs::remove_file(&part_path);
+      if let Err(cleanup_error) = remove_failed_artifact(&part_path) {
+        eprintln!("Export cleanup also failed for '{}': {}. The partial artifact may require manual removal.", part_path, cleanup_error);
+      }
       process::exit(1);
     }
   }
