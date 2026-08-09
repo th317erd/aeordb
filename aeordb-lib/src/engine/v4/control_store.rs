@@ -137,11 +137,7 @@ impl<'a> V3TransitionControlStore<'a> {
         expected_sequence, incoming.sequence
       )));
     }
-    let target_slot = match current.as_ref().map(|selected| selected.selected_slot) {
-      Some(SystemControlSlotV1::A) => SystemControlSlotV1::B,
-      Some(SystemControlSlotV1::B) | None => SystemControlSlotV1::A,
-      Some(SystemControlSlotV1::Immutable) => unreachable!("mutable selection cannot choose immutable slot"),
-    };
+    let target_slot = next_mutable_publication_slot(current.as_ref().map(|selected| selected.selected_slot))?;
     let target_path = publication.target_path(target_slot)?;
     DirectoryOps::new(self.engine).store_transition_control_v0(&publication, target_slot, bytes)?;
     let read_back = self.load_slot(kind, &target_path)?.ok_or_else(|| EngineError::NotFound(target_path.clone()))?;
@@ -207,18 +203,50 @@ pub fn discover_mutable_control(
     (None, Some(bytes)) => select_single_mutable(algorithm, SystemControlSlotV1::B, bytes)?,
   };
   verify_kind_and_identity(&selection.control, kind, identity)?;
-  let bytes = match selection.selected_slot {
-    SystemControlSlotV1::A => a.as_ref().expect("selected A slot is present").clone(),
-    SystemControlSlotV1::B => b.as_ref().expect("selected B slot is present").clone(),
-    SystemControlSlotV1::Immutable => unreachable!("mutable selection cannot choose immutable slot"),
-  };
-  Ok(Some(LoadedMutableControlV1 {
-    database_id: selection.control.database_id.try_into().expect("validated control database ID width"),
+  loaded_mutable_control_from_selection(selection, a.as_deref(), b.as_deref()).map(Some)
+}
+
+fn next_mutable_publication_slot(current: Option<SystemControlSlotV1>) -> EngineResult<SystemControlSlotV1> {
+  match current {
+    Some(SystemControlSlotV1::A) => Ok(SystemControlSlotV1::B),
+    Some(SystemControlSlotV1::B) | None => Ok(SystemControlSlotV1::A),
+    Some(SystemControlSlotV1::Immutable) => {
+      Err(EngineError::InvalidInput("mutable ControlStore selection unexpectedly references the immutable slot".to_string()))
+    }
+  }
+}
+
+fn loaded_mutable_control_from_selection(
+  selection: SystemControlSelectionV1<'_>,
+  a: Option<&[u8]>,
+  b: Option<&[u8]>,
+) -> FormatResult<LoadedMutableControlV1> {
+  let selected_bytes = match selection.selected_slot {
+    SystemControlSlotV1::A => a,
+    SystemControlSlotV1::B => b,
+    SystemControlSlotV1::Immutable => {
+      return Err(identity_error(
+        "control_store_mutable_selected_immutable",
+        "mutable ControlStore selection unexpectedly references the immutable slot",
+      ));
+    }
+  }
+  .ok_or_else(|| identity_error("control_store_selected_slot_missing", "ControlStore selector referenced a slot that was not supplied"))?;
+  let database_id = <[u8; 16]>::try_from(selection.control.database_id).map_err(|_| {
+    FormatError::new(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "control_store_database_id_width",
+      format!("selected database ID has length {}, expected 16", selection.control.database_id.len()),
+    )
+  })?;
+
+  Ok(LoadedMutableControlV1 {
+    database_id,
     selected_slot: selection.selected_slot,
     sequence: selection.control.sequence,
     redundancy_degraded: selection.redundancy_degraded,
-    bytes,
-  }))
+    bytes: selected_bytes.to_vec(),
+  })
 }
 
 pub fn select_control_store_read<'a>(
@@ -324,3 +352,7 @@ fn format_error(error: FormatError) -> EngineError {
 fn identity_error(code: &'static str, detail: &'static str) -> FormatError {
   FormatError::new(MalformedInputClass::IdentityKeyOrGenerationMismatch, code, detail)
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/v4_control_store_internal_spec.rs"]
+mod v4_control_store_internal_spec;

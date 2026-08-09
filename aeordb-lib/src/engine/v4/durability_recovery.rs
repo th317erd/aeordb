@@ -179,23 +179,7 @@ pub fn classify_persistent_durability_recovery(
   let latch_cleared = latch_state == Some(LATCH_CLEARED);
   let catalog_complete = catalog_state.is_none_or(|state| state == CATALOG_COMPLETE);
   let blocks_writes = !latch_cleared || !catalog_complete || !catalog_presence_consistent || !catalog_reference_consistent;
-  let reason = if !catalog_presence_consistent {
-    "durability recovery is incomplete (spill-catalog presence disagrees with selected authority); run explicit repair".to_string()
-  } else if !catalog_reference_consistent {
-    "durability recovery is incomplete (latch/catalog publication is partially advanced); run explicit repair".to_string()
-  } else {
-    match (latch_state, catalog_state, blocks_writes) {
-      (Some(state), Some(catalog_state), true) => {
-        format!("durability recovery is incomplete (latch state {state}, spill catalog state {catalog_state}); run explicit repair")
-      }
-      (Some(state), None, true) => format!("durability recovery is incomplete (latch state {state}); run explicit repair"),
-      (None, Some(state), true) => {
-        format!("durability recovery is incomplete (spill catalog state {state}, clear latch missing); run explicit repair")
-      }
-      (None, None, true) => unreachable!("recovery controls disappeared while building admission state"),
-      (_, _, false) => "durability recovery is complete".to_string(),
-    }
-  };
+  let reason = recovery_reason(latch_state, catalog_state, blocks_writes, catalog_presence_consistent, catalog_reference_consistent)?;
 
   Ok(Some(PersistentDurabilityRecoveryState {
     database_id,
@@ -270,7 +254,9 @@ pub fn seed_from_external_spills(engine: &StorageEngine, artifacts: &[EmergencyS
     .as_ref()
     .is_some_and(|catalog| catalog.state != CATALOG_COMPLETE && same_spill_rows(&catalog.rows, &rows))
   {
-    existing_catalog.expect("decoded existing catalog")
+    existing_catalog.ok_or_else(|| {
+      EngineError::DurabilityFailure("selected spill catalog disappeared after its body was decoded during recovery seeding".to_string())
+    })?
   } else {
     let sequence = existing_catalog.as_ref().map(|selected| next_sequence(selected.sequence)).transpose()?.unwrap_or(1);
     let generation =
@@ -592,6 +578,37 @@ fn next_generation(generation: u64, name: &str) -> EngineResult<u64> {
   generation.checked_add(1).ok_or_else(|| EngineError::DurabilityFailure(format!("{name} generation exhausted")))
 }
 
+fn recovery_reason(
+  latch_state: Option<u16>,
+  catalog_state: Option<u16>,
+  blocks_writes: bool,
+  catalog_presence_consistent: bool,
+  catalog_reference_consistent: bool,
+) -> EngineResult<String> {
+  if !catalog_presence_consistent {
+    return Ok(
+      "durability recovery is incomplete (spill-catalog presence disagrees with selected authority); run explicit repair".to_string(),
+    );
+  }
+  if !catalog_reference_consistent {
+    return Ok("durability recovery is incomplete (latch/catalog publication is partially advanced); run explicit repair".to_string());
+  }
+
+  match (latch_state, catalog_state, blocks_writes) {
+    (Some(state), Some(catalog_state), true) => {
+      Ok(format!("durability recovery is incomplete (latch state {state}, spill catalog state {catalog_state}); run explicit repair"))
+    }
+    (Some(state), None, true) => Ok(format!("durability recovery is incomplete (latch state {state}); run explicit repair")),
+    (None, Some(state), true) => {
+      Ok(format!("durability recovery is incomplete (spill catalog state {state}, clear latch missing); run explicit repair"))
+    }
+    (None, None, true) => {
+      Err(EngineError::DurabilityFailure("persistent recovery controls disappeared while building write-admission state".to_string()))
+    }
+    (_, _, false) => Ok("durability recovery is complete".to_string()),
+  }
+}
+
 fn recovery_database_id(latch: Option<&LoadedMutableControlV1>, catalog: Option<&LoadedMutableControlV1>) -> EngineResult<[u8; 16]> {
   match (latch, catalog) {
     (Some(latch), Some(catalog)) if latch.database_id != catalog.database_id => Err(EngineError::InvalidInput(
@@ -599,10 +616,16 @@ fn recovery_database_id(latch: Option<&LoadedMutableControlV1>, catalog: Option<
     )),
     (Some(latch), _) => Ok(latch.database_id),
     (_, Some(catalog)) => Ok(catalog.database_id),
-    (None, None) => unreachable!("recovery identity requested without controls"),
+    (None, None) => Err(EngineError::DurabilityFailure(
+      "persistent recovery controls disappeared before their database identity was selected".to_string(),
+    )),
   }
 }
 
 fn format_error(error: super::reader::FormatError) -> EngineError {
   EngineError::InvalidInput(format!("malformed persistent durability recovery control: {error}"))
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/v4_durability_recovery_internal_spec.rs"]
+mod v4_durability_recovery_internal_spec;

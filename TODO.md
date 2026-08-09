@@ -512,6 +512,7 @@
         - [x] Reject malformed webhook and parser registry configuration, retain the last valid webhook registry on reload failure, and validate parser memory limits without defaulting invalid values.
         - [x] Propagate emergency-spill path permission and resolver failures while retaining fallback only for genuinely missing paths.
         - [x] Preserve every dirty-startup WAL gap byte, including extents wider than `u32` and the trailing gap before the hot tail.
+        - [x] Replace persisted ControlStore and durability-recovery selector panics with typed format, input, or durability failures that preserve fail-closed admission.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
