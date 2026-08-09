@@ -683,15 +683,10 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
         )?
       {
         if destination_mode.coordinates_active_locators() {
-          locator_batch.as_mut().expect("active import mode creates a locator batch").replace(
-            EntryType::FileRecord,
-            path_key,
-            value.clone(),
-            header.flags,
-            header.entry_version,
-            path.clone(),
-            file_hash.clone(),
-          )?;
+          locator_batch
+            .as_mut()
+            .ok_or_else(|| EngineError::DurabilityFailure("active FileRecord import is missing its locator publication batch".to_string()))?
+            .replace(EntryType::FileRecord, path_key, value.clone(), header.flags, header.entry_version, path.clone(), file_hash.clone())?;
           locator_staged = true;
         } else {
           store_file_record_entry_preserving_version(output, &path_key, &value, header.flags, header.entry_version)?;
@@ -743,15 +738,10 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
         )?
       {
         if destination_mode.coordinates_active_locators() {
-          locator_batch.as_mut().expect("active import mode creates a locator batch").replace(
-            EntryType::Symlink,
-            path_key,
-            value.clone(),
-            header.flags,
-            header.entry_version,
-            path.clone(),
-            symlink_hash.clone(),
-          )?;
+          locator_batch
+            .as_mut()
+            .ok_or_else(|| EngineError::DurabilityFailure("active symlink import is missing its locator publication batch".to_string()))?
+            .replace(EntryType::Symlink, path_key, value.clone(), header.flags, header.entry_version, path.clone(), symlink_hash.clone())?;
           locator_staged = true;
         } else {
           output.store_entry_with_flags_and_version(EntryType::Symlink, &path_key, &value, header.flags, header.entry_version)?;
@@ -847,7 +837,10 @@ fn write_transfer_directories_admitted<S: HistoricalEntrySource + ?Sized>(
     budget.record_work(1)?;
     let checkpoint = budget.checkpoint();
     let result = (|| {
-      let (source_hash, _) = tree.directories.get(path).expect("directory path came from the same immutable map");
+      let (source_hash, _) = tree.directories.get(path).ok_or_else(|| EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("backup directory inventory lost path '{path}' during transfer"),
+      })?;
       let ((header, source_key, source_value), loaded_charge) = required_backup_entry(source, source_hash, "DirectoryIndex", budget)?;
       if header.entry_type != EntryType::DirectoryIndex {
         return Err(EngineError::CorruptEntry {
@@ -968,15 +961,20 @@ fn write_transfer_directories_admitted<S: HistoricalEntrySource + ?Sized>(
           budget,
         )? {
           if destination_mode.coordinates_active_locators() {
-            locator_batch.as_deref_mut().expect("active import mode creates a locator batch").replace(
-              EntryType::DirectoryIndex,
-              path_key,
-              exported_value,
-              flags,
-              exported_header.entry_version,
-              path.clone(),
-              exported_hash.clone(),
-            )?;
+            locator_batch
+              .as_deref_mut()
+              .ok_or_else(|| {
+                EngineError::DurabilityFailure("active directory import is missing its locator publication batch".to_string())
+              })?
+              .replace(
+                EntryType::DirectoryIndex,
+                path_key,
+                exported_value,
+                flags,
+                exported_header.entry_version,
+                path.clone(),
+                exported_hash.clone(),
+              )?;
             locator_staged = true;
           } else {
             store_directory_entry_preserving_version(output, &path_key, &exported_value, flags, exported_header.entry_version)?;
@@ -2763,3 +2761,7 @@ mod atomic_cleanup_tests {
     assert!(!std::path::Path::new(&format!("{part}.lock")).exists());
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/backup_panic_internal_spec.rs"]
+mod backup_panic_internal_spec;
