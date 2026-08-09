@@ -27,6 +27,18 @@ pub(crate) struct ScannedRebuildEntry {
   pub value: Option<Vec<u8>>,
 }
 
+#[derive(Debug)]
+pub(crate) enum RebuildScanError {
+  /// Bytes beyond the selected durable WAL frontier are not authoritative.
+  /// Dirty recovery stops at the first malformed record in that tail rather
+  /// than resynchronizing into stale bytes that happen to resemble entries.
+  DiscardedRecoveryTail {
+    offset: u64,
+    error: EngineError,
+  },
+  Fatal(EngineError),
+}
+
 pub struct EntryScanner {
   file: File,
   current_offset: u64,
@@ -309,9 +321,18 @@ impl EntryScanner {
   /// Scan one entry for KV rebuild. Chunk and void payloads are skipped
   /// because rebuild only needs the key/header metadata for those large
   /// records. Mutable metadata records are still read and hash-verified.
-  pub(crate) fn next_rebuild_entry(&mut self) -> Option<EngineResult<ScannedRebuildEntry>> {
-    let verify_recovery_tail = self.is_recovery_tail_offset(self.current_offset);
-    self.next_bounded_entry(verify_recovery_tail)
+  pub(crate) fn next_rebuild_entry(&mut self) -> Option<Result<ScannedRebuildEntry, RebuildScanError>> {
+    let entry_offset = self.current_offset;
+    let verify_recovery_tail = self.is_recovery_tail_offset(entry_offset);
+    self.next_bounded_entry(verify_recovery_tail).map(|result| {
+      result.map_err(|error| {
+        if verify_recovery_tail && matches!(error, EngineError::CorruptEntry { .. }) {
+          RebuildScanError::DiscardedRecoveryTail { offset: entry_offset, error }
+        } else {
+          RebuildScanError::Fatal(error)
+        }
+      })
+    })
   }
 
   /// Scan one entry for verification without materializing its value. Every
@@ -582,6 +603,10 @@ impl Iterator for EntryScanner {
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/entry_scanner_internal_spec.rs"]
+mod entry_scanner_internal_spec;
 
 #[cfg(test)]
 mod tests {

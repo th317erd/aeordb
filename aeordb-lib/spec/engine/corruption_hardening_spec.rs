@@ -710,6 +710,39 @@ fn rebuild_kv_on_clean_database_is_idempotent() {
 }
 
 #[test]
+fn rebuild_kv_refuses_corrupt_durable_wal_without_replacing_the_active_kv() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("corrupt-durable-wal.aeordb");
+  let db_str = db_path.to_str().unwrap().to_string();
+  let key = vec![0x6D; 32];
+
+  let engine = StorageEngine::create(&db_str).unwrap();
+  let stale_offset = engine.store_entry(EntryType::DirectoryIndex, &key, b"obsolete-value").unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &key, b"current-value").unwrap();
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let engine = StorageEngine::open(&db_str).unwrap();
+  assert_eq!(engine.get_entry(&key).unwrap().unwrap().2, b"current-value");
+
+  let stale_header = engine.read_entry_header_at(stale_offset).unwrap();
+  let stale_value_offset = stale_offset + stale_header.header_size() as u64 + stale_header.key_length as u64;
+  let mut file = OpenOptions::new().write(true).open(&db_path).unwrap();
+  file.seek(SeekFrom::Start(stale_value_offset)).unwrap();
+  file.write_all(&[0xFF]).unwrap();
+  file.sync_data().unwrap();
+  drop(file);
+
+  let error = engine.rebuild_kv().expect_err("a corrupt durable WAL record must not become a successful partial rebuild");
+  assert!(matches!(error, aeordb::engine::EngineError::CorruptEntry { offset, .. } if offset == stale_offset));
+  assert_eq!(
+    engine.get_entry(&key).unwrap().unwrap().2,
+    b"current-value",
+    "failed rebuild must preserve the previously published KV generation"
+  );
+}
+
+#[test]
 fn rebuild_kv_memory_refusal_precedes_database_mutation_and_releases_cleanly() {
   let (engine, temp) = create_test_db();
   store_test_files(&engine);
@@ -1981,7 +2014,9 @@ fn dirty_rebuild_post_marker_failure_spills_before_runtime_configuration_is_load
 
   let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
   for index in 0..700u64 {
-    engine.store_entry(EntryType::Chunk, &index.to_le_bytes(), b"dirty rebuild spill fixture").unwrap();
+    let mut key = [0u8; 32];
+    key[..8].copy_from_slice(&index.to_le_bytes());
+    engine.store_entry(EntryType::Chunk, &key, b"dirty rebuild spill fixture").unwrap();
   }
   engine.shutdown().unwrap();
   drop(engine);

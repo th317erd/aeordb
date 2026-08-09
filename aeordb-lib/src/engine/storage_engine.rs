@@ -22,6 +22,7 @@ use crate::engine::durability_coordinator::{
 };
 use crate::engine::engine_counters::EngineCounters;
 use crate::engine::entry_header::EntryHeader;
+use crate::engine::entry_scanner::RebuildScanError;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
@@ -5064,10 +5065,15 @@ impl StorageEngine {
               order,
             )?;
           }
-          Err(e) => {
-            tracing::warn!("Skipping corrupt entry during KV rebuild: {}", e);
+          Err(RebuildScanError::DiscardedRecoveryTail { offset, error }) => {
+            tracing::warn!(
+              offset,
+              error = %error,
+              "Discarding non-authoritative recovery tail after its first corrupt entry"
+            );
             corrupt_entry_count = corrupt_entry_count.saturating_add(1);
           }
+          Err(RebuildScanError::Fatal(error)) => return Err(error),
         }
         if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
           let current = scanner.current_offset();
