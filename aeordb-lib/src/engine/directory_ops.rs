@@ -1520,7 +1520,12 @@ impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
 
     for path in &effects.metadata_index_removal_paths {
       if let Err(error) = crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, path) {
-        tracing::warn!(operation_id = %acknowledgement.operation_id, path, error = %error, "Post-commit metadata index removal failed");
+        crate::metrics::record_system_soft_failure(
+          "index_cleanup",
+          "post_commit_path_removal",
+          format_args!("operation_id={} path={path}", acknowledgement.operation_id),
+          error,
+        );
       }
     }
 

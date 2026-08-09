@@ -36,11 +36,22 @@ pub struct IndexCleanupSender {
   tx: mpsc::UnboundedSender<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexCleanupQueueError;
+
+impl std::fmt::Display for IndexCleanupQueueError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("index cleanup worker is unavailable")
+  }
+}
+
+impl std::error::Error for IndexCleanupQueueError {}
+
 impl IndexCleanupSender {
   /// Queue a file path for background index cleanup.
   /// Returns immediately — cleanup happens asynchronously.
-  pub fn queue(&self, path: String) {
-    let _ = self.tx.send(path);
+  pub fn queue(&self, path: String) -> Result<(), IndexCleanupQueueError> {
+    self.tx.send(path).map_err(|_send_error| IndexCleanupQueueError)
   }
 }
 
@@ -79,28 +90,47 @@ async fn cleanup_loop(mut rx: mpsc::UnboundedReceiver<String>, engine: Arc<Stora
 
     // Flush the batch
     let paths = std::mem::take(&mut batch);
+    let path_count = paths.len();
     let engine_clone = Arc::clone(&engine);
 
-    if let Err(e) = tokio::task::spawn_blocking(move || {
+    if let Err(error) = tokio::task::spawn_blocking(move || {
       process_batch(&engine_clone, &paths);
     })
     .await
     {
-      tracing::warn!("Index cleanup task panicked: {}", e);
+      record_worker_join_failure(path_count, error);
     }
   }
 }
 
+fn record_worker_join_failure(path_count: usize, error: tokio::task::JoinError) {
+  crate::metrics::record_system_soft_failure("index_cleanup", "worker_join", path_count, error);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexCleanupBatchOutcome {
+  attempted_paths: usize,
+  failed_paths: usize,
+}
+
 fn process_batch(engine: &StorageEngine, paths: &[String]) {
+  let outcome = process_batch_with(paths, |path| remove_file_from_resolved_indexes(engine, path));
+
+  if outcome.attempted_paths > 0 {
+    tracing::debug!(attempted_paths = outcome.attempted_paths, failed_paths = outcome.failed_paths, "Index cleanup batch completed");
+  }
+}
+
+fn process_batch_with(paths: &[String], mut remove_path: impl FnMut(&str) -> EngineResult<usize>) -> IndexCleanupBatchOutcome {
+  let mut failed_paths = 0usize;
   for path in paths {
-    if let Err(error) = remove_file_from_resolved_indexes(engine, path) {
-      tracing::warn!("Index cleanup: failed for '{}': {}", path, error);
+    if let Err(error) = remove_path(path) {
+      failed_paths += 1;
+      crate::metrics::record_system_soft_failure("index_cleanup", "path_removal", path, error);
     }
   }
 
-  if !paths.is_empty() {
-    tracing::debug!("Index cleanup: processed {} paths", paths.len());
-  }
+  IndexCleanupBatchOutcome { attempted_paths: paths.len(), failed_paths }
 }
 
 pub(crate) fn resolve_index_removal_targets(engine: &StorageEngine, path: &str) -> EngineResult<Vec<IndexRemovalTarget>> {
@@ -143,3 +173,7 @@ pub(crate) fn remove_file_from_resolved_indexes(engine: &StorageEngine, path: &s
 
   Ok(removed_indexes)
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/index_cleanup_internal_spec.rs"]
+mod index_cleanup_internal_spec;

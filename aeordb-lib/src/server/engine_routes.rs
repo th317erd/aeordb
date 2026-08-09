@@ -1841,7 +1841,9 @@ pub async fn engine_delete_file(
   match result {
     Ok(Ok(kind)) => {
       if kind == "file" {
-        state.index_cleanup.queue(path.clone());
+        if let Err(error) = state.index_cleanup.queue(path.clone()) {
+          crate::metrics::record_system_soft_failure("index_cleanup", "queue_delivery", &path, error);
+        }
       }
       let mut body = serde_json::json!({ "deleted": true, "path": path });
       if kind != "file" {
