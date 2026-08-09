@@ -221,6 +221,7 @@ impl AppendWriter {
     entry_version: u8,
   ) -> EngineResult<(u64, u32)> {
     let hash_algo = self.file_header.hash_algo;
+    EntryHeader::validate_key_length(entry_type, key.len(), hash_algo)?;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 
@@ -332,6 +333,7 @@ impl AppendWriter {
     entry_version: u8,
   ) -> EngineResult<u32> {
     let hash_algo = self.file_header.hash_algo;
+    EntryHeader::validate_key_length(entry_type, key.len(), hash_algo)?;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
     let total_length = EntryHeader::compute_total_length(hash_algo, key.len(), value.len())?;
 

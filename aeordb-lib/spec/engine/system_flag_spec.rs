@@ -10,6 +10,10 @@ fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
   create_temp_engine_for_tests()
 }
 
+fn test_key(engine: &StorageEngine, label: &[u8]) -> Vec<u8> {
+  engine.compute_hash(label).unwrap()
+}
+
 // ─── 1. FLAG_SYSTEM constant ───────────────────────────────────────────────
 
 #[test]
@@ -84,15 +88,15 @@ fn test_v0_system_entry_flags() {
 #[test]
 fn test_store_entry_with_flags() {
   let (engine, _temp) = setup();
-  let key = b"test-key-with-flags";
+  let key = test_key(&engine, b"test-key-with-flags");
   let value = b"test-value";
 
-  let offset = engine.store_entry_with_flags(EntryType::Chunk, key, value, FLAG_SYSTEM).unwrap();
+  let offset = engine.store_entry_with_flags(EntryType::Chunk, &key, value, FLAG_SYSTEM).unwrap();
 
   assert!(offset > 0, "Offset should be positive (after file header)");
 
   // Read back and verify flags
-  let result = engine.get_entry(key).unwrap();
+  let result = engine.get_entry(&key).unwrap();
   assert!(result.is_some(), "Entry must be retrievable after store");
 
   let (header, retrieved_key, retrieved_value) = result.unwrap();
@@ -108,15 +112,15 @@ fn test_is_system_entry() {
   let (engine, _temp) = setup();
 
   // Store entry WITH FLAG_SYSTEM
-  let sys_key = b"system-entry-key";
-  engine.store_entry_with_flags(EntryType::Chunk, sys_key, b"sys", FLAG_SYSTEM).unwrap();
-  let (sys_header, _, _) = engine.get_entry(sys_key).unwrap().unwrap();
+  let sys_key = test_key(&engine, b"system-entry-key");
+  engine.store_entry_with_flags(EntryType::Chunk, &sys_key, b"sys", FLAG_SYSTEM).unwrap();
+  let (sys_header, _, _) = engine.get_entry(&sys_key).unwrap().unwrap();
   assert!(sys_header.is_system_entry(), "Entry with FLAG_SYSTEM must return true for is_system_entry");
 
   // Store entry WITHOUT FLAG_SYSTEM
-  let user_key = b"user-entry-key";
-  engine.store_entry(EntryType::Chunk, user_key, b"user").unwrap();
-  let (user_header, _, _) = engine.get_entry(user_key).unwrap().unwrap();
+  let user_key = test_key(&engine, b"user-entry-key");
+  engine.store_entry(EntryType::Chunk, &user_key, b"user").unwrap();
+  let (user_header, _, _) = engine.get_entry(&user_key).unwrap().unwrap();
   assert!(!user_header.is_system_entry(), "Entry without FLAG_SYSTEM must return false for is_system_entry");
 }
 
@@ -169,12 +173,12 @@ fn test_user_cannot_forge_system_hash() {
 #[test]
 fn test_store_entry_with_flags_zero_flags() {
   let (engine, _temp) = setup();
-  let key = b"zero-flags-key";
+  let key = test_key(&engine, b"zero-flags-key");
   let value = b"zero-flags-value";
 
-  engine.store_entry_with_flags(EntryType::Chunk, key, value, 0).unwrap();
+  engine.store_entry_with_flags(EntryType::Chunk, &key, value, 0).unwrap();
 
-  let (header, _, _) = engine.get_entry(key).unwrap().unwrap();
+  let (header, _, _) = engine.get_entry(&key).unwrap().unwrap();
   assert_eq!(header.flags, 0, "Flags should be 0 when stored with 0");
   assert!(!header.is_system_entry(), "is_system_entry must be false with flags=0");
 }

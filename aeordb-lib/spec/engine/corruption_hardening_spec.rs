@@ -1091,9 +1091,11 @@ fn verify_does_not_require_void_entries_in_live_kv() {
   let db_path = temp.path().join("test.aeordb");
   let db_str = db_path.to_str().unwrap().to_string();
 
-  let key = engine.hash_algo().compute_hash(b"void-bookkeeping").unwrap();
-  engine.store_entry(EntryType::Void, &key, b"void").unwrap();
+  let key = vec![0xE5; engine.hash_algo().hash_length()];
+  let offset = engine.store_entry(EntryType::Chunk, &key, b"void-bookkeeping").unwrap();
+  let total_length = engine.read_entry_header_at(offset).unwrap().total_length;
   engine.remove_kv_entry(&key).unwrap();
+  engine.write_void_at(offset, total_length).unwrap();
   engine.shutdown().unwrap();
   drop(engine);
 

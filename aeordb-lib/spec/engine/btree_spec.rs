@@ -946,6 +946,57 @@ fn test_write_batch_basic() {
 }
 
 #[test]
+fn write_batch_rejects_every_malformed_key_before_appending_any_entry() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let database_path = temp.path().join("test.aeordb");
+  let initial_length = std::fs::metadata(&database_path).unwrap().len();
+  let initial_kv_entries = engine.kv_entry_count().unwrap();
+  let valid_key = vec![0x31; 32];
+
+  let mut batch = WriteBatch::new();
+  batch.add(EntryType::Chunk, valid_key.clone(), b"must-not-append".to_vec());
+  batch.add(EntryType::FileRecord, b"short".to_vec(), b"invalid".to_vec());
+
+  let error = engine.flush_batch(batch).expect_err("batch key validation must finish before the first WAL append");
+  assert!(error.to_string().contains("key length"));
+  assert_eq!(std::fs::metadata(&database_path).unwrap().len(), initial_length);
+  assert_eq!(engine.kv_entry_count().unwrap(), initial_kv_entries);
+  assert!(engine.get_entry(&valid_key).unwrap().is_none());
+}
+
+#[test]
+fn indexed_storage_facades_reject_physical_void_entries_before_mutation() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let database_path = temp.path().join("test.aeordb");
+  let initial_length = std::fs::metadata(&database_path).unwrap().len();
+  let initial_kv_entries = engine.kv_entry_count().unwrap();
+  let initial_head = engine.head_hash().unwrap();
+
+  let store_error = engine.store_entry(EntryType::Void, &[], &[]).expect_err("indexed storage must reject physical Void entries");
+  assert!(store_error.to_string().contains("physical Void"));
+
+  let typed_error = engine
+    .store_entry_typed(EntryType::Void, &[], &[], aeordb::engine::kv_store::KV_TYPE_VOID)
+    .expect_err("typed indexed storage must reject physical Void entries");
+  assert!(typed_error.to_string().contains("physical Void"));
+
+  let mut batch = WriteBatch::new();
+  batch.add(EntryType::Void, Vec::new(), Vec::new());
+  let batch_error = engine.flush_batch(batch).expect_err("indexed batches must reject physical Void entries");
+  assert!(batch_error.to_string().contains("physical Void"));
+
+  let mut head_batch = WriteBatch::new();
+  head_batch.add(EntryType::Void, Vec::new(), Vec::new());
+  let head_batch_error =
+    engine.flush_batch_and_update_head(head_batch, &[0x42; 32]).expect_err("HEAD batches must reject physical Void entries");
+  assert!(head_batch_error.to_string().contains("physical Void"));
+
+  assert_eq!(std::fs::metadata(&database_path).unwrap().len(), initial_length);
+  assert_eq!(engine.kv_entry_count().unwrap(), initial_kv_entries);
+  assert_eq!(engine.head_hash().unwrap(), initial_head);
+}
+
+#[test]
 fn test_write_batch_empty() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let batch = WriteBatch::new();
@@ -1403,13 +1454,13 @@ fn test_btree_list_rejects_child_hash_with_wrong_entry_type() {
   let leaf = BTreeNode::Leaf(LeafNode { entries: vec![make_entry("alpha")] });
   let leaf_hash = store_btree_node(&engine, &leaf, hash_length, &algo).unwrap();
   let bad_child_hash = engine.compute_hash(b"btree:bad-child").unwrap();
-  engine.store_entry(EntryType::Void, &bad_child_hash, &[]).unwrap();
+  engine.store_entry(EntryType::Chunk, &bad_child_hash, &[]).unwrap();
 
   let root = BTreeNode::Internal(InternalNode { keys: vec!["middle".to_string()], children: vec![leaf_hash, bad_child_hash.clone()] });
   let root_hash = store_btree_node(&engine, &root, hash_length, &algo).unwrap();
 
   let err = btree_list(&engine, &root_hash, hash_length, false).expect_err("strict B-tree listing should reject non-B-tree child entries");
-  assert!(err.to_string().contains("B-tree node hash resolved to Void entry"), "unexpected error: {}", err);
+  assert!(err.to_string().contains("B-tree node hash resolved to Chunk entry"), "unexpected error: {}", err);
 
   let result = btree_list_with_mode(&engine, &root_hash, hash_length, false, BTreeWalkMode::BestEffort).unwrap();
   assert!(!result.is_complete());

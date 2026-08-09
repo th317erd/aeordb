@@ -186,6 +186,26 @@ fn compute_total_length_consistency() {
   assert_eq!(total, expected);
 }
 
+#[test]
+fn key_length_validation_tracks_hash_width_and_physical_void_format() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha3_256] {
+    assert!(EntryHeader::validate_key_length(EntryType::Chunk, 32, algorithm).is_ok());
+    assert!(EntryHeader::validate_key_length(EntryType::Chunk, 31, algorithm).is_err());
+    assert!(EntryHeader::validate_key_length(EntryType::Chunk, 33, algorithm).is_err());
+  }
+
+  for algorithm in [HashAlgorithm::Sha512, HashAlgorithm::Sha3_512] {
+    assert!(EntryHeader::validate_key_length(EntryType::FileRecord, 64, algorithm).is_ok());
+    assert!(EntryHeader::validate_key_length(EntryType::FileRecord, 32, algorithm).is_err());
+    assert!(EntryHeader::validate_key_length(EntryType::FileRecord, 65, algorithm).is_err());
+  }
+
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha3_512] {
+    assert!(EntryHeader::validate_key_length(EntryType::Void, 0, algorithm).is_ok());
+    assert!(EntryHeader::validate_key_length(EntryType::Void, algorithm.hash_length(), algorithm).is_err());
+  }
+}
+
 // ===========================================================================
 // compute_hash and verify
 // ===========================================================================

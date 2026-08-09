@@ -36,6 +36,17 @@ impl EntryHeader {
     Self::FIXED_HEADER_SIZE + self.hash_algo.hash_length()
   }
 
+  pub fn validate_key_length(entry_type: EntryType, key_length: usize, hash_algo: HashAlgorithm) -> EngineResult<()> {
+    let expected = if entry_type == EntryType::Void { 0 } else { hash_algo.hash_length() };
+    if key_length != expected {
+      return Err(EngineError::InvalidInput(format!(
+        "{:?} entry key length {} does not match the required {} bytes for {:?}",
+        entry_type, key_length, expected, hash_algo
+      )));
+    }
+    Ok(())
+  }
+
   /// Check if this entry has the system flag set.
   pub fn is_system_entry(&self) -> bool {
     self.flags & FLAG_SYSTEM != 0

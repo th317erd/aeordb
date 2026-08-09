@@ -37,7 +37,7 @@ fn poisoned_kv_probe_latches_the_timer_instead_of_looking_busy() {
 fn poisoned_wal_writer_latches_the_timer_instead_of_looking_busy() {
   let temporary = tempfile::tempdir().unwrap();
   let engine = test_engine(&temporary, "poisoned-wal-writer.aeordb");
-  engine.store_entry(EntryType::Chunk, b"pending-key", b"pending-value").unwrap();
+  engine.store_entry(EntryType::Chunk, &[0xA1; 32], b"pending-value").unwrap();
   let poison_engine = Arc::clone(&engine);
   let _ = std::thread::spawn(move || {
     let _guard = poison_engine.writer.write().unwrap();
@@ -56,7 +56,7 @@ fn poisoned_wal_writer_latches_the_timer_instead_of_looking_busy() {
 fn healthy_lock_contention_still_defers_without_latching() {
   let temporary = tempfile::tempdir().unwrap();
   let engine = test_engine(&temporary, "healthy-contention.aeordb");
-  engine.store_entry(EntryType::Chunk, b"pending-key", b"pending-value").unwrap();
+  engine.store_entry(EntryType::Chunk, &[0xA2; 32], b"pending-value").unwrap();
 
   {
     let kv_guard = engine.kv_writer.lock().unwrap();

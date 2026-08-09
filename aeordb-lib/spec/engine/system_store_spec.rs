@@ -1688,13 +1688,15 @@ fn store_user_then_magic_link_after_dirty_startup() {
     engine.shutdown().unwrap();
   }
 
-  // Corrupt the hot tail region — overwrite the last 256 bytes of the file
-  // with garbage so the dirty-startup path triggers.
+  // Corrupt only the hot-tail magic so the dirty-startup path triggers without
+  // damaging authoritative WAL bytes. An empty hot tail is only 18 bytes, so
+  // corrupting an arbitrary suffix of the file can reach before its boundary.
   {
-    let mut f = std::fs::OpenOptions::new().write(true).open(&db_path).unwrap();
-    let size = f.metadata().unwrap().len();
-    f.seek(SeekFrom::Start(size - 256)).unwrap();
-    f.write_all(&[0xFFu8; 256]).unwrap();
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+    let (header, _) = aeordb::engine::file_header::read_active_header(&mut f).unwrap();
+    f.seek(SeekFrom::Start(header.hot_tail_offset)).unwrap();
+    f.write_all(&[0xFFu8; 5]).unwrap();
+    f.sync_data().unwrap();
   }
 
   // Re-open — should trigger dirty startup + KV rebuild.

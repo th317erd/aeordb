@@ -3184,6 +3184,15 @@ impl StorageEngine {
     self.store_entry_internal(entry_type, key, value, flags, compression_algo, crate::engine::entry_header::CURRENT_ENTRY_VERSION)
   }
 
+  fn validate_indexed_entry_key(&self, entry_type: EntryType, key: &[u8]) -> EngineResult<()> {
+    if entry_type == EntryType::Void {
+      return Err(EngineError::InvalidInput(
+        "physical Void entries must be written through the dedicated reusable-space APIs and cannot be registered in KV".to_string(),
+      ));
+    }
+    EntryHeader::validate_key_length(entry_type, key.len(), self.hash_algo)
+  }
+
   /// Core store_entry implementation. Acquires writer + KV locks, appends
   /// entry to WAL, and registers in KV index.
   /// Lock order: writer first, then KV (must be consistent everywhere).
@@ -3198,6 +3207,7 @@ impl StorageEngine {
   ) -> EngineResult<u64> {
     let _operation = self.operation_guard("store_entry")?;
     self.ensure_writable()?;
+    self.validate_indexed_entry_key(entry_type, key)?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
 
@@ -4094,6 +4104,7 @@ impl StorageEngine {
   pub fn store_entry_typed(&self, entry_type: EntryType, key: &[u8], value: &[u8], kv_type: u8) -> EngineResult<u64> {
     let _operation = self.operation_guard("store_entry_typed")?;
     self.ensure_writable()?;
+    self.validate_indexed_entry_key(entry_type, key)?;
     // Acquire BOTH locks before any work to close the TOCTOU gap.
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -4134,6 +4145,9 @@ impl StorageEngine {
     self.ensure_writable()?;
     if batch.is_empty() {
       return Ok(Vec::new());
+    }
+    for entry in &batch.entries {
+      self.validate_indexed_entry_key(entry.entry_type, &entry.key)?;
     }
 
     // Acquire BOTH locks before any work to close the TOCTOU gap.
@@ -4189,6 +4203,9 @@ impl StorageEngine {
     if batch.is_empty() {
       // Still update HEAD even if batch is empty (e.g., system path that skips propagation)
       return self.update_head(head_hash).map(|_| Vec::new());
+    }
+    for entry in &batch.entries {
+      self.validate_indexed_entry_key(entry.entry_type, &entry.key)?;
     }
 
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -5910,6 +5927,10 @@ mod tests {
   use std::io::{Seek, SeekFrom};
   use std::time::{Duration, Instant};
 
+  fn test_entry_key(engine: &StorageEngine, label: &[u8]) -> Vec<u8> {
+    engine.compute_hash(label).unwrap()
+  }
+
   #[test]
   fn layout_maintenance_drains_existing_operations_and_blocks_new_admission() {
     let tracker = Arc::new(EngineOperationTracker::default());
@@ -6050,7 +6071,8 @@ mod tests {
   fn timer_waiter_pressure_defers_without_latching_or_consuming_the_hot_tail() {
     let temp = tempfile::tempdir().unwrap();
     let engine = StorageEngine::create(temp.path().join("timer-waiter-pressure.aeordb").to_str().unwrap()).unwrap();
-    engine.store_entry(EntryType::Chunk, b"timer-pressure-key", b"staged dependency").unwrap();
+    let key = test_entry_key(&engine, b"timer-pressure-key");
+    engine.store_entry(EntryType::Chunk, &key, b"staged dependency").unwrap();
     assert!(engine.kv_writer.lock().unwrap().hot_buffer_len() > 0);
 
     let memory = engine.memory_coordinator();
@@ -6182,10 +6204,11 @@ mod tests {
     }
   }
 
-  fn admit_pending_namespace_transaction(engine: &StorageEngine, key: &[u8]) -> DurabilityTicket {
+  fn admit_pending_namespace_transaction(engine: &StorageEngine, key_material: &[u8]) -> DurabilityTicket {
     let namespace = engine.namespace_write_guard().unwrap();
     engine.begin_transaction(false).unwrap();
-    engine.store_entry(EntryType::Chunk, key, b"pending transaction bytes").unwrap();
+    let key = test_entry_key(engine, key_material);
+    engine.store_entry(EntryType::Chunk, &key, b"pending transaction bytes").unwrap();
     let ticket = engine.prepare_transaction_completion().unwrap().expect("outer transaction must admit a hard-authority ticket");
     drop(namespace);
     ticket
@@ -6206,7 +6229,7 @@ mod tests {
 
     assert!(premature_failure.is_none(), "timer treated coordinator contention as a serious storage failure: {premature_failure:?}");
     assert_eq!(engine.durability_snapshot().unwrap().pending_hard, 0);
-    assert!(engine.get_entry(b"timer-race-key").unwrap().is_some());
+    assert!(engine.get_entry(&test_entry_key(&engine, b"timer-race-key")).unwrap().is_some());
   }
 
   #[test]
@@ -6398,7 +6421,8 @@ mod tests {
 
     let engine_path = temp_dir.path().join("durability-spill.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    engine.store_entry(EntryType::Chunk, b"chunk-1", b"hello").unwrap();
+    let stored_key = test_entry_key(&engine, b"chunk-1");
+    engine.store_entry(EntryType::Chunk, &stored_key, b"hello").unwrap();
 
     let error = engine.record_durability_failure(DurabilityOperation::AuthorityBarrier, "test forced durability failure", "synthetic EIO");
     assert!(matches!(error, EngineError::DurabilityFailure(_)));
@@ -6463,8 +6487,9 @@ mod tests {
     assert_eq!(artifacts[0].incident_id.map(hex::encode).as_deref(), Some(spill.incident_id.as_str()));
     assert_eq!(artifacts[0].creation_sequence, spill.creation_sequence);
 
-    assert!(engine.get_entry(b"chunk-1").unwrap().is_some());
-    let rejected = engine.store_entry(EntryType::Chunk, b"chunk-2", b"blocked");
+    assert!(engine.get_entry(&stored_key).unwrap().is_some());
+    let rejected_key = test_entry_key(&engine, b"chunk-2");
+    let rejected = engine.store_entry(EntryType::Chunk, &rejected_key, b"blocked");
     assert!(matches!(rejected, Err(EngineError::DurabilityFailure(_))));
   }
 
@@ -6515,7 +6540,8 @@ mod tests {
       active.active_properties["recovery.emergency_spill_dir"].source,
       Some(crate::engine::config_resolver::ConfigSource::StoredRuntimeV1)
     );
-    engine.store_entry(EntryType::Chunk, b"stored-spill-key", b"preserve me").unwrap();
+    let key = test_entry_key(&engine, b"stored-spill-key");
+    engine.store_entry(EntryType::Chunk, &key, b"preserve me").unwrap();
     engine.record_durability_failure(DurabilityOperation::AuthorityBarrier, "stored spill root proof", "synthetic EIO");
 
     let report = engine.emergency_spill_report().expect("durability failure must attempt a spill");
@@ -6537,7 +6563,8 @@ mod tests {
     let _restore = SpillTestEnv::new(&spill_dir);
     let engine_path = temp_dir.path().join("durability-spill-hard-pressure.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    engine.store_entry(EntryType::Chunk, b"critical-spill-chunk", b"preserve me").unwrap();
+    let key = test_entry_key(&engine, b"critical-spill-chunk");
+    engine.store_entry(EntryType::Chunk, &key, b"preserve me").unwrap();
     let coordinator = engine.memory_coordinator();
     let policy = coordinator.snapshot().unwrap().policy.unwrap();
     coordinator
@@ -6648,7 +6675,8 @@ mod tests {
     let _restore = SpillTestEnv::new(&spill_dir);
     let engine_path = temp_dir.path().join("durability-partial-spill.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    engine.store_entry(EntryType::Chunk, b"authoritative-hot-entry", b"must survive").unwrap();
+    let key = test_entry_key(&engine, b"authoritative-hot-entry");
+    engine.store_entry(EntryType::Chunk, &key, b"must survive").unwrap();
     let config = crate::engine::index_config::IndexFieldConfig {
       name: "title".to_string(),
       index_type: "string".to_string(),
@@ -6691,7 +6719,8 @@ mod tests {
     let temp_dir = tempfile::tempdir().unwrap();
     let engine_path = temp_dir.path().join("shutdown-hard-pressure.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    engine.store_entry(EntryType::Chunk, b"shutdown-pressure-chunk", b"durable bytes").unwrap();
+    let key = test_entry_key(&engine, b"shutdown-pressure-chunk");
+    engine.store_entry(EntryType::Chunk, &key, b"durable bytes").unwrap();
     let coordinator = engine.memory_coordinator();
     let policy = coordinator.snapshot().unwrap().policy.unwrap();
     coordinator
@@ -6720,7 +6749,8 @@ mod tests {
     let _restore = SpillTestEnv::new(&spill_dir);
     let engine_path = temp_dir.path().join("shutdown-failure-spill-order.aeordb");
     let engine = Arc::new(StorageEngine::create(engine_path.to_str().unwrap()).unwrap());
-    engine.store_entry(EntryType::Chunk, b"shutdown-spill-order", b"authoritative bytes").unwrap();
+    let key = test_entry_key(&engine, b"shutdown-spill-order");
+    engine.store_entry(EntryType::Chunk, &key, b"authoritative bytes").unwrap();
     let poisoned_engine = Arc::clone(&engine);
     let poison = std::thread::spawn(move || {
       let _guard = poisoned_engine.index_write_buffer.lock().unwrap();
@@ -6758,7 +6788,8 @@ mod tests {
     let temp_dir = tempfile::tempdir().unwrap();
     let engine_path = temp_dir.path().join("shutdown-admission-retry.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    engine.store_entry(EntryType::Chunk, b"shutdown-retry-chunk", b"durable bytes").unwrap();
+    let key = test_entry_key(&engine, b"shutdown-retry-chunk");
+    engine.store_entry(EntryType::Chunk, &key, b"durable bytes").unwrap();
     let coordinator = engine.memory_coordinator();
     let snapshot = coordinator.snapshot().unwrap();
     let policy = snapshot.policy.unwrap();
@@ -6803,7 +6834,8 @@ mod tests {
     let _restore = SpillTestEnv::new(&blocked_root);
     let engine_path = temp_dir.path().join("spill-retry.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    engine.store_entry(EntryType::Chunk, b"chunk-1", b"hello").unwrap();
+    let key = test_entry_key(&engine, b"chunk-1");
+    engine.store_entry(EntryType::Chunk, &key, b"hello").unwrap();
 
     engine.record_durability_failure(DurabilityOperation::AuthorityBarrier, "first durability failure", "synthetic EIO");
     let first_state = engine.durability_failure_state().unwrap();
