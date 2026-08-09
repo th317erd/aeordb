@@ -91,8 +91,16 @@ fn main() {
   let mut checkpoint_file = OpenOptions::new().create(true).append(true).open(&checkpoint).expect("open checkpoint");
 
   // Signal that we're up so the parent knows the engine opened cleanly.
-  writeln!(checkpoint_file, "# worker up mode={}", mode).ok();
-  checkpoint_file.flush().ok();
+  let startup_checkpoint = (|| -> Result<(), String> {
+    writeln!(checkpoint_file, "# worker up mode={}", mode).map_err(|error| format!("startup checkpoint write failed: {error}"))?;
+    checkpoint_file.flush().map_err(|error| format!("startup checkpoint flush failed: {error}"))?;
+    aeordb::engine::native_durability::sync_file_data_native(&checkpoint_file)
+      .map_err(|error| format!("startup checkpoint durability failed: {error}"))
+  })();
+  if let Err(error) = startup_checkpoint {
+    eprintln!("{error}");
+    process::exit(4);
+  }
 
   let mut counter: u64 = 0;
   loop {

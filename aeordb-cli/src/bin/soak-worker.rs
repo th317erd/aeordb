@@ -178,7 +178,7 @@ fn run(config: Config) -> Result<(), String> {
 
   // 1. Build the source corpus list (walk once, skip symlinks).
   print!("walking source corpus... ");
-  std::io::stdout().flush().ok();
+  std::io::stdout().flush().map_err(|error| format!("flush source-corpus status: {error}"))?;
   let walk_start = Instant::now();
   let corpus = build_corpus(&config.source_dir);
   println!("{} files in {:.1}s", corpus.len(), walk_start.elapsed().as_secs_f64());
@@ -310,9 +310,10 @@ fn run(config: Config) -> Result<(), String> {
   let mut last_gc = Instant::now();
   let mut size_capped_logged = false;
   let mut rng_state: u64 = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+  let mut workload_result = Ok(());
 
   println!("starting workload loop");
-  while start.elapsed() < config.duration {
+  'workload: while start.elapsed() < config.duration {
     let pick = next_u32(&mut rng_state) % 100;
     let action: char = if pick < config.pct_write as u32 {
       'W'
@@ -344,8 +345,10 @@ fn run(config: Config) -> Result<(), String> {
         let source = &corpus[next_u32(&mut rng_state) as usize % corpus.len()];
         match do_write(&engine, source, &config.source_dir) {
           Ok(stored_path) => {
-            writeln!(checkpoint_file, "+\t{}", stored_path).ok();
-            checkpoint_file.flush().ok();
+            if let Err(error) = append_checkpoint(&mut checkpoint_file, '+', &stored_path) {
+              workload_result = Err(error);
+              break 'workload;
+            }
             committed.insert(stored_path.clone());
             writes.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut s) = last_action.lock() {
@@ -415,8 +418,10 @@ fn run(config: Config) -> Result<(), String> {
         let ops = DirectoryOps::new(&engine);
         match ops.delete_file(&ctx, &path) {
           Ok(_) => {
-            writeln!(checkpoint_file, "-\t{}", path).ok();
-            checkpoint_file.flush().ok();
+            if let Err(error) = append_checkpoint(&mut checkpoint_file, '-', &path) {
+              workload_result = Err(error);
+              break 'workload;
+            }
             committed.remove(&path);
             deletes.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut s) = last_action.lock() {
@@ -469,7 +474,8 @@ fn run(config: Config) -> Result<(), String> {
 
   // Final flush of the engine so any in-memory state is durable.
   let shutdown_result = engine.shutdown().map_err(|error| format!("engine shutdown failed: {error}"));
-  combine_soak_shutdown_results(diagnostics_result, shutdown_result)?;
+  let cleanup_result = combine_soak_shutdown_results(diagnostics_result, shutdown_result);
+  combine_workload_cleanup_results(workload_result, cleanup_result)?;
 
   println!(
     "done. Writes={} Reads={} Deletes={}",
@@ -504,6 +510,23 @@ fn combine_soak_shutdown_results(diagnostics_result: Result<(), String>, shutdow
     }
   }
   Ok(())
+}
+
+fn combine_workload_cleanup_results(workload_result: Result<(), String>, cleanup_result: Result<(), String>) -> Result<(), String> {
+  match (workload_result, cleanup_result) {
+    (Ok(()), Ok(())) => {}
+    (Err(workload_error), Ok(())) => return Err(workload_error),
+    (Ok(()), Err(cleanup_error)) => return Err(cleanup_error),
+    (Err(workload_error), Err(cleanup_error)) => {
+      return Err(format!("soak workload and cleanup failed: workload: {workload_error}; cleanup: {cleanup_error}"));
+    }
+  }
+  Ok(())
+}
+
+fn append_checkpoint(writer: &mut impl Write, operation: char, path: &str) -> Result<(), String> {
+  writeln!(writer, "{operation}\t{path}").map_err(|error| format!("checkpoint write failed for {operation} {path}: {error}"))?;
+  writer.flush().map_err(|error| format!("checkpoint flush failed for {operation} {path}: {error}"))
 }
 
 #[cfg(test)]
@@ -619,7 +642,7 @@ fn open_metrics(path: &str) -> Result<BufWriter<File>, String> {
   let mut writer = BufWriter::new(file);
   if needs_header {
     writeln!(writer, "{}", METRICS_HEADER).map_err(|e| format!("write header: {}", e))?;
-    writer.flush().ok();
+    writer.flush().map_err(|error| format!("flush metrics header: {error}"))?;
   }
   Ok(writer)
 }
