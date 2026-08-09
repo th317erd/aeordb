@@ -2,15 +2,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// Error returned when a rate limit is exceeded.
-#[derive(Debug, Clone)]
-pub struct RateLimitError {
-  pub retry_after_seconds: u64,
+/// Error returned when request admission is denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitError {
+  LimitExceeded { retry_after_seconds: u64 },
+  StateUnavailable,
 }
 
 impl std::fmt::Display for RateLimitError {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(formatter, "Rate limit exceeded. Retry after {} seconds.", self.retry_after_seconds)
+    match self {
+      Self::LimitExceeded { retry_after_seconds } => write!(formatter, "Rate limit exceeded. Retry after {retry_after_seconds} seconds."),
+      Self::StateUnavailable => write!(formatter, "Rate limiter state is unavailable."),
+    }
   }
 }
 
@@ -48,11 +52,16 @@ impl RateLimiter {
 
   /// Check whether a request from the given key is allowed.
   ///
-  /// Returns Ok(()) if allowed, Err(RateLimitError) if the limit is exceeded.
+  /// Returns `Ok(())` if allowed, or a typed denial when the limit is exceeded
+  /// or its state cannot be trusted.
   pub fn check_rate_limit(&self, key: &str) -> Result<(), RateLimitError> {
-    let mut inner = self.inner.lock().expect("rate limiter lock poisoned");
+    let mut inner = self.inner.lock().map_err(|_| RateLimitError::StateUnavailable)?;
     let now = Instant::now();
     let window_duration = std::time::Duration::from_secs(self.window_seconds);
+
+    if self.max_requests == 0 {
+      return Err(RateLimitError::LimitExceeded { retry_after_seconds: self.window_seconds.max(1) });
+    }
 
     // M4: Evict oldest entries when the HashMap grows too large to prevent
     // unbounded memory growth from unique keys (e.g. IP-based rate limiting).
@@ -70,10 +79,10 @@ impl RateLimiter {
     timestamps.retain(|timestamp| now.duration_since(*timestamp) < window_duration);
 
     if timestamps.len() as u64 >= self.max_requests {
-      let oldest = timestamps.first().expect("timestamps not empty");
+      let oldest = timestamps.first().ok_or(RateLimitError::StateUnavailable)?;
       let elapsed = now.duration_since(*oldest);
       let retry_after = self.window_seconds.saturating_sub(elapsed.as_secs());
-      return Err(RateLimitError { retry_after_seconds: retry_after.max(1) });
+      return Err(RateLimitError::LimitExceeded { retry_after_seconds: retry_after.max(1) });
     }
 
     timestamps.push(now);
@@ -81,14 +90,20 @@ impl RateLimiter {
   }
 
   /// Reset the rate limiter state for a given key (useful for testing).
-  pub fn reset(&self, key: &str) {
-    let mut inner = self.inner.lock().expect("rate limiter lock poisoned");
+  pub fn reset(&self, key: &str) -> Result<(), RateLimitError> {
+    let mut inner = self.inner.lock().map_err(|_| RateLimitError::StateUnavailable)?;
     inner.windows.remove(key);
+    Ok(())
   }
 
   /// Reset all rate limiter state.
-  pub fn reset_all(&self) {
-    let mut inner = self.inner.lock().expect("rate limiter lock poisoned");
+  pub fn reset_all(&self) -> Result<(), RateLimitError> {
+    let mut inner = self.inner.lock().map_err(|_| RateLimitError::StateUnavailable)?;
     inner.windows.clear();
+    Ok(())
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/auth/rate_limiter_internal_spec.rs"]
+mod rate_limiter_internal_spec;

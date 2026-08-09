@@ -18,7 +18,7 @@ use crate::engine::RequestContext;
 use crate::engine::memory_coordinator::MemoryReservation;
 use crate::auth::{
   TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord, DEFAULT_EXPIRY_DAYS, generate_magic_link_code,
-  hash_magic_link_code, generate_refresh_token, hash_refresh_token,
+  hash_magic_link_code, generate_refresh_token, hash_refresh_token, rate_limiter::RateLimitError,
 };
 use crate::auth::magic_link::MagicLinkRecord;
 use crate::auth::magic_link::MagicLinkConsumeResult;
@@ -369,11 +369,21 @@ pub async fn auth_token(State(state): State<AppState>, Json(payload): Json<AuthT
   // limit here is the shared default (5/60s) — increase via
   // RateLimiter::new(max, window_secs) if your legitimate users see 429s.
   let rl_key = format!("token:{}", key_id_prefix);
-  if state.rate_limiter.check_rate_limit(&rl_key).is_err() {
-    metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "rate_limited").increment(1);
-    return ErrorResponse::new("Too many authentication attempts for this key. Wait a moment and retry.".to_string())
-      .with_status(StatusCode::TOO_MANY_REQUESTS)
-      .into_response();
+  match state.rate_limiter.check_rate_limit(&rl_key) {
+    Ok(()) => {}
+    Err(RateLimitError::LimitExceeded { .. }) => {
+      metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "rate_limited").increment(1);
+      return ErrorResponse::new("Too many authentication attempts for this key. Wait a moment and retry.".to_string())
+        .with_status(StatusCode::TOO_MANY_REQUESTS)
+        .into_response();
+    }
+    Err(RateLimitError::StateUnavailable) => {
+      tracing::error!("Authentication rate limiter state is unavailable");
+      metrics::counter!(crate::metrics::definitions::AUTH_TOKEN_EXCHANGES_TOTAL, "result" => "rate_limiter_unavailable").increment(1);
+      return ErrorResponse::new("Authentication admission is temporarily unavailable. Retry shortly.".to_string())
+        .with_status(StatusCode::SERVICE_UNAVAILABLE)
+        .into_response();
+    }
   }
 
   let record = match state.auth_provider.get_api_key_by_prefix(&key_id_prefix) {
@@ -730,9 +740,18 @@ pub async fn request_magic_link(State(state): State<AppState>, Json(payload): Js
   }
 
   // Rate-limit by email.
-  if let Err(error) = state.rate_limiter.check_rate_limit(&email) {
-    metrics::counter!(crate::metrics::definitions::AUTH_RATE_LIMIT_HITS_TOTAL).increment(1);
-    return ErrorResponse::new(error.to_string()).with_status(StatusCode::TOO_MANY_REQUESTS).into_response();
+  match state.rate_limiter.check_rate_limit(&email) {
+    Ok(()) => {}
+    Err(error @ RateLimitError::LimitExceeded { .. }) => {
+      metrics::counter!(crate::metrics::definitions::AUTH_RATE_LIMIT_HITS_TOTAL).increment(1);
+      return ErrorResponse::new(error.to_string()).with_status(StatusCode::TOO_MANY_REQUESTS).into_response();
+    }
+    Err(RateLimitError::StateUnavailable) => {
+      tracing::error!("Magic-link rate limiter state is unavailable");
+      return ErrorResponse::new("Authentication admission is temporarily unavailable. Retry shortly.".to_string())
+        .with_status(StatusCode::SERVICE_UNAVAILABLE)
+        .into_response();
+    }
   }
 
   let user = match system_store::get_user_by_username(&state.engine, &email) {
