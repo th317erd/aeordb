@@ -156,11 +156,14 @@ During an active reindex, query responses include `meta.reindexing: true` so cli
 
 ## Cron Scheduling
 
-AeorDB includes a built-in cron scheduler that checks `/.config/cron.json` every 60 seconds and enqueues matching tasks.
+AeorDB includes a built-in cron scheduler that checks the engine-owned
+`/.aeordb-config/cron.json` authority every 60 seconds and enqueues matching
+tasks. Manage it through the root-only `/system/cron` API; generic file and
+blob routes cannot access this protected path.
 
 ### Configuration
 
-Store the cron configuration at `/.config/cron.json`:
+The stored document has this shape:
 
 ```json
 {
@@ -200,38 +203,50 @@ Examples:
 
 ### Cron API
 
-**Create/update the schedule:**
+**Create a schedule:**
 ```bash
-curl -X PUT http://localhost:6830/.config/cron.json \
+curl -X POST http://localhost:6830/system/cron \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "schedules": [
-      {
-        "id": "nightly-gc",
-        "task_type": "gc",
-        "schedule": "0 3 * * *",
-        "args": {},
-        "enabled": true
-      }
-    ]
+    "id": "nightly-gc",
+    "task_type": "gc",
+    "schedule": "0 3 * * *",
+    "args": {},
+    "enabled": true
   }'
 ```
 
 **Read the schedule:**
 ```bash
-curl http://localhost:6830/.config/cron.json \
+curl http://localhost:6830/system/cron \
   -H "Authorization: Bearer $API_KEY"
 ```
 
-**Disable a schedule** (set `enabled: false` and re-upload):
+**Disable a schedule:**
 ```bash
-# Fetch, modify, re-upload
+curl -X PATCH http://localhost:6830/system/cron/nightly-gc \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":false}'
 ```
+
+Create, update, and delete are atomic read-modify-write operations under the
+same namespace authority as the stored file. Concurrent requests cannot discard
+one another's schedules. The complete document is limited to 1 MiB and every
+cron expression is validated before publication. Malformed, unreadable,
+duplicate-ID, or oversized stored authority is reported as an error rather than
+treated as an empty schedule.
 
 ### Deduplication
 
 The cron scheduler checks whether a task with the same type and arguments is already pending or running before enqueuing. This prevents duplicate tasks from stacking up if a previous run hasn't finished.
+
+Configuration and task-registry reads are strict. A failed scheduler tick is
+logged as an error and retried at the next cadence; task-list failures never
+become permission to enqueue duplicates, and enqueue failures are not discarded.
+Tasks durably enqueued before a later failure remain visible and are deduplicated
+on retry.
 
 ### CronSchedule Fields
 

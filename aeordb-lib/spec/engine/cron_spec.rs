@@ -1,5 +1,10 @@
-use aeordb::engine::cron_scheduler::{cron_matches_now, load_cron_config, save_cron_config, validate_cron_expression, CronConfig, CronSchedule};
+use aeordb::engine::cron_scheduler::{
+  create_cron_schedule, cron_matches_now, delete_cron_schedule, load_cron_config, run_cron_tick, save_cron_config,
+  seed_default_cron_if_missing, update_cron_schedule, validate_cron_expression, CronConfig, CronSchedule, CronScheduleUpdate,
+};
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::entry_type::EntryType;
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::engine::request_context::RequestContext;
 use aeordb::engine::task_queue::{TaskQueue, TaskStatus};
 use aeordb::server::create_temp_engine_for_tests;
@@ -97,7 +102,7 @@ fn test_load_cron_config_from_engine() {
   let data = serde_json::to_vec_pretty(&config).unwrap();
   ops.store_file_buffered(&ctx, "/.aeordb-config/cron.json", &data, Some("application/json")).unwrap();
 
-  let schedules = load_cron_config(&engine);
+  let schedules = load_cron_config(&engine).unwrap();
   assert_eq!(schedules.len(), 2);
   assert_eq!(schedules[0].id, "s1");
   assert_eq!(schedules[0].task_type, "reindex");
@@ -113,7 +118,7 @@ fn test_load_cron_config_from_engine() {
 #[test]
 fn test_load_cron_config_missing_file() {
   let (engine, _temp) = create_temp_engine_for_tests();
-  let schedules = load_cron_config(&engine);
+  let schedules = load_cron_config(&engine).unwrap();
   assert!(schedules.is_empty(), "should return empty vec when config file missing");
 }
 
@@ -136,7 +141,7 @@ fn test_save_and_reload_cron_config() {
 
   save_cron_config(&engine, &config).unwrap();
 
-  let reloaded = load_cron_config(&engine);
+  let reloaded = load_cron_config(&engine).unwrap();
   assert_eq!(reloaded.len(), 1);
   assert_eq!(reloaded[0].id, "rt1");
   assert_eq!(reloaded[0].task_type, "backup");
@@ -173,7 +178,7 @@ fn test_disabled_schedule_field() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. load_cron_config — malformed JSON returns empty
+// 9. load_cron_config — malformed JSON fails closed
 // ---------------------------------------------------------------------------
 #[test]
 fn test_load_cron_config_malformed_json() {
@@ -184,8 +189,8 @@ fn test_load_cron_config_malformed_json() {
   // Store garbage at the config path
   ops.store_file_buffered(&ctx, "/.aeordb-config/cron.json", b"not json at all{{{", Some("application/json")).unwrap();
 
-  let schedules = load_cron_config(&engine);
-  assert!(schedules.is_empty(), "malformed JSON should return empty vec");
+  let error = load_cron_config(&engine).expect_err("malformed cron authority must not become an empty schedule");
+  assert!(error.to_string().contains("cron config"), "unexpected error: {error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +212,7 @@ fn test_save_empty_config() {
   let config = CronConfig { schedules: vec![] };
   save_cron_config(&engine, &config).unwrap();
 
-  let reloaded = load_cron_config(&engine);
+  let reloaded = load_cron_config(&engine).unwrap();
   assert!(reloaded.is_empty());
 }
 
@@ -282,7 +287,7 @@ fn test_save_cron_config_overwrite() {
   };
   save_cron_config(&engine, &config2).unwrap();
 
-  let reloaded = load_cron_config(&engine);
+  let reloaded = load_cron_config(&engine).unwrap();
   assert_eq!(reloaded.len(), 2);
   assert_eq!(reloaded[0].id, "v2a");
   assert_eq!(reloaded[1].id, "v2b");
@@ -301,4 +306,325 @@ fn test_validate_cron_expression_edge_cases() {
   assert!(validate_cron_expression("0 9-17 * * 1-5").is_ok());
   // Lists
   assert!(validate_cron_expression("0,15,30,45 * * * *").is_ok());
+}
+
+#[test]
+fn invalid_complete_config_is_refused_before_publication() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+  let config = CronConfig {
+    schedules: vec![CronSchedule {
+      id: "invalid".to_string(),
+      task_type: "gc".to_string(),
+      schedule: "not a cron expression".to_string(),
+      args: serde_json::json!({}),
+      enabled: true,
+    }],
+  };
+
+  let error = save_cron_config(&engine, &config).expect_err("invalid complete config must fail");
+
+  assert!(error.to_string().contains("invalid cron expression"), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert!(load_cron_config(&engine).unwrap().is_empty());
+}
+
+#[test]
+fn concurrent_cron_mutations_retain_every_schedule_with_one_acknowledgement_each() {
+  const WRITERS: usize = 12;
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+  let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+
+  std::thread::scope(|scope| {
+    for index in 0..WRITERS {
+      let engine = engine.clone();
+      let barrier = barrier.clone();
+      scope.spawn(move || {
+        barrier.wait();
+        create_cron_schedule(
+          &engine,
+          CronSchedule {
+            id: format!("concurrent-{index:02}"),
+            task_type: "gc".to_string(),
+            schedule: "0 3 * * *".to_string(),
+            args: serde_json::json!({"writer": index}),
+            enabled: true,
+          },
+        )
+        .unwrap();
+      });
+    }
+  });
+
+  let mut schedules = load_cron_config(&engine).unwrap();
+  schedules.sort_by(|left, right| left.id.cmp(&right.id));
+  assert_eq!(schedules.len(), WRITERS);
+  for (index, schedule) in schedules.iter().enumerate() {
+    assert_eq!(schedule.id, format!("concurrent-{index:02}"));
+  }
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + WRITERS as u64);
+}
+
+#[test]
+fn typed_cron_crud_uses_one_acknowledgement_per_operation() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let created = create_cron_schedule(
+    &engine,
+    CronSchedule {
+      id: "typed-crud".to_string(),
+      task_type: "gc".to_string(),
+      schedule: "0 3 * * *".to_string(),
+      args: serde_json::json!({}),
+      enabled: true,
+    },
+  )
+  .unwrap();
+  assert_eq!(created.id, "typed-crud");
+
+  let updated = update_cron_schedule(
+    &engine,
+    "typed-crud",
+    CronScheduleUpdate { enabled: Some(false), schedule: Some("15 3 * * *".to_string()), task_type: None, args: None },
+  )
+  .unwrap();
+  assert!(!updated.enabled);
+  assert_eq!(updated.schedule, "15 3 * * *");
+
+  delete_cron_schedule(&engine, "typed-crud").unwrap();
+  assert!(load_cron_config(&engine).unwrap().is_empty());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 3);
+}
+
+#[test]
+fn cron_tick_enqueues_due_work_once_and_reports_deduplication() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  save_cron_config(
+    &engine,
+    &CronConfig {
+      schedules: vec![
+        CronSchedule {
+          id: "due-a".to_string(),
+          task_type: "gc".to_string(),
+          schedule: "* * * * *".to_string(),
+          args: serde_json::json!({"dry_run": true}),
+          enabled: true,
+        },
+        CronSchedule {
+          id: "due-b".to_string(),
+          task_type: "gc".to_string(),
+          schedule: "* * * * *".to_string(),
+          args: serde_json::json!({"dry_run": true}),
+          enabled: true,
+        },
+      ],
+    },
+  )
+  .unwrap();
+
+  let first = run_cron_tick(&queue, &engine).unwrap();
+  let second = run_cron_tick(&queue, &engine).unwrap();
+
+  assert_eq!(first.tasks_enqueued, 1);
+  assert_eq!(first.tasks_deduplicated, 1);
+  assert_eq!(second.tasks_enqueued, 0);
+  assert_eq!(second.tasks_deduplicated, 2);
+  assert_eq!(queue.list_tasks().unwrap().len(), 1);
+}
+
+#[test]
+fn cron_tick_propagates_task_registry_corruption_without_enqueueing() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  save_cron_config(
+    &engine,
+    &CronConfig {
+      schedules: vec![CronSchedule {
+        id: "due".to_string(),
+        task_type: "gc".to_string(),
+        schedule: "* * * * *".to_string(),
+        args: serde_json::json!({}),
+        enabled: true,
+      }],
+    },
+  )
+  .unwrap();
+  let registry_key = blake3::hash(b"::aeordb:task:_registry").as_bytes().to_vec();
+  engine.store_entry(EntryType::FileRecord, &registry_key, b"not-json").unwrap();
+
+  let error = run_cron_tick(&queue, &engine).expect_err("task registry corruption must fail the tick");
+
+  assert!(error.to_string().contains("task registry is malformed"), "unexpected error: {error}");
+}
+
+#[test]
+fn cron_tick_propagates_enqueue_pressure_and_retries_without_phantom_work() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let queue = TaskQueue::new(engine.clone());
+  save_cron_config(
+    &engine,
+    &CronConfig {
+      schedules: vec![CronSchedule {
+        id: "due-under-pressure".to_string(),
+        task_type: "gc".to_string(),
+        schedule: "* * * * *".to_string(),
+        args: serde_json::json!({"dry_run": true}),
+        enabled: true,
+      }],
+    },
+  )
+  .unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+  let memory = engine.memory_coordinator();
+  let snapshot = memory.snapshot().unwrap();
+  let remaining = snapshot.policy.unwrap().emergency_reserve_bytes - snapshot.critical_reserved_bytes;
+  let pressure = memory
+    .reserve(
+      MemoryOwner::DurabilityWaiters,
+      remaining.saturating_sub(8 * 1024),
+      AdmissionClass::Critical(CriticalMemoryPurpose::DurableWrite),
+    )
+    .unwrap();
+
+  let error = run_cron_tick(&queue, &engine).expect_err("enqueue pressure must fail the scheduler tick");
+
+  assert!(error.to_string().contains("emergency reserve"), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert!(queue.list_tasks().unwrap().is_empty());
+
+  drop(pressure);
+  let retry = run_cron_tick(&queue, &engine).unwrap();
+  assert_eq!(retry.tasks_enqueued, 1);
+  assert_eq!(retry.tasks_deduplicated, 0);
+  assert_eq!(queue.list_tasks().unwrap().len(), 1);
+}
+
+#[test]
+fn duplicate_schedule_ids_are_rejected_without_replacing_persisted_authority() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ops = DirectoryOps::new(&engine);
+  let duplicate = serde_json::to_vec_pretty(&CronConfig {
+    schedules: vec![
+      CronSchedule {
+        id: "duplicate".to_string(),
+        task_type: "gc".to_string(),
+        schedule: "0 3 * * *".to_string(),
+        args: serde_json::json!({}),
+        enabled: true,
+      },
+      CronSchedule {
+        id: "duplicate".to_string(),
+        task_type: "cleanup".to_string(),
+        schedule: "0 * * * *".to_string(),
+        args: serde_json::json!({}),
+        enabled: false,
+      },
+    ],
+  })
+  .unwrap();
+  ops.store_file_buffered(&RequestContext::system(), "/.aeordb-config/cron.json", &duplicate, Some("application/json")).unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let load_error = load_cron_config(&engine).expect_err("duplicate persisted ids must fail closed");
+  let mutate_error = create_cron_schedule(
+    &engine,
+    CronSchedule {
+      id: "probe".to_string(),
+      task_type: "gc".to_string(),
+      schedule: "0 3 * * *".to_string(),
+      args: serde_json::json!({}),
+      enabled: true,
+    },
+  )
+  .expect_err("duplicate persisted ids must not be replaced");
+
+  assert!(load_error.to_string().contains("duplicate schedule id"), "unexpected error: {load_error}");
+  assert!(mutate_error.to_string().contains("duplicate schedule id"), "unexpected error: {mutate_error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert_eq!(ops.read_file_buffered("/.aeordb-config/cron.json").unwrap(), duplicate);
+}
+
+#[test]
+fn oversized_cron_authority_is_rejected_before_buffering_or_replacement() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ops = DirectoryOps::new(&engine);
+  let oversized = vec![b' '; 1024 * 1024 + 1];
+  ops.store_file_buffered(&RequestContext::system(), "/.aeordb-config/cron.json", &oversized, Some("application/json")).unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let load_error = load_cron_config(&engine).expect_err("oversized stored authority must fail before JSON parsing");
+  let mutate_error = create_cron_schedule(
+    &engine,
+    CronSchedule {
+      id: "probe".to_string(),
+      task_type: "gc".to_string(),
+      schedule: "0 3 * * *".to_string(),
+      args: serde_json::json!({}),
+      enabled: true,
+    },
+  )
+  .expect_err("oversized stored authority must not be replaced");
+
+  assert!(load_error.to_string().contains("1048576-byte limit"), "unexpected error: {load_error}");
+  assert!(mutate_error.to_string().contains("1048576-byte limit"), "unexpected error: {mutate_error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert_eq!(ops.read_file_buffered("/.aeordb-config/cron.json").unwrap(), oversized);
+}
+
+#[test]
+fn oversized_cron_replacement_is_refused_before_namespace_publication() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+  let payload = "x".repeat(1024 * 1024);
+
+  let error = create_cron_schedule(
+    &engine,
+    CronSchedule {
+      id: "oversized".to_string(),
+      task_type: "gc".to_string(),
+      schedule: "0 3 * * *".to_string(),
+      args: serde_json::json!({"payload": payload}),
+      enabled: true,
+    },
+  )
+  .expect_err("oversized proposed authority must fail");
+
+  assert!(error.to_string().contains("exceeding the 1048576-byte limit"), "unexpected error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert!(load_cron_config(&engine).unwrap().is_empty());
+}
+
+#[test]
+fn default_cron_seed_is_one_acknowledged_write_then_a_true_noop() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(seed_default_cron_if_missing(&engine).unwrap());
+  let after_seed = engine.durability_snapshot().unwrap().next_sequence;
+  assert_eq!(after_seed, before + 1);
+  let schedules = load_cron_config(&engine).unwrap();
+  assert_eq!(schedules.len(), 2);
+  assert!(schedules.iter().any(|schedule| schedule.id == "default-cleanup"));
+  assert!(schedules.iter().any(|schedule| schedule.id == "default-gc"));
+
+  assert!(!seed_default_cron_if_missing(&engine).unwrap());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, after_seed);
+}
+
+#[test]
+fn default_cron_seed_preserves_existing_malformed_authority_for_diagnostics() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ops = DirectoryOps::new(&engine);
+  let malformed = b"existing malformed cron authority";
+  ops.store_file_buffered(&RequestContext::system(), "/.aeordb-config/cron.json", malformed, Some("application/json")).unwrap();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(!seed_default_cron_if_missing(&engine).unwrap());
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+  assert_eq!(ops.read_file_buffered("/.aeordb-config/cron.json").unwrap(), malformed);
+  assert!(load_cron_config(&engine).is_err());
 }

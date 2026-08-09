@@ -248,34 +248,25 @@ See [Indexing & Queries](../concepts/indexing.md) for the full indexing referenc
 
 ## Cron Configuration
 
-Schedule recurring background tasks by storing `/.config/cron.json`:
+Schedule recurring background tasks through the root-only cron API. Repeat this
+request for each schedule:
 
 ```bash
-curl -X PUT http://localhost:6830/files/.config/cron.json \
+curl -X POST http://localhost:6830/system/cron \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "schedules": [
-      {
-        "id": "weekly-gc",
-        "task_type": "gc",
-        "schedule": "0 3 * * 0",
-        "args": {},
-        "enabled": true
-      },
-      {
-        "id": "nightly-reindex",
-        "task_type": "reindex",
-        "schedule": "0 2 * * *",
-        "args": {"path": "/data/"},
-        "enabled": true
-      }
-    ]
+    "id": "weekly-gc",
+    "task_type": "gc",
+    "schedule": "0 3 * * 0",
+    "args": {},
+    "enabled": true
   }'
 ```
 
 Supported task types: `"gc"`, `"reindex"`, and `"backup"`. The `"backup"` type accepts `backup_dir`, `retention_count`, and `snapshot` arguments (see [Backup & Restore](../operations/backup.md#automated-backup-scheduling)).
 
-The `schedule` field uses standard 5-field cron syntax: `minute hour day_of_month month day_of_week`. Cron schedules can also be managed via the HTTP API at `/system/cron`.
+The `schedule` field uses standard 5-field cron syntax: `minute hour day_of_month month day_of_week`. AeorDB stores the complete document at the protected `/.aeordb-config/cron.json` path; use `GET`, `POST`, `PATCH`, and `DELETE` under `/system/cron` rather than generic file routes.
 
 ## Lifecycle Policy
 

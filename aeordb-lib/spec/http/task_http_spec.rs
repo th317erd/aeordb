@@ -306,6 +306,30 @@ async fn test_cron_create_list_delete() {
   assert_eq!(schedules.len(), 0);
 }
 
+#[tokio::test]
+async fn malformed_cron_authority_fails_http_reads_and_mutations_closed() {
+  let (app, jwt_manager, engine, task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let ctx = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, "/.aeordb-config/cron.json", b"not-json", Some("application/json")).unwrap();
+  let authority_before = DirectoryOps::new(&engine).read_file_buffered("/.aeordb-config/cron.json").unwrap();
+
+  let list = Request::builder().method("GET").uri("/system/cron").header("authorization", &auth).body(Body::empty()).unwrap();
+  let list_response = app.oneshot(list).await.unwrap();
+  assert_eq!(list_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+  let create = Request::builder()
+    .method("POST")
+    .uri("/system/cron")
+    .header("authorization", &auth)
+    .header("content-type", "application/json")
+    .body(Body::from(r#"{"id":"must-not-overwrite","task_type":"gc","schedule":"0 3 * * *","args":{},"enabled":true}"#))
+    .unwrap();
+  let create_response = rebuild_app(&jwt_manager, &engine, &task_queue).oneshot(create).await.unwrap();
+  assert_eq!(create_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered("/.aeordb-config/cron.json").unwrap(), authority_before);
+}
+
 // ===========================================================================
 // 7. test_task_endpoints_require_auth
 // ===========================================================================
@@ -332,7 +356,7 @@ async fn test_task_endpoints_require_auth() {
   let response = app2.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-  // Same for POST /admin/cron
+  // Same for GET /system/cron
   let app3 = rebuild_app(&jwt_manager, &engine, &task_queue);
   let request = Request::builder().method("GET").uri("/system/cron").body(Body::empty()).unwrap();
 

@@ -464,6 +464,39 @@ does not delete an orphan companion, while an already-absent automatic group is
 accepted for compatibility. Each successful compound operation emits one
 `system_write` event and counts as one logical write.
 
+## Cron Scheduling
+
+Embedded callers use typed cron operations rather than editing the protected
+configuration file or running callbacks while namespace authority is held:
+
+```rust,ignore
+use aeordb::engine::{
+    create_cron_schedule, delete_cron_schedule, update_cron_schedule,
+    CronSchedule, CronScheduleUpdate,
+};
+
+create_cron_schedule(&engine, CronSchedule {
+    id: "nightly-gc".to_string(),
+    task_type: "gc".to_string(),
+    schedule: "0 3 * * *".to_string(),
+    args: serde_json::json!({"dry_run": false}),
+    enabled: true,
+}).unwrap();
+
+update_cron_schedule(&engine, "nightly-gc", CronScheduleUpdate {
+    enabled: Some(false),
+    ..CronScheduleUpdate::default()
+}).unwrap();
+
+delete_cron_schedule(&engine, "nightly-gc").unwrap();
+```
+
+Each typed mutation is an atomic read-validate-write operation under one
+namespace acknowledgement. Concurrent callers cannot lose accepted schedules.
+Malformed, duplicate-ID, invalid, unreadable, or oversized stored authority is
+returned as an error and remains unchanged. `save_cron_config` remains available
+for callers deliberately replacing the complete schedule document.
+
 ## Virtual Clock
 
 For replication, the virtual clock provides synchronized timestamps:

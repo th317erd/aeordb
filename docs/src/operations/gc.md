@@ -101,19 +101,18 @@ This enqueues a GC task that the background task worker will pick up. Track its 
 - **After version cleanup**: If you delete old snapshots, the entries they exclusively referenced become garbage.
 - **Periodically**: Set up a [cron schedule](tasks.md) for automatic GC.
 
-Example cron configuration (`/.config/cron.json`):
-```json
-{
-  "schedules": [
-    {
-      "id": "nightly-gc",
-      "task_type": "gc",
-      "schedule": "0 3 * * *",
-      "args": {},
-      "enabled": true
-    }
-  ]
-}
+Example cron request:
+```bash
+curl -X POST http://localhost:6830/system/cron \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id":"nightly-gc",
+    "task_type":"gc",
+    "schedule":"0 3 * * *",
+    "args":{},
+    "enabled":true
+  }'
 ```
 
 ## Concurrency and Safety

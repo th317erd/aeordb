@@ -485,11 +485,71 @@ pub(crate) struct BatchFilePublicationInput {
   pub throughput_bytes: u64,
 }
 
+pub(crate) enum BufferedFileTransform<T> {
+  Keep(T),
+  Replace { data: Vec<u8>, output: T },
+}
+
 #[derive(Debug)]
 struct PreparedFileRecordPublication {
   entries: PreparedFileRecordEntries,
   result: FileRecordPublishResult,
   previous_identity: Option<Vec<u8>>,
+}
+
+fn prepare_buffered_file_publication(
+  engine: &StorageEngine,
+  normalized_path: String,
+  data: &[u8],
+  content_type: String,
+  flags: u8,
+  chunk_owner: &str,
+  chunk_dependencies: &mut std::collections::BTreeMap<Vec<u8>, (Vec<u8>, u8)>,
+  counter_delta: &mut DirectoryMutationCounterDelta,
+) -> EngineResult<PreparedFileRecordPublication> {
+  let algorithm = engine.hash_algo();
+  let mut chunk_hashes = Vec::new();
+  for chunk_data in data.chunks(DEFAULT_CHUNK_SIZE) {
+    let chunk_key = chunk_content_hash(chunk_data, &algorithm)?;
+    if validate_existing_chunk_locator(engine, chunk_owner, &chunk_key)? {
+      counter_delta.chunks_deduped = counter_delta
+        .chunks_deduped
+        .checked_add(1)
+        .ok_or_else(|| EngineError::ResourceExhausted("buffered publication deduplicated chunk counter overflow".to_string()))?;
+    } else if let Some((existing_data, existing_flags)) = chunk_dependencies.get_mut(&chunk_key) {
+      if existing_data.as_slice() != chunk_data {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("buffered publication chunk hash collision at {}", hex::encode(&chunk_key)),
+        });
+      }
+      *existing_flags |= flags;
+      counter_delta.chunks_deduped = counter_delta
+        .chunks_deduped
+        .checked_add(1)
+        .ok_or_else(|| EngineError::ResourceExhausted("buffered publication deduplicated chunk counter overflow".to_string()))?;
+    } else {
+      chunk_dependencies.insert(chunk_key.clone(), (chunk_data.to_vec(), flags));
+      counter_delta.chunk_stored_sizes.push(chunk_data.len() as u64);
+    }
+    chunk_hashes.push(chunk_key);
+  }
+
+  prepare_file_record_publication_at_version(
+    engine,
+    FileRecordPublishInput {
+      normalized_path,
+      content_type: Some(content_type),
+      total_size: data.len() as u64,
+      chunk_hashes,
+      content_hash: whole_file_content_hash(data, &algorithm)?,
+      flags,
+      created_at_override: None,
+      updated_at_override: None,
+      prefer_existing_created_at: true,
+    },
+    CURRENT_FILE_RECORD_VERSION,
+  )
 }
 
 enum FileRecordRestoreSource {
@@ -2146,6 +2206,84 @@ impl<'a> DirectoryOps<'a> {
     self.store_file_internal(ctx, path, data, content_type, CompressionAlgorithm::None)
   }
 
+  /// Read and conditionally replace one small file while namespace authority
+  /// is held. The transform sees one immutable current body (or absence), and
+  /// any replacement shares a single root/locator acknowledgement.
+  pub(crate) fn transform_file_buffered<T, F>(
+    &self,
+    ctx: &RequestContext,
+    path: &str,
+    content_type: Option<&str>,
+    maximum_bytes: u64,
+    kind: NamespaceMutationKind,
+    transform: F,
+  ) -> EngineResult<T>
+  where
+    F: FnOnce(Option<&[u8]>) -> EngineResult<BufferedFileTransform<T>>,
+  {
+    let normalized = normalize_path(path);
+    if normalized == "/" {
+      return Err(EngineError::InvalidInput("Cannot transform the root path as a file".to_string()));
+    }
+    let requested_content_type = content_type.map(str::to_string);
+
+    self.execute_optional_namespace_mutation(Some(ctx), move |planning_engine| {
+      let existing = match self.read_file_buffered_bounded(&normalized, maximum_bytes) {
+        Ok(data) => Some(data),
+        Err(EngineError::NotFound(_)) => None,
+        Err(error) => return Err(error),
+      };
+      let (data, output) = match transform(existing.as_deref())? {
+        BufferedFileTransform::Keep(output) => return Ok((None, output)),
+        BufferedFileTransform::Replace { data, output } => (data, output),
+      };
+      if data.len() as u64 > maximum_bytes {
+        return Err(EngineError::ResourceExhausted(format!(
+          "buffered transform for '{normalized}' produced {} bytes, exceeding the {maximum_bytes}-byte limit",
+          data.len(),
+        )));
+      }
+
+      let flags = v0_system_entry_flags(&normalized);
+      let detected_content_type = crate::engine::content_type::detect_content_type(&data, requested_content_type.as_deref());
+      let total_size = data.len() as u64;
+      let mut chunk_dependencies = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, u8)>::new();
+      let mut counter_delta = DirectoryMutationCounterDelta::default();
+      let chunk_owner = format!("buffered transform '{normalized}'");
+      let prepared = prepare_buffered_file_publication(
+        planning_engine,
+        normalized.clone(),
+        &data,
+        detected_content_type,
+        flags,
+        &chunk_owner,
+        &mut chunk_dependencies,
+        &mut counter_delta,
+      )?;
+
+      let mut batch = NamespaceMutationBatch::new(kind);
+      for (chunk_key, (chunk_data, chunk_flags)) in chunk_dependencies {
+        batch.store_dependency(EntryType::Chunk, chunk_key, chunk_data, chunk_flags)?;
+      }
+      add_prepared_file_record_entries(&mut batch, &prepared.entries)?;
+      batch.add_source_identity(NamespaceMutationSourceIdentity {
+        path: normalized.clone(),
+        entry_type: Some(EntryType::FileRecord.to_u8()),
+        previous_identity: prepared.previous_identity.clone(),
+        new_identity: Some(prepared.entries.identity_key.clone()),
+      })?;
+
+      counter_delta.throughput_bytes = total_size;
+      counter_delta.file_writes.push((prepared.result.existing_total_size, prepared.result.file_record.total_size));
+      let mut planner = DirectoryMutationPlanner::default();
+      planner.upsert_child(&normalized, prepared.result.child_entry.clone())?;
+      let mut effects = DirectoryMutationEffects::new(DirectoryMutationCounterEffect::Aggregate(counter_delta));
+      effects.events.push((EVENT_ENTRIES_CREATED, serde_json::json!({ "entries": [prepared.result.event_entry] })));
+      planner.finalize(self, &mut batch, &mut effects)?;
+      Ok((Some((batch, effects)), output))
+    })
+  }
+
   pub(crate) fn store_transition_control_v0(&self, path: &str, data: &[u8]) -> EngineResult<FileRecord> {
     let normalized = normalize_path(path);
     if !normalized.starts_with("/.aeordb-system/controls/v1/") {
@@ -2241,7 +2379,6 @@ impl<'a> DirectoryOps<'a> {
     }
 
     self.execute_namespace_mutation(Some(ctx), move |planning_engine| {
-      let algorithm = planning_engine.hash_algo();
       let mut chunk_dependencies: std::collections::BTreeMap<Vec<u8>, (Vec<u8>, u8)> = std::collections::BTreeMap::new();
       let mut counter_delta = DirectoryMutationCounterDelta::default();
       let mut prepared_merges = Vec::with_capacity(normalized_patches.len());
@@ -2251,46 +2388,15 @@ impl<'a> DirectoryOps<'a> {
         let flags = v0_system_entry_flags(&patch.path);
         let chunk_owner = format!("JSON merge '{}'", patch.path);
         let total_size = serialized.len() as u64;
-        let mut chunk_hashes = Vec::new();
-        for chunk_data in serialized.chunks(DEFAULT_CHUNK_SIZE) {
-          let chunk_key = chunk_content_hash(chunk_data, &algorithm)?;
-          if validate_existing_chunk_locator(planning_engine, &chunk_owner, &chunk_key)? {
-            counter_delta.chunks_deduped = counter_delta
-              .chunks_deduped
-              .checked_add(1)
-              .ok_or_else(|| EngineError::ResourceExhausted("JSON merge deduplicated chunk counter overflow".to_string()))?;
-          } else if let Some((existing_data, existing_flags)) = chunk_dependencies.get_mut(&chunk_key) {
-            if existing_data.as_slice() != chunk_data {
-              return Err(EngineError::CorruptEntry {
-                offset: 0,
-                reason: format!("JSON merge chunk hash collision at {}", hex::encode(&chunk_key)),
-              });
-            }
-            *existing_flags |= flags;
-            counter_delta.chunks_deduped = counter_delta
-              .chunks_deduped
-              .checked_add(1)
-              .ok_or_else(|| EngineError::ResourceExhausted("JSON merge deduplicated chunk counter overflow".to_string()))?;
-          } else {
-            chunk_dependencies.insert(chunk_key.clone(), (chunk_data.to_vec(), flags));
-            counter_delta.chunk_stored_sizes.push(chunk_data.len() as u64);
-          }
-          chunk_hashes.push(chunk_key);
-        }
-        let prepared = prepare_file_record_publication_at_version(
+        let prepared = prepare_buffered_file_publication(
           planning_engine,
-          FileRecordPublishInput {
-            normalized_path: patch.path,
-            content_type: Some("application/json".to_string()),
-            total_size,
-            chunk_hashes,
-            content_hash: whole_file_content_hash(&serialized, &algorithm)?,
-            flags,
-            created_at_override: None,
-            updated_at_override: None,
-            prefer_existing_created_at: true,
-          },
-          CURRENT_FILE_RECORD_VERSION,
+          patch.path,
+          &serialized,
+          "application/json".to_string(),
+          flags,
+          &chunk_owner,
+          &mut chunk_dependencies,
+          &mut counter_delta,
         )?;
         counter_delta.throughput_bytes = counter_delta
           .throughput_bytes
@@ -2662,6 +2768,23 @@ impl<'a> DirectoryOps<'a> {
   pub fn read_file_buffered(&self, path: &str) -> EngineResult<Vec<u8>> {
     let result = self.read_file_streaming(path)?.collect_to_vec()?;
     Ok(result)
+  }
+
+  /// Read a small file only after its declared size passes the caller's bound.
+  pub(crate) fn read_file_buffered_bounded(&self, path: &str, maximum_bytes: u64) -> EngineResult<Vec<u8>> {
+    let timer_start = std::time::Instant::now();
+    let normalized = normalize_path(path);
+    let file_record = self.resolve_current_file_record(&normalized)?;
+    if file_record.total_size > maximum_bytes {
+      return Err(EngineError::ResourceExhausted(format!(
+        "buffered read for '{normalized}' declares {} bytes, exceeding the {maximum_bytes}-byte limit",
+        file_record.total_size,
+      )));
+    }
+    self.engine.counters().record_read(file_record.total_size);
+    metrics::histogram!(crate::metrics::definitions::FILE_READ_DURATION).record(timer_start.elapsed().as_secs_f64());
+    EngineFileStream::new_with_expected_total_size(file_record.chunk_hashes, self.engine, false, Some(file_record.total_size))?
+      .collect_to_vec()
   }
 
   /// Delete a file, storing a DeletionRecord and updating parent directories.

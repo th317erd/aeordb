@@ -1256,7 +1256,6 @@ fn staged_file_publications_revalidate_chunk_authority_inside_the_namespace_plan
 fn wave_two_chunk_staging_never_treats_an_arbitrary_kv_row_as_a_chunk() {
   let directory_ops = include_str!("../../src/engine/directory_ops.rs");
   for (start_marker, end_marker) in [
-    ("fn execute_json_merge_patches(", "\n  fn prepare_json_merge("),
     ("pub fn store_chunk(", "\n  /// Finalize a file from pre-stored chunk hashes."),
     ("pub fn store_file_compressed(", "\n  /// Restore a file from an existing FileRecord"),
   ] {
@@ -1266,6 +1265,15 @@ fn wave_two_chunk_staging_never_treats_an_arbitrary_kv_row_as_a_chunk() {
     assert!(body.contains("validate_existing_chunk_locator("), "{start_marker} must use typed chunk-locator validation");
     assert!(!body.contains("has_entry(&chunk_key)"), "{start_marker} must not deduplicate against an untyped KV existence check");
   }
+
+  let buffered_start = directory_ops.find("fn prepare_buffered_file_publication(").unwrap();
+  let buffered_end = directory_ops[buffered_start..].find("\n}\n\n").unwrap() + buffered_start;
+  let buffered_body = &directory_ops[buffered_start..buffered_end];
+  assert!(buffered_body.contains("validate_existing_chunk_locator("));
+  assert!(!buffered_body.contains("has_entry(&chunk_key)"));
+  let merge_start = directory_ops.find("fn execute_json_merge_patches(").unwrap();
+  let merge_end = directory_ops[merge_start..].find("\n  fn prepare_json_merge(").unwrap() + merge_start;
+  assert!(directory_ops[merge_start..merge_end].contains("prepare_buffered_file_publication("));
 
   let batch_commit = include_str!("../../src/engine/batch_commit.rs");
   let batch_start = batch_commit.find("fn store_buffered_chunk(").unwrap();
@@ -1359,6 +1367,29 @@ fn wave_three_conflict_resolution_and_cleanup_share_one_receipt() {
   let dismiss_body = &source[resolve_end..];
   assert_eq!(dismiss_body.matches("ops.apply_sync_merge(").count(), 1);
   assert!(!dismiss_body.contains("ops.delete_file("), "conflict dismissal must not acknowledge cleanup through a second writer");
+}
+
+#[test]
+fn wave_four_cron_uses_strict_atomic_config_and_observable_task_errors() {
+  let cron = include_str!("../../src/engine/cron_scheduler.rs");
+  assert!(cron.contains("fn mutate_cron_config"));
+  assert!(!cron.contains("pub fn mutate_cron_config"), "generic namespace-locked callbacks must not be public API");
+  assert!(cron.contains("pub fn create_cron_schedule"));
+  assert!(cron.contains("pub fn update_cron_schedule"));
+  assert!(cron.contains("pub fn delete_cron_schedule"));
+  assert!(cron.contains("transform_file_buffered"));
+  assert!(cron.contains("pub fn run_cron_tick"));
+  assert!(!cron.contains("Err(_) => Vec::new()"));
+  assert!(!cron.contains("Err(_) => false"));
+  assert!(!cron.contains("let _ = queue.enqueue"));
+
+  let routes = include_str!("../../src/server/task_routes.rs");
+  assert_eq!(routes.matches("load_cron_config(&state.engine").count(), 1, "only the read-only list route may load directly");
+  assert_eq!(routes.matches("create_cron_schedule(&state.engine").count(), 1);
+  assert_eq!(routes.matches("delete_cron_schedule(&state.engine").count(), 1);
+  assert_eq!(routes.matches("update_cron_schedule(&state.engine").count(), 1);
+  assert!(!routes.contains("mutate_cron_config"), "HTTP routes must not own generic namespace-locked callbacks");
+  assert!(!routes.contains("save_cron_config("), "cron routes retained split read/replace authority");
 }
 
 #[test]

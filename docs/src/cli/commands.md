@@ -108,7 +108,7 @@ aeordb --version
 7. Starts background workers:
    - **Heartbeat**: emits clock-sync pulses every 15 seconds
    - **Metrics**: emits system metrics snapshots every 15 seconds
-   - **Cron scheduler**: checks `/.config/cron.json` every 60 seconds
+   - **Cron scheduler**: checks protected `/.aeordb-config/cron.json` authority every 60 seconds; manage it through `/system/cron`
    - **Task worker**: dequeues and executes background tasks
    - **Webhook dispatcher**: delivers events to registered webhook URLs
 8. Switches the full API router to ready and emits `server_ready` on eligible SSE streams

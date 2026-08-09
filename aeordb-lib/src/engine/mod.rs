@@ -242,8 +242,8 @@ pub use integrity_scanner::spawn_integrity_scanner;
 pub use metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
 pub use task_worker::{spawn_task_worker, process_next_task};
 pub use cron_scheduler::{
-  CronSchedule, CronConfig, spawn_cron_scheduler, load_cron_config, save_cron_config, seed_default_cron_if_missing,
-  validate_cron_expression,
+  CronConfig, CronSchedule, CronScheduleUpdate, CronTickResult, create_cron_schedule, delete_cron_schedule, load_cron_config,
+  run_cron_tick, save_cron_config, seed_default_cron_if_missing, spawn_cron_scheduler, update_cron_schedule, validate_cron_expression,
 };
 pub use lifecycle_config::{
   LifecycleConfig, SnapshotRetention, load_lifecycle_config, save_lifecycle_config, snapshot_writes_enabled,

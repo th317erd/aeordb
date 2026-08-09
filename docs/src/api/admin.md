@@ -311,6 +311,12 @@ curl -X DELETE http://localhost:6830/system/tasks/task-uuid-here \
 
 > **Tip:** The portal Settings page provides an intuitive UI for scheduling garbage collection. Navigate to Settings → Garbage Collector to configure.
 
+Cron configuration is engine-owned and limited to 1 MiB. All mutations read,
+validate, and replace the complete document under one namespace authority, so
+concurrent create, update, and delete requests cannot lose accepted schedules.
+Malformed, unreadable, duplicate-ID, or oversized stored authority fails closed
+with `500` and remains unchanged.
+
 ### GET /system/cron
 
 List all cron schedules.
@@ -380,6 +386,7 @@ curl -X POST http://localhost:6830/system/cron \
 |--------|-----------|
 | 400 | Invalid cron expression |
 | 409 | Schedule with this ID already exists |
+| 500 | Stored cron authority is unreadable, malformed, invalid, or oversized |
 
 ---
 
@@ -413,6 +420,7 @@ Returns the updated schedule.
 |--------|-----------|
 | 400 | Invalid cron expression |
 | 404 | Schedule not found |
+| 500 | Stored cron authority is unreadable, malformed, invalid, or oversized |
 
 ---
 
@@ -434,6 +442,7 @@ Delete a cron schedule.
 | Status | Condition |
 |--------|-----------|
 | 404 | Schedule not found |
+| 500 | Stored cron authority is unreadable, malformed, invalid, or oversized |
 
 ---
 

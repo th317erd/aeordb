@@ -1,16 +1,19 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::event_bus::EventBus;
+use crate::engine::namespace_mutation::NamespaceMutationKind;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::task_queue::{TaskQueue, TaskStatus};
 
 const CRON_CONFIG_PATH: &str = "/.aeordb-config/cron.json";
+const CRON_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronSchedule {
@@ -22,37 +25,140 @@ pub struct CronSchedule {
   pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CronScheduleUpdate {
+  pub enabled: Option<bool>,
+  pub schedule: Option<String>,
+  pub task_type: Option<String>,
+  pub args: Option<serde_json::Value>,
+}
+
 fn default_enabled() -> bool {
   true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CronConfig {
   pub schedules: Vec<CronSchedule>,
 }
 
 /// Load cron config from `/.aeordb-config/cron.json` in the engine.
-/// Returns empty vec if the file is not found or cannot be parsed.
-pub fn load_cron_config(engine: &StorageEngine) -> Vec<CronSchedule> {
+/// A truly absent file is an empty schedule; unreadable, malformed, duplicate,
+/// or semantically invalid persisted authority is an error.
+pub fn load_cron_config(engine: &StorageEngine) -> EngineResult<Vec<CronSchedule>> {
   let ops = DirectoryOps::new(engine);
-  match ops.read_file_buffered(CRON_CONFIG_PATH) {
-    Ok(data) => match serde_json::from_slice::<CronConfig>(&data) {
-      Ok(config) => config.schedules,
-      Err(e) => {
-        tracing::warn!("Failed to parse /.aeordb-config/cron.json: {} — schedules disabled", e);
-        Vec::new()
-      }
-    },
-    Err(_) => Vec::new(),
+  match ops.read_file_buffered_bounded(CRON_CONFIG_PATH, CRON_CONFIG_MAX_BYTES) {
+    Ok(data) => decode_cron_config(&data).map(|config| config.schedules),
+    Err(EngineError::NotFound(_)) => Ok(Vec::new()),
+    Err(error) => Err(error),
   }
 }
 
 /// Save cron config to `/.aeordb-config/cron.json` in the engine.
 pub fn save_cron_config(engine: &StorageEngine, config: &CronConfig) -> EngineResult<()> {
+  validate_cron_config(config)?;
   let ops = DirectoryOps::new(engine);
   let ctx = RequestContext::system();
   let data = serde_json::to_vec_pretty(config).map_err(|e| EngineError::InvalidInput(format!("serialization error: {e}")))?;
-  ops.store_file_buffered(&ctx, CRON_CONFIG_PATH, &data, Some("application/json"))?;
+  ops.transform_file_buffered(
+    &ctx,
+    CRON_CONFIG_PATH,
+    Some("application/json"),
+    CRON_CONFIG_MAX_BYTES,
+    NamespaceMutationKind::SystemWrite,
+    move |_| Ok(BufferedFileTransform::Replace { data, output: () }),
+  )
+}
+
+/// Atomically read, mutate, validate, and replace cron configuration.
+///
+/// The callback runs while namespace authority is held, so concurrent embedded
+/// or HTTP mutations cannot overwrite schedules observed by another writer.
+fn mutate_cron_config<T, F>(engine: &StorageEngine, mutate: F) -> EngineResult<T>
+where
+  F: FnOnce(&mut Vec<CronSchedule>) -> EngineResult<T>,
+{
+  let ops = DirectoryOps::new(engine);
+  let ctx = RequestContext::system();
+  ops.transform_file_buffered(
+    &ctx,
+    CRON_CONFIG_PATH,
+    Some("application/json"),
+    CRON_CONFIG_MAX_BYTES,
+    NamespaceMutationKind::SystemWrite,
+    move |existing| {
+      let mut config = existing.map(decode_cron_config).transpose()?.unwrap_or_default();
+      let output = mutate(&mut config.schedules)?;
+      validate_cron_config(&config)?;
+      let data = serde_json::to_vec_pretty(&config)
+        .map_err(|error| EngineError::InvalidInput(format!("cron config serialization error: {error}")))?;
+      Ok(BufferedFileTransform::Replace { data, output })
+    },
+  )
+}
+
+/// Create one schedule without exposing the namespace-locked transform callback.
+pub fn create_cron_schedule(engine: &StorageEngine, schedule: CronSchedule) -> EngineResult<CronSchedule> {
+  mutate_cron_config(engine, move |schedules| {
+    if schedules.iter().any(|existing| existing.id == schedule.id) {
+      return Err(EngineError::AlreadyExists(schedule.id.clone()));
+    }
+    schedules.push(schedule.clone());
+    Ok(schedule)
+  })
+}
+
+/// Update one schedule atomically with concurrent cron mutations.
+pub fn update_cron_schedule(engine: &StorageEngine, id: &str, update: CronScheduleUpdate) -> EngineResult<CronSchedule> {
+  let requested_id = id.to_string();
+  mutate_cron_config(engine, move |schedules| {
+    let schedule =
+      schedules.iter_mut().find(|schedule| schedule.id == requested_id).ok_or_else(|| EngineError::NotFound(requested_id.clone()))?;
+    if let Some(enabled) = update.enabled {
+      schedule.enabled = enabled;
+    }
+    if let Some(expression) = update.schedule {
+      schedule.schedule = expression;
+    }
+    if let Some(task_type) = update.task_type {
+      schedule.task_type = task_type;
+    }
+    if let Some(args) = update.args {
+      schedule.args = args;
+    }
+    Ok(schedule.clone())
+  })
+}
+
+/// Delete one schedule atomically with concurrent cron mutations.
+pub fn delete_cron_schedule(engine: &StorageEngine, id: &str) -> EngineResult<()> {
+  let requested_id = id.to_string();
+  mutate_cron_config(engine, move |schedules| {
+    let original_len = schedules.len();
+    schedules.retain(|schedule| schedule.id != requested_id);
+    if schedules.len() == original_len {
+      return Err(EngineError::NotFound(requested_id));
+    }
+    Ok(())
+  })
+}
+
+fn decode_cron_config(data: &[u8]) -> EngineResult<CronConfig> {
+  let config: CronConfig = serde_json::from_slice(data)
+    .map_err(|error| EngineError::JsonParseError(format!("cron config at {CRON_CONFIG_PATH} is malformed: {error}")))?;
+  validate_cron_config(&config)?;
+  Ok(config)
+}
+
+fn validate_cron_config(config: &CronConfig) -> EngineResult<()> {
+  let mut ids = HashSet::with_capacity(config.schedules.len());
+  for schedule in &config.schedules {
+    if !ids.insert(schedule.id.as_str()) {
+      return Err(EngineError::InvalidInput(format!("cron config contains duplicate schedule id '{}'", schedule.id)));
+    }
+    validate_cron_expression(&schedule.schedule)
+      .map_err(|error| EngineError::InvalidInput(format!("invalid cron expression for schedule '{}': {error}", schedule.id)))?;
+  }
   Ok(())
 }
 
@@ -61,9 +167,17 @@ pub fn save_cron_config(engine: &StorageEngine, config: &CronConfig) -> EngineRe
 /// so users can disable defaults without them being re-added on restart.
 pub fn seed_default_cron_if_missing(engine: &StorageEngine) -> EngineResult<bool> {
   let ops = DirectoryOps::new(engine);
-  match ops.read_file_buffered(CRON_CONFIG_PATH) {
-    Ok(_) => Ok(false),
-    Err(EngineError::NotFound(_)) => {
+  let ctx = RequestContext::system();
+  let seeded = ops.transform_file_buffered(
+    &ctx,
+    CRON_CONFIG_PATH,
+    Some("application/json"),
+    CRON_CONFIG_MAX_BYTES,
+    NamespaceMutationKind::SystemWrite,
+    |existing| {
+      if existing.is_some() {
+        return Ok(BufferedFileTransform::Keep(false));
+      }
       let defaults = CronConfig {
         schedules: vec![
           CronSchedule {
@@ -82,12 +196,16 @@ pub fn seed_default_cron_if_missing(engine: &StorageEngine) -> EngineResult<bool
           },
         ],
       };
-      save_cron_config(engine, &defaults)?;
-      tracing::info!("Seeded default cron schedules: hourly cleanup, daily 03:00 GC");
-      Ok(true)
-    }
-    Err(other) => Err(other),
+      validate_cron_config(&defaults)?;
+      let data = serde_json::to_vec_pretty(&defaults)
+        .map_err(|error| EngineError::InvalidInput(format!("default cron config serialization error: {error}")))?;
+      Ok(BufferedFileTransform::Replace { data, output: true })
+    },
+  )?;
+  if seeded {
+    tracing::info!("Seeded default cron schedules: hourly cleanup, daily 03:00 GC");
   }
+  Ok(seeded)
 }
 
 /// Convert a 5-field Unix cron expression to a 6-field expression compatible
@@ -171,13 +289,14 @@ pub fn validate_cron_expression(expression: &str) -> Result<(), String> {
 /// Converts to a 6-field expression for the `cron` crate, then checks if
 /// any occurrence falls within the current minute window.
 pub fn cron_matches_now(expression: &str) -> bool {
+  cron_matches_now_checked(expression).unwrap_or(false)
+}
+
+fn cron_matches_now_checked(expression: &str) -> Result<bool, String> {
   use chrono::Timelike;
 
   let six_field = to_cron_crate_expression(expression);
-  let schedule = match cron::Schedule::from_str(&six_field) {
-    Ok(s) => s,
-    Err(_) => return false,
-  };
+  let schedule = cron::Schedule::from_str(&six_field).map_err(|error| error.to_string())?;
 
   // Build one second before the start of the current minute so that
   // `after()` (which is exclusive) will include second-0 of this minute.
@@ -185,7 +304,7 @@ pub fn cron_matches_now(expression: &str) -> bool {
   let start_of_minute = now.with_second(0).and_then(|t| t.with_nanosecond(0)).unwrap_or(now) - chrono::Duration::seconds(1);
 
   // Ask: is the next occurrence after (start_of_minute - 1s) within this minute?
-  match schedule.after(&start_of_minute).take(1).next() {
+  Ok(match schedule.after(&start_of_minute).take(1).next() {
     Some(next) => {
       let diff = next.signed_duration_since(start_of_minute);
       // The occurrence should be at second 0 of this minute (diff == 0)
@@ -193,7 +312,65 @@ pub fn cron_matches_now(expression: &str) -> bool {
       diff.num_seconds() >= 0 && diff.num_seconds() < 60
     }
     None => false,
+  })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CronTickResult {
+  pub schedules_checked: usize,
+  pub tasks_enqueued: usize,
+  pub tasks_deduplicated: usize,
+}
+
+/// Execute one scheduler tick with explicit failure semantics.
+///
+/// A config or task-registry failure occurs before enqueue. If a later enqueue
+/// fails after earlier due schedules succeeded, those tasks remain durable and
+/// the next tick deduplicates them before retrying the remainder.
+pub fn run_cron_tick(queue: &TaskQueue, engine: &StorageEngine) -> EngineResult<CronTickResult> {
+  let schedules = load_cron_config(engine)?;
+  let mut due = Vec::new();
+  let mut result = CronTickResult::default();
+  for schedule in schedules {
+    if !schedule.enabled {
+      continue;
+    }
+    result.schedules_checked = result
+      .schedules_checked
+      .checked_add(1)
+      .ok_or_else(|| EngineError::ResourceExhausted("cron checked-schedule counter overflow".to_string()))?;
+    if cron_matches_now_checked(&schedule.schedule)
+      .map_err(|error| EngineError::InvalidInput(format!("invalid cron expression for schedule '{}': {error}", schedule.id)))?
+    {
+      due.push(schedule);
+    }
   }
+  if due.is_empty() {
+    return Ok(result);
+  }
+
+  let mut tasks = queue.list_tasks()?;
+  for schedule in due {
+    let dominated = tasks.iter().any(|task| {
+      (task.status == TaskStatus::Pending || task.status == TaskStatus::Running)
+        && task.task_type == schedule.task_type
+        && task.args == schedule.args
+    });
+    if dominated {
+      result.tasks_deduplicated = result
+        .tasks_deduplicated
+        .checked_add(1)
+        .ok_or_else(|| EngineError::ResourceExhausted("cron deduplicated-task counter overflow".to_string()))?;
+      continue;
+    }
+
+    tasks.push(queue.enqueue(&schedule.task_type, schedule.args)?);
+    result.tasks_enqueued = result
+      .tasks_enqueued
+      .checked_add(1)
+      .ok_or_else(|| EngineError::ResourceExhausted("cron enqueued-task counter overflow".to_string()))?;
+  }
+  Ok(result)
 }
 
 /// Spawn the cron scheduler loop. Runs every 60 seconds, loading the cron
@@ -214,32 +391,8 @@ pub fn spawn_cron_scheduler(
           _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {}
       }
 
-      let schedules = load_cron_config(&engine);
-
-      for schedule in &schedules {
-        if !schedule.enabled {
-          continue;
-        }
-
-        if !cron_matches_now(&schedule.schedule) {
-          continue;
-        }
-
-        // Dedup: check if a task with same type+args is already pending or running.
-        let dominated = match queue.list_tasks() {
-          Ok(tasks) => tasks.iter().any(|t| {
-            (t.status == TaskStatus::Pending || t.status == TaskStatus::Running)
-              && t.task_type == schedule.task_type
-              && t.args == schedule.args
-          }),
-          Err(_) => false,
-        };
-
-        if dominated {
-          continue;
-        }
-
-        let _ = queue.enqueue(&schedule.task_type, schedule.args.clone());
+      if let Err(error) = run_cron_tick(&queue, &engine) {
+        tracing::error!(%error, "Cron scheduler tick failed; due work was not reported as successful");
       }
     }
   })

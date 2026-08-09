@@ -411,6 +411,10 @@
         - [x] Add one coordinator-owned buffered publication and planned file-retirement path, remove the best-effort delete squelch, and source-gate the compound producer.
         - [x] Run focused user/system/namespace, adjacent auth/permissions/sharing/restart, static, and disposable live restart/verify proof before landing.
       - [ ] Convert keys, permissions, shares, config, plugins, peers, conflicts, cron, and legacy system-path migration adapters.
+        - [x] Converge cron configuration CRUD on one strict, atomic namespace mutation path without lost read-modify-write updates.
+        - [x] Make scheduler config, task-list, expression, and enqueue failures observable and fail closed for the affected tick.
+        - [x] Prove malformed storage, concurrent CRUD, task deduplication, restart, architecture, and live HTTP behavior.
+        - [ ] Correct the startup empty-root diagnostic so a database containing only concealed system state is not reported as possibly missing data; retain the warning for genuinely inconsistent roots.
       - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [ ] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
       - [ ] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.
