@@ -5598,6 +5598,14 @@ impl StorageEngine {
     }
   }
 
+  fn record_hot_tail_timer_lock_poison(&self, lock_name: &'static str) {
+    self.record_durability_failure(
+      DurabilityOperation::HeaderAb,
+      "Hot-tail timer lock poisoned",
+      EngineError::IoError(std::io::Error::other(format!("{lock_name} lock poisoned"))),
+    );
+  }
+
   /// Try to flush the hot buffer if the KV lock is available.
   /// Used by the 100ms timer task — non-blocking, skips if writer is busy.
   ///
@@ -5629,7 +5637,12 @@ impl StorageEngine {
       Ok(kv) => kv.hot_buffer_len() > 0,
       // Couldn't get the lock — a writer is busy; let them finish and we'll
       // pick it up on the next tick.
-      Err(_) => return,
+      Err(std::sync::TryLockError::WouldBlock) => return,
+      Err(std::sync::TryLockError::Poisoned(error)) => {
+        drop(error);
+        self.record_hot_tail_timer_lock_poison("KV writer probe");
+        return;
+      }
     };
     if !has_pending {
       return;
@@ -5651,11 +5664,22 @@ impl StorageEngine {
     let commit_result = {
       let mut writer = match self.writer.try_write() {
         Ok(writer) => writer,
-        Err(_) => return,
+        Err(std::sync::TryLockError::WouldBlock) => return,
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+          drop(error);
+          self.record_hot_tail_timer_lock_poison("WAL writer");
+          return;
+        }
       };
       let mut kv = match self.kv_writer.try_lock() {
         Ok(kv) => kv,
-        Err(_) => return,
+        Err(std::sync::TryLockError::WouldBlock) => return,
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+          drop(error);
+          drop(writer);
+          self.record_hot_tail_timer_lock_poison("KV writer commit");
+          return;
+        }
       };
       if kv.hot_buffer_len() == 0 || kv.transaction_depth != 0 {
         return;
@@ -5851,6 +5875,10 @@ impl Drop for StorageEngine {
 #[cfg(test)]
 #[path = "../../spec/engine/operation_tracker_internal_spec.rs"]
 mod operation_tracker_internal_spec;
+
+#[cfg(test)]
+#[path = "../../spec/engine/hot_tail_timer_poison_internal_spec.rs"]
+mod hot_tail_timer_poison_internal_spec;
 
 #[cfg(test)]
 mod tests {
