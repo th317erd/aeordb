@@ -465,13 +465,14 @@
         - [x] Preserve exact acknowledged token/link counts, metrics, events, no-op cardinality, and concurrent replacement safety.
         - [x] Project cleanup and other batched SSE paths per subscriber so protected or denied sibling paths cannot leak.
         - [x] Require ordinary SSE path events to satisfy current user/group permissions and active API-key authority; reject malformed identities, exclude recipient-addressed events from the global stream, classify administrative events as root-only, and fail closed after authority revocation.
-        - [ ] Run focused, affected, broad, live HTTP/restart, and offline integrity gates; commit and push.
+        - [x] Run focused, affected, broad, live HTTP/restart, and offline integrity gates; commit and push.
       - [ ] Preserve targeted/full directory repair outcomes, stale-locator repairs, and durability publication as exact acknowledged maintenance evidence.
       - [ ] Make GC recheck teardown explicit and non-squelched without allowing cleanup failure to erase the primary GC result.
       - [ ] Re-audit the already-converged backup import locator/HEAD authority and source-gate the Wave 5 exit invariant.
       - [ ] Keep migration source capture classified as unavailable until the P7 runtime writer activates, then bind it to the shared migration authority and memory owner.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
+    - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
     - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
     - [ ] P8: expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
 
