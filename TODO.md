@@ -428,7 +428,7 @@
           - [x] Prove embedded, HTTP, separate-auth-engine, malformed, oversized, concurrent, no-op, restart, and architecture behavior.
         - [x] Correct the startup empty-root diagnostic so a database containing only concealed system state is not reported as possibly missing data; retain the warning for genuinely inconsistent roots.
       - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
-      - [ ] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
+      - [x] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
       - [ ] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.
     - [ ] P2e Wave 5: converge maintenance and repair producers on one namespace mutation and locator authority.
       - [ ] Convert reindex metadata resave, repair, cleanup, GC follow-up, import, and migration source capture.

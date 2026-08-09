@@ -342,6 +342,16 @@ checked installers use a bounded read-only inspector and the
 `aeordb.v3-transition-recovery.v1` capability to enforce this rule. See
 [Deployment Safety](../operations/deployment-safety.md).
 
+Mutable transition controls use canonical A/B slots below the protected
+ControlStore subtree. Publication is available only through the typed
+ControlStore authority: it selects the inactive slot, performs one ordinary
+hard-acknowledged namespace transaction, reads the stored bytes back, and
+verifies that the new sequence is selected while retaining the same namespace
+authority. Generic file and plugin APIs cannot manufacture control authority by
+supplying a path below the protected subtree. The v3 compatibility adapter
+continues to write the existing system-flagged FileRecord v0 representation;
+this authority boundary does not change stored bytes.
+
 ## Crash Recovery
 
 The recovery hierarchy, from least to most damage:

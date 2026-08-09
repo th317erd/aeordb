@@ -708,7 +708,7 @@ fn transition_control_store_serializes_concurrent_publication_of_one_sequence() 
 }
 
 #[test]
-fn transition_v0_writer_has_one_definition_and_control_store_is_its_only_caller() {
+fn transition_v0_writer_requires_the_typed_control_store_publication_context() {
   fn visit(path: &Path, matches: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(path).unwrap() {
       let entry = entry.unwrap();
@@ -730,4 +730,24 @@ fn transition_v0_writer_has_one_definition_and_control_store_is_its_only_caller(
   let relative: Vec<_> =
     matches.iter().map(|path| path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().to_string_lossy().replace('\\', "/")).collect();
   assert_eq!(relative, vec!["src/engine/directory_ops.rs", "src/engine/v4/control_store.rs"]);
+
+  let directory_source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/directory_ops.rs")).unwrap();
+  let writer_start = directory_source.find("  pub(crate) fn store_transition_control_v0(").unwrap();
+  let writer_end = directory_source[writer_start..].find("\n  /// Store multiple small files").unwrap() + writer_start;
+  let writer = &directory_source[writer_start..writer_end];
+  assert!(writer.contains("publication: &V3ControlPublicationContextV0"));
+  assert!(writer.contains("std::ptr::eq(self.engine, publication.engine())"));
+  assert!(writer.contains("publication.target_path(target_slot)?"));
+  assert!(!writer.contains("starts_with"), "ControlStore authority must not be granted by matching a caller-supplied string path");
+
+  let control_source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/control_store.rs")).unwrap();
+  assert!(control_source.contains("struct V3ControlPublicationContextV0<'a>"));
+  assert!(control_source.contains("_authority: NamespaceWriteGuard<'a>"));
+  let context_impl_start = control_source.find("impl<'a> V3ControlPublicationContextV0<'a>").unwrap();
+  let context_impl_end = control_source[context_impl_start..].find("\npub struct V3TransitionControlStore").unwrap() + context_impl_start;
+  let context_impl = &control_source[context_impl_start..context_impl_end];
+  assert!(context_impl.contains("  fn new("));
+  assert!(!context_impl.contains("pub(crate) fn new("), "only ControlStore may construct publication authority");
+  assert!(control_source.contains("store_transition_control_v0(&publication, target_slot, bytes)"));
+  assert!(!control_source.contains("store_transition_control_v0(&target_path, bytes)"));
 }

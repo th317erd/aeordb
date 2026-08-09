@@ -15,7 +15,7 @@ use crate::engine::entry_header::FLAG_SYSTEM;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
-use crate::engine::storage_engine::StorageEngine;
+use crate::engine::storage_engine::{NamespaceWriteGuard, StorageEngine};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ControlStoreSlotsV1<'a> {
@@ -38,6 +38,38 @@ pub struct LoadedMutableControlV1 {
   pub sequence: u64,
   pub redundancy_degraded: bool,
   pub bytes: Vec<u8>,
+}
+
+/// Typed proof that ControlStore owns namespace authority for one mutable v0
+/// control publication. Only this module can construct the context; the
+/// DirectoryOps adapter derives the canonical path from its typed fields.
+pub(crate) struct V3ControlPublicationContextV0<'a> {
+  engine: &'a StorageEngine,
+  kind: SystemControlKindV1,
+  identity: Vec<u8>,
+  _authority: NamespaceWriteGuard<'a>,
+}
+
+impl<'a> V3ControlPublicationContextV0<'a> {
+  fn new(engine: &'a StorageEngine, kind: SystemControlKindV1, identity: &[u8]) -> EngineResult<Self> {
+    if kind.is_immutable() {
+      return Err(EngineError::InvalidInput("v3 transition ControlStore only publishes mutable A/B controls".to_string()));
+    }
+    system_control_path(kind, identity, SystemControlSlotV1::A).map_err(format_error)?;
+    let authority = engine.namespace_write_guard()?;
+    Ok(Self { engine, kind, identity: identity.to_vec(), _authority: authority })
+  }
+
+  pub(crate) fn engine(&self) -> &StorageEngine {
+    self.engine
+  }
+
+  pub(crate) fn target_path(&self, slot: SystemControlSlotV1) -> EngineResult<String> {
+    if slot == SystemControlSlotV1::Immutable {
+      return Err(EngineError::InvalidInput("mutable v0 ControlStore publication requires an A/B slot".to_string()));
+    }
+    system_control_path(self.kind, &self.identity, slot).map_err(format_error)
+  }
 }
 
 pub struct V3TransitionControlStore<'a> {
@@ -88,11 +120,10 @@ impl<'a> V3TransitionControlStore<'a> {
     let incoming = decode_system_control(bytes, self.engine.hash_algo()).map_err(format_error)?;
     verify_expected(&incoming, kind, database_id, identity).map_err(format_error)?;
 
-    // Sequence selection and inactive-slot publication are one namespace
-    // authority operation. DirectoryOps re-enters this guard while publishing
-    // the FileRecord, so the lock remains held through hard completion and
-    // selected-state read-back without introducing a second lock order.
-    let _publication = self.engine.namespace_write_guard()?;
+    // The typed context owns sequence selection, the one DirectoryOps
+    // coordinator publication, and selected-state read-back under the same
+    // namespace authority lifetime without granting access by string path.
+    let publication = V3ControlPublicationContextV0::new(self.engine, kind, identity)?;
     let current = self.load_mutable(kind, database_id, identity)?;
     let expected_sequence = match current.as_ref() {
       Some(selected) => {
@@ -111,8 +142,8 @@ impl<'a> V3TransitionControlStore<'a> {
       Some(SystemControlSlotV1::B) | None => SystemControlSlotV1::A,
       Some(SystemControlSlotV1::Immutable) => unreachable!("mutable selection cannot choose immutable slot"),
     };
-    let target_path = system_control_path(kind, identity, target_slot).map_err(format_error)?;
-    DirectoryOps::new(self.engine).store_transition_control_v0(&target_path, bytes)?;
+    let target_path = publication.target_path(target_slot)?;
+    DirectoryOps::new(self.engine).store_transition_control_v0(&publication, target_slot, bytes)?;
     let read_back = self.load_slot(kind, &target_path)?.ok_or_else(|| EngineError::NotFound(target_path.clone()))?;
     if read_back != bytes {
       return Err(EngineError::DurabilityFailure(format!("ControlStore read-back mismatch for {target_path}")));

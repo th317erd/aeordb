@@ -27,6 +27,8 @@ use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::traversal::{TraversalIntegrity, VisitorCompletion};
+use crate::engine::v4::control_store::V3ControlPublicationContextV0;
+use crate::engine::v4::system_control::SystemControlSlotV1;
 use crate::engine::v4::system_family::SystemFamilyClassificationV1;
 use crate::engine::SystemFamilyPolicyResolver;
 
@@ -2284,11 +2286,16 @@ impl<'a> DirectoryOps<'a> {
     })
   }
 
-  pub(crate) fn store_transition_control_v0(&self, path: &str, data: &[u8]) -> EngineResult<FileRecord> {
-    let normalized = normalize_path(path);
-    if !normalized.starts_with("/.aeordb-system/controls/v1/") {
-      return Err(EngineError::InvalidInput("transition control writer requires a canonical ControlStore path".to_string()));
+  pub(crate) fn store_transition_control_v0(
+    &self,
+    publication: &V3ControlPublicationContextV0<'_>,
+    target_slot: SystemControlSlotV1,
+    data: &[u8],
+  ) -> EngineResult<FileRecord> {
+    if !std::ptr::eq(self.engine, publication.engine()) {
+      return Err(EngineError::InvalidInput("transition control publication context belongs to a different engine".to_string()));
     }
+    let normalized = publication.target_path(target_slot)?;
     self.store_file_internal_inner(
       &RequestContext::system(),
       &normalized,
