@@ -467,7 +467,15 @@
         - [x] Require ordinary SSE path events to satisfy current user/group permissions and active API-key authority; reject malformed identities, exclude recipient-addressed events from the global stream, classify administrative events as root-only, and fail closed after authority revocation.
         - [x] Run focused, affected, broad, live HTTP/restart, and offline integrity gates; commit and push.
       - [ ] Preserve targeted/full directory repair outcomes, stale-locator repairs, and durability publication as exact acknowledged maintenance evidence.
+        - [ ] Reproduce and preserve a successful stale-locator acknowledgement when a later locator repair fails.
+        - [ ] Make full directory rebuild report exact acknowledged directory writes when later workspace/planning/publication work fails.
+        - [ ] Merge nested repair partial counts into one bounded `verify and repair` terminal outcome without erasing serious failure evidence.
+        - [ ] Route stale directory-locator replacement through the shared `MaintenanceRepair` namespace authority.
+        - [ ] Count Void snapshot republication only after its hard hot-tail publication succeeds.
       - [ ] Make GC recheck teardown explicit and non-squelched without allowing cleanup failure to erase the primary GC result.
+        - [ ] Replace Drop-only normal completion with explicit primary-result/teardown-result combination while retaining unwind cleanup.
+        - [ ] Recover a poisoned recheck lock so a cleanup incident cannot permanently disable later GC runs.
+        - [ ] Surface recovered teardown incidents in the successful GC result/event and visible telemetry; preserve an existing primary error unchanged.
       - [ ] Re-audit the already-converged backup import locator/HEAD authority and source-gate the Wave 5 exit invariant.
       - [ ] Keep migration source capture classified as unavailable until the P7 runtime writer activates, then bind it to the shared migration authority and memory owner.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
