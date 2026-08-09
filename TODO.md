@@ -432,10 +432,10 @@
           - [x] Publish persisted peer changes before mutating `PeerManager`, and never advertise a peer whose authority failed.
           - [x] Make node identity create-once and make malformed node, peer, or bundled-plugin authority abort server construction instead of logging a ready server.
           - [x] Prove concurrent updates, no-op/idempotent transitions, malformed/oversized state, startup refusal, restart, and HTTP behavior.
-        - [ ] Converge plugin deployment and removal authority.
-          - [ ] Decide bundled version/identity replacement while storage authority is held and preserve exact first-party metadata semantics.
-          - [ ] Bind compiled-cache identity to the stored plugin checksum so concurrent or external managers cannot execute stale bytes after acknowledgement.
-          - [ ] Bound and strictly validate plugin records, then prove concurrent deploy/remove, malformed state, pressure, restart, and invocation behavior.
+        - [x] Converge plugin deployment and removal authority.
+          - [x] Decide bundled version/identity replacement while storage authority is held and preserve exact first-party metadata semantics.
+          - [x] Bind compiled-cache identity to the stored plugin checksum so concurrent or external managers cannot execute stale bytes after acknowledgement.
+          - [x] Bound and strictly validate plugin records, then prove concurrent deploy/remove, malformed state, pressure, restart, and invocation behavior.
         - [ ] Converge legacy configuration, email configuration, and system-path migration authority.
           - [ ] Validate and bound legacy config keys/values and make JWT first initialization single-winner.
           - [ ] Bound email authority and remove serialization error squelching.

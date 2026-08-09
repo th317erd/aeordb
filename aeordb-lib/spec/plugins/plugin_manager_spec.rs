@@ -1,7 +1,10 @@
-use aeordb::plugins::plugin_manager::{PluginManager, PluginManagerError};
+use std::sync::{Arc, Barrier};
+
+use aeordb::engine::system_store;
+use aeordb::engine::RequestContext;
+use aeordb::plugins::plugin_manager::{PLUGIN_BINARY_MAX_BYTES, PluginManager, PluginManagerError};
 use aeordb::plugins::types::PluginType;
 use aeordb::server::create_temp_engine_for_tests;
-use aeordb::engine::RequestContext;
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
 
 /// Compile a minimal valid WASM module for testing.
@@ -51,6 +54,24 @@ fn fuel_exhausting_wasm_bytes() -> Vec<u8> {
     )
     "#,
   )
+  .expect("WAT should be valid")
+}
+
+fn constant_wasm_bytes(value: u8) -> Vec<u8> {
+  wat::parse_str(format!(
+    r#"
+    (module
+      (memory (export "memory") 1)
+      (data (i32.const 4096) "\{value:02x}")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (i64.or
+          (i64.shl (i64.const 4096) (i64.const 32))
+          (i64.const 1)
+        )
+      )
+    )
+    "#,
+  ))
   .expect("WAT should be valid")
 }
 
@@ -282,6 +303,176 @@ fn compiled_plugin_cache_is_accounted_and_invalidation_releases_it() {
   let invalidated = engine.memory_coordinator_snapshot().unwrap();
   assert_eq!(invalidated.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
   assert_eq!(invalidated.owner(MemoryOwner::ParserPlugin).unwrap().active_reservations, 0);
+}
+
+#[test]
+fn compiled_plugin_cache_identity_tracks_acknowledged_bytes_across_managers() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager_a = PluginManager::new(engine.clone());
+  let manager_b = PluginManager::new(engine.clone());
+  manager_a.deploy_plugin("old", "cache/shared", PluginType::Wasm, constant_wasm_bytes(b'A')).unwrap();
+
+  assert_eq!(manager_b.invoke_wasm_plugin("cache/shared", b"request").unwrap(), b"A");
+  manager_a.deploy_plugin("new", "cache/shared", PluginType::Wasm, constant_wasm_bytes(b'B')).unwrap();
+
+  assert_eq!(
+    manager_b.invoke_wasm_plugin("cache/shared", b"request").unwrap(),
+    b"B",
+    "an acknowledged replacement must not reuse another manager's path-keyed stale runtime",
+  );
+  assert!(manager_b.remove_plugin("cache/shared").unwrap());
+  let invalidated = engine.memory_coordinator_snapshot().unwrap();
+  assert_eq!(invalidated.owner(MemoryOwner::ParserPlugin).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn concurrent_first_deploys_reuse_one_persistent_plugin_id() {
+  const WRITERS: usize = 16;
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let barrier = Arc::new(Barrier::new(WRITERS));
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let mut handles = Vec::with_capacity(WRITERS);
+
+  for writer in 0..WRITERS {
+    let engine = engine.clone();
+    let barrier = barrier.clone();
+    handles.push(std::thread::spawn(move || {
+      let manager = PluginManager::new(engine);
+      barrier.wait();
+      manager.deploy_plugin(&format!("writer-{writer}"), "race/identity", PluginType::Wasm, minimal_wasm_bytes()).unwrap()
+    }));
+  }
+
+  let records: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+  let expected_id = &records[0].plugin_id;
+  assert!(records.iter().all(|record| &record.plugin_id == expected_id), "every acknowledged replacement must retain one stable ID");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + WRITERS as u64);
+}
+
+#[test]
+fn stored_plugin_checksum_mismatch_fails_closed() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  manager.deploy_plugin("checksum", "strict/checksum", PluginType::Wasm, minimal_wasm_bytes()).unwrap();
+  let encoded = system_store::get_plugin(&engine, "strict/checksum").unwrap().unwrap();
+  let mut record: aeordb::plugins::PluginRecord = serde_json::from_slice(&encoded).unwrap();
+  record.checksum = format!("blake3:{}", "0".repeat(64));
+  system_store::store_plugin(&engine, &RequestContext::system(), "strict/checksum", &serde_json::to_vec(&record).unwrap()).unwrap();
+
+  let error = manager.get_plugin("strict/checksum").unwrap_err();
+  assert!(error.to_string().contains("checksum"), "unexpected checksum-corruption error: {error}");
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let error = manager.deploy_plugin("replacement", "strict/checksum", PluginType::Wasm, minimal_wasm_bytes()).unwrap_err();
+  assert!(error.to_string().contains("checksum"), "unexpected replacement error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+}
+
+#[test]
+fn ambiguous_plugin_key_is_rejected_before_publication() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = manager.deploy_plugin("ambiguous", "aliases::plugin", PluginType::Wasm, minimal_wasm_bytes()).unwrap_err();
+
+  assert!(matches!(error, PluginManagerError::InvalidPlugin(_)), "unexpected ambiguous-key error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(manager.get_plugin("aliases/plugin").unwrap().is_none());
+}
+
+#[test]
+fn legacy_empty_checksum_is_derived_without_rewriting_the_record() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  manager.deploy_plugin("legacy", "strict/legacy", PluginType::Wasm, minimal_wasm_bytes()).unwrap();
+  let encoded = system_store::get_plugin(&engine, "strict/legacy").unwrap().unwrap();
+  let mut record: aeordb::plugins::PluginRecord = serde_json::from_slice(&encoded).unwrap();
+  record.checksum.clear();
+  let legacy_encoded = serde_json::to_vec(&record).unwrap();
+  system_store::store_plugin(&engine, &RequestContext::system(), "strict/legacy", &legacy_encoded).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let loaded = manager.get_plugin("strict/legacy").unwrap().unwrap();
+
+  assert_eq!(loaded.checksum, format!("blake3:{}", blake3::hash(&loaded.wasm_bytes).to_hex()));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(system_store::get_plugin(&engine, "strict/legacy").unwrap().unwrap(), legacy_encoded);
+}
+
+#[test]
+fn oversized_plugin_and_metadata_are_rejected_before_publication() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let oversized = manager.deploy_plugin("oversized", "limits/body", PluginType::Native, vec![0x5a; PLUGIN_BINARY_MAX_BYTES + 1]);
+  assert!(matches!(oversized, Err(PluginManagerError::ResourceExhausted(_))));
+  let metadata = manager.deploy_plugin(&"n".repeat(4097), "limits/name", PluginType::Wasm, minimal_wasm_bytes());
+  assert!(matches!(metadata, Err(PluginManagerError::InvalidPlugin(_))));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(manager.get_plugin("limits/body").unwrap().is_none());
+  assert!(manager.get_plugin("limits/name").unwrap().is_none());
+}
+
+#[test]
+fn native_deployment_refuses_pressure_before_publication_and_retries_cleanly() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  let snapshot = engine.memory_coordinator_snapshot().unwrap();
+  let available = snapshot.policy.unwrap().ordinary_limit_bytes().saturating_sub(snapshot.accounted_bytes);
+  let remaining = 512 * 1024;
+  assert!(available > remaining);
+  let pressure = engine.memory_coordinator().reserve(MemoryOwner::Task, available - remaining, AdmissionClass::Workload).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let native_bytes = vec![0x31; 256 * 1024];
+
+  let error = manager.deploy_plugin("native", "pressure/native", PluginType::Native, native_bytes.clone()).unwrap_err();
+
+  assert!(matches!(error, PluginManagerError::ResourceExhausted(_)), "unexpected pressure error: {error}");
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(manager.get_plugin("pressure/native").unwrap().is_none());
+  drop(pressure);
+  assert_eq!(manager.deploy_plugin("native", "pressure/native", PluginType::Native, native_bytes).unwrap().name, "native");
+}
+
+#[test]
+fn concurrent_remove_and_deploy_are_linearizable_with_a_cached_observer() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let setup_manager = PluginManager::new(engine.clone());
+  let observer = PluginManager::new(engine.clone());
+  setup_manager.deploy_plugin("old", "race/remove", PluginType::Wasm, constant_wasm_bytes(b'A')).unwrap();
+  assert_eq!(observer.invoke_wasm_plugin("race/remove", b"request").unwrap(), b"A");
+  let barrier = Arc::new(Barrier::new(2));
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let remove_handle = {
+    let engine = engine.clone();
+    let barrier = barrier.clone();
+    std::thread::spawn(move || {
+      let manager = PluginManager::new(engine);
+      barrier.wait();
+      manager.remove_plugin("race/remove").unwrap()
+    })
+  };
+  let deploy_handle = {
+    let engine = engine.clone();
+    std::thread::spawn(move || {
+      let manager = PluginManager::new(engine);
+      barrier.wait();
+      manager.deploy_plugin("new", "race/remove", PluginType::Wasm, constant_wasm_bytes(b'B')).unwrap()
+    })
+  };
+
+  assert!(remove_handle.join().unwrap());
+  let _deployed = deploy_handle.join().unwrap();
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 2);
+  match observer.get_plugin("race/remove").unwrap() {
+    Some(record) => {
+      assert_eq!(record.name, "new");
+      assert_eq!(observer.invoke_wasm_plugin("race/remove", b"request").unwrap(), b"B");
+    }
+    None => assert!(matches!(observer.invoke_wasm_plugin("race/remove", b"request"), Err(PluginManagerError::NotFound(_)))),
+  }
 }
 
 #[test]

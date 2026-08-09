@@ -69,6 +69,13 @@ startup instead of serving without the requested peers. While initialization
 is in progress or has failed, the startup health surface reports that state;
 ordinary application routes are not exposed as ready.
 
+Bundled-plugin replacement policy is evaluated against the current record
+under namespace authority. Canonical no-op records do not require WASM compile
+admission; records that may change are validated and then rechecked before one
+atomic per-plugin publication. Stored checksums and record paths are verified
+before use, and compiled runtimes are identified by path plus checksum rather
+than path alone.
+
 ### Authentication
 
 All `/sync/*` endpoints require JWT authentication. Nodes mint short-lived root JWTs (nil UUID `sub`) internally when calling each other's `/sync/diff` and `/sync/chunks` endpoints. This works because every node in the cluster shares the same Ed25519 signing key (distributed by `/sync/join`).

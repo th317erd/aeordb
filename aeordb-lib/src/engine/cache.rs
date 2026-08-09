@@ -291,6 +291,28 @@ where
     Ok(true)
   }
 
+  pub fn remove_where<F>(&self, mut predicate: F) -> EngineResult<usize>
+  where
+    F: FnMut(&K) -> bool,
+  {
+    let mut state = self
+      .state
+      .write()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Clean cache write lock poisoned: {error}"))))?;
+    let mut removed_entries = 0usize;
+    let mut removed_bytes = 0u64;
+    state.entries.retain(|key, entry| {
+      if !predicate(key) {
+        return true;
+      }
+      removed_entries = removed_entries.saturating_add(1);
+      removed_bytes = removed_bytes.saturating_add(entry.weight);
+      false
+    });
+    state.resident_bytes = state.resident_bytes.saturating_sub(removed_bytes);
+    Ok(removed_entries)
+  }
+
   fn evict_lru_locked(&self, state: &mut CleanCacheState<K, V>, excluded: Option<&K>) -> bool {
     let Some(key) = state
       .entries

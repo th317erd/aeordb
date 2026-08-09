@@ -47,6 +47,18 @@ Deploy a WASM plugin at the given plugin path. If a plugin already exists at thi
 
 `{name}` in the URL is the plugin path/key used for storage and invocation. The optional `name` query parameter is display metadata only.
 
+Deployment is one atomic namespace mutation. A replacement retains the existing
+`plugin_id`; concurrent first deployments select one persistent ID and every
+acknowledged replacement reuses it. AeorDB validates WASM before publication,
+then rechecks the current record while mutation authority is held. A rejected
+or failed deployment does not invalidate the currently executable plugin.
+
+Plugin bodies are limited to 8 MiB through the embedded `PluginManager` API.
+The HTTP route retains AeorDB's 1 MiB default request-body limit. Each name,
+path, ID, version, and author field is limited to 4 KiB, and the persisted v3
+JSON record is limited to 48 MiB. Plugin keys must be nonempty and cannot be
+`.` or `..`; literal `::` is reserved by the v3 slash-to-filename encoding.
+
 ### Request
 
 - **URL parameters:**
@@ -92,8 +104,10 @@ curl -X PUT "http://localhost:6830/plugins/my-plugin?version=1.2.3&author=Plugin
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Empty body or invalid plugin type |
+| 400 | Empty body, invalid plugin type, key, or metadata |
 | 400 | Invalid WASM module |
+| 413 | HTTP request exceeds the route's 1 MiB body limit |
+| 503 | Deployment memory or size limit refused the request |
 | 500 | Deployment failure |
 
 ---
@@ -101,6 +115,13 @@ curl -X PUT "http://localhost:6830/plugins/my-plugin?version=1.2.3&author=Plugin
 ## POST /plugins/{name}/invoke
 
 Invoke a deployed plugin. The request body is wrapped in a `PluginRequest` envelope with metadata, then passed to the WASM runtime.
+
+Every stored nonempty checksum is recomputed and verified before invocation.
+Legacy records with an empty checksum remain readable and derive their checksum
+without an implicit rewrite. Compiled runtimes are cached by both plugin path
+and the verified checksum, so a manager cannot execute stale bytes after
+another manager acknowledges a replacement. Malformed records, path/key
+mismatches, and checksum mismatches fail closed.
 
 ### Request
 
@@ -170,6 +191,7 @@ curl -X POST http://localhost:6830/plugins/my-plugin/invoke \
 | Status | Condition |
 |--------|-----------|
 | 404 | Plugin not found |
+| 503 | Invocation memory or record-size limit refused the request |
 | 500 | Plugin invocation failure (runtime error, panic, etc.) |
 
 ---

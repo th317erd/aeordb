@@ -1511,6 +1511,24 @@ fn wave_four_peer_and_startup_authority_has_no_split_or_best_effort_path() {
 }
 
 #[test]
+fn wave_four_plugin_policy_and_cache_identity_share_acknowledged_authority() {
+  let plugin_manager = include_str!("../../src/plugins/plugin_manager.rs");
+  let deploy_start = plugin_manager.find("  fn deploy_plugin_record(").unwrap();
+  let deploy_end = plugin_manager[deploy_start..].find("\n  /// Retrieve a deployed plugin").unwrap() + deploy_start;
+  let deploy = &plugin_manager[deploy_start..deploy_end];
+
+  assert_eq!(deploy.matches("transform_file_buffered(").count(), 1);
+  assert!(!deploy.contains("self.get_plugin("), "deploy policy must not read current state outside mutation authority");
+  assert!(!deploy.contains("system_store::store_plugin"), "typed deployment must not retain the raw storage writer");
+  assert!(plugin_manager.contains("struct PluginCacheKey"));
+  assert!(plugin_manager.contains("checksum: String"));
+  assert!(plugin_manager.contains("decode_stored_plugin_record"));
+  assert!(plugin_manager.contains("PLUGIN_RECORD_MAX_BYTES"));
+  assert!(plugin_manager.contains("invalidate_cached_runtime_after_ack"));
+  assert!(!plugin_manager.contains("self.invalidate_cached_runtime(path)?"), "cache cleanup must not become pre-ack authority");
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

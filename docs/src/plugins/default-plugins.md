@@ -9,6 +9,15 @@ On startup, AeorDB installs these bundled plugins if they are missing. If a plug
 
 This makes checksum drift a signal, not the authority. A stored plugin at the same path with a different plugin ID is treated as user-managed and left untouched. A stored plugin with the bundled ID but a newer version is also left untouched to avoid downgrades.
 
+The replacement decision is made while namespace mutation authority is held.
+An unchanged bundle is a true no-op and does not consume a durability sequence
+or require compile-memory admission. When an install may be needed, AeorDB
+validates the bundled WASM and then rechecks the policy under authority before
+writing. Each bundled record is atomic; if any required record is malformed,
+oversized, unreadable, or cannot be durably stored, server construction fails
+instead of exposing a ready server with partial runtime authority. A later
+startup can safely retry any earlier per-record installation.
+
 Bundled records use the plugin release timestamp for both `created_at` and `updated_at`, rather than the local startup time. Independently initialized nodes therefore store the same JSON bytes and content identity for the same bundled release. A current bundled record with legacy node-local timestamps is canonicalized once at startup when the ID and version replacement rules above allow it; later startups do not rewrite it.
 
 | Plugin | Plugin ID | Version | Author | Public invoke path |
@@ -30,7 +39,11 @@ cp target/wasm32-unknown-unknown/release/aeordb_jq_plugin.wasm \
   ../../aeordb-lib/src/plugins/bundled/jq.wasm
 ```
 
-User-deployed plugins still use the normal plugin deployment API. The bundled plugin paths are reserved for AeorDB defaults; if one of those paths is occupied by a plugin without the matching bundled plugin ID, startup leaves it untouched and logs a warning.
+User-deployed plugins still use the normal plugin deployment API. If a bundled
+path is occupied by a plugin without the matching bundled plugin ID, startup
+leaves it untouched and logs a warning. Removing a bundled record before
+installing a user replacement gives that replacement a new ID and prevents the
+default installer from taking the path back.
 
 ## `extract`
 
