@@ -780,7 +780,7 @@ fn rebuild_kv_completion_restores_a_valid_hot_tail_checkpoint() {
   let header = active_header(db_path.to_str().unwrap());
   let mut file = OpenOptions::new().read(true).open(&db_path).unwrap();
   assert!(
-    hot_tail::read_hot_tail(&mut file, header.hot_tail_offset, header.hash_algo.hash_length()).is_some(),
+    hot_tail::read_hot_tail_checked(&mut file, header.hot_tail_offset, header.hash_algo.hash_length()).is_ok(),
     "a completed rebuild must not leave the durable dirty-startup marker active"
   );
 }
@@ -808,7 +808,7 @@ fn durable_missing_hot_tail_marker_recovers_partially_rewritten_kv_on_reopen() {
   assert_eq!(ops.read_file_buffered("/images/photo.jpg").unwrap(), b"jpeg-data");
   let recovered = active_header(db_str);
   let mut file = OpenOptions::new().read(true).open(&db_path).unwrap();
-  assert!(hot_tail::read_hot_tail(&mut file, recovered.hot_tail_offset, recovered.hash_algo.hash_length()).is_some());
+  assert!(hot_tail::read_hot_tail_checked(&mut file, recovered.hot_tail_offset, recovered.hash_algo.hash_length()).is_ok());
 }
 
 #[test]
@@ -1590,8 +1590,9 @@ fn kv_expansion_relocates_reusable_voids_from_growth_zone() {
   assert_eq!(read_u32_at(&db_str, new_wal_start), ENTRY_MAGIC, "expanded KV slack must end on a complete WAL entry boundary");
   assert!(void_offset < new_wal_start, "the original void offset should now be inside the expanded KV block");
   let mut db_file = OpenOptions::new().read(true).open(&db_str).unwrap();
-  let expanded_hot_tail = hot_tail::read_hot_tail(&mut db_file, expanded_header.hot_tail_offset, expanded_header.hash_algo.hash_length())
-    .expect("expanded DB should advertise a valid hot tail");
+  let expanded_hot_tail =
+    hot_tail::read_hot_tail_checked(&mut db_file, expanded_header.hot_tail_offset, expanded_header.hash_algo.hash_length())
+      .expect("expanded DB should advertise a valid hot tail");
   assert!(expanded_hot_tail.writes.is_empty(), "expanded KV pages should not leave stale pre-expansion writes in the hot tail");
 
   let (replacement_offset, _replacement_size) = store_raw_chunk_entry(&engine, 0x44, 64);
@@ -1689,7 +1690,7 @@ fn kv_expansion_places_a_short_wal_after_the_new_block() {
   assert!(header.hot_tail_offset >= new_kv_end, "expanded hot tail must not remain inside the new KV block");
   let mut file = OpenOptions::new().read(true).open(&db_str).unwrap();
   assert!(
-    hot_tail::read_hot_tail(&mut file, header.hot_tail_offset, header.hash_algo.hash_length()).is_some(),
+    hot_tail::read_hot_tail_checked(&mut file, header.hot_tail_offset, header.hash_algo.hash_length()).is_ok(),
     "completed expansion must publish a valid hot tail after the new block"
   );
   assert_eq!(engine.get_entry(&key).unwrap().unwrap().2, value, "short-WAL relocation must preserve the copied entry");
@@ -1764,7 +1765,7 @@ fn pre_relocation_recovery_does_not_trust_an_unselected_future_hot_tail() {
 
   let recovered = active_header(&db_str);
   let mut file = OpenOptions::new().read(true).open(&db_str).unwrap();
-  let payload = hot_tail::read_hot_tail(&mut file, recovered.hot_tail_offset, recovered.hash_algo.hash_length()).unwrap();
+  let payload = hot_tail::read_hot_tail_checked(&mut file, recovered.hot_tail_offset, recovered.hash_algo.hash_length()).unwrap();
   assert!(
     payload.writes.iter().all(|entry| entry.hash != vec![0xEE; 32]),
     "bytes at an unselected future offset must never become recovery authority"

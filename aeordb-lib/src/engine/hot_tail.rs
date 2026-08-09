@@ -47,11 +47,6 @@ fn decode_hot_tail_header(header: &[u8; HOT_TAIL_HEADER_SIZE], offset: u64) -> E
   })
 }
 
-/// Per-write-record size: version(1) + hash + type_flags(1) + offset(8) + total_length(4).
-fn write_record_size(hash_length: usize) -> usize {
-  checked_write_record_size(hash_length).expect("supported hash lengths fit the hot-tail record format")
-}
-
 fn checked_write_record_size(hash_length: usize) -> Option<usize> {
   hash_length.checked_add(1 + 1 + 8 + 4)
 }
@@ -63,8 +58,13 @@ fn checked_body_size(write_count: usize, void_count: usize, hash_length: usize) 
 /// Per-void-record size: version(1) + offset(8) + size(4) = 13 bytes.
 const VOID_RECORD_SIZE: usize = 1 + 8 + 4;
 
-pub fn serialized_size(write_count: usize, void_count: usize, hash_length: usize) -> usize {
-  HOT_TAIL_HEADER_SIZE + write_count * write_record_size(hash_length) + void_count * VOID_RECORD_SIZE
+pub fn serialized_size(write_count: usize, void_count: usize, hash_length: usize) -> EngineResult<usize> {
+  HOT_TAIL_HEADER_SIZE
+    .checked_add(
+      checked_body_size(write_count, void_count, hash_length)
+        .ok_or_else(|| EngineError::ResourceExhausted("hot-tail serialized size overflow".to_string()))?,
+    )
+    .ok_or_else(|| EngineError::ResourceExhausted("hot-tail serialized size overflow".to_string()))
 }
 
 /// A descriptive void record carried in the hot tail. Pure data — its
@@ -92,8 +92,15 @@ pub fn write_hot_tail_payload<W: Write>(writer: &mut W, payload: &HotTailPayload
     .map_err(|_| EngineError::ResourceExhausted("hot-tail write count exceeds the v1 format limit".to_string()))?;
   let void_count = u32::try_from(payload.voids.len())
     .map_err(|_| EngineError::ResourceExhausted("hot-tail void count exceeds the v1 format limit".to_string()))?;
-  checked_body_size(payload.writes.len(), payload.voids.len(), hash_length)
-    .ok_or_else(|| EngineError::ResourceExhausted("hot-tail serialized size overflow".to_string()))?;
+  serialized_size(payload.writes.len(), payload.voids.len(), hash_length)?;
+  for entry in &payload.writes {
+    if entry.hash.len() != hash_length {
+      return Err(EngineError::InvalidInput(format!(
+        "hot-tail KV hash length {} does not match active hash length {hash_length}",
+        entry.hash.len()
+      )));
+    }
+  }
 
   let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
   header[..5].copy_from_slice(&HOT_TAIL_MAGIC);
@@ -104,17 +111,9 @@ pub fn write_hot_tail_payload<W: Write>(writer: &mut W, payload: &HotTailPayload
   header[14..18].copy_from_slice(&header_crc.to_le_bytes());
   writer.write_all(&header)?;
 
-  const ZERO_PADDING: [u8; 64] = [0; 64];
   for entry in &payload.writes {
     writer.write_all(&[WRITE_RECORD_VERSION])?;
-    let copy_length = hash_length.min(entry.hash.len());
-    writer.write_all(&entry.hash[..copy_length])?;
-    let mut padding = hash_length - copy_length;
-    while padding > 0 {
-      let width = padding.min(ZERO_PADDING.len());
-      writer.write_all(&ZERO_PADDING[..width])?;
-      padding -= width;
-    }
+    writer.write_all(&entry.hash)?;
     writer.write_all(&[entry.type_flags])?;
     writer.write_all(&entry.offset.to_le_bytes())?;
     writer.write_all(&entry.total_length.to_le_bytes())?;
@@ -128,107 +127,24 @@ pub fn write_hot_tail_payload<W: Write>(writer: &mut W, payload: &HotTailPayload
   Ok(())
 }
 
-/// Serialize the hot tail payload (writes + voids) into a single byte buffer.
-pub fn serialize_hot_tail(payload: &HotTailPayload, hash_length: usize) -> Vec<u8> {
-  let total = serialized_size(payload.writes.len(), payload.voids.len(), hash_length);
-
-  let mut buf = Vec::with_capacity(total);
-  buf.extend_from_slice(&HOT_TAIL_MAGIC);
-  buf.push(HOT_TAIL_FORMAT_VERSION);
-  buf.extend_from_slice(&(payload.writes.len() as u32).to_le_bytes());
-  buf.extend_from_slice(&(payload.voids.len() as u32).to_le_bytes());
-
-  // CRC over the 14-byte pre-CRC header (magic + version + writes_count + voids_count).
-  let header_crc = crc32fast::hash(&buf[..14]);
-  buf.extend_from_slice(&header_crc.to_le_bytes());
-
-  // Write records.
-  for entry in &payload.writes {
-    buf.push(WRITE_RECORD_VERSION);
-    let hash_bytes = &entry.hash;
-    let copy_len = hash_length.min(hash_bytes.len());
-    buf.extend_from_slice(&hash_bytes[..copy_len]);
-    if hash_bytes.len() < hash_length {
-      buf.resize(buf.len() + (hash_length - hash_bytes.len()), 0);
-    }
-    buf.push(entry.type_flags);
-    buf.extend_from_slice(&entry.offset.to_le_bytes());
-    buf.extend_from_slice(&entry.total_length.to_le_bytes());
-  }
-
-  // Void records.
-  for v in &payload.voids {
-    buf.push(VOID_RECORD_VERSION);
-    buf.extend_from_slice(&v.offset.to_le_bytes());
-    buf.extend_from_slice(&v.size.to_le_bytes());
-  }
-
-  buf
-}
-
-/// Deserialize a hot-tail payload from bytes. Returns `None` if magic
-/// mismatches, CRC fails, format version is unrecognized, or the buffer
-/// is truncated.
-pub fn deserialize_hot_tail(data: &[u8], hash_length: usize) -> Option<HotTailPayload> {
-  if data.len() < HOT_TAIL_HEADER_SIZE {
-    return None;
-  }
-  let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
-  header.copy_from_slice(&data[..HOT_TAIL_HEADER_SIZE]);
-  let decoded = decode_hot_tail_header(&header, 0).ok()?;
-  let write_count = decoded.write_count as usize;
-  let void_count = decoded.void_count as usize;
-
-  let expected_len = HOT_TAIL_HEADER_SIZE.checked_add(checked_body_size(write_count, void_count, hash_length)?)?;
-  if data.len() < expected_len {
-    return None;
-  }
-
-  let mut writes = Vec::new();
-  writes.try_reserve_exact(write_count).ok()?;
-  let mut cursor = HOT_TAIL_HEADER_SIZE;
-
-  for _ in 0..write_count {
-    if data[cursor] != WRITE_RECORD_VERSION {
-      return None;
-    }
-    cursor += 1;
-    let mut hash = Vec::new();
-    hash.try_reserve_exact(hash_length).ok()?;
-    hash.extend_from_slice(&data[cursor..cursor + hash_length]);
-    cursor += hash_length;
-    let type_flags = data[cursor];
-    cursor += 1;
-    let offset = u64::from_le_bytes(data[cursor..cursor + 8].try_into().ok()?);
-    cursor += 8;
-    let total_length = u32::from_le_bytes(data[cursor..cursor + 4].try_into().ok()?);
-    cursor += 4;
-    writes.push(KVEntry { hash, type_flags, offset, total_length });
-  }
-
-  let mut voids = Vec::new();
-  voids.try_reserve_exact(void_count).ok()?;
-  for _ in 0..void_count {
-    if data[cursor] != VOID_RECORD_VERSION {
-      return None;
-    }
-    cursor += 1;
-    let offset = u64::from_le_bytes(data[cursor..cursor + 8].try_into().ok()?);
-    cursor += 8;
-    let size = u32::from_le_bytes(data[cursor..cursor + 4].try_into().ok()?);
-    cursor += 4;
-    voids.push(VoidRecord { offset, size });
-  }
-
-  Some(HotTailPayload { writes, voids })
+/// Serialize through the same checked streaming writer used for publication.
+pub fn serialize_hot_tail(payload: &HotTailPayload, hash_length: usize) -> EngineResult<Vec<u8>> {
+  let total = serialized_size(payload.writes.len(), payload.voids.len(), hash_length)?;
+  let mut buffer = Vec::new();
+  buffer
+    .try_reserve_exact(total)
+    .map_err(|error| EngineError::ResourceExhausted(format!("hot-tail serialization allocation failed: {error}")))?;
+  write_hot_tail_payload(&mut buffer, payload, hash_length)?;
+  Ok(buffer)
 }
 
 /// Write the hot tail payload to a file at the given offset.
 pub fn write_hot_tail<W: Write + Seek>(writer: &mut W, offset: u64, payload: &HotTailPayload, hash_length: usize) -> EngineResult<u64> {
   writer.seek(SeekFrom::Start(offset))?;
   write_hot_tail_payload(writer, payload, hash_length)?;
-  let length = serialized_size(payload.writes.len(), payload.voids.len(), hash_length);
-  offset.checked_add(length as u64).ok_or_else(|| EngineError::ResourceExhausted("hot-tail end offset overflow".to_string()))
+  let length = u64::try_from(serialized_size(payload.writes.len(), payload.voids.len(), hash_length)?)
+    .map_err(|_| EngineError::ResourceExhausted("hot-tail length exceeds u64".to_string()))?;
+  offset.checked_add(length).ok_or_else(|| EngineError::ResourceExhausted("hot-tail end offset overflow".to_string()))
 }
 
 /// Strictly read the hot tail payload from a file at the given offset.
@@ -344,13 +260,6 @@ pub fn is_rebuildable_hot_tail_error(error: &EngineError) -> bool {
   )
 }
 
-/// Compatibility probe for callers that explicitly treat every read failure
-/// as an absent hot tail. Authoritative and diagnostic paths must use
-/// [`read_hot_tail_checked`].
-pub fn read_hot_tail<R: Read + Seek>(reader: &mut R, offset: u64, hash_length: usize) -> Option<HotTailPayload> {
-  read_hot_tail_checked(reader, offset, hash_length).ok()
-}
-
 /// Validate a hot tail and visit its void records without allocating arrays
 /// from its on-disk counts. Verification and recovery diagnostics use this
 /// path because those counts are untrusted until every fixed-size record has
@@ -373,7 +282,8 @@ where
   let write_count = decoded.write_count;
   let void_count = decoded.void_count;
 
-  let write_record_length = write_record_size(hash_length);
+  let write_record_length = checked_write_record_size(hash_length)
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail write record length overflows usize".to_string() })?;
   let records_start = offset
     .checked_add(HOT_TAIL_HEADER_SIZE as u64)
     .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail record offset overflow".to_string() })?;
@@ -500,8 +410,8 @@ mod tests {
   #[test]
   fn writes_only_roundtrip() {
     let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 128), make_entry(0xBB, 0x02, 200, 256)], voids: vec![] };
-    let data = serialize_hot_tail(&p, 32);
-    let got = deserialize_hot_tail(&data, 32).unwrap();
+    let data = serialize_hot_tail(&p, 32).unwrap();
+    let got = read_hot_tail_checked(&mut std::io::Cursor::new(data), 0, 32).unwrap();
     assert_eq!(got.writes.len(), 2);
     assert_eq!(got.voids.len(), 0);
     assert_eq!(got.writes[0].total_length, 128);
@@ -511,8 +421,8 @@ mod tests {
   #[test]
   fn voids_only_roundtrip() {
     let p = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 1000, size: 500 }, VoidRecord { offset: 5000, size: 256 }] };
-    let data = serialize_hot_tail(&p, 32);
-    let got = deserialize_hot_tail(&data, 32).unwrap();
+    let data = serialize_hot_tail(&p, 32).unwrap();
+    let got = read_hot_tail_checked(&mut std::io::Cursor::new(data), 0, 32).unwrap();
     assert_eq!(got.writes.len(), 0);
     assert_eq!(got.voids, p.voids);
   }
@@ -520,8 +430,8 @@ mod tests {
   #[test]
   fn mixed_roundtrip() {
     let p = HotTailPayload { writes: vec![make_entry(0xCC, 0x03, 300, 512)], voids: vec![VoidRecord { offset: 2000, size: 128 }] };
-    let data = serialize_hot_tail(&p, 32);
-    let got = deserialize_hot_tail(&data, 32).unwrap();
+    let data = serialize_hot_tail(&p, 32).unwrap();
+    let got = read_hot_tail_checked(&mut std::io::Cursor::new(data), 0, 32).unwrap();
     assert_eq!(got.writes.len(), 1);
     assert_eq!(got.voids.len(), 1);
   }
@@ -529,8 +439,8 @@ mod tests {
   #[test]
   fn empty_roundtrip() {
     let p = HotTailPayload::default();
-    let data = serialize_hot_tail(&p, 32);
-    let got = deserialize_hot_tail(&data, 32).unwrap();
+    let data = serialize_hot_tail(&p, 32).unwrap();
+    let got = read_hot_tail_checked(&mut std::io::Cursor::new(data), 0, 32).unwrap();
     assert!(got.writes.is_empty());
     assert!(got.voids.is_empty());
   }
@@ -541,7 +451,7 @@ mod tests {
       writes: vec![make_entry(0x11, 0x02, 1000, 80), make_entry(0x22, 0x03, 2000, 200)],
       voids: vec![VoidRecord { offset: 8888, size: 64 }],
     };
-    let expected = serialize_hot_tail(&payload, 32);
+    let expected = serialize_hot_tail(&payload, 32).unwrap();
     let mut streamed = Vec::new();
 
     write_hot_tail_payload(&mut streamed, &payload, 32).unwrap();
@@ -565,57 +475,56 @@ mod tests {
   #[test]
   fn corrupt_magic_returns_none() {
     let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![] };
-    let mut data = serialize_hot_tail(&p, 32);
+    let mut data = serialize_hot_tail(&p, 32).unwrap();
     data[0] = 0xFF;
-    assert!(deserialize_hot_tail(&data, 32).is_none());
+    assert!(matches!(read_hot_tail_checked(&mut std::io::Cursor::new(data), 0, 32), Err(EngineError::InvalidMagic)));
   }
 
   #[test]
   fn corrupt_crc_returns_none() {
     let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![] };
-    let mut data = serialize_hot_tail(&p, 32);
+    let mut data = serialize_hot_tail(&p, 32).unwrap();
     // Tamper a count byte without updating the CRC.
     data[6] = 99;
-    assert!(deserialize_hot_tail(&data, 32).is_none());
+    assert!(matches!(read_hot_tail_checked(&mut std::io::Cursor::new(data), 0, 32), Err(EngineError::CorruptEntry { .. })));
   }
 
   #[test]
   fn unknown_format_version_returns_none() {
     let p = HotTailPayload::default();
-    let mut data = serialize_hot_tail(&p, 32);
+    let mut data = serialize_hot_tail(&p, 32).unwrap();
     data[5] = 99; // Unknown format version
                   // CRC must still match the (now-tampered) bytes for the version check to be the rejector.
     let new_crc = crc32fast::hash(&data[..14]);
     data[14..18].copy_from_slice(&new_crc.to_le_bytes());
-    assert!(deserialize_hot_tail(&data, 32).is_none());
+    assert!(matches!(read_hot_tail_checked(&mut std::io::Cursor::new(data), 0, 32), Err(EngineError::InvalidEntryVersion(99))));
   }
 
   #[test]
   fn truncated_returns_none() {
     let p = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![VoidRecord { offset: 5, size: 9 }] };
-    let data = serialize_hot_tail(&p, 32);
-    let truncated = &data[..data.len() - 4];
-    assert!(deserialize_hot_tail(truncated, 32).is_none());
+    let data = serialize_hot_tail(&p, 32).unwrap();
+    let truncated = data[..data.len() - 4].to_vec();
+    assert!(matches!(read_hot_tail_checked(&mut std::io::Cursor::new(truncated), 0, 32), Err(EngineError::CorruptEntry { .. })));
   }
 
   #[test]
   fn readers_reject_unknown_record_versions() {
     let payload = HotTailPayload { writes: vec![make_entry(0xAA, 0x01, 100, 64)], voids: vec![] };
-    let mut bytes = serialize_hot_tail(&payload, 32);
+    let mut bytes = serialize_hot_tail(&payload, 32).unwrap();
     bytes[HOT_TAIL_HEADER_SIZE] = WRITE_RECORD_VERSION + 1;
 
-    assert!(deserialize_hot_tail(&bytes, 32).is_none());
-    assert!(read_hot_tail(&mut std::io::Cursor::new(bytes), 0, 32).is_none());
+    assert!(matches!(read_hot_tail_checked(&mut std::io::Cursor::new(bytes), 0, 32), Err(EngineError::CorruptEntry { .. })));
   }
 
   #[test]
   fn file_reader_preflights_untrusted_counts_against_physical_extent() {
-    let mut bytes = serialize_hot_tail(&HotTailPayload::default(), 32);
+    let mut bytes = serialize_hot_tail(&HotTailPayload::default(), 32).unwrap();
     bytes[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
     let crc = crc32fast::hash(&bytes[..14]);
     bytes[14..18].copy_from_slice(&crc.to_le_bytes());
 
-    assert!(read_hot_tail(&mut std::io::Cursor::new(bytes), 0, 32).is_none());
+    assert!(matches!(read_hot_tail_checked(&mut std::io::Cursor::new(bytes), 0, 32), Err(EngineError::CorruptEntry { .. })));
   }
 
   #[test]
@@ -628,7 +537,7 @@ mod tests {
     let end = write_hot_tail(&mut cursor, 0, &p, 32).unwrap();
     assert!(end > 0);
 
-    let got = read_hot_tail(&mut cursor, 0, 32).unwrap();
+    let got = read_hot_tail_checked(&mut cursor, 0, 32).unwrap();
     assert_eq!(got.writes.len(), 2);
     assert_eq!(got.voids[0].offset, 8888);
   }
@@ -640,14 +549,14 @@ mod tests {
     let end = write_hot_tail(&mut cursor, 256, &p, 32).unwrap();
     assert!(end > 256);
 
-    let got = read_hot_tail(&mut cursor, 256, 32).unwrap();
+    let got = read_hot_tail_checked(&mut cursor, 256, 32).unwrap();
     assert_eq!(got.writes[0].offset, 999);
   }
 
   #[test]
   fn bounded_void_visitor_rejects_truncated_untrusted_counts() {
     let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
-    let mut bytes = serialize_hot_tail(&payload, 32);
+    let mut bytes = serialize_hot_tail(&payload, 32).unwrap();
     bytes[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
     let crc = crc32fast::hash(&bytes[..14]);
     bytes[14..18].copy_from_slice(&crc.to_le_bytes());
@@ -658,7 +567,7 @@ mod tests {
   #[test]
   fn bounded_void_visitor_rejects_unknown_record_versions() {
     let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
-    let mut bytes = serialize_hot_tail(&payload, 32);
+    let mut bytes = serialize_hot_tail(&payload, 32).unwrap();
     bytes[HOT_TAIL_HEADER_SIZE] = VOID_RECORD_VERSION + 1;
     let error = visit_hot_tail_voids(&mut std::io::Cursor::new(bytes), 0, 32, None, |_index, _void| Ok(())).unwrap_err();
     assert!(matches!(error, EngineError::CorruptEntry { reason, .. } if reason.contains("unsupported version")));
@@ -667,7 +576,7 @@ mod tests {
   #[test]
   fn bounded_void_visitor_preserves_non_eof_io_failures() {
     let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
-    let bytes = serialize_hot_tail(&payload, 32);
+    let bytes = serialize_hot_tail(&payload, 32).unwrap();
     let mut reader = FailAfterCursor { inner: std::io::Cursor::new(bytes), fail_at: HOT_TAIL_HEADER_SIZE as u64 };
 
     let error = visit_hot_tail_voids(&mut reader, 0, 32, None, |_index, _void| Ok(())).unwrap_err();
@@ -678,7 +587,7 @@ mod tests {
   #[test]
   fn bounded_void_visitor_honors_cancellation_before_record_reads() {
     let payload = HotTailPayload { writes: vec![], voids: vec![VoidRecord { offset: 100, size: 20 }] };
-    let bytes = serialize_hot_tail(&payload, 32);
+    let bytes = serialize_hot_tail(&payload, 32).unwrap();
     let cancelled = std::sync::atomic::AtomicBool::new(true);
 
     let error = visit_hot_tail_voids(&mut std::io::Cursor::new(bytes), 0, 32, Some(&cancelled), |_index, _void| Ok(())).unwrap_err();

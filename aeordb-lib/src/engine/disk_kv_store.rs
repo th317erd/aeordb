@@ -1490,7 +1490,7 @@ impl DiskKVStore {
   /// the KV write_buffer (e.g., GC sweep that only registers voids).
   pub fn force_flush_hot_buffer(&mut self) -> EngineResult<()> {
     if self.prepare_hot_tail_dependency(true)? {
-      self.sync_data_barrier(self.pending_hot_tail_bytes())?;
+      self.sync_data_barrier(self.pending_hot_tail_bytes()?)?;
       self.complete_hot_tail_dependency();
     }
     Ok(())
@@ -1499,18 +1499,19 @@ impl DiskKVStore {
   /// Flush the hot buffer to the hot tail at the end of the database file.
   pub fn flush_hot_buffer(&mut self) -> EngineResult<()> {
     if self.prepare_hot_tail_dependency(false)? {
-      self.sync_data_barrier(self.pending_hot_tail_bytes())?;
+      self.sync_data_barrier(self.pending_hot_tail_bytes()?)?;
       self.complete_hot_tail_dependency();
     }
 
     Ok(())
   }
 
-  pub(crate) fn pending_hot_tail_bytes(&self) -> u64 {
+  pub(crate) fn pending_hot_tail_bytes(&self) -> EngineResult<u64> {
     if !self.hot_tail_enabled {
-      return 0;
+      return Ok(0);
     }
-    hot_tail::serialized_size(self.write_buffer.len(), self.pending_voids.len(), self.hash_algo.hash_length()) as u64
+    u64::try_from(hot_tail::serialized_size(self.write_buffer.len(), self.pending_voids.len(), self.hash_algo.hash_length())?)
+      .map_err(|_| EngineError::ResourceExhausted("hot-tail serialized length exceeds u64".to_string()))
   }
 
   pub(crate) fn prepare_hot_tail_dependency(&mut self, force: bool) -> std::io::Result<bool> {
@@ -1520,9 +1521,14 @@ impl DiskKVStore {
 
     self.sanitize_pending_voids(if force { "force hot-tail dependency" } else { "hot-buffer dependency" });
     let payload = hot_tail::HotTailPayload { writes: self.write_buffer.values().cloned().collect(), voids: self.pending_voids.clone() };
+    let serialized_length = hot_tail::serialized_size(payload.writes.len(), payload.voids.len(), self.hash_algo.hash_length())
+      .and_then(|length| {
+        u64::try_from(length).map_err(|_| EngineError::ResourceExhausted("hot-tail serialized length exceeds u64".to_string()))
+      })
+      .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
     let end = self
       .hot_tail_offset
-      .checked_add(hot_tail::serialized_size(payload.writes.len(), payload.voids.len(), self.hash_algo.hash_length()) as u64)
+      .checked_add(serialized_length)
       .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "hot-tail end offset overflowed"))?;
     self.db_file.seek(SeekFrom::Start(self.hot_tail_offset))?;
     hot_tail::write_hot_tail_payload(&mut self.db_file, &payload, self.hash_algo.hash_length()).map_err(|error| match error {

@@ -22,7 +22,7 @@ fn checked_hot_tail_reader_round_trips_valid_payloads() {
     writes: vec![KVEntry { hash: vec![0xAB; 32], type_flags: 3, offset: 4_096, total_length: 81 }],
     voids: vec![VoidRecord { offset: 8_192, size: 512 }],
   };
-  let bytes = serialize_hot_tail(&expected, 32);
+  let bytes = serialize_hot_tail(&expected, 32).unwrap();
 
   let actual = read_hot_tail_checked(&mut Cursor::new(bytes), 0, 32).unwrap();
 
@@ -34,11 +34,11 @@ fn checked_hot_tail_reader_round_trips_valid_payloads() {
 
 #[test]
 fn checked_hot_tail_reader_distinguishes_structural_damage() {
-  let mut wrong_magic = serialize_hot_tail(&HotTailPayload::default(), 32);
+  let mut wrong_magic = serialize_hot_tail(&HotTailPayload::default(), 32).unwrap();
   wrong_magic[0] ^= 0xFF;
   assert!(matches!(read_hot_tail_checked(&mut Cursor::new(wrong_magic), 0, 32), Err(EngineError::InvalidMagic)));
 
-  let mut wrong_version = serialize_hot_tail(&HotTailPayload::default(), 32);
+  let mut wrong_version = serialize_hot_tail(&HotTailPayload::default(), 32).unwrap();
   wrong_version[5] = 99;
   assert!(matches!(read_hot_tail_checked(&mut Cursor::new(wrong_version), 0, 32), Err(EngineError::InvalidEntryVersion(99))));
 
@@ -52,6 +52,18 @@ fn checked_hot_tail_reader_preserves_underlying_io_failures() {
     read_hot_tail_checked(&mut FailingReader, 0, 32),
     Err(EngineError::IoError(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
   ));
+}
+
+#[test]
+fn hot_tail_writer_rejects_wrong_width_hash_before_writing() {
+  let payload =
+    HotTailPayload { writes: vec![KVEntry { hash: vec![0xAA; 31], type_flags: 1, offset: 512, total_length: 64 }], voids: Vec::new() };
+  let mut destination = Vec::new();
+
+  let error = write_hot_tail_payload(&mut destination, &payload, 32).unwrap_err();
+
+  assert!(matches!(error, EngineError::InvalidInput(ref reason) if reason.contains("hash length")));
+  assert!(destination.is_empty());
 }
 
 #[test]

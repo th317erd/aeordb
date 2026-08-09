@@ -450,11 +450,13 @@ impl TaskQueue {
 
   /// Check if a task has been cancelled (in-memory check for speed).
   pub fn is_cancelled(&self, id: &str) -> bool {
-    let cancelled = self.cancelled.read().unwrap_or_else(|e| {
-      tracing::warn!("cancelled set read lock poisoned, recovering: {}", e);
-      e.into_inner()
-    });
-    cancelled.contains(id)
+    match self.cancelled.read() {
+      Ok(cancelled) => cancelled.contains(id),
+      Err(error) => {
+        tracing::error!(%error, task_id = id, "task cancellation authority is poisoned; treating task as cancelled");
+        true
+      }
+    }
   }
 
   pub(crate) fn register_active_cancellation<'a>(&'a self, id: &str, parent: &CancellationToken) -> ActiveTaskCancellation<'a> {
@@ -828,3 +830,7 @@ fn task_json_allocation_charge(value_length: u32, label: &str) -> EngineResult<u
     .and_then(|bytes| bytes.checked_add(TASK_JSON_ALLOCATION_OVERHEAD))
     .ok_or_else(|| EngineError::ResourceExhausted(format!("{label} memory estimate overflow")))
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/task_queue_poison_internal_spec.rs"]
+mod task_queue_poison_internal_spec;

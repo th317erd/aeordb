@@ -1236,7 +1236,7 @@ fn expansion_persists_target_bucket_overflow_in_hot_tail() {
   assert_eq!(store.write_buffer_len(), 1, "one colliding key should remain outside the full target page");
 
   let mut file = OpenOptions::new().read(true).open(&db_path).unwrap();
-  let payload = hot_tail::read_hot_tail(&mut file, new_hot_tail, HashAlgorithm::Blake3_256.hash_length())
+  let payload = hot_tail::read_hot_tail_checked(&mut file, new_hot_tail, HashAlgorithm::Blake3_256.hash_length())
     .expect("expansion must publish a recoverable hot tail");
   assert_eq!(payload.writes.len(), 1, "target-layout overflow must remain durable in the hot tail");
   assert!(entries.iter().any(|entry| entry.hash == payload.writes[0].hash));

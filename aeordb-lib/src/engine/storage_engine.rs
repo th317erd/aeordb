@@ -3078,7 +3078,7 @@ impl StorageEngine {
 
     let hot_tail_offset = kv.hot_tail_offset();
     let entry_count = kv.len() as u64;
-    let estimated_dependency_bytes = kv.pending_hot_tail_bytes();
+    let estimated_dependency_bytes = kv.pending_hot_tail_bytes()?;
     let mut header = writer.file_header().clone();
     header.hot_tail_offset = hot_tail_offset;
     header.entry_count = entry_count;
@@ -5591,7 +5591,7 @@ impl StorageEngine {
           .kv_writer
           .lock()
           .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to estimate transaction hot tail: {error}"))))?
-          .pending_hot_tail_bytes();
+          .pending_hot_tail_bytes()?;
         self.admit_transaction_ticket(estimated_dependency_bytes)?
       }
     };
