@@ -5,6 +5,7 @@
 //! anything touching the named-version forest (snapshots + forks).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::{
   extract::{Path, State},
@@ -12,7 +13,7 @@ use axum::{
   response::{IntoResponse, Response},
   Extension, Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::TokenClaims;
 use crate::engine::errors::EngineError;
@@ -42,6 +43,33 @@ pub struct RestoreSnapshotRequest {
   pub name: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct CreateSnapshotResponse {
+  #[serde(flatten)]
+  snapshot: SnapshotResponse,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  duplicate: Option<bool>,
+}
+
+const MANUAL_SNAPSHOT_RATE_LIMIT_MILLISECONDS: i64 = 60_000;
+
+fn claim_manual_snapshot_rate_limit(last_manual_snapshot: &AtomicI64, now: i64) -> Result<(), i64> {
+  let mut observed = last_manual_snapshot.load(Ordering::Acquire);
+  loop {
+    if observed > 0 {
+      let retry_milliseconds = observed.saturating_add(MANUAL_SNAPSHOT_RATE_LIMIT_MILLISECONDS).saturating_sub(now);
+      if retry_milliseconds > 0 {
+        return Err(retry_milliseconds.saturating_add(999) / 1_000);
+      }
+    }
+
+    match last_manual_snapshot.compare_exchange_weak(observed, now, Ordering::AcqRel, Ordering::Acquire) {
+      Ok(_) => return Ok(()),
+      Err(current) => observed = current,
+    }
+  }
+}
+
 /// POST /version/snapshot -- create a named snapshot of the current HEAD.
 pub async fn snapshot_create(
   State(state): State<AppState>,
@@ -55,17 +83,12 @@ pub async fn snapshot_create(
   }
 
   if std::env::var("AEORDB_DISABLE_SNAPSHOT_RATE_LIMIT").is_err() {
-    use std::sync::atomic::Ordering;
     let now = chrono::Utc::now().timestamp_millis();
-    let last = state.engine.last_manual_snapshot.load(Ordering::Relaxed);
-    let elapsed = now - last;
-    if elapsed < 60_000 && last > 0 {
-      let remaining = (60_000 - elapsed) / 1000;
+    if let Err(remaining) = claim_manual_snapshot_rate_limit(&state.engine.last_manual_snapshot, now) {
       return ErrorResponse::new(format!("Snapshot rate limited. Try again in {} seconds.", remaining))
         .with_status(StatusCode::TOO_MANY_REQUESTS)
         .into_response();
     }
-    let _ = state.engine.last_manual_snapshot.compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed);
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -75,12 +98,11 @@ pub async fn snapshot_create(
     Ok(snapshot_info) => {
       let is_duplicate = snapshot_info.name != payload.name;
       let status = if is_duplicate { StatusCode::OK } else { StatusCode::CREATED };
-      let mut response_body = serde_json::to_value(SnapshotResponse::from(&snapshot_info)).unwrap_or_default();
       if is_duplicate {
-        response_body["duplicate"] = serde_json::json!(true);
-        state.engine.last_manual_snapshot.store(0, std::sync::atomic::Ordering::Relaxed);
+        state.engine.last_manual_snapshot.store(0, Ordering::Release);
       }
-      (status, Json(response_body)).into_response()
+      (status, Json(CreateSnapshotResponse { snapshot: SnapshotResponse::from(&snapshot_info), duplicate: is_duplicate.then_some(true) }))
+        .into_response()
     }
     Err(EngineError::AlreadyExists(message)) => ErrorResponse::new(message).with_status(StatusCode::CONFLICT).into_response(),
     Err(EngineError::SnapshotWritesDisabled) => {
@@ -411,3 +433,7 @@ pub async fn fork_abandon(State(state): State<AppState>, Extension(claims): Exte
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/http/version_routes_internal_spec.rs"]
+mod version_routes_internal_spec;
