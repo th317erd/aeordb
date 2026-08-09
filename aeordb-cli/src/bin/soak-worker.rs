@@ -224,7 +224,7 @@ fn run(config: Config) -> Result<(), String> {
     let engine = Arc::clone(&engine);
     let database = config.database.clone();
     let start = Instant::now();
-    std::thread::spawn(move || {
+    std::thread::spawn(move || -> Result<(), String> {
       let mut next_tick = Instant::now();
       while !stop_flag.load(Ordering::Relaxed) {
         // Emit a row every 60s, sleeping in 1s slices so we shut down quickly.
@@ -262,14 +262,13 @@ fn run(config: Config) -> Result<(), String> {
             cache_dir,
             action,
           );
-          if let Err(error) = writeln!(metrics_file, "{}", line) {
-            eprintln!("metrics write failed: {}", error);
-          }
-          let _ = metrics_file.flush();
+          writeln!(metrics_file, "{}", line).map_err(|error| format!("metrics write failed: {error}"))?;
+          metrics_file.flush().map_err(|error| format!("metrics flush failed: {error}"))?;
           next_tick += Duration::from_secs(60);
         }
         std::thread::sleep(Duration::from_secs(1));
       }
+      Ok(())
     })
   };
 
@@ -279,15 +278,10 @@ fn run(config: Config) -> Result<(), String> {
   let wide_handle = {
     let stop_flag = Arc::clone(&stop_flag);
     let wide_path = format!("{}.wide_rss.tsv", config.database);
-    std::thread::spawn(move || {
-      let mut file = match std::fs::File::create(&wide_path) {
-        Ok(f) => f,
-        Err(e) => {
-          eprintln!("wide_rss create failed: {e}");
-          return;
-        }
-      };
-      let _ = writeln!(file, "iso_time\tpeak_rss_kb\tcur_rss_kb\thwm_kb");
+    std::thread::spawn(move || -> Result<(), String> {
+      let mut file = std::fs::File::create(&wide_path).map_err(|error| format!("wide RSS create failed for {wide_path}: {error}"))?;
+      writeln!(file, "iso_time\tpeak_rss_kb\tcur_rss_kb\thwm_kb")
+        .map_err(|error| format!("wide RSS header write failed for {wide_path}: {error}"))?;
       let mut bucket_start = Instant::now();
       let mut bucket_peak_kb: u64 = 0;
       while !stop_flag.load(Ordering::Relaxed) {
@@ -296,13 +290,15 @@ fn run(config: Config) -> Result<(), String> {
           bucket_peak_kb = mem.rss_kb;
         }
         if bucket_start.elapsed() >= Duration::from_secs(1) {
-          let _ = writeln!(file, "{}\t{}\t{}\t{}", chrono::Utc::now().to_rfc3339(), bucket_peak_kb, mem.rss_kb, mem.hwm_kb,);
-          let _ = file.flush();
+          writeln!(file, "{}\t{}\t{}\t{}", chrono::Utc::now().to_rfc3339(), bucket_peak_kb, mem.rss_kb, mem.hwm_kb,)
+            .map_err(|error| format!("wide RSS write failed for {wide_path}: {error}"))?;
+          file.flush().map_err(|error| format!("wide RSS flush failed for {wide_path}: {error}"))?;
           bucket_start = Instant::now();
           bucket_peak_kb = 0;
         }
         std::thread::sleep(Duration::from_millis(50));
       }
+      Ok(())
     })
   };
 
@@ -467,13 +463,13 @@ fn run(config: Config) -> Result<(), String> {
 
   println!("duration reached, shutting down");
   stop_flag.store(true, Ordering::Relaxed);
-  let _ = metrics_handle.join();
-  let _ = wide_handle.join();
+  let metrics_result = metrics_handle.join().map_err(|_| "metrics worker panicked".to_string()).and_then(|result| result);
+  let wide_result = wide_handle.join().map_err(|_| "wide RSS worker panicked".to_string()).and_then(|result| result);
+  let diagnostics_result = combine_diagnostic_worker_results(metrics_result, wide_result);
 
   // Final flush of the engine so any in-memory state is durable.
-  if let Err(e) = engine.shutdown() {
-    eprintln!("shutdown returned error: {}", e);
-  }
+  let shutdown_result = engine.shutdown().map_err(|error| format!("engine shutdown failed: {error}"));
+  combine_soak_shutdown_results(diagnostics_result, shutdown_result)?;
 
   println!(
     "done. Writes={} Reads={} Deletes={}",
@@ -485,6 +481,34 @@ fn run(config: Config) -> Result<(), String> {
   println!("Run `soak-worker --summarize {}` for a pass/fail report.", config.metrics);
   Ok(())
 }
+
+fn combine_diagnostic_worker_results(metrics_result: Result<(), String>, wide_result: Result<(), String>) -> Result<(), String> {
+  match (metrics_result, wide_result) {
+    (Ok(()), Ok(())) => {}
+    (Err(metrics_error), Ok(())) => return Err(metrics_error),
+    (Ok(()), Err(wide_error)) => return Err(wide_error),
+    (Err(metrics_error), Err(wide_error)) => {
+      return Err(format!("diagnostic workers failed: metrics: {metrics_error}; wide RSS: {wide_error}"));
+    }
+  }
+  Ok(())
+}
+
+fn combine_soak_shutdown_results(diagnostics_result: Result<(), String>, shutdown_result: Result<(), String>) -> Result<(), String> {
+  match (diagnostics_result, shutdown_result) {
+    (Ok(()), Ok(())) => {}
+    (Err(diagnostics_error), Ok(())) => return Err(diagnostics_error),
+    (Ok(()), Err(shutdown_error)) => return Err(shutdown_error),
+    (Err(diagnostics_error), Err(shutdown_error)) => {
+      return Err(format!("soak shutdown failed: diagnostics: {diagnostics_error}; engine: {shutdown_error}"));
+    }
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+#[path = "../../spec/soak_worker_internal_spec.rs"]
+mod soak_worker_internal_spec;
 
 // ---------------------------------------------------------------------------
 // Workload helpers

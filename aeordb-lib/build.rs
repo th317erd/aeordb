@@ -80,8 +80,7 @@ fn ensure_link(manifest_dir: &Path, portal_dir: &Path, spec: &LinkSpec) {
   // checkout (pre-fix), a broken symlink, etc. Remove it before
   // recreating.
   if link_path.exists() || link_path.symlink_metadata().is_ok() {
-    let _ = std::fs::remove_file(&link_path);
-    let _ = std::fs::remove_dir(&link_path);
+    remove_stale_link_path(&link_path);
   }
 
   // Search upward from this crate for a directory named `sibling_dir_name`.
@@ -97,6 +96,20 @@ fn ensure_link(manifest_dir: &Path, portal_dir: &Path, spec: &LinkSpec) {
   });
 
   create_directory_link(&link_path, &target, spec.name);
+}
+
+fn remove_stale_link_path(link_path: &Path) {
+  match std::fs::remove_file(link_path) {
+    Ok(()) => return,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+    Err(file_error) => match std::fs::remove_dir(link_path) {
+      Ok(()) => {}
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(directory_error) => {
+        panic!("failed to remove stale portal link `{}` as a file ({file_error}) or directory ({directory_error})", link_path.display())
+      }
+    },
+  }
 }
 
 /// Walk up from `start` looking for any ancestor that contains a direct
@@ -197,7 +210,11 @@ fn generate_docs_asset_table(manifest_dir: &Path) {
   register_rerun_if_changed_recursive(&docs_src_dir);
 
   if docs_dir.join("book.toml").is_file() {
-    let _ = std::fs::remove_dir_all(&docs_book_dir);
+    if let Err(error) = std::fs::remove_dir_all(&docs_book_dir) {
+      if error.kind() != std::io::ErrorKind::NotFound {
+        panic!("failed to remove stale generated documentation at `{}`: {error}", docs_book_dir.display());
+      }
+    }
     match std::process::Command::new("mdbook").arg("build").arg(&docs_dir).arg("--dest-dir").arg(&docs_book_dir).status() {
       Ok(status) if status.success() => {}
       Ok(status) => {

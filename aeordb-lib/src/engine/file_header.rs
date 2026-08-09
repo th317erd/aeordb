@@ -201,7 +201,8 @@ impl FileHeader {
     // target_hash: hash_length bytes
     let copy_len = hash_length.min(self.target_hash.len());
     buffer[offset..offset + copy_len].copy_from_slice(&self.target_hash[..copy_len]);
-    let _ = offset + hash_length; // suppress unused warning
+    offset += hash_length;
+    debug_assert!(offset <= FILE_HEADER_SIZE - HEADER_CRC_SIZE);
 
     // CRC32 over the first 252 bytes (all fields + padding zeros). The last
     // 4 bytes hold the CRC itself. A torn write that lands magic + version
@@ -325,7 +326,8 @@ impl FileHeader {
 
     // target_hash: hash_length bytes
     let target_hash = bytes[offset..offset + hash_length].to_vec();
-    let _ = offset + hash_length; // suppress unused warning
+    offset += hash_length;
+    debug_assert!(offset <= FILE_HEADER_SIZE - HEADER_CRC_SIZE);
 
     Ok(FileHeader {
       header_version,
