@@ -20,8 +20,14 @@ fn store_signing_key(engine: &StorageEngine) -> Vec<u8> {
   let key_bytes = manager.to_bytes();
   let context = RequestContext::system();
 
-  system_store::store_config(engine, &context, "jwt_signing_key", &key_bytes).expect("failed to store signing key");
+  system_store::store_jwt_signing_key(engine, &context, &key_bytes).expect("failed to store signing key");
   key_bytes
+}
+
+fn store_raw_signing_key(engine: &StorageEngine, key_bytes: &[u8]) {
+  DirectoryOps::new(engine)
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-system/config/jwt_signing_key", key_bytes, Some("application/octet-stream"))
+    .unwrap();
 }
 
 fn store_peer_configs(engine: &StorageEngine, peers: &[PeerConfig]) {
@@ -77,10 +83,10 @@ fn store_file(engine: &StorageEngine, path: &str, data: &[u8]) {
 /// logic from the sync engine's current limitation (it only syncs directory
 /// tree data, not loose system table KV entries).
 fn simulate_signing_key_sync(source: &StorageEngine, destination: &StorageEngine) {
-  if let Ok(Some(key_bytes)) = system_store::get_config(source, "jwt_signing_key") {
+  if let Ok(Some(key_bytes)) = system_store::get_jwt_signing_key(source) {
     let context = RequestContext::system();
 
-    system_store::store_config(destination, &context, "jwt_signing_key", &key_bytes).expect("failed to sync signing key to destination");
+    system_store::store_jwt_signing_key(destination, &context, &key_bytes).expect("failed to sync signing key to destination");
   }
 }
 
@@ -104,18 +110,16 @@ fn test_has_signing_key_absent() {
 #[test]
 fn test_has_signing_key_too_short() {
   let (engine, _temp) = create_temp_engine_for_tests();
-  let context = RequestContext::system();
 
-  system_store::store_config(&engine, &context, "jwt_signing_key", &[0u8; 16]).unwrap();
+  store_raw_signing_key(&engine, &[0u8; 16]);
   assert!(!has_signing_key(&engine));
 }
 
 #[test]
 fn test_has_signing_key_empty() {
   let (engine, _temp) = create_temp_engine_for_tests();
-  let context = RequestContext::system();
 
-  system_store::store_config(&engine, &context, "jwt_signing_key", &[]).unwrap();
+  store_raw_signing_key(&engine, &[]);
   assert!(!has_signing_key(&engine));
 }
 
@@ -124,17 +128,24 @@ fn test_has_signing_key_exactly_32_bytes() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let context = RequestContext::system();
 
-  system_store::store_config(&engine, &context, "jwt_signing_key", &[0xABu8; 32]).unwrap();
+  system_store::store_jwt_signing_key(&engine, &context, &[0xABu8; 32]).unwrap();
   assert!(has_signing_key(&engine));
+}
+
+#[test]
+fn test_has_signing_key_rejects_oversized_seed_the_jwt_reader_cannot_parse() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+
+  store_raw_signing_key(&engine, &[0xABu8; 33]);
+  assert!(!has_signing_key(&engine));
 }
 
 #[test]
 fn test_has_signing_key_31_bytes_rejected() {
   // 31 bytes is one byte short of the minimum.
   let (engine, _temp) = create_temp_engine_for_tests();
-  let context = RequestContext::system();
 
-  system_store::store_config(&engine, &context, "jwt_signing_key", &[0xFFu8; 31]).unwrap();
+  store_raw_signing_key(&engine, &[0xFFu8; 31]);
   assert!(!has_signing_key(&engine));
 }
 
@@ -181,9 +192,8 @@ fn test_is_ready_cluster_with_key() {
 #[test]
 fn test_is_ready_cluster_with_short_key() {
   let (engine, _temp) = create_temp_engine_for_tests();
-  let context = RequestContext::system();
 
-  system_store::store_config(&engine, &context, "jwt_signing_key", &[0u8; 31]).unwrap();
+  store_raw_signing_key(&engine, &[0u8; 31]);
   assert!(!is_ready_for_traffic(&engine, true));
 }
 
@@ -423,11 +433,11 @@ fn test_signing_key_overwrite_updates_readiness() {
   assert!(is_ready_for_traffic(&engine, true));
 
   // Overwrite with too-short value: not ready.
-  system_store::store_config(&engine, &context, "jwt_signing_key", &[0u8; 10]).unwrap();
+  store_raw_signing_key(&engine, &[0u8; 10]);
   assert!(!is_ready_for_traffic(&engine, true));
 
   // Overwrite with valid key again: ready.
   let manager = JwtManager::generate();
-  system_store::store_config(&engine, &context, "jwt_signing_key", &manager.to_bytes()).unwrap();
+  system_store::store_jwt_signing_key(&engine, &context, &manager.to_bytes()).unwrap();
   assert!(is_ready_for_traffic(&engine, true));
 }

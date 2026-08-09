@@ -851,7 +851,7 @@ async fn perform_cluster_join(
   .map_err(|e| format!("failed to open engine for join: {}", e))?;
 
   let ctx = aeordb::engine::RequestContext::system();
-  aeordb::engine::system_store::store_config(&engine, &ctx, "jwt_signing_key", &signing_key)
+  aeordb::engine::system_store::store_jwt_signing_key(&engine, &ctx, &signing_key)
     .map_err(|e| format!("failed to store signing key: {}", e))?;
 
   // Register the responding node as a peer.

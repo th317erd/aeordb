@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -463,6 +463,29 @@ fn test_file_auth_provider_jwt_manager_persists() {
   let jwt_bytes_2 = provider2.jwt_manager().to_bytes();
 
   assert_eq!(jwt_bytes_1, jwt_bytes_2, "JWT signing key should persist across restarts");
+}
+
+#[test]
+fn concurrent_file_auth_provider_initialization_returns_one_persisted_signing_key() {
+  const INITIALIZERS: usize = 32;
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let barrier = Arc::new(Barrier::new(INITIALIZERS));
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let mut handles = Vec::with_capacity(INITIALIZERS);
+
+  for _ in 0..INITIALIZERS {
+    let engine = engine.clone();
+    let barrier = barrier.clone();
+    handles.push(std::thread::spawn(move || {
+      barrier.wait();
+      FileAuthProvider::try_new(engine).unwrap().jwt_manager().to_bytes()
+    }));
+  }
+
+  let keys: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+  assert!(keys.iter().all(|key| key == &keys[0]), "every acknowledged provider must use the one persisted signing key");
+  assert_eq!(system_store::get_config(&engine, "jwt_signing_key").unwrap().unwrap(), keys[0]);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
 }
 
 #[test]

@@ -1529,6 +1529,25 @@ fn wave_four_plugin_policy_and_cache_identity_share_acknowledged_authority() {
 }
 
 #[test]
+fn wave_four_jwt_initialization_has_one_bounded_persistent_winner() {
+  let system_store = include_str!("../../src/engine/system_store.rs");
+  let auth_provider = include_str!("../../src/auth/provider.rs");
+  let cluster_join = include_str!("../../src/engine/cluster_join.rs");
+  let cluster_routes = include_str!("../../src/server/cluster_routes.rs");
+  let cli_start = include_str!("../../../aeordb-cli/src/commands/start.rs");
+
+  assert!(system_store.contains("pub fn initialize_jwt_signing_key"));
+  assert!(system_store.contains("read_file_buffered_bounded(&path, LEGACY_CONFIG_VALUE_MAX_BYTES)"));
+  assert!(system_store.contains("NamespaceMutationKind::SystemWrite"));
+  assert!(auth_provider.contains("system_store::initialize_jwt_signing_key"));
+  assert!(!auth_provider.contains("system_store::store_config"), "first-run auth must not retain split read/store publication");
+  assert!(cluster_join.contains("system_store::get_jwt_signing_key"));
+  assert!(cluster_routes.contains("system_store::get_jwt_signing_key"));
+  assert!(cli_start.contains("system_store::store_jwt_signing_key"));
+  assert!(!cli_start.contains("system_store::store_config(&engine, &ctx, \"jwt_signing_key\""));
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

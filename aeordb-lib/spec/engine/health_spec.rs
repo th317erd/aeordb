@@ -20,7 +20,13 @@ fn store_signing_key(engine: &StorageEngine) {
   let manager = JwtManager::generate();
   let key_bytes = manager.to_bytes();
   let context = RequestContext::system();
-  system_store::store_config(engine, &context, "jwt_signing_key", &key_bytes).expect("failed to store signing key");
+  system_store::store_jwt_signing_key(engine, &context, &key_bytes).expect("failed to store signing key");
+}
+
+fn store_raw_signing_key(engine: &StorageEngine, key_bytes: &[u8]) {
+  DirectoryOps::new(engine)
+    .store_file_buffered(&RequestContext::system(), "/.aeordb-system/config/jwt_signing_key", key_bytes, Some("application/octet-stream"))
+    .unwrap();
 }
 
 fn store_peer_configs(engine: &StorageEngine, peers: &[PeerConfig]) {
@@ -319,8 +325,7 @@ fn test_auth_health_cluster_with_short_key_unhealthy() {
   store_peer_configs(&engine, &[make_peer_config(2)]);
 
   // Store a key that's too short (31 bytes).
-  let ctx = RequestContext::system();
-  system_store::store_config(&engine, &ctx, "jwt_signing_key", &[0xFFu8; 31]).unwrap();
+  store_raw_signing_key(&engine, &[0xFFu8; 31]);
 
   let health = check_auth(&engine);
   assert_eq!(health.status, HealthStatus::Unhealthy);

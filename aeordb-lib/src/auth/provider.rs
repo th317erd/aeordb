@@ -144,8 +144,6 @@ pub struct FileAuthProvider {
   jwt_manager: JwtManager,
 }
 
-const SIGNING_KEY_CONFIG: &str = "jwt_signing_key";
-
 impl FileAuthProvider {
   /// Create a provider while preserving initialization failures for callers
   /// that own process startup and shutdown policy.
@@ -244,18 +242,16 @@ impl AuthProvider for FileAuthProvider {
 ///     outstanding JWT and refresh token on the cluster and could mask a
 ///     deeper corruption issue. Refusing to start surfaces the problem.
 fn load_or_create_jwt_manager(engine: &StorageEngine) -> std::result::Result<JwtManager, String> {
-  match system_store::get_config(engine, SIGNING_KEY_CONFIG) {
+  match system_store::get_jwt_signing_key(engine) {
     Ok(Some(key_bytes)) => {
-      // Key bytes ARE present. They MUST parse. Don't fall through.
-      return JwtManager::from_bytes(&key_bytes).map_err(|e| {
+      return JwtManager::from_bytes(&key_bytes).map_err(|error| {
         format!(
-          "JWT signing key is present at /.aeordb-system/config/{} but failed to parse: {:?}. \
+          "JWT signing key is present at /.aeordb-system/config/jwt_signing_key but failed to parse: {error:?}. \
          This indicates corruption. Refusing to regenerate the key automatically — \
          doing so would invalidate every outstanding JWT and refresh token in the cluster. \
          If you intend to reset the signing key, run emergency-reset (which also wipes \
          /.aeordb-system/refresh-tokens) or remove the corrupt config entry manually \
-         before restart.",
-          SIGNING_KEY_CONFIG, e
+         before restart."
         )
       });
     }
@@ -267,10 +263,9 @@ fn load_or_create_jwt_manager(engine: &StorageEngine) -> std::result::Result<Jwt
     }
   }
 
-  let manager = JwtManager::generate();
-  let key_bytes = manager.to_bytes();
+  let candidate = JwtManager::generate();
   let ctx = RequestContext::system();
-  system_store::store_config(engine, &ctx, SIGNING_KEY_CONFIG, &key_bytes)
-    .map_err(|error| format!("failed to persist JWT signing key: {}", error))?;
-  Ok(manager)
+  let selected = system_store::initialize_jwt_signing_key(engine, &ctx, &candidate.to_bytes())
+    .map_err(|error| format!("failed to initialize JWT signing key: {error}"))?;
+  JwtManager::from_bytes(&selected).map_err(|error| format!("initialized JWT signing key failed validation: {error:?}"))
 }

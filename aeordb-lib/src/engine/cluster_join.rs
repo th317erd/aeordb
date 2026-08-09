@@ -1,18 +1,12 @@
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_store;
 
-/// Minimum size (in bytes) for a valid JWT signing key (Ed25519 seed).
-const SIGNING_KEY_MIN_LENGTH: usize = 32;
-
 /// Check if this node has a valid JWT signing key in system store.
 ///
 /// The JWT signing key is stored at `/.aeordb-system/config/jwt_signing_key` and must
-/// be at least 32 bytes (an Ed25519 seed).
+/// be exactly 32 bytes (an Ed25519 seed).
 pub fn has_signing_key(engine: &StorageEngine) -> bool {
-  match system_store::get_config(engine, "jwt_signing_key") {
-    Ok(Some(key_bytes)) if key_bytes.len() >= SIGNING_KEY_MIN_LENGTH => true,
-    _ => false,
-  }
+  matches!(system_store::get_jwt_signing_key(engine), Ok(Some(_)))
 }
 
 /// Check if this node is ready to serve client HTTP traffic.

@@ -72,6 +72,53 @@ fn test_config_overwrite() {
   assert_eq!(result, Some(b"v2".to_vec()));
 }
 
+#[test]
+fn config_rejects_path_shaping_keys_and_oversized_values_before_publication() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  for key in ["", ".", "..", "nested/key", "aliases::value", "line\nbreak"] {
+    assert!(system_store::store_config(&engine, &ctx, key, b"value").is_err(), "config key '{key}' must be rejected");
+  }
+  let oversized = vec![0x5a; 1024 * 1024 + 1];
+  assert!(matches!(system_store::store_config(&engine, &ctx, "oversized", &oversized), Err(EngineError::ResourceExhausted(_))));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+}
+
+#[test]
+fn config_reads_refuse_oversized_persisted_values_before_buffering_them_as_authority() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let oversized = vec![0x31; 1024 * 1024 + 1];
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&ctx, "/.aeordb-system/config/oversized", &oversized, Some("application/octet-stream"))
+    .unwrap();
+
+  assert!(matches!(system_store::get_config(&engine, "oversized"), Err(EngineError::ResourceExhausted(_))));
+}
+
+#[test]
+fn jwt_config_refuses_invalid_candidates_and_malformed_current_authority_without_writing() {
+  let (engine, _dir) = setup();
+  let ctx = test_context();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  assert!(matches!(system_store::store_jwt_signing_key(&engine, &ctx, &[0x11; 31]), Err(EngineError::InvalidInput(_))));
+  assert!(matches!(system_store::store_config(&engine, &ctx, "jwt_signing_key", &[0x11; 31]), Err(EngineError::InvalidInput(_))));
+  assert!(matches!(system_store::initialize_jwt_signing_key(&engine, &ctx, &[0x22; 33]), Err(EngineError::InvalidInput(_))));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&ctx, "/.aeordb-system/config/jwt_signing_key", &[0x33; 31], Some("application/octet-stream"))
+    .unwrap();
+  let malformed_sequence = engine.durability_snapshot().unwrap().next_sequence;
+  assert!(matches!(system_store::get_jwt_signing_key(&engine), Err(EngineError::CorruptEntry { .. })));
+  assert!(matches!(system_store::initialize_jwt_signing_key(&engine, &ctx, &[0x44; 32]), Err(EngineError::CorruptEntry { .. })));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, malformed_sequence);
+  assert_eq!(system_store::get_config(&engine, "jwt_signing_key").unwrap().unwrap(), vec![0x33; 31]);
+}
+
 // ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------

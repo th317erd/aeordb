@@ -437,7 +437,7 @@
           - [x] Bind compiled-cache identity to the stored plugin checksum so concurrent or external managers cannot execute stale bytes after acknowledgement.
           - [x] Bound and strictly validate plugin records, then prove concurrent deploy/remove, malformed state, pressure, restart, and invocation behavior.
         - [ ] Converge legacy configuration, email configuration, and system-path migration authority.
-          - [ ] Validate and bound legacy config keys/values and make JWT first initialization single-winner.
+          - [x] Validate and bound legacy config keys/values and make JWT first initialization single-winner.
           - [ ] Bound email authority and remove serialization error squelching.
           - [ ] Replace split copy/delete migration with atomic per-entry moves, reject divergent canonical collisions, and preserve content metadata.
         - [ ] Classify every remaining swallowed system/plugin persistence failure as fatal, acknowledged soft evidence, or deferred Wave 5 work, and source-gate the approved direction.

@@ -13,7 +13,7 @@ use crate::auth::api_key::{ApiKeyRecord, ApiKeyRevokePolicy, ApiKeyRevokeResult}
 use crate::auth::magic_link::{MagicLinkConsumeResult, MagicLinkRecord};
 use crate::auth::refresh::{RefreshTokenRecord, RefreshTokenRotationResult};
 use crate::engine::batch_commit::{BufferedFile, commit_buffered_files_with_kind};
-use crate::engine::directory_ops::{DirectoryOps, FileDeletionRequest};
+use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps, FileDeletionRequest};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::group::Group;
 use crate::engine::json_store::{JsonDoc, JsonStore, JsonStoreMutation};
@@ -25,6 +25,9 @@ use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::{ROOT_USER_ID, User, validate_user_id};
 
 const CREDENTIAL_RECORD_MAX_BYTES: u64 = 1024 * 1024;
+const LEGACY_CONFIG_KEY_MAX_BYTES: usize = 255;
+const LEGACY_CONFIG_VALUE_MAX_BYTES: u64 = 1024 * 1024;
+const JWT_SIGNING_KEY_BYTES: usize = 32;
 const PEER_CONFIG_DOCUMENT_MAX_BYTES: u64 = 1024 * 1024;
 const NODE_ID_PATH: &str = "/.aeordb-system/cluster/node_id";
 
@@ -42,10 +45,45 @@ fn ensure_credential_record_bounded<T: JsonVersioned>(record: &T, role: &str) ->
 // Config
 // ---------------------------------------------------------------------------
 
+fn validate_legacy_config_key(key: &str) -> EngineResult<()> {
+  if key.is_empty() {
+    return Err(EngineError::InvalidInput("config key must not be empty".to_string()));
+  }
+  if key.len() > LEGACY_CONFIG_KEY_MAX_BYTES {
+    return Err(EngineError::ResourceExhausted(format!(
+      "config key is {} bytes, exceeding the {LEGACY_CONFIG_KEY_MAX_BYTES}-byte limit",
+      key.len(),
+    )));
+  }
+  if key == "." || key == ".." || key.contains('/') || key.contains('\\') || key.contains("::") || key.chars().any(char::is_control) {
+    return Err(EngineError::InvalidInput(format!("config key '{key}' contains reserved path characters")));
+  }
+  Ok(())
+}
+
+fn validate_legacy_config_value(value: &[u8]) -> EngineResult<()> {
+  if value.len() as u64 > LEGACY_CONFIG_VALUE_MAX_BYTES {
+    return Err(EngineError::ResourceExhausted(format!(
+      "config value is {} bytes, exceeding the {LEGACY_CONFIG_VALUE_MAX_BYTES}-byte limit",
+      value.len(),
+    )));
+  }
+  Ok(())
+}
+
+fn legacy_config_path(key: &str) -> EngineResult<String> {
+  validate_legacy_config_key(key)?;
+  Ok(format!("/.aeordb-system/config/{key}"))
+}
+
 /// Store a config value by key.
 pub fn store_config(engine: &StorageEngine, ctx: &RequestContext, key: &str, value: &[u8]) -> EngineResult<()> {
+  validate_legacy_config_value(value)?;
+  if key == "jwt_signing_key" {
+    validate_jwt_signing_key(value, false)?;
+  }
   let ops = DirectoryOps::new(engine);
-  let path = format!("/.aeordb-system/config/{}", key);
+  let path = legacy_config_path(key)?;
   ops.store_file_buffered(ctx, &path, value, Some("application/octet-stream"))?;
   Ok(())
 }
@@ -53,12 +91,63 @@ pub fn store_config(engine: &StorageEngine, ctx: &RequestContext, key: &str, val
 /// Retrieve a config value by key.
 pub fn get_config(engine: &StorageEngine, key: &str) -> EngineResult<Option<Vec<u8>>> {
   let ops = DirectoryOps::new(engine);
-  let path = format!("/.aeordb-system/config/{}", key);
-  match ops.read_file_buffered(&path) {
+  let path = legacy_config_path(key)?;
+  match ops.read_file_buffered_bounded(&path, LEGACY_CONFIG_VALUE_MAX_BYTES) {
     Ok(data) => Ok(Some(data)),
     Err(EngineError::NotFound(_)) => Ok(None),
     Err(error) => Err(error),
   }
+}
+
+fn validate_jwt_signing_key(key: &[u8], persisted: bool) -> EngineResult<()> {
+  if key.len() == JWT_SIGNING_KEY_BYTES {
+    return Ok(());
+  }
+  let reason = format!("JWT signing key must be exactly {JWT_SIGNING_KEY_BYTES} bytes, found {}", key.len());
+  if persisted {
+    Err(EngineError::CorruptEntry { offset: 0, reason })
+  } else {
+    Err(EngineError::InvalidInput(reason))
+  }
+}
+
+/// Read the exact persisted Ed25519 JWT seed, failing closed on malformed
+/// authority instead of treating it as absent.
+pub fn get_jwt_signing_key(engine: &StorageEngine) -> EngineResult<Option<Vec<u8>>> {
+  let Some(key) = get_config(engine, "jwt_signing_key")? else {
+    return Ok(None);
+  };
+  validate_jwt_signing_key(&key, true)?;
+  Ok(Some(key))
+}
+
+/// Replace the persisted Ed25519 JWT seed after exact validation.
+pub fn store_jwt_signing_key(engine: &StorageEngine, ctx: &RequestContext, key: &[u8]) -> EngineResult<()> {
+  validate_jwt_signing_key(key, false)?;
+  store_config(engine, ctx, "jwt_signing_key", key)
+}
+
+/// Atomically install the first JWT seed or return the already-persisted
+/// winner. Concurrent first-run providers therefore cannot acknowledge
+/// different in-memory signing authority.
+pub fn initialize_jwt_signing_key(engine: &StorageEngine, ctx: &RequestContext, candidate: &[u8]) -> EngineResult<Vec<u8>> {
+  validate_jwt_signing_key(candidate, false)?;
+  let candidate = candidate.to_vec();
+  let path = legacy_config_path("jwt_signing_key")?;
+  DirectoryOps::new(engine).transform_file_buffered(
+    ctx,
+    &path,
+    Some("application/octet-stream"),
+    LEGACY_CONFIG_VALUE_MAX_BYTES,
+    NamespaceMutationKind::SystemWrite,
+    move |current| {
+      if let Some(current) = current {
+        validate_jwt_signing_key(current, true)?;
+        return Ok(BufferedFileTransform::Keep(current.to_vec()));
+      }
+      Ok(BufferedFileTransform::Replace { data: candidate.clone(), output: candidate })
+    },
+  )
 }
 
 // ---------------------------------------------------------------------------

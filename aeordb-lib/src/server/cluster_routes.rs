@@ -360,7 +360,7 @@ pub async fn join_cluster(
 
   // Read this node's JWT signing key. This is the shared secret of the
   // cluster — joining nodes adopt it so JWTs validate everywhere.
-  let signing_key = match system_store::get_config(&state.engine, "jwt_signing_key") {
+  let signing_key = match system_store::get_jwt_signing_key(&state.engine) {
     Ok(Some(key)) => key,
     Ok(None) => {
       tracing::error!("/sync/join: no JWT signing key in system store");

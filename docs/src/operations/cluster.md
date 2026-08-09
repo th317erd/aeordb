@@ -80,6 +80,14 @@ than path alone.
 
 All `/sync/*` endpoints require JWT authentication. Nodes mint short-lived root JWTs (nil UUID `sub`) internally when calling each other's `/sync/diff` and `/sync/chunks` endpoints. This works because every node in the cluster shares the same Ed25519 signing key (distributed by `/sync/join`).
 
+The signing seed is exactly 32 bytes. First startup installs it through one
+atomic system-namespace decision, so concurrent authentication providers all
+receive the same persisted winner and consume one durability sequence. Reads,
+readiness checks, and join reject malformed or oversized seed authority rather
+than treating it as absent or regenerating it. Legacy system config keys are
+limited to 255 bytes, cannot contain path-shaping characters, and their values
+are limited to 1 MiB.
+
 Protected `/.aeordb-*` state is not exposed through generic HTTP file APIs merely because a caller is root. Peer sync also does not copy the entire `/.aeordb-system/` tree. A root sync JWT selects the peer-replication policy in AeorDB's SystemFamily registry: portable state such as users, groups, central permissions, plugin definitions, and namespace configuration is included, while node-local credentials, signing keys, API keys, email secrets, operational controls, logs, derived indexes, and conflict records are omitted. Root and nested `.aeordb-indexes` and `.aeordb-logs` instances use the same declared policies. Cluster join transfers the signing key through the dedicated `/sync/join` protocol rather than ordinary replication.
 
 Both sync producers and receivers enforce this policy. A peer response containing an unknown protected path, an omitted family, or a structural container presented as a file/symlink is rejected before AeorDB requests its chunks or mutates the destination.
