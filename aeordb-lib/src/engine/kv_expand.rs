@@ -181,21 +181,24 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
     relocation_delta = u64::try_from(raw_delta)
       .map_err(|_| EngineError::InvalidInput(format!("KV relocation delta {raw_delta} cannot be represented as u64")))?;
 
-    let relocated_payload = if let Some(old_payload) = crate::engine::hot_tail::read_hot_tail(&mut file, old_hot_tail, hash_length) {
-      relocate_hot_tail_payload(old_payload, old_kv_end, relocation_end, offset_delta, new_kv_end, new_hot_tail)?
-    } else {
-      // A previous pre-relocation attempt may have overwritten the selected
-      // old hot tail while copying WAL bytes. Bytes at the future hot-tail
-      // offset are not authority until phase 2 is selected, so never trust
-      // them even when they happen to contain valid framing and checksums.
-      // WAL bytes remain authoritative and the subsequent mandatory
-      // rebuild/gap scan recovers KV and Void state.
-      tracing::warn!(
-        old_hot_tail,
-        new_hot_tail,
-        "No complete hot-tail copy survived pre-relocation recovery; rebuilding it from authoritative WAL"
-      );
-      HotTailPayload::default()
+    let relocated_payload = match crate::engine::hot_tail::read_hot_tail_checked(&mut file, old_hot_tail, hash_length) {
+      Ok(old_payload) => relocate_hot_tail_payload(old_payload, old_kv_end, relocation_end, offset_delta, new_kv_end, new_hot_tail)?,
+      Err(error) if crate::engine::hot_tail::is_rebuildable_hot_tail_error(&error) => {
+        // A previous pre-relocation attempt may have overwritten the selected
+        // old hot tail while copying WAL bytes. Bytes at the future hot-tail
+        // offset are not authority until phase 2 is selected, so never trust
+        // them even when they happen to contain valid framing and checksums.
+        // WAL bytes remain authoritative and the subsequent mandatory
+        // rebuild/gap scan recovers KV and Void state.
+        tracing::warn!(
+          old_hot_tail,
+          new_hot_tail,
+          error = %error,
+          "No complete hot-tail copy survived pre-relocation recovery; rebuilding it from authoritative WAL"
+        );
+        HotTailPayload::default()
+      }
+      Err(error) => return Err(error),
     };
 
     copy_nonoverlapping_region(&mut file, old_kv_end, copy_destination, relocation_bytes)?;

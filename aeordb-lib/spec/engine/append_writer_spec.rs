@@ -488,3 +488,13 @@ fn test_void_and_data_entries_interleaved() {
   assert_eq!(entries[1].header.entry_type, EntryType::Void);
   assert_eq!(entries[2].header.entry_type, EntryType::Chunk);
 }
+
+#[test]
+fn hot_tail_reader_does_not_turn_an_unreadable_offset_into_an_empty_payload() {
+  let temp_directory = create_temp_path();
+  let file_path = temp_directory.path().join("strict-hot-tail.aeor");
+  let writer = AppendWriter::create(&file_path).unwrap();
+
+  assert!(writer.read_hot_tail_payload(u64::MAX - 1, 32).is_err());
+  assert!(writer.read_hot_tail_entries(u64::MAX - 1, 32).is_err());
+}

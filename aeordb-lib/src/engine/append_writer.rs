@@ -430,18 +430,14 @@ impl AppendWriter {
   }
 
   /// Read hot tail payload (writes + voids) from this writer's reader handle.
-  /// Returns an empty payload if the hot tail is missing, torn, or unreadable.
-  pub fn read_hot_tail_payload(&self, offset: u64, hash_length: usize) -> crate::engine::hot_tail::HotTailPayload {
-    let mut reader = match self.reader.try_clone() {
-      Ok(r) => r,
-      Err(_) => return crate::engine::hot_tail::HotTailPayload::default(),
-    };
-    crate::engine::hot_tail::read_hot_tail(&mut reader, offset, hash_length).unwrap_or_default()
+  pub fn read_hot_tail_payload(&self, offset: u64, hash_length: usize) -> EngineResult<crate::engine::hot_tail::HotTailPayload> {
+    let mut reader = self.reader.try_clone()?;
+    crate::engine::hot_tail::read_hot_tail_checked(&mut reader, offset, hash_length)
   }
 
   /// Backwards-compatible wrapper that returns only the write entries.
-  pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> Vec<crate::engine::kv_store::KVEntry> {
-    self.read_hot_tail_payload(offset, hash_length).writes
+  pub fn read_hot_tail_entries(&self, offset: u64, hash_length: usize) -> EngineResult<Vec<crate::engine::kv_store::KVEntry>> {
+    Ok(self.read_hot_tail_payload(offset, hash_length)?.writes)
   }
 
   /// Write a void entry at a specific file offset (in-place overwrite).

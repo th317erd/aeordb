@@ -18,11 +18,34 @@ pub const HOT_TAIL_FORMAT_VERSION: u8 = 1;
 pub const WRITE_RECORD_VERSION: u8 = 1;
 pub const VOID_RECORD_VERSION: u8 = 1;
 
-/// Header layout (21 bytes):
+/// Header layout (18 bytes):
 ///   magic(5) + format_version(1) + write_count(u32) + void_count(u32) +
 ///   crc32_of_header(u32)
 /// The CRC is computed over the preceding 17 bytes (magic + version + counts).
 const HOT_TAIL_HEADER_SIZE: usize = 5 + 1 + 4 + 4 + 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecodedHotTailHeader {
+  write_count: u32,
+  void_count: u32,
+}
+
+fn decode_hot_tail_header(header: &[u8; HOT_TAIL_HEADER_SIZE], offset: u64) -> EngineResult<DecodedHotTailHeader> {
+  if header[..5] != HOT_TAIL_MAGIC {
+    return Err(EngineError::InvalidMagic);
+  }
+  if header[5] != HOT_TAIL_FORMAT_VERSION {
+    return Err(EngineError::InvalidEntryVersion(header[5]));
+  }
+  let stored_crc = u32::from_le_bytes([header[14], header[15], header[16], header[17]]);
+  if crc32fast::hash(&header[..14]) != stored_crc {
+    return Err(EngineError::CorruptEntry { offset, reason: "hot-tail header checksum mismatch".to_string() });
+  }
+  Ok(DecodedHotTailHeader {
+    write_count: u32::from_le_bytes([header[6], header[7], header[8], header[9]]),
+    void_count: u32::from_le_bytes([header[10], header[11], header[12], header[13]]),
+  })
+}
 
 /// Per-write-record size: version(1) + hash + type_flags(1) + offset(8) + total_length(4).
 fn write_record_size(hash_length: usize) -> usize {
@@ -150,21 +173,11 @@ pub fn deserialize_hot_tail(data: &[u8], hash_length: usize) -> Option<HotTailPa
   if data.len() < HOT_TAIL_HEADER_SIZE {
     return None;
   }
-  if data[..5] != HOT_TAIL_MAGIC {
-    return None;
-  }
-  let format_version = data[5];
-  if format_version != HOT_TAIL_FORMAT_VERSION {
-    return None;
-  }
-
-  let write_count = u32::from_le_bytes(data[6..10].try_into().ok()?) as usize;
-  let void_count = u32::from_le_bytes(data[10..14].try_into().ok()?) as usize;
-  let stored_crc = u32::from_le_bytes(data[14..18].try_into().ok()?);
-  let actual_crc = crc32fast::hash(&data[..14]);
-  if stored_crc != actual_crc {
-    return None;
-  }
+  let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
+  header.copy_from_slice(&data[..HOT_TAIL_HEADER_SIZE]);
+  let decoded = decode_hot_tail_header(&header, 0).ok()?;
+  let write_count = decoded.write_count as usize;
+  let void_count = decoded.void_count as usize;
 
   let expected_len = HOT_TAIL_HEADER_SIZE.checked_add(checked_body_size(write_count, void_count, hash_length)?)?;
   if data.len() < expected_len {
@@ -218,71 +231,124 @@ pub fn write_hot_tail<W: Write + Seek>(writer: &mut W, offset: u64, payload: &Ho
   offset.checked_add(length as u64).ok_or_else(|| EngineError::ResourceExhausted("hot-tail end offset overflow".to_string()))
 }
 
-/// Read the hot tail payload from a file at the given offset.
-/// Returns `None` for any failure (missing, torn, wrong version, etc.).
-pub fn read_hot_tail<R: Read + Seek>(reader: &mut R, offset: u64, hash_length: usize) -> Option<HotTailPayload> {
-  reader.seek(SeekFrom::Start(offset)).ok()?;
-
+/// Strictly read the hot tail payload from a file at the given offset.
+pub fn read_hot_tail_checked<R: Read + Seek>(reader: &mut R, offset: u64, hash_length: usize) -> EngineResult<HotTailPayload> {
+  reader.seek(SeekFrom::Start(offset))?;
   let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
-  reader.read_exact(&mut header).ok()?;
+  reader.read_exact(&mut header)?;
+  let decoded = decode_hot_tail_header(&header, offset)?;
+  let write_count_u32 = decoded.write_count;
+  let void_count_u32 = decoded.void_count;
+  let write_count = write_count_u32 as usize;
+  let void_count = void_count_u32 as usize;
 
-  if header[..5] != HOT_TAIL_MAGIC {
-    return None;
+  let body_length = checked_body_size(write_count, void_count, hash_length)
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail record span overflows usize".to_string() })?;
+  let records_start = offset
+    .checked_add(HOT_TAIL_HEADER_SIZE as u64)
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail record offset overflows u64".to_string() })?;
+  let required_end = records_start
+    .checked_add(
+      u64::try_from(body_length)
+        .map_err(|_| EngineError::CorruptEntry { offset, reason: "hot-tail record span exceeds u64".to_string() })?,
+    )
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail end offset overflows u64".to_string() })?;
+  let physical_end = reader.seek(SeekFrom::End(0))?;
+  if required_end > physical_end {
+    return Err(EngineError::CorruptEntry {
+      offset,
+      reason: format!("hot-tail requires end offset {required_end}, but file ends at {physical_end}"),
+    });
   }
-  if header[5] != HOT_TAIL_FORMAT_VERSION {
-    return None;
-  }
+  reader.seek(SeekFrom::Start(records_start))?;
 
-  let write_count = u32::from_le_bytes(header[6..10].try_into().ok()?) as usize;
-  let void_count = u32::from_le_bytes(header[10..14].try_into().ok()?) as usize;
-  let stored_crc = u32::from_le_bytes(header[14..18].try_into().ok()?);
-  if crc32fast::hash(&header[..14]) != stored_crc {
-    return None;
-  }
-
-  let body_len = checked_body_size(write_count, void_count, hash_length)?;
-  let records_start = offset.checked_add(HOT_TAIL_HEADER_SIZE as u64)?;
-  let required_end = records_start.checked_add(u64::try_from(body_len).ok()?)?;
-  if required_end > reader.seek(SeekFrom::End(0)).ok()? {
-    return None;
-  }
-  reader.seek(SeekFrom::Start(records_start)).ok()?;
-
-  let write_size = checked_write_record_size(hash_length)?;
+  let write_size = checked_write_record_size(hash_length)
+    .ok_or_else(|| EngineError::CorruptEntry { offset, reason: "hot-tail write record size overflows usize".to_string() })?;
   let mut write_record = Vec::new();
-  write_record.try_reserve_exact(write_size).ok()?;
+  write_record
+    .try_reserve_exact(write_size)
+    .map_err(|error| EngineError::ResourceExhausted(format!("hot-tail write record allocation failed: {error}")))?;
   write_record.resize(write_size, 0);
   let mut writes = Vec::new();
-  writes.try_reserve_exact(write_count).ok()?;
-  for _ in 0..write_count {
-    reader.read_exact(&mut write_record).ok()?;
+  writes
+    .try_reserve_exact(write_count)
+    .map_err(|error| EngineError::ResourceExhausted(format!("hot-tail write collection allocation failed: {error}")))?;
+  for index in 0..write_count_u32 {
+    reader.read_exact(&mut write_record).map_err(|error| hot_tail_record_error(offset, "write", index, error))?;
     if write_record[0] != WRITE_RECORD_VERSION {
-      return None;
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("hot-tail write record {index} has unsupported version {}", write_record[0]),
+      });
     }
     let mut hash = Vec::new();
-    hash.try_reserve_exact(hash_length).ok()?;
+    hash
+      .try_reserve_exact(hash_length)
+      .map_err(|error| EngineError::ResourceExhausted(format!("hot-tail hash allocation failed: {error}")))?;
     hash.extend_from_slice(&write_record[1..1 + hash_length]);
     let type_flags = write_record[1 + hash_length];
     let number_start = 2 + hash_length;
-    let entry_offset = u64::from_le_bytes(write_record[number_start..number_start + 8].try_into().ok()?);
-    let total_length = u32::from_le_bytes(write_record[number_start + 8..number_start + 12].try_into().ok()?);
+    let entry_offset = u64::from_le_bytes([
+      write_record[number_start],
+      write_record[number_start + 1],
+      write_record[number_start + 2],
+      write_record[number_start + 3],
+      write_record[number_start + 4],
+      write_record[number_start + 5],
+      write_record[number_start + 6],
+      write_record[number_start + 7],
+    ]);
+    let total_length = u32::from_le_bytes([
+      write_record[number_start + 8],
+      write_record[number_start + 9],
+      write_record[number_start + 10],
+      write_record[number_start + 11],
+    ]);
     writes.push(KVEntry { hash, type_flags, offset: entry_offset, total_length });
   }
 
   let mut voids = Vec::new();
-  voids.try_reserve_exact(void_count).ok()?;
+  voids
+    .try_reserve_exact(void_count)
+    .map_err(|error| EngineError::ResourceExhausted(format!("hot-tail void collection allocation failed: {error}")))?;
   let mut void_record = [0u8; VOID_RECORD_SIZE];
-  for _ in 0..void_count {
-    reader.read_exact(&mut void_record).ok()?;
+  for index in 0..void_count_u32 {
+    reader.read_exact(&mut void_record).map_err(|error| hot_tail_record_error(offset, "void", index, error))?;
     if void_record[0] != VOID_RECORD_VERSION {
-      return None;
+      return Err(EngineError::CorruptEntry {
+        offset,
+        reason: format!("hot-tail void record {index} has unsupported version {}", void_record[0]),
+      });
     }
-    let void_offset = u64::from_le_bytes(void_record[1..9].try_into().ok()?);
-    let size = u32::from_le_bytes(void_record[9..13].try_into().ok()?);
+    let void_offset = u64::from_le_bytes([
+      void_record[1],
+      void_record[2],
+      void_record[3],
+      void_record[4],
+      void_record[5],
+      void_record[6],
+      void_record[7],
+      void_record[8],
+    ]);
+    let size = u32::from_le_bytes([void_record[9], void_record[10], void_record[11], void_record[12]]);
     voids.push(VoidRecord { offset: void_offset, size });
   }
 
-  Some(HotTailPayload { writes, voids })
+  Ok(HotTailPayload { writes, voids })
+}
+
+pub fn is_rebuildable_hot_tail_error(error: &EngineError) -> bool {
+  matches!(
+    error,
+    EngineError::InvalidMagic | EngineError::InvalidEntryVersion(_) | EngineError::CorruptEntry { .. } | EngineError::UnexpectedEof
+  )
+}
+
+/// Compatibility probe for callers that explicitly treat every read failure
+/// as an absent hot tail. Authoritative and diagnostic paths must use
+/// [`read_hot_tail_checked`].
+pub fn read_hot_tail<R: Read + Seek>(reader: &mut R, offset: u64, hash_length: usize) -> Option<HotTailPayload> {
+  read_hot_tail_checked(reader, offset, hash_length).ok()
 }
 
 /// Validate a hot tail and visit its void records without allocating arrays
@@ -303,18 +369,9 @@ where
   reader.seek(SeekFrom::Start(offset))?;
   let mut header = [0u8; HOT_TAIL_HEADER_SIZE];
   reader.read_exact(&mut header)?;
-  if header[..5] != HOT_TAIL_MAGIC {
-    return Err(EngineError::InvalidMagic);
-  }
-  if header[5] != HOT_TAIL_FORMAT_VERSION {
-    return Err(EngineError::InvalidEntryVersion(header[5]));
-  }
-  let write_count = u32::from_le_bytes(header[6..10].try_into().map_err(|_| EngineError::UnexpectedEof)?);
-  let void_count = u32::from_le_bytes(header[10..14].try_into().map_err(|_| EngineError::UnexpectedEof)?);
-  let stored_crc = u32::from_le_bytes(header[14..18].try_into().map_err(|_| EngineError::UnexpectedEof)?);
-  if crc32fast::hash(&header[..14]) != stored_crc {
-    return Err(EngineError::CorruptEntry { offset, reason: "hot-tail header checksum mismatch".to_string() });
-  }
+  let decoded = decode_hot_tail_header(&header, offset)?;
+  let write_count = decoded.write_count;
+  let void_count = decoded.void_count;
 
   let write_record_length = write_record_size(hash_length);
   let records_start = offset
@@ -385,6 +442,10 @@ fn hot_tail_record_error(offset: u64, section: &str, index: u32, error: std::io:
     EngineError::IoError(error)
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/hot_tail_checked_internal_spec.rs"]
+mod hot_tail_checked_internal_spec;
 
 #[cfg(test)]
 mod tests {

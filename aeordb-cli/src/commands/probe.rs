@@ -346,7 +346,13 @@ fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
   println!("file path key: {}", kv_summary(engine, &file_key));
   println!();
   println!("--- WAL matches ---");
-  let hot_tail_voids = load_hot_tail_voids(config.database);
+  let hot_tail_voids = match load_hot_tail_voids(config.database) {
+    Ok(voids) => voids,
+    Err(error) => {
+      eprintln!("hot-tail diagnostics: {error}");
+      std::process::exit(1);
+    }
+  };
 
   let writer = match engine.writer_read_lock() {
     Ok(writer) => writer,
@@ -435,20 +441,16 @@ fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
   }
 }
 
-fn load_hot_tail_voids(database: &str) -> Vec<aeordb::engine::hot_tail::VoidRecord> {
-  let mut file = match File::open(database) {
-    Ok(file) => file,
-    Err(_) => return Vec::new(),
-  };
-  let Ok((header, _slot)) = aeordb::engine::file_header::read_active_header(&mut file) else {
-    return Vec::new();
-  };
+fn load_hot_tail_voids(database: &str) -> Result<Vec<aeordb::engine::hot_tail::VoidRecord>, String> {
+  let mut file = File::open(database).map_err(|error| format!("failed to open database: {error}"))?;
+  let (header, _slot) = aeordb::engine::file_header::read_active_header(&mut file)
+    .map_err(|error| format!("failed to read active database header: {error}"))?;
   if header.hot_tail_offset == 0 {
-    return Vec::new();
+    return Ok(Vec::new());
   }
-  aeordb::engine::hot_tail::read_hot_tail(&mut file, header.hot_tail_offset, header.hash_algo.hash_length())
+  aeordb::engine::hot_tail::read_hot_tail_checked(&mut file, header.hot_tail_offset, header.hash_algo.hash_length())
     .map(|payload| payload.voids)
-    .unwrap_or_default()
+    .map_err(|error| format!("failed to read hot tail at {}: {error}", header.hot_tail_offset))
 }
 
 fn first_overlapping_void(offset: u64, length: u32, voids: &[aeordb::engine::hot_tail::VoidRecord]) -> Option<(u64, u32)> {

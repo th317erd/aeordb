@@ -2704,8 +2704,8 @@ impl StorageEngine {
     // Read hot tail payload (writes + voids) from end of file
     let (hot_payload, needs_dirty_startup) = if hot_tail_offset > 0 {
       let mut f = OpenOptions::new().read(true).open(path)?;
-      match crate::engine::hot_tail::read_hot_tail(&mut f, hot_tail_offset, hash_length) {
-        Some(payload) => {
+      match crate::engine::hot_tail::read_hot_tail_checked(&mut f, hot_tail_offset, hash_length) {
+        Ok(payload) => {
           tracing::debug!(
             hot_writes_loaded = payload.writes.len(),
             hot_voids_loaded = payload.voids.len(),
@@ -2713,10 +2713,11 @@ impl StorageEngine {
           );
           (payload, false)
         }
-        None => {
-          tracing::warn!(hot_tail_offset, "Corrupt or missing hot tail — will rebuild KV from WAL (dirty startup)");
+        Err(error) if crate::engine::hot_tail::is_rebuildable_hot_tail_error(&error) => {
+          tracing::warn!(hot_tail_offset, error = %error, "Corrupt or missing hot tail — will rebuild KV from WAL (dirty startup)");
           (crate::engine::hot_tail::HotTailPayload::default(), true)
         }
+        Err(error) => return Err(error),
       }
     } else {
       (crate::engine::hot_tail::HotTailPayload::default(), false)
