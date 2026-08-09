@@ -4420,26 +4420,25 @@ impl StorageEngine {
     })
   }
 
-  /// Best-effort O(1) metrics for the in-file KV block.
+  /// O(1) metrics for the in-file KV block.
   ///
   /// Returns `(kv_block_size_bytes, kv_fill_ratio)`. The ratio is based on the
   /// current snapshot's live KV entries against the current bucket-page
   /// capacity, so it avoids the old full stats scan while still reflecting
   /// resize pressure.
-  pub fn kv_layout_metrics(&self) -> (u64, f64) {
-    let kv_size_bytes = match self.writer.read() {
-      Ok(writer) => writer.file_header().kv_block_length,
-      Err(e) => {
-        tracing::error!("writer lock poisoned in kv_layout_metrics(): {}", e);
-        0
-      }
-    };
+  pub fn kv_layout_metrics(&self) -> EngineResult<(u64, f64)> {
+    let kv_size_bytes = self
+      .writer
+      .read()
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned in kv_layout_metrics(): {error}"))))?
+      .file_header()
+      .kv_block_length;
 
     let snapshot = self.kv_snapshot.load();
     let capacity = snapshot.bucket_count().saturating_mul(crate::engine::kv_pages::MAX_ENTRIES_PER_PAGE);
     let fill_ratio = if capacity > 0 { snapshot.len() as f64 / capacity as f64 } else { 0.0 };
 
-    (kv_size_bytes, fill_ratio)
+    Ok((kv_size_bytes, fill_ratio))
   }
 
   /// Perform online KV block expansion. Called after a KV flush detects

@@ -49,6 +49,7 @@ fn poisoned_wal_writer_latches_the_timer_instead_of_looking_busy() {
 
   assert!(result.is_ok(), "the timer must not unwind after writer lock poison");
   assert!(engine.durability_failure().is_some(), "writer lock poison must latch write admission read-only");
+  assert!(engine.kv_layout_metrics().is_err(), "diagnostics must not publish a fabricated zero-sized KV block after writer poison");
 }
 
 #[test]

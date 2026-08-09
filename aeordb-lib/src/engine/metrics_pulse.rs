@@ -50,7 +50,13 @@ pub fn spawn_metrics_pulse(
           continue;
         }
       };
-      let (kv_file, kv_fill_ratio) = engine.kv_layout_metrics();
+      let (kv_file, kv_fill_ratio) = match engine.kv_layout_metrics() {
+        Ok(metrics) => metrics,
+        Err(error) => {
+          tracing::error!(%error, "Metrics pulse could not read KV layout metrics");
+          continue;
+        }
+      };
       let runtime = match engine.runtime_observability_snapshot(ConfigurationVisibility::Root) {
         Ok(runtime) => runtime,
         Err(error) => {

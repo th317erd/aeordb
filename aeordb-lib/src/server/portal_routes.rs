@@ -413,7 +413,9 @@ fn get_stats_inner(
   let disk_total = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
   // In-file KV block metrics: O(1) writer header read + snapshot counts.
-  let (kv_file, kv_fill_ratio) = state.engine.kv_layout_metrics();
+  let (kv_file, kv_fill_ratio) = state.engine.kv_layout_metrics().map_err(|error| {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to read KV layout metrics: {error}") })))
+  })?;
 
   // Dedup savings
   let dedup_savings = counters.logical_data_size.saturating_sub(counters.chunk_data_size);
