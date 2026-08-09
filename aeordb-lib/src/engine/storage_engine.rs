@@ -246,6 +246,7 @@ pub struct EngineOperationSnapshot {
 struct EngineOperationTracker {
   state: Mutex<EngineOperationState>,
   idle: Condvar,
+  poison_reported: AtomicBool,
 }
 
 #[derive(Default)]
@@ -269,6 +270,29 @@ struct EngineMaintenanceGuard<'a> {
 }
 
 impl EngineOperationTracker {
+  fn record_poison_once(&self, operation: &'static str) {
+    if !self.poison_reported.swap(true, Ordering::AcqRel) {
+      crate::metrics::record_system_soft_failure(
+        "operation_tracker",
+        "mutex_poison",
+        operation,
+        "operation accounting lock was poisoned; engine admission is now closed",
+      );
+    }
+  }
+
+  fn lock_state_fail_closed(&self, operation: &'static str) -> MutexGuard<'_, EngineOperationState> {
+    match self.state.lock() {
+      Ok(state) => state,
+      Err(poisoned) => {
+        self.record_poison_once(operation);
+        let mut state = poisoned.into_inner();
+        state.shutting_down = true;
+        state
+      }
+    }
+  }
+
   fn begin(&self, engine_id: usize, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
     let nested = ENGINE_OPERATION_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
     ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
@@ -276,25 +300,15 @@ impl EngineOperationTracker {
       return Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: false, _thread_bound: std::marker::PhantomData });
     }
 
-    let mut state = match self.state.lock() {
-      Ok(state) => state,
-      Err(error) => {
-        ENGINE_OPERATION_STACK.with(|stack| {
-          let mut stack = stack.borrow_mut();
-          let popped = stack.pop();
-          debug_assert_eq!(popped, Some(engine_id));
-        });
-        return Err(EngineError::IoError(std::io::Error::other(error.to_string())));
-      }
-    };
+    let mut state = self.lock_state_fail_closed("begin");
     while state.maintenance_in_progress && !state.shutting_down {
       state = match self.idle.wait(state) {
         Ok(state) => state,
-        Err(error) => {
-          ENGINE_OPERATION_STACK.with(|stack| {
-            stack.borrow_mut().pop();
-          });
-          return Err(EngineError::IoError(std::io::Error::other(error.to_string())));
+        Err(poisoned) => {
+          self.record_poison_once("begin_wait");
+          let mut state = poisoned.into_inner();
+          state.shutting_down = true;
+          state
         }
       };
     }
@@ -312,13 +326,9 @@ impl EngineOperationTracker {
   }
 
   fn begin_shutdown(&self) {
-    if let Ok(mut state) = self.state.lock() {
-      state.shutting_down = true;
-      self.idle.notify_all();
-      if state.active_operations == 0 {
-        self.idle.notify_all();
-      }
-    }
+    let mut state = self.lock_state_fail_closed("begin_shutdown");
+    state.shutting_down = true;
+    self.idle.notify_all();
   }
 
   fn begin_maintenance(&self, engine_id: usize, timeout: std::time::Duration) -> EngineResult<EngineMaintenanceGuard<'_>> {
@@ -327,7 +337,7 @@ impl EngineOperationTracker {
       return Err(EngineError::InvalidInput("KV layout maintenance requires an admitted engine operation".to_string()));
     }
     let deadline = std::time::Instant::now() + timeout;
-    let mut state = self.state.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let mut state = self.lock_state_fail_closed("begin_maintenance");
     if state.shutting_down {
       return Err(EngineError::ShuttingDown);
     }
@@ -343,8 +353,15 @@ impl EngineOperationTracker {
         return Err(EngineError::InvalidInput("timed out waiting for active operations before KV layout maintenance".to_string()));
       }
       let remaining = deadline.saturating_duration_since(now);
-      let (next, result) =
-        self.idle.wait_timeout(state, remaining).map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      let (next, result) = match self.idle.wait_timeout(state, remaining) {
+        Ok(waited) => waited,
+        Err(poisoned) => {
+          self.record_poison_once("begin_maintenance_wait");
+          let (mut state, result) = poisoned.into_inner();
+          state.shutting_down = true;
+          (state, result)
+        }
+      };
       state = next;
       if state.shutting_down {
         state.maintenance_in_progress = false;
@@ -361,9 +378,7 @@ impl EngineOperationTracker {
   }
 
   fn snapshot(&self) -> EngineOperationSnapshot {
-    let Ok(state) = self.state.lock() else {
-      return EngineOperationSnapshot { shutting_down: true, active_operations: 0, operations: Vec::new() };
-    };
+    let state = self.lock_state_fail_closed("snapshot");
     let mut operations: Vec<(String, usize)> = state.operations.iter().map(|(name, count)| ((*name).to_string(), *count)).collect();
     operations.sort_by(|a, b| a.0.cmp(&b.0));
     EngineOperationSnapshot { shutting_down: state.shutting_down, active_operations: state.active_operations, operations }
@@ -371,10 +386,7 @@ impl EngineOperationTracker {
 
   fn wait_until_idle(&self, timeout: std::time::Duration) -> EngineOperationSnapshot {
     let deadline = std::time::Instant::now() + timeout;
-    let mut state = match self.state.lock() {
-      Ok(state) => state,
-      Err(_) => return self.snapshot(),
-    };
+    let mut state = self.lock_state_fail_closed("wait_until_idle");
     while state.active_operations > 0 {
       let now = std::time::Instant::now();
       if now >= deadline {
@@ -388,7 +400,15 @@ impl EngineOperationTracker {
             break;
           }
         }
-        Err(_) => return self.snapshot(),
+        Err(poisoned) => {
+          self.record_poison_once("wait_until_idle_wait");
+          let (mut next_state, result) = poisoned.into_inner();
+          next_state.shutting_down = true;
+          state = next_state;
+          if result.timed_out() {
+            break;
+          }
+        }
       }
     }
     let mut operations: Vec<(String, usize)> = state.operations.iter().map(|(name, count)| ((*name).to_string(), *count)).collect();
@@ -409,9 +429,7 @@ impl Drop for EngineOperationGuard<'_> {
       return;
     }
 
-    let Ok(mut state) = self.tracker.state.lock() else {
-      return;
-    };
+    let mut state = self.tracker.lock_state_fail_closed("operation_drop");
     state.active_operations = state.active_operations.saturating_sub(1);
     if let Some(count) = state.operations.get_mut(self.operation) {
       *count = count.saturating_sub(1);
@@ -427,10 +445,9 @@ impl Drop for EngineOperationGuard<'_> {
 
 impl Drop for EngineMaintenanceGuard<'_> {
   fn drop(&mut self) {
-    if let Ok(mut state) = self.tracker.state.lock() {
-      state.maintenance_in_progress = false;
-      self.tracker.idle.notify_all();
-    }
+    let mut state = self.tracker.lock_state_fail_closed("maintenance_drop");
+    state.maintenance_in_progress = false;
+    self.tracker.idle.notify_all();
   }
 }
 
@@ -5829,6 +5846,10 @@ impl Drop for StorageEngine {
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/operation_tracker_internal_spec.rs"]
+mod operation_tracker_internal_spec;
 
 #[cfg(test)]
 mod tests {
