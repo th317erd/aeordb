@@ -65,18 +65,24 @@ pub async fn list_tasks(State(state): State<AppState>, Extension(claims): Extens
 
   match queue.list_tasks() {
     Ok(tasks) => {
-      let response: Vec<serde_json::Value> = tasks
+      let response = tasks
         .iter()
-        .filter_map(|task| {
-          let mut json = serde_json::to_value(task).ok()?;
+        .map(|task| -> Result<serde_json::Value, serde_json::Error> {
+          let mut json = serde_json::to_value(task)?;
           if let Some(progress) = queue.get_progress(&task.id) {
             json["progress"] = serde_json::json!(progress.progress);
             json["eta_ms"] = serde_json::json!(progress.eta_ms);
           }
-          Some(json)
+          Ok(json)
         })
-        .collect();
-      (StatusCode::OK, Json(serde_json::json!({"items": response}))).into_response()
+        .collect::<Result<Vec<_>, _>>();
+      match response {
+        Ok(response) => (StatusCode::OK, Json(serde_json::json!({"items": response}))).into_response(),
+        Err(error) => {
+          tracing::error!(%error, "Failed to serialize task listing");
+          ErrorResponse::new("Failed to serialize task listing").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
+        }
+      }
     }
     Err(e) => ErrorResponse::new(format!("Failed to list tasks: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response(),
   }
