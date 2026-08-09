@@ -3262,8 +3262,8 @@ fn dispatching_a_legacy_header_region_does_not_modify_the_file() {
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join("legacy.aeordb");
   let mut source = Vec::with_capacity(HEADER_REGION_SIZE + 16);
-  source.extend_from_slice(&deterministic_v3_header(7).serialize());
-  source.extend_from_slice(&deterministic_v3_header(8).serialize());
+  source.extend_from_slice(&deterministic_v3_header(7).serialize().unwrap());
+  source.extend_from_slice(&deterministic_v3_header(8).serialize().unwrap());
   source.extend_from_slice(b"legacy-data-tail");
   fs::write(&path, &source).unwrap();
 
@@ -3283,8 +3283,8 @@ fn read_only_database_header_dispatch_preserves_v3_and_v4_bytes() {
   let mut legacy_a = deterministic_v3_header(7);
   let mut legacy_b = deterministic_v3_header(8);
   let mut legacy_bytes = Vec::with_capacity(HEADER_REGION_SIZE + 4);
-  legacy_bytes.extend_from_slice(&legacy_a.serialize());
-  legacy_bytes.extend_from_slice(&legacy_b.serialize());
+  legacy_bytes.extend_from_slice(&legacy_a.serialize().unwrap());
+  legacy_bytes.extend_from_slice(&legacy_b.serialize().unwrap());
   legacy_bytes.extend_from_slice(b"data");
   let before = legacy_bytes.clone();
   let mut legacy = Cursor::new(&mut legacy_bytes);
@@ -3299,9 +3299,9 @@ fn read_only_database_header_dispatch_preserves_v3_and_v4_bytes() {
   legacy_a.sequence = 9;
   legacy_b.sequence = 9;
   let mut equal = Vec::new();
-  equal.extend_from_slice(&legacy_a.serialize());
+  equal.extend_from_slice(&legacy_a.serialize().unwrap());
   legacy_b.entry_count += 1;
-  equal.extend_from_slice(&legacy_b.serialize());
+  equal.extend_from_slice(&legacy_b.serialize().unwrap());
   let mut equal = Cursor::new(equal);
   let ReadOnlyDatabaseHeader::V3 { selected_slot, .. } = read_database_header_read_only(&mut equal).unwrap() else {
     panic!("v3 bytes dispatched to v4")

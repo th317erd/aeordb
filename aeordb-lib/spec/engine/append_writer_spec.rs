@@ -285,7 +285,7 @@ fn coordinated_header_publication_preserves_v3_bytes_and_records_readback() {
   let mut bytes = vec![0u8; FILE_HEADER_SIZE];
   file.seek(SeekFrom::Start(FILE_HEADER_SIZE as u64)).unwrap();
   file.read_exact(&mut bytes).unwrap();
-  assert_eq!(bytes, active.serialize());
+  assert_eq!(bytes, active.serialize().unwrap());
 }
 
 #[test]

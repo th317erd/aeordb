@@ -13,6 +13,48 @@ fn make_temp_db() -> (tempfile::TempDir, String) {
   (dir, path)
 }
 
+#[test]
+fn offline_header_inspection_and_repair_reject_future_versions_without_mutation() {
+  let temporary = tempfile::tempdir().unwrap();
+  let path = temporary.path().join("future-header.aeordb");
+  StorageEngine::create(path.to_str().unwrap()).unwrap().shutdown().unwrap();
+  let mut bytes = std::fs::read(&path).unwrap();
+  bytes[4] = 99;
+  let checksum = crc32fast::hash(&bytes[..aeordb::engine::file_header::FILE_HEADER_SIZE - 4]);
+  bytes[aeordb::engine::file_header::FILE_HEADER_SIZE - 4..aeordb::engine::file_header::FILE_HEADER_SIZE]
+    .copy_from_slice(&checksum.to_le_bytes());
+  std::fs::write(&path, &bytes).unwrap();
+  let before = std::fs::read(&path).unwrap();
+
+  let inspect_error = inspect_header(path.to_str().unwrap()).unwrap_err();
+  let repair_error = repair_header_in_place(path.to_str().unwrap()).unwrap_err();
+
+  assert!(matches!(inspect_error, aeordb::engine::EngineError::InvalidEntryVersion(99)));
+  assert!(matches!(repair_error, aeordb::engine::EngineError::InvalidEntryVersion(99)));
+  assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn offline_header_inspection_and_repair_reject_unsupported_hash_width_without_mutation() {
+  let temporary = tempfile::tempdir().unwrap();
+  let path = temporary.path().join("wide-header.aeordb");
+  StorageEngine::create(path.to_str().unwrap()).unwrap().shutdown().unwrap();
+  let mut bytes = std::fs::read(&path).unwrap();
+  bytes[5..7].copy_from_slice(&HashAlgorithm::Sha512.to_u16().to_le_bytes());
+  let checksum = crc32fast::hash(&bytes[..aeordb::engine::file_header::FILE_HEADER_SIZE - 4]);
+  bytes[aeordb::engine::file_header::FILE_HEADER_SIZE - 4..aeordb::engine::file_header::FILE_HEADER_SIZE]
+    .copy_from_slice(&checksum.to_le_bytes());
+  std::fs::write(&path, &bytes).unwrap();
+  let before = std::fs::read(&path).unwrap();
+
+  let inspect_error = inspect_header(path.to_str().unwrap()).unwrap_err();
+  let repair_error = repair_header_in_place(path.to_str().unwrap()).unwrap_err();
+
+  assert!(inspect_error.to_string().contains("64-byte"), "{inspect_error}");
+  assert!(repair_error.to_string().contains("64-byte"), "{repair_error}");
+  assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 fn write_v2_fixture(path: &str, payload: &[u8]) {
   let mut header = [0u8; FILE_HEADER_SIZE];
   header[..4].copy_from_slice(FILE_MAGIC);
@@ -54,6 +96,25 @@ fn write_v2_fixture(path: &str, payload: &[u8]) {
   file.write_all(&header).unwrap();
   file.write_all(payload).unwrap();
   file.sync_all().unwrap();
+}
+
+#[test]
+fn repair_rejects_checksum_failed_v2_header_without_mutation() {
+  let temporary = tempfile::tempdir().unwrap();
+  let path = temporary.path().join("checksum-failed-v2.aeordb");
+  write_v2_fixture(path.to_str().unwrap(), b"legacy payload");
+
+  let mut bytes = std::fs::read(&path).unwrap();
+  bytes[50] ^= 0xA5;
+  std::fs::write(&path, &bytes).unwrap();
+  let before = std::fs::read(&path).unwrap();
+
+  let report = inspect_header(path.to_str().unwrap()).unwrap();
+  let error = repair_header_in_place(path.to_str().unwrap()).unwrap_err();
+
+  assert!(report.crc_failed);
+  assert!(error.to_string().contains("no redundant slot"), "{error}");
+  assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 fn write_v2_no_kv_fixture(path: &str, source_header: &FileHeader, wal: &[u8]) {
@@ -237,6 +298,40 @@ fn header_crc_catches_single_byte_corruption_in_one_slot() {
   let engine = result.unwrap();
   let ops = DirectoryOps::new(&engine);
   assert_eq!(ops.read_file_buffered("/test.txt").unwrap(), b"hello");
+}
+
+#[test]
+fn repair_recovers_checksum_failed_v3_slot_from_redundant_slot() {
+  let (_directory, path) = make_temp_db();
+  {
+    let engine = StorageEngine::create(&path).unwrap();
+    let operations = DirectoryOps::new(&engine);
+    operations.store_file_buffered(&RequestContext::system(), "/survives.txt", b"redundant header", Some("text/plain")).unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  {
+    let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(50)).unwrap();
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0xFF;
+    file.seek(SeekFrom::Start(50)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.sync_all().unwrap();
+  }
+  let before_repair = std::fs::read(&path).unwrap();
+  let surviving_slot = before_repair[FILE_HEADER_SIZE..FILE_HEADER_SIZE * 2].to_vec();
+
+  let report = repair_header_in_place(&path).unwrap();
+
+  assert!(report.crc_failed);
+  assert!(report.repaired);
+  let after_repair = std::fs::read(&path).unwrap();
+  assert_eq!(&after_repair[FILE_HEADER_SIZE..FILE_HEADER_SIZE * 2], surviving_slot.as_slice());
+  let reopened = StorageEngine::open(&path).unwrap();
+  assert_eq!(DirectoryOps::new(&reopened).read_file_buffered("/survives.txt").unwrap(), b"redundant header");
+  reopened.shutdown().unwrap();
 }
 
 #[test]

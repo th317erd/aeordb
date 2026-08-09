@@ -21,7 +21,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBarrierKind};
 use crate::engine::entry_scanner::EntryScanner;
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::file_header::{write_initial_header_coordinated, FileHeader, FILE_HEADER_SIZE, FILE_MAGIC, SUPPORTED_HEADER_VERSION};
+use crate::engine::file_header::{
+  FileHeader, FILE_HEADER_SIZE, FILE_MAGIC, SUPPORTED_HEADER_VERSION, read_active_header, read_header_field, read_header_i64,
+  read_header_u64, validate_legacy_file_header_hash_layout, write_header_to_inactive_slot_coordinated, write_initial_header_coordinated,
+};
 use crate::engine::hash_algorithm::HashAlgorithm;
 
 /// Pre-open legacy-header repair cannot use the runtime memory coordinator.
@@ -62,8 +65,6 @@ impl HeaderRepairReport {
 /// Inspect the header at `db_path` without going through `StorageEngine::open`.
 /// Returns a description of what's wrong without modifying anything.
 pub fn inspect_header(db_path: &str) -> EngineResult<HeaderRepairReport> {
-  let mut report = HeaderRepairReport::default();
-
   let mut file = OpenOptions::new().read(true).open(db_path)?;
   let file_size = file.metadata()?.len();
 
@@ -72,29 +73,47 @@ pub fn inspect_header(db_path: &str) -> EngineResult<HeaderRepairReport> {
     return Err(EngineError::IoError(error));
   }
 
+  inspect_header_bytes(&bytes, file_size)
+}
+
+fn inspect_header_bytes(bytes: &[u8; FILE_HEADER_SIZE], file_size: u64) -> EngineResult<HeaderRepairReport> {
+  let mut report = HeaderRepairReport::default();
+
   if &bytes[0..4] != FILE_MAGIC {
     report.bad_magic = true;
     return Ok(report);
   }
 
   let header_version = bytes[4];
-  if header_version != SUPPORTED_HEADER_VERSION {
-    report.upgraded_version = Some((header_version, SUPPORTED_HEADER_VERSION));
+  match header_version {
+    1 | 2 => report.upgraded_version = Some((header_version, SUPPORTED_HEADER_VERSION)),
+    SUPPORTED_HEADER_VERSION => {}
+    unsupported => return Err(EngineError::InvalidEntryVersion(unsupported)),
   }
 
   // For v2+ check CRC; for v1 there's no CRC to check.
   if header_version >= 2 {
-    let stored = u32::from_le_bytes(bytes[FILE_HEADER_SIZE - 4..].try_into().unwrap());
+    let stored = u32::from_le_bytes([
+      bytes[FILE_HEADER_SIZE - 4],
+      bytes[FILE_HEADER_SIZE - 3],
+      bytes[FILE_HEADER_SIZE - 2],
+      bytes[FILE_HEADER_SIZE - 1],
+    ]);
     let computed = crc32fast::hash(&bytes[..FILE_HEADER_SIZE - 4]);
     if stored != computed {
       report.crc_failed = true;
+      return Ok(report);
     }
   }
+
+  let hash_algorithm_raw = u16::from_le_bytes([bytes[5], bytes[6]]);
+  let hash_algorithm = HashAlgorithm::from_u16(hash_algorithm_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algorithm_raw))?;
+  validate_legacy_file_header_hash_layout(hash_algorithm)?;
 
   // Parse hot_tail_offset directly. v1/v2 has it at bytes 114..122. v3
   // inserts a u64 sequence at byte 7, shifting hot_tail_offset to 122..130.
   let hot_tail_pos = if header_version >= 3 { 122 } else { 114 };
-  let hot_tail_offset = u64::from_le_bytes(bytes[hot_tail_pos..hot_tail_pos + 8].try_into().unwrap());
+  let hot_tail_offset = read_header_u64(bytes, hot_tail_pos, "hot_tail_offset")?;
   if hot_tail_offset > file_size {
     report.hot_tail_past_eof =
       Some(HotTailMismatch { recorded_offset: hot_tail_offset, actual_file_size: file_size, bytes_past_eof: hot_tail_offset - file_size });
@@ -116,15 +135,6 @@ pub fn inspect_header(db_path: &str) -> EngineResult<HeaderRepairReport> {
 /// Returns `(report, repaired_header)` so the caller can decide what to do
 /// next (e.g. trigger dirty startup, rebuild_kv, etc.).
 pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport> {
-  let mut report = inspect_header(db_path)?;
-
-  if report.already_ok {
-    return Ok(report);
-  }
-  if report.bad_magic {
-    return Err(EngineError::InvalidMagic);
-  }
-
   let mut file = OpenOptions::new().read(true).write(true).open(db_path)?;
   let file_size = file.metadata()?.len();
 
@@ -132,81 +142,36 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
   file.seek(SeekFrom::Start(0))?;
   file.read_exact(&mut bytes)?;
 
-  // Parse the fields we trust into a fresh FileHeader. v1 and v2 share the
-  // same field layout from byte 7 onwards (v2 adds a tail CRC). v3 inserts
-  // a u64 sequence at byte 7, shifting every subsequent field by 8.
-  let source_version = bytes[4];
+  let mut report = inspect_header_bytes(&bytes, file_size)?;
+  if report.already_ok {
+    return Ok(report);
+  }
+  if report.bad_magic {
+    return Err(EngineError::InvalidMagic);
+  }
+
+  let (mut new_header, active_v3_slot) = read_repair_source_header(&mut file, &bytes, &report)?;
+  let source_version = new_header.header_version;
   let needs_data_shift = source_version <= 2;
-  let sequence_size: usize = if source_version >= 3 { 8 } else { 0 };
-
-  let hash_algo_raw = u16::from_le_bytes([bytes[5], bytes[6]]);
-  let hash_algo = HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
-  let hash_length = hash_algo.hash_length();
-
-  let mut pos = 7 + sequence_size; // skip sequence in v3
-  let created_at = i64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let updated_at = i64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let kv_block_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let kv_block_length = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let kv_block_version = bytes[pos];
-  pos += 1;
-  let nvt_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let nvt_length = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let nvt_version = bytes[pos];
-  pos += 1;
-
-  let head_hash = bytes[pos..pos + hash_length].to_vec();
-  pos += hash_length;
-
-  let entry_count = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let resize_in_progress = bytes[pos] != 0;
-  pos += 1;
-  let buffer_kvs_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let buffer_nvt_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let mut hot_tail_offset = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-  pos += 8;
-  let kv_block_stage = bytes[pos];
-  pos += 1;
-  let resize_target_stage = bytes[pos];
-  pos += 1;
-  let backup_type = bytes[pos];
-  pos += 1;
-
-  let base_hash = bytes[pos..pos + hash_length].to_vec();
-  pos += hash_length;
-  let target_hash = bytes[pos..pos + hash_length].to_vec();
+  let hash_length = validate_legacy_file_header_hash_layout(new_header.hash_algo)?;
+  if new_header.hot_tail_offset > file_size {
+    report.hot_tail_past_eof = Some(HotTailMismatch {
+      recorded_offset: new_header.hot_tail_offset,
+      actual_file_size: file_size,
+      bytes_past_eof: new_header.hot_tail_offset - file_size,
+    });
+  }
 
   // For v1 and v2 → v3 migration, the data region needs to shift forward
   // 256 bytes (one slot's worth) to make room for slot B. Bump every
   // header-stored offset that refers to a location inside the data region.
-  let mut kv_block_offset = kv_block_offset;
-  let mut nvt_offset = nvt_offset;
-  let mut buffer_kvs_offset = buffer_kvs_offset;
-  let mut buffer_nvt_offset = buffer_nvt_offset;
   let durability_coordinator = DurabilityCoordinator::new();
   if needs_data_shift {
-    kv_block_offset = if kv_block_offset > 0 { kv_block_offset + FILE_HEADER_SIZE as u64 } else { 0 };
-    if hot_tail_offset > 0 {
-      hot_tail_offset += FILE_HEADER_SIZE as u64;
-    }
-    if nvt_offset > 0 {
-      nvt_offset += FILE_HEADER_SIZE as u64;
-    }
-    if buffer_kvs_offset > 0 {
-      buffer_kvs_offset += FILE_HEADER_SIZE as u64;
-    }
-    if buffer_nvt_offset > 0 {
-      buffer_nvt_offset += FILE_HEADER_SIZE as u64;
-    }
+    new_header.kv_block_offset = shift_legacy_header_offset(new_header.kv_block_offset, "kv_block_offset")?;
+    new_header.hot_tail_offset = shift_legacy_header_offset(new_header.hot_tail_offset, "hot_tail_offset")?;
+    new_header.nvt_offset = shift_legacy_header_offset(new_header.nvt_offset, "nvt_offset")?;
+    new_header.buffer_kvs_offset = shift_legacy_header_offset(new_header.buffer_kvs_offset, "buffer_kvs_offset")?;
+    new_header.buffer_nvt_offset = shift_legacy_header_offset(new_header.buffer_nvt_offset, "buffer_nvt_offset")?;
   }
 
   // Apply the fix: if hot_tail_offset points past EOF, recover the exact
@@ -215,7 +180,10 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
   // their data region is relocated below before the v3 reader can inspect it.
   if let Some(ref mismatch) = report.hot_tail_past_eof {
     let target_size = if needs_data_shift {
-      mismatch.actual_file_size + FILE_HEADER_SIZE as u64
+      mismatch
+        .actual_file_size
+        .checked_add(FILE_HEADER_SIZE as u64)
+        .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "legacy repaired file size overflows u64".to_string() })?
     } else {
       recover_terminal_v3_hot_tail_offset(&file, mismatch.actual_file_size, hash_length)?
     };
@@ -226,13 +194,107 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
       "hot_tail_offset is past EOF — restoring verified terminal boundary {}",
       target_size,
     );
-    hot_tail_offset = target_size;
+    new_header.hot_tail_offset = target_size;
   }
 
-  let mut new_header = FileHeader {
-    header_version: SUPPORTED_HEADER_VERSION,
-    hash_algo,
-    sequence: 0, // write_initial_header sets to 1
+  new_header.header_version = SUPPORTED_HEADER_VERSION;
+  if active_v3_slot.is_none() {
+    new_header.sequence = 0; // write_initial_header sets legacy migrations to 1
+  }
+
+  // If we're migrating v1/v2 → v3, shift the data region forward by
+  // FILE_HEADER_SIZE bytes (the size of one slot). Copy from the end
+  // backwards to avoid overwriting source data before we've read it.
+  if needs_data_shift {
+    tracing::info!(
+      file_size,
+      source_version,
+      "Migrating v{} → v3: shifting data region forward {} bytes",
+      source_version,
+      FILE_HEADER_SIZE,
+    );
+    shift_data_region_forward(&mut file, file_size, FILE_HEADER_SIZE as u64, &durability_coordinator)?;
+  }
+
+  if let Some(active_slot) = active_v3_slot {
+    write_header_to_inactive_slot_coordinated(&mut file, &mut new_header, active_slot, &durability_coordinator)?;
+  } else {
+    // Legacy files have no second authority slot until the data shift above.
+    write_initial_header_coordinated(&mut file, &mut new_header, &durability_coordinator)?;
+  }
+
+  report.repaired = true;
+  Ok(report)
+}
+
+fn read_repair_source_header(
+  file: &mut std::fs::File,
+  bytes: &[u8; FILE_HEADER_SIZE],
+  report: &HeaderRepairReport,
+) -> EngineResult<(FileHeader, Option<usize>)> {
+  match bytes[4] {
+    1 => deserialize_legacy_file_header(bytes, 1).map(|header| (header, None)),
+    2 if report.crc_failed => Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: "legacy v2 file header failed CRC validation and has no redundant slot to recover from".to_string(),
+    }),
+    2 => deserialize_legacy_file_header(bytes, 2).map(|header| (header, None)),
+    SUPPORTED_HEADER_VERSION => {
+      file.seek(SeekFrom::Start(0))?;
+      read_active_header(file).map(|(header, slot)| (header, Some(slot)))
+    }
+    unsupported => Err(EngineError::InvalidEntryVersion(unsupported)),
+  }
+}
+
+fn deserialize_legacy_file_header(bytes: &[u8; FILE_HEADER_SIZE], source_version: u8) -> EngineResult<FileHeader> {
+  let hash_algorithm_raw = u16::from_le_bytes([bytes[5], bytes[6]]);
+  let hash_algorithm = HashAlgorithm::from_u16(hash_algorithm_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algorithm_raw))?;
+  let hash_length = validate_legacy_file_header_hash_layout(hash_algorithm)?;
+  let mut position = 7;
+
+  let created_at = read_header_i64(bytes, position, "created_at")?;
+  position += 8;
+  let updated_at = read_header_i64(bytes, position, "updated_at")?;
+  position += 8;
+  let kv_block_offset = read_header_u64(bytes, position, "kv_block_offset")?;
+  position += 8;
+  let kv_block_length = read_header_u64(bytes, position, "kv_block_length")?;
+  position += 8;
+  let kv_block_version = read_header_field(bytes, position, 1, "kv_block_version")?[0];
+  position += 1;
+  let nvt_offset = read_header_u64(bytes, position, "nvt_offset")?;
+  position += 8;
+  let nvt_length = read_header_u64(bytes, position, "nvt_length")?;
+  position += 8;
+  let nvt_version = read_header_field(bytes, position, 1, "nvt_version")?[0];
+  position += 1;
+  let head_hash = read_header_field(bytes, position, hash_length, "head_hash")?.to_vec();
+  position += hash_length;
+  let entry_count = read_header_u64(bytes, position, "entry_count")?;
+  position += 8;
+  let resize_in_progress = read_header_field(bytes, position, 1, "resize_in_progress")?[0] != 0;
+  position += 1;
+  let buffer_kvs_offset = read_header_u64(bytes, position, "buffer_kvs_offset")?;
+  position += 8;
+  let buffer_nvt_offset = read_header_u64(bytes, position, "buffer_nvt_offset")?;
+  position += 8;
+  let hot_tail_offset = read_header_u64(bytes, position, "hot_tail_offset")?;
+  position += 8;
+  let kv_block_stage = read_header_field(bytes, position, 1, "kv_block_stage")?[0];
+  position += 1;
+  let resize_target_stage = read_header_field(bytes, position, 1, "resize_target_stage")?[0];
+  position += 1;
+  let backup_type = read_header_field(bytes, position, 1, "backup_type")?[0];
+  position += 1;
+  let base_hash = read_header_field(bytes, position, hash_length, "base_hash")?.to_vec();
+  position += hash_length;
+  let target_hash = read_header_field(bytes, position, hash_length, "target_hash")?.to_vec();
+
+  Ok(FileHeader {
+    header_version: source_version,
+    hash_algo: hash_algorithm,
+    sequence: 0,
     created_at,
     updated_at,
     kv_block_offset,
@@ -252,28 +314,17 @@ pub fn repair_header_in_place(db_path: &str) -> EngineResult<HeaderRepairReport>
     backup_type,
     base_hash,
     target_hash,
-  };
+  })
+}
 
-  // If we're migrating v1/v2 → v3, shift the data region forward by
-  // FILE_HEADER_SIZE bytes (the size of one slot). Copy from the end
-  // backwards to avoid overwriting source data before we've read it.
-  if needs_data_shift {
-    tracing::info!(
-      file_size,
-      source_version,
-      "Migrating v{} → v3: shifting data region forward {} bytes",
-      source_version,
-      FILE_HEADER_SIZE,
-    );
-    shift_data_region_forward(&mut file, file_size, FILE_HEADER_SIZE as u64, &durability_coordinator)?;
+fn shift_legacy_header_offset(offset: u64, field: &str) -> EngineResult<u64> {
+  if offset == 0 {
+    return Ok(0);
   }
-
-  // Write the new v3 header to slot A and zero slot B. The barrier inside
-  // write_initial_header fsyncs both writes.
-  write_initial_header_coordinated(&mut file, &mut new_header, &durability_coordinator)?;
-
-  report.repaired = true;
-  Ok(report)
+  offset.checked_add(FILE_HEADER_SIZE as u64).ok_or_else(|| EngineError::CorruptEntry {
+    offset: 0,
+    reason: format!("legacy file-header {field} overflows while reserving the second v3 header slot"),
+  })
 }
 
 fn recover_terminal_v3_hot_tail_offset(file: &std::fs::File, file_size: u64, hash_length: usize) -> EngineResult<u64> {

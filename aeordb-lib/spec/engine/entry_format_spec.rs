@@ -196,7 +196,7 @@ fn test_hash_algorithm_from_u16() {
 #[test]
 fn test_file_header_serialize_deserialize_roundtrip() {
   let header = FileHeader::new(HashAlgorithm::Blake3_256);
-  let serialized = header.serialize();
+  let serialized = header.serialize().unwrap();
   let deserialized = FileHeader::deserialize(&serialized).expect("Failed to deserialize file header");
 
   assert_eq!(deserialized.header_version, header.header_version);
@@ -219,7 +219,7 @@ fn test_file_header_serialize_deserialize_roundtrip() {
 #[test]
 fn test_file_header_is_exactly_256_bytes() {
   let header = FileHeader::new(HashAlgorithm::Blake3_256);
-  let serialized = header.serialize();
+  let serialized = header.serialize().unwrap();
   assert_eq!(serialized.len(), FILE_HEADER_SIZE);
   assert_eq!(FILE_HEADER_SIZE, 256);
 }
@@ -408,7 +408,7 @@ fn test_file_header_with_nonzero_fields() {
   header.buffer_nvt_offset = 9216;
   header.head_hash = vec![0xAB; 32];
 
-  let serialized = header.serialize();
+  let serialized = header.serialize().unwrap();
   let deserialized = FileHeader::deserialize(&serialized).expect("Failed to deserialize file header");
 
   assert_eq!(deserialized.kv_block_offset, 1024);

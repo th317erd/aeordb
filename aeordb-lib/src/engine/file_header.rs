@@ -27,6 +27,7 @@ pub const FILE_MAGIC: &[u8; 4] = b"AEOR";
 /// .. FILE_HEADER_SIZE] hold the CRC32 computed over the first 252 bytes of
 /// the slot.
 const HEADER_CRC_SIZE: usize = 4;
+const LEGACY_HEADER_FIXED_BYTES_EXCLUDING_HASHES: usize = 101;
 
 /// Header format version this build understands. Bumping this is a
 /// commitment: every future change to the on-disk header layout must increment
@@ -103,7 +104,8 @@ impl FileHeader {
     }
   }
 
-  pub fn serialize(&self) -> [u8; FILE_HEADER_SIZE] {
+  pub fn serialize(&self) -> EngineResult<[u8; FILE_HEADER_SIZE]> {
+    let hash_length = self.validate_for_serialization()?;
     let mut buffer = [0u8; FILE_HEADER_SIZE];
     let mut offset = 0;
 
@@ -156,9 +158,7 @@ impl FileHeader {
     offset += 1;
 
     // head_hash: dynamic length (hash_algo.hash_length() bytes)
-    let hash_length = self.hash_algo.hash_length();
-    let copy_length = hash_length.min(self.head_hash.len());
-    buffer[offset..offset + copy_length].copy_from_slice(&self.head_hash[..copy_length]);
+    buffer[offset..offset + hash_length].copy_from_slice(&self.head_hash);
     offset += hash_length;
 
     // entry_count: 8 bytes
@@ -194,13 +194,11 @@ impl FileHeader {
     offset += 1;
 
     // base_hash: hash_length bytes
-    let copy_len = hash_length.min(self.base_hash.len());
-    buffer[offset..offset + copy_len].copy_from_slice(&self.base_hash[..copy_len]);
+    buffer[offset..offset + hash_length].copy_from_slice(&self.base_hash);
     offset += hash_length;
 
     // target_hash: hash_length bytes
-    let copy_len = hash_length.min(self.target_hash.len());
-    buffer[offset..offset + copy_len].copy_from_slice(&self.target_hash[..copy_len]);
+    buffer[offset..offset + hash_length].copy_from_slice(&self.target_hash);
     offset += hash_length;
     debug_assert!(offset <= FILE_HEADER_SIZE - HEADER_CRC_SIZE);
 
@@ -211,7 +209,18 @@ impl FileHeader {
     let crc = crc32fast::hash(&buffer[..FILE_HEADER_SIZE - HEADER_CRC_SIZE]);
     buffer[FILE_HEADER_SIZE - HEADER_CRC_SIZE..].copy_from_slice(&crc.to_le_bytes());
 
-    buffer
+    Ok(buffer)
+  }
+
+  fn validate_for_serialization(&self) -> EngineResult<usize> {
+    if self.header_version != SUPPORTED_HEADER_VERSION {
+      return Err(EngineError::InvalidEntryVersion(self.header_version));
+    }
+    let hash_length = validate_legacy_file_header_hash_layout(self.hash_algo)?;
+    validate_hash_field("head", &self.head_hash, hash_length)?;
+    validate_hash_field("base", &self.base_hash, hash_length)?;
+    validate_hash_field("target", &self.target_hash, hash_length)?;
+    Ok(hash_length)
   }
 
   pub fn deserialize(bytes: &[u8; FILE_HEADER_SIZE]) -> EngineResult<Self> {
@@ -233,7 +242,12 @@ impl FileHeader {
 
     // CRC32 verification — must come BEFORE we interpret any later field so
     // a torn write doesn't bleed garbled data into the in-memory header.
-    let stored_crc = u32::from_le_bytes(bytes[FILE_HEADER_SIZE - HEADER_CRC_SIZE..].try_into().unwrap());
+    let stored_crc = u32::from_le_bytes([
+      bytes[FILE_HEADER_SIZE - 4],
+      bytes[FILE_HEADER_SIZE - 3],
+      bytes[FILE_HEADER_SIZE - 2],
+      bytes[FILE_HEADER_SIZE - 1],
+    ]);
     let computed_crc = crc32fast::hash(&bytes[..FILE_HEADER_SIZE - HEADER_CRC_SIZE]);
     if stored_crc != computed_crc {
       return Err(EngineError::CorruptEntry {
@@ -246,25 +260,26 @@ impl FileHeader {
     let hash_algo_raw = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
     let hash_algo = HashAlgorithm::from_u16(hash_algo_raw).ok_or(EngineError::InvalidHashAlgorithm(hash_algo_raw))?;
     offset += 2;
+    let hash_length = validate_legacy_file_header_hash_layout(hash_algo)?;
 
     // sequence: 8 bytes — v3 A/B slot selector
-    let sequence = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let sequence = read_header_u64(bytes, offset, "sequence")?;
     offset += 8;
 
     // created_at: 8 bytes
-    let created_at = i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let created_at = read_header_i64(bytes, offset, "created_at")?;
     offset += 8;
 
     // updated_at: 8 bytes
-    let updated_at = i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let updated_at = read_header_i64(bytes, offset, "updated_at")?;
     offset += 8;
 
     // kv_block_offset: 8 bytes
-    let kv_block_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let kv_block_offset = read_header_u64(bytes, offset, "kv_block_offset")?;
     offset += 8;
 
     // kv_block_length: 8 bytes
-    let kv_block_length = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let kv_block_length = read_header_u64(bytes, offset, "kv_block_length")?;
     offset += 8;
 
     // kv_block_version: 1 byte
@@ -272,11 +287,11 @@ impl FileHeader {
     offset += 1;
 
     // nvt_offset: 8 bytes
-    let nvt_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let nvt_offset = read_header_u64(bytes, offset, "nvt_offset")?;
     offset += 8;
 
     // nvt_length: 8 bytes
-    let nvt_length = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let nvt_length = read_header_u64(bytes, offset, "nvt_length")?;
     offset += 8;
 
     // nvt_version: 1 byte
@@ -284,12 +299,11 @@ impl FileHeader {
     offset += 1;
 
     // head_hash: dynamic length
-    let hash_length = hash_algo.hash_length();
     let head_hash = bytes[offset..offset + hash_length].to_vec();
     offset += hash_length;
 
     // entry_count: 8 bytes
-    let entry_count = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let entry_count = read_header_u64(bytes, offset, "entry_count")?;
     offset += 8;
 
     // resize_in_progress: 1 byte
@@ -297,15 +311,15 @@ impl FileHeader {
     offset += 1;
 
     // buffer_kvs_offset: 8 bytes
-    let buffer_kvs_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let buffer_kvs_offset = read_header_u64(bytes, offset, "buffer_kvs_offset")?;
     offset += 8;
 
     // buffer_nvt_offset: 8 bytes
-    let buffer_nvt_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let buffer_nvt_offset = read_header_u64(bytes, offset, "buffer_nvt_offset")?;
     offset += 8;
 
     // hot_tail_offset: 8 bytes
-    let hot_tail_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let hot_tail_offset = read_header_u64(bytes, offset, "hot_tail_offset")?;
     offset += 8;
 
     // kv_block_stage: 1 byte
@@ -354,6 +368,48 @@ impl FileHeader {
       target_hash,
     })
   }
+}
+
+pub(crate) fn validate_legacy_file_header_hash_layout(hash_algorithm: HashAlgorithm) -> EngineResult<usize> {
+  let hash_length = hash_algorithm.hash_length();
+  let encoded_length = LEGACY_HEADER_FIXED_BYTES_EXCLUDING_HASHES
+    .checked_add(
+      hash_length.checked_mul(3).ok_or_else(|| EngineError::InvalidInput("legacy file-header hash span overflows usize".to_string()))?,
+    )
+    .ok_or_else(|| EngineError::InvalidInput("legacy file-header layout overflows usize".to_string()))?;
+  if encoded_length > FILE_HEADER_SIZE - HEADER_CRC_SIZE {
+    return Err(EngineError::InvalidInput(format!(
+      "legacy v1-v3 file header cannot encode {hash_length}-byte hashes in its fixed {FILE_HEADER_SIZE}-byte slot"
+    )));
+  }
+  Ok(hash_length)
+}
+
+fn validate_hash_field(field: &str, hash: &[u8], expected_length: usize) -> EngineResult<()> {
+  if hash.len() != expected_length {
+    return Err(EngineError::InvalidInput(format!("legacy file-header {field} hash has {} bytes; expected {expected_length}", hash.len())));
+  }
+  Ok(())
+}
+
+pub(crate) fn read_header_u64(bytes: &[u8], offset: usize, field: &str) -> EngineResult<u64> {
+  let value = read_header_field(bytes, offset, 8, field)?;
+  Ok(u64::from_le_bytes([value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7]]))
+}
+
+pub(crate) fn read_header_i64(bytes: &[u8], offset: usize, field: &str) -> EngineResult<i64> {
+  let value = read_header_field(bytes, offset, 8, field)?;
+  Ok(i64::from_le_bytes([value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7]]))
+}
+
+pub(crate) fn read_header_field<'a>(bytes: &'a [u8], offset: usize, length: usize, field: &str) -> EngineResult<&'a [u8]> {
+  let end = offset
+    .checked_add(length)
+    .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: format!("file-header {field} span overflows usize") })?;
+  bytes.get(offset..end).ok_or_else(|| EngineError::CorruptEntry {
+    offset: 0,
+    reason: format!("file-header {field} requires bytes {offset}..{end}, but the header has {} bytes", bytes.len()),
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -433,13 +489,13 @@ pub fn write_header_to_inactive_slot_coordinated(
   if active_slot > 1 {
     return Err(EngineError::InvalidInput(format!("v3 active header slot must be 0 or 1, got {active_slot}")));
   }
-  // Increment sequence — the new slot must win on next read.
+  header.validate_for_serialization()?;
   header.sequence = header.sequence.wrapping_add(1);
-
-  let bytes = header.serialize();
+  let bytes = header.serialize()?;
   let target_slot = 1 - active_slot;
   let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
-  publish_v3_header_slot(file, slot_offset, &bytes, V3HeaderDependency::None, coordinator)
+  publish_v3_header_slot(file, slot_offset, &bytes, V3HeaderDependency::None, coordinator)?;
+  Ok(())
 }
 
 pub(crate) fn write_header_to_inactive_slot_with_dependency<F>(
@@ -456,9 +512,9 @@ where
   if active_slot > 1 {
     return Err(EngineError::InvalidInput(format!("v3 active header slot must be 0 or 1, got {active_slot}")));
   }
+  header.validate_for_serialization()?;
   header.sequence = header.sequence.wrapping_add(1);
-
-  let bytes = header.serialize();
+  let bytes = header.serialize()?;
   let target_slot = 1 - active_slot;
   let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
   publish_v3_header_slot(
@@ -467,7 +523,8 @@ where
     &bytes,
     V3HeaderDependency::Callback { estimated_bytes: estimated_dependency_bytes, action: &mut dependency },
     coordinator,
-  )
+  )?;
+  Ok(())
 }
 
 pub(crate) fn write_header_group_to_inactive_slot_with_dependency<F>(
@@ -484,9 +541,9 @@ where
   if active_slot > 1 {
     return Err(EngineError::InvalidInput(format!("v3 active header slot must be 0 or 1, got {active_slot}")));
   }
+  header.validate_for_serialization()?;
   header.sequence = header.sequence.wrapping_add(1);
-
-  let bytes = header.serialize();
+  let bytes = header.serialize()?;
   let target_slot = 1 - active_slot;
   let slot_offset = (target_slot * FILE_HEADER_SIZE) as u64;
   let mut executor = V3HeaderPublicationExecutor {
@@ -495,7 +552,8 @@ where
     bytes: &bytes,
     dependency: V3HeaderDependency::Callback { estimated_bytes: 0, action: &mut dependency },
   };
-  coordinator.execute_group(tickets, &mut executor).map_err(coordinator_error)
+  coordinator.execute_group(tickets, &mut executor).map_err(coordinator_error)?;
+  Ok(())
 }
 
 pub(crate) fn v3_header_commit_plan() -> Result<DurabilityCommitPlan, DurabilityCoordinatorError> {
@@ -601,7 +659,9 @@ pub fn write_initial_header_coordinated(file: &mut File, header: &mut FileHeader
   // Zero slot B explicitly so a torn write doesn't accidentally produce a
   // valid-looking slot B at a higher sequence.
   let zero = [0u8; FILE_HEADER_SIZE];
+  header.validate_for_serialization()?;
   header.sequence = 1; // start at 1 so any "all zeros" slot reads as older
-  let bytes = header.serialize();
-  publish_v3_header_slot(file, 0, &bytes, V3HeaderDependency::Positional { offset: FILE_HEADER_SIZE as u64, bytes: &zero }, coordinator)
+  let bytes = header.serialize()?;
+  publish_v3_header_slot(file, 0, &bytes, V3HeaderDependency::Positional { offset: FILE_HEADER_SIZE as u64, bytes: &zero }, coordinator)?;
+  Ok(())
 }
