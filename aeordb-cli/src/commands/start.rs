@@ -95,50 +95,50 @@ impl StartupGateState {
   }
 
   fn set_phase(&self, phase: impl Into<String>, message: impl Into<String>, progress: f64, eta_seconds: Option<u64>) {
-    if let Ok(mut inner) = self.inner.write() {
-      *inner = StartupGateInner::Starting {
-        phase: phase.into(),
-        message: message.into(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-        progress: progress.clamp(0.0, 1.0),
-        eta_seconds,
-      };
-    }
+    let mut inner = self.write_inner();
+    *inner = StartupGateInner::Starting {
+      phase: phase.into(),
+      message: message.into(),
+      updated_at: chrono::Utc::now().to_rfc3339(),
+      progress: progress.clamp(0.0, 1.0),
+      eta_seconds,
+    };
   }
 
   fn set_ready(&self, application: Router) {
-    if let Ok(mut inner) = self.inner.write() {
-      *inner = StartupGateInner::Ready { application };
-    }
+    *self.write_inner() = StartupGateInner::Ready { application };
   }
 
   fn set_failed(&self, error: impl Into<String>) {
-    if let Ok(mut inner) = self.inner.write() {
-      *inner = StartupGateInner::Failed { error: error.into(), updated_at: chrono::Utc::now().to_rfc3339() };
-    }
+    *self.write_inner() = StartupGateInner::Failed { error: error.into(), updated_at: chrono::Utc::now().to_rfc3339() };
   }
 
   fn ready_application(&self) -> Option<Router> {
-    match &*self.inner.read().ok()? {
+    match &*self.read_inner() {
       StartupGateInner::Ready { application } => Some(application.clone()),
       _ => None,
     }
   }
 
+  fn read_inner(&self) -> std::sync::RwLockReadGuard<'_, StartupGateInner> {
+    self.inner.read().unwrap_or_else(|poisoned| {
+      tracing::error!("Startup status lock was poisoned; recovering the last structurally valid state");
+      self.inner.clear_poison();
+      poisoned.into_inner()
+    })
+  }
+
+  fn write_inner(&self) -> std::sync::RwLockWriteGuard<'_, StartupGateInner> {
+    self.inner.write().unwrap_or_else(|poisoned| {
+      tracing::error!("Startup status lock was poisoned; recovering and replacing its state");
+      self.inner.clear_poison();
+      poisoned.into_inner()
+    })
+  }
+
   fn status_payload(&self) -> serde_json::Value {
     let elapsed_ms = self.started_at_instant.elapsed().as_millis() as u64;
-    let Ok(inner) = self.inner.read() else {
-      return serde_json::json!({
-        "status": "failed",
-        "phase": "startup_lock_poisoned",
-        "message": "startup status lock is unavailable",
-        "version": env!("CARGO_PKG_VERSION"),
-        "started_at": self.started_at,
-        "progress": null,
-        "eta": null,
-        "elapsed_ms": elapsed_ms,
-      });
-    };
+    let inner = self.read_inner();
     match &*inner {
       StartupGateInner::Starting { phase, message, updated_at, progress, eta_seconds } => serde_json::json!({
         "status": "starting",
@@ -449,15 +449,22 @@ pub async fn run(config: StartConfig<'_>) -> Result<(), String> {
   let signal_cancelled = cancel.clone();
   let signal_task = tokio::spawn(async move {
     tokio::select! {
-      _ = shutdown_signal() => signal_cancel.cancel(),
-      _ = signal_cancelled.cancelled() => {},
+      result = shutdown_signal() => {
+        signal_cancel.cancel();
+        result
+      },
+      _ = signal_cancelled.cancelled() => Ok(()),
     }
   });
 
   let (initialization_result, server_result) = supervise_server_and_initialization(init_task, server_task, &cancel).await;
 
   cancel.cancel();
-  let _ = tokio::time::timeout(std::time::Duration::from_secs(1), signal_task).await;
+  let mut shutdown_errors = Vec::new();
+  if let Err(error) = wait_for_signal_task(signal_task, std::time::Duration::from_secs(1)).await {
+    tracing::error!(%error, "Shutdown signal listener did not terminate cleanly");
+    shutdown_errors.push(error);
+  }
 
   let (runtime, startup_error) = match initialization_result {
     Ok(Ok(runtime)) => (Some(runtime), None),
@@ -469,36 +476,38 @@ pub async fn run(config: StartConfig<'_>) -> Result<(), String> {
     Err(error) => Err(format!("server task failed: {error}")),
   };
 
-  let mut clean_shutdown = true;
   if let Some(runtime) = runtime {
     runtime.engine.begin_shutdown();
 
     // Wait for background tasks to finish (with a timeout).
     tracing::info!("Waiting for background tasks to finish...");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), futures_join_all(runtime.handles)).await;
+    if let Err(error) = wait_for_background_tasks(runtime.handles, std::time::Duration::from_secs(10)).await {
+      tracing::error!(%error, "Background tasks did not terminate cleanly");
+      shutdown_errors.push(error);
+    }
 
     // Flush engine buffers and sync to disk.
     if let Err(error) = runtime.engine.shutdown() {
-      clean_shutdown = false;
       tracing::error!("Storage engine shutdown did not complete cleanly: {}", error);
       eprintln!("Storage engine shutdown did not complete cleanly: {error}");
+      shutdown_errors.push(format!("storage engine shutdown failed: {error}"));
     }
     let uptime = runtime.startup_instant.elapsed().as_secs();
     tracing::info!(uptime_seconds = uptime, "AeorDB shutting down");
   }
 
   if let Some(error) = startup_error {
-    return Err(error);
+    return Err(combine_primary_and_shutdown_error(error, &shutdown_errors));
   }
   if let Err(error) = server_result {
-    return Err(format!("Server error: {error}"));
+    return Err(combine_primary_and_shutdown_error(format!("Server error: {error}"), &shutdown_errors));
   }
 
-  if clean_shutdown {
+  if shutdown_errors.is_empty() {
     println!("Server shut down gracefully.");
     Ok(())
   } else {
-    Err("Server stopped, but storage shutdown did not complete cleanly.".to_string())
+    Err(format!("Server stopped, but shutdown did not complete cleanly: {}", shutdown_errors.join("; ")))
   }
 }
 
@@ -623,17 +632,17 @@ async fn initialize_server_runtime(
         // overriding via per-directory `.aeordb-config/indexes.json` files
         // anywhere in the tree.
         let default_config = default_global_index_config();
-        let config_bytes = serde_json::to_vec_pretty(&default_config).unwrap();
-        if let Err(e) = ops.store_file_buffered(&ctx, config_path, &config_bytes, Some("application/json")) {
-          tracing::warn!("Failed to write default index config: {}", e);
-        } else {
-          tracing::info!("Created default global index config");
-          // Enqueue initial reindex.
-          let task = task_queue
-            .enqueue("reindex", serde_json::json!({"path": "/"}))
-            .map_err(|error| format!("created the default index config but failed to durably enqueue its initial reindex: {error}"))?;
-          tracing::info!(task_id = %task.id, "Enqueued initial global reindex");
-        }
+        let config_bytes = serde_json::to_vec_pretty(&default_config)
+          .map_err(|error| format!("failed to serialize the default global index config: {error}"))?;
+        ops
+          .store_file_buffered(&ctx, config_path, &config_bytes, Some("application/json"))
+          .map_err(|error| format!("failed to write the default global index config at {config_path}: {error}"))?;
+        tracing::info!("Created default global index config");
+        // Enqueue initial reindex.
+        let task = task_queue
+          .enqueue("reindex", serde_json::json!({"path": "/"}))
+          .map_err(|error| format!("created the default index config but failed to durably enqueue its initial reindex: {error}"))?;
+        tracing::info!(task_id = %task.id, "Enqueued initial global reindex");
       }
       Err(error) => return Err(format!("failed to inspect the default global index config at {config_path}: {error}")),
     }
@@ -641,9 +650,8 @@ async fn initialize_server_runtime(
 
   // Seed default cron schedules on first start (hourly cleanup, daily GC).
   // No-op if a cron config already exists.
-  if let Err(error) = aeordb::engine::seed_default_cron_if_missing(&engine) {
-    tracing::warn!("Failed to seed default cron schedules: {}", error);
-  }
+  aeordb::engine::seed_default_cron_if_missing(&engine)
+    .map_err(|error| format!("failed to seed default cron schedules before starting the scheduler: {error}"))?;
 
   // Start the cron scheduler (enqueues tasks based on cron config every 60s).
   let cron_handle = spawn_cron_scheduler(task_queue.clone(), engine.clone(), event_bus.clone(), cancel.clone());
@@ -730,33 +738,100 @@ fn fail_if_unresolved_emergency_spills(
   Err(message)
 }
 
-/// Wait for all join handles to complete.
-async fn futures_join_all(handles: Vec<tokio::task::JoinHandle<()>>) {
-  for handle in handles {
-    let _ = handle.await;
+/// Wait for all background workers, aborting unfinished work on timeout or a
+/// peer task failure so no detached worker outlives shutdown.
+#[doc(hidden)]
+pub async fn wait_for_background_tasks(mut handles: Vec<tokio::task::JoinHandle<()>>, timeout: std::time::Duration) -> Result<(), String> {
+  let mut completed = 0usize;
+  let completion = async {
+    for (index, handle) in handles.iter_mut().enumerate() {
+      let result = handle.await;
+      completed = index + 1;
+      result.map_err(|error| describe_join_error(index, error))?;
+    }
+    Ok(())
+  };
+
+  let result = match tokio::time::timeout(timeout, completion).await {
+    Ok(result) => result,
+    Err(_) => Err(format!("{} background task(s) did not stop within {} ms", handles.len() - completed, timeout.as_millis())),
+  };
+  if result.is_err() {
+    abort_and_join_remaining_background_tasks(&mut handles, completed).await;
+  }
+  result
+}
+
+fn describe_join_error(index: usize, error: tokio::task::JoinError) -> String {
+  let outcome = if error.is_panic() {
+    "panicked"
+  } else if error.is_cancelled() {
+    "was cancelled before shutdown requested it"
+  } else {
+    "failed"
+  };
+  format!("background task {} {outcome}: {error}", index + 1)
+}
+
+async fn abort_and_join_remaining_background_tasks(handles: &mut [tokio::task::JoinHandle<()>], completed: usize) {
+  for handle in handles.iter().skip(completed) {
+    handle.abort();
+  }
+  for (index, handle) in handles.iter_mut().enumerate().skip(completed) {
+    match handle.await {
+      Ok(()) => tracing::warn!(task_number = index + 1, "Background task completed while shutdown was aborting it"),
+      Err(error) if error.is_cancelled() => {}
+      Err(error) => tracing::error!(task_number = index + 1, %error, "Background task failed while shutdown was aborting it"),
+    }
   }
 }
 
+async fn wait_for_signal_task(mut handle: tokio::task::JoinHandle<Result<(), String>>, timeout: std::time::Duration) -> Result<(), String> {
+  match tokio::time::timeout(timeout, &mut handle).await {
+    Ok(Ok(result)) => result,
+    Ok(Err(error)) => Err(format!("shutdown signal task join failed: {error}")),
+    Err(_) => {
+      handle.abort();
+      match handle.await {
+        Err(error) if error.is_cancelled() => {}
+        Ok(result) => tracing::warn!(?result, "Shutdown signal task completed while it was being aborted"),
+        Err(error) => tracing::error!(%error, "Shutdown signal task failed while it was being aborted"),
+      }
+      Err(format!("shutdown signal task did not stop within {} ms", timeout.as_millis()))
+    }
+  }
+}
+
+fn combine_primary_and_shutdown_error(primary: String, shutdown_errors: &[String]) -> String {
+  if shutdown_errors.is_empty() {
+    return primary;
+  }
+  format!("{primary}\nShutdown also failed: {}", shutdown_errors.join("; "))
+}
+
 /// Listen for shutdown signals (SIGINT and SIGTERM on Unix, Ctrl+C everywhere).
-async fn shutdown_signal() {
-  let ctrl_c = async {
-    tokio::signal::ctrl_c().await.expect("failed to install CTRL+C handler");
-  };
+async fn shutdown_signal() -> Result<(), String> {
+  let ctrl_c = async { tokio::signal::ctrl_c().await.map_err(|error| format!("failed to install or receive Ctrl+C: {error}")) };
 
   #[cfg(unix)]
   let terminate = async {
-    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("failed to install SIGTERM handler").recv().await;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+      .map_err(|error| format!("failed to install SIGTERM handler: {error}"))?;
+    signal.recv().await.ok_or_else(|| "SIGTERM listener closed before receiving a signal".to_string())
   };
 
   #[cfg(not(unix))]
-  let terminate = std::future::pending::<()>();
+  let terminate = std::future::pending::<Result<(), String>>();
 
-  tokio::select! {
-    _ = ctrl_c => {},
-    _ = terminate => {},
+  let result = tokio::select! {
+    result = ctrl_c => result,
+    result = terminate => result,
+  };
+
+  if result.is_ok() {
+    println!("\nReceived shutdown signal");
   }
-
-  println!("\nReceived shutdown signal");
+  result
 }
 
 // ---------------------------------------------------------------------------
@@ -839,16 +914,7 @@ async fn perform_cluster_join(
 
   // Open the engine, write the signing key + peer, then drop it so the
   // server can re-open it normally.
-  let engine = aeordb::engine::StorageEngine::open_with_hot_dir_progress_and_configuration_overrides(
-    database,
-    Some(hot_dir),
-    None,
-    command_line_overrides.clone(),
-  )
-  .or_else(|_| {
-    aeordb::engine::StorageEngine::create_with_hot_dir_and_configuration_overrides(database, Some(hot_dir), command_line_overrides)
-  })
-  .map_err(|e| format!("failed to open engine for join: {}", e))?;
+  let engine = open_or_create_bootstrap_engine(database, hot_dir, command_line_overrides, "cluster join")?;
 
   let ctx = aeordb::engine::RequestContext::system();
   aeordb::engine::system_store::store_jwt_signing_key(&engine, &ctx, &signing_key)
@@ -880,16 +946,7 @@ fn register_initial_peers(
   peers: &[String],
   command_line_overrides: aeordb::engine::config_resolver::CommandLineConfigOverrides,
 ) -> Result<(), String> {
-  let engine = aeordb::engine::StorageEngine::open_with_hot_dir_progress_and_configuration_overrides(
-    database,
-    Some(hot_dir),
-    None,
-    command_line_overrides.clone(),
-  )
-  .or_else(|_| {
-    aeordb::engine::StorageEngine::create_with_hot_dir_and_configuration_overrides(database, Some(hot_dir), command_line_overrides)
-  })
-  .map_err(|e| format!("failed to open engine: {}", e))?;
+  let engine = open_or_create_bootstrap_engine(database, hot_dir, command_line_overrides, "initial peer registration")?;
 
   let ctx = aeordb::engine::RequestContext::system();
   aeordb::engine::system_store::PeerConfigStore::new(&engine)
@@ -902,6 +959,29 @@ fn register_initial_peers(
 
   drop(engine);
   Ok(())
+}
+
+fn open_or_create_bootstrap_engine(
+  database: &str,
+  hot_dir: &std::path::Path,
+  command_line_overrides: aeordb::engine::config_resolver::CommandLineConfigOverrides,
+  operation: &str,
+) -> Result<aeordb::engine::StorageEngine, String> {
+  let database_exists = std::path::Path::new(database)
+    .try_exists()
+    .map_err(|error| format!("failed to inspect the database path before {operation}: {error}"))?;
+  if database_exists {
+    return aeordb::engine::StorageEngine::open_with_hot_dir_progress_and_configuration_overrides(
+      database,
+      Some(hot_dir),
+      None,
+      command_line_overrides,
+    )
+    .map_err(|error| format!("failed to open existing engine for {operation}: {error}"));
+  }
+
+  aeordb::engine::StorageEngine::create_with_hot_dir_and_configuration_overrides(database, Some(hot_dir), command_line_overrides)
+    .map_err(|error| format!("failed to create engine for {operation}: {error}"))
 }
 
 #[cfg(test)]

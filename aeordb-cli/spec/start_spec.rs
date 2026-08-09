@@ -3,7 +3,11 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use aeordb_cli::commands::start::wait_for_background_tasks;
 
 fn wait_for_output(mut child: Child, timeout: Duration) -> (Output, bool) {
   let deadline = Instant::now() + timeout;
@@ -63,9 +67,11 @@ fn fatal_initialization_error_terminates_listener_and_exits_nonzero() {
   let runtime_data = temporary_directory.path().join("runtime-data");
   let runtime_temp = temporary_directory.path().join("runtime-temp");
   let hot_directory = temporary_directory.path().join("hot");
+  let spill_directory = runtime_data.join("emergency-spill");
   std::fs::create_dir_all(&runtime_data).expect("create runtime data directory");
   std::fs::create_dir_all(&runtime_temp).expect("create runtime temporary directory");
   std::fs::create_dir_all(&hot_directory).expect("create hot directory");
+  std::fs::create_dir_all(&spill_directory).expect("create spill directory");
 
   let child = Command::new(env!("CARGO_BIN_EXE_aeordb"))
     .args([
@@ -83,6 +89,7 @@ fn fatal_initialization_error_terminates_listener_and_exits_nonzero() {
     ])
     .env("XDG_DATA_HOME", &runtime_data)
     .env("TMPDIR", &runtime_temp)
+    .env("AEORDB_RECOVERY_EMERGENCY_SPILL_DIR", &spill_directory)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .spawn()
@@ -94,6 +101,85 @@ fn fatal_initialization_error_terminates_listener_and_exits_nonzero() {
   assert!(!output.status.success(), "fatal initialization must return a nonzero status");
   assert!(stderr.contains("Startup error:"), "expected a surfaced startup error, got:\n{stderr}");
   assert!(!stderr.contains("panicked at"), "startup failure must not unwind:\n{stderr}");
+}
+
+#[test]
+fn existing_corrupt_database_with_initial_peers_never_falls_through_to_create() {
+  let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+  let database = temporary_directory.path().join("invalid.aeordb");
+  let corrupt_bytes = b"not an AeorDB database";
+  std::fs::write(&database, corrupt_bytes).expect("write invalid database");
+  let runtime_data = temporary_directory.path().join("runtime-data");
+  let runtime_temp = temporary_directory.path().join("runtime-temp");
+  let hot_directory = temporary_directory.path().join("hot");
+  let spill_directory = runtime_data.join("emergency-spill");
+  std::fs::create_dir_all(&runtime_data).expect("create runtime data directory");
+  std::fs::create_dir_all(&runtime_temp).expect("create runtime temporary directory");
+  std::fs::create_dir_all(&hot_directory).expect("create hot directory");
+  std::fs::create_dir_all(&spill_directory).expect("create spill directory");
+
+  let child = Command::new(env!("CARGO_BIN_EXE_aeordb"))
+    .args([
+      "start",
+      "--database",
+      database.to_str().expect("database path is UTF-8"),
+      "--hot-dir",
+      hot_directory.to_str().expect("hot path is UTF-8"),
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "0",
+      "--auth",
+      "disabled",
+      "--peers",
+      "http://127.0.0.1:1",
+    ])
+    .env("XDG_DATA_HOME", &runtime_data)
+    .env("TMPDIR", &runtime_temp)
+    .env("AEORDB_RECOVERY_EMERGENCY_SPILL_DIR", &spill_directory)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("start aeordb child");
+
+  let (output, timed_out) = wait_for_output(child, Duration::from_secs(5));
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(!timed_out, "corrupt peer bootstrap left the listener running:\n{stderr}");
+  assert!(!output.status.success(), "corrupt peer bootstrap must fail");
+  assert!(stderr.contains("failed to open existing engine"), "the original open failure was masked:\n{stderr}");
+  assert_eq!(std::fs::read(database).expect("read preserved corrupt database"), corrupt_bytes);
+}
+
+struct CancellationProbe(Arc<AtomicBool>);
+
+impl Drop for CancellationProbe {
+  fn drop(&mut self) {
+    self.0.store(true, Ordering::SeqCst);
+  }
+}
+
+#[tokio::test]
+async fn background_task_panic_is_a_shutdown_failure() {
+  let handles = vec![tokio::spawn(async { panic!("injected worker panic") })];
+
+  let error = wait_for_background_tasks(handles, Duration::from_secs(1)).await.unwrap_err();
+
+  assert!(error.contains("background task 1") && error.contains("panicked"), "unexpected join failure: {error}");
+}
+
+#[tokio::test]
+async fn timed_out_background_task_is_aborted_and_joined() {
+  let cancelled = Arc::new(AtomicBool::new(false));
+  let task_cancelled = Arc::clone(&cancelled);
+  let handles = vec![tokio::spawn(async move {
+    let _probe = CancellationProbe(task_cancelled);
+    std::future::pending::<()>().await;
+  })];
+
+  let error = wait_for_background_tasks(handles, Duration::from_millis(20)).await.unwrap_err();
+
+  assert!(error.contains("did not stop within"), "unexpected timeout failure: {error}");
+  assert!(cancelled.load(Ordering::SeqCst), "timed-out background task was detached instead of aborted");
 }
 
 #[test]
