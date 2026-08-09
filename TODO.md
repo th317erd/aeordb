@@ -427,6 +427,11 @@
           - [x] Make authenticated root API-key creation use an explicit root-authority policy instead of misusing the initial-bootstrap escape hatch or returning `500`.
           - [x] Prove embedded, HTTP, separate-auth-engine, malformed, oversized, concurrent, no-op, restart, and architecture behavior.
         - [x] Correct the startup empty-root diagnostic so a database containing only concealed system state is not reported as possibly missing data; retain the warning for genuinely inconsistent roots.
+      - [x] Converge multi-path share and unshare permission authority.
+          - [x] Reject invalid, protected, over-expanded, corrupt, and later-failing requests before any permission publication.
+          - [x] Serialize grant/revoke read-modify-write operations and publish all changed permission files through one hard-acknowledged batch.
+          - [x] Emit recipient notifications only after the shared permission authority acknowledges success.
+          - [x] Prove one-sequence success, zero-sequence failure/no-op, concurrency, restart, architecture, and live HTTP behavior.
       - [ ] Remove system/plugin/task direct raw storage, swallowed persistence failures, and duplicate acknowledgement paths with architecture gates.
       - [x] Add typed recursion suppression for ControlStore detail records without string-path exceptions.
       - [ ] Run focused, adjacent, fault, restart, recurring-sync, architecture, documentation, contract, broad, and live disposable-database verification; record and land the Wave 4 handoff.

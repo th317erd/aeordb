@@ -14,7 +14,7 @@ aeordb = { path = "../aeordb/aeordb-lib" }
 Basic usage:
 
 ```rust,ignore
-use aeordb::engine::{StorageEngine, DirectoryOps, RequestContext, BufferedFile, JsonMergeFilePatch, MergeDepth};
+use aeordb::engine::{StorageEngine, DirectoryOps, RequestContext, BufferedFile, JsonMergeFilePatch, MergeDepth, PermissionStore};
 
 // Create or open a database
 let engine = StorageEngine::create("my.aeordb").unwrap();
@@ -48,6 +48,14 @@ ops.merge_json_files_batch(&ctx, vec![
         depth: MergeDepth::Unbounded,
     },
 ]).unwrap();
+
+// Atomically grant one group access to several paths
+PermissionStore::new(&engine).grant_paths(
+    &ctx,
+    vec!["/sync/a.json".to_string(), "/sync/b.txt".to_string()],
+    vec!["sync-readers".to_string()],
+    ".r..l...".to_string(),
+).unwrap();
 
 // Read it back into a single Vec
 let data = ops.read_file_buffered("/hello.txt").unwrap();
@@ -126,6 +134,53 @@ part of the requested path set. Metadata indexes, counters, and SSE fanout run
 only after that acknowledgement. Unlike the HTTP `/blobs/commit` endpoint, this
 embedded helper supports internal system paths because any caller with direct
 `StorageEngine` access is already trusted code.
+
+### Permission Authority
+
+Use `PermissionStore` for grant and revoke read-modify-write operations. Do not
+manually read and replace `.aeordb-permissions` when the update depends on its
+current contents.
+
+```rust,ignore
+use aeordb::engine::{PermissionRevokeResult, PermissionStore};
+
+let permissions = PermissionStore::new(&engine);
+let granted = permissions.grant_paths(
+    &ctx,
+    vec!["/reports/a.json".to_string(), "/reports/b.json".to_string()],
+    vec!["analysts".to_string()],
+    ".r..l...".to_string(),
+).unwrap();
+assert_eq!(granted.paths.len(), 2);
+assert_eq!(granted.changed_paths.len(), 2);
+
+let revoked = permissions.revoke_path(
+    &ctx,
+    "/reports/a.json",
+    "analysts",
+    Some("a.json"),
+).unwrap();
+assert_eq!(revoked, PermissionRevokeResult::Revoked);
+```
+
+`grant_paths` deduplicates normalized paths and groups, validates every target
+and every current permission document, and publishes all changed permission
+files in one hard-acknowledged namespace batch. `paths` reports the accepted
+request paths; `changed_paths` reports the exact subset whose links changed, so
+callers can avoid false notifications on retries. An identical grant is a
+zero-write success. A request may expand to at most 65,536 path/group link
+updates; path, group, and flag metadata is bounded to 16 MiB; each stored
+permission document is bounded to 1 MiB; and aggregate serialized output is
+bounded to 64 MiB. Retained request and permission-mutation workspaces are
+admitted against the process memory policy and a refusal publishes nothing.
+
+Grant and revoke retain namespace authority from selected-root classification
+through publication, preventing concurrent read-modify-write updates from
+overwriting each other. File-specific revoke requires `path_pattern` to match
+the filename in `path`; it can remove a retained permission link even after the
+content file has been deleted. Revoke returns `PermissionFileNotFound` or
+`LinkNotFound` as typed no-write outcomes. Malformed, oversized, wrong-policy,
+or unreadable authority is an error and is never replaced with an empty file.
 
 ### JSON Merge Patch
 

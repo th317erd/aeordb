@@ -225,7 +225,10 @@ pub use virtual_clock::{VirtualClock, SystemClock, MockClock, PeerClockTracker, 
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 pub use group::Group;
 pub use permission_resolver::{CrudlifyOp, PermissionResolver, path_levels};
-pub use permissions::{PathPermissions, PermissionLink, parse_crudlify_flags, merge_flags};
+pub use permissions::{
+  PathPermissions, PermissionGrantResult, PermissionLink, PermissionRevokeResult, PermissionStore, merge_flags, parse_crudlify_flags,
+  validate_permission_flags,
+};
 pub use engine_event::{
   EngineEvent, EntryEventData, VersionEventData, UserEventData, PermissionChangeData, ImportEventData, IndexEventData, ErrorEventData,
   TokenEventData, ApiKeyEventData, PluginEventData, HeartbeatData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_UPDATED, EVENT_ENTRIES_DELETED,

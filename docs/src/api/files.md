@@ -760,11 +760,20 @@ At least one of `users` or `groups` must be non-empty.
 - For each file path, a `PermissionLink` is created on the parent directory's `.aeordb-permissions` file with a `path_pattern` matching the filename — so the permission only applies to that specific file.
 - For each directory path, the link is created with no `path_pattern` — it applies to everything in the directory.
 - If a link for the same group and pattern already exists, it is updated (not duplicated).
+- The complete request is one atomic authority transition. AeorDB validates every path and existing permission document before publishing any changed permission file. A request that changes multiple permission files crosses one durability frontier; a validation or storage failure changes none of them.
+- Repeating an identical request is a successful no-op. It performs no write and emits no recipient notification. A mixed retry emits `files_shared` only for paths whose grants actually changed, after the shared permission batch acknowledges.
 
 File-versus-directory classification reads file metadata only; sharing a large
 file does not buffer its content. Existing permission authority is decoded
-strictly. Malformed or unreadable `.aeordb-permissions` data returns `500` and
-is never replaced with an empty permission set.
+strictly and is limited to 1 MiB per `.aeordb-permissions` document. Malformed,
+oversized, or unreadable permission authority returns `500` and is never
+replaced with an empty permission set. Permission flags must contain the
+canonical letter or `.` at each `crudlify` position. Duplicate normalized paths
+and duplicate groups are collapsed, and one request may expand to at most
+65,536 unique path/group link updates. Path, group, and flag request metadata
+is limited to 16 MiB; the aggregate serialized output of one atomic permission
+batch is limited to 64 MiB. Retained request and output workspaces are admitted
+against the process memory policy before publication.
 
 **Example:**
 
@@ -843,7 +852,12 @@ Revoke a specific share by removing the matching `PermissionLink`.
 |-------|------|----------|-------------|
 | `path` | string | Yes | The shared path |
 | `group` | string | Yes | The group to revoke (`user:{uuid}` or group name) |
-| `path_pattern` | string | No | The path pattern to match (null for directory-wide links) |
+| `path_pattern` | string | No | Exact filename pattern to match (null for directory-wide links). For a file-specific share it must match the filename in `path`. |
+
+File-specific revocation derives the permission document from the shared
+path's parent and therefore still works after the shared file itself has been
+deleted. Grant and revoke read-modify-write operations are serialized with
+namespace publication, so concurrent operations cannot overwrite one another.
 
 **Response:** `200 OK`
 
@@ -871,10 +885,11 @@ curl -X DELETE http://localhost:6830/files/shares \
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Empty paths, no users/groups, or invalid permissions string |
+| 400 | Empty paths, no users/groups, invalid positional permissions, mismatched file pattern, protected path, more than 16 MiB of request metadata, or more than 65,536 expanded link updates |
 | 403 | Non-root user attempted to share or unshare |
 | 404 | Path not found, or no matching share to revoke |
-| 500 | Internal storage failure or malformed/unreadable permission authority |
+| 500 | Internal storage failure or malformed, oversized, or unreadable permission authority |
+| 503 | Process memory policy refused the permission mutation before publication |
 
 ---
 

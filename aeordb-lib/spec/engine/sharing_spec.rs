@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -7,11 +8,15 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::{CrudlifyOp, DirectoryOps, PathPermissions, PermissionLink, PermissionResolver, StorageEngine, Cache, GroupLoader};
+use aeordb::engine::{
+  Cache, CrudlifyOp, DirectoryOps, GroupLoader, PathPermissions, PermissionLink, PermissionResolver, PermissionRevokeResult,
+  PermissionStore, StorageEngine,
+};
 use aeordb::engine::system_store;
 use aeordb::engine::user::{ROOT_USER_ID, User};
 use aeordb::engine::RequestContext;
-use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
+use aeordb::engine::memory_coordinator::MemoryPolicy;
+use aeordb::server::{create_app_with_jwt_and_engine, create_app_with_jwt_engine_and_event_bus, create_temp_engine_for_tests};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -401,6 +406,477 @@ async fn share_endpoint_rejects_malformed_permission_authority_without_overwriti
 }
 
 #[tokio::test]
+async fn multi_path_share_publishes_one_authority_transition() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "atomic_multi_share_target");
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/alpha/one.txt", b"one", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/two.txt", b"two", Some("text/plain")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "paths": ["/alpha/one.txt", "/beta/two.txt"],
+            "users": [target_user_id.to_string()],
+            "permissions": ".r..l..."
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+  for path in ["/alpha/.aeordb-permissions", "/beta/.aeordb-permissions"] {
+    let permissions = PathPermissions::deserialize(&ops.read_file_buffered(path).unwrap()).unwrap();
+    assert!(permissions.links.iter().any(|link| link.group == format!("user:{target_user_id}")));
+  }
+}
+
+#[tokio::test]
+async fn multi_path_share_rejects_later_corrupt_authority_without_partial_publication() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "atomic_corrupt_share_target");
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  let malformed = b"not permission JSON";
+  ops.store_file_buffered(&ctx, "/alpha/one.txt", b"one", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/two.txt", b"two", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/.aeordb-permissions", malformed, Some("application/json")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "paths": ["/alpha/one.txt", "/beta/two.txt"],
+            "users": [target_user_id.to_string()],
+            "permissions": ".r..l..."
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(matches!(ops.read_file_buffered("/alpha/.aeordb-permissions"), Err(aeordb::engine::EngineError::NotFound(_))));
+  assert_eq!(ops.read_file_buffered("/beta/.aeordb-permissions").unwrap(), malformed);
+}
+
+#[tokio::test]
+async fn multi_path_share_rejects_later_missing_path_without_partial_publication() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "atomic_missing_share_target");
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&RequestContext::system(), "/alpha/one.txt", b"one", Some("text/plain")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "paths": ["/alpha/one.txt", "/missing/two.txt"],
+            "users": [target_user_id.to_string()],
+            "permissions": ".r..l..."
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(matches!(ops.read_file_buffered("/alpha/.aeordb-permissions"), Err(aeordb::engine::EngineError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn identical_share_retry_is_a_zero_sequence_noop() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "idempotent_share_target");
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/docs/readme.txt", b"readme", Some("text/plain")).unwrap();
+  let body = serde_json::to_vec(&serde_json::json!({
+    "paths": ["/docs/readme.txt"],
+    "users": [target_user_id.to_string()],
+    "permissions": ".r..l..."
+  }))
+  .unwrap();
+
+  let first = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(body.clone()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(first.status(), StatusCode::OK);
+  let sequence_after_first = engine.durability_snapshot().unwrap().next_sequence;
+
+  let retry = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(body))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(retry.status(), StatusCode::OK);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_after_first);
+}
+
+#[test]
+fn permission_store_reports_only_paths_changed_by_a_mixed_retry() {
+  let (engine, _temp_dir) = test_engine();
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/alpha/one.txt", b"one", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/two.txt", b"two", Some("text/plain")).unwrap();
+  PermissionStore::new(&engine)
+    .grant_paths(&ctx, vec!["/alpha/one.txt".to_string()], vec!["team".to_string()], ".r..l...".to_string())
+    .unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let result = PermissionStore::new(&engine)
+    .grant_paths(&ctx, vec!["/alpha/one.txt".to_string(), "/beta/two.txt".to_string()], vec!["team".to_string()], ".r..l...".to_string())
+    .unwrap();
+
+  assert_eq!(result.paths, vec!["/alpha/one.txt", "/beta/two.txt"]);
+  assert_eq!(result.changed_paths, vec!["/beta/two.txt"]);
+  assert_eq!(result.changed_permission_files, 1);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+}
+
+#[test]
+fn permission_store_deduplicates_normalized_paths_and_groups() {
+  let (engine, _temp_dir) = test_engine();
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/docs/readme.txt", b"readme", Some("text/plain")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let result = PermissionStore::new(&engine)
+    .grant_paths(
+      &ctx,
+      vec!["docs/readme.txt".to_string(), "/docs/readme.txt".to_string()],
+      vec!["team".to_string(), "team".to_string()],
+      ".r..l...".to_string(),
+    )
+    .unwrap();
+
+  assert_eq!(result.paths, vec!["/docs/readme.txt"]);
+  assert_eq!(result.changed_paths, vec!["/docs/readme.txt"]);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+  let permissions = PathPermissions::deserialize(&ops.read_file_buffered("/docs/.aeordb-permissions").unwrap()).unwrap();
+  assert_eq!(permissions.links.len(), 1);
+}
+
+#[test]
+fn permission_store_rejects_output_above_document_limit_without_publication() {
+  const MAX_PERMISSION_BYTES: usize = 1024 * 1024;
+
+  let (engine, _temp_dir) = test_engine();
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/full/file.txt", b"data", Some("text/plain")).unwrap();
+  let mut link = member_link_with_pattern("", ".r..l...", "........", "file.txt");
+  let fixed_size = PathPermissions { links: vec![link.clone()] }.serialize().len();
+  link.group = "x".repeat(MAX_PERMISSION_BYTES - fixed_size);
+  let at_limit = PathPermissions { links: vec![link] }.serialize();
+  assert_eq!(at_limit.len(), MAX_PERMISSION_BYTES);
+  ops.store_file_buffered(&ctx, "/full/.aeordb-permissions", &at_limit, Some("application/json")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = PermissionStore::new(&engine)
+    .grant_paths(&ctx, vec!["/full/file.txt".to_string()], vec!["new-team".to_string()], ".r..l...".to_string())
+    .expect_err("permission output above the fixed document limit must fail");
+
+  assert!(matches!(error, aeordb::engine::EngineError::InvalidInput(message) if message.contains("would be")));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(ops.read_file_buffered("/full/.aeordb-permissions").unwrap(), at_limit);
+}
+
+#[test]
+fn permission_store_memory_refusal_publishes_nothing() {
+  let (engine, _temp_dir) = test_engine();
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/pressure/file.txt", b"data", Some("text/plain")).unwrap();
+  engine.memory_coordinator().reconfigure_policy(MemoryPolicy::new(512 * 1024, 1024 * 1024, 1, 256 * 1024).unwrap()).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let error = PermissionStore::new(&engine)
+    .grant_paths(&ctx, vec!["/pressure/file.txt".to_string()], vec!["team".to_string()], ".r..l...".to_string())
+    .expect_err("permission batch must honor process memory refusal");
+
+  assert!(matches!(error, aeordb::engine::EngineError::ResourceExhausted(_)));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert!(matches!(ops.read_file_buffered("/pressure/.aeordb-permissions"), Err(aeordb::engine::EngineError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn share_notifications_report_only_acknowledged_changed_paths() {
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "event_share_target");
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/alpha/one.txt", b"one", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/two.txt", b"two", Some("text/plain")).unwrap();
+  PermissionStore::new(&engine)
+    .grant_paths(&ctx, vec!["/alpha/one.txt".to_string()], vec![format!("user:{target_user_id}")], ".r..l...".to_string())
+    .unwrap();
+  let (app, event_bus) = create_app_with_jwt_engine_and_event_bus(Arc::clone(&jwt_manager), Arc::clone(&engine));
+  let mut events = event_bus.subscribe();
+  let body = serde_json::to_vec(&serde_json::json!({
+    "paths": ["/alpha/one.txt", "/beta/two.txt"],
+    "users": [target_user_id.to_string(), target_user_id.to_string()],
+    "permissions": ".r..l..."
+  }))
+  .unwrap();
+
+  let response = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(body.clone()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let event = tokio::time::timeout(Duration::from_secs(1), events.recv()).await.expect("missing changed-path notification").unwrap();
+  assert_eq!(event.event_type, aeordb::engine::engine_event::EVENT_FILES_SHARED);
+  assert_eq!(event.recipient_user_id.as_deref(), Some(target_user_id.to_string().as_str()));
+  assert_eq!(event.payload["path"], "/beta/two.txt");
+  assert!(tokio::time::timeout(Duration::from_millis(50), events.recv()).await.is_err(), "unchanged path emitted a notification");
+
+  let retry = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(body))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(retry.status(), StatusCode::OK);
+  assert!(tokio::time::timeout(Duration::from_millis(50), events.recv()).await.is_err(), "idempotent retry emitted a notification");
+}
+
+#[tokio::test]
+async fn failed_compound_share_emits_no_recipient_notification() {
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "failed_event_share_target");
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/alpha/one.txt", b"one", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/two.txt", b"two", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&ctx, "/beta/.aeordb-permissions", b"not permission JSON", Some("application/json")).unwrap();
+  let (app, event_bus) = create_app_with_jwt_engine_and_event_bus(jwt_manager, engine);
+  let mut events = event_bus.subscribe();
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/files/share")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "paths": ["/alpha/one.txt", "/beta/two.txt"],
+            "users": [target_user_id.to_string()],
+            "permissions": ".r..l..."
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert!(tokio::time::timeout(Duration::from_millis(50), events.recv()).await.is_err(), "failed share emitted a notification");
+}
+
+#[test]
+fn concurrent_permission_grants_preserve_every_group() {
+  let (engine, _temp_dir) = test_engine();
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/race/shared.txt", b"shared", Some("text/plain")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let barrier = Arc::new(Barrier::new(17));
+  let mut workers = Vec::new();
+
+  for index in 0..16 {
+    let worker_engine = Arc::clone(&engine);
+    let worker_barrier = Arc::clone(&barrier);
+    workers.push(std::thread::spawn(move || {
+      worker_barrier.wait();
+      PermissionStore::new(&worker_engine).grant_paths(
+        &RequestContext::system(),
+        vec!["/race/shared.txt".to_string()],
+        vec![format!("team-{index}")],
+        ".r..l...".to_string(),
+      )
+    }));
+  }
+  barrier.wait();
+  for worker in workers {
+    worker.join().expect("grant worker panicked").expect("concurrent grant failed");
+  }
+
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 16);
+  let permissions =
+    PathPermissions::deserialize(&DirectoryOps::new(&engine).read_file_buffered("/race/.aeordb-permissions").unwrap()).unwrap();
+  assert_eq!(permissions.links.len(), 16);
+  for index in 0..16 {
+    assert!(permissions.links.iter().any(|link| link.group == format!("team-{index}")));
+  }
+}
+
+#[test]
+fn concurrent_permission_grant_and_revoke_preserve_commuting_updates() {
+  let (engine, _temp_dir) = test_engine();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&RequestContext::system(), "/race/shared.txt", b"shared", Some("text/plain")).unwrap();
+  write_permissions(
+    &engine,
+    "/race",
+    &PathPermissions {
+      links: vec![
+        member_link_with_pattern("remove-me", ".r..l...", "........", "shared.txt"),
+        member_link_with_pattern("preserve-me", ".r..l...", "........", "shared.txt"),
+      ],
+    },
+  );
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let barrier = Arc::new(Barrier::new(3));
+
+  let grant_engine = Arc::clone(&engine);
+  let grant_barrier = Arc::clone(&barrier);
+  let grant = std::thread::spawn(move || {
+    grant_barrier.wait();
+    PermissionStore::new(&grant_engine).grant_paths(
+      &RequestContext::system(),
+      vec!["/race/shared.txt".to_string()],
+      vec!["add-me".to_string()],
+      ".r..l...".to_string(),
+    )
+  });
+  let revoke_engine = Arc::clone(&engine);
+  let revoke_barrier = Arc::clone(&barrier);
+  let revoke = std::thread::spawn(move || {
+    revoke_barrier.wait();
+    PermissionStore::new(&revoke_engine).revoke_path(&RequestContext::system(), "/race/shared.txt", "remove-me", Some("shared.txt"))
+  });
+  barrier.wait();
+
+  grant.join().expect("grant worker panicked").expect("grant failed");
+  assert_eq!(revoke.join().expect("revoke worker panicked").expect("revoke failed"), PermissionRevokeResult::Revoked);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 2);
+
+  let permissions = PathPermissions::deserialize(&ops.read_file_buffered("/race/.aeordb-permissions").unwrap()).unwrap();
+  assert!(permissions.links.iter().any(|link| link.group == "preserve-me"));
+  assert!(permissions.links.iter().any(|link| link.group == "add-me"));
+  assert!(!permissions.links.iter().any(|link| link.group == "remove-me"));
+}
+
+#[test]
+fn permission_store_grant_and_revoke_survive_clean_restarts() {
+  let temporary = tempfile::tempdir().unwrap();
+  let database_path = temporary.path().join("permission-store-restart.aeordb");
+  let database_path = database_path.to_str().unwrap();
+  let ctx = RequestContext::system();
+
+  {
+    let engine = StorageEngine::create(database_path).unwrap();
+    let ops = DirectoryOps::new(&engine);
+    ops.ensure_root_directory(&ctx).unwrap();
+    ops.store_file_buffered(&ctx, "/alpha/one.txt", b"one", Some("text/plain")).unwrap();
+    ops.store_file_buffered(&ctx, "/beta/two.txt", b"two", Some("text/plain")).unwrap();
+    PermissionStore::new(&engine)
+      .grant_paths(
+        &ctx,
+        vec!["/alpha/one.txt".to_string(), "/beta/two.txt".to_string()],
+        vec!["restart-team".to_string()],
+        ".r..l...".to_string(),
+      )
+      .unwrap();
+    engine.shutdown().unwrap();
+  }
+
+  {
+    let engine = StorageEngine::open(database_path).unwrap();
+    let ops = DirectoryOps::new(&engine);
+    for path in ["/alpha/.aeordb-permissions", "/beta/.aeordb-permissions"] {
+      let permissions = PathPermissions::deserialize(&ops.read_file_buffered(path).unwrap()).unwrap();
+      assert!(permissions.links.iter().any(|link| link.group == "restart-team"));
+    }
+    assert_eq!(
+      PermissionStore::new(&engine).revoke_path(&ctx, "/alpha/one.txt", "restart-team", Some("one.txt")).unwrap(),
+      PermissionRevokeResult::Revoked
+    );
+    engine.shutdown().unwrap();
+  }
+
+  let engine = StorageEngine::open(database_path).unwrap();
+  let ops = DirectoryOps::new(&engine);
+  let alpha = PathPermissions::deserialize(&ops.read_file_buffered("/alpha/.aeordb-permissions").unwrap()).unwrap();
+  let beta = PathPermissions::deserialize(&ops.read_file_buffered("/beta/.aeordb-permissions").unwrap()).unwrap();
+  assert!(!alpha.links.iter().any(|link| link.group == "restart-team"));
+  assert!(beta.links.iter().any(|link| link.group == "restart-team"));
+  engine.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn shared_with_me_surfaces_malformed_permission_authority() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let user_id = create_test_user(&engine, "malformed_grants_user");
@@ -746,6 +1222,115 @@ async fn unshare_nonexistent_returns_404() {
   assert_eq!(resp.status(), StatusCode::NOT_FOUND, "Unsharing nonexistent link should return 404");
 }
 
+#[tokio::test]
+async fn unshare_rejects_corrupt_permission_authority_without_publication() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let ops = DirectoryOps::new(&engine);
+  let malformed = b"not permission JSON";
+  ops.store_file_buffered(&RequestContext::system(), "/broken/file.txt", b"data", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&RequestContext::system(), "/broken/.aeordb-permissions", malformed, Some("application/json")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("DELETE")
+        .uri("/files/shares")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "path": "/broken/file.txt",
+            "group": "remove-me",
+            "path_pattern": "file.txt"
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(ops.read_file_buffered("/broken/.aeordb-permissions").unwrap(), malformed);
+}
+
+#[tokio::test]
+async fn unshare_file_specific_link_after_file_deletion() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let ops = DirectoryOps::new(&engine);
+  let ctx = RequestContext::system();
+  ops.store_file_buffered(&ctx, "/deleted/file.txt", b"data", Some("text/plain")).unwrap();
+  PermissionStore::new(&engine)
+    .grant_paths(&ctx, vec!["/deleted/file.txt".to_string()], vec!["remove-me".to_string()], ".r..l...".to_string())
+    .unwrap();
+  ops.delete_file(&ctx, "/deleted/file.txt").unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("DELETE")
+        .uri("/files/shares")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "path": "/deleted/file.txt",
+            "group": "remove-me",
+            "path_pattern": "file.txt"
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+  let permissions = PathPermissions::deserialize(&ops.read_file_buffered("/deleted/.aeordb-permissions").unwrap()).unwrap();
+  assert!(permissions.links.is_empty());
+}
+
+#[tokio::test]
+async fn unshare_rejects_oversized_permission_authority_without_publication() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let ops = DirectoryOps::new(&engine);
+  let oversized = vec![b'x'; 1024 * 1024 + 1];
+  ops.store_file_buffered(&RequestContext::system(), "/oversized/file.txt", b"data", Some("text/plain")).unwrap();
+  ops.store_file_buffered(&RequestContext::system(), "/oversized/.aeordb-permissions", &oversized, Some("application/json")).unwrap();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("DELETE")
+        .uri("/files/shares")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(
+          serde_json::to_vec(&serde_json::json!({
+            "path": "/oversized/file.txt",
+            "group": "remove-me",
+            "path_pattern": "file.txt"
+          }))
+          .unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  assert_eq!(ops.read_file_buffered("/oversized/.aeordb-permissions").unwrap(), oversized);
+}
+
 // ---------------------------------------------------------------------------
 // Additional edge cases
 // ---------------------------------------------------------------------------
@@ -838,6 +1423,56 @@ async fn share_with_invalid_permissions_length_returns_400() {
 }
 
 #[tokio::test]
+async fn share_with_positionally_invalid_permissions_returns_400_without_publication() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let share_body = serde_json::json!({
+      "paths": ["/some/path"],
+      "users": ["some-user"],
+      "permissions": "r......."
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/share")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&share_body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+}
+
+#[tokio::test]
+async fn share_rejects_over_expanded_request_without_publication() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let paths = (0..257).map(|index| format!("/missing/path-{index}")).collect::<Vec<_>>();
+  let groups = (0..256).map(|index| format!("group-{index}")).collect::<Vec<_>>();
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/share")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(
+      serde_json::to_vec(&serde_json::json!({
+        "paths": paths,
+        "groups": groups,
+        "permissions": ".r..l..."
+      }))
+      .unwrap(),
+    ))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+}
+
+#[tokio::test]
 async fn share_nonexistent_path_returns_404() {
   let (app, jwt_manager, _engine, _temp_dir) = test_app();
   let auth = root_bearer_token(&jwt_manager);
@@ -864,6 +1499,7 @@ async fn share_rejects_nested_registry_concealed_path() {
   let auth = root_bearer_token(&jwt_manager);
   store_test_file(&engine, "/docs/.aeordb-indexes/private.idx", b"derived index");
   let target_user = create_test_user(&engine, "concealed_share_target");
+  let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
   let share_body = serde_json::json!({
       "paths": ["/docs/.aeordb-indexes/private.idx"],
       "users": [target_user.to_string()],
@@ -879,6 +1515,7 @@ async fn share_rejects_nested_registry_concealed_path() {
 
   let response = app.oneshot(request).await.unwrap();
   assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
   assert!(DirectoryOps::new(&engine).read_file_buffered("/docs/.aeordb-permissions").is_err());
 }
 

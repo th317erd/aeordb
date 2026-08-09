@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
   Extension,
   extract::State,
@@ -15,12 +17,10 @@ use crate::auth::TokenClaims;
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::permission_resolver::CrudlifyOp;
-use crate::engine::permissions::{PathPermissions, PermissionLink};
+use crate::engine::permissions::{PathPermissions, PermissionRevokeResult, PermissionStore, validate_permission_flags};
 use crate::engine::path_utils::{normalize_path, parent_path, file_name};
 use crate::engine::request_context::RequestContext;
 use crate::engine::user::is_root;
-use crate::engine::system_family_policy::GenericDataPathSelection;
-use crate::engine::SystemFamilyPolicyResolver;
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -135,21 +135,11 @@ pub async fn share(
     }
   };
 
-  // Resolve the caller's display name for notifications
-  let sharer_name = if is_root(&caller_id) {
-    "Root".to_string()
-  } else {
-    crate::engine::system_store::get_user(&state.engine, &caller_id)
-      .ok()
-      .flatten()
-      .map(|u| u.username)
-      .unwrap_or_else(|| "Someone".to_string())
-  };
-
   // Only root can share for now
   if !is_root(&caller_id) {
     return ErrorResponse::new("Only root can share files").with_status(StatusCode::FORBIDDEN).into_response();
   }
+  let sharer_name = "Root".to_string();
 
   if body.paths.is_empty() {
     return ErrorResponse::new("At least one path is required").with_status(StatusCode::BAD_REQUEST).into_response();
@@ -161,117 +151,45 @@ pub async fn share(
     return ErrorResponse::new("At least one user or group is required").with_status(StatusCode::BAD_REQUEST).into_response();
   }
 
-  // Validate the permissions string (must be 8 chars of crudlify pattern)
-  if body.permissions.len() != 8 {
-    return ErrorResponse::new("permissions must be exactly 8 characters (crudlify pattern)")
-      .with_status(StatusCode::BAD_REQUEST)
-      .into_response();
+  if let Err(error) = validate_permission_flags(&body.permissions) {
+    return ErrorResponse::new(error.to_string()).with_status(StatusCode::BAD_REQUEST).into_response();
   }
 
-  let ops = DirectoryOps::new(&state.engine);
   let ctx = RequestContext::system();
-  let family_policy = match SystemFamilyPolicyResolver::new(state.engine.hash_algo()) {
-    Ok(policy) => policy,
-    Err(error) => return engine_error_response("Failed to classify shared paths", &error),
+  let mut direct_users = Vec::new();
+  let mut seen_direct_users = HashSet::new();
+  if let Some(users) = body.users.as_ref() {
+    for user_id in users {
+      if seen_direct_users.insert(user_id.clone()) {
+        direct_users.push(user_id.clone());
+      }
+    }
+  }
+  let mut target_groups = Vec::new();
+  target_groups.extend(direct_users.iter().map(|user_id| format!("user:{user_id}")));
+  if let Some(groups) = body.groups.as_ref() {
+    target_groups.extend(groups.iter().cloned());
+  }
+  let grant = match PermissionStore::new(&state.engine).grant_paths(&ctx, body.paths.clone(), target_groups, body.permissions.clone()) {
+    Ok(grant) => grant,
+    Err(error) => return engine_error_response("Failed to share paths", &error),
   };
+  let changed_paths = grant.changed_paths;
+  let shared_paths = grant.paths;
+  let shared_count = shared_paths.len();
 
-  let mut shared_count = 0usize;
-  let mut shared_paths: Vec<String> = Vec::new();
-
-  for raw_path in &body.paths {
-    let normalized = normalize_path(raw_path);
-
-    match family_policy.generic_data_path_selection(&normalized) {
-      Ok(GenericDataPathSelection::Include) => {}
-      Ok(GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer) => {
-        return ErrorResponse::new("Cannot share owner-specific paths").with_status(StatusCode::BAD_REQUEST).into_response();
-      }
-      Err(error) => return engine_error_response("Failed to classify shared path", &error),
-    }
-
-    let path_kind = match share_path_kind(&ops, &normalized) {
-      Ok(Some(kind)) => kind,
-      Ok(None) => return ErrorResponse::new(format!("Path not found: {}", normalized)).with_status(StatusCode::NOT_FOUND).into_response(),
-      Err(error) => return engine_error_response("Failed to inspect shared path", &error),
-    };
-
-    // For files: store permission on parent dir with path_pattern = filename
-    // For dirs:  store permission on the dir itself with no path_pattern
-    let (perm_dir, path_pattern) = if path_kind == SharePathKind::File {
-      let parent = parent_path(&normalized).unwrap_or_else(|| "/".to_string());
-      let fname = file_name(&normalized).unwrap_or("").to_string();
-      (parent, Some(fname))
-    } else {
-      (normalized.clone(), None)
-    };
-
-    // Read existing .aeordb-permissions or start empty.
-    let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-      format!("{}.aeordb-permissions", perm_dir)
-    } else {
-      format!("{}/.aeordb-permissions", perm_dir)
-    };
-
-    let mut perms = match load_stored_permissions(&ops, &perm_file_path) {
-      Ok(Some(permissions)) => permissions,
-      Ok(None) => PathPermissions { links: Vec::new() },
-      Err(error) => return engine_error_response("Failed to load existing permissions", &error),
-    };
-
-    // Build the list of groups to add links for
-    let mut target_groups: Vec<String> = Vec::new();
-
-    if let Some(ref users) = body.users {
-      for user_id_str in users {
-        target_groups.push(format!("user:{}", user_id_str));
-      }
-    }
-    if let Some(ref groups) = body.groups {
-      for group_name in groups {
-        target_groups.push(group_name.clone());
-      }
-    }
-
-    // Upsert links
-    for group in &target_groups {
-      let existing = perms.links.iter_mut().find(|link| link.group == *group && link.path_pattern == path_pattern);
-
-      match existing {
-        Some(link) => {
-          // Update existing link
-          link.allow = body.permissions.clone();
-        }
-        None => {
-          // Insert new link
-          perms.links.push(PermissionLink {
-            group: group.clone(),
-            allow: body.permissions.clone(),
-            deny: "........".to_string(),
-            others_allow: None,
-            others_deny: None,
-            path_pattern: path_pattern.clone(),
-          });
-        }
-      }
-    }
-
-    // Write back the .aeordb-permissions file.
-    let serialized = perms.serialize();
-    if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
-      return ErrorResponse::new(format!("Failed to store permissions: {}", e))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-
-    shared_count += 1;
-    shared_paths.push(normalized);
+  if changed_paths.is_empty() {
+    return Json(serde_json::json!({
+        "shared": shared_count,
+        "paths": shared_paths,
+    }))
+    .into_response();
   }
 
   // Emit per-recipient SSE events for live notification.
   // Each user receives one event per shared path (delivered via /events/me).
-  let direct_users: Vec<String> = body.users.clone().unwrap_or_default();
   for recipient_uid in &direct_users {
-    for path in &shared_paths {
+    for path in &changed_paths {
       let event = crate::engine::engine_event::EngineEvent::for_user(
         crate::engine::engine_event::EVENT_FILES_SHARED,
         &claims.sub,
@@ -288,7 +206,7 @@ pub async fn share(
 
   // Spawn background email notification (best-effort)
   let engine_clone = state.engine.clone();
-  let notify_paths = body.paths.clone();
+  let notify_paths = changed_paths.clone();
   let notify_permissions = body.permissions.clone();
   let notify_users: Vec<String> = direct_users;
   let sharer = sharer_name.clone();
@@ -431,42 +349,16 @@ pub async fn unshare(
   }
 
   let normalized = normalize_path(&body.path);
-  let ops = DirectoryOps::new(&state.engine);
   let ctx = RequestContext::system();
-
-  // Determine perm_dir
-  let is_file = match share_path_kind(&ops, &normalized) {
-    Ok(Some(SharePathKind::File)) => true,
-    Ok(Some(SharePathKind::Directory)) | Ok(None) => false,
-    Err(error) => return engine_error_response("Failed to inspect shared path", &error),
-  };
-  let perm_dir = if is_file { parent_path(&normalized).unwrap_or_else(|| "/".to_string()) } else { normalized.clone() };
-
-  let perm_file_path = if perm_dir == "/" || perm_dir.ends_with('/') {
-    format!("{}.aeordb-permissions", perm_dir)
-  } else {
-    format!("{}/.aeordb-permissions", perm_dir)
-  };
-
-  let mut perms = match load_stored_permissions(&ops, &perm_file_path) {
-    Ok(Some(permissions)) => permissions,
-    Ok(None) => return ErrorResponse::new("No permissions found for this path").with_status(StatusCode::NOT_FOUND).into_response(),
-    Err(error) => return engine_error_response("Failed to load permissions", &error),
-  };
-
-  let original_len = perms.links.len();
-  perms.links.retain(|link| !(link.group == body.group && link.path_pattern == body.path_pattern));
-
-  if perms.links.len() == original_len {
-    return ErrorResponse::new("No matching permission link found").with_status(StatusCode::NOT_FOUND).into_response();
-  }
-
-  // Write back
-  let serialized = perms.serialize();
-  if let Err(e) = ops.store_file_buffered(&ctx, &perm_file_path, &serialized, Some("application/json")) {
-    return ErrorResponse::new(format!("Failed to update permissions: {}", e))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
+  match PermissionStore::new(&state.engine).revoke_path(&ctx, &normalized, &body.group, body.path_pattern.as_deref()) {
+    Ok(PermissionRevokeResult::Revoked) => {}
+    Ok(PermissionRevokeResult::PermissionFileNotFound) => {
+      return ErrorResponse::new("No permissions found for this path").with_status(StatusCode::NOT_FOUND).into_response();
+    }
+    Ok(PermissionRevokeResult::LinkNotFound) => {
+      return ErrorResponse::new("No matching permission link found").with_status(StatusCode::NOT_FOUND).into_response();
+    }
+    Err(error) => return engine_error_response("Failed to update permissions", &error),
   }
 
   Json(serde_json::json!({

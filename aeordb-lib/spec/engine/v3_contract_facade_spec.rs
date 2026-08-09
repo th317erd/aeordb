@@ -1447,6 +1447,14 @@ fn wave_four_credentials_use_engine_owned_cache_fanout_and_typed_transitions() {
   ] {
     assert!(!source.contains("evict_caches_for_path"), "routes must not own post-commit cache invalidation");
   }
+  let sharing = include_str!("../../src/server/share_routes.rs");
+  assert_eq!(sharing.matches("PermissionStore::new").count(), 2, "share and unshare must use typed permission authority");
+  assert!(!sharing.contains("store_file_buffered"), "share routes must not publish permission files directly");
+  assert!(!sharing.contains("PermissionLink"), "share routes must not own permission document mutation");
+  assert!(sharing.contains("let changed_paths = grant.changed_paths"));
+  assert!(sharing.contains("if changed_paths.is_empty()"), "idempotent share retries must not emit false notifications");
+  assert!(sharing.contains("let notify_paths = changed_paths.clone()"), "mixed retries may notify only paths that changed");
+  assert!(!sharing.contains(".ok().flatten()"), "share routes must not squelch authority failures");
   let admin = include_str!("../../src/server/admin_routes.rs");
   assert!(!admin.contains("ops.read_file_buffered(&path)"), "API-key update must not manually deserialize outside authority");
   for source in [include_str!("../../src/server/routes.rs"), include_str!("../../src/server/api_key_self_service_routes.rs")] {
