@@ -104,7 +104,7 @@ pub struct TriggerSyncParams {
 use super::responses::{ErrorResponse, require_root};
 use super::state::AppState;
 use crate::auth::TokenClaims;
-use crate::engine::PeerConfig;
+use crate::engine::system_store::{NewPeerConfig, PeerAddressConflictPolicy, PeerConfigStore};
 use crate::engine::system_store;
 
 // ---------------------------------------------------------------------------
@@ -121,28 +121,6 @@ pub struct AddPeerRequest {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Generate a random `node_id` for a new peer record, retrying until it
-/// doesn't collide with any existing peer or with this node's own id.
-///
-/// The birthday-bound on u64 (2^32) makes a single collision astronomically
-/// unlikely, but the check is cheap and removes a latent class of "peer
-/// can never sync" bugs at zero cost.
-fn fresh_peer_node_id(existing_peers: &[PeerConfig], local_node_id: Option<u64>) -> u64 {
-  loop {
-    let candidate: u64 = rand::random();
-    if candidate == 0 {
-      continue; // reserve 0 as "uninitialized"
-    }
-    if Some(candidate) == local_node_id {
-      continue;
-    }
-    if existing_peers.iter().any(|p| p.node_id == candidate) {
-      continue;
-    }
-    return candidate;
-  }
-}
 
 /// Serialize a PeerConnection into a JSON value with sync status.
 fn peer_to_json(peer: &crate::engine::peer_connection::PeerConnection, peer_manager: &crate::engine::PeerManager) -> serde_json::Value {
@@ -223,17 +201,6 @@ pub async fn add_peer(
     .and_then(|value| value.as_array())
     .map(|array| array.iter().filter_map(|value| value.as_str().map(|string| string.to_string())).collect::<Vec<String>>());
 
-  // Generate a node_id for the new peer that doesn't collide with any
-  // existing peer or with our local node_id.
-  let mut peer_configs = match system_store::get_peer_configs(&state.engine) {
-    Ok(configs) => configs,
-    Err(error) => {
-      tracing::error!(%error, "Failed to read persisted peer configuration");
-      return ErrorResponse::new(format!("Failed to read persisted peer configuration: {error}"))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  };
   let local_node_id = match system_store::get_node_id(&state.engine) {
     Ok(node_id) => node_id,
     Err(error) => {
@@ -243,34 +210,25 @@ pub async fn add_peer(
         .into_response();
     }
   };
-  let peer_node_id = fresh_peer_node_id(&peer_configs, local_node_id);
-
-  let config = PeerConfig {
-    node_id: peer_node_id,
-    address: address.clone(),
-    label: label.clone(),
-    sync_paths,
-    last_clock_offset_ms: None,
-    last_wire_time_ms: None,
-    last_jitter_ms: None,
-    clock_state_at: None,
-  };
-
-  // Add to runtime PeerManager.
-  state.peer_manager.add_peer(&config);
-
-  // Persist to system store.
-  peer_configs.push(config.clone());
   let ctx = crate::engine::RequestContext::system();
-  if let Err(error) = system_store::store_peer_configs(&state.engine, &ctx, &peer_configs) {
-    tracing::error!("Failed to persist peer config: {}", error);
-    return ErrorResponse::new(format!("Failed to persist peer: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-  }
+  let transition = match PeerConfigStore::new(&state.engine).create(
+    &ctx,
+    local_node_id,
+    NewPeerConfig { address: address.clone(), label: label.clone(), sync_paths },
+    PeerAddressConflictPolicy::AllowDuplicate,
+  ) {
+    Ok(transition) => transition,
+    Err(error) => {
+      tracing::error!(%error, "Failed to persist peer config");
+      return ErrorResponse::new(format!("Failed to persist peer: {error}")).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+    }
+  };
+  state.peer_manager.add_peer(&transition.peer);
 
   (
     StatusCode::CREATED,
     Json(serde_json::json!({
-        "node_id": peer_node_id,
+        "node_id": transition.peer.node_id,
         "address": address,
         "label": label,
         "state": "disconnected",
@@ -311,29 +269,20 @@ pub async fn remove_peer(
     }
   };
 
-  if !state.peer_manager.all_peers().iter().any(|peer| peer.node_id == node_id) {
-    return ErrorResponse::new(format!("Peer not found: {}. Use GET /admin/cluster/peers to list active peers", node_id))
-      .with_status(StatusCode::NOT_FOUND)
-      .into_response();
-  }
-
-  // Remove from persisted configs.
-  let mut peer_configs = match system_store::get_peer_configs(&state.engine) {
-    Ok(configs) => configs,
+  let ctx = crate::engine::RequestContext::system();
+  match PeerConfigStore::new(&state.engine).remove(&ctx, node_id) {
+    Ok(Some(_)) => {}
+    Ok(None) => {
+      return ErrorResponse::new(format!("Peer not found: {}. Use GET /admin/cluster/peers to list active peers", node_id))
+        .with_status(StatusCode::NOT_FOUND)
+        .into_response();
+    }
     Err(error) => {
-      tracing::error!(%error, "Failed to read persisted peer configuration");
-      return ErrorResponse::new(format!("Failed to read persisted peer configuration: {error}"))
+      tracing::error!(%error, "Failed to persist peer removal");
+      return ErrorResponse::new(format!("Failed to persist peer removal: {error}"))
         .with_status(StatusCode::INTERNAL_SERVER_ERROR)
         .into_response();
     }
-  };
-  peer_configs.retain(|config| config.node_id != node_id);
-  let ctx = crate::engine::RequestContext::system();
-  if let Err(error) = system_store::store_peer_configs(&state.engine, &ctx, &peer_configs) {
-    tracing::error!("Failed to persist peer removal: {}", error);
-    return ErrorResponse::new(format!("Failed to persist peer removal: {error}"))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
   }
   state.peer_manager.remove_peer(node_id);
 
@@ -447,36 +396,24 @@ pub async fn join_cluster(
   // back to it. The new peer's node_id is random (collision-checked);
   // the joining node will record its own canonical node_id on its end
   // and we'll reconcile via the first sync handshake.
-  let mut peer_configs = match system_store::get_peer_configs(&state.engine) {
-    Ok(configs) => configs,
+  let ctx = crate::engine::RequestContext::system();
+  let transition = match PeerConfigStore::new(&state.engine).create(
+    &ctx,
+    Some(responding_node_id),
+    NewPeerConfig { address: node_url.clone(), label, sync_paths: None },
+    PeerAddressConflictPolicy::ReplaceExisting,
+  ) {
+    Ok(transition) => transition,
     Err(error) => {
-      tracing::error!(%error, "/sync/join: failed to read peer configuration");
-      return ErrorResponse::new(format!("Failed to read peer configuration: {error}"))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
+      tracing::error!(%error, "/sync/join: failed to persist peer config");
+      return ErrorResponse::new(format!("Failed to persist peer: {error}")).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
     }
   };
-  let new_peer_node_id = fresh_peer_node_id(&peer_configs, Some(responding_node_id));
-  let config = PeerConfig {
-    node_id: new_peer_node_id,
-    address: node_url.clone(),
-    label,
-    sync_paths: None,
-    last_clock_offset_ms: None,
-    last_wire_time_ms: None,
-    last_jitter_ms: None,
-    clock_state_at: None,
-  };
-  state.peer_manager.add_peer(&config);
-
-  // Avoid duplicates if the same node URL is already registered.
-  peer_configs.retain(|p| p.address != node_url);
-  peer_configs.push(config);
-  let ctx = crate::engine::RequestContext::system();
-  if let Err(error) = system_store::store_peer_configs(&state.engine, &ctx, &peer_configs) {
-    tracing::error!("/sync/join: failed to persist peer config: {}", error);
-    return ErrorResponse::new(format!("Failed to persist peer: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
+  for retired_node_id in &transition.retired_node_ids {
+    state.peer_manager.remove_peer(*retired_node_id);
   }
+  state.peer_manager.add_peer(&transition.peer);
+  let new_peer_node_id = transition.peer.node_id;
 
   record_join_audit(&state.engine, &caller_ip, &node_url, &format!("admitted: peer_node_id={}", new_peer_node_id));
 
@@ -589,47 +526,4 @@ pub async fn trigger_sync(
     })),
   )
     .into_response()
-}
-
-#[cfg(test)]
-mod fresh_peer_node_id_tests {
-  use super::*;
-
-  fn cfg(id: u64) -> PeerConfig {
-    PeerConfig {
-      node_id: id,
-      address: format!("http://test-{}", id),
-      label: None,
-      sync_paths: None,
-      last_clock_offset_ms: None,
-      last_wire_time_ms: None,
-      last_jitter_ms: None,
-      clock_state_at: None,
-    }
-  }
-
-  #[test]
-  fn never_returns_zero() {
-    // 100 iterations is plenty to catch the "0 leaks through" bug.
-    for _ in 0..100 {
-      let id = fresh_peer_node_id(&[], None);
-      assert_ne!(id, 0);
-    }
-  }
-
-  #[test]
-  fn skips_collision_with_existing_peer() {
-    // Construct a (theoretical) scenario where rand keeps returning a
-    // colliding value; the function still terminates with a non-colliding
-    // ID because the second draw is independent.
-    let existing = vec![cfg(42), cfg(43), cfg(44)];
-    let id = fresh_peer_node_id(&existing, None);
-    assert!(!existing.iter().any(|p| p.node_id == id));
-  }
-
-  #[test]
-  fn skips_collision_with_local_node_id() {
-    let id = fresh_peer_node_id(&[], Some(123));
-    assert_ne!(id, 123);
-  }
 }

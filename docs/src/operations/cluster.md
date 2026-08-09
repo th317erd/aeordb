@@ -46,6 +46,29 @@ curl -X POST http://localhost:6830/sync/peers \
   -d '{"address": "https://nodeC:6830", "label": "US West"}'
 ```
 
+### Startup Authority And Failure Semantics
+
+Each database has one persisted, nonzero cluster node ID. AeorDB creates it
+exactly once; concurrent initialization selects one acknowledged value, and a
+later startup never replaces it. The persisted peer list is a versioned,
+1 MiB-bounded authority document. Peer add, upsert, remove, and startup
+registration operations decide against the current document and publish one
+atomic replacement, so concurrent accepted changes are not lost.
+
+Runtime peer state is derived from that document. AeorDB updates the in-memory
+peer manager only after the corresponding persistent mutation is acknowledged.
+An unchanged startup peer or upsert is a true no-op: it does not reorder the
+document or consume another durability sequence.
+
+Cluster authority is required for a writable server startup. AeorDB refuses to
+construct the application router when the node ID, peer document, or required
+bundled-plugin authority is malformed, oversized, unreadable, or internally
+inconsistent. A local node ID that collides with a persisted peer ID is also a
+startup error. Likewise, an explicit `--peers` registration failure aborts
+startup instead of serving without the requested peers. While initialization
+is in progress or has failed, the startup health surface reports that state;
+ordinary application routes are not exposed as ready.
+
 ### Authentication
 
 All `/sync/*` endpoints require JWT authentication. Nodes mint short-lived root JWTs (nil UUID `sub`) internally when calling each other's `/sync/diff` and `/sync/chunks` endpoints. This works because every node in the cluster shares the same Ed25519 signing key (distributed by `/sync/join`).

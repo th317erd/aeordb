@@ -25,6 +25,8 @@ use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::{ROOT_USER_ID, User, validate_user_id};
 
 const CREDENTIAL_RECORD_MAX_BYTES: u64 = 1024 * 1024;
+const PEER_CONFIG_DOCUMENT_MAX_BYTES: u64 = 1024 * 1024;
+const NODE_ID_PATH: &str = "/.aeordb-system/cluster/node_id";
 
 fn ensure_credential_record_bounded<T: JsonVersioned>(record: &T, role: &str) -> EngineResult<()> {
   let serialized_bytes = record.serialize_versioned().len() as u64;
@@ -492,17 +494,51 @@ pub fn cleanup_expired_tokens(engine: &StorageEngine, ctx: &RequestContext) -> E
 
 /// Persist this node's unique identifier.
 pub fn store_node_id(engine: &StorageEngine, ctx: &RequestContext, node_id: u64) -> EngineResult<()> {
-  let ops = DirectoryOps::new(engine);
-  let value = node_id.to_le_bytes().to_vec();
-  ops.store_file_buffered(ctx, "/.aeordb-system/cluster/node_id", &value, Some("application/octet-stream"))?;
+  let selected = initialize_node_id(engine, ctx, node_id)?;
+  if selected != node_id {
+    return Err(EngineError::AlreadyExists(format!("cluster node_id is already initialized as {selected}")));
+  }
   Ok(())
+}
+
+/// Initialize this node's stable identifier exactly once.
+///
+/// Concurrent callers all receive the first acknowledged nonzero value. An
+/// existing malformed value fails closed instead of being treated as absent.
+pub fn initialize_node_id(engine: &StorageEngine, ctx: &RequestContext, candidate_node_id: u64) -> EngineResult<u64> {
+  if candidate_node_id == 0 {
+    return Err(EngineError::InvalidInput("cluster node_id 0 is reserved for uninitialized state".to_string()));
+  }
+  let ops = DirectoryOps::new(engine);
+  ops.transform_file_buffered(ctx, NODE_ID_PATH, Some("application/octet-stream"), 8, NamespaceMutationKind::SystemWrite, move |current| {
+    match current {
+      Some(bytes) if bytes.len() == 8 => {
+        let selected = u64::from_le_bytes(bytes.try_into().expect("length checked"));
+        if selected == 0 {
+          return Err(EngineError::CorruptEntry { offset: 0, reason: "cluster node_id contains reserved value 0".to_string() });
+        }
+        Ok(crate::engine::directory_ops::BufferedFileTransform::Keep(selected))
+      }
+      Some(bytes) => Err(EngineError::CorruptEntry { offset: 0, reason: format!("cluster node_id has {} bytes; expected 8", bytes.len()) }),
+      None => Ok(crate::engine::directory_ops::BufferedFileTransform::Replace {
+        data: candidate_node_id.to_le_bytes().to_vec(),
+        output: candidate_node_id,
+      }),
+    }
+  })
 }
 
 /// Load the persisted node identifier, if any.
 pub fn get_node_id(engine: &StorageEngine) -> EngineResult<Option<u64>> {
   let ops = DirectoryOps::new(engine);
-  match ops.read_file_buffered("/.aeordb-system/cluster/node_id") {
-    Ok(data) if data.len() == 8 => Ok(Some(u64::from_le_bytes(data[..8].try_into().unwrap()))),
+  match ops.read_file_buffered_bounded(NODE_ID_PATH, 8) {
+    Ok(data) if data.len() == 8 => {
+      let node_id = u64::from_le_bytes(data[..8].try_into().expect("length checked"));
+      if node_id == 0 {
+        return Err(EngineError::CorruptEntry { offset: 0, reason: "cluster node_id contains reserved value 0".to_string() });
+      }
+      Ok(Some(node_id))
+    }
     Ok(data) => Err(EngineError::CorruptEntry { offset: 0, reason: format!("cluster node_id has {} bytes; expected 8", data.len()) }),
     Err(EngineError::NotFound(_)) => Ok(None),
     Err(error) => Err(error),
@@ -521,14 +557,271 @@ crate::impl_json_versioned_v0!(PeerConfigList);
 
 static PEER_CONFIGS_DOC: JsonDoc<PeerConfigList> = JsonDoc::new("/.aeordb-system/cluster/peers");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerAddressConflictPolicy {
+  AllowDuplicate,
+  KeepExisting,
+  ReplaceExisting,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPeerConfig {
+  pub address: String,
+  pub label: Option<String>,
+  pub sync_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerConfigTransition {
+  pub peer: PeerConfig,
+  pub changed: bool,
+  pub retired_node_ids: Vec<u64>,
+}
+
+/// Typed authority for the singleton peer-configuration document.
+pub struct PeerConfigStore<'a> {
+  engine: &'a StorageEngine,
+}
+
+impl<'a> PeerConfigStore<'a> {
+  pub fn new(engine: &'a StorageEngine) -> Self {
+    Self { engine }
+  }
+
+  pub fn list(&self) -> EngineResult<Vec<PeerConfig>> {
+    let peers = PEER_CONFIGS_DOC.get_or_default_bounded(self.engine, PeerConfigList::default(), PEER_CONFIG_DOCUMENT_MAX_BYTES)?.peers;
+    validate_peer_configs(&peers)?;
+    Ok(peers)
+  }
+
+  pub fn replace_all(&self, ctx: &RequestContext, peers: Vec<PeerConfig>) -> EngineResult<bool> {
+    validate_peer_configs(&peers)?;
+    PEER_CONFIGS_DOC.transform(self.engine, ctx, PEER_CONFIG_DOCUMENT_MAX_BYTES, move |current| {
+      if let Some(current) = &current {
+        validate_peer_configs(&current.peers)?;
+        if current.peers == peers {
+          return Ok(JsonStoreMutation::Keep(false));
+        }
+      }
+      Ok(JsonStoreMutation::Replace { value: PeerConfigList { peers }, output: true })
+    })
+  }
+
+  pub fn create(
+    &self,
+    ctx: &RequestContext,
+    local_node_id: Option<u64>,
+    new_peer: NewPeerConfig,
+    address_policy: PeerAddressConflictPolicy,
+  ) -> EngineResult<PeerConfigTransition> {
+    validate_new_peer_config(&new_peer)?;
+    PEER_CONFIGS_DOC.transform(self.engine, ctx, PEER_CONFIG_DOCUMENT_MAX_BYTES, move |current| {
+      let mut peers = current.unwrap_or_default().peers;
+      validate_peer_configs(&peers)?;
+      if address_policy == PeerAddressConflictPolicy::KeepExisting {
+        if let Some(existing) = peers.iter().find(|peer| peer.address == new_peer.address).cloned() {
+          return Ok(JsonStoreMutation::Keep(PeerConfigTransition { peer: existing, changed: false, retired_node_ids: Vec::new() }));
+        }
+      }
+
+      let mut retired_node_ids = Vec::new();
+      if address_policy == PeerAddressConflictPolicy::ReplaceExisting {
+        peers.retain(|peer| {
+          let retain = peer.address != new_peer.address;
+          if !retain {
+            retired_node_ids.push(peer.node_id);
+          }
+          retain
+        });
+      }
+      let node_id = fresh_peer_node_id(&peers, local_node_id);
+      let peer = PeerConfig {
+        node_id,
+        address: new_peer.address,
+        label: new_peer.label,
+        sync_paths: new_peer.sync_paths,
+        last_clock_offset_ms: None,
+        last_wire_time_ms: None,
+        last_jitter_ms: None,
+        clock_state_at: None,
+      };
+      peers.push(peer.clone());
+      validate_peer_configs(&peers)?;
+      Ok(JsonStoreMutation::Replace {
+        value: PeerConfigList { peers },
+        output: PeerConfigTransition { peer, changed: true, retired_node_ids },
+      })
+    })
+  }
+
+  /// Ensure a set of startup peer addresses exists through one bounded
+  /// document transition. Existing addresses are no-write results.
+  pub fn ensure_addresses(
+    &self,
+    ctx: &RequestContext,
+    local_node_id: Option<u64>,
+    addresses: Vec<String>,
+  ) -> EngineResult<Vec<PeerConfigTransition>> {
+    let mut unique_addresses = Vec::new();
+    let mut seen_addresses = std::collections::HashSet::with_capacity(addresses.len());
+    for address in addresses {
+      let peer = NewPeerConfig { address, label: None, sync_paths: None };
+      validate_new_peer_config(&peer)?;
+      if seen_addresses.insert(peer.address.clone()) {
+        unique_addresses.push(peer.address);
+      }
+    }
+
+    PEER_CONFIGS_DOC.transform(self.engine, ctx, PEER_CONFIG_DOCUMENT_MAX_BYTES, move |current| {
+      let mut peers = current.unwrap_or_default().peers;
+      validate_peer_configs(&peers)?;
+      let mut transitions = Vec::with_capacity(unique_addresses.len());
+      let mut changed = false;
+      for address in unique_addresses {
+        if let Some(existing) = peers.iter().find(|peer| peer.address == address).cloned() {
+          transitions.push(PeerConfigTransition { peer: existing, changed: false, retired_node_ids: Vec::new() });
+          continue;
+        }
+        let peer = PeerConfig {
+          node_id: fresh_peer_node_id(&peers, local_node_id),
+          address,
+          label: None,
+          sync_paths: None,
+          last_clock_offset_ms: None,
+          last_wire_time_ms: None,
+          last_jitter_ms: None,
+          clock_state_at: None,
+        };
+        peers.push(peer.clone());
+        transitions.push(PeerConfigTransition { peer, changed: true, retired_node_ids: Vec::new() });
+        changed = true;
+      }
+      validate_peer_configs(&peers)?;
+      if !changed {
+        return Ok(JsonStoreMutation::Keep(transitions));
+      }
+      Ok(JsonStoreMutation::Replace { value: PeerConfigList { peers }, output: transitions })
+    })
+  }
+
+  pub fn upsert(
+    &self,
+    ctx: &RequestContext,
+    peer: PeerConfig,
+    address_policy: PeerAddressConflictPolicy,
+  ) -> EngineResult<PeerConfigTransition> {
+    validate_peer_config(&peer)?;
+    PEER_CONFIGS_DOC.transform(self.engine, ctx, PEER_CONFIG_DOCUMENT_MAX_BYTES, move |current| {
+      let original_peers = current.unwrap_or_default().peers;
+      let peers = original_peers.clone();
+      validate_peer_configs(&peers)?;
+      if address_policy == PeerAddressConflictPolicy::KeepExisting {
+        if let Some(existing) = peers.iter().find(|current| current.address == peer.address).cloned() {
+          return Ok(JsonStoreMutation::Keep(PeerConfigTransition { peer: existing, changed: false, retired_node_ids: Vec::new() }));
+        }
+      }
+
+      let mut retired_node_ids = Vec::new();
+      let mut replacement = Vec::with_capacity(peers.len().saturating_add(1));
+      let mut inserted = false;
+      for current in peers {
+        let same_node = current.node_id == peer.node_id;
+        let same_address = current.address == peer.address;
+        let retire = same_node || (address_policy == PeerAddressConflictPolicy::ReplaceExisting && same_address);
+        if retire && current.node_id != peer.node_id {
+          retired_node_ids.push(current.node_id);
+        }
+        if retire {
+          if !inserted {
+            replacement.push(peer.clone());
+            inserted = true;
+          }
+          continue;
+        }
+        replacement.push(current);
+      }
+      if !inserted {
+        replacement.push(peer.clone());
+      }
+      validate_peer_configs(&replacement)?;
+      let changed = original_peers != replacement;
+      if !changed {
+        return Ok(JsonStoreMutation::Keep(PeerConfigTransition { peer, changed: false, retired_node_ids: Vec::new() }));
+      }
+      Ok(JsonStoreMutation::Replace {
+        value: PeerConfigList { peers: replacement },
+        output: PeerConfigTransition { peer, changed: true, retired_node_ids },
+      })
+    })
+  }
+
+  pub fn remove(&self, ctx: &RequestContext, node_id: u64) -> EngineResult<Option<PeerConfig>> {
+    PEER_CONFIGS_DOC.transform(self.engine, ctx, PEER_CONFIG_DOCUMENT_MAX_BYTES, move |current| {
+      let Some(mut current) = current else {
+        return Ok(JsonStoreMutation::Keep(None));
+      };
+      validate_peer_configs(&current.peers)?;
+      let Some(index) = current.peers.iter().position(|peer| peer.node_id == node_id) else {
+        return Ok(JsonStoreMutation::Keep(None));
+      };
+      let removed = current.peers.remove(index);
+      Ok(JsonStoreMutation::Replace { value: current, output: Some(removed) })
+    })
+  }
+}
+
+fn validate_new_peer_config(peer: &NewPeerConfig) -> EngineResult<()> {
+  if peer.address.trim().is_empty() {
+    return Err(EngineError::InvalidInput("peer address cannot be empty".to_string()));
+  }
+  Ok(())
+}
+
+fn validate_peer_config(peer: &PeerConfig) -> EngineResult<()> {
+  if peer.node_id == 0 {
+    return Err(EngineError::InvalidInput("peer node_id 0 is reserved".to_string()));
+  }
+  validate_new_peer_config(&NewPeerConfig { address: peer.address.clone(), label: peer.label.clone(), sync_paths: peer.sync_paths.clone() })
+}
+
+fn validate_peer_configs(peers: &[PeerConfig]) -> EngineResult<()> {
+  let mut node_ids = std::collections::HashSet::with_capacity(peers.len());
+  for peer in peers {
+    validate_peer_config(peer)?;
+    if !node_ids.insert(peer.node_id) {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("peer configuration contains duplicate node_id {}", peer.node_id),
+      });
+    }
+  }
+  let serialized = PeerConfigList { peers: peers.to_vec() }.serialize_versioned();
+  if serialized.len() as u64 > PEER_CONFIG_DOCUMENT_MAX_BYTES {
+    return Err(EngineError::ResourceExhausted(format!(
+      "peer configuration is {} bytes, exceeding the {PEER_CONFIG_DOCUMENT_MAX_BYTES}-byte limit",
+      serialized.len()
+    )));
+  }
+  Ok(())
+}
+
+fn fresh_peer_node_id(existing_peers: &[PeerConfig], local_node_id: Option<u64>) -> u64 {
+  loop {
+    let candidate: u64 = rand::random();
+    if candidate != 0 && Some(candidate) != local_node_id && !existing_peers.iter().any(|peer| peer.node_id == candidate) {
+      return candidate;
+    }
+  }
+}
+
 /// Persist the full set of peer configurations.
 pub fn store_peer_configs(engine: &StorageEngine, ctx: &RequestContext, peers: &[PeerConfig]) -> EngineResult<()> {
-  PEER_CONFIGS_DOC.put(engine, ctx, &PeerConfigList { peers: peers.to_vec() })
+  PeerConfigStore::new(engine).replace_all(ctx, peers.to_vec()).map(|_| ())
 }
 
 /// Load persisted peer configurations.
 pub fn get_peer_configs(engine: &StorageEngine) -> EngineResult<Vec<PeerConfig>> {
-  Ok(PEER_CONFIGS_DOC.get_or_default(engine, PeerConfigList::default())?.peers)
+  PeerConfigStore::new(engine).list()
 }
 
 // ---------------------------------------------------------------------------

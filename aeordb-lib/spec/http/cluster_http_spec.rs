@@ -10,7 +10,7 @@ use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::engine::{DirectoryOps, EventBus, RequestContext, StorageEngine};
 use aeordb::plugins::PluginManager;
 use aeordb::auth::FileAuthProvider;
-use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, CorsState};
+use aeordb::server::{create_app_with_all, create_temp_engine_for_tests, try_create_app_with_all, CorsState};
 
 fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
   metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle()
@@ -33,6 +33,23 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, tempfile::T
     CorsState { default_origins: None, rules: vec![] },
   );
   (app, jwt_manager, engine, temp_dir)
+}
+
+fn try_test_app(engine: Arc<StorageEngine>) -> Result<axum::Router, String> {
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
+  let rate_limiter = Arc::new(RateLimiter::default_config());
+  let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
+  try_create_app_with_all(
+    auth_provider,
+    jwt_manager,
+    plugin_manager,
+    rate_limiter,
+    make_prometheus_handle(),
+    engine,
+    Arc::new(EventBus::new()),
+    CorsState { default_origins: None, rules: vec![] },
+  )
 }
 
 fn root_bearer_token(jwt_manager: &JwtManager) -> String {
@@ -68,6 +85,52 @@ fn non_root_bearer_token(jwt_manager: &JwtManager) -> String {
 async fn body_json(body: Body) -> serde_json::Value {
   let bytes = body.collect().await.unwrap().to_bytes().to_vec();
   serde_json::from_slice(&bytes).expect("valid JSON response body")
+}
+
+#[test]
+fn server_construction_refuses_malformed_required_system_authority() {
+  for (path, body, expected) in [
+    ("/.aeordb-system/cluster/node_id", b"short".as_slice(), "node_id"),
+    ("/.aeordb-system/cluster/peers", b"not peer JSON".as_slice(), "peer configuration"),
+    ("/.aeordb-system/plugins/extract", b"not a plugin record".as_slice(), "bundled plugins"),
+  ] {
+    let (engine, _temp_dir) = create_temp_engine_for_tests();
+    DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), path, body, Some("application/octet-stream")).unwrap();
+
+    let error = match try_test_app(engine) {
+      Ok(_) => panic!("server construction unexpectedly accepted malformed authority at {path}"),
+      Err(error) => error,
+    };
+    assert!(error.contains(expected), "unexpected startup error for {path}: {error}");
+  }
+}
+
+#[test]
+fn server_construction_refuses_local_and_peer_node_id_collision() {
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  aeordb::engine::system_store::store_node_id(&engine, &ctx, 42).unwrap();
+  aeordb::engine::system_store::store_peer_configs(
+    &engine,
+    &ctx,
+    &[aeordb::engine::PeerConfig {
+      node_id: 42,
+      address: "http://peer:6830".to_string(),
+      label: None,
+      sync_paths: None,
+      last_clock_offset_ms: None,
+      last_wire_time_ms: None,
+      last_jitter_ms: None,
+      clock_state_at: None,
+    }],
+  )
+  .unwrap();
+
+  let error = match try_test_app(engine) {
+    Ok(_) => panic!("server construction accepted a local/peer node_id collision"),
+    Err(error) => error,
+  };
+  assert!(error.contains("collides with persisted peer"), "unexpected startup error: {error}");
 }
 
 // ===========================================================================
@@ -168,6 +231,7 @@ async fn test_add_peer_rejects_malformed_persisted_configuration() {
     .unwrap();
 
   let response = app
+    .clone()
     .oneshot(
       Request::post("/sync/peers")
         .header("authorization", root_bearer_token(&jwt_manager))
@@ -178,6 +242,13 @@ async fn test_add_peer_rejects_malformed_persisted_configuration() {
     .await
     .unwrap();
   assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+  let list_response = app
+    .oneshot(Request::get("/sync/peers").header("authorization", root_bearer_token(&jwt_manager)).body(Body::empty()).unwrap())
+    .await
+    .unwrap();
+  assert_eq!(list_response.status(), StatusCode::OK);
+  assert_eq!(body_json(list_response.into_body()).await["items"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

@@ -257,7 +257,7 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
   let task_queue = Arc::new(TaskQueue::new(engine.clone()));
   let cors_state = build_cors_state(cors_flag, &engine);
   let router = match cancel.clone() {
-    Some(token) => create_app_with_all_and_task_queue_with_cancel(
+    Some(token) => try_create_app_with_all_and_task_queue_inner(
       auth_provider,
       jwt_manager,
       plugin_manager,
@@ -267,9 +267,9 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
       event_bus.clone(),
       cors_state,
       Some(task_queue.clone()),
-      token,
+      Some(token),
     ),
-    None => create_app_with_all_and_task_queue(
+    None => try_create_app_with_all_and_task_queue_inner(
       auth_provider,
       jwt_manager,
       plugin_manager,
@@ -279,8 +279,10 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
       event_bus.clone(),
       cors_state,
       Some(task_queue.clone()),
+      None,
     ),
-  };
+  }
+  .map_err(|error| format!("failed to initialize server authority: {error}"))?;
   spawn_hot_buffer_flush_timer(engine.clone(), cancel.clone());
   spawn_index_buffer_flush_timer(engine.clone(), cancel);
   Ok((router, bootstrap_key, engine, event_bus, task_queue))
@@ -388,7 +390,24 @@ pub fn create_app_with_all(
   event_bus: Arc<EventBus>,
   cors_state: CorsState,
 ) -> Router {
-  create_app_with_all_and_task_queue(
+  try_create_app_with_all(auth_provider, jwt_manager, plugin_manager, rate_limiter, prometheus_handle, engine, event_bus, cors_state)
+    .expect("failed to initialize server authority")
+}
+
+/// Fallible application constructor for callers that must report malformed or
+/// unavailable system authority without exposing a partially initialized router.
+#[allow(clippy::too_many_arguments)]
+pub fn try_create_app_with_all(
+  auth_provider: Arc<dyn AuthProvider>,
+  jwt_manager: Arc<JwtManager>,
+  plugin_manager: Arc<PluginManager>,
+  rate_limiter: Arc<RateLimiter>,
+  prometheus_handle: PrometheusHandle,
+  engine: Arc<StorageEngine>,
+  event_bus: Arc<EventBus>,
+  cors_state: CorsState,
+) -> Result<Router, String> {
+  try_create_app_with_all_and_task_queue_inner(
     auth_provider,
     jwt_manager,
     plugin_manager,
@@ -397,6 +416,7 @@ pub fn create_app_with_all(
     engine,
     event_bus,
     cors_state,
+    None,
     None,
   )
 }
@@ -416,7 +436,7 @@ pub fn create_app_with_all_and_task_queue(
   cors_state: CorsState,
   task_queue: Option<Arc<TaskQueue>>,
 ) -> Router {
-  create_app_with_all_and_task_queue_inner(
+  try_create_app_with_all_and_task_queue_inner(
     auth_provider,
     jwt_manager,
     plugin_manager,
@@ -428,6 +448,7 @@ pub fn create_app_with_all_and_task_queue(
     task_queue,
     None,
   )
+  .expect("failed to initialize server authority")
 }
 
 /// Same as `create_app_with_all_and_task_queue`, but accepts an explicit
@@ -447,7 +468,7 @@ pub fn create_app_with_all_and_task_queue_with_cancel(
   task_queue: Option<Arc<TaskQueue>>,
   cancel: tokio_util::sync::CancellationToken,
 ) -> Router {
-  create_app_with_all_and_task_queue_inner(
+  try_create_app_with_all_and_task_queue_inner(
     auth_provider,
     jwt_manager,
     plugin_manager,
@@ -459,10 +480,11 @@ pub fn create_app_with_all_and_task_queue_with_cancel(
     task_queue,
     Some(cancel),
   )
+  .expect("failed to initialize server authority")
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_app_with_all_and_task_queue_inner(
+fn try_create_app_with_all_and_task_queue_inner(
   auth_provider: Arc<dyn AuthProvider>,
   jwt_manager: Arc<JwtManager>,
   plugin_manager: Arc<PluginManager>,
@@ -473,59 +495,44 @@ fn create_app_with_all_and_task_queue_inner(
   cors_state: CorsState,
   task_queue: Option<Arc<TaskQueue>>,
   cancel: Option<tokio_util::sync::CancellationToken>,
-) -> Router {
+) -> Result<Router, String> {
   let auth_engine = match auth_provider.authority_engine() {
     Some(auth_engine) => auth_engine,
     None if !auth_provider.is_enabled() => engine.clone(),
-    None => panic!("enabled AuthProvider must expose its authority engine"),
+    None => return Err("enabled AuthProvider must expose its authority engine".to_string()),
   };
 
-  if let Err(error) = plugin_manager.install_bundled_plugins() {
-    tracing::warn!("Failed to install bundled plugins: {}", error);
+  let persisted_peers = crate::engine::system_store::PeerConfigStore::new(&engine)
+    .list()
+    .map_err(|error| format!("failed to load persisted peer configuration: {error}"))?;
+  let candidate_node_id = loop {
+    let candidate = rand::random();
+    if candidate != 0 && !persisted_peers.iter().any(|peer| peer.node_id == candidate) {
+      break candidate;
+    }
+  };
+  let ctx = crate::engine::RequestContext::system();
+  let node_id = crate::engine::system_store::initialize_node_id(&engine, &ctx, candidate_node_id)
+    .map_err(|error| format!("failed to initialize cluster node_id: {error}"))?;
+  if persisted_peers.iter().any(|peer| peer.node_id == node_id) {
+    return Err(format!("local cluster node_id {node_id} collides with persisted peer configuration"));
   }
+  plugin_manager.install_bundled_plugins().map_err(|error| format!("failed to install bundled plugins: {error}"))?;
 
   let group_cache = engine.group_cache.clone();
   let api_key_cache = auth_engine.api_key_cache.clone();
   let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));
   let peer_manager = Arc::new(PeerManager::new());
 
-  // Ensure this node has a stable node_id BEFORE any sync handler can run.
-  // The previous lazy-generation-inside-/sync/join was racy: two concurrent
-  // joins against a fresh node could both observe `Ok(None)`, both call
-  // `rand::random()`, and the second `store_node_id` would overwrite the
-  // first — the first joining node had already received the stale ID.
-  match crate::engine::system_store::get_node_id(&engine) {
-    Ok(Some(id)) => {
-      tracing::debug!(node_id = id, "Loaded existing node_id");
-    }
-    Ok(None) => {
-      let new_id: u64 = rand::random();
-      let ctx = crate::engine::RequestContext::system();
-      if let Err(e) = crate::engine::system_store::store_node_id(&engine, &ctx, new_id) {
-        tracing::error!("Failed to persist node_id at startup: {}", e);
-      } else {
-        tracing::info!(node_id = new_id, "Generated and persisted new node_id");
-      }
-    }
-    Err(e) => {
-      tracing::error!("Failed to read node_id at startup: {}", e);
-    }
-  }
+  tracing::debug!(node_id, "Loaded initialized node_id");
 
   // Load any persisted peer configs (added via /sync/peers, --peers, or
   // --join) into the runtime PeerManager so the sync loop sees them.
-  match crate::engine::system_store::get_peer_configs(&engine) {
-    Ok(persisted) => {
-      for cfg in &persisted {
-        peer_manager.add_peer(cfg);
-      }
-      if !persisted.is_empty() {
-        tracing::info!("Loaded {} peer(s) from system store", persisted.len());
-      }
-    }
-    Err(error) => {
-      tracing::error!(%error, "Persisted peer configuration is unreadable; peer synchronization remains disabled");
-    }
+  for configuration in &persisted_peers {
+    peer_manager.add_peer(configuration);
+  }
+  if !persisted_peers.is_empty() {
+    tracing::info!("Loaded {} peer(s) from system store", persisted_peers.len());
   }
 
   // Construct the sync engine so /sync/trigger and the periodic loop have
@@ -764,11 +771,11 @@ fn create_app_with_all_and_task_queue_inner(
 
   // CORS middleware is the OUTERMOST layer so it can handle OPTIONS preflight
   // before auth middleware rejects for missing tokens.
-  if cors_state.default_origins.is_some() || !cors_state.rules.is_empty() {
+  Ok(if cors_state.default_origins.is_some() || !cors_state.rules.is_empty() {
     router.layer(from_fn_with_state(cors_state, cors::cors_middleware))
   } else {
     router
-  }
+  })
 }
 
 use crate::auth::middleware::auth_middleware;

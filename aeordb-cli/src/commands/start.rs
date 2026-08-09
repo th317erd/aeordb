@@ -527,12 +527,9 @@ async fn initialize_server_runtime(
   // Register any --peers URLs into the system store before serving.
   if !peers.is_empty() {
     startup_gate.set_phase("registering_peers", "Registering configured peers before opening the serving engine", 0.10, None);
-    if let Err(e) = register_initial_peers(&database, hot_dir_ref, &peers, command_line_overrides.clone()) {
-      tracing::warn!("Failed to register some --peers: {}", e);
-      eprintln!("Warning: failed to register some --peers: {}", e);
-    } else {
-      println!("Registered {} peer(s) from --peers", peers.len());
-    }
+    register_initial_peers(&database, hot_dir_ref, &peers, command_line_overrides.clone())
+      .map_err(|error| format!("failed to register --peers: {error}"))?;
+    println!("Registered {} peer(s) from --peers", peers.len());
   }
 
   // Build the app (single engine open — no separate bootstrap engine).
@@ -868,10 +865,8 @@ async fn perform_cluster_join(
     last_jitter_ms: None,
     clock_state_at: None,
   };
-  let mut peer_configs = aeordb::engine::system_store::get_peer_configs(&engine).unwrap_or_default();
-  peer_configs.retain(|p| p.address != peer_config.address);
-  peer_configs.push(peer_config);
-  aeordb::engine::system_store::store_peer_configs(&engine, &ctx, &peer_configs)
+  aeordb::engine::system_store::PeerConfigStore::new(&engine)
+    .upsert(&ctx, peer_config, aeordb::engine::system_store::PeerAddressConflictPolicy::ReplaceExisting)
     .map_err(|e| format!("failed to store peer config: {}", e))?;
 
   drop(engine);
@@ -897,26 +892,13 @@ fn register_initial_peers(
   .map_err(|e| format!("failed to open engine: {}", e))?;
 
   let ctx = aeordb::engine::RequestContext::system();
-  let mut peer_configs = aeordb::engine::system_store::get_peer_configs(&engine).unwrap_or_default();
-
-  for url in peers {
-    if peer_configs.iter().any(|p| &p.address == url) {
-      continue;
-    }
-    peer_configs.push(aeordb::engine::PeerConfig {
-      node_id: rand::random(),
-      address: url.clone(),
-      label: None,
-      sync_paths: None,
-      last_clock_offset_ms: None,
-      last_wire_time_ms: None,
-      last_jitter_ms: None,
-      clock_state_at: None,
-    });
-  }
-
-  aeordb::engine::system_store::store_peer_configs(&engine, &ctx, &peer_configs)
-    .map_err(|e| format!("failed to store peer configs: {}", e))?;
+  aeordb::engine::system_store::PeerConfigStore::new(&engine)
+    .ensure_addresses(
+      &ctx,
+      aeordb::engine::system_store::get_node_id(&engine).map_err(|e| format!("failed to load local node_id: {e}"))?,
+      peers.to_vec(),
+    )
+    .map_err(|e| format!("failed to store initial peer configs: {e}"))?;
 
   drop(engine);
   Ok(())

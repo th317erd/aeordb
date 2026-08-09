@@ -16,6 +16,7 @@ use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::system_store;
 use aeordb::engine::user::{ROOT_USER_ID, User};
 use aeordb::engine::DirectoryOps;
+use aeordb::engine::EngineError;
 use aeordb::server::create_temp_engine_for_tests;
 
 fn setup() -> (Arc<StorageEngine>, tempfile::TempDir) {
@@ -919,6 +920,55 @@ fn test_node_id_malformed_is_not_reported_as_absent() {
 }
 
 #[test]
+fn test_reserved_zero_node_id_is_malformed_authority() {
+  let (engine, _dir) = setup();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&test_context(), "/.aeordb-system/cluster/node_id", &0u64.to_le_bytes(), Some("application/octet-stream"))
+    .unwrap();
+
+  assert!(matches!(system_store::get_node_id(&engine), Err(EngineError::CorruptEntry { .. })));
+}
+
+#[test]
+fn oversized_node_id_authority_is_rejected_before_buffering() {
+  let (engine, _dir) = setup();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&test_context(), "/.aeordb-system/cluster/node_id", &[42; 9], Some("application/octet-stream"))
+    .unwrap();
+
+  let error = system_store::get_node_id(&engine).expect_err("oversized node identity must fail before buffering");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+}
+
+#[test]
+fn node_id_initialization_is_single_winner_and_cannot_be_overwritten() {
+  let (engine, _dir) = setup();
+  let barrier = Arc::new(std::sync::Barrier::new(8));
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+  let selected = std::thread::scope(|scope| {
+    let mut handles = Vec::new();
+    for candidate in 1..=8u64 {
+      let engine = engine.clone();
+      let barrier = barrier.clone();
+      handles.push(scope.spawn(move || {
+        barrier.wait();
+        system_store::initialize_node_id(&engine, &RequestContext::system(), candidate).unwrap()
+      }));
+    }
+    handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+  });
+
+  assert!(selected.iter().all(|node_id| *node_id == selected[0]));
+  assert_eq!(system_store::get_node_id(&engine).unwrap(), Some(selected[0]));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
+
+  let replacement = if selected[0] == 99 { 100 } else { 99 };
+  system_store::store_node_id(&engine, &test_context(), replacement).expect_err("node identity must be create-once");
+  assert_eq!(system_store::get_node_id(&engine).unwrap(), Some(selected[0]));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
+}
+
+#[test]
 fn cleanup_rejects_malformed_token_records() {
   let (engine, _dir) = setup();
   DirectoryOps::new(&engine)
@@ -971,6 +1021,194 @@ fn test_peer_configs_empty() {
   let (engine, _dir) = setup();
   let result = system_store::get_peer_configs(&engine).unwrap();
   assert!(result.is_empty());
+}
+
+#[test]
+fn concurrent_peer_creates_preserve_every_acknowledged_peer() {
+  let (engine, _dir) = setup();
+  let barrier = Arc::new(std::sync::Barrier::new(12));
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  std::thread::scope(|scope| {
+    for index in 0..12 {
+      let engine = engine.clone();
+      let barrier = barrier.clone();
+      scope.spawn(move || {
+        barrier.wait();
+        let transition = system_store::PeerConfigStore::new(&engine)
+          .create(
+            &RequestContext::system(),
+            Some(9000),
+            system_store::NewPeerConfig {
+              address: format!("http://peer-{index}:8080"),
+              label: Some(format!("peer-{index}")),
+              sync_paths: None,
+            },
+            system_store::PeerAddressConflictPolicy::AllowDuplicate,
+          )
+          .unwrap();
+        assert!(transition.changed);
+      });
+    }
+  });
+
+  let peers = system_store::PeerConfigStore::new(&engine).list().unwrap();
+  assert_eq!(peers.len(), 12);
+  assert!(peers.iter().all(|peer| peer.node_id != 0 && peer.node_id != 9000));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 12);
+}
+
+#[test]
+fn peer_address_policies_and_removal_are_atomic_and_idempotent() {
+  let (engine, _dir) = setup();
+  let store = system_store::PeerConfigStore::new(&engine);
+  let ctx = test_context();
+  let first = store
+    .create(
+      &ctx,
+      Some(999),
+      system_store::NewPeerConfig { address: "http://same:8080".to_string(), label: Some("first".to_string()), sync_paths: None },
+      system_store::PeerAddressConflictPolicy::KeepExisting,
+    )
+    .unwrap();
+  let after_first = engine.durability_snapshot().unwrap().next_sequence;
+
+  let repeated = store
+    .create(
+      &ctx,
+      Some(999),
+      system_store::NewPeerConfig { address: "http://same:8080".to_string(), label: Some("ignored".to_string()), sync_paths: None },
+      system_store::PeerAddressConflictPolicy::KeepExisting,
+    )
+    .unwrap();
+  assert!(!repeated.changed);
+  assert_eq!(repeated.peer, first.peer);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, after_first);
+
+  let replaced = store
+    .create(
+      &ctx,
+      Some(999),
+      system_store::NewPeerConfig { address: "http://same:8080".to_string(), label: Some("replacement".to_string()), sync_paths: None },
+      system_store::PeerAddressConflictPolicy::ReplaceExisting,
+    )
+    .unwrap();
+  assert!(replaced.changed);
+  assert_eq!(replaced.retired_node_ids, vec![first.peer.node_id]);
+  assert_ne!(replaced.peer.node_id, first.peer.node_id);
+  assert_eq!(store.list().unwrap(), vec![replaced.peer.clone()]);
+
+  let after_replace = engine.durability_snapshot().unwrap().next_sequence;
+  let unchanged = store.upsert(&ctx, replaced.peer.clone(), system_store::PeerAddressConflictPolicy::ReplaceExisting).unwrap();
+  assert!(!unchanged.changed);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, after_replace);
+
+  assert!(store.remove(&ctx, replaced.peer.node_id).unwrap().is_some());
+  let after_remove = engine.durability_snapshot().unwrap().next_sequence;
+  assert!(store.remove(&ctx, replaced.peer.node_id).unwrap().is_none());
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, after_remove);
+}
+
+#[test]
+fn unchanged_peer_upsert_preserves_document_order_without_a_write() {
+  let (engine, _dir) = setup();
+  let store = system_store::PeerConfigStore::new(&engine);
+  let ctx = test_context();
+  let first = store
+    .create(
+      &ctx,
+      Some(999),
+      system_store::NewPeerConfig { address: "http://first:8080".to_string(), label: Some("first".to_string()), sync_paths: None },
+      system_store::PeerAddressConflictPolicy::AllowDuplicate,
+    )
+    .unwrap()
+    .peer;
+  let second = store
+    .create(
+      &ctx,
+      Some(999),
+      system_store::NewPeerConfig { address: "http://second:8080".to_string(), label: Some("second".to_string()), sync_paths: None },
+      system_store::PeerAddressConflictPolicy::AllowDuplicate,
+    )
+    .unwrap()
+    .peer;
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+
+  let transition = store.upsert(&ctx, first.clone(), system_store::PeerAddressConflictPolicy::ReplaceExisting).unwrap();
+
+  assert!(!transition.changed);
+  assert_eq!(store.list().unwrap(), vec![first, second]);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+}
+
+#[test]
+fn startup_peer_addresses_publish_as_one_idempotent_transition() {
+  let (engine, _dir) = setup();
+  let store = system_store::PeerConfigStore::new(&engine);
+  let ctx = test_context();
+  let before = engine.durability_snapshot().unwrap().next_sequence;
+  let addresses = vec!["http://first:8080".to_string(), "http://second:8080".to_string(), "http://first:8080".to_string()];
+
+  let created = store.ensure_addresses(&ctx, Some(999), addresses.clone()).unwrap();
+  assert_eq!(created.len(), 2);
+  assert!(created.iter().all(|transition| transition.changed));
+  assert_eq!(store.list().unwrap().len(), 2);
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
+
+  let repeated = store.ensure_addresses(&ctx, Some(999), addresses).unwrap();
+  assert_eq!(repeated.len(), 2);
+  assert!(repeated.iter().all(|transition| !transition.changed));
+  assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before + 1);
+}
+
+#[test]
+fn malformed_and_oversized_peer_authority_fail_before_transition() {
+  for body in [
+    b"not versioned peer JSON".to_vec(),
+    serde_json::to_vec(&serde_json::json!({
+      "$v": 0,
+      "peers": [{
+        "node_id": 42,
+        "address": "http://peer:8080",
+        "label": "x".repeat(1024 * 1024),
+        "sync_paths": null,
+        "last_clock_offset_ms": null,
+        "last_wire_time_ms": null,
+        "last_jitter_ms": null,
+        "clock_state_at": null
+      }]
+    }))
+    .unwrap(),
+  ] {
+    let (engine, _dir) = setup();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&test_context(), "/.aeordb-system/cluster/peers", &body, Some("application/json")).unwrap();
+    let before = engine.durability_snapshot().unwrap().next_sequence;
+
+    system_store::PeerConfigStore::new(&engine)
+      .create(
+        &test_context(),
+        Some(1),
+        system_store::NewPeerConfig { address: "http://new:8080".to_string(), label: None, sync_paths: None },
+        system_store::PeerAddressConflictPolicy::AllowDuplicate,
+      )
+      .expect_err("invalid authority must fail closed");
+
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before);
+    assert_eq!(ops.read_file_buffered("/.aeordb-system/cluster/peers").unwrap(), body);
+  }
+}
+
+#[test]
+fn oversized_peer_authority_is_rejected_before_buffering_for_list() {
+  let (engine, _dir) = setup();
+  let body = vec![b' '; 1024 * 1024 + 1];
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&test_context(), "/.aeordb-system/cluster/peers", &body, Some("application/json"))
+    .unwrap();
+
+  let error = system_store::PeerConfigStore::new(&engine).list().expect_err("oversized peer authority must fail before buffering");
+  assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
 }
 
 // ---------------------------------------------------------------------------

@@ -67,9 +67,48 @@ where
     }
   }
 
+  /// Retrieve this singleton only after its declared size passes the caller's
+  /// allocation bound.
+  pub fn get_bounded(&self, engine: &StorageEngine, maximum_bytes: u64) -> EngineResult<Option<T>> {
+    let ops = DirectoryOps::new(engine);
+    match ops.read_file_buffered_bounded(self.path, maximum_bytes) {
+      Ok(data) => Ok(Some(T::deserialize_versioned(&data)?)),
+      Err(EngineError::NotFound(_)) => Ok(None),
+      Err(error) => Err(error),
+    }
+  }
+
   /// Convenience: `get` returning the supplied default when absent.
   pub fn get_or_default(&self, engine: &StorageEngine, default: T) -> EngineResult<T> {
     Ok(self.get(engine)?.unwrap_or(default))
+  }
+
+  /// Bounded variant of [`Self::get_or_default`].
+  pub fn get_or_default_bounded(&self, engine: &StorageEngine, default: T, maximum_bytes: u64) -> EngineResult<T> {
+    Ok(self.get_bounded(engine, maximum_bytes)?.unwrap_or(default))
+  }
+
+  /// Atomically read, decode, transform, and optionally replace this bounded
+  /// singleton document while namespace authority is held.
+  pub(crate) fn transform<O, F>(&self, engine: &StorageEngine, ctx: &RequestContext, maximum_bytes: u64, transform: F) -> EngineResult<O>
+  where
+    F: FnOnce(Option<T>) -> EngineResult<JsonStoreMutation<T, O>>,
+  {
+    let ops = DirectoryOps::new(engine);
+    ops.transform_file_buffered(
+      ctx,
+      self.path,
+      Some("application/json"),
+      maximum_bytes,
+      NamespaceMutationKind::SystemWrite,
+      move |existing| {
+        let current = existing.map(T::deserialize_versioned).transpose()?;
+        match transform(current)? {
+          JsonStoreMutation::Keep(output) => Ok(BufferedFileTransform::Keep(output)),
+          JsonStoreMutation::Replace { value, output } => Ok(BufferedFileTransform::Replace { data: value.serialize_versioned(), output }),
+        }
+      },
+    )
   }
 }
 

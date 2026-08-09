@@ -1481,6 +1481,36 @@ fn startup_root_diagnostic_uses_one_bounded_strict_authority_probe() {
 }
 
 #[test]
+fn wave_four_peer_and_startup_authority_has_no_split_or_best_effort_path() {
+  let system = include_str!("../../src/engine/system_store.rs");
+  assert!(system.contains("pub struct PeerConfigStore"), "peer configuration needs one typed authority owner");
+  assert!(system.contains("PEER_CONFIGS_DOC.transform"), "peer mutations must decide against current state while authority is held");
+  assert!(system.contains("pub fn initialize_node_id"), "node identity needs create-once authority");
+
+  let cluster = include_str!("../../src/server/cluster_routes.rs");
+  assert!(!cluster.contains("system_store::store_peer_configs"), "cluster routes retained whole-document replacement authority");
+  assert!(!cluster.contains("system_store::get_peer_configs"), "cluster mutation routes retained split peer-list reads");
+  let add_start = cluster.find("pub async fn add_peer(").unwrap();
+  let add_end = cluster[add_start..].find("\n/// GET /admin/cluster/peers").unwrap() + add_start;
+  let add_body = &cluster[add_start..add_end];
+  let persistent_add = add_body.find("PeerConfigStore::new").expect("typed peer persistence");
+  let runtime_add = add_body.find("peer_manager.add_peer").expect("post-ack runtime peer publication");
+  assert!(persistent_add < runtime_add, "runtime peer publication must follow persistent acknowledgement");
+
+  let server = include_str!("../../src/server/mod.rs");
+  assert!(!server.contains("Failed to persist node_id at startup"), "node identity failure must abort construction");
+  assert!(!server.contains("peer synchronization remains disabled"), "malformed peer authority must abort construction");
+  assert!(!server.contains("Failed to install bundled plugins"), "bundled plugin authority failure must abort construction");
+  assert!(server.contains("try_create_app_with_all"), "production startup needs a fallible router-construction path");
+
+  let cli_start = include_str!("../../../aeordb-cli/src/commands/start.rs");
+  assert!(
+    !cli_start.contains("Warning: failed to register some --peers"),
+    "explicit --peers registration must fail startup when it is not acknowledged"
+  );
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

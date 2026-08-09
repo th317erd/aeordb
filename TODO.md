@@ -427,6 +427,20 @@
           - [x] Make authenticated root API-key creation use an explicit root-authority policy instead of misusing the initial-bootstrap escape hatch or returning `500`.
           - [x] Prove embedded, HTTP, separate-auth-engine, malformed, oversized, concurrent, no-op, restart, and architecture behavior.
         - [x] Correct the startup empty-root diagnostic so a database containing only concealed system state is not reported as possibly missing data; retain the warning for genuinely inconsistent roots.
+        - [x] Converge peer configuration, node identity, and server-startup authority.
+          - [x] Replace peer-list read/replace races with bounded typed add, upsert, and remove transitions under namespace authority.
+          - [x] Publish persisted peer changes before mutating `PeerManager`, and never advertise a peer whose authority failed.
+          - [x] Make node identity create-once and make malformed node, peer, or bundled-plugin authority abort server construction instead of logging a ready server.
+          - [x] Prove concurrent updates, no-op/idempotent transitions, malformed/oversized state, startup refusal, restart, and HTTP behavior.
+        - [ ] Converge plugin deployment and removal authority.
+          - [ ] Decide bundled version/identity replacement while storage authority is held and preserve exact first-party metadata semantics.
+          - [ ] Bind compiled-cache identity to the stored plugin checksum so concurrent or external managers cannot execute stale bytes after acknowledgement.
+          - [ ] Bound and strictly validate plugin records, then prove concurrent deploy/remove, malformed state, pressure, restart, and invocation behavior.
+        - [ ] Converge legacy configuration, email configuration, and system-path migration authority.
+          - [ ] Validate and bound legacy config keys/values and make JWT first initialization single-winner.
+          - [ ] Bound email authority and remove serialization error squelching.
+          - [ ] Replace split copy/delete migration with atomic per-entry moves, reject divergent canonical collisions, and preserve content metadata.
+        - [ ] Classify every remaining swallowed system/plugin persistence failure as fatal, acknowledged soft evidence, or deferred Wave 5 work, and source-gate the approved direction.
       - [x] Converge multi-path share and unshare permission authority.
           - [x] Reject invalid, protected, over-expanded, corrupt, and later-failing requests before any permission publication.
           - [x] Serialize grant/revoke read-modify-write operations and publish all changed permission files through one hard-acknowledged batch.

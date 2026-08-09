@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::engine::virtual_clock::PeerClockStats;
 
@@ -104,7 +104,7 @@ pub struct PeerConnection {
 }
 
 /// Persistent peer configuration (stored in system tables).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PeerConfig {
   pub node_id: u64,
   pub address: String,
@@ -132,6 +132,20 @@ impl PeerManager {
     PeerManager { connections: RwLock::new(HashMap::new()) }
   }
 
+  fn read_connections(&self) -> RwLockReadGuard<'_, HashMap<u64, PeerConnection>> {
+    self.connections.read().unwrap_or_else(|poisoned| {
+      tracing::error!("PeerManager read lock was poisoned; recovering the retained runtime state");
+      poisoned.into_inner()
+    })
+  }
+
+  fn write_connections(&self) -> RwLockWriteGuard<'_, HashMap<u64, PeerConnection>> {
+    self.connections.write().unwrap_or_else(|poisoned| {
+      tracing::error!("PeerManager write lock was poisoned; recovering the retained runtime state");
+      poisoned.into_inner()
+    })
+  }
+
   /// Add or update a peer connection.
   pub fn add_peer(&self, config: &PeerConfig) -> PeerConnection {
     let connection = PeerConnection {
@@ -145,178 +159,90 @@ impl PeerManager {
       sync_status: SyncStatus::new(),
     };
 
-    match self.connections.write() {
-      Ok(mut connections) => {
-        connections.insert(config.node_id, connection.clone());
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in add_peer: {}", e);
-      }
-    }
+    self.write_connections().insert(config.node_id, connection.clone());
 
     connection
   }
 
   /// Remove a peer.
   pub fn remove_peer(&self, node_id: u64) -> bool {
-    match self.connections.write() {
-      Ok(mut connections) => connections.remove(&node_id).is_some(),
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in remove_peer: {}", e);
-        false
-      }
-    }
+    self.write_connections().remove(&node_id).is_some()
   }
 
   /// Get a snapshot of a specific peer's connection state.
   pub fn get_peer(&self, node_id: u64) -> Option<PeerConnection> {
-    match self.connections.read() {
-      Ok(connections) => connections.get(&node_id).cloned(),
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in get_peer: {}", e);
-        None
-      }
-    }
+    self.read_connections().get(&node_id).cloned()
   }
 
   /// Get all peer connections.
   pub fn all_peers(&self) -> Vec<PeerConnection> {
-    match self.connections.read() {
-      Ok(connections) => connections.values().cloned().collect(),
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in all_peers: {}", e);
-        Vec::new()
-      }
-    }
+    self.read_connections().values().cloned().collect()
   }
 
   /// Transition a peer to Honeymoon state.
   pub fn start_honeymoon(&self, node_id: u64, started_at: u64) {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          peer.state = ConnectionState::Honeymoon { started_at, heartbeats_received: 0 };
-        }
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in start_honeymoon: {}", e);
-      }
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      peer.state = ConnectionState::Honeymoon { started_at, heartbeats_received: 0 };
     }
   }
 
   /// Record a heartbeat during honeymoon, incrementing the counter.
   pub fn record_honeymoon_heartbeat(&self, node_id: u64) -> Option<u32> {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          if let ConnectionState::Honeymoon { heartbeats_received, .. } = &mut peer.state {
-            *heartbeats_received += 1;
-            return Some(*heartbeats_received);
-          }
-        }
-        None
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in record_honeymoon_heartbeat: {}", e);
-        None
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      if let ConnectionState::Honeymoon { heartbeats_received, .. } = &mut peer.state {
+        *heartbeats_received += 1;
+        return Some(*heartbeats_received);
       }
     }
+    None
   }
 
   /// Transition a peer to Active state.
   pub fn activate_peer(&self, node_id: u64) {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          peer.state = ConnectionState::Active;
-        }
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in activate_peer: {}", e);
-      }
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      peer.state = ConnectionState::Active;
     }
   }
 
   /// Transition a peer to Disconnected.
   pub fn disconnect_peer(&self, node_id: u64) {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          peer.state = ConnectionState::Disconnected;
-        }
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in disconnect_peer: {}", e);
-      }
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      peer.state = ConnectionState::Disconnected;
     }
   }
 
   /// Update clock stats for a peer.
   pub fn update_clock_stats(&self, node_id: u64, stats: PeerClockStats) {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          peer.clock_stats = Some(stats);
-        }
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in update_clock_stats: {}", e);
-      }
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      peer.clock_stats = Some(stats);
     }
   }
 
   /// Update sync state for a peer.
   pub fn update_sync_state(&self, node_id: u64, root_hash: Vec<u8>, sync_time: u64) {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          peer.last_synced_root_hash = Some(root_hash);
-          peer.last_sync_at = Some(sync_time);
-        }
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in update_sync_state: {}", e);
-      }
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      peer.last_synced_root_hash = Some(root_hash);
+      peer.last_sync_at = Some(sync_time);
     }
   }
 
   /// Record a successful sync for a peer.
   pub fn record_sync_success(&self, node_id: u64) {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          peer.sync_status.record_success();
-        }
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in record_sync_success: {}", e);
-      }
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      peer.sync_status.record_success();
     }
   }
 
   /// Record a failed sync for a peer.
   pub fn record_sync_failure(&self, node_id: u64, error: String) {
-    match self.connections.write() {
-      Ok(mut connections) => {
-        if let Some(peer) = connections.get_mut(&node_id) {
-          peer.sync_status.record_failure(error);
-        }
-      }
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in record_sync_failure: {}", e);
-      }
+    if let Some(peer) = self.write_connections().get_mut(&node_id) {
+      peer.sync_status.record_failure(error);
     }
   }
 
   /// Get a snapshot of a peer's sync status.
   pub fn get_sync_status(&self, node_id: u64) -> Option<SyncStatus> {
-    match self.connections.read() {
-      Ok(connections) => connections.get(&node_id).map(|peer| peer.sync_status.clone()),
-      Err(e) => {
-        tracing::warn!("PeerManager lock poisoned in get_sync_status: {}", e);
-        None
-      }
-    }
+    self.read_connections().get(&node_id).map(|peer| peer.sync_status.clone())
   }
 }
 
