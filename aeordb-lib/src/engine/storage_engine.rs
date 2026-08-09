@@ -1470,10 +1470,28 @@ impl StorageEngine {
   }
 
   fn record_durability_failure(&self, operation: DurabilityOperation, context: &str, error: impl std::fmt::Display) -> EngineError {
-    let message = format!("{}: {}", context, error);
+    let primary_message = format!("{}: {}", context, error);
     let failure_at_ms = chrono::Utc::now().timestamp_millis();
-    let coordinator_snapshot = self.durability_coordinator.snapshot().ok();
-    let hard_failure = self.durability_coordinator.hard_failure().ok().flatten();
+    let mut diagnostic_failures = Vec::new();
+    let coordinator_snapshot = match self.durability_coordinator.snapshot() {
+      Ok(snapshot) => Some(snapshot),
+      Err(error) => {
+        diagnostic_failures.push(format!("coordinator snapshot unavailable: {error}"));
+        None
+      }
+    };
+    let hard_failure = match self.durability_coordinator.hard_failure() {
+      Ok(failure) => failure,
+      Err(error) => {
+        diagnostic_failures.push(format!("coordinator hard-failure evidence unavailable: {error}"));
+        None
+      }
+    };
+    let message = if diagnostic_failures.is_empty() {
+      primary_message
+    } else {
+      format!("{primary_message}; durability diagnostics degraded: {}", diagnostic_failures.join("; "))
+    };
     let creation_sequence = coordinator_snapshot.as_ref().map(|snapshot| snapshot.next_sequence.max(1)).unwrap_or(1);
     let failed_operation = hard_failure.as_ref().map(|failure| failure.operation).unwrap_or(operation).stable_id();
     let os_error_class =
