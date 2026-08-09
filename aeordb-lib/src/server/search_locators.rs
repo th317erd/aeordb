@@ -201,9 +201,9 @@ pub fn generate_locators(
   file_record: &FileRecord,
   terms: &[LocatorTerm],
   options: &LocatorOptions,
-) -> LocatorGeneration {
-  let request_budget = engine.start_query_request_budget().ok();
-  generate_locators_with_budget(engine, file_record, terms, options, request_budget.as_ref())
+) -> EngineResult<LocatorGeneration> {
+  let request_budget = engine.start_query_request_budget()?;
+  try_generate_locators_with_budget(engine, file_record, terms, options, &request_budget)
 }
 
 pub(crate) fn generate_locators_with_budget(

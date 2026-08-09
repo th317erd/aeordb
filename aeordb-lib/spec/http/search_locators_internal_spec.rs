@@ -4,7 +4,7 @@ use crate::engine::errors::EngineError;
 use crate::engine::memory_coordinator::MemoryOwner;
 use crate::engine::RequestContext;
 
-use super::search_locators::{generate_locators_with_budget, try_generate_locators_with_budget, LocatorOptions, LocatorTerm};
+use super::search_locators::{generate_locators, generate_locators_with_budget, try_generate_locators_with_budget, LocatorOptions, LocatorTerm};
 
 fn locator_options() -> LocatorOptions {
   LocatorOptions {
@@ -14,6 +14,26 @@ fn locator_options() -> LocatorOptions {
     match_context_lines: 2,
     max_locator_scan_bytes: 1024 * 1024,
   }
+}
+
+#[test]
+fn convenience_locator_entrypoint_requires_query_admission() {
+  let (engine, _directory) = crate::server::create_temp_engine_for_tests();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&RequestContext::system(), "/convenience.txt", b"find the needle", Some("text/plain")).unwrap();
+  let file_record = ops.get_metadata("/convenience.txt").unwrap().unwrap();
+
+  let generated = generate_locators(
+    &engine,
+    &file_record,
+    &[LocatorTerm { field: "text".to_string(), operator: "contains".to_string(), literal: "needle".to_string() }],
+    &locator_options(),
+  )
+  .unwrap();
+
+  assert_eq!(generated.locator_status, "complete");
+  assert_eq!(generated.matches.len(), 1);
+  assert_eq!(engine.query_runtime_snapshot().unwrap().active_requests, 0);
 }
 
 #[test]
