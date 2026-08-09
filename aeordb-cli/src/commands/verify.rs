@@ -1,5 +1,5 @@
 use std::process;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 
 use aeordb::engine::emergency_spill::{self, EmergencySpillApplyReport, EmergencySpillArtifact};
 use aeordb::engine::StorageEngine;
@@ -72,9 +72,18 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
       process::exit(1);
     }
     print_emergency_spill_summary(&emergency_spills);
-    if !yes && !confirm_emergency_spill_replay() {
-      eprintln!("Aborted. No emergency spill artifacts were applied.");
-      process::exit(1);
+    if !yes {
+      match confirm_emergency_spill_replay() {
+        Ok(true) => {}
+        Ok(false) => {
+          eprintln!("Aborted. No emergency spill artifacts were applied.");
+          process::exit(1);
+        }
+        Err(error) => {
+          eprintln!("Failed to read emergency spill repair confirmation: {error}");
+          process::exit(1);
+        }
+      }
     }
     println!();
   }
@@ -593,14 +602,18 @@ fn print_emergency_spill_summary(artifacts: &[EmergencySpillArtifact]) {
   println!("Repair will copy matching WAL-tail bytes into the database, force a WAL-to-EOF KV rebuild, recover reusable gaps, and republish the hot tail.");
 }
 
-fn confirm_emergency_spill_replay() -> bool {
-  print!("Proceed with emergency spill replay and repair? [y/N] ");
-  let _ = io::stdout().flush();
+fn confirm_emergency_spill_replay() -> io::Result<bool> {
+  let stdin = io::stdin();
+  let stdout = io::stdout();
+  confirm_emergency_spill_replay_with(&mut stdin.lock(), &mut stdout.lock())
+}
+
+fn confirm_emergency_spill_replay_with(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<bool> {
+  write!(writer, "Proceed with emergency spill replay and repair? [y/N] ")?;
+  writer.flush()?;
   let mut answer = String::new();
-  if io::stdin().read_line(&mut answer).is_err() {
-    return false;
-  }
-  matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+  reader.read_line(&mut answer)?;
+  Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 fn format_emergency_spill_repair_summary(report: &EmergencySpillApplyReport) -> String {
@@ -687,3 +700,7 @@ mod tests {
     assert!(rendered.contains("Logical/WAL chunk delta:        2 bytes (clamped at zero)"));
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/commands/verify_prompt_spec.rs"]
+mod verify_prompt_spec;
