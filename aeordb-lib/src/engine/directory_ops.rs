@@ -3692,20 +3692,22 @@ impl<'a> DirectoryOps<'a> {
     let deletion_entries = self.engine.entries_by_type(crate::engine::kv_store::KV_TYPE_DELETION)?;
 
     let mut results = Vec::new();
-    for (_hash, value) in &deletion_entries {
+    for (hash, value) in &deletion_entries {
       // TODO: when a v1 DeletionRecord format ships, plumb header.entry_version
       // through entries_by_type (it currently exposes only hash+value, not the
       // surrounding EntryHeader). For now every entry on disk is v0.
-      if let Ok(record) = crate::engine::deletion_record::DeletionRecord::deserialize(value, 0) {
-        // Check if this deletion is a direct child of the requested directory
-        if record.path.starts_with(&prefix) || (normalized == "/" && record.path.starts_with('/')) {
-          let remainder = if normalized == "/" { &record.path[1..] } else { &record.path[prefix.len()..] };
-          // Direct child: no further slashes in the remainder
-          if !remainder.contains('/') && !remainder.is_empty() {
-            match family_policy.generic_data_path_selection(&record.path)? {
-              GenericDataPathSelection::Include => results.push(record),
-              GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer => {}
-            }
+      let record = crate::engine::deletion_record::DeletionRecord::deserialize(value, 0).map_err(|error| EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("deletion record {} is malformed: {error}", hex::encode(hash)),
+      })?;
+      // Check if this deletion is a direct child of the requested directory
+      if record.path.starts_with(&prefix) || (normalized == "/" && record.path.starts_with('/')) {
+        let remainder = if normalized == "/" { &record.path[1..] } else { &record.path[prefix.len()..] };
+        // Direct child: no further slashes in the remainder
+        if !remainder.contains('/') && !remainder.is_empty() {
+          match family_policy.generic_data_path_selection(&record.path)? {
+            GenericDataPathSelection::Include => results.push(record),
+            GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer => {}
           }
         }
       }

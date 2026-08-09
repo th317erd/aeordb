@@ -807,13 +807,24 @@ fn absolute_path_with_current_dir<F>(path: &Path, current_dir: F) -> EngineResul
 where
   F: FnOnce() -> std::io::Result<PathBuf>,
 {
-  if let Ok(canonical) = path.canonicalize() {
-    return Ok(canonical);
-  }
-  if path.is_absolute() {
-    Ok(path.to_path_buf())
-  } else {
-    Ok(current_dir()?.join(path))
+  absolute_path_with_resolvers(path, current_dir, Path::canonicalize)
+}
+
+fn absolute_path_with_resolvers<F, C>(path: &Path, current_dir: F, canonicalize: C) -> EngineResult<PathBuf>
+where
+  F: FnOnce() -> std::io::Result<PathBuf>,
+  C: FnOnce(&Path) -> std::io::Result<PathBuf>,
+{
+  match canonicalize(path) {
+    Ok(canonical) => Ok(canonical),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+      if path.is_absolute() {
+        Ok(path.to_path_buf())
+      } else {
+        Ok(current_dir()?.join(path))
+      }
+    }
+    Err(error) => Err(EngineError::IoError(error)),
   }
 }
 

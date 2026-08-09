@@ -482,11 +482,36 @@
       - [x] Keep migration source capture classified as unavailable until the P7 runtime writer activates, then bind it to the shared migration authority and memory owner.
         - [x] Prove migration configuration and persistent-format readers have no runtime capture caller, migration module, or lease/progress control writer.
     - [ ] P2f: classify and gate the complete production error-suppression surface before any v4 writer activates.
-      - [ ] Inventory ignored/converted/defaulted/logged-only errors across every production Rust module with stable machine identities.
+      - [x] Inventory ignored/converted/defaulted/logged-only errors across every production Rust module with stable machine identities.
       - [ ] Define a checked shrinking allowlist with class, rationale, owner, guarding test, and removal condition for every retained suppression.
-      - [ ] Fail the campaign gate on any unreviewed suppression, stale allowlist entry, duplicate identity, malformed classification, or unbounded rationale.
+      - [x] Implement gate failures for unreviewed suppressions, stale metadata/policies, duplicate identities, malformed classification, unbounded rationale, and baseline growth.
       - [ ] Audit durability, authority, traversal, shutdown, spill, ControlStore, GC, Void, migration/cutover, plugin, backup/import, repair, and async-worker hotspots first.
+        - [x] Fail write admission closed when any in-memory durability-authority lock is poisoned; do not recover an unknown state into writable service.
+        - [x] Remove repair's fabricated zero KV length when the WAL-writer layout lock is unavailable.
+        - [x] Make emergency-spill identity, ordering, and path containment checks reject unresolved path/timestamp evidence instead of substituting current-directory or epoch defaults.
+        - [x] Remove guarded KV replacement-offset fallback after preserving the already-validated page offset.
+        - [x] Make v3 FileHeader serialization/deserialization and offline repair reject unsupported hash widths, wrong-sized hash fields, and future versions with typed errors instead of slice panics or speculative rewrites.
       - [ ] Correct every serious durability/authority or correctness-bearing suppression found; preserve optional cleanup/telemetry only with visible evidence.
+        - [x] Reject malformed rule output, invalid auth configuration, malformed bundled-plugin versions, invalid virtual-query UTF-8, and snapshot metadata serialization failure (`31e9d8b`).
+        - [x] Surface startup/shutdown task, signal, default-configuration, and corrupt-open failures instead of continuing through an invalid lifecycle (`69b9f76`).
+        - [x] Atomically fail and retire durability tickets, latch serious transaction-authority failures read-only, and preserve emergency spill evidence (`d73b4a7`).
+        - [x] Keep optional GC cleanup failures non-authoritative while exposing bounded warning/event/metric evidence (`98d39f6`).
+        - [x] Make asynchronous index-cleanup delivery and worker failures visible without changing an acknowledged primary mutation.
+        - [x] Make manual snapshot rate limiting atomic under concurrency and replace silent response-serialization fallback with a typed envelope.
+        - [x] Fail operation admission closed after tracker poison while preserving truthful active counts, maintenance release, and shutdown draining.
+        - [x] Clear hard-durability driver ownership during poisoned permit teardown without falsely restoring coordinator availability.
+        - [x] Replace hot-tail error-to-empty reads with a strict parser; allow WAL rebuild only for structural damage and preserve I/O/resource failures.
+        - [x] Refuse successful KV rebuild after durable-WAL corruption or operational scan failure; discard only the non-authoritative tail beyond the selected frontier.
+        - [x] Validate every raw entry key against the active hash width before WAL mutation; the strict rebuild audit exposed test-only callers able to append malformed short keys.
+          - [x] Preflight complete indexed batches before the first WAL append and keep physical Void writes on the dedicated reusable-space path.
+          - [x] Correct the dirty-startup fixture so it corrupts only the recorded hot-tail magic rather than authoritative WAL bytes.
+          - [x] Pass the focused writer/scanner matrix and the uninterrupted 183-target AeorDB all-target gate with only the unfinished exact suppression allowlist gate skipped.
+        - [x] Remove lossy hot-tail compatibility readers, reject wrong-width hashes before any output, and propagate checked serialized-size failures through publication.
+        - [x] Treat poisoned task-cancellation authority as cancelled so a running maintenance worker cannot continue from unknown state.
+        - [x] Make deleted-entry traversal reject malformed deletion records instead of returning a false complete listing.
+        - [x] Reject malformed webhook and parser registry configuration, retain the last valid webhook registry on reload failure, and validate parser memory limits without defaulting invalid values.
+        - [x] Propagate emergency-spill path permission and resolver failures while retaining fallback only for genuinely missing paths.
+        - [x] Preserve every dirty-startup WAL gap byte, including extents wider than `u32` and the trailing gap before the hot tail.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

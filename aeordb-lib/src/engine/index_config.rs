@@ -4,6 +4,30 @@ use crate::engine::scalar_converter::{
   TrigramConverter, PhoneticConverter, ScalarConverter,
 };
 
+pub const DEFAULT_PARSER_MEMORY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+
+pub fn parse_parser_memory_limit(limit: &str) -> EngineResult<usize> {
+  let normalized = limit.trim().to_ascii_lowercase();
+  let (number, multiplier) = if let Some(number) = normalized.strip_suffix("kb") {
+    (number.trim(), 1024usize)
+  } else if let Some(number) = normalized.strip_suffix("mb") {
+    (number.trim(), 1024usize * 1024)
+  } else if let Some(number) = normalized.strip_suffix("gb") {
+    (number.trim(), 1024usize * 1024 * 1024)
+  } else {
+    (normalized.as_str(), 1usize)
+  };
+  let quantity = number.parse::<usize>().map_err(|error| {
+    EngineError::InvalidInput(format!("parser_memory_limit '{limit}' must be a positive integer number of bytes, KB, MB, or GB: {error}"))
+  })?;
+  if quantity == 0 {
+    return Err(EngineError::InvalidInput(format!("parser_memory_limit '{limit}' must be greater than zero")));
+  }
+  quantity
+    .checked_mul(multiplier)
+    .ok_or_else(|| EngineError::InvalidInput(format!("parser_memory_limit '{limit}' overflows this platform's address space")))
+}
+
 /// Configuration for a single indexed field.
 #[derive(Debug, Clone)]
 pub struct IndexFieldConfig {
@@ -84,13 +108,19 @@ impl PathIndexConfig {
       .and_then(|value| value.as_array())
       .ok_or_else(|| EngineError::JsonParseError("Missing 'indexes' array".to_string()))?;
 
-    let parser = parsed.get("parser").and_then(|v| v.as_str()).map(|v| v.to_string());
+    let parser = optional_string(&parsed, "parser")?;
 
-    let parser_memory_limit = parsed.get("parser_memory_limit").and_then(|v| v.as_str()).map(|v| v.to_string());
+    let parser_memory_limit = optional_string(&parsed, "parser_memory_limit")?;
+    if let Some(limit) = parser_memory_limit.as_deref() {
+      parse_parser_memory_limit(limit)?;
+    }
 
-    let logging = parsed.get("logging").and_then(|v| v.as_bool()).unwrap_or(false);
+    let logging = match parsed.get("logging") {
+      None => false,
+      Some(value) => value.as_bool().ok_or_else(|| EngineError::JsonParseError("'logging' must be a boolean".to_string()))?,
+    };
 
-    let glob = parsed.get("glob").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let glob = optional_string(&parsed, "glob")?;
 
     let mut indexes = Vec::with_capacity(indexes_array.len());
     for item in indexes_array {
@@ -151,9 +181,18 @@ impl PathIndexConfig {
     let parsed: serde_json::Value =
       serde_json::from_str(text).map_err(|error| EngineError::JsonParseError(format!("Invalid JSON: {}", error)))?;
 
-    let compression = parsed.get("compression").and_then(|value| value.as_str()).map(|value| value.to_string());
+    let compression = optional_string(&parsed, "compression")?;
 
     Ok(compression)
+  }
+}
+
+fn optional_string(document: &serde_json::Value, field: &str) -> EngineResult<Option<String>> {
+  match document.get(field) {
+    None => Ok(None),
+    Some(value) => {
+      value.as_str().map(|value| Some(value.to_string())).ok_or_else(|| EngineError::JsonParseError(format!("'{field}' must be a string")))
+    }
   }
 }
 

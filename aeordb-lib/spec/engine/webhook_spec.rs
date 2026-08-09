@@ -186,9 +186,7 @@ fn test_load_webhook_config_from_database() {
   let config_json = r#"{"webhooks":[{"id":"wh1","url":"https://example.com","events":["entries_created"],"secret":"test-secret"}]}"#;
   ops.store_file_buffered(&ctx, "/.aeordb-config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
-  let registry = load_webhook_config(&engine);
-  assert!(registry.is_some());
-  let registry = registry.unwrap();
+  let registry = load_webhook_config(&engine).unwrap().unwrap();
   assert_eq!(registry.webhooks.len(), 1);
   assert_eq!(registry.webhooks[0].id, "wh1");
   assert_eq!(registry.webhooks[0].secret, "test-secret");
@@ -197,7 +195,7 @@ fn test_load_webhook_config_from_database() {
 #[test]
 fn test_load_webhook_config_missing() {
   let (engine, _temp) = create_temp_engine_for_tests();
-  let registry = load_webhook_config(&engine);
+  let registry = load_webhook_config(&engine).unwrap();
   assert!(registry.is_none());
 }
 
@@ -209,8 +207,8 @@ fn test_load_webhook_config_invalid_json() {
 
   ops.store_file_buffered(&ctx, "/.aeordb-config/webhooks.json", b"not json", Some("text/plain")).unwrap();
 
-  let registry = load_webhook_config(&engine);
-  assert!(registry.is_none());
+  let error = load_webhook_config(&engine).unwrap_err();
+  assert!(matches!(error, aeordb::engine::errors::EngineError::CorruptEntry { .. }));
 }
 
 #[test]
@@ -222,8 +220,8 @@ fn test_load_webhook_config_empty_json_object() {
   // Valid JSON but missing "webhooks" key
   ops.store_file_buffered(&ctx, "/.aeordb-config/webhooks.json", b"{}", Some("application/json")).unwrap();
 
-  let registry = load_webhook_config(&engine);
-  assert!(registry.is_none());
+  let error = load_webhook_config(&engine).unwrap_err();
+  assert!(matches!(error, aeordb::engine::errors::EngineError::CorruptEntry { .. }));
 }
 
 #[test]
@@ -234,9 +232,8 @@ fn test_load_webhook_config_empty_webhooks_array() {
 
   ops.store_file_buffered(&ctx, "/.aeordb-config/webhooks.json", b"{\"webhooks\":[]}", Some("application/json")).unwrap();
 
-  let registry = load_webhook_config(&engine);
-  assert!(registry.is_some());
-  assert_eq!(registry.unwrap().webhooks.len(), 0);
+  let registry = load_webhook_config(&engine).unwrap().unwrap();
+  assert_eq!(registry.webhooks.len(), 0);
 }
 
 #[test]
@@ -247,8 +244,8 @@ fn test_load_webhook_config_invalid_utf8() {
 
   ops.store_file_buffered(&ctx, "/.aeordb-config/webhooks.json", &[0xFF, 0xFE, 0xFD], Some("application/octet-stream")).unwrap();
 
-  let registry = load_webhook_config(&engine);
-  assert!(registry.is_none());
+  let error = load_webhook_config(&engine).unwrap_err();
+  assert!(matches!(error, aeordb::engine::errors::EngineError::CorruptEntry { .. }));
 }
 
 #[test]
@@ -261,8 +258,8 @@ fn test_load_webhook_config_partial_invalid_webhooks() {
   let json = r#"{"webhooks":[{"id":"wh1"}]}"#;
   ops.store_file_buffered(&ctx, "/.aeordb-config/webhooks.json", json.as_bytes(), Some("application/json")).unwrap();
 
-  let registry = load_webhook_config(&engine);
-  assert!(registry.is_none());
+  let error = load_webhook_config(&engine).unwrap_err();
+  assert!(matches!(error, aeordb::engine::errors::EngineError::CorruptEntry { .. }));
 }
 
 #[test]
@@ -277,7 +274,7 @@ fn test_load_webhook_config_multiple_webhooks() {
     ]}"#;
   ops.store_file_buffered(&ctx, "/.aeordb-config/webhooks.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
-  let registry = load_webhook_config(&engine).unwrap();
+  let registry = load_webhook_config(&engine).unwrap().unwrap();
   assert_eq!(registry.webhooks.len(), 2);
   assert_eq!(registry.webhooks[0].id, "wh1");
   assert_eq!(registry.webhooks[1].id, "wh2");

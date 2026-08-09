@@ -23,3 +23,29 @@ fn absolute_spill_path_resolution_does_not_require_current_directory() {
 
   assert_eq!(resolved, path);
 }
+
+#[test]
+fn spill_path_resolution_propagates_canonicalization_permission_failures() {
+  let path = PathBuf::from("/restricted/database.aeordb");
+  let error = absolute_path_with_resolvers(
+    &path,
+    || Ok(PathBuf::from("/unused")),
+    |_| Err(io::Error::new(io::ErrorKind::PermissionDenied, "canonicalization denied")),
+  )
+  .unwrap_err();
+
+  assert!(matches!(error, EngineError::IoError(ref source) if source.kind() == io::ErrorKind::PermissionDenied));
+}
+
+#[test]
+fn spill_path_resolution_falls_back_only_when_the_path_does_not_exist() {
+  let path = PathBuf::from("relative/database.aeordb");
+  let resolved = absolute_path_with_resolvers(
+    &path,
+    || Ok(PathBuf::from("/var/lib/aeordb")),
+    |_| Err(io::Error::new(io::ErrorKind::NotFound, "not created yet")),
+  )
+  .unwrap();
+
+  assert_eq!(resolved, PathBuf::from("/var/lib/aeordb/relative/database.aeordb"));
+}

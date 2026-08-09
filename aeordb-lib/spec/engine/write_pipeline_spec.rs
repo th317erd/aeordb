@@ -1,4 +1,5 @@
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::errors::EngineError;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
 use aeordb::engine::json_parser::parse_json_fields;
@@ -344,6 +345,12 @@ fn test_index_config_deserialize_invalid_json() {
 fn test_index_config_deserialize_missing_indexes_key() {
   let result = PathIndexConfig::deserialize(br#"{"foo":"bar"}"#);
   assert!(result.is_err());
+}
+
+#[test]
+fn test_index_config_rejects_non_string_parser_memory_limit() {
+  let error = PathIndexConfig::deserialize(br#"{"parser_memory_limit":1048576,"indexes":[]}"#).unwrap_err();
+  assert!(matches!(error, EngineError::JsonParseError(ref message) if message.contains("parser_memory_limit")));
 }
 
 #[test]

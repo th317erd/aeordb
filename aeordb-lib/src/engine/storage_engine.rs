@@ -640,6 +640,44 @@ struct GcRecheckState {
   failure: Option<String>,
 }
 
+fn append_recovered_void_extent(recovered: &mut Vec<VoidRecord>, start: u64, end: u64) -> EngineResult<()> {
+  if end <= start {
+    return Ok(());
+  }
+
+  let mut offset = start;
+  while offset < end {
+    recovered.try_reserve(1).map_err(|error| EngineError::ResourceExhausted(format!("void gap recovery allocation failed: {error}")))?;
+    let remaining = end - offset;
+    let size = u32::try_from(remaining.min(u64::from(u32::MAX)))
+      .map_err(|_| EngineError::ResourceExhausted("void gap recovery extent exceeds u32".to_string()))?;
+    recovered.push(VoidRecord { offset, size });
+    offset = offset.checked_add(u64::from(size)).ok_or_else(|| EngineError::CorruptEntry {
+      offset,
+      reason: "void gap recovery extent overflows the WAL address space".to_string(),
+    })?;
+  }
+
+  Ok(())
+}
+
+fn recovered_void_records_from_sorted_ranges(wal_start: u64, wal_end: u64, ranges: &[(u64, u32)]) -> EngineResult<Vec<VoidRecord>> {
+  let mut recovered = Vec::new();
+  let mut cursor = wal_start;
+
+  for (offset, total_length) in ranges {
+    append_recovered_void_extent(&mut recovered, cursor, *offset)?;
+    let live_end = offset.checked_add(u64::from(*total_length)).ok_or_else(|| EngineError::CorruptEntry {
+      offset: *offset,
+      reason: "live KV range overflows the WAL address space during void recovery".to_string(),
+    })?;
+    cursor = live_end.max(cursor);
+  }
+
+  append_recovered_void_extent(&mut recovered, cursor, wal_end)?;
+  Ok(recovered)
+}
+
 /// Top-level storage engine combining an append-only WAL, a disk-backed KV index,
 /// and a void manager for reclaimable space tracking.
 ///
@@ -3018,16 +3056,7 @@ impl StorageEngine {
 
     let mut vm = self.void_manager.write().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
 
-    let mut recovered = Vec::new();
-    let mut cursor: u64 = wal_start;
-    for (offset, total_length) in &ranges {
-      if *offset > cursor {
-        let gap_size = *offset - cursor;
-        let gap_size_u32 = u32::try_from(gap_size).unwrap_or(u32::MAX);
-        recovered.push(VoidRecord { offset: cursor, size: gap_size_u32 });
-      }
-      cursor = offset.saturating_add(*total_length as u64).max(cursor);
-    }
+    let recovered = recovered_void_records_from_sorted_ranges(wal_start, wal_end, &ranges)?;
     vm.replace_all(recovered.into_iter().map(|void| (void.offset, void.size)));
 
     tracing::info!(
@@ -7290,3 +7319,7 @@ impl<'a> Drop for TransactionGuard<'a> {
 #[cfg(test)]
 #[path = "../../spec/engine/storage_engine_transaction_admission_internal_spec.rs"]
 mod storage_engine_transaction_admission_internal_spec;
+
+#[cfg(test)]
+#[path = "../../spec/engine/void_gap_recovery_internal_spec.rs"]
+mod void_gap_recovery_internal_spec;

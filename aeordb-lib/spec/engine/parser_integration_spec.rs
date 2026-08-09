@@ -306,8 +306,7 @@ fn test_parse_memory_limit_kb() {
 }
 
 #[test]
-fn test_parse_memory_limit_default_on_invalid() {
-  // "invalid" should fall back to default (256MB) without panic
+fn test_parse_memory_limit_rejects_invalid_values() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);
   let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
@@ -325,8 +324,30 @@ fn test_parse_memory_limit_default_on_invalid() {
 
   let pipeline = IndexingPipeline::with_plugin_manager(&engine, &pm);
   let ctx = RequestContext::system();
-  let result = pipeline.run(&ctx, "/fallback/file.bin", b"data", Some("application/octet-stream"));
-  assert!(result.is_ok());
+  let error = pipeline.run(&ctx, "/fallback/file.bin", b"data", Some("application/octet-stream")).unwrap_err();
+  assert!(matches!(error, EngineError::InvalidInput(ref message) if message.contains("parser_memory_limit")));
+}
+
+#[test]
+fn test_parse_memory_limit_rejects_overflow() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let engine_arc = Arc::new(StorageEngine::create(dir.path().join("pm.aeor").to_str().unwrap()).unwrap());
+  let pm = PluginManager::new(engine_arc);
+  let config = PathIndexConfig {
+    parser: Some("/parsers/overflow".to_string()),
+    parser_memory_limit: Some(format!("{}gb", usize::MAX)),
+    logging: true,
+    glob: None,
+    indexes: vec![],
+  };
+  store_index_config(&engine, "/overflow", &config);
+
+  let error = IndexingPipeline::with_plugin_manager(&engine, &pm)
+    .run(&RequestContext::system(), "/overflow/file.bin", b"data", Some("application/octet-stream"))
+    .unwrap_err();
+
+  assert!(matches!(error, EngineError::InvalidInput(ref message) if message.contains("overflows")));
 }
 
 #[test]
@@ -654,6 +675,28 @@ fn test_content_type_registry_not_exists() {
   let index = index_manager.load_index("/noreg", "key").unwrap();
   assert!(index.is_some(), "Missing registry should fall back to raw JSON");
   assert_eq!(index.unwrap().len(), 1);
+}
+
+#[test]
+fn test_malformed_content_type_registry_is_not_treated_as_an_absent_registry() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let operations = DirectoryOps::new(&engine);
+  let context = RequestContext::system();
+  operations.store_file_buffered(&context, "/.aeordb-config/parsers.json", b"not-json", Some("application/json")).unwrap();
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "key".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  store_index_config(&engine, "/malformed-registry", &config);
+
+  let error =
+    IndexingPipeline::new(&engine).run(&context, "/malformed-registry/file.txt", br#"{"key":"value"}"#, Some("text/plain")).unwrap_err();
+
+  assert!(matches!(error, EngineError::CorruptEntry { .. }));
 }
 
 // ============================================================

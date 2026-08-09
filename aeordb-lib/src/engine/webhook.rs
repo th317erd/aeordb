@@ -2,11 +2,13 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use crate::engine::engine_event::EngineEvent;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::event_bus::EventBus;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::directory_ops::DirectoryOps;
 
 const WEBHOOK_CONFIG_PATH: &str = "/.aeordb-config/webhooks.json";
+const WEBHOOK_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
@@ -30,14 +32,32 @@ pub struct WebhookRegistry {
 }
 
 /// Load webhook configuration from the database.
-pub fn load_webhook_config(engine: &StorageEngine) -> Option<WebhookRegistry> {
+pub fn load_webhook_config(engine: &StorageEngine) -> EngineResult<Option<WebhookRegistry>> {
   let ops = DirectoryOps::new(engine);
-  match ops.read_file_buffered(WEBHOOK_CONFIG_PATH) {
+  match ops.read_file_buffered_bounded(WEBHOOK_CONFIG_PATH, WEBHOOK_CONFIG_MAX_BYTES) {
     Ok(data) => {
-      let text = std::str::from_utf8(&data).ok()?;
-      serde_json::from_str(text).ok()
+      let text = std::str::from_utf8(&data)
+        .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("webhook configuration is not valid UTF-8: {error}") })?;
+      let registry = serde_json::from_str(text)
+        .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("webhook configuration is malformed: {error}") })?;
+      Ok(Some(registry))
     }
-    Err(_) => None,
+    Err(EngineError::NotFound(_)) => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+fn reload_dispatcher_config(engine: &StorageEngine, current: &mut Option<WebhookRegistry>, stage: &'static str) -> bool {
+  match load_webhook_config(engine) {
+    Ok(replacement) => {
+      *current = replacement;
+      true
+    }
+    Err(error) => {
+      crate::metrics::record_system_soft_failure("webhook_dispatcher", stage, WEBHOOK_CONFIG_PATH, &error);
+      tracing::error!(%error, stage, "Webhook configuration load failed; retaining the last valid registry");
+      false
+    }
   }
 }
 
@@ -136,7 +156,8 @@ pub fn spawn_webhook_dispatcher(
   // This allows the channel to close when all external senders are dropped.
   let mut rx = bus.subscribe();
   tokio::spawn(async move {
-    let mut config = load_webhook_config(&engine);
+    let mut config = None;
+    reload_dispatcher_config(&engine, &mut config, "startup_config");
 
     loop {
       tokio::select! {
@@ -158,8 +179,9 @@ pub fn spawn_webhook_dispatcher(
                                           .unwrap_or(false)
                                   });
                                   if config_changed {
-                                      config = load_webhook_config(&engine);
-                                      tracing::info!("Webhook config reloaded");
+                                      if reload_dispatcher_config(&engine, &mut config, "reload_config") {
+                                          tracing::info!("Webhook config reloaded");
+                                      }
                                       continue; // Don't deliver the config change itself
                                   }
                               }
@@ -192,3 +214,7 @@ pub fn spawn_webhook_dispatcher(
     }
   })
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/webhook_internal_spec.rs"]
+mod webhook_internal_spec;

@@ -535,6 +535,20 @@ fn list_deleted_uses_registry_visibility_and_rejects_unknown_protected_paths() {
 }
 
 #[test]
+fn list_deleted_reports_malformed_deletion_records_instead_of_returning_a_complete_result() {
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let malformed_key = vec![0xA5; engine.hash_algo().hash_length()];
+
+  engine.store_entry(EntryType::DeletionRecord, &malformed_key, b"not-a-deletion-record").unwrap();
+
+  let error = ops.list_deleted("/").unwrap_err();
+
+  assert!(matches!(error, EngineError::UnexpectedEof | EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+}
+
+#[test]
 fn test_root_reachable_file_survives_a_stale_path_tombstone() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);

@@ -1,7 +1,7 @@
 use crate::engine::directory_ops::{BufferedFileTransform, DirectoryOps};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
-use crate::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+use crate::engine::index_config::{DEFAULT_PARSER_MEMORY_LIMIT_BYTES, IndexFieldConfig, PathIndexConfig, parse_parser_memory_limit};
 use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::index_store::{IndexManager, IndexWriteBuffer};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
@@ -21,6 +21,8 @@ pub use crate::engine::index_config_resolver::glob_matches;
 const INDEX_DIAGNOSTIC_LOG_MAX_BYTES: u64 = 1024 * 1024;
 const INDEX_DIAGNOSTIC_ENTRY_MAX_BYTES: usize = 16 * 1024;
 const INDEX_DIAGNOSTIC_LOG_WORKSPACE_BYTES: u64 = INDEX_DIAGNOSTIC_LOG_MAX_BYTES * 8;
+const PARSER_REGISTRY_MAX_BYTES: u64 = 1024 * 1024;
+const PARSER_REGISTRY_PATH: &str = "/.aeordb-config/parsers.json";
 
 fn canonical_metadata_field_name(field_name: &str) -> Option<&'static str> {
   match field_name {
@@ -263,7 +265,7 @@ impl<'a> IndexingPipeline<'a> {
     self.index_metadata_fields(&config, &config_dir, path, &file_key, index_sink)?;
 
     let explicit_parser = config.parser.clone();
-    let registry_parser = self.lookup_parser_by_content_type(content_type);
+    let registry_parser = if explicit_parser.is_none() { self.lookup_parser_by_content_type(content_type)? } else { None };
     let content_fields: Vec<&IndexFieldConfig> = config.indexes.iter().filter(|field| !field.name.starts_with('@')).collect();
     if content_fields.is_empty() && explicit_parser.is_none() && registry_parser.is_none() {
       return Ok(());
@@ -577,7 +579,8 @@ impl<'a> IndexingPipeline<'a> {
   ) -> EngineResult<serde_json::Value> {
     let pm = self.plugin_manager.ok_or_else(|| EngineError::NotFound("Plugin manager required for parser invocation".to_string()))?;
 
-    let memory_limit = config.parser_memory_limit.as_deref().map(Self::parse_memory_limit).unwrap_or(256 * 1024 * 1024); // 256MB default
+    let memory_limit =
+      config.parser_memory_limit.as_deref().map(parse_parser_memory_limit).transpose()?.unwrap_or(DEFAULT_PARSER_MEMORY_LIMIT_BYTES);
 
     memory.reserve_parser_envelope(data.len(), path.len())?;
     let envelope = Self::build_parser_envelope(data, path, content_type);
@@ -635,35 +638,24 @@ impl<'a> IndexingPipeline<'a> {
   }
 
   /// Look up a parser name from the global registry at /.aeordb-config/parsers.json
-  fn lookup_parser_by_content_type(&self, content_type: Option<&str>) -> Option<String> {
-    let ct = content_type?;
+  fn lookup_parser_by_content_type(&self, content_type: Option<&str>) -> EngineResult<Option<String>> {
+    let Some(content_type) = content_type else {
+      return Ok(None);
+    };
     // Don't look up JSON — it's handled natively
-    if ct == "application/json" {
-      return None;
+    if content_type == "application/json" {
+      return Ok(None);
     }
 
     let ops = DirectoryOps::new(self.engine);
-    match ops.read_file_buffered("/.aeordb-config/parsers.json") {
+    match ops.read_file_buffered_bounded(PARSER_REGISTRY_PATH, PARSER_REGISTRY_MAX_BYTES) {
       Ok(data) => {
-        let text = std::str::from_utf8(&data).ok()?;
-        let registry: serde_json::Value = serde_json::from_str(text).ok()?;
-        registry.get(ct).and_then(|v| v.as_str()).map(String::from)
+        let registry: std::collections::BTreeMap<String, String> = serde_json::from_slice(&data)
+          .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("parser registry is malformed: {error}") })?;
+        Ok(registry.get(content_type).cloned())
       }
-      Err(_) => None,
-    }
-  }
-
-  /// Parse a memory limit string like "256mb", "1gb", "512kb", or raw bytes.
-  fn parse_memory_limit(limit_str: &str) -> usize {
-    let s = limit_str.trim().to_lowercase();
-    if let Some(mb) = s.strip_suffix("mb") {
-      mb.trim().parse::<usize>().unwrap_or(256) * 1024 * 1024
-    } else if let Some(gb) = s.strip_suffix("gb") {
-      gb.trim().parse::<usize>().unwrap_or(1) * 1024 * 1024 * 1024
-    } else if let Some(kb) = s.strip_suffix("kb") {
-      kb.trim().parse::<usize>().unwrap_or(256 * 1024) * 1024
-    } else {
-      s.parse::<usize>().unwrap_or(256 * 1024 * 1024)
+      Err(EngineError::NotFound(_)) => Ok(None),
+      Err(error) => Err(error),
     }
   }
 
