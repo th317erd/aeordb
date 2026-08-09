@@ -20,6 +20,7 @@ use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::{symlink_path_hash, symlink_content_hash};
 use crate::engine::system_family_policy::GcPathSelection;
 use crate::engine::version_manager::VersionManager;
+use crate::engine::version_manager::SnapshotInfo;
 use crate::engine::SystemFamilyPolicyResolver;
 
 use serde::Serialize;
@@ -31,6 +32,7 @@ const GC_ADMISSION_BYTES: u64 = 512 * 1024;
 /// Conservative retained v3 mark/sweep footprint per live KV row. This covers
 /// cloned KV rows, hash-set buckets, candidate/reverify hashes, and void tuples.
 const GC_RETAINED_BYTES_PER_KV_ENTRY: u64 = 512;
+const MAXIMUM_GC_CLEANUP_WARNINGS: usize = 32;
 
 /// Result of a garbage collection run, returned by [`run_gc`].
 #[derive(Debug, Clone, Serialize)]
@@ -47,8 +49,8 @@ pub struct GcResult {
   pub duration_ms: u64,
   /// True if this was a dry run (no entries were actually swept).
   pub dry_run: bool,
-  /// Bounded optional-cleanup incidents recovered after the primary GC result
-  /// was known. The primary result remains authoritative.
+  /// Bounded optional-cleanup incidents observed during or after the primary
+  /// GC operation. The primary mark/sweep result remains authoritative.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub cleanup_warnings: Vec<String>,
 }
@@ -70,7 +72,7 @@ impl<'a> GcRecheckGuard<'a> {
       (result, Ok(())) => result,
       (Ok(mut result), Err(cleanup_error)) => {
         metrics::counter!("aeordb_gc_recheck_teardown_failures_total").increment(1);
-        let warning = bounded_gc_cleanup_warning(&cleanup_error.to_string());
+        let warning = bounded_gc_cleanup_warning("GC recheck teardown recovered", &cleanup_error.to_string());
         tracing::warn!(%cleanup_error, "GC recheck teardown recovered after primary success");
         result.cleanup_warnings.push(warning);
         Ok(result)
@@ -96,18 +98,56 @@ impl Drop for GcRecheckGuard<'_> {
   }
 }
 
-fn bounded_gc_cleanup_warning(error: &str) -> String {
+fn bounded_gc_cleanup_warning(context: &str, error: &str) -> String {
   const MAXIMUM_BYTES: usize = 512;
-  const PREFIX: &str = "GC recheck teardown recovered: ";
-  let available = MAXIMUM_BYTES.saturating_sub(PREFIX.len());
+  let prefix = format!("{context}: ");
+  let available = MAXIMUM_BYTES.saturating_sub(prefix.len());
   if error.len() <= available {
-    return format!("{PREFIX}{error}");
+    return format!("{prefix}{error}");
   }
   let mut boundary = available.saturating_sub(3);
   while boundary > 0 && !error.is_char_boundary(boundary) {
     boundary -= 1;
   }
-  format!("{PREFIX}{}...", &error[..boundary])
+  format!("{prefix}{}...", &error[..boundary])
+}
+
+fn record_gc_cleanup_failure(cleanup_warnings: &mut Vec<String>, stage: &'static str, context: &str, error: &str) {
+  metrics::counter!("aeordb_gc_optional_cleanup_failures_total", "stage" => stage).increment(1);
+  tracing::warn!(stage, error, "Optional GC cleanup failed; preserving the primary GC operation");
+  if cleanup_warnings.len() < MAXIMUM_GC_CLEANUP_WARNINGS.saturating_sub(1) {
+    cleanup_warnings.push(bounded_gc_cleanup_warning(context, error));
+  } else if cleanup_warnings.len() == MAXIMUM_GC_CLEANUP_WARNINGS.saturating_sub(1) {
+    cleanup_warnings.push("Additional GC optional-cleanup incidents were omitted from this bounded result".to_string());
+  }
+}
+
+fn cleanup_old_pre_gc_snapshots<F>(snapshots: EngineResult<Vec<SnapshotInfo>>, mut delete_snapshot: F, cleanup_warnings: &mut Vec<String>)
+where
+  F: FnMut(&str) -> EngineResult<()>,
+{
+  let mut pre_gc_snapshots: Vec<String> = match snapshots {
+    Ok(snapshots) => {
+      snapshots.iter().filter(|snapshot| snapshot.name.starts_with("_aeordb_pre_gc_")).map(|snapshot| snapshot.name.clone()).collect()
+    }
+    Err(error) => {
+      record_gc_cleanup_failure(cleanup_warnings, "pre_gc_snapshot_list", "Failed to list old pre-GC snapshots", &error.to_string());
+      return;
+    }
+  };
+  pre_gc_snapshots.sort();
+  pre_gc_snapshots.reverse();
+
+  for old_name in pre_gc_snapshots.iter().skip(3) {
+    if let Err(error) = delete_snapshot(old_name) {
+      record_gc_cleanup_failure(
+        cleanup_warnings,
+        "pre_gc_snapshot_delete",
+        &format!("Failed to delete old pre-GC snapshot {old_name}"),
+        &error.to_string(),
+      );
+    }
+  }
 }
 
 /// Reachability set returned by the low-level mark API. Its coordinator
@@ -982,6 +1022,7 @@ where
 
   let primary_result = (|| -> EngineResult<GcResult> {
     let vm = VersionManager::new(engine);
+    let mut cleanup_warnings = Vec::new();
 
     // Auto-snapshot before GC — safety net in case sweep removes something needed
     if !dry_run {
@@ -1000,19 +1041,9 @@ where
         tracing::info!("Skipping pre-GC snapshot because snapshot writes are disabled");
       }
 
-      // Clean up old pre-GC snapshots — keep last 3
-      if let Ok(snapshots) = vm.list_snapshots() {
-        let mut pre_gc_snapshots: Vec<String> =
-          snapshots.iter().filter(|s| s.name.starts_with("_aeordb_pre_gc_")).map(|s| s.name.clone()).collect();
-        pre_gc_snapshots.sort();
-        pre_gc_snapshots.reverse(); // newest first (timestamp suffix sorts lexicographically)
-
-        for old_name in pre_gc_snapshots.iter().skip(3) {
-          if let Err(e) = vm.delete_snapshot(ctx, old_name) {
-            tracing::warn!("Failed to delete old pre-GC snapshot {}: {}", old_name, e);
-          }
-        }
-      }
+      // Clean up old pre-GC snapshots — keep last 3. This is optional data
+      // retention, so failures remain visible without invalidating sweep.
+      cleanup_old_pre_gc_snapshots(vm.list_snapshots(), |old_name| vm.delete_snapshot(ctx, old_name), &mut cleanup_warnings);
 
       // Apply user-configured retention to non-engine snapshots before the
       // mark phase. Snapshots deleted here have their orphaned data swept in
@@ -1028,7 +1059,12 @@ where
           );
         }
         Ok(_) => {}
-        Err(e) => tracing::warn!("Lifecycle retention pruning failed: {}", e),
+        Err(error) => record_gc_cleanup_failure(
+          &mut cleanup_warnings,
+          "lifecycle_retention_prune",
+          "Lifecycle retention pruning failed",
+          &error.to_string(),
+        ),
       }
       if _gc_timing {
         eprintln!("[gc-timing] prune: {:?}", prune_start.elapsed());
@@ -1096,7 +1132,7 @@ where
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    Ok(GcResult { versions_scanned, live_entries, garbage_entries, reclaimed_bytes, duration_ms, dry_run, cleanup_warnings: Vec::new() })
+    Ok(GcResult { versions_scanned, live_entries, garbage_entries, reclaimed_bytes, duration_ms, dry_run, cleanup_warnings })
   })();
 
   pre_teardown_hook();
@@ -1158,6 +1194,55 @@ mod recheck_teardown_tests {
       dry_run: false,
       cleanup_warnings: Vec::new(),
     }
+  }
+
+  fn snapshot_fixture(name: impl Into<String>) -> SnapshotInfo {
+    SnapshotInfo { name: name.into(), root_hash: vec![1; 32], created_at: 0, metadata: std::collections::HashMap::new() }
+  }
+
+  #[test]
+  fn optional_pre_gc_cleanup_preserves_list_failure_as_bounded_evidence() {
+    let mut cleanup_warnings = Vec::new();
+
+    cleanup_old_pre_gc_snapshots(
+      Err(EngineError::InvalidInput("injected snapshot listing failure".to_string())),
+      |_| panic!("delete must not run when listing failed"),
+      &mut cleanup_warnings,
+    );
+
+    assert_eq!(cleanup_warnings.len(), 1);
+    assert!(cleanup_warnings[0].contains("list old pre-GC snapshots"));
+    assert!(cleanup_warnings[0].contains("injected snapshot listing failure"));
+  }
+
+  #[test]
+  fn optional_pre_gc_cleanup_keeps_newest_three_and_bounds_delete_failures() {
+    let snapshots = (0..40).map(|index| snapshot_fixture(format!("_aeordb_pre_gc_{index:03}"))).collect();
+    let mut attempted = Vec::new();
+    let mut cleanup_warnings = Vec::new();
+
+    cleanup_old_pre_gc_snapshots(
+      Ok(snapshots),
+      |name| {
+        attempted.push(name.to_string());
+        Err(EngineError::InvalidInput(format!("injected deletion failure for {name}")))
+      },
+      &mut cleanup_warnings,
+    );
+
+    assert_eq!(attempted.len(), 37);
+    assert_eq!(&attempted[..3], &["_aeordb_pre_gc_036", "_aeordb_pre_gc_035", "_aeordb_pre_gc_034"]);
+    assert!(!attempted.iter().any(|name| ["_aeordb_pre_gc_039", "_aeordb_pre_gc_038", "_aeordb_pre_gc_037"].contains(&name.as_str())));
+    assert_eq!(cleanup_warnings.len(), MAXIMUM_GC_CLEANUP_WARNINGS);
+    assert!(cleanup_warnings.last().unwrap().contains("omitted"));
+  }
+
+  #[test]
+  fn optional_gc_cleanup_warning_is_utf8_safe_and_byte_bounded() {
+    let warning = bounded_gc_cleanup_warning("Lifecycle retention pruning failed", &"é".repeat(600));
+
+    assert!(warning.len() <= 512);
+    assert!(warning.ends_with("..."));
   }
 
   #[test]
