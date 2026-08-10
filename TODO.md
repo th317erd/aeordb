@@ -481,7 +481,7 @@
         - [x] Preserve direct destination writes only for immutable identities and standalone artifact construction; historical imports must not publish current path locators.
       - [x] Keep migration source capture classified as unavailable until the P7 runtime writer activates, then bind it to the shared migration authority and memory owner.
         - [x] Prove migration configuration and persistent-format readers have no runtime capture caller, migration module, or lease/progress control writer.
-    - [ ] P2f: classify and gate the complete production error-suppression surface before any v4 writer activates.
+    - [x] P2f: classify and gate the complete production error-suppression surface before any v4 writer activates.
       - [x] Inventory ignored/converted/defaulted/logged-only errors across every production Rust module with stable machine identities.
       - [x] Close the syntax scanner's macro-token blind spot without classifying error-preserving `map_err` closures as suppression.
       - [x] Define a checked shrinking allowlist with class, rationale, owner, guarding test, and removal condition for every retained suppression.
@@ -543,7 +543,7 @@
         - [x] Preserve non-conflict operating-system evidence from database lock acquisition instead of reporting every failure as another process holding the lock.
         - [x] Reject malformed or non-Unicode logging directives through fallible CLI startup and diagnostic entry points instead of silently selecting another filter.
         - [x] Emit a typed `stream_gap` SSE control event on global and per-user broadcast lag instead of silently leaving client views stale.
-      - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
+      - [x] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary (`8f2ab42`).
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
