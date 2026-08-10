@@ -1,23 +1,39 @@
+use std::io::{self, BufRead, Write};
+
 use aeordb::auth::{ApiKeyRecord, generate_api_key, hash_api_key};
 use aeordb::engine::{RequestContext, ROOT_USER_ID};
 use aeordb::engine::system_store;
 use aeordb::server::create_engine_for_storage;
 
+fn confirm_emergency_reset_with<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> io::Result<bool> {
+  write!(output, "Proceed? [y/N]: ")?;
+  output.flush()?;
+
+  let mut answer = String::new();
+  input.read_line(&mut answer)?;
+  Ok(answer.trim().eq_ignore_ascii_case("y"))
+}
+
+fn confirm_emergency_reset() -> io::Result<bool> {
+  let stdin = io::stdin();
+  let stdout = io::stdout();
+  confirm_emergency_reset_with(&mut stdin.lock(), &mut stdout.lock())
+}
+
 pub fn run(database: &str, force: bool) {
   if !force {
     println!("WARNING: This will invalidate the current root API key.");
     println!("A new root API key will be generated.");
-    print!("Proceed? [y/N]: ");
-
-    // Flush stdout so the prompt appears before reading stdin.
-    use std::io::Write;
-    std::io::stdout().flush().unwrap();
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
-    if !input.trim().eq_ignore_ascii_case("y") {
-      println!("Aborted.");
-      return;
+    match confirm_emergency_reset() {
+      Ok(true) => {}
+      Ok(false) => {
+        println!("Aborted.");
+        return;
+      }
+      Err(error) => {
+        eprintln!("Failed to read emergency reset confirmation: {error}");
+        std::process::exit(1);
+      }
     }
   }
 
@@ -80,3 +96,7 @@ pub fn run(database: &str, force: bool) {
   println!("  {}", plaintext_key);
   println!("==========================================================");
 }
+
+#[cfg(test)]
+#[path = "../../spec/commands/emergency_reset_prompt_internal_spec.rs"]
+mod emergency_reset_prompt_internal_spec;

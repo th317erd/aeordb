@@ -55,7 +55,7 @@ pub async fn fetch_status(request: StatusRequest) -> Result<Value, String> {
     (Some(token), None) => Some(token),
     (None, Some(api_key)) => Some(exchange_api_key(&client, &target, &api_key).await?),
     (None, None) => None,
-    (Some(_), Some(_)) => unreachable!("credential conflict checked above"),
+    (Some(_), Some(_)) => return Err("--api-key and --token cannot be used together".to_string()),
   };
 
   let mut request = client.get(endpoint(&target, "system/stats")?);

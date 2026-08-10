@@ -26,7 +26,8 @@ fn task_storage_hash(key: &str) -> Vec<u8> {
 
 /// Recognize and validate the task queue's sanctioned reuse of the low-level
 /// FileRecord tag. `None` means the row belongs to another FileRecord producer.
-pub(crate) fn validate_task_storage_record(hash: &[u8], value: &[u8]) -> Option<EngineResult<()>> {
+#[doc(hidden)]
+pub fn validate_task_storage_record(hash: &[u8], value: &[u8]) -> Option<EngineResult<()>> {
   if hash == task_storage_hash(TASK_REGISTRY) {
     return Some(decode_task_registry(value).map(|_| ()));
   }

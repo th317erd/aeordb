@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use aeordb::engine::{DirectoryOps, RequestContext};
+use aeordb::engine::{DirectoryOps, RequestContext, TaskQueue};
 use aeordb::server::create_engine_for_storage;
 use aeordb_cli::commands::probe::db_path_from_http_path;
 
@@ -149,4 +149,45 @@ fn probe_command_supports_explicit_wal_tail_bytes_without_valid_database() {
   let stdout = String::from_utf8_lossy(&output.stdout);
   assert!(stdout.contains("=== wal-tail-bytes"), "stdout was:\n{stdout}");
   assert!(stdout.contains("|base|"), "stdout was:\n{stdout}");
+}
+
+#[test]
+fn probe_file_inventory_recognizes_sanctioned_task_records() {
+  let temp = tempfile::tempdir().expect("tempdir");
+  let db_path = temp.path().join("probe-task-record.aeordb");
+  let db_path_str = db_path.to_str().unwrap();
+
+  {
+    let engine = create_engine_for_storage(db_path_str);
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&RequestContext::system(), "/docs/readme.txt", b"file payload", Some("text/plain")).expect("store file");
+    TaskQueue::new(engine.clone()).enqueue("diagnostic-test", serde_json::json!({"path": "/docs"})).expect("enqueue persisted task");
+    engine.shutdown().expect("shutdown engine");
+  }
+
+  let output =
+    Command::new(env!("CARGO_BIN_EXE_aeordb")).args(["probe", "-D", db_path_str, "--list-files"]).output().expect("run aeordb probe");
+
+  assert!(
+    output.status.success(),
+    "probe failed: status={:?}\nstdout={}\nstderr={}",
+    output.status.code(),
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr),
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(stdout.contains("/docs/readme.txt"), "stdout was:\n{stdout}");
+  assert!(stdout.contains("Sanctioned non-file records: 2"), "stdout was:\n{stdout}");
+
+  let history_output = Command::new(env!("CARGO_BIN_EXE_aeordb"))
+    .args(["probe", "-D", db_path_str, "--path", "/docs/readme.txt", "--path-history"])
+    .output()
+    .expect("run path-history probe");
+  assert!(
+    history_output.status.success(),
+    "path-history probe failed: status={:?}\nstdout={}\nstderr={}",
+    history_output.status.code(),
+    String::from_utf8_lossy(&history_output.stdout),
+    String::from_utf8_lossy(&history_output.stderr),
+  );
 }

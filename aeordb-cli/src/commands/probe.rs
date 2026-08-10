@@ -2,7 +2,7 @@ use std::fs::File;
 use std::time::Instant;
 
 use aeordb::engine::file_record::FileRecord;
-use aeordb::engine::{DirectoryOps, EngineFileStream, EntryType, StorageEngine};
+use aeordb::engine::{DirectoryOps, EngineFileStream, EngineResult, EntryType, StorageEngine};
 
 pub struct ProbeConfig<'a> {
   pub database: &'a str,
@@ -25,6 +25,31 @@ pub struct HttpPathMapping {
   pub route_prefix: String,
   pub db_path: String,
   pub prefix_matched: bool,
+}
+
+fn require_diagnostic_hash(result: EngineResult<Vec<u8>>, context: &str) -> Vec<u8> {
+  require_diagnostic_result(result, context)
+}
+
+fn require_diagnostic_result<T>(result: EngineResult<T>, context: &str) -> T {
+  match result {
+    Ok(value) => value,
+    Err(error) => {
+      eprintln!("{context}: {error}");
+      std::process::exit(1);
+    }
+  }
+}
+
+fn is_sanctioned_non_file_record(hash: &[u8], value: &[u8]) -> bool {
+  match aeordb::engine::task_queue::validate_task_storage_record(hash, value) {
+    Some(Ok(())) => true,
+    Some(Err(error)) => {
+      eprintln!("malformed persisted task record {}: {error}", hex::encode(hash));
+      std::process::exit(3);
+    }
+    None => false,
+  }
 }
 
 // Diagnostic helper: list /.aeordb-system/ contents in a database file.
@@ -76,27 +101,43 @@ pub fn run(config: ProbeConfig<'_>) {
     // settings so we cover whichever the DB was written with.
     use aeordb::engine::file_record::FileRecord;
     let hash_length = engine.hash_algo().hash_length();
-    let entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
+    let entries =
+      require_diagnostic_result(engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD), "failed to enumerate FileRecord entries");
     println!("FileRecord entries: {}", entries.len());
     let mut seen_paths = std::collections::BTreeSet::new();
+    let mut malformed_entries = 0usize;
+    let mut sanctioned_non_file_records = 0usize;
     for (hash, value) in &entries {
       // Read entry header to get correct entry_version.
       let entry = match engine.get_entry_including_deleted(hash) {
         Ok(Some(e)) => e,
-        _ => continue,
+        Ok(None) => {
+          eprintln!("FileRecord type index references a missing entry: {}", hex::encode(hash));
+          std::process::exit(3);
+        }
+        Err(error) => {
+          eprintln!("failed to read FileRecord entry {}: {error}", hex::encode(hash));
+          std::process::exit(1);
+        }
       };
       let version = entry.0.entry_version;
+      if is_sanctioned_non_file_record(hash, value) {
+        sanctioned_non_file_records += 1;
+        continue;
+      }
       match FileRecord::deserialize(value, hash_length, version) {
         Ok(record) => {
           seen_paths.insert(record.path);
         }
         Err(e) => {
           println!("  [deser err: {} hash={} version={}]", e, hex::encode(&hash[..8.min(hash.len())]), version);
+          malformed_entries += 1;
         }
       }
     }
 
     println!("Unique FileRecord paths: {}", seen_paths.len());
+    println!("Sanctioned non-file records: {sanctioned_non_file_records}");
     for path in seen_paths {
       match current_file_path_record(&engine, &path, hash_length) {
         Ok(Some((path_version, record))) => {
@@ -118,6 +159,10 @@ pub fn run(config: ProbeConfig<'_>) {
         }
       }
     }
+    if malformed_entries > 0 {
+      eprintln!("FileRecord inventory is incomplete: {malformed_entries} malformed entries");
+      std::process::exit(3);
+    }
     return;
   }
 
@@ -126,10 +171,14 @@ pub fn run(config: ProbeConfig<'_>) {
     // so we can see what /.aeordb-system content looks like across
     // its multiple versions.
     let algo = engine.hash_algo();
-    let aeordb_system_dir_key = aeordb::engine::directory_path_hash("/.aeordb-system", &algo).unwrap();
+    let aeordb_system_dir_key = require_diagnostic_hash(
+      aeordb::engine::directory_path_hash("/.aeordb-system", &algo),
+      "failed to derive /.aeordb-system directory key",
+    );
     println!("/.aeordb-system dir_key = {}", hex::encode(&aeordb_system_dir_key));
 
-    let dir_entries = engine.entries_by_type(aeordb::engine::KV_TYPE_DIRECTORY).unwrap_or_default();
+    let dir_entries =
+      require_diagnostic_result(engine.entries_by_type(aeordb::engine::KV_TYPE_DIRECTORY), "failed to enumerate DirectoryIndex entries");
     println!("DirectoryIndex entries (live KV): {}", dir_entries.len());
     for (hash, value) in &dir_entries {
       let hl = if value.len() == algo.hash_length() {
@@ -216,22 +265,34 @@ pub fn run(config: ProbeConfig<'_>) {
   let mut sys_dirs = 0u32;
   let mut total_files = 0u32;
   let mut total_dirs = 0u32;
-  let file_entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
+  let file_entries = require_diagnostic_result(
+    engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD),
+    "failed to enumerate FileRecord entries for system-flag counts",
+  );
   for (hash, _value) in &file_entries {
     total_files += 1;
-    if let Ok(Some((header, _key, _value))) = engine.get_entry_including_deleted(hash) {
-      if header.flags & FLAG_SYSTEM != 0 {
-        sys_files += 1;
-      }
+    let entry = require_diagnostic_result(engine.get_entry_including_deleted(hash), "failed to read FileRecord for system-flag counts");
+    let Some((header, _key, _value)) = entry else {
+      eprintln!("FileRecord type index references a missing entry: {}", hex::encode(hash));
+      std::process::exit(3);
+    };
+    if header.flags & FLAG_SYSTEM != 0 {
+      sys_files += 1;
     }
   }
-  let dir_entries = engine.entries_by_type(aeordb::engine::KV_TYPE_DIRECTORY).unwrap_or_default();
+  let dir_entries = require_diagnostic_result(
+    engine.entries_by_type(aeordb::engine::KV_TYPE_DIRECTORY),
+    "failed to enumerate DirectoryIndex entries for system-flag counts",
+  );
   for (hash, _value) in &dir_entries {
     total_dirs += 1;
-    if let Ok(Some((header, _key, _value))) = engine.get_entry_including_deleted(hash) {
-      if header.flags & FLAG_SYSTEM != 0 {
-        sys_dirs += 1;
-      }
+    let entry = require_diagnostic_result(engine.get_entry_including_deleted(hash), "failed to read DirectoryIndex for system-flag counts");
+    let Some((header, _key, _value)) = entry else {
+      eprintln!("DirectoryIndex type index references a missing entry: {}", hex::encode(hash));
+      std::process::exit(3);
+    };
+    if header.flags & FLAG_SYSTEM != 0 {
+      sys_dirs += 1;
     }
   }
   println!("--- FLAG_SYSTEM counts ---");
@@ -248,26 +309,30 @@ pub fn run(config: ProbeConfig<'_>) {
     "cafc6f96-e263-4199-818a-b0090b206317",
   ] {
     let path = format!("/.aeordb-system/api-keys/{}", uuid);
-    let path_key = aeordb::engine::file_path_hash(&path, &algo).unwrap();
-    let exists = engine.has_entry(&path_key).unwrap_or(false);
+    let path_key = require_diagnostic_hash(aeordb::engine::file_path_hash(&path, &algo), "failed to derive API-key path hash");
+    let exists = require_diagnostic_result(engine.has_entry(&path_key), "failed to read API-key path from KV");
     println!("  {}: {}", uuid, if exists { "PRESENT" } else { "missing" });
   }
 
   // Read the api-keys directory data raw
   let dir_path = "/.aeordb-system/api-keys";
-  let dir_key = aeordb::engine::directory_path_hash(dir_path, &algo).unwrap();
+  let dir_key = require_diagnostic_hash(aeordb::engine::directory_path_hash(dir_path, &algo), "failed to derive API-key directory hash");
   println!("--- Raw dir entry at {} ---", dir_path);
-  if let Ok(Some((header, _key, value))) = engine.get_entry_including_deleted(&dir_key) {
-    println!("  flags: {:#x}, value len: {}", header.flags, value.len());
-    if value.len() == algo.hash_length() {
-      println!("  hard link → {}", hex::encode(&value));
-      // Follow the link
-      if let Ok(Some((_h, _k, real_value))) = engine.get_entry_including_deleted(&value) {
-        println!("  target len: {}", real_value.len());
+  match require_diagnostic_result(engine.get_entry_including_deleted(&dir_key), "failed to read raw API-key directory entry") {
+    Some((header, _key, value)) => {
+      println!("  flags: {:#x}, value len: {}", header.flags, value.len());
+      if value.len() == algo.hash_length() {
+        println!("  hard link → {}", hex::encode(&value));
+        match require_diagnostic_result(engine.get_entry_including_deleted(&value), "failed to follow raw API-key directory link") {
+          Some((_header, _key, real_value)) => println!("  target len: {}", real_value.len()),
+          None => {
+            eprintln!("  target MISSING (dangling hard-link)");
+            std::process::exit(3);
+          }
+        }
       }
     }
-  } else {
-    println!("  not found");
+    None => println!("  not found"),
   }
 }
 
@@ -301,7 +366,10 @@ fn print_path_probe(engine: &StorageEngine, ops: &DirectoryOps<'_>, config: &Pro
     }
     mapping.db_path
   } else {
-    let p = config.path.expect("path probe requires --path or --http-path");
+    let Some(p) = config.path else {
+      eprintln!("path probe requires --path or --http-path");
+      std::process::exit(2);
+    };
     let normalized = aeordb::engine::path_utils::normalize_path(p);
     println!("=== Probe path ===");
     println!("Input path:    {}", p);
@@ -310,8 +378,8 @@ fn print_path_probe(engine: &StorageEngine, ops: &DirectoryOps<'_>, config: &Pro
   };
 
   let algo = engine.hash_algo();
-  let dir_key = aeordb::engine::directory_path_hash(&normalized, &algo).unwrap();
-  let file_key = aeordb::engine::file_path_hash(&normalized, &algo).unwrap();
+  let dir_key = require_diagnostic_hash(aeordb::engine::directory_path_hash(&normalized, &algo), "failed to derive probe directory hash");
+  let file_key = require_diagnostic_hash(aeordb::engine::file_path_hash(&normalized, &algo), "failed to derive probe file hash");
 
   println!("--- Path keys ---");
   println!("dir path key:  {}", kv_summary(engine, &dir_key));
@@ -332,8 +400,9 @@ fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
   let normalized = aeordb::engine::path_utils::normalize_path(path);
   let algo = engine.hash_algo();
   let hash_length = algo.hash_length();
-  let dir_key = aeordb::engine::directory_path_hash(&normalized, &algo).unwrap();
-  let file_key = aeordb::engine::file_path_hash(&normalized, &algo).unwrap();
+  let dir_key =
+    require_diagnostic_hash(aeordb::engine::directory_path_hash(&normalized, &algo), "failed to derive path-history directory hash");
+  let file_key = require_diagnostic_hash(aeordb::engine::file_path_hash(&normalized, &algo), "failed to derive path-history file hash");
 
   println!("=== Path history ===");
   println!("Input path:    {}", path);
@@ -370,10 +439,18 @@ fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
   };
 
   let mut matches = 0usize;
+  let mut scan_errors = 0usize;
+  let mut malformed_file_records = 0usize;
   for result in scanner.by_ref() {
     let scanned = match result {
       Ok(scanned) => scanned,
-      Err(_) => continue,
+      Err(error) => {
+        if scan_errors < 20 {
+          eprintln!("WAL scan error: {error}");
+        }
+        scan_errors += 1;
+        continue;
+      }
     };
 
     let mut reasons = Vec::new();
@@ -386,16 +463,27 @@ fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
 
     let mut file_record_summary = None;
     if scanned.header.entry_type == EntryType::FileRecord {
-      if let Ok(record) = FileRecord::deserialize(&scanned.value, hash_length, scanned.header.entry_version) {
-        if record.path == normalized {
-          reasons.push("file_record_value_path");
-          file_record_summary = Some(format!(
-            " path={} size={} chunks={} updated_at={}",
-            record.path,
-            record.total_size,
-            record.chunk_hashes.len(),
-            format_timestamp_millis(record.updated_at)
-          ));
+      if is_sanctioned_non_file_record(&scanned.key, &scanned.value) {
+        continue;
+      }
+      match FileRecord::deserialize(&scanned.value, hash_length, scanned.header.entry_version) {
+        Ok(record) => {
+          if record.path == normalized {
+            reasons.push("file_record_value_path");
+            file_record_summary = Some(format!(
+              " path={} size={} chunks={} updated_at={}",
+              record.path,
+              record.total_size,
+              record.chunk_hashes.len(),
+              format_timestamp_millis(record.updated_at)
+            ));
+          }
+        }
+        Err(error) => {
+          if malformed_file_records < 20 {
+            eprintln!("malformed FileRecord at WAL offset {}: {error}", scanned.offset);
+          }
+          malformed_file_records += 1;
         }
       }
     }
@@ -438,6 +526,13 @@ fn print_path_history(engine: &StorageEngine, config: &ProbeConfig<'_>) {
   println!("matches: {}", matches);
   if !scanner.skipped_regions.is_empty() {
     println!("skipped regions: {}", scanner.skipped_regions.len());
+  }
+  if scan_errors > 0 || malformed_file_records > 0 || !scanner.skipped_regions.is_empty() {
+    eprintln!(
+      "path history is incomplete: scan_errors={scan_errors}, malformed_file_records={malformed_file_records}, skipped_regions={}",
+      scanner.skipped_regions.len()
+    );
+    std::process::exit(3);
   }
 }
 
@@ -501,7 +596,7 @@ fn print_dir_entry_diagnostics(engine: &StorageEngine, dir_key: &[u8], hash_leng
 fn print_file_record_diagnostics(engine: &StorageEngine, ops: &DirectoryOps<'_>, normalized: &str, config: &ProbeConfig<'_>) {
   println!("--- FileRecord ---");
   let algo = engine.hash_algo();
-  let file_key = aeordb::engine::file_path_hash(normalized, &algo).unwrap();
+  let file_key = require_diagnostic_hash(aeordb::engine::file_path_hash(normalized, &algo), "failed to derive FileRecord path hash");
   match engine.get_entry_including_deleted(&file_key) {
     Ok(Some((header, _key, _value))) => {
       println!("Path FileRecord header:");
@@ -867,7 +962,14 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
   let mut lines = 0u64;
   let mut adds = 0u64;
   let mut dels = 0u64;
-  for line in BufReader::new(file).lines().map_while(Result::ok) {
+  for line in BufReader::new(file).lines() {
+    let line = match line {
+      Ok(line) => line,
+      Err(error) => {
+        eprintln!("read checkpoint {}: {error}", tsv_path);
+        std::process::exit(1);
+      }
+    };
     lines += 1;
     if let Some(rest) = line.strip_prefix("+\t") {
       let path = rest.split_once('\t').map(|(path, _)| path).unwrap_or(rest);
@@ -889,15 +991,18 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
   for path in &committed {
     let hash = match aeordb::engine::file_path_hash(path, &algo) {
       Ok(h) => h,
-      Err(_) => {
-        missing.push(path.clone());
-        continue;
+      Err(error) => {
+        eprintln!("invalid checkpoint path {path:?}: {error}");
+        std::process::exit(3);
       }
     };
     match engine.has_entry(&hash) {
       Ok(true) => present += 1,
       Ok(false) => missing.push(path.clone()),
-      Err(_) => missing.push(path.clone()),
+      Err(error) => {
+        eprintln!("failed to check checkpoint path {path:?}: {error}");
+        std::process::exit(1);
+      }
     }
   }
 
@@ -905,17 +1010,35 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
   // but useful for spotting in-flight writes that landed before the
   // checkpoint flush.
   let mut extras: Vec<String> = Vec::new();
-  let entries = engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD).unwrap_or_default();
+  let entries = require_diagnostic_result(
+    engine.entries_by_type(aeordb::engine::KV_TYPE_FILE_RECORD),
+    "failed to enumerate FileRecord entries for checkpoint comparison",
+  );
   let hash_length = engine.hash_algo().hash_length();
   let mut db_paths = HashSet::new();
   for (hash, value) in &entries {
     let version = match engine.get_entry_including_deleted(hash) {
-      Ok(Some(e)) => e.0.entry_version,
-      _ => continue,
+      Ok(Some(entry)) => entry.0.entry_version,
+      Ok(None) => {
+        eprintln!("FileRecord type index references a missing entry: {}", hex::encode(hash));
+        std::process::exit(3);
+      }
+      Err(error) => {
+        eprintln!("failed to read FileRecord entry {}: {error}", hex::encode(hash));
+        std::process::exit(1);
+      }
     };
-    if let Ok(record) = aeordb::engine::file_record::FileRecord::deserialize(value, hash_length, version) {
-      db_paths.insert(record.path);
+    if is_sanctioned_non_file_record(hash, value) {
+      continue;
     }
+    let record = match aeordb::engine::file_record::FileRecord::deserialize(value, hash_length, version) {
+      Ok(record) => record,
+      Err(error) => {
+        eprintln!("malformed FileRecord {} during checkpoint comparison: {error}", hex::encode(hash));
+        std::process::exit(3);
+      }
+    };
+    db_paths.insert(record.path);
   }
   for p in &db_paths {
     if !committed.contains(p) && !p.starts_with("/.aeordb-system") {
@@ -973,9 +1096,18 @@ fn dump_wal_tail(path: &str, n: usize) {
     eprintln!("seek: {}", e);
     std::process::exit(1);
   }
-  let mut buf = vec![0u8; n];
-  let read = file.read(&mut buf).unwrap_or(0);
-  buf.truncate(read);
+  let capacity = match usize::try_from(total) {
+    Ok(total) => n.min(total),
+    Err(_) => n,
+  };
+  let mut buf = Vec::with_capacity(capacity);
+  let read = match file.take(n as u64).read_to_end(&mut buf) {
+    Ok(read) => read,
+    Err(error) => {
+      eprintln!("read WAL tail: {error}");
+      std::process::exit(1);
+    }
+  };
 
   println!("=== wal-tail-bytes (last {} of {}, starting offset {}) ===", read, total, from);
   // 16 bytes per row, offset | hex | ascii
@@ -986,3 +1118,7 @@ fn dump_wal_tail(path: &str, n: usize) {
     println!("{:012x}  {:<48}  |{}|", off, hex, ascii);
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/commands/probe_panic_internal_spec.rs"]
+mod probe_panic_internal_spec;

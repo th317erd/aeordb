@@ -514,6 +514,8 @@
         - [x] Preserve every dirty-startup WAL gap byte, including extents wider than `u32` and the trailing gap before the hot tail.
         - [x] Replace persisted ControlStore and durability-recovery selector panics with typed format, input, or durability failures that preserve fail-closed admission.
         - [x] Stop recovering poisoned task cancellation/progress maps; reject authority mutations, fail cancellation reads closed, and degrade derived progress telemetry with visible metrics.
+        - [x] Replace backup/import locator and directory-inventory panic assumptions with typed durability/corruption failures.
+        - [x] Make destructive and diagnostic CLI commands reject prompt I/O failures, contradictory repair state, incomplete KV/WAL inventories, and checkpoint read failures instead of panicking or reporting partial success.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

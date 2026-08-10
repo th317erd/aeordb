@@ -254,9 +254,12 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
           }
         };
 
-        match run_repair_pass(&engine2, &work_path, &[], None, false) {
-          RepairPass::Complete(report) => report,
-          RepairPass::Expand { .. } => unreachable!("KV expansion is disabled on the second repair pass"),
+        match require_complete_second_repair_pass(run_repair_pass(&engine2, &work_path, &[], None, false)) {
+          Ok(report) => report,
+          Err(error) => {
+            eprintln!("Repair failed: {error}");
+            process::exit(1);
+          }
         }
       }
     }
@@ -275,7 +278,15 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   }
 
   if repair && !emergency_spills.is_empty() && !report.has_issues() {
-    if let Err(error) = emergency_spill::mark_artifacts_applied(&work_path, &emergency_spills, spill_apply_report.as_ref().unwrap()) {
+    let apply_report = match require_spill_apply_report(spill_apply_report.as_ref()) {
+      Ok(report) => report,
+      Err(error) => {
+        eprintln!("Repair succeeded, but {error}.");
+        eprintln!("Startup will continue to refuse this database until the artifacts are resolved.");
+        process::exit(1);
+      }
+    };
+    if let Err(error) = emergency_spill::mark_artifacts_applied(&work_path, &emergency_spills, apply_report) {
       eprintln!("Repair succeeded, but failed to mark emergency spill artifacts applied: {}", error);
       eprintln!("Startup will continue to refuse this database until the artifacts are resolved.");
       process::exit(1);
@@ -449,6 +460,19 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
 enum RepairPass {
   Complete(verify::VerifyReport),
   Expand { needed_stage: usize, hash_length: usize, current_size: u64, needed_size: u64 },
+}
+
+fn require_complete_second_repair_pass(pass: RepairPass) -> Result<verify::VerifyReport, String> {
+  match pass {
+    RepairPass::Complete(report) => Ok(report),
+    RepairPass::Expand { needed_stage, current_size, needed_size, .. } => {
+      Err(format!("second repair pass still requires KV expansion from {current_size} to {needed_size} bytes (stage {needed_stage})"))
+    }
+  }
+}
+
+fn require_spill_apply_report(report: Option<&EmergencySpillApplyReport>) -> Result<&EmergencySpillApplyReport, String> {
+  report.ok_or_else(|| "emergency spill completion is missing its apply report".to_string())
 }
 
 fn run_repair_pass(
@@ -648,7 +672,10 @@ fn format_storage_summary(report: &verify::VerifyReport) -> String {
 
 #[cfg(test)]
 mod tests {
-  use super::{RepairCopyPreparation, format_storage_summary, prepare_source_for_repair_copy};
+  use super::{
+    RepairCopyPreparation, RepairPass, format_storage_summary, prepare_source_for_repair_copy, require_complete_second_repair_pass,
+    require_spill_apply_report,
+  };
   use aeordb::engine::verify::VerifyReport;
   use std::cell::Cell;
 
@@ -704,6 +731,36 @@ mod tests {
     assert!(rendered.contains("FileRecord payloads (WAL):      40 bytes"));
     assert!(rendered.contains("Chunk payloads (WAL):           8 bytes"));
     assert!(rendered.contains("Logical/WAL chunk delta:        2 bytes (clamped at zero)"));
+  }
+
+  #[test]
+  fn second_repair_pass_rejects_another_expansion_request() {
+    let error = require_complete_second_repair_pass(RepairPass::Expand {
+      needed_stage: 2,
+      hash_length: 32,
+      current_size: 64 * 1024,
+      needed_size: 1024 * 1024,
+    })
+    .unwrap_err();
+
+    assert!(error.contains("second repair pass"));
+  }
+
+  #[test]
+  fn spill_completion_requires_the_apply_report() {
+    let error = require_spill_apply_report(None).unwrap_err();
+
+    assert!(error.contains("apply report"));
+  }
+
+  #[test]
+  fn production_verify_paths_contain_no_panic_macros_or_methods() {
+    let source = include_str!("verify.rs");
+    let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
+
+    assert!(!production.contains("unreachable!("));
+    assert!(!production.contains(".unwrap()"));
+    assert!(!production.contains(".expect("));
   }
 }
 
