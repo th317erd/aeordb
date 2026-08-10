@@ -289,7 +289,7 @@ fn coordinated_header_publication_preserves_v3_bytes_and_records_readback() {
 }
 
 #[test]
-fn coordinated_header_publication_refuses_write_failure_without_touching_inactive_slot() {
+fn coordinated_header_publication_refuses_read_only_handle_without_touching_inactive_slot() {
   let temp_directory = create_temp_path();
   let file_path = temp_directory.path().join("read-only-header.aeor");
   let mut initial = FileHeader::new(HashAlgorithm::Blake3_256);
@@ -307,7 +307,10 @@ fn coordinated_header_publication_refuses_write_failure_without_touching_inactiv
   let snapshot = coordinator.snapshot().unwrap();
   assert_eq!(snapshot.hard_frontier, 0);
   assert_eq!(snapshot.failed, 1);
+  #[cfg(unix)]
   assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::AuthorityWrite);
+  #[cfg(windows)]
+  assert_eq!(snapshot.ledger.last().unwrap().operation, DurabilityOperation::DataBarrier);
   assert!(!snapshot.ledger.last().unwrap().succeeded);
   let bytes = std::fs::read(&file_path).unwrap();
   assert!(bytes[FILE_HEADER_SIZE..HEADER_REGION_SIZE].iter().all(|byte| *byte == 0));
