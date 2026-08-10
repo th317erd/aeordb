@@ -55,6 +55,15 @@ struct FixtureManifest {
   fixtures: Vec<FixtureRow>,
 }
 
+#[test]
+fn contract_gate_uses_portable_hash_and_file_size_helpers() {
+  let source = include_str!("../../../scripts/plan/check-v4-contracts.sh");
+
+  assert!(source.contains("sha256_file()"));
+  assert!(source.contains("file_size_bytes()"));
+  assert!(!source.contains("stat -c"));
+}
+
 #[derive(Deserialize)]
 struct FixtureRow {
   id: String,

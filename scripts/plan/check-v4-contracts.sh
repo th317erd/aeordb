@@ -10,7 +10,25 @@ fail() {
   exit 1
 }
 
-for tool in cargo git jq rg python3; do
+sha256_file() {
+  local path=$1
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  fail "neither sha256sum nor shasum is available"
+}
+
+file_size_bytes() {
+  wc -c < "$1" | tr -d '[:space:]'
+}
+
+for tool in awk cargo git jq rg python3 tr wc; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool '$tool' is unavailable"
 done
 
@@ -212,8 +230,8 @@ jq -e '
 
 registry_report="$evidence_dir/p0b-contract-registry-report.json"
 [[ -f "$registry_report" ]] || fail "missing P0b collision/ID/capability registry report"
-jq -e --arg source_sha "$(sha256sum "$contract_registry" | awk '{print $1}')" \
-  --arg fixture_sha "$(sha256sum "$fixture_manifest" | awk '{print $1}')" '
+jq -e --arg source_sha "$(sha256_file "$contract_registry")" \
+  --arg fixture_sha "$(sha256_file "$fixture_manifest")" '
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .source_sha256 == $source_sha and .fixture_manifest_sha256 == $fixture_sha and
   .counts == {
@@ -231,9 +249,9 @@ jq -e --arg source_sha "$(sha256sum "$contract_registry" | awk '{print $1}')" \
 p0c_report="$evidence_dir/p0c-machine-contract-report.json"
 [[ -f "$p0c_report" ]] || fail "missing P0c machine contract report"
 jq -e \
-  --arg architecture_sha "$(sha256sum "$architecture_registry" | awk '{print $1}')" \
-  --arg generated_sha "$(sha256sum "$generated_contract" | awk '{print $1}')" \
-  --argjson generated_bytes "$(stat -c %s "$generated_contract")" '
+  --arg architecture_sha "$(sha256_file "$architecture_registry")" \
+  --arg generated_sha "$(sha256_file "$generated_contract")" \
+  --argjson generated_bytes "$(file_size_bytes "$generated_contract")" '
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .landing_unit == "P0c" and
   .architecture_registry_sha256 == $architecture_sha and
@@ -281,7 +299,7 @@ diff -u \
 while IFS=$'\t' read -r binary annotation byte_length; do
   [[ -f "$fixture_root/$binary" ]] || fail "missing fixture binary: $binary"
   [[ -f "$fixture_root/$annotation" ]] || fail "missing annotated fixture hex: $annotation"
-  [[ "$(stat -c %s "$fixture_root/$binary")" == "$byte_length" ]] || fail "fixture binary length differs from manifest: $binary"
+  [[ "$(file_size_bytes "$fixture_root/$binary")" == "$byte_length" ]] || fail "fixture binary length differs from manifest: $binary"
 done < <(jq -r '.fixtures[] | [.binary, .annotated_hex, .byte_length] | @tsv' "$fixture_manifest")
 
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
