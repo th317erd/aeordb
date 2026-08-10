@@ -228,11 +228,13 @@ impl KvPageProvider {
     loop {
       let mut state = self.lock()?;
 
-      if let Some(pending) = state.pending.as_ref().and_then(|update| update.pages.get(&bucket)) {
-        if generation < state.pending.as_ref().expect("pending update exists").generation {
-          let data = Arc::clone(&pending.data);
-          state.hits = state.hits.saturating_add(1);
-          return Ok(data);
+      if let Some(update) = state.pending.as_ref() {
+        if let Some(pending_page) = update.pages.get(&bucket) {
+          if generation < update.generation {
+            let data = Arc::clone(&pending_page.data);
+            state.hits = state.hits.saturating_add(1);
+            return Ok(data);
+          }
         }
       }
 
@@ -527,8 +529,9 @@ impl KvPageUpdate {
         .or_default()
         .insert(old.old_generation, HistoricalPage { data: old.data, _reservation: old.reservation });
       if previous.is_some() {
-        state.poisoned_reason = Some(format!("duplicate historical KV page generation {} for bucket {bucket}", old.old_generation));
-        return Err(EngineError::DurabilityFailure(state.poisoned_reason.clone().expect("poison reason was set")));
+        let reason = format!("duplicate historical KV page generation {} for bucket {bucket}", old.old_generation);
+        state.poisoned_reason = Some(reason.clone());
+        return Err(EngineError::DurabilityFailure(reason));
       }
       state.bucket_generations.insert(bucket, self.generation);
     }

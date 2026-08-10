@@ -34,6 +34,12 @@ pub struct FilteredListing {
   pub allowed_children: std::collections::HashSet<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PermissionIdentity {
+  ShareKey,
+  User(Uuid),
+}
+
 /// Special file names that map to Configure or Deploy operations.
 const CONFIGURE_FILES: &[&str] = &[".aeordb-config", ".aeordb-permissions"];
 const DEPLOY_FILES: &[&str] = &[".aeordb-functions"];
@@ -129,12 +135,11 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   // Parse user_id from claims.sub.
   // Share keys use "share:<id>" as sub — they skip the permission resolver.
   // Normal users must have UUID identities.
-  let is_share_key = claims.sub.starts_with("share:");
-  let user_id = if is_share_key {
-    None
+  let identity = if claims.sub.starts_with("share:") {
+    PermissionIdentity::ShareKey
   } else {
     match Uuid::parse_str(&claims.sub) {
-      Ok(user_id) => Some(user_id),
+      Ok(user_id) => PermissionIdentity::User(user_id),
       Err(_) => {
         tracing::warn!(
           sub = %claims.sub,
@@ -144,6 +149,7 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
       }
     }
   };
+  let is_share_key = matches!(identity, PermissionIdentity::ShareKey);
 
   // Determine the crudlify operation (needed for both key enforcement and permission check).
   let operation = match http_to_crudlify(request.method(), engine_path, &state) {
@@ -222,8 +228,11 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
 
   // Check permission (normal user flow).
   let resolver = PermissionResolver::new(&state.engine, &state.group_cache);
-
-  let user_uuid = user_id.unwrap();
+  let PermissionIdentity::User(user_uuid) = identity else {
+    tracing::error!("Normal permission flow reached without a user identity");
+    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Permission check failed".to_string(), code: None }))
+      .into_response();
+  };
 
   // Direct check first: did the user receive an explicit grant for this op?
   // Use `check_path_permission` (NOT `check_direct_permission`) so a path

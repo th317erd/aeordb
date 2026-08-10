@@ -850,6 +850,43 @@ async fn test_permission_middleware_allows_root() {
 }
 
 #[tokio::test]
+async fn permission_middleware_rejects_a_signed_token_with_a_malformed_user_identity() {
+  use axum::body::Body;
+  use axum::http::Request;
+  use http_body_util::BodyExt;
+  use tower::ServiceExt;
+
+  let (engine, _temp_dir) = test_engine();
+  let jwt_manager = Arc::new(aeordb::auth::JwtManager::generate());
+  let app = aeordb::server::create_app_with_jwt_and_engine(jwt_manager.clone(), engine);
+  let now = chrono::Utc::now().timestamp();
+  let token = jwt_manager
+    .create_token(&aeordb::auth::TokenClaims {
+      sub: "not-a-user-uuid".to_string(),
+      iss: "aeordb".to_string(),
+      iat: now,
+      exp: now + 3600,
+      scope: None,
+      permissions: None,
+      key_id: None,
+    })
+    .unwrap();
+  let request = Request::builder()
+    .method("GET")
+    .uri("/files/private/document.txt")
+    .header("authorization", format!("Bearer {token}"))
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+  let body = response.into_body().collect().await.unwrap().to_bytes();
+  let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+  assert_eq!(json["error"], "Invalid user identity");
+}
+
+#[tokio::test]
 async fn test_permission_middleware_denies_without_permission() {
   use axum::body::Body;
   use axum::http::Request;

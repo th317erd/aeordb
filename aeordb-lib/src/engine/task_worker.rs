@@ -599,6 +599,12 @@ fn task_worker_memory_error(error: MemoryCoordinatorError) -> EngineError {
   }
 }
 
+fn require_forced_migration_memory(migration_memory: &mut Option<OperationMemoryBudget>) -> EngineResult<&mut OperationMemoryBudget> {
+  migration_memory
+    .as_mut()
+    .ok_or_else(|| EngineError::DurabilityFailure("forced reindex migration memory authority is unavailable".to_string()))
+}
+
 /// Execute a reindex task: re-run the indexing pipeline on all files under a directory.
 fn execute_reindex(
   queue: &TaskQueue,
@@ -644,21 +650,20 @@ fn execute_reindex(
   // able to run without an indexes.json and simply migrate every file in the
   // subtree.
   let config_path = IndexConfigResolver::config_path_for_directory(&reindex_root);
-  let (config, config_dir) = match resolver.find_config_for_reindex_scope(&reindex_root) {
-    Ok(Some((config, config_dir))) => (Some(config), Some(config_dir)),
+  let resolved_config = match resolver.find_config_for_reindex_scope(&reindex_root) {
+    Ok(Some((config, config_dir))) => Some((config, config_dir)),
     Ok(None) if force => {
       tracing::info!(
         path = %reindex_root,
         config_path = %config_path,
         "forced reindex running migration-only because no index config was found"
       );
-      (None, None)
+      None
     }
     Ok(None) => return Err(EngineError::NotFound(config_path)),
     Err(error) => return Err(error),
   };
-  let stale_indexes_deleted = if let Some(ref config) = config {
-    let config_dir = config_dir.as_deref().expect("resolved config has an owner directory");
+  let stale_indexes_deleted = if let Some((config, config_dir)) = resolved_config.as_ref() {
     let deleted = IndexManager::new(engine).delete_indexes_not_in_config(config_dir, config)?;
     if deleted > 0 {
       tracing::info!(path = %config_dir, requested_scope = %reindex_root, deleted, "retired stale indexes before reindex");
@@ -671,16 +676,10 @@ fn execute_reindex(
   // Build a sorted list of full file paths to reindex.
   let prefix = reindex_root.trim_end_matches('/');
   let mut file_paths: Vec<String> = if force {
-    collect_current_file_record_paths(engine, &reindex_root, migration_memory.as_mut().expect("force creates migration memory"))?
-  } else if let Some(ref config) = config {
+    collect_current_file_record_paths(engine, &reindex_root, require_forced_migration_memory(&mut migration_memory)?)?
+  } else if let Some((config, config_dir)) = resolved_config.as_ref() {
     if let Some(ref glob_pattern) = config.glob {
-      collect_recursive_reindex_paths(
-        engine,
-        &reindex_root,
-        config_dir.as_deref().expect("resolved glob config has an owner directory"),
-        glob_pattern,
-        &mut task_memory,
-      )?
+      collect_recursive_reindex_paths(engine, &reindex_root, config_dir, glob_pattern, &mut task_memory)?
     } else {
       collect_direct_reindex_paths(&ops, &reindex_root, prefix, &mut task_memory)?
     }
@@ -747,9 +746,7 @@ fn execute_reindex(
       };
 
       if force {
-        match ops
-          .migrate_file_record_to_current_version_with_memory(file_path, migration_memory.as_mut().expect("force creates migration memory"))
-        {
+        match ops.migrate_file_record_to_current_version_with_memory(file_path, require_forced_migration_memory(&mut migration_memory)?) {
           Ok(true) => {
             migrated_count += 1;
           }
@@ -779,7 +776,7 @@ fn execute_reindex(
           }
         }
 
-        if config.is_none() || !indexable {
+        if resolved_config.is_none() || !indexable {
           consecutive_failures = 0;
           indexed_count += 1;
           completed_count += 1;

@@ -519,6 +519,10 @@
         - [x] Replace hash-fetch/query response panic assumptions and locator omission fallbacks with explicit HTTP/corruption failures.
         - [x] Replace fallible cache singleflight/replacement and constrained directory-operation panic assumptions with typed invariant failures.
         - [x] Replace directory-repair workspace container and fixed-width decode panics with bounded typed corruption failures.
+        - [x] Replace permission identity, reindex state-pairing, and KV page-publication panic assumptions with structural state and typed failures.
+          - [x] Keep share-key and normal-user identities disjoint without reconstructing a validated UUID through `unwrap`.
+          - [x] Pair resolved reindex configuration with its owner and require forced-migration memory through a typed invariant check.
+          - [x] Preserve pending KV generation and poison evidence without re-reading locally proven state through `expect`.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
