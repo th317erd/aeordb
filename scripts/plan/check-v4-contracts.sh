@@ -28,8 +28,12 @@ file_size_bytes() {
   wc -c < "$1" | tr -d '[:space:]'
 }
 
+normalize_text_lines() {
+  tr -d '\r'
+}
+
 normalize_inventory_paths() {
-  tr -d '\r' | sed 's|\\|/|g'
+  normalize_text_lines | sed 's|\\|/|g'
 }
 
 for tool in awk cargo git jq rg python3 tr wc; do
@@ -72,12 +76,12 @@ if not document.get("forbidden_divergences"):
     raise SystemExit("missing forbidden divergences")
 PY
 
-entry_commit=$(jq -r '.source.entry_commit' "$evidence_dir/baseline-environment.json")
+entry_commit=$(jq -r '.source.entry_commit' "$evidence_dir/baseline-environment.json" | normalize_text_lines)
 git -C "$repo_root" cat-file -e "$entry_commit^{commit}" 2>/dev/null || fail "entry commit $entry_commit is not in repository history"
 
-behavior_commit=$(jq -r '.source_commit' "$evidence_dir/baseline-behavior-and-performance.json")
-inventory_commit=$(jq -r '.source_commit' "$evidence_dir/persisted-producer-consumer-inventory.json")
-route_commit=$(jq -r '.source_commit' "$evidence_dir/route-root-contract-manifest.json")
+behavior_commit=$(jq -r '.source_commit' "$evidence_dir/baseline-behavior-and-performance.json" | normalize_text_lines)
+inventory_commit=$(jq -r '.source_commit' "$evidence_dir/persisted-producer-consumer-inventory.json" | normalize_text_lines)
+route_commit=$(jq -r '.source_commit' "$evidence_dir/route-root-contract-manifest.json" | normalize_text_lines)
 [[ "$entry_commit" == "$behavior_commit" && "$entry_commit" == "$inventory_commit" && "$entry_commit" == "$route_commit" ]] \
   || fail "P0a source commits disagree"
 
@@ -90,16 +94,16 @@ jq -e '
   (.focused_probes | all(.result == "pass"))
 ' "$evidence_dir/baseline-behavior-and-performance.json" >/dev/null || fail "behavior characterization is not green and equivalent"
 
-route_source_count=$(rg -c '\.route\s*\(' "$repo_root/aeordb-lib/src/server/mod.rs")
-manifest_route_count=$(jq '.route_registration_count' "$evidence_dir/route-root-contract-manifest.json")
-group_route_count=$(jq '[.route_groups[].paths | length] | add' "$evidence_dir/route-root-contract-manifest.json")
+route_source_count=$(rg -c '\.route\s*\(' "$repo_root/aeordb-lib/src/server/mod.rs" | normalize_text_lines)
+manifest_route_count=$(jq '.route_registration_count' "$evidence_dir/route-root-contract-manifest.json" | normalize_text_lines)
+group_route_count=$(jq '[.route_groups[].paths | length] | add' "$evidence_dir/route-root-contract-manifest.json" | normalize_text_lines)
 jq -e 'all(.route_groups[]; .registration_count == (.paths | length))' "$evidence_dir/route-root-contract-manifest.json" >/dev/null \
   || fail "a route group count does not match its path list"
 [[ "$route_source_count" == "$manifest_route_count" && "$manifest_route_count" == "$group_route_count" ]] \
   || fail "route count drift: source=$route_source_count manifest=$manifest_route_count groups=$group_route_count"
 
 duplicate_routes=$(jq -r '[.route_groups[].paths[]] | group_by(.) | map(select(length > 1) | .[0]) | .[]' \
-  "$evidence_dir/route-root-contract-manifest.json")
+  "$evidence_dir/route-root-contract-manifest.json" | normalize_text_lines)
 [[ -z "$duplicate_routes" ]] || fail "duplicate registered route paths: $duplicate_routes"
 
 docs_manifest=$(mktemp)
@@ -126,7 +130,7 @@ done < <(
     .stable_keys_and_root_mutation.head_update_callers[],
     .stable_keys_and_root_mutation.raw_entry_writer_files[],
     .stable_keys_and_root_mutation.directory_mutator_caller_files[]
-  ' "$evidence_dir/persisted-producer-consumer-inventory.json" | sort -u
+  ' "$evidence_dir/persisted-producer-consumer-inventory.json" | normalize_inventory_paths | sort -u
 )
 
 jq -e '
@@ -160,9 +164,9 @@ architecture_registry="$fixture_root/architecture-contract-registry.json"
 contract_registry="$fixture_root/format-contract-registry.json"
 fixture_manifest="$fixture_root/format-fixture-manifest.json"
 result_ledger="$fixture_root/reference-result-ledger.json"
-expected_format_count=$(jq -er '.p0b_progress.fixture_family_count | numbers' "$contract_registry") \
+expected_format_count=$(jq -er '.p0b_progress.fixture_family_count | numbers' "$contract_registry" | normalize_text_lines) \
   || fail "P0b progress lacks a numeric fixture-family count"
-expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contract_registry") \
+expected_fixture_count=$(jq -er '.p0b_progress.fixture_count | numbers' "$contract_registry" | normalize_text_lines) \
   || fail "P0b progress lacks a numeric fixture count"
 jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
@@ -296,15 +300,15 @@ jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_c
 ' "$fixture_manifest" >/dev/null || fail "P0b-2 core fixture manifest is incomplete"
 
 diff -u \
-  <(jq -r '.formats[] | .fixture_ids_32[], .fixture_ids_64[]' "$contract_registry" | sort) \
-  <(jq -r '.fixtures[].id' "$fixture_manifest" | sort) >/dev/null \
+  <(jq -r '.formats[] | .fixture_ids_32[], .fixture_ids_64[]' "$contract_registry" | normalize_text_lines | sort) \
+  <(jq -r '.fixtures[].id' "$fixture_manifest" | normalize_text_lines | sort) >/dev/null \
   || fail "contract-registry fixture IDs differ from the fixture manifest"
 
 while IFS=$'\t' read -r binary annotation byte_length; do
   [[ -f "$fixture_root/$binary" ]] || fail "missing fixture binary: $binary"
   [[ -f "$fixture_root/$annotation" ]] || fail "missing annotated fixture hex: $annotation"
   [[ "$(file_size_bytes "$fixture_root/$binary")" == "$byte_length" ]] || fail "fixture binary length differs from manifest: $binary"
-done < <(jq -r '.fixtures[] | [.binary, .annotated_hex, .byte_length] | @tsv' "$fixture_manifest")
+done < <(jq -r '.fixtures[] | [.binary, .annotated_hex, .byte_length] | @tsv' "$fixture_manifest" | normalize_inventory_paths)
 
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
@@ -734,7 +738,7 @@ while IFS=$'\t' read -r kind name; do
   for bundle_file in SPEC.md invalid.bin properties.json vectors.bin; do
     [[ -s "$bundle_dir/$bundle_file" ]] || fail "missing semantic bundle file: ${kind}s/$name/$bundle_file"
   done
-done < <(jq -r '.bundles[] | [.kind, .name] | @tsv' "$semantics_registry")
+done < <(jq -r '.bundles[] | [.kind, .name] | @tsv' "$semantics_registry" | normalize_text_lines)
 
 reference_jobs=${CARGO_BUILD_JOBS:-4}
 if ((reference_jobs > 6)); then
