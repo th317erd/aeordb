@@ -28,6 +28,10 @@ file_size_bytes() {
   wc -c < "$1" | tr -d '[:space:]'
 }
 
+normalize_inventory_paths() {
+  tr -d '\r' | sed 's|\\|/|g'
+}
+
 for tool in awk cargo git jq rg python3 tr wc; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool '$tool' is unavailable"
 done
@@ -101,10 +105,10 @@ duplicate_routes=$(jq -r '[.route_groups[].paths[]] | group_by(.) | map(select(l
 docs_manifest=$(mktemp)
 docs_source=$(mktemp)
 trap 'rm -f "$docs_manifest" "$docs_source"' EXIT
-jq -r '.documentation_pages[]' "$evidence_dir/route-root-contract-manifest.json" | sort >"$docs_manifest"
+jq -r '.documentation_pages[]' "$evidence_dir/route-root-contract-manifest.json" | normalize_inventory_paths | sort >"$docs_manifest"
 (
   cd "$repo_root"
-  rg --files docs/src -g '*.md' | sort
+  rg --files docs/src -g '*.md' | normalize_inventory_paths | sort
 ) >"$docs_source"
 cmp -s "$docs_manifest" "$docs_source" || fail "documentation page inventory drifted"
 

@@ -61,6 +61,10 @@ fn contract_gate_uses_portable_hash_and_file_size_helpers() {
 
   assert!(source.contains("sha256_file()"));
   assert!(source.contains("file_size_bytes()"));
+  assert!(source.contains("normalize_inventory_paths()"));
+  assert!(source.contains("tr -d '\\r'"));
+  assert!(source.contains("sed 's|\\\\|/|g'"));
+  assert_eq!(source.matches("| normalize_inventory_paths").count(), 2);
   assert!(!source.contains("stat -c"));
 }
 
