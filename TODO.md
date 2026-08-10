@@ -84,6 +84,7 @@
     - [x] Replace the Windows parent-directory-sync no-op with a real native flush or a typed unsupported result.
     - [x] Implement native file/data barriers, durable replace, preallocation, read-back, filesystem reporting, and stable file identity.
     - [x] Implement bounded A/B/I ControlStore read selection with expected kind/database/identity verification.
+    - [x] Correct the native qualification adapter to report macOS weaker-barrier fallback and use only supported Windows replace flags with target read-back.
     - [ ] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
     - [ ] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.
       - [x] Repair architecture inventory drift for root-only `/system/runtime`, public `/dashboard.css`, and `operations/observability.md`; restore exact 95-route/38-page closure.

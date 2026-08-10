@@ -147,6 +147,28 @@ pub struct NativeDurabilityCapabilities {
   pub stable_file_identity: NativeOperationSupport,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeDurabilityMechanism {
+  UnixFdatasync,
+  UnixFsync,
+  AppleBarrierFsync,
+  AppleFullFsync,
+  AppleFsyncFallback,
+  WindowsFlushFileBuffers,
+  WindowsDirectoryFlushFileBuffers,
+  UnixRenameAndDirectoryFsync,
+  WindowsReplaceFileAndFlush,
+  WindowsMoveFileExWriteThrough,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeDurabilityMechanisms {
+  pub data_barrier: Option<NativeDurabilityMechanism>,
+  pub file_barrier: Option<NativeDurabilityMechanism>,
+  pub parent_directory_sync: Option<NativeDurabilityMechanism>,
+  pub durable_replace: Option<NativeDurabilityMechanism>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeFilesystemInfo {
   pub kind: String,
@@ -182,6 +204,7 @@ impl PlatformFileIdentityDescriptorV1 {
 pub struct NativeDurabilityProbeReport {
   pub filesystem: NativeFilesystemInfo,
   pub capabilities: NativeDurabilityCapabilities,
+  pub mechanisms: NativeDurabilityMechanisms,
   pub read_back_verified: bool,
   pub identity_before_rename: Option<PlatformFileIdentityDescriptorV1>,
   pub identity_after_rename: Option<PlatformFileIdentityDescriptorV1>,
@@ -190,6 +213,10 @@ pub struct NativeDurabilityProbeReport {
 }
 
 pub fn sync_file_data_native(file: &File) -> NativeDurabilityResult<()> {
+  sync_file_data_with_mechanism(file).map(|_| ())
+}
+
+fn sync_file_data_with_mechanism(file: &File) -> NativeDurabilityResult<NativeDurabilityMechanism> {
   sync_data_platform(file).map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::DataBarrier, error))
 }
 
@@ -211,11 +238,15 @@ pub fn verify_file_bytes_native(file: &File, offset: u64, expected: &[u8]) -> Na
 }
 
 pub fn sync_file_all_native(file: &File) -> NativeDurabilityResult<()> {
+  sync_file_all_with_mechanism(file).map(|_| ())
+}
+
+fn sync_file_all_with_mechanism(file: &File) -> NativeDurabilityResult<NativeDurabilityMechanism> {
   sync_all_platform(file).map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::FileBarrier, error))
 }
 
 pub fn sync_directory_native(path: impl AsRef<Path>) -> NativeDurabilityResult<()> {
-  sync_directory_platform(path.as_ref())
+  sync_directory_platform(path.as_ref()).map(|_| ())
 }
 
 pub fn preallocate_file(file: &File, length: u64) -> NativeDurabilityResult<()> {
@@ -226,16 +257,19 @@ pub fn preallocate_file(file: &File, length: u64) -> NativeDurabilityResult<()> 
 }
 
 pub fn durable_replace_native(from: impl AsRef<Path>, to: impl AsRef<Path>) -> NativeDurabilityResult<()> {
-  let from = from.as_ref();
-  let to = to.as_ref();
+  durable_replace_with_mechanism(from.as_ref(), to.as_ref()).map(|_| ())
+}
+
+fn durable_replace_with_mechanism(from: &Path, to: &Path) -> NativeDurabilityResult<NativeDurabilityMechanism> {
   if from == to {
     return Err(NativeDurabilityError::invalid(NativeDurabilityOperation::DurableReplace, "source and destination must differ"));
   }
   // Probe the required namespace barrier before mutation. If it is unsupported,
   // the caller gets a clean refusal rather than an already-renamed path.
   sync_rename_parents(from, to)?;
-  durable_replace_platform(from, to)?;
-  sync_rename_parents(from, to).map_err(|error| NativeDurabilityError::uncertain(NativeDurabilityOperation::DurableReplace, error))
+  let mechanism = durable_replace_platform(from, to)?;
+  sync_rename_parents(from, to).map_err(|error| NativeDurabilityError::uncertain(NativeDurabilityOperation::DurableReplace, error))?;
+  Ok(mechanism)
 }
 
 pub fn platform_file_identity(path: impl AsRef<Path>) -> NativeDurabilityResult<PlatformFileIdentityDescriptorV1> {
@@ -266,8 +300,8 @@ pub fn probe_native_durability(root: impl AsRef<Path>) -> NativeDurabilityResult
   file
     .write_all(b"aeordb-native-durability-probe-v1")
     .map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::ReadBack, error))?;
-  let data_barrier = probe_support(sync_file_data_native(&file))?;
-  let file_barrier = probe_support(sync_file_all_native(&file))?;
+  let (data_barrier, data_barrier_mechanism) = probe_mechanism(sync_file_data_with_mechanism(&file))?;
+  let (file_barrier, file_barrier_mechanism) = probe_mechanism(sync_file_all_with_mechanism(&file))?;
   drop(file);
 
   let mut read_back = Vec::new();
@@ -280,7 +314,7 @@ pub fn probe_native_durability(root: impl AsRef<Path>) -> NativeDurabilityResult
 
   let identity_before_rename = probe_value(platform_file_identity(&source))?;
   std::fs::rename(&source, &moved).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableReplace, error))?;
-  let parent_directory_sync = probe_support(sync_directory_native(root))?;
+  let (parent_directory_sync, parent_directory_sync_mechanism) = probe_mechanism(sync_directory_platform(root))?;
   let identity_after_rename = probe_value(platform_file_identity(&moved))?;
   if let (Some(before), Some(after)) = (identity_before_rename, identity_after_rename) {
     if before != after {
@@ -291,16 +325,19 @@ pub fn probe_native_durability(root: impl AsRef<Path>) -> NativeDurabilityResult
   let mut old_destination =
     File::create(&destination).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::ReadBack, error))?;
   old_destination.write_all(b"old destination").map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::ReadBack, error))?;
-  let destination_barrier = probe_support(sync_file_all_native(&old_destination))?;
+  let (destination_barrier, destination_barrier_mechanism) = probe_mechanism(sync_file_all_with_mechanism(&old_destination))?;
   if destination_barrier != NativeOperationSupport::Supported && file_barrier == NativeOperationSupport::Supported {
     return Err(NativeDurabilityError::verification(
       NativeDurabilityOperation::FileBarrier,
       "file barrier capability changed during probe",
     ));
   }
+  if destination_barrier_mechanism != file_barrier_mechanism {
+    return Err(NativeDurabilityError::verification(NativeDurabilityOperation::FileBarrier, "file barrier mechanism changed during probe"));
+  }
   drop(old_destination);
   let destination_identity_before_replace = probe_value(platform_file_identity(&destination))?;
-  let durable_replace = probe_support(durable_replace_native(&moved, &destination))?;
+  let (durable_replace, durable_replace_mechanism) = probe_mechanism(durable_replace_with_mechanism(&moved, &destination))?;
   let (replaced_identity, replace_readback) = if durable_replace == NativeOperationSupport::Supported {
     let bytes = std::fs::read(&destination).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::ReadBack, error))?;
     if !bytes.starts_with(b"aeordb-native-durability-probe-v1") {
@@ -333,6 +370,12 @@ pub fn probe_native_durability(root: impl AsRef<Path>) -> NativeDurabilityResult
       preallocation,
       stable_file_identity,
     },
+    mechanisms: NativeDurabilityMechanisms {
+      data_barrier: data_barrier_mechanism,
+      file_barrier: file_barrier_mechanism,
+      parent_directory_sync: parent_directory_sync_mechanism,
+      durable_replace: durable_replace_mechanism,
+    },
     read_back_verified: replace_readback,
     identity_before_rename,
     identity_after_rename,
@@ -361,6 +404,16 @@ fn probe_value<T>(result: NativeDurabilityResult<T>) -> NativeDurabilityResult<O
   match result {
     Ok(value) => Ok(Some(value)),
     Err(error) if error.is_unsupported() => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+fn probe_mechanism(
+  result: NativeDurabilityResult<NativeDurabilityMechanism>,
+) -> NativeDurabilityResult<(NativeOperationSupport, Option<NativeDurabilityMechanism>)> {
+  match result {
+    Ok(mechanism) => Ok((NativeOperationSupport::Supported, Some(mechanism))),
+    Err(error) if error.is_unsupported() => Ok((NativeOperationSupport::Unsupported { reason: error.to_string() }, None)),
     Err(error) => Err(error),
   }
 }
@@ -435,36 +488,55 @@ pub(crate) fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8])
   Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn sync_data_platform(file: &File) -> io::Result<()> {
-  file.sync_data()
+#[cfg(all(unix, not(target_os = "macos")))]
+fn sync_data_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
+  file.sync_data()?;
+  Ok(NativeDurabilityMechanism::UnixFdatasync)
 }
 
 #[cfg(target_os = "macos")]
-fn sync_data_platform(file: &File) -> io::Result<()> {
+fn sync_data_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
   use std::os::fd::AsRawFd;
   if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == -1 {
     return Err(io::Error::last_os_error());
   }
-  Ok(())
+  Ok(NativeDurabilityMechanism::AppleBarrierFsync)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn sync_all_platform(file: &File) -> io::Result<()> {
-  file.sync_all()
+#[cfg(windows)]
+fn sync_data_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
+  file.sync_data()?;
+  Ok(NativeDurabilityMechanism::WindowsFlushFileBuffers)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn sync_all_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
+  file.sync_all()?;
+  Ok(NativeDurabilityMechanism::UnixFsync)
 }
 
 #[cfg(target_os = "macos")]
-fn sync_all_platform(file: &File) -> io::Result<()> {
+fn sync_all_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
   use std::os::fd::AsRawFd;
-  if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
-    return Err(io::Error::last_os_error());
+  if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } != -1 {
+    return Ok(NativeDurabilityMechanism::AppleFullFsync);
   }
-  Ok(())
+  let error = io::Error::last_os_error();
+  if !is_unsupported_io(&error) {
+    return Err(error);
+  }
+  file.sync_all()?;
+  Ok(NativeDurabilityMechanism::AppleFsyncFallback)
+}
+
+#[cfg(windows)]
+fn sync_all_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
+  file.sync_all()?;
+  Ok(NativeDurabilityMechanism::WindowsFlushFileBuffers)
 }
 
 #[cfg(unix)]
-fn sync_directory_platform(path: &Path) -> NativeDurabilityResult<()> {
+fn sync_directory_platform(path: &Path) -> NativeDurabilityResult<NativeDurabilityMechanism> {
   let metadata =
     std::fs::symlink_metadata(path).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::ParentDirectorySync, error))?;
   if !metadata.file_type().is_dir() {
@@ -474,11 +546,12 @@ fn sync_directory_platform(path: &Path) -> NativeDurabilityResult<()> {
     ));
   }
   let directory = File::open(path).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::ParentDirectorySync, error))?;
-  sync_all_platform(&directory).map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::ParentDirectorySync, error))
+  directory.sync_all().map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::ParentDirectorySync, error))?;
+  Ok(NativeDurabilityMechanism::UnixFsync)
 }
 
 #[cfg(windows)]
-fn sync_directory_platform(path: &Path) -> NativeDurabilityResult<()> {
+fn sync_directory_platform(path: &Path) -> NativeDurabilityResult<NativeDurabilityMechanism> {
   use std::os::windows::fs::OpenOptionsExt;
   use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -490,34 +563,62 @@ fn sync_directory_platform(path: &Path) -> NativeDurabilityResult<()> {
     .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
     .open(path)
     .map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::ParentDirectorySync, error))?;
-  directory.sync_all().map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::ParentDirectorySync, error))
+  directory.sync_all().map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::ParentDirectorySync, error))?;
+  Ok(NativeDurabilityMechanism::WindowsDirectoryFlushFileBuffers)
 }
 
 #[cfg(unix)]
-fn durable_replace_platform(from: &Path, to: &Path) -> NativeDurabilityResult<()> {
-  std::fs::rename(from, to).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableReplace, error))
+fn durable_replace_platform(from: &Path, to: &Path) -> NativeDurabilityResult<NativeDurabilityMechanism> {
+  std::fs::rename(from, to).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableReplace, error))?;
+  Ok(NativeDurabilityMechanism::UnixRenameAndDirectoryFsync)
 }
 
 #[cfg(windows)]
-fn durable_replace_platform(from: &Path, to: &Path) -> NativeDurabilityResult<()> {
+fn durable_replace_platform(from: &Path, to: &Path) -> NativeDurabilityResult<NativeDurabilityMechanism> {
   use std::os::windows::ffi::OsStrExt;
+  use std::os::windows::fs::OpenOptionsExt;
   use windows_sys::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH, ReplaceFileW,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
   };
 
   let from_wide: Vec<u16> = from.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
   let to_wide: Vec<u16> = to.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-  let result = unsafe {
+  let (result, mechanism) = unsafe {
     if to.exists() {
-      ReplaceFileW(to_wide.as_ptr(), from_wide.as_ptr(), std::ptr::null(), REPLACEFILE_WRITE_THROUGH, std::ptr::null(), std::ptr::null())
+      (
+        ReplaceFileW(to_wide.as_ptr(), from_wide.as_ptr(), std::ptr::null(), 0, std::ptr::null(), std::ptr::null()),
+        NativeDurabilityMechanism::WindowsReplaceFileAndFlush,
+      )
     } else {
-      MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+      (
+        MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
+        NativeDurabilityMechanism::WindowsMoveFileExWriteThrough,
+      )
     }
   };
   if result == 0 {
-    return Err(NativeDurabilityError::operation_io(NativeDurabilityOperation::DurableReplace, io::Error::last_os_error()));
+    let error = NativeDurabilityError::operation_io(NativeDurabilityOperation::DurableReplace, io::Error::last_os_error());
+    if matches!(error.raw_os_error(), Some(1176 | 1177)) {
+      return Err(NativeDurabilityError::uncertain(NativeDurabilityOperation::DurableReplace, error));
+    }
+    return Err(error);
   }
-  Ok(())
+  let target =
+    OpenOptions::new().read(true).write(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).open(to).map_err(
+      |error| {
+        NativeDurabilityError::uncertain(
+          NativeDurabilityOperation::DurableReplace,
+          NativeDurabilityError::operation_io(NativeDurabilityOperation::DurableReplace, error),
+        )
+      },
+    )?;
+  sync_all_platform(&target).map_err(|error| {
+    NativeDurabilityError::uncertain(
+      NativeDurabilityOperation::DurableReplace,
+      NativeDurabilityError::operation_io(NativeDurabilityOperation::DurableReplace, error),
+    )
+  })?;
+  Ok(mechanism)
 }
 
 #[cfg(unix)]

@@ -1,12 +1,15 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use aeordb::engine::EngineError;
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::durability::{rename_durable, sync_parent_dir};
 use aeordb::engine::native_durability::{
-  NativeDurabilityErrorClass, NativeOperationSupport, PlatformFileIdentityDescriptorV1, durable_replace_native, platform_file_identity,
-  preallocate_file, probe_native_durability, sync_directory_native, sync_file_all_native, sync_file_data_native,
+  NativeDurabilityError, NativeDurabilityErrorClass, NativeDurabilityMechanism, NativeDurabilityOperation, NativeOperationSupport,
+  PlatformFileIdentityDescriptorV1, durable_replace_native, platform_file_identity, preallocate_file, probe_native_durability,
+  sync_directory_native, sync_file_all_native, sync_file_data_native,
 };
 use aeordb::engine::v4::control_store::{ControlStoreReadV1, ControlStoreSlotsV1, select_control_store_read};
 use aeordb::engine::v4::config_value::{
@@ -44,21 +47,95 @@ fn native_probe_proves_barriers_preallocation_replace_identity_and_readback() {
   let report = probe_native_durability(temp.path()).unwrap();
 
   assert!(!report.filesystem.kind.is_empty());
-  assert!(report.read_back_verified);
   for support in [
     &report.capabilities.data_barrier,
     &report.capabilities.file_barrier,
-    &report.capabilities.parent_directory_sync,
-    &report.capabilities.durable_replace,
     &report.capabilities.preallocation,
     &report.capabilities.stable_file_identity,
   ] {
     assert_eq!(support, &NativeOperationSupport::Supported);
   }
   assert_eq!(report.identity_before_rename, report.identity_after_rename);
-  assert_eq!(report.replaced_identity, report.identity_after_rename);
-  assert_ne!(report.destination_identity_before_replace, report.replaced_identity);
   assert_eq!(report.identity_before_rename.unwrap().to_bytes().len(), PlatformFileIdentityDescriptorV1::ENCODED_LENGTH);
+
+  #[cfg(unix)]
+  {
+    assert!(report.read_back_verified);
+    assert_eq!(report.capabilities.parent_directory_sync, NativeOperationSupport::Supported);
+    assert_eq!(report.capabilities.durable_replace, NativeOperationSupport::Supported);
+    assert_eq!(report.replaced_identity, report.identity_after_rename);
+    assert_ne!(report.destination_identity_before_replace, report.replaced_identity);
+  }
+
+  #[cfg(windows)]
+  match &report.capabilities.parent_directory_sync {
+    NativeOperationSupport::Supported => {
+      assert_eq!(report.capabilities.durable_replace, NativeOperationSupport::Supported);
+      assert!(report.read_back_verified);
+      assert_eq!(report.replaced_identity, report.identity_after_rename);
+      assert_ne!(report.destination_identity_before_replace, report.replaced_identity);
+    }
+    NativeOperationSupport::Unsupported { reason } => {
+      assert!(!reason.is_empty());
+      assert!(matches!(report.capabilities.durable_replace, NativeOperationSupport::Unsupported { .. }));
+      assert!(!report.read_back_verified);
+      assert!(report.replaced_identity.is_none());
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  assert_eq!(
+    report.mechanisms,
+    aeordb::engine::native_durability::NativeDurabilityMechanisms {
+      data_barrier: Some(NativeDurabilityMechanism::UnixFdatasync),
+      file_barrier: Some(NativeDurabilityMechanism::UnixFsync),
+      parent_directory_sync: Some(NativeDurabilityMechanism::UnixFsync),
+      durable_replace: Some(NativeDurabilityMechanism::UnixRenameAndDirectoryFsync),
+    }
+  );
+
+  #[cfg(target_os = "macos")]
+  {
+    assert_eq!(report.mechanisms.data_barrier, Some(NativeDurabilityMechanism::AppleBarrierFsync));
+    assert!(matches!(
+      report.mechanisms.file_barrier,
+      Some(NativeDurabilityMechanism::AppleFullFsync | NativeDurabilityMechanism::AppleFsyncFallback)
+    ));
+    assert_eq!(report.mechanisms.parent_directory_sync, Some(NativeDurabilityMechanism::UnixFsync));
+    assert_eq!(report.mechanisms.durable_replace, Some(NativeDurabilityMechanism::UnixRenameAndDirectoryFsync));
+  }
+
+  #[cfg(windows)]
+  {
+    assert_eq!(report.mechanisms.data_barrier, Some(NativeDurabilityMechanism::WindowsFlushFileBuffers));
+    assert_eq!(report.mechanisms.file_barrier, Some(NativeDurabilityMechanism::WindowsFlushFileBuffers));
+    assert!(matches!(report.mechanisms.parent_directory_sync, Some(NativeDurabilityMechanism::WindowsDirectoryFlushFileBuffers) | None));
+    if report.capabilities.durable_replace == NativeOperationSupport::Supported {
+      assert!(matches!(
+        report.mechanisms.durable_replace,
+        Some(NativeDurabilityMechanism::WindowsReplaceFileAndFlush | NativeDurabilityMechanism::WindowsMoveFileExWriteThrough)
+      ));
+    }
+  }
+}
+
+#[test]
+fn windows_replace_never_passes_the_documented_unsupported_replacefile_flag() {
+  let source = include_str!("../../src/engine/native_durability.rs");
+  assert!(!source.contains("REPLACEFILE_WRITE_THROUGH"));
+}
+
+#[test]
+fn native_unsupported_os_results_remain_typed_and_never_become_warning_success() {
+  #[cfg(unix)]
+  let raw_error = libc::ENOSYS;
+  #[cfg(windows)]
+  let raw_error = 50;
+
+  let error = NativeDurabilityError::from_io(NativeDurabilityOperation::ParentDirectorySync, io::Error::from_raw_os_error(raw_error));
+  assert_eq!(error.class(), NativeDurabilityErrorClass::Unsupported);
+  assert_eq!(error.operation(), NativeDurabilityOperation::ParentDirectorySync);
+  assert_eq!(error.raw_os_error(), Some(raw_error));
 }
 
 #[test]
@@ -73,10 +150,20 @@ fn native_primitives_preserve_identity_across_rename_and_replace_contents_durabl
   file.write_all(b"old payload").unwrap();
   sync_file_data_native(&file).unwrap();
   sync_file_all_native(&file).unwrap();
+  #[cfg(unix)]
   sync_directory_native(temp.path()).unwrap();
+  #[cfg(windows)]
+  if let Err(error) = sync_directory_native(temp.path()) {
+    assert_eq!(error.class(), NativeDurabilityErrorClass::Unsupported);
+    assert_eq!(fs::read(&original).unwrap(), b"old payload");
+    return;
+  }
   let before = platform_file_identity(&original).unwrap();
 
   fs::rename(&original, &renamed).unwrap();
+  #[cfg(unix)]
+  sync_directory_native(temp.path()).unwrap();
+  #[cfg(windows)]
   sync_directory_native(temp.path()).unwrap();
   assert_eq!(before, platform_file_identity(&renamed).unwrap());
 
@@ -84,7 +171,15 @@ fn native_primitives_preserve_identity_across_rename_and_replace_contents_durabl
   file.write_all(b"new payload").unwrap();
   sync_file_all_native(&file).unwrap();
   drop(file);
+  #[cfg(unix)]
   durable_replace_native(&replacement, &renamed).unwrap();
+  #[cfg(windows)]
+  if let Err(error) = durable_replace_native(&replacement, &renamed) {
+    assert_eq!(error.class(), NativeDurabilityErrorClass::Unsupported);
+    assert_eq!(fs::read(&renamed).unwrap(), b"old payload");
+    assert_eq!(fs::read(&replacement).unwrap(), b"new payload");
+    return;
+  }
   assert_eq!(fs::read(&renamed).unwrap(), b"new payload");
   assert_ne!(before, platform_file_identity(&renamed).unwrap());
   assert!(!replacement.exists());
@@ -97,7 +192,18 @@ fn legacy_durability_helpers_delegate_to_the_proven_native_path() {
   let destination = temp.path().join("legacy-destination.bin");
   fs::write(&source, b"replacement").unwrap();
   fs::write(&destination, b"old").unwrap();
+  #[cfg(unix)]
   sync_parent_dir(&source).unwrap();
+  #[cfg(windows)]
+  if let Err(error) = sync_parent_dir(&source) {
+    let EngineError::DurabilityFailure(message) = error else {
+      panic!("unexpected parent-sync error: {error}")
+    };
+    assert!(message.contains("Unsupported"));
+    assert_eq!(fs::read(&source).unwrap(), b"replacement");
+    assert_eq!(fs::read(&destination).unwrap(), b"old");
+    return;
+  }
   rename_durable(&source, &destination).unwrap();
   assert_eq!(fs::read(&destination).unwrap(), b"replacement");
   assert!(!source.exists());

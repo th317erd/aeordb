@@ -1,20 +1,20 @@
 # Child 01 Progress: Format
 
-- **Status:** P0b, P0c, P1a, and P1b complete; P1c next
+- **Status:** P0b, P0c, P1a, and P1b complete; P1c native-host qualification in progress
 - **Current landing unit:** P1c native platform probes and read-only control selection
-- **Entry commit:** `628fd87`
-- **Last green commit:** P1a reader hardening closure `628fd87`
+- **Entry commit:** resumed from pushed P2f boundary `f12031f`
+- **Last green commit:** pushed P2f exit `8f2ab42`; documentation boundary `f12031f`
 - **Owner:** Codex, persistent-format/reference owner
 - **Start gate:** Child 08 P0a inventory/baseline accepted
 - **Plan:** [Child 01](../children/01-format-capabilities-and-fixtures.md)
-- **Owned files:** this ledger; `tools/v4-reference/`; `aeordb-lib/spec/fixtures/v4/`; P0b/P0c clauses in `scripts/plan/check-v4-contracts.sh`
-- **Forbidden/hotspot files:** production Rust codecs/readers/writers, root Cargo workspace membership, GC/query/index/namespace behavior, real/evidence databases, `.codex/DETAILS.md`, `.codex/wip.md`, and `downloads/`
+- **Owned files:** this ledger; `TODO.md`; `aeordb-lib/src/engine/native_durability.rs`; `aeordb-lib/spec/engine/v4_platform_probe_spec.rs`; native qualification evidence
+- **Forbidden/hotspot files:** v4 production writers, root Cargo workspace membership, GC/query/index/namespace behavior, real/evidence databases, `.codex/DETAILS.md`, `.codex/wip.md`, and `downloads/`
 - **Hotspot handoff commit:** none
 - **Narrow gate:** `timeout 2m ./scripts/plan/check-v4-contracts.sh`
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** implement Linux, macOS, and Windows durability probes plus read-only ControlStore selection
+- **Next action:** complete native macOS and Windows qualification on the exact landing commit, then close P1c
 
 ## P0c Machine Contract Registry
 
@@ -528,6 +528,8 @@
 - **Remaining gate:** both native hosts were unreachable at the first attempt (`wyatt-mac`: no route to host; `win11vm`: forwarded port refused). Run this exact commit natively on both, run the contract/format corpus there, then complete the local architecture/diff gate and close P1c.
 - **Boundary:** no v4 writer, ControlStore file loader/writer, startup activation, migration cutover, route, or database byte is active. Probe files are temporary and are strictly removed after successful verification.
 - **P1c resumed local gate:** the current 18-test native durability/ControlStore target, 72 format fixtures, 9 admission cases, 21,364-case reader mutation target, and 136 adjacent legacy format/restart tests pass under the four-thread home-backed scratch envelope. The architecture gate correctly detected two routes and one documentation page added after the P0a inventory: root-only `/system/runtime`, public `/dashboard.css`, and `operations/observability.md`. Their existing behavior matches the protected/public/documentation contracts; the frozen manifest now closes all 95 registered routes and 38 documentation pages. Native execution remains pending because `wyatt-mac` still reports no route to host and `win11vm` still refuses its forwarded SSH port.
+- **Platform-contract correction:** a fresh adversarial review against the ratified Round 10 platform adapter found that the Windows branch passed `REPLACEFILE_WRITE_THROUGH` to `ReplaceFileW` even though Microsoft documents that flag as unsupported, and that the macOS branch could not report its approved weaker `fsync` fallback when `F_FULLFSYNC` is unavailable. The new red target failed on the absent mechanism report. The adapter now records the exact barrier/replace mechanism, uses ordinary parent-directory `fsync` on macOS, reports `F_FULLFSYNC` versus fallback, invokes `ReplaceFileW` with supported flags only, reopens and flushes the Windows target, and classifies documented partial replacement errors as uncertain completion. Windows directory-handle flush remains either proven support or a typed visible unsupported capability; it is never warning-success.
+- **Corrected local proof:** the expanded native/control target passes 20 tests on Linux; the six legacy compatibility targets pass 143 tests; the v4 format target passes all 72 fixtures; admission passes 9; the bounded 21,364-case malformed corpus passes; the durability coordinator subset passes 20; and all 63 disk-KV tests pass. The complete corrected target cross-compiles for `x86_64-pc-windows-gnu` with only the same three pre-existing Windows warnings outside the changed module. The final workspace all-target gate passed 5,436 tests across 205 result groups with zero failures under the four-thread cap; its log is SHA-256 `3869dbdb4f9daa45a8ef7155d973fbd7146ae359e6a5a168dbb5b13c205a7e0f`. The machine contract gate verifies 436 independent fixtures, 95 routes, and 38 documentation pages, and the syntax-aware suppression gate verifies the unchanged 1,420 reviewed occurrences plus all 27 architecture tests. On 2026-08-09 the required native hosts remained unavailable (`wyatt-mac`: no route to host; `win11vm`: forwarded port refused), so native qualification is still not claimed.
 
 ## P1 Pre-Writer SystemFamily Root-Path Correction
 
