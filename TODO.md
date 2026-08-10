@@ -518,6 +518,7 @@
         - [x] Make destructive and diagnostic CLI commands reject prompt I/O failures, contradictory repair state, incomplete KV/WAL inventories, and checkpoint read failures instead of panicking or reporting partial success.
         - [x] Replace hash-fetch/query response panic assumptions and locator omission fallbacks with explicit HTTP/corruption failures.
         - [x] Replace fallible cache singleflight/replacement and constrained directory-operation panic assumptions with typed invariant failures.
+        - [x] Replace directory-repair workspace container and fixed-width decode panics with bounded typed corruption failures.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

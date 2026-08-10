@@ -175,7 +175,7 @@ impl DirectoryRepairWorkspace {
       }
       runs = next;
     }
-    let run = runs.pop().expect("at least one repair run");
+    let run = runs.pop().ok_or_else(|| workspace_corruption("directory-repair run planner produced no final run".to_string()))?;
     DirectoryRepairCursor::open(run, self.hash_algo, self.hash_length, Arc::clone(&self.cancellation))
   }
 
@@ -204,7 +204,11 @@ impl DirectoryRepairWorkspace {
       let file = OpenOptions::new().create(true).append(true).open(path)?;
       self.raw_files.insert(depth, file);
     }
-    self.raw_files.get_mut(&depth).expect("depth file inserted").write_all(&frame)?;
+    let raw_file = self
+      .raw_files
+      .get_mut(&depth)
+      .ok_or_else(|| workspace_corruption(format!("directory-repair depth file {depth} disappeared before append")))?;
+    raw_file.write_all(&frame)?;
     Ok(())
   }
 
@@ -249,7 +253,7 @@ impl DirectoryRepairWorkspace {
 
   fn merge_runs(&mut self, runs: Vec<RunFile>) -> EngineResult<RunFile> {
     if runs.len() == 1 {
-      return Ok(runs.into_iter().next().expect("one run"));
+      return runs.into_iter().next().ok_or_else(|| workspace_corruption("directory-repair merge lost its sole input run".to_string()));
     }
     let count = runs.iter().try_fold(0u64, |total, run| {
       total.checked_add(run.records).ok_or_else(|| EngineError::ResourceExhausted("directory-repair merge count overflow".to_string()))
@@ -474,12 +478,41 @@ fn encode_frame(record: &RepairRecord, hash_length: usize) -> EngineResult<Vec<u
   Ok(frame)
 }
 
+fn workspace_u16_at(bytes: &[u8], offset: usize, field: &str) -> EngineResult<u16> {
+  let end = offset.checked_add(2).ok_or_else(|| workspace_corruption(format!("directory-repair {field} offset overflow")))?;
+  let raw =
+    bytes.get(offset..end).ok_or_else(|| workspace_corruption(format!("directory-repair {field} is truncated at offset {offset}")))?;
+  let mut value = [0u8; 2];
+  value.copy_from_slice(raw);
+  Ok(u16::from_le_bytes(value))
+}
+
+fn workspace_u32_at(bytes: &[u8], offset: usize, field: &str) -> EngineResult<u32> {
+  let end = offset.checked_add(4).ok_or_else(|| workspace_corruption(format!("directory-repair {field} offset overflow")))?;
+  let raw =
+    bytes.get(offset..end).ok_or_else(|| workspace_corruption(format!("directory-repair {field} is truncated at offset {offset}")))?;
+  let mut value = [0u8; 4];
+  value.copy_from_slice(raw);
+  Ok(u32::from_le_bytes(value))
+}
+
+fn workspace_u64_at(bytes: &[u8], offset: usize, field: &str) -> EngineResult<u64> {
+  let end = offset.checked_add(8).ok_or_else(|| workspace_corruption(format!("directory-repair {field} offset overflow")))?;
+  let raw =
+    bytes.get(offset..end).ok_or_else(|| workspace_corruption(format!("directory-repair {field} is truncated at offset {offset}")))?;
+  let mut value = [0u8; 8];
+  value.copy_from_slice(raw);
+  Ok(u64::from_le_bytes(value))
+}
+
 fn read_frame<R: Read>(reader: &mut R, path: &Path, hash_length: usize) -> EngineResult<Option<RepairRecord>> {
   let mut length = [0u8; 4];
   match reader.read(&mut length[..1]) {
     Ok(0) => return Ok(None),
     Ok(1) => {}
-    Ok(_) => unreachable!("single-byte read"),
+    Ok(read) => {
+      return Err(workspace_corruption(format!("directory-repair reader returned invalid byte count {read} for a one-byte buffer")))
+    }
     Err(error) => return Err(workspace_io(path, "record prefix", error)),
   }
   reader.read_exact(&mut length[1..]).map_err(|error| workspace_io(path, "record prefix", error))?;
@@ -494,7 +527,7 @@ fn read_frame<R: Read>(reader: &mut R, path: &Path, hash_length: usize) -> Engin
   frame.resize(frame_length, 0);
   reader.read_exact(&mut frame).map_err(|error| workspace_io(path, "record body", error))?;
   let checksum_offset = frame_length - FRAME_CRC_BYTES;
-  let stored = u32::from_le_bytes(frame[checksum_offset..].try_into().expect("four-byte checksum"));
+  let stored = workspace_u32_at(&frame, checksum_offset, "record checksum")?;
   if stored != crc32fast::hash(&frame[..checksum_offset]) {
     return Err(workspace_corruption(format!("directory-repair record checksum mismatch in {}", path.display())));
   }
@@ -502,8 +535,8 @@ fn read_frame<R: Read>(reader: &mut R, path: &Path, hash_length: usize) -> Engin
   if kind > 1 || frame[1..4] != [0u8; 3] {
     return Err(workspace_corruption(format!("directory-repair record flags are invalid in {}", path.display())));
   }
-  let directory_length = u32::from_le_bytes(frame[4..8].try_into().expect("four-byte directory length")) as usize;
-  let child_length = u32::from_le_bytes(frame[8..12].try_into().expect("four-byte child length")) as usize;
+  let directory_length = workspace_u32_at(&frame, 4, "record directory length")? as usize;
+  let child_length = workspace_u32_at(&frame, 8, "record child length")? as usize;
   let expected = FRAME_FIXED_BYTES
     .checked_add(directory_length)
     .and_then(|length| length.checked_add(child_length))
@@ -542,13 +575,13 @@ fn encode_run_header(hash_algo: HashAlgorithm, hash_length: usize, records: u64)
 }
 
 fn decode_run_header(header: &[u8; RUN_HEADER_BYTES], hash_algo: HashAlgorithm, hash_length: usize) -> EngineResult<u64> {
-  let stored = u32::from_le_bytes(header[28..32].try_into().expect("four-byte checksum"));
+  let stored = workspace_u32_at(header, 28, "run-header checksum")?;
   if &header[..8] != RUN_MAGIC || stored != crc32fast::hash(&header[..28]) {
     return Err(workspace_corruption("directory-repair run header magic/checksum is invalid".to_string()));
   }
-  let version = u16::from_le_bytes(header[8..10].try_into().expect("two-byte version"));
-  let algorithm = u16::from_le_bytes(header[10..12].try_into().expect("two-byte algorithm"));
-  let stored_hash_length = u16::from_le_bytes(header[12..14].try_into().expect("two-byte hash length")) as usize;
+  let version = workspace_u16_at(header, 8, "run-header version")?;
+  let algorithm = workspace_u16_at(header, 10, "run-header algorithm")?;
+  let stored_hash_length = workspace_u16_at(header, 12, "run-header hash length")? as usize;
   if version != RUN_VERSION
     || algorithm != hash_algo.to_u16()
     || stored_hash_length != hash_length
@@ -557,7 +590,7 @@ fn decode_run_header(header: &[u8; RUN_HEADER_BYTES], hash_algo: HashAlgorithm, 
   {
     return Err(workspace_corruption("directory-repair run header contract mismatch".to_string()));
   }
-  Ok(u64::from_le_bytes(header[16..24].try_into().expect("eight-byte count")))
+  workspace_u64_at(header, 16, "run-header record count")
 }
 
 fn validate_directory_path(path: &str) -> EngineResult<String> {
@@ -639,6 +672,10 @@ fn workspace_io(path: &Path, operation: &str, error: std::io::Error) -> EngineEr
 fn workspace_corruption(reason: String) -> EngineError {
   EngineError::CorruptEntry { offset: 0, reason }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/directory_repair_workspace_panic_internal_spec.rs"]
+mod directory_repair_workspace_panic_internal_spec;
 
 #[cfg(test)]
 mod tests {
