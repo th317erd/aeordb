@@ -4,7 +4,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use crate::engine::{DirectoryOps, StorageEngine};
+use crate::engine::{DirectoryOps, EngineError, EngineResult, StorageEngine};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CorsRule {
@@ -51,26 +51,31 @@ pub fn parse_cors_origins(flag: &str) -> Vec<String> {
 }
 
 /// Load per-path CORS rules from /.aeordb-config/cors.json in the engine.
-/// Returns an empty Vec if the file does not exist or is invalid.
-pub fn load_cors_config(engine: &StorageEngine) -> Vec<CorsRule> {
+/// A missing file means no path-specific CORS policy. Malformed or unreadable
+/// authority is returned to startup instead of being presented as no policy.
+pub fn load_cors_config(engine: &StorageEngine) -> EngineResult<Vec<CorsRule>> {
   let ops = DirectoryOps::new(engine);
   match ops.read_file_buffered("/.aeordb-config/cors.json") {
-    Ok(data) => match serde_json::from_slice::<CorsConfig>(&data) {
-      Ok(config) => config.rules,
-      Err(e) => {
-        tracing::warn!("Failed to parse /.aeordb-config/cors.json: {}", e);
-        vec![]
-      }
-    },
-    Err(_) => vec![],
+    Ok(data) => serde_json::from_slice::<CorsConfig>(&data)
+      .map(|config| config.rules)
+      .map_err(|error| EngineError::JsonParseError(format!("Invalid CORS configuration: {error}"))),
+    Err(EngineError::NotFound(_)) => Ok(Vec::new()),
+    Err(error) => Err(error),
   }
 }
 
 /// Build a CorsState from the CLI flag and the engine config file.
-pub fn build_cors_state(cors_flag: Option<&str>, engine: &StorageEngine) -> CorsState {
+pub fn build_cors_state(cors_flag: Option<&str>, engine: &StorageEngine) -> EngineResult<CorsState> {
   let default_origins = cors_flag.map(parse_cors_origins);
-  let rules = load_cors_config(engine);
-  CorsState { default_origins, rules }
+  let rules = load_cors_config(engine)?;
+  Ok(CorsState { default_origins, rules })
+}
+
+fn response_header(value: &str, name: &'static str) -> Result<HeaderValue, Response> {
+  HeaderValue::from_str(value).map_err(|error| {
+    tracing::error!(header = name, %error, "CORS policy produced an invalid response header");
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+  })
 }
 
 /// CORS middleware: checks per-path rules first, then falls back to CLI default.
@@ -117,21 +122,29 @@ pub async fn cors_middleware(axum::extract::State(cors_state): axum::extract::St
 
   // Handle preflight
   if is_preflight {
+    let allow_origin = match response_header(&allow_origin, "access-control-allow-origin") {
+      Ok(value) => value,
+      Err(response) => return response,
+    };
+    let methods = match response_header(&methods, "access-control-allow-methods") {
+      Ok(value) => value,
+      Err(response) => return response,
+    };
+    let headers = match response_header(&headers, "access-control-allow-headers") {
+      Ok(value) => value,
+      Err(response) => return response,
+    };
+    let max_age = match response_header(&max_age.to_string(), "access-control-max-age") {
+      Ok(value) => value,
+      Err(response) => return response,
+    };
     let mut response = StatusCode::NO_CONTENT.into_response();
     let hdrs = response.headers_mut();
 
-    if let Ok(v) = HeaderValue::from_str(&allow_origin) {
-      hdrs.insert("access-control-allow-origin", v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&methods) {
-      hdrs.insert("access-control-allow-methods", v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&headers) {
-      hdrs.insert("access-control-allow-headers", v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&max_age.to_string()) {
-      hdrs.insert("access-control-max-age", v);
-    }
+    hdrs.insert("access-control-allow-origin", allow_origin);
+    hdrs.insert("access-control-allow-methods", methods);
+    hdrs.insert("access-control-allow-headers", headers);
+    hdrs.insert("access-control-max-age", max_age);
     if credentials {
       hdrs.insert("access-control-allow-credentials", HeaderValue::from_static("true"));
     }
@@ -139,12 +152,14 @@ pub async fn cors_middleware(axum::extract::State(cors_state): axum::extract::St
   }
 
   // Normal request -- run handler then attach CORS headers
+  let allow_origin = match response_header(&allow_origin, "access-control-allow-origin") {
+    Ok(value) => value,
+    Err(response) => return response,
+  };
   let mut response = next.run(request).await;
   let hdrs = response.headers_mut();
 
-  if let Ok(v) = HeaderValue::from_str(&allow_origin) {
-    hdrs.insert("access-control-allow-origin", v);
-  }
+  hdrs.insert("access-control-allow-origin", allow_origin);
   if credentials {
     hdrs.insert("access-control-allow-credentials", HeaderValue::from_static("true"));
   }

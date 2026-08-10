@@ -13,8 +13,19 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 ///
 /// The `AEORDB_LOG` environment variable, when set, takes precedence over the
 /// configured level string.
-pub fn initialize_logging(config: &LogConfig) {
-  let env_filter = EnvFilter::try_from_env("AEORDB_LOG").unwrap_or_else(|_| EnvFilter::new(&config.level));
+pub fn resolve_log_filter(config: &LogConfig) -> Result<EnvFilter, String> {
+  match std::env::var("AEORDB_LOG") {
+    Ok(value) => EnvFilter::try_new(&value).map_err(|error| format!("invalid AEORDB_LOG value {value:?}: {error}")),
+    Err(std::env::VarError::NotPresent) => {
+      EnvFilter::try_new(&config.level).map_err(|error| format!("invalid configured log level {:?}: {error}", config.level))
+    }
+    Err(std::env::VarError::NotUnicode(_)) => Err("AEORDB_LOG must contain valid Unicode".to_string()),
+  }
+}
+
+/// Fallibly initialize the process-wide tracing subscriber.
+pub fn try_initialize_logging(config: &LogConfig) -> Result<(), String> {
+  let env_filter = resolve_log_filter(config)?;
 
   match config.format {
     LogFormat::Json => {
@@ -28,7 +39,11 @@ pub fn initialize_logging(config: &LogConfig) {
         .with_timer(fmt::time::UtcTime::rfc_3339())
         .with_current_span(true);
 
-      tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
+      tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .try_init()
+        .map_err(|error| format!("failed to initialize logging: {error}"))?;
     }
     LogFormat::Pretty => {
       let fmt_layer = fmt::layer()
@@ -40,7 +55,19 @@ pub fn initialize_logging(config: &LogConfig) {
         .with_line_number(config.show_file_line)
         .with_timer(fmt::time::UtcTime::rfc_3339());
 
-      tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
+      tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .try_init()
+        .map_err(|error| format!("failed to initialize logging: {error}"))?;
     }
   }
+  Ok(())
+}
+
+/// Initialize logging for callers that retain the historical infallible API.
+/// CLI startup and diagnostics use [`try_initialize_logging`] so configuration
+/// failures are returned to the operator instead of panicking.
+pub fn initialize_logging(config: &LogConfig) {
+  try_initialize_logging(config).expect("logging initialization failed");
 }

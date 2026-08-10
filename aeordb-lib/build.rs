@@ -100,8 +100,8 @@ fn ensure_link(manifest_dir: &Path, portal_dir: &Path, spec: &LinkSpec) {
 
 fn remove_stale_link_path(link_path: &Path) {
   match std::fs::remove_file(link_path) {
-    Ok(()) => return,
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+    Ok(()) => {}
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
     Err(file_error) => match std::fs::remove_dir(link_path) {
       Ok(()) => {}
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -126,9 +126,10 @@ fn find_sibling_dir(start: &Path, dir_name: &str) -> Option<PathBuf> {
     let dir = cursor?;
     let candidate = dir.join(dir_name);
     if candidate.is_dir() {
-      if let Ok(canonical) = candidate.canonicalize() {
-        return Some(canonical);
-      }
+      let canonical = candidate
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("failed to canonicalize portal asset sibling `{}`: {error}", candidate.display()));
+      return Some(canonical);
     }
     cursor = dir.parent();
   }
@@ -284,21 +285,22 @@ fn register_rerun_if_changed_recursive(path: &Path) {
   }
   println!("cargo:rerun-if-changed={}", path.display());
   if path.is_dir() {
-    if let Ok(entries) = std::fs::read_dir(path) {
-      for entry in entries.flatten() {
-        register_rerun_if_changed_recursive(&entry.path());
-      }
+    let entries = std::fs::read_dir(path)
+      .unwrap_or_else(|error| panic!("failed to enumerate documentation source directory `{}`: {error}", path.display()));
+    for entry in entries {
+      let entry = entry.unwrap_or_else(|error| panic!("failed to read a documentation source entry under `{}`: {error}", path.display()));
+      register_rerun_if_changed_recursive(&entry.path());
     }
   }
 }
 
 fn collect_docs_book_assets(base: &Path, current: &Path, assets: &mut Vec<(String, PathBuf, &'static str)>) {
-  let entries = match std::fs::read_dir(current) {
-    Ok(entries) => entries,
-    Err(_) => return,
-  };
+  let entries = std::fs::read_dir(current)
+    .unwrap_or_else(|error| panic!("failed to enumerate generated documentation `{}`: {error}", current.display()));
 
-  for entry in entries.flatten() {
+  for entry in entries {
+    let entry =
+      entry.unwrap_or_else(|error| panic!("failed to read a generated documentation entry under `{}`: {error}", current.display()));
     let path = entry.path();
     if path.is_dir() {
       collect_docs_book_assets(base, &path, assets);
@@ -308,9 +310,9 @@ fn collect_docs_book_assets(base: &Path, current: &Path, assets: &mut Vec<(Strin
       continue;
     }
 
-    let Ok(relative) = path.strip_prefix(base) else {
-      continue;
-    };
+    let relative = path
+      .strip_prefix(base)
+      .unwrap_or_else(|error| panic!("generated documentation path `{}` escaped base `{}`: {error}", path.display(), base.display()));
     let url_path = relative.components().map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
     let content_type = docs_content_type(&url_path);
     assets.push((url_path, path, content_type));

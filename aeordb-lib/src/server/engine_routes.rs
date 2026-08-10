@@ -397,23 +397,18 @@ pub async fn engine_store_file(
     }
   }
 
-  let mut response_body = EngineFileResponse::from(&file_record);
-
-  // Compute the content-addressed hash so the caller can fetch by hash.
   let algo = state.engine.hash_algo();
-  let hash_length = algo.hash_length();
-  let file_value = match file_record.serialize(hash_length) {
-    Ok(v) => v,
-    Err(_) => return ErrorResponse::new(
-      "Failed to serialize file record after storing. The file was saved but the response could not be built — contact your administrator"
-        .to_string(),
-    )
-    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    .into_response(),
+  let response_body = match engine_file_response_with_hash(&file_record, algo) {
+    Ok(response) => response,
+    Err(error) => {
+      tracing::error!(path, %error, "Stored file but could not construct its HTTP response hash");
+      return ErrorResponse::new(
+        "The file was saved, but its response hash could not be constructed; inspect server health before retrying".to_string(),
+      )
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
+    }
   };
-  if let Ok(content_hash) = file_content_hash(&file_value, &algo) {
-    response_body.hash = Some(hex::encode(&content_hash));
-  }
 
   (StatusCode::CREATED, Json(response_body)).into_response()
 }
@@ -1310,6 +1305,14 @@ fn serialize_response_value<T: serde::Serialize>(value: &T, context: &str) -> Re
     tracing::error!(context, %error, "HTTP response serialization failed");
     ErrorResponse::new(format!("{context} serialization failed")).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
   })
+}
+
+fn engine_file_response_with_hash(file_record: &FileRecord, algorithm: crate::engine::HashAlgorithm) -> EngineResult<EngineFileResponse> {
+  let file_value = file_record.serialize(algorithm.hash_length())?;
+  let content_hash = file_content_hash(&file_value, &algorithm)?;
+  let mut response = EngineFileResponse::from(file_record);
+  response.hash = Some(hex::encode(content_hash));
+  Ok(response)
 }
 
 fn json_item_path(item: &serde_json::Value) -> Option<&str> {
@@ -2807,14 +2810,18 @@ async fn do_merge_patch(
     }
   };
 
-  let mut response_body = EngineFileResponse::from(&file_record);
   let algo = state.engine.hash_algo();
-  let hash_length = algo.hash_length();
-  if let Ok(file_value) = file_record.serialize(hash_length) {
-    if let Ok(content_hash) = file_content_hash(&file_value, &algo) {
-      response_body.hash = Some(hex::encode(&content_hash));
+  let response_body = match engine_file_response_with_hash(&file_record, algo) {
+    Ok(response) => response,
+    Err(error) => {
+      tracing::error!(path, %error, "Merged file but could not construct its HTTP response hash");
+      return ErrorResponse::new(
+        "The merge was saved, but its response hash could not be constructed; inspect server health before retrying".to_string(),
+      )
+      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+      .into_response();
     }
-  }
+  };
 
   let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
   (status, Json(response_body)).into_response()

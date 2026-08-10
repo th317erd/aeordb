@@ -162,6 +162,32 @@ async fn test_cors_preflight_options_returns_204() {
   assert_eq!(hdrs.get("access-control-max-age").unwrap(), "3600");
 }
 
+#[tokio::test]
+async fn malformed_cors_response_headers_fail_before_request_dispatch() {
+  let cors_state = CorsState {
+    default_origins: None,
+    rules: vec![CorsRule {
+      path: "/files/*".to_string(),
+      origins: vec!["*".to_string()],
+      methods: vec!["PUT\r\nx-injected: true".to_string()],
+      allow_headers: vec!["content-type".to_string()],
+      max_age: 60,
+      allow_credentials: false,
+    }],
+  };
+  let (app, _jwt_manager, _engine, _temp_dir) = test_app_with_cors(cors_state);
+  let request = Request::builder()
+    .method("OPTIONS")
+    .uri("/files/not-dispatched.txt")
+    .header("origin", "https://client.example")
+    .header("access-control-request-method", "PUT")
+    .body(Body::empty())
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
 // ===========================================================================
 // 6. Config file rule overrides CLI default for matching path
 // ===========================================================================
@@ -516,7 +542,7 @@ async fn test_load_cors_config_from_engine() {
 
   ops.store_file_buffered(&ctx, "/.aeordb-config/cors.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
-  let rules = aeordb::server::load_cors_config(&engine);
+  let rules = aeordb::server::load_cors_config(&engine).unwrap();
   assert_eq!(rules.len(), 2);
   assert_eq!(rules[0].path, "/files/*");
   assert_eq!(rules[0].origins, vec!["https://myapp.com"]);
@@ -540,12 +566,12 @@ async fn test_load_cors_config_from_engine() {
 #[tokio::test]
 async fn test_load_cors_config_missing_file() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
-  let rules = aeordb::server::load_cors_config(&engine);
+  let rules = aeordb::server::load_cors_config(&engine).unwrap();
   assert!(rules.is_empty());
 }
 
 // ===========================================================================
-// 17. load_cors_config with invalid JSON returns empty (with warning)
+// 17. load_cors_config rejects invalid JSON
 // ===========================================================================
 
 #[tokio::test]
@@ -556,8 +582,8 @@ async fn test_load_cors_config_invalid_json() {
 
   ops.store_file_buffered(&ctx, "/.aeordb-config/cors.json", b"not valid json", Some("application/json")).unwrap();
 
-  let rules = aeordb::server::load_cors_config(&engine);
-  assert!(rules.is_empty());
+  let error = aeordb::server::load_cors_config(&engine).unwrap_err();
+  assert!(error.to_string().contains("CORS configuration"), "unexpected error: {error}");
 }
 
 // ===========================================================================
@@ -573,7 +599,7 @@ async fn test_build_cors_state() {
   let config_json = r#"{"rules": [{"path": "/api/*", "origins": ["https://api.com"]}]}"#;
   ops.store_file_buffered(&ctx, "/.aeordb-config/cors.json", config_json.as_bytes(), Some("application/json")).unwrap();
 
-  let state = aeordb::server::build_cors_state(Some("https://default.com"), &engine);
+  let state = aeordb::server::build_cors_state(Some("https://default.com"), &engine).unwrap();
   assert_eq!(state.default_origins, Some(vec!["https://default.com".to_string()]));
   assert_eq!(state.rules.len(), 1);
   assert_eq!(state.rules[0].path, "/api/*");
@@ -586,7 +612,7 @@ async fn test_build_cors_state() {
 #[tokio::test]
 async fn test_build_cors_state_no_cors() {
   let (engine, _temp_dir) = create_temp_engine_for_tests();
-  let state = aeordb::server::build_cors_state(None, &engine);
+  let state = aeordb::server::build_cors_state(None, &engine).unwrap();
   assert!(state.default_origins.is_none());
   assert!(state.rules.is_empty());
 }

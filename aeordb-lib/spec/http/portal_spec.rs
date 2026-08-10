@@ -302,6 +302,21 @@ async fn test_stats_returns_json() {
 }
 
 #[tokio::test]
+async fn test_stats_rejects_unavailable_database_metadata_instead_of_reporting_zero_bytes() {
+  let (app, jwt_manager, _, temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let missing_path = temp_dir.path().join("missing.aeordb").to_string_lossy().to_string();
+  let app = app.layer(axum::Extension(missing_path));
+
+  let request = Request::builder().method("GET").uri("/system/stats").header("authorization", &auth).body(Body::empty()).unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+  let json = body_json(response.into_body()).await;
+  assert!(json["error"].as_str().is_some_and(|error| error.contains("database file metadata")), "unexpected response: {json}");
+}
+
+#[tokio::test]
 async fn test_stats_requires_auth() {
   let (app, _, _, _temp_dir) = test_app();
 

@@ -112,6 +112,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+aeordb-error-squelch-audit = { path = "../tools/error-squelch-audit" }
 futures-util = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio-util = "0.7"
@@ -807,6 +808,14 @@ path = "spec/engine/v3_contract_facade_spec.rs"
 [[test]]
 name = "namespace_mutation_spec"
 path = "spec/engine/namespace_mutation_spec.rs"
+
+[[test]]
+name = "error_squelch_architecture_spec"
+path = "spec/engine/error_squelch_architecture_spec.rs"
+
+[[test]]
+name = "rss_sampler_spec"
+path = "spec/engine/rss_sampler_spec.rs"
 
 [[test]]
 name = "metrics_initialization_spec"

@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::storage_engine::StorageEngine;
-use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::version_manager::{SnapshotInfo, VersionManager};
 use aeordb::engine::lifecycle_config::prune_expired_snapshots_with_post_capture_hook;
 use aeordb::engine::{
-  load_lifecycle_config, save_lifecycle_config, prune_expired_snapshots, EngineError, LifecycleConfig, RequestContext, SnapshotRetention,
-  SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_MANUAL,
+  load_lifecycle_config, save_lifecycle_config, prune_expired_snapshots, EngineError, EntryType, LifecycleConfig, RequestContext,
+  SnapshotRetention, SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_MANUAL,
 };
 
 fn create_engine(dir: &tempfile::TempDir) -> StorageEngine {
@@ -241,4 +241,30 @@ fn prune_targets_correct_type() {
   let result = prune_expired_snapshots(&engine, &ctx).unwrap();
   assert_eq!(result.pruned_count, 0, "fresh snapshots shouldn't be pruned");
   assert_eq!(vm.list_snapshots().unwrap().len(), 2);
+}
+
+#[test]
+fn prune_reports_an_eligible_snapshot_delete_failure() {
+  let ctx = RequestContext::system();
+  let dir = tempfile::tempdir().unwrap();
+  let engine = create_engine(&dir);
+  let mut metadata = HashMap::new();
+  metadata.insert(SNAPSHOT_TYPE_KEY.to_string(), SNAPSHOT_TYPE_AUTO.to_string());
+  let snapshot = SnapshotInfo {
+    name: "missing-locator".to_string(),
+    root_hash: engine.head_hash().unwrap(),
+    created_at: chrono::Utc::now().timestamp_millis() - 31 * 24 * 60 * 60 * 1000,
+    metadata,
+  };
+  let mismatched_key = engine.compute_hash(b"snap:different-locator").unwrap();
+  let value = snapshot.serialize(engine.hash_algo().hash_length()).unwrap();
+  engine.store_entry_typed(EntryType::Snapshot, &mismatched_key, &value, aeordb::engine::kv_store::KV_TYPE_SNAPSHOT).unwrap();
+  save_lifecycle_config(
+    &engine,
+    &LifecycleConfig { snapshot_retention: SnapshotRetention { auto_months: 1, manual_months: 0 }, ..LifecycleConfig::default() },
+  )
+  .unwrap();
+
+  let error = prune_expired_snapshots(&engine, &ctx).expect_err("an eligible snapshot that cannot be deleted must fail the retention pass");
+  assert!(matches!(error, EngineError::NotFound(ref message) if message.contains("missing-locator")), "unexpected error: {error}");
 }

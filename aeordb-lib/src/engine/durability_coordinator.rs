@@ -1617,8 +1617,19 @@ impl Drop for GroupExecutionGuard<'_> {
     let Some(operation) = self.operation else {
       return;
     };
-    let Ok(mut state) = self.coordinator.state.lock() else {
-      return;
+    let mut state = match self.coordinator.state.lock() {
+      Ok(state) => state,
+      Err(poisoned) => {
+        if !self.coordinator.state_poison_reported.swap(true, Ordering::AcqRel) {
+          crate::metrics::record_system_soft_failure(
+            "durability_coordinator",
+            "execution_guard_after_poison",
+            self.coordinator.id,
+            "executor unwound while poisoning coordinator state; pending operations were failed and normal APIs remain unavailable",
+          );
+        }
+        poisoned.into_inner()
+      }
     };
     let hard_authority = self
       .sequences

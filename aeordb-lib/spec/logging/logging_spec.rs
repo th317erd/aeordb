@@ -6,7 +6,7 @@ use axum::{
 };
 use tower::ServiceExt;
 
-use aeordb::logging::{LogConfig, LogFormat, initialize_logging, request_id_middleware};
+use aeordb::logging::{LogConfig, LogFormat, initialize_logging, request_id_middleware, resolve_log_filter};
 
 // ---------------------------------------------------------------------------
 // Request ID middleware tests
@@ -156,6 +156,79 @@ fn test_log_config_custom_level_string() {
   let config = LogConfig { level: "debug,aeordb::storage=trace".to_string(), ..LogConfig::default() };
 
   assert_eq!(config.level, "debug,aeordb::storage=trace");
+}
+
+static LOG_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct LogEnvironmentGuard(Option<std::ffi::OsString>);
+
+impl LogEnvironmentGuard {
+  fn replace(value: Option<std::ffi::OsString>) -> Self {
+    let previous = std::env::var_os("AEORDB_LOG");
+    match value {
+      Some(value) => std::env::set_var("AEORDB_LOG", value),
+      None => std::env::remove_var("AEORDB_LOG"),
+    }
+    Self(previous)
+  }
+}
+
+impl Drop for LogEnvironmentGuard {
+  fn drop(&mut self) {
+    match self.0.take() {
+      Some(value) => std::env::set_var("AEORDB_LOG", value),
+      None => std::env::remove_var("AEORDB_LOG"),
+    }
+  }
+}
+
+#[test]
+fn test_resolve_log_filter_rejects_invalid_environment_directive() {
+  let _lock = LOG_ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+  let _environment = LogEnvironmentGuard::replace(Some("not a valid [directive".into()));
+
+  let error = resolve_log_filter(&LogConfig::default()).expect_err("a configured invalid log filter must not become the default filter");
+
+  assert!(error.contains("AEORDB_LOG"));
+  assert!(error.contains("not a valid [directive"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_log_filter_rejects_non_unicode_environment_directive() {
+  use std::os::unix::ffi::OsStringExt;
+
+  let _lock = LOG_ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+  let _environment = LogEnvironmentGuard::replace(Some(std::ffi::OsString::from_vec(vec![0xFF])));
+
+  let error = resolve_log_filter(&LogConfig::default()).expect_err("a non-Unicode log filter must not become the default filter");
+
+  assert!(error.contains("AEORDB_LOG"));
+  assert!(error.contains("Unicode"));
+}
+
+#[test]
+fn test_resolve_log_filter_rejects_invalid_configured_directive_when_environment_is_absent() {
+  let _lock = LOG_ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+  let _environment = LogEnvironmentGuard::replace(None);
+  let config = LogConfig { level: "not a valid [directive".to_string(), ..LogConfig::default() };
+
+  let error = resolve_log_filter(&config).expect_err("an invalid configured log filter must not be accepted");
+
+  assert!(error.contains("configured log level"));
+  assert!(error.contains("not a valid [directive"));
+}
+
+#[test]
+fn test_resolve_log_filter_uses_valid_environment_override() {
+  let _lock = LOG_ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+  let _environment = LogEnvironmentGuard::replace(Some("debug,aeordb=trace".into()));
+
+  let filter = resolve_log_filter(&LogConfig::default()).expect("valid environment filter");
+
+  let canonical = filter.to_string();
+  assert!(canonical.split(',').any(|directive| directive == "debug"));
+  assert!(canonical.split(',').any(|directive| directive == "aeordb=trace"));
 }
 
 // ---------------------------------------------------------------------------

@@ -12,3 +12,7 @@ base64 = "0.22"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "response_spec"
+path = "spec/response_spec.rs"

@@ -221,7 +221,7 @@ pub use backup::{
 pub use version_manager::{VersionManager, SnapshotInfo, ForkInfo};
 pub use cluster_join::{has_signing_key, is_ready_for_traffic, get_cluster_mode};
 pub use peer_connection::{PeerConnection, PeerConfig, PeerManager, ConnectionState, SyncStatus};
-pub use virtual_clock::{VirtualClock, SystemClock, MockClock, PeerClockTracker, PeerClockStats};
+pub use virtual_clock::{VirtualClock, SystemClock, MockClock, PeerClockTracker, PeerClockStats, PeerClockTrackerError};
 pub use user::{User, ROOT_USER_ID, validate_user_id, is_root, SAFE_QUERY_FIELDS};
 pub use group::Group;
 pub use permission_resolver::{CrudlifyOp, PermissionResolver, path_levels};
@@ -237,7 +237,7 @@ pub use engine_event::{
   EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED, EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
   EVENT_FILES_SHARED, EVENT_GC_STARTED, EVENT_GC_COMPLETED, EVENT_METRICS, GcEventData, EVENT_TASKS_CREATED, EVENT_TASKS_STARTED,
   EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_CANCELLED, EVENT_TASKS_DEFERRED, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED,
-  EVENT_SERVER_READY,
+  EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;

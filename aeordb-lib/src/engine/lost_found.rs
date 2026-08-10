@@ -23,6 +23,7 @@ pub fn quarantine_bytes(engine: &StorageEngine, parent_path: &str, filename: &st
   tracing::warn!("Quarantining {} bytes to {}: {}", data.len(), lf_path, reason,);
 
   if let Err(e) = ops.store_file_buffered(&ctx, &lf_path, data, Some("application/octet-stream")) {
+    crate::metrics::record_system_soft_failure("lost_found", "quarantine_write", &lf_path, &e);
     tracing::warn!("Failed to write quarantine file {}: {}. Data may be lost.", lf_path, e,);
   }
 }
@@ -52,7 +53,14 @@ pub fn quarantine_metadata(
     }
   }
 
-  let data = serde_json::to_vec_pretty(&meta).unwrap_or_default();
+  let data = match serde_json::to_vec_pretty(&meta) {
+    Ok(data) => data,
+    Err(error) => {
+      crate::metrics::record_system_soft_failure("lost_found", "metadata_encode", filename, &error);
+      tracing::warn!(filename, error = %error, "Failed to encode quarantine metadata");
+      return;
+    }
+  };
   let lf_path = lost_found_path(parent_path, filename);
   let ctx = RequestContext::system();
   let ops = DirectoryOps::new(engine);
@@ -60,6 +68,7 @@ pub fn quarantine_metadata(
   tracing::warn!("Quarantining metadata to {}: {}", lf_path, reason,);
 
   if let Err(e) = ops.store_file_buffered(&ctx, &lf_path, &data, Some("application/json")) {
+    crate::metrics::record_system_soft_failure("lost_found", "quarantine_write", &lf_path, &e);
     tracing::warn!("Failed to write quarantine metadata {}: {}. Metadata may be lost.", lf_path, e,);
   }
 }

@@ -5,6 +5,7 @@ use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, MemoryType, Module, 
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
+use crate::engine::errors::EngineError;
 use crate::engine::api_key_rules::{check_operation_permitted, is_ancestor_of_any_rule, match_rules, operation_to_flag_char};
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
@@ -274,8 +275,8 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         let dir_ops = DirectoryOps::new(&engine);
@@ -357,8 +358,8 @@ impl WasmPluginRuntime {
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Create) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Create) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         let dir_ops = DirectoryOps::new(&engine);
@@ -395,8 +396,8 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Missing 'path' argument"),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         let engine = match caller.data().engine.as_ref() {
@@ -438,8 +439,8 @@ impl WasmPluginRuntime {
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Delete) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Delete) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         let dir_ops = DirectoryOps::new(&engine);
@@ -476,8 +477,8 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         let dir_ops = DirectoryOps::new(&engine);
@@ -521,8 +522,8 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &path, CrudlifyOp::List) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::List) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         let dir_ops = DirectoryOps::new(&engine);
@@ -532,9 +533,15 @@ impl WasmPluginRuntime {
         };
         let normalized_directory = crate::engine::path_utils::normalize_path(&path);
         let response_capacity = host_response_capacity(&caller);
-        let offset = args_json.get("offset").and_then(|value| value.as_u64()).and_then(|value| usize::try_from(value).ok()).unwrap_or(0);
+        let offset = match optional_json_usize(&args_json, "offset") {
+          Ok(value) => value.unwrap_or(0),
+          Err(error) => return write_error_response(&mut caller, &error),
+        };
         let capacity_limit = response_capacity.saturating_sub(256) / 128;
-        let requested_limit = args_json.get("limit").and_then(|value| value.as_u64()).and_then(|value| usize::try_from(value).ok());
+        let requested_limit = match optional_json_usize(&args_json, "limit") {
+          Ok(value) => value,
+          Err(error) => return write_error_response(&mut caller, &error),
+        };
         let limit = requested_limit.unwrap_or(capacity_limit).min(capacity_limit);
 
         match dir_ops.list_directory_window_strict(&path, offset, limit) {
@@ -603,8 +610,8 @@ impl WasmPluginRuntime {
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         let response_capacity = host_response_capacity(&caller);
@@ -620,7 +627,11 @@ impl WasmPluginRuntime {
           if !family_policy.generic_data_path_is_visible(&result.file_record.path)? {
             return Ok(false);
           }
-          Ok(authorize_plugin_path(&caller, &result.file_record.path, CrudlifyOp::Read).is_ok())
+          match authorize_plugin_path(&caller, &result.file_record.path, CrudlifyOp::Read) {
+            Ok(()) => Ok(true),
+            Err(PluginPathAuthorizationError::Denied(_)) => Ok(false),
+            Err(error) => Err(error.into_engine_error()),
+          }
         }) {
           Ok(paginated) => {
             let mut result_items = Vec::new();
@@ -693,8 +704,8 @@ impl WasmPluginRuntime {
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        if let Err(e) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
-          return write_error_response(&mut caller, &e);
+        if let Err(error) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
+          return write_error_response(&mut caller, &error.to_string());
         }
 
         if query.aggregate.is_none() {
@@ -810,16 +821,43 @@ fn get_engine_and_context(caller: &Caller<'_, HostState>) -> Result<(Arc<Storage
   Ok((Arc::clone(engine), ctx))
 }
 
-fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: CrudlifyOp) -> Result<(), String> {
-  let engine = caller.data().engine.as_ref().ok_or_else(|| "Database access not available in this plugin context".to_string())?;
-  let ctx = caller.data().request_context.as_ref().ok_or_else(|| "Request context not available in this plugin context".to_string())?;
+#[derive(Debug, thiserror::Error)]
+enum PluginPathAuthorizationError {
+  #[error("{0}")]
+  Denied(String),
+  #[error("{0}")]
+  Operational(#[source] EngineError),
+  #[error("{0}")]
+  Context(String),
+}
+
+impl PluginPathAuthorizationError {
+  fn into_engine_error(self) -> EngineError {
+    match self {
+      Self::Operational(error) => error,
+      Self::Denied(message) | Self::Context(message) => EngineError::InvalidInput(format!("plugin authorization failed: {message}")),
+    }
+  }
+}
+
+fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: CrudlifyOp) -> Result<(), PluginPathAuthorizationError> {
+  let engine = caller
+    .data()
+    .engine
+    .as_ref()
+    .ok_or_else(|| PluginPathAuthorizationError::Context("Database access not available in this plugin context".to_string()))?;
+  let ctx = caller
+    .data()
+    .request_context
+    .as_ref()
+    .ok_or_else(|| PluginPathAuthorizationError::Context("Request context not available in this plugin context".to_string()))?;
 
   let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
   let visible = SystemFamilyPolicyResolver::new(engine.hash_algo())
     .and_then(|resolver| resolver.generic_data_path_is_visible(&normalized))
-    .map_err(|error| format!("System family policy failed for '{}': {}", normalized, error))?;
+    .map_err(PluginPathAuthorizationError::Operational)?;
   if !visible {
-    return Err(format!("Permission denied: {}", normalized));
+    return Err(PluginPathAuthorizationError::Denied(format!("Permission denied: {}", normalized)));
   }
 
   if ctx.user_id == "system" {
@@ -827,20 +865,26 @@ fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: 
   }
 
   if let Some(key_id) = ctx.key_id.as_ref() {
-    let api_key_cache =
-      caller.data().api_key_cache.as_ref().ok_or_else(|| "API key cache not available in this plugin context".to_string())?;
-    let api_key_engine =
-      caller.data().api_key_engine.as_ref().ok_or_else(|| "API key authority not available in this plugin context".to_string())?;
+    let api_key_cache = caller
+      .data()
+      .api_key_cache
+      .as_ref()
+      .ok_or_else(|| PluginPathAuthorizationError::Context("API key cache not available in this plugin context".to_string()))?;
+    let api_key_engine = caller
+      .data()
+      .api_key_engine
+      .as_ref()
+      .ok_or_else(|| PluginPathAuthorizationError::Context("API key authority not available in this plugin context".to_string()))?;
     let key_record = api_key_cache
       .get(key_id, api_key_engine)
-      .map_err(|error| format!("Failed to verify API key: {}", error))?
-      .ok_or_else(|| "API key not found".to_string())?;
+      .map_err(PluginPathAuthorizationError::Operational)?
+      .ok_or_else(|| PluginPathAuthorizationError::Denied("API key not found".to_string()))?;
 
     if key_record.is_revoked {
-      return Err("API key has been revoked".to_string());
+      return Err(PluginPathAuthorizationError::Denied("API key has been revoked".to_string()));
     }
     if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
-      return Err("API key expired".to_string());
+      return Err(PluginPathAuthorizationError::Denied("API key expired".to_string()));
     }
 
     if !key_record.rules.is_empty() {
@@ -851,7 +895,7 @@ fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: 
       if !ancestor_allowed {
         match match_rules(&key_record.rules, &normalized) {
           Some(rule) if check_operation_permitted(&rule.permitted, flag_char) => {}
-          _ => return Err(format!("Permission denied: {}", normalized)),
+          _ => return Err(PluginPathAuthorizationError::Denied(format!("Permission denied: {}", normalized))),
         }
       }
     }
@@ -861,16 +905,20 @@ fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: 
     }
   }
 
-  let user_id = uuid::Uuid::parse_str(&ctx.user_id).map_err(|_| "Invalid user identity".to_string())?;
-  let group_cache = caller.data().group_cache.as_ref().ok_or_else(|| "Group cache not available in this plugin context".to_string())?;
+  let user_id =
+    uuid::Uuid::parse_str(&ctx.user_id).map_err(|_| PluginPathAuthorizationError::Denied("Invalid user identity".to_string()))?;
+  let group_cache = caller
+    .data()
+    .group_cache
+    .as_ref()
+    .ok_or_else(|| PluginPathAuthorizationError::Context("Group cache not available in this plugin context".to_string()))?;
   let resolver = PermissionResolver::new(engine, group_cache);
-  let allowed =
-    resolver.check_path_permission(&user_id, &normalized, operation).map_err(|error| format!("Permission check failed: {}", error))?;
+  let allowed = resolver.check_path_permission(&user_id, &normalized, operation).map_err(PluginPathAuthorizationError::Operational)?;
 
   if allowed {
     Ok(())
   } else {
-    Err(format!("Permission denied: {}", normalized))
+    Err(PluginPathAuthorizationError::Denied(format!("Permission denied: {}", normalized)))
   }
 }
 
@@ -1017,40 +1065,27 @@ fn parse_query_from_json(json: &serde_json::Value) -> Result<Query, String> {
   let query_node = parse_where_clause(&where_clause)?;
   let is_empty = matches!(&query_node, crate::engine::query_engine::QueryNode::And(children) if children.is_empty());
 
-  let limit = json.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-  let offset = json.get("offset").and_then(|v| v.as_u64()).map(|v| v as usize);
-  let after = json.get("after").and_then(|v| v.as_str()).map(|s| s.to_string());
-  let before = json.get("before").and_then(|v| v.as_str()).map(|s| s.to_string());
-  let include_total = json.get("include_total").and_then(|v| v.as_bool()).unwrap_or(false);
+  let limit = optional_json_usize(json, "limit")?;
+  let offset = optional_json_usize(json, "offset")?;
+  let after = optional_query_string(json, "after")?;
+  let before = optional_query_string(json, "before")?;
+  let include_total = optional_query_bool(json, "include_total")?.unwrap_or(false);
+  let order_by = parse_query_order_by(json.get("order_by"))?;
 
-  // Parse order_by
-  let order_by: Vec<SortField> = json
-    .get("order_by")
-    .and_then(|v| v.as_array())
-    .map(|fields| {
-      fields
-        .iter()
-        .filter_map(|f| {
-          let field = f.get("field")?.as_str()?.to_string();
-          let direction = match f.get("direction").and_then(|d| d.as_str()) {
-            Some("desc") => SortDirection::Desc,
-            _ => SortDirection::Asc,
-          };
-          Some(SortField { field, direction })
-        })
-        .collect()
-    })
-    .unwrap_or_default();
-
-  // Parse aggregate section
-  let aggregate = json.get("aggregate").map(|agg| AggregateQuery {
-    count: agg.get("count").and_then(|v| v.as_bool()).unwrap_or(false),
-    sum: parse_string_array(agg.get("sum")),
-    avg: parse_string_array(agg.get("avg")),
-    min: parse_string_array(agg.get("min")),
-    max: parse_string_array(agg.get("max")),
-    group_by: parse_string_array(agg.get("group_by")),
-  });
+  let aggregate = match json.get("aggregate") {
+    None => None,
+    Some(value) => {
+      let aggregate = value.as_object().ok_or_else(|| "'aggregate' must be an object".to_string())?;
+      Some(AggregateQuery {
+        count: optional_query_bool(value, "count")?.unwrap_or(false),
+        sum: parse_string_array(aggregate.get("sum"), "aggregate.sum")?,
+        avg: parse_string_array(aggregate.get("avg"), "aggregate.avg")?,
+        min: parse_string_array(aggregate.get("min"), "aggregate.min")?,
+        max: parse_string_array(aggregate.get("max"), "aggregate.max")?,
+        group_by: parse_string_array(aggregate.get("group_by"), "aggregate.group_by")?,
+      })
+    }
+  };
 
   Ok(Query {
     path,
@@ -1068,10 +1103,64 @@ fn parse_query_from_json(json: &serde_json::Value) -> Result<Query, String> {
   })
 }
 
-/// Parse an optional JSON value as an array of strings.
-fn parse_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
-  value
-    .and_then(|v| v.as_array())
-    .map(|arr| arr.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
-    .unwrap_or_default()
+fn optional_json_usize(json: &serde_json::Value, field: &str) -> Result<Option<usize>, String> {
+  let Some(value) = json.get(field) else {
+    return Ok(None);
+  };
+  let value = value.as_u64().ok_or_else(|| format!("'{field}' must be an unsigned integer"))?;
+  usize::try_from(value).map(Some).map_err(|_| format!("'{field}' exceeds this platform's address space"))
 }
+
+fn optional_query_string(json: &serde_json::Value, field: &str) -> Result<Option<String>, String> {
+  let Some(value) = json.get(field) else {
+    return Ok(None);
+  };
+  value.as_str().map(|value| Some(value.to_string())).ok_or_else(|| format!("'{field}' must be a string"))
+}
+
+fn optional_query_bool(json: &serde_json::Value, field: &str) -> Result<Option<bool>, String> {
+  let Some(value) = json.get(field) else {
+    return Ok(None);
+  };
+  value.as_bool().map(Some).ok_or_else(|| format!("'{field}' must be a boolean"))
+}
+
+fn parse_query_order_by(value: Option<&serde_json::Value>) -> Result<Vec<SortField>, String> {
+  let Some(value) = value else {
+    return Ok(Vec::new());
+  };
+  let fields = value.as_array().ok_or_else(|| "'order_by' must be an array".to_string())?;
+  let mut order_by = Vec::with_capacity(fields.len());
+  for (index, value) in fields.iter().enumerate() {
+    let field = value
+      .get("field")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| format!("'order_by[{index}].field' must be a string"))?
+      .to_string();
+    let direction = match value.get("direction") {
+      None => SortDirection::Asc,
+      Some(value) if value.as_str() == Some("asc") => SortDirection::Asc,
+      Some(value) if value.as_str() == Some("desc") => SortDirection::Desc,
+      Some(_) => return Err(format!("'order_by[{index}].direction' must be 'asc' or 'desc'")),
+    };
+    order_by.push(SortField { field, direction });
+  }
+  Ok(order_by)
+}
+
+/// Parse an absent value as an empty list; a present value must be an array of strings.
+fn parse_string_array(value: Option<&serde_json::Value>, field: &str) -> Result<Vec<String>, String> {
+  let Some(value) = value else {
+    return Ok(Vec::new());
+  };
+  let values = value.as_array().ok_or_else(|| format!("'{field}' must be an array"))?;
+  values
+    .iter()
+    .enumerate()
+    .map(|(index, value)| value.as_str().map(str::to_string).ok_or_else(|| format!("'{field}[{index}]' must be a string")))
+    .collect()
+}
+
+#[cfg(test)]
+#[path = "../../spec/plugins/wasm_runtime_query_internal_spec.rs"]
+mod wasm_runtime_query_internal_spec;

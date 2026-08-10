@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use aeordb::engine::{
   directory_content_hash, file_path_hash, save_lifecycle_config, DirectoryOps, EntryType, LifecycleConfig, RequestContext, StorageEngine,
-  VersionManager,
+  SnapshotRetention, VersionManager,
 };
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::config_resolver::ConfigurationFamily;
@@ -12,6 +12,7 @@ use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, ru
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
 use aeordb::engine::storage_engine::WriteBatch;
 use aeordb::engine::tree_walker::walk_version_tree;
+use aeordb::engine::version_manager::SnapshotInfo;
 use aeordb::engine::{EngineError, EventBus};
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
@@ -557,6 +558,31 @@ fn test_gc_mark_preserves_path_file_record_as_repair_evidence_when_head_lost_ref
 }
 
 #[test]
+fn test_gc_mark_refuses_ambiguous_malformed_file_record_before_sweeping_chunks() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&ctx, "/malformed-path-record.txt", b"must survive failed mark", Some("text/plain")).unwrap();
+
+  let algorithm = engine.hash_algo();
+  let path_key = file_path_hash("/malformed-path-record.txt", &algorithm).unwrap();
+  let (header, _key, value) = engine.get_entry(&path_key).unwrap().expect("path FileRecord should exist");
+  let record = FileRecord::deserialize(&value, algorithm.hash_length(), header.entry_version).unwrap();
+  let chunk_hash = record.chunk_hashes.first().expect("test file should have one chunk").clone();
+
+  let empty_root_key = directory_content_hash(&[], &algorithm).unwrap();
+  if !engine.has_entry(&empty_root_key).unwrap() {
+    engine.store_entry(EntryType::DirectoryIndex, &empty_root_key, &[]).unwrap();
+  }
+  engine.update_head(&empty_root_key).unwrap();
+  engine.store_entry(EntryType::FileRecord, &path_key, b"malformed-file-record").unwrap();
+
+  let error = gc_mark(&engine).expect_err("ambiguous malformed FileRecord must abort mark before sweep");
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "{error}");
+  assert!(engine.get_entry(&chunk_hash).unwrap().is_some(), "failed mark must not sweep referenced chunk evidence");
+}
+
+#[test]
 fn test_gc_mark_fails_closed_when_live_btree_child_is_missing() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let ctx = RequestContext::system();
@@ -669,6 +695,36 @@ fn test_run_gc_skips_pre_gc_snapshot_when_snapshot_writes_disabled() {
   let vm = VersionManager::new(&engine);
   let snapshots = vm.list_snapshots().unwrap();
   assert!(!snapshots.iter().any(|snapshot| snapshot.name.starts_with("_aeordb_pre_gc_")));
+}
+
+#[test]
+fn test_run_gc_reports_retention_delete_failure_without_aborting_sweep() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let ctx = RequestContext::system();
+  let snapshot = SnapshotInfo {
+    name: "missing-retention-locator".to_string(),
+    root_hash: engine.head_hash().unwrap(),
+    created_at: chrono::Utc::now().timestamp_millis() - 31 * 24 * 60 * 60 * 1000,
+    metadata: HashMap::new(),
+  };
+  let mismatched_key = engine.compute_hash(b"snap:different-retention-locator").unwrap();
+  let value = snapshot.serialize(engine.hash_algo().hash_length()).unwrap();
+  engine.store_entry_typed(EntryType::Snapshot, &mismatched_key, &value, aeordb::engine::kv_store::KV_TYPE_SNAPSHOT).unwrap();
+  save_lifecycle_config(
+    &engine,
+    &LifecycleConfig { snapshot_writes_enabled: false, snapshot_retention: SnapshotRetention { auto_months: 0, manual_months: 1 } },
+  )
+  .unwrap();
+
+  let result = run_gc(&engine, &ctx, false).expect("optional retention cleanup must not abort the primary GC sweep");
+  assert!(
+    result
+      .cleanup_warnings
+      .iter()
+      .any(|warning| warning.contains("Lifecycle retention pruning failed") && warning.contains("missing-retention-locator")),
+    "retention failure must remain visible in the successful GC result: {:?}",
+    result.cleanup_warnings,
+  );
 }
 
 #[test]

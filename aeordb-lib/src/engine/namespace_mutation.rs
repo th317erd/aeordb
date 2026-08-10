@@ -695,20 +695,14 @@ impl<'a> NamespaceMutationCoordinator<'a> {
       )
       .increment(1);
       if whole_root_publication && acknowledgement.previous_root_hash != acknowledgement.root_hash {
-        if let Err(error) = self.engine.invalidate_all_authority_caches() {
-          tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not invalidate authority caches");
-        }
-        if let Err(error) = self.engine.clear_dir_content_cache() {
-          tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not clear the directory-content cache");
-        }
+        self.engine.invalidate_all_authority_caches();
+        self.engine.clear_dir_content_cache_authoritatively();
         self.engine.counters().record_write(0);
         if let Err(error) = self.engine.counters().reconcile_live_namespace_from_head(self.engine) {
           tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Whole-root publication could not reconcile live namespace counters");
         }
-      } else if let Err(error) =
-        self.engine.invalidate_caches_for_paths(acknowledgement.source_identities.iter().map(|identity| &identity.path))
-      {
-        tracing::error!(operation_id = %acknowledgement.operation_id, %error, "Acknowledged namespace mutation could not invalidate authority caches");
+      } else {
+        self.engine.invalidate_caches_for_paths(acknowledgement.source_identities.iter().map(|identity| &identity.path));
       }
       self.fanout.publish(&acknowledgement);
     }))

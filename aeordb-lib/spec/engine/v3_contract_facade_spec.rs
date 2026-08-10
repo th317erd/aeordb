@@ -1502,7 +1502,7 @@ fn wave_four_credentials_use_engine_owned_cache_fanout_and_typed_transitions() {
 }
 
 #[test]
-fn startup_root_diagnostic_uses_one_bounded_strict_authority_probe() {
+fn startup_root_validation_uses_one_bounded_strict_authority_probe() {
   let directory = include_str!("../../src/engine/directory_ops.rs");
   let start = directory.find("  pub fn ensure_root_directory(").unwrap();
   let end = directory[start..].find("\n  fn repair_workspace_file_child(").unwrap() + start;
@@ -1511,10 +1511,11 @@ fn startup_root_diagnostic_uses_one_bounded_strict_authority_probe() {
   assert!(body.contains("list_directory_window_strict(\"/\", 0, 1)"));
   assert!(!body.contains("list_directory(\"/\")"), "startup must not materialize and count the generic root listing");
   assert!(!body.contains("appears empty"), "zero ordinary children are not an integrity diagnostic");
-  assert!(body.contains("Root directory exists but is not completely readable"));
+  assert!(body.contains("root directory is not completely readable"));
   assert!(body.contains("let head_hash = planning_engine.head_hash()?"));
   assert!(body.contains("!head_hash.is_empty() && !head_hash.iter().all"));
-  assert!(body.contains("Root directory locator is missing while namespace authority remains"));
+  assert!(body.contains("root directory locator is missing while namespace authority"));
+  assert!(body.contains("return Err(EngineError::CorruptEntry"));
   assert!(body.contains("aeordb verify --repair"));
 }
 
@@ -1656,7 +1657,7 @@ fn wave_four_touched_system_and_plugin_failures_have_explicit_direction() {
   assert!(!log.contains("let _ = ops.store_file_buffered"));
 
   let scheduling_start = engine_routes.find("// Auto-trigger reindex when indexes.json is stored").unwrap();
-  let scheduling_end = engine_routes[scheduling_start..].find("let mut response_body").unwrap() + scheduling_start;
+  let scheduling_end = engine_routes[scheduling_start..].find("let response_body").unwrap() + scheduling_start;
   let scheduling = &engine_routes[scheduling_start..scheduling_end];
   assert!(scheduling.contains("tokio::task::spawn_blocking"));
   assert!(scheduling.contains("schedule_automatic_reindex_after_commit"));

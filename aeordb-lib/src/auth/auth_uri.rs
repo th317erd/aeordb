@@ -22,18 +22,11 @@ pub fn parse_auth_uri(uri: &str) -> Result<AuthMode, String> {
   match uri.to_lowercase().as_str() {
     "disabled" | "false" | "null" | "no" | "0" => Ok(AuthMode::Disabled),
     "self" | "./" => Ok(AuthMode::SelfContained),
-    _ => {
-      if uri.starts_with("file://") {
-        let path = uri.strip_prefix("file://").unwrap();
-        if path.is_empty() {
-          return Err("file:// URI requires a path".to_string());
-        }
-        let expanded = expand_tilde(path);
-        Ok(AuthMode::File(expanded))
-      } else {
-        Err(format!("Unknown auth URI: {}", uri))
-      }
-    }
+    _ => match uri.strip_prefix("file://") {
+      Some("") => Err("file:// URI requires a path".to_string()),
+      Some(path) => Ok(AuthMode::File(expand_tilde(path))),
+      None => Err(format!("Unknown auth URI: {}", uri)),
+    },
   }
 }
 
@@ -49,10 +42,10 @@ pub fn resolve_auth_mode(cli_flag: Option<&str>) -> Result<AuthMode, String> {
   }
 
   // 2. AEORDB_AUTH environment variable
-  if let Ok(env_val) = std::env::var("AEORDB_AUTH") {
-    if !env_val.is_empty() {
-      return parse_auth_uri(&env_val);
-    }
+  match std::env::var("AEORDB_AUTH") {
+    Ok(value) if !value.is_empty() => return parse_auth_uri(&value),
+    Ok(_) | Err(std::env::VarError::NotPresent) => {}
+    Err(std::env::VarError::NotUnicode(_)) => return Err("AEORDB_AUTH must contain valid Unicode".to_string()),
   }
 
   // 3. Check for ~/.aeordb-config/aeordb/identity

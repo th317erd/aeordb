@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::{bootstrap_root_key, generate_api_key, hash_api_key, ApiKeyRecord};
-use aeordb::engine::StorageEngine;
+use aeordb::engine::{DirectoryOps, StorageEngine};
 use aeordb::engine::system_store;
 use aeordb::engine::RequestContext;
 use aeordb::server::{create_app_with_jwt, create_temp_engine_for_tests};
@@ -319,6 +319,38 @@ async fn test_list_api_keys_returns_metadata() {
   assert!(array[0]["is_revoked"].is_boolean());
   assert!(array[0].get("key_hash").is_none(), "should not expose key_hash");
   assert!(array[0].get("api_key").is_none(), "should not expose api_key");
+}
+
+#[tokio::test]
+async fn test_list_api_keys_rejects_corrupt_user_authority() {
+  let ctx = RequestContext::system();
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let user_id = uuid::Uuid::new_v4();
+  let key_id = uuid::Uuid::new_v4();
+  let plaintext_key = generate_api_key(key_id);
+  let record = ApiKeyRecord {
+    key_id,
+    key_hash: hash_api_key(&plaintext_key).unwrap(),
+    user_id: Some(user_id),
+    created_at: chrono::Utc::now(),
+    is_revoked: false,
+    expires_at: i64::MAX,
+    label: None,
+    rules: vec![],
+  };
+  system_store::store_api_key(&engine, &ctx, &record).unwrap();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&ctx, &format!("/.aeordb-system/users/{user_id}"), b"not a versioned user record", Some("application/json"))
+    .unwrap();
+
+  let request = Request::builder()
+    .uri("/auth/keys/admin")
+    .header("authorization", format!("Bearer {}", admin_token(&jwt_manager)))
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]

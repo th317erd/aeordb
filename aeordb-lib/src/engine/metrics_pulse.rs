@@ -66,8 +66,16 @@ pub fn spawn_metrics_pulse(
       };
       crate::metrics::record_runtime_metrics(&runtime);
 
-      // Get the db file size from disk metadata.
-      let disk_total = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+      // Keep the previous client-side sample when the filesystem cannot
+      // provide an authoritative size; zero is a valid value and must not be
+      // used as an error sentinel.
+      let disk_total = match std::fs::metadata(&db_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+          tracing::error!(%error, "Metrics pulse could not read database file metadata");
+          continue;
+        }
+      };
 
       // statvfs for the partition holding the db file.
       let disk_health = crate::engine::health::check_disk(&db_path);

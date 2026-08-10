@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aeordb::engine::{gc, DirectoryOps, RequestContext, StorageEngine, VersionManager};
@@ -55,6 +55,40 @@ enum WorkloadAction {
   Delete,
 }
 
+fn argument_value<'a>(arguments: &'a [String], index: usize, flag: &str) -> Result<&'a str, String> {
+  arguments.get(index + 1).map(String::as_str).ok_or_else(|| format!("{flag} requires a value"))
+}
+
+fn parse_f64_argument(arguments: &[String], index: usize, flag: &str) -> Result<f64, String> {
+  let raw = argument_value(arguments, index, flag)?;
+  let value = raw.parse::<f64>().map_err(|_| format!("{flag} expects a number, got {raw:?}"))?;
+  if !value.is_finite() || value < 0.0 {
+    return Err(format!("{flag} expects a finite non-negative number, got {raw:?}"));
+  }
+  Ok(value)
+}
+
+fn parse_u64_argument(arguments: &[String], index: usize, flag: &str) -> Result<u64, String> {
+  let raw = argument_value(arguments, index, flag)?;
+  raw.parse::<u64>().map_err(|_| format!("{flag} expects an unsigned integer, got {raw:?}"))
+}
+
+fn duration_from_hours(hours: f64) -> Result<Duration, String> {
+  let seconds = hours * 3600.0;
+  if seconds > u64::MAX as f64 {
+    return Err("--duration-hours exceeds the supported duration".to_string());
+  }
+  Ok(Duration::from_secs(seconds as u64))
+}
+
+fn gibibytes_to_bytes(gibibytes: f64) -> Result<u64, String> {
+  let bytes = gibibytes * 1_073_741_824.0;
+  if bytes > u64::MAX as f64 {
+    return Err("--max-db-size-gb exceeds the supported database size".to_string());
+  }
+  Ok(bytes as u64)
+}
+
 fn parse_args() -> Result<Mode, String> {
   let args: Vec<String> = std::env::args().collect();
   let mut database: Option<String> = None;
@@ -71,51 +105,48 @@ fn parse_args() -> Result<Mode, String> {
   let mut i = 1;
   while i < args.len() {
     let arg = args[i].as_str();
-    let value = || args.get(i + 1).cloned();
     match arg {
       "--database" => {
-        database = value();
+        database = Some(argument_value(&args, i, arg)?.to_string());
         i += 2;
       }
       "--source-dir" => {
-        source_dir = value();
+        source_dir = Some(argument_value(&args, i, arg)?.to_string());
         i += 2;
       }
       "--duration-hours" => {
-        duration_hours = value().and_then(|v| v.parse().ok()).unwrap_or(12.0);
+        duration_hours = parse_f64_argument(&args, i, arg)?;
         i += 2;
       }
       "--checkpoint" => {
-        checkpoint = value();
+        checkpoint = Some(argument_value(&args, i, arg)?.to_string());
         i += 2;
       }
       "--metrics" => {
-        metrics = value();
+        metrics = Some(argument_value(&args, i, arg)?.to_string());
         i += 2;
       }
       "--workload" => {
-        workload = value().unwrap_or(workload);
+        workload = argument_value(&args, i, arg)?.to_string();
         i += 2;
       }
       "--snapshot-interval-secs" => {
-        snapshot_secs = value().and_then(|v| v.parse().ok()).unwrap_or(snapshot_secs);
+        snapshot_secs = parse_u64_argument(&args, i, arg)?;
         i += 2;
       }
       "--gc-interval-secs" => {
-        gc_secs = value().and_then(|v| v.parse().ok()).unwrap_or(gc_secs);
+        gc_secs = parse_u64_argument(&args, i, arg)?;
         i += 2;
       }
       "--max-db-size-gb" => {
-        max_db_size_gb = value().and_then(|v| v.parse().ok());
+        max_db_size_gb = Some(parse_f64_argument(&args, i, arg)?);
         i += 2;
       }
       "--summarize" => {
-        summarize = value();
+        summarize = Some(argument_value(&args, i, arg)?.to_string());
         i += 2;
       }
-      _ => {
-        i += 1;
-      }
+      _ => return Err(format!("unknown argument {arg:?}")),
     }
   }
 
@@ -128,7 +159,10 @@ fn parse_args() -> Result<Mode, String> {
   let checkpoint = checkpoint.unwrap_or_else(|| format!("{}.checkpoint.tsv", database));
   let metrics_path = metrics.unwrap_or_else(|| format!("{}.metrics.tsv", database));
 
-  let mix: Vec<u8> = workload.split(':').filter_map(|s| s.parse().ok()).collect();
+  let mix = workload
+    .split(':')
+    .map(|value| value.parse::<u8>().map_err(|_| format!("--workload expects unsigned W:R:D percentages, got {workload:?}")))
+    .collect::<Result<Vec<_>, _>>()?;
   if mix.len() != 3 || mix.iter().sum::<u8>() != 100 {
     return Err(format!("--workload must be W:R:D summing to 100, got {}", workload));
   }
@@ -136,7 +170,7 @@ fn parse_args() -> Result<Mode, String> {
   Ok(Mode::Run(Config {
     database,
     source_dir,
-    duration: Duration::from_secs((duration_hours * 3600.0) as u64),
+    duration: duration_from_hours(duration_hours)?,
     checkpoint,
     metrics: metrics_path,
     pct_write: mix[0],
@@ -144,7 +178,7 @@ fn parse_args() -> Result<Mode, String> {
     pct_delete: mix[2],
     snapshot_interval: Duration::from_secs(snapshot_secs),
     gc_interval: Duration::from_secs(gc_secs),
-    max_db_size_bytes: max_db_size_gb.map(|gb| (gb * 1_073_741_824.0) as u64),
+    max_db_size_bytes: max_db_size_gb.map(gibibytes_to_bytes).transpose()?,
   }))
 }
 
@@ -187,7 +221,7 @@ fn run(config: Config) -> Result<(), String> {
   print!("walking source corpus... ");
   std::io::stdout().flush().map_err(|error| format!("flush source-corpus status: {error}"))?;
   let walk_start = Instant::now();
-  let corpus = build_corpus(&config.source_dir);
+  let corpus = build_corpus(&config.source_dir)?;
   println!("{} files in {:.1}s", corpus.len(), walk_start.elapsed().as_secs_f64());
   if corpus.is_empty() {
     return Err("source corpus is empty — nothing to do".to_string());
@@ -207,7 +241,7 @@ fn run(config: Config) -> Result<(), String> {
 
   // 3. Load any existing checkpoint so reads/deletes can target previously
   //    committed paths after a crash-restart.
-  let mut committed: HashSet<String> = load_checkpoint(&config.checkpoint);
+  let mut committed: HashSet<String> = load_checkpoint(Path::new(&config.checkpoint))?;
   println!("loaded {} previously-committed paths from checkpoint", committed.len());
 
   let mut checkpoint_file =
@@ -218,7 +252,7 @@ fn run(config: Config) -> Result<(), String> {
   let writes = Arc::new(AtomicU64::new(0));
   let reads = Arc::new(AtomicU64::new(0));
   let deletes = Arc::new(AtomicU64::new(0));
-  let last_action: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new("startup".to_string()));
+  let last_action = Arc::new(Mutex::new("startup".to_string()));
   let stop_flag = Arc::new(AtomicBool::new(false));
 
   // Metrics thread: sample every 60s.
@@ -237,9 +271,9 @@ fn run(config: Config) -> Result<(), String> {
         // Emit a row every 60s, sleeping in 1s slices so we shut down quickly.
         if Instant::now() >= next_tick {
           let elapsed = start.elapsed().as_secs();
-          let mem = read_self_memory_stats().unwrap_or_default();
-          let fd_count = count_fds().unwrap_or(0);
-          let db_size = std::fs::metadata(&database).map(|m| m.len()).unwrap_or(0);
+          let mem = read_self_memory_stats()?;
+          let fd_count = count_fds().map(|value| value.to_string()).unwrap_or_else(|| "unavailable".to_string());
+          let db_size = database_size_bytes(Path::new(&database))?;
           let counters = engine.counters().snapshot();
           let wal_bytes = counters.write_buffer_depth;
           let void_bytes = counters.void_space;
@@ -247,7 +281,7 @@ fn run(config: Config) -> Result<(), String> {
           let entry_count =
             counters.files + counters.directories + counters.symlinks + counters.chunks + counters.snapshots + counters.forks;
           let (cache_perms, cache_index, cache_dir) = engine.engine_cache_sizes();
-          let action = last_action.lock().map(|g| g.clone()).unwrap_or_default();
+          let action = read_last_action(&last_action)?;
           let line = format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             chrono::Utc::now().to_rfc3339(),
@@ -292,7 +326,7 @@ fn run(config: Config) -> Result<(), String> {
       let mut bucket_start = Instant::now();
       let mut bucket_peak_kb: u64 = 0;
       while !stop_flag.load(Ordering::Relaxed) {
-        let mem = read_self_memory_stats().unwrap_or_default();
+        let mem = read_self_memory_stats()?;
         if mem.rss_kb > bucket_peak_kb {
           bucket_peak_kb = mem.rss_kb;
         }
@@ -331,7 +365,13 @@ fn run(config: Config) -> Result<(), String> {
     };
 
     // Honor the DB size cap by demoting writes to reads when we're past it.
-    let size_now = std::fs::metadata(&config.database).map(|m| m.len()).unwrap_or(0);
+    let size_now = match database_size_bytes(Path::new(&config.database)) {
+      Ok(size) => size,
+      Err(error) => {
+        workload_result = Err(error);
+        break 'workload;
+      }
+    };
     let action = match config.max_db_size_bytes {
       Some(cap) if size_now >= cap => {
         if !size_capped_logged {
@@ -358,16 +398,14 @@ fn run(config: Config) -> Result<(), String> {
             }
             committed.insert(stored_path.clone());
             writes.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut s) = last_action.lock() {
-              *s = format!("W {}", stored_path);
+            if let Err(error) = set_last_action(&last_action, format!("W {}", stored_path)) {
+              workload_result = Err(error);
+              break 'workload;
             }
           }
           Err(e) => {
-            // Source read errors (e.g. permission denied on .gnupg, broken
-            // symlink target) are expected — log + continue, don't fail.
-            if let Ok(mut s) = last_action.lock() {
-              *s = format!("W FAIL {}: {}", source.display(), e);
-            }
+            workload_result = Err(record_workload_failure(&last_action, format!("write {} failed: {e}", source.display())));
+            break 'workload;
           }
         }
       }
@@ -397,22 +435,19 @@ fn run(config: Config) -> Result<(), String> {
               }
             }
             if let Some(err) = failure {
-              eprintln!("read stream failed for {}: {}", path, err);
-              if let Ok(mut s) = last_action.lock() {
-                *s = format!("R FAIL {}: {}", path, err);
-              }
+              workload_result = Err(record_workload_failure(&last_action, format!("read stream {path} failed: {err}")));
+              break 'workload;
             } else {
               reads.fetch_add(1, Ordering::Relaxed);
-              if let Ok(mut s) = last_action.lock() {
-                *s = format!("R {} ({} bytes)", path, total);
+              if let Err(error) = set_last_action(&last_action, format!("R {} ({} bytes)", path, total)) {
+                workload_result = Err(error);
+                break 'workload;
               }
             }
           }
           Err(e) => {
-            eprintln!("read failed for {}: {}", path, e);
-            if let Ok(mut s) = last_action.lock() {
-              *s = format!("R FAIL {}: {}", path, e);
-            }
+            workload_result = Err(record_workload_failure(&last_action, format!("read {path} failed: {e}")));
+            break 'workload;
           }
         }
       }
@@ -431,14 +466,14 @@ fn run(config: Config) -> Result<(), String> {
             }
             committed.remove(&path);
             deletes.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut s) = last_action.lock() {
-              *s = format!("D {}", path);
+            if let Err(error) = set_last_action(&last_action, format!("D {}", path)) {
+              workload_result = Err(error);
+              break 'workload;
             }
           }
           Err(e) => {
-            if let Ok(mut s) = last_action.lock() {
-              *s = format!("D FAIL {}: {}", path, e);
-            }
+            workload_result = Err(record_workload_failure(&last_action, format!("delete {path} failed: {e}")));
+            break 'workload;
           }
         }
       }
@@ -449,10 +484,17 @@ fn run(config: Config) -> Result<(), String> {
       let ctx = RequestContext::system();
       let vm = VersionManager::new(&engine);
       let name = format!("soak-{}", chrono::Utc::now().timestamp());
-      if let Err(e) = vm.create_snapshot(&ctx, &name, std::collections::HashMap::new()) {
-        eprintln!("snapshot failed: {}", e);
-      } else if let Ok(mut s) = last_action.lock() {
-        *s = format!("SNAPSHOT {}", name);
+      match vm.create_snapshot(&ctx, &name, std::collections::HashMap::new()) {
+        Ok(_) => {
+          if let Err(error) = set_last_action(&last_action, format!("SNAPSHOT {}", name)) {
+            workload_result = Err(error);
+            break 'workload;
+          }
+        }
+        Err(error) => {
+          workload_result = Err(record_workload_failure(&last_action, format!("snapshot {name} failed: {error}")));
+          break 'workload;
+        }
       }
       last_snapshot = Instant::now();
     }
@@ -462,11 +504,17 @@ fn run(config: Config) -> Result<(), String> {
       let ctx = RequestContext::system();
       match gc::run_gc(&engine, &ctx, false) {
         Ok(result) => {
-          if let Ok(mut s) = last_action.lock() {
-            *s = format!("GC reclaimed={}b swept={}", result.reclaimed_bytes, result.garbage_entries);
+          if let Err(error) =
+            set_last_action(&last_action, format!("GC reclaimed={}b swept={}", result.reclaimed_bytes, result.garbage_entries))
+          {
+            workload_result = Err(error);
+            break 'workload;
           }
         }
-        Err(e) => eprintln!("gc failed: {}", e),
+        Err(error) => {
+          workload_result = Err(record_workload_failure(&last_action, format!("GC failed: {error}")));
+          break 'workload;
+        }
       }
       last_gc = Instant::now();
     }
@@ -586,56 +634,52 @@ fn guess_content_type(p: &Path) -> String {
 // Corpus walk
 // ---------------------------------------------------------------------------
 
-fn build_corpus(root: &str) -> Vec<PathBuf> {
+fn build_corpus(root: &str) -> Result<Vec<PathBuf>, String> {
   let mut out = Vec::new();
   let mut stack = vec![PathBuf::from(root)];
   while let Some(dir) = stack.pop() {
-    let entries = match std::fs::read_dir(&dir) {
-      Ok(entries) => entries,
-      Err(_) => continue,
-    };
+    let entries = std::fs::read_dir(&dir).map_err(|error| format!("read source corpus directory {}: {error}", dir.display()))?;
     for entry_result in entries {
-      let entry = match entry_result {
-        Ok(e) => e,
-        Err(_) => continue,
-      };
+      let entry = entry_result.map_err(|error| format!("enumerate source corpus directory {}: {error}", dir.display()))?;
       // Skip symlinks unconditionally — they can point outside the source
       // root or form cycles. We only want regular files / regular dirs.
-      let meta = match entry.path().symlink_metadata() {
-        Ok(m) => m,
-        Err(_) => continue,
-      };
+      let entry_path = entry.path();
+      let meta = entry_path.symlink_metadata().map_err(|error| format!("inspect source corpus entry {}: {error}", entry_path.display()))?;
       let file_type = meta.file_type();
       if file_type.is_symlink() {
         continue;
       } else if file_type.is_dir() {
-        stack.push(entry.path());
+        stack.push(entry_path);
       } else if file_type.is_file() {
-        out.push(entry.path());
+        out.push(entry_path);
       }
     }
   }
-  out
+  Ok(out)
 }
 
 // ---------------------------------------------------------------------------
 // Checkpoint
 // ---------------------------------------------------------------------------
 
-fn load_checkpoint(path: &str) -> HashSet<String> {
+fn load_checkpoint(path: &Path) -> Result<HashSet<String>, String> {
   let file = match File::open(path) {
     Ok(f) => f,
-    Err(_) => return HashSet::new(),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+    Err(error) => return Err(format!("open checkpoint {}: {error}", path.display())),
   };
   let mut set = HashSet::new();
-  for line in BufReader::new(file).lines().map_while(Result::ok) {
+  for (index, line_result) in BufReader::new(file).lines().enumerate() {
+    let line = line_result.map_err(|error| format!("read checkpoint {} line {}: {error}", path.display(), index + 1))?;
     if let Some(rest) = line.strip_prefix("+\t") {
       set.insert(rest.to_string());
     } else if let Some(rest) = line.strip_prefix("-\t") {
       set.remove(rest);
+    } else {
+      return Err(format!("malformed checkpoint {} line {}: expected + or - operation", path.display(), index + 1));
     }
   }
-  set
+  Ok(set)
 }
 
 // ---------------------------------------------------------------------------
@@ -653,7 +697,6 @@ fn open_metrics(path: &str) -> Result<BufWriter<File>, String> {
   Ok(writer)
 }
 
-#[derive(Default)]
 struct MemoryStats {
   rss_kb: u64,
   data_kb: u64,
@@ -661,13 +704,13 @@ struct MemoryStats {
   hwm_kb: u64,
 }
 
-fn read_self_memory_stats() -> Option<MemoryStats> {
+fn read_self_memory_stats() -> Result<MemoryStats, String> {
   // Cross-platform process memory via the engine's rss_sampler. The
   // sampler reads /proc/self/status on Linux and Mach task_info on macOS;
   // both report bytes the kernel attributes to the current process. Values
   // it can't observe (VmData on macOS) come back as 0.
-  let m = aeordb::engine::rss_sampler::read_process_memory();
-  Some(MemoryStats { rss_kb: m.resident_kb, data_kb: m.data_kb, size_kb: m.virtual_kb, hwm_kb: m.peak_resident_kb })
+  let m = aeordb::engine::rss_sampler::try_read_process_memory().map_err(|error| format!("process memory sample failed: {error}"))?;
+  Ok(MemoryStats { rss_kb: m.resident_kb, data_kb: m.data_kb, size_kb: m.virtual_kb, hwm_kb: m.peak_resident_kb })
 }
 
 fn count_fds() -> Option<usize> {
@@ -679,6 +722,27 @@ fn count_fds() -> Option<usize> {
   std::fs::read_dir(path).ok().map(|iter| iter.count())
 }
 
+fn database_size_bytes(path: &Path) -> Result<u64, String> {
+  std::fs::metadata(path).map(|metadata| metadata.len()).map_err(|error| format!("database metadata {}: {error}", path.display()))
+}
+
+fn set_last_action(last_action: &Mutex<String>, value: impl Into<String>) -> Result<(), String> {
+  let mut action = last_action.lock().map_err(|_| "last-action diagnostics lock is poisoned".to_string())?;
+  *action = value.into();
+  Ok(())
+}
+
+fn read_last_action(last_action: &Mutex<String>) -> Result<String, String> {
+  last_action.lock().map(|action| action.clone()).map_err(|_| "last-action diagnostics lock is poisoned".to_string())
+}
+
+fn record_workload_failure(last_action: &Mutex<String>, primary_error: String) -> String {
+  match set_last_action(last_action, format!("FAIL {primary_error}")) {
+    Ok(()) => primary_error,
+    Err(diagnostic_error) => format!("{primary_error}; additionally failed to record diagnostic state: {diagnostic_error}"),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Summarize
 // ---------------------------------------------------------------------------
@@ -686,13 +750,12 @@ fn count_fds() -> Option<usize> {
 fn summarize(path: &str) -> Result<(), String> {
   let file = File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
   let mut rows: Vec<Row> = Vec::new();
-  for (i, line) in BufReader::new(file).lines().map_while(Result::ok).enumerate() {
+  for (i, line_result) in BufReader::new(file).lines().enumerate() {
+    let line = line_result.map_err(|error| format!("read metrics row {} from {}: {error}", i + 1, path))?;
     if i == 0 || line.starts_with("iso_time") {
       continue;
     }
-    if let Some(row) = parse_row(&line) {
-      rows.push(row);
-    }
+    rows.push(parse_row(&line).map_err(|error| format!("malformed metrics row {}: {error}", i + 1))?);
   }
   if rows.is_empty() {
     return Err("no metric rows parsed".to_string());
@@ -739,8 +802,10 @@ fn summarize(path: &str) -> Result<(), String> {
   println!("  dir_content: T+0={}  T+end={}", first.cache_dir, last.cache_dir);
   println!();
   println!("FD count:");
-  println!("  min:              {}", rows.iter().map(|r| r.fd_count).min().unwrap_or(0));
-  println!("  max:              {}", rows.iter().map(|r| r.fd_count).max().unwrap_or(0));
+  let fd_min = rows.iter().filter_map(|row| row.fd_count).min();
+  let fd_max = rows.iter().filter_map(|row| row.fd_count).max();
+  println!("  min:              {}", fd_min.map(|value| value.to_string()).unwrap_or_else(|| "unavailable".to_string()));
+  println!("  max:              {}", fd_max.map(|value| value.to_string()).unwrap_or_else(|| "unavailable".to_string()));
   println!();
   println!("DB size:");
   println!("  T+0:              {:.2} MB", first.db_size_bytes as f64 / 1_048_576.0);
@@ -762,9 +827,10 @@ fn summarize(path: &str) -> Result<(), String> {
   let data_ok = data_growth_pct <= 30.0;
   report("VmData growth ≤ 30% (T+1h→end)", data_ok, format!("{:+.1}%", data_growth_pct));
 
-  let fd_max = rows.iter().map(|r| r.fd_count).max().unwrap_or(0);
-  let fd_ok = fd_max <= 500;
-  report("FD count ≤ 500", fd_ok, format!("max={}", fd_max));
+  match fd_max {
+    Some(fd_max) => report("FD count ≤ 500", fd_max <= 500, format!("max={fd_max}")),
+    None => report("FD count ≤ 500", false, "unavailable".to_string()),
+  }
 
   println!();
   println!("verdict: {}", if pass { "PASS" } else { "FAIL" });
@@ -782,7 +848,7 @@ struct Row {
   rss_kb: u64,
   data_kb: u64,
   hwm_kb: u64,
-  fd_count: usize,
+  fd_count: Option<usize>,
   db_size_bytes: u64,
   entry_count: u64,
   cache_perms: u64,
@@ -790,28 +856,40 @@ struct Row {
   cache_dir: u64,
 }
 
-fn parse_row(line: &str) -> Option<Row> {
+fn parse_row(line: &str) -> Result<Row, String> {
   let cols: Vec<&str> = line.split('\t').collect();
   // 18 columns in v2 header. Earlier 12-column files are tolerated by falling
   // back to v1 positions for the fields we know about.
   let v2 = cols.len() >= 18;
   if cols.len() < 11 {
-    return None;
+    return Err(format!("expected at least 11 columns, found {}", cols.len()));
   }
-  Some(Row {
-    elapsed_secs: cols[1].parse().ok()?,
-    writes: cols[2].parse().ok()?,
-    reads: cols[3].parse().ok()?,
-    deletes: cols[4].parse().ok()?,
-    rss_kb: cols[5].parse().ok()?,
-    data_kb: if v2 { cols[6].parse().ok()? } else { 0 },
-    hwm_kb: if v2 { cols[8].parse().ok()? } else { 0 },
-    fd_count: if v2 { cols[9].parse().ok()? } else { cols[6].parse().ok()? },
-    db_size_bytes: if v2 { cols[10].parse().ok()? } else { cols[7].parse().ok()? },
-    entry_count: if v2 { cols[13].parse().ok()? } else { cols[10].parse().ok()? },
-    cache_perms: if v2 { cols[14].parse().ok()? } else { 0 },
-    cache_index: if v2 { cols[15].parse().ok()? } else { 0 },
-    cache_dir: if v2 { cols[16].parse().ok()? } else { 0 },
+  let parse_u64 = |index: usize, name: &str| {
+    cols[index].parse::<u64>().map_err(|_| format!("{name} column {} is not an unsigned integer: {:?}", index + 1, cols[index]))
+  };
+  let fd_count = if v2 {
+    if cols[9] == "unavailable" {
+      None
+    } else {
+      Some(cols[9].parse::<usize>().map_err(|_| format!("fd_count column 10 is not an unsigned integer or unavailable: {:?}", cols[9]))?)
+    }
+  } else {
+    Some(cols[6].parse::<usize>().map_err(|_| format!("fd_count column 7 is not an unsigned integer: {:?}", cols[6]))?)
+  };
+  Ok(Row {
+    elapsed_secs: parse_u64(1, "elapsed_secs")?,
+    writes: parse_u64(2, "writes")?,
+    reads: parse_u64(3, "reads")?,
+    deletes: parse_u64(4, "deletes")?,
+    rss_kb: parse_u64(5, "rss_kb")?,
+    data_kb: if v2 { parse_u64(6, "vm_data_kb")? } else { 0 },
+    hwm_kb: if v2 { parse_u64(8, "vm_hwm_kb")? } else { 0 },
+    fd_count,
+    db_size_bytes: if v2 { parse_u64(10, "db_size_bytes")? } else { parse_u64(7, "db_size_bytes")? },
+    entry_count: if v2 { parse_u64(13, "entry_count")? } else { parse_u64(10, "entry_count")? },
+    cache_perms: if v2 { parse_u64(14, "cache_perms")? } else { 0 },
+    cache_index: if v2 { parse_u64(15, "cache_index")? } else { 0 },
+    cache_dir: if v2 { parse_u64(16, "cache_dir")? } else { 0 },
   })
 }
 

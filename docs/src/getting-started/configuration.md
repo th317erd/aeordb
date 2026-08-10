@@ -58,6 +58,24 @@ aeordb start [OPTIONS]
 | `--jwt-expiry` | `604800` | JWT token lifetime in seconds (7 days) |
 | `--chunk-size` | `262144` | Write chunk size in bytes (256 KiB default) |
 
+### Logging Filters
+
+AeorDB logs at `info` by default. Set `AEORDB_LOG` to a
+[`tracing_subscriber` filter directive](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
+to change global or module-specific verbosity:
+
+```bash
+AEORDB_LOG=info,aeordb::engine=debug aeordb start -D data.aeordb
+```
+
+When present, `AEORDB_LOG` takes precedence over the configured default log
+level. The value must be valid Unicode and every directive must parse. AeorDB
+rejects `start` and diagnostic commands such as `verify` when the filter is
+malformed; it does not silently fall back to another level. Logging also uses
+one process-wide subscriber, so embedded callers that install their own
+subscriber should use the library's fallible initialization API and handle an
+initialization conflict explicitly.
+
 ### Runtime And Lifecycle Overrides
 
 `aeordb start --help` exposes one explicit flag for every property in the frozen runtime/lifecycle registry. These flags use the same value syntax as registered environment variables and have the highest precedence:

@@ -87,10 +87,10 @@ impl ReadSnapshot {
     hash_algo: HashAlgorithm,
     entry_count: usize,
     pages: KvPageSet,
-  ) -> Self {
-    let page_type_counts = Self::build_page_type_counts(&pages, hash_algo);
+  ) -> EngineResult<Self> {
+    let page_type_counts = Self::build_page_type_counts(&pages, hash_algo)?;
     let buffer_type_counts = Self::build_buffer_type_counts(&buffer);
-    ReadSnapshot {
+    Ok(ReadSnapshot {
       buffer,
       nvt,
       bucket_count,
@@ -99,7 +99,7 @@ impl ReadSnapshot {
       pages: SnapshotPages::Resident(pages),
       page_type_counts,
       buffer_type_counts,
-    }
+    })
   }
 
   /// Create a new snapshot while reusing precomputed flushed-page counts.
@@ -183,19 +183,17 @@ impl ReadSnapshot {
   }
 
   /// Build compact type counts from flushed KV pages only. Deleted entries are
-  /// excluded. Corrupt pages are treated as empty here; open/flush paths are
-  /// responsible for flagging corruption and triggering rebuild.
-  fn build_page_type_counts(pages: &[Arc<[u8]>], hash_algo: HashAlgorithm) -> KvTypeCounts {
+  /// excluded and malformed pages fail the snapshot publication.
+  fn build_page_type_counts(pages: &[Arc<[u8]>], hash_algo: HashAlgorithm) -> EngineResult<KvTypeCounts> {
     let hash_length = hash_algo.hash_length();
     let mut counts = [0usize; 16];
     for page_data in pages.iter() {
-      if let Ok(page_counts) = live_type_counts_in_page(page_data, hash_length) {
-        for (i, count) in page_counts.iter().enumerate() {
-          counts[i] += count;
-        }
+      let page_counts = live_type_counts_in_page(page_data, hash_length)?;
+      for (i, count) in page_counts.iter().enumerate() {
+        counts[i] = counts[i].saturating_add(*count);
       }
     }
-    counts
+    Ok(counts)
   }
 
   /// Build compact type counts from the write buffer only.
@@ -501,7 +499,7 @@ mod tests {
     let page = serialize_page(&[entry(1, KV_TYPE_CHUNK, false), entry(2, KV_TYPE_FILE_RECORD, false)], 32);
     let pages = Arc::new(vec![Arc::<[u8]>::from(page.into_boxed_slice())]);
     let nvt = Arc::new(NormalizedVectorTable::new(Box::new(HashConverter), 1));
-    ReadSnapshot::new(buffer, nvt, 1, HashAlgorithm::Blake3_256, 2, pages)
+    ReadSnapshot::new(buffer, nvt, 1, HashAlgorithm::Blake3_256, 2, pages).unwrap()
   }
 
   #[test]

@@ -182,3 +182,4 @@ pub const EVENT_TASKS_DEFERRED: &str = "tasks_deferred";
 pub const EVENT_SYNCS_COMPLETED: &str = "syncs_completed";
 pub const EVENT_SYNCS_FAILED: &str = "syncs_failed";
 pub const EVENT_SERVER_READY: &str = "server_ready";
+pub const EVENT_STREAM_GAP: &str = "stream_gap";

@@ -248,15 +248,19 @@ pub fn apply_wal_tails_to_database(
     let Some(wal_tail_path) = artifact.wal_tail_path.as_ref() else {
       continue;
     };
-    if fs::symlink_metadata(wal_tail_path).is_err() {
-      if artifact.wal_tail_bytes > 0 {
-        return Err(EngineError::InvalidInput(format!(
-          "emergency spill manifest {} references missing WAL tail {}",
-          artifact.manifest_path.display(),
-          wal_tail_path.display()
-        )));
+    match fs::symlink_metadata(wal_tail_path) {
+      Ok(_) => {}
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        if artifact.wal_tail_bytes > 0 {
+          return Err(EngineError::InvalidInput(format!(
+            "emergency spill manifest {} references missing WAL tail {}",
+            artifact.manifest_path.display(),
+            wal_tail_path.display()
+          )));
+        }
+        continue;
       }
-      continue;
+      Err(error) => return Err(EngineError::IoError(error)),
     }
 
     let copy_start = artifact.wal_tail_copy_start.ok_or_else(|| {
@@ -653,7 +657,20 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
       components.iter().find(|component| component.kind == "wal_tail").map(|component| component.path.clone())
     }
   };
-  let wal_tail_bytes = manifest.get("wal_tail_bytes").and_then(|value| value.as_u64()).unwrap_or(0);
+  let (wal_tail_bytes, hot_tail_writes, hot_tail_voids, wal_tail_truncated) = match format_version {
+    EmergencySpillFormatVersion::V1 => (
+      optional_u64(&manifest, "wal_tail_bytes")?.unwrap_or(0),
+      optional_u64(&manifest, "hot_tail_writes")?.unwrap_or(0),
+      optional_u64(&manifest, "hot_tail_voids")?.unwrap_or(0),
+      optional_bool(&manifest, "wal_tail_truncated")?.unwrap_or(false),
+    ),
+    EmergencySpillFormatVersion::V2 => (
+      required_u64(&manifest, "wal_tail_bytes")?,
+      required_u64(&manifest, "hot_tail_writes")?,
+      required_u64(&manifest, "hot_tail_voids")?,
+      required_bool(&manifest, "wal_tail_truncated")?,
+    ),
+  };
   if format_version == EmergencySpillFormatVersion::V2 {
     let evidenced = components.iter().find(|component| component.kind == "wal_tail").map(|component| component.length).unwrap_or(0);
     if evidenced != wal_tail_bytes {
@@ -694,12 +711,14 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
     latest_failure,
     hot_tail_path,
     wal_tail_path,
-    hot_tail_writes: manifest.get("hot_tail_writes").and_then(|value| value.as_u64()).unwrap_or(0) as usize,
-    hot_tail_voids: manifest.get("hot_tail_voids").and_then(|value| value.as_u64()).unwrap_or(0) as usize,
+    hot_tail_writes: usize::try_from(hot_tail_writes)
+      .map_err(|_| EngineError::InvalidInput("emergency spill hot_tail_writes overflows this platform".to_string()))?,
+    hot_tail_voids: usize::try_from(hot_tail_voids)
+      .map_err(|_| EngineError::InvalidInput("emergency spill hot_tail_voids overflows this platform".to_string()))?,
     wal_tail_copy_start: manifest.get("wal_tail_copy_start").and_then(|value| value.as_u64()),
     wal_tail_end: manifest.get("wal_tail_end").and_then(|value| value.as_u64()),
     wal_tail_bytes,
-    wal_tail_truncated: manifest.get("wal_tail_truncated").and_then(|value| value.as_bool()).unwrap_or(false),
+    wal_tail_truncated,
   }))
 }
 
@@ -905,6 +924,33 @@ fn required_u64(manifest: &serde_json::Value, field: &str) -> EngineResult<u64> 
     .get(field)
     .and_then(|value| value.as_u64())
     .ok_or_else(|| EngineError::InvalidInput(format!("emergency spill manifest is missing unsigned field {field}")))
+}
+
+fn optional_u64(manifest: &serde_json::Value, field: &str) -> EngineResult<Option<u64>> {
+  match manifest.get(field) {
+    None => Ok(None),
+    Some(value) => value
+      .as_u64()
+      .map(Some)
+      .ok_or_else(|| EngineError::InvalidInput(format!("emergency spill manifest field {field} must be an unsigned integer"))),
+  }
+}
+
+fn required_bool(manifest: &serde_json::Value, field: &str) -> EngineResult<bool> {
+  manifest
+    .get(field)
+    .and_then(|value| value.as_bool())
+    .ok_or_else(|| EngineError::InvalidInput(format!("emergency spill manifest is missing boolean field {field}")))
+}
+
+fn optional_bool(manifest: &serde_json::Value, field: &str) -> EngineResult<Option<bool>> {
+  match manifest.get(field) {
+    None => Ok(None),
+    Some(value) => value
+      .as_bool()
+      .map(Some)
+      .ok_or_else(|| EngineError::InvalidInput(format!("emergency spill manifest field {field} must be a boolean"))),
+  }
 }
 
 fn required_i64(manifest: &serde_json::Value, field: &str) -> EngineResult<i64> {

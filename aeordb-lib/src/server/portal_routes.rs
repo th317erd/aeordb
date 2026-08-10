@@ -410,7 +410,10 @@ fn get_stats_inner(
   // Database file size: single stat() call
   let db_path_string = db_path_ext.map(|Extension(p)| p).unwrap_or_else(|| state.db_path.clone());
   let db_path = &db_path_string;
-  let disk_total = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+  let disk_total = std::fs::metadata(db_path).map(|metadata| metadata.len()).map_err(|error| {
+    tracing::error!(%error, "Failed to read database file metadata for stats");
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to read database file metadata: {error}")})))
+  })?;
 
   // In-file KV block metrics: O(1) writer header read + snapshot counts.
   let (kv_file, kv_fill_ratio) = state.engine.kv_layout_metrics().map_err(|error| {

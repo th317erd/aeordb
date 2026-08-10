@@ -127,6 +127,59 @@ fn test_backup_task_default_backup_dir() {
   let _ = std::fs::remove_dir_all("./backups/");
 }
 
+#[test]
+fn backup_task_rejects_malformed_retention_before_creating_an_artifact() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let backup_dir = _temp.path().join("malformed-retention");
+  let task = queue
+    .enqueue(
+      "backup",
+      serde_json::json!({
+        "backup_dir": backup_dir.to_string_lossy(),
+        "retention_count": "2"
+      }),
+    )
+    .unwrap();
+
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  let finished = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(finished.status, TaskStatus::Failed);
+  assert!(finished.error.as_deref().is_some_and(|error| error.contains("retention_count") && error.contains("integer")));
+  assert!(!backup_dir.exists(), "malformed task arguments must be rejected before the backup destination is created");
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_retention_ignores_non_file_aeordb_entries_instead_of_assigning_them_epoch_age() {
+  use std::os::unix::fs::symlink;
+
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let backup_dir = _temp.path().join("retention-non-file");
+  std::fs::create_dir_all(&backup_dir).unwrap();
+  let broken_link = backup_dir.join("foreign.aeordb");
+  symlink(backup_dir.join("missing-target"), &broken_link).unwrap();
+
+  let task = queue
+    .enqueue(
+      "backup",
+      serde_json::json!({
+        "backup_dir": backup_dir.to_string_lossy(),
+        "retention_count": 1
+      }),
+    )
+    .unwrap();
+
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  assert_eq!(queue.get_task(&task.id).unwrap().unwrap().status, TaskStatus::Completed);
+  assert!(broken_link.symlink_metadata().is_ok(), "retention must not delete a non-file entry merely because its name ends in .aeordb");
+}
+
 // ---------------------------------------------------------------------------
 // Retention enforcement
 // ---------------------------------------------------------------------------

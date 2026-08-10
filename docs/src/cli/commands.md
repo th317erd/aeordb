@@ -30,6 +30,12 @@ aeordb start [OPTIONS]
 | `--join` | | -- | URL of an existing cluster member to join (one-shot; fetches the cluster's signing key) |
 | `--join-token` | | -- | Root API key (or bearer token) of the existing cluster member, required with `--join` |
 
+`AEORDB_LOG` overrides the default `info` filter with standard
+`tracing_subscriber` directives, for example
+`AEORDB_LOG=info,aeordb::engine=debug`. Invalid or non-Unicode directives are a
+startup error. `aeordb verify` applies the same strict environment override and
+exits nonzero rather than silently selecting a different filter.
+
 ### Runtime And Lifecycle Configuration Flags
 
 The `start` command generates one explicit option for each of the 41 properties in AeorDB's frozen runtime/lifecycle registry. Run `aeordb start --help` to list the exact options. They include the `memory`, `cache`, `index`, `garbage-collection`, `io`, `query`, `durability`, `maintenance`, `recovery`, `shutdown`, `migration`, and `lifecycle` groups.

@@ -312,12 +312,12 @@ async fn test_metrics_pulse_db_file_size_from_disk() {
 
 #[tokio::test]
 async fn test_metrics_pulse_nonexistent_db_path() {
-  // When the db_path doesn't exist, disk_total should be 0 (not panic).
-  let (engine, _temp) = create_temp_engine_for_tests();
+  let (engine, temp) = create_temp_engine_for_tests();
   let bus = Arc::new(EventBus::new());
   let mut rx = bus.subscribe();
   let counters = Arc::new(EngineCounters::new());
   let rate_trackers = Arc::new(RateTrackerSet::new());
+  let missing_path = temp.path().join("missing.aeordb");
 
   let cancel = CancellationToken::new();
   let handle = spawn_metrics_pulse(
@@ -325,13 +325,12 @@ async fn test_metrics_pulse_nonexistent_db_path() {
     engine.clone(),
     counters.clone(),
     rate_trackers.clone(),
-    "/tmp/nonexistent_aeordb_test_file.aeordb".to_string(),
+    missing_path.to_string_lossy().to_string(),
     cancel.clone(),
   );
 
-  let event = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv()).await.unwrap().unwrap();
-
-  assert_eq!(event.payload["sizes"]["disk_total"].as_u64().unwrap(), 0);
+  let received = tokio::time::timeout(std::time::Duration::from_secs(16), rx.recv()).await;
+  assert!(received.is_err(), "metrics pulse must not publish a fabricated zero disk size when metadata is unavailable");
 
   cancel.cancel();
   let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;

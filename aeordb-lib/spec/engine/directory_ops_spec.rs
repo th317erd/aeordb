@@ -88,7 +88,7 @@ fn ensure_root_directory_does_not_warn_for_a_valid_system_only_database() {
 }
 
 #[test]
-fn ensure_root_directory_preserves_a_nonempty_head_when_the_root_locator_is_missing() {
+fn ensure_root_directory_refuses_a_nonempty_head_when_the_root_locator_is_missing() {
   let dir = tempfile::tempdir().unwrap();
   let path = dir.path().join("missing-root-locator.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
@@ -103,19 +103,19 @@ fn ensure_root_directory_preserves_a_nonempty_head_when_the_root_locator_is_miss
   assert!(!engine.has_entry(&root_locator).unwrap());
 
   let before_probe = engine.durability_snapshot().unwrap().next_sequence;
-  let warnings = capture_warning_logs(|| ops.ensure_root_directory(&ctx).unwrap());
+  let error = ops.ensure_root_directory(&ctx).unwrap_err();
 
   assert_eq!(engine.head_hash().unwrap(), authoritative_head, "startup diagnostics must not replace surviving namespace authority");
   assert!(!engine.has_entry(&root_locator).unwrap(), "startup repair, not root initialization, owns a missing locator");
   assert_eq!(engine.durability_snapshot().unwrap().next_sequence, before_probe, "diagnostics must not publish replacement state");
   assert!(
-    warnings.contains("Root directory locator is missing") && warnings.contains("aeordb verify --repair"),
-    "missing root authority in an existing namespace must remain actionable: {warnings}"
+    error.to_string().contains("root directory locator is missing") && error.to_string().contains("aeordb verify --repair"),
+    "missing root authority in an existing namespace must remain actionable: {error}"
   );
 }
 
 #[test]
-fn ensure_root_directory_retains_a_repair_warning_for_a_malformed_head_root() {
+fn ensure_root_directory_refuses_a_malformed_head_root() {
   let dir = tempfile::tempdir().unwrap();
   let path = dir.path().join("malformed-root.aeor");
   let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
@@ -128,11 +128,11 @@ fn ensure_root_directory_retains_a_repair_warning_for_a_malformed_head_root() {
   engine.store_entry(EntryType::DirectoryIndex, &malformed_hash, &malformed_root).unwrap();
   engine.update_head(&malformed_hash).unwrap();
 
-  let warnings = capture_warning_logs(|| ops.ensure_root_directory(&ctx).unwrap());
+  let error = ops.ensure_root_directory(&ctx).unwrap_err();
 
   assert!(
-    warnings.contains("Root directory exists but is not completely readable") && warnings.contains("aeordb verify --repair"),
-    "a malformed authoritative root must retain an actionable startup warning: {warnings}"
+    error.to_string().contains("root directory is not completely readable") && error.to_string().contains("aeordb verify --repair"),
+    "a malformed authoritative root must retain an actionable startup failure: {error}"
   );
 }
 

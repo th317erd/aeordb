@@ -88,6 +88,17 @@ fn test_engine_health_reflects_entries() {
   assert!(health.db_file_size_bytes > 0);
 }
 
+#[test]
+fn test_engine_health_degrades_when_database_metadata_is_unavailable() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let missing_path = temp.path().join("missing.aeordb");
+
+  let health = check_engine(&engine, missing_path.to_str().unwrap());
+
+  assert_eq!(health.status, HealthStatus::Degraded);
+  assert_eq!(health.db_file_size_bytes, 0);
+}
+
 // ===========================================================================
 // check_disk
 // ===========================================================================
@@ -116,7 +127,7 @@ fn test_disk_health_fallback_with_invalid_path() {
   // A path with a null byte in it will fail the CString conversion,
   // triggering the fallback path.
   let health = check_disk("/nonexistent/path/\0with/null");
-  assert_eq!(health.status, HealthStatus::Healthy);
+  assert_eq!(health.status, HealthStatus::Degraded);
   assert_eq!(health.available_bytes, 0);
   assert_eq!(health.total_bytes, 0);
   assert_eq!(health.usage_percent, 0.0);
@@ -276,6 +287,18 @@ fn test_auth_health_standalone_with_key() {
   assert_eq!(health.status, HealthStatus::Healthy);
   assert_eq!(health.mode, "standalone");
   assert!(health.signing_key_present);
+}
+
+#[test]
+fn test_auth_health_standalone_with_malformed_key_is_unhealthy() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  store_raw_signing_key(&engine, &[0xFFu8; 31]);
+
+  let health = check_auth(&engine);
+
+  assert_eq!(health.status, HealthStatus::Unhealthy);
+  assert_eq!(health.mode, "standalone");
+  assert!(!health.signing_key_present);
 }
 
 #[test]

@@ -5,6 +5,7 @@
 use aeordb::auth::api_key::{generate_api_key, hash_api_key, ApiKeyRecord};
 use aeordb::engine::api_key_rules::KeyRule;
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use aeordb::engine::system_store;
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::{Cache, GroupLoader, PathPermissions, PermissionLink, RequestContext, User};
@@ -354,6 +355,94 @@ fn list_directory_host_function_pages_a_large_btree_without_truncating_silently(
     .expect("oversized listing should be a bounded host error");
   let error: serde_json::Value = serde_json::from_slice(&error).unwrap();
   assert!(error["error"].as_str().is_some_and(|message| message.contains("bounded limit and offset")), "unexpected host response: {error}");
+}
+
+#[test]
+fn list_directory_host_function_rejects_present_malformed_pagination() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+
+  for (index, request, field) in [
+    (0, br#"{"path":"/","offset":"1","limit":1}"#.as_slice(), "offset"),
+    (1, br#"{"path":"/","offset":0,"limit":"1"}"#.as_slice(), "limit"),
+  ] {
+    let encoded_request = request.iter().map(|byte| format!("\\{byte:02x}")).collect::<String>();
+    let wasm = wat::parse_str(format!(
+      r#"
+      (module
+        (import "aeordb" "aeordb_list_directory" (func $list (param i32 i32) (result i64)))
+        (memory (export "memory") 1)
+        (data (i32.const 1024) "{encoded_request}")
+        (func (export "handle") (param i32) (param i32) (result i64)
+          (call $list (i32.const 1024) (i32.const {}))
+        )
+      )
+      "#,
+      request.len(),
+    ))
+    .unwrap();
+    let plugin_path = format!("test/malformed-list-{index}");
+    manager.deploy_plugin(&format!("malformed-list-{index}"), &plugin_path, PluginType::Wasm, wasm).unwrap();
+
+    let response = manager
+      .invoke_wasm_plugin_with_context(&plugin_path, b"{}", engine.clone(), RequestContext::system())
+      .expect("malformed host arguments must produce a bounded response");
+    let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert!(response["error"].as_str().is_some_and(|message| message.contains(field)), "malformed {field} was defaulted: {response}");
+  }
+}
+
+#[test]
+fn query_host_function_reports_permission_authority_failures_instead_of_filtering_them_as_denied() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let manager = PluginManager::new(engine.clone());
+  let request = br#"{"path":"/allowed","where":{"field":"@filename","op":"eq","value":"file.txt"},"limit":10}"#;
+  let encoded_request = request.iter().map(|byte| format!("\\{byte:02x}")).collect::<String>();
+  let wasm = wat::parse_str(format!(
+    r#"
+    (module
+      (import "aeordb" "aeordb_query" (func $query (param i32 i32) (result i64)))
+      (memory (export "memory") 1)
+      (data (i32.const 1024) "{encoded_request}")
+      (func (export "handle") (param i32) (param i32) (result i64)
+        (call $query (i32.const 1024) (i32.const {}))
+      )
+    )
+    "#,
+    request.len(),
+  ))
+  .unwrap();
+  manager.deploy_plugin("permission-query", "test/permission-query", PluginType::Wasm, wasm).unwrap();
+
+  let context = scoped_context(&engine, "query-permission-authority", "/allowed");
+  let operations = DirectoryOps::new(&engine);
+  let system_context = RequestContext::system();
+  operations.store_file_buffered(&system_context, "/allowed/child/file.txt", b"content", Some("text/plain")).unwrap();
+  operations
+    .store_file_buffered(&system_context, "/allowed/child/.aeordb-permissions", b"not valid permission JSON", Some("application/json"))
+    .unwrap();
+  let user_id = Uuid::parse_str(&context.user_id).unwrap();
+  let group_cache = Arc::new(Cache::new(GroupLoader));
+  let permission_error = PermissionResolver::new(&engine, &group_cache)
+    .check_path_permission(&user_id, "/allowed/child/file.txt", CrudlifyOp::Read)
+    .expect_err("the child authority fixture must fail before the plugin boundary is tested");
+  assert!(permission_error.to_string().contains("malformed stored permission authority"));
+
+  let response = manager
+    .invoke_wasm_plugin_with_auth(
+      "test/permission-query",
+      b"{}",
+      engine.clone(),
+      context,
+      group_cache,
+      Arc::new(Cache::new(aeordb::engine::ApiKeyLoader)),
+    )
+    .expect("the plugin host must return structured authorization failure evidence");
+  let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+  assert!(
+    response["error"].as_str().is_some_and(|message| message.contains("malformed stored permission authority")),
+    "permission authority failure was hidden as an empty query success: {response}",
+  );
 }
 
 #[test]

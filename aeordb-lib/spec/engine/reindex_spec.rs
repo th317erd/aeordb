@@ -355,6 +355,30 @@ fn test_forced_reindex_migrates_legacy_file_record_to_current_version_and_indexe
 }
 
 #[test]
+fn forced_reindex_fails_when_the_live_file_record_inventory_is_malformed() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+  let path = "/malformed-inventory/file.txt";
+  operations.store_file_buffered(&context, path, b"valid body", Some("text/plain")).unwrap();
+  let path_key = file_path_hash(path, &engine.hash_algo()).unwrap();
+  let malformed_offset =
+    engine.store_entry_with_version(EntryType::FileRecord, &path_key, b"not-a-file-record", CURRENT_FILE_RECORD_VERSION).unwrap();
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/malformed-inventory", "force": true})).unwrap();
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+
+  let completed = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(completed.status, TaskStatus::Failed);
+  let error = completed.error.expect("malformed inventory must retain failure evidence");
+  assert!(error.contains("malformed FileRecord"), "unexpected forced-reindex error: {error}");
+  assert!(error.contains(&malformed_offset.to_string()), "failure must identify WAL offset {malformed_offset}: {error}");
+}
+
+#[test]
 fn forced_reindex_reports_partial_migration_instead_of_completing_successfully() {
   let (engine, _temp) = create_temp_engine_for_tests();
   let event_bus = Arc::new(EventBus::new());
@@ -1052,6 +1076,37 @@ fn test_reindex_empty_directory() {
 
   let final_task = queue.get_task(&task.id).unwrap().unwrap();
   assert_eq!(final_task.status, TaskStatus::Completed);
+}
+
+#[test]
+fn reindex_task_rejects_a_malformed_boolean_mode_instead_of_defaulting_it() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+  store_index_config(&engine, "/malformed-task");
+
+  let task = queue.enqueue("reindex", serde_json::json!({"path": "/malformed-task", "metadata_only": "true"})).unwrap();
+
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  let finished = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(finished.status, TaskStatus::Failed);
+  assert!(finished.error.as_deref().is_some_and(|error| error.contains("metadata_only") && error.contains("boolean")));
+}
+
+#[test]
+fn gc_task_rejects_a_malformed_dry_run_flag_before_collection() {
+  let (engine, _temp) = create_temp_engine_for_tests();
+  let event_bus = Arc::new(EventBus::new());
+  let plugin_manager = PluginManager::new(engine.clone());
+  let queue = TaskQueue::new(engine.clone());
+
+  let task = queue.enqueue("gc", serde_json::json!({"dry_run": "true"})).unwrap();
+
+  assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+  let finished = queue.get_task(&task.id).unwrap().unwrap();
+  assert_eq!(finished.status, TaskStatus::Failed);
+  assert!(finished.error.as_deref().is_some_and(|error| error.contains("dry_run") && error.contains("boolean")));
 }
 
 #[test]

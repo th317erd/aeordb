@@ -255,7 +255,7 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let task_queue = Arc::new(TaskQueue::new(engine.clone()));
-  let cors_state = build_cors_state(cors_flag, &engine);
+  let cors_state = build_cors_state(cors_flag, &engine).map_err(|error| format!("failed to load CORS configuration: {error}"))?;
   let router = match cancel.clone() {
     Some(token) => try_create_app_with_all_and_task_queue_inner(
       auth_provider,
@@ -561,6 +561,7 @@ fn try_create_app_with_all_and_task_queue_inner(
   let sync_loop_cancel = cancel.clone().unwrap_or_default();
   let _sync_loop_handle = crate::engine::spawn_sync_loop(Arc::clone(&sync_engine), 30, Some(Arc::clone(&event_bus)), sync_loop_cancel);
 
+  let database_path = engine.database_path().to_string_lossy().into_owned();
   let app_state = AppState {
     jwt_manager,
     auth_provider,
@@ -578,7 +579,7 @@ fn try_create_app_with_all_and_task_queue_inner(
     sync_engine: Some(sync_engine),
     startup_time: chrono::Utc::now().timestamp_millis() as u64,
     startup_instant: std::time::Instant::now(),
-    db_path: String::new(),
+    db_path: database_path,
     rate_trackers: None,
   };
 

@@ -3634,9 +3634,17 @@ impl<'a> DirectoryOps<'a> {
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<FileRecord>() as u64))
         .ok_or_else(|| EngineError::ResourceExhausted("file record migration record estimate overflow".to_string()))?;
       memory.reserve(record_workspace, "file record migration record admission failed")?;
-      let (path_header, _stored_key, value) =
+      let (path_header, stored_key, value) =
         planning_engine.get_entry(&file_key)?.ok_or_else(|| EngineError::NotFound(normalized.clone()))?;
-      let mut record = FileRecord::deserialize(&value, hash_length, path_header.entry_version)?;
+      if stored_key != file_key || path_header.entry_type != EntryType::FileRecord {
+        return Err(EngineError::CorruptEntry {
+          offset: path_entry.offset,
+          reason: format!("file path locator '{normalized}' does not resolve to its expected FileRecord"),
+        });
+      }
+      let mut record = FileRecord::deserialize(&value, hash_length, path_header.entry_version).map_err(|error| {
+        EngineError::CorruptEntry { offset: path_entry.offset, reason: format!("malformed FileRecord for path '{normalized}': {error}") }
+      })?;
       let mut needs_migration = path_header.entry_version < CURRENT_FILE_RECORD_VERSION;
       if record.path != normalized {
         record.path = normalized.clone();
@@ -3808,23 +3816,22 @@ impl<'a> DirectoryOps<'a> {
       // Startup repair owns recovery; silently recreating root would discard
       // the only authoritative link to a live directory tree.
       if planning_engine.has_entry(&dir_key)? {
-        match self.list_directory_window_strict("/", 0, 1) {
-          Ok(_) => {}
-          Err(error) => tracing::warn!(
-            %error,
-            "Root directory exists but is not completely readable. Run 'aeordb verify --repair' to recover."
-          ),
-        }
+        self.list_directory_window_strict("/", 0, 1).map_err(|error| EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("root directory is not completely readable; run 'aeordb verify --repair' to recover: {error}"),
+        })?;
         return Ok((None, ()));
       }
 
       let head_hash = planning_engine.head_hash()?;
       if !head_hash.is_empty() && !head_hash.iter().all(|byte| *byte == 0) {
-        tracing::warn!(
-          head_hash = %hex::encode(&head_hash),
-          "Root directory locator is missing while namespace authority remains. Run 'aeordb verify --repair' to recover."
-        );
-        return Ok((None, ()));
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!(
+            "root directory locator is missing while namespace authority {} remains; run 'aeordb verify --repair' to recover",
+            hex::encode(&head_hash)
+          ),
+        });
       }
 
       let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::DirectoryCreate);

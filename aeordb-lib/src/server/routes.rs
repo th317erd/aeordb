@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::responses::{require_root, ErrorResponse};
 use super::state::AppState;
-use crate::engine::RequestContext;
+use crate::engine::{EngineResult, RequestContext, StorageEngine};
 use crate::engine::memory_coordinator::MemoryReservation;
 use crate::auth::{
   TokenClaims, generate_api_key, hash_api_key, parse_api_key, verify_api_key, ApiKeyRecord, DEFAULT_EXPIRY_DAYS, generate_magic_link_code,
@@ -616,53 +616,55 @@ pub async fn list_api_keys(State(state): State<AppState>, Extension(claims): Ext
     return response;
   }
 
-  match state.auth_provider.list_api_keys() {
-    Ok(keys) => {
-      // Build a user_id → username cache to avoid repeated lookups
-      let mut username_cache: std::collections::HashMap<uuid::Uuid, String> = std::collections::HashMap::new();
-      username_cache.insert(uuid::Uuid::nil(), "root".to_string());
+  let keys = match state.auth_provider.list_api_keys() {
+    Ok(keys) => keys,
+    Err(error) => return api_key_list_storage_error(&error),
+  };
+  let metadata = match api_key_metadata(&state.engine, &keys) {
+    Ok(metadata) => metadata,
+    Err(error) => return api_key_list_storage_error(&error),
+  };
+  (StatusCode::OK, Json(serde_json::json!({"items": metadata}))).into_response()
+}
 
-      let metadata: Vec<serde_json::Value> = keys
-        .iter()
-        .map(|record| {
-          let username = if let Some(uid) = record.user_id {
-            username_cache
-              .entry(uid)
-              .or_insert_with(|| {
-                crate::engine::system_store::get_user(&state.engine, &uid)
-                  .ok()
-                  .flatten()
-                  .map(|u| u.username)
-                  .unwrap_or_else(|| uid.to_string())
-              })
-              .clone()
-          } else {
-            "share-key".to_string()
-          };
+fn api_key_metadata(engine: &StorageEngine, keys: &[ApiKeyRecord]) -> EngineResult<Vec<serde_json::Value>> {
+  let mut username_cache = std::collections::HashMap::new();
+  username_cache.insert(Uuid::nil(), "root".to_string());
+  let mut metadata = Vec::with_capacity(keys.len());
 
-          serde_json::json!({
-            "key_id": record.key_id,
-            "user_id": record.user_id,
-            "username": username,
-            "created_at": record.created_at.to_rfc3339(),
-            "is_revoked": record.is_revoked,
-            "expires_at": record.expires_at,
-            "label": record.label,
-            "rules": record.rules,
-          })
-        })
-        .collect();
-      (StatusCode::OK, Json(serde_json::json!({"items": metadata}))).into_response()
-    }
-    Err(error) => {
-      tracing::error!("Failed to list API keys: {}", error);
-      ErrorResponse::new(
-        "Failed to list API keys: could not read from storage. If this persists, check GET /system/health for system status".to_string(),
-      )
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response()
-    }
+  for record in keys {
+    let username = match record.user_id {
+      None => "share-key".to_string(),
+      Some(user_id) => match username_cache.get(&user_id) {
+        Some(username) => username.clone(),
+        None => {
+          let username = system_store::get_user(engine, &user_id)?.map(|user| user.username).unwrap_or_else(|| user_id.to_string());
+          username_cache.insert(user_id, username.clone());
+          username
+        }
+      },
+    };
+    metadata.push(serde_json::json!({
+      "key_id": record.key_id,
+      "user_id": record.user_id,
+      "username": username,
+      "created_at": record.created_at.to_rfc3339(),
+      "is_revoked": record.is_revoked,
+      "expires_at": record.expires_at,
+      "label": record.label,
+      "rules": record.rules,
+    }));
   }
+  Ok(metadata)
+}
+
+fn api_key_list_storage_error(error: &dyn std::fmt::Display) -> Response {
+  tracing::error!("Failed to list API keys: {}", error);
+  ErrorResponse::new(
+    "Failed to list API keys: could not read from storage. If this persists, check GET /system/health for system status".to_string(),
+  )
+  .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+  .into_response()
 }
 
 /// DELETE /admin/api-keys/:key_id -- revoke an API key.

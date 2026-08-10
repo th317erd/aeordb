@@ -11,6 +11,7 @@ use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_stream::once;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -23,7 +24,7 @@ use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
 use crate::engine::engine_event::{
   EngineEvent, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED, EVENT_ENTRIES_UPDATED, EVENT_HEARTBEAT, EVENT_INDEXES_UPDATED,
-  EVENT_PERMISSIONS_CHANGED, EVENT_SERVER_READY,
+  EVENT_PERMISSIONS_CHANGED, EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::{StorageEngine, SystemFamilyPolicyResolver};
@@ -271,6 +272,20 @@ fn server_ready_event(state: &AppState) -> EngineEvent {
   )
 }
 
+fn stream_gap_to_sse(error: BroadcastStreamRecvError) -> Option<Result<Event, Infallible>> {
+  let BroadcastStreamRecvError::Lagged(missed_events) = error;
+  metrics::counter!("aeordb_sse_stream_gaps_total").increment(1);
+  metrics::counter!("aeordb_sse_missed_events_total").increment(missed_events);
+  event_to_sse(EngineEvent::new(
+    EVENT_STREAM_GAP,
+    "system",
+    serde_json::json!({
+      "missed_events": missed_events,
+      "action": "refresh",
+    }),
+  ))
+}
+
 /// GET /events/stream -- Server-Sent Events stream of engine events.
 ///
 /// Query parameters:
@@ -303,11 +318,9 @@ pub async fn event_stream(
   let initial_ready =
     project_event_for_subscriber(ready_event, &event_filter, &path_prefix, &authority, family_policy).and_then(event_to_sse);
 
-  let live_stream = BroadcastStream::new(rx).filter_map(move |result| {
-    match result {
-      Ok(event) => project_event_for_subscriber(event, &event_filter, &path_prefix, &authority, family_policy).and_then(event_to_sse),
-      Err(_) => None, // Lagged or closed -- silently skip
-    }
+  let live_stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+    Ok(event) => project_event_for_subscriber(event, &event_filter, &path_prefix, &authority, family_policy).and_then(event_to_sse),
+    Err(error) => stream_gap_to_sse(error),
   });
   let stream = once(initial_ready).filter_map(|event| event).chain(live_stream);
 
@@ -347,7 +360,7 @@ pub async fn user_event_stream(
           Err(_) => None,
         }
       }
-      Err(_) => None,
+      Err(error) => stream_gap_to_sse(error),
     }
   });
 

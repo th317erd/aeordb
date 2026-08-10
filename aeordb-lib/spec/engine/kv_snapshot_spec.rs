@@ -91,7 +91,7 @@ fn test_snapshot_memory_stats_separate_pages_buffer_and_metadata() {
   let mut buffer = HashMap::new();
   let entry = make_entry(7, 700);
   buffer.insert(entry.hash.clone(), entry);
-  let snapshot = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages);
+  let snapshot = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages).unwrap();
 
   let stats = snapshot.memory_stats();
   assert_eq!(stats.resident_page_bytes, expected_page_bytes);
@@ -105,6 +105,15 @@ fn test_snapshot_memory_stats_separate_pages_buffer_and_metadata() {
 fn empty_pages(bucket_count: usize, hash_length: usize) -> Arc<Vec<Arc<[u8]>>> {
   let empty = page_arc(vec![0u8; page_size(hash_length)]);
   Arc::new(vec![empty; bucket_count])
+}
+
+#[test]
+fn resident_snapshot_rejects_a_malformed_page_instead_of_counting_it_as_empty() {
+  let pages = Arc::new(vec![page_arc(vec![0xff; page_size(HashAlgorithm::Blake3_256.hash_length())])]);
+
+  let result = ReadSnapshot::new(HashMap::new(), make_nvt(1), 1, HashAlgorithm::Blake3_256, 0, pages);
+
+  assert!(result.is_err());
 }
 
 // ============================================================================
@@ -122,7 +131,8 @@ fn test_snapshot_get_finds_entry_in_buffer() {
   let mut buffer = HashMap::new();
   buffer.insert(entry.hash.clone(), entry.clone());
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, empty_pages(bucket_count, 32));
+  let snap =
+    ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, empty_pages(bucket_count, 32)).unwrap();
 
   let result = snap.get(&make_hash(42)).unwrap();
   assert!(result.is_some());
@@ -140,7 +150,8 @@ fn test_snapshot_get_returns_none_for_deleted_in_buffer() {
   let mut buffer = HashMap::new();
   buffer.insert(entry.hash.clone(), entry.clone());
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 0, empty_pages(bucket_count, 32));
+  let snap =
+    ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 0, empty_pages(bucket_count, 32)).unwrap();
 
   let result = snap.get(&make_hash(42)).unwrap();
   assert!(result.is_none(), "Deleted entry in buffer should return None from get()");
@@ -161,7 +172,7 @@ fn test_snapshot_get_falls_through_to_disk() {
   let (bucket_count, pages) = create_flushed_store(dir.path(), &entries);
 
   // Empty buffer — all lookups must hit pages
-  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages).unwrap();
 
   let r1 = snap.get(&make_hash(1)).unwrap();
   assert!(r1.is_some());
@@ -182,7 +193,7 @@ fn test_snapshot_get_returns_none_for_missing() {
   let entries = vec![make_entry(1, 100)];
   let (bucket_count, pages) = create_flushed_store(dir.path(), &entries);
 
-  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages);
+  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages).unwrap();
 
   // Hash 99 was never inserted
   let result = snap.get(&make_hash(99)).unwrap();
@@ -206,7 +217,7 @@ fn test_snapshot_buffer_wins_over_disk() {
   let mut buffer = HashMap::new();
   buffer.insert(buffer_entry.hash.clone(), buffer_entry.clone());
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages);
+  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages).unwrap();
 
   let result = snap.get(&make_hash(10)).unwrap();
   assert!(result.is_some());
@@ -228,7 +239,7 @@ fn test_snapshot_iter_all_merges_buffer_and_disk() {
   buffer.insert(new_entry.hash.clone(), new_entry);
   buffer.insert(updated_entry.hash.clone(), updated_entry);
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 4, pages);
+  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 4, pages).unwrap();
 
   let all = snap.iter_all().unwrap();
   assert_eq!(all.len(), 4, "Should have 4 unique entries (3 disk + 1 new, with 1 overlap)");
@@ -255,7 +266,7 @@ fn test_snapshot_iter_all_excludes_deleted() {
   let tombstone = make_deleted_entry(2, 200);
   buffer.insert(tombstone.hash.clone(), tombstone);
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages);
+  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 1, pages).unwrap();
 
   let all = snap.iter_all().unwrap();
   assert_eq!(all.len(), 1, "Deleted entry should be excluded from iter_all");
@@ -283,7 +294,7 @@ fn test_snapshot_count_by_type_respects_buffer_overrides() {
   buffer.insert(tombstone.hash.clone(), tombstone);
   buffer.insert(new_entry.hash.clone(), new_entry);
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+  let snap = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages).unwrap();
 
   assert_eq!(snap.count_by_type(KV_TYPE_CHUNK).unwrap(), 3);
   let all = snap.iter_by_type(KV_TYPE_CHUNK).unwrap();
@@ -310,7 +321,7 @@ fn snapshot_visitors_preserve_overrides_filters_and_early_stop() {
   buffer.insert(deleted.hash.clone(), deleted);
   buffer.insert(inserted.hash.clone(), inserted);
 
-  let snapshot = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+  let snapshot = ReadSnapshot::new(buffer, make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages).unwrap();
   let mut all = Vec::new();
   let completed = snapshot
     .visit_all(|entry| {
@@ -344,7 +355,7 @@ fn snapshot_visitors_propagate_callback_errors_without_scanning_further() {
   let dir = tempdir().unwrap();
   let disk_entries = vec![make_entry(1, 100), make_entry(2, 200), make_entry(3, 300)];
   let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
-  let snapshot = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+  let snapshot = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages).unwrap();
   let mut visits = 0usize;
 
   let error = snapshot
@@ -364,7 +375,7 @@ fn test_snapshot_buffer_only_publish_reuses_pages_and_type_counts() {
 
   let disk_entries = vec![make_entry(1, 100), make_entry(2, 200)];
   let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
-  let first = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 2, pages);
+  let first = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 2, pages).unwrap();
 
   let page_type_counts = first.page_type_counts();
   let mut buffer = HashMap::new();
@@ -394,7 +405,7 @@ fn test_snapshot_get_concurrent_file_handles() {
   let disk_entries = vec![make_entry(10, 1000), make_entry(20, 2000), make_entry(30, 3000)];
   let (bucket_count, pages) = create_flushed_store(dir.path(), &disk_entries);
 
-  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages);
+  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(bucket_count), bucket_count, HashAlgorithm::Blake3_256, 3, pages).unwrap();
 
   // Multiple sequential get() calls — all served from in-memory pages.
   for _ in 0..5 {
@@ -466,7 +477,7 @@ fn bounded_snapshot_propagates_page_io_failure_instead_of_reporting_a_miss() {
 
 #[test]
 fn test_snapshot_accessors() {
-  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(1024), 1024, HashAlgorithm::Blake3_256, 0, empty_pages(1024, 32));
+  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(1024), 1024, HashAlgorithm::Blake3_256, 0, empty_pages(1024, 32)).unwrap();
 
   assert_eq!(snap.len(), 0);
   assert!(snap.is_empty());
@@ -483,7 +494,7 @@ fn test_snapshot_accessors_with_data() {
   buffer.insert(e1.hash.clone(), e1);
   buffer.insert(e2.hash.clone(), e2);
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(2048), 2048, HashAlgorithm::Blake3_256, 5, empty_pages(2048, 32));
+  let snap = ReadSnapshot::new(buffer, make_nvt(2048), 2048, HashAlgorithm::Blake3_256, 5, empty_pages(2048, 32)).unwrap();
 
   assert_eq!(snap.len(), 5);
   assert!(!snap.is_empty());
@@ -493,7 +504,7 @@ fn test_snapshot_accessors_with_data() {
 
 #[test]
 fn test_snapshot_is_deleted_in_buffer_false_for_missing() {
-  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(1024), 1024, HashAlgorithm::Blake3_256, 0, empty_pages(1024, 32));
+  let snap = ReadSnapshot::new(HashMap::new(), make_nvt(1024), 1024, HashAlgorithm::Blake3_256, 0, empty_pages(1024, 32)).unwrap();
 
   assert!(!snap.is_deleted_in_buffer(&make_hash(99)));
 }
@@ -504,7 +515,7 @@ fn test_snapshot_is_deleted_in_buffer_false_for_live_entry() {
   let entry = make_entry(5, 500);
   buffer.insert(entry.hash.clone(), entry);
 
-  let snap = ReadSnapshot::new(buffer, make_nvt(1024), 1024, HashAlgorithm::Blake3_256, 1, empty_pages(1024, 32));
+  let snap = ReadSnapshot::new(buffer, make_nvt(1024), 1024, HashAlgorithm::Blake3_256, 1, empty_pages(1024, 32)).unwrap();
 
   assert!(!snap.is_deleted_in_buffer(&make_hash(5)), "Live entry should not be reported as deleted");
 }

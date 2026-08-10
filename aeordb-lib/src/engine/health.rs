@@ -1,9 +1,10 @@
 use serde::Serialize;
 use std::path::Path;
 
-use crate::engine::cluster_join::{get_cluster_mode, has_signing_key};
+use crate::engine::cluster_join::get_cluster_mode;
 use crate::engine::peer_connection::{ConnectionState, PeerManager};
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::system_store;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -68,17 +69,27 @@ pub fn check_engine(engine: &StorageEngine, db_path: &str) -> EngineHealth {
   let snapshot = engine.counters().snapshot();
   // Total entry count: files + directories + symlinks + chunks + snapshots + forks
   let entry_count = snapshot.files + snapshot.directories + snapshot.symlinks + snapshot.chunks + snapshot.snapshots + snapshot.forks;
-  let db_file_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+  let (db_file_size_bytes, metadata_available) = match std::fs::metadata(db_path) {
+    Ok(metadata) => (metadata.len(), true),
+    Err(_) => (0, false),
+  };
   let durability_failure = engine.durability_failure();
-  let status = if durability_failure.is_some() { HealthStatus::Unhealthy } else { HealthStatus::Healthy };
+  let status = if durability_failure.is_some() {
+    HealthStatus::Unhealthy
+  } else if metadata_available {
+    HealthStatus::Healthy
+  } else {
+    HealthStatus::Degraded
+  };
   EngineHealth { status, entry_count, db_file_size_bytes, durability_failure }
 }
 
 /// Check disk health for the partition containing the database file.
 ///
 /// On Unix (Linux/macOS), uses `libc::statvfs` to determine available and total space.
-/// Returns a fallback with zero values and Healthy status on non-Unix
-/// platforms or if the stat call fails.
+/// Returns a fallback with zero values and Degraded status on non-Unix
+/// platforms or if the stat call fails; unknown filesystem state must not be
+/// presented as healthy.
 pub fn check_disk(db_path: &str) -> DiskHealth {
   #[cfg(unix)]
   {
@@ -107,8 +118,8 @@ pub fn check_disk(db_path: &str) -> DiskHealth {
     }
   }
 
-  // Fallback: cannot determine disk stats — report healthy with zeros.
-  DiskHealth { status: HealthStatus::Healthy, available_bytes: 0, total_bytes: 0, usage_percent: 0.0 }
+  // Fallback: cannot determine disk stats. Zeroes mean unknown, not healthy.
+  DiskHealth { status: HealthStatus::Degraded, available_bytes: 0, total_bytes: 0, usage_percent: 0.0 }
 }
 
 /// Check sync health by inspecting peer connections.
@@ -133,12 +144,18 @@ pub fn check_sync(peer_manager: &PeerManager) -> SyncHealth {
 /// If it is missing, the node cannot verify JWTs and auth is unhealthy.
 /// In standalone mode, auth is always healthy.
 pub fn check_auth(engine: &StorageEngine) -> AuthHealth {
-  let key_present = has_signing_key(engine);
   let mode = match get_cluster_mode(engine) {
     Ok(mode) => mode,
     Err(error) => {
       tracing::error!(%error, "auth health could not determine cluster mode");
-      return AuthHealth { status: HealthStatus::Unhealthy, mode: "unknown".to_string(), signing_key_present: key_present };
+      return AuthHealth { status: HealthStatus::Unhealthy, mode: "unknown".to_string(), signing_key_present: false };
+    }
+  };
+  let key_present = match system_store::get_jwt_signing_key(engine) {
+    Ok(key) => key.is_some(),
+    Err(error) => {
+      tracing::error!(%error, "auth health could not read JWT signing authority");
+      return AuthHealth { status: HealthStatus::Unhealthy, mode, signing_key_present: false };
     }
   };
   let is_cluster = mode == "cluster";

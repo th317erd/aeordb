@@ -273,6 +273,19 @@ fn test_resolve_auth_mode_invalid_environment_value_is_rejected() {
   assert!(matches!(result, Err(error) if error.contains("Unknown auth URI")));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_resolve_auth_mode_non_unicode_environment_value_is_rejected() {
+  use std::os::unix::ffi::OsStringExt;
+
+  let _guard = AUTH_ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+  std::env::set_var("AEORDB_AUTH", std::ffi::OsString::from_vec(vec![0xFF]));
+  let result = resolve_auth_mode(None);
+  std::env::remove_var("AEORDB_AUTH");
+
+  assert!(matches!(result, Err(error) if error.contains("AEORDB_AUTH") && error.contains("Unicode")));
+}
+
 // ===========================================================================
 // NoAuthProvider tests
 // ===========================================================================

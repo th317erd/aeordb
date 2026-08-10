@@ -164,6 +164,31 @@ fn v2_scan_rejects_partial_typed_failure_evidence() {
 }
 
 #[test]
+fn v2_scan_rejects_missing_or_wrong_typed_count_and_truncation_evidence() {
+  for field in ["wal_tail_bytes", "hot_tail_writes", "hot_tail_voids", "wal_tail_truncated"] {
+    for wrong_type in [false, true] {
+      let temp = tempfile::tempdir().unwrap();
+      let database = temp.path().join("test.aeordb");
+      fs::write(&database, b"abc").unwrap();
+      let base = temp.path().join("spill");
+      fs::create_dir_all(&base).unwrap();
+      let directory = write_v2_artifact(&base, "artifact", &database, [0x3b; 16], 1_700_000_000_000, 1, b"def");
+      let manifest_path = directory.join("manifest.json");
+      let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+      if wrong_type {
+        manifest[field] = serde_json::json!("not-the-declared-type");
+      } else {
+        manifest.as_object_mut().unwrap().remove(field);
+      }
+      fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+      let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
+      assert!(error.to_string().contains(field), "field={field} wrong_type={wrong_type}: {error}");
+    }
+  }
+}
+
+#[test]
 fn matching_spill_with_malformed_attempt_timestamp_fails_closed() {
   let temp = tempfile::tempdir().unwrap();
   let database = temp.path().join("test.aeordb");
@@ -197,6 +222,27 @@ fn v2_scan_and_replay_fail_closed_when_component_changes() {
 
   let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
   assert!(error.to_string().contains("digest"));
+}
+
+#[test]
+fn replay_propagates_wal_tail_metadata_failures_that_are_not_missing_files() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  write_v2_artifact(&base, "artifact", &database, [0x47; 16], 1_700_000_000_000, 1, b"def");
+
+  let mut artifacts = scan_for_database_with_locations(&database, &[location(&base)]).unwrap();
+  let non_directory = temp.path().join("not-a-directory");
+  fs::write(&non_directory, b"ordinary file").unwrap();
+  artifacts[0].wal_tail_path = Some(non_directory.join("wal-tail.bin"));
+
+  let error = apply_wal_tails_to_database(&database, &artifacts)
+    .expect_err("an operational metadata failure must not be reported as a missing spill component");
+
+  assert!(matches!(error, aeordb::engine::EngineError::IoError(_)), "unexpected replay error: {error}");
+  assert!(!error.to_string().contains("references missing WAL tail"), "operational failure was mislabeled as absence: {error}");
 }
 
 #[test]

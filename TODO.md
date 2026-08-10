@@ -483,15 +483,16 @@
         - [x] Prove migration configuration and persistent-format readers have no runtime capture caller, migration module, or lease/progress control writer.
     - [ ] P2f: classify and gate the complete production error-suppression surface before any v4 writer activates.
       - [x] Inventory ignored/converted/defaulted/logged-only errors across every production Rust module with stable machine identities.
-      - [ ] Define a checked shrinking allowlist with class, rationale, owner, guarding test, and removal condition for every retained suppression.
+      - [x] Close the syntax scanner's macro-token blind spot without classifying error-preserving `map_err` closures as suppression.
+      - [x] Define a checked shrinking allowlist with class, rationale, owner, guarding test, and removal condition for every retained suppression.
       - [x] Implement gate failures for unreviewed suppressions, stale metadata/policies, duplicate identities, malformed classification, unbounded rationale, and baseline growth.
-      - [ ] Audit durability, authority, traversal, shutdown, spill, ControlStore, GC, Void, migration/cutover, plugin, backup/import, repair, and async-worker hotspots first.
+      - [x] Audit durability, authority, traversal, shutdown, spill, ControlStore, GC, Void, migration/cutover, plugin, backup/import, repair, and async-worker hotspots first.
         - [x] Fail write admission closed when any in-memory durability-authority lock is poisoned; do not recover an unknown state into writable service.
         - [x] Remove repair's fabricated zero KV length when the WAL-writer layout lock is unavailable.
         - [x] Make emergency-spill identity, ordering, and path containment checks reject unresolved path/timestamp evidence instead of substituting current-directory or epoch defaults.
         - [x] Remove guarded KV replacement-offset fallback after preserving the already-validated page offset.
         - [x] Make v3 FileHeader serialization/deserialization and offline repair reject unsupported hash widths, wrong-sized hash fields, and future versions with typed errors instead of slice panics or speculative rewrites.
-      - [ ] Correct every serious durability/authority or correctness-bearing suppression found; preserve optional cleanup/telemetry only with visible evidence.
+      - [x] Correct every serious durability/authority or correctness-bearing suppression found; preserve optional cleanup/telemetry only with visible evidence.
         - [x] Reject malformed rule output, invalid auth configuration, malformed bundled-plugin versions, invalid virtual-query UTF-8, and snapshot metadata serialization failure (`31e9d8b`).
         - [x] Surface startup/shutdown task, signal, default-configuration, and corrupt-open failures instead of continuing through an invalid lifecycle (`69b9f76`).
         - [x] Atomically fail and retire durability tickets, latch serious transaction-authority failures read-only, and preserve emergency spill evidence (`d73b4a7`).
@@ -531,6 +532,17 @@
         - [x] Replace deployment-report serialization and crash-soak checkpoint startup panics with typed, classified CLI failures.
           - [x] Make `deployment-check --json` propagate serialization failure through `EngineResult`.
           - [x] Make an unavailable crash-soak checkpoint path exit with startup failure evidence instead of panic code 101.
+        - [x] Make fallible server startup return metrics-recorder conflicts instead of panicking inside initialization.
+        - [x] Propagate stored-file locator namespace/chunk/I/O failures instead of reporting them as an unsupported document format.
+        - [x] Reject malformed plugin host file responses instead of fabricating empty bytes, MIME type, or size in the SDK.
+        - [x] Reject malformed plugin host query options, sort descriptors, and aggregate fields instead of silently dropping or defaulting them.
+        - [x] Make soak-worker checkpoints and resource evidence reject unreadable/malformed state instead of fabricating empty checkpoints or zero-valued samples.
+        - [x] Make shared binary readers reject offset arithmetic overflow and reuse them for deletion-record decoding instead of panicking in duplicate helpers.
+        - [x] Reject a non-Unicode `AEORDB_AUTH` override instead of silently selecting a lower-precedence authentication mode.
+        - [x] Make root API-key listings reject corrupt user authority instead of returning a fabricated UUID username in a successful response.
+        - [x] Preserve non-conflict operating-system evidence from database lock acquisition instead of reporting every failure as another process holding the lock.
+        - [x] Reject malformed or non-Unicode logging directives through fallible CLI startup and diagnostic entry points instead of silently selecting another filter.
+        - [x] Emit a typed `stream_gap` SSE control event on global and per-user broadcast lag instead of silently leaving client views stale.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

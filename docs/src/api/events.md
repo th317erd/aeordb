@@ -102,6 +102,7 @@ Each event is a JSON object with:
 | Event Type | Description | Payload |
 |------------|-------------|---------|
 | `server_ready` | Synthetic first event on ready SSE connections | `{"status": "ready", "version": "...", "startup_time": 1781233139578, "uptime_ms": 6500}` |
+| `stream_gap` | This connection fell behind the bounded event buffer and must refresh authoritative state | `{"missed_events": 3, "action": "refresh"}` |
 | `entries_created` | Files were created or updated | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 42, "mutation_kind": "file_write"}` |
 | `entries_deleted` | Files were deleted | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 43, "mutation_kind": "file_delete"}` |
 | `versions_created` | A new version (snapshot/fork) was created | Version metadata plus namespace acknowledgement |
@@ -384,8 +385,15 @@ The path prefix filter checks two locations in the event payload:
 ### Connection Behavior
 
 - The connection stays open indefinitely until the client disconnects.
-- If the client falls behind (lagged), missed events are silently dropped.
-- Reconnecting clients should use the last received `id` for gap detection (standard SSE `Last-Event-ID` header).
+- If a client falls behind the bounded broadcast buffer, the server emits a
+  `stream_gap` event on that connection with the exact number of events missed.
+  The client must refresh the authoritative listing/query/state it derives from
+  SSE before it resumes applying incremental updates.
+- `stream_gap` is delivered regardless of the `events` filter because the
+  server cannot prove that every skipped event was irrelevant to that filter.
+- Event IDs are unique correlation identifiers, not a replay cursor. AeorDB
+  does not retain an SSE replay log and does not honor `Last-Event-ID` for
+  recovery.
 
 ### JavaScript Example
 
@@ -400,6 +408,12 @@ evtSource.addEventListener('entries_created', (event) => {
   console.log('Files created:', data.payload.entries);
 });
 
+evtSource.addEventListener('stream_gap', async (event) => {
+  const data = JSON.parse(event.data);
+  console.warn(`Missed ${data.payload.missed_events} events; refreshing`);
+  await refreshCurrentView();
+});
+
 evtSource.onerror = (err) => {
   console.error('SSE error:', err);
 };
@@ -412,6 +426,10 @@ evtSource.onerror = (err) => {
 A per-user SSE channel that delivers ONLY events addressed to the authenticated user. The server filters the event bus and forwards an event only when its `recipient_user_id` matches the JWT's `sub` claim. Generic events with no recipient (heartbeats, system metrics, file uploads, etc.) are NOT delivered here — those go through `/system/events`.
 
 This channel is the security boundary for personal notifications: each user can only see events sent specifically to them, even if multiple users are subscribed simultaneously.
+
+The per-user stream emits the same `stream_gap` control event if its receiver
+falls behind. Clients must refresh their notification/share state before
+continuing with incremental events.
 
 ### Request
 

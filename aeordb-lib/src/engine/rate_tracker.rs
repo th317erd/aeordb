@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::Serialize;
 
@@ -13,6 +14,7 @@ use super::engine_counters::CountersSnapshot;
 pub struct RateTracker {
   samples: Mutex<VecDeque<(u64, u64)>>, // (timestamp_ms, counter_value)
   max_samples: usize,                   // 900 = 15 minutes at 1s intervals
+  poison_reported: AtomicBool,
 }
 
 /// All four rate windows captured at a single instant.
@@ -39,14 +41,14 @@ pub struct RateSetSnapshot {
 impl RateTracker {
   /// Create an empty tracker.  Retains up to 900 samples (15 minutes at 1 Hz).
   pub fn new() -> Self {
-    Self { samples: Mutex::new(VecDeque::new()), max_samples: 900 }
+    Self { samples: Mutex::new(VecDeque::new()), max_samples: 900, poison_reported: AtomicBool::new(false) }
   }
 
   /// Push a new `(timestamp_ms, counter_value)` sample.
   ///
   /// If the deque exceeds `max_samples`, the oldest entry is evicted.
   pub fn record(&self, timestamp_ms: u64, counter_value: u64) {
-    let mut samples = self.samples.lock().unwrap();
+    let mut samples = self.lock_samples();
     samples.push_back((timestamp_ms, counter_value));
     if samples.len() > self.max_samples {
       samples.pop_front();
@@ -70,7 +72,7 @@ impl RateTracker {
 
   /// Maximum single-second rate observed in the last 60 samples.
   pub fn peak_1m(&self) -> f64 {
-    let samples = self.samples.lock().unwrap();
+    let samples = self.lock_samples();
     if samples.len() < 2 {
       return 0.0;
     }
@@ -100,7 +102,7 @@ impl RateTracker {
   /// Capture all four rates into a single [`RateSnapshot`].
   pub fn snapshot(&self) -> RateSnapshot {
     // Take the lock once and compute everything while holding it.
-    let samples = self.samples.lock().unwrap();
+    let samples = self.lock_samples();
     RateSnapshot {
       rate_1m: Self::rate_over_window_inner(&samples, 60_000),
       rate_5m: Self::rate_over_window_inner(&samples, 300_000),
@@ -111,7 +113,7 @@ impl RateTracker {
 
   /// Number of samples currently held (mostly useful for tests).
   pub fn sample_count(&self) -> usize {
-    self.samples.lock().unwrap().len()
+    self.lock_samples().len()
   }
 
   // ------------------------------------------------------------------
@@ -119,8 +121,26 @@ impl RateTracker {
   // ------------------------------------------------------------------
 
   fn rate_over_window(&self, window_ms: u64) -> f64 {
-    let samples = self.samples.lock().unwrap();
+    let samples = self.lock_samples();
     Self::rate_over_window_inner(&samples, window_ms)
+  }
+
+  fn lock_samples(&self) -> MutexGuard<'_, VecDeque<(u64, u64)>> {
+    match self.samples.lock() {
+      Ok(samples) => samples,
+      Err(poisoned) => {
+        if !self.poison_reported.swap(true, Ordering::AcqRel) {
+          crate::metrics::record_system_soft_failure(
+            "rate_tracker",
+            "samples_lock_poisoned",
+            "rates",
+            "recovering rebuildable rate samples after lock poison",
+          );
+          tracing::error!("Rate sample lock was poisoned; continuing with rebuildable telemetry state");
+        }
+        poisoned.into_inner()
+      }
+    }
   }
 
   fn rate_over_window_inner(samples: &VecDeque<(u64, u64)>, window_ms: u64) -> f64 {
@@ -215,3 +235,7 @@ impl RateTrackerSet {
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/rate_tracker_poison_internal_spec.rs"]
+mod rate_tracker_poison_internal_spec;

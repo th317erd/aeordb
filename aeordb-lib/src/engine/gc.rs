@@ -311,13 +311,21 @@ fn mark_live_path_file_records(
     if entry.entry_type() != KV_TYPE_FILE_RECORD {
       continue;
     }
+    if live.contains(&entry.hash) {
+      continue;
+    }
 
     let Some((header, _key, value)) = engine.get_entry(&entry.hash)? else {
       continue;
     };
-    let Ok(file_record) = FileRecord::deserialize(&value, hash_length, header.entry_version) else {
+    if let Some(task_validation) = crate::engine::task_queue::validate_task_storage_record(&entry.hash, &value) {
+      task_validation?;
       continue;
-    };
+    }
+    let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version).map_err(|error| EngineError::CorruptEntry {
+      offset: entry.offset,
+      reason: format!("ambiguous FileRecord-tag row cannot be safely classified during GC mark: {error}"),
+    })?;
     let path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algo)?;
     if entry.hash != path_key {
       continue;

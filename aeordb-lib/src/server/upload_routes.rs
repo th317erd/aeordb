@@ -35,11 +35,8 @@ struct BlobCommitInFlightGuard {
 }
 
 impl BlobCommitInFlightGuard {
-  fn try_acquire(signature: u64) -> bool {
-    match in_flight_blob_commits().lock() {
-      Ok(mut in_flight) => in_flight.insert(signature),
-      Err(_) => false,
-    }
+  fn try_acquire(signature: u64) -> crate::engine::EngineResult<bool> {
+    try_register_blob_commit(in_flight_blob_commits(), signature)
   }
 
   fn new(signature: u64) -> Self {
@@ -49,10 +46,25 @@ impl BlobCommitInFlightGuard {
 
 impl Drop for BlobCommitInFlightGuard {
   fn drop(&mut self) {
-    if let Ok(mut in_flight) = in_flight_blob_commits().lock() {
-      in_flight.remove(&self.signature);
-    }
+    unregister_blob_commit(in_flight_blob_commits(), self.signature);
   }
+}
+
+fn try_register_blob_commit(registry: &Mutex<HashSet<u64>>, signature: u64) -> crate::engine::EngineResult<bool> {
+  let mut in_flight =
+    registry.lock().map_err(|error| EngineError::IoError(std::io::Error::other(format!("blob commit registry lock poisoned: {error}"))))?;
+  Ok(in_flight.insert(signature))
+}
+
+fn unregister_blob_commit(registry: &Mutex<HashSet<u64>>, signature: u64) {
+  let mut in_flight = match registry.lock() {
+    Ok(in_flight) => in_flight,
+    Err(poisoned) => {
+      tracing::error!(signature, "Recovering poisoned blob commit registry to release an in-flight signature");
+      poisoned.into_inner()
+    }
+  };
+  in_flight.remove(&signature);
 }
 
 fn blob_commit_signature(files: &[CommitFile]) -> u64 {
@@ -294,23 +306,37 @@ pub async fn upload_commit(
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
 
   let commit_signature = blob_commit_signature(&body.files);
-  if !BlobCommitInFlightGuard::try_acquire(commit_signature) {
-    tracing::warn!(
-      files = file_count,
-      total_chunk_refs,
-      supplied_content_hash_files,
-      supplied_size_files,
-      supplied_logical_file_bytes,
-      "duplicate blob commit rejected while identical request is still in progress"
-    );
-    return (
-      StatusCode::TOO_MANY_REQUESTS,
-      Json(serde_json::json!({
-        "error": "An identical blob commit is already in progress; retry after it completes",
-        "retryable": true
-      })),
-    )
-      .into_response();
+  match BlobCommitInFlightGuard::try_acquire(commit_signature) {
+    Ok(true) => {}
+    Ok(false) => {
+      tracing::warn!(
+        files = file_count,
+        total_chunk_refs,
+        supplied_content_hash_files,
+        supplied_size_files,
+        supplied_logical_file_bytes,
+        "duplicate blob commit rejected while identical request is still in progress"
+      );
+      return (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+          "error": "An identical blob commit is already in progress; retry after it completes",
+          "retryable": true
+        })),
+      )
+        .into_response();
+    }
+    Err(error) => {
+      tracing::error!(%error, "blob commit registry is unavailable");
+      return (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+          "error": "Blob commit admission is unavailable; retry after the server restarts",
+          "retryable": true
+        })),
+      )
+        .into_response();
+    }
   }
   let commit_guard = BlobCommitInFlightGuard::new(commit_signature);
 
@@ -390,13 +416,13 @@ mod tests {
   fn blob_commit_duplicate_guard_rejects_until_drop() {
     let signature = u64::MAX - 17;
 
-    assert!(BlobCommitInFlightGuard::try_acquire(signature));
+    assert!(BlobCommitInFlightGuard::try_acquire(signature).unwrap());
     let guard = BlobCommitInFlightGuard::new(signature);
-    assert!(!BlobCommitInFlightGuard::try_acquire(signature));
+    assert!(!BlobCommitInFlightGuard::try_acquire(signature).unwrap());
 
     drop(guard);
 
-    assert!(BlobCommitInFlightGuard::try_acquire(signature));
+    assert!(BlobCommitInFlightGuard::try_acquire(signature).unwrap());
     drop(BlobCommitInFlightGuard::new(signature));
   }
 
@@ -417,3 +443,7 @@ mod tests {
     drop(second);
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/http/upload_routes_poison_internal_spec.rs"]
+mod upload_routes_poison_internal_spec;

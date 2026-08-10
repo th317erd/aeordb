@@ -89,7 +89,10 @@ pub fn encode_response(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 /// Serialize an error into response bytes (as a JSON error object).
 pub fn encode_error(message: &str) -> Vec<u8> {
   let error = serde_json::json!({"error": message});
-  serde_json::to_vec(&error).unwrap_or_else(|_| b"{}".to_vec())
+  match serde_json::to_vec(&error) {
+    Ok(bytes) => bytes,
+    Err(_) => br#"{"error":"Error response serialization failed"}"#.to_vec(),
+  }
 }
 
 /// Generate the WASM `handle` export function that deserializes the parser

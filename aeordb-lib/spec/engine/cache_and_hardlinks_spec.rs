@@ -193,6 +193,34 @@ fn poisoned_clean_cache_reads_surface_an_error_instead_of_becoming_a_cache_miss(
 }
 
 #[test]
+fn poisoned_clean_cache_can_be_cleared_for_authority_invalidation_without_preserving_stale_entries() {
+  let panic = Arc::new(AtomicBool::new(false));
+  let key = PanicHashKey { panic: Arc::clone(&panic) };
+  let cache = Arc::new(CleanCache::new_bounded(memory_coordinator(), MemoryOwner::DirectoryCache, 100));
+  assert!(cache.insert_with_weight(key.clone(), vec![1u8], 1).unwrap());
+  panic.store(true, Ordering::SeqCst);
+  let poisoner = Arc::clone(&cache);
+  let poison_key = key.clone();
+  assert!(thread::spawn(move || poisoner.insert_with_weight(poison_key, vec![2u8], 1)).join().is_err());
+  panic.store(false, Ordering::SeqCst);
+
+  assert!(cache.clear_recovering_poison());
+  assert!(cache.is_empty());
+  assert!(cache.insert_with_weight(key.clone(), vec![3u8], 1).unwrap());
+
+  panic.store(true, Ordering::SeqCst);
+  let poisoner = Arc::clone(&cache);
+  let poison_key = key.clone();
+  assert!(thread::spawn(move || poisoner.insert_with_weight(poison_key, vec![4u8], 1)).join().is_err());
+  panic.store(false, Ordering::SeqCst);
+
+  let invalidation = cache.remove_or_clear_poisoned(&key);
+  assert!(invalidation.recovered_poison);
+  assert!(!invalidation.removed_exact_key);
+  assert!(cache.is_empty());
+}
+
+#[test]
 fn concurrent_clean_cache_hits_preserve_values_and_exact_hit_accounting() {
   const THREADS: usize = 16;
   const READS_PER_THREAD: usize = 1_000;

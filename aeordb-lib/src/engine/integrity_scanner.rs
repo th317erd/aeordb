@@ -53,6 +53,7 @@ pub fn spawn_integrity_scanner(engine: Arc<StorageEngine>, cancel: CancellationT
           break;
         }
         Err(error) => {
+          crate::metrics::record_system_soft_failure("integrity_scanner", "cycle", "/", &error);
           tracing::warn!(error = %error, "Integrity scanner cycle did not complete");
         }
       }
@@ -88,9 +89,7 @@ pub fn run_integrity_scan_cycle(engine: &StorageEngine, cancellation: &Cancellat
   // the cluster and miss other slices for the same wall-clock period).
   static PROCESS_JITTER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
   let jitter = *PROCESS_JITTER.get_or_init(rand::random::<u64>);
-  let cycle_offset =
-    ((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().wrapping_add(jitter))
-      % stride as u64) as usize;
+  let cycle_offset = integrity_cycle_offset(std::time::SystemTime::now(), jitter, stride)?;
 
   let sampled_entries = {
     let snapshot = engine.kv_snapshot.load();
@@ -155,6 +154,18 @@ fn integrity_sample_bytes(sample_size: usize, hash_length: usize) -> EngineResul
     .and_then(|bytes| u64::try_from(bytes).ok())
     .ok_or_else(|| EngineError::ResourceExhausted("integrity scan sample estimate overflow".to_string()))
 }
+
+fn integrity_cycle_offset(now: std::time::SystemTime, jitter: u64, stride: usize) -> EngineResult<usize> {
+  let seconds = now
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|error| EngineError::InvalidInput(format!("system clock precedes Unix epoch during integrity scan: {error}")))?
+    .as_secs();
+  Ok((seconds.wrapping_add(jitter) % stride as u64) as usize)
+}
+
+#[cfg(test)]
+#[path = "../../spec/engine/integrity_scanner_internal_spec.rs"]
+mod integrity_scanner_internal_spec;
 
 #[cfg(test)]
 fn run_scan_cycle(engine: &StorageEngine) {

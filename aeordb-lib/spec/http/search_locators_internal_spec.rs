@@ -132,3 +132,47 @@ fn locator_scan_honors_the_callers_existing_per_request_charge() {
   assert_eq!(generated.locator_status, "complete");
   assert_eq!(generated.matches.len(), 1);
 }
+
+#[test]
+fn streaming_locator_propagates_namespace_read_failures() {
+  let (engine, _directory) = crate::server::create_temp_engine_for_tests();
+  let ops = DirectoryOps::new(&engine);
+  ops.store_file_buffered(&RequestContext::system(), "/source.txt", b"find the needle", Some("text/plain")).unwrap();
+  let mut file_record = ops.get_metadata("/source.txt").unwrap().unwrap();
+  file_record.path = "/missing.txt".to_string();
+  let request_budget = engine.start_query_request_budget().unwrap();
+
+  let error = try_generate_locators_with_budget(
+    &engine,
+    &file_record,
+    &[LocatorTerm { field: "text".to_string(), operator: "contains".to_string(), literal: "needle".to_string() }],
+    &locator_options(),
+    &request_budget,
+  )
+  .expect_err("a missing stored file must not be reported as an unsupported locator format");
+
+  assert!(matches!(error, EngineError::NotFound(ref path) if path == "/missing.txt"), "unexpected locator error: {error}");
+}
+
+#[test]
+fn buffered_json_locator_propagates_namespace_read_failures() {
+  let (engine, _directory) = crate::server::create_temp_engine_for_tests();
+  let ops = DirectoryOps::new(&engine);
+  ops
+    .store_file_buffered(&RequestContext::system(), "/source.json", br#"{"message":"find the needle"}"#, Some("application/json"))
+    .unwrap();
+  let mut file_record = ops.get_metadata("/source.json").unwrap().unwrap();
+  file_record.path = "/missing.json".to_string();
+  let request_budget = engine.start_query_request_budget().unwrap();
+
+  let error = try_generate_locators_with_budget(
+    &engine,
+    &file_record,
+    &[LocatorTerm { field: "message".to_string(), operator: "contains".to_string(), literal: "needle".to_string() }],
+    &locator_options(),
+    &request_budget,
+  )
+  .expect_err("a missing JSON file must not be reported as an unsupported locator format");
+
+  assert!(matches!(error, EngineError::NotFound(ref path) if path == "/missing.json"), "unexpected locator error: {error}");
+}

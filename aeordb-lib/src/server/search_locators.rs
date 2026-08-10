@@ -206,6 +206,7 @@ pub fn generate_locators(
   try_generate_locators_with_budget(engine, file_record, terms, options, &request_budget)
 }
 
+#[cfg(test)]
 pub(crate) fn generate_locators_with_budget(
   engine: &StorageEngine,
   file_record: &FileRecord,
@@ -286,11 +287,11 @@ fn generate_locator_attempt(
 
     let before = matches.len();
     match generate_stored_file_locators(engine, file_record, term, options, request_budget, &mut matches) {
-      Ok(truncated) => matches_truncated |= truncated,
-      Err(error @ (EngineError::ResourceExhausted(_) | EngineError::ShuttingDown | EngineError::Cancelled(_))) => {
+      Ok(Some(truncated)) => matches_truncated |= truncated,
+      Ok(None) => saw_unsupported = true,
+      Err(error) => {
         return LocatorAttempt { generation: finish_locator_generation(matches, matches_truncated, true), failure: Some(error) };
       }
-      Err(_) => saw_unsupported = true,
     }
     if matches.len() == before {
       saw_unsupported = true;
@@ -403,7 +404,7 @@ fn generate_stored_file_locators(
   options: &LocatorOptions,
   request_budget: &QueryRequestBudget,
   out: &mut Vec<SearchHitLocator>,
-) -> EngineResult<bool> {
+) -> EngineResult<Option<bool>> {
   if is_json_content_type(file_record.content_type.as_deref()) {
     let admitted_bytes = file_record
       .total_size
@@ -411,10 +412,14 @@ fn generate_stored_file_locators(
       .and_then(|bytes| bytes.checked_add(1024 * 1024))
       .ok_or_else(|| EngineError::ResourceExhausted("JSON locator scan estimate overflow".to_string()))?;
     let _memory = reserve_locator_memory(engine, request_budget, admitted_bytes, "JSON locator scan admission failed")?;
-    return Ok(generate_buffered_stored_file_locators(engine, file_record, term, options, out));
+    return generate_buffered_stored_file_locators(engine, file_record, term, options, out);
   }
 
-  generate_streaming_stored_file_locators(engine, file_record, term, options, request_budget, out)
+  match generate_streaming_stored_file_locators(engine, file_record, term, options, request_budget, out) {
+    Ok(truncated) => Ok(Some(truncated)),
+    Err(EngineError::InvalidInput(message)) if message.starts_with("Invalid UTF-8:") => Ok(None),
+    Err(error) => Err(error),
+  }
 }
 
 fn generate_buffered_stored_file_locators(
@@ -423,25 +428,23 @@ fn generate_buffered_stored_file_locators(
   term: &LocatorTerm,
   options: &LocatorOptions,
   out: &mut Vec<SearchHitLocator>,
-) -> bool {
+) -> EngineResult<Option<bool>> {
   let ops = DirectoryOps::new(engine);
-  let Ok(data) = ops.read_file_buffered(&file_record.path) else {
-    return false;
-  };
+  let data = ops.read_file_buffered(&file_record.path)?;
   let Ok(text) = std::str::from_utf8(&data) else {
-    return false;
+    return Ok(None);
   };
 
   let before_json = out.len();
   let json_truncated = generate_json_field_locators(file_record, term, text, options, out);
   if out.len() > before_json {
-    return json_truncated;
+    return Ok(Some(json_truncated));
   }
 
   let mut search_from = 0usize;
   while out.len() < options.max_matches_per_result {
     let Some((start, end)) = find_literal_case_insensitive(text, &term.literal, search_from) else {
-      return false;
+      return Ok(Some(false));
     };
     search_from = end;
 
@@ -488,10 +491,10 @@ fn generate_buffered_stored_file_locators(
     });
 
     if out.len() >= options.max_matches_per_result {
-      return find_literal_case_insensitive(text, &term.literal, search_from).is_some();
+      return Ok(Some(find_literal_case_insensitive(text, &term.literal, search_from).is_some()));
     }
   }
-  false
+  Ok(Some(false))
 }
 
 struct LocatorScanMemory {

@@ -192,21 +192,15 @@ where
       continue;
     }
 
-    match vm.delete_snapshot(ctx, &snapshot.name) {
-      Ok(()) => {
-        tracing::info!(
-          name = %snapshot.name,
-          age_days = age_ms / (24 * 60 * 60 * 1000),
-          snapshot_type = %snapshot_type(snapshot),
-          "Pruned expired snapshot"
-        );
-        result.pruned_count += 1;
-        result.pruned_names.push(snapshot.name.clone());
-      }
-      Err(e) => {
-        tracing::warn!("Failed to prune snapshot {}: {}", snapshot.name, e);
-      }
-    }
+    vm.delete_snapshot(ctx, &snapshot.name)?;
+    tracing::info!(
+      name = %snapshot.name,
+      age_days = age_ms / (24 * 60 * 60 * 1000),
+      snapshot_type = %snapshot_type(snapshot),
+      "Pruned expired snapshot"
+    );
+    result.pruned_count += 1;
+    result.pruned_names.push(snapshot.name.clone());
   }
 
   Ok(result)

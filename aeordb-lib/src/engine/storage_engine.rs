@@ -1199,7 +1199,8 @@ impl StorageEngine {
   }
 
   fn collect_memory_inputs(&self) -> Result<EngineMemoryInputs, MemoryCoordinatorError> {
-    let process = crate::engine::rss_sampler::read_process_memory_detailed();
+    let process = crate::engine::rss_sampler::try_read_process_memory_detailed()
+      .map_err(|error| observation_failed(MemoryOwner::HealthStatus, format!("process memory sample failed: {error}")))?;
     let index =
       self.index_write_buffer.lock().map_err(|error| observation_failed(MemoryOwner::IndexDirtyBuffers, error.to_string()))?.stats();
     let directory = self.dir_content_cache.stats().map_err(|error| observation_failed(MemoryOwner::DirectoryCache, error.to_string()))?;
@@ -2570,12 +2571,15 @@ impl StorageEngine {
       .open(lock_path)
       .map_err(|error| EngineError::IoError(std::io::Error::other(format!("Failed to create lock file '{}': {}", lock_path, error))))?;
 
-    lock_file.try_lock_exclusive().map_err(|_| {
-      EngineError::IoError(std::io::Error::other(format!(
-        "Database '{}' is locked by another process. Only one process can open a database at a time.",
-        lock_path.trim_end_matches(".lock"),
-      )))
-    })?;
+    if let Err(error) = lock_file.try_lock_exclusive() {
+      let database_path = lock_path.trim_end_matches(".lock");
+      let message = if error.kind() == std::io::ErrorKind::WouldBlock {
+        format!("Database '{database_path}' is locked by another process. Only one process can open a database at a time.")
+      } else {
+        format!("Failed to acquire the database lock for '{database_path}': {error}")
+      };
+      return Err(EngineError::IoError(std::io::Error::new(error.kind(), message)));
+    }
 
     Ok(lock_file)
   }
@@ -4408,10 +4412,16 @@ impl StorageEngine {
     self.dir_content_cache.clear()
   }
 
+  pub(crate) fn clear_dir_content_cache_authoritatively(&self) {
+    if self.dir_content_cache.clear_recovering_poison() {
+      Self::record_authority_cache_poison_recovery("directory-content");
+    }
+  }
+
   /// Invalidate authority-derived caches for acknowledged namespace paths.
-  /// This runs only after durable publication, so a failure is observable but
-  /// must never turn the committed mutation into a retryable caller error.
-  pub(crate) fn invalidate_caches_for_paths<I, P>(&self, paths: I) -> EngineResult<()>
+  /// This runs only after durable publication. A poisoned cache is discarded
+  /// in full so stale authority can never survive the acknowledgement.
+  pub(crate) fn invalidate_caches_for_paths<I, P>(&self, paths: I)
   where
     I: IntoIterator<Item = P>,
     P: AsRef<str>,
@@ -4444,55 +4454,49 @@ impl StorageEngine {
       }
     }
 
-    let mut failures = Vec::new();
     for directory in permission_directories {
-      if let Err(error) = self.permissions_cache.evict(&directory) {
-        failures.push(format!("permissions cache '{directory}': {error}"));
+      if self.permissions_cache.evict_authoritatively(&directory).recovered_poison {
+        Self::record_authority_cache_poison_recovery("permissions");
       }
     }
     for directory in index_config_directories {
-      if let Err(error) = self.index_config_cache.evict(&directory) {
-        failures.push(format!("index-config cache '{directory}': {error}"));
+      if self.index_config_cache.evict_authoritatively(&directory).recovered_poison {
+        Self::record_authority_cache_poison_recovery("index-config");
       }
     }
     for key_id in api_key_ids {
-      if let Err(error) = self.api_key_cache.evict(&key_id) {
-        failures.push(format!("API-key cache '{key_id}': {error}"));
+      if self.api_key_cache.evict_authoritatively(&key_id).recovered_poison {
+        Self::record_authority_cache_poison_recovery("API keys");
       }
     }
-    if invalidate_grants {
-      if let Err(error) = self.grants_index_cache.evict_all() {
-        failures.push(format!("grants-index cache: {error}"));
-      }
+    if invalidate_grants && self.grants_index_cache.evict_all_authoritatively() {
+      Self::record_authority_cache_poison_recovery("grants-index");
     }
-    if invalidate_groups {
-      if let Err(error) = self.group_cache.evict_all() {
-        failures.push(format!("group cache: {error}"));
-      }
+    if invalidate_groups && self.group_cache.evict_all_authoritatively() {
+      Self::record_authority_cache_poison_recovery("groups");
     }
-    if !failures.is_empty() {
-      return Err(EngineError::IoError(std::io::Error::other(format!("authority-cache invalidation failed: {}", failures.join("; ")))));
-    }
-    Ok(())
   }
 
   /// Clear every cache whose contents are derived from mutable namespace
   /// authority after a whole-root replacement.
-  pub(crate) fn invalidate_all_authority_caches(&self) -> EngineResult<()> {
-    let invalidations = [
-      ("permissions", self.permissions_cache.evict_all()),
-      ("index-config", self.index_config_cache.evict_all()),
-      ("grants-index", self.grants_index_cache.evict_all()),
-      ("groups", self.group_cache.evict_all()),
-      ("API keys", self.api_key_cache.evict_all()),
+  pub(crate) fn invalidate_all_authority_caches(&self) {
+    let poison_recoveries = [
+      ("permissions", self.permissions_cache.evict_all_authoritatively()),
+      ("index-config", self.index_config_cache.evict_all_authoritatively()),
+      ("grants-index", self.grants_index_cache.evict_all_authoritatively()),
+      ("groups", self.group_cache.evict_all_authoritatively()),
+      ("API keys", self.api_key_cache.evict_all_authoritatively()),
     ];
-    let failures =
-      invalidations.into_iter().filter_map(|(name, result)| result.err().map(|error| format!("{name}: {error}"))).collect::<Vec<_>>();
-    if failures.is_empty() {
-      Ok(())
-    } else {
-      Err(EngineError::IoError(std::io::Error::other(format!("whole-root authority-cache invalidation failed: {}", failures.join("; ")))))
+    for (cache, recovered_poison) in poison_recoveries {
+      if recovered_poison {
+        Self::record_authority_cache_poison_recovery(cache);
+      }
     }
+  }
+
+  fn record_authority_cache_poison_recovery(cache: &'static str) {
+    metrics::counter!("aeordb_authority_cache_poison_recoveries_total", "cache" => cache).increment(1);
+    tracing::error!(cache, "Recovered a poisoned authority-cache lock by discarding the complete derived cache");
   }
 
   /// Best-effort sizes of this engine's in-memory caches. Used by soak-test

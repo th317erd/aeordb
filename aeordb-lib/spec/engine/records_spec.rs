@@ -4,6 +4,31 @@ use aeordb::engine::{
 };
 use aeordb::engine::file_record::CURRENT_FILE_RECORD_VERSION;
 
+#[test]
+fn binary_readers_reject_offset_overflow_without_panicking() {
+  use aeordb::engine::binary_utils::{read_bytes, read_i64, read_string, read_u16, read_u32, read_u64};
+  use aeordb::engine::EngineError;
+
+  let data = [0_u8; 8];
+  let mut offset = usize::MAX;
+  assert!(matches!(read_u16(&data, &mut offset), Err(EngineError::UnexpectedEof)));
+
+  let mut offset = usize::MAX;
+  assert!(matches!(read_u32(&data, &mut offset), Err(EngineError::UnexpectedEof)));
+
+  let mut offset = usize::MAX;
+  assert!(matches!(read_u64(&data, &mut offset), Err(EngineError::UnexpectedEof)));
+
+  let mut offset = usize::MAX;
+  assert!(matches!(read_i64(&data, &mut offset), Err(EngineError::UnexpectedEof)));
+
+  let mut offset = usize::MAX;
+  assert!(matches!(read_bytes(&data, &mut offset, 1), Err(EngineError::UnexpectedEof)));
+
+  let mut offset = usize::MAX;
+  assert!(matches!(read_string(&data, &mut offset, 1), Err(EngineError::UnexpectedEof)));
+}
+
 // ─── FileRecord tests ───────────────────────────────────────────────────────
 
 #[test]

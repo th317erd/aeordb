@@ -5,7 +5,7 @@ use aeordb::engine::emergency_spill::{self, EmergencySpillApplyReport, Emergency
 use aeordb::engine::StorageEngine;
 use aeordb::engine::v4::durability_recovery::ExplicitDurabilityRepair;
 use aeordb::engine::verify;
-use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
+use aeordb::logging::{LogConfig, LogFormat, try_initialize_logging};
 use crate::utils::format_bytes;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,7 +28,10 @@ fn prepare_source_for_repair_copy<Engine, OpenError, ShutdownError>(
 
 pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   // Initialize logging so debug/trace output works with AEORDB_LOG env var.
-  initialize_logging(&LogConfig { format: LogFormat::Pretty, level: "warn".to_string(), ..LogConfig::default() });
+  if let Err(error) = try_initialize_logging(&LogConfig { format: LogFormat::Pretty, level: "warn".to_string(), ..LogConfig::default() }) {
+    eprintln!("Error: {error}");
+    process::exit(1);
+  }
 
   println!("AeorDB Integrity Check");
   println!("=======================");

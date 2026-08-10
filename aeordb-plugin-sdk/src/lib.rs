@@ -94,10 +94,21 @@ impl PluginResponse {
     let error_body = serde_json::json!({ "error": message.into() });
     Self {
       status_code,
-      body: serde_json::to_vec(&error_body).unwrap_or_default(),
+      body: match serde_json::to_vec(&error_body) {
+        Ok(body) => body,
+        Err(_) => br#"{"error":"Error response serialization failed"}"#.to_vec(),
+      },
       content_type: Some("application/json".to_string()),
       headers: HashMap::new(),
     }
+  }
+}
+
+#[doc(hidden)]
+pub fn encode_plugin_response(response: &PluginResponse) -> Vec<u8> {
+  match serde_json::to_vec(response) {
+    Ok(bytes) => bytes,
+    Err(_) => br#"{"status_code":500,"body":[],"content_type":"application/octet-stream","headers":{}}"#.to_vec(),
   }
 }
 
@@ -214,7 +225,7 @@ macro_rules! aeordb_query_plugin {
 
     /// Internal helper: serialize a PluginResponse and return packed ptr+len.
     fn _aeordb_encode_plugin_response(response: &$crate::PluginResponse) -> i64 {
-      let bytes = $crate::serde_json::to_vec(response).unwrap_or_default();
+      let bytes = $crate::encode_plugin_response(response);
       let len = bytes.len();
       let ptr = bytes.as_ptr() as i64;
       std::mem::forget(bytes);

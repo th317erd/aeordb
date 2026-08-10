@@ -98,8 +98,12 @@ impl Drop for SnapshotLease {
     let Some(provider) = self.provider.upgrade() else {
       return;
     };
-    let Ok(mut state) = provider.state.lock() else {
-      return;
+    let mut state = match provider.state.lock() {
+      Ok(state) => state,
+      Err(poisoned) => {
+        tracing::error!(generation = self.generation, "Recovering poisoned KV page state to release a snapshot lease");
+        poisoned.into_inner()
+      }
     };
     if let Some(active) = state.active_generations.get_mut(&self.generation) {
       *active = active.saturating_sub(1);
@@ -575,8 +579,12 @@ impl Drop for KvPageUpdate {
       }
       return;
     }
-    let Ok(mut state) = self.provider.inner.state.lock() else {
-      return;
+    let mut state = match self.provider.inner.state.lock() {
+      Ok(state) => state,
+      Err(poisoned) => {
+        tracing::error!(generation = self.generation, "Recovering poisoned KV page state to record an abandoned overwrite");
+        poisoned.into_inner()
+      }
     };
     if state.pending.as_ref().is_some_and(|pending| pending.generation == self.generation) {
       state.poisoned_reason = Some(format!("KV page update generation {} was abandoned after overwrite started", self.generation));
@@ -614,3 +622,7 @@ fn prune_historical_pages(state: &mut PageCacheState) {
     !versions.is_empty()
   });
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/kv_page_provider_poison_internal_spec.rs"]
+mod kv_page_provider_poison_internal_spec;

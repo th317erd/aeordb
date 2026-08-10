@@ -17,7 +17,7 @@ use aeordb::engine::{
 };
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
-use aeordb::logging::{LogConfig, LogFormat, initialize_logging};
+use aeordb::logging::{LogConfig, LogFormat, try_initialize_logging};
 use aeordb::server::try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides;
 
 #[cfg(test)]
@@ -283,7 +283,7 @@ pub async fn run(config: StartConfig<'_>) -> Result<(), String> {
     ..LogConfig::default()
   };
 
-  initialize_logging(&log_config);
+  try_initialize_logging(&log_config).map_err(|error| format!("Error: {error}"))?;
 
   // Validate TLS flags: must supply both or neither.
   let tls_config = match (tls_cert, tls_key) {

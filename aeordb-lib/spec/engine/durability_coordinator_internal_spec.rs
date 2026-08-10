@@ -44,3 +44,44 @@ fn explicitly_releasing_a_drive_permit_clears_driver_ownership_after_state_poiso
   assert!(!poisoned_state(&coordinator).driver_active);
   assert!(matches!(coordinator.snapshot(), Err(DurabilityCoordinatorError::StateUnavailable)));
 }
+
+struct PoisoningExecutor {
+  coordinator: Arc<DurabilityCoordinator>,
+}
+
+impl DurabilityExecutor for PoisoningExecutor {
+  type Error = std::io::Error;
+
+  fn execute(&mut self, _sequence: u64, _operation: DurabilityOperation) -> Result<(), Self::Error> {
+    let _state = self.coordinator.state.lock().unwrap();
+    panic!("injected executor poison");
+  }
+}
+
+#[test]
+fn execution_guard_fails_an_executing_hard_record_even_when_the_executor_poisons_state() {
+  let coordinator = Arc::new(DurabilityCoordinator::new());
+  let plan = DurabilityCommitPlan::new(
+    CommitClass::HardAuthority,
+    vec![
+      DurabilityOperation::DependencyAppend,
+      DurabilityOperation::DataBarrier,
+      DurabilityOperation::AuthorityWrite,
+      DurabilityOperation::HeaderAb,
+      DurabilityOperation::AuthorityBarrier,
+      DurabilityOperation::AuthorityReadback,
+    ],
+  )
+  .unwrap();
+  let ticket = coordinator.admit(plan).unwrap();
+  let mut executor = PoisoningExecutor { coordinator: Arc::clone(&coordinator) };
+
+  let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| coordinator.execute(ticket, &mut executor)));
+  assert!(unwind.is_err());
+
+  let state = poisoned_state(&coordinator);
+  assert!(matches!(state.records.get(&ticket.sequence).map(|record| &record.status), Some(CommitStatus::Failed(_))));
+  assert!(state.hard_failure.is_some(), "hard authority unwind must latch a hard failure even after lock poison");
+  drop(state);
+  assert!(matches!(coordinator.snapshot(), Err(DurabilityCoordinatorError::StateUnavailable)));
+}

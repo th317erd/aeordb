@@ -206,15 +206,7 @@ impl PluginContext {
   pub fn read_file(&self, path: &str) -> Result<FileData, PluginError> {
     let args = serde_json::json!({ "path": path });
     let value = self.call("aeordb_read_file", &args)?;
-
-    // The host returns base64-encoded data
-    let data_b64 = value.get("data").and_then(|v| v.as_str()).unwrap_or_default();
-    let data = base64_decode(data_b64)?;
-
-    let content_type = value.get("content_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string();
-    let size = value.get("size").and_then(|v| v.as_u64()).unwrap_or(data.len() as u64);
-
-    Ok(FileData { data, content_type, size })
+    decode_file_data(value)
   }
 
   /// Extract a text range from a file without buffering the full file in the plugin host.
@@ -320,6 +312,28 @@ fn base64_decode(encoded: &str) -> Result<Vec<u8>, PluginError> {
   base64::engine::general_purpose::STANDARD
     .decode(encoded)
     .map_err(|e| PluginError::SerializationFailed(format!("base64 decode failed: {}", e)))
+}
+
+#[derive(Deserialize)]
+struct HostFileData {
+  data: String,
+  content_type: String,
+  size: u64,
+}
+
+fn decode_file_data(value: serde_json::Value) -> Result<FileData, PluginError> {
+  let response: HostFileData =
+    serde_json::from_value(value).map_err(|error| PluginError::SerializationFailed(format!("failed to parse file response: {error}")))?;
+  let data = base64_decode(&response.data)?;
+  let actual_size = u64::try_from(data.len())
+    .map_err(|_| PluginError::SerializationFailed("decoded file size exceeds the supported u64 range".to_string()))?;
+  if response.size != actual_size {
+    return Err(PluginError::SerializationFailed(format!(
+      "file response size {} does not match {} decoded bytes",
+      response.size, actual_size
+    )));
+  }
+  Ok(FileData { data, content_type: response.content_type, size: response.size })
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +563,33 @@ mod tests {
       }
       other => panic!("expected SerializationFailed, got: {:?}", other),
     }
+  }
+
+  #[test]
+  fn file_data_host_response_requires_every_contract_field() {
+    for malformed in [
+      serde_json::json!({"content_type": "text/plain", "size": 0}),
+      serde_json::json!({"data": "", "size": 0}),
+      serde_json::json!({"data": "", "content_type": "text/plain"}),
+      serde_json::json!({"data": 7, "content_type": "text/plain", "size": 0}),
+      serde_json::json!({"data": "", "content_type": 7, "size": 0}),
+      serde_json::json!({"data": "", "content_type": "text/plain", "size": "0"}),
+    ] {
+      let error = decode_file_data(malformed).expect_err("malformed host file response must not fabricate defaults");
+      assert!(matches!(error, PluginError::SerializationFailed(_)), "unexpected error: {error}");
+    }
+  }
+
+  #[test]
+  fn file_data_host_response_rejects_declared_size_mismatch() {
+    let error = decode_file_data(serde_json::json!({
+      "data": "aGVsbG8=",
+      "content_type": "text/plain",
+      "size": 4,
+    }))
+    .expect_err("host response size must describe the decoded bytes");
+
+    assert!(matches!(error, PluginError::SerializationFailed(ref message) if message.contains("size")), "unexpected error: {error}");
   }
 
   #[test]

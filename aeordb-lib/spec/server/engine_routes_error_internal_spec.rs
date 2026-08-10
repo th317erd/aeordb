@@ -1,6 +1,7 @@
 use serde::Serialize;
 
-use super::{required_dispatch_value, serialize_response_value};
+use super::{engine_file_response_with_hash, required_dispatch_value, serialize_response_value};
+use crate::engine::{FileRecord, HashAlgorithm};
 
 struct SerializationFailure;
 
@@ -25,6 +26,18 @@ fn response_serialization_failure_returns_an_http_error() {
   let response = serialize_response_value(&SerializationFailure, "query result").unwrap_err();
 
   assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[test]
+fn file_response_hash_construction_propagates_serialization_and_hash_failures() {
+  let malformed = FileRecord::new("/malformed.txt".to_string(), Some("text/plain".to_string()), 0, Vec::new());
+  let serialization_error = engine_file_response_with_hash(&malformed, HashAlgorithm::Blake3_256).unwrap_err();
+  assert!(serialization_error.to_string().contains("Content hash length"));
+
+  let mut valid = malformed;
+  valid.content_hash = vec![0; HashAlgorithm::Blake3_256.hash_length()];
+  let hash_error = engine_file_response_with_hash(&valid, HashAlgorithm::Sha256).unwrap_err();
+  assert!(hash_error.to_string().contains("Invalid hash algorithm"));
 }
 
 #[test]

@@ -1251,7 +1251,7 @@ impl DiskKVStore {
       self.hash_algo,
       self.entry_count,
       pages,
-    );
+    )?;
     self.snapshot.store(Arc::new(snapshot));
     Ok(())
   }

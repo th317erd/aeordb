@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::{io, str::FromStr};
 
 /// Current resident set size in kB. 0 if unavailable.
 pub fn read_rss_kb() -> u64 {
@@ -45,30 +46,43 @@ pub struct ProcessMemory {
 }
 
 pub fn read_process_memory() -> ProcessMemory {
+  try_read_process_memory().unwrap_or_default()
+}
+
+/// Read the current process memory without converting platform observation
+/// failures into a plausible all-zero sample.
+pub fn try_read_process_memory() -> io::Result<ProcessMemory> {
   #[cfg(target_os = "linux")]
   {
     read_linux_proc_status()
   }
   #[cfg(target_os = "macos")]
   {
-    read_macos_task_info().unwrap_or_default()
+    read_macos_task_info().ok_or_else(|| io::Error::other("Mach task_info failed while reading process memory"))
   }
   #[cfg(target_os = "windows")]
   {
-    read_windows_process_memory().unwrap_or_default()
+    read_windows_process_memory().ok_or_else(|| io::Error::last_os_error())
   }
   #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
   {
-    ProcessMemory::default()
+    Err(io::Error::new(io::ErrorKind::Unsupported, "process memory observation is unsupported on this platform"))
   }
 }
 
 /// Process memory with the platform's more expensive ownership breakdown.
 /// Fast RSS/HWM samplers intentionally use [`read_process_memory`] instead.
 pub fn read_process_memory_detailed() -> ProcessMemory {
+  try_read_process_memory_detailed().unwrap_or_default()
+}
+
+/// Read process memory plus optional ownership details. Missing optional
+/// platform breakdowns remain `None`, while failure of the core process sample
+/// is returned to the caller.
+pub fn try_read_process_memory_detailed() -> io::Result<ProcessMemory> {
   #[cfg(target_os = "linux")]
   {
-    let mut process = read_process_memory();
+    let mut process = try_read_process_memory()?;
     if let Ok(rollup) = std::fs::read_to_string("/proc/self/smaps_rollup") {
       if let Some(rollup) = parse_linux_smaps_rollup(&rollup) {
         process.private_kb = Some(rollup.private_kb);
@@ -76,11 +90,11 @@ pub fn read_process_memory_detailed() -> ProcessMemory {
         process.mapped_kb = Some(rollup.mapped_kb);
       }
     }
-    process
+    Ok(process)
   }
   #[cfg(not(target_os = "linux"))]
   {
-    read_process_memory()
+    try_read_process_memory()
   }
 }
 
@@ -237,36 +251,65 @@ fn read_macos_available_bytes() -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_linux_proc_status() -> ProcessMemory {
-  let Ok(s) = std::fs::read_to_string("/proc/self/status") else {
-    return ProcessMemory::default();
-  };
+fn read_linux_proc_status() -> io::Result<ProcessMemory> {
+  let status = std::fs::read_to_string("/proc/self/status")?;
+  let mut process = parse_linux_proc_status(&status)?;
+  process.fd_count = read_fd_count();
+  Ok(process)
+}
+
+#[cfg(target_os = "linux")]
+pub fn parse_linux_proc_status(status: &str) -> io::Result<ProcessMemory> {
   let mut out = ProcessMemory::default();
-  let parse = |line: &str, prefix: &str| -> Option<u64> {
-    line.strip_prefix(prefix)?.trim().trim_end_matches(" kB").split_ascii_whitespace().next()?.parse().ok()
+  let mut resident_seen = false;
+  let mut peak_seen = false;
+  let mut virtual_seen = false;
+  let parse = |line: &str, prefix: &str| -> io::Result<Option<u64>> {
+    let Some(value) = line.strip_prefix(prefix) else {
+      return Ok(None);
+    };
+    let value = value
+      .trim()
+      .split_ascii_whitespace()
+      .next()
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{prefix} has no numeric value")))?;
+    u64::from_str(value)
+      .map(Some)
+      .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{prefix} has invalid numeric value {value:?}")))
   };
-  for line in s.lines() {
-    if let Some(v) = parse(line, "VmRSS:") {
+  for line in status.lines() {
+    if let Some(v) = parse(line, "VmRSS:")? {
       out.resident_kb = v;
+      resident_seen = true;
     }
-    if let Some(v) = parse(line, "VmHWM:") {
+    if let Some(v) = parse(line, "VmHWM:")? {
       out.peak_resident_kb = v;
+      peak_seen = true;
     }
-    if let Some(v) = parse(line, "VmSize:") {
+    if let Some(v) = parse(line, "VmSize:")? {
       out.virtual_kb = v;
+      virtual_seen = true;
     }
-    if let Some(v) = parse(line, "VmData:") {
+    if let Some(v) = parse(line, "VmData:")? {
       out.data_kb = v;
     }
-    if let Some(v) = parse(line, "VmSwap:") {
+    if let Some(v) = parse(line, "VmSwap:")? {
       out.swap_kb = v;
     }
-    if let Some(v) = parse(line, "Threads:") {
+    if let Some(v) = parse(line, "Threads:")? {
       out.thread_count = v;
     }
   }
-  out.fd_count = read_fd_count();
-  out
+  if !resident_seen {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "/proc status is missing VmRSS"));
+  }
+  if !peak_seen {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "/proc status is missing VmHWM"));
+  }
+  if !virtual_seen {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "/proc status is missing VmSize"));
+  }
+  Ok(out)
 }
 
 #[cfg(target_os = "macos")]

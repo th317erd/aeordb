@@ -5,6 +5,7 @@ members = [
     "aeordb-cli",
     "aeordb-plugin-sdk",
     "aeordb-parsers/plaintext",
+    "tools/error-squelch-audit",
 ]
 exclude = [
     "aeordb-plugins/echo-plugin",

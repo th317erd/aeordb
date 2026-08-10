@@ -20,6 +20,12 @@ pub struct CleanCacheStats {
   pub admission_skips: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheInvalidationOutcome {
+  pub removed_exact_key: bool,
+  pub recovered_poison: bool,
+}
+
 #[derive(Clone)]
 struct CleanCachePolicy {
   coordinator: MemoryCoordinator,
@@ -139,6 +145,22 @@ impl<K, V> CleanCache<K, V> {
     state.entries.clear();
     state.resident_bytes = 0;
     Ok(())
+  }
+
+  /// Clear derived state even when an earlier panic poisoned the cache lock.
+  /// Authority publication uses this path because retaining a stale entry is
+  /// less safe than discarding the complete rebuildable cache.
+  pub fn clear_recovering_poison(&self) -> bool {
+    let (mut state, recovered_poison) = match self.state.write() {
+      Ok(state) => (state, false),
+      Err(poisoned) => (poisoned.into_inner(), true),
+    };
+    state.entries.clear();
+    state.resident_bytes = 0;
+    if recovered_poison {
+      self.state.clear_poison();
+    }
+    recovered_poison
   }
 }
 
@@ -295,6 +317,28 @@ where
     };
     state.resident_bytes = state.resident_bytes.saturating_sub(entry.weight);
     Ok(true)
+  }
+
+  /// Remove one derived entry, clearing the complete cache if the lock was
+  /// poisoned. Clearing is the fail-closed authority behavior because the
+  /// poisoned state cannot prove which cached values remain current.
+  pub fn remove_or_clear_poisoned(&self, key: &K) -> CacheInvalidationOutcome {
+    let (mut state, recovered_poison) = match self.state.write() {
+      Ok(state) => (state, false),
+      Err(poisoned) => (poisoned.into_inner(), true),
+    };
+    if recovered_poison {
+      state.entries.clear();
+      state.resident_bytes = 0;
+      self.state.clear_poison();
+      return CacheInvalidationOutcome { removed_exact_key: false, recovered_poison: true };
+    }
+
+    let Some(entry) = state.entries.remove(key) else {
+      return CacheInvalidationOutcome { removed_exact_key: false, recovered_poison: false };
+    };
+    state.resident_bytes = state.resident_bytes.saturating_sub(entry.weight);
+    CacheInvalidationOutcome { removed_exact_key: true, recovered_poison: false }
   }
 
   pub fn remove_where<F>(&self, mut predicate: F) -> EngineResult<usize>
@@ -493,9 +537,21 @@ impl<L: CacheLoader> Cache<L> {
     self.entries.remove(key)
   }
 
+  /// Invalidate one authority-derived entry without allowing a poisoned lock
+  /// to retain stale state. Poison recovery clears the complete cache.
+  pub fn evict_authoritatively(&self, key: &L::Key) -> CacheInvalidationOutcome {
+    self.entries.remove_or_clear_poisoned(key)
+  }
+
   /// Flush the entire cache.
   pub fn evict_all(&self) -> EngineResult<()> {
     self.entries.clear()
+  }
+
+  /// Invalidate all authority-derived entries, recovering a poisoned lock by
+  /// discarding the complete rebuildable cache.
+  pub fn evict_all_authoritatively(&self) -> bool {
+    self.entries.clear_recovering_poison()
   }
 
   /// Current number of cached entries. Best-effort: returns 0 if the read

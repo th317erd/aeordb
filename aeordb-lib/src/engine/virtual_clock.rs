@@ -88,6 +88,21 @@ pub struct PeerClockStats {
   pub last_updated_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerClockTrackerError {
+  Poisoned,
+}
+
+impl std::fmt::Display for PeerClockTrackerError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      PeerClockTrackerError::Poisoned => formatter.write_str("peer clock tracker lock poisoned"),
+    }
+  }
+}
+
+impl std::error::Error for PeerClockTrackerError {}
+
 // ---------------------------------------------------------------------------
 // PeerClockTracker — aggregates clock stats across all known peers
 // ---------------------------------------------------------------------------
@@ -112,23 +127,27 @@ impl PeerClockTracker {
   /// * `construct_time` — wall-clock time when the peer built the message
   /// * `receive_time`  — local wall-clock time when the message arrived
   ///
-  /// Returns `false` if the heartbeat is rejected (unreasonable clock claim).
-  pub fn record_heartbeat(&self, peer_node_id: u64, _intent_time: u64, construct_time: u64, receive_time: u64) -> bool {
+  /// Returns `Ok(false)` if the heartbeat is rejected (unreasonable clock
+  /// claim). Internal synchronization failures remain distinct errors.
+  pub fn record_heartbeat(
+    &self,
+    peer_node_id: u64,
+    _intent_time: u64,
+    construct_time: u64,
+    receive_time: u64,
+  ) -> Result<bool, PeerClockTrackerError> {
     // Raw offset: positive means peer clock is ahead of ours.
     let raw_offset = construct_time as f64 - receive_time as f64;
 
     // Bounds check: reject if offset exceeds threshold.
     if raw_offset.abs() > self.bounds_threshold_ms as f64 {
-      return false;
+      return Ok(false);
     }
 
     // One-way wire time estimate (clamped to non-negative).
     let wire_time = (receive_time as f64 - construct_time as f64).max(0.0);
 
-    let mut peers = match self.peers.write() {
-      Ok(guard) => guard,
-      Err(_) => return false,
-    };
+    let mut peers = self.peers.write().map_err(|_| PeerClockTrackerError::Poisoned)?;
 
     let stats = peers.entry(peer_node_id).or_insert(PeerClockStats {
       clock_offset_ms: 0.0,
@@ -155,33 +174,36 @@ impl PeerClockTracker {
     stats.samples += 1;
     stats.last_updated_ms = receive_time;
 
-    true
+    Ok(true)
   }
 
   /// Get the stats for a specific peer, if any.
-  pub fn get_peer_stats(&self, peer_node_id: u64) -> Option<PeerClockStats> {
-    self.peers.read().ok()?.get(&peer_node_id).cloned()
+  pub fn get_peer_stats(&self, peer_node_id: u64) -> Result<Option<PeerClockStats>, PeerClockTrackerError> {
+    Ok(self.peers.read().map_err(|_| PeerClockTrackerError::Poisoned)?.get(&peer_node_id).cloned())
   }
 
   /// Check whether we have enough samples from a peer for the clock
   /// relationship to be considered settled.
-  pub fn is_settled(&self, peer_node_id: u64, min_samples: u32, max_jitter_ms: f64) -> bool {
-    if let Some(stats) = self.get_peer_stats(peer_node_id) {
-      stats.samples >= min_samples && stats.jitter_ms < max_jitter_ms
+  pub fn is_settled(&self, peer_node_id: u64, min_samples: u32, max_jitter_ms: f64) -> Result<bool, PeerClockTrackerError> {
+    if let Some(stats) = self.get_peer_stats(peer_node_id)? {
+      Ok(stats.samples >= min_samples && stats.jitter_ms < max_jitter_ms)
     } else {
-      false
+      Ok(false)
     }
   }
 
   /// Snapshot of all peer stats.
-  pub fn all_peer_stats(&self) -> HashMap<u64, PeerClockStats> {
-    self.peers.read().map(|guard| guard.clone()).unwrap_or_default()
+  pub fn all_peer_stats(&self) -> Result<HashMap<u64, PeerClockStats>, PeerClockTrackerError> {
+    Ok(self.peers.read().map_err(|_| PeerClockTrackerError::Poisoned)?.clone())
   }
 
   /// Seed stats from persisted data (for fast honeymoon after restart).
-  pub fn seed_peer(&self, peer_node_id: u64, stats: PeerClockStats) {
-    if let Ok(mut peers) = self.peers.write() {
-      peers.insert(peer_node_id, stats);
-    }
+  pub fn seed_peer(&self, peer_node_id: u64, stats: PeerClockStats) -> Result<(), PeerClockTrackerError> {
+    self.peers.write().map_err(|_| PeerClockTrackerError::Poisoned)?.insert(peer_node_id, stats);
+    Ok(())
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/virtual_clock_poison_internal_spec.rs"]
+mod virtual_clock_poison_internal_spec;

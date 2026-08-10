@@ -390,10 +390,13 @@ impl EngineCounters {
 
     counters.chunk_data_size.store(chunk_size, Ordering::Relaxed);
 
-    // Capture void space from the void manager
-    if let Ok(void_manager) = engine.void_manager.read() {
-      counters.void_space.store(void_manager.total_void_space(), Ordering::Relaxed);
-    }
+    // Capture void space from the void manager. A poisoned manager is unknown
+    // allocator authority, not evidence that the database has no reusable
+    // space, so startup/reconciliation must reject the fabricated zero.
+    let void_manager = engine.void_manager.read().map_err(|error| {
+      crate::engine::errors::EngineError::IoError(std::io::Error::other(format!("void manager lock poisoned: {error}")))
+    })?;
+    counters.void_space.store(void_manager.total_void_space(), Ordering::Relaxed);
 
     Ok(counters)
   }
@@ -422,3 +425,7 @@ fn saturating_sub(atomic: &AtomicU64, amount: u64) {
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/engine_counters_poison_internal_spec.rs"]
+mod engine_counters_poison_internal_spec;

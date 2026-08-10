@@ -16,6 +16,7 @@ use aeordb::auth::FileAuthProvider;
 use aeordb::engine::api_key_rules::KeyRule;
 use aeordb::engine::{
   DirectoryOps, EngineEvent, EventBus, PermissionStore, RequestContext, StorageEngine, User, EVENT_METRICS, EVENT_SERVER_READY,
+  EVENT_STREAM_GAP,
 };
 use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
@@ -27,12 +28,18 @@ fn make_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
 
 /// Create a test app that returns the shared EventBus for direct event injection.
 fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<EventBus>, tempfile::TempDir) {
+  test_app_with_event_capacity(1024)
+}
+
+fn test_app_with_event_capacity(
+  event_capacity: usize,
+) -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<EventBus>, tempfile::TempDir) {
   let jwt_manager = Arc::new(JwtManager::generate());
   let (engine, temp_dir) = create_temp_engine_for_tests();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
-  let event_bus = Arc::new(EventBus::new());
+  let event_bus = Arc::new(EventBus::with_capacity(event_capacity));
   let app = create_app_with_all(
     auth_provider,
     jwt_manager.clone(),
@@ -317,6 +324,56 @@ async fn read_first_sse_frame(mut body: Body) -> String {
     .expect("failed to read first SSE frame");
   let bytes = frame.into_data().expect("first SSE frame should contain data");
   String::from_utf8_lossy(&bytes).to_string()
+}
+
+async fn read_next_sse_frame(body: &mut Body) -> String {
+  let frame = tokio::time::timeout(Duration::from_millis(500), body.frame())
+    .await
+    .expect("timed out waiting for SSE frame")
+    .expect("SSE stream ended before frame")
+    .expect("failed to read SSE frame");
+  let bytes = frame.into_data().expect("SSE frame should contain data");
+  String::from_utf8_lossy(&bytes).to_string()
+}
+
+#[tokio::test]
+async fn test_global_sse_reports_broadcast_lag_as_a_stream_gap() {
+  let (app, jwt_manager, _engine, event_bus, _temp) = test_app_with_event_capacity(2);
+  let auth = bearer_token(&jwt_manager);
+  let request = Request::builder().method("GET").uri("/system/events").header("authorization", auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let ready = read_next_sse_frame(&mut body).await;
+  assert!(ready.contains(EVENT_SERVER_READY));
+
+  for sequence in 0..5 {
+    event_bus.emit(EngineEvent::new("entries_created", "system", serde_json::json!({"path": format!("/lag/{sequence}")})));
+  }
+
+  let gap = read_next_sse_frame(&mut body).await;
+  assert!(gap.contains(&format!("event: {EVENT_STREAM_GAP}")), "missing stream-gap event: {gap}");
+  assert!(gap.contains("\"missed_events\":3"), "wrong lag evidence: {gap}");
+  assert!(gap.contains("\"action\":\"refresh\""), "missing client recovery action: {gap}");
+}
+
+#[tokio::test]
+async fn test_user_sse_reports_broadcast_lag_as_a_stream_gap() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app_with_event_capacity(2);
+  let user_id = create_test_user(&engine, "sse_lag_user");
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder().method("GET").uri("/events/me").header("authorization", auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  for sequence in 0..5 {
+    event_bus.emit(EngineEvent::for_user("notification", "system", &user_id.to_string(), serde_json::json!({"sequence": sequence})));
+  }
+
+  let gap = read_next_sse_frame(&mut body).await;
+  assert!(gap.contains(&format!("event: {EVENT_STREAM_GAP}")), "missing user stream-gap event: {gap}");
+  assert!(gap.contains("\"missed_events\":3"), "wrong user lag evidence: {gap}");
 }
 
 #[tokio::test]
