@@ -60,7 +60,12 @@ fn contract_gate_uses_portable_hash_and_file_size_helpers() {
   let source = include_str!("../../../scripts/plan/check-v4-contracts.sh");
 
   assert!(source.contains("sha256_file()"));
+  assert!(source.contains("sha256_canonical_text_file()"));
+  assert!(source.contains("sed 's/\\r$//'"));
+  assert_eq!(source.matches("sha256_canonical_text_file").count(), 5);
   assert!(source.contains("file_size_bytes()"));
+  assert!(source.contains("canonical_text_file_size_bytes()"));
+  assert_eq!(source.matches("canonical_text_file_size_bytes").count(), 2);
   assert!(source.contains("normalize_text_lines()"));
   assert!(source.contains("normalize_inventory_paths()"));
   assert!(source.contains("tr -d '\\r'"));
@@ -68,6 +73,26 @@ fn contract_gate_uses_portable_hash_and_file_size_helpers() {
   assert!(source.matches("| normalize_text_lines").count() >= 12);
   assert!(source.matches("| normalize_inventory_paths").count() >= 4);
   assert!(!source.contains("stat -c"));
+}
+
+#[test]
+fn repository_attributes_preserve_canonical_contract_bytes_on_every_platform() {
+  let attributes_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.gitattributes");
+  let attributes = fs::read_to_string(&attributes_path).expect("repository must define canonical line-ending attributes");
+
+  for required_rule in [
+    "*.rs text eol=lf",
+    "*.toml text eol=lf",
+    "*.json text eol=lf",
+    "*.md text eol=lf",
+    "*.sh text eol=lf",
+    "*.yaml text eol=lf",
+    "*.yml text eol=lf",
+    "*.hex text eol=lf",
+    "*.bin binary",
+  ] {
+    assert!(attributes.lines().any(|line| line == required_rule), "missing repository attribute rule: {required_rule}");
+  }
 }
 
 #[derive(Deserialize)]

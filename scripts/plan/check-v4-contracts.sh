@@ -10,22 +10,36 @@ fail() {
   exit 1
 }
 
-sha256_file() {
-  local path=$1
-
+sha256_stream() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$path" | awk '{print $1}'
+    sha256sum | awk '{print $1}'
     return
   fi
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$path" | awk '{print $1}'
+    shasum -a 256 | awk '{print $1}'
     return
   fi
   fail "neither sha256sum nor shasum is available"
 }
 
+sha256_file() {
+  sha256_stream < "$1"
+}
+
+canonical_text_file() {
+  sed 's/\r$//' "$1"
+}
+
+sha256_canonical_text_file() {
+  canonical_text_file "$1" | sha256_stream
+}
+
 file_size_bytes() {
   wc -c < "$1" | tr -d '[:space:]'
+}
+
+canonical_text_file_size_bytes() {
+  canonical_text_file "$1" | wc -c | tr -d '[:space:]'
 }
 
 normalize_text_lines() {
@@ -36,7 +50,7 @@ normalize_inventory_paths() {
   normalize_text_lines | sed 's|\\|/|g'
 }
 
-for tool in awk cargo git jq rg python3 tr wc; do
+for tool in awk cargo git jq rg python3 sed tr wc; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool '$tool' is unavailable"
 done
 
@@ -238,8 +252,8 @@ jq -e '
 
 registry_report="$evidence_dir/p0b-contract-registry-report.json"
 [[ -f "$registry_report" ]] || fail "missing P0b collision/ID/capability registry report"
-jq -e --arg source_sha "$(sha256_file "$contract_registry")" \
-  --arg fixture_sha "$(sha256_file "$fixture_manifest")" '
+jq -e --arg source_sha "$(sha256_canonical_text_file "$contract_registry")" \
+  --arg fixture_sha "$(sha256_canonical_text_file "$fixture_manifest")" '
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .source_sha256 == $source_sha and .fixture_manifest_sha256 == $fixture_sha and
   .counts == {
@@ -257,9 +271,9 @@ jq -e --arg source_sha "$(sha256_file "$contract_registry")" \
 p0c_report="$evidence_dir/p0c-machine-contract-report.json"
 [[ -f "$p0c_report" ]] || fail "missing P0c machine contract report"
 jq -e \
-  --arg architecture_sha "$(sha256_file "$architecture_registry")" \
-  --arg generated_sha "$(sha256_file "$generated_contract")" \
-  --argjson generated_bytes "$(file_size_bytes "$generated_contract")" '
+  --arg architecture_sha "$(sha256_canonical_text_file "$architecture_registry")" \
+  --arg generated_sha "$(sha256_canonical_text_file "$generated_contract")" \
+  --argjson generated_bytes "$(canonical_text_file_size_bytes "$generated_contract")" '
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .landing_unit == "P0c" and
   .architecture_registry_sha256 == $architecture_sha and
