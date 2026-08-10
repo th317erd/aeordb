@@ -72,8 +72,8 @@ fn native_probe_proves_barriers_preallocation_replace_identity_and_readback() {
     NativeOperationSupport::Supported => {
       assert_eq!(report.capabilities.durable_replace, NativeOperationSupport::Supported);
       assert!(report.read_back_verified);
-      assert_eq!(report.replaced_identity, report.identity_after_rename);
-      assert_ne!(report.destination_identity_before_replace, report.replaced_identity);
+      assert!(report.replaced_identity.unwrap().represents_same_physical_file_as(report.identity_after_rename.unwrap()));
+      assert!(!report.destination_identity_before_replace.unwrap().represents_same_physical_file_as(report.replaced_identity.unwrap()));
     }
     NativeOperationSupport::Unsupported { reason } => {
       assert!(!reason.is_empty());
@@ -224,6 +224,37 @@ fn platform_file_identity_descriptor_has_the_frozen_exact_layout() {
   assert_eq!(&bytes[8..24], &[0x11; 16]);
   assert_eq!(&bytes[24..40], &[0x22; 16]);
   assert_eq!(&bytes[40..56], &[0x33; 16]);
+}
+
+#[test]
+fn platform_file_identity_compares_stable_native_identity_separately_from_birth_evidence() {
+  let windows_identity = PlatformFileIdentityDescriptorV1 {
+    platform: 2,
+    schema: 1,
+    flags: 1 << 1,
+    volume_identity: [0x11; 16],
+    file_identity: [0x22; 16],
+    birth_identity: [0x33; 16],
+  };
+  let mut windows_after_replace = windows_identity;
+  windows_after_replace.birth_identity = [0x44; 16];
+  assert!(windows_identity.represents_same_physical_file_as(windows_after_replace));
+
+  let mut different_windows_file = windows_after_replace;
+  different_windows_file.file_identity[0] ^= 1;
+  assert!(!windows_identity.represents_same_physical_file_as(different_windows_file));
+
+  let mut different_windows_volume = windows_after_replace;
+  different_windows_volume.volume_identity[0] ^= 1;
+  assert!(!windows_identity.represents_same_physical_file_as(different_windows_volume));
+
+  let windows_future_schema = PlatformFileIdentityDescriptorV1 { schema: 2, ..windows_identity };
+  let windows_future_schema_changed_birth = PlatformFileIdentityDescriptorV1 { schema: 2, ..windows_after_replace };
+  assert!(!windows_future_schema.represents_same_physical_file_as(windows_future_schema_changed_birth));
+
+  let unix_identity = PlatformFileIdentityDescriptorV1 { platform: 1, ..windows_identity };
+  let unix_reused_inode = PlatformFileIdentityDescriptorV1 { platform: 1, ..windows_after_replace };
+  assert!(!unix_identity.represents_same_physical_file_as(unix_reused_inode));
 }
 
 #[test]

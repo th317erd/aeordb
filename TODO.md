@@ -85,6 +85,7 @@
     - [x] Implement native file/data barriers, durable replace, preallocation, read-back, filesystem reporting, and stable file identity.
     - [x] Implement bounded A/B/I ControlStore read selection with expected kind/database/identity verification.
     - [x] Correct the native qualification adapter to report macOS weaker-barrier fallback and use only supported Windows replace flags with target read-back.
+    - [ ] Correct Windows physical-file comparison for `ReplaceFileW` creation-time preservation and prove the replacement invariants natively.
     - [ ] Make the native contract gate use portable SHA-256 and file-size probes on Linux, macOS, and Windows shells.
     - [ ] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
     - [ ] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.

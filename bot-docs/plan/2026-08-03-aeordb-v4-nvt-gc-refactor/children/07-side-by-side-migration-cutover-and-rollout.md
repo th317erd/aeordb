@@ -50,6 +50,13 @@ Forbidden without handoff:
 - Stable same-host file identity combines platform file identity, selected
   header bytes, format, logical/physical identity, expected size, and durable
   sequence. Unsupported stable identity blocks online cutover.
+- The complete 56-byte platform descriptor is retained as exact evidence. Its
+  same-physical-file comparison is platform-specific: Unix schema 1 includes
+  available birth evidence to resist inode reuse; Windows schema 1 follows the
+  documented volume-serial plus 128-bit file-ID key because `ReplaceFileW`
+  preserves the old destination creation time while retaining the replacement
+  file ID. Recompute and record the complete descriptor after every reopen,
+  rename, and replacement boundary.
 - Byte-for-byte copies retain physical identity and are diagnostic/read-only
   until explicit adoption publishes a new physical ID and writer fence.
 - V3 rollback is lossless only before any v4 write acknowledgement. The exact

@@ -15140,6 +15140,16 @@ identity. It is recomputed after every rename/reopen, which detects path
 replacement without requiring a multi-terabyte full-file hash while writes are
 frozen.
 
+Descriptor bytes remain exact journal evidence, but same-physical-file
+comparison follows the native identity contract rather than raw descriptor
+equality. On Unix schema 1, volume, file/generation, and available birth
+evidence must all match to guard against inode reuse. On Windows schema 1,
+volume identity plus `FILE_ID_INFO.FileId` is the same-file key; birth remains
+recorded evidence but is not part of same-file comparison because
+`ReplaceFileW` preserves the replaced destination's creation time while the
+resulting file retains the replacement file's file ID. Cutover recomputes and
+records the complete descriptor after each reopen/replace boundary.
+
 The external journal is exactly 2,048 bytes: two independent 1,024-byte slots.
 Each slot has `ACUT` at 0, schema `u16 = 1` at 4, slot length `u16 = 1024` at
 6, slot sequence `u64` at 8, body length `u32 = 140 + 5H` at 16, flags zero at

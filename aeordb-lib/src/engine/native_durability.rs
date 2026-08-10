@@ -198,6 +198,22 @@ impl PlatformFileIdentityDescriptorV1 {
     bytes[40..56].copy_from_slice(&self.birth_identity);
     bytes
   }
+
+  pub fn represents_same_physical_file_as(self, other: Self) -> bool {
+    if self.platform != other.platform
+      || self.schema != other.schema
+      || self.flags != other.flags
+      || self.volume_identity != other.volume_identity
+      || self.file_identity != other.file_identity
+    {
+      return false;
+    }
+
+    // FILE_ID_INFO defines the Windows same-file key as volume serial plus
+    // file ID. ReplaceFileW retains that ID but preserves the destination's
+    // creation time, so birth evidence is deliberately not part of equality.
+    (self.platform == 2 && self.schema == 1) || self.birth_identity == other.birth_identity
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,6 +363,23 @@ pub fn probe_native_durability(root: impl AsRef<Path>) -> NativeDurabilityResult
   } else {
     (None, false)
   };
+
+  if let (Some(source), Some(replaced)) = (identity_after_rename, replaced_identity) {
+    if !source.represents_same_physical_file_as(replaced) {
+      return Err(NativeDurabilityError::verification(
+        NativeDurabilityOperation::FileIdentity,
+        "durable replace did not preserve the replacement file identity",
+      ));
+    }
+  }
+  if let (Some(previous_destination), Some(replaced)) = (destination_identity_before_replace, replaced_identity) {
+    if previous_destination.represents_same_physical_file_as(replaced) {
+      return Err(NativeDurabilityError::verification(
+        NativeDurabilityOperation::FileIdentity,
+        "durable replace retained the replaced destination file identity",
+      ));
+    }
+  }
 
   let stable_file_identity = if identity_before_rename.is_some()
     && identity_after_rename.is_some()
