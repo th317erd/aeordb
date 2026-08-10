@@ -346,6 +346,49 @@ fn malformed_applied_marker_cannot_hide_v2_evidence() {
 }
 
 #[test]
+fn v2_applied_marker_requires_both_artifact_identities_without_writing_a_marker() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let directory = write_v2_artifact(&base, "artifact", &database, [0x44; 16], 1_700_000_000_000, 1, b"def");
+  let artifacts = scan_for_database_with_locations(&database, &[location(&base)]).unwrap();
+  let report = EmergencySpillApplyReport { artifact_count: 1, ..EmergencySpillApplyReport::default() };
+
+  let mut missing_database_id = artifacts.clone();
+  missing_database_id[0].database_id = None;
+  let error = mark_artifacts_applied(&database, &missing_database_id, &report).unwrap_err();
+  assert!(error.to_string().contains("database identity"), "{error}");
+  assert!(!directory.join("applied.json").exists());
+
+  let mut missing_incident_id = artifacts;
+  missing_incident_id[0].incident_id = None;
+  let error = mark_artifacts_applied(&database, &missing_incident_id, &report).unwrap_err();
+  assert!(error.to_string().contains("incident identity"), "{error}");
+  assert!(!directory.join("applied.json").exists());
+}
+
+#[test]
+fn v2_applied_marker_preflights_the_complete_batch_before_writing() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let first_directory = write_v2_artifact(&base, "first", &database, [0x45; 16], 1_700_000_000_000, 1, b"def");
+  let second_directory = write_v2_artifact(&base, "second", &database, [0x46; 16], 1_700_000_000_001, 2, b"ghi");
+  let mut artifacts = scan_for_database_with_locations(&database, &[location(&base)]).unwrap();
+  artifacts.last_mut().unwrap().incident_id = None;
+  let report = EmergencySpillApplyReport { artifact_count: 2, ..EmergencySpillApplyReport::default() };
+
+  let error = mark_artifacts_applied(&database, &artifacts, &report).unwrap_err();
+  assert!(error.to_string().contains("incident identity"), "{error}");
+  assert!(!first_directory.join("applied.json").exists());
+  assert!(!second_directory.join("applied.json").exists());
+}
+
+#[test]
 fn legacy_v1_evidence_remains_scannable_replayable_and_markable() {
   let temp = tempfile::tempdir().unwrap();
   let database = temp.path().join("legacy.aeordb");

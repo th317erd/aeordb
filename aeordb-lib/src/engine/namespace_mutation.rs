@@ -787,12 +787,14 @@ where
     .prepare_and_maybe_execute(|planning_engine| {
       validate_requested_namespace_root(planning_engine, &requested_root, "requested namespace")?;
       let previous_root = planning_engine.head_hash()?;
-      if expected_root.as_ref().is_some_and(|expected| expected != &previous_root) {
-        return Err(EngineError::AlreadyExists(format!(
-          "namespace HEAD changed from {} to {} while the transition was staging",
-          hex::encode(expected_root.as_ref().expect("checked above")),
-          hex::encode(&previous_root)
-        )));
+      if let Some(expected_root) = expected_root.as_ref() {
+        if expected_root != &previous_root {
+          return Err(EngineError::AlreadyExists(format!(
+            "namespace HEAD changed from {} to {} while the transition was staging",
+            hex::encode(expected_root),
+            hex::encode(&previous_root)
+          )));
+        }
       }
       if previous_root == requested_root {
         return Ok((None, ()));

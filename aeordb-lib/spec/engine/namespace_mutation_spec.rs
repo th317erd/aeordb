@@ -982,7 +982,11 @@ fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
   let tree_writer_end = backup[tree_writer_start..].find("fn write_transfer_directories").unwrap() + tree_writer_start;
   let tree_writer_source = &backup[tree_writer_start..tree_writer_end];
   assert!(tree_writer_source.contains("destination_mode.coordinates_active_locators()"));
-  assert!(tree_writer_source.contains("locator_batch.as_mut().expect(\"active import mode creates a locator batch\").replace("));
+  assert!(tree_writer_source.contains("active FileRecord import is missing its locator publication batch"));
+  assert!(tree_writer_source.contains("active symlink import is missing its locator publication batch"));
+  assert!(tree_writer_source.contains(".replace(EntryType::FileRecord"));
+  assert!(tree_writer_source.contains(".replace(EntryType::Symlink"));
+  assert!(!tree_writer_source.contains("locator_batch.as_mut().expect("));
   assert!(tree_writer_source.contains("locator_batch.flush()?"));
 
   let alias_policy_start = backup.find("fn should_store_transfer_alias").unwrap();

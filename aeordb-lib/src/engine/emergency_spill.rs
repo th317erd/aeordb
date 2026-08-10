@@ -283,6 +283,12 @@ pub fn mark_artifacts_applied(
   artifacts: &[EmergencySpillArtifact],
   report: &EmergencySpillApplyReport,
 ) -> EngineResult<()> {
+  for artifact in artifacts {
+    if artifact.format_version == EmergencySpillFormatVersion::V2 {
+      required_v2_artifact_identities(artifact)?;
+    }
+  }
+
   let db_path = db_path.as_ref().display().to_string();
   for artifact in artifacts {
     let marker = match artifact.format_version {
@@ -294,23 +300,36 @@ pub fn mark_artifacts_applied(
         "wal_tail_bytes_present": report.wal_tail_bytes_present,
         "wal_tail_bytes_written": report.wal_tail_bytes_written,
       }),
-      EmergencySpillFormatVersion::V2 => serde_json::json!({
-        "format": EMERGENCY_SPILL_APPLIED_FORMAT_V2,
-        "applied_at": chrono::Utc::now().to_rfc3339(),
-        "db_path": db_path.clone(),
-        "database_id": hex::encode(artifact.database_id.expect("v2 artifact database identity")),
-        "incident_id": hex::encode(artifact.incident_id.expect("v2 artifact incident identity")),
-        "manifest_length": artifact.manifest_length,
-        "manifest_blake3": hex::encode(artifact.manifest_digest),
-        "wal_tail_bytes_present": report.wal_tail_bytes_present,
-        "wal_tail_bytes_written": report.wal_tail_bytes_written,
-      }),
+      EmergencySpillFormatVersion::V2 => {
+        let (database_id, incident_id) = required_v2_artifact_identities(artifact)?;
+        serde_json::json!({
+          "format": EMERGENCY_SPILL_APPLIED_FORMAT_V2,
+          "applied_at": chrono::Utc::now().to_rfc3339(),
+          "db_path": db_path.clone(),
+          "database_id": hex::encode(database_id),
+          "incident_id": hex::encode(incident_id),
+          "manifest_length": artifact.manifest_length,
+          "manifest_blake3": hex::encode(artifact.manifest_digest),
+          "wal_tail_bytes_present": report.wal_tail_bytes_present,
+          "wal_tail_bytes_written": report.wal_tail_bytes_written,
+        })
+      }
     };
     let marker_path = artifact.directory.join("applied.json");
     let bytes = serde_json::to_vec_pretty(&marker).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
     write_durable_file(&marker_path, &bytes)?;
   }
   Ok(())
+}
+
+fn required_v2_artifact_identities(artifact: &EmergencySpillArtifact) -> EngineResult<([u8; 16], [u8; 16])> {
+  let database_id = artifact.database_id.ok_or_else(|| {
+    EngineError::InvalidInput(format!("v2 emergency spill artifact {} is missing its database identity", artifact.manifest_path.display()))
+  })?;
+  let incident_id = artifact.incident_id.ok_or_else(|| {
+    EngineError::InvalidInput(format!("v2 emergency spill artifact {} is missing its incident identity", artifact.manifest_path.display()))
+  })?;
+  Ok((database_id, incident_id))
 }
 
 pub fn update_v2_manifest_latest(
