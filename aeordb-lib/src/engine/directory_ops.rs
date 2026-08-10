@@ -4007,7 +4007,10 @@ impl<'a> DirectoryOps<'a> {
             }
             Ok(())
           }
-          _ => unreachable!("entry type filtered above"),
+          other => Err(EngineError::CorruptEntry {
+            offset: entry.offset,
+            reason: format!("directory repair received unfiltered entry type {other}"),
+          }),
         }
       })();
       let release = memory.release_to(checkpoint, "directory-repair record release failed");
@@ -5190,7 +5193,10 @@ impl<'a> DirectoryOps<'a> {
         }
         symlink_identity_hash(&normalized, &record.target, &algorithm).map(Some)
       }
-      _ => unreachable!("entry type was constrained above"),
+      other => Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("Live locator identity resolution reached unsupported constrained type {other:?} at '{normalized}'"),
+      }),
     }
   }
 

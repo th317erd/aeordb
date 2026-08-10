@@ -213,7 +213,11 @@ where
     if replacing {
       let resize_result = loop {
         let result = {
-          let entry = state.entries.get_mut(&key).expect("replacement cache entry remains admitted");
+          let Some(entry) = state.entries.get_mut(&key) else {
+            return Err(EngineError::IoError(std::io::Error::other(
+              "Clean cache replacement entry disappeared while its write lock was held",
+            )));
+          };
           let reservation = entry
             ._reservation
             .as_mut()
@@ -235,7 +239,9 @@ where
       };
       match resize_result {
         Ok(()) => {
-          let entry = state.entries.get_mut(&key).expect("replacement cache entry remains admitted after resize");
+          let Some(entry) = state.entries.get_mut(&key) else {
+            return Err(EngineError::IoError(std::io::Error::other("Clean cache replacement entry disappeared after reservation resize")));
+          };
           entry.value = value;
           entry.weight = weight;
           entry.last_access.store(self.next_access(), Ordering::Relaxed);
@@ -437,7 +443,11 @@ impl<L: CacheLoader> Cache<L> {
         match &*state {
           CacheLoadState::Loaded(value) => return Ok(value.clone()),
           CacheLoadState::Failed => continue,
-          CacheLoadState::Loading => unreachable!("cache load wait returned before completion"),
+          CacheLoadState::Loading => {
+            return Err(EngineError::IoError(std::io::Error::other(
+              "Cache load condition wait returned before the load reached a terminal state",
+            )))
+          }
         }
       }
 
@@ -519,3 +529,7 @@ impl<L: CacheLoader> Cache<L> {
     self.entries.stats()
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/cache_panic_internal_spec.rs"]
+mod cache_panic_internal_spec;
