@@ -126,6 +126,7 @@ struct HeaderFields {
   profile: HashProfile,
   sequence: u64,
   updated_at_ms: u64,
+  writer_fence_epoch: u64,
   physical_instance_id: [u8; 16],
   extra_reader_capability_bit: Option<usize>,
   extra_writer_capability_bit: Option<usize>,
@@ -139,6 +140,7 @@ impl HeaderFields {
       profile,
       sequence,
       updated_at_ms: 1_700_000_000_000 + sequence,
+      writer_fence_epoch: 9,
       physical_instance_id: sequence_bytes(0xa0),
       extra_reader_capability_bit: None,
       extra_writer_capability_bit: None,
@@ -438,9 +440,11 @@ fn fixture_cases() -> Vec<FixtureCase> {
   padding_b.nonzero_hash_padding = true;
   let nonzero_hash_padding = header_region(padding_a, padding_b);
 
-  let mut adopted_a = HeaderFields::canonical(HashProfile::Blake3_256, 43);
+  let mut adopted_a = HeaderFields::canonical(HashProfile::Blake3_256, 42);
+  adopted_a.writer_fence_epoch = 10;
   adopted_a.physical_instance_id = sequence_bytes(0xb0);
-  let mut adopted_b = HeaderFields::canonical(HashProfile::Blake3_256, 44);
+  let mut adopted_b = HeaderFields::canonical(HashProfile::Blake3_256, 43);
+  adopted_b.writer_fence_epoch = 10;
   adopted_b.physical_instance_id = sequence_bytes(0xb0);
   let adopted = header_region(adopted_a, adopted_b);
 
@@ -469,7 +473,7 @@ fn fixture_cases() -> Vec<FixtureCase> {
     header_fixture(
       "header-blake3-256-adopted-physical-id",
       HashProfile::Blake3_256,
-      "selected:44",
+      "selected:43",
       Some("adopts:header-blake3-256-valid-ab"),
       adopted,
     ),
@@ -659,7 +663,7 @@ fn build_slot(fields: &HeaderFields) -> [u8; SLOT_LENGTH] {
   }
   put_u16(&mut slot, 384, 1);
   put_hash_bytes(&mut slot, 392, &system_family::fingerprint(fields.profile));
-  put_u64(&mut slot, 456, 9);
+  put_u64(&mut slot, 456, fields.writer_fence_epoch);
   slot[464..480].copy_from_slice(&fields.physical_instance_id);
   if fields.nonzero_reserved {
     slot[480] = 1;

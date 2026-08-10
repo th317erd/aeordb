@@ -8176,7 +8176,7 @@
     {
       "id": "esq-v1-33735333602acd4b234d-00",
       "file": "aeordb-lib/src/engine/v4/admission.rs",
-      "line": 355,
+      "line": 362,
       "column": 37,
       "enclosing_item": "impl PeerCapabilityViewV1::from_selected",
       "kind": "panic_method",
@@ -8186,7 +8186,7 @@
     {
       "id": "esq-v1-3eee151887871f826715-00",
       "file": "aeordb-lib/src/engine/v4/admission.rs",
-      "line": 357,
+      "line": 364,
       "column": 37,
       "enclosing_item": "impl PeerCapabilityViewV1::from_selected",
       "kind": "panic_method",

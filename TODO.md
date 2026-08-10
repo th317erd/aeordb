@@ -554,6 +554,11 @@
         - [x] Reject invalid identities, capabilities, versions, regions, flags, algorithms, lengths, sequences, and overflow before output.
         - [x] Add an architecture gate that keeps fixture generation independent from production encoders.
       - [ ] P3a-2: implement inactive-slot DatabaseHeaderV4 publication, barriers, read-back, selection, and clone-adoption fencing through the native durability coordinator.
+        - [x] Correct the independent adoption fixture so its first-write prefix is fail-closed and its writer fence advances.
+        - [x] Reject writable admission from degraded one-slot header evidence.
+        - [ ] Prove ordinary inactive-slot publication with dependency barrier, full authority barrier, exact read-back, and deterministic selection.
+        - [ ] Prove same-identity startup fencing and new-identity clone adoption hard-publish both slots before writable admission.
+        - [ ] Cover stale callers, concurrent publication, read-only handles, sequence/fence exhaustion, torn writes, barrier failures, and every adoption crash prefix.
       - [ ] P3a-3: add v1 immutable entity/artifact envelope writers only for families whose readers and independent fixtures are already green.
       - [ ] P3a-4: add the v4 ControlStore FileRecord writer through the shared namespace/locator and hard-durability coordinators.
       - [ ] P3a-5: activate only the writer capabilities proven by exact readers/writers and keep namespace/index/GC/migration service activation disabled.

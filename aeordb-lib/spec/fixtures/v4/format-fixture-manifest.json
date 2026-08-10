@@ -156,10 +156,10 @@
       "binary": "database-header-v4/header-blake3-256-adopted-physical-id.bin",
       "annotated_hex": "database-header-v4/header-blake3-256-adopted-physical-id.hex",
       "byte_length": 2048,
-      "sha256": "803c992a30cd7cb8779aaa2be4542fdc0319023da802a9579335799785f9bdb6",
-      "blake3": "cc4282a762d84b55fa72b812400256169b43ae6c73c8107f20dca820ba1f9b19",
+      "sha256": "8c5274816d18a130a6399281e274b14af5451b72bea262ac9b5ccb1c9759e391",
+      "blake3": "aa96978f093c35eff28e049a25545e28b66207a601a1f2168a9140d25accc012",
       "canonical_key": null,
-      "expected": "selected:44",
+      "expected": "selected:43",
       "relation": "adopts:header-blake3-256-valid-ab"
     },
     {

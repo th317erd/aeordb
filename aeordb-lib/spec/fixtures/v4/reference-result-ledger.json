@@ -59,8 +59,8 @@
     },
     {
       "fixture_id": "header-blake3-256-adopted-physical-id",
-      "expected": "selected:44",
-      "observed": "selected:44",
+      "expected": "selected:43",
+      "observed": "selected:43",
       "result": "pass"
     },
     {

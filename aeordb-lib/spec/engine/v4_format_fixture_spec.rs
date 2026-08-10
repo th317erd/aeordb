@@ -3,8 +3,8 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::v4::database_header::{
-  DatabaseHeaderReadError, DatabaseHeaderVersion, ReadOnlyDatabaseHeader, decode_header_region, probe_header_version,
-  read_database_header_read_only, read_header_region,
+  DATABASE_HEADER_V4_REGION_LENGTH, DATABASE_HEADER_V4_SLOT_LENGTH, DatabaseHeaderReadError, DatabaseHeaderVersion, ReadOnlyDatabaseHeader,
+  decode_header_region, probe_header_version, read_database_header_read_only, read_header_region,
 };
 use aeordb::engine::v4::config_value::{CanonicalValueBounds, validate_canonical_value};
 use aeordb::engine::v4::entity::decode_whole_entity;
@@ -128,6 +128,35 @@ fn every_database_header_fixture_matches_the_independent_oracle() {
     };
     assert_eq!(observed, row.expected, "fixture {}", row.id);
   }
+}
+
+#[test]
+fn adopted_header_fixture_models_a_fail_closed_two_slot_transition() {
+  let fixture_directory = fixture_root().join("database-header-v4");
+  let source = fs::read(fixture_directory.join("header-blake3-256-valid-ab.bin")).unwrap();
+  let adopted = fs::read(fixture_directory.join("header-blake3-256-adopted-physical-id.bin")).unwrap();
+  let source_selected = decode_header_region(&source).unwrap();
+  let adopted_selected = decode_header_region(&adopted).unwrap();
+
+  let mut adopted_slot_a_region = vec![0u8; DATABASE_HEADER_V4_REGION_LENGTH];
+  adopted_slot_a_region[..DATABASE_HEADER_V4_SLOT_LENGTH].copy_from_slice(&adopted[..DATABASE_HEADER_V4_SLOT_LENGTH]);
+  adopted_slot_a_region[DATABASE_HEADER_V4_SLOT_LENGTH..].copy_from_slice(&adopted[..DATABASE_HEADER_V4_SLOT_LENGTH]);
+  let adopted_slot_a = decode_header_region(&adopted_slot_a_region).unwrap();
+
+  assert_eq!(source_selected.selected_slot, 1);
+  assert_eq!(adopted_selected.selected_slot, 1);
+  assert_eq!(adopted_slot_a.header.slot_sequence, source_selected.header.slot_sequence);
+  assert_eq!(adopted_selected.header.slot_sequence, source_selected.header.slot_sequence + 1);
+  assert_eq!(adopted_slot_a.header.writer_fence_epoch, source_selected.header.writer_fence_epoch + 1);
+  assert_eq!(adopted_selected.header.writer_fence_epoch, source_selected.header.writer_fence_epoch + 1);
+  assert_eq!(adopted_selected.header.database_id, source_selected.header.database_id);
+  assert_ne!(adopted_selected.header.physical_instance_id, source_selected.header.physical_instance_id);
+
+  let mut interrupted = source;
+  interrupted[..DATABASE_HEADER_V4_SLOT_LENGTH].copy_from_slice(&adopted[..DATABASE_HEADER_V4_SLOT_LENGTH]);
+  let error = decode_header_region(&interrupted).unwrap_err();
+  assert_eq!(error.class(), MalformedInputClass::AmbiguousEqualSequenceSelector);
+  assert_eq!(error.code(), "ambiguous_equal_sequence");
 }
 
 #[test]

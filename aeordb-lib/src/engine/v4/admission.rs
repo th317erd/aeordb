@@ -244,6 +244,13 @@ pub fn admit_v4_header(
     }));
   }
 
+  if selected.redundancy_degraded {
+    return Err(V4AdmissionError::new(
+      "writable_header_redundancy_degraded",
+      "writable admission requires two valid database-header slots",
+    ));
+  }
+
   let writer_floor = required_readers.union(required_writers);
   let missing_writers = writer_floor.difference(profile.supported_writer_capabilities);
   if !missing_writers.is_empty() {

@@ -207,14 +207,27 @@ fn writable_admission_requires_a_hard_fenced_existing_or_adopted_identity() {
     "writer_fence_not_advanced"
   );
 
-  let mut adopted = header("header-blake3-256-adopted-physical-id.bin");
-  adopted.header.writer_fence_epoch = selected.header.writer_fence_epoch + 1;
+  let adopted = header("header-blake3-256-adopted-physical-id.bin");
   let evidence = PhysicalIdentityEvidenceV1::AdoptedCopy {
     source_physical_instance_id: selected.header.physical_instance_id,
     source_writer_fence_epoch: selected.header.writer_fence_epoch,
   };
   let admitted = admit_v4_header(&adopted, AdmissionModeV1::Writable, full_profile(), Some(evidence)).unwrap();
   assert!(matches!(admitted, V4AdmissionResult::Writable(_)));
+}
+
+#[test]
+fn writable_admission_rejects_degraded_header_redundancy() {
+  let degraded = header("header-blake3-256-one-valid-slot.bin");
+  assert!(degraded.redundancy_degraded);
+
+  let error = admit_v4_header(&degraded, AdmissionModeV1::Writable, full_profile(), Some(identity_evidence(&degraded.header))).unwrap_err();
+  assert_eq!(error.code(), "writable_header_redundancy_degraded");
+
+  assert!(matches!(
+    admit_v4_header(&degraded, AdmissionModeV1::SemanticReadOnly, BinaryCapabilityProfileV1::current(), None).unwrap(),
+    V4AdmissionResult::SemanticReadOnly(_)
+  ));
 }
 
 #[test]
