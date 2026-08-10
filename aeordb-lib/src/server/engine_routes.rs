@@ -1228,10 +1228,10 @@ fn enrich_query_items_with_locators(
 ) -> EngineResult<()> {
   for item in items {
     let Some(path) = json_item_path(item).map(str::to_string) else {
-      continue;
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "query result JSON is missing its path".to_string() });
     };
     let Some(result) = query_results.iter().find(|result| result.file_record.path == path) else {
-      continue;
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("query result JSON has no source FileRecord for '{path}'") });
     };
     add_locator_fields(engine, item, &result.file_record, terms, options, request_budget)?;
   }
@@ -1252,18 +1252,19 @@ fn enrich_search_items_with_locators(
 
   for item in items {
     let Some(path) = json_item_path(item).map(str::to_string) else {
-      continue;
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "search result JSON is missing its path".to_string() });
     };
     let Some(search_result) = search_results.iter().find(|result| result.path == path) else {
-      continue;
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("search result JSON has no source result for '{path}'") });
     };
     let terms = match query {
       Some(query_text) => broad_query_terms(query_text, &search_result.matched_fields),
       None => structured_terms.clone().unwrap_or_default(),
     };
-    let Ok(Some(file_record)) = ops.get_metadata(&path) else {
-      continue;
-    };
+    let file_record = ops.get_metadata(&path)?.ok_or_else(|| EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("search result '{path}' disappeared before locator generation"),
+    })?;
     add_locator_fields(engine, item, &file_record, &terms, options, request_budget)?;
   }
   Ok(())
@@ -1278,7 +1279,7 @@ fn add_locator_fields(
   request_budget: &crate::engine::query_runtime::QueryRequestBudget,
 ) -> EngineResult<()> {
   let Some(object) = item.as_object_mut() else {
-    return Ok(());
+    return Err(EngineError::CorruptEntry { offset: 0, reason: "locator enrichment target is not a JSON object".to_string() });
   };
 
   if !file_record.content_hash.is_empty() {
@@ -1286,10 +1287,29 @@ fn add_locator_fields(
   }
 
   let generation = try_generate_locators_with_budget(engine, file_record, terms, options, request_budget)?;
-  object.insert("matches".to_string(), serde_json::to_value(generation.matches).unwrap_or_else(|_| serde_json::Value::Array(Vec::new())));
+  let matches = serde_json::to_value(&generation.matches)
+    .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("locator response serialization failed: {error}") })?;
+  object.insert("matches".to_string(), matches);
   object.insert("matches_truncated".to_string(), serde_json::json!(generation.matches_truncated));
   object.insert("locator_status".to_string(), serde_json::json!(generation.locator_status));
   Ok(())
+}
+
+fn required_dispatch_value<T>(value: Option<T>, entry_type: &str, hash: &str) -> Result<T, Response> {
+  match value {
+    Some(value) => Ok(value),
+    None => {
+      tracing::error!(entry_type, hash, "entry hash dispatch state is incomplete");
+      Err(ErrorResponse::new("Failed to retrieve entry").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response())
+    }
+  }
+}
+
+fn serialize_response_value<T: serde::Serialize>(value: &T, context: &str) -> Result<serde_json::Value, Response> {
+  serde_json::to_value(value).map_err(|error| {
+    tracing::error!(context, %error, "HTTP response serialization failed");
+    ErrorResponse::new(format!("{context} serialization failed")).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
+  })
 }
 
 fn json_item_path(item: &serde_json::Value) -> Option<&str> {
@@ -2175,7 +2195,10 @@ pub async fn engine_get_by_hash(
 
   match header.entry_type {
     EntryType::FileRecord => {
-      let file_record = file_record.take().expect("FileRecord dispatch must load its record");
+      let file_record = match required_dispatch_value(file_record.take(), "FileRecord", &hex_hash) {
+        Ok(file_record) => file_record,
+        Err(response) => return response,
+      };
 
       build_file_streaming_response(
         &state.engine,
@@ -2210,7 +2233,10 @@ pub async fn engine_get_by_hash(
     }
 
     EntryType::DirectoryIndex => {
-      let value = raw_value.expect("raw entry dispatch must load its value");
+      let value = match required_dispatch_value(raw_value, "DirectoryIndex", &hex_hash) {
+        Ok(value) => value,
+        Err(response) => return response,
+      };
       state.engine.counters().record_read(value.len() as u64);
       axum::http::Response::builder()
         .status(StatusCode::OK)
@@ -2223,7 +2249,10 @@ pub async fn engine_get_by_hash(
 
     _ => {
       // Other types: return raw value bytes.
-      let value = raw_value.expect("raw entry dispatch must load its value");
+      let value = match required_dispatch_value(raw_value, "raw", &hex_hash) {
+        Ok(value) => value,
+        Err(response) => return response,
+      };
       axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
@@ -2441,7 +2470,11 @@ pub async fn query_endpoint(
     let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
     match query_engine.execute_explain_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
       Ok(result) => {
-        return (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response();
+        let response = match serialize_response_value(&result, "Explain response") {
+          Ok(response) => response,
+          Err(response) => return response,
+        };
+        return (StatusCode::OK, Json(response)).into_response();
       }
       Err(error) => return engine_error_response("Explain failed", &error),
     }
@@ -2476,7 +2509,10 @@ pub async fn query_endpoint(
     let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
     match query_engine.execute_aggregate_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
       Ok(result) => {
-        let mut response_value = serde_json::to_value(&result).unwrap();
+        let mut response_value = match serialize_response_value(&result, "Aggregation response") {
+          Ok(response) => response,
+          Err(response) => return response,
+        };
         // Apply projection if select is specified
         if let Some(ref select) = body.select {
           if !select.is_empty() {
@@ -2608,7 +2644,10 @@ pub async fn query_endpoint(
         })
       });
       if let Some(ref meta) = meta {
-        response["meta"] = serde_json::to_value(meta).unwrap();
+        response["meta"] = match serialize_response_value(meta, "Query metadata response") {
+          Ok(meta) => meta,
+          Err(response) => return response,
+        };
       }
 
       // Apply projection if select is specified
@@ -3089,3 +3128,7 @@ pub async fn global_search_endpoint(
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/server/engine_routes_error_internal_spec.rs"]
+mod engine_routes_error_internal_spec;
