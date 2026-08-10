@@ -5,6 +5,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use crate::engine::errors::EngineError;
 use crate::engine::file_header::{FileHeader, HEADER_REGION_SIZE, decode_active_header_region};
 use crate::engine::hash_algorithm::HashAlgorithm;
+use crate::engine::kv_stages::KV_STAGE_SIZES;
 
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
@@ -227,6 +228,58 @@ pub fn decode_header_region(region: &[u8]) -> FormatResult<SelectedDatabaseHeade
   }
 }
 
+/// Encode one v4 database-header slot without publishing it.
+///
+/// Publication, inactive-slot selection, barriers, and read-back are separate
+/// authority operations. This function only produces the exact checked bytes
+/// for a caller that already owns those responsibilities.
+pub fn encode_database_header_slot(header: &DatabaseHeaderV4) -> FormatResult<[u8; DATABASE_HEADER_V4_SLOT_LENGTH]> {
+  let hash_width = header.hash_algorithm.hash_length();
+  validate_hash_width(&header.head_hash, hash_width, "head")?;
+  validate_hash_width(&header.base_hash, hash_width, "base")?;
+  validate_hash_width(&header.target_hash, hash_width, "target")?;
+  validate_hash_width(&header.system_family_registry_fingerprint, hash_width, "system-family registry fingerprint")?;
+
+  let mut slot = [0u8; DATABASE_HEADER_V4_SLOT_LENGTH];
+  slot[..4].copy_from_slice(b"AEOR");
+  slot[4] = 4;
+  put_u16(&mut slot, 5, DATABASE_HEADER_V4_SLOT_LENGTH as u16);
+  put_u16(&mut slot, 8, header.hash_algorithm.to_u16());
+  put_u64(&mut slot, 10, header.slot_sequence);
+  put_u64(&mut slot, 18, header.created_at_ms);
+  put_u64(&mut slot, 26, header.updated_at_ms);
+  slot[34..50].copy_from_slice(&header.database_id);
+  put_u64(&mut slot, 50, header.write_sequence_high_water);
+  slot[58..90].copy_from_slice(&header.required_reader_capabilities);
+  put_u64(&mut slot, 90, header.kv_block_offset);
+  put_u64(&mut slot, 98, header.kv_block_length);
+  slot[106] = header.kv_block_version;
+  slot[107] = header.kv_block_stage;
+  slot[108] = u8::from(header.resize_in_progress);
+  slot[109] = header.resize_target_stage;
+  put_u64(&mut slot, 110, header.nvt_offset);
+  put_u64(&mut slot, 118, header.nvt_length);
+  slot[126] = header.nvt_version;
+  slot[127] = header.backup_type;
+  put_u64(&mut slot, 128, header.hot_tail_offset);
+  put_u64(&mut slot, 136, header.buffer_kvs_offset);
+  put_u64(&mut slot, 144, header.buffer_nvt_offset);
+  put_u64(&mut slot, 152, header.entry_count);
+  put_hash(&mut slot, 160, &header.head_hash);
+  put_hash(&mut slot, 224, &header.base_hash);
+  put_hash(&mut slot, 288, &header.target_hash);
+  slot[352..384].copy_from_slice(&header.required_writer_capabilities);
+  put_u16(&mut slot, 384, header.system_family_registry_version);
+  put_hash(&mut slot, 392, &header.system_family_registry_fingerprint);
+  put_u64(&mut slot, 456, header.writer_fence_epoch);
+  slot[464..480].copy_from_slice(&header.physical_instance_id);
+  let slot_crc = crc32fast::hash(&slot[..CRC_OFFSET]);
+  put_u32(&mut slot, CRC_OFFSET, slot_crc);
+
+  decode_slot(&slot)?;
+  Ok(slot)
+}
+
 fn selected(header: DatabaseHeaderV4, selected_slot: usize, redundancy_degraded: bool) -> SelectedDatabaseHeaderV4 {
   SelectedDatabaseHeaderV4 { header, selected_slot, redundancy_degraded }
 }
@@ -286,7 +339,6 @@ fn decode_slot(slot: &[u8]) -> FormatResult<DatabaseHeaderV4> {
   if slot[127] > 2 {
     return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "backup_type", format!("unknown backup type {}", slot[127])));
   }
-
   let database_id: [u8; 16] = slot[34..50].try_into().expect("fixed database ID");
   let physical_instance_id: [u8; 16] = slot[464..480].try_into().expect("fixed physical ID");
   if all_zero(&database_id) || all_zero(&physical_instance_id) {
@@ -306,6 +358,13 @@ fn decode_slot(slot: &[u8]) -> FormatResult<DatabaseHeaderV4> {
       "registry version and writer fence must be nonzero",
     ));
   }
+  if u64_at(slot, 10) == 0 || u64_at(slot, 50) == 0 {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "zero_header_sequence",
+      "slot sequence and write-sequence high water must be nonzero",
+    ));
+  }
 
   let kv_block_offset = u64_at(slot, 90);
   let kv_block_length = u64_at(slot, 98);
@@ -313,6 +372,7 @@ fn decode_slot(slot: &[u8]) -> FormatResult<DatabaseHeaderV4> {
   let nvt_length = u64_at(slot, 118);
   let hot_tail_offset = u64_at(slot, 128);
   let kv_end = checked_end(kv_block_offset, kv_block_length, "KV")?;
+  validate_kv_stage_state(slot[107], resize_in_progress, slot[109], kv_block_length)?;
   let nvt_end = checked_end(nvt_offset, nvt_length, "NVT")?;
   if kv_block_offset < DATABASE_HEADER_V4_DATA_OFFSET || kv_end > nvt_offset || nvt_end > hot_tail_offset {
     return Err(error(
@@ -377,6 +437,21 @@ fn hash_at(slot: &[u8], offset: usize, width: usize) -> FormatResult<Vec<u8>> {
   Ok(slot[offset..offset + width].to_vec())
 }
 
+fn validate_hash_width(hash: &[u8], expected_width: usize, field: &'static str) -> FormatResult<()> {
+  if hash.len() != expected_width {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "hash_width",
+      format!("{field} hash has length {}, expected {expected_width}", hash.len()),
+    ));
+  }
+  Ok(())
+}
+
+fn put_hash(slot: &mut [u8; DATABASE_HEADER_V4_SLOT_LENGTH], offset: usize, hash: &[u8]) {
+  slot[offset..offset + hash.len()].copy_from_slice(hash);
+}
+
 fn require_zero(bytes: &[u8], code: &'static str, context: &'static str) -> FormatResult<()> {
   if bytes.iter().any(|byte| *byte != 0) {
     return Err(error(MalformedInputClass::NonzeroReservedOrPadding, code, context));
@@ -388,6 +463,36 @@ fn checked_end(offset: u64, length: u64, region: &'static str) -> FormatResult<u
   offset.checked_add(length).ok_or_else(|| {
     error(MalformedInputClass::LengthCountOrArithmeticOverflow, "offset_overflow", format!("{region} offset {offset} plus length {length}"))
   })
+}
+
+fn validate_kv_stage_state(current_stage: u8, resize_in_progress: bool, target_stage: u8, kv_block_length: u64) -> FormatResult<()> {
+  let current = usize::from(current_stage);
+  if current >= KV_STAGE_SIZES.len() {
+    return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "kv_stage", format!("unknown KV stage {current_stage}")));
+  }
+  let target = usize::from(target_stage);
+  if target >= KV_STAGE_SIZES.len() {
+    return Err(error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "resize_target_stage",
+      format!("unknown KV resize target stage {target_stage}"),
+    ));
+  }
+  if (!resize_in_progress && target != 0) || (resize_in_progress && target <= current) {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "resize_state",
+      format!("current stage {current_stage}, resize {resize_in_progress}, target {target_stage}"),
+    ));
+  }
+  if kv_block_length != KV_STAGE_SIZES[current] {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "kv_stage_length",
+      format!("stage {current_stage} requires {} bytes, found {kv_block_length}", KV_STAGE_SIZES[current]),
+    ));
+  }
+  Ok(())
 }
 
 fn all_zero(bytes: &[u8]) -> bool {
@@ -404,6 +509,18 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
 
 fn u64_at(bytes: &[u8], offset: usize) -> u64 {
   u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("fixed slot bounds"))
+}
+
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+  bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+  bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+  bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {

@@ -686,6 +686,10 @@ name = "v4_format_fixture_spec"
 path = "spec/engine/v4_format_fixture_spec.rs"
 
 [[test]]
+name = "v4_writer_fixture_spec"
+path = "spec/engine/v4_writer_fixture_spec.rs"
+
+[[test]]
 name = "path_utils_spec"
 path = "spec/engine/path_utils_spec.rs"
 

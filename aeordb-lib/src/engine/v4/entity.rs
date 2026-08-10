@@ -60,6 +60,98 @@ pub struct WholeEntityV1<'a> {
   pub stored_value: &'a [u8],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WholeEntityWriteV1<'a> {
+  pub entry_type: EntryTypeV4,
+  pub flags: u8,
+  pub hash_algorithm: HashAlgorithm,
+  pub compression_algorithm: CompressionAlgorithm,
+  pub timestamp_ms: u64,
+  pub write_sequence: u64,
+  pub key: &'a [u8],
+  pub stored_value: &'a [u8],
+}
+
+/// Return the exact encoded length after applying all component and arithmetic
+/// bounds, without allocating the entity.
+pub fn checked_whole_entity_encoded_length(
+  hash_algorithm: HashAlgorithm,
+  key_length: usize,
+  stored_value_length: usize,
+) -> FormatResult<usize> {
+  if key_length > WHOLE_ENTITY_V1_KEY_CAP || stored_value_length > WHOLE_ENTITY_V1_VALUE_CAP {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "entity_component_exceeds_cap",
+      format!("key {key_length}, value {stored_value_length}"),
+    ));
+  }
+  let header_length = 77usize.checked_add(hash_algorithm.hash_length()).ok_or_else(|| {
+    error(MalformedInputClass::LengthCountOrArithmeticOverflow, "header_length_overflow", "whole entity header length overflow")
+  })?;
+  if header_length > WHOLE_ENTITY_V1_MAX_HEADER_LENGTH {
+    return Err(error(MalformedInputClass::AllocationAmplification, "entity_header_exceeds_cap", format!("header length {header_length}")));
+  }
+  let total_length = header_length
+    .checked_add(key_length)
+    .and_then(|length| length.checked_add(stored_value_length))
+    .ok_or_else(|| error(MalformedInputClass::LengthCountOrArithmeticOverflow, "entity_length_overflow", "entity length overflow"))?;
+  checked_u32(total_length, "total_length_conversion", "entity length exceeds u32")?;
+  Ok(total_length)
+}
+
+/// Encode one complete v1 entity without publishing it to a database.
+pub fn encode_whole_entity(request: &WholeEntityWriteV1<'_>) -> FormatResult<Vec<u8>> {
+  if request.flags & !WHOLE_ENTITY_V1_FLAG_SYSTEM != 0 {
+    return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "unknown_entity_flags", format!("flags {:#04x}", request.flags)));
+  }
+  if request.write_sequence == 0 {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "unreserved_write_sequence",
+      "whole entity write sequence must be nonzero",
+    ));
+  }
+
+  let key_length = request.key.len();
+  let value_length = request.stored_value.len();
+  let total_length = checked_whole_entity_encoded_length(request.hash_algorithm, key_length, value_length)?;
+  let key_length_u32 = checked_u32(key_length, "key_length_conversion", "key length exceeds u32")?;
+  let value_length_u32 = checked_u32(value_length, "value_length_conversion", "value length exceeds u32")?;
+  let hash_width = request.hash_algorithm.hash_length();
+  let header_length = 77 + hash_width;
+  let total_length_u32 = checked_u32(total_length, "total_length_conversion", "entity length exceeds u32")?;
+
+  let mut entity = vec![0u8; total_length];
+  put_u32(&mut entity, 0, WHOLE_ENTITY_V1_MAGIC);
+  entity[4] = WHOLE_ENTITY_V1_VERSION;
+  entity[5] = request.entry_type.to_u8();
+  put_u16(&mut entity, 6, header_length as u16);
+  put_u32(&mut entity, 8, total_length_u32);
+  entity[12] = request.flags;
+  put_u16(&mut entity, 13, request.hash_algorithm.to_u16());
+  entity[15] = request.compression_algorithm.to_u8();
+  put_u32(&mut entity, 17, key_length_u32);
+  put_u32(&mut entity, 21, value_length_u32);
+  put_u64(&mut entity, 25, request.timestamp_ms);
+  put_u64(&mut entity, 33, request.write_sequence);
+
+  let integrity = digest_parts(
+    request.hash_algorithm,
+    &[b"aeordb-entry-v1\0", &entity[4..6], &entity[12..13], &entity[13..17], &entity[17..25], request.key, request.stored_value],
+  );
+  entity[41..41 + hash_width].copy_from_slice(&integrity);
+  let crc_offset = header_length - 4;
+  let header_crc = crc32fast::hash(&entity[..crc_offset]);
+  put_u32(&mut entity, crc_offset, header_crc);
+  let key_end = header_length + key_length;
+  entity[header_length..key_end].copy_from_slice(request.key);
+  entity[key_end..].copy_from_slice(request.stored_value);
+
+  decode_whole_entity(&entity, request.hash_algorithm, request.write_sequence)?;
+  Ok(entity)
+}
+
 pub fn decode_whole_entity<'a>(
   entity: &'a [u8],
   expected_hash_algorithm: HashAlgorithm,
@@ -209,6 +301,25 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
 
 fn u64_at(bytes: &[u8], offset: usize) -> u64 {
   u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("validated entity bounds"))
+}
+
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+  bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+  bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+  bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn checked_u32(value: usize, code: &'static str, context: &'static str) -> FormatResult<u32> {
+  if value > u32::MAX as usize {
+    return Err(error(MalformedInputClass::LengthCountOrArithmeticOverflow, code, context));
+  }
+  Ok(value as u32)
 }
 
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {

@@ -548,6 +548,16 @@
         - [x] Reject malformed or non-Unicode logging directives through fallible CLI startup and diagnostic entry points instead of silently selecting another filter.
         - [x] Emit a typed `stream_gap` SSE control event on global and per-user broadcast lag instead of silently leaving client views stale.
       - [x] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary (`8f2ab42`).
+    - [ ] P3a: add exact v4 format writers without activating v4 service authority.
+      - [x] P3a-1: add checked common encoders whose output byte-matches the independent DatabaseHeaderV4 and WholeEntityV1 fixtures.
+        - [x] Prove exact Blake3-256 and SHA-512 fixture equality before production implementation.
+        - [x] Reject invalid identities, capabilities, versions, regions, flags, algorithms, lengths, sequences, and overflow before output.
+        - [x] Add an architecture gate that keeps fixture generation independent from production encoders.
+      - [ ] P3a-2: implement inactive-slot DatabaseHeaderV4 publication, barriers, read-back, selection, and clone-adoption fencing through the native durability coordinator.
+      - [ ] P3a-3: add v1 immutable entity/artifact envelope writers only for families whose readers and independent fixtures are already green.
+      - [ ] P3a-4: add the v4 ControlStore FileRecord writer through the shared namespace/locator and hard-durability coordinators.
+      - [ ] P3a-5: activate only the writer capabilities proven by exact readers/writers and keep namespace/index/GC/migration service activation disabled.
+      - [ ] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
