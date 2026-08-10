@@ -21,6 +21,7 @@ pub mod gc_mark;
 pub mod gc_state;
 pub mod gc_void;
 pub mod hash;
+pub mod header_publication;
 pub mod index_artifact;
 pub mod index_nvt;
 pub mod index_page;

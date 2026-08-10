@@ -240,6 +240,11 @@ pub fn write_file_at_native(file: &File, offset: u64, bytes: &[u8]) -> NativeDur
   write_all_at_platform(file, offset, bytes).map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::WriteAt, error))
 }
 
+pub fn read_file_at_native(file: &File, offset: u64, bytes: &mut [u8]) -> NativeDurabilityResult<()> {
+  read_exact_at_platform(file, offset, bytes)
+    .map_err(|error| NativeDurabilityError::operation_io(NativeDurabilityOperation::ReadBack, error))
+}
+
 pub fn verify_file_bytes_native(file: &File, offset: u64, expected: &[u8]) -> NativeDurabilityResult<()> {
   let mut actual = vec![0u8; expected.len()];
   read_exact_at_platform(file, offset, &mut actual)
