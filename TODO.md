@@ -528,6 +528,9 @@
         - [x] Replace emergency-spill replay and namespace-root publication panic assumptions with typed invariant failures.
           - [x] Preflight every v2 spill identity before applied-marker publication; reject either missing identity without writing any marker in the batch.
           - [x] Preserve expected-root mismatch evidence without re-reading a proven optional value through `expect`.
+        - [x] Replace deployment-report serialization and crash-soak checkpoint startup panics with typed, classified CLI failures.
+          - [x] Make `deployment-check --json` propagate serialization failure through `EngineResult`.
+          - [x] Make an unavailable crash-soak checkpoint path exit with startup failure evidence instead of panic code 101.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

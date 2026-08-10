@@ -1,4 +1,4 @@
-use aeordb::engine::EngineResult;
+use aeordb::engine::{EngineError, EngineResult};
 use aeordb::engine::v4::deployment_guard::{
   DeploymentDecisionV1, DeploymentTransitionStateV1, TRANSITION_RECOVERY_CAPABILITY_V1, current_deployment_capabilities,
   acquire_deployment_inspection_lock, evaluate_deployment_candidate, inspect_deployment_transition_state_read_only,
@@ -38,7 +38,9 @@ pub fn check_database(database: &str, candidate_capability: Option<&str>, json: 
   let decision = evaluate_deployment_candidate(&state, candidate_capability);
   if json {
     let output = DeploymentCheckOutput { state: &state, decision: &decision };
-    println!("{}", serde_json::to_string(&output).expect("deployment check output is serializable"));
+    let output = serde_json::to_string(&output)
+      .map_err(|error| EngineError::JsonParseError(format!("deployment check output serialization failed: {error}")))?;
+    println!("{output}");
   } else {
     println!("database: {database}");
     println!("transition recovery required: {}", state.requires_transition_capability);

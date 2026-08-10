@@ -67,6 +67,13 @@ fn main() {
       process::exit(2);
     }
   };
+  let mut checkpoint_file = match OpenOptions::new().create(true).append(true).open(&checkpoint) {
+    Ok(file) => file,
+    Err(error) => {
+      eprintln!("open checkpoint {checkpoint}: {error}");
+      process::exit(4);
+    }
+  };
 
   let engine = match StorageEngine::open(&database) {
     Ok(engine) => engine,
@@ -88,7 +95,6 @@ fn main() {
 
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();
-  let mut checkpoint_file = OpenOptions::new().create(true).append(true).open(&checkpoint).expect("open checkpoint");
 
   // Signal that we're up so the parent knows the engine opened cleanly.
   let startup_checkpoint = (|| -> Result<(), String> {

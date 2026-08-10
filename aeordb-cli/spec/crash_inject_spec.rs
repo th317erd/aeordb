@@ -69,6 +69,24 @@ fn spawn_worker(db_path: &str, checkpoint_path: &str, mode: &str) -> Child {
     .expect("spawn worker")
 }
 
+#[test]
+fn crash_worker_reports_checkpoint_open_failure_without_panicking() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("checkpoint-open-failure.aeordb");
+  let checkpoint = temp.path().join("missing-parent").join("checkpoint.tsv");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_crash-soak-worker"))
+    .args(["--database", database.to_str().unwrap(), "--checkpoint", checkpoint.to_str().unwrap(), "--mode", "writes"])
+    .output()
+    .unwrap();
+
+  assert_eq!(output.status.code(), Some(4), "{}", String::from_utf8_lossy(&output.stderr));
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(stderr.contains("open checkpoint"), "{stderr}");
+  assert!(!stderr.contains("panicked"), "{stderr}");
+  assert!(!database.exists(), "checkpoint admission must fail before the worker creates or opens the database");
+}
+
 /// Terminate the child without graceful shutdown. `Child::kill` maps to
 /// SIGKILL on Unix and the equivalent forced process termination on Windows.
 fn sigkill(child: &mut Child) {
