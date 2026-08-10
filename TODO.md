@@ -79,19 +79,19 @@
     - [x] Gate clone adoption on a new physical identity and a strictly advanced writer fence.
     - [x] Gate peer transfer on database, hash, registry, capability, and physical-instance compatibility.
     - [x] Prove all refusal paths occur before mutation authority is exposed and run the full P1b gate.
-  - [ ] P1c: prove native durability primitives and deterministic read-only ControlStore selection.
+  - [x] P1c: prove native durability primitives and deterministic read-only ControlStore selection.
     - [x] Add failing platform/control-store specs covering success, unsupported, malformed, and torn-state paths.
     - [x] Replace the Windows parent-directory-sync no-op with a real native flush or a typed unsupported result.
     - [x] Implement native file/data barriers, durable replace, preallocation, read-back, filesystem reporting, and stable file identity.
     - [x] Implement bounded A/B/I ControlStore read selection with expected kind/database/identity verification.
     - [x] Correct the native qualification adapter to report macOS weaker-barrier fallback and use only supported Windows replace flags with target read-back.
-    - [ ] Correct Windows physical-file comparison for `ReplaceFileW` creation-time preservation and prove the replacement invariants natively.
-    - [ ] Correct the native read-only-header failure proof for Windows `FlushFileBuffers` access ordering.
-    - [ ] Make the native contract gate use portable SHA-256 and file-size probes on Linux, macOS, and Windows shells.
-    - [ ] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
-    - [ ] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.
+    - [x] Correct Windows physical-file comparison for `ReplaceFileW` creation-time preservation and prove the replacement invariants natively.
+    - [x] Correct the native read-only-header failure proof for Windows `FlushFileBuffers` access ordering.
+    - [x] Make the native contract gate use portable SHA-256 and file-size probes on Linux, macOS, and Windows shells.
+    - [x] Run the native probe and shared fixture/malformed corpus on Linux, `wyatt-mac`, and `win11vm`.
+    - [x] Run the P1c narrow, adjacent, workspace, static, and architecture gates; record evidence and land the phase.
       - [x] Repair architecture inventory drift for root-only `/system/runtime`, public `/dashboard.css`, and `operations/observability.md`; restore exact 95-route/38-page closure.
-      - [ ] Execute the native platform/fixture gates on `wyatt-mac` and `win11vm` when both hosts are online.
+      - [x] Execute the native platform/fixture gates on `wyatt-mac` and `win11vm` when both hosts are online.
   - [x] P2a: converge every acknowledged v3 write behind one truthful durability coordinator.
     - [x] P2a-1: freeze the current durability-operation inventory and land the coordinator/ledger shell without changing writers.
       - [x] Refresh raw write/barrier/replace/header/shutdown producer and consumer territory from current source.
@@ -295,7 +295,7 @@
       - [x] Map every old system/internal predicate, protected-path list, registry producer, and traversal consumer from current source.
       - [x] Characterize the current adjacent behavior with 194 green B-tree, tree-walk, backup/import, sync, permission, and GC tests; record the ratified policy differences explicitly.
       - [x] Freeze the P2c red-test protocol, independent policy oracle, traversal-state matrix, consumer proof, and architecture-removal gate.
-      - [ ] Close P1c by running the native durability/fixture/malformed gates on `wyatt-mac` and `win11vm` when the hosts are online.
+      - [x] Close P1c by running the native durability/fixture/malformed gates on `wyatt-mac` and `win11vm` when the hosts are online.
       - [x] Add failing registry tests for typed policies, exact embedded-registry reuse, structural namespace containers, unknown protected state, and permissions/conflicts/controls contracts.
         - [x] Prove all 46 family policies and 63 descriptors against the independent manifest oracle.
         - [x] Prove one cached embedded registry per hash algorithm and pointer reuse by v4 admission.

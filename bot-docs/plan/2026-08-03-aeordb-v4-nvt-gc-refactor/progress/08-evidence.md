@@ -3,9 +3,9 @@
 ## Landing State
 
 - **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** P2f landed; handoff to Child 01 P1c native completion and then P3a/P3b.
+- **Current landing unit:** P1c native closure is green; handoff to P3a/P3b.
 - **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P2f exit `8f2ab42` on `development` and `origin/development`.
+- **Last pushed green commit:** P1c implementation and portable native-contract boundary `e1f1e29` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -60,4 +60,4 @@ Optional cleanup and telemetry failures retain the acknowledged primary result o
 
 ## Next Action
 
-Complete the still-open Child 01 P1c native macOS and Windows durability/fixture gates. Only after that green pushed boundary may Child 01 P3a writers and Child 03 P3b immutable roots/read views activate; P7 migration work remains forbidden until its own start gate.
+Begin Child 01 P3a writers with independent fixture equality and no-bypass architecture tests before production activation. Child 03 P3b immutable roots/read views may proceed only through its own start gate; P7 migration work remains forbidden until its own gate.
