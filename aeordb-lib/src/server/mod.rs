@@ -52,7 +52,7 @@ use crate::engine::{
 };
 use crate::logging::request_id_middleware;
 use crate::metrics::http_metrics_layer::HttpMetricsLayer;
-use crate::metrics::initialize_metrics;
+use crate::metrics::{initialize_metrics, try_initialize_metrics};
 use crate::plugins::PluginManager;
 use state::AppState;
 
@@ -251,7 +251,7 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
     JwtManager::from_bytes(&auth_provider.jwt_manager().to_bytes())
       .map_err(|error| format!("failed to reconstruct JWT manager from auth provider: {}", error.0))?,
   );
-  let prometheus_handle = initialize_metrics();
+  let prometheus_handle = try_initialize_metrics().map_err(|error| format!("failed to initialize server metrics: {error}"))?;
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let task_queue = Arc::new(TaskQueue::new(engine.clone()));

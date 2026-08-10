@@ -809,6 +809,10 @@ name = "namespace_mutation_spec"
 path = "spec/engine/namespace_mutation_spec.rs"
 
 [[test]]
+name = "metrics_initialization_spec"
+path = "spec/metrics/metrics_initialization_spec.rs"
+
+[[test]]
 name = "config_resolver_spec"
 path = "spec/engine/config_resolver_spec.rs"
 

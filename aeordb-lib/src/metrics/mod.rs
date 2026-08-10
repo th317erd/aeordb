@@ -8,7 +8,19 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use crate::engine::storage_engine::EngineMemoryStats;
 use crate::engine::runtime_observability::RuntimeObservabilitySnapshot;
 
-static GLOBAL_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+static GLOBAL_HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
+
+/// Install AeorDB's Prometheus recorder without taking process-exit policy
+/// away from an embedding host.
+pub fn try_initialize_metrics() -> Result<PrometheusHandle, String> {
+  GLOBAL_HANDLE
+    .get_or_init(|| {
+      metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|error| format!("failed to install AeorDB metrics recorder: {error}"))
+    })
+    .clone()
+}
 
 /// Install the Prometheus recorder globally and return the handle used to
 /// render metrics in Prometheus text format.
@@ -16,11 +28,7 @@ static GLOBAL_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 /// Safe to call multiple times -- only the first call installs the recorder;
 /// subsequent calls return the same handle.
 pub fn initialize_metrics() -> PrometheusHandle {
-  GLOBAL_HANDLE
-    .get_or_init(|| {
-      metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder().expect("failed to install Prometheus metrics recorder")
-    })
-    .clone()
+  try_initialize_metrics().expect("failed to install Prometheus metrics recorder")
 }
 
 /// Record a non-authoritative follow-up failure without changing the outcome
