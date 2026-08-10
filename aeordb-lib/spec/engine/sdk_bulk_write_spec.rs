@@ -67,6 +67,18 @@ fn merge_patch_primitive_is_exported_from_engine() {
 }
 
 #[test]
+fn merge_patch_full_replace_overwrites_the_complete_document() {
+  let mut target = json!({
+    "retained": false,
+    "nested": {"old": true}
+  });
+
+  apply_merge_patch(&mut target, json!({"replacement": [1, 2, 3]}), MergeDepth::FullReplace);
+
+  assert_eq!(target, json!({"replacement": [1, 2, 3]}));
+}
+
+#[test]
 fn store_files_buffered_batch_stores_multiple_small_files() {
   let dir = tempfile::tempdir().unwrap();
   let engine = create_engine(&dir);

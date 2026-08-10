@@ -48,6 +48,13 @@ struct Config {
   max_db_size_bytes: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkloadAction {
+  Write,
+  Read,
+  Delete,
+}
+
 fn parse_args() -> Result<Mode, String> {
   let args: Vec<String> = std::env::args().collect();
   let mut database: Option<String> = None;
@@ -315,12 +322,12 @@ fn run(config: Config) -> Result<(), String> {
   println!("starting workload loop");
   'workload: while start.elapsed() < config.duration {
     let pick = next_u32(&mut rng_state) % 100;
-    let action: char = if pick < config.pct_write as u32 {
-      'W'
+    let action = if pick < config.pct_write as u32 {
+      WorkloadAction::Write
     } else if pick < (config.pct_write + config.pct_read) as u32 {
-      'R'
+      WorkloadAction::Read
     } else {
-      'D'
+      WorkloadAction::Delete
     };
 
     // Honor the DB size cap by demoting writes to reads when we're past it.
@@ -331,8 +338,8 @@ fn run(config: Config) -> Result<(), String> {
           eprintln!("DB size {} ≥ cap {} — demoting future writes to reads", size_now, cap);
           size_capped_logged = true;
         }
-        if action == 'W' {
-          'R'
+        if action == WorkloadAction::Write {
+          WorkloadAction::Read
         } else {
           action
         }
@@ -341,7 +348,7 @@ fn run(config: Config) -> Result<(), String> {
     };
 
     match action {
-      'W' => {
+      WorkloadAction::Write => {
         let source = &corpus[next_u32(&mut rng_state) as usize % corpus.len()];
         match do_write(&engine, source, &config.source_dir) {
           Ok(stored_path) => {
@@ -364,7 +371,7 @@ fn run(config: Config) -> Result<(), String> {
           }
         }
       }
-      'R' => {
+      WorkloadAction::Read => {
         if committed.is_empty() {
           // Nothing to read yet — fall through to write.
           continue;
@@ -409,7 +416,7 @@ fn run(config: Config) -> Result<(), String> {
           }
         }
       }
-      'D' => {
+      WorkloadAction::Delete => {
         if committed.is_empty() {
           continue;
         }
@@ -435,7 +442,6 @@ fn run(config: Config) -> Result<(), String> {
           }
         }
       }
-      _ => unreachable!(),
     }
 
     // Periodic snapshot.

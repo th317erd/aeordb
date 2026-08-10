@@ -75,15 +75,13 @@ impl ActiveDepth {
 /// Apply `patch` to `target` per the rules above. Mutates `target` in
 /// place when both are objects; otherwise replaces `*target = patch`.
 pub fn apply_merge_patch(target: &mut Value, patch: Value, depth: MergeDepth) {
-  // `FullReplace` is the PUT-via-PATCH path — overwrite the document.
-  if matches!(depth, MergeDepth::FullReplace) {
-    *target = patch;
-    return;
-  }
-
   let active = match depth {
     MergeDepth::Unbounded => ActiveDepth::Unbounded,
-    MergeDepth::FullReplace => unreachable!("handled above"),
+    // `FullReplace` is the PUT-via-PATCH path — overwrite the document.
+    MergeDepth::FullReplace => {
+      *target = patch;
+      return;
+    }
     MergeDepth::ReplaceBeyond(n) => ActiveDepth::Bounded { levels: n, beyond: BeyondPolicy::Replace },
     MergeDepth::PreserveBeyond(n) => ActiveDepth::Bounded { levels: n, beyond: BeyondPolicy::Preserve },
   };
