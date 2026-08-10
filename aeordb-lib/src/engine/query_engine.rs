@@ -297,10 +297,18 @@ pub fn parse_single_field_query(value: &serde_json::Value) -> Result<QueryNode, 
       let s = raw_value.as_str().ok_or_else(|| format!("'fuzzy' requires string value for field '{}'", field))?;
 
       let fuzziness = match value.get("fuzziness") {
-        Some(v) if v.is_string() && v.as_str() == Some("auto") => Fuzziness::Auto,
-        Some(v) if v.is_u64() => Fuzziness::Fixed(v.as_u64().unwrap() as usize),
-        Some(v) if v.is_i64() => Fuzziness::Fixed(v.as_i64().unwrap().max(0) as usize),
-        _ => Fuzziness::Auto,
+        Some(value) if value.as_str() == Some("auto") => Fuzziness::Auto,
+        Some(value) if value.as_u64().is_some() => {
+          let value = value.as_u64().ok_or_else(|| "fuzziness changed type during query parsing".to_string())?;
+          let value = usize::try_from(value).map_err(|_| "fuzziness exceeds this platform's supported range".to_string())?;
+          Fuzziness::Fixed(value)
+        }
+        Some(value) if value.as_i64().is_some() => {
+          let value = value.as_i64().ok_or_else(|| "fuzziness changed type during query parsing".to_string())?.max(0) as u64;
+          let value = usize::try_from(value).map_err(|_| "fuzziness exceeds this platform's supported range".to_string())?;
+          Fuzziness::Fixed(value)
+        }
+        Some(_) | None => Fuzziness::Auto,
       };
 
       let algorithm = match value.get("algorithm").and_then(|v| v.as_str()) {
@@ -330,8 +338,7 @@ fn parse_where_clause_inner(value: &serde_json::Value, depth: usize) -> Result<Q
     return Err(format!("Query nesting too deep (max {} levels). Simplify the where clause", MAX_WHERE_CLAUSE_DEPTH));
   }
 
-  if value.is_array() {
-    let array = value.as_array().unwrap();
+  if let Some(array) = value.as_array() {
     let children: Result<Vec<QueryNode>, String> = array.iter().map(|v| parse_where_clause_inner(v, depth + 1)).collect();
     return Ok(QueryNode::And(children?));
   }
@@ -1496,10 +1503,11 @@ impl<'a> QueryEngine<'a> {
     } else {
       // Legacy path: wrap flat field_queries as an implicit AND.
       let leaves: Vec<QueryNode> = query.field_queries.iter().map(|fq| QueryNode::Field(fq.clone())).collect();
-      if leaves.len() == 1 {
-        leaves.into_iter().next().unwrap()
-      } else {
-        QueryNode::And(leaves)
+      match leaves.len() {
+        1 => {
+          leaves.into_iter().next().ok_or_else(|| EngineError::InvalidInput("query leaf construction lost its only field".to_string()))?
+        }
+        _ => QueryNode::And(leaves),
       }
     };
 
@@ -3078,32 +3086,16 @@ pub fn bytes_to_json_value(bytes: &[u8], type_tag: u8) -> serde_json::Value {
       }
     }
     CONVERTER_TYPE_U32 => {
-      if bytes.len() >= 4 {
-        serde_json::json!(u32::from_be_bytes(bytes[..4].try_into().unwrap()))
-      } else {
-        serde_json::Value::Null
-      }
+      fixed_width_prefix::<4>(bytes).map_or(serde_json::Value::Null, |encoded| serde_json::json!(u32::from_be_bytes(encoded)))
     }
     CONVERTER_TYPE_U64 => {
-      if bytes.len() >= 8 {
-        serde_json::json!(u64::from_be_bytes(bytes[..8].try_into().unwrap()))
-      } else {
-        serde_json::Value::Null
-      }
+      fixed_width_prefix::<8>(bytes).map_or(serde_json::Value::Null, |encoded| serde_json::json!(u64::from_be_bytes(encoded)))
     }
     CONVERTER_TYPE_I64 | CONVERTER_TYPE_TIMESTAMP => {
-      if bytes.len() >= 8 {
-        serde_json::json!(i64::from_be_bytes(bytes[..8].try_into().unwrap()))
-      } else {
-        serde_json::Value::Null
-      }
+      fixed_width_prefix::<8>(bytes).map_or(serde_json::Value::Null, |encoded| serde_json::json!(i64::from_be_bytes(encoded)))
     }
     CONVERTER_TYPE_F64 => {
-      if bytes.len() >= 8 {
-        serde_json::json!(f64::from_be_bytes(bytes[..8].try_into().unwrap()))
-      } else {
-        serde_json::Value::Null
-      }
+      fixed_width_prefix::<8>(bytes).map_or(serde_json::Value::Null, |encoded| serde_json::json!(f64::from_be_bytes(encoded)))
     }
     CONVERTER_TYPE_STRING => {
       serde_json::json!(String::from_utf8_lossy(bytes).to_string())
@@ -3117,6 +3109,10 @@ pub fn bytes_to_json_value(bytes: &[u8], type_tag: u8) -> serde_json::Value {
       }
     }
   }
+}
+
+fn fixed_width_prefix<const WIDTH: usize>(bytes: &[u8]) -> Option<[u8; WIDTH]> {
+  bytes.get(..WIDTH)?.try_into().ok()
 }
 
 /// Check if a converter type supports numeric aggregation (SUM/AVG).
@@ -3331,9 +3327,14 @@ impl<'a> QueryBuilder<'a> {
     let mut sub = QueryBuilder::new(self.engine, &self.path);
     sub.cancellation = self.cancellation.clone();
     let built = build_fn(sub);
-    if !built.nodes.is_empty() {
-      let inner = if built.nodes.len() == 1 { built.nodes.into_iter().next().unwrap() } else { QueryNode::And(built.nodes) };
-      self.nodes.push(QueryNode::Not(Box::new(inner)));
+    match built.nodes.len() {
+      0 => {}
+      1 => {
+        if let Some(inner) = built.nodes.into_iter().next() {
+          self.nodes.push(QueryNode::Not(Box::new(inner)));
+        }
+      }
+      _ => self.nodes.push(QueryNode::Not(Box::new(QueryNode::And(built.nodes)))),
     }
     self
   }

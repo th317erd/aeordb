@@ -561,13 +561,23 @@ impl SharedIndexWriteBuffer {
       self.reserve_dirty_exact(&key, reservation_target)?;
       self.indexes.insert(key.clone(), index);
     } else {
-      let reservation_target =
-        Self::mutation_reservation_target(self.indexes.get(&key).expect("buffered index exists before mutation"), field_values, file_key);
+      let index = self.indexes.get(&key).ok_or_else(|| {
+        EngineError::DurabilityFailure(format!(
+          "buffered index {}.{} at {} disappeared before mutation",
+          key.field_name, key.strategy, key.parent
+        ))
+      })?;
+      let reservation_target = Self::mutation_reservation_target(index, field_values, file_key);
       self.reserve_dirty_exact(&key, reservation_target)?;
     }
     self.deleted_keys.remove(&key);
 
-    let index = self.indexes.get_mut(&key).expect("buffered index exists after insertion");
+    let index = self.indexes.get_mut(&key).ok_or_else(|| {
+      EngineError::DurabilityFailure(format!(
+        "buffered index {}.{} at {} disappeared after insertion",
+        key.field_name, key.strategy, key.parent
+      ))
+    })?;
     index.remove(file_key);
     for value in field_values {
       index.insert_expanded(value, file_key.to_vec());
@@ -710,7 +720,14 @@ impl SharedIndexWriteBuffer {
         self.flush_reservations.insert(key.clone(), reservation);
       }
       if !delete {
-        let index = self.indexes.get_mut(&key).expect("selected dirty index remains cached");
+        let Some(index) = self.indexes.get_mut(&key) else {
+          let partial = IndexFlushSnapshot { saves, deletes, mutation_counts, pending_mutations };
+          self.restore_failed_flush(&partial);
+          return Err(EngineError::DurabilityFailure(format!(
+            "selected dirty index {}.{} at {} disappeared before flush serialization",
+            key.field_name, key.strategy, key.parent
+          )));
+        };
         index.ensure_nvt_current();
         let data = index.serialize(hash_length);
         debug_assert_eq!(data.len() as u64, serialized_size);

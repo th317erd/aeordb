@@ -524,6 +524,7 @@
           - [x] Pair resolved reindex configuration with its owner and require forced-migration memory through a typed invariant check.
           - [x] Preserve pending KV generation and poison evidence without re-reading locally proven state through `expect`.
         - [x] Make runtime action and merge-depth state machines exhaustive without wildcard panic branches.
+        - [x] Replace request-query and mutable shared-index-buffer panic assumptions with bounded parsing and typed invariant failures.
       - [ ] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
