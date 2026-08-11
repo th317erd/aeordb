@@ -28,6 +28,7 @@ use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::traversal::{TraversalIntegrity, VisitorCompletion};
 use crate::engine::v4::control_store::{SYSTEM_CONTROL_CONTENT_TYPE, V3ControlPublicationContextV0, V4ControlPublicationContextV1};
+use crate::engine::v4::semantic_store::{SEMANTIC_OBJECT_CONTENT_TYPE, V4SemanticObjectPublicationContextV1};
 use crate::engine::v4::system_control::SystemControlSlotV1;
 use crate::engine::v4::system_family::SystemFamilyClassificationV1;
 use crate::engine::SystemFamilyPolicyResolver;
@@ -2422,6 +2423,25 @@ impl<'a> DirectoryOps<'a> {
       &normalized,
       data,
       Some(SYSTEM_CONTROL_CONTENT_TYPE),
+      CompressionAlgorithm::None,
+      CURRENT_FILE_RECORD_VERSION,
+      false,
+    )
+  }
+
+  pub(crate) fn store_semantic_file_record_v1(
+    &self,
+    publication: &V4SemanticObjectPublicationContextV1<'_>,
+    data: &[u8],
+  ) -> EngineResult<FileRecord> {
+    if !std::ptr::eq(self.engine, publication.engine()) {
+      return Err(EngineError::InvalidInput("v4 semantic-object publication context belongs to a different engine".to_string()));
+    }
+    self.store_file_internal_inner(
+      &RequestContext::system(),
+      publication.target_path(),
+      data,
+      Some(SEMANTIC_OBJECT_CONTENT_TYPE),
       CompressionAlgorithm::None,
       CURRENT_FILE_RECORD_VERSION,
       false,

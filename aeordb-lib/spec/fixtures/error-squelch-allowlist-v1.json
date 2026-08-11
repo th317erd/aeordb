@@ -2606,7 +2606,7 @@
     {
       "id": "esq-v1-38281a8d9215267b904b-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 110,
+      "line": 111,
       "column": 27,
       "enclosing_item": "file_identity_hash",
       "kind": "default_on_error",
@@ -2616,7 +2616,7 @@
     {
       "id": "esq-v1-a04a1e7664477e5c2787-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 251,
+      "line": 252,
       "column": 27,
       "enclosing_item": "system_file_identity_hash",
       "kind": "default_on_error",
@@ -2626,7 +2626,7 @@
     {
       "id": "esq-v1-3db5823ccf57cf24faa1-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 325,
+      "line": 326,
       "column": 25,
       "enclosing_item": "ensure_file_record_content_hash_for_migration",
       "kind": "default_on_error",
@@ -2636,7 +2636,7 @@
     {
       "id": "esq-v1-d9de9cd74f819b07109c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 330,
+      "line": 331,
       "column": 31,
       "enclosing_item": "ensure_file_record_content_hash_for_migration",
       "kind": "error_conversion",
@@ -2646,7 +2646,7 @@
     {
       "id": "esq-v1-8d286ff5184fa5e51c2d-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 683,
+      "line": 684,
       "column": 11,
       "enclosing_item": "prepare_file_record_publication_at_version",
       "kind": "default_on_error",
@@ -2656,7 +2656,7 @@
     {
       "id": "esq-v1-cfabfeb146337f5a001a-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 918,
+      "line": 919,
       "column": 9,
       "enclosing_item": "impl EngineFileStream < 'a >::collect_to_vec",
       "kind": "error_conversion",
@@ -2666,7 +2666,7 @@
     {
       "id": "esq-v1-8f3ed42be42648ae9ab9-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 935,
+      "line": 936,
       "column": 124,
       "enclosing_item": "impl EngineFileStream < 'a >::collect_to_vec",
       "kind": "default_on_error",
@@ -2676,7 +2676,7 @@
     {
       "id": "esq-v1-21f60add84ba0112c257-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 946,
+      "line": 947,
       "column": 25,
       "enclosing_item": "impl EngineFileStream < 'a >::collect_to_vec",
       "kind": "default_on_error",
@@ -2686,7 +2686,7 @@
     {
       "id": "esq-v1-f1631d6072ba20ad2e02-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1032,
+      "line": 1033,
       "column": 23,
       "enclosing_item": "stream_hash_inventory_bytes",
       "kind": "result_to_option",
@@ -2696,7 +2696,7 @@
     {
       "id": "esq-v1-bd50e1a9421ebb829b1c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1060,
+      "line": 1061,
       "column": 23,
       "enclosing_item": "read_chunk_reserved",
       "kind": "default_on_error",
@@ -2706,7 +2706,7 @@
     {
       "id": "esq-v1-79b8ae4468fa9cb70fa9-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1066,
+      "line": 1067,
       "column": 30,
       "enclosing_item": "read_chunk_reserved",
       "kind": "error_conversion",
@@ -2716,7 +2716,7 @@
     {
       "id": "esq-v1-358240da98139c85062f-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1092,
+      "line": 1093,
       "column": 24,
       "enclosing_item": "read_chunk_reserved",
       "kind": "result_to_option",
@@ -2726,7 +2726,7 @@
     {
       "id": "esq-v1-f133421ac0293e4d77f1-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1217,
+      "line": 1218,
       "column": 25,
       "enclosing_item": "impl DirectoryMutationPlanner::upsert_child",
       "kind": "default_on_error",
@@ -2736,7 +2736,7 @@
     {
       "id": "esq-v1-3febd40c5a921c46e0fd-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1238,
+      "line": 1239,
       "column": 22,
       "enclosing_item": "impl DirectoryMutationPlanner::remove_child",
       "kind": "default_on_error",
@@ -2746,7 +2746,7 @@
     {
       "id": "esq-v1-44a7e04d19a1157afec0-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1434,
+      "line": 1435,
       "column": 17,
       "enclosing_item": "impl DirectoryMutationPlanner::finalize",
       "kind": "default_on_error",
@@ -2756,7 +2756,7 @@
     {
       "id": "esq-v1-647400b3c56fd35d1a37-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1467,
+      "line": 1468,
       "column": 7,
       "enclosing_item": "impl DirectoryMutationFanout < '_ >::publish",
       "kind": "logged_error_continues",
@@ -2766,7 +2766,7 @@
     {
       "id": "esq-v1-3eb766a72b3b1ffee0fb-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1537,
+      "line": 1538,
       "column": 9,
       "enclosing_item": "impl DirectoryMutationFanout < '_ >::publish",
       "kind": "logged_error_continues",
@@ -2776,7 +2776,7 @@
     {
       "id": "esq-v1-464c6678effe0d43dc24-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1540,
+      "line": 1541,
       "column": 9,
       "enclosing_item": "impl DirectoryMutationFanout < '_ >::publish",
       "kind": "logged_error_continues",
@@ -2786,7 +2786,7 @@
     {
       "id": "esq-v1-1dbe127dc1453310f45f-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1641,
+      "line": 1642,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::execute_namespace_mutation",
       "kind": "error_conversion",
@@ -2796,7 +2796,7 @@
     {
       "id": "esq-v1-e68210dbf3155e3f8134-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1665,
+      "line": 1666,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::execute_optional_namespace_mutation",
       "kind": "error_conversion",
@@ -2806,7 +2806,7 @@
     {
       "id": "esq-v1-4772f14e72268cde34eb-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1887,
+      "line": 1888,
       "column": 25,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "result_to_option",
@@ -2816,7 +2816,7 @@
     {
       "id": "esq-v1-4772f14e72268cde34eb-01",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1898,
+      "line": 1899,
       "column": 27,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "result_to_option",
@@ -2826,7 +2826,7 @@
     {
       "id": "esq-v1-4772f14e72268cde34eb-02",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1916,
+      "line": 1917,
       "column": 25,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "result_to_option",
@@ -2836,7 +2836,7 @@
     {
       "id": "esq-v1-2bafbe596c439a91de1c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 2192,
+      "line": 2193,
       "column": 33,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "default_on_error",
@@ -2846,7 +2846,7 @@
     {
       "id": "esq-v1-25bdcf384e2da6d6d6f2-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 2216,
+      "line": 2217,
       "column": 23,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "default_on_error",
@@ -2856,7 +2856,7 @@
     {
       "id": "esq-v1-1e9d7ebbd60ed62357cb-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3142,
+      "line": 3162,
       "column": 46,
       "enclosing_item": "impl DirectoryOps < 'a >::list_directory",
       "kind": "default_on_error",
@@ -2866,7 +2866,7 @@
     {
       "id": "esq-v1-35a885337f68f9d467c8-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3240,
+      "line": 3260,
       "column": 46,
       "enclosing_item": "impl DirectoryOps < 'a >::visit_live_directory_children_with_mode",
       "kind": "default_on_error",
@@ -2876,7 +2876,7 @@
     {
       "id": "esq-v1-ddaf162496826bd2621d-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3591,
+      "line": 3611,
       "column": 19,
       "enclosing_item": "impl DirectoryOps < 'a >::create_directory",
       "kind": "default_on_error",
@@ -2886,7 +2886,7 @@
     {
       "id": "esq-v1-c6203fc4c82a25ca0cb8-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3655,
+      "line": 3675,
       "column": 25,
       "enclosing_item": "impl DirectoryOps < 'a >::migrate_file_record_to_current_version_inner",
       "kind": "result_to_option",
@@ -2896,7 +2896,7 @@
     {
       "id": "esq-v1-7c1cc635d0b4d2a5c311-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3784,
+      "line": 3804,
       "column": 8,
       "enclosing_item": "impl DirectoryOps < 'a >::auto_snapshot_throttled",
       "kind": "result_status_probe",
@@ -2906,7 +2906,7 @@
     {
       "id": "esq-v1-43252b5e53ae66d08444-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3817,
+      "line": 3837,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::auto_snapshot_throttled",
       "kind": "logged_error_continues",
@@ -2916,7 +2916,7 @@
     {
       "id": "esq-v1-091284cb537f519fd859-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3895,
+      "line": 3915,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_file_child",
       "kind": "broad_err_pattern",
@@ -2926,7 +2926,7 @@
     {
       "id": "esq-v1-c20a9327c3f637070ef4-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3908,
+      "line": 3928,
       "column": 16,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_file_child",
       "kind": "default_on_error",
@@ -2936,7 +2936,7 @@
     {
       "id": "esq-v1-ff4fdd4be6b6b81d6572-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3914,
+      "line": 3934,
       "column": 18,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_file_child",
       "kind": "default_on_error",
@@ -2946,7 +2946,7 @@
     {
       "id": "esq-v1-3e42bb88d2d698f9a3fb-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3942,
+      "line": 3962,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_symlink_child",
       "kind": "broad_err_pattern",
@@ -2956,7 +2956,7 @@
     {
       "id": "esq-v1-f3579da5fa92c4b8bf2c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3952,
+      "line": 3972,
       "column": 16,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_symlink_child",
       "kind": "default_on_error",
@@ -2966,7 +2966,7 @@
     {
       "id": "esq-v1-8916fd6e7b3bfaeb376e-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3958,
+      "line": 3978,
       "column": 18,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_symlink_child",
       "kind": "default_on_error",
@@ -2976,7 +2976,7 @@
     {
       "id": "esq-v1-05b02ba1132680630d0d-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4088,
+      "line": 4108,
       "column": 13,
       "enclosing_item": "impl DirectoryOps < 'a >::rebuild_directory_tree",
       "kind": "logged_error_continues",
@@ -2986,7 +2986,7 @@
     {
       "id": "esq-v1-4c077f272b49160fc704-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4101,
+      "line": 4121,
       "column": 24,
       "enclosing_item": "impl DirectoryOps < 'a >::rebuild_directory_tree",
       "kind": "default_on_error",
@@ -2996,7 +2996,7 @@
     {
       "id": "esq-v1-1e6d440e690fba60e748-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4103,
+      "line": 4123,
       "column": 19,
       "enclosing_item": "impl DirectoryOps < 'a >::rebuild_directory_tree",
       "kind": "default_on_error",
@@ -3006,7 +3006,7 @@
     {
       "id": "esq-v1-138d8f1368bc877683d6-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4281,
+      "line": 4301,
       "column": 9,
       "enclosing_item": "impl DirectoryOps < 'a >::collect_existing_directory_children_for_repair",
       "kind": "broad_err_pattern",
@@ -3016,7 +3016,7 @@
     {
       "id": "esq-v1-dd0bbde8cd3df6dca2a3-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4307,
+      "line": 4327,
       "column": 20,
       "enclosing_item": "impl DirectoryOps < 'a >::insert_repair_child",
       "kind": "default_on_error",
@@ -3026,7 +3026,7 @@
     {
       "id": "esq-v1-c0f0dbcc192ff7824702-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4325,
+      "line": 4345,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_child_from_file_record",
       "kind": "broad_err_pattern",
@@ -3036,7 +3036,7 @@
     {
       "id": "esq-v1-7a9a444ef10a1ed7a5b8-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4373,
+      "line": 4393,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_child_from_symlink_record",
       "kind": "broad_err_pattern",
@@ -3046,7 +3046,7 @@
     {
       "id": "esq-v1-d5bfbebee29ca0c70251-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4518,
+      "line": 4538,
       "column": 19,
       "enclosing_item": "impl DirectoryOps < 'a >::store_rebuilt_directory",
       "kind": "default_on_error",
@@ -3056,7 +3056,7 @@
     {
       "id": "esq-v1-d49aa2a759482adca71c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4560,
+      "line": 4580,
       "column": 5,
       "enclosing_item": "impl DirectoryOps < 'a >::store_file_with_indexing",
       "kind": "logged_error_continues",
@@ -3066,7 +3066,7 @@
     {
       "id": "esq-v1-8bc034a038fa75a4ffa1-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4586,
+      "line": 4606,
       "column": 5,
       "enclosing_item": "impl DirectoryOps < 'a >::store_file_with_full_pipeline",
       "kind": "logged_error_continues",
@@ -3076,7 +3076,7 @@
     {
       "id": "esq-v1-15cd8cb7b9bc18b8708f-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4927,
+      "line": 4947,
       "column": 15,
       "enclosing_item": "impl DirectoryOps < 'a >::plan_parent_directories",
       "kind": "default_on_error",
@@ -3086,7 +3086,7 @@
     {
       "id": "esq-v1-399f75a57038761b9e31-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4950,
+      "line": 4970,
       "column": 22,
       "enclosing_item": "impl DirectoryOps < 'a >::plan_remove_from_parent_directory",
       "kind": "default_on_error",
@@ -3096,7 +3096,7 @@
     {
       "id": "esq-v1-834a5a4e5bbd8e0df4dc-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5004,
+      "line": 5024,
       "column": 15,
       "enclosing_item": "impl DirectoryOps < 'a >::plan_remove_from_parent_directory",
       "kind": "default_on_error",
@@ -3106,7 +3106,7 @@
     {
       "id": "esq-v1-718d438102254aa2e3c2-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5077,
+      "line": 5097,
       "column": 17,
       "enclosing_item": "impl DirectoryOps < 'a >::store_symlink",
       "kind": "default_on_error",
@@ -3116,7 +3116,7 @@
     {
       "id": "esq-v1-18d183645adb5f604d20-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5673,
+      "line": 5693,
       "column": 18,
       "enclosing_item": "impl DirectoryOps < 'a >::copy_paths",
       "kind": "default_on_error",
@@ -3126,7 +3126,7 @@
     {
       "id": "esq-v1-3bc49429e037c6ff65ef-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5829,
+      "line": 5849,
       "column": 23,
       "enclosing_item": "impl DirectoryOps < 'a >::execute_copy_mappings",
       "kind": "default_on_error",
@@ -3136,7 +3136,7 @@
     {
       "id": "esq-v1-9c97b40cb3549e4785dc-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 6026,
+      "line": 6046,
       "column": 17,
       "enclosing_item": "impl DirectoryOps < 'a >::rename_symlink",
       "kind": "default_on_error",
@@ -3146,7 +3146,7 @@
     {
       "id": "esq-v1-7afda66a35a8678d385c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 6069,
+      "line": 6089,
       "column": 23,
       "enclosing_item": "copy_workspace_bytes",
       "kind": "result_to_option",

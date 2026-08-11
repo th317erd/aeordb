@@ -32,6 +32,7 @@ pub mod position;
 pub mod reader;
 pub mod root_authority;
 pub mod scope;
+pub mod semantic_store;
 pub mod source_selector;
 pub mod system_control;
 pub mod system_family;
