@@ -3,9 +3,9 @@
 ## Landing State
 
 - **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** Child 01 P3a is complete; Child 03 P3b-1 immutable root/semantic readers and reference model are next.
+- **Current landing unit:** Child 03 P3b-1 immutable root/semantic readers are complete; P3b-2 shadow root/admission publication is active.
 - **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P3a-5 writer capability profile commit `ec20bd4` on `development` and `origin/development`.
+- **Last pushed green commit:** P3b-1 immutable authority reader commit `ba60b4d` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -71,7 +71,14 @@ Optional cleanup and telemetry failures retain the acknowledged primary result o
 
 ## Next Action
 
-Begin Child 03 P3b-1 with a fresh immutable namespace-root, semantic-state, admission-witness, lifecycle, and historical-read territory map plus an independent reference model. Keep shadow root publication in P3b-2 and read-view/service activation in P3b-3 behind their own gates; P7 migration work remains forbidden until its gate.
+Begin Child 03 P3b-2 with an exhaustive shadow-publication/storage map and a failure-first writer target. Publish exact immutable dependencies, root prepare evidence, and admission commit through the shared hard-durability and namespace authorities without selecting HEAD or activating service reads. Keep read-view/lifecycle/pins in P3b-3 and migration work behind its P7 gate.
+
+## P3b-1 Immutable Root Authority Closure
+
+- Commit `ba60b4d9447e89576a0ce3665b0570c41566c34a` adds disconnected immutable namespace-root, namespace-tree, semantic-state, and admission-witness readers plus an independent reference model. No startup, route, HEAD selector, lifecycle, authorization, migration, or service caller is activated.
+- The focused target passes 11 tests; the complete adjacent v4 matrix passes 121 tests on Linux, macOS arm64, and Windows x86_64 MSVC. macOS passes the independent 436-fixture/95-route/38-document contract wrapper; Windows natively exercises all 436 fixtures but does not claim the POSIX wrapper because its `jq` and Python/PyYAML dependencies are absent.
+- The final Linux workspace/all-target gate passes 5,490 tests across 209 result groups with zero failures and seven intentional ignores. Preserved log SHA-256: `d5eff5ef36265578aa2eb3b95cdef6c93532e234c32cc2328c26fc4f95f8e13a`.
+- Workspace checking, both Rust formatters, mdBook, `git diff --check`, the exact 1,420-entry suppression check, all 27 suppression architecture tests, and the independent contract gate are green. Real storage proof performs store, clean shutdown, reopen, bounded verified reads, authority resolution, and final shutdown on a disposable database.
 
 ## P3a-4 Entry Territory
 
