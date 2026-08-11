@@ -3,9 +3,9 @@
 ## Landing State
 
 - **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** Child 03 P3b-1 immutable root/semantic readers are complete; P3b-2 shadow root/admission publication is active.
+- **Current landing unit:** Child 03 P3b-2b write-once semantic-object storage is complete; P3b-2c atomic shadow first-authority publication is active.
 - **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P3b-1 immutable authority reader commit `ba60b4d` on `development` and `origin/development`.
+- **Last pushed green commit:** P3b-2b write-once semantic-object storage commit `0b739c7` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -71,7 +71,15 @@ Optional cleanup and telemetry failures retain the acknowledged primary result o
 
 ## Next Action
 
-Begin Child 03 P3b-2 with an exhaustive shadow-publication/storage map and a failure-first writer target. Publish exact immutable dependencies, root prepare evidence, and admission commit through the shared hard-durability and namespace authorities without selecting HEAD or activating service reads. Keep read-view/lifecycle/pins in P3b-3 and migration work behind its P7 gate.
+Begin Child 03 P3b-2c with an exhaustive first-authority visibility map and a failure-first transaction target. Keep prepared roots unadmitted, then publish the authority selector and admission witness through one shared visibility/durability boundary without selecting HEAD or activating service reads. Keep capability bits 1, 2, and 5 disabled, read-view/lifecycle/pins in P3b-3, and migration work behind its P7 gate.
+
+## P3b-2b Semantic Object Storage Closure
+
+- Exact commit `0b739c71b434101f35660c051bd657f73148681e` adds disconnected, deterministic, write-once v4 semantic-object publication through the ordinary system FileRecord v1 namespace and hard-durability authorities. It activates no HEAD, service, startup, route, migration, or capability caller.
+- The focused target passes 8 tests; the adjacent twelve-target v4 matrix passes 267. The final Linux workspace/all-target run passes 5,501 tests across 210 harness groups with zero failures, seven intentional ignores, and 126 filtered tests. Preserved broad log SHA-256: `e66b2627c53974c7dc7293100d4ee0fa5fdfbee9f6de20349dca3e769de6beab`.
+- Workspace checking, both formatters, mdBook, `git diff --check`, the independent 436-fixture/95-route/38-document contract gate, the exact 1,420-entry suppression check, and all 27 suppression architecture tests are green. Strict focused Clippy remains blocked only by the established 110-diagnostic crate baseline and reports nothing in the changed semantic-store/spec files; preserved non-strict log SHA-256 is `dde4e74b7b9ab0d5ac613bcd8d058eead4e4df9889abcffeb52a3b9335168b9d`.
+- The exact twelve-target, 267-test matrix passes on native macOS arm64 and Windows x86_64 MSVC using lockfile SHA-256 `b9fa3f1afdb6eac58ff877e942381bc92e45e81a3a2e51a20c671024333793de`. macOS also passes the portable contract gate. Retained native log SHA-256 values are `8094691c6e3ba24ac552b03f71c764d290faa685b24444c212f31bdc53b255f4` and `6b33820ae59540f0b2ef00ed1ae49b9c4be18f27e3452a9026ab158b46453471`.
+- Real-storage proof creates actual engine files, hard-publishes every semantic kind, shuts down cleanly, reopens, and loads exact bytes on all three native platforms. The isolated native worktrees, build targets, logs, and disposable tooling were removed after qualification; no server, Cargo process, or user checkout was left active or modified.
 
 ## P3b-1 Immutable Root Authority Closure
 
