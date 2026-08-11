@@ -38,6 +38,7 @@ pub mod semantic_store;
 pub mod source_selector;
 pub mod system_control;
 pub mod system_family;
+pub mod transfer_closure;
 pub mod value_store;
 
 #[cfg(test)]

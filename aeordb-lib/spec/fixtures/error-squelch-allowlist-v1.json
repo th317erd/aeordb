@@ -10936,7 +10936,7 @@
     {
       "id": "esq-v1-2aac3ea9e76e5f79a972-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 393,
+      "line": 397,
       "column": 11,
       "enclosing_item": "impl SystemFamilyPolicyResolverV1::policy",
       "kind": "panic_macro",
@@ -10946,7 +10946,7 @@
     {
       "id": "esq-v1-7e8ceaf0610f42eaaa17-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 519,
+      "line": 523,
       "column": 23,
       "enclosing_item": "is_absolute_family_structural_container",
       "kind": "error_conversion",
@@ -10956,7 +10956,7 @@
     {
       "id": "esq-v1-8d8340b0b326b80f7be2-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 521,
+      "line": 525,
       "column": 23,
       "enclosing_item": "is_absolute_family_structural_container",
       "kind": "default_on_error",
@@ -10966,7 +10966,7 @@
     {
       "id": "esq-v1-5a28c026e71b3e181d53-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 563,
+      "line": 567,
       "column": 18,
       "enclosing_item": "deepest_segment_match",
       "kind": "panic_method",
@@ -10976,7 +10976,7 @@
     {
       "id": "esq-v1-a350048bb13c651df4b3-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 590,
+      "line": 594,
       "column": 17,
       "enclosing_item": "decode_descendant_file_matcher",
       "kind": "error_conversion",
@@ -10986,7 +10986,7 @@
     {
       "id": "esq-v1-09ab672849d4ac31ce54-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 594,
+      "line": 598,
       "column": 16,
       "enclosing_item": "decode_descendant_file_matcher",
       "kind": "error_conversion",
@@ -10996,7 +10996,7 @@
     {
       "id": "esq-v1-91ca1348b8b99f8fb94b-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 604,
+      "line": 608,
       "column": 3,
       "enclosing_item": "decode_segment_matcher",
       "kind": "error_conversion",
@@ -11006,7 +11006,7 @@
     {
       "id": "esq-v1-43961c9c08ed5551a1ef-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 626,
+      "line": 630,
       "column": 6,
       "enclosing_item": "classify_scalar",
       "kind": "default_on_error",
@@ -11016,7 +11016,7 @@
     {
       "id": "esq-v1-8c58e76d43940a6028cd-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 646,
+      "line": 650,
       "column": 6,
       "enclosing_item": "classify_kv_key",
       "kind": "default_on_error",
@@ -11026,7 +11026,7 @@
     {
       "id": "esq-v1-f4cb703e3cfb5d6284bf-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 694,
+      "line": 698,
       "column": 8,
       "enclosing_item": "impl SystemFamilyDescriptorIterV1 < 'a >::next",
       "kind": "result_status_probe",
@@ -11036,7 +11036,7 @@
     {
       "id": "esq-v1-88ebd3f8aa75d4987320-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 711,
+      "line": 715,
       "column": 22,
       "enclosing_item": "decode_system_family_registry",
       "kind": "error_conversion",
@@ -11046,7 +11046,7 @@
     {
       "id": "esq-v1-71ad732027e5850da67b-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 715,
+      "line": 719,
       "column": 26,
       "enclosing_item": "decode_system_family_registry",
       "kind": "error_conversion",
@@ -11056,7 +11056,7 @@
     {
       "id": "esq-v1-e4d90a0015e0b8dbae69-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 716,
+      "line": 720,
       "column": 28,
       "enclosing_item": "decode_system_family_registry",
       "kind": "error_conversion",
@@ -11066,7 +11066,7 @@
     {
       "id": "esq-v1-d9c25a6c4753a1ce7eb3-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 840,
+      "line": 844,
       "column": 9,
       "enclosing_item": "validate_matcher",
       "kind": "error_conversion",
@@ -11076,7 +11076,7 @@
     {
       "id": "esq-v1-fdc0c8b9a4c7b24263e0-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 901,
+      "line": 905,
       "column": 14,
       "enclosing_item": "validate_absolute_path",
       "kind": "default_on_error",
@@ -11086,7 +11086,7 @@
     {
       "id": "esq-v1-e1e71ad0a906cd8766c3-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 910,
+      "line": 914,
       "column": 5,
       "enclosing_item": "validate_relative_path",
       "kind": "error_conversion",
@@ -11096,7 +11096,7 @@
     {
       "id": "esq-v1-4b8428f38e10177cbc58-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 921,
+      "line": 925,
       "column": 17,
       "enclosing_item": "validate_segment",
       "kind": "error_conversion",
@@ -11106,7 +11106,7 @@
     {
       "id": "esq-v1-403ab49cc5ae2b5cb66a-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 929,
+      "line": 933,
       "column": 24,
       "enclosing_item": "append_semantic_projection",
       "kind": "error_conversion",
@@ -11116,7 +11116,7 @@
     {
       "id": "esq-v1-5fa54837d51077c145e5-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 957,
+      "line": 961,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -11126,7 +11126,7 @@
     {
       "id": "esq-v1-ecbe73f8aeb5adccd5b2-00",
       "file": "aeordb-lib/src/engine/v4/system_family.rs",
-      "line": 962,
+      "line": 966,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",

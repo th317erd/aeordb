@@ -370,6 +370,10 @@ impl SystemFamilyPolicyResolverV1 {
     Ok(Self { registry: embedded_system_family_registry(algorithm)? })
   }
 
+  pub(super) const fn selected(registry: &'static SystemFamilyRegistryV1<'static>) -> Self {
+    Self { registry }
+  }
+
   pub const fn registry(self) -> &'static SystemFamilyRegistryV1<'static> {
     self.registry
   }
