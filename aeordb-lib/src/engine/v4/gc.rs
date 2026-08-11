@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use crate::engine::HashAlgorithm;
@@ -455,6 +457,18 @@ pub fn decode_physical_incarnation(bytes: &[u8], algorithm: HashAlgorithm) -> Fo
     entry_type,
     entity_version,
   })
+}
+
+pub fn compare_physical_incarnations_v1(left: &PhysicalIncarnationV1<'_>, right: &PhysicalIncarnationV1<'_>) -> Ordering {
+  left
+    .logical_key
+    .cmp(right.logical_key)
+    .then_with(|| left.integrity_or_legacy_digest.cmp(right.integrity_or_legacy_digest))
+    .then_with(|| left.wal_offset.cmp(&right.wal_offset))
+    .then_with(|| left.write_sequence.cmp(&right.write_sequence))
+    .then_with(|| left.entity_length.cmp(&right.entity_length))
+    .then_with(|| left.entry_type.cmp(&right.entry_type))
+    .then_with(|| left.entity_version.cmp(&right.entity_version))
 }
 
 pub fn immutable_gc_artifact_key(algorithm: HashAlgorithm, kind: GcArtifactKindV1, complete_value: &[u8]) -> Vec<u8> {

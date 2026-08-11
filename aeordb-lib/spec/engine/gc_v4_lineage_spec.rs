@@ -142,10 +142,13 @@ fn retirement_reference_model_closes_a_canonical_segment_chain_without_collectin
     let summary = model.finish().unwrap();
     assert_eq!(summary.segment_count, 2);
     assert_eq!(summary.record_count, 3);
+    assert_eq!(summary.database_id, <[u8; 16]>::try_from((0x31u8..=0x40).collect::<Vec<_>>()).unwrap());
     assert_eq!(summary.first_replacement_sequence, 5_000);
     assert_eq!(summary.last_replacement_sequence, 5_001);
     assert_eq!(summary.last_segment_ordinal, 2);
+    assert_eq!(summary.last_segment_generation, 402);
     assert_eq!(summary.last_segment_hash, second.key);
+    assert_eq!(summary.last_old_incarnation[0], 0x32);
   }
 }
 

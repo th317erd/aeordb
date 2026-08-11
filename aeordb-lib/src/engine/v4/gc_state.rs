@@ -4,8 +4,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::gc::{
-  GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_artifact_envelope, decode_physical_incarnation, immutable_gc_artifact_key, u16_at,
-  u32_at, u64_at,
+  GcArtifactKindV1, PhysicalIncarnationV1, compare_physical_incarnations_v1, decode_gc_artifact_envelope, decode_physical_incarnation,
+  immutable_gc_artifact_key, u16_at, u32_at, u64_at,
 };
 use super::contract_generated::root_retirement_reason_v1;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
@@ -268,12 +268,15 @@ impl ExactSizeIterator for RetirementJournalRecordsV1<'_> {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetirementJournalModelSummaryV1 {
+  pub database_id: [u8; 16],
   pub segment_count: u64,
   pub record_count: u64,
   pub first_replacement_sequence: u64,
   pub last_replacement_sequence: u64,
   pub last_segment_ordinal: u64,
+  pub last_segment_generation: u64,
   pub last_segment_hash: Vec<u8>,
+  pub last_old_incarnation: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -341,6 +344,7 @@ pub struct RetirementJournalReferenceModelV1<'a> {
   first_replacement_sequence: u64,
   last_replacement_sequence: u64,
   last_segment_ordinal: u64,
+  last_segment_generation: u64,
   last_segment_hash: Vec<u8>,
   previous_old_incarnation: Vec<u8>,
   failed: bool,
@@ -358,6 +362,7 @@ impl<'a> RetirementJournalReferenceModelV1<'a> {
       first_replacement_sequence: 0,
       last_replacement_sequence: 0,
       last_segment_ordinal: 0,
+      last_segment_generation: 0,
       last_segment_hash: Vec::with_capacity(algorithm.hash_length()),
       previous_old_incarnation: Vec::with_capacity(24 + 2 * algorithm.hash_length()),
       failed: false,
@@ -387,13 +392,17 @@ impl<'a> RetirementJournalReferenceModelV1<'a> {
     if self.segment_count == 0 {
       return Err(RetirementJournalModelErrorV1::Empty);
     }
+    let database_id = self.database_id.ok_or(RetirementJournalModelErrorV1::SegmentShape)?;
     Ok(RetirementJournalModelSummaryV1 {
+      database_id,
       segment_count: self.segment_count,
       record_count: self.record_count,
       first_replacement_sequence: self.first_replacement_sequence,
       last_replacement_sequence: self.last_replacement_sequence,
       last_segment_ordinal: self.last_segment_ordinal,
+      last_segment_generation: self.last_segment_generation,
       last_segment_hash: self.last_segment_hash,
+      last_old_incarnation: self.previous_old_incarnation,
     })
   }
 
@@ -470,6 +479,7 @@ impl<'a> RetirementJournalReferenceModelV1<'a> {
     self.segment_count = self.segment_count.checked_add(1).ok_or(RetirementJournalModelErrorV1::ArithmeticOverflow)?;
     self.record_count = next_record_count;
     self.last_segment_ordinal = segment.segment_ordinal;
+    self.last_segment_generation = segment.generation;
     self.last_segment_hash.clear();
     self.last_segment_hash.extend_from_slice(&segment.key);
     Ok(())
@@ -1946,15 +1956,7 @@ fn compare_physical_bytes(algorithm: HashAlgorithm, left: &[u8], right: &[u8]) -
 }
 
 fn compare_physical(left: &PhysicalIncarnationV1<'_>, right: &PhysicalIncarnationV1<'_>) -> Ordering {
-  left
-    .logical_key
-    .cmp(right.logical_key)
-    .then_with(|| left.integrity_or_legacy_digest.cmp(right.integrity_or_legacy_digest))
-    .then_with(|| left.wal_offset.cmp(&right.wal_offset))
-    .then_with(|| left.write_sequence.cmp(&right.write_sequence))
-    .then_with(|| left.entity_length.cmp(&right.entity_length))
-    .then_with(|| left.entry_type.cmp(&right.entry_type))
-    .then_with(|| left.entity_version.cmp(&right.entity_version))
+  compare_physical_incarnations_v1(left, right)
 }
 
 fn compare_fences(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, left: &[u8], right: &[u8]) -> FormatResult<()> {
