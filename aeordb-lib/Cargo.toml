@@ -694,6 +694,10 @@ name = "v4_root_migration_spec"
 path = "spec/engine/v4_root_migration_spec.rs"
 
 [[test]]
+name = "v4_lifecycle_reader_spec"
+path = "spec/engine/v4_lifecycle_reader_spec.rs"
+
+[[test]]
 name = "v4_first_authority_spec"
 path = "spec/engine/v4_first_authority_spec.rs"
 

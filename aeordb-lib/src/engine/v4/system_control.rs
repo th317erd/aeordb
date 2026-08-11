@@ -189,6 +189,39 @@ pub struct SystemControlSelectionV1<'a> {
   pub redundancy_degraded: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskPinStateV1 {
+  Active,
+  Releasing,
+  Released,
+}
+
+impl TaskPinStateV1 {
+  fn from_u16(value: u16) -> FormatResult<Self> {
+    match value {
+      1 => Ok(Self::Active),
+      2 => Ok(Self::Releasing),
+      3 => Ok(Self::Released),
+      _ => Err(kind_error("task_pin_kind", "task pin state is outside the frozen enum")),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskPinV1 {
+  pub control_sequence: u64,
+  pub database_id: [u8; 16],
+  pub task_id: [u8; 16],
+  pub task_kind: u16,
+  pub state: TaskPinStateV1,
+  pub created_at_ms: i64,
+  pub renewed_at_ms: i64,
+  pub expires_at_ms: Option<i64>,
+  pub fencing_token: u64,
+  pub root_hashes: Vec<Vec<u8>>,
+  pub artifact_hashes: Vec<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurabilityLatchBodyV1 {
   pub database_id: [u8; 16],
@@ -343,6 +376,36 @@ pub fn decode_system_control(bytes: &[u8], algorithm: HashAlgorithm) -> FormatRe
     return Err(identity_error("system_control_immutable_sequence", "immutable controls require sequence one"));
   }
   Ok(SystemControlV1 { kind, sequence, database_id: &body[..16], identity, body })
+}
+
+pub fn decode_task_pin_v1(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<TaskPinV1> {
+  let control = decode_system_control(bytes, algorithm)?;
+  if control.kind != SystemControlKindV1::TaskPin {
+    return Err(kind_error("task_pin_control_kind", "control is not a TaskPin"));
+  }
+  let body = control.body;
+  let hash_width = algorithm.hash_length();
+  let root_count = usize::try_from(u32_at(body, 68)?).map_err(|_| overflow_error("task pin root count"))?;
+  let artifact_count = usize::try_from(u32_at(body, 72)?).map_err(|_| overflow_error("task pin artifact count"))?;
+  let roots_end = checked_add(76, checked_mul(root_count, hash_width, "task pin root hashes")?, "task pin roots")?;
+  let artifacts_end = checked_add(roots_end, checked_mul(artifact_count, hash_width, "task pin artifact hashes")?, "task pin artifacts")?;
+  debug_assert_eq!(artifacts_end, body.len(), "decode_system_control already validated task-pin closure");
+  let root_hashes = body[76..roots_end].chunks_exact(hash_width).map(<[u8]>::to_vec).collect();
+  let artifact_hashes = body[roots_end..artifacts_end].chunks_exact(hash_width).map(<[u8]>::to_vec).collect();
+  let expires_at_ms = i64_at(body, 52)?;
+  Ok(TaskPinV1 {
+    control_sequence: control.sequence,
+    database_id: body[..16].try_into().expect("validated task-pin database ID width"),
+    task_id: body[16..32].try_into().expect("validated task-pin task ID width"),
+    task_kind: u16_at(body, 32)?,
+    state: TaskPinStateV1::from_u16(u16_at(body, 34)?)?,
+    created_at_ms: i64_at(body, 36)?,
+    renewed_at_ms: i64_at(body, 44)?,
+    expires_at_ms: (expires_at_ms != 0).then_some(expires_at_ms),
+    fencing_token: u64_at(body, 60)?,
+    root_hashes,
+    artifact_hashes,
+  })
 }
 
 pub fn decode_durability_latch_body(body: &[u8], algorithm: HashAlgorithm) -> FormatResult<DurabilityLatchBodyV1> {

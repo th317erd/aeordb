@@ -4,6 +4,7 @@ use super::gc::{
   GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_artifact_envelope, decode_physical_incarnation, immutable_gc_artifact_key, u16_at,
   u32_at, u64_at,
 };
+use super::contract_generated::root_retirement_reason_v1;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use crate::engine::HashAlgorithm;
 
@@ -105,6 +106,37 @@ pub enum GcStateArtifactV1<'a> {
   RootRetirementCommit { mark_generation: u64, key: Vec<u8> },
   RootObjectReclaimProof { incarnation_count: u64, receipt_count: u64, key: Vec<u8> },
   RetirementJournal { record_count: u32, key: Vec<u8> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootCandidateRecordV1<'a> {
+  pub namespace_root_hash: &'a [u8],
+  pub reason: u16,
+  pub pending_since_ms: i64,
+  pub first_unreachable_generation: u64,
+  pub last_confirmed_unreachable_generation: u64,
+  pub grace_at_pending_ms: u64,
+  pub authority_root_set_digest: &'a [u8],
+  pub admission_commit_payload_hash: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootExpiryStateV1 {
+  LogicallyRetired,
+  PhysicallyReclaimed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootExpiryRecordV1<'a> {
+  pub namespace_root_hash: &'a [u8],
+  pub retired_at_ms: i64,
+  pub last_pending_since_ms: i64,
+  pub final_mark_generation: u64,
+  pub reason: u16,
+  pub state: RootExpiryStateV1,
+  pub retirement_commit_hash: &'a [u8],
+  pub root_object_reclaim_proof_hash: Option<&'a [u8]>,
+  pub evidence_expires_at_ms: Option<i64>,
 }
 
 impl GcStateArtifactV1<'_> {
@@ -782,56 +814,99 @@ fn validate_candidate_row(algorithm: HashAlgorithm, row: &[u8], clear: bool) -> 
 }
 
 fn validate_root_expiry_row(algorithm: HashAlgorithm, row: &[u8]) -> FormatResult<()> {
-  let h = algorithm.hash_length();
-  if row.len() != 40 + 3 * h {
+  decode_root_expiry_record_v1(row, algorithm).map(|_| ())
+}
+
+pub fn decode_root_expiry_record_v1(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<RootExpiryRecordV1<'_>> {
+  let hash_width = algorithm.hash_length();
+  if row.len() != 40 + 3 * hash_width {
     return Err(trailing_error("root_expiry_row", "root-expiry row has wrong fixed length"));
   }
-  if row[h + 28..h + 32].iter().any(|byte| *byte != 0) {
+  if row[hash_width + 28..hash_width + 32].iter().any(|byte| *byte != 0) {
     return Err(reserved_error("root_expiry_row", "root-expiry row reserve must be zero"));
   }
-  let pending = i64_at(row, h)?;
-  let observed = i64_at(row, h + 8)?;
-  let state = row[h + 26];
-  let proof = &row[h + 32 + h..h + 32 + 2 * h];
-  let expires = i64_at(row, h + 32 + 2 * h)?;
-  if all_zero(&row[..h])
-    || pending <= 0
-    || observed <= 0
-    || observed > pending
-    || u64_at(row, h + 16)? == 0
-    || u16_at(row, h + 24)? == 0
+  let retired_at_ms = i64_at(row, hash_width)?;
+  let last_pending_since_ms = i64_at(row, hash_width + 8)?;
+  let final_mark_generation = u64_at(row, hash_width + 16)?;
+  let reason = u16_at(row, hash_width + 24)?;
+  let state = row[hash_width + 26];
+  let root_object_reclaim_proof = &row[hash_width + 32 + hash_width..hash_width + 32 + 2 * hash_width];
+  let evidence_expires_at_ms = i64_at(row, hash_width + 32 + 2 * hash_width)?;
+  if all_zero(&row[..hash_width])
+    || retired_at_ms <= 0
+    || last_pending_since_ms <= 0
+    || last_pending_since_ms > retired_at_ms
+    || final_mark_generation == 0
     || !matches!(state, 1 | 2)
-    || all_zero(&row[h + 32..h + 32 + h])
+    || all_zero(&row[hash_width + 32..hash_width + 32 + hash_width])
   {
     return Err(identity_error("root_expiry_row", "root-expiry identity/times/state are invalid"));
   }
-  match state {
-    1 if row[h + 27] == 0 && all_zero(proof) && expires == 0 => Ok(()),
-    2 if row[h + 27] == 1 && !all_zero(proof) && expires >= pending => Ok(()),
-    _ => Err(closure_error("root_expiry_row_state", "root-expiry pending/reclaimed evidence is inconsistent")),
+  if !matches!(reason, root_retirement_reason_v1::ORDINARY_GC_UNREACHABLE | root_retirement_reason_v1::EXPLICIT_OPERATOR_RETIREMENT) {
+    return Err(kind_error("root_expiry_reason", "root-expiry reason is outside RootRetirementReasonV1"));
   }
+  let (state, root_object_reclaim_proof_hash, evidence_expires_at_ms) = match state {
+    1 if row[hash_width + 27] == 0 && all_zero(root_object_reclaim_proof) && evidence_expires_at_ms == 0 => {
+      (RootExpiryStateV1::LogicallyRetired, None, None)
+    }
+    2 if row[hash_width + 27] == 1 && !all_zero(root_object_reclaim_proof) && evidence_expires_at_ms >= retired_at_ms => {
+      (RootExpiryStateV1::PhysicallyReclaimed, Some(root_object_reclaim_proof), Some(evidence_expires_at_ms))
+    }
+    _ => return Err(closure_error("root_expiry_row_state", "root-expiry pending/reclaimed evidence is inconsistent")),
+  };
+  Ok(RootExpiryRecordV1 {
+    namespace_root_hash: &row[..hash_width],
+    retired_at_ms,
+    last_pending_since_ms,
+    final_mark_generation,
+    reason,
+    state,
+    retirement_commit_hash: &row[hash_width + 32..hash_width + 32 + hash_width],
+    root_object_reclaim_proof_hash,
+    evidence_expires_at_ms,
+  })
 }
 
 fn validate_root_candidate_row(algorithm: HashAlgorithm, row: &[u8]) -> FormatResult<()> {
-  let h = algorithm.hash_length();
-  if row.len() != 36 + 3 * h {
+  decode_root_candidate_record_v1(row, algorithm).map(|_| ())
+}
+
+pub fn decode_root_candidate_record_v1(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<RootCandidateRecordV1<'_>> {
+  let hash_width = algorithm.hash_length();
+  if row.len() != 36 + 3 * hash_width {
     return Err(trailing_error("root_candidate_row", "root-candidate row has wrong fixed length"));
   }
-  if row[h + 1] != 0 {
+  if row[hash_width + 1] != 0 {
     return Err(reserved_error("root_candidate_row", "root-candidate reserve must be zero"));
   }
-  if all_zero(&row[..h])
-    || row[h] != 1
-    || u16_at(row, h + 2)? == 0
-    || i64_at(row, h + 4)? <= 0
-    || u64_at(row, h + 12)? == 0
-    || u64_at(row, h + 20)? < u64_at(row, h + 12)?
-    || all_zero(&row[h + 36..h + 36 + h])
-    || all_zero(&row[h + 36 + h..])
+  let reason = u16_at(row, hash_width + 2)?;
+  let pending_since_ms = i64_at(row, hash_width + 4)?;
+  let first_unreachable_generation = u64_at(row, hash_width + 12)?;
+  let last_confirmed_unreachable_generation = u64_at(row, hash_width + 20)?;
+  let grace_at_pending_ms = u64_at(row, hash_width + 28)?;
+  if all_zero(&row[..hash_width])
+    || row[hash_width] != 1
+    || pending_since_ms <= 0
+    || first_unreachable_generation == 0
+    || last_confirmed_unreachable_generation < first_unreachable_generation
+    || all_zero(&row[hash_width + 36..hash_width + 36 + hash_width])
+    || all_zero(&row[hash_width + 36 + hash_width..])
   {
     return Err(identity_error("root_candidate_row", "root-candidate state/identity/evidence is invalid"));
   }
-  Ok(())
+  if !matches!(reason, root_retirement_reason_v1::ORDINARY_GC_UNREACHABLE | root_retirement_reason_v1::EXPLICIT_OPERATOR_RETIREMENT) {
+    return Err(kind_error("root_candidate_reason", "root-candidate reason is outside RootRetirementReasonV1"));
+  }
+  Ok(RootCandidateRecordV1 {
+    namespace_root_hash: &row[..hash_width],
+    reason,
+    pending_since_ms,
+    first_unreachable_generation,
+    last_confirmed_unreachable_generation,
+    grace_at_pending_ms,
+    authority_root_set_digest: &row[hash_width + 36..hash_width + 36 + hash_width],
+    admission_commit_payload_hash: &row[hash_width + 36 + hash_width..],
+  })
 }
 
 fn validate_inventory_row(algorithm: HashAlgorithm, row: &[u8]) -> FormatResult<()> {
