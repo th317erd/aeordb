@@ -5,7 +5,8 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::gc_mark::{
   GcMarkArtifactV1, MarkMutationJournalSegmentWriteV1, MarkMutationOperationV1, MarkMutationRecordWriteV1, decode_gc_mark_artifact,
-  encode_mark_mutation_journal_segment, mark_mutation_journal_records_v1, validate_mark_mutation_journal_chain,
+  encode_mark_mutation_journal_segment, mark_mutation_journal_records_v1, mark_workspace_mutation_records_v1,
+  validate_mark_mutation_journal_chain,
 };
 use aeordb::engine::v4::gc_mark_convergence::{
   MarkMutationJournalBufferOptionsV1, MarkMutationJournalChainStartV1, MarkMutationJournalDurabilityReceiptV1,
@@ -16,6 +17,10 @@ use tokio_util::sync::CancellationToken;
 
 fn fixture_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1")
+}
+
+fn workspace_fixture_root() -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-mark-workspace-object-v1")
 }
 
 fn fixture_label(algorithm: HashAlgorithm) -> &'static str {
@@ -198,6 +203,26 @@ fn mutation_writer_matches_independent_both_width_fixtures_and_iterator_fields()
 }
 
 #[test]
+fn workspace_mutation_iterator_exposes_the_independent_both_width_records_without_copying() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let name = match algorithm {
+      HashAlgorithm::Blake3_256 => "agwo-blake3-256-mutation-valid.bin",
+      HashAlgorithm::Sha512 => "agwo-sha512-mutation-valid.bin",
+      _ => unreachable!(),
+    };
+    let bytes = fs::read(workspace_fixture_root().join(name)).unwrap();
+    let mut records = mark_workspace_mutation_records_v1(&bytes, algorithm).unwrap();
+    assert_eq!(records.len(), 1);
+    let record = records.next().unwrap().unwrap();
+    assert_eq!(record.publication_sequence, 802);
+    assert_eq!(record.mutation_id.len(), algorithm.hash_length());
+    assert_eq!(record.mutation_id[0], 0x14);
+    assert_eq!(record.operation, MarkMutationOperationV1::Replace);
+    assert!(records.next().is_none());
+  }
+}
+
+#[test]
 fn segment_chain_allows_a_publication_to_span_bounded_segments_but_not_regress() {
   let algorithm = HashAlgorithm::Blake3_256;
   let database_id = sequence(0x31);
@@ -332,6 +357,30 @@ fn acknowledged_mutations_only_buffer_and_background_flush_publishes_exact_segme
     assert_eq!(segment.first_sequence, 11);
     assert_eq!(segment.last_sequence, 12);
   }
+}
+
+#[test]
+fn a_known_journal_publication_does_not_manufacture_a_mutation_gap() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(1, 1024, 4096, 30_000).unwrap();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let first = mutation_values(algorithm, 0x11, 11);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(11, &first, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::Buffered { flush_due: true }
+  ));
+
+  let mut sink = RecordingSink { next_publication_sequence: 11, ..RecordingSink::default() };
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(owner.status().last_hard_publication_sequence, 12);
+
+  let next_namespace_mutation = mutation_values(algorithm, 0x21, 13);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(13, &next_namespace_mutation, MarkMutationOperationV1::Replace), 2),
+    MarkMutationObservationV1::Buffered { flush_due: true }
+  ));
 }
 
 #[test]

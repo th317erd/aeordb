@@ -9206,7 +9206,7 @@
     {
       "id": "esq-v1-b59e5f6ba768e6cc8b3d-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 540,
+      "line": 591,
       "column": 21,
       "enclosing_item": "decode_gc_mark_artifact",
       "kind": "result_to_option",
@@ -9216,7 +9216,7 @@
     {
       "id": "esq-v1-3117313dfed8cc45ba06-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 621,
+      "line": 672,
       "column": 21,
       "enclosing_item": "decode_mark_checkpoint",
       "kind": "error_conversion",
@@ -9226,7 +9226,7 @@
     {
       "id": "esq-v1-9689b42dab85a0b5cc13-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 649,
+      "line": 700,
       "column": 24,
       "enclosing_item": "decode_mark_checkpoint",
       "kind": "error_conversion",
@@ -9236,7 +9236,7 @@
     {
       "id": "esq-v1-a453c09cf4db8ef45f00-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 715,
+      "line": 766,
       "column": 24,
       "enclosing_item": "decode_mark_mutation_journal",
       "kind": "error_conversion",
@@ -9246,7 +9246,7 @@
     {
       "id": "esq-v1-0be1ef2c7a9ff86ca673-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 862,
+      "line": 913,
       "column": 6,
       "enclosing_item": "decode_mark_workspace_manifest",
       "kind": "error_conversion",
@@ -9256,7 +9256,7 @@
     {
       "id": "esq-v1-341cededf93cee6de2fd-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 919,
+      "line": 970,
       "column": 28,
       "enclosing_item": "decode_mark_workspace_manifest",
       "kind": "error_conversion",
@@ -9266,7 +9266,7 @@
     {
       "id": "esq-v1-335a8b000c23de9fc847-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 922,
+      "line": 973,
       "column": 23,
       "enclosing_item": "decode_mark_workspace_manifest",
       "kind": "error_conversion",
@@ -9276,7 +9276,7 @@
     {
       "id": "esq-v1-feed638e54f43084eef0-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 938,
+      "line": 989,
       "column": 16,
       "enclosing_item": "decode_mark_workspace_manifest",
       "kind": "error_conversion",
@@ -9286,7 +9286,7 @@
     {
       "id": "esq-v1-aa0342dad0bd2d32d999-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 986,
+      "line": 1037,
       "column": 6,
       "enclosing_item": "decode_mark_workspace_object",
       "kind": "error_conversion",
@@ -9296,7 +9296,7 @@
     {
       "id": "esq-v1-037f4dd98d8125bbc16f-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 997,
+      "line": 1048,
       "column": 21,
       "enclosing_item": "decode_mark_workspace_object",
       "kind": "error_conversion",
@@ -9306,7 +9306,7 @@
     {
       "id": "esq-v1-2d64f4c6c6c08c1ec58b-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1012,
+      "line": 1063,
       "column": 23,
       "enclosing_item": "validate_mark_workspace_object",
       "kind": "error_conversion",
@@ -9316,7 +9316,7 @@
     {
       "id": "esq-v1-e147cccbfd9e19195610-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1121,
+      "line": 1172,
       "column": 22,
       "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
@@ -9326,7 +9326,7 @@
     {
       "id": "esq-v1-69bcbb18ad2fc437c9d3-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1146,
+      "line": 1197,
       "column": 24,
       "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
@@ -9336,7 +9336,7 @@
     {
       "id": "esq-v1-92a2818b3f47bdc616e3-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1154,
+      "line": 1205,
       "column": 6,
       "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
@@ -9346,7 +9346,7 @@
     {
       "id": "esq-v1-b4f19423b2660f1f3478-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1160,
+      "line": 1211,
       "column": 25,
       "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
@@ -9356,7 +9356,7 @@
     {
       "id": "esq-v1-eb5102060c4279ceaa4f-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1222,
+      "line": 1273,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9366,7 +9366,7 @@
     {
       "id": "esq-v1-1f78f70c3414d09cda1c-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1252,
+      "line": 1303,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9376,7 +9376,7 @@
     {
       "id": "esq-v1-80e805e6ba27ddfd6f21-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1264,
+      "line": 1315,
       "column": 28,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9386,7 +9386,7 @@
     {
       "id": "esq-v1-5b379ba1d70e96efb50e-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1274,
+      "line": 1325,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9396,7 +9396,7 @@
     {
       "id": "esq-v1-8f98f9bddae2cc901a14-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1289,
+      "line": 1340,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9406,7 +9406,7 @@
     {
       "id": "esq-v1-57db0e0ad10d7ba56a7a-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1303,
+      "line": 1354,
       "column": 28,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9416,7 +9416,7 @@
     {
       "id": "esq-v1-54579fd5c71ee197f885-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1312,
+      "line": 1363,
       "column": 9,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9426,7 +9426,7 @@
     {
       "id": "esq-v1-bc578c6aed0f01d7706b-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 1389,
+      "line": 1440,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",

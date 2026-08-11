@@ -528,12 +528,63 @@ pub struct MarkWorkspaceObjectV1<'a> {
   pub checkpoint_sequence: u64,
   pub ordinal: u64,
   pub logical_record_count: u64,
+  body: &'a [u8],
 }
 
 impl MarkWorkspaceObjectV1<'_> {
   pub fn summary(&self) -> String {
     format!("gc:workspace-object:{}:ordinal={}:records={}", self.kind.name(), self.ordinal, self.logical_record_count)
   }
+}
+
+#[derive(Debug)]
+pub struct MarkWorkspaceMutationRecordsV1<'a> {
+  records: std::slice::ChunksExact<'a, u8>,
+  algorithm: HashAlgorithm,
+}
+
+impl<'a> Iterator for MarkWorkspaceMutationRecordsV1<'a> {
+  type Item = FormatResult<MarkMutationRecordV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.records.next().map(|record| decode_mark_mutation_record(record, self.algorithm))
+  }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    self.records.size_hint()
+  }
+}
+
+impl ExactSizeIterator for MarkWorkspaceMutationRecordsV1<'_> {}
+
+pub fn mark_workspace_mutation_records_v1(
+  complete_object: &[u8],
+  algorithm: HashAlgorithm,
+) -> FormatResult<MarkWorkspaceMutationRecordsV1<'_>> {
+  let object = decode_mark_workspace_object(complete_object, algorithm)?;
+  if object.kind != MarkWorkspaceObjectKindV1::Mutation {
+    return Err(kind_error("mark_workspace_mutation_kind", "workspace object does not contain mutation records"));
+  }
+  let records = &object.body[24..];
+  let record_length =
+    checked_add(40, checked_mul(6, algorithm.hash_length(), "workspace mutation record width")?, "workspace mutation record")?;
+  let chunks = records.chunks_exact(record_length);
+  let expected_record_count = match usize::try_from(object.logical_record_count) {
+    Ok(expected_record_count) => expected_record_count,
+    Err(error) => {
+      return Err(closure_error(
+        "mark_workspace_mutation_records",
+        format!("workspace mutation record count does not fit this platform: {error}"),
+      ));
+    }
+  };
+  if !chunks.remainder().is_empty() || chunks.len() != expected_record_count {
+    return Err(closure_error(
+      "mark_workspace_mutation_records",
+      "workspace mutation records do not close against the validated object count",
+    ));
+  }
+  Ok(MarkWorkspaceMutationRecordsV1 { records: chunks, algorithm })
 }
 
 pub fn decode_gc_mark_artifact(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<GcMarkArtifactV1<'_>> {
@@ -1000,7 +1051,7 @@ pub fn decode_mark_workspace_object(bytes: &[u8], algorithm: HashAlgorithm) -> F
   }
   let body = &bytes[WORKSPACE_OBJECT_HEADER..WORKSPACE_OBJECT_HEADER + body_length];
   let logical_record_count = validate_mark_workspace_body(body, kind, generation, algorithm)?;
-  Ok(MarkWorkspaceObjectV1 { kind, database_id, run_id, generation, checkpoint_sequence, ordinal, logical_record_count })
+  Ok(MarkWorkspaceObjectV1 { kind, database_id, run_id, generation, checkpoint_sequence, ordinal, logical_record_count, body })
 }
 
 pub fn validate_mark_workspace_object(
