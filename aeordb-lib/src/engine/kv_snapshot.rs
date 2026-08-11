@@ -2,15 +2,31 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::engine::errors::EngineResult;
+use tokio_util::sync::CancellationToken;
+
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::kv_page_provider::KvPageSnapshot;
-use crate::engine::kv_pages::{deserialize_page, find_entry_in_page_data, live_type_counts_in_page};
+use crate::engine::kv_pages::{MAX_ENTRIES_PER_PAGE, deserialize_page, find_entry_in_page_data, live_type_counts_in_page};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::nvt::NormalizedVectorTable;
 
 pub type KvPageSet = Arc<Vec<Arc<[u8]>>>;
 pub type KvTypeCounts = [usize; 16];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturedKvSlotPositionV1 {
+  pub bucket_index: u64,
+  pub slot_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturedKvSlotVisitSummaryV1 {
+  pub bucket_count: u64,
+  pub slots_per_bucket: u32,
+  pub visited_slots: u64,
+  pub complete: bool,
+}
 
 #[derive(Clone)]
 enum SnapshotPages {
@@ -381,6 +397,129 @@ impl ReadSnapshot {
     F: FnMut(&KVEntry) -> EngineResult<bool>,
   {
     self.visit(None, visitor)
+  }
+
+  /// Visit the immutable flushed KV layout with exact bucket/slot identity.
+  ///
+  /// Physical mark runs must flush before capture. Buffered overrides have no
+  /// stable slot and are therefore rejected rather than assigned fabricated
+  /// positions. Each page entry is also checked against the captured NVT.
+  pub fn visit_captured_slots<F>(&self, cancellation: &CancellationToken, mut visitor: F) -> EngineResult<CapturedKvSlotVisitSummaryV1>
+  where
+    F: FnMut(CapturedKvSlotPositionV1, &KVEntry) -> EngineResult<bool>,
+  {
+    self.require_flushed_captured_layout()?;
+    let bucket_count = u64::try_from(self.bucket_count)
+      .map_err(|_| EngineError::ResourceExhausted("captured KV bucket count does not fit the v4 mark contract".to_string()))?;
+    let mut visited_slots = 0u64;
+
+    for bucket_index in 0..self.bucket_count {
+      if cancellation.is_cancelled() {
+        return Err(EngineError::Cancelled("captured KV slot scan".to_string()));
+      }
+      let page_data = self.page(bucket_index)?;
+      let entries = deserialize_page(&page_data, self.hash_algo.hash_length())?;
+      self.validate_captured_page(bucket_index, &entries)?;
+      for (slot_index, entry) in entries.into_iter().enumerate() {
+        if cancellation.is_cancelled() {
+          return Err(EngineError::Cancelled("captured KV slot scan".to_string()));
+        }
+        if entry.is_deleted() {
+          continue;
+        }
+        let position = CapturedKvSlotPositionV1 {
+          bucket_index: u64::try_from(bucket_index)
+            .map_err(|_| EngineError::ResourceExhausted("captured KV bucket index does not fit the v4 mark contract".to_string()))?,
+          slot_index: u32::try_from(slot_index)
+            .map_err(|_| EngineError::ResourceExhausted("captured KV slot index does not fit the v4 mark contract".to_string()))?,
+        };
+        visited_slots = visited_slots
+          .checked_add(1)
+          .ok_or_else(|| EngineError::ResourceExhausted("captured KV visited-slot count overflow".to_string()))?;
+        if !visitor(position, &entry)? {
+          return Ok(CapturedKvSlotVisitSummaryV1 {
+            bucket_count,
+            slots_per_bucket: MAX_ENTRIES_PER_PAGE as u32,
+            visited_slots,
+            complete: false,
+          });
+        }
+      }
+    }
+    let expected_slots = u64::try_from(self.entry_count)
+      .map_err(|_| EngineError::ResourceExhausted("captured KV entry count does not fit the v4 mark contract".to_string()))?;
+    if visited_slots != expected_slots {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("captured KV live-slot count {visited_slots} disagrees with snapshot entry count {}", self.entry_count),
+      });
+    }
+    Ok(CapturedKvSlotVisitSummaryV1 { bucket_count, slots_per_bucket: MAX_ENTRIES_PER_PAGE as u32, visited_slots, complete: true })
+  }
+
+  /// Resolve one live key to its captured bucket/slot position.
+  pub fn find_captured_slot(&self, hash: &[u8]) -> EngineResult<Option<(CapturedKvSlotPositionV1, KVEntry)>> {
+    self.require_flushed_captured_layout()?;
+    if hash.len() != self.hash_algo.hash_length() {
+      return Err(EngineError::InvalidInput("captured KV lookup hash width does not match the database".to_string()));
+    }
+    let bucket_index = self.nvt.bucket_for_value(hash);
+    if bucket_index >= self.bucket_count {
+      return Ok(None);
+    }
+    let page_data = self.page(bucket_index)?;
+    let entries = deserialize_page(&page_data, self.hash_algo.hash_length())?;
+    self.validate_captured_page(bucket_index, &entries)?;
+    for (slot_index, entry) in entries.into_iter().enumerate() {
+      if entry.hash != hash {
+        continue;
+      }
+      if entry.is_deleted() {
+        return Ok(None);
+      }
+      return Ok(Some((
+        CapturedKvSlotPositionV1 {
+          bucket_index: u64::try_from(bucket_index)
+            .map_err(|_| EngineError::ResourceExhausted("captured KV bucket index does not fit the v4 mark contract".to_string()))?,
+          slot_index: u32::try_from(slot_index)
+            .map_err(|_| EngineError::ResourceExhausted("captured KV slot index does not fit the v4 mark contract".to_string()))?,
+        },
+        entry,
+      )));
+    }
+    Ok(None)
+  }
+
+  fn require_flushed_captured_layout(&self) -> EngineResult<()> {
+    if !self.buffer.is_empty() {
+      return Err(EngineError::InvalidInput("captured KV slot operations require a flushed write buffer".to_string()));
+    }
+    if self.nvt.bucket_count() != self.bucket_count {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: "captured KV NVT bucket count disagrees with snapshot layout".to_string(),
+      });
+    }
+    Ok(())
+  }
+
+  fn validate_captured_page(&self, bucket_index: usize, entries: &[KVEntry]) -> EngineResult<()> {
+    for (slot_index, entry) in entries.iter().enumerate() {
+      let expected_bucket = self.nvt.bucket_for_value(&entry.hash);
+      if expected_bucket != bucket_index {
+        return Err(EngineError::CorruptEntry {
+          offset: entry.offset,
+          reason: format!("captured KV entry is in bucket {bucket_index}, but its key maps to bucket {expected_bucket}"),
+        });
+      }
+      if entries[..slot_index].iter().any(|prior| prior.hash == entry.hash) {
+        return Err(EngineError::CorruptEntry {
+          offset: entry.offset,
+          reason: format!("captured KV bucket {bucket_index} contains a duplicate key"),
+        });
+      }
+    }
+    Ok(())
   }
 
   fn visit<F>(&self, target_type: Option<u8>, mut visitor: F) -> EngineResult<bool>

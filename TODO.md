@@ -646,6 +646,11 @@
           - [x] Hard-publish evidence before an injected journal failure, reopen with only diagnosis selected, and retry through the same real publisher.
           - [x] Re-run corrupt/missing-chain, cancellation, crash-prefix, architecture, broad regression, strict-lint-delta, and full-library gates.
       - [ ] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.
+        - [x] P4-3a: add a fully reserved dense bitmap and a cancellation-aware captured KV bucket/slot visitor with exact identity and layout checks.
+        - [ ] P4-3b: write private no-follow AGWO objects and AGCW manifests through bounded, checksummed, synced workspace files.
+        - [ ] P4-3c: hard-publish selected mark checkpoints only after workspace closure, and resume only after complete identity/generation/fingerprint validation.
+        - [ ] P4-3d: drain bounded mutation runs to an exact final publication boundary, restart on layout generation change or journal gaps, and prove retained-or-leaked failure direction.
+        - [ ] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.

@@ -20,6 +20,7 @@ pub mod gc;
 pub mod gc_audit;
 pub mod gc_lineage_recovery;
 pub mod gc_mark;
+pub mod gc_mark_runtime;
 pub mod gc_retirement;
 pub mod gc_state;
 pub mod gc_void;
