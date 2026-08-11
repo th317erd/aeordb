@@ -561,13 +561,13 @@
         - [x] Cover stale callers, concurrent publication, read-only handles, sequence/fence exhaustion, torn writes, barrier failures, and every adoption crash prefix.
         - [x] Qualify the exact implementation on Linux, macOS arm64, and Windows x86_64 MSVC; correct the native Windows positional-read cursor falsifier without adding a service caller.
       - [x] P3a-3: add v1 immutable entity/artifact envelope writers only for families whose readers and independent fixtures are already green.
-      - [ ] P3a-4: add the v4 ControlStore FileRecord writer through the shared namespace/locator and hard-durability coordinators.
+      - [x] P3a-4: add the v4 ControlStore FileRecord writer through the shared namespace/locator and hard-durability coordinators.
         - [x] Refresh ControlStore producer/consumer, protected-path, FileRecord, locator, durability, migration, and test territory.
         - [x] Add and demonstrate the failure-first v4 ControlStore writer target.
         - [x] Publish all mutable and immutable control kinds as system FileRecord v1 entries with exact MIME and payload bytes.
         - [x] Accept legacy v0 slots only as migration input and roll both A/B slots forward through normal inactive-slot publication.
         - [x] Prove validation-before-mutation, sequence serialization, idempotency, hard acknowledgement, restart, and no production caller.
-        - [ ] Run focused, adjacent, workspace, architecture, native, documentation, and real-world shadow-write gates; record and land the unit.
+        - [x] Run focused, adjacent, workspace, architecture, native, documentation, and real-world shadow-write gates; record and land the unit.
       - [ ] P3a-5: activate only the writer capabilities proven by exact readers/writers and keep namespace/index/GC/migration service activation disabled.
       - [ ] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
