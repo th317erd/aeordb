@@ -6,6 +6,13 @@ use aeordb::engine::v4::entity::{
   WHOLE_ENTITY_V1_KEY_CAP, WHOLE_ENTITY_V1_VALUE_CAP, WholeEntityWriteV1, checked_whole_entity_encoded_length, decode_whole_entity,
   encode_whole_entity,
 };
+use aeordb::engine::v4::gc::{
+  GcArtifactKindV1, ImmutableGcArtifactWriteV1, checked_immutable_gc_artifact_encoded_length, encode_immutable_gc_artifact,
+};
+use aeordb::engine::v4::index_artifact::{
+  ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1, checked_immutable_index_artifact_encoded_length,
+  encode_immutable_index_artifact,
+};
 use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::{CompressionAlgorithm, HashAlgorithm};
 
@@ -56,6 +63,217 @@ fn whole_entity_writer_matches_both_independent_hash_width_fixtures() {
     let encoded = encode_whole_entity(&request).expect("fixture-derived whole entity must encode");
     assert_eq!(encoded, expected, "fixture {name}");
   }
+}
+
+#[test]
+fn immutable_index_artifact_writer_matches_every_independent_fixture_and_key() {
+  let manifest = fixture_manifest();
+  let mut immutable_count = 0;
+  let mut mutable_pointer_count = 0;
+
+  for fixture in manifest["fixtures"].as_array().unwrap() {
+    if fixture["family"].as_str() != Some("IndexArtifactV1") {
+      continue;
+    }
+    let expected = fixture_bytes(fixture);
+    let (kind_id, generation, identity, body) = artifact_envelope_fields(&expected);
+    let Some(kind) = ImmutableIndexArtifactKindV1::from_u16(kind_id) else {
+      assert!(matches!(kind_id, 0x0001..=0x0003), "fixture {}", fixture["id"]);
+      mutable_pointer_count += 1;
+      continue;
+    };
+    let encoded = encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+      kind,
+      hash_algorithm: fixture_hash_algorithm(fixture),
+      generation,
+      identity,
+      body,
+    })
+    .unwrap();
+
+    assert_eq!(encoded.value, expected, "fixture {}", fixture["id"]);
+    assert_eq!(hex::encode(encoded.key), fixture["canonical_key"].as_str().unwrap(), "fixture {}", fixture["id"]);
+    immutable_count += 1;
+  }
+
+  assert_eq!(immutable_count, 54);
+  assert_eq!(mutable_pointer_count, 12);
+}
+
+#[test]
+fn immutable_gc_artifact_writer_matches_every_independent_fixture_and_key() {
+  let manifest = fixture_manifest();
+  let mut immutable_count = 0;
+  let mut mutable_control_count = 0;
+
+  for fixture in manifest["fixtures"].as_array().unwrap() {
+    if fixture["family"].as_str() != Some("GcArtifactV1") {
+      continue;
+    }
+    let expected = fixture_bytes(fixture);
+    let (kind_id, generation, identity, body) = artifact_envelope_fields(&expected);
+    let kind = GcArtifactKindV1::from_u16(kind_id).unwrap();
+    let request = ImmutableGcArtifactWriteV1 { kind, hash_algorithm: fixture_hash_algorithm(fixture), generation, identity, body };
+    if kind.is_control() {
+      let error = encode_immutable_gc_artifact(&request).unwrap_err();
+      assert_eq!(error.class(), MalformedInputClass::UnknownTypeKindOrEnum, "fixture {}", fixture["id"]);
+      mutable_control_count += 1;
+      continue;
+    }
+    let encoded = encode_immutable_gc_artifact(&request).unwrap();
+
+    assert_eq!(encoded.value, expected, "fixture {}", fixture["id"]);
+    assert_eq!(hex::encode(encoded.key), fixture["canonical_key"].as_str().unwrap(), "fixture {}", fixture["id"]);
+    immutable_count += 1;
+  }
+
+  assert_eq!(immutable_count, 92);
+  assert_eq!(mutable_control_count, 24);
+}
+
+#[test]
+fn immutable_artifact_writers_reject_invalid_bounds_before_allocation() {
+  for kind in ImmutableIndexArtifactKindV1::ALL {
+    let maximum_length = kind.maximum_encoded_length();
+    let body_length_at_cap = maximum_length - 32 - 1 - 4;
+    assert_eq!(checked_immutable_index_artifact_encoded_length(kind, 1, body_length_at_cap).unwrap(), maximum_length);
+    let error = checked_immutable_index_artifact_encoded_length(kind, 1, body_length_at_cap + 1).unwrap_err();
+    assert_eq!(error.class(), MalformedInputClass::AllocationAmplification, "kind {kind:?}");
+  }
+  assert_eq!(
+    checked_immutable_index_artifact_encoded_length(ImmutableIndexArtifactKindV1::FieldIndexManifest, 0, 0).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  assert_eq!(
+    checked_immutable_index_artifact_encoded_length(ImmutableIndexArtifactKindV1::FieldIndexManifest, 4_097, 0).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+  assert_eq!(
+    checked_immutable_index_artifact_encoded_length(ImmutableIndexArtifactKindV1::FieldIndexManifest, 1, usize::MAX).unwrap_err().class(),
+    MalformedInputClass::LengthCountOrArithmeticOverflow
+  );
+  assert!(ImmutableIndexArtifactKindV1::from_u16(0x0001).is_none());
+  assert!(ImmutableIndexArtifactKindV1::from_u16(u16::MAX).is_none());
+
+  for kind in GcArtifactKindV1::ALL {
+    if kind.is_control() {
+      assert!(kind.immutable_maximum_encoded_length().is_none());
+      let error = checked_immutable_gc_artifact_encoded_length(kind, 1, 0).unwrap_err();
+      assert_eq!(error.class(), MalformedInputClass::UnknownTypeKindOrEnum, "kind {kind:?}");
+      continue;
+    }
+    let maximum_length = kind.immutable_maximum_encoded_length().unwrap();
+    let body_length_at_cap = maximum_length - 32 - 1 - 4;
+    assert_eq!(checked_immutable_gc_artifact_encoded_length(kind, 1, body_length_at_cap).unwrap(), maximum_length);
+    let error = checked_immutable_gc_artifact_encoded_length(kind, 1, body_length_at_cap + 1).unwrap_err();
+    assert_eq!(error.class(), MalformedInputClass::AllocationAmplification, "kind {kind:?}");
+  }
+  assert_eq!(
+    checked_immutable_gc_artifact_encoded_length(GcArtifactKindV1::QuarantineManifest, 0, 0).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  assert_eq!(
+    checked_immutable_gc_artifact_encoded_length(GcArtifactKindV1::QuarantineManifest, usize::from(u16::MAX) + 1, 0).unwrap_err().class(),
+    MalformedInputClass::LengthCountOrArithmeticOverflow
+  );
+  assert_eq!(
+    checked_immutable_gc_artifact_encoded_length(GcArtifactKindV1::CandidateDelta, 1, usize::MAX).unwrap_err().class(),
+    MalformedInputClass::LengthCountOrArithmeticOverflow
+  );
+}
+
+#[test]
+fn immutable_artifact_kind_registries_freeze_every_ratified_encoded_cap() {
+  for kind in ImmutableIndexArtifactKindV1::ALL {
+    let expected = match kind {
+      ImmutableIndexArtifactKindV1::FieldIndexManifest
+      | ImmutableIndexArtifactKindV1::FieldNvtManifest
+      | ImmutableIndexArtifactKindV1::ScopeCatalogManifest
+      | ImmutableIndexArtifactKindV1::ValueStoreManifest => 1_024 * 1_024,
+      ImmutableIndexArtifactKindV1::ArtifactDirectoryNode
+      | ImmutableIndexArtifactKindV1::PostingPage
+      | ImmutableIndexArtifactKindV1::ValuePage
+      | ImmutableIndexArtifactKindV1::NvtTile
+      | ImmutableIndexArtifactKindV1::ScopeCatalogPage
+      | ImmutableIndexArtifactKindV1::DocumentStatePage
+      | ImmutableIndexArtifactKindV1::IndexTaskCheckpoint => 4 * 1_024 * 1_024,
+      ImmutableIndexArtifactKindV1::MutationJournalSegment => 16 * 1_024 * 1_024,
+    };
+    assert_eq!(kind.maximum_encoded_length(), expected, "kind {kind:?}");
+  }
+
+  for kind in GcArtifactKindV1::ALL {
+    let expected = match kind {
+      GcArtifactKindV1::QuarantineActiveControl
+      | GcArtifactKindV1::MarkRunActiveControl
+      | GcArtifactKindV1::PhysicalInventoryActiveControl
+      | GcArtifactKindV1::AuditCatalogActiveControl
+      | GcArtifactKindV1::VoidCatalogActiveControl
+      | GcArtifactKindV1::RootLifecycleActiveControl => None,
+      GcArtifactKindV1::QuarantineManifest
+      | GcArtifactKindV1::RootExpiryCatalogManifest
+      | GcArtifactKindV1::PhysicalInventoryManifest
+      | GcArtifactKindV1::AuditCatalogManifest
+      | GcArtifactKindV1::GcRunSummary
+      | GcArtifactKindV1::VoidCatalogManifest
+      | GcArtifactKindV1::RootLifecycleManifest
+      | GcArtifactKindV1::CorruptGcEvidence
+      | GcArtifactKindV1::AuditPin
+      | GcArtifactKindV1::RootRetirementCommit
+      | GcArtifactKindV1::VoidClaimSettlementReceipt
+      | GcArtifactKindV1::RootObjectReclaimProof => Some(1_024 * 1_024),
+      GcArtifactKindV1::MarkRunCheckpoint => Some(32 + 40 + 256 * 1_024 + 4),
+      GcArtifactKindV1::GcArtifactDirectoryNode => Some(4 * 1_024 * 1_024),
+      GcArtifactKindV1::CandidatePage
+      | GcArtifactKindV1::RootExpiryPage
+      | GcArtifactKindV1::RetirementJournalSegment
+      | GcArtifactKindV1::PhysicalInventoryPage
+      | GcArtifactKindV1::MarkMutationJournalSegment
+      | GcArtifactKindV1::VoidExtentPage
+      | GcArtifactKindV1::VoidClaim
+      | GcArtifactKindV1::RootCandidatePage
+      | GcArtifactKindV1::SweepProposal
+      | GcArtifactKindV1::SweepCommitReceipt
+      | GcArtifactKindV1::RecoveredSweepReceipt
+      | GcArtifactKindV1::AuditDetailPage
+      | GcArtifactKindV1::AuditSummaryPage => Some(16 * 1_024 * 1_024),
+      GcArtifactKindV1::CandidateDelta => Some(64 * 1_024 * 1_024),
+    };
+    assert_eq!(kind.immutable_maximum_encoded_length(), expected, "kind {kind:?}");
+  }
+}
+
+#[test]
+fn immutable_artifact_writers_reject_zero_generation() {
+  let index_error = encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+    kind: ImmutableIndexArtifactKindV1::FieldIndexManifest,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    generation: 0,
+    identity: b"identity",
+    body: b"body",
+  })
+  .unwrap_err();
+  assert_eq!(index_error.class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+
+  let gc_error = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::QuarantineManifest,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    generation: 0,
+    identity: b"identity",
+    body: b"body",
+  })
+  .unwrap_err();
+  assert_eq!(gc_error.class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+
+  let control_error = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::QuarantineActiveControl,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    generation: 0,
+    identity: b"identity",
+    body: b"body",
+  })
+  .unwrap_err();
+  assert_eq!(control_error.class(), MalformedInputClass::UnknownTypeKindOrEnum);
 }
 
 #[test]
@@ -167,12 +385,60 @@ fn production_writer_surface_remains_disconnected_from_fixture_generation_and_se
     .join("\n");
   assert!(!reference_sources.contains("encode_database_header_slot"));
   assert!(!reference_sources.contains("encode_whole_entity"));
+  assert!(!reference_sources.contains("encode_immutable_index_artifact"));
+  assert!(!reference_sources.contains("encode_immutable_gc_artifact"));
 
   let admission = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/admission.rs")).unwrap();
   assert!(admission.contains("Self::new(CapabilitySetV1(reader), CapabilitySetV1::empty())"));
   let storage_engine = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/storage_engine.rs")).unwrap();
   assert!(!storage_engine.contains("encode_database_header_slot"));
   assert!(!storage_engine.contains("encode_whole_entity"));
+  assert!(!storage_engine.contains("encode_immutable_index_artifact"));
+  assert!(!storage_engine.contains("encode_immutable_gc_artifact"));
+
+  let production_sources = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+  assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 1);
+  assert_eq!(production_sources.matches("encode_immutable_gc_artifact(").count(), 1);
+}
+
+fn rust_sources(path: PathBuf) -> String {
+  let mut source = String::new();
+  for entry in fs::read_dir(path).unwrap() {
+    let entry = entry.unwrap();
+    if entry.file_type().unwrap().is_dir() {
+      source.push_str(&rust_sources(entry.path()));
+    } else if entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs") {
+      source.push_str(&fs::read_to_string(entry.path()).unwrap());
+    }
+  }
+  source
+}
+
+fn fixture_manifest() -> serde_json::Value {
+  serde_json::from_slice(&fs::read(fixture_root().join("format-fixture-manifest.json")).unwrap()).unwrap()
+}
+
+fn fixture_bytes(fixture: &serde_json::Value) -> Vec<u8> {
+  fs::read(fixture_root().join(fixture["binary"].as_str().unwrap())).unwrap()
+}
+
+fn fixture_hash_algorithm(fixture: &serde_json::Value) -> HashAlgorithm {
+  match fixture["hash_algorithm"].as_str().unwrap() {
+    "blake3-256" => HashAlgorithm::Blake3_256,
+    "sha512" => HashAlgorithm::Sha512,
+    other => panic!("unexpected fixture hash algorithm {other}"),
+  }
+}
+
+fn artifact_envelope_fields(value: &[u8]) -> (u16, u64, &[u8], &[u8]) {
+  let kind = u16::from_le_bytes(value[6..8].try_into().unwrap());
+  let identity_length = usize::from(u16::from_le_bytes(value[16..18].try_into().unwrap()));
+  let body_length = usize::try_from(u32::from_le_bytes(value[20..24].try_into().unwrap())).unwrap();
+  let generation = u64::from_le_bytes(value[24..32].try_into().unwrap());
+  let identity_end = 32 + identity_length;
+  let body_end = identity_end + body_length;
+  assert_eq!(body_end + 4, value.len());
+  (kind, generation, &value[32..identity_end], &value[identity_end..body_end])
 }
 
 fn mutate_header(header: &DatabaseHeaderV4, mutate: impl FnOnce(&mut DatabaseHeaderV4)) -> DatabaseHeaderV4 {

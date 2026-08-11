@@ -9,6 +9,149 @@ use super::value_store::decode_value_store_definition;
 pub(crate) const INDEX_ENVELOPE_LENGTH: usize = 32;
 const MAX_IDENTITY_LENGTH: usize = 4_096;
 const MAX_MANIFEST_LENGTH: usize = 1_048_576;
+const MAX_ORDERED_ARTIFACT_LENGTH: usize = 4 * 1_024 * 1_024;
+const MAX_MUTATION_JOURNAL_LENGTH: usize = 16 * 1_024 * 1_024;
+const MAX_INDEX_TASK_CHECKPOINT_LENGTH: usize = 4 * 1_024 * 1_024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ImmutableIndexArtifactKindV1 {
+  FieldIndexManifest = 0x0010,
+  FieldNvtManifest = 0x0011,
+  ScopeCatalogManifest = 0x0012,
+  ValueStoreManifest = 0x0013,
+  ArtifactDirectoryNode = 0x0020,
+  PostingPage = 0x0030,
+  ValuePage = 0x0031,
+  NvtTile = 0x0032,
+  ScopeCatalogPage = 0x0033,
+  DocumentStatePage = 0x0034,
+  MutationJournalSegment = 0x0040,
+  IndexTaskCheckpoint = 0x0041,
+}
+
+impl ImmutableIndexArtifactKindV1 {
+  pub const ALL: [Self; 12] = [
+    Self::FieldIndexManifest,
+    Self::FieldNvtManifest,
+    Self::ScopeCatalogManifest,
+    Self::ValueStoreManifest,
+    Self::ArtifactDirectoryNode,
+    Self::PostingPage,
+    Self::ValuePage,
+    Self::NvtTile,
+    Self::ScopeCatalogPage,
+    Self::DocumentStatePage,
+    Self::MutationJournalSegment,
+    Self::IndexTaskCheckpoint,
+  ];
+
+  pub fn from_u16(value: u16) -> Option<Self> {
+    Self::ALL.into_iter().find(|kind| *kind as u16 == value)
+  }
+
+  pub fn id(self) -> u16 {
+    self as u16
+  }
+
+  pub fn maximum_encoded_length(self) -> usize {
+    match self {
+      Self::FieldIndexManifest | Self::FieldNvtManifest | Self::ScopeCatalogManifest | Self::ValueStoreManifest => MAX_MANIFEST_LENGTH,
+      Self::ArtifactDirectoryNode
+      | Self::PostingPage
+      | Self::ValuePage
+      | Self::NvtTile
+      | Self::ScopeCatalogPage
+      | Self::DocumentStatePage => MAX_ORDERED_ARTIFACT_LENGTH,
+      Self::MutationJournalSegment => MAX_MUTATION_JOURNAL_LENGTH,
+      Self::IndexTaskCheckpoint => MAX_INDEX_TASK_CHECKPOINT_LENGTH,
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImmutableIndexArtifactWriteV1<'a> {
+  pub kind: ImmutableIndexArtifactKindV1,
+  pub hash_algorithm: HashAlgorithm,
+  pub generation: u64,
+  pub identity: &'a [u8],
+  pub body: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedImmutableIndexArtifactV1 {
+  pub key: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
+/// Return the exact immutable AIDX envelope length after validating every
+/// representational and per-kind bound, without allocating the artifact.
+pub fn checked_immutable_index_artifact_encoded_length(
+  kind: ImmutableIndexArtifactKindV1,
+  identity_length: usize,
+  body_length: usize,
+) -> FormatResult<usize> {
+  if identity_length == 0 {
+    return Err(identity_error("immutable artifact identity is empty"));
+  }
+  if identity_length > MAX_IDENTITY_LENGTH {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "index_artifact_identity_exceeds_cap",
+      format!("identity length {identity_length} exceeds {MAX_IDENTITY_LENGTH}"),
+    ));
+  }
+  let _identity_length = checked_index_u16(identity_length, "artifact identity length exceeds u16")?;
+  let _body_length = checked_index_u32(body_length, "artifact body length exceeds u32")?;
+  let total_length = INDEX_ENVELOPE_LENGTH
+    .checked_add(identity_length)
+    .and_then(|length| length.checked_add(body_length))
+    .and_then(|length| length.checked_add(4))
+    .ok_or_else(|| length_error("artifact length formula overflow"))?;
+  let _total_length = checked_index_u32(total_length, "artifact total length exceeds u32")?;
+  let maximum_length = kind.maximum_encoded_length();
+  if total_length > maximum_length {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "index_artifact_exceeds_cap",
+      format!("{total_length} bytes exceeds {maximum_length}"),
+    ));
+  }
+  Ok(total_length)
+}
+
+/// Encode one complete immutable AIDX envelope without publishing it.
+pub fn encode_immutable_index_artifact(request: &ImmutableIndexArtifactWriteV1<'_>) -> FormatResult<EncodedImmutableIndexArtifactV1> {
+  if request.generation == 0 {
+    return Err(identity_error("immutable artifact generation is zero"));
+  }
+  let total_length = checked_immutable_index_artifact_encoded_length(request.kind, request.identity.len(), request.body.len())?;
+  let identity_length = checked_index_u16(request.identity.len(), "artifact identity length exceeds u16")?;
+  let body_length = checked_index_u32(request.body.len(), "artifact body length exceeds u32")?;
+  let total_length_u32 = checked_index_u32(total_length, "artifact total length exceeds u32")?;
+
+  let mut value = vec![0u8; total_length];
+  value[..4].copy_from_slice(b"AIDX");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&request.kind.id().to_le_bytes());
+  value[8..10].copy_from_slice(&(INDEX_ENVELOPE_LENGTH as u16).to_le_bytes());
+  value[12..16].copy_from_slice(&total_length_u32.to_le_bytes());
+  value[16..18].copy_from_slice(&identity_length.to_le_bytes());
+  value[20..24].copy_from_slice(&body_length.to_le_bytes());
+  value[24..32].copy_from_slice(&request.generation.to_le_bytes());
+  let identity_end = INDEX_ENVELOPE_LENGTH + request.identity.len();
+  let body_end = identity_end + request.body.len();
+  value[INDEX_ENVELOPE_LENGTH..identity_end].copy_from_slice(request.identity);
+  value[identity_end..body_end].copy_from_slice(request.body);
+  let checksum = crc32fast::hash(&value[..body_end]);
+  value[body_end..].copy_from_slice(&checksum.to_le_bytes());
+
+  let decoded = decode_immutable_index_artifact(&value, request.hash_algorithm, request.kind.maximum_encoded_length())?;
+  if decoded.kind != request.kind.id() {
+    return Err(closure_error("encoded immutable artifact kind disagrees with its request"));
+  }
+  Ok(EncodedImmutableIndexArtifactV1 { key: decoded.key, value })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePointerKindV1 {
@@ -619,6 +762,20 @@ pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> FormatResult<u64> {
 
 fn truncated_error(offset: usize, width: usize) -> FormatError {
   error(MalformedInputClass::TruncationOrTrailingBytes, "index_artifact_truncated", format!("need {width} bytes at offset {offset}"))
+}
+
+fn checked_index_u16(value: usize, context: &'static str) -> FormatResult<u16> {
+  if value > usize::from(u16::MAX) {
+    return Err(length_error(context));
+  }
+  Ok(value as u16)
+}
+
+fn checked_index_u32(value: usize, context: &'static str) -> FormatResult<u32> {
+  if value > u32::MAX as usize {
+    return Err(length_error(context));
+  }
+  Ok(value as u32)
 }
 
 fn length_error(context: impl Into<String>) -> FormatError {

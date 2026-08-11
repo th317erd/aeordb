@@ -560,7 +560,7 @@
         - [x] Prove same-identity startup fencing and new-identity clone adoption hard-publish both slots before writable admission.
         - [x] Cover stale callers, concurrent publication, read-only handles, sequence/fence exhaustion, torn writes, barrier failures, and every adoption crash prefix.
         - [x] Qualify the exact implementation on Linux, macOS arm64, and Windows x86_64 MSVC; correct the native Windows positional-read cursor falsifier without adding a service caller.
-      - [ ] P3a-3: add v1 immutable entity/artifact envelope writers only for families whose readers and independent fixtures are already green.
+      - [x] P3a-3: add v1 immutable entity/artifact envelope writers only for families whose readers and independent fixtures are already green.
       - [ ] P3a-4: add the v4 ControlStore FileRecord writer through the shared namespace/locator and hard-durability coordinators.
       - [ ] P3a-5: activate only the writer capabilities proven by exact readers/writers and keep namespace/index/GC/migration service activation disabled.
       - [ ] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.

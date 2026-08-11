@@ -3,9 +3,9 @@
 ## Landing State
 
 - **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** P3a-2 native header-publication closure is green; P3a-3 immutable artifact writers are next.
+- **Current landing unit:** P3a-3 immutable artifact writers are green; P3a-4 ControlStore FileRecord publication is next.
 - **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P3a-2 native cursor correction and exact qualification commit `e41e45d` on `development` and `origin/development`.
+- **Last pushed green commit:** P3a-2 closure commit `3bfd659` on `development` and `origin/development`; P3a-3 is locally green and awaiting its coherent landing commit.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -64,8 +64,9 @@ Optional cleanup and telemetry failures retain the acknowledged primary result o
 - P3a-2's serialized header publisher uses the shared durability coordinator, exact inactive-slot publication, full barriers/read-back, and fail-closed two-slot fencing/adoption. Its fault suite covers roughly 6,150 crash/failure prefixes.
 - Native qualification found and corrected a Windows shared-cursor regression in positional reads. Exact commit `e41e45d` passes four internal fault tests and the 216-test adjacent matrix on Linux, macOS arm64, and Windows x86_64 MSVC. Both native hosts pass the 436-fixture, 95-route, and 38-document contract gate.
 - The corrected Linux workspace/all-target closure passes 5,463 tests across 207 result groups with zero failures and seven intentionally ignored stress cases. Its log SHA-256 is `417c3bfe37314d69f7a51e975373f12e733c9fee75281eca4d1dd4433deaec88`; the suppression inventory remains exactly 1,420 reviewed occurrences after refreshing four line-only metadata entries.
+- P3a-3 adds disconnected immutable AIDX/AGCA envelope writers only. All 54 immutable index and 92 immutable GC fixtures byte- and key-match the independent oracle; every mutable pointer/control fixture is excluded or rejected; every kind cap and allocation boundary is frozen independently. The complete workspace/all-target closure passes 5,468 tests across 207 result groups with zero failures and seven intentionally ignored crash-injection cases. Its log SHA-256 is `36fe2ba3e784e61ee19890602dcfcc3c927900e35a91ba7bcfb41d2b31a14878`; the reviewed suppression inventory remains exactly 1,420 entries.
 - No writer capability, service authority, route, migration destination, deployment, or live database byte is active.
 
 ## Next Action
 
-Implement Child 01 P3a-3 immutable v1 entity and artifact envelope writers only for families with green bounded readers and independent fixtures. Keep capability activation in P3a-5 and Child 03 P3b immutable roots/read views behind their own start gates; P7 migration work remains forbidden until its gate.
+Implement Child 01 P3a-4 ControlStore FileRecord publication through the shared namespace/locator and hard-durability coordinators. Keep capability activation in P3a-5 and Child 03 P3b immutable roots/read views behind their own start gates; P7 migration work remains forbidden until its gate.

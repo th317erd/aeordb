@@ -4,6 +4,10 @@ use crate::engine::HashAlgorithm;
 
 const AGCA_HEADER_LENGTH: usize = 32;
 pub const MAX_GC_ARTIFACT_LENGTH: usize = 64 * 1_024 * 1_024;
+const MAX_GC_MANIFEST_LENGTH: usize = 1_024 * 1_024;
+const MAX_GC_PAGE_LENGTH: usize = 16 * 1_024 * 1_024;
+const MAX_GC_DIRECTORY_LENGTH: usize = 4 * 1_024 * 1_024;
+const MAX_MARK_RUN_CHECKPOINT_LENGTH: usize = 32 + 40 + 256 * 1_024 + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -148,6 +152,129 @@ impl GcArtifactKindV1 {
       _ => None,
     }
   }
+
+  pub fn immutable_maximum_encoded_length(self) -> Option<usize> {
+    match self {
+      Self::QuarantineActiveControl
+      | Self::MarkRunActiveControl
+      | Self::PhysicalInventoryActiveControl
+      | Self::AuditCatalogActiveControl
+      | Self::VoidCatalogActiveControl
+      | Self::RootLifecycleActiveControl => None,
+      Self::QuarantineManifest
+      | Self::RootExpiryCatalogManifest
+      | Self::PhysicalInventoryManifest
+      | Self::AuditCatalogManifest
+      | Self::GcRunSummary
+      | Self::VoidCatalogManifest
+      | Self::RootLifecycleManifest
+      | Self::CorruptGcEvidence
+      | Self::AuditPin
+      | Self::RootRetirementCommit
+      | Self::VoidClaimSettlementReceipt
+      | Self::RootObjectReclaimProof => Some(MAX_GC_MANIFEST_LENGTH),
+      Self::MarkRunCheckpoint => Some(MAX_MARK_RUN_CHECKPOINT_LENGTH),
+      Self::GcArtifactDirectoryNode => Some(MAX_GC_DIRECTORY_LENGTH),
+      Self::CandidatePage
+      | Self::RootExpiryPage
+      | Self::RetirementJournalSegment
+      | Self::PhysicalInventoryPage
+      | Self::MarkMutationJournalSegment
+      | Self::VoidExtentPage
+      | Self::VoidClaim
+      | Self::RootCandidatePage
+      | Self::SweepProposal
+      | Self::SweepCommitReceipt
+      | Self::RecoveredSweepReceipt
+      | Self::AuditDetailPage
+      | Self::AuditSummaryPage => Some(MAX_GC_PAGE_LENGTH),
+      Self::CandidateDelta => Some(MAX_GC_ARTIFACT_LENGTH),
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImmutableGcArtifactWriteV1<'a> {
+  pub kind: GcArtifactKindV1,
+  pub hash_algorithm: HashAlgorithm,
+  pub generation: u64,
+  pub identity: &'a [u8],
+  pub body: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedImmutableGcArtifactV1 {
+  pub key: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
+/// Return the exact immutable AGCA envelope length after validating every
+/// representational and per-kind bound, without allocating the artifact.
+pub fn checked_immutable_gc_artifact_encoded_length(
+  kind: GcArtifactKindV1,
+  identity_length: usize,
+  body_length: usize,
+) -> FormatResult<usize> {
+  let maximum_length = kind.immutable_maximum_encoded_length().ok_or_else(|| {
+    error(MalformedInputClass::UnknownTypeKindOrEnum, "gc_immutable_artifact_kind", format!("{} is a mutable control kind", kind.name()))
+  })?;
+  if identity_length == 0 {
+    return Err(error(MalformedInputClass::IdentityKeyOrGenerationMismatch, "gc_artifact_metadata", "AGCA identity is empty"));
+  }
+  let _identity_length = checked_gc_u16(identity_length, "AGCA identity length exceeds u16")?;
+  let _body_length = checked_gc_u32(body_length, "AGCA body length exceeds u32")?;
+  let total_length = AGCA_HEADER_LENGTH
+    .checked_add(identity_length)
+    .and_then(|length| length.checked_add(body_length))
+    .and_then(|length| length.checked_add(4))
+    .ok_or_else(|| length_error("AGCA length formula overflow"))?;
+  let _total_length = checked_gc_u32(total_length, "AGCA total length exceeds u32")?;
+  if total_length > maximum_length {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "gc_artifact_length",
+      format!("{total_length} bytes exceeds {maximum_length}-byte cap for {}", kind.name()),
+    ));
+  }
+  Ok(total_length)
+}
+
+/// Encode one complete immutable AGCA envelope without publishing it.
+pub fn encode_immutable_gc_artifact(request: &ImmutableGcArtifactWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let total_length = checked_immutable_gc_artifact_encoded_length(request.kind, request.identity.len(), request.body.len())?;
+  if request.generation == 0 {
+    return Err(error(MalformedInputClass::IdentityKeyOrGenerationMismatch, "gc_artifact_metadata", "AGCA generation is zero"));
+  }
+  let identity_length = checked_gc_u16(request.identity.len(), "AGCA identity length exceeds u16")?;
+  let body_length = checked_gc_u32(request.body.len(), "AGCA body length exceeds u32")?;
+  let total_length_u32 = checked_gc_u32(total_length, "AGCA total length exceeds u32")?;
+
+  let mut value = vec![0u8; total_length];
+  value[..4].copy_from_slice(b"AGCA");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&(request.kind as u16).to_le_bytes());
+  value[8..10].copy_from_slice(&(AGCA_HEADER_LENGTH as u16).to_le_bytes());
+  value[12..16].copy_from_slice(&total_length_u32.to_le_bytes());
+  value[16..18].copy_from_slice(&identity_length.to_le_bytes());
+  value[20..24].copy_from_slice(&body_length.to_le_bytes());
+  value[24..32].copy_from_slice(&request.generation.to_le_bytes());
+  let identity_end = AGCA_HEADER_LENGTH + request.identity.len();
+  let body_end = identity_end + request.body.len();
+  value[AGCA_HEADER_LENGTH..identity_end].copy_from_slice(request.identity);
+  value[identity_end..body_end].copy_from_slice(request.body);
+  let checksum = crc32fast::hash(&value[..body_end]);
+  value[body_end..].copy_from_slice(&checksum.to_le_bytes());
+
+  let decoded = decode_gc_artifact_envelope(&value)?;
+  if decoded.kind != request.kind {
+    return Err(error(
+      MalformedInputClass::CrossRecordClosureMismatch,
+      "gc_artifact_kind",
+      "encoded immutable artifact kind disagrees with its request",
+    ));
+  }
+  let key = immutable_gc_artifact_key(request.hash_algorithm, request.kind, &value);
+  Ok(EncodedImmutableGcArtifactV1 { key, value })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -354,6 +481,20 @@ pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> FormatResult<u64> {
     .get(offset..offset + 8)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "gc_artifact_truncated", format!("u64 at offset {offset}")))?;
   Ok(u64::from_le_bytes(raw.try_into().expect("checked GC u64 width")))
+}
+
+fn checked_gc_u16(value: usize, context: &'static str) -> FormatResult<u16> {
+  if value > usize::from(u16::MAX) {
+    return Err(length_error(context));
+  }
+  Ok(value as u16)
+}
+
+fn checked_gc_u32(value: usize, context: &'static str) -> FormatResult<u32> {
+  if value > u32::MAX as usize {
+    return Err(length_error(context));
+  }
+  Ok(value as u32)
 }
 
 fn length_error(context: impl Into<String>) -> FormatError {
