@@ -8,7 +8,7 @@ use super::namespace::{
   decode_semantic_object,
 };
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
-use super::system_control::{SystemControlKindV1, decode_system_control};
+use super::system_control::{SYSTEM_CONTROL_IDENTITY_LENGTH_CAP, SystemControlKindV1, decode_system_control, encode_system_control};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootAuthorityReferenceRoleV1 {
@@ -87,6 +87,22 @@ impl RootAuthorityKindV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootPublicationPrepareV1 {
+  pub database_id: [u8; 16],
+  pub transaction_id: [u8; 16],
+  pub created_at_ms: i64,
+  pub target_namespace_root: Vec<u8>,
+  pub target_semantic_state: Vec<u8>,
+  pub typed_closure_digest: Vec<u8>,
+  pub authority_kind: RootAuthorityKindV1,
+  pub authority_identity: Vec<u8>,
+  pub expected_authority_before: Vec<u8>,
+  pub expected_authority_after: Vec<u8>,
+  pub intended_header_slot_sequence: u64,
+  pub intended_publication_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootAdmissionCommitV1 {
   pub database_id: [u8; 16],
   pub namespace_root: Vec<u8>,
@@ -99,6 +115,110 @@ pub struct RootAdmissionCommitV1 {
   pub selected_header_slot_sequence: u64,
   pub publication_sequence: u64,
   pub prepare_payload_hash: Vec<u8>,
+}
+
+pub fn encode_root_publication_prepare_control(prepare: &RootPublicationPrepareV1, hash_algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+  let hash_width = hash_algorithm.hash_length();
+  require_hash(&prepare.target_namespace_root, hash_width, false, "root_prepare_hashes", "target namespace root")?;
+  require_hash(&prepare.target_semantic_state, hash_width, false, "root_prepare_hashes", "target semantic state")?;
+  require_hash(&prepare.typed_closure_digest, hash_width, false, "root_prepare_hashes", "typed closure digest")?;
+  require_hash(&prepare.expected_authority_before, hash_width, true, "root_prepare_hashes", "expected authority before")?;
+  require_hash(&prepare.expected_authority_after, hash_width, false, "root_prepare_hashes", "expected authority after")?;
+  if prepare.transaction_id.iter().all(|byte| *byte == 0) {
+    return Err(format_error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "root_prepare_identity",
+      "root publication transaction ID is zero",
+    ));
+  }
+  if prepare.created_at_ms < 0 {
+    return Err(format_error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "root_prepare_hashes",
+      "root publication creation time is negative",
+    ));
+  }
+  if prepare.authority_identity.is_empty() || prepare.authority_identity.len() > SYSTEM_CONTROL_IDENTITY_LENGTH_CAP {
+    return Err(format_error(
+      MalformedInputClass::AllocationAmplification,
+      "root_prepare_authority_length",
+      format!("authority identity length {} is outside 1..={SYSTEM_CONTROL_IDENTITY_LENGTH_CAP}", prepare.authority_identity.len()),
+    ));
+  }
+  if prepare.intended_header_slot_sequence == 0 || prepare.intended_publication_sequence == 0 {
+    return Err(format_error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "root_prepare_sequences",
+      "root publication sequences must be nonzero",
+    ));
+  }
+
+  let body_length = (64 + 5 * hash_width)
+    .checked_add(prepare.authority_identity.len())
+    .ok_or_else(|| format_error(MalformedInputClass::LengthCountOrArithmeticOverflow, "root_prepare_length", "body length overflow"))?;
+  let authority_identity_length = prepare.authority_identity.len() as u16;
+  let mut body = Vec::with_capacity(body_length);
+  body.extend_from_slice(&prepare.database_id);
+  body.extend_from_slice(&prepare.transaction_id);
+  body.extend_from_slice(&prepare.created_at_ms.to_le_bytes());
+  body.extend_from_slice(&prepare.target_namespace_root);
+  body.extend_from_slice(&prepare.target_semantic_state);
+  body.extend_from_slice(&prepare.typed_closure_digest);
+  body.extend_from_slice(&(prepare.authority_kind as u16).to_le_bytes());
+  body.extend_from_slice(&1u16.to_le_bytes());
+  body.extend_from_slice(&authority_identity_length.to_le_bytes());
+  body.extend_from_slice(&0u16.to_le_bytes());
+  body.extend_from_slice(&prepare.expected_authority_before);
+  body.extend_from_slice(&prepare.expected_authority_after);
+  body.extend_from_slice(&prepare.intended_header_slot_sequence.to_le_bytes());
+  body.extend_from_slice(&prepare.intended_publication_sequence.to_le_bytes());
+  body.extend_from_slice(&prepare.authority_identity);
+  encode_system_control(SystemControlKindV1::RootPublicationPrepare, 1, &body, hash_algorithm)
+}
+
+pub fn encode_root_admission_commit_control(commit: &RootAdmissionCommitV1, hash_algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+  let hash_width = hash_algorithm.hash_length();
+  require_hash(&commit.namespace_root, hash_width, false, "root_commit_identity", "namespace root")?;
+  require_hash(&commit.authority_identity_digest, hash_width, false, "root_commit_identity", "authority identity digest")?;
+  require_hash(&commit.authority_after, hash_width, false, "root_commit_identity", "authority after")?;
+  require_hash(&commit.prepare_payload_hash, hash_width, false, "root_commit_identity", "prepare payload hash")?;
+  if commit.transaction_id.iter().all(|byte| *byte == 0) {
+    return Err(format_error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "root_commit_identity",
+      "root admission transaction ID is zero",
+    ));
+  }
+  if commit.publication_started_at_ms < 0 {
+    return Err(format_error(
+      MalformedInputClass::CrossRecordClosureMismatch,
+      "root_commit_time",
+      "root admission publication time is negative",
+    ));
+  }
+  if commit.selected_header_slot_sequence == 0 || commit.publication_sequence == 0 {
+    return Err(format_error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "root_commit_sequences",
+      "root admission sequences must be nonzero",
+    ));
+  }
+
+  let body_length = 64 + 4 * hash_width;
+  let mut body = Vec::with_capacity(body_length);
+  body.extend_from_slice(&commit.database_id);
+  body.extend_from_slice(&commit.namespace_root);
+  body.extend_from_slice(&commit.transaction_id);
+  body.extend_from_slice(&commit.publication_started_at_ms.to_le_bytes());
+  body.extend_from_slice(&(commit.authority_kind as u16).to_le_bytes());
+  body.extend_from_slice(&1u16.to_le_bytes());
+  body.extend_from_slice(&u32::from(commit.recovered_from_selected_authority).to_le_bytes());
+  body.extend_from_slice(&commit.authority_identity_digest);
+  body.extend_from_slice(&commit.authority_after);
+  body.extend_from_slice(&commit.selected_header_slot_sequence.to_le_bytes());
+  body.extend_from_slice(&commit.publication_sequence.to_le_bytes());
+  body.extend_from_slice(&commit.prepare_payload_hash);
+  encode_system_control(SystemControlKindV1::RootAdmissionCommit, 1, &body, hash_algorithm)
 }
 
 pub fn decode_root_admission_commit(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<RootAdmissionCommitV1> {
@@ -275,6 +395,20 @@ fn invalid<T>(
 
 fn format_error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(class, code, context)
+}
+
+fn require_hash(bytes: &[u8], expected: usize, allow_zero: bool, code: &'static str, context: &'static str) -> FormatResult<()> {
+  if bytes.len() != expected {
+    return Err(format_error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      code,
+      format!("{context} has width {}, expected {expected}", bytes.len()),
+    ));
+  }
+  if !allow_zero && bytes.iter().all(|byte| *byte == 0) {
+    return Err(format_error(MalformedInputClass::IdentityKeyOrGenerationMismatch, code, format!("{context} is zero")));
+  }
+  Ok(())
 }
 
 fn array_16_at(bytes: &[u8], offset: usize) -> FormatResult<[u8; 16]> {

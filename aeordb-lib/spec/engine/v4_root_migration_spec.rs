@@ -3,10 +3,13 @@ use std::path::{Path, PathBuf};
 
 use aeordb::engine::v4::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM};
 use aeordb::engine::v4::namespace::{
-  NamespaceTreeEdgeV0, NamespaceTreeLayoutV0, SemanticAvailabilityV1, SemanticUnavailableReasonV1, decode_namespace_tree_root_v0,
+  EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, NamespaceTreeEdgeV0, NamespaceTreeLayoutV0,
+  SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, decode_namespace_tree_root_v0, encode_namespace_root,
+  encode_semantic_state_object,
 };
 use aeordb::engine::v4::root_authority::{
-  ImmutableNamespaceAuthorityInputV1, RootAuthorityKindV1, RootAuthorityReferenceRoleV1, decode_immutable_namespace_authority,
+  ImmutableNamespaceAuthorityInputV1, RootAdmissionCommitV1, RootAuthorityKindV1, RootAuthorityReferenceRoleV1, RootPublicationPrepareV1,
+  decode_immutable_namespace_authority, encode_root_admission_commit_control, encode_root_publication_prepare_control,
 };
 use aeordb::engine::{CompressionAlgorithm, EntryType as LegacyEntryType, HashAlgorithm, StorageEngine};
 use sha2::{Digest, Sha512};
@@ -39,6 +42,259 @@ struct IndependentEntityWrite<'a> {
   write_sequence: u64,
   key: &'a [u8],
   stored_value: &'a [u8],
+}
+
+#[test]
+fn namespace_and_semantic_root_writers_match_independent_fixtures_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let hash_width = algorithm.hash_length();
+    let algorithm_name = algorithm_fixture_name(algorithm);
+    let expected_root = fixture(&format!("directory-index-v1/adir-{algorithm_name}-namespace-root-valid.bin"));
+    let root = encode_namespace_root(
+      &NamespaceRootWriteV1 {
+        required_capabilities: expected_root[36..68].try_into().unwrap(),
+        namespace_tree_root: expected_root[72..72 + hash_width].to_vec(),
+        semantic_state_root: expected_root[72 + hash_width..72 + 2 * hash_width].to_vec(),
+      },
+      algorithm,
+    )
+    .unwrap();
+    assert_eq!(
+      root,
+      EncodedNamespaceRootV1 {
+        root_hash: independent_digest(algorithm, &[b"aeordb.directory-index.immutable.v1\0", &3u16.to_le_bytes(), &expected_root]),
+        value: expected_root,
+      }
+    );
+
+    for fixture_name in ["state-complete", "state-content-only"] {
+      let expected = fixture(&format!("semantic-object-v1/asem-{algorithm_name}-{fixture_name}.bin"));
+      let body_offset = 32;
+      let availability = if fixture_name == "state-complete" {
+        let hashes_offset = body_offset + 48;
+        let counts_offset = hashes_offset + 3 * hash_width;
+        SemanticAvailabilityV1::Complete {
+          compiler_fingerprint: expected[hashes_offset..hashes_offset + hash_width].to_vec(),
+          semantic_registry_fingerprint: expected[hashes_offset + hash_width..hashes_offset + 2 * hash_width].to_vec(),
+          catalog_root: expected[hashes_offset + 2 * hash_width..hashes_offset + 3 * hash_width].to_vec(),
+          catalog_record_count: fixture_u64(&expected, counts_offset),
+          catalog_node_count: fixture_u64(&expected, counts_offset + 8),
+          definition_count: fixture_u64(&expected, counts_offset + 16),
+          dependency_count: fixture_u64(&expected, counts_offset + 24),
+        }
+      } else {
+        SemanticAvailabilityV1::ContentOnly { reason: SemanticUnavailableReasonV1::LegacyGlobalStateNotCaptured }
+      };
+      let encoded = encode_semantic_state_object(
+        &SemanticStateWriteV1 { required_capabilities: expected[body_offset + 4..body_offset + 36].try_into().unwrap(), availability },
+        algorithm,
+      )
+      .unwrap();
+      assert_eq!(
+        encoded,
+        EncodedSemanticObjectV1 {
+          object_id: independent_digest(algorithm, &[b"aeordb.semantic-object.immutable.v1\0", &1u16.to_le_bytes(), &expected]),
+          value: expected,
+        }
+      );
+    }
+  }
+}
+
+#[test]
+fn root_prepare_and_admission_writers_match_independent_fixtures_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let hash_width = algorithm.hash_length();
+    let algorithm_name = algorithm_fixture_name(algorithm);
+    let expected_prepare = fixture(&format!("system-control-v1/control-{algorithm_name}-root-publication-prepare-valid.bin"));
+    let prepare_body = &expected_prepare[32..expected_prepare.len() - 4];
+    let prepare = RootPublicationPrepareV1 {
+      database_id: prepare_body[..16].try_into().unwrap(),
+      transaction_id: prepare_body[16..32].try_into().unwrap(),
+      created_at_ms: fixture_i64(prepare_body, 32),
+      target_namespace_root: prepare_body[40..40 + hash_width].to_vec(),
+      target_semantic_state: prepare_body[40 + hash_width..40 + 2 * hash_width].to_vec(),
+      typed_closure_digest: prepare_body[40 + 2 * hash_width..40 + 3 * hash_width].to_vec(),
+      authority_kind: RootAuthorityKindV1::Head,
+      authority_identity: prepare_body[64 + 5 * hash_width..].to_vec(),
+      expected_authority_before: prepare_body[48 + 3 * hash_width..48 + 4 * hash_width].to_vec(),
+      expected_authority_after: prepare_body[48 + 4 * hash_width..48 + 5 * hash_width].to_vec(),
+      intended_header_slot_sequence: fixture_u64(prepare_body, 48 + 5 * hash_width),
+      intended_publication_sequence: fixture_u64(prepare_body, 56 + 5 * hash_width),
+    };
+    assert_eq!(encode_root_publication_prepare_control(&prepare, algorithm).unwrap(), expected_prepare);
+
+    let expected_commit = fixture(&format!("system-control-v1/control-{algorithm_name}-root-admission-commit-valid.bin"));
+    let commit_body = &expected_commit[32..expected_commit.len() - 4];
+    let commit = RootAdmissionCommitV1 {
+      database_id: commit_body[..16].try_into().unwrap(),
+      namespace_root: commit_body[16..16 + hash_width].to_vec(),
+      transaction_id: commit_body[16 + hash_width..32 + hash_width].try_into().unwrap(),
+      publication_started_at_ms: fixture_i64(commit_body, 32 + hash_width),
+      authority_kind: RootAuthorityKindV1::Head,
+      recovered_from_selected_authority: false,
+      authority_identity_digest: commit_body[48 + hash_width..48 + 2 * hash_width].to_vec(),
+      authority_after: commit_body[48 + 2 * hash_width..48 + 3 * hash_width].to_vec(),
+      selected_header_slot_sequence: fixture_u64(commit_body, 48 + 3 * hash_width),
+      publication_sequence: fixture_u64(commit_body, 56 + 3 * hash_width),
+      prepare_payload_hash: commit_body[64 + 3 * hash_width..64 + 4 * hash_width].to_vec(),
+    };
+    assert_eq!(encode_root_admission_commit_control(&commit, algorithm).unwrap(), expected_commit);
+  }
+}
+
+#[test]
+fn root_authority_writers_reject_every_invalid_input_class() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let hash_width = algorithm.hash_length();
+
+  let valid_namespace = NamespaceRootWriteV1 {
+    required_capabilities: INITIAL_CAPABILITIES,
+    namespace_tree_root: vec![1; hash_width],
+    semantic_state_root: vec![2; hash_width],
+  };
+  let mut invalid_namespace = valid_namespace.clone();
+  invalid_namespace.required_capabilities[3] = 1;
+  assert_eq!(encode_namespace_root(&invalid_namespace, algorithm).unwrap_err().code(), "unsupported_required_capability");
+  let mut invalid_namespace = valid_namespace.clone();
+  invalid_namespace.namespace_tree_root.pop();
+  assert_eq!(encode_namespace_root(&invalid_namespace, algorithm).unwrap_err().code(), "namespace_root_zero_edge");
+  let mut invalid_namespace = valid_namespace;
+  invalid_namespace.semantic_state_root.fill(0);
+  assert_eq!(encode_namespace_root(&invalid_namespace, algorithm).unwrap_err().code(), "namespace_root_zero_edge");
+
+  let valid_semantic = SemanticStateWriteV1 {
+    required_capabilities: INITIAL_CAPABILITIES,
+    availability: SemanticAvailabilityV1::Complete {
+      compiler_fingerprint: vec![3; hash_width],
+      semantic_registry_fingerprint: vec![4; hash_width],
+      catalog_root: vec![5; hash_width],
+      catalog_record_count: 1,
+      catalog_node_count: 1,
+      definition_count: 0,
+      dependency_count: 0,
+    },
+  };
+  let mut invalid_semantic = valid_semantic.clone();
+  invalid_semantic.required_capabilities[3] = 1;
+  assert_eq!(encode_semantic_state_object(&invalid_semantic, algorithm).unwrap_err().code(), "unsupported_required_capability");
+  let mut invalid_semantic = valid_semantic.clone();
+  if let SemanticAvailabilityV1::Complete { compiler_fingerprint, .. } = &mut invalid_semantic.availability {
+    compiler_fingerprint.fill(0);
+  }
+  assert_eq!(encode_semantic_state_object(&invalid_semantic, algorithm).unwrap_err().code(), "semantic_state_hash_width");
+  let mut invalid_semantic = valid_semantic.clone();
+  if let SemanticAvailabilityV1::Complete { semantic_registry_fingerprint, .. } = &mut invalid_semantic.availability {
+    semantic_registry_fingerprint.pop();
+  }
+  assert_eq!(encode_semantic_state_object(&invalid_semantic, algorithm).unwrap_err().code(), "semantic_state_hash_width");
+  let mut invalid_semantic = valid_semantic.clone();
+  if let SemanticAvailabilityV1::Complete { catalog_root, .. } = &mut invalid_semantic.availability {
+    catalog_root.fill(0);
+  }
+  assert_eq!(encode_semantic_state_object(&invalid_semantic, algorithm).unwrap_err().code(), "semantic_state_hash_width");
+  let mut invalid_semantic = valid_semantic.clone();
+  if let SemanticAvailabilityV1::Complete { catalog_record_count, .. } = &mut invalid_semantic.availability {
+    *catalog_record_count = 0;
+  }
+  assert_eq!(encode_semantic_state_object(&invalid_semantic, algorithm).unwrap_err().code(), "semantic_state_complete_invariant");
+  let mut invalid_semantic = valid_semantic;
+  if let SemanticAvailabilityV1::Complete { catalog_node_count, .. } = &mut invalid_semantic.availability {
+    *catalog_node_count = 0;
+  }
+  assert_eq!(encode_semantic_state_object(&invalid_semantic, algorithm).unwrap_err().code(), "semantic_state_complete_invariant");
+
+  let valid_prepare = RootPublicationPrepareV1 {
+    database_id: [1; 16],
+    transaction_id: [2; 16],
+    created_at_ms: 1,
+    target_namespace_root: vec![3; hash_width],
+    target_semantic_state: vec![4; hash_width],
+    typed_closure_digest: vec![5; hash_width],
+    authority_kind: RootAuthorityKindV1::Head,
+    authority_identity: vec![6; 12],
+    expected_authority_before: vec![0; hash_width],
+    expected_authority_after: vec![7; hash_width],
+    intended_header_slot_sequence: 1,
+    intended_publication_sequence: 1,
+  };
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.database_id.fill(0);
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "system_control_database_id");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.transaction_id.fill(0);
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_identity");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.created_at_ms = -1;
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_hashes");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.target_namespace_root.pop();
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_hashes");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.target_semantic_state.fill(0);
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_hashes");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.typed_closure_digest.fill(0);
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_hashes");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.expected_authority_before.pop();
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_hashes");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.expected_authority_after.fill(0);
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_hashes");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.authority_identity.clear();
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_authority_length");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.authority_identity.resize(4_097, 6);
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_authority_length");
+  let mut invalid_prepare = valid_prepare.clone();
+  invalid_prepare.intended_header_slot_sequence = 0;
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_sequences");
+  let mut invalid_prepare = valid_prepare;
+  invalid_prepare.intended_publication_sequence = 0;
+  assert_eq!(encode_root_publication_prepare_control(&invalid_prepare, algorithm).unwrap_err().code(), "root_prepare_sequences");
+
+  let valid_commit = RootAdmissionCommitV1 {
+    database_id: [1; 16],
+    namespace_root: vec![3; hash_width],
+    transaction_id: [2; 16],
+    publication_started_at_ms: 1,
+    authority_kind: RootAuthorityKindV1::Head,
+    recovered_from_selected_authority: false,
+    authority_identity_digest: vec![4; hash_width],
+    authority_after: vec![5; hash_width],
+    selected_header_slot_sequence: 1,
+    publication_sequence: 1,
+    prepare_payload_hash: vec![6; hash_width],
+  };
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.database_id.fill(0);
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "system_control_database_id");
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.transaction_id.fill(0);
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_identity");
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.publication_started_at_ms = -1;
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_time");
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.namespace_root.pop();
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_identity");
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.authority_identity_digest.fill(0);
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_identity");
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.authority_after.fill(0);
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_identity");
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.prepare_payload_hash.fill(0);
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_identity");
+  let mut invalid_commit = valid_commit.clone();
+  invalid_commit.selected_header_slot_sequence = 0;
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_sequences");
+  let mut invalid_commit = valid_commit;
+  invalid_commit.publication_sequence = 0;
+  assert_eq!(encode_root_admission_commit_control(&invalid_commit, algorithm).unwrap_err().code(), "root_commit_sequences");
 }
 
 #[test]
@@ -384,15 +640,33 @@ fn immutable_authority_reports_each_missing_reference_without_guessing() {
 }
 
 #[test]
-fn immutable_authority_reader_is_disconnected_from_storage_and_service_authority() {
+fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authority() {
   let root = repository_root();
   let sources = ["namespace.rs", "root_authority.rs"]
     .into_iter()
     .map(|name| fs::read_to_string(root.join("aeordb-lib/src/engine/v4").join(name)).unwrap())
     .collect::<Vec<_>>()
     .join("\n");
-  for forbidden in ["StorageEngine", "DirectoryOps", "update_head", "publish_namespace_root", "ControlStore"] {
-    assert!(!sources.contains(forbidden), "P3b-1 reader unexpectedly contains {forbidden}");
+  for forbidden in [
+    "StorageEngine",
+    "DirectoryOps",
+    "NamespaceMutationCoordinator",
+    "update_head",
+    "publish_namespace_root",
+    "V4ControlStore",
+    "admit_v4_header",
+  ] {
+    assert!(!sources.contains(forbidden), "P3b-2a codec unexpectedly contains {forbidden}");
+  }
+
+  let production_sources = read_rust_sources(&root.join("aeordb-lib/src"));
+  for encoder in [
+    "encode_namespace_root",
+    "encode_semantic_state_object",
+    "encode_root_publication_prepare_control",
+    "encode_root_admission_commit_control",
+  ] {
+    assert_eq!(production_sources.matches(encoder).count(), 1, "P3b-2a encoder {encoder} gained a production caller before activation");
   }
 
   let reference_source = fs::read_to_string(root.join("aeordb-lib/spec/engine/v4_root_migration_spec.rs")).unwrap();
@@ -653,6 +927,14 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
   bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
+fn fixture_u64(bytes: &[u8], offset: usize) -> u64 {
+  u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn fixture_i64(bytes: &[u8], offset: usize) -> i64 {
+  i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
 fn independent_digest(algorithm: HashAlgorithm, parts: &[&[u8]]) -> Vec<u8> {
   match algorithm {
     HashAlgorithm::Blake3_256 => {
@@ -689,4 +971,17 @@ fn fixture_root() -> PathBuf {
 
 fn repository_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+fn read_rust_sources(path: &Path) -> String {
+  let mut sources = String::new();
+  for entry in fs::read_dir(path).unwrap() {
+    let path = entry.unwrap().path();
+    if path.is_dir() {
+      sources.push_str(&read_rust_sources(&path));
+    } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+      sources.push_str(&fs::read_to_string(path).unwrap());
+    }
+  }
+  sources
 }

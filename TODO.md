@@ -584,6 +584,11 @@
         - [x] Prove malformed, missing, mismatched, content-only, both-hash-width, and disconnected-service behavior against an independent model.
         - [x] Run focused, adjacent, workspace, architecture, native, documentation, and real-storage reader gates; record and land the unit.
       - [ ] P3b-2: add shadow root/admission publication through the shared durability and namespace authorities.
+        - [ ] P3b-2a: add exact NamespaceRootV1, SemanticStateRootV1, RootPublicationPrepare, and RootAdmissionCommit encoders against the independent fixtures.
+        - [ ] P3b-2b: add deterministic write-once semantic-object publication with bounded exact read-back and collision refusal.
+        - [ ] P3b-2c: add one shadow first-authority transaction that keeps prepared roots unadmitted and publishes the authority selector plus admission witness at one visibility/durability boundary.
+        - [ ] Keep v4 capability bits 1, 2, and 5 and every service/HEAD caller disabled until the complete P3b-2 writer family is proven.
+        - [ ] Prove crash-prefix, retry/idempotency, malformed/collision, restart, memory-bound, architecture, native-platform, and real-storage behavior before closure.
       - [ ] P3b-3: add the read-view resolver, lifecycle states, pins, and transfer closure before service activation.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

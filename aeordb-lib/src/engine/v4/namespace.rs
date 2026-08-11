@@ -24,6 +24,19 @@ pub struct NamespaceRootV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceRootWriteV1 {
+  pub required_capabilities: [u8; 32],
+  pub namespace_tree_root: Vec<u8>,
+  pub semantic_state_root: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedNamespaceRootV1 {
+  pub root_hash: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceTreeLayoutV0 {
   Empty,
   Flat { child_count: usize },
@@ -90,6 +103,18 @@ pub struct SemanticStateV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticStateWriteV1 {
+  pub required_capabilities: [u8; 32],
+  pub availability: SemanticAvailabilityV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedSemanticObjectV1 {
+  pub object_id: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticObjectKind {
   State { content_only_reason: Option<u16> },
   CatalogLeaf { record_count: u32 },
@@ -104,6 +129,129 @@ pub struct SemanticObjectV1 {
   pub kind: SemanticObjectKind,
   pub graph_edges: Vec<Vec<u8>>,
   pub semantic_state: Option<SemanticStateV1>,
+}
+
+pub fn encode_namespace_root(request: &NamespaceRootWriteV1, hash_algorithm: HashAlgorithm) -> FormatResult<EncodedNamespaceRootV1> {
+  validate_capabilities(&request.required_capabilities, "namespace root")?;
+  let hash_width = hash_algorithm.hash_length();
+  require_nonzero_hash(&request.namespace_tree_root, hash_width, "namespace root tree edge", "namespace_root_zero_edge")?;
+  require_nonzero_hash(&request.semantic_state_root, hash_width, "namespace root semantic edge", "namespace_root_zero_edge")?;
+
+  let body_length = checked_add(72, checked_mul(2, hash_width, "namespace root hashes")?, "namespace root body")?;
+  let total_length = checked_add(DIRECTORY_HEADER_LENGTH, body_length, "directory envelope")?
+    .checked_add(4)
+    .ok_or_else(|| length_error("directory total length overflow"))?;
+  let mut value = vec![0u8; total_length];
+  value[..4].copy_from_slice(b"ADIR");
+  put_u16(&mut value, 4, 1);
+  put_u16(&mut value, 6, DIRECTORY_KIND_NAMESPACE_ROOT);
+  put_u16(&mut value, 8, DIRECTORY_HEADER_LENGTH as u16);
+  put_u32(&mut value, 12, checked_u32(total_length, "directory total length")?);
+  put_u32(&mut value, 16, checked_u32(body_length, "directory body length")?);
+
+  let body = &mut value[DIRECTORY_HEADER_LENGTH..DIRECTORY_HEADER_LENGTH + body_length];
+  body[4..36].copy_from_slice(&request.required_capabilities);
+  put_u16(body, 36, 1);
+  put_u16(body, 38, 1);
+  body[40..40 + hash_width].copy_from_slice(&request.namespace_tree_root);
+  body[40 + hash_width..40 + 2 * hash_width].copy_from_slice(&request.semantic_state_root);
+  write_trailing_crc(&mut value);
+
+  let root_hash = immutable_id(hash_algorithm, b"aeordb.directory-index.immutable.v1\0", DIRECTORY_KIND_NAMESPACE_ROOT, &value);
+  let decoded = decode_namespace_root(&value, hash_algorithm)?;
+  if decoded.root_hash != root_hash {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "namespace_root_encode_roundtrip",
+      "encoded namespace root did not round-trip its identity",
+    ));
+  }
+  Ok(EncodedNamespaceRootV1 { root_hash, value })
+}
+
+pub fn encode_semantic_state_object(
+  request: &SemanticStateWriteV1,
+  hash_algorithm: HashAlgorithm,
+) -> FormatResult<EncodedSemanticObjectV1> {
+  validate_capabilities(&request.required_capabilities, "semantic state")?;
+  let hash_width = hash_algorithm.hash_length();
+  let body_length = checked_add(112, checked_mul(3, hash_width, "semantic state hashes")?, "semantic state body")?;
+  let total_length = checked_add(SEMANTIC_HEADER_LENGTH, body_length, "semantic state envelope")?
+    .checked_add(4)
+    .ok_or_else(|| length_error("semantic state total length overflow"))?;
+  if total_length > 4_096 {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "semantic_state_exceeds_cap",
+      format!("{total_length} bytes exceeds 4096"),
+    ));
+  }
+
+  let mut item_count = 0u64;
+  let mut body = vec![0u8; body_length];
+  body[4..36].copy_from_slice(&request.required_capabilities);
+  put_u16(&mut body, 36, 1);
+  put_u16(&mut body, 38, 1);
+  put_u16(&mut body, 40, 1);
+  match &request.availability {
+    SemanticAvailabilityV1::Complete {
+      compiler_fingerprint,
+      semantic_registry_fingerprint,
+      catalog_root,
+      catalog_record_count,
+      catalog_node_count,
+      definition_count,
+      dependency_count,
+    } => {
+      require_nonzero_hash(compiler_fingerprint, hash_width, "semantic compiler fingerprint", "semantic_state_hash_width")?;
+      require_nonzero_hash(semantic_registry_fingerprint, hash_width, "semantic registry fingerprint", "semantic_state_hash_width")?;
+      require_nonzero_hash(catalog_root, hash_width, "semantic catalog root", "semantic_state_hash_width")?;
+      if *catalog_record_count == 0 || *catalog_node_count == 0 {
+        return Err(error(
+          MalformedInputClass::CrossRecordClosureMismatch,
+          "semantic_state_complete_invariant",
+          "complete semantic state requires nonzero catalog record and node counts",
+        ));
+      }
+      body[44] = 1;
+      let hashes_offset = 48;
+      body[hashes_offset..hashes_offset + hash_width].copy_from_slice(compiler_fingerprint);
+      body[hashes_offset + hash_width..hashes_offset + 2 * hash_width].copy_from_slice(semantic_registry_fingerprint);
+      body[hashes_offset + 2 * hash_width..hashes_offset + 3 * hash_width].copy_from_slice(catalog_root);
+      let counts_offset = hashes_offset + 3 * hash_width;
+      put_u64(&mut body, counts_offset, *catalog_record_count);
+      put_u64(&mut body, counts_offset + 8, *catalog_node_count);
+      put_u64(&mut body, counts_offset + 16, *definition_count);
+      put_u64(&mut body, counts_offset + 24, *dependency_count);
+      item_count = *catalog_record_count;
+    }
+    SemanticAvailabilityV1::ContentOnly { reason } => {
+      put_u32(&mut body, 0, 1);
+      put_u16(&mut body, 42, *reason as u16);
+    }
+  }
+
+  let mut value = vec![0u8; total_length];
+  value[..4].copy_from_slice(b"ASEM");
+  put_u16(&mut value, 4, 1);
+  put_u16(&mut value, 6, 1);
+  put_u16(&mut value, 8, SEMANTIC_HEADER_LENGTH as u16);
+  put_u32(&mut value, 12, checked_u32(total_length, "semantic total length")?);
+  put_u32(&mut value, 16, checked_u32(body_length, "semantic body length")?);
+  put_u64(&mut value, 20, item_count);
+  value[SEMANTIC_HEADER_LENGTH..SEMANTIC_HEADER_LENGTH + body_length].copy_from_slice(&body);
+  write_trailing_crc(&mut value);
+
+  let object_id = immutable_id(hash_algorithm, b"aeordb.semantic-object.immutable.v1\0", 1, &value);
+  let decoded = decode_semantic_object(&value, hash_algorithm)?;
+  if decoded.object_id != object_id || decoded.semantic_state.is_none() {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "semantic_state_encode_roundtrip",
+      "encoded semantic state did not round-trip its identity",
+    ));
+  }
+  Ok(EncodedSemanticObjectV1 { object_id, value })
 }
 
 pub fn decode_namespace_root_entity(
@@ -675,6 +823,26 @@ fn immutable_id(hash_algorithm: HashAlgorithm, domain: &[u8], kind: u16, value: 
   digest_parts(hash_algorithm, &[domain, &kind, value])
 }
 
+fn require_nonzero_hash(bytes: &[u8], expected: usize, context: &'static str, code: &'static str) -> FormatResult<()> {
+  if bytes.len() != expected {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      code,
+      format!("{context} has width {}, expected {expected}", bytes.len()),
+    ));
+  }
+  if all_zero(bytes) {
+    return Err(error(MalformedInputClass::InvalidGraphEdgeOrCycle, code, format!("{context} is zero")));
+  }
+  Ok(())
+}
+
+fn write_trailing_crc(value: &mut [u8]) {
+  let checksum_offset = value.len() - 4;
+  let checksum = crc32fast::hash(&value[..checksum_offset]);
+  value[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+}
+
 fn verify_trailing_crc(value: &[u8]) -> FormatResult<()> {
   let crc_offset = value.len() - 4;
   let stored = u32_at(value, crc_offset);
@@ -743,6 +911,29 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
 
 fn u64_at(bytes: &[u8], offset: usize) -> u64 {
   u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("validated namespace bounds"))
+}
+
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+  bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+  bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+  bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn checked_u32(value: usize, context: &'static str) -> FormatResult<u32> {
+  if value > u32::MAX as usize {
+    return Err(error(
+      MalformedInputClass::LengthCountOrArithmeticOverflow,
+      "namespace_writer_length_overflow",
+      format!("{context} exceeds u32"),
+    ));
+  }
+  Ok(value as u32)
 }
 
 fn length_error(context: impl Into<String>) -> FormatError {

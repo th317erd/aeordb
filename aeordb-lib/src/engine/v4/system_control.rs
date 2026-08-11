@@ -555,7 +555,12 @@ pub fn encode_config_diagnostics_control(
   encode_system_control(diagnostics.configuration_kind.diagnostics_control_kind(), sequence, &body, algorithm)
 }
 
-fn encode_system_control(kind: SystemControlKindV1, sequence: u64, body: &[u8], algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+pub(crate) fn encode_system_control(
+  kind: SystemControlKindV1,
+  sequence: u64,
+  body: &[u8],
+  algorithm: HashAlgorithm,
+) -> FormatResult<Vec<u8>> {
   if sequence == 0 {
     return Err(identity_error("system_control_sequence", "control sequence must be nonzero"));
   }
