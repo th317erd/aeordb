@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::hot_tail::{HotTailPayload, read_hot_tail_checked};
 use crate::engine::kv_stages::initial_block_size;
+use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use crate::engine::native_durability::{sync_file_all_native, sync_file_data_native};
 use crate::engine::v4::database_header::{
   DATABASE_HEADER_V4_DATA_OFFSET, DATABASE_HEADER_V4_REGION_LENGTH, DATABASE_HEADER_V4_SLOT_LENGTH, encode_database_header_slot,
 };
+use crate::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1, RetirementJournalRecordWriteV1};
 use crate::engine::v4::header_publication::HeaderPublicationIo;
 use crate::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug)]
 enum FirstAuthorityFailurePoint {
@@ -152,6 +155,58 @@ impl FailingDependencyObserver {
       ));
     }
     Ok(())
+  }
+}
+
+#[derive(Debug)]
+struct CapturedRetirementSegmentV1 {
+  segment_ordinal: u64,
+  generation: u64,
+  first_replacement_sequence: u64,
+  last_replacement_sequence: u64,
+  record_count: u32,
+  artifact_key: Vec<u8>,
+  value: Vec<u8>,
+}
+
+impl CapturedRetirementSegmentV1 {
+  fn prepared(&self) -> PreparedRetirementJournalSegmentV1<'_> {
+    PreparedRetirementJournalSegmentV1 {
+      segment_ordinal: self.segment_ordinal,
+      generation: self.generation,
+      first_replacement_sequence: self.first_replacement_sequence,
+      last_replacement_sequence: self.last_replacement_sequence,
+      record_count: self.record_count,
+      artifact_key: &self.artifact_key,
+      value: &self.value,
+    }
+  }
+}
+
+#[derive(Default)]
+struct CapturingRetirementSinkV1 {
+  captured: Option<CapturedRetirementSegmentV1>,
+}
+
+impl RetirementJournalDurableSinkV1 for CapturingRetirementSinkV1 {
+  fn publish_synced(
+    &mut self,
+    segment: &PreparedRetirementJournalSegmentV1<'_>,
+  ) -> Result<RetirementJournalDurabilityReceiptV1, RetirementJournalSinkErrorV1> {
+    self.captured = Some(CapturedRetirementSegmentV1 {
+      segment_ordinal: segment.segment_ordinal,
+      generation: segment.generation,
+      first_replacement_sequence: segment.first_replacement_sequence,
+      last_replacement_sequence: segment.last_replacement_sequence,
+      record_count: segment.record_count,
+      artifact_key: segment.artifact_key.to_vec(),
+      value: segment.value.to_vec(),
+    });
+    Ok(RetirementJournalDurabilityReceiptV1 {
+      artifact_key: segment.artifact_key.to_vec(),
+      stored_value_length: segment.value.len() as u32,
+      hard_publication_sequence: 1,
+    })
   }
 }
 
@@ -318,6 +373,61 @@ fn request() -> FirstAuthorityPublicationRequestV1 {
   }
 }
 
+fn captured_retirement_segment(database_id: [u8; 16]) -> CapturedRetirementSegmentV1 {
+  captured_retirement_segment_with_timestamp(database_id, None)
+}
+
+fn captured_retirement_segment_with_timestamp(database_id: [u8; 16], retired_at_ms: Option<u64>) -> CapturedRetirementSegmentV1 {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let fixture_path =
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1/agca-blake3-256-retirement-journal-segment-valid.bin");
+  let fixture = std::fs::read(fixture_path).unwrap();
+  let decoded = decode_retirement_journal_segment_v1(&fixture, algorithm).unwrap();
+  let record = retirement_journal_records_v1(&decoded, algorithm).unwrap().next().unwrap().unwrap();
+  let physical_length = 24 + 2 * algorithm.hash_length();
+  let old_start = 24;
+  let replacement_start = old_start + physical_length;
+  let replacement_end = replacement_start + physical_length;
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id,
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut sink = CapturingRetirementSinkV1::default();
+  owner
+    .append(
+      RetirementJournalRecordWriteV1 {
+        reason: record.reason,
+        replacement_publication_sequence: record.replacement_publication_sequence,
+        retired_at_ms: retired_at_ms.unwrap_or(record.retired_at_ms),
+        old_incarnation: &record.encoded[old_start..replacement_start],
+        replacement_incarnation: &record.encoded[replacement_start..replacement_end],
+      },
+      1,
+      &mut sink,
+    )
+    .unwrap();
+  sink.captured.unwrap()
+}
+
+fn publish_first_authority(publisher: &V4FirstAuthorityPublisher) {
+  publisher.publish(&request()).unwrap();
+}
+
+fn write_redundant_header(publisher: &V4FirstAuthorityPublisher, header: &DatabaseHeaderV4) {
+  let encoded = encode_database_header_slot(header).unwrap();
+  write_file_at_native(&publisher.file, 0, &encoded).unwrap();
+  write_file_at_native(&publisher.file, DATABASE_HEADER_V4_SLOT_LENGTH as u64, &encoded).unwrap();
+  sync_file_all_native(&publisher.file).unwrap();
+}
+
 #[test]
 fn staged_first_authority_entities_are_absent_from_every_published_snapshot() {
   let (_directory, _coordinator, publisher) = environment("hidden");
@@ -371,6 +481,207 @@ fn post_commit_failure_returns_the_exact_committed_receipt_and_retry_is_idempote
   assert_eq!(retry.publication_sequence, committed_sequence);
   assert_eq!(retry.namespace_root.root_hash, committed_root);
   assert_eq!(coordinator.snapshot().unwrap().next_sequence, committed_sequence + 1);
+}
+
+#[test]
+fn retirement_post_commit_failure_retries_the_exact_selected_entity_without_republication() {
+  let (_directory, _path, coordinator, mut publisher) = create_environment("retirement-post-commit", None);
+  publish_first_authority(&publisher);
+  let segment = captured_retirement_segment([0x31; 16]);
+  let mut observer = FailingPostCommitObserver;
+
+  let error = publisher.publish_retirement_journal_segment(&segment.prepared(), &mut observer).unwrap_err();
+
+  assert_eq!(error.code(), "retirement_journal_committed_postcondition");
+  let committed = publisher.observe().unwrap();
+  let committed_frontier = coordinator.snapshot().unwrap().hard_frontier;
+  let retry = publisher.publish_synced(&segment.prepared()).unwrap();
+  assert_eq!(retry.hard_publication_sequence, committed.selected.header.write_sequence_high_water);
+  assert_eq!(publisher.observe().unwrap(), committed);
+  assert_eq!(coordinator.snapshot().unwrap().hard_frontier, committed_frontier);
+}
+
+#[test]
+fn retirement_exact_retry_survives_later_header_timestamp_advancement() {
+  let (_directory, _path, coordinator, mut publisher) = create_environment("retirement-later-header", None);
+  publish_first_authority(&publisher);
+  let first_segment = captured_retirement_segment([0x31; 16]);
+  let first = publisher.publish_synced(&first_segment.prepared()).unwrap();
+  let first_entity_timestamp = publisher.observe().unwrap().selected.header.updated_at_ms;
+  let later_segment = captured_retirement_segment_with_timestamp([0x31; 16], Some(first_entity_timestamp + 10_000));
+  publisher.publish_synced(&later_segment.prepared()).unwrap();
+  let later_header = publisher.observe().unwrap();
+  let later_frontier = coordinator.snapshot().unwrap().hard_frontier;
+
+  let retry = publisher.publish_synced(&first_segment.prepared()).unwrap();
+
+  assert_eq!(retry, first);
+  assert_eq!(publisher.observe().unwrap(), later_header);
+  assert_eq!(coordinator.snapshot().unwrap().hard_frontier, later_frontier);
+}
+
+#[test]
+fn every_retirement_dependency_failure_keeps_the_old_selected_hot_tail_restartable() {
+  let phases = [DependencyFailurePhase::BeforeEntity, DependencyFailurePhase::EntityWritten, DependencyFailurePhase::EntityStaged];
+  for phase in phases {
+    let (_directory, path, coordinator, publisher) = create_environment(&format!("retirement-dependency-{phase:?}"), None);
+    publish_first_authority(&publisher);
+    let segment = captured_retirement_segment([0x31; 16]);
+    let before = publisher.observe().unwrap();
+    let mut observer = FailingDependencyObserver { phase, entity_index: 0 };
+
+    let error = publisher.publish_retirement_journal_segment(&segment.prepared(), &mut observer).unwrap_err();
+
+    assert_eq!(error.code(), "durability_failure", "phase {phase:?}");
+    assert_eq!(publisher.observe().unwrap(), before, "phase {phase:?}");
+    assert!(publisher.locator(&segment.artifact_key).unwrap().is_none(), "phase {phase:?}");
+    assert!(coordinator.hard_failure().unwrap().is_some(), "phase {phase:?}");
+    drop(publisher);
+
+    let (_restart_coordinator, mut reopened) = reopen(&path);
+    assert_eq!(reopened.observe().unwrap(), before, "phase {phase:?}");
+    assert!(reopened.locator(&segment.artifact_key).unwrap().is_none(), "phase {phase:?}");
+    reopened.publish_synced(&segment.prepared()).unwrap();
+    assert!(reopened.locator(&segment.artifact_key).unwrap().is_some(), "phase {phase:?}");
+  }
+}
+
+#[test]
+fn every_retirement_header_failure_reopens_as_old_or_one_complete_selected_entity() {
+  let failures = [
+    FirstAuthorityFailurePoint::DataBarrier,
+    FirstAuthorityFailurePoint::HeaderWriteBefore,
+    FirstAuthorityFailurePoint::HeaderWriteAfter,
+    FirstAuthorityFailurePoint::FullBarrier,
+    FirstAuthorityFailurePoint::Verify,
+  ];
+  for failure in failures {
+    let (_directory, path, coordinator, publisher) = create_environment(&format!("retirement-header-{failure:?}"), None);
+    publish_first_authority(&publisher);
+    let segment = captured_retirement_segment([0x31; 16]);
+    let before = publisher.observe().unwrap();
+    let publisher = V4FirstAuthorityPublisher {
+      file: publisher.file,
+      kv: publisher.kv,
+      header_publisher: DatabaseHeaderPublisherV4::with_io(coordinator.clone(), Arc::new(FaultingNativeHeaderPublicationIo { failure })),
+      root_state: publisher.root_state,
+    };
+
+    let error = publisher.publish_retirement_journal_segment(&segment.prepared(), &mut NoopFirstAuthorityDependencyObserverV1).unwrap_err();
+
+    assert_eq!(error.code(), "durability_failure", "failure point {failure:?}");
+    assert!(coordinator.hard_failure().unwrap().is_some(), "failure point {failure:?}");
+    let interrupted = publisher.observe().unwrap();
+    drop(publisher);
+
+    let (restart_coordinator, mut reopened) = reopen(&path);
+    assert_eq!(reopened.observe().unwrap(), interrupted, "failure point {failure:?}");
+    let selected_new_entity = interrupted.selected.header.write_sequence_high_water > before.selected.header.write_sequence_high_water;
+    assert_eq!(reopened.locator(&segment.artifact_key).unwrap().is_some(), selected_new_entity, "failure point {failure:?}");
+    let frontier_before_retry = restart_coordinator.snapshot().unwrap().hard_frontier;
+    let retry = reopened.publish_synced(&segment.prepared()).unwrap();
+    assert!(reopened.locator(&segment.artifact_key).unwrap().is_some(), "failure point {failure:?}");
+    if selected_new_entity {
+      assert_eq!(retry.hard_publication_sequence, interrupted.selected.header.write_sequence_high_water, "failure point {failure:?}");
+      assert_eq!(restart_coordinator.snapshot().unwrap().hard_frontier, frontier_before_retry, "failure point {failure:?}");
+    } else {
+      assert!(restart_coordinator.snapshot().unwrap().hard_frontier > frontier_before_retry, "failure point {failure:?}");
+    }
+  }
+}
+
+#[test]
+fn retirement_authority_preconditions_refuse_before_append_or_ticket_reservation() {
+  let segment = captured_retirement_segment([0x31; 16]);
+
+  let (_missing_directory, missing_path, missing_coordinator, mut missing) = create_environment("retirement-missing-authority", None);
+  let missing_before = missing.observe().unwrap();
+  let missing_length = std::fs::metadata(&missing_path).unwrap().len();
+  let missing_sequence = missing_coordinator.snapshot().unwrap().next_sequence;
+  let error = missing.publish_synced(&segment.prepared()).unwrap_err();
+  assert_eq!(error.code(), "retirement_journal_missing_authority");
+  assert_eq!(missing.observe().unwrap(), missing_before);
+  assert_eq!(std::fs::metadata(&missing_path).unwrap().len(), missing_length);
+  assert_eq!(missing_coordinator.snapshot().unwrap().next_sequence, missing_sequence);
+
+  let (_mismatch_directory, mismatch_path, mismatch_coordinator, mut mismatch) = create_environment("retirement-database-mismatch", None);
+  publish_first_authority(&mismatch);
+  let other_database_segment = captured_retirement_segment([0x32; 16]);
+  let mismatch_before = mismatch.observe().unwrap();
+  let mismatch_length = std::fs::metadata(&mismatch_path).unwrap().len();
+  let mismatch_sequence = mismatch_coordinator.snapshot().unwrap().next_sequence;
+  let error = mismatch.publish_synced(&other_database_segment.prepared()).unwrap_err();
+  assert_eq!(error.code(), "retirement_journal_database_mismatch");
+  assert_eq!(mismatch.observe().unwrap(), mismatch_before);
+  assert_eq!(std::fs::metadata(&mismatch_path).unwrap().len(), mismatch_length);
+  assert_eq!(mismatch_coordinator.snapshot().unwrap().next_sequence, mismatch_sequence);
+}
+
+#[test]
+fn degraded_or_exhausted_retirement_authority_refuses_without_flushing_baseline_state() {
+  let segment = captured_retirement_segment([0x31; 16]);
+
+  let (_degraded_directory, degraded_path, degraded_coordinator, mut degraded) = create_environment("retirement-degraded", None);
+  publish_first_authority(&degraded);
+  let selected = degraded.observe().unwrap().selected;
+  let invalid_slot_offset = ((1 - selected.selected_slot) * DATABASE_HEADER_V4_SLOT_LENGTH) as u64;
+  write_file_at_native(&degraded.file, invalid_slot_offset, &[0; DATABASE_HEADER_V4_SLOT_LENGTH]).unwrap();
+  sync_file_all_native(&degraded.file).unwrap();
+  let degraded_before = degraded.observe().unwrap();
+  assert!(degraded_before.selected.redundancy_degraded);
+  let degraded_length = std::fs::metadata(&degraded_path).unwrap().len();
+  let degraded_sequence = degraded_coordinator.snapshot().unwrap().next_sequence;
+  let error = degraded.publish_synced(&segment.prepared()).unwrap_err();
+  assert_eq!(error.code(), "retirement_journal_degraded_header");
+  assert_eq!(degraded.observe().unwrap(), degraded_before);
+  assert_eq!(std::fs::metadata(&degraded_path).unwrap().len(), degraded_length);
+  assert_eq!(degraded_coordinator.snapshot().unwrap().next_sequence, degraded_sequence);
+
+  let (_directory, path, coordinator, mut publisher) = create_environment("retirement-exhausted-write-sequence", None);
+  publish_first_authority(&publisher);
+  let mut header = publisher.observe().unwrap().selected.header;
+  header.write_sequence_high_water = u64::MAX;
+  write_redundant_header(&publisher, &header);
+  let before = publisher.observe().unwrap();
+  let before_length = std::fs::metadata(&path).unwrap().len();
+  let before_sequence = coordinator.snapshot().unwrap().next_sequence;
+
+  let error = publisher.publish_synced(&segment.prepared()).unwrap_err();
+
+  assert_eq!(error.code(), "retirement_journal_write_sequence_exhausted");
+  assert_eq!(publisher.observe().unwrap(), before);
+  assert_eq!(std::fs::metadata(&path).unwrap().len(), before_length);
+  assert_eq!(coordinator.snapshot().unwrap().next_sequence, before_sequence);
+}
+
+#[test]
+fn retirement_identity_collisions_refuse_before_flushing_or_header_mutation() {
+  for type_flags in [KV_TYPE_DIRECTORY, kv_tag::GC_ARTIFACT] {
+    let (_directory, path, coordinator, mut publisher) = create_environment(&format!("retirement-collision-{type_flags}"), None);
+    publish_first_authority(&publisher);
+    let segment = captured_retirement_segment([0x31; 16]);
+    {
+      let mut kv = publisher.kv.lock().unwrap();
+      kv.insert(KVEntry { type_flags, hash: segment.artifact_key.clone(), offset: 0, total_length: 1 }).unwrap();
+    }
+    let mut aligned_header = publisher.observe().unwrap().selected.header;
+    aligned_header.entry_count += 1;
+    write_redundant_header(&publisher, &aligned_header);
+    let before = publisher.observe().unwrap();
+    let before_length = std::fs::metadata(&path).unwrap().len();
+    let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
+
+    let error = publisher.publish_synced(&segment.prepared()).unwrap_err();
+
+    if type_flags == KV_TYPE_DIRECTORY {
+      assert_eq!(error.code(), "retirement_journal_identity_collision");
+    } else {
+      assert_eq!(error.code(), "truncated_entity_prefix");
+    }
+    assert_eq!(publisher.observe().unwrap(), before);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), before_length);
+    assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_frontier);
+  }
 }
 
 #[test]

@@ -16,6 +16,7 @@ use crate::engine::native_durability::{
 use crate::engine::{CompressionAlgorithm, DiskKVStore, HashAlgorithm};
 
 use super::control_store::SYSTEM_CONTROL_CONTENT_TYPE;
+use super::contract_generated::kv_tag;
 use super::database_header::DatabaseHeaderV4;
 use super::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, WholeEntityWriteV1, decode_whole_entity, encode_whole_entity};
 use super::header_publication::{
@@ -23,6 +24,10 @@ use super::header_publication::{
   observe_database_header_v4,
 };
 use super::hash::digest_parts;
+use super::gc_retirement::{
+  PreparedRetirementJournalSegmentV1, RetirementJournalDurabilityReceiptV1, RetirementJournalDurableSinkV1, RetirementJournalSinkErrorV1,
+};
+use super::gc_state::{decode_retirement_journal_segment_v1, retirement_journal_records_v1};
 use super::namespace::{
   EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_tree_root_v0,
   decode_semantic_object, encode_namespace_root,
@@ -237,6 +242,195 @@ impl V4FirstAuthorityPublisher {
     self.locator(&key)
   }
 
+  fn publish_retirement_journal_segment(
+    &self,
+    segment: &PreparedRetirementJournalSegmentV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<RetirementJournalDurabilityReceiptV1, RetirementJournalSinkErrorV1> {
+    let _authority = match self.root_state.lock() {
+      Ok(authority) => authority,
+      Err(poisoned) => {
+        drop(poisoned);
+        return Err(RetirementJournalSinkErrorV1::new(
+          "retirement_journal_authority_lock",
+          FirstAuthorityPublicationErrorV1::StateLockPoisoned,
+        ));
+      }
+    };
+    let observation = self.observe().map_err(retirement_sink_first_authority_error)?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded {
+      return Err(retirement_sink_invalid(
+        "retirement_journal_degraded_header",
+        "retirement-journal publication requires two valid v4 header slots",
+      ));
+    }
+    if header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(retirement_sink_invalid(
+        "retirement_journal_missing_authority",
+        "retirement-journal publication requires selected first authority",
+      ));
+    }
+
+    let decoded = decode_retirement_journal_segment_v1(segment.value, header.hash_algorithm).map_err(retirement_sink_format_error)?;
+    if decoded.key != segment.artifact_key
+      || decoded.segment_ordinal != segment.segment_ordinal
+      || decoded.generation != segment.generation
+      || decoded.first_replacement_sequence != segment.first_replacement_sequence
+      || decoded.last_replacement_sequence != segment.last_replacement_sequence
+      || decoded.record_count != segment.record_count
+    {
+      return Err(retirement_sink_invalid(
+        "retirement_journal_prepared_mismatch",
+        "prepared retirement-journal fields do not match the exact immutable artifact",
+      ));
+    }
+    if decoded.database_id != header.database_id {
+      return Err(retirement_sink_invalid(
+        "retirement_journal_database_mismatch",
+        "retirement-journal segment belongs to another logical database",
+      ));
+    }
+    let mut segment_timestamp_ms = 0;
+    for record in retirement_journal_records_v1(&decoded, header.hash_algorithm).map_err(retirement_sink_format_error)? {
+      let record = record.map_err(retirement_sink_format_error)?;
+      segment_timestamp_ms = segment_timestamp_ms.max(record.retired_at_ms);
+    }
+    let publication_timestamp_ms = header.updated_at_ms.max(segment_timestamp_ms);
+
+    let mut kv = self.lock_kv().map_err(retirement_sink_first_authority_error)?;
+    validate_kv_header_alignment(&kv, header).map_err(retirement_sink_first_authority_error)?;
+    if let Some(locator) = kv.get(segment.artifact_key).map_err(retirement_sink_engine_error)? {
+      if locator.type_flags != kv_tag::GC_ARTIFACT {
+        return Err(retirement_sink_invalid(
+          "retirement_journal_identity_collision",
+          "retirement-journal artifact key resolves to another KV role",
+        ));
+      }
+      let maximum_length =
+        super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, segment.artifact_key.len(), segment.value.len())
+          .map_err(retirement_sink_format_error)?;
+      let bytes = read_entity_bounded(&self.file, &kv, segment.artifact_key, maximum_length, header.write_sequence_high_water)
+        .map_err(retirement_sink_first_authority_error)?
+        .ok_or_else(|| retirement_sink_invalid("retirement_journal_readback_missing", "retirement-journal locator disappeared"))?;
+      let entity =
+        decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water).map_err(retirement_sink_format_error)?;
+      if entity.entry_type != EntryTypeV4::GcArtifact
+        || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+        || entity.compression_algorithm != CompressionAlgorithm::None
+        || entity.key != segment.artifact_key
+        || entity.stored_value != segment.value
+        || entity.timestamp_ms < segment_timestamp_ms
+      {
+        return Err(retirement_sink_invalid(
+          "retirement_journal_identity_collision",
+          "existing retirement-journal entity differs from the exact immutable artifact representation",
+        ));
+      }
+      return retirement_journal_receipt(segment, entity.write_sequence);
+    }
+
+    let write_sequence = header
+      .write_sequence_high_water
+      .checked_add(1)
+      .ok_or_else(|| retirement_sink_invalid("retirement_journal_write_sequence_exhausted", "v4 write sequence is exhausted"))?;
+    let entry_count = header
+      .entry_count
+      .checked_add(1)
+      .ok_or_else(|| retirement_sink_invalid("retirement_journal_entry_count_overflow", "v4 entry count overflowed"))?;
+    let entity_bytes = encode_entity(
+      EntryTypeV4::GcArtifact,
+      WHOLE_ENTITY_V1_FLAG_SYSTEM,
+      header.hash_algorithm,
+      publication_timestamp_ms,
+      write_sequence,
+      segment.artifact_key,
+      segment.value,
+    )
+    .map_err(retirement_sink_first_authority_error)?;
+    let entities = [PreparedWholeEntityV1 { key: segment.artifact_key.to_vec(), kv_type: kv_tag::GC_ARTIFACT, bytes: entity_bytes }];
+    let dependency_bytes =
+      entity_dependency_bytes(&entities, header.hash_algorithm.hash_length()).map_err(retirement_sink_first_authority_error)?;
+
+    kv.flush().map_err(retirement_sink_engine_error)?;
+    validate_kv_header_alignment(&kv, header).map_err(retirement_sink_first_authority_error)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(retirement_sink_invalid(
+        "retirement_journal_baseline_not_flushed",
+        "retirement-journal publication requires an empty KV write and hot-buffer baseline",
+      ));
+    }
+    let append_start = self.file.metadata().map_err(|error| retirement_sink_engine_error(EngineError::IoError(error)))?.len();
+    if append_start < header.hot_tail_offset {
+      return Err(retirement_sink_invalid("retirement_journal_file_truncated", "database length precedes the selected v4 hot-tail offset"));
+    }
+    let expected_hot_tail_offset = append_start
+      .checked_add(entities[0].bytes.len() as u64)
+      .ok_or_else(|| retirement_sink_invalid("retirement_journal_wal_overflow", "retirement-journal WAL offset overflowed"))?;
+    let mut candidate = header.clone();
+    candidate.updated_at_ms = publication_timestamp_ms;
+    candidate.write_sequence_high_water = write_sequence;
+    candidate.hot_tail_offset = expected_hot_tail_offset;
+    candidate.entry_count = entry_count;
+    let admitted = self
+      .header_publisher
+      .admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)
+      .map_err(retirement_sink_header_error)?;
+    let authority_sequence = admitted.sequence();
+    let batch = kv.begin_atomic_visibility_batch(1, authority_sequence).map_err(retirement_sink_engine_error)?;
+    let (publication_result, append_completed) = {
+      let mut dependency = FirstAuthorityDependencyV1 {
+        file: &self.file,
+        kv: &mut kv,
+        batch,
+        expected_publication_sequence: authority_sequence,
+        entities: &entities,
+        start_offset: append_start,
+        expected_hot_tail_offset,
+        append_completed: false,
+        observer,
+      };
+      let publication_result = admitted.commit_with_dependency(&mut dependency);
+      (publication_result, dependency.append_completed)
+    };
+    let publication = match publication_result {
+      Ok(publication) => publication,
+      Err(error) => {
+        kv.abort_atomic_visibility_batch(batch).map_err(retirement_sink_engine_error)?;
+        return Err(retirement_sink_header_error(error));
+      }
+    };
+    if !append_completed {
+      kv.abort_atomic_visibility_batch(batch).map_err(retirement_sink_engine_error)?;
+      return Err(retirement_sink_invalid(
+        "retirement_journal_dependency_missing",
+        "header publication completed without the exact retirement-journal dependency append",
+      ));
+    }
+    kv.complete_hot_tail_dependency();
+    kv.publish_atomic_visibility_after_authority(batch, &publication.durability).map_err(retirement_sink_engine_error)?;
+    observer
+      .authority_committed(&kv, &entities)
+      .map_err(|error| RetirementJournalSinkErrorV1::new("retirement_journal_committed_postcondition", error))?;
+
+    let stored = read_entity_bounded(
+      &self.file,
+      &kv,
+      segment.artifact_key,
+      entities[0].bytes.len(),
+      publication.observation.selected.header.write_sequence_high_water,
+    )
+    .map_err(retirement_sink_first_authority_error)?
+    .ok_or_else(|| retirement_sink_invalid("retirement_journal_readback_missing", "published retirement-journal locator is absent"))?;
+    if stored != entities[0].bytes {
+      return Err(retirement_sink_invalid(
+        "retirement_journal_readback_mismatch",
+        "published retirement-journal entity differs from its exact prepared bytes",
+      ));
+    }
+    retirement_journal_receipt(segment, write_sequence)
+  }
+
   pub fn publish(
     &self,
     request: &FirstAuthorityPublicationRequestV1,
@@ -439,6 +633,16 @@ impl V4FirstAuthorityPublisher {
   }
 }
 
+impl RetirementJournalDurableSinkV1 for V4FirstAuthorityPublisher {
+  fn publish_synced(
+    &mut self,
+    segment: &PreparedRetirementJournalSegmentV1<'_>,
+  ) -> Result<RetirementJournalDurabilityReceiptV1, RetirementJournalSinkErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_retirement_journal_segment(segment, &mut observer)
+  }
+}
+
 fn prepare_namespace_root(
   request: &FirstAuthorityPublicationRequestV1,
   algorithm: HashAlgorithm,
@@ -504,7 +708,11 @@ fn refuse_existing_entities(kv: &DiskKVStore, entities: &[PreparedWholeEntityV1]
 }
 
 fn package_dependency_bytes(package: &FirstAuthorityPackageV1, hash_length: usize) -> Result<u64, FirstAuthorityPublicationErrorV1> {
-  let entity_bytes = package.entities.iter().try_fold(0u64, |total, entity| {
+  entity_dependency_bytes(&package.entities, hash_length)
+}
+
+fn entity_dependency_bytes(entities: &[PreparedWholeEntityV1], hash_length: usize) -> Result<u64, FirstAuthorityPublicationErrorV1> {
+  let entity_bytes = entities.iter().try_fold(0u64, |total, entity| {
     let length = match u64::try_from(entity.bytes.len()) {
       Ok(length) => length,
       Err(error) => {
@@ -518,7 +726,7 @@ fn package_dependency_bytes(package: &FirstAuthorityPackageV1, hash_length: usiz
       .checked_add(length)
       .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_package_size", "entity byte total overflowed"))
   })?;
-  let hot_tail_bytes = crate::engine::hot_tail::serialized_size(package.entities.len(), 0, hash_length)?;
+  let hot_tail_bytes = crate::engine::hot_tail::serialized_size(entities.len(), 0, hash_length)?;
   let hot_tail_bytes = match u64::try_from(hot_tail_bytes) {
     Ok(hot_tail_bytes) => hot_tail_bytes,
     Err(error) => {
@@ -531,6 +739,43 @@ fn package_dependency_bytes(package: &FirstAuthorityPackageV1, hash_length: usiz
   entity_bytes
     .checked_add(hot_tail_bytes)
     .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_package_size", "dependency byte total overflowed"))
+}
+
+fn retirement_journal_receipt(
+  segment: &PreparedRetirementJournalSegmentV1<'_>,
+  hard_publication_sequence: u64,
+) -> Result<RetirementJournalDurabilityReceiptV1, RetirementJournalSinkErrorV1> {
+  let stored_value_length =
+    u32::try_from(segment.value.len()).map_err(|error| RetirementJournalSinkErrorV1::new("retirement_journal_value_length", error))?;
+  if hard_publication_sequence == 0 {
+    return Err(retirement_sink_invalid(
+      "retirement_journal_publication_sequence",
+      "retirement-journal entity has no durable v4 write sequence",
+    ));
+  }
+  Ok(RetirementJournalDurabilityReceiptV1 { artifact_key: segment.artifact_key.to_vec(), stored_value_length, hard_publication_sequence })
+}
+
+fn retirement_sink_invalid(code: &'static str, message: &'static str) -> RetirementJournalSinkErrorV1 {
+  RetirementJournalSinkErrorV1::new(code, FirstAuthorityPublicationErrorV1::invalid(code, message))
+}
+
+fn retirement_sink_format_error(error: FormatError) -> RetirementJournalSinkErrorV1 {
+  RetirementJournalSinkErrorV1::new(error.code(), error)
+}
+
+fn retirement_sink_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> RetirementJournalSinkErrorV1 {
+  let code = error.code();
+  RetirementJournalSinkErrorV1::new(code, error)
+}
+
+fn retirement_sink_header_error(error: DatabaseHeaderPublicationErrorV4) -> RetirementJournalSinkErrorV1 {
+  let code = error.code();
+  RetirementJournalSinkErrorV1::new(code, error)
+}
+
+fn retirement_sink_engine_error(error: EngineError) -> RetirementJournalSinkErrorV1 {
+  RetirementJournalSinkErrorV1::new("retirement_journal_storage", error)
 }
 
 fn build_package(
