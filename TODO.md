@@ -548,7 +548,7 @@
         - [x] Reject malformed or non-Unicode logging directives through fallible CLI startup and diagnostic entry points instead of silently selecting another filter.
         - [x] Emit a typed `stream_gap` SSE control event on global and per-user broadcast lag instead of silently leaving client views stale.
       - [x] Run narrow, affected, architecture, contract, broad, and documentation gates; record and land the P2f evidence boundary (`8f2ab42`).
-    - [ ] P3a: add exact v4 format writers without activating v4 service authority.
+    - [x] P3a: add exact v4 format writers without activating v4 service authority.
       - [x] P3a-1: add checked common encoders whose output byte-matches the independent DatabaseHeaderV4 and WholeEntityV1 fixtures.
         - [x] Prove exact Blake3-256 and SHA-512 fixture equality before production implementation.
         - [x] Reject invalid identities, capabilities, versions, regions, flags, algorithms, lengths, sequences, and overflow before output.
@@ -568,13 +568,13 @@
         - [x] Accept legacy v0 slots only as migration input and roll both A/B slots forward through normal inactive-slot publication.
         - [x] Prove validation-before-mutation, sequence serialization, idempotency, hard acknowledgement, restart, and no production caller.
         - [x] Run focused, adjacent, workspace, architecture, native, documentation, and real-world shadow-write gates; record and land the unit.
-      - [ ] P3a-5: activate only the writer capabilities proven by exact readers/writers and keep namespace/index/GC/migration service activation disabled.
+      - [x] P3a-5: activate only the writer capabilities proven by exact readers/writers and keep namespace/index/GC/migration service activation disabled.
         - [x] Map capability-profile producers, writable/peer consumers, exact P3a writers, and service-activation boundaries.
         - [x] Add and demonstrate the failure-first exact writer-capability profile test.
         - [x] Advertise only WholeEntityV1 and SystemControlV1 writers; keep partial immutable-only IndexArtifactV1 and GcArtifactV1 support disabled.
         - [x] Prove all other capabilities remain disabled and current writable/peer admission still fails closed.
-        - [ ] Run P3a focused, adjacent, workspace, architecture, native, documentation, and shadow-storage gates; record and land the phase.
-      - [ ] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.
+        - [x] Run P3a focused, adjacent, workspace, architecture, native, documentation, and shadow-storage gates; record and land the phase.
+      - [x] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.

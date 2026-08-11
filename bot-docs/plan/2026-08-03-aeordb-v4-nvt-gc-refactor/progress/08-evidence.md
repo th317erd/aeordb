@@ -3,14 +3,14 @@
 ## Landing State
 
 - **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** P3a-4 ControlStore FileRecord publication is complete; P3a-5 capability activation is next.
+- **Current landing unit:** Child 01 P3a is complete; Child 03 P3b-1 immutable root/semantic readers and reference model are next.
 - **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P3a-4 implementation commit `4d4ef27` plus native Windows test-oracle correction `14fbace` on `development` and `origin/development`.
+- **Last pushed green commit:** P3a-5 writer capability profile commit `ec20bd4` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
 - **Owned files:** this ledger; suppression scanner/inventory; architecture target; narrowly required production corrections and regression tests; affected operator documentation.
-- **Forbidden files and actions honored:** no v4 writer activation, migration/cutover activation, production or evidence database mutation, deployment, `.codex/DETAILS.md`, `.codex/wip.md`, or `downloads/` changes.
+- **Forbidden files and actions honored:** no v4 service authority, migration/cutover activation, production or evidence database mutation, deployment, `.codex/DETAILS.md`, `.codex/wip.md`, or `downloads/` changes.
 
 ## Inventory Contract
 
@@ -66,11 +66,12 @@ Optional cleanup and telemetry failures retain the acknowledged primary result o
 - The corrected Linux workspace/all-target closure passes 5,463 tests across 207 result groups with zero failures and seven intentionally ignored stress cases. Its log SHA-256 is `417c3bfe37314d69f7a51e975373f12e733c9fee75281eca4d1dd4433deaec88`; the suppression inventory remains exactly 1,420 reviewed occurrences after refreshing four line-only metadata entries.
 - P3a-3 adds disconnected immutable AIDX/AGCA envelope writers only. All 54 immutable index and 92 immutable GC fixtures byte- and key-match the independent oracle; every mutable pointer/control fixture is excluded or rejected; every kind cap and allocation boundary is frozen independently. The complete workspace/all-target closure passes 5,468 tests across 207 result groups with zero failures and seven intentionally ignored crash-injection cases. Its log SHA-256 is `36fe2ba3e784e61ee19890602dcfcc3c927900e35a91ba7bcfb41d2b31a14878`; the reviewed suppression inventory remains exactly 1,420 entries.
 - P3a-4 publishes every validated mutable and immutable SystemControlV1 payload through one typed FileRecord v1 adapter, shared namespace authority, and hard durability acknowledgement. Legacy v0 wrappers remain migration input only. The exact native ten-target matrix passes 203 tests on both macOS arm64 and Windows x86_64 MSVC, and the final Linux workspace closure passes 5,478 tests across 208 result groups with zero failures and seven intentional ignores.
-- No writer capability, service authority, route, migration destination, deployment, or live database byte is active.
+- P3a-5 advertises only complete common-format writers: WholeEntityV1 bit 0 and SystemControlV1 bit 4. Partial immutable-only IndexArtifactV1 and GcArtifactV1 writers do not advertise bits 7/12 because their mutable pointer/control families remain absent. Current writable and peer admission still fail closed on the nine missing baseline writer capabilities.
+- No service authority, route, migration destination, deployment, or production database byte is active.
 
 ## Next Action
 
-Begin P3a-5 with an exact capability-profile red test. Advertise only writer capabilities whose reader, encoder, publication path, and independent fixtures are already green; retain fail-closed v4 writable admission because namespace, semantic-state, root-admission, index-page/NVT, GC-state, and migration writers remain inactive. Keep Child 03 P3b immutable roots/read views behind its own start gate; P7 migration work remains forbidden until its gate.
+Begin Child 03 P3b-1 with a fresh immutable namespace-root, semantic-state, admission-witness, lifecycle, and historical-read territory map plus an independent reference model. Keep shadow root publication in P3b-2 and read-view/service activation in P3b-3 behind their own gates; P7 migration work remains forbidden until its gate.
 
 ## P3a-4 Entry Territory
 
@@ -91,3 +92,11 @@ Begin P3a-5 with an exact capability-profile red test. Advertise only writer cap
 - **Exact Linux closure:** the final `14fbace` workspace/all-target run passes 5,478 tests across 208 result groups with zero failures and seven intentionally ignored crash-injection cases. Preserved log SHA-256: `84dd209b4a042db380cf50dbfd65ba41f4e37f5d3310206e86c66e1e455d1cc8`.
 - **Real storage boundary:** the disconnected writer has deliberately no HTTP, startup, migration, or service caller, so an HTTP live test would falsely activate authority. The focused target instead exercises the real `StorageEngine` and namespace/durability coordinators against disposable database files, including shutdown/reopen and byte-exact read-back on all three native platforms.
 - **Boundary:** P3a-4 activates no v4 writer capability, service/storage caller, startup admission, route, migration destination, deployment, or production database byte. P3a-5 owns the capability-profile change.
+
+## P3a-5 Capability Profile Qualification
+
+- **Red proof:** the first exact profile test failed because the binary advertised no writers. An adversarial contract pass then rejected the initial proposed `[0, 4, 7, 12]` profile: bits 7/12 cover complete artifact families, while P3a-3 deliberately has no mutable A/B pointer/control writers. A second preserved red run proves those extra bits were present before the profile was tightened. Logs: `/home/wyatt/.cache/codex/aeordb-tests/logs/p3a5-capability-profile-red.log` and `/home/wyatt/.cache/codex/aeordb-tests/logs/p3a5-partial-artifact-capability-red.log`.
+- **Exact profile:** `BinaryCapabilityProfileV1::current()` continues to advertise all 24 readers and now advertises only WholeEntityV1 bit 0 and SystemControlV1 bit 4. Generated capability constants feed one private const bit builder. All other bits remain absent; IndexArtifactV1 and GcArtifactV1 stay disabled until their complete mutable families exist.
+- **Fail-closed proof:** writable admission reports the exact missing baseline bits `[1, 2, 3, 5, 6, 18, 19, 21, 22]`. A peer source/destination pair using the current profile fails as `peer_destination_writer_capability_mismatch`. Source architecture proves no production `admit_v4_header` or current-profile caller exists, and the storage engine still has no P3 writer caller.
+- **Qualification:** the eight-target P3a matrix passes 150 tests locally, on macOS arm64, and on Windows x86_64 MSVC at exact commit `ec20bd4a9627f48d52ddf38d0f4a723fa4203d4a`. The complete Linux workspace passes 5,479 tests across 208 groups with zero failures and seven intentional ignores; log SHA-256 is `2bba8e296ce453d2ff7387ec5c77e385f749a4e539dd498865a87304ced6a6d7`. Workspace/all-target checking, both Rust formatters, mdBook, `git diff --check`, the 436-fixture/95-route/38-page contract gate, all 27 suppression architecture tests, and the exact 1,420-entry suppression check pass. Three suppression rows moved by line only; normalized entry SHA-256 remains `16b0368f9d415224028baa5657d16975964da4559717731d144fca526de205a8`.
+- **Boundary:** capability self-description changes, but no v4 database header is selected by service startup and no service, storage, route, peer, migration, index, GC, or root authority caller consumes the profile. No persistent byte or production database changed.
