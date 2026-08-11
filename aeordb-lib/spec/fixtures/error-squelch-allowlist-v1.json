@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 290,
+      "line": 852,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 709,
+      "line": 1275,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 712,
+      "line": 1278,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -9636,7 +9636,7 @@
     {
       "id": "esq-v1-99874e4a452f57413152-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 742,
+      "line": 832,
       "column": 29,
       "enclosing_item": "impl RetirementJournalReplacementCoordinatorV1 < 'coordinator , 'owner >::prepare",
       "kind": "error_conversion",
@@ -9646,7 +9646,7 @@
     {
       "id": "esq-v1-3568baeb31a260286058-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 907,
+      "line": 1053,
       "column": 27,
       "enclosing_item": "retirement_journal_replacement_batch_digest_v1",
       "kind": "error_conversion",
@@ -9656,7 +9656,7 @@
     {
       "id": "esq-v1-d1ac4a4e0eccd7d04809-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1192,
+      "line": 1407,
       "column": 41,
       "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::preflight_record_batch",
       "kind": "error_conversion",
@@ -9666,7 +9666,7 @@
     {
       "id": "esq-v1-7fd6acfc452b039de5f9-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1240,
+      "line": 1455,
       "column": 39,
       "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::validate_order",
       "kind": "error_conversion",
@@ -9676,7 +9676,7 @@
     {
       "id": "esq-v1-ebca7a6d4001c52e8d58-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1284,
+      "line": 1499,
       "column": 31,
       "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::flush_pending",
       "kind": "error_conversion",
@@ -9686,7 +9686,7 @@
     {
       "id": "esq-v1-e20f2faf36fefe6a0111-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1321,
+      "line": 1536,
       "column": 27,
       "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::encode_pending_segment",
       "kind": "error_conversion",
@@ -9696,7 +9696,7 @@
     {
       "id": "esq-v1-b9ee108cf38bb1b167d3-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1386,
+      "line": 1601,
       "column": 3,
       "enclosing_item": "required_memory_bytes",
       "kind": "error_conversion",
@@ -9706,7 +9706,7 @@
     {
       "id": "esq-v1-04fce5a85a12011c3fd8-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1412,
+      "line": 1627,
       "column": 30,
       "enclosing_item": "encode_record",
       "kind": "error_conversion",

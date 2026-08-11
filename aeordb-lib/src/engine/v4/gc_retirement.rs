@@ -9,6 +9,7 @@
 use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use thiserror::Error as ThisError;
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,8 @@ pub const RETIREMENT_JOURNAL_TARGET_SEGMENT_BYTES_V1: usize = 1024 * 1024;
 pub const RETIREMENT_JOURNAL_MAX_SEGMENT_BYTES_V1: usize = 16 * 1024 * 1024;
 pub const RETIREMENT_JOURNAL_DEFAULT_FLUSH_RECORDS_V1: u32 = 4_096;
 pub const RETIREMENT_JOURNAL_DEFAULT_FLUSH_AFTER_MS_V1: u64 = 30_000;
+
+static NEXT_RETIREMENT_JOURNAL_OWNER_INSTANCE_ID_V1: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy)]
 pub enum PhysicalInventoryRetirementClassificationV1<'a> {
@@ -483,6 +486,10 @@ pub enum RetirementJournalOwnerErrorV1 {
   ArithmeticOverflow,
   #[error("retirement journal durability receipt does not bind the published segment")]
   ReceiptMismatch { incoming_record_retained: bool },
+  #[error("buffered retirement rollback belongs to another owner")]
+  BufferedRollbackOwner,
+  #[error("buffered retirement rollback no longer matches the owner's exact soft state")]
+  BufferedRollbackState,
   #[error("retirement journal durable sink failed: {source}")]
   Sink {
     #[source]
@@ -506,6 +513,8 @@ impl RetirementJournalOwnerErrorV1 {
       Self::RecordOrder => "retirement_journal_record_order",
       Self::ArithmeticOverflow => "retirement_journal_arithmetic",
       Self::ReceiptMismatch { .. } => "retirement_journal_receipt",
+      Self::BufferedRollbackOwner => "retirement_journal_buffered_rollback_owner",
+      Self::BufferedRollbackState => "retirement_journal_buffered_rollback_state",
       Self::Sink { .. } => "retirement_journal_sink",
       Self::Format(error) => error.code(),
       Self::Memory(_) => "retirement_journal_memory",
@@ -602,6 +611,7 @@ impl RetirementJournalActivationPermitV1 {
 pub struct PreparedRetirementJournalReplacementV1 {
   permit: RetirementJournalActivationPermitV1,
   journal_state: RetirementJournalActivationJournalStateV1,
+  buffered_rollback: Option<Box<RetirementJournalBufferedRollbackV1>>,
 }
 
 impl PreparedRetirementJournalReplacementV1 {
@@ -622,6 +632,86 @@ impl PreparedRetirementJournalReplacementV1 {
       Err(source) => Err(RetirementJournalReplacementErrorV1::Activation { source, prepared: self }),
     }
   }
+
+  /// Remove the exact soft record admitted by `prepare_buffered_single` after
+  /// a replacement is proven not to have activated.
+  ///
+  /// Any intervening owner mutation latches the owner instead of guessing
+  /// which retirement evidence is safe to remove.
+  pub fn discard_buffered(mut self, owner: &mut RetirementJournalOwnerV1<'_>) -> Result<(), RetirementJournalBufferedDiscardErrorV1> {
+    let Some(rollback) = self.buffered_rollback.as_ref() else {
+      return Err(RetirementJournalBufferedDiscardErrorV1::new(RetirementJournalOwnerErrorV1::BufferedRollbackState, self));
+    };
+    if rollback.owner_instance_id != owner.owner_instance_id
+      || rollback.algorithm != owner.algorithm
+      || rollback.database_id != owner.database_id
+    {
+      return Err(RetirementJournalBufferedDiscardErrorV1::new(RetirementJournalOwnerErrorV1::BufferedRollbackOwner, self));
+    }
+    if owner.soft_state() != rollback.after {
+      owner.failed = true;
+      return Err(RetirementJournalBufferedDiscardErrorV1::new(RetirementJournalOwnerErrorV1::BufferedRollbackState, self));
+    }
+    let Some(rollback) = self.buffered_rollback.take() else {
+      return Err(RetirementJournalBufferedDiscardErrorV1::new(RetirementJournalOwnerErrorV1::BufferedRollbackState, self));
+    };
+    let rollback = *rollback;
+    owner.restore_soft_state(rollback.before);
+    Ok(())
+  }
+}
+
+#[derive(Debug)]
+pub struct RetirementJournalBufferedDiscardErrorV1 {
+  source: RetirementJournalOwnerErrorV1,
+  prepared: Box<PreparedRetirementJournalReplacementV1>,
+}
+
+impl RetirementJournalBufferedDiscardErrorV1 {
+  fn new(source: RetirementJournalOwnerErrorV1, prepared: PreparedRetirementJournalReplacementV1) -> Self {
+    Self { source, prepared: Box::new(prepared) }
+  }
+
+  pub fn code(&self) -> &'static str {
+    self.source.code()
+  }
+
+  pub fn into_parts(self) -> (RetirementJournalOwnerErrorV1, Box<PreparedRetirementJournalReplacementV1>) {
+    (self.source, self.prepared)
+  }
+}
+
+impl Display for RetirementJournalBufferedDiscardErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    write!(formatter, "buffered retirement rollback refused: {}", self.source)
+  }
+}
+
+impl Error for RetirementJournalBufferedDiscardErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    Some(&self.source)
+  }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RetirementJournalSoftStateV1 {
+  records_length: usize,
+  pending_records: u32,
+  pending_first_sequence: u64,
+  pending_last_sequence: u64,
+  pending_started_at_ms: Option<u64>,
+  last_observed_at_ms: Option<u64>,
+  last_record_sequence: u64,
+  last_old_incarnation: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct RetirementJournalBufferedRollbackV1 {
+  owner_instance_id: u64,
+  algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  before: RetirementJournalSoftStateV1,
+  after: RetirementJournalSoftStateV1,
 }
 
 #[must_use = "replacement outcome may contain a deferred retirement-journal durability failure"]
@@ -796,6 +886,62 @@ impl<'coordinator, 'owner> RetirementJournalReplacementCoordinatorV1<'coordinato
         batch_digest,
       },
       journal_state,
+      buffered_rollback: None,
+    })
+  }
+
+  /// Admit one already-appended replacement without recursively invoking the
+  /// durable sink while its publication authority is held.
+  ///
+  /// The caller must activate through the returned permit and flush the owner
+  /// immediately after releasing that authority. A crash before the flush can
+  /// only lose soft retirement evidence; physical reconciliation then leaks or
+  /// protects the affected extent instead of authorizing reclaim.
+  pub fn prepare_buffered_single(
+    &mut self,
+    batch: RetirementJournalReplacementBatchV1<'_>,
+    monotonic_now_ms: u64,
+  ) -> Result<PreparedRetirementJournalReplacementV1, RetirementJournalReplacementAdmissionErrorV1> {
+    if batch.replacements.len() != 1 {
+      return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("buffered authority admission requires exactly one replacement"));
+    }
+    let (reason_counts, batch_digest) = self.preflight_batch(&batch, monotonic_now_ms)?;
+    let replacement = &batch.replacements[0];
+    let before = self.owner.soft_state();
+    self
+      .owner
+      .append_buffered(
+        RetirementJournalRecordWriteV1 {
+          reason: replacement.reason,
+          replacement_publication_sequence: batch.replacement_publication_sequence,
+          retired_at_ms: batch.retired_at_ms,
+          old_incarnation: replacement.old_incarnation,
+          replacement_incarnation: replacement.replacement_incarnation,
+        },
+        monotonic_now_ms,
+      )
+      .map_err(|source| RetirementJournalReplacementAdmissionErrorV1::Journal {
+        admitted_records: u32::from(source.incoming_record_retained()),
+        source,
+      })?;
+    let after = self.owner.soft_state();
+    Ok(PreparedRetirementJournalReplacementV1 {
+      permit: RetirementJournalActivationPermitV1 {
+        hash_algorithm: self.owner.algorithm,
+        replacement_publication_sequence: batch.replacement_publication_sequence,
+        retired_at_ms: batch.retired_at_ms,
+        replacement_count: 1,
+        reason_counts,
+        batch_digest,
+      },
+      journal_state: RetirementJournalActivationJournalStateV1::Buffered,
+      buffered_rollback: Some(Box::new(RetirementJournalBufferedRollbackV1 {
+        owner_instance_id: self.owner.owner_instance_id,
+        algorithm: self.owner.algorithm,
+        database_id: self.owner.database_id,
+        before,
+        after,
+      })),
     })
   }
 
@@ -944,6 +1090,7 @@ fn physical_extents_overlap(left: &PhysicalIncarnationV1<'_>, right: &PhysicalIn
 }
 
 pub struct RetirementJournalOwnerV1<'a> {
+  owner_instance_id: u64,
   algorithm: HashAlgorithm,
   database_id: [u8; 16],
   next_segment_ordinal: u64,
@@ -1080,8 +1227,25 @@ impl<'a> RetirementJournalOwnerV1<'a> {
     validate_options(algorithm, options)?;
     let required_memory = required_memory_bytes(options)?;
     let reservation = memory.reserve(MemoryOwner::GarbageCollection, required_memory, AdmissionClass::Maintenance)?;
+    let mut owner_instance_id = NEXT_RETIREMENT_JOURNAL_OWNER_INSTANCE_ID_V1.load(AtomicOrdering::Relaxed);
+    loop {
+      let next_owner_instance_id = owner_instance_id.checked_add(1).ok_or(RetirementJournalOwnerErrorV1::ArithmeticOverflow)?;
+      match NEXT_RETIREMENT_JOURNAL_OWNER_INSTANCE_ID_V1.compare_exchange_weak(
+        owner_instance_id,
+        next_owner_instance_id,
+        AtomicOrdering::Relaxed,
+        AtomicOrdering::Relaxed,
+      ) {
+        Ok(reserved_owner_instance_id) => {
+          owner_instance_id = reserved_owner_instance_id;
+          break;
+        }
+        Err(observed_owner_instance_id) => owner_instance_id = observed_owner_instance_id,
+      }
+    }
     let record_capacity = options.target_segment_bytes.saturating_sub(complete_segment_fixed_length(algorithm));
     Ok(Self {
+      owner_instance_id,
       algorithm,
       database_id,
       next_segment_ordinal: state.next_segment_ordinal,
@@ -1144,6 +1308,33 @@ impl<'a> RetirementJournalOwnerV1<'a> {
     Ok(())
   }
 
+  fn append_buffered(
+    &mut self,
+    record: RetirementJournalRecordWriteV1<'_>,
+    monotonic_now_ms: u64,
+  ) -> Result<(), RetirementJournalOwnerErrorV1> {
+    self.preflight(monotonic_now_ms)?;
+    let encoded = encode_record(record, self.algorithm)?;
+    self.validate_order(&encoded)?;
+    let prospective_length =
+      self.current_segment_length().checked_add(encoded.len()).ok_or(RetirementJournalOwnerErrorV1::ArithmeticOverflow)?;
+    if prospective_length > self.options.target_segment_bytes {
+      return Err(RetirementJournalOwnerErrorV1::InvalidOptions("buffered replacement does not fit the admitted retirement segment"));
+    }
+    let pending_records = self.pending_records.checked_add(1).ok_or(RetirementJournalOwnerErrorV1::ArithmeticOverflow)?;
+    if self.pending_records == 0 {
+      self.pending_first_sequence = record.replacement_publication_sequence;
+      self.pending_started_at_ms = Some(monotonic_now_ms);
+    }
+    self.records.extend_from_slice(&encoded);
+    self.pending_records = pending_records;
+    self.pending_last_sequence = record.replacement_publication_sequence;
+    self.last_record_sequence = record.replacement_publication_sequence;
+    self.last_old_incarnation.clear();
+    self.last_old_incarnation.extend_from_slice(record.old_incarnation);
+    Ok(())
+  }
+
   pub fn poll(
     &mut self,
     monotonic_now_ms: u64,
@@ -1177,6 +1368,30 @@ impl<'a> RetirementJournalOwnerV1<'a> {
       last_hard_publication_sequence: self.last_hard_publication_sequence,
       failed: self.failed,
     }
+  }
+
+  fn soft_state(&self) -> RetirementJournalSoftStateV1 {
+    RetirementJournalSoftStateV1 {
+      records_length: self.records.len(),
+      pending_records: self.pending_records,
+      pending_first_sequence: self.pending_first_sequence,
+      pending_last_sequence: self.pending_last_sequence,
+      pending_started_at_ms: self.pending_started_at_ms,
+      last_observed_at_ms: self.last_observed_at_ms,
+      last_record_sequence: self.last_record_sequence,
+      last_old_incarnation: self.last_old_incarnation.clone(),
+    }
+  }
+
+  fn restore_soft_state(&mut self, state: RetirementJournalSoftStateV1) {
+    self.records.truncate(state.records_length);
+    self.pending_records = state.pending_records;
+    self.pending_first_sequence = state.pending_first_sequence;
+    self.pending_last_sequence = state.pending_last_sequence;
+    self.pending_started_at_ms = state.pending_started_at_ms;
+    self.last_observed_at_ms = state.last_observed_at_ms;
+    self.last_record_sequence = state.last_record_sequence;
+    self.last_old_incarnation = state.last_old_incarnation;
   }
 
   pub(crate) fn preflight_record_batch<'record>(

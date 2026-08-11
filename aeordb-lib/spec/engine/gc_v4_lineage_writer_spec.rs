@@ -433,5 +433,10 @@ fn writer_has_no_live_service_or_independent_watermark_control_caller() {
       callers.push(path.strip_prefix(&source_root).unwrap().to_owned());
     }
   }
-  assert!(callers.is_empty(), "retirement owner activated outside P4-2: {callers:?}");
+  callers.sort();
+  assert_eq!(
+    callers,
+    [PathBuf::from("engine/v4/first_authority.rs")],
+    "retirement owner must remain confined to the disconnected P4 first-authority owner"
+  );
 }

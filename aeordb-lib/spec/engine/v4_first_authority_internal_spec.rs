@@ -11,6 +11,13 @@ use crate::engine::v4::database_header::{
   DATABASE_HEADER_V4_DATA_OFFSET, DATABASE_HEADER_V4_REGION_LENGTH, DATABASE_HEADER_V4_SLOT_LENGTH, encode_database_header_slot,
 };
 use crate::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1, RetirementJournalRecordWriteV1};
+use crate::engine::v4::gc::{
+  EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlWriteV1, GcArtifactKindV1, encode_gc_active_control,
+};
+use crate::engine::v4::gc_mark::{MarkRunCheckpointWriteV1, encode_mark_run_checkpoint};
+use crate::engine::v4::gc_mark_workspace::{
+  DurableMarkWorkspaceClosureV1, DurableMarkWorkspaceV1, MarkWorkspaceBasisV1, MarkWorkspaceIdentityV1, MarkWorkspaceOptionsV1,
+};
 use crate::engine::v4::header_publication::HeaderPublicationIo;
 use crate::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use tokio_util::sync::CancellationToken;
@@ -116,6 +123,25 @@ impl FirstAuthorityDependencyObserverV1 for FailingPostCommitObserver {
   }
 }
 
+struct CancelRetirementAfterCommitObserver {
+  cancellation: CancellationToken,
+}
+
+impl FirstAuthorityDependencyObserverV1 for CancelRetirementAfterCommitObserver {
+  fn staged(&mut self, _kv: &DiskKVStore, _entities: &[PreparedWholeEntityV1]) -> Result<(), NativeDurabilityError> {
+    Ok(())
+  }
+
+  fn authority_committed(
+    &mut self,
+    _kv: &DiskKVStore,
+    _entities: &[PreparedWholeEntityV1],
+  ) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    self.cancellation.cancel();
+    Ok(())
+  }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum DependencyFailurePhase {
   BeforeEntity,
@@ -218,7 +244,7 @@ fn create_environment(
   let path = directory.path().join(format!("{name}.aeordb"));
   let mut file = std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
   let algorithm = HashAlgorithm::Blake3_256;
-  let kv_block_length = initial_block_size() as u64;
+  let kv_block_length = initial_block_size();
   let header = DatabaseHeaderV4 {
     hash_algorithm: algorithm,
     slot_sequence: 1,
@@ -421,6 +447,113 @@ fn publish_first_authority(publisher: &V4FirstAuthorityPublisher) {
   publisher.publish(&request()).unwrap();
 }
 
+struct PreparedMarkCheckpointV1 {
+  closure: DurableMarkWorkspaceClosureV1,
+  checkpoint: EncodedImmutableGcArtifactV1,
+  control: EncodedGcActiveControlV1,
+}
+
+fn prepare_mark_checkpoint(
+  database_path: &Path,
+  scratch_root: &Path,
+  memory: &MemoryCoordinator,
+  run_byte: u8,
+  generation: u64,
+  checkpoint_sequence: u64,
+) -> PreparedMarkCheckpointV1 {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x31; 16];
+  let run_id = [run_byte; 16];
+  let identity = MarkWorkspaceIdentityV1::new(database_id, run_id, generation, checkpoint_sequence, algorithm).unwrap();
+  let basis = MarkWorkspaceBasisV1::new(
+    1,
+    1_700_000_100_000 + checkpoint_sequence,
+    1_700_000_100_500 + checkpoint_sequence,
+    vec![0x51; algorithm.hash_length()],
+    vec![0x11; algorithm.hash_length()],
+    [0x71; 32],
+  )
+  .unwrap();
+  let mut workspace = DurableMarkWorkspaceV1::create(
+    database_path,
+    identity,
+    basis,
+    MarkWorkspaceOptionsV1::new(Some(scratch_root.to_path_buf()), 64 * 1024 * 1024, 0).unwrap(),
+    CancellationToken::new(),
+    memory,
+  )
+  .unwrap();
+  let closure = workspace.complete().unwrap();
+  let mut capabilities = [0u8; 32];
+  for bit in [12usize, 13, 14, 15, 17] {
+    capabilities[bit / 8] |= 1 << (bit % 8);
+  }
+  let checkpoint = encode_mark_run_checkpoint(&MarkRunCheckpointWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    run_id: &run_id,
+    generation,
+    checkpoint_sequence,
+    state: 1,
+    phase: 1,
+    resumable: true,
+    canceled: false,
+    capabilities,
+    started_at_ms: 1_700_000_100_000 + checkpoint_sequence,
+    updated_at_ms: 1_700_000_100_500 + checkpoint_sequence,
+    authority_root_set_digest: &[0x11; 32],
+    semantic_state_digest: &[0x31; 32],
+    kv_layout_fingerprint: &[0x51; 32],
+    effective_policy_fingerprint: [0x71; 32],
+    system_family_registry_fingerprint: [0x91; 32],
+    captured_header_sequence: 17,
+    captured_write_high_water: 900,
+    reconciled_through_sequence: 801,
+    active_bitmap_bit_count: 512,
+    kv_bucket_count: 8,
+    kv_slots_per_bucket: 64,
+    workspace_path: closure.workspace_path().to_str().unwrap(),
+    workspace_id: [run_byte.wrapping_add(0x20); 16],
+    workspace_manifest_digest: closure.manifest_digest(),
+    mutation_journal_head: &[0xB1; 32],
+    checkpoint_logical_work: checkpoint_sequence * 1024,
+    total_logical_work_hint: 64 * 1024 * 1024,
+  })
+  .unwrap();
+  let control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::MarkRunActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: u8::try_from((checkpoint_sequence - 1) % 2).unwrap(),
+    sequence: checkpoint_sequence,
+    generation,
+    target_manifest_hash: &checkpoint.key,
+  })
+  .unwrap();
+  PreparedMarkCheckpointV1 { closure, checkpoint, control }
+}
+
+fn publish_mark_checkpoint(
+  publisher: &mut V4FirstAuthorityPublisher,
+  owner: &mut RetirementJournalOwnerV1<'_>,
+  prepared: &PreparedMarkCheckpointV1,
+  timestamp_ms: u64,
+) -> MarkRunCheckpointPublicationReceiptV1 {
+  publisher
+    .publish_mark_run_checkpoint(
+      MarkRunCheckpointPublicationRequestV1 {
+        hash_algorithm: HashAlgorithm::Blake3_256,
+        checkpoint: &prepared.checkpoint,
+        control: &prepared.control,
+        workspace: &prepared.closure,
+        publication_timestamp_ms: timestamp_ms,
+        monotonic_now_ms: timestamp_ms,
+      },
+      owner,
+    )
+    .unwrap()
+}
+
 fn write_redundant_header(publisher: &V4FirstAuthorityPublisher, header: &DatabaseHeaderV4) {
   let encoded = encode_database_header_slot(header).unwrap();
   write_file_at_native(&publisher.file, 0, &encoded).unwrap();
@@ -481,6 +614,188 @@ fn post_commit_failure_returns_the_exact_committed_receipt_and_retry_is_idempote
   assert_eq!(retry.publication_sequence, committed_sequence);
   assert_eq!(retry.namespace_root.root_hash, committed_root);
   assert_eq!(coordinator.snapshot().unwrap().next_sequence, committed_sequence + 1);
+}
+
+#[test]
+fn mark_control_post_commit_failure_returns_exact_receipt_and_hard_lineage() {
+  let (directory, path, _coordinator, mut publisher) = create_environment("mark-control-post-commit", None);
+  publish_first_authority(&publisher);
+  let scratch_root = directory.path().join("mark-scratch");
+  std::fs::create_dir(&scratch_root).unwrap();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap());
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let first = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x51, 101, 1);
+  let _first_receipt = publish_mark_checkpoint(&mut publisher, &mut owner, &first, 1_700_000_200_001);
+  let second = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x52, 102, 2);
+  let _second_receipt = publish_mark_checkpoint(&mut publisher, &mut owner, &second, 1_700_000_200_002);
+  let replacement = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x53, 103, 3);
+  let mut observer = FailingPostCommitObserver;
+
+  let error = publisher
+    .publish_mark_run_checkpoint_with_control_observer(
+      MarkRunCheckpointPublicationRequestV1 {
+        hash_algorithm: HashAlgorithm::Blake3_256,
+        checkpoint: &replacement.checkpoint,
+        control: &replacement.control,
+        workspace: &replacement.closure,
+        publication_timestamp_ms: 1_700_000_200_003,
+        monotonic_now_ms: 1_700_000_200_003,
+      },
+      &mut owner,
+      &mut observer,
+    )
+    .unwrap_err();
+
+  assert_eq!(error.code(), "mark_checkpoint_control_committed_postcondition_failure");
+  let committed = error.committed_receipt().expect("selected mark control must return its exact committed receipt");
+  assert_eq!(committed.control_slot, 0);
+  assert!(committed.replaced_control);
+  assert!(!committed.idempotent);
+  assert!(matches!(committed.lineage_state, MarkRunCheckpointLineageStateV1::HardPublished { .. }));
+  assert_eq!(owner.status().pending_records, 0);
+  assert_eq!(owner.status().durable_records, 1);
+  let committed_locator = publisher.locator(&replacement.control.key).unwrap().unwrap();
+  assert_eq!(committed_locator.type_flags, kv_tag::GC_ARTIFACT);
+  assert!(committed_locator.offset < committed.observation.selected.header.hot_tail_offset);
+
+  let before_retry = publisher.observe().unwrap();
+  let retry = publish_mark_checkpoint(&mut publisher, &mut owner, &replacement, 1_700_000_200_003);
+  assert!(retry.idempotent);
+  assert_eq!(publisher.observe().unwrap(), before_retry);
+}
+
+#[test]
+fn mark_control_activation_failure_discards_soft_lineage_and_keeps_old_control_selected() {
+  let (directory, path, coordinator, mut publisher) = create_environment("mark-control-pre-commit", None);
+  publish_first_authority(&publisher);
+  let scratch_root = directory.path().join("mark-scratch");
+  std::fs::create_dir(&scratch_root).unwrap();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap());
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let first = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x61, 201, 1);
+  let _first_receipt = publish_mark_checkpoint(&mut publisher, &mut owner, &first, 1_700_000_300_001);
+  let second = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x62, 202, 2);
+  let _second_receipt = publish_mark_checkpoint(&mut publisher, &mut owner, &second, 1_700_000_300_002);
+  let replacement = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x63, 203, 3);
+  let old_locator = publisher.locator(&first.control.key).unwrap().unwrap();
+  let mut observer = FailingDependencyObserver { phase: DependencyFailurePhase::BeforeEntity, entity_index: 0 };
+
+  let error = publisher
+    .publish_mark_run_checkpoint_with_control_observer(
+      MarkRunCheckpointPublicationRequestV1 {
+        hash_algorithm: HashAlgorithm::Blake3_256,
+        checkpoint: &replacement.checkpoint,
+        control: &replacement.control,
+        workspace: &replacement.closure,
+        publication_timestamp_ms: 1_700_000_300_003,
+        monotonic_now_ms: 1_700_000_300_003,
+      },
+      &mut owner,
+      &mut observer,
+    )
+    .unwrap_err();
+
+  assert_eq!(error.code(), "durability_failure");
+  assert!(error.committed_receipt().is_none());
+  assert_eq!(publisher.locator(&replacement.control.key).unwrap().unwrap(), old_locator);
+  assert_eq!(owner.status().pending_records, 0);
+  assert_eq!(owner.status().durable_records, 0);
+  assert!(coordinator.hard_failure().unwrap().is_some());
+  let interrupted = publisher.observe().unwrap();
+  let interrupted_length = std::fs::metadata(&path).unwrap().len();
+  assert!(interrupted_length > interrupted.selected.header.hot_tail_offset);
+  let reserved_write_sequence = interrupted.selected.header.write_sequence_high_water;
+  drop(owner);
+  drop(publisher);
+
+  let (_restart_coordinator, mut reopened) = reopen(&path);
+  assert_eq!(reopened.locator(&replacement.control.key).unwrap().unwrap(), old_locator);
+  let retry_cancellation = CancellationToken::new();
+  let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &retry_cancellation,
+    &memory,
+  )
+  .unwrap();
+  let retry = publish_mark_checkpoint(&mut reopened, &mut retry_owner, &replacement, 1_700_000_300_003);
+  assert_eq!(retry.control_write_sequence, reserved_write_sequence + 1);
+  assert!(reopened.locator(&replacement.control.key).unwrap().unwrap().offset >= interrupted_length);
+  assert_eq!(retry_owner.status().pending_records, 0);
+  assert_eq!(retry_owner.status().durable_records, 1);
+}
+
+#[test]
+fn mark_control_surfaces_buffered_lineage_when_immediate_post_commit_flush_fails() {
+  let (directory, path, _coordinator, mut publisher) = create_environment("mark-control-buffered-lineage", None);
+  publish_first_authority(&publisher);
+  let scratch_root = directory.path().join("mark-scratch");
+  std::fs::create_dir(&scratch_root).unwrap();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap());
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let first = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x71, 301, 1);
+  let _first_receipt = publish_mark_checkpoint(&mut publisher, &mut owner, &first, 1_700_000_400_001);
+  let second = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x72, 302, 2);
+  let _second_receipt = publish_mark_checkpoint(&mut publisher, &mut owner, &second, 1_700_000_400_002);
+  let replacement = prepare_mark_checkpoint(&path, &scratch_root, &memory, 0x73, 303, 3);
+  let mut observer = CancelRetirementAfterCommitObserver { cancellation: cancellation.clone() };
+
+  let receipt = publisher
+    .publish_mark_run_checkpoint_with_control_observer(
+      MarkRunCheckpointPublicationRequestV1 {
+        hash_algorithm: HashAlgorithm::Blake3_256,
+        checkpoint: &replacement.checkpoint,
+        control: &replacement.control,
+        workspace: &replacement.closure,
+        publication_timestamp_ms: 1_700_000_400_003,
+        monotonic_now_ms: 1_700_000_400_003,
+      },
+      &mut owner,
+      &mut observer,
+    )
+    .unwrap();
+
+  assert!(receipt.replaced_control);
+  assert!(matches!(
+    receipt.lineage_state,
+    MarkRunCheckpointLineageStateV1::BufferedAfterFlushFailure { code: "retirement_journal_cancelled", .. }
+  ));
+  assert_eq!(owner.status().pending_records, 1);
+  assert_eq!(owner.status().durable_records, 0);
+  assert_eq!(publisher.locator(&replacement.control.key).unwrap().unwrap().type_flags, kv_tag::GC_ARTIFACT);
 }
 
 #[test]

@@ -655,7 +655,12 @@
           - [x] Prove malformed, collision, symlink, crash-prefix, cancellation, pressure, capacity, barrier, and architecture failure direction.
         - [ ] P4-3c: hard-publish selected mark checkpoints only after workspace closure, and resume only after complete identity/generation/fingerprint validation.
           - [x] P4-3c1: expose the complete frozen checkpoint/manifest context, add exact both-width checkpoint/control encoders, and reject every resume-context mismatch before storage access.
-          - [ ] P4-3c2: publish immutable checkpoint entities and mutable A/B mark-run controls through one WholeEntity-v1 authority, with prior-control retirement admitted before replacement activation.
+          - [x] P4-3c2: publish immutable checkpoint entities and mutable A/B mark-run controls through one WholeEntity-v1 authority, with prior-control retirement admitted before replacement activation.
+            - [x] Add one bounded buffered-admission mode to the existing retirement coordinator so authority-critical replacement does not recursively publish through the same lock or manufacture a sink error as flow control.
+            - [x] Publish and read back the immutable checkpoint before preparing its control, binding the non-constructible durable workspace closure to the exact checkpoint path and manifest digest.
+            - [x] Append the exact replacement control WholeEntity before retirement admission, activate only through the returned permit, and flush retained lineage immediately after releasing control authority.
+            - [x] Enforce canonical A-first, then absent slot, then inactive/older-slot replacement with a strictly newer sequence and exact checkpoint target.
+            - [x] Prove both hash widths, exact retry, A/B/A replacement lineage, one-record flush thresholds, committed-but-buffered lineage failure, malformed/collision/cancellation/pressure paths, and crash-prefix retained-or-leaked behavior.
           - [ ] P4-3c3: select and reopen only complete checkpoint/workspace/object closures, preserving the prior valid checkpoint across crash, tamper, cancellation, and incomplete replacement prefixes.
         - [ ] P4-3d: drain bounded mutation runs to an exact final publication boundary, restart on layout generation change or journal gaps, and prove retained-or-leaked failure direction.
         - [ ] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.

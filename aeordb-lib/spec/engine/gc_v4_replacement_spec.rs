@@ -200,6 +200,111 @@ fn buffered_admission_can_activate_without_a_soft_journal_sync() {
 }
 
 #[test]
+fn authority_critical_single_replacement_buffers_even_when_the_normal_threshold_is_one() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut owner = owner(algorithm, &cancellation, RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000), &memory);
+  let mut sink = RecordingSink::default();
+  let pairs = [replacement_pair(algorithm, 1, RetirementReasonV1::PointerOrControlReplace)];
+  let records = replacements(&pairs);
+
+  let prepared =
+    RetirementJournalReplacementCoordinatorV1::new(&mut owner, &mut sink).prepare_buffered_single(batch(&records), 10).unwrap();
+  assert_eq!(sink.attempts, 0, "buffered admission must not recurse into the authority sink");
+  assert_eq!(owner.status().pending_records, 1);
+  let outcome = prepared.activate(|permit| -> Result<_, InjectedFailure> {
+    assert_eq!(permit.reason_count(RetirementReasonV1::PointerOrControlReplace), 1);
+    Ok("activated")
+  });
+  assert_eq!(outcome.unwrap().output, "activated");
+
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(sink.attempts, 1);
+  assert_eq!(owner.status().pending_records, 0);
+}
+
+#[test]
+fn failed_buffered_activation_can_discard_only_its_exact_soft_record() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let pairs = [replacement_pair(algorithm, 1, RetirementReasonV1::PointerOrControlReplace)];
+  let records = replacements(&pairs);
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut owner = owner(algorithm, &cancellation, RetirementJournalBufferOptionsV1::new(1, 1_048_576, 30_000), &memory);
+  let mut sink = RecordingSink::default();
+  let before = owner.status();
+  let prepared =
+    RetirementJournalReplacementCoordinatorV1::new(&mut owner, &mut sink).prepare_buffered_single(batch(&records), 10).unwrap();
+  let error = prepared.activate(|_| -> Result<(), InjectedFailure> { Err(InjectedFailure) }).unwrap_err();
+  let (_source, prepared) = error.into_activation_failure().unwrap();
+
+  prepared.discard_buffered(&mut owner).unwrap();
+
+  assert_eq!(owner.status(), before);
+  assert_eq!(sink.attempts, 0);
+}
+
+#[test]
+fn buffered_discard_refuses_wrong_or_changed_owners_without_guessing() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let pairs = [
+    replacement_pair(algorithm, 1, RetirementReasonV1::PointerOrControlReplace),
+    replacement_pair(algorithm, 2, RetirementReasonV1::PointerOrControlReplace),
+  ];
+  let records = replacements(&pairs);
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let options = RetirementJournalBufferOptionsV1::new(4, 1_048_576, 30_000);
+  let mut first_owner = owner(algorithm, &cancellation, options, &memory);
+  let mut other_owner = owner(algorithm, &cancellation, options, &memory);
+  let mut sink = RecordingSink::default();
+  let wrong_owner_prepared =
+    RetirementJournalReplacementCoordinatorV1::new(&mut first_owner, &mut sink).prepare_buffered_single(batch(&records[..1]), 10).unwrap();
+
+  let error = wrong_owner_prepared.discard_buffered(&mut other_owner).unwrap_err();
+
+  assert_eq!(error.code(), "retirement_journal_buffered_rollback_owner");
+  assert!(!other_owner.status().failed);
+  let (_source, wrong_owner_prepared) = error.into_parts();
+  (*wrong_owner_prepared).discard_buffered(&mut first_owner).unwrap();
+  assert_eq!(first_owner.status().pending_records, 0);
+
+  let mut changed_owner = owner(algorithm, &cancellation, options, &memory);
+  let older = RetirementJournalReplacementCoordinatorV1::new(&mut changed_owner, &mut sink)
+    .prepare_buffered_single(batch(&records[..1]), 10)
+    .unwrap();
+  let newer = RetirementJournalReplacementCoordinatorV1::new(&mut changed_owner, &mut sink)
+    .prepare_buffered_single(batch(&records[1..]), 10)
+    .unwrap();
+  let error = older.discard_buffered(&mut changed_owner).unwrap_err();
+  assert_eq!(error.code(), "retirement_journal_buffered_rollback_state");
+  assert!(changed_owner.status().failed);
+  drop(newer);
+}
+
+#[test]
+fn buffered_authority_admission_rejects_plural_batches_without_partial_owner_mutation() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut owner = owner(algorithm, &cancellation, RetirementJournalBufferOptionsV1::default(), &memory);
+  let mut sink = RecordingSink::default();
+  let pairs = [
+    replacement_pair(algorithm, 1, RetirementReasonV1::PointerOrControlReplace),
+    replacement_pair(algorithm, 2, RetirementReasonV1::PointerOrControlReplace),
+  ];
+  let records = replacements(&pairs);
+
+  let error =
+    RetirementJournalReplacementCoordinatorV1::new(&mut owner, &mut sink).prepare_buffered_single(batch(&records), 10).unwrap_err();
+  assert_eq!(error.code(), "retirement_replacement_preflight");
+  assert_eq!(error.admitted_records(), 0);
+  assert_eq!(owner.status().pending_records, 0);
+  assert_eq!(sink.attempts, 0);
+}
+
+#[test]
 fn a_final_retryable_sink_failure_retains_evidence_and_surfaces_the_deferred_failure() {
   let algorithm = HashAlgorithm::Blake3_256;
   let cancellation = CancellationToken::new();
@@ -437,7 +542,12 @@ fn replacement_boundary_has_no_live_v3_service_or_control_store_activation() {
       callers.push(path.strip_prefix(&source_root).unwrap().to_owned());
     }
   }
-  assert!(callers.is_empty(), "replacement boundary activated outside its P4 owner: {callers:?}");
+  callers.sort();
+  assert_eq!(
+    callers,
+    [PathBuf::from("engine/v4/first_authority.rs")],
+    "replacement boundary must remain confined to the disconnected P4 first-authority owner"
+  );
 
   let v3 = fs::read_to_string(source_root.join("engine/namespace_mutation.rs")).unwrap();
   let controls = fs::read_to_string(source_root.join("engine/v4/control_store.rs")).unwrap();
