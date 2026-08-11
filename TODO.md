@@ -622,10 +622,15 @@
         - [x] Prove malformed rows, role mismatch, cancellation/bounds, fixture equality, and reference-model agreement before landing.
       - [ ] P4-2: persist replacement/retirement lineage and typed corruption evidence before any v4 stable-key replacement.
         - [x] P4-2a: expose typed zero-copy retirement-journal segments/records and a conservative lineage reference model at both hash widths.
-        - [ ] P4-2b: add one bounded retirement-journal owner with count/byte/time flushing, immutable segment chaining, and durable audited-through publication.
+        - [x] P4-2b: add one bounded retirement-journal owner with count/byte/time flushing, immutable segment chaining, and durable audited-through publication.
           - [x] P4-2b1: add the bounded memory-admitted owner, exact immutable encoder, restart summary, and hard-sync sink/receipt contract.
           - [x] P4-2b2: implement the concrete shared-durability immutable v4 sink with exact idempotent readback.
-          - [ ] P4-2b3: hand durable journal discovery and the reconciled audited-through watermark to the selected physical-inventory checkpoint.
+          - [x] P4-2b3: hand durable journal discovery and the reconciled audited-through watermark to the selected physical-inventory checkpoint.
+            - [x] Add the compile-red both-width inventory/journal checkpoint contract and failure-direction matrix.
+            - [x] Reconcile only current immutable journal incarnations while accounting for every physical extent through the captured audit boundary.
+            - [x] Preserve the prior selected watermark unless the full reset-to-tip chain and exact scan boundary close successfully.
+            - [x] Bind the resulting handoff to the candidate physical-inventory manifest without adding a second mutable journal authority.
+            - [x] Prove cancellation, bounds, gaps, corruption, orphaned crash prefixes, manifest mismatch, and architecture isolation before landing.
         - [ ] P4-2c: make every v4 stable-key replacement, relocation, repair, migration, and pointer/control replacement enter that owner before replacement activation.
         - [ ] P4-2d: recover missing post-watermark lower-incarnation lineage conservatively and emit the existing typed `CorruptGcEvidenceV1` contract without reclaim authority.
         - [ ] P4-2e: prove cancellation, crash prefixes, corrupt/missing chains, ordering, resource bounds, recovery, architecture isolation, and retained-or-leaked failure direction.

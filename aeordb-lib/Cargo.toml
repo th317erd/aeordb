@@ -714,6 +714,10 @@ name = "gc_v4_lineage_storage_spec"
 path = "spec/engine/gc_v4_lineage_storage_spec.rs"
 
 [[test]]
+name = "gc_v4_inventory_retirement_spec"
+path = "spec/engine/gc_v4_inventory_retirement_spec.rs"
+
+[[test]]
 name = "v4_read_pin_spec"
 path = "spec/engine/v4_read_pin_spec.rs"
 

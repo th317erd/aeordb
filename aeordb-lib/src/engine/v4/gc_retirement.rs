@@ -13,11 +13,15 @@ use std::fmt::{self, Display, Formatter};
 use thiserror::Error as ThisError;
 use tokio_util::sync::CancellationToken;
 
+use super::entity::EntryTypeV4;
 use super::gc::{
-  EncodedImmutableGcArtifactV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, compare_physical_incarnations_v1,
+  EncodedImmutableGcArtifactV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, PhysicalIncarnationV1, compare_physical_incarnations_v1,
   decode_physical_incarnation, encode_immutable_gc_artifact,
 };
-use super::gc_state::{RetirementJournalModelSummaryV1, RetirementReasonV1, decode_retirement_journal_segment_v1};
+use super::gc_state::{
+  PhysicalInventoryManifestV1, RetirementJournalModelErrorV1, RetirementJournalModelSummaryV1, RetirementJournalReferenceModelV1,
+  RetirementJournalSegmentV1, RetirementReasonV1, decode_retirement_journal_segment_v1,
+};
 use super::reader::{FormatError, MalformedInputClass};
 use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
@@ -26,6 +30,337 @@ pub const RETIREMENT_JOURNAL_TARGET_SEGMENT_BYTES_V1: usize = 1024 * 1024;
 pub const RETIREMENT_JOURNAL_MAX_SEGMENT_BYTES_V1: usize = 16 * 1024 * 1024;
 pub const RETIREMENT_JOURNAL_DEFAULT_FLUSH_RECORDS_V1: u32 = 4_096;
 pub const RETIREMENT_JOURNAL_DEFAULT_FLUSH_AFTER_MS_V1: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy)]
+pub enum PhysicalInventoryRetirementClassificationV1<'a> {
+  NonGcArtifact,
+  NoncurrentGcArtifact,
+  CurrentOtherGcArtifact(GcArtifactKindV1),
+  CurrentRetirementSegment(&'a RetirementJournalSegmentV1<'a>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PhysicalInventoryRetirementObservationV1<'a> {
+  pub incarnation: PhysicalIncarnationV1<'a>,
+  pub classification: PhysicalInventoryRetirementClassificationV1<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalInventoryAuditBoundaryV1 {
+  pub database_id: [u8; 16],
+  pub scan_start_wal_offset: u64,
+  pub audited_wal_offset: u64,
+  pub audited_write_sequence: u64,
+  pub maximum_physical_entities: u64,
+  pub maximum_retirement_records: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetirementJournalCheckpointHandoffV1 {
+  database_id: [u8; 16],
+  scan_start_wal_offset: u64,
+  audited_wal_offset: u64,
+  audited_write_sequence: u64,
+  retirement_journal_through_sequence: u64,
+  physical_entity_count: u64,
+  journal: Option<RetirementJournalModelSummaryV1>,
+}
+
+impl RetirementJournalCheckpointHandoffV1 {
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub const fn scan_start_wal_offset(&self) -> u64 {
+    self.scan_start_wal_offset
+  }
+
+  pub const fn audited_wal_offset(&self) -> u64 {
+    self.audited_wal_offset
+  }
+
+  pub const fn audited_write_sequence(&self) -> u64 {
+    self.audited_write_sequence
+  }
+
+  pub const fn retirement_journal_through_sequence(&self) -> u64 {
+    self.retirement_journal_through_sequence
+  }
+
+  pub const fn physical_entity_count(&self) -> u64 {
+    self.physical_entity_count
+  }
+
+  pub const fn journal(&self) -> Option<&RetirementJournalModelSummaryV1> {
+    self.journal.as_ref()
+  }
+
+  /// Bind the reconciled scan to the exact fields a future inventory writer
+  /// may place in its immutable manifest. Directory/page closure remains the
+  /// responsibility of `PhysicalInventoryReferenceModelV1`.
+  pub fn validate_candidate_manifest(&self, candidate: &PhysicalInventoryManifestV1<'_>) -> Result<(), RetirementJournalCheckpointErrorV1> {
+    if candidate.database_id != self.database_id
+      || candidate.audited_wal_offset != self.audited_wal_offset
+      || candidate.audited_write_sequence != self.audited_write_sequence
+      || candidate.retirement_journal_through_sequence != self.retirement_journal_through_sequence
+      || candidate.record_count() != self.physical_entity_count
+    {
+      return Err(RetirementJournalCheckpointErrorV1::CandidateManifest);
+    }
+    Ok(())
+  }
+}
+
+#[derive(Debug, ThisError)]
+pub enum RetirementJournalCheckpointErrorV1 {
+  #[error("retirement-journal checkpoint boundary is invalid: {0}")]
+  InvalidBoundary(&'static str),
+  #[error("prior physical-inventory manifest does not match this database or hash profile")]
+  PriorManifest,
+  #[error("retirement-journal checkpoint regresses prior selected inventory authority")]
+  PriorRegression,
+  #[error("retirement-journal checkpoint reconciliation was canceled")]
+  Canceled,
+  #[error("retirement-journal checkpoint exceeds its admitted physical-entity limit")]
+  EntityLimit,
+  #[error("retirement-journal checkpoint physical extents are not contiguous and ordered")]
+  PhysicalGap,
+  #[error("retirement-journal checkpoint physical incarnation is malformed")]
+  PhysicalIncarnation,
+  #[error("retirement-journal checkpoint classification disagrees with the physical incarnation")]
+  Classification,
+  #[error("retirement-journal checkpoint did not close at its exact WAL/write-sequence boundary")]
+  AuditBoundary,
+  #[error("prior selected retirement-journal watermark was not rediscovered as current authority")]
+  PriorWatermarkMissing,
+  #[error("retirement-journal checkpoint counters or extents overflowed")]
+  ArithmeticOverflow,
+  #[error(transparent)]
+  Journal(#[from] RetirementJournalModelErrorV1),
+  #[error("candidate physical-inventory manifest disagrees with the reconciled journal handoff")]
+  CandidateManifest,
+  #[error("retirement-journal checkpoint reconciler has already failed")]
+  Failed,
+}
+
+impl RetirementJournalCheckpointErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::InvalidBoundary(_) => "retirement_checkpoint_boundary",
+      Self::PriorManifest => "retirement_checkpoint_prior_manifest",
+      Self::PriorRegression => "retirement_checkpoint_prior_regression",
+      Self::Canceled => "retirement_checkpoint_cancelled",
+      Self::EntityLimit => "retirement_checkpoint_entity_limit",
+      Self::PhysicalGap => "retirement_checkpoint_physical_gap",
+      Self::PhysicalIncarnation => "retirement_checkpoint_physical_incarnation",
+      Self::Classification => "retirement_checkpoint_classification",
+      Self::AuditBoundary => "retirement_checkpoint_audit_boundary",
+      Self::PriorWatermarkMissing => "retirement_checkpoint_prior_watermark_missing",
+      Self::ArithmeticOverflow => "retirement_checkpoint_arithmetic",
+      Self::Journal(error) => error.code(),
+      Self::CandidateManifest => "retirement_checkpoint_candidate_manifest",
+      Self::Failed => "retirement_checkpoint_failed",
+    }
+  }
+}
+
+/// Constant-memory handoff between a complete physical scan and the next
+/// selected inventory manifest.
+///
+/// The caller must classify every physical entity in exact WAL order. Current
+/// retirement segments rebuild their immutable chain from its reset; leaked or
+/// superseded crash-prefix copies remain inventoried but cannot become journal
+/// authority. Any gap, cancellation, corrupt chain, or missing prior watermark
+/// latches failure and leaves the previously selected manifest untouched.
+#[derive(Debug)]
+pub struct RetirementJournalCheckpointReconcilerV1<'a> {
+  algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  scan_start_wal_offset: u64,
+  audited_wal_offset: u64,
+  audited_write_sequence: u64,
+  previous_retirement_journal_through_sequence: u64,
+  maximum_physical_entities: u64,
+  maximum_retirement_records: u64,
+  cancellation: &'a CancellationToken,
+  next_wal_offset: u64,
+  physical_entity_count: u64,
+  maximum_observed_write_sequence: u64,
+  retirement_journal_through_sequence: u64,
+  previous_watermark_seen: bool,
+  journal: Option<RetirementJournalReferenceModelV1<'a>>,
+  failed: bool,
+}
+
+impl<'a> RetirementJournalCheckpointReconcilerV1<'a> {
+  pub fn new(
+    algorithm: HashAlgorithm,
+    boundary: PhysicalInventoryAuditBoundaryV1,
+    prior_manifest: Option<&PhysicalInventoryManifestV1<'_>>,
+    cancellation: &'a CancellationToken,
+  ) -> Result<Self, RetirementJournalCheckpointErrorV1> {
+    if boundary.database_id.iter().all(|byte| *byte == 0)
+      || boundary.scan_start_wal_offset == 0
+      || boundary.scan_start_wal_offset >= boundary.audited_wal_offset
+      || boundary.audited_write_sequence == 0
+      || boundary.maximum_physical_entities == 0
+    {
+      return Err(RetirementJournalCheckpointErrorV1::InvalidBoundary(
+        "database, WAL interval, write sequence, and physical-entity limit must be nonzero and ordered",
+      ));
+    }
+    let previous_retirement_journal_through_sequence = if let Some(prior) = prior_manifest {
+      if prior.database_id != boundary.database_id
+        || prior.kv_layout_fingerprint.len() != algorithm.hash_length()
+        || prior.key.len() != algorithm.hash_length()
+      {
+        return Err(RetirementJournalCheckpointErrorV1::PriorManifest);
+      }
+      if prior.audited_wal_offset > boundary.audited_wal_offset
+        || prior.audited_write_sequence > boundary.audited_write_sequence
+        || prior.retirement_journal_through_sequence > boundary.audited_write_sequence
+      {
+        return Err(RetirementJournalCheckpointErrorV1::PriorRegression);
+      }
+      prior.retirement_journal_through_sequence
+    } else {
+      0
+    };
+    Ok(Self {
+      algorithm,
+      database_id: boundary.database_id,
+      scan_start_wal_offset: boundary.scan_start_wal_offset,
+      audited_wal_offset: boundary.audited_wal_offset,
+      audited_write_sequence: boundary.audited_write_sequence,
+      previous_retirement_journal_through_sequence,
+      maximum_physical_entities: boundary.maximum_physical_entities,
+      maximum_retirement_records: boundary.maximum_retirement_records,
+      cancellation,
+      next_wal_offset: boundary.scan_start_wal_offset,
+      physical_entity_count: 0,
+      maximum_observed_write_sequence: 0,
+      retirement_journal_through_sequence: 0,
+      previous_watermark_seen: previous_retirement_journal_through_sequence == 0,
+      journal: None,
+      failed: false,
+    })
+  }
+
+  pub fn observe(&mut self, observation: PhysicalInventoryRetirementObservationV1<'_>) -> Result<(), RetirementJournalCheckpointErrorV1> {
+    if self.failed {
+      return Err(RetirementJournalCheckpointErrorV1::Failed);
+    }
+    if self.cancellation.is_cancelled() {
+      return self.fail(RetirementJournalCheckpointErrorV1::Canceled);
+    }
+    if self.physical_entity_count >= self.maximum_physical_entities {
+      return self.fail(RetirementJournalCheckpointErrorV1::EntityLimit);
+    }
+    if !valid_inventory_incarnation_shape(self.algorithm, &observation.incarnation) {
+      return self.fail(RetirementJournalCheckpointErrorV1::PhysicalIncarnation);
+    }
+    if observation.incarnation.wal_offset != self.next_wal_offset {
+      return self.fail(RetirementJournalCheckpointErrorV1::PhysicalGap);
+    }
+    let Some(extent_end) = observation.incarnation.wal_offset.checked_add(u64::from(observation.incarnation.entity_length)) else {
+      return self.fail(RetirementJournalCheckpointErrorV1::ArithmeticOverflow);
+    };
+    if extent_end > self.audited_wal_offset || observation.incarnation.write_sequence > self.audited_write_sequence {
+      return self.fail(RetirementJournalCheckpointErrorV1::AuditBoundary);
+    }
+    if !classification_matches_incarnation(&observation) {
+      return self.fail(RetirementJournalCheckpointErrorV1::Classification);
+    }
+
+    if let PhysicalInventoryRetirementClassificationV1::CurrentRetirementSegment(segment) = observation.classification {
+      if segment.database_id != self.database_id || segment.key != observation.incarnation.logical_key {
+        return self.fail(RetirementJournalCheckpointErrorV1::Classification);
+      }
+      let journal = self
+        .journal
+        .get_or_insert_with(|| RetirementJournalReferenceModelV1::new(self.algorithm, self.cancellation, self.maximum_retirement_records));
+      if let Err(error) = journal.observe_segment(segment) {
+        return self.fail(error.into());
+      }
+      if observation.incarnation.write_sequence <= self.retirement_journal_through_sequence {
+        return self.fail(RetirementJournalCheckpointErrorV1::AuditBoundary);
+      }
+      self.retirement_journal_through_sequence = observation.incarnation.write_sequence;
+      if observation.incarnation.write_sequence == self.previous_retirement_journal_through_sequence {
+        self.previous_watermark_seen = true;
+      }
+    }
+
+    self.next_wal_offset = extent_end;
+    self.physical_entity_count = self.physical_entity_count.checked_add(1).ok_or(RetirementJournalCheckpointErrorV1::ArithmeticOverflow)?;
+    self.maximum_observed_write_sequence = self.maximum_observed_write_sequence.max(observation.incarnation.write_sequence);
+    Ok(())
+  }
+
+  pub fn finish(mut self) -> Result<RetirementJournalCheckpointHandoffV1, RetirementJournalCheckpointErrorV1> {
+    if self.failed {
+      return Err(RetirementJournalCheckpointErrorV1::Failed);
+    }
+    if self.cancellation.is_cancelled() {
+      return self.fail(RetirementJournalCheckpointErrorV1::Canceled);
+    }
+    if self.next_wal_offset != self.audited_wal_offset || self.maximum_observed_write_sequence != self.audited_write_sequence {
+      return self.fail(RetirementJournalCheckpointErrorV1::AuditBoundary);
+    }
+    if !self.previous_watermark_seen || self.retirement_journal_through_sequence < self.previous_retirement_journal_through_sequence {
+      return self.fail(RetirementJournalCheckpointErrorV1::PriorWatermarkMissing);
+    }
+    let journal = match self.journal.take() {
+      Some(journal) => {
+        let summary = journal.finish()?;
+        if summary.database_id != self.database_id {
+          return Err(RetirementJournalCheckpointErrorV1::PriorManifest);
+        }
+        Some(summary)
+      }
+      None => None,
+    };
+    Ok(RetirementJournalCheckpointHandoffV1 {
+      database_id: self.database_id,
+      scan_start_wal_offset: self.scan_start_wal_offset,
+      audited_wal_offset: self.audited_wal_offset,
+      audited_write_sequence: self.audited_write_sequence,
+      retirement_journal_through_sequence: self.retirement_journal_through_sequence,
+      physical_entity_count: self.physical_entity_count,
+      journal,
+    })
+  }
+
+  fn fail<T>(&mut self, error: RetirementJournalCheckpointErrorV1) -> Result<T, RetirementJournalCheckpointErrorV1> {
+    self.failed = true;
+    Err(error)
+  }
+}
+
+fn valid_inventory_incarnation_shape(algorithm: HashAlgorithm, incarnation: &PhysicalIncarnationV1<'_>) -> bool {
+  incarnation.logical_key.len() == algorithm.hash_length()
+    && incarnation.integrity_or_legacy_digest.len() == algorithm.hash_length()
+    && incarnation.logical_key.iter().any(|byte| *byte != 0)
+    && incarnation.integrity_or_legacy_digest.iter().any(|byte| *byte != 0)
+    && incarnation.wal_offset != 0
+    && incarnation.entity_length != 0
+    && (1..=EntryTypeV4::GcArtifact.to_u8()).contains(&incarnation.entry_type)
+    && (incarnation.entity_version == 0) == (incarnation.write_sequence == 0)
+}
+
+fn classification_matches_incarnation(observation: &PhysicalInventoryRetirementObservationV1<'_>) -> bool {
+  let is_gc_artifact = observation.incarnation.entry_type == EntryTypeV4::GcArtifact.to_u8();
+  match observation.classification {
+    PhysicalInventoryRetirementClassificationV1::NonGcArtifact => !is_gc_artifact,
+    PhysicalInventoryRetirementClassificationV1::NoncurrentGcArtifact => is_gc_artifact,
+    PhysicalInventoryRetirementClassificationV1::CurrentOtherGcArtifact(kind) => {
+      is_gc_artifact && kind != GcArtifactKindV1::RetirementJournalSegment
+    }
+    PhysicalInventoryRetirementClassificationV1::CurrentRetirementSegment(_) => {
+      is_gc_artifact && observation.incarnation.entity_version == 1 && observation.incarnation.write_sequence != 0
+    }
+  }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetirementJournalBufferOptionsV1 {
