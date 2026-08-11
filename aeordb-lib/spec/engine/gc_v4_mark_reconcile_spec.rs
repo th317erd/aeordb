@@ -1,6 +1,10 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
@@ -12,8 +16,10 @@ use aeordb::engine::v4::gc_mark_convergence::{
   MarkMutationApplierV1, MarkMutationBoundaryV1, MarkMutationCatchUpV1, MarkMutationConvergenceBasisV1, MarkMutationConvergenceErrorV1,
   MarkMutationConvergenceOptionsV1, MarkMutationCursorV1, MarkMutationDrainSourceV1, MarkMutationEncodedRunV1,
   MarkMutationFinalGuardAuthorityV1, MarkMutationFinalGuardOperationV1, MarkMutationFinalGuardSessionV1,
-  MarkMutationFinalPublicationReceiptV1, MarkMutationFinalPublicationRequestV1, MarkMutationReconcilerV1, MarkMutationRestartReasonV1,
-  MarkMutationRunVisitorV1,
+  MarkMutationFinalPublicationReceiptV1, MarkMutationFinalPublicationRequestV1, MarkMutationJournalBufferOptionsV1,
+  MarkMutationJournalChainStartV1, MarkMutationJournalDurabilityReceiptV1, MarkMutationJournalDurableSinkV1,
+  MarkMutationJournalOwnerErrorV1, MarkMutationJournalOwnerV1, MarkMutationJournalSinkErrorV1, MarkMutationObservationV1,
+  MarkMutationReconcilerV1, MarkMutationRestartReasonV1, MarkMutationRunVisitorV1, PreparedMarkMutationJournalSegmentV1,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -71,6 +77,58 @@ struct FailingApplier;
 impl MarkMutationApplierV1 for FailingApplier {
   fn apply(&mut self, _record: &MarkMutationRecordV1<'_>) -> Result<(), aeordb::engine::v4::gc_mark_convergence::MarkMutationApplyErrorV1> {
     Err(aeordb::engine::v4::gc_mark_convergence::MarkMutationApplyErrorV1::new("injected_mark_apply", InjectedApplyFailure))
+  }
+}
+
+struct CancelingApplier<'a> {
+  cancellation: &'a CancellationToken,
+  sequences: Vec<u64>,
+}
+
+impl MarkMutationApplierV1 for CancelingApplier<'_> {
+  fn apply(&mut self, record: &MarkMutationRecordV1<'_>) -> Result<(), aeordb::engine::v4::gc_mark_convergence::MarkMutationApplyErrorV1> {
+    self.sequences.push(record.publication_sequence);
+    self.cancellation.cancel();
+    Ok(())
+  }
+}
+
+#[derive(Debug)]
+struct InjectedSinkFailure;
+
+impl std::fmt::Display for InjectedSinkFailure {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("injected soft mutation sink failure")
+  }
+}
+
+impl std::error::Error for InjectedSinkFailure {}
+
+#[derive(Default)]
+struct RetryMutationSink {
+  fail_next: bool,
+  attempts: Vec<Vec<u8>>,
+  durable_segments: Vec<Vec<u8>>,
+  next_hard_publication_sequence: u64,
+}
+
+impl MarkMutationJournalDurableSinkV1 for RetryMutationSink {
+  fn publish_mark_mutation_segment_synced(
+    &mut self,
+    segment: &PreparedMarkMutationJournalSegmentV1<'_>,
+  ) -> Result<MarkMutationJournalDurabilityReceiptV1, MarkMutationJournalSinkErrorV1> {
+    self.attempts.push(segment.value.to_vec());
+    if self.fail_next {
+      self.fail_next = false;
+      return Err(MarkMutationJournalSinkErrorV1::new("injected_mark_sink", InjectedSinkFailure));
+    }
+    self.durable_segments.push(segment.value.to_vec());
+    self.next_hard_publication_sequence = self.next_hard_publication_sequence.max(segment.last_publication_sequence) + 1;
+    Ok(MarkMutationJournalDurabilityReceiptV1 {
+      artifact_key: segment.artifact_key.to_vec(),
+      stored_value_length: segment.value.len() as u32,
+      hard_publication_sequence: self.next_hard_publication_sequence,
+    })
   }
 }
 
@@ -237,6 +295,132 @@ impl MarkMutationFinalGuardAuthorityV1 for FailingAfterOperationGuard {
     self.source.guard_active = false;
     result?;
     Err(MarkMutationConvergenceErrorV1::InvalidOptions("injected post-operation authority failure"))
+  }
+}
+
+struct BypassFinalGuard {
+  receipt: MarkMutationFinalPublicationReceiptV1,
+}
+
+impl MarkMutationFinalGuardAuthorityV1 for BypassFinalGuard {
+  fn execute_exclusively(
+    &mut self,
+    _operation: &mut dyn MarkMutationFinalGuardOperationV1,
+  ) -> Result<MarkMutationFinalPublicationReceiptV1, MarkMutationConvergenceErrorV1> {
+    Ok(self.receipt.clone())
+  }
+}
+
+struct DoubleExecutionFinalGuard {
+  source: ScriptedMutationSource,
+}
+
+impl MarkMutationFinalGuardAuthorityV1 for DoubleExecutionFinalGuard {
+  fn execute_exclusively(
+    &mut self,
+    operation: &mut dyn MarkMutationFinalGuardOperationV1,
+  ) -> Result<MarkMutationFinalPublicationReceiptV1, MarkMutationConvergenceErrorV1> {
+    self.source.guard_active = true;
+    let first = operation.execute(&mut self.source);
+    if first.is_err() {
+      self.source.guard_active = false;
+      return first;
+    }
+    let second = operation.execute(&mut self.source);
+    self.source.guard_active = false;
+    second
+  }
+}
+
+struct CancelBeforeExecutionFinalGuard<'a> {
+  cancellation: &'a CancellationToken,
+  source: ScriptedMutationSource,
+}
+
+impl MarkMutationFinalGuardAuthorityV1 for CancelBeforeExecutionFinalGuard<'_> {
+  fn execute_exclusively(
+    &mut self,
+    operation: &mut dyn MarkMutationFinalGuardOperationV1,
+  ) -> Result<MarkMutationFinalPublicationReceiptV1, MarkMutationConvergenceErrorV1> {
+    self.source.guard_active = true;
+    self.cancellation.cancel();
+    let result = operation.execute(&mut self.source);
+    self.source.guard_active = false;
+    result
+  }
+}
+
+struct IgnoredVisitorFailureSource {
+  boundary: MarkMutationBoundaryV1,
+  malformed_run: Vec<u8>,
+}
+
+impl MarkMutationDrainSourceV1 for IgnoredVisitorFailureSource {
+  fn capture_boundary(&mut self, _after: &MarkMutationCursorV1) -> Result<MarkMutationBoundaryV1, MarkMutationConvergenceErrorV1> {
+    Ok(self.boundary.clone())
+  }
+
+  fn visit_runs(
+    &mut self,
+    _after: &MarkMutationCursorV1,
+    _through_publication_sequence: u64,
+    visitor: &mut dyn MarkMutationRunVisitorV1,
+  ) -> Result<(), MarkMutationConvergenceErrorV1> {
+    let _ignored = visitor.visit_run(MarkMutationEncodedRunV1::JournalSegment(&self.malformed_run));
+    Ok(())
+  }
+}
+
+struct SharedFinalGate {
+  exclusion: Mutex<()>,
+  ready: Barrier,
+  active: AtomicUsize,
+  maximum_active: AtomicUsize,
+}
+
+struct ConcurrentFinalGuard {
+  shared: Arc<SharedFinalGate>,
+  source: ScriptedMutationSource,
+}
+
+impl MarkMutationFinalGuardAuthorityV1 for ConcurrentFinalGuard {
+  fn execute_exclusively(
+    &mut self,
+    operation: &mut dyn MarkMutationFinalGuardOperationV1,
+  ) -> Result<MarkMutationFinalPublicationReceiptV1, MarkMutationConvergenceErrorV1> {
+    self.shared.ready.wait();
+    let _exclusive = self.shared.exclusion.lock().unwrap();
+    let active = self.shared.active.fetch_add(1, Ordering::SeqCst) + 1;
+    self.shared.maximum_active.fetch_max(active, Ordering::SeqCst);
+    self.source.guard_active = true;
+    thread::sleep(Duration::from_millis(25));
+    let result = operation.execute(&mut self.source);
+    self.source.guard_active = false;
+    self.shared.active.fetch_sub(1, Ordering::SeqCst);
+    result
+  }
+}
+
+fn stable_final_receipt(
+  algorithm: HashAlgorithm,
+  layout: &[u8],
+  root: &[u8],
+  reconciled_through_publication_sequence: u64,
+) -> MarkMutationFinalPublicationReceiptV1 {
+  MarkMutationFinalPublicationReceiptV1 {
+    hash_algorithm: algorithm,
+    database_id: [0x31; 16],
+    run_id: [0x51; 16],
+    generation: 77,
+    checkpoint_sequence: 7,
+    kv_layout_generation: 8,
+    kv_layout_fingerprint: layout.to_vec(),
+    authority_root_hash: root.to_vec(),
+    reconciled_through_publication_sequence,
+    reconciled_through_mutation_id: Vec::new(),
+    mutation_journal_head: Vec::new(),
+    applied_records: 0,
+    hard_publication_sequence: reconciled_through_publication_sequence + 100,
   }
 }
 
@@ -529,6 +713,66 @@ fn gap_malformed_source_cancellation_and_memory_pressure_all_require_restart() {
 }
 
 #[test]
+fn cancellation_between_records_stops_the_run_before_applying_more_mutations() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x31; 16];
+  let run_id = [0x51; 16];
+  let layout = repeated_hash(algorithm, 0x71);
+  let initial_root = repeated_hash(algorithm, 0x81);
+  let middle_root = repeated_hash(algorithm, 0x82);
+  let final_root = repeated_hash(algorithm, 0x83);
+  let first_mutation_id = repeated_hash(algorithm, 0x21);
+  let first_logical_key = repeated_hash(algorithm, 0x22);
+  let first_incarnation = physical_incarnation(algorithm, 0x23, 11);
+  let second_mutation_id = repeated_hash(algorithm, 0x31);
+  let second_logical_key = repeated_hash(algorithm, 0x32);
+  let second_incarnation = physical_incarnation(algorithm, 0x33, 12);
+  let records = [
+    MarkMutationRecordWriteV1 {
+      publication_sequence: 11,
+      mutation_id: &first_mutation_id,
+      root_before: &initial_root,
+      root_after: &middle_root,
+      published_logical_key: &first_logical_key,
+      new_incarnation: &first_incarnation,
+      operation: MarkMutationOperationV1::Replace,
+    },
+    MarkMutationRecordWriteV1 {
+      publication_sequence: 12,
+      mutation_id: &second_mutation_id,
+      root_before: &middle_root,
+      root_after: &final_root,
+      published_logical_key: &second_logical_key,
+      new_incarnation: &second_incarnation,
+      operation: MarkMutationOperationV1::Replace,
+    },
+  ];
+  let journal = encode_mark_mutation_journal_segment(&MarkMutationJournalSegmentWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    run_id: &run_id,
+    generation: 77,
+    segment_ordinal: 1,
+    previous_segment_hash: None,
+    records: &records,
+  })
+  .unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut reconciler = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
+  let mut applier = CancelingApplier { cancellation: &cancellation, sequences: Vec::new() };
+
+  let error = reconciler.reconcile_run(MarkMutationEncodedRunV1::JournalSegment(&journal.value), &mut applier).unwrap_err();
+
+  assert!(matches!(error, MarkMutationConvergenceErrorV1::Canceled));
+  assert_eq!(applier.sequences, [11]);
+  let status = reconciler.status();
+  assert_eq!(status.reconciled_through_publication_sequence, 11);
+  assert_eq!(status.current_root_hash, middle_root);
+  assert_eq!(status.restart_required, Some(MarkMutationRestartReasonV1::Canceled));
+}
+
+#[test]
 fn final_publication_occurs_once_inside_the_guard_after_an_empty_second_drain() {
   for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
     let database_id = [0x31; 16];
@@ -640,4 +884,234 @@ fn final_guard_refuses_layout_drift_nonempty_second_drain_and_dishonest_receipts
   assert!(matches!(error, MarkMutationConvergenceErrorV1::RestartRequired(MarkMutationRestartReasonV1::PublicationFailure)));
   assert_eq!(authority.source.publication_count, 1);
   assert_eq!(uncertain.status().final_publication_sequence, None);
+}
+
+#[test]
+fn failed_soft_publication_retries_exact_bytes_but_only_a_fresh_run_can_resume_them() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x31; 16];
+  let run_id = [0x51; 16];
+  let layout = repeated_hash(algorithm, 0x71);
+  let initial_root = repeated_hash(algorithm, 0x81);
+  let final_root = repeated_hash(algorithm, 0x82);
+  let mutation_id = repeated_hash(algorithm, 0x21);
+  let logical_key = repeated_hash(algorithm, 0x22);
+  let incarnation = physical_incarnation(algorithm, 0x23, 11);
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(1, 1024, 4096, 30_000).unwrap();
+  let mut owner = MarkMutationJournalOwnerV1::new_chain(
+    MarkMutationJournalChainStartV1 {
+      algorithm,
+      database_id,
+      run_id,
+      generation: 77,
+      captured_publication_sequence: 10,
+      options,
+      cancellation: &cancellation,
+    },
+    &memory,
+  )
+  .unwrap();
+  assert_eq!(
+    owner.observe_committed(
+      MarkMutationRecordWriteV1 {
+        publication_sequence: 11,
+        mutation_id: &mutation_id,
+        root_before: &initial_root,
+        root_after: &final_root,
+        published_logical_key: &logical_key,
+        new_incarnation: &incarnation,
+        operation: MarkMutationOperationV1::Replace,
+      },
+      1,
+    ),
+    MarkMutationObservationV1::Buffered { flush_due: true }
+  );
+  let mut sink = RetryMutationSink { fail_next: true, ..RetryMutationSink::default() };
+
+  assert!(matches!(owner.flush(&mut sink), Err(MarkMutationJournalOwnerErrorV1::Sink { .. })));
+  assert!(owner.status().incomplete);
+  assert_eq!(owner.status().pending_records, 1);
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(sink.attempts.len(), 2);
+  assert_eq!(sink.attempts[0], sink.attempts[1]);
+  assert_eq!(sink.durable_segments, [sink.attempts[0].clone()]);
+  assert!(owner.status().incomplete, "an exact retry cannot restore the failed run's reclaim authority");
+
+  let fresh_cancellation = CancellationToken::new();
+  let fresh_memory = memory_coordinator();
+  let mut fresh = reconciler(algorithm, &fresh_cancellation, &fresh_memory, &initial_root, &layout, 10, 2);
+  let mut applier = RecordingApplier::default();
+  fresh.reconcile_run(MarkMutationEncodedRunV1::JournalSegment(&sink.durable_segments[0]), &mut applier).unwrap();
+  let status = fresh.status();
+  assert_eq!(status.reconciled_through_publication_sequence, 11);
+  assert_eq!(status.current_root_hash, final_root);
+  assert_eq!(status.restart_required, None);
+  assert_eq!(applier.sequences, [11]);
+}
+
+#[test]
+fn malformed_predecessors_and_ignored_visitor_failures_cannot_complete_catch_up() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x31; 16];
+  let run_id = [0x51; 16];
+  let layout = repeated_hash(algorithm, 0x71);
+  let initial_root = repeated_hash(algorithm, 0x81);
+  let final_root = repeated_hash(algorithm, 0x82);
+  let false_predecessor = repeated_hash(algorithm, 0x91);
+  let (malformed_chain, _) =
+    journal_run(algorithm, &database_id, &run_id, 1, Some(&false_predecessor), 11, 0x21, &initial_root, &final_root);
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut malformed = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
+  let mut applier = RecordingApplier::default();
+
+  let error = malformed.reconcile_run(MarkMutationEncodedRunV1::JournalSegment(&malformed_chain), &mut applier).unwrap_err();
+
+  assert!(matches!(error, MarkMutationConvergenceErrorV1::RestartRequired(MarkMutationRestartReasonV1::ContextMismatch)));
+  assert!(applier.sequences.is_empty());
+  assert_eq!(malformed.status().reconciled_through_publication_sequence, 10);
+
+  let memory = memory_coordinator();
+  let mut ignored = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
+  let mut source =
+    IgnoredVisitorFailureSource { boundary: boundary(&layout, &initial_root, 10, None), malformed_run: b"not a mutation journal".to_vec() };
+  let error = ignored.catch_up(&mut source, &mut RecordingApplier::default()).unwrap_err();
+  assert!(matches!(error, MarkMutationConvergenceErrorV1::RestartRequired(MarkMutationRestartReasonV1::MalformedRun)));
+  assert_eq!(ignored.status().final_publication_sequence, None);
+}
+
+#[test]
+fn final_authority_must_execute_exactly_once_and_observe_guard_entry_cancellation() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let layout = repeated_hash(algorithm, 0x71);
+  let initial_root = repeated_hash(algorithm, 0x81);
+  let cancellation = CancellationToken::new();
+
+  let memory = memory_coordinator();
+  let mut bypassed = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
+  let mut bypass = BypassFinalGuard { receipt: stable_final_receipt(algorithm, &layout, &initial_root, 10) };
+  let error = bypassed.finalize_guarded(&mut bypass, &mut RecordingApplier::default()).unwrap_err();
+  assert!(matches!(error, MarkMutationConvergenceErrorV1::RestartRequired(MarkMutationRestartReasonV1::PublicationFailure)));
+  assert_eq!(bypassed.status().final_publication_sequence, None);
+
+  let memory = memory_coordinator();
+  let mut doubled = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
+  let stable = boundary(&layout, &initial_root, 10, None);
+  let mut double = DoubleExecutionFinalGuard {
+    source: ScriptedMutationSource {
+      boundaries: VecDeque::from([stable.clone(), stable.clone(), stable]),
+      drains: VecDeque::from([Vec::new(), Vec::new()]),
+      publication_count: 0,
+      guard_active: false,
+      dishonest_receipt: false,
+    },
+  };
+  let error = doubled.finalize_guarded(&mut double, &mut RecordingApplier::default()).unwrap_err();
+  assert!(matches!(error, MarkMutationConvergenceErrorV1::RestartRequired(MarkMutationRestartReasonV1::PublicationFailure)));
+  assert_eq!(double.source.publication_count, 1);
+  assert_eq!(doubled.status().final_publication_sequence, None);
+
+  let canceled = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut canceled_reconciler = reconciler(algorithm, &canceled, &memory, &initial_root, &layout, 10, 2);
+  let mut canceling_guard = CancelBeforeExecutionFinalGuard {
+    cancellation: &canceled,
+    source: ScriptedMutationSource {
+      boundaries: VecDeque::from([boundary(&layout, &initial_root, 10, None)]),
+      drains: VecDeque::new(),
+      publication_count: 0,
+      guard_active: false,
+      dishonest_receipt: false,
+    },
+  };
+  let error = canceled_reconciler.finalize_guarded(&mut canceling_guard, &mut RecordingApplier::default()).unwrap_err();
+  assert!(matches!(error, MarkMutationConvergenceErrorV1::Canceled));
+  assert_eq!(canceling_guard.source.publication_count, 0);
+  assert_eq!(canceled_reconciler.status().restart_required, Some(MarkMutationRestartReasonV1::Canceled));
+}
+
+#[test]
+fn concurrent_finalizers_share_one_real_exclusion_boundary() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let layout = repeated_hash(algorithm, 0x71);
+  let initial_root = repeated_hash(algorithm, 0x81);
+  let shared = Arc::new(SharedFinalGate {
+    exclusion: Mutex::new(()),
+    ready: Barrier::new(2),
+    active: AtomicUsize::new(0),
+    maximum_active: AtomicUsize::new(0),
+  });
+  let first_cancellation = CancellationToken::new();
+  let second_cancellation = CancellationToken::new();
+  let first_memory = memory_coordinator();
+  let second_memory = memory_coordinator();
+  let mut first = reconciler(algorithm, &first_cancellation, &first_memory, &initial_root, &layout, 10, 2);
+  let mut second = reconciler(algorithm, &second_cancellation, &second_memory, &initial_root, &layout, 10, 2);
+  let source = || {
+    let stable = boundary(&layout, &initial_root, 10, None);
+    ScriptedMutationSource {
+      boundaries: VecDeque::from([stable.clone(), stable.clone(), stable]),
+      drains: VecDeque::from([Vec::new(), Vec::new()]),
+      publication_count: 0,
+      guard_active: false,
+      dishonest_receipt: false,
+    }
+  };
+  let mut first_guard = ConcurrentFinalGuard { shared: shared.clone(), source: source() };
+  let mut second_guard = ConcurrentFinalGuard { shared: shared.clone(), source: source() };
+
+  let (first_result, second_result) = thread::scope(|scope| {
+    let first_thread = scope.spawn(|| first.finalize_guarded(&mut first_guard, &mut RecordingApplier::default()));
+    let second_thread = scope.spawn(|| second.finalize_guarded(&mut second_guard, &mut RecordingApplier::default()));
+    (first_thread.join().unwrap(), second_thread.join().unwrap())
+  });
+
+  assert!(first_result.is_ok());
+  assert!(second_result.is_ok());
+  assert_eq!(shared.maximum_active.load(Ordering::SeqCst), 1);
+  assert_eq!(shared.active.load(Ordering::SeqCst), 0);
+  assert_eq!(first_guard.source.publication_count, 1);
+  assert_eq!(second_guard.source.publication_count, 1);
+}
+
+#[test]
+fn mark_convergence_symbols_remain_confined_to_disconnected_v4_modules() {
+  fn collect_rust_sources(directory: &Path, output: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory).unwrap() {
+      let entry = entry.unwrap();
+      let metadata = fs::symlink_metadata(entry.path()).unwrap();
+      if metadata.file_type().is_symlink() {
+        continue;
+      }
+      if metadata.is_dir() {
+        collect_rust_sources(&entry.path(), output);
+      } else if entry.path().extension().is_some_and(|extension| extension == "rs") {
+        output.push(entry.path());
+      }
+    }
+  }
+
+  let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let mut sources = Vec::new();
+  collect_rust_sources(&source_root, &mut sources);
+  let confinement = [
+    ("MarkMutationReconcilerV1", &["engine/v4/gc_mark_convergence.rs"][..]),
+    ("MarkMutationFinalGuardAuthorityV1", &["engine/v4/gc_mark_convergence.rs"][..]),
+    ("MarkMutationDrainSourceV1", &["engine/v4/gc_mark_convergence.rs"][..]),
+    ("MarkMutationJournalOwnerV1", &["engine/v4/gc_mark_convergence.rs"][..]),
+    ("mark_workspace_mutation_records_v1", &["engine/v4/gc_mark.rs", "engine/v4/gc_mark_convergence.rs"][..]),
+    ("MarkMutationJournalDurableSinkV1", &["engine/v4/gc_mark_convergence.rs", "engine/v4/first_authority.rs"][..]),
+  ];
+
+  for path in sources {
+    let relative = path.strip_prefix(&source_root).unwrap().to_string_lossy().replace('\\', "/");
+    let source = fs::read_to_string(&path).unwrap();
+    for (symbol, allowed) in confinement {
+      if source.contains(symbol) {
+        assert!(allowed.contains(&relative.as_str()), "{symbol} escaped disconnected v4 ownership into {relative}");
+      }
+    }
+  }
 }

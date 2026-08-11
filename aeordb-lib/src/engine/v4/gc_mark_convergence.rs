@@ -1140,6 +1140,7 @@ impl<'a> MarkMutationReconcilerV1<'a> {
     record: &MarkMutationRecordV1<'_>,
     applier: &mut dyn MarkMutationApplierV1,
   ) -> Result<(), MarkMutationConvergenceErrorV1> {
+    self.preflight()?;
     let next_applied = self
       .applied_records
       .checked_add(1)

@@ -667,11 +667,11 @@
             - [x] Validate the exact captured resume context before external path I/O, then apply the frozen closure-aware A/B selector and retain deterministic degraded-slot diagnostics.
             - [x] Return an owned selected-checkpoint handle whose object reads remain bounded and revalidate the immutable descriptor closure at point of use.
             - [x] Prove no-control absence, newest-valid selection, corrupt/tampered newest fallback, equal-sequence ambiguity, both-invalid refusal, cancellation, memory pressure, symlink/path substitution, restart, and both hash widths without activating service or destructive GC callers.
-        - [ ] P4-3d: drain bounded mutation runs to an exact final publication boundary, restart on layout generation change or journal gaps, and prove retained-or-leaked failure direction.
+        - [x] P4-3d: drain bounded mutation runs to an exact final publication boundary, restart on layout generation change or journal gaps, and prove retained-or-leaked failure direction.
           - [x] P4-3d1: expose typed borrowed mutation records/cursors, encode exact immutable segments, and validate cross-segment order by `(publication_sequence, mutation_id)` at both hash widths.
           - [x] P4-3d2: own bounded recoverable-soft mutation buffering and hard segment publication without making an acknowledged user write depend on journal I/O.
           - [x] P4-3d3: stream journal/workspace mutation runs through one bounded reconciler, restart on gaps/layout drift/starvation, and require a guarded empty second drain before final publication.
-          - [ ] P4-3d4: prove cancellation, malformed chains, dishonest receipts, failed soft publication, exact retry/resume, concurrent final-guard exclusion, and no live v3/service/destructive activation.
+          - [x] P4-3d4: prove cancellation, malformed chains, dishonest receipts, failed soft publication, exact retry/resume, concurrent final-guard exclusion, and no live v3/service/destructive activation.
         - [ ] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.
           - [ ] Prove and, if necessary, harden the Windows private-workspace ACL as the platform equivalent of Unix 0700/0600 before native closure.
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
