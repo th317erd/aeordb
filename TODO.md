@@ -600,7 +600,12 @@
         - [x] P3b-3a: expose typed bounded RootCandidate, RootExpiry, and durable TaskPin readers over the already-frozen v4 bytes.
         - [x] P3b-3b: add a bounded, memory-accounted request-pin registry whose readable-state check and pin acquisition share one lifecycle guard.
         - [x] P3b-3c: add the disconnected `ReadViewSelectorV1` / `ResolvedReadViewV1` resolver with current authorization first, one HEAD capture, exact authority validation, selected-root restriction, cancellation, and stable lifecycle errors.
-        - [ ] P3b-3d: add a streaming typed transfer-closure classifier that delegates protected-family policy to `SystemFamilyPolicyResolverV1`, requires authority edges, omits derived state by declared policy, and fails unknown protected state closed.
+        - [x] P3b-3d: add a streaming typed transfer-closure classifier that delegates protected-family policy to `SystemFamilyPolicyResolverV1`, requires authority edges, omits derived state by declared policy, and fails unknown protected state closed.
+          - [x] Freeze a root-bound classifier API whose borrow keeps the resolved read-view pin alive through terminal closure classification.
+          - [x] Require the exact NamespaceRoot, NamespaceTreeRoot, SemanticStateRoot, and RootAdmissionCommit edges before yielding payload decisions.
+          - [x] Delegate path, entry-type, KV-key, control-tag, and external-workspace decisions to the selected SystemFamily registry for the exact transfer operation.
+          - [x] Preserve required/optional/omitted/node-local/redacted/named-subset policies, refuse fail-unknown and unknown-protected state, and expose complete versus content-only terminal summaries.
+          - [x] Prove bounded constant-state streaming, cancellation, terminal failure latching, both hash widths, architecture isolation, and all error paths.
         - [ ] P3b-3e: prove lifecycle races, malformed state, auth ordering, no explicit-root fallback, content-only semantics, bounded memory, transfer completeness, architecture isolation, restart fixtures, broad Linux, and native-platform behavior before closure.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
