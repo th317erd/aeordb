@@ -301,13 +301,36 @@ pub fn encode_gc_active_control(request: &GcActiveControlWriteV1<'_>) -> FormatR
   let mut identity = [0u8; 17];
   identity[..16].copy_from_slice(request.database_id);
   identity[16] = request.slot;
+  let key = gc_active_control_key(request.hash_algorithm, request.kind, request.database_id, request.slot)?;
   let mut body = Vec::with_capacity(8 + request.target_manifest_hash.len());
   body.extend_from_slice(&request.sequence.to_le_bytes());
   body.extend_from_slice(request.target_manifest_hash);
   let total_length = AGCA_HEADER_LENGTH + identity.len() + body.len() + 4;
   let value = encode_gc_artifact_envelope(request.kind, request.generation, &identity, &body, total_length)?;
   let decoded = decode_gc_active_control(&value, request.hash_algorithm)?;
-  Ok(EncodedGcActiveControlV1 { key: decoded.key, value })
+  if decoded.key != key {
+    return Err(error(
+      MalformedInputClass::CrossRecordClosureMismatch,
+      "gc_control_key",
+      "encoded GC active control key differs from its canonical identity key",
+    ));
+  }
+  Ok(EncodedGcActiveControlV1 { key, value })
+}
+
+pub fn gc_active_control_key(algorithm: HashAlgorithm, kind: GcArtifactKindV1, database_id: &[u8; 16], slot: u8) -> FormatResult<Vec<u8>> {
+  if !kind.is_control() || database_id.iter().all(|byte| *byte == 0) || slot > 1 {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "gc_control_key_identity",
+      "GC active control key requires a control kind, nonzero database identity, and A/B slot",
+    ));
+  }
+  let mut identity = [0u8; 17];
+  identity[..16].copy_from_slice(database_id);
+  identity[16] = slot;
+  let kind_bytes = (kind as u16).to_le_bytes();
+  Ok(digest_parts(algorithm, &[b"aeordb.gc-artifact.control.v1\0", &kind_bytes, &identity]))
 }
 
 fn encode_gc_artifact_envelope(
@@ -446,8 +469,9 @@ pub fn decode_gc_active_control(value: &[u8], algorithm: HashAlgorithm) -> Forma
       "GC active control has a zero or invalid identity, slot, sequence, or target",
     ));
   }
-  let kind_bytes = (envelope.kind as u16).to_le_bytes();
-  let key = digest_parts(algorithm, &[b"aeordb.gc-artifact.control.v1\0", &kind_bytes, envelope.identity]);
+  let mut database_id_array = [0u8; 16];
+  database_id_array.copy_from_slice(database_id);
+  let key = gc_active_control_key(algorithm, envelope.kind, &database_id_array, slot)?;
   Ok(GcActiveControlV1 { kind: envelope.kind, database_id, slot, sequence, generation: envelope.generation, target_manifest_hash, key })
 }
 

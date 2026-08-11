@@ -10,10 +10,12 @@ use crate::engine::durability_coordinator::DurabilityCoordinator;
 use crate::engine::errors::EngineError;
 use crate::engine::file_record::FileRecord;
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD, KVEntry};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::native_durability::{
   NativeDurabilityError, NativeDurabilityOperation, read_file_at_native, verify_file_bytes_native, write_file_at_native,
 };
 use crate::engine::{CompressionAlgorithm, DiskKVStore, HashAlgorithm};
+use tokio_util::sync::CancellationToken;
 
 use super::control_store::SYSTEM_CONTROL_CONTENT_TYPE;
 use super::contract_generated::kv_tag;
@@ -25,8 +27,8 @@ use super::header_publication::{
 };
 use super::hash::digest_parts;
 use super::gc::{
-  EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlV1, GcActiveControlWriteV1, GcArtifactKindV1,
-  decode_gc_active_control, decode_gc_artifact_envelope, encode_gc_active_control, immutable_gc_artifact_key,
+  EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlV1, GcArtifactKindV1, decode_gc_active_control,
+  decode_gc_artifact_envelope, gc_active_control_key, immutable_gc_artifact_key, select_gc_active_control,
 };
 use super::gc_audit::{
   AuditArtifactV1, CorruptGcEvidenceDurabilityReceiptV1, CorruptGcEvidenceDurableSinkV1, CorruptGcEvidenceSinkErrorV1,
@@ -38,8 +40,10 @@ use super::gc_retirement::{
   RetirementJournalReplacementCoordinatorV1, RetirementJournalReplacementV1, RetirementJournalSinkErrorV1,
 };
 use super::gc_state::{RetirementReasonV1, decode_retirement_journal_segment_v1, retirement_journal_records_v1};
-use super::gc_mark::{GcMarkArtifactV1, decode_gc_mark_artifact};
-use super::gc_mark_workspace::DurableMarkWorkspaceClosureV1;
+use super::gc_mark::{
+  GcMarkArtifactV1, MARK_CHECKPOINT_VALUE_MAX, MarkResumeContextV1, decode_gc_mark_artifact, validate_mark_checkpoint_resume_context,
+};
+use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceErrorV1, MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1};
 use super::namespace::{
   EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_tree_root_v0,
   decode_semantic_object, encode_namespace_root,
@@ -231,6 +235,130 @@ impl From<RetirementJournalOwnerErrorV1> for MarkRunCheckpointPublicationErrorV1
   }
 }
 
+#[derive(Clone)]
+pub struct MarkRunCheckpointSelectionRequestV1<'a> {
+  pub resume_contexts: &'a [MarkResumeContextV1<'a>],
+  pub workspace_options: MarkWorkspaceReopenOptionsV1,
+  pub cancellation: &'a CancellationToken,
+  pub memory: &'a MemoryCoordinator,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkRunCheckpointSlotDiagnosticV1 {
+  pub slot: u8,
+  pub code: &'static str,
+  pub message: String,
+}
+
+#[derive(Debug)]
+pub enum MarkRunCheckpointSelectionV1 {
+  Absent,
+  Selected(Box<SelectedMarkRunCheckpointV1>),
+}
+
+pub struct SelectedMarkRunCheckpointV1 {
+  algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+  checkpoint_entity_bytes: Vec<u8>,
+  _checkpoint_memory: MemoryReservation,
+  workspace: ReopenedMarkWorkspaceV1,
+  pub control_slot: u8,
+  pub control_sequence: u64,
+  pub control_write_sequence: u64,
+  pub checkpoint_key: Vec<u8>,
+  pub checkpoint_write_sequence: u64,
+  pub degraded_slots: Vec<MarkRunCheckpointSlotDiagnosticV1>,
+}
+
+impl fmt::Debug for SelectedMarkRunCheckpointV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("SelectedMarkRunCheckpointV1")
+      .field("control_slot", &self.control_slot)
+      .field("control_sequence", &self.control_sequence)
+      .field("control_write_sequence", &self.control_write_sequence)
+      .field("checkpoint_key", &hex::encode(&self.checkpoint_key))
+      .field("checkpoint_write_sequence", &self.checkpoint_write_sequence)
+      .field("degraded_slots", &self.degraded_slots)
+      .finish()
+  }
+}
+
+impl SelectedMarkRunCheckpointV1 {
+  pub fn checkpoint(&self) -> Result<Box<super::gc_mark::MarkRunCheckpointV1<'_>>, FormatError> {
+    let entity = decode_whole_entity(&self.checkpoint_entity_bytes, self.algorithm, self.write_sequence_high_water)?;
+    let GcMarkArtifactV1::Checkpoint(checkpoint) = decode_gc_mark_artifact(entity.stored_value, self.algorithm)? else {
+      return Err(super::reader::FormatError::new(
+        super::reader::MalformedInputClass::UnknownTypeKindOrEnum,
+        "mark_checkpoint_selected_kind",
+        "selected mark checkpoint entity contains another mark artifact kind",
+      ));
+    };
+    Ok(checkpoint)
+  }
+
+  pub fn workspace(&self) -> &ReopenedMarkWorkspaceV1 {
+    &self.workspace
+  }
+}
+
+#[derive(Debug)]
+pub enum MarkRunCheckpointSelectionErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Authority(FirstAuthorityPublicationErrorV1),
+  Workspace(MarkWorkspaceErrorV1),
+  Memory(MemoryCoordinatorError),
+}
+
+impl MarkRunCheckpointSelectionErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Invalid { code, .. } => code,
+      Self::Authority(source) => source.code(),
+      Self::Workspace(source) => source.code(),
+      Self::Memory(_) => "mark_checkpoint_selection_memory",
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+}
+
+impl Display for MarkRunCheckpointSelectionErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Authority(source) => write!(formatter, "mark checkpoint selection authority error: {source}"),
+      Self::Workspace(source) => write!(formatter, "mark checkpoint selection workspace error: {source}"),
+      Self::Memory(source) => write!(formatter, "mark checkpoint selection memory error: {source}"),
+    }
+  }
+}
+
+impl Error for MarkRunCheckpointSelectionErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Authority(source) => Some(source),
+      Self::Workspace(source) => Some(source),
+      Self::Memory(source) => Some(source),
+      Self::Invalid { .. } => None,
+    }
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for MarkRunCheckpointSelectionErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<MemoryCoordinatorError> for MarkRunCheckpointSelectionErrorV1 {
+  fn from(source: MemoryCoordinatorError) -> Self {
+    Self::Memory(source)
+  }
+}
+
 #[derive(Debug)]
 pub enum FirstAuthorityPublicationErrorV1 {
   Invalid { code: &'static str, message: String },
@@ -383,6 +511,36 @@ struct StoredGcControlEntityV1 {
   integrity_hash: Vec<u8>,
 }
 
+struct ChargedSelectionEntityV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+struct LoadedMarkRunControlV1 {
+  entity: ChargedSelectionEntityV1,
+  write_sequence: u64,
+}
+
+enum LoadedMarkRunControlSlotV1 {
+  Absent,
+  Invalid(MarkRunCheckpointSlotDiagnosticV1),
+  Valid(LoadedMarkRunControlV1),
+}
+
+struct LoadedMarkRunCheckpointV1 {
+  entity: ChargedSelectionEntityV1,
+  key: Vec<u8>,
+  write_sequence: u64,
+  resume_context_index: usize,
+}
+
+struct ValidatedMarkRunClosureV1 {
+  checkpoint_entity: ChargedSelectionEntityV1,
+  checkpoint_key: Vec<u8>,
+  checkpoint_write_sequence: u64,
+  workspace: ReopenedMarkWorkspaceV1,
+}
+
 struct MarkRunControlPublicationV1 {
   control_write_sequence: u64,
   control_slot: u8,
@@ -450,6 +608,207 @@ impl V4FirstAuthorityPublisher {
     let path = system_control_path(SystemControlKindV1::RootAdmissionCommit, root_hash, SystemControlSlotV1::Immutable)?;
     let key = first_authority_file_path_hash(&path, observation.selected.header.hash_algorithm);
     self.locator(&key)
+  }
+
+  pub fn select_mark_run_checkpoint(
+    &self,
+    request: MarkRunCheckpointSelectionRequestV1<'_>,
+  ) -> Result<MarkRunCheckpointSelectionV1, MarkRunCheckpointSelectionErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+        "mark_checkpoint_selection_cancelled",
+        "mark checkpoint selection was canceled before database access",
+      ));
+    }
+    if request.resume_contexts.len() > 2 {
+      return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+        "mark_checkpoint_selection_contexts",
+        "mark checkpoint selection accepts at most one exact resume context per A/B slot",
+      ));
+    }
+
+    let (observation, controls, checkpoint_loads, control_keys, control_locators) = {
+      let _authority = self.root_state.lock().map_err(|poisoned| {
+        drop(poisoned);
+        MarkRunCheckpointSelectionErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+      })?;
+      let observation = self.observe()?;
+      let header = &observation.selected.header;
+      if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+        return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+          "mark_checkpoint_selection_authority",
+          "mark checkpoint selection requires selected non-degraded first authority",
+        ));
+      }
+      for context in request.resume_contexts {
+        if context.hash_algorithm != header.hash_algorithm || context.database_id != header.database_id {
+          return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+            "mark_checkpoint_selection_contexts",
+            "resume context hash profile or database identity differs from selected authority",
+          ));
+        }
+      }
+      let control_keys = [
+        gc_active_control_key(header.hash_algorithm, GcArtifactKindV1::MarkRunActiveControl, &header.database_id, 0)
+          .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?,
+        gc_active_control_key(header.hash_algorithm, GcArtifactKindV1::MarkRunActiveControl, &header.database_id, 1)
+          .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?,
+      ];
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      let controls = [
+        load_mark_run_control_for_selection(&self.file, &kv, &control_keys[0], 0, header, request.cancellation, request.memory)?,
+        load_mark_run_control_for_selection(&self.file, &kv, &control_keys[1], 1, header, request.cancellation, request.memory)?,
+      ];
+      let control_locators = [
+        kv.get(&control_keys[0]).map_err(FirstAuthorityPublicationErrorV1::from)?,
+        kv.get(&control_keys[1]).map_err(FirstAuthorityPublicationErrorV1::from)?,
+      ];
+      if matches!(controls[0], LoadedMarkRunControlSlotV1::Absent) && matches!(controls[1], LoadedMarkRunControlSlotV1::Absent) {
+        return Ok(MarkRunCheckpointSelectionV1::Absent);
+      }
+      let mut checkpoint_loads = Vec::with_capacity(2);
+      for slot in 0u8..=1 {
+        let loaded = &controls[usize::from(slot)];
+        let checkpoint = match loaded {
+          LoadedMarkRunControlSlotV1::Valid(control) => Some(load_mark_run_checkpoint_for_selection(
+            &self.file,
+            &kv,
+            control,
+            slot,
+            header,
+            request.resume_contexts,
+            request.cancellation,
+            request.memory,
+          )?),
+          LoadedMarkRunControlSlotV1::Absent | LoadedMarkRunControlSlotV1::Invalid(_) => None,
+        };
+        checkpoint_loads.push(checkpoint);
+      }
+      (observation, controls, checkpoint_loads, control_keys, control_locators)
+    };
+
+    let header = &observation.selected.header;
+    let mut diagnostics = Vec::new();
+    for loaded in &controls {
+      if let LoadedMarkRunControlSlotV1::Invalid(diagnostic) = loaded {
+        diagnostics.push(diagnostic.clone());
+      }
+    }
+    let mut closures: [Option<ValidatedMarkRunClosureV1>; 2] = std::array::from_fn(|_| None);
+    for (slot, checkpoint_load) in (0u8..=1).zip(checkpoint_loads) {
+      let Some(checkpoint_load) = checkpoint_load else {
+        continue;
+      };
+      let checkpoint_load = match checkpoint_load {
+        Ok(checkpoint) => checkpoint,
+        Err(diagnostic) => {
+          diagnostics.push(diagnostic);
+          continue;
+        }
+      };
+      let checkpoint = decode_loaded_mark_checkpoint(&checkpoint_load, header)
+        .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?;
+      let context = &request.resume_contexts[checkpoint_load.resume_context_index];
+      match ReopenedMarkWorkspaceV1::open(
+        &checkpoint,
+        context,
+        request.workspace_options.clone(),
+        request.cancellation.clone(),
+        request.memory,
+      ) {
+        Ok(workspace) => {
+          closures[usize::from(slot)] = Some(ValidatedMarkRunClosureV1 {
+            checkpoint_entity: checkpoint_load.entity,
+            checkpoint_key: checkpoint_load.key,
+            checkpoint_write_sequence: checkpoint_load.write_sequence,
+            workspace,
+          });
+        }
+        Err(source) => diagnostics.push(classify_workspace_selection_error(slot, source)?),
+      }
+    }
+
+    if request.cancellation.is_cancelled() {
+      return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+        "mark_checkpoint_selection_cancelled",
+        "mark checkpoint selection was canceled before authority revalidation",
+      ));
+    }
+    {
+      let _authority = self.root_state.lock().map_err(|poisoned| {
+        drop(poisoned);
+        MarkRunCheckpointSelectionErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+      })?;
+      let current = self.observe()?;
+      if current.selected.header.database_id != header.database_id || current.selected.header.hash_algorithm != header.hash_algorithm {
+        return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+          "mark_checkpoint_selection_changed",
+          "selected database identity or hash profile changed during workspace validation",
+        ));
+      }
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, &current.selected.header)?;
+      for slot in 0..2 {
+        if kv.get(&control_keys[slot]).map_err(FirstAuthorityPublicationErrorV1::from)? != control_locators[slot] {
+          return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+            "mark_checkpoint_selection_changed",
+            "mark-run A/B authority changed during workspace validation; selection must be retried",
+          ));
+        }
+      }
+    }
+
+    let selected_slot = match (&controls[0], &controls[1]) {
+      (LoadedMarkRunControlSlotV1::Valid(a), LoadedMarkRunControlSlotV1::Valid(b)) => {
+        let a = decode_loaded_mark_control(a, header)
+          .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?;
+        let b = decode_loaded_mark_control(b, header)
+          .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?;
+        select_gc_active_control(&a, closures[0].is_some(), &b, closures[1].is_some())
+          .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?
+          .map(|selected| selected.slot)
+      }
+      (LoadedMarkRunControlSlotV1::Valid(_), _) if closures[0].is_some() => Some(0),
+      (_, LoadedMarkRunControlSlotV1::Valid(_)) if closures[1].is_some() => Some(1),
+      _ => None,
+    };
+    let Some(selected_slot) = selected_slot else {
+      diagnostics.sort_by_key(|diagnostic| diagnostic.slot);
+      return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+        "mark_checkpoint_selection_no_valid_closure",
+        format!("no complete mark checkpoint closure is selectable: {diagnostics:?}"),
+      ));
+    };
+    let selected_index = usize::from(selected_slot);
+    let selected_control = match &controls[selected_index] {
+      LoadedMarkRunControlSlotV1::Valid(control) => control,
+      LoadedMarkRunControlSlotV1::Absent | LoadedMarkRunControlSlotV1::Invalid(_) => {
+        return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+          "mark_checkpoint_selection_internal",
+          "frozen selector returned a slot without a valid control",
+        ));
+      }
+    };
+    let decoded_control = decode_loaded_mark_control(selected_control, header)
+      .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?;
+    let selected = closures[selected_index].take().ok_or_else(|| {
+      MarkRunCheckpointSelectionErrorV1::invalid("mark_checkpoint_selection_internal", "frozen selector returned an incomplete closure")
+    })?;
+    diagnostics.sort_by_key(|diagnostic| diagnostic.slot);
+    Ok(MarkRunCheckpointSelectionV1::Selected(Box::new(SelectedMarkRunCheckpointV1 {
+      algorithm: header.hash_algorithm,
+      write_sequence_high_water: header.write_sequence_high_water,
+      checkpoint_entity_bytes: selected.checkpoint_entity.bytes,
+      _checkpoint_memory: selected.checkpoint_entity._memory,
+      workspace: selected.workspace,
+      control_slot: selected_slot,
+      control_sequence: decoded_control.sequence,
+      control_write_sequence: selected_control.write_sequence,
+      checkpoint_key: selected.checkpoint_key,
+      checkpoint_write_sequence: selected.checkpoint_write_sequence,
+      degraded_slots: diagnostics,
+    })))
   }
 
   pub fn publish_mark_run_checkpoint(
@@ -598,7 +957,7 @@ impl V4FirstAuthorityPublisher {
       ));
     }
 
-    let control_keys = mark_run_control_keys(header.hash_algorithm, &header.database_id, control.target_manifest_hash)?;
+    let control_keys = mark_run_control_keys(header.hash_algorithm, &header.database_id)?;
     if encoded_control.key != control_keys[usize::from(control.slot)] {
       return Err(MarkRunCheckpointPublicationErrorV1::invalid(
         "mark_checkpoint_control_key",
@@ -1833,30 +2192,286 @@ fn validate_mark_run_checkpoint_publication<'a>(
   Ok((checkpoint, control))
 }
 
-fn mark_run_control_keys(
-  algorithm: HashAlgorithm,
-  database_id: &[u8; 16],
-  target_manifest_hash: &[u8],
-) -> Result<[Vec<u8>; 2], MarkRunCheckpointPublicationErrorV1> {
-  let a = encode_gc_active_control(&GcActiveControlWriteV1 {
-    kind: GcArtifactKindV1::MarkRunActiveControl,
-    hash_algorithm: algorithm,
-    database_id,
-    slot: 0,
-    sequence: 1,
-    generation: 1,
-    target_manifest_hash,
+fn mark_selection_diagnostic(slot: u8, code: &'static str, message: impl Into<String>) -> MarkRunCheckpointSlotDiagnosticV1 {
+  MarkRunCheckpointSlotDiagnosticV1 { slot, code, message: message.into() }
+}
+
+fn load_mark_run_control_for_selection(
+  file: &File,
+  kv: &DiskKVStore,
+  key: &[u8],
+  slot: u8,
+  header: &DatabaseHeaderV4,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<LoadedMarkRunControlSlotV1, MarkRunCheckpointSelectionErrorV1> {
+  let Some(locator) = kv.get(key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+    return Ok(LoadedMarkRunControlSlotV1::Absent);
+  };
+  if locator.type_flags != kv_tag::GC_ARTIFACT {
+    return Ok(LoadedMarkRunControlSlotV1::Invalid(mark_selection_diagnostic(
+      slot,
+      "mark_checkpoint_control_collision",
+      "mark control key resolves to another KV role",
+    )));
+  }
+  let length = match usize::try_from(locator.total_length) {
+    Ok(length) => length,
+    Err(source) => {
+      return Ok(LoadedMarkRunControlSlotV1::Invalid(mark_selection_diagnostic(
+        slot,
+        "mark_checkpoint_control_length",
+        format!("mark control locator length exceeds usize: {source}"),
+      )));
+    }
+  };
+  if length > FIRST_AUTHORITY_CONTROL_ENTITY_CAP {
+    return Ok(LoadedMarkRunControlSlotV1::Invalid(mark_selection_diagnostic(
+      slot,
+      "mark_checkpoint_control_length",
+      format!("mark control entity length {length} exceeds {FIRST_AUTHORITY_CONTROL_ENTITY_CAP}"),
+    )));
+  }
+  let entity = read_selection_entity(file, &locator, length, "mark control", cancellation, memory)?;
+  let write_sequence = {
+    let decoded = match decode_whole_entity(&entity.bytes, header.hash_algorithm, header.write_sequence_high_water) {
+      Ok(decoded) => decoded,
+      Err(source) => {
+        return Ok(LoadedMarkRunControlSlotV1::Invalid(mark_selection_diagnostic(slot, source.code(), source.to_string())));
+      }
+    };
+    if decoded.entry_type != EntryTypeV4::GcArtifact
+      || decoded.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || decoded.compression_algorithm != CompressionAlgorithm::None
+      || decoded.key != key
+    {
+      return Ok(LoadedMarkRunControlSlotV1::Invalid(mark_selection_diagnostic(
+        slot,
+        "mark_checkpoint_control_representation",
+        "stored mark control is not one canonical system GC WholeEntity",
+      )));
+    }
+    let control = match decode_gc_active_control(decoded.stored_value, header.hash_algorithm) {
+      Ok(control) => control,
+      Err(source) => {
+        return Ok(LoadedMarkRunControlSlotV1::Invalid(mark_selection_diagnostic(slot, source.code(), source.to_string())));
+      }
+    };
+    if control.kind != GcArtifactKindV1::MarkRunActiveControl
+      || control.database_id != header.database_id
+      || control.slot != slot
+      || control.key != key
+    {
+      return Ok(LoadedMarkRunControlSlotV1::Invalid(mark_selection_diagnostic(
+        slot,
+        "mark_checkpoint_control_representation",
+        "stored GC entity is not the canonical mark-run control for its database and slot",
+      )));
+    }
+    decoded.write_sequence
+  };
+  Ok(LoadedMarkRunControlSlotV1::Valid(LoadedMarkRunControlV1 { entity, write_sequence }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_mark_run_checkpoint_for_selection(
+  file: &File,
+  kv: &DiskKVStore,
+  control: &LoadedMarkRunControlV1,
+  slot: u8,
+  header: &DatabaseHeaderV4,
+  resume_contexts: &[MarkResumeContextV1<'_>],
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<Result<LoadedMarkRunCheckpointV1, MarkRunCheckpointSlotDiagnosticV1>, MarkRunCheckpointSelectionErrorV1> {
+  let control = decode_loaded_mark_control(control, header)
+    .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?;
+  let Some(locator) = kv.get(control.target_manifest_hash).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+    return Ok(Err(mark_selection_diagnostic(slot, "mark_checkpoint_entity_missing", "mark control target checkpoint is absent")));
+  };
+  if locator.type_flags != kv_tag::GC_ARTIFACT {
+    return Ok(Err(mark_selection_diagnostic(slot, "mark_checkpoint_entity_collision", "mark checkpoint key resolves to another KV role")));
+  }
+  let maximum_entity_length = super::entity::checked_whole_entity_encoded_length(
+    header.hash_algorithm,
+    control.target_manifest_hash.len(),
+    MARK_CHECKPOINT_VALUE_MAX,
+  )
+  .map_err(|source| MarkRunCheckpointSelectionErrorV1::invalid(source.code(), source.to_string()))?;
+  let length = match usize::try_from(locator.total_length) {
+    Ok(length) => length,
+    Err(source) => {
+      return Ok(Err(mark_selection_diagnostic(
+        slot,
+        "mark_checkpoint_entity_length",
+        format!("mark checkpoint locator length exceeds usize: {source}"),
+      )));
+    }
+  };
+  if length > maximum_entity_length {
+    return Ok(Err(mark_selection_diagnostic(
+      slot,
+      "mark_checkpoint_entity_length",
+      format!("mark checkpoint entity length {length} exceeds {maximum_entity_length}"),
+    )));
+  }
+  let entity = read_selection_entity(file, &locator, length, "mark checkpoint", cancellation, memory)?;
+  let (key, write_sequence, resume_context_index) = {
+    let decoded = match decode_whole_entity(&entity.bytes, header.hash_algorithm, header.write_sequence_high_water) {
+      Ok(decoded) => decoded,
+      Err(source) => return Ok(Err(mark_selection_diagnostic(slot, source.code(), source.to_string()))),
+    };
+    if decoded.entry_type != EntryTypeV4::GcArtifact
+      || decoded.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || decoded.compression_algorithm != CompressionAlgorithm::None
+      || decoded.key != control.target_manifest_hash
+    {
+      return Ok(Err(mark_selection_diagnostic(
+        slot,
+        "mark_checkpoint_entity_representation",
+        "stored mark checkpoint is not one canonical system GC WholeEntity",
+      )));
+    }
+    let checkpoint = match decode_gc_mark_artifact(decoded.stored_value, header.hash_algorithm) {
+      Ok(GcMarkArtifactV1::Checkpoint(checkpoint)) => checkpoint,
+      Ok(GcMarkArtifactV1::MutationJournal(_)) => {
+        return Ok(Err(mark_selection_diagnostic(
+          slot,
+          "mark_checkpoint_entity_kind",
+          "mark control target is a mutation journal rather than a checkpoint",
+        )));
+      }
+      Err(source) => return Ok(Err(mark_selection_diagnostic(slot, source.code(), source.to_string()))),
+    };
+    if checkpoint.key != control.target_manifest_hash
+      || checkpoint.database_id != control.database_id
+      || checkpoint.generation != control.generation
+    {
+      return Ok(Err(mark_selection_diagnostic(
+        slot,
+        "mark_checkpoint_control_closure",
+        "mark checkpoint key, database, or generation does not close against its control",
+      )));
+    }
+    let mut resume_context_index = None;
+    let mut mismatch_details = Vec::new();
+    for (index, context) in resume_contexts.iter().enumerate() {
+      if context.hash_algorithm != header.hash_algorithm {
+        mismatch_details.push(format!("context {index}: hash profile mismatch"));
+        continue;
+      }
+      match validate_mark_checkpoint_resume_context(&checkpoint, context) {
+        Ok(()) => {
+          resume_context_index = Some(index);
+          break;
+        }
+        Err(source) => mismatch_details.push(format!("context {index}: {}: {}", source.code(), source)),
+      }
+    }
+    let Some(resume_context_index) = resume_context_index else {
+      return Ok(Err(mark_selection_diagnostic(
+        slot,
+        "mark_checkpoint_resume_context",
+        format!("mark checkpoint does not match any exact expected resume context: {}", mismatch_details.join("; ")),
+      )));
+    };
+    (checkpoint.key.clone(), decoded.write_sequence, resume_context_index)
+  };
+  Ok(Ok(LoadedMarkRunCheckpointV1 { entity, key, write_sequence, resume_context_index }))
+}
+
+fn read_selection_entity(
+  file: &File,
+  locator: &KVEntry,
+  length: usize,
+  role: &'static str,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<ChargedSelectionEntityV1, MarkRunCheckpointSelectionErrorV1> {
+  if cancellation.is_cancelled() {
+    return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+      "mark_checkpoint_selection_cancelled",
+      format!("mark checkpoint selection was canceled before reading {role}"),
+    ));
+  }
+  let reservation_bytes = u64::try_from(length).map_err(|source| {
+    MarkRunCheckpointSelectionErrorV1::invalid(
+      "mark_checkpoint_selection_allocation",
+      format!("{role} length exceeds u64 memory accounting: {source}"),
+    )
   })?;
-  let b = encode_gc_active_control(&GcActiveControlWriteV1 {
-    kind: GcArtifactKindV1::MarkRunActiveControl,
-    hash_algorithm: algorithm,
-    database_id,
-    slot: 1,
-    sequence: 1,
-    generation: 1,
-    target_manifest_hash,
+  let reservation = memory.reserve(MemoryOwner::GarbageCollection, reservation_bytes, AdmissionClass::Maintenance)?;
+  let mut bytes = Vec::new();
+  bytes.try_reserve_exact(length).map_err(|source| {
+    MarkRunCheckpointSelectionErrorV1::invalid("mark_checkpoint_selection_allocation", format!("failed to allocate {role}: {source}"))
   })?;
-  Ok([a.key, b.key])
+  bytes.resize(length, 0);
+  read_file_at_native(file, locator.offset, &mut bytes).map_err(|source| {
+    MarkRunCheckpointSelectionErrorV1::Authority(FirstAuthorityPublicationErrorV1::invalid(
+      "mark_checkpoint_selection_read",
+      format!("failed to read {role}: {source}"),
+    ))
+  })?;
+  if cancellation.is_cancelled() {
+    return Err(MarkRunCheckpointSelectionErrorV1::invalid(
+      "mark_checkpoint_selection_cancelled",
+      format!("mark checkpoint selection was canceled after reading {role}"),
+    ));
+  }
+  Ok(ChargedSelectionEntityV1 { bytes, _memory: reservation })
+}
+
+fn decode_loaded_mark_control<'a>(
+  loaded: &'a LoadedMarkRunControlV1,
+  header: &DatabaseHeaderV4,
+) -> Result<GcActiveControlV1<'a>, FormatError> {
+  let entity = decode_whole_entity(&loaded.entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  decode_gc_active_control(entity.stored_value, header.hash_algorithm)
+}
+
+fn decode_loaded_mark_checkpoint<'a>(
+  loaded: &'a LoadedMarkRunCheckpointV1,
+  header: &DatabaseHeaderV4,
+) -> Result<Box<super::gc_mark::MarkRunCheckpointV1<'a>>, FormatError> {
+  let entity = decode_whole_entity(&loaded.entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  let GcMarkArtifactV1::Checkpoint(checkpoint) = decode_gc_mark_artifact(entity.stored_value, header.hash_algorithm)? else {
+    return Err(FormatError::new(
+      super::reader::MalformedInputClass::UnknownTypeKindOrEnum,
+      "mark_checkpoint_selected_kind",
+      "selected mark checkpoint entity contains another mark artifact kind",
+    ));
+  };
+  Ok(checkpoint)
+}
+
+fn classify_workspace_selection_error(
+  slot: u8,
+  source: MarkWorkspaceErrorV1,
+) -> Result<MarkRunCheckpointSlotDiagnosticV1, MarkRunCheckpointSelectionErrorV1> {
+  let code = source.code();
+  match source {
+    MarkWorkspaceErrorV1::Canceled => Err(MarkRunCheckpointSelectionErrorV1::invalid(
+      "mark_checkpoint_selection_cancelled",
+      "mark checkpoint workspace validation was canceled",
+    )),
+    MarkWorkspaceErrorV1::Memory(source) => Err(MarkRunCheckpointSelectionErrorV1::Memory(*source)),
+    source @ (MarkWorkspaceErrorV1::MemoryRollback { .. }
+    | MarkWorkspaceErrorV1::Allocation(_)
+    | MarkWorkspaceErrorV1::Io { .. }
+    | MarkWorkspaceErrorV1::Durability(_)) => Err(MarkRunCheckpointSelectionErrorV1::Workspace(source)),
+    source @ (MarkWorkspaceErrorV1::Identity(_)
+    | MarkWorkspaceErrorV1::Path(_)
+    | MarkWorkspaceErrorV1::State(_)
+    | MarkWorkspaceErrorV1::Capacity(_)
+    | MarkWorkspaceErrorV1::Format(_)) => Ok(mark_selection_diagnostic(slot, code, source.to_string())),
+  }
+}
+
+fn mark_run_control_keys(algorithm: HashAlgorithm, database_id: &[u8; 16]) -> Result<[Vec<u8>; 2], MarkRunCheckpointPublicationErrorV1> {
+  Ok([
+    gc_active_control_key(algorithm, GcArtifactKindV1::MarkRunActiveControl, database_id, 0)?,
+    gc_active_control_key(algorithm, GcArtifactKindV1::MarkRunActiveControl, database_id, 1)?,
+  ])
 }
 
 fn load_gc_control_entity(

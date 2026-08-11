@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::gc_mark::{
-  MarkWorkspaceObjectKindV1, decode_mark_workspace_manifest, decode_mark_workspace_object, validate_mark_workspace_object,
+  GcMarkArtifactV1, MarkResumeContextV1, MarkRunCheckpointV1, MarkRunCheckpointWriteV1, MarkWorkspaceObjectKindV1, decode_gc_mark_artifact,
+  decode_mark_workspace_manifest, decode_mark_workspace_object, encode_mark_run_checkpoint, validate_mark_workspace_object,
 };
-use aeordb::engine::v4::gc_mark_workspace::{DurableMarkWorkspaceV1, MarkWorkspaceBasisV1, MarkWorkspaceIdentityV1, MarkWorkspaceOptionsV1};
+use aeordb::engine::v4::gc_mark_workspace::{
+  DurableMarkWorkspaceClosureV1, DurableMarkWorkspaceV1, MarkWorkspaceBasisV1, MarkWorkspaceIdentityV1, MarkWorkspaceOptionsV1,
+  MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1,
+};
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
@@ -77,6 +81,386 @@ fn database_file(root: &Path, name: &str) -> PathBuf {
   let path = root.join(name);
   fs::write(&path, b"database identity placeholder").unwrap();
   path
+}
+
+fn capabilities() -> [u8; 32] {
+  let mut capabilities = [0u8; 32];
+  for bit in [12usize, 13, 14, 15, 17] {
+    capabilities[bit / 8] |= 1 << (bit % 8);
+  }
+  capabilities
+}
+
+fn checkpoint_for_workspace(
+  algorithm: HashAlgorithm,
+  closure: &DurableMarkWorkspaceClosureV1,
+) -> aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1 {
+  checkpoint_for_workspace_digest(algorithm, closure, closure.manifest_digest())
+}
+
+fn checkpoint_for_workspace_digest(
+  algorithm: HashAlgorithm,
+  closure: &DurableMarkWorkspaceClosureV1,
+  workspace_manifest_digest: [u8; 32],
+) -> aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1 {
+  let run_id = sequence::<16>(0x51);
+  encode_mark_run_checkpoint(&MarkRunCheckpointWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &sequence::<16>(0x31),
+    run_id: &run_id,
+    generation: 77,
+    checkpoint_sequence: 7,
+    state: 1,
+    phase: 2,
+    resumable: true,
+    canceled: false,
+    capabilities: capabilities(),
+    started_at_ms: 1_700_000_100_000,
+    updated_at_ms: 1_700_000_100_500,
+    authority_root_set_digest: &sequence_vec(0x11, algorithm.hash_length()),
+    semantic_state_digest: &sequence_vec(0x31, algorithm.hash_length()),
+    kv_layout_fingerprint: &sequence_vec(0x51, algorithm.hash_length()),
+    effective_policy_fingerprint: sequence::<32>(0x71),
+    system_family_registry_fingerprint: sequence::<32>(0x91),
+    captured_header_sequence: 17,
+    captured_write_high_water: 900,
+    reconciled_through_sequence: 801,
+    active_bitmap_bit_count: 512,
+    kv_bucket_count: 8,
+    kv_slots_per_bucket: 64,
+    workspace_path: closure.workspace_path().to_str().unwrap(),
+    workspace_id: sequence::<16>(0xA1),
+    workspace_manifest_digest,
+    mutation_journal_head: &sequence_vec(0xB1, algorithm.hash_length()),
+    checkpoint_logical_work: closure.logical_record_count(),
+    total_logical_work_hint: 64 * 1024 * 1024,
+  })
+  .unwrap()
+}
+
+#[test]
+fn reopener_validates_and_reloads_every_workspace_object_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let directory = tempdir().unwrap();
+    let database = database_file(directory.path(), "reopen.aeordb");
+    let scratch = directory.path().join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let memory = memory_coordinator();
+    let mut writer = DurableMarkWorkspaceV1::create(
+      &database,
+      identity(algorithm),
+      basis(algorithm),
+      options(&scratch),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap();
+    for (index, kind) in MarkWorkspaceObjectKindV1::ALL.into_iter().enumerate() {
+      let fixture = object_fixture(algorithm, kind);
+      writer.write_object(kind, u64::try_from(index).unwrap() + 1, &fixture[80..fixture.len() - 4]).unwrap();
+    }
+    let closure = writer.complete().unwrap();
+    let encoded = checkpoint_for_workspace(algorithm, &closure);
+    let checkpoint = decoded_checkpoint(algorithm, &encoded);
+    let context = resume_context(algorithm, &checkpoint);
+    drop(writer);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, 0);
+
+    let reopened = ReopenedMarkWorkspaceV1::open(
+      &checkpoint,
+      &context,
+      MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap();
+    assert_eq!(reopened.manifest_digest(), closure.manifest_digest());
+    assert_eq!(reopened.object_count(), MarkWorkspaceObjectKindV1::ALL.len());
+    assert_eq!(reopened.checkpoint_directory(), closure.checkpoint_directory());
+    assert!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes > 0);
+
+    for (index, kind) in MarkWorkspaceObjectKindV1::ALL.into_iter().enumerate() {
+      let object = reopened.read_object(kind, u64::try_from(index).unwrap() + 1).unwrap();
+      assert_eq!(object.bytes(), object_fixture(algorithm, kind));
+    }
+    drop(reopened);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn reopener_rejects_context_before_path_io_and_honors_cancellation_capacity_and_memory() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path(), "reopen-refusal.aeordb");
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory_coordinator();
+  let mut writer =
+    DurableMarkWorkspaceV1::create(&database, identity(algorithm), basis(algorithm), options(&scratch), CancellationToken::new(), &memory)
+      .unwrap();
+  let closure = writer.complete().unwrap();
+  let encoded = checkpoint_for_workspace(algorithm, &closure);
+  let checkpoint = decoded_checkpoint(algorithm, &encoded);
+  drop(writer);
+
+  let mut mismatched = resume_context(algorithm, &checkpoint);
+  mismatched.captured_header_sequence += 1;
+  fs::remove_dir_all(closure.workspace_path()).unwrap();
+  let error = ReopenedMarkWorkspaceV1::open(
+    &checkpoint,
+    &mismatched,
+    MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap_err();
+  assert_eq!(error.code(), "mark_workspace_format");
+  assert!(error.to_string().contains("resume context"));
+
+  let exact = resume_context(algorithm, &checkpoint);
+  assert_eq!(
+    ReopenedMarkWorkspaceV1::open(
+      &checkpoint,
+      &exact,
+      MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap_err()
+    .code(),
+    "mark_workspace_path"
+  );
+
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path(), "reopen-limits.aeordb");
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let mut writer =
+    DurableMarkWorkspaceV1::create(&database, identity(algorithm), basis(algorithm), options(&scratch), CancellationToken::new(), &memory)
+      .unwrap();
+  let closure = writer.complete().unwrap();
+  let encoded = checkpoint_for_workspace(algorithm, &closure);
+  let checkpoint = decoded_checkpoint(algorithm, &encoded);
+  let exact = resume_context(algorithm, &checkpoint);
+  drop(writer);
+
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+  assert_eq!(
+    ReopenedMarkWorkspaceV1::open(
+      &checkpoint,
+      &exact,
+      MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      cancellation,
+      &memory,
+    )
+    .unwrap_err()
+    .code(),
+    "mark_workspace_cancelled"
+  );
+  assert_eq!(
+    ReopenedMarkWorkspaceV1::open(&checkpoint, &exact, MarkWorkspaceReopenOptionsV1::new(1).unwrap(), CancellationToken::new(), &memory,)
+      .unwrap_err()
+      .code(),
+    "mark_workspace_capacity"
+  );
+
+  let constrained = MemoryCoordinator::new(MemoryPolicy::new(1, 1024, 1, 1).unwrap());
+  assert_eq!(
+    ReopenedMarkWorkspaceV1::open(
+      &checkpoint,
+      &exact,
+      MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      CancellationToken::new(),
+      &constrained,
+    )
+    .unwrap_err()
+    .code(),
+    "mark_workspace_memory"
+  );
+  assert_eq!(constrained.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn reopener_rejects_noncanonical_missing_tampered_and_post_open_changed_objects() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let memory = memory_coordinator();
+
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path(), "reopen-name.aeordb");
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let mut writer =
+    DurableMarkWorkspaceV1::create(&database, identity(algorithm), basis(algorithm), options(&scratch), CancellationToken::new(), &memory)
+      .unwrap();
+  let fixture = object_fixture(algorithm, MarkWorkspaceObjectKindV1::Bitmap);
+  writer.write_object(MarkWorkspaceObjectKindV1::Bitmap, 1, &fixture[80..fixture.len() - 4]).unwrap();
+  let closure = writer.complete().unwrap();
+  let mut manifest = fs::read(closure.manifest_path()).unwrap();
+  let name = b"bitmap/0000000000000001.agwo";
+  let start = manifest.windows(name.len()).position(|candidate| candidate == name).unwrap();
+  manifest[start + name.len() - 6] = b'2';
+  let checksum = crc32fast::hash(&manifest[..manifest.len() - 4]);
+  let checksum_offset = manifest.len() - 4;
+  manifest[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+  fs::write(closure.manifest_path(), &manifest).unwrap();
+  let encoded = checkpoint_for_workspace_digest(algorithm, &closure, *blake3::hash(&manifest).as_bytes());
+  let checkpoint = decoded_checkpoint(algorithm, &encoded);
+  let error = ReopenedMarkWorkspaceV1::open(
+    &checkpoint,
+    &resume_context(algorithm, &checkpoint),
+    MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap_err();
+  assert_eq!(error.code(), "mark_workspace_format");
+  assert!(error.to_string().contains("canonical object name"));
+
+  for failure in ["missing", "tampered"] {
+    let directory = tempdir().unwrap();
+    let database = database_file(directory.path(), &format!("reopen-{failure}.aeordb"));
+    let scratch = directory.path().join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let mut writer = DurableMarkWorkspaceV1::create(
+      &database,
+      identity(algorithm),
+      basis(algorithm),
+      options(&scratch),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap();
+    writer.write_object(MarkWorkspaceObjectKindV1::Bitmap, 1, &fixture[80..fixture.len() - 4]).unwrap();
+    let closure = writer.complete().unwrap();
+    let encoded = checkpoint_for_workspace(algorithm, &closure);
+    let checkpoint = decoded_checkpoint(algorithm, &encoded);
+    let object_path = writer.object_path(MarkWorkspaceObjectKindV1::Bitmap, 1);
+    drop(writer);
+    if failure == "missing" {
+      fs::remove_file(object_path).unwrap();
+    } else {
+      let mut bytes = fs::read(&object_path).unwrap();
+      bytes[80] ^= 1;
+      fs::write(object_path, bytes).unwrap();
+    }
+    let error = ReopenedMarkWorkspaceV1::open(
+      &checkpoint,
+      &resume_context(algorithm, &checkpoint),
+      MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), if failure == "missing" { "mark_workspace_path" } else { "mark_workspace_format" });
+  }
+
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path(), "reopen-recheck.aeordb");
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let mut writer =
+    DurableMarkWorkspaceV1::create(&database, identity(algorithm), basis(algorithm), options(&scratch), CancellationToken::new(), &memory)
+      .unwrap();
+  writer.write_object(MarkWorkspaceObjectKindV1::Bitmap, 1, &fixture[80..fixture.len() - 4]).unwrap();
+  let closure = writer.complete().unwrap();
+  let encoded = checkpoint_for_workspace(algorithm, &closure);
+  let checkpoint = decoded_checkpoint(algorithm, &encoded);
+  let object_path = writer.object_path(MarkWorkspaceObjectKindV1::Bitmap, 1);
+  drop(writer);
+  let reopened = ReopenedMarkWorkspaceV1::open(
+    &checkpoint,
+    &resume_context(algorithm, &checkpoint),
+    MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  let mut bytes = fs::read(&object_path).unwrap();
+  bytes[80] ^= 1;
+  fs::write(object_path, bytes).unwrap();
+  assert_eq!(reopened.read_object(MarkWorkspaceObjectKindV1::Bitmap, 1).unwrap_err().code(), "mark_workspace_format");
+}
+
+#[cfg(unix)]
+#[test]
+fn reopener_refuses_symlink_substitution_for_manifest_and_objects() {
+  use std::os::unix::fs::symlink;
+
+  let algorithm = HashAlgorithm::Blake3_256;
+  let memory = memory_coordinator();
+  for substituted in ["manifest", "object"] {
+    let directory = tempdir().unwrap();
+    let database = database_file(directory.path(), &format!("reopen-{substituted}-symlink.aeordb"));
+    let scratch = directory.path().join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let mut writer = DurableMarkWorkspaceV1::create(
+      &database,
+      identity(algorithm),
+      basis(algorithm),
+      options(&scratch),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap();
+    let fixture = object_fixture(algorithm, MarkWorkspaceObjectKindV1::Bitmap);
+    writer.write_object(MarkWorkspaceObjectKindV1::Bitmap, 1, &fixture[80..fixture.len() - 4]).unwrap();
+    let closure = writer.complete().unwrap();
+    let encoded = checkpoint_for_workspace(algorithm, &closure);
+    let checkpoint = decoded_checkpoint(algorithm, &encoded);
+    let target = if substituted == "manifest" {
+      closure.manifest_path().to_path_buf()
+    } else {
+      writer.object_path(MarkWorkspaceObjectKindV1::Bitmap, 1)
+    };
+    let retained = target.with_extension("retained");
+    fs::rename(&target, &retained).unwrap();
+    symlink(&retained, &target).unwrap();
+    drop(writer);
+    let error = ReopenedMarkWorkspaceV1::open(
+      &checkpoint,
+      &resume_context(algorithm, &checkpoint),
+      MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "mark_workspace_path");
+  }
+}
+
+fn decoded_checkpoint<'a>(
+  algorithm: HashAlgorithm,
+  encoded: &'a aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
+) -> Box<MarkRunCheckpointV1<'a>> {
+  let GcMarkArtifactV1::Checkpoint(checkpoint) = decode_gc_mark_artifact(&encoded.value, algorithm).unwrap() else {
+    panic!("fixture did not decode as a mark checkpoint");
+  };
+  checkpoint
+}
+
+fn resume_context<'a>(algorithm: HashAlgorithm, checkpoint: &'a MarkRunCheckpointV1<'a>) -> MarkResumeContextV1<'a> {
+  MarkResumeContextV1 {
+    hash_algorithm: algorithm,
+    database_id: checkpoint.database_id,
+    run_id: checkpoint.run_id,
+    generation: checkpoint.generation,
+    checkpoint_sequence: checkpoint.checkpoint_sequence,
+    workspace_path: checkpoint.workspace_path,
+    workspace_id: checkpoint.workspace_id,
+    authority_root_set_digest: checkpoint.authority_root_set_digest,
+    semantic_state_digest: checkpoint.semantic_state_digest,
+    kv_layout_fingerprint: checkpoint.kv_layout_fingerprint,
+    effective_policy_fingerprint: checkpoint.effective_policy_fingerprint,
+    system_family_registry_fingerprint: checkpoint.system_family_registry_fingerprint,
+    captured_header_sequence: checkpoint.captured_header_sequence,
+    captured_write_high_water: checkpoint.captured_write_high_water,
+    reconciled_through_sequence: checkpoint.reconciled_through_sequence,
+    active_bitmap_bit_count: checkpoint.active_bitmap_bit_count,
+    kv_bucket_count: checkpoint.kv_bucket_count,
+    kv_slots_per_bucket: checkpoint.kv_slots_per_bucket,
+  }
 }
 
 #[test]

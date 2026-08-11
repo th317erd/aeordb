@@ -13,8 +13,9 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::gc_mark::{
-  MarkWorkspaceObjectKindV1, WORKSPACE_MANIFEST_MAX, WORKSPACE_OBJECT_HEADER, WORKSPACE_OBJECT_MAX, decode_mark_workspace_manifest,
-  validate_mark_workspace_body,
+  MarkResumeContextV1, MarkRunCheckpointV1, MarkWorkspaceDescriptorV1, MarkWorkspaceManifestV1, MarkWorkspaceObjectKindV1,
+  WORKSPACE_MANIFEST_MAX, WORKSPACE_OBJECT_HEADER, WORKSPACE_OBJECT_MAX, decode_mark_workspace_manifest, decode_mark_workspace_object,
+  validate_mark_checkpoint_resume_context, validate_mark_resume_context, validate_mark_workspace_body, validate_mark_workspace_object,
 };
 use crate::engine::HashAlgorithm;
 use crate::engine::emergency_spill::{create_new_regular_file_no_follow, open_regular_file_no_follow, reject_symlink};
@@ -168,6 +169,146 @@ impl MarkWorkspaceOptionsV1 {
       return Err(MarkWorkspaceErrorV1::Path("configured scratch root must be absolute".to_string()));
     }
     Ok(Self { scratch_root, maximum_stored_bytes, minimum_free_bytes })
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkWorkspaceReopenOptionsV1 {
+  maximum_stored_bytes: u64,
+}
+
+impl MarkWorkspaceReopenOptionsV1 {
+  pub fn new(maximum_stored_bytes: u64) -> Result<Self, MarkWorkspaceErrorV1> {
+    if maximum_stored_bytes == 0 {
+      return Err(MarkWorkspaceErrorV1::Capacity("reopen run cap is zero".to_string()));
+    }
+    Ok(Self { maximum_stored_bytes })
+  }
+}
+
+pub struct ValidatedMarkWorkspaceObjectV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+impl ValidatedMarkWorkspaceObjectV1 {
+  pub fn bytes(&self) -> &[u8] {
+    &self.bytes
+  }
+}
+
+impl fmt::Debug for ValidatedMarkWorkspaceObjectV1 {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.debug_struct("ValidatedMarkWorkspaceObjectV1").field("stored_length", &self.bytes.len()).finish()
+  }
+}
+
+pub struct ReopenedMarkWorkspaceV1 {
+  checkpoint_directory: PathBuf,
+  manifest_path: PathBuf,
+  manifest_bytes: Vec<u8>,
+  manifest_digest: [u8; 32],
+  object_count: usize,
+  maximum_stored_bytes: u64,
+  algorithm: HashAlgorithm,
+  cancellation: CancellationToken,
+  memory: MemoryCoordinator,
+  _manifest_memory: MemoryReservation,
+}
+
+impl fmt::Debug for ReopenedMarkWorkspaceV1 {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("ReopenedMarkWorkspaceV1")
+      .field("checkpoint_directory", &self.checkpoint_directory)
+      .field("manifest_path", &self.manifest_path)
+      .field("manifest_digest", &hex::encode(self.manifest_digest))
+      .field("object_count", &self.object_count)
+      .finish()
+  }
+}
+
+impl ReopenedMarkWorkspaceV1 {
+  pub fn open(
+    checkpoint: &MarkRunCheckpointV1<'_>,
+    context: &MarkResumeContextV1<'_>,
+    options: MarkWorkspaceReopenOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, MarkWorkspaceErrorV1> {
+    if cancellation.is_cancelled() {
+      return Err(MarkWorkspaceErrorV1::Canceled);
+    }
+    validate_mark_checkpoint_resume_context(checkpoint, context).map_err(|error| MarkWorkspaceErrorV1::Format(error.to_string()))?;
+
+    let workspace_path = PathBuf::from(checkpoint.workspace_path);
+    if !workspace_path.is_absolute() {
+      return Err(MarkWorkspaceErrorV1::Path("checkpoint workspace path must be absolute".to_string()));
+    }
+    validate_private_directory_readonly(&workspace_path, "checkpoint workspace")?;
+    let checkpoints_path = workspace_path.join("checkpoints");
+    validate_private_directory_readonly(&checkpoints_path, "checkpoint collection")?;
+    let checkpoint_directory = checkpoints_path.join(format!("{:016x}", checkpoint.checkpoint_sequence));
+    validate_private_directory_readonly(&checkpoint_directory, "selected checkpoint directory")?;
+    let manifest_path = checkpoint_directory.join("manifest.agcw");
+    let manifest_cap = options.maximum_stored_bytes.min(WORKSPACE_MANIFEST_MAX as u64) as usize;
+    let (manifest_bytes, manifest_memory) =
+      read_charged_regular_file(&manifest_path, manifest_cap, 2, "workspace manifest", &cancellation, memory)?;
+    let manifest = decode_mark_workspace_manifest(&manifest_bytes, context.hash_algorithm)
+      .map_err(|error| MarkWorkspaceErrorV1::Format(error.to_string()))?;
+    validate_mark_resume_context(checkpoint, &manifest, &manifest_bytes, context)
+      .map_err(|error| MarkWorkspaceErrorV1::Format(error.to_string()))?;
+    validate_manifest_object_names(&manifest)?;
+    enforce_reopen_run_cap(&manifest, manifest_bytes.len(), options.maximum_stored_bytes)?;
+    for descriptor in &manifest.descriptors {
+      let object = read_workspace_object(&checkpoint_directory, &manifest, descriptor, context.hash_algorithm, &cancellation, memory)?;
+      drop(object);
+    }
+
+    Ok(Self {
+      checkpoint_directory,
+      manifest_path,
+      manifest_digest: *blake3::hash(&manifest_bytes).as_bytes(),
+      object_count: manifest.descriptors.len(),
+      maximum_stored_bytes: options.maximum_stored_bytes,
+      algorithm: context.hash_algorithm,
+      cancellation,
+      memory: memory.clone(),
+      manifest_bytes,
+      _manifest_memory: manifest_memory,
+    })
+  }
+
+  pub fn checkpoint_directory(&self) -> &Path {
+    &self.checkpoint_directory
+  }
+
+  pub fn manifest_path(&self) -> &Path {
+    &self.manifest_path
+  }
+
+  pub const fn manifest_digest(&self) -> [u8; 32] {
+    self.manifest_digest
+  }
+
+  pub const fn object_count(&self) -> usize {
+    self.object_count
+  }
+
+  pub fn read_object(&self, kind: MarkWorkspaceObjectKindV1, ordinal: u64) -> Result<ValidatedMarkWorkspaceObjectV1, MarkWorkspaceErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(MarkWorkspaceErrorV1::Canceled);
+    }
+    let manifest = decode_mark_workspace_manifest(&self.manifest_bytes, self.algorithm)
+      .map_err(|error| MarkWorkspaceErrorV1::Format(error.to_string()))?;
+    enforce_reopen_run_cap(&manifest, self.manifest_bytes.len(), self.maximum_stored_bytes)?;
+    let descriptor = manifest
+      .descriptors
+      .iter()
+      .find(|descriptor| descriptor.kind == kind && descriptor.ordinal == ordinal)
+      .ok_or(MarkWorkspaceErrorV1::State("requested object is absent from the selected manifest"))?;
+    validate_descriptor_object_name(descriptor)?;
+    read_workspace_object(&self.checkpoint_directory, &manifest, descriptor, self.algorithm, &self.cancellation, &self.memory)
   }
 }
 
@@ -562,6 +703,160 @@ impl DurableMarkWorkspaceV1 {
     sync_file_all_native(&file).map_err(|error| MarkWorkspaceErrorV1::Durability(Box::new(error)))?;
     Ok(())
   }
+}
+
+fn validate_manifest_object_names(manifest: &MarkWorkspaceManifestV1<'_>) -> Result<(), MarkWorkspaceErrorV1> {
+  for descriptor in &manifest.descriptors {
+    validate_descriptor_object_name(descriptor)?;
+  }
+  Ok(())
+}
+
+fn validate_descriptor_object_name(descriptor: &MarkWorkspaceDescriptorV1<'_>) -> Result<(), MarkWorkspaceErrorV1> {
+  let expected = object_name(descriptor.kind, descriptor.ordinal);
+  if descriptor.name != expected {
+    return Err(MarkWorkspaceErrorV1::Format(format!("descriptor {} does not match canonical object name {expected}", descriptor.name)));
+  }
+  Ok(())
+}
+
+fn enforce_reopen_run_cap(
+  manifest: &MarkWorkspaceManifestV1<'_>,
+  manifest_length: usize,
+  maximum_stored_bytes: u64,
+) -> Result<(), MarkWorkspaceErrorV1> {
+  let manifest_length = match u64::try_from(manifest_length) {
+    Ok(length) => length,
+    Err(error) => return Err(MarkWorkspaceErrorV1::Capacity(format!("manifest length exceeds u64: {error}"))),
+  };
+  let total = manifest
+    .stored_bytes
+    .checked_add(manifest_length)
+    .ok_or_else(|| MarkWorkspaceErrorV1::Capacity("reopened workspace byte total overflow".to_string()))?;
+  if total > maximum_stored_bytes {
+    return Err(MarkWorkspaceErrorV1::Capacity(format!("reopened workspace bytes {total} exceed cap {maximum_stored_bytes}")));
+  }
+  Ok(())
+}
+
+fn read_workspace_object(
+  checkpoint_directory: &Path,
+  manifest: &MarkWorkspaceManifestV1<'_>,
+  descriptor: &MarkWorkspaceDescriptorV1<'_>,
+  algorithm: HashAlgorithm,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<ValidatedMarkWorkspaceObjectV1, MarkWorkspaceErrorV1> {
+  validate_descriptor_object_name(descriptor)?;
+  let expected_length = match usize::try_from(descriptor.stored_length) {
+    Ok(length) => length,
+    Err(error) => return Err(MarkWorkspaceErrorV1::Capacity(format!("workspace object length exceeds usize: {error}"))),
+  };
+  if expected_length > WORKSPACE_OBJECT_MAX {
+    return Err(MarkWorkspaceErrorV1::Capacity(format!("workspace object length {expected_length} exceeds {WORKSPACE_OBJECT_MAX}")));
+  }
+  let object_directory = checkpoint_directory.join(descriptor.kind.name());
+  validate_private_directory_readonly(&object_directory, "workspace object directory")?;
+  let object_path = checkpoint_directory.join(descriptor.name);
+  let (bytes, reservation) = read_charged_regular_file(&object_path, WORKSPACE_OBJECT_MAX, 1, "workspace object", cancellation, memory)?;
+  if bytes.len() != expected_length {
+    return Err(MarkWorkspaceErrorV1::Format(format!(
+      "workspace object {} has {} bytes but its descriptor requires {expected_length}",
+      descriptor.name,
+      bytes.len()
+    )));
+  }
+  let object = decode_mark_workspace_object(&bytes, algorithm).map_err(|error| MarkWorkspaceErrorV1::Format(error.to_string()))?;
+  validate_mark_workspace_object(manifest, descriptor, &object, &bytes).map_err(|error| MarkWorkspaceErrorV1::Format(error.to_string()))?;
+  Ok(ValidatedMarkWorkspaceObjectV1 { bytes, _memory: reservation })
+}
+
+fn read_charged_regular_file(
+  path: &Path,
+  maximum_length: usize,
+  reservation_multiplier: u64,
+  role: &'static str,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<(Vec<u8>, MemoryReservation), MarkWorkspaceErrorV1> {
+  if cancellation.is_cancelled() {
+    return Err(MarkWorkspaceErrorV1::Canceled);
+  }
+  let mut file = open_regular_file_no_follow(path).map_err(|error| MarkWorkspaceErrorV1::Path(error.to_string()))?;
+  let metadata = file.metadata().map_err(|source| MarkWorkspaceErrorV1::Io { operation: role, source })?;
+  validate_private_regular_file(path, &metadata, role)?;
+  let length = match usize::try_from(metadata.len()) {
+    Ok(length) => length,
+    Err(error) => return Err(MarkWorkspaceErrorV1::Capacity(format!("{role} length exceeds usize: {error}"))),
+  };
+  if length > maximum_length {
+    return Err(MarkWorkspaceErrorV1::Capacity(format!("{role} length {length} exceeds cap {maximum_length}")));
+  }
+  let reservation_length = match u64::try_from(length) {
+    Ok(length) => length,
+    Err(error) => return Err(MarkWorkspaceErrorV1::Capacity(format!("{role} reservation length exceeds u64: {error}"))),
+  };
+  let reservation_bytes = reservation_length
+    .checked_mul(reservation_multiplier)
+    .ok_or_else(|| MarkWorkspaceErrorV1::Capacity(format!("{role} memory reservation overflow")))?;
+  let reservation = memory
+    .reserve(MemoryOwner::GarbageCollection, reservation_bytes, AdmissionClass::Maintenance)
+    .map_err(|error| MarkWorkspaceErrorV1::Memory(Box::new(error)))?;
+  let mut bytes = Vec::new();
+  bytes.try_reserve_exact(length).map_err(|error| MarkWorkspaceErrorV1::Allocation(error.to_string()))?;
+  bytes.resize(length, 0);
+  let mut read_total = 0usize;
+  while read_total < length {
+    if cancellation.is_cancelled() {
+      return Err(MarkWorkspaceErrorV1::Canceled);
+    }
+    let end = (read_total + OBJECT_IO_CHUNK_BYTES).min(length);
+    let read = file.read(&mut bytes[read_total..end]).map_err(|source| MarkWorkspaceErrorV1::Io { operation: role, source })?;
+    if read == 0 {
+      return Err(MarkWorkspaceErrorV1::Format(format!("{role} was truncated while reading")));
+    }
+    read_total = read_total.checked_add(read).ok_or_else(|| MarkWorkspaceErrorV1::Capacity(format!("{role} read count overflow")))?;
+  }
+  let mut trailing = [0u8; 1];
+  if file.read(&mut trailing).map_err(|source| MarkWorkspaceErrorV1::Io { operation: role, source })? != 0 {
+    return Err(MarkWorkspaceErrorV1::Format(format!("{role} grew while reading")));
+  }
+  let final_length = file.metadata().map_err(|source| MarkWorkspaceErrorV1::Io { operation: role, source })?.len();
+  if final_length != metadata.len() {
+    return Err(MarkWorkspaceErrorV1::Format(format!("{role} length changed while reading")));
+  }
+  Ok((bytes, reservation))
+}
+
+fn validate_private_directory_readonly(path: &Path, role: &str) -> Result<(), MarkWorkspaceErrorV1> {
+  validate_existing_directory(path, role)?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)
+      .map_err(|source| MarkWorkspaceErrorV1::Io { operation: "private directory metadata", source })?
+      .permissions()
+      .mode();
+    if mode & 0o077 != 0 {
+      return Err(MarkWorkspaceErrorV1::Path(format!("{role} is not private (mode {:04o}): {}", mode & 0o7777, path.display())));
+    }
+  }
+  Ok(())
+}
+
+fn validate_private_regular_file(path: &Path, metadata: &fs::Metadata, role: &str) -> Result<(), MarkWorkspaceErrorV1> {
+  if !metadata.is_file() {
+    return Err(MarkWorkspaceErrorV1::Path(format!("{role} is not a regular file: {}", path.display())));
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 != 0 {
+      return Err(MarkWorkspaceErrorV1::Path(format!("{role} is not private (mode {:04o}): {}", mode & 0o7777, path.display())));
+    }
+  }
+  Ok(())
 }
 
 fn create_workspace_directories(

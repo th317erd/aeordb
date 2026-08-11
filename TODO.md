@@ -653,7 +653,7 @@
           - [x] Stream validated AGWO bodies through exact CRC/BLAKE3 closure under run-cap, free-reserve, cancellation, and memory admission.
           - [x] Publish and verify immutable per-checkpoint AGCW manifests through an atomic no-clobber install without invalidating the prior checkpoint closure.
           - [x] Prove malformed, collision, symlink, crash-prefix, cancellation, pressure, capacity, barrier, and architecture failure direction.
-        - [ ] P4-3c: hard-publish selected mark checkpoints only after workspace closure, and resume only after complete identity/generation/fingerprint validation.
+        - [x] P4-3c: hard-publish selected mark checkpoints only after workspace closure, and resume only after complete identity/generation/fingerprint validation.
           - [x] P4-3c1: expose the complete frozen checkpoint/manifest context, add exact both-width checkpoint/control encoders, and reject every resume-context mismatch before storage access.
           - [x] P4-3c2: publish immutable checkpoint entities and mutable A/B mark-run controls through one WholeEntity-v1 authority, with prior-control retirement admitted before replacement activation.
             - [x] Add one bounded buffered-admission mode to the existing retirement coordinator so authority-critical replacement does not recursively publish through the same lock or manufacture a sink error as flow control.
@@ -661,7 +661,12 @@
             - [x] Append the exact replacement control WholeEntity before retirement admission, activate only through the returned permit, and flush retained lineage immediately after releasing control authority.
             - [x] Enforce canonical A-first, then absent slot, then inactive/older-slot replacement with a strictly newer sequence and exact checkpoint target.
             - [x] Prove both hash widths, exact retry, A/B/A replacement lineage, one-record flush thresholds, committed-but-buffered lineage failure, malformed/collision/cancellation/pressure paths, and crash-prefix retained-or-leaked behavior.
-          - [ ] P4-3c3: select and reopen only complete checkpoint/workspace/object closures, preserving the prior valid checkpoint across crash, tamper, cancellation, and incomplete replacement prefixes.
+          - [x] P4-3c3: select and reopen only complete checkpoint/workspace/object closures, preserving the prior valid checkpoint across crash, tamper, cancellation, and incomplete replacement prefixes.
+            - [x] Add a bounded no-follow workspace reopener that reserves manifest/object bytes before allocation, validates exact canonical descriptor paths, and rechecks every AGCW/AGWO identity, checksum, and semantic body.
+            - [x] Load both MarkRun control slots independently from WholeEntity-v1 storage and classify absence, malformed controls, missing checkpoints, and invalid external closures without allowing one bad slot to hide a complete peer.
+            - [x] Validate the exact captured resume context before external path I/O, then apply the frozen closure-aware A/B selector and retain deterministic degraded-slot diagnostics.
+            - [x] Return an owned selected-checkpoint handle whose object reads remain bounded and revalidate the immutable descriptor closure at point of use.
+            - [x] Prove no-control absence, newest-valid selection, corrupt/tampered newest fallback, equal-sequence ambiguity, both-invalid refusal, cancellation, memory pressure, symlink/path substitution, restart, and both hash widths without activating service or destructive GC callers.
         - [ ] P4-3d: drain bounded mutation runs to an exact final publication boundary, restart on layout generation change or journal gaps, and prove retained-or-leaked failure direction.
         - [ ] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.
           - [ ] Prove and, if necessary, harden the Windows private-workspace ACL as the platform equivalent of Unix 0700/0600 before native closure.

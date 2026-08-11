@@ -8,21 +8,24 @@ use aeordb::engine::hot_tail::read_hot_tail_checked;
 use aeordb::engine::kv_stages::initial_block_size;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
-use aeordb::engine::v4::entity::decode_whole_entity;
+use aeordb::engine::v4::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, WholeEntityWriteV1, decode_whole_entity, encode_whole_entity};
 use aeordb::engine::v4::first_authority::{
-  FirstAuthorityPublicationRequestV1, MarkRunCheckpointLineageStateV1, MarkRunCheckpointPublicationRequestV1, PreparedNamespaceTreeV0,
-  V4FirstAuthorityPublisher,
+  FirstAuthorityPublicationRequestV1, MarkRunCheckpointLineageStateV1, MarkRunCheckpointPublicationRequestV1,
+  MarkRunCheckpointSelectionRequestV1, MarkRunCheckpointSelectionV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher,
 };
 use aeordb::engine::v4::gc::{GcActiveControlWriteV1, GcArtifactKindV1, decode_gc_active_control, encode_gc_active_control};
-use aeordb::engine::v4::gc_mark::{MarkRunCheckpointWriteV1, encode_mark_run_checkpoint};
+use aeordb::engine::v4::gc_mark::{
+  GcMarkArtifactV1, MarkResumeContextV1, MarkRunCheckpointV1, MarkRunCheckpointWriteV1, decode_gc_mark_artifact, encode_mark_run_checkpoint,
+};
 use aeordb::engine::v4::gc_mark_workspace::{
   DurableMarkWorkspaceClosureV1, DurableMarkWorkspaceV1, MarkWorkspaceBasisV1, MarkWorkspaceIdentityV1, MarkWorkspaceOptionsV1,
+  MarkWorkspaceReopenOptionsV1,
 };
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::gc_state::{RetirementReasonV1, decode_retirement_journal_segment_v1, retirement_journal_records_v1};
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, encode_semantic_state_object};
-use aeordb::engine::{DiskKVStore, HashAlgorithm};
+use aeordb::engine::{CompressionAlgorithm, DiskKVStore, HashAlgorithm};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -161,6 +164,49 @@ struct PreparedCheckpoint {
   closure: DurableMarkWorkspaceClosureV1,
   checkpoint: aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
   control: aeordb::engine::v4::gc::EncodedGcActiveControlV1,
+}
+
+fn decoded_checkpoint<'a>(algorithm: HashAlgorithm, prepared: &'a PreparedCheckpoint) -> Box<MarkRunCheckpointV1<'a>> {
+  let GcMarkArtifactV1::Checkpoint(checkpoint) = decode_gc_mark_artifact(&prepared.checkpoint.value, algorithm).unwrap() else {
+    panic!("prepared artifact is not a mark checkpoint");
+  };
+  checkpoint
+}
+
+fn resume_context<'a>(algorithm: HashAlgorithm, checkpoint: &'a MarkRunCheckpointV1<'a>) -> MarkResumeContextV1<'a> {
+  MarkResumeContextV1 {
+    hash_algorithm: algorithm,
+    database_id: checkpoint.database_id,
+    run_id: checkpoint.run_id,
+    generation: checkpoint.generation,
+    checkpoint_sequence: checkpoint.checkpoint_sequence,
+    workspace_path: checkpoint.workspace_path,
+    workspace_id: checkpoint.workspace_id,
+    authority_root_set_digest: checkpoint.authority_root_set_digest,
+    semantic_state_digest: checkpoint.semantic_state_digest,
+    kv_layout_fingerprint: checkpoint.kv_layout_fingerprint,
+    effective_policy_fingerprint: checkpoint.effective_policy_fingerprint,
+    system_family_registry_fingerprint: checkpoint.system_family_registry_fingerprint,
+    captured_header_sequence: checkpoint.captured_header_sequence,
+    captured_write_high_water: checkpoint.captured_write_high_water,
+    reconciled_through_sequence: checkpoint.reconciled_through_sequence,
+    active_bitmap_bit_count: checkpoint.active_bitmap_bit_count,
+    kv_bucket_count: checkpoint.kv_bucket_count,
+    kv_slots_per_bucket: checkpoint.kv_slots_per_bucket,
+  }
+}
+
+fn selection_request<'a>(
+  resume_contexts: &'a [MarkResumeContextV1<'a>],
+  cancellation: &'a CancellationToken,
+  memory: &'a MemoryCoordinator,
+) -> MarkRunCheckpointSelectionRequestV1<'a> {
+  MarkRunCheckpointSelectionRequestV1 {
+    resume_contexts,
+    workspace_options: MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+    cancellation,
+    memory,
+  }
 }
 
 fn prepare_checkpoint(
@@ -402,4 +448,338 @@ fn workspace_mismatch_and_canceled_retirement_owner_refuse_before_checkpoint_aut
     .unwrap_err();
   assert_eq!(error.code(), "retirement_journal_cancelled");
   assert_eq!(publisher.observe().unwrap(), before);
+}
+
+#[test]
+fn restart_selection_reports_absence_then_selects_the_newest_complete_checkpoint_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (directory, path, mut publisher) = create_publisher(algorithm);
+    let scratch = directory.path().join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let memory = memory_coordinator();
+    let cancellation = CancellationToken::new();
+    assert!(matches!(
+      publisher.select_mark_run_checkpoint(selection_request(&[], &cancellation, &memory)).unwrap(),
+      MarkRunCheckpointSelectionV1::Absent
+    ));
+
+    let mut owner = RetirementJournalOwnerV1::new_chain(
+      algorithm,
+      database_id(),
+      1,
+      401,
+      RetirementJournalBufferOptionsV1::default(),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x71, 301, 1, 0, 1);
+    let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_400_001);
+    let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x72, 302, 2, 1, 2);
+    let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_400_002);
+    let a_checkpoint = decoded_checkpoint(algorithm, &a1);
+    let b_checkpoint = decoded_checkpoint(algorithm, &b2);
+    let contexts = [resume_context(algorithm, &a_checkpoint), resume_context(algorithm, &b_checkpoint)];
+
+    let selected = match publisher.select_mark_run_checkpoint(selection_request(&contexts, &cancellation, &memory)).unwrap() {
+      MarkRunCheckpointSelectionV1::Selected(selected) => selected,
+      MarkRunCheckpointSelectionV1::Absent => panic!("published mark controls were reported absent"),
+    };
+    assert_eq!(selected.control_slot, 1);
+    assert_eq!(selected.control_sequence, 2);
+    assert_eq!(selected.checkpoint_key, b2.checkpoint.key);
+    assert!(selected.degraded_slots.is_empty());
+    assert_eq!(selected.workspace().manifest_digest(), b2.closure.manifest_digest());
+    assert_eq!(selected.checkpoint().unwrap().checkpoint_sequence, 2);
+    drop(selected);
+    drop(publisher);
+
+    let reopened = reopen(&path);
+    let selected = match reopened.select_mark_run_checkpoint(selection_request(&contexts, &cancellation, &memory)).unwrap() {
+      MarkRunCheckpointSelectionV1::Selected(selected) => selected,
+      MarkRunCheckpointSelectionV1::Absent => panic!("reopened mark controls were reported absent"),
+    };
+    assert_eq!(selected.control_slot, 1);
+    assert_eq!(selected.checkpoint_key, b2.checkpoint.key);
+  }
+}
+
+#[test]
+fn selection_falls_back_from_a_tampered_newer_workspace_and_refuses_when_both_are_invalid() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, path, mut publisher) = create_publisher(algorithm);
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory_coordinator();
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::default(),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x73, 303, 1, 0, 1);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_500_001);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x74, 304, 2, 1, 2);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_500_002);
+  let a_checkpoint = decoded_checkpoint(algorithm, &a1);
+  let b_checkpoint = decoded_checkpoint(algorithm, &b2);
+  let contexts = [resume_context(algorithm, &a_checkpoint), resume_context(algorithm, &b_checkpoint)];
+
+  let mut b_manifest = fs::read(b2.closure.manifest_path()).unwrap();
+  b_manifest[0] ^= 1;
+  fs::write(b2.closure.manifest_path(), b_manifest).unwrap();
+  let selected = match publisher.select_mark_run_checkpoint(selection_request(&contexts, &cancellation, &memory)).unwrap() {
+    MarkRunCheckpointSelectionV1::Selected(selected) => selected,
+    MarkRunCheckpointSelectionV1::Absent => panic!("prior complete checkpoint was hidden by a tampered replacement"),
+  };
+  assert_eq!(selected.control_slot, 0);
+  assert_eq!(selected.checkpoint_key, a1.checkpoint.key);
+  assert_eq!(selected.degraded_slots.len(), 1);
+  assert_eq!(selected.degraded_slots[0].slot, 1);
+  assert_eq!(selected.degraded_slots[0].code, "mark_workspace_format");
+  drop(selected);
+
+  let mut a_manifest = fs::read(a1.closure.manifest_path()).unwrap();
+  a_manifest[0] ^= 1;
+  fs::write(a1.closure.manifest_path(), a_manifest).unwrap();
+  let error = publisher.select_mark_run_checkpoint(selection_request(&contexts, &cancellation, &memory)).unwrap_err();
+  assert_eq!(error.code(), "mark_checkpoint_selection_no_valid_closure");
+  assert!(error.to_string().contains("slot: 0"));
+  assert!(error.to_string().contains("slot: 1"));
+}
+
+#[test]
+fn corrupt_control_falls_back_but_equal_sequence_disagreement_remains_ambiguous() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, path, mut publisher) = create_publisher(algorithm);
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory_coordinator();
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::default(),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x75, 305, 1, 0, 1);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_600_001);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x76, 306, 2, 1, 2);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_600_002);
+  let a_checkpoint = decoded_checkpoint(algorithm, &a1);
+  let b_checkpoint = decoded_checkpoint(algorithm, &b2);
+  let contexts = [resume_context(algorithm, &a_checkpoint), resume_context(algorithm, &b_checkpoint)];
+  let b_locator = publisher.locator(&b2.control.key).unwrap().unwrap();
+  let b_bytes = read_entity(&path, b_locator.offset, b_locator.total_length);
+  let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+  file.seek(SeekFrom::Start(b_locator.offset + u64::from(b_locator.total_length) - 1)).unwrap();
+  file.write_all(&[b_bytes[b_bytes.len() - 1] ^ 1]).unwrap();
+  file.sync_all().unwrap();
+  let selected = match publisher.select_mark_run_checkpoint(selection_request(&contexts, &cancellation, &memory)).unwrap() {
+    MarkRunCheckpointSelectionV1::Selected(selected) => selected,
+    MarkRunCheckpointSelectionV1::Absent => panic!("valid A control was hidden by corrupt B"),
+  };
+  assert_eq!(selected.control_slot, 0);
+  assert_eq!(selected.degraded_slots.len(), 1);
+  assert_eq!(selected.degraded_slots[0].slot, 1);
+  drop(selected);
+  drop(file);
+
+  let (directory, path, mut publisher) = create_publisher(algorithm);
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory_coordinator();
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::default(),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x77, 307, 1, 0, 1);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_700_001);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x78, 308, 2, 1, 2);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_700_002);
+  let b_locator = publisher.locator(&b2.control.key).unwrap().unwrap();
+  let high_water = publisher.observe().unwrap().selected.header.write_sequence_high_water;
+  let old_bytes = read_entity(&path, b_locator.offset, b_locator.total_length);
+  let old_entity = decode_whole_entity(&old_bytes, algorithm, high_water).unwrap();
+  let ambiguous_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::MarkRunActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id(),
+    slot: 1,
+    sequence: 1,
+    generation: 308,
+    target_manifest_hash: &b2.checkpoint.key,
+  })
+  .unwrap();
+  let replacement = encode_whole_entity(&WholeEntityWriteV1 {
+    entry_type: EntryTypeV4::GcArtifact,
+    flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+    hash_algorithm: algorithm,
+    compression_algorithm: CompressionAlgorithm::None,
+    timestamp_ms: old_entity.timestamp_ms,
+    write_sequence: old_entity.write_sequence,
+    key: &b2.control.key,
+    stored_value: &ambiguous_control.value,
+  })
+  .unwrap();
+  assert_eq!(replacement.len(), old_bytes.len());
+  let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+  file.seek(SeekFrom::Start(b_locator.offset)).unwrap();
+  file.write_all(&replacement).unwrap();
+  file.sync_all().unwrap();
+  let a_checkpoint = decoded_checkpoint(algorithm, &a1);
+  let b_checkpoint = decoded_checkpoint(algorithm, &b2);
+  let contexts = [resume_context(algorithm, &a_checkpoint), resume_context(algorithm, &b_checkpoint)];
+  let error = publisher.select_mark_run_checkpoint(selection_request(&contexts, &cancellation, &memory)).unwrap_err();
+  assert_eq!(error.code(), "gc_control_pair_ambiguous");
+}
+
+#[test]
+fn selection_cancellation_memory_pressure_and_context_amplification_fail_before_resume() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, path, mut publisher) = create_publisher(algorithm);
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory_coordinator();
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::default(),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x79, 309, 1, 0, 1);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_800_001);
+  let checkpoint = decoded_checkpoint(algorithm, &a1);
+  let context = resume_context(algorithm, &checkpoint);
+
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  assert_eq!(
+    publisher.select_mark_run_checkpoint(selection_request(&[context], &canceled, &memory)).unwrap_err().code(),
+    "mark_checkpoint_selection_cancelled"
+  );
+  let constrained = MemoryCoordinator::new(MemoryPolicy::new(1, 1024, 1, 1).unwrap());
+  assert_eq!(
+    publisher.select_mark_run_checkpoint(selection_request(&[context], &cancellation, &constrained)).unwrap_err().code(),
+    "mark_checkpoint_selection_memory"
+  );
+  assert_eq!(constrained.snapshot().unwrap().reserved_bytes, 0);
+  assert_eq!(
+    publisher.select_mark_run_checkpoint(selection_request(&[context, context, context], &cancellation, &memory)).unwrap_err().code(),
+    "mark_checkpoint_selection_contexts"
+  );
+}
+
+#[test]
+fn control_with_a_missing_checkpoint_does_not_hide_its_complete_peer() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, path, mut publisher) = create_publisher(algorithm);
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory_coordinator();
+  let cancellation = CancellationToken::new();
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::default(),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x7A, 310, 1, 0, 1);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_900_001);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x7B, 311, 2, 1, 2);
+  let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_900_002);
+
+  let b_locator = publisher.locator(&b2.control.key).unwrap().unwrap();
+  let high_water = publisher.observe().unwrap().selected.header.write_sequence_high_water;
+  let old_bytes = read_entity(&path, b_locator.offset, b_locator.total_length);
+  let old_entity = decode_whole_entity(&old_bytes, algorithm, high_water).unwrap();
+  let missing_target = vec![0xE1; algorithm.hash_length()];
+  let missing_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::MarkRunActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id(),
+    slot: 1,
+    sequence: 2,
+    generation: 311,
+    target_manifest_hash: &missing_target,
+  })
+  .unwrap();
+  let replacement = encode_whole_entity(&WholeEntityWriteV1 {
+    entry_type: EntryTypeV4::GcArtifact,
+    flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+    hash_algorithm: algorithm,
+    compression_algorithm: CompressionAlgorithm::None,
+    timestamp_ms: old_entity.timestamp_ms,
+    write_sequence: old_entity.write_sequence,
+    key: &b2.control.key,
+    stored_value: &missing_control.value,
+  })
+  .unwrap();
+  assert_eq!(replacement.len(), old_bytes.len());
+  let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+  file.seek(SeekFrom::Start(b_locator.offset)).unwrap();
+  file.write_all(&replacement).unwrap();
+  file.sync_all().unwrap();
+
+  let a_checkpoint = decoded_checkpoint(algorithm, &a1);
+  let contexts = [resume_context(algorithm, &a_checkpoint)];
+  let selected = match publisher.select_mark_run_checkpoint(selection_request(&contexts, &cancellation, &memory)).unwrap() {
+    MarkRunCheckpointSelectionV1::Selected(selected) => selected,
+    MarkRunCheckpointSelectionV1::Absent => panic!("missing B checkpoint hid complete A"),
+  };
+  assert_eq!(selected.control_slot, 0);
+  assert_eq!(selected.degraded_slots.len(), 1);
+  assert_eq!(selected.degraded_slots[0].slot, 1);
+  assert_eq!(selected.degraded_slots[0].code, "mark_checkpoint_entity_missing");
+}
+
+fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
+  for entry in fs::read_dir(root).unwrap() {
+    let path = entry.unwrap().path();
+    if path.is_dir() {
+      rust_sources(&path, sources);
+    } else if path.extension().is_some_and(|extension| extension == "rs") {
+      sources.push(path);
+    }
+  }
+}
+
+#[test]
+fn checkpoint_selection_remains_disconnected_from_live_service_and_destructive_gc() {
+  let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let owner_path = source_root.join("engine/v4/first_authority.rs");
+  let mut sources = Vec::new();
+  rust_sources(&source_root, &mut sources);
+  let callers: Vec<_> = sources
+    .into_iter()
+    .filter(|path| path != &owner_path)
+    .filter(|path| fs::read_to_string(path).unwrap_or_default().contains(".select_mark_run_checkpoint("))
+    .map(|path| path.strip_prefix(&source_root).unwrap().to_owned())
+    .collect();
+  assert!(callers.is_empty(), "P4-3 checkpoint selection activated before the runtime owner exists: {callers:?}");
 }

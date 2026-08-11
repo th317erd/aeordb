@@ -7,7 +7,7 @@ use super::gc::{
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use crate::engine::HashAlgorithm;
 
-const MARK_CHECKPOINT_VALUE_MAX: usize = 32 + 40 + 256 * 1024 + 4;
+pub const MARK_CHECKPOINT_VALUE_MAX: usize = 32 + 40 + 256 * 1024 + 4;
 const MARK_JOURNAL_MAX: usize = 16 * 1024 * 1024;
 pub const WORKSPACE_MANIFEST_MAX: usize = 8 * 1024 * 1024;
 pub const WORKSPACE_OBJECT_MAX: usize = 64 * 1024 * 1024;
@@ -772,12 +772,31 @@ pub fn validate_mark_resume_context(
   complete_manifest: &[u8],
   context: &MarkResumeContextV1<'_>,
 ) -> FormatResult<()> {
+  validate_mark_checkpoint_resume_context(checkpoint, context)?;
   validate_mark_checkpoint_workspace(checkpoint, manifest, complete_manifest)?;
+  if context.hash_algorithm != manifest.hash_algorithm
+    || manifest.created_at_ms != checkpoint.started_at_ms
+    || manifest.updated_at_ms > checkpoint.updated_at_ms
+    || manifest.kv_layout_fingerprint != checkpoint.kv_layout_fingerprint
+    || manifest.authority_root_set_digest != checkpoint.authority_root_set_digest
+    || manifest.effective_policy_fingerprint != checkpoint.effective_policy_fingerprint
+  {
+    return Err(closure_error(
+      "mark_resume_manifest_basis",
+      "workspace manifest timestamps or resume fingerprints do not close against the selected checkpoint",
+    ));
+  }
+  Ok(())
+}
+
+pub fn validate_mark_checkpoint_resume_context(
+  checkpoint: &MarkRunCheckpointV1<'_>,
+  context: &MarkResumeContextV1<'_>,
+) -> FormatResult<()> {
   if !checkpoint.resumable || checkpoint.canceled || checkpoint.state > 3 {
     return Err(closure_error("mark_resume_state", "selected mark checkpoint is not resumable"));
   }
-  if context.hash_algorithm != manifest.hash_algorithm
-    || checkpoint.database_id != context.database_id
+  if checkpoint.database_id != context.database_id
     || checkpoint.run_id != context.run_id
     || checkpoint.generation != context.generation
     || checkpoint.checkpoint_sequence != context.checkpoint_sequence
@@ -796,17 +815,6 @@ pub fn validate_mark_resume_context(
     || checkpoint.kv_slots_per_bucket != context.kv_slots_per_bucket
   {
     return Err(closure_error("mark_resume_context", "mark checkpoint does not match the exact captured resume context"));
-  }
-  if manifest.created_at_ms != checkpoint.started_at_ms
-    || manifest.updated_at_ms > checkpoint.updated_at_ms
-    || manifest.kv_layout_fingerprint != checkpoint.kv_layout_fingerprint
-    || manifest.authority_root_set_digest != checkpoint.authority_root_set_digest
-    || manifest.effective_policy_fingerprint != checkpoint.effective_policy_fingerprint
-  {
-    return Err(closure_error(
-      "mark_resume_manifest_basis",
-      "workspace manifest timestamps or resume fingerprints do not close against the selected checkpoint",
-    ));
   }
   Ok(())
 }
