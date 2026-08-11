@@ -515,9 +515,22 @@ pub(crate) fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8])
 #[cfg(windows)]
 pub(crate) fn read_exact_at_platform(file: &File, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
   use std::os::windows::fs::FileExt;
+  use std::os::windows::io::{AsRawHandle, FromRawHandle};
+  use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+  use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile};
+
+  // Windows FileExt::seek_read updates the handle's file pointer. Reopen the
+  // same file object so positional reads cannot disturb the caller's cursor.
+  let reopened_handle =
+    unsafe { ReOpenFile(file.as_raw_handle(), FILE_GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0) };
+  if reopened_handle == INVALID_HANDLE_VALUE {
+    return Err(io::Error::last_os_error());
+  }
+  let reopened = unsafe { File::from_raw_handle(reopened_handle) };
+
   let mut read = 0usize;
   while read < bytes.len() {
-    let count = file.seek_read(&mut bytes[read..], offset + read as u64)?;
+    let count = reopened.seek_read(&mut bytes[read..], offset + read as u64)?;
     if count == 0 {
       return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
     }

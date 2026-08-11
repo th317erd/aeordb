@@ -1,28 +1,13 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
 /// Read exactly `buf.len()` bytes at `offset` without modifying the file's
-/// seek position. Equivalent to Unix `pread` / Windows `seek_read`. Loops
-/// until the buffer is filled to handle short reads on either platform.
+/// seek position. Loops until the buffer is filled to handle short reads on
+/// either platform.
 fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-  let mut total = 0;
-  while total < buf.len() {
-    #[cfg(unix)]
-    let n = file.read_at(&mut buf[total..], offset + total as u64)?;
-    #[cfg(windows)]
-    let n = file.seek_read(&mut buf[total..], offset + total as u64)?;
-    if n == 0 {
-      return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "early EOF in read_exact_at"));
-    }
-    total += n;
-  }
-  Ok(())
+  crate::engine::native_durability::read_exact_at_platform(file, offset, buf)
 }
 
 pub(crate) fn read_span_at(file: &File, offset: u64, length: usize) -> std::io::Result<Vec<u8>> {
