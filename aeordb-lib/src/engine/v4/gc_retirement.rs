@@ -980,6 +980,14 @@ struct RetirementJournalChainStateV1 {
 }
 
 impl<'a> RetirementJournalOwnerV1<'a> {
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.algorithm
+  }
+
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
   pub fn new_chain(
     algorithm: HashAlgorithm,
     database_id: [u8; 16],
@@ -1169,6 +1177,38 @@ impl<'a> RetirementJournalOwnerV1<'a> {
       last_hard_publication_sequence: self.last_hard_publication_sequence,
       failed: self.failed,
     }
+  }
+
+  pub(crate) fn preflight_record_batch<'record>(
+    &self,
+    records: impl IntoIterator<Item = RetirementJournalRecordWriteV1<'record>>,
+    monotonic_now_ms: u64,
+  ) -> Result<(), RetirementJournalOwnerErrorV1> {
+    self.ensure_operable()?;
+    if self.last_observed_at_ms.is_some_and(|previous| monotonic_now_ms < previous) {
+      return Err(RetirementJournalOwnerErrorV1::ClockRegression);
+    }
+    let mut previous_sequence = self.last_record_sequence;
+    let mut previous_old = self.last_old_incarnation.clone();
+    for record in records {
+      let encoded = encode_record(record, self.algorithm)?;
+      let sequence = u64::from_le_bytes(encoded[8..16].try_into().map_err(|_| RetirementJournalOwnerErrorV1::ArithmeticOverflow)?);
+      if sequence < previous_sequence {
+        return Err(RetirementJournalOwnerErrorV1::RecordOrder);
+      }
+      if sequence == previous_sequence && previous_sequence != 0 {
+        let physical_length = 24 + 2 * self.algorithm.hash_length();
+        let old = decode_physical_incarnation(&encoded[24..24 + physical_length], self.algorithm)?;
+        let previous = decode_physical_incarnation(&previous_old, self.algorithm)?;
+        if compare_physical_incarnations_v1(&previous, &old) != Ordering::Less {
+          return Err(RetirementJournalOwnerErrorV1::RecordOrder);
+        }
+      }
+      previous_sequence = sequence;
+      previous_old.clear();
+      previous_old.extend_from_slice(record.old_incarnation);
+    }
+    Ok(())
   }
 
   fn preflight(&mut self, monotonic_now_ms: u64) -> Result<(), RetirementJournalOwnerErrorV1> {

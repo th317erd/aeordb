@@ -425,7 +425,7 @@ fn writer_has_no_live_service_or_independent_watermark_control_caller() {
   let mut sources = Vec::new();
   rust_sources(&source_root, &mut sources);
   for path in sources {
-    if path == source_root.join("engine/v4/gc_retirement.rs") {
+    if path == source_root.join("engine/v4/gc_retirement.rs") || path == source_root.join("engine/v4/gc_lineage_recovery.rs") {
       continue;
     }
     let source = fs::read_to_string(&path).unwrap_or_default();

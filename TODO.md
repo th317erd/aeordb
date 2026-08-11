@@ -637,7 +637,7 @@
           - [x] Return a non-constructible activation permit only after every record has entered the bounded retirement owner.
           - [x] Preserve explicit soft-durability status, permit retry after activation failure without duplicate journal append, and refuse activation after partial or dishonest admission.
           - [x] Prove all five reasons, both hash widths, malformed/canceled/resource/failure paths, and no live v3/service activation.
-        - [ ] P4-2d: recover missing post-watermark lower-incarnation lineage conservatively and emit the existing typed `CorruptGcEvidenceV1` contract without reclaim authority.
+        - [x] P4-2d: recover missing post-watermark lower-incarnation lineage conservatively and emit the existing typed `CorruptGcEvidenceV1` contract without reclaim authority.
         - [ ] P4-2e: prove cancellation, crash prefixes, corrupt/missing chains, ordering, resource bounds, recovery, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.

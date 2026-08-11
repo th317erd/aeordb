@@ -1,8 +1,13 @@
 use std::cmp::Ordering;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 
 use super::config_value::{CanonicalValueBounds, validate_canonical_value};
 use super::contract_generated::capability_bit;
-use super::gc::{GcArtifactEnvelopeV1, GcArtifactKindV1, decode_gc_artifact_envelope, immutable_gc_artifact_key, u16_at, u32_at, u64_at};
+use super::gc::{
+  EncodedImmutableGcArtifactV1, GcArtifactEnvelopeV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, decode_gc_artifact_envelope,
+  encode_immutable_gc_artifact, immutable_gc_artifact_key, u16_at, u32_at, u64_at,
+};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use crate::engine::HashAlgorithm;
 
@@ -384,6 +389,185 @@ pub struct CorruptGcEvidenceV1<'a> {
   pub evidence_count: u16,
   pub evidence_hashes: &'a [u8],
   pub key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CorruptGcEvidenceWriteV1<'a> {
+  pub database_id: [u8; 16],
+  pub evidence_id: [u8; 16],
+  pub generation: u64,
+  pub detected_at_ms: i64,
+  pub error_class: GcErrorClassV1,
+  pub observed_entry_type: Option<u8>,
+  pub observed_artifact_kind: Option<GcArtifactKindV1>,
+  pub physical_range: Option<(u64, u32)>,
+  pub write_sequence: Option<u64>,
+  pub expected_hash: Option<&'a [u8]>,
+  pub observed_hash: Option<&'a [u8]>,
+  pub run_id: Option<[u8; 16]>,
+  pub control_kind: Option<GcArtifactKindV1>,
+  pub control_identity_digest: Option<&'a [u8]>,
+  pub context: &'a [u8],
+  pub evidence_hashes: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorruptGcEvidenceDurabilityReceiptV1 {
+  pub artifact_key: Vec<u8>,
+  pub stored_value_length: u32,
+  pub hard_publication_sequence: u64,
+}
+
+pub struct CorruptGcEvidenceSinkErrorV1 {
+  code: &'static str,
+  source: Box<dyn Error + Send + Sync>,
+}
+
+impl CorruptGcEvidenceSinkErrorV1 {
+  pub fn new(code: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
+    Self { code, source: Box::new(source) }
+  }
+
+  pub const fn code(&self) -> &'static str {
+    self.code
+  }
+}
+
+impl fmt::Debug for CorruptGcEvidenceSinkErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    formatter.debug_struct("CorruptGcEvidenceSinkErrorV1").field("code", &self.code).field("source", &self.source.to_string()).finish()
+  }
+}
+
+impl Display for CorruptGcEvidenceSinkErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}: {}", self.code, self.source)
+  }
+}
+
+impl Error for CorruptGcEvidenceSinkErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    Some(self.source.as_ref())
+  }
+}
+
+/// A successful return certifies hard publication of the exact immutable
+/// corrupt-evidence key/value. Exact retries must be idempotent.
+pub trait CorruptGcEvidenceDurableSinkV1 {
+  fn publish_corrupt_evidence_synced(
+    &mut self,
+    artifact_key: &[u8],
+    value: &[u8],
+  ) -> Result<CorruptGcEvidenceDurabilityReceiptV1, CorruptGcEvidenceSinkErrorV1>;
+}
+
+/// Encode one immutable corrupt-GC evidence artifact using the frozen reader's
+/// exact schema, then re-read it before returning it to a durable sink.
+pub fn encode_corrupt_gc_evidence_v1(
+  request: &CorruptGcEvidenceWriteV1<'_>,
+  algorithm: HashAlgorithm,
+) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = algorithm.hash_length();
+  if request.database_id.iter().all(|byte| *byte == 0) || request.evidence_id.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("corrupt_evidence_identity", "corrupt evidence database/evidence IDs must be nonzero"));
+  }
+  if request.detected_at_ms <= 0 {
+    return Err(closure_error("corrupt_evidence_fields", "corrupt evidence detection time must be positive"));
+  }
+  if request.context.is_empty() {
+    return Err(closure_error("corrupt_evidence_context", "corrupt evidence context is empty"));
+  }
+  validate_canonical_value(request.context, CanonicalValueBounds::AUDIT_VALUE)?;
+  if !request.evidence_hashes.len().is_multiple_of(hash_width) {
+    return Err(trailing_error("corrupt_evidence_length", "corrupt evidence hash bytes do not close at the selected hash width"));
+  }
+  let evidence_count = request.evidence_hashes.len() / hash_width;
+  if evidence_count > MAX_EVIDENCE_HASHES {
+    return Err(amplification_error("corrupt_evidence_count", evidence_count, MAX_EVIDENCE_HASHES));
+  }
+  validate_sorted_hashes(request.evidence_hashes, hash_width, "corrupt_evidence_order")?;
+  validate_optional_hash(request.expected_hash, hash_width, "corrupt evidence expected hash")?;
+  validate_optional_hash(request.observed_hash, hash_width, "corrupt evidence observed hash")?;
+  validate_optional_hash(request.control_identity_digest, hash_width, "corrupt evidence control digest")?;
+  if request.run_id.is_some_and(|run_id| run_id.iter().all(|byte| *byte == 0)) {
+    return Err(identity_error("corrupt_evidence_run", "corrupt evidence run ID must be nonzero when present"));
+  }
+  if request.control_kind.is_some() != request.control_identity_digest.is_some()
+    || request.control_kind.is_some_and(|kind| !kind.is_control())
+  {
+    return Err(closure_error(
+      "corrupt_evidence_fields",
+      "corrupt evidence control kind and identity digest must be present together and identify a control",
+    ));
+  }
+
+  let mut flags = 0u8;
+  flags |= u8::from(request.observed_entry_type.is_some());
+  flags |= u8::from(request.observed_artifact_kind.is_some()) << 1;
+  flags |= u8::from(request.physical_range.is_some()) << 2;
+  flags |= u8::from(request.write_sequence.is_some()) << 3;
+  flags |= u8::from(request.expected_hash.is_some()) << 4;
+  flags |= u8::from(request.observed_hash.is_some()) << 5;
+  flags |= u8::from(request.run_id.is_some()) << 6;
+  flags |= u8::from(request.control_kind.is_some()) << 7;
+
+  let fixed_length = 68usize
+    .checked_add(3usize.checked_mul(hash_width).ok_or_else(|| overflow_error("corrupt evidence fixed hash fields"))?)
+    .ok_or_else(|| overflow_error("corrupt evidence fixed body"))?;
+  let body_length = fixed_length
+    .checked_add(request.context.len())
+    .and_then(|length| length.checked_add(request.evidence_hashes.len()))
+    .ok_or_else(|| overflow_error("corrupt evidence body"))?;
+  let mut body = vec![0u8; body_length];
+  body[0..8].copy_from_slice(&request.detected_at_ms.to_le_bytes());
+  body[8..10].copy_from_slice(&(request.error_class as u16).to_le_bytes());
+  body[10] = request.observed_entry_type.unwrap_or(0);
+  body[11] = flags;
+  body[12..14].copy_from_slice(&request.observed_artifact_kind.map_or(0, |kind| kind as u16).to_le_bytes());
+  if let Some((offset, length)) = request.physical_range {
+    if offset == 0 || length == 0 || offset.checked_add(u64::from(length)).is_none() {
+      return Err(closure_error("corrupt_evidence_fields", "corrupt evidence physical range is invalid"));
+    }
+    body[16..24].copy_from_slice(&offset.to_le_bytes());
+    body[24..28].copy_from_slice(&length.to_le_bytes());
+  }
+  if let Some(write_sequence) = request.write_sequence {
+    if write_sequence == 0 {
+      return Err(closure_error("corrupt_evidence_fields", "corrupt evidence write sequence must be nonzero when present"));
+    }
+    body[32..40].copy_from_slice(&write_sequence.to_le_bytes());
+  }
+  copy_optional_hash(&mut body[40..40 + hash_width], request.expected_hash);
+  copy_optional_hash(&mut body[40 + hash_width..40 + 2 * hash_width], request.observed_hash);
+  if let Some(run_id) = request.run_id {
+    body[40 + 2 * hash_width..56 + 2 * hash_width].copy_from_slice(&run_id);
+  }
+  body[56 + 2 * hash_width..58 + 2 * hash_width].copy_from_slice(&request.control_kind.map_or(0, |kind| kind as u16).to_le_bytes());
+  copy_optional_hash(&mut body[60 + 2 * hash_width..60 + 3 * hash_width], request.control_identity_digest);
+  body[60 + 3 * hash_width..64 + 3 * hash_width]
+    .copy_from_slice(&u32::try_from(request.context.len()).map_err(|_| overflow_error("corrupt evidence context length"))?.to_le_bytes());
+  body[64 + 3 * hash_width..66 + 3 * hash_width]
+    .copy_from_slice(&u16::try_from(evidence_count).map_err(|_| overflow_error("corrupt evidence hash count"))?.to_le_bytes());
+  body[fixed_length..fixed_length + request.context.len()].copy_from_slice(request.context);
+  body[fixed_length + request.context.len()..].copy_from_slice(request.evidence_hashes);
+
+  let mut identity = Vec::with_capacity(32);
+  identity.extend_from_slice(&request.database_id);
+  identity.extend_from_slice(&request.evidence_id);
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::CorruptGcEvidence,
+    hash_algorithm: algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let AuditArtifactV1::CorruptEvidence(decoded) = decode_audit_artifact(&encoded.value, algorithm)? else {
+    return Err(closure_error("corrupt_evidence_writer", "encoded corrupt evidence did not decode through its frozen typed reader"));
+  };
+  if decoded.key != encoded.key {
+    return Err(closure_error("corrupt_evidence_writer", "encoded corrupt evidence key disagrees with its typed reader"));
+  }
+  Ok(encoded)
 }
 
 #[derive(Debug, Clone)]
@@ -1142,6 +1326,19 @@ fn validate_sorted_hashes(bytes: &[u8], hash_width: usize, code: &'static str) -
     previous = Some(hash);
   }
   Ok(())
+}
+
+fn validate_optional_hash(value: Option<&[u8]>, hash_width: usize, context: &'static str) -> FormatResult<()> {
+  if value.is_some_and(|hash| hash.len() != hash_width || all_zero(hash)) {
+    return Err(identity_error("corrupt_evidence_hash", format!("{context} must be one nonzero selected-width hash")));
+  }
+  Ok(())
+}
+
+fn copy_optional_hash(target: &mut [u8], value: Option<&[u8]>) {
+  if let Some(value) = value {
+    target.copy_from_slice(value);
+  }
 }
 
 fn sorted_hashes_contain(bytes: &[u8], hash_width: usize, target: &[u8]) -> bool {

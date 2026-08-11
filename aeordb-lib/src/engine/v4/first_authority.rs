@@ -24,6 +24,11 @@ use super::header_publication::{
   observe_database_header_v4,
 };
 use super::hash::digest_parts;
+use super::gc::{GcArtifactKindV1, decode_gc_artifact_envelope, immutable_gc_artifact_key};
+use super::gc_audit::{
+  AuditArtifactV1, CorruptGcEvidenceDurabilityReceiptV1, CorruptGcEvidenceDurableSinkV1, CorruptGcEvidenceSinkErrorV1,
+  decode_audit_artifact,
+};
 use super::gc_retirement::{
   PreparedRetirementJournalSegmentV1, RetirementJournalDurabilityReceiptV1, RetirementJournalDurableSinkV1, RetirementJournalSinkErrorV1,
 };
@@ -205,6 +210,15 @@ impl FirstAuthorityDependencyObserverV1 for NoopFirstAuthorityDependencyObserver
   }
 }
 
+struct ImmutableGcArtifactPublicationV1<'a> {
+  kind: GcArtifactKindV1,
+  database_id: &'a [u8; 16],
+  artifact_key: &'a [u8],
+  value: &'a [u8],
+  minimum_timestamp_ms: u64,
+  committed_postcondition_code: &'static str,
+}
+
 pub struct V4FirstAuthorityPublisher {
   file: File,
   kv: Mutex<DiskKVStore>,
@@ -247,31 +261,8 @@ impl V4FirstAuthorityPublisher {
     segment: &PreparedRetirementJournalSegmentV1<'_>,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<RetirementJournalDurabilityReceiptV1, RetirementJournalSinkErrorV1> {
-    let _authority = match self.root_state.lock() {
-      Ok(authority) => authority,
-      Err(poisoned) => {
-        drop(poisoned);
-        return Err(RetirementJournalSinkErrorV1::new(
-          "retirement_journal_authority_lock",
-          FirstAuthorityPublicationErrorV1::StateLockPoisoned,
-        ));
-      }
-    };
     let observation = self.observe().map_err(retirement_sink_first_authority_error)?;
     let header = &observation.selected.header;
-    if observation.selected.redundancy_degraded {
-      return Err(retirement_sink_invalid(
-        "retirement_journal_degraded_header",
-        "retirement-journal publication requires two valid v4 header slots",
-      ));
-    }
-    if header.head_hash.iter().all(|byte| *byte == 0) {
-      return Err(retirement_sink_invalid(
-        "retirement_journal_missing_authority",
-        "retirement-journal publication requires selected first authority",
-      ));
-    }
-
     let decoded = decode_retirement_journal_segment_v1(segment.value, header.hash_algorithm).map_err(retirement_sink_format_error)?;
     if decoded.key != segment.artifact_key
       || decoded.segment_ordinal != segment.segment_ordinal
@@ -296,88 +287,141 @@ impl V4FirstAuthorityPublisher {
       let record = record.map_err(retirement_sink_format_error)?;
       segment_timestamp_ms = segment_timestamp_ms.max(record.retired_at_ms);
     }
-    let publication_timestamp_ms = header.updated_at_ms.max(segment_timestamp_ms);
+    let database_id: [u8; 16] = decoded.database_id.try_into().map_err(|_| {
+      retirement_sink_invalid("retirement_journal_database_mismatch", "retirement-journal database identity has the wrong width")
+    })?;
+    let write_sequence = self
+      .publish_immutable_gc_artifact(
+        ImmutableGcArtifactPublicationV1 {
+          kind: GcArtifactKindV1::RetirementJournalSegment,
+          database_id: &database_id,
+          artifact_key: segment.artifact_key,
+          value: segment.value,
+          minimum_timestamp_ms: segment_timestamp_ms,
+          committed_postcondition_code: "immutable_gc_committed_postcondition",
+        },
+        observer,
+      )
+      .map_err(retirement_sink_first_authority_error)?;
+    retirement_journal_receipt(segment, write_sequence)
+  }
 
-    let mut kv = self.lock_kv().map_err(retirement_sink_first_authority_error)?;
-    validate_kv_header_alignment(&kv, header).map_err(retirement_sink_first_authority_error)?;
-    if let Some(locator) = kv.get(segment.artifact_key).map_err(retirement_sink_engine_error)? {
+  fn publish_immutable_gc_artifact(
+    &self,
+    request: ImmutableGcArtifactPublicationV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<u64, FirstAuthorityPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_degraded_header",
+        "immutable GC publication requires two valid v4 header slots",
+      ));
+    }
+    if header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_missing_authority",
+        "immutable GC publication requires selected first authority",
+      ));
+    }
+    if &header.database_id != request.database_id {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_database_mismatch",
+        "immutable GC artifact belongs to another logical database",
+      ));
+    }
+    let envelope = decode_gc_artifact_envelope(request.value)?;
+    if envelope.kind != request.kind
+      || envelope.identity.len() < 16
+      || &envelope.identity[..16] != request.database_id
+      || immutable_gc_artifact_key(header.hash_algorithm, request.kind, request.value) != request.artifact_key
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_prepared_mismatch",
+        "immutable GC key, kind, database identity, or value disagrees",
+      ));
+    }
+    let publication_timestamp_ms = header.updated_at_ms.max(request.minimum_timestamp_ms);
+    let mut kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    if let Some(locator) = kv.get(request.artifact_key)? {
       if locator.type_flags != kv_tag::GC_ARTIFACT {
-        return Err(retirement_sink_invalid(
-          "retirement_journal_identity_collision",
-          "retirement-journal artifact key resolves to another KV role",
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "immutable_gc_identity_collision",
+          "immutable GC artifact key resolves to another KV role",
         ));
       }
       let maximum_length =
-        super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, segment.artifact_key.len(), segment.value.len())
-          .map_err(retirement_sink_format_error)?;
-      let bytes = read_entity_bounded(&self.file, &kv, segment.artifact_key, maximum_length, header.write_sequence_high_water)
-        .map_err(retirement_sink_first_authority_error)?
-        .ok_or_else(|| retirement_sink_invalid("retirement_journal_readback_missing", "retirement-journal locator disappeared"))?;
-      let entity =
-        decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water).map_err(retirement_sink_format_error)?;
+        super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, request.artifact_key.len(), request.value.len())?;
+      let bytes = read_entity_bounded(&self.file, &kv, request.artifact_key, maximum_length, header.write_sequence_high_water)?
+        .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_gc_readback_missing", "immutable GC locator disappeared"))?;
+      let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
       if entity.entry_type != EntryTypeV4::GcArtifact
         || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
         || entity.compression_algorithm != CompressionAlgorithm::None
-        || entity.key != segment.artifact_key
-        || entity.stored_value != segment.value
-        || entity.timestamp_ms < segment_timestamp_ms
+        || entity.key != request.artifact_key
+        || entity.stored_value != request.value
+        || entity.timestamp_ms < request.minimum_timestamp_ms
       {
-        return Err(retirement_sink_invalid(
-          "retirement_journal_identity_collision",
-          "existing retirement-journal entity differs from the exact immutable artifact representation",
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "immutable_gc_identity_collision",
+          "existing immutable GC entity differs from its exact artifact representation",
         ));
       }
-      return retirement_journal_receipt(segment, entity.write_sequence);
+      return Ok(entity.write_sequence);
     }
 
-    let write_sequence = header
-      .write_sequence_high_water
-      .checked_add(1)
-      .ok_or_else(|| retirement_sink_invalid("retirement_journal_write_sequence_exhausted", "v4 write sequence is exhausted"))?;
+    let write_sequence = header.write_sequence_high_water.checked_add(1).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_gc_write_sequence_exhausted", "v4 write sequence is exhausted")
+    })?;
     let entry_count = header
       .entry_count
       .checked_add(1)
-      .ok_or_else(|| retirement_sink_invalid("retirement_journal_entry_count_overflow", "v4 entry count overflowed"))?;
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_gc_entry_count_overflow", "v4 entry count overflowed"))?;
     let entity_bytes = encode_entity(
       EntryTypeV4::GcArtifact,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
       publication_timestamp_ms,
       write_sequence,
-      segment.artifact_key,
-      segment.value,
-    )
-    .map_err(retirement_sink_first_authority_error)?;
-    let entities = [PreparedWholeEntityV1 { key: segment.artifact_key.to_vec(), kv_type: kv_tag::GC_ARTIFACT, bytes: entity_bytes }];
-    let dependency_bytes =
-      entity_dependency_bytes(&entities, header.hash_algorithm.hash_length()).map_err(retirement_sink_first_authority_error)?;
+      request.artifact_key,
+      request.value,
+    )?;
+    let entities = [PreparedWholeEntityV1 { key: request.artifact_key.to_vec(), kv_type: kv_tag::GC_ARTIFACT, bytes: entity_bytes }];
+    let dependency_bytes = entity_dependency_bytes(&entities, header.hash_algorithm.hash_length())?;
 
-    kv.flush().map_err(retirement_sink_engine_error)?;
-    validate_kv_header_alignment(&kv, header).map_err(retirement_sink_first_authority_error)?;
+    kv.flush()?;
+    validate_kv_header_alignment(&kv, header)?;
     if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
-      return Err(retirement_sink_invalid(
-        "retirement_journal_baseline_not_flushed",
-        "retirement-journal publication requires an empty KV write and hot-buffer baseline",
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_baseline_not_flushed",
+        "immutable GC publication requires an empty KV write and hot-buffer baseline",
       ));
     }
-    let append_start = self.file.metadata().map_err(|error| retirement_sink_engine_error(EngineError::IoError(error)))?.len();
+    let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
     if append_start < header.hot_tail_offset {
-      return Err(retirement_sink_invalid("retirement_journal_file_truncated", "database length precedes the selected v4 hot-tail offset"));
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_file_truncated",
+        "database length precedes the selected v4 hot-tail offset",
+      ));
     }
     let expected_hot_tail_offset = append_start
       .checked_add(entities[0].bytes.len() as u64)
-      .ok_or_else(|| retirement_sink_invalid("retirement_journal_wal_overflow", "retirement-journal WAL offset overflowed"))?;
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_gc_wal_overflow", "immutable GC WAL offset overflowed"))?;
     let mut candidate = header.clone();
     candidate.updated_at_ms = publication_timestamp_ms;
     candidate.write_sequence_high_water = write_sequence;
     candidate.hot_tail_offset = expected_hot_tail_offset;
     candidate.entry_count = entry_count;
-    let admitted = self
-      .header_publisher
-      .admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)
-      .map_err(retirement_sink_header_error)?;
+    let admitted =
+      self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)?;
     let authority_sequence = admitted.sequence();
-    let batch = kv.begin_atomic_visibility_batch(1, authority_sequence).map_err(retirement_sink_engine_error)?;
+    let batch = kv.begin_atomic_visibility_batch(1, authority_sequence)?;
     let (publication_result, append_completed) = {
       let mut dependency = FirstAuthorityDependencyV1 {
         file: &self.file,
@@ -396,39 +440,40 @@ impl V4FirstAuthorityPublisher {
     let publication = match publication_result {
       Ok(publication) => publication,
       Err(error) => {
-        kv.abort_atomic_visibility_batch(batch).map_err(retirement_sink_engine_error)?;
-        return Err(retirement_sink_header_error(error));
+        kv.abort_atomic_visibility_batch(batch)?;
+        return Err(error.into());
       }
     };
     if !append_completed {
-      kv.abort_atomic_visibility_batch(batch).map_err(retirement_sink_engine_error)?;
-      return Err(retirement_sink_invalid(
-        "retirement_journal_dependency_missing",
-        "header publication completed without the exact retirement-journal dependency append",
+      kv.abort_atomic_visibility_batch(batch)?;
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_dependency_missing",
+        "header publication completed without the exact immutable GC dependency append",
       ));
     }
     kv.complete_hot_tail_dependency();
-    kv.publish_atomic_visibility_after_authority(batch, &publication.durability).map_err(retirement_sink_engine_error)?;
+    kv.publish_atomic_visibility_after_authority(batch, &publication.durability)?;
     observer
       .authority_committed(&kv, &entities)
-      .map_err(|error| RetirementJournalSinkErrorV1::new("retirement_journal_committed_postcondition", error))?;
+      .map_err(|error| FirstAuthorityPublicationErrorV1::invalid(request.committed_postcondition_code, error.to_string()))?;
 
     let stored = read_entity_bounded(
       &self.file,
       &kv,
-      segment.artifact_key,
+      request.artifact_key,
       entities[0].bytes.len(),
       publication.observation.selected.header.write_sequence_high_water,
-    )
-    .map_err(retirement_sink_first_authority_error)?
-    .ok_or_else(|| retirement_sink_invalid("retirement_journal_readback_missing", "published retirement-journal locator is absent"))?;
+    )?
+    .ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_gc_readback_missing", "published immutable GC locator is absent")
+    })?;
     if stored != entities[0].bytes {
-      return Err(retirement_sink_invalid(
-        "retirement_journal_readback_mismatch",
-        "published retirement-journal entity differs from its exact prepared bytes",
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_gc_readback_mismatch",
+        "published immutable GC entity differs from its exact prepared bytes",
       ));
     }
-    retirement_journal_receipt(segment, write_sequence)
+    Ok(write_sequence)
   }
 
   pub fn publish(
@@ -643,6 +688,50 @@ impl RetirementJournalDurableSinkV1 for V4FirstAuthorityPublisher {
   }
 }
 
+impl CorruptGcEvidenceDurableSinkV1 for V4FirstAuthorityPublisher {
+  fn publish_corrupt_evidence_synced(
+    &mut self,
+    artifact_key: &[u8],
+    value: &[u8],
+  ) -> Result<CorruptGcEvidenceDurabilityReceiptV1, CorruptGcEvidenceSinkErrorV1> {
+    let observation = self.observe().map_err(corrupt_evidence_sink_first_authority_error)?;
+    let algorithm = observation.selected.header.hash_algorithm;
+    let AuditArtifactV1::CorruptEvidence(evidence) = decode_audit_artifact(value, algorithm).map_err(corrupt_evidence_sink_format_error)?
+    else {
+      return Err(corrupt_evidence_sink_invalid(
+        "corrupt_gc_evidence_kind",
+        "corrupt-evidence sink received another immutable GC artifact kind",
+      ));
+    };
+    if evidence.key != artifact_key {
+      return Err(corrupt_evidence_sink_invalid("corrupt_gc_evidence_key", "corrupt-evidence key does not bind the exact immutable value"));
+    }
+    let database_id: [u8; 16] = evidence.database_id.try_into().map_err(|_| {
+      corrupt_evidence_sink_invalid("corrupt_gc_evidence_database", "corrupt-evidence database identity has the wrong width")
+    })?;
+    let minimum_timestamp_ms = u64::try_from(evidence.detected_at_ms).map_err(|_| {
+      corrupt_evidence_sink_invalid("corrupt_gc_evidence_timestamp", "corrupt-evidence detection time is outside the storage range")
+    })?;
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    let hard_publication_sequence = self
+      .publish_immutable_gc_artifact(
+        ImmutableGcArtifactPublicationV1 {
+          kind: GcArtifactKindV1::CorruptGcEvidence,
+          database_id: &database_id,
+          artifact_key,
+          value,
+          minimum_timestamp_ms,
+          committed_postcondition_code: "immutable_gc_committed_postcondition",
+        },
+        &mut observer,
+      )
+      .map_err(corrupt_evidence_sink_first_authority_error)?;
+    let stored_value_length =
+      u32::try_from(value.len()).map_err(|error| CorruptGcEvidenceSinkErrorV1::new("corrupt_gc_evidence_value_length", error))?;
+    Ok(CorruptGcEvidenceDurabilityReceiptV1 { artifact_key: artifact_key.to_vec(), stored_value_length, hard_publication_sequence })
+  }
+}
+
 fn prepare_namespace_root(
   request: &FirstAuthorityPublicationRequestV1,
   algorithm: HashAlgorithm,
@@ -765,17 +854,39 @@ fn retirement_sink_format_error(error: FormatError) -> RetirementJournalSinkErro
 }
 
 fn retirement_sink_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> RetirementJournalSinkErrorV1 {
-  let code = error.code();
+  let code = match error.code() {
+    "immutable_gc_degraded_header" => "retirement_journal_degraded_header",
+    "immutable_gc_missing_authority" => "retirement_journal_missing_authority",
+    "immutable_gc_database_mismatch" => "retirement_journal_database_mismatch",
+    "immutable_gc_prepared_mismatch" => "retirement_journal_prepared_mismatch",
+    "immutable_gc_identity_collision" => "retirement_journal_identity_collision",
+    "immutable_gc_readback_missing" => "retirement_journal_readback_missing",
+    "immutable_gc_write_sequence_exhausted" => "retirement_journal_write_sequence_exhausted",
+    "immutable_gc_entry_count_overflow" => "retirement_journal_entry_count_overflow",
+    "immutable_gc_baseline_not_flushed" => "retirement_journal_baseline_not_flushed",
+    "immutable_gc_file_truncated" => "retirement_journal_file_truncated",
+    "immutable_gc_wal_overflow" => "retirement_journal_wal_overflow",
+    "immutable_gc_dependency_missing" => "retirement_journal_dependency_missing",
+    "immutable_gc_readback_mismatch" => "retirement_journal_readback_mismatch",
+    "immutable_gc_committed_postcondition" => "retirement_journal_committed_postcondition",
+    "first_authority_lock_poisoned" => "retirement_journal_authority_lock",
+    "engine_failure" => "retirement_journal_storage",
+    code => code,
+  };
   RetirementJournalSinkErrorV1::new(code, error)
 }
 
-fn retirement_sink_header_error(error: DatabaseHeaderPublicationErrorV4) -> RetirementJournalSinkErrorV1 {
-  let code = error.code();
-  RetirementJournalSinkErrorV1::new(code, error)
+fn corrupt_evidence_sink_invalid(code: &'static str, message: &'static str) -> CorruptGcEvidenceSinkErrorV1 {
+  CorruptGcEvidenceSinkErrorV1::new(code, FirstAuthorityPublicationErrorV1::invalid(code, message))
 }
 
-fn retirement_sink_engine_error(error: EngineError) -> RetirementJournalSinkErrorV1 {
-  RetirementJournalSinkErrorV1::new("retirement_journal_storage", error)
+fn corrupt_evidence_sink_format_error(error: FormatError) -> CorruptGcEvidenceSinkErrorV1 {
+  CorruptGcEvidenceSinkErrorV1::new(error.code(), error)
+}
+
+fn corrupt_evidence_sink_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> CorruptGcEvidenceSinkErrorV1 {
+  let code = error.code();
+  CorruptGcEvidenceSinkErrorV1::new(code, error)
 }
 
 fn build_package(

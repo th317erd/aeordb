@@ -12,6 +12,11 @@ use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, Databa
 use aeordb::engine::v4::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, decode_whole_entity};
 use aeordb::engine::v4::first_authority::{FirstAuthorityPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher};
 use aeordb::engine::v4::gc::immutable_gc_artifact_key;
+use aeordb::engine::v4::gc_audit::{CorruptGcEvidenceDurableSinkV1, decode_audit_artifact};
+use aeordb::engine::v4::gc_lineage_recovery::{
+  RetirementLineageRecoveryContextV1, RetirementLineageRecoveryDispositionV1, RetirementLineageRecoveryGroupV1,
+  RetirementLineageRecoveryObservationV1, RetirementLineageRecoveryReconcilerV1,
+};
 use aeordb::engine::v4::gc_retirement::{
   PreparedRetirementJournalSegmentV1, RetirementJournalBufferOptionsV1, RetirementJournalDurableSinkV1, RetirementJournalOwnerV1,
   RetirementJournalRecordWriteV1,
@@ -33,6 +38,18 @@ fn fixture(algorithm: HashAlgorithm) -> Vec<u8> {
     _ => unreachable!("the v4 contract has two fixture widths"),
   };
   fs::read(fixture_root().join(format!("agca-{name}-retirement-journal-segment-valid.bin"))).unwrap()
+}
+
+fn evidence_fixture(algorithm: HashAlgorithm) -> Vec<u8> {
+  fs::read(fixture_root().join(format!("agca-{}-corrupt-gc-evidence.bin", algorithm_name(algorithm)))).unwrap()
+}
+
+fn algorithm_name(algorithm: HashAlgorithm) -> &'static str {
+  match algorithm {
+    HashAlgorithm::Blake3_256 => "blake3-256",
+    HashAlgorithm::Sha512 => "sha512",
+    _ => unreachable!("the v4 contract has two fixture widths"),
+  }
 }
 
 fn database_id() -> [u8; 16] {
@@ -176,6 +193,19 @@ fn read_entity(path: &Path, offset: u64, length: u32) -> Vec<u8> {
   bytes
 }
 
+fn physical_incarnation(algorithm: HashAlgorithm, logical_key_byte: u8, digest_byte: u8, wal_offset: u64, write_sequence: u64) -> Vec<u8> {
+  let hash_width = algorithm.hash_length();
+  let mut bytes = vec![0u8; 24 + 2 * hash_width];
+  bytes[..hash_width].fill(logical_key_byte);
+  bytes[hash_width..2 * hash_width].fill(digest_byte);
+  bytes[2 * hash_width..2 * hash_width + 8].copy_from_slice(&wal_offset.to_le_bytes());
+  bytes[2 * hash_width + 8..2 * hash_width + 16].copy_from_slice(&write_sequence.to_le_bytes());
+  bytes[2 * hash_width + 16..2 * hash_width + 20].copy_from_slice(&128u32.to_le_bytes());
+  bytes[2 * hash_width + 20] = 3;
+  bytes[2 * hash_width + 21] = 1;
+  bytes
+}
+
 #[test]
 fn bounded_owner_publishes_one_exact_gc_entity_through_the_shared_hard_authority_at_both_widths() {
   for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
@@ -263,4 +293,125 @@ fn malformed_or_mismatched_prepared_segments_refuse_before_mutating_header_or_fi
     assert_eq!(fs::metadata(&path).unwrap().len(), before_length);
     assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_frontier);
   }
+}
+
+#[test]
+fn corrupt_evidence_uses_the_same_hard_immutable_gc_path_and_retries_after_reopen() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let value = evidence_fixture(algorithm);
+    let artifact = decode_audit_artifact(&value, algorithm).unwrap();
+    let key = artifact.key().to_vec();
+    let (_directory, path, coordinator, mut publisher) = create_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
+
+    let first = publisher.publish_corrupt_evidence_synced(&key, &value).unwrap();
+
+    let after = publisher.observe().unwrap();
+    assert_eq!(after.selected.header.slot_sequence, before.selected.header.slot_sequence + 1);
+    assert_eq!(after.selected.header.write_sequence_high_water, before.selected.header.write_sequence_high_water + 1);
+    assert_eq!(after.selected.header.entry_count, before.selected.header.entry_count + 1);
+    assert_eq!(after.selected.header.head_hash, before.selected.header.head_hash);
+    assert!(coordinator.snapshot().unwrap().hard_frontier > before_frontier);
+    assert_eq!(first.artifact_key, key);
+    assert_eq!(first.stored_value_length, value.len() as u32);
+    assert_eq!(first.hard_publication_sequence, after.selected.header.write_sequence_high_water);
+    let locator = publisher.locator(&key).unwrap().unwrap();
+    let entity_bytes = read_entity(&path, locator.offset, locator.total_length);
+    let entity = decode_whole_entity(&entity_bytes, algorithm, after.selected.header.write_sequence_high_water).unwrap();
+    assert_eq!(entity.entry_type, EntryTypeV4::GcArtifact);
+    assert_eq!(entity.flags, WHOLE_ENTITY_V1_FLAG_SYSTEM);
+    assert_eq!(entity.key, key);
+    assert_eq!(entity.stored_value, value);
+    drop(publisher);
+
+    let (reopen_coordinator, mut reopened) = reopen(&path);
+    let reopen_frontier = reopen_coordinator.snapshot().unwrap().hard_frontier;
+    let retry = reopened.publish_corrupt_evidence_synced(&key, &value).unwrap();
+    assert_eq!(retry, first);
+    assert_eq!(reopened.observe().unwrap(), after);
+    assert_eq!(reopen_coordinator.snapshot().unwrap().hard_frontier, reopen_frontier);
+  }
+}
+
+#[test]
+fn corrupt_evidence_mismatch_refuses_before_mutating_shared_authority() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let value = evidence_fixture(algorithm);
+  let artifact = decode_audit_artifact(&value, algorithm).unwrap();
+  let mut wrong_key = artifact.key().to_vec();
+  wrong_key[0] ^= 0x80;
+  let (_directory, path, coordinator, mut publisher) = create_publisher(algorithm);
+  let before = publisher.observe().unwrap();
+  let before_length = fs::metadata(&path).unwrap().len();
+  let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
+
+  assert!(publisher.publish_corrupt_evidence_synced(&wrong_key, &value).is_err());
+  assert_eq!(publisher.observe().unwrap(), before);
+  assert_eq!(fs::metadata(&path).unwrap().len(), before_length);
+  assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_frontier);
+}
+
+#[test]
+fn recovery_uses_one_real_publisher_for_evidence_and_retirement_then_reopens_both() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, path, coordinator, mut publisher) = create_publisher(algorithm);
+  let before = publisher.observe().unwrap();
+  let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(4_096, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let old = physical_incarnation(algorithm, 0x41, 0x11, 10_000, 7);
+  let selected = physical_incarnation(algorithm, 0x41, 0x12, 20_000, 8);
+  let observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &old, retirement_present: false },
+    RetirementLineageRecoveryObservationV1 { incarnation: &selected, retirement_present: false },
+  ];
+  let mut recovery = RetirementLineageRecoveryReconcilerV1::new(
+    algorithm,
+    RetirementLineageRecoveryContextV1 {
+      database_id: database_id(),
+      run_id: [0x71; 16],
+      generation: 500,
+      detected_at_ms: 1_700_000_500_000,
+      recovery_publication_sequence: 9_000,
+    },
+    &cancellation,
+  )
+  .unwrap();
+
+  let outcome = recovery
+    .recover_group(
+      RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &observations },
+      100,
+      &mut owner,
+      &mut publisher,
+    )
+    .unwrap();
+
+  assert_eq!(outcome.disposition, RetirementLineageRecoveryDispositionV1::Synthesized { record_count: 1 });
+  assert!(!outcome.authorizes_reclaim());
+  let evidence_key = outcome.evidence_receipt.unwrap().artifact_key;
+  let journal_key = owner.status().last_segment_hash;
+  assert!(publisher.locator(&evidence_key).unwrap().is_some());
+  assert!(publisher.locator(&journal_key).unwrap().is_some());
+  let after = publisher.observe().unwrap();
+  assert_eq!(after.selected.header.write_sequence_high_water, before.selected.header.write_sequence_high_water + 2);
+  assert_eq!(after.selected.header.entry_count, before.selected.header.entry_count + 2);
+  assert!(coordinator.snapshot().unwrap().hard_frontier > before_frontier);
+  drop(publisher);
+
+  let (_reopen_coordinator, reopened) = reopen(&path);
+  assert_eq!(reopened.observe().unwrap(), after);
+  assert!(reopened.locator(&evidence_key).unwrap().is_some());
+  assert!(reopened.locator(&journal_key).unwrap().is_some());
 }
