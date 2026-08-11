@@ -1,6 +1,9 @@
 use std::cmp::Ordering;
 
-use super::gc::{GcArtifactKindV1, decode_gc_artifact_envelope, decode_physical_incarnation, immutable_gc_artifact_key, u16_at, u32_at, u64_at};
+use super::gc::{
+  EncodedImmutableGcArtifactV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, decode_gc_artifact_envelope, decode_physical_incarnation,
+  encode_immutable_gc_artifact, immutable_gc_artifact_key, u16_at, u32_at, u64_at,
+};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use crate::engine::HashAlgorithm;
 
@@ -53,10 +56,82 @@ pub struct MarkRunCheckpointV1<'a> {
   pub phase: u16,
   pub resumable: bool,
   pub canceled: bool,
+  pub capabilities: &'a [u8],
+  pub started_at_ms: u64,
+  pub updated_at_ms: u64,
+  pub authority_root_set_digest: &'a [u8],
+  pub semantic_state_digest: &'a [u8],
+  pub kv_layout_fingerprint: &'a [u8],
+  pub effective_policy_fingerprint: &'a [u8],
+  pub system_family_registry_fingerprint: &'a [u8],
+  pub captured_header_sequence: u64,
+  pub captured_write_high_water: u64,
+  pub reconciled_through_sequence: u64,
+  pub active_bitmap_bit_count: u64,
+  pub kv_bucket_count: u64,
+  pub kv_slots_per_bucket: u32,
   pub workspace_path: &'a str,
+  pub workspace_id: &'a [u8],
   pub workspace_manifest_digest: &'a [u8],
   pub mutation_journal_head: &'a [u8],
+  pub checkpoint_logical_work: u64,
+  pub total_logical_work_hint: u64,
   pub key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkRunCheckpointWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8; 16],
+  pub run_id: &'a [u8; 16],
+  pub generation: u64,
+  pub checkpoint_sequence: u64,
+  pub state: u16,
+  pub phase: u16,
+  pub resumable: bool,
+  pub canceled: bool,
+  pub capabilities: [u8; 32],
+  pub started_at_ms: u64,
+  pub updated_at_ms: u64,
+  pub authority_root_set_digest: &'a [u8],
+  pub semantic_state_digest: &'a [u8],
+  pub kv_layout_fingerprint: &'a [u8],
+  pub effective_policy_fingerprint: [u8; 32],
+  pub system_family_registry_fingerprint: [u8; 32],
+  pub captured_header_sequence: u64,
+  pub captured_write_high_water: u64,
+  pub reconciled_through_sequence: u64,
+  pub active_bitmap_bit_count: u64,
+  pub kv_bucket_count: u64,
+  pub kv_slots_per_bucket: u32,
+  pub workspace_path: &'a str,
+  pub workspace_id: [u8; 16],
+  pub workspace_manifest_digest: [u8; 32],
+  pub mutation_journal_head: &'a [u8],
+  pub checkpoint_logical_work: u64,
+  pub total_logical_work_hint: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MarkResumeContextV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8],
+  pub run_id: &'a [u8],
+  pub generation: u64,
+  pub checkpoint_sequence: u64,
+  pub workspace_path: &'a str,
+  pub workspace_id: &'a [u8],
+  pub authority_root_set_digest: &'a [u8],
+  pub semantic_state_digest: &'a [u8],
+  pub kv_layout_fingerprint: &'a [u8],
+  pub effective_policy_fingerprint: &'a [u8],
+  pub system_family_registry_fingerprint: &'a [u8],
+  pub captured_header_sequence: u64,
+  pub captured_write_high_water: u64,
+  pub reconciled_through_sequence: u64,
+  pub active_bitmap_bit_count: u64,
+  pub kv_bucket_count: u64,
+  pub kv_slots_per_bucket: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +150,7 @@ pub struct MarkMutationJournalV1<'a> {
 
 #[derive(Debug, Clone)]
 pub enum GcMarkArtifactV1<'a> {
-  Checkpoint(MarkRunCheckpointV1<'a>),
+  Checkpoint(Box<MarkRunCheckpointV1<'a>>),
   MutationJournal(MarkMutationJournalV1<'a>),
 }
 
@@ -138,9 +213,73 @@ pub struct MarkWorkspaceManifestV1<'a> {
   pub run_id: &'a [u8],
   pub generation: u64,
   pub checkpoint_sequence: u64,
+  pub created_at_ms: u64,
+  pub updated_at_ms: u64,
+  pub hash_algorithm: HashAlgorithm,
+  pub kv_layout_fingerprint: &'a [u8],
+  pub authority_root_set_digest: &'a [u8],
+  pub effective_policy_fingerprint: &'a [u8],
   pub stored_bytes: u64,
   pub logical_record_count: u64,
   pub descriptors: Vec<MarkWorkspaceDescriptorV1<'a>>,
+}
+
+pub fn encode_mark_run_checkpoint(request: &MarkRunCheckpointWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  let path = request.workspace_path.as_bytes();
+  let body_length = checked_add(236, checked_mul(4, hash_width, "mark checkpoint hash width")?, "mark checkpoint body")?;
+  let body_length = checked_add(body_length, path.len(), "mark checkpoint path")?;
+  if body_length > 256 * 1024 {
+    return Err(amplification_error("mark_checkpoint_length", body_length, 256 * 1024));
+  }
+  let mut body = vec![0u8; body_length];
+  let flags = u32::from(request.resumable) | (u32::from(request.canceled) << 1);
+  body[..4].copy_from_slice(&flags.to_le_bytes());
+  body[4..6].copy_from_slice(&1u16.to_le_bytes());
+  body[6..8].copy_from_slice(&request.state.to_le_bytes());
+  body[8..10].copy_from_slice(&request.phase.to_le_bytes());
+  body[12..44].copy_from_slice(&request.capabilities);
+  body[44..52].copy_from_slice(&request.started_at_ms.to_le_bytes());
+  body[52..60].copy_from_slice(&request.updated_at_ms.to_le_bytes());
+  copy_exact_hash(&mut body[60..60 + hash_width], request.authority_root_set_digest, hash_width, "authority root-set digest")?;
+  copy_exact_hash(&mut body[60 + hash_width..60 + 2 * hash_width], request.semantic_state_digest, hash_width, "semantic state digest")?;
+  copy_exact_hash(&mut body[60 + 2 * hash_width..60 + 3 * hash_width], request.kv_layout_fingerprint, hash_width, "KV layout fingerprint")?;
+  body[60 + 3 * hash_width..92 + 3 * hash_width].copy_from_slice(&request.effective_policy_fingerprint);
+  body[92 + 3 * hash_width..124 + 3 * hash_width].copy_from_slice(&request.system_family_registry_fingerprint);
+  let scalar = 124 + 3 * hash_width;
+  body[scalar..scalar + 8].copy_from_slice(&request.captured_header_sequence.to_le_bytes());
+  body[scalar + 8..scalar + 16].copy_from_slice(&request.captured_write_high_water.to_le_bytes());
+  body[scalar + 16..scalar + 24].copy_from_slice(&request.reconciled_through_sequence.to_le_bytes());
+  body[scalar + 24..scalar + 32].copy_from_slice(&request.active_bitmap_bit_count.to_le_bytes());
+  body[scalar + 32..scalar + 40].copy_from_slice(&request.kv_bucket_count.to_le_bytes());
+  body[scalar + 40..scalar + 44].copy_from_slice(&request.kv_slots_per_bucket.to_le_bytes());
+  let path_length = path.len() as u32;
+  body[scalar + 44..scalar + 48].copy_from_slice(&path_length.to_le_bytes());
+  body[scalar + 48..scalar + 64].copy_from_slice(&request.workspace_id);
+  body[scalar + 64..scalar + 96].copy_from_slice(&request.workspace_manifest_digest);
+  copy_exact_hash(
+    &mut body[scalar + 96..scalar + 96 + hash_width],
+    request.mutation_journal_head,
+    hash_width,
+    "mark mutation journal head",
+  )?;
+  body[scalar + 96 + hash_width..scalar + 104 + hash_width].copy_from_slice(&request.checkpoint_logical_work.to_le_bytes());
+  body[scalar + 104 + hash_width..scalar + 112 + hash_width].copy_from_slice(&request.total_logical_work_hint.to_le_bytes());
+  body[236 + 4 * hash_width..].copy_from_slice(path);
+
+  let mut identity = [0u8; 40];
+  identity[..16].copy_from_slice(request.database_id);
+  identity[16..32].copy_from_slice(request.run_id);
+  identity[32..].copy_from_slice(&request.checkpoint_sequence.to_le_bytes());
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::MarkRunCheckpoint,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let _decoded = decode_gc_mark_artifact(&encoded.value, request.hash_algorithm)?;
+  Ok(encoded)
 }
 
 impl MarkWorkspaceManifestV1<'_> {
@@ -189,7 +328,7 @@ pub fn decode_gc_mark_artifact(bytes: &[u8], algorithm: HashAlgorithm) -> Format
   let envelope = decode_gc_artifact_envelope(bytes)?;
   let key = immutable_gc_artifact_key(algorithm, envelope.kind, bytes);
   match envelope.kind {
-    GcArtifactKindV1::MarkRunCheckpoint => decode_mark_checkpoint(bytes, algorithm, key).map(GcMarkArtifactV1::Checkpoint),
+    GcArtifactKindV1::MarkRunCheckpoint => decode_mark_checkpoint(bytes, algorithm, key).map(Box::new).map(GcMarkArtifactV1::Checkpoint),
     GcArtifactKindV1::MarkMutationJournalSegment => {
       decode_mark_mutation_journal(bytes, algorithm, key).map(GcMarkArtifactV1::MutationJournal)
     }
@@ -233,12 +372,16 @@ fn decode_mark_checkpoint(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) 
   if canceled != (state == 4) || state == 5 && resumable {
     return Err(closure_error("mark_checkpoint_state_flags", "mark state and workspace/canceled flags disagree"));
   }
-  validate_exact_capabilities(&body[12..44])?;
+  let capabilities = &body[12..44];
+  validate_exact_capabilities(capabilities)?;
   let created_at = u64_at(body, 44)?;
   let updated_at = u64_at(body, 52)?;
   if created_at == 0 || updated_at < created_at {
     return Err(closure_error("mark_checkpoint_timestamps", "mark checkpoint timestamps are invalid"));
   }
+  let authority_root_set_digest = &body[60..60 + hash_width];
+  let semantic_state_digest = &body[60 + hash_width..60 + 2 * hash_width];
+  let kv_layout_fingerprint = &body[60 + 2 * hash_width..60 + 3 * hash_width];
   let three_hashes_end = checked_add(60, checked_mul(3, hash_width, "mark checkpoint identity hashes")?, "mark checkpoint hashes")?;
   if body[60..three_hashes_end].chunks(hash_width).any(all_zero) {
     return Err(identity_error("mark_checkpoint_hashes", "mark checkpoint identity hashes must be nonzero"));
@@ -247,20 +390,22 @@ fn decode_mark_checkpoint(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) 
   if body[policy_start..policy_start + 64].chunks(32).any(all_zero) {
     return Err(identity_error("mark_checkpoint_policy", "mark checkpoint policy fingerprints must be nonzero"));
   }
+  let effective_policy_fingerprint = &body[policy_start..policy_start + 32];
+  let system_family_registry_fingerprint = &body[policy_start + 32..policy_start + 64];
   let scalar = 124 + 3 * hash_width;
-  let authority_root_count = u64_at(body, scalar)?;
-  let journal_observed = u64_at(body, scalar + 8)?;
-  let journal_applied = u64_at(body, scalar + 16)?;
-  let bitmap_bytes = u64_at(body, scalar + 24)?;
-  let bitmap_units = u64_at(body, scalar + 32)?;
-  let bitmap_unit_bytes = u32_at(body, scalar + 40)?;
+  let captured_header_sequence = u64_at(body, scalar)?;
+  let captured_write_high_water = u64_at(body, scalar + 8)?;
+  let reconciled_through_sequence = u64_at(body, scalar + 16)?;
+  let active_bitmap_bit_count = u64_at(body, scalar + 24)?;
+  let kv_bucket_count = u64_at(body, scalar + 32)?;
+  let kv_slots_per_bucket = u32_at(body, scalar + 40)?;
   let path_length = usize::try_from(u32_at(body, scalar + 44)?).map_err(|_| overflow_error("mark checkpoint path length"))?;
-  if authority_root_count == 0
-    || journal_applied > journal_observed
-    || bitmap_bytes == 0
-    || bitmap_units == 0
-    || bitmap_unit_bytes == 0
-    || bitmap_units.checked_mul(u64::from(bitmap_unit_bytes)) != Some(bitmap_bytes)
+  if captured_header_sequence == 0
+    || reconciled_through_sequence > captured_write_high_water
+    || active_bitmap_bit_count == 0
+    || kv_bucket_count == 0
+    || kv_slots_per_bucket == 0
+    || kv_bucket_count.checked_mul(u64::from(kv_slots_per_bucket)) != Some(active_bitmap_bit_count)
     || path_length == 0
   {
     return Err(closure_error("mark_checkpoint_counts", "mark checkpoint counts or bitmap geometry are invalid"));
@@ -276,9 +421,9 @@ fn decode_mark_checkpoint(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) 
   if all_zero(workspace_id) || all_zero(manifest_digest) {
     return Err(identity_error("mark_checkpoint_workspace", "workspace ID and manifest digest must be nonzero"));
   }
-  let completed_work = u64_at(body, journal_head_start + hash_width)?;
-  let total_work_hint = u64_at(body, journal_head_start + hash_width + 8)?;
-  if completed_work > total_work_hint {
+  let checkpoint_logical_work = u64_at(body, journal_head_start + hash_width)?;
+  let total_logical_work_hint = u64_at(body, journal_head_start + hash_width + 8)?;
+  if checkpoint_logical_work > total_logical_work_hint {
     return Err(closure_error("mark_checkpoint_work", "completed logical work exceeds its total hint"));
   }
   let path_bytes = &body[minimum_body..];
@@ -295,9 +440,26 @@ fn decode_mark_checkpoint(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) 
     phase,
     resumable,
     canceled,
+    capabilities,
+    started_at_ms: created_at,
+    updated_at_ms: updated_at,
+    authority_root_set_digest,
+    semantic_state_digest,
+    kv_layout_fingerprint,
+    effective_policy_fingerprint,
+    system_family_registry_fingerprint,
+    captured_header_sequence,
+    captured_write_high_water,
+    reconciled_through_sequence,
+    active_bitmap_bit_count,
+    kv_bucket_count,
+    kv_slots_per_bucket,
     workspace_path,
+    workspace_id,
     workspace_manifest_digest: manifest_digest,
     mutation_journal_head,
+    checkpoint_logical_work,
+    total_logical_work_hint,
     key,
   })
 }
@@ -432,19 +594,23 @@ pub fn decode_mark_workspace_manifest(bytes: &[u8], algorithm: HashAlgorithm) ->
   if all_zero(database_id) || all_zero(run_id) || generation == 0 || checkpoint_sequence == 0 {
     return Err(identity_error("mark_workspace_manifest_identity", "workspace identity must be nonzero"));
   }
-  if u64_at(bytes, 64)? == 0 || u64_at(bytes, 72)? < u64_at(bytes, 64)? {
+  let created_at_ms = u64_at(bytes, 64)?;
+  let updated_at_ms = u64_at(bytes, 72)?;
+  if created_at_ms == 0 || updated_at_ms < created_at_ms {
     return Err(closure_error("mark_workspace_manifest_timestamps", "workspace timestamps are invalid"));
   }
-  if u16_at(bytes, 80)? != algorithm.to_u16() {
+  let encoded_algorithm = HashAlgorithm::from_u16(u16_at(bytes, 80)?)
+    .ok_or_else(|| kind_error("mark_workspace_manifest_hash_algorithm", "workspace hash algorithm is unknown"))?;
+  if encoded_algorithm != algorithm {
     return Err(closure_error("mark_workspace_manifest_hash_algorithm", "workspace hash algorithm does not match database"));
   }
   if u32_at(bytes, 84)? != 0 {
     return Err(reserved_error("mark_workspace_manifest_flags", "workspace manifest flags must be zero"));
   }
-  if all_zero(&bytes[88..88 + hash_width])
-    || all_zero(&bytes[88 + hash_width..88 + 2 * hash_width])
-    || all_zero(&bytes[88 + 2 * hash_width..fixed_end])
-  {
+  let kv_layout_fingerprint = &bytes[88..88 + hash_width];
+  let authority_root_set_digest = &bytes[88 + hash_width..88 + 2 * hash_width];
+  let effective_policy_fingerprint = &bytes[88 + 2 * hash_width..fixed_end];
+  if all_zero(kv_layout_fingerprint) || all_zero(authority_root_set_digest) || all_zero(effective_policy_fingerprint) {
     return Err(identity_error("mark_workspace_manifest_fingerprints", "workspace resume identities must be nonzero"));
   }
 
@@ -515,6 +681,12 @@ pub fn decode_mark_workspace_manifest(bytes: &[u8], algorithm: HashAlgorithm) ->
     run_id,
     generation,
     checkpoint_sequence,
+    created_at_ms,
+    updated_at_ms,
+    hash_algorithm: encoded_algorithm,
+    kv_layout_fingerprint,
+    authority_root_set_digest,
+    effective_policy_fingerprint,
     stored_bytes,
     logical_record_count: total_logical_record_count,
     descriptors,
@@ -589,6 +761,51 @@ pub fn validate_mark_checkpoint_workspace(
     return Err(closure_error(
       "mark_checkpoint_workspace_closure",
       "mark checkpoint identity/state/digest does not match its workspace manifest",
+    ));
+  }
+  Ok(())
+}
+
+pub fn validate_mark_resume_context(
+  checkpoint: &MarkRunCheckpointV1<'_>,
+  manifest: &MarkWorkspaceManifestV1<'_>,
+  complete_manifest: &[u8],
+  context: &MarkResumeContextV1<'_>,
+) -> FormatResult<()> {
+  validate_mark_checkpoint_workspace(checkpoint, manifest, complete_manifest)?;
+  if !checkpoint.resumable || checkpoint.canceled || checkpoint.state > 3 {
+    return Err(closure_error("mark_resume_state", "selected mark checkpoint is not resumable"));
+  }
+  if context.hash_algorithm != manifest.hash_algorithm
+    || checkpoint.database_id != context.database_id
+    || checkpoint.run_id != context.run_id
+    || checkpoint.generation != context.generation
+    || checkpoint.checkpoint_sequence != context.checkpoint_sequence
+    || checkpoint.workspace_path != context.workspace_path
+    || checkpoint.workspace_id != context.workspace_id
+    || checkpoint.authority_root_set_digest != context.authority_root_set_digest
+    || checkpoint.semantic_state_digest != context.semantic_state_digest
+    || checkpoint.kv_layout_fingerprint != context.kv_layout_fingerprint
+    || checkpoint.effective_policy_fingerprint != context.effective_policy_fingerprint
+    || checkpoint.system_family_registry_fingerprint != context.system_family_registry_fingerprint
+    || checkpoint.captured_header_sequence != context.captured_header_sequence
+    || checkpoint.captured_write_high_water != context.captured_write_high_water
+    || checkpoint.reconciled_through_sequence != context.reconciled_through_sequence
+    || checkpoint.active_bitmap_bit_count != context.active_bitmap_bit_count
+    || checkpoint.kv_bucket_count != context.kv_bucket_count
+    || checkpoint.kv_slots_per_bucket != context.kv_slots_per_bucket
+  {
+    return Err(closure_error("mark_resume_context", "mark checkpoint does not match the exact captured resume context"));
+  }
+  if manifest.created_at_ms != checkpoint.started_at_ms
+    || manifest.updated_at_ms > checkpoint.updated_at_ms
+    || manifest.kv_layout_fingerprint != checkpoint.kv_layout_fingerprint
+    || manifest.authority_root_set_digest != checkpoint.authority_root_set_digest
+    || manifest.effective_policy_fingerprint != checkpoint.effective_policy_fingerprint
+  {
+    return Err(closure_error(
+      "mark_resume_manifest_basis",
+      "workspace manifest timestamps or resume fingerprints do not close against the selected checkpoint",
     ));
   }
   Ok(())
@@ -834,6 +1051,14 @@ fn validate_exact_capabilities(bytes: &[u8]) -> FormatResult<()> {
   if bytes != expected {
     return Err(closure_error("mark_checkpoint_capabilities", "mark checkpoint capabilities do not match the frozen set"));
   }
+  Ok(())
+}
+
+fn copy_exact_hash(destination: &mut [u8], source: &[u8], expected_length: usize, field: &'static str) -> FormatResult<()> {
+  if destination.len() != expected_length || source.len() != expected_length {
+    return Err(identity_error("mark_checkpoint_hash_width", format!("{field} does not match the selected hash width")));
+  }
+  destination.copy_from_slice(source);
   Ok(())
 }
 

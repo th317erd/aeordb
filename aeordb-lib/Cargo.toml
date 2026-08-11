@@ -737,6 +737,10 @@ name = "gc_v4_mark_workspace_spec"
 path = "spec/engine/gc_v4_mark_workspace_spec.rs"
 
 [[test]]
+name = "gc_v4_mark_checkpoint_spec"
+path = "spec/engine/gc_v4_mark_checkpoint_spec.rs"
+
+[[test]]
 name = "v4_read_pin_spec"
 path = "spec/engine/v4_read_pin_spec.rs"
 

@@ -654,6 +654,9 @@
           - [x] Publish and verify immutable per-checkpoint AGCW manifests through an atomic no-clobber install without invalidating the prior checkpoint closure.
           - [x] Prove malformed, collision, symlink, crash-prefix, cancellation, pressure, capacity, barrier, and architecture failure direction.
         - [ ] P4-3c: hard-publish selected mark checkpoints only after workspace closure, and resume only after complete identity/generation/fingerprint validation.
+          - [x] P4-3c1: expose the complete frozen checkpoint/manifest context, add exact both-width checkpoint/control encoders, and reject every resume-context mismatch before storage access.
+          - [ ] P4-3c2: publish immutable checkpoint entities and mutable A/B mark-run controls through one WholeEntity-v1 authority, with prior-control retirement admitted before replacement activation.
+          - [ ] P4-3c3: select and reopen only complete checkpoint/workspace/object closures, preserving the prior valid checkpoint across crash, tamper, cancellation, and incomplete replacement prefixes.
         - [ ] P4-3d: drain bounded mutation runs to an exact final publication boundary, restart on layout generation change or journal gaps, and prove retained-or-leaked failure direction.
         - [ ] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.
           - [ ] Prove and, if necessary, harden the Windows private-workspace ACL as the platform equivalent of Unix 0700/0600 before native closure.

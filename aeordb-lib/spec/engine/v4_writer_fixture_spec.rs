@@ -401,7 +401,11 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
 
   let production_sources = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
   assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 1);
-  assert_eq!(production_sources.matches("encode_immutable_gc_artifact(").count(), 1);
+  assert_eq!(production_sources.matches("encode_immutable_gc_artifact(").count(), 4);
+  for owner in ["gc.rs", "gc_audit.rs", "gc_mark.rs", "gc_retirement.rs"] {
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4").join(owner)).unwrap();
+    assert_eq!(source.matches("encode_immutable_gc_artifact(").count(), 1, "unexpected immutable GC encoder surface in {owner}");
+  }
 }
 
 fn rust_sources(path: PathBuf) -> String {

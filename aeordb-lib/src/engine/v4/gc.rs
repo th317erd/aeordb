@@ -210,6 +210,23 @@ pub struct EncodedImmutableGcArtifactV1 {
   pub value: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcActiveControlWriteV1<'a> {
+  pub kind: GcArtifactKindV1,
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8; 16],
+  pub slot: u8,
+  pub sequence: u64,
+  pub generation: u64,
+  pub target_manifest_hash: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedGcActiveControlV1 {
+  pub key: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
 /// Return the exact immutable AGCA envelope length after validating every
 /// representational and per-kind bound, without allocating the artifact.
 pub fn checked_immutable_gc_artifact_encoded_length(
@@ -244,28 +261,7 @@ pub fn checked_immutable_gc_artifact_encoded_length(
 /// Encode one complete immutable AGCA envelope without publishing it.
 pub fn encode_immutable_gc_artifact(request: &ImmutableGcArtifactWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
   let total_length = checked_immutable_gc_artifact_encoded_length(request.kind, request.identity.len(), request.body.len())?;
-  if request.generation == 0 {
-    return Err(error(MalformedInputClass::IdentityKeyOrGenerationMismatch, "gc_artifact_metadata", "AGCA generation is zero"));
-  }
-  let identity_length = checked_gc_u16(request.identity.len(), "AGCA identity length exceeds u16")?;
-  let body_length = checked_gc_u32(request.body.len(), "AGCA body length exceeds u32")?;
-  let total_length_u32 = checked_gc_u32(total_length, "AGCA total length exceeds u32")?;
-
-  let mut value = vec![0u8; total_length];
-  value[..4].copy_from_slice(b"AGCA");
-  value[4..6].copy_from_slice(&1u16.to_le_bytes());
-  value[6..8].copy_from_slice(&(request.kind as u16).to_le_bytes());
-  value[8..10].copy_from_slice(&(AGCA_HEADER_LENGTH as u16).to_le_bytes());
-  value[12..16].copy_from_slice(&total_length_u32.to_le_bytes());
-  value[16..18].copy_from_slice(&identity_length.to_le_bytes());
-  value[20..24].copy_from_slice(&body_length.to_le_bytes());
-  value[24..32].copy_from_slice(&request.generation.to_le_bytes());
-  let identity_end = AGCA_HEADER_LENGTH + request.identity.len();
-  let body_end = identity_end + request.body.len();
-  value[AGCA_HEADER_LENGTH..identity_end].copy_from_slice(request.identity);
-  value[identity_end..body_end].copy_from_slice(request.body);
-  let checksum = crc32fast::hash(&value[..body_end]);
-  value[body_end..].copy_from_slice(&checksum.to_le_bytes());
+  let value = encode_gc_artifact_envelope(request.kind, request.generation, request.identity, request.body, total_length)?;
 
   let decoded = decode_gc_artifact_envelope(&value)?;
   if decoded.kind != request.kind {
@@ -277,6 +273,84 @@ pub fn encode_immutable_gc_artifact(request: &ImmutableGcArtifactWriteV1<'_>) ->
   }
   let key = immutable_gc_artifact_key(request.hash_algorithm, request.kind, &value);
   Ok(EncodedImmutableGcArtifactV1 { key, value })
+}
+
+/// Encode one complete mutable A/B GC control without publishing it.
+pub fn encode_gc_active_control(request: &GcActiveControlWriteV1<'_>) -> FormatResult<EncodedGcActiveControlV1> {
+  if !request.kind.is_control() {
+    return Err(error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "gc_control_kind",
+      format!("{} is not a mutable GC control kind", request.kind.name()),
+    ));
+  }
+  if request.database_id.iter().all(|byte| *byte == 0)
+    || request.slot > 1
+    || request.sequence == 0
+    || request.generation == 0
+    || request.target_manifest_hash.len() != request.hash_algorithm.hash_length()
+    || request.target_manifest_hash.iter().all(|byte| *byte == 0)
+  {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "gc_control_identity_or_body",
+      "GC active control has a zero, invalid, or width-mismatched identity, slot, sequence, generation, or target",
+    ));
+  }
+
+  let mut identity = [0u8; 17];
+  identity[..16].copy_from_slice(request.database_id);
+  identity[16] = request.slot;
+  let mut body = Vec::with_capacity(8 + request.target_manifest_hash.len());
+  body.extend_from_slice(&request.sequence.to_le_bytes());
+  body.extend_from_slice(request.target_manifest_hash);
+  let total_length = AGCA_HEADER_LENGTH + identity.len() + body.len() + 4;
+  let value = encode_gc_artifact_envelope(request.kind, request.generation, &identity, &body, total_length)?;
+  let decoded = decode_gc_active_control(&value, request.hash_algorithm)?;
+  Ok(EncodedGcActiveControlV1 { key: decoded.key, value })
+}
+
+fn encode_gc_artifact_envelope(
+  kind: GcArtifactKindV1,
+  generation: u64,
+  identity: &[u8],
+  body: &[u8],
+  total_length: usize,
+) -> FormatResult<Vec<u8>> {
+  if generation == 0 || identity.is_empty() {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "gc_artifact_metadata",
+      "AGCA generation and identity must be nonzero",
+    ));
+  }
+  let identity_length = checked_gc_u16(identity.len(), "AGCA identity length exceeds u16")?;
+  let body_length = checked_gc_u32(body.len(), "AGCA body length exceeds u32")?;
+  let expected_length = AGCA_HEADER_LENGTH
+    .checked_add(identity.len())
+    .and_then(|length| length.checked_add(body.len()))
+    .and_then(|length| length.checked_add(4))
+    .ok_or_else(|| length_error("AGCA length formula overflow"))?;
+  if total_length != expected_length || total_length > MAX_GC_ARTIFACT_LENGTH {
+    return Err(length_error("AGCA encoded length is invalid"));
+  }
+  let total_length_u32 = checked_gc_u32(total_length, "AGCA total length exceeds u32")?;
+  let mut value = vec![0u8; total_length];
+  value[..4].copy_from_slice(b"AGCA");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&(kind as u16).to_le_bytes());
+  value[8..10].copy_from_slice(&(AGCA_HEADER_LENGTH as u16).to_le_bytes());
+  value[12..16].copy_from_slice(&total_length_u32.to_le_bytes());
+  value[16..18].copy_from_slice(&identity_length.to_le_bytes());
+  value[20..24].copy_from_slice(&body_length.to_le_bytes());
+  value[24..32].copy_from_slice(&generation.to_le_bytes());
+  let identity_end = AGCA_HEADER_LENGTH + identity.len();
+  let body_end = identity_end + body.len();
+  value[AGCA_HEADER_LENGTH..identity_end].copy_from_slice(identity);
+  value[identity_end..body_end].copy_from_slice(body);
+  let checksum = crc32fast::hash(&value[..body_end]);
+  value[body_end..].copy_from_slice(&checksum.to_le_bytes());
+  Ok(value)
 }
 
 #[derive(Debug, Clone, Copy)]
