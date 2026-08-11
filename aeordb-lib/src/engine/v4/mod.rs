@@ -30,6 +30,7 @@ pub mod index_task;
 pub mod namespace;
 pub mod parser_plan;
 pub mod position;
+pub mod read_view;
 pub mod reader;
 pub mod root_authority;
 pub mod scope;

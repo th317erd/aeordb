@@ -598,7 +598,7 @@
         - [x] Prove crash-prefix, retry/idempotency, malformed/collision, restart, memory-bound, architecture, native-platform, and real-storage behavior before closure.
       - [ ] P3b-3: add the read-view resolver, lifecycle states, pins, and transfer closure before service activation.
         - [x] P3b-3a: expose typed bounded RootCandidate, RootExpiry, and durable TaskPin readers over the already-frozen v4 bytes.
-        - [ ] P3b-3b: add a bounded, memory-accounted request-pin registry whose readable-state check and pin acquisition share one lifecycle guard.
+        - [x] P3b-3b: add a bounded, memory-accounted request-pin registry whose readable-state check and pin acquisition share one lifecycle guard.
         - [ ] P3b-3c: add the disconnected `ReadViewSelectorV1` / `ResolvedReadViewV1` resolver with current authorization first, one HEAD capture, exact authority validation, selected-root restriction, cancellation, and stable lifecycle errors.
         - [ ] P3b-3d: add a streaming typed transfer-closure classifier that delegates protected-family policy to `SystemFamilyPolicyResolverV1`, requires authority edges, omits derived state by declared policy, and fails unknown protected state closed.
         - [ ] P3b-3e: prove lifecycle races, malformed state, auth ordering, no explicit-root fallback, content-only semantics, bounded memory, transfer completeness, architecture isolation, restart fixtures, broad Linux, and native-platform behavior before closure.

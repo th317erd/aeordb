@@ -337,8 +337,8 @@ fn review_policy_name(occurrence: &SuppressionOccurrence) -> Option<&'static str
       Some("legacy-infallible-boundary")
     }
     SuppressionKind::PanicMacro | SuppressionKind::PanicMethod => Some("validated-local-invariant"),
-    SuppressionKind::ErrorConversion if persistent_format_file(file) => Some("typed-format-failure"),
     SuppressionKind::ErrorConversion if authority_file(file) => Some("authority-state-failure"),
+    SuppressionKind::ErrorConversion if persistent_format_file(file) => Some("typed-format-failure"),
     SuppressionKind::ErrorConversion => Some("boundary-validation-failure"),
     SuppressionKind::ErrorRecovery => Some("ordered-optional-precedence"),
     SuppressionKind::BroadErrPattern if file.starts_with("aeordb-lib/src/server/") => Some("http-terminal-error"),
@@ -428,6 +428,7 @@ fn authority_file(file: &str) -> bool {
     "/namespace_mutation.rs",
     "/native_durability.rs",
     "/rate_limiter.rs",
+    "/v4/read_view.rs",
     "/storage_engine.rs",
     "/sync_engine.rs",
     "/void_manager.rs",

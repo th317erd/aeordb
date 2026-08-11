@@ -294,6 +294,20 @@ fn reviewed_inventory_assigns_named_semantic_policies() {
 }
 
 #[test]
+fn v4_runtime_authority_errors_do_not_inherit_the_persistent_format_policy() {
+  let discovered =
+    scan_source("aeordb-lib/src/engine/v4/read_view.rs", "fn lock_state() { let _guard = state.lock().map_err(|_| authority_error()); }")
+      .unwrap();
+
+  let inventory = reviewed_inventory(&discovered).expect("known runtime authority failure policy");
+
+  assert_eq!(inventory.entries.len(), 1);
+  assert_eq!(inventory.entries[0].review, "authority-state-failure");
+  assert_eq!(inventory.reviews["authority-state-failure"].review_status, ReviewStatus::Reviewed);
+  assert_eq!(inventory.reviews["authority-state-failure"].class, SuppressionClass::DurabilityAuthority);
+}
+
+#[test]
 fn reviewed_inventory_refuses_unknown_suppression_forms() {
   let discovered = scan_source("aeordb-lib/src/engine/example.rs", "fn mutate() { let _ = persist(); }").unwrap();
 
