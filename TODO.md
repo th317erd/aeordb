@@ -575,7 +575,7 @@
         - [x] Prove all other capabilities remain disabled and current writable/peer admission still fails closed.
         - [x] Run P3a focused, adjacent, workspace, architecture, native, documentation, and shadow-storage gates; record and land the phase.
       - [x] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.
-    - [ ] P3b: add immutable v4 namespace and semantic authority before activating any selected-root service path.
+    - [x] P3b: add immutable v4 namespace and semantic authority before activating any selected-root service path.
       - [x] P3b-1: add immutable root/semantic readers and an independent reference model.
         - [x] Map existing payload readers, outer entity framing, admission controls, future root consumers, and activation boundaries.
         - [x] Add a failing `v4_root_migration_spec` target for exact root entity, semantic-state, and admission-witness closure.
@@ -596,7 +596,7 @@
             - [x] Run exact-commit macOS arm64 and Windows x86_64 MSVC qualification before closing the first-authority writer.
         - [x] Keep v4 capability bits 1, 2, and 5 and every service/HEAD caller disabled until the complete P3b-2 writer family is proven.
         - [x] Prove crash-prefix, retry/idempotency, malformed/collision, restart, memory-bound, architecture, native-platform, and real-storage behavior before closure.
-      - [ ] P3b-3: add the read-view resolver, lifecycle states, pins, and transfer closure before service activation.
+      - [x] P3b-3: add the read-view resolver, lifecycle states, pins, and transfer closure before service activation.
         - [x] P3b-3a: expose typed bounded RootCandidate, RootExpiry, and durable TaskPin readers over the already-frozen v4 bytes.
         - [x] P3b-3b: add a bounded, memory-accounted request-pin registry whose readable-state check and pin acquisition share one lifecycle guard.
         - [x] P3b-3c: add the disconnected `ReadViewSelectorV1` / `ResolvedReadViewV1` resolver with current authorization first, one HEAD capture, exact authority validation, selected-root restriction, cancellation, and stable lifecycle errors.
@@ -606,7 +606,12 @@
           - [x] Delegate path, entry-type, KV-key, control-tag, and external-workspace decisions to the selected SystemFamily registry for the exact transfer operation.
           - [x] Preserve required/optional/omitted/node-local/redacted/named-subset policies, refuse fail-unknown and unknown-protected state, and expose complete versus content-only terminal summaries.
           - [x] Prove bounded constant-state streaming, cancellation, terminal failure latching, both hash widths, architecture isolation, and all error paths.
-        - [ ] P3b-3e: prove lifecycle races, malformed state, auth ordering, no explicit-root fallback, content-only semantics, bounded memory, transfer completeness, architecture isolation, restart fixtures, broad Linux, and native-platform behavior before closure.
+        - [x] P3b-3e: prove lifecycle races, malformed state, auth ordering, no explicit-root fallback, content-only semantics, bounded memory, transfer completeness, architecture isolation, restart fixtures, broad Linux, and native-platform behavior before closure.
+          - [x] Run the combined resolver, lifecycle, pin, transfer, authority, registry, admission, and memory falsifier matrix on Linux.
+          - [x] Reopen exact immutable authority from real file-backed storage and retain the disconnected service boundary.
+          - [x] Pass the complete Linux workspace/all-target suite, all-target compilation, suppression, formatting, documentation, and independent contract gates.
+          - [x] Qualify the exact pushed commit on macOS arm64 and Windows x86_64 MSVC using the frozen lockfile and bounded native commands.
+          - [x] Record retained activation boundaries and close P3b-3 only after every required proof is green.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
