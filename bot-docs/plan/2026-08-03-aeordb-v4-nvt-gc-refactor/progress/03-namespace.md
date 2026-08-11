@@ -3,7 +3,7 @@
 - **Status:** P2e, Child 08 P2f, Child 01 P3a, and Child 03 P3b-1 through P3b-2c are complete and pushed; P3b-3 read-view/lifecycle preflight is active
 - **Current landing unit:** P3b-3c disconnected authorization-first read-view resolver before service activation
 - **Entry commit:** `9f3c6d0`
-- **Last green commit:** P3b-2c atomic first-authority publication `9f3c6d0`
+- **Last green commit:** P3b-3b bounded root request pins `9b1a7a8`
 - **Owner:** Codex, namespace/semantic authority and integration owner
 - **Start gate:** Children 01 and 02 plus Child 08 P2f are green and pushed; the complete P3b-2 writer family passes its exact native matrix on Linux, macOS arm64, and Windows x86_64 MSVC
 - **Plan:** [Child 03](../children/03-namespace-semantic-roots-and-system-families.md)
@@ -35,6 +35,7 @@
 
 ## P3b-3b Bounded Request-Pin Evidence
 
+- **Landing commit:** `9b1a7a8` (`add bounded v4 root request pins`).
 - **Coordinator contract:** `RootReadPinCoordinatorV1` retains only per-root gates for currently active or contending requests, not a database-sized lifecycle catalog. Each gate has one explicit process-memory reservation, distinct-root and total-pin caps, exact selected-algorithm hash validation, cancellation before and after lifecycle observation, and an owned RAII pin. Lifecycle observation and pin acquisition run under the same per-root guard used by future P4 retirement rechecks, while unrelated roots remain concurrent.
 - **Lifecycle and failure direction:** live, retained, and pending-delete roots are readable; pending expiry is checked from `pending_since + max(frozen_grace, current_grace)` without refreshing lifecycle state. Retired, reclaimed, unknown, corrupt, and unavailable roots retain distinct stable errors. Pin-coordinator poison/accounting corruption is separately reported as `read_pin_corrupt`, rather than being mislabeled as lifecycle corruption. Cleanup errors propagate on ordinary paths; only `Drop` cannot return, so it latches and logs release failure.
 - **Race/resource proof:** the external spec uses channel handshakes rather than sleeps to force both request-first and retirement-first orders. Twelve tests cover both hash widths, malformed/zero hashes, invalid caps, checked expiry overflow, cancellation before and after observation, lifecycle-source failure, hard memory pressure, root/pin caps, shared same-root accounting, retirement cancellation/action failure, unrelated-root concurrency, exact loser behavior, and zero retained reservations after the final pin.
