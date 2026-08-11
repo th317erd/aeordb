@@ -220,7 +220,7 @@ fn validated_external_spills_seed_one_persistent_recovery_incident() {
   let body = decode_emergency_spill_catalog_body(control.body, engine.hash_algo()).unwrap();
   assert_eq!(body.rows.len(), 2);
   assert_eq!(body.rows[0].creation_sequence, 9);
-  assert_eq!(body.rows[0].native_path, native_path(temp.path().join("earlier/manifest.json").as_path()));
+  assert_eq!(body.rows[0].native_path, native_path(temp.path().join("earlier").join("manifest.json").as_path()));
   assert_eq!(body.rows[1].creation_sequence, 10);
 
   let repair = engine.begin_explicit_durability_repair().unwrap();
