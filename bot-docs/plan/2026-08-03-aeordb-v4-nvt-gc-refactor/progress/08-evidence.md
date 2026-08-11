@@ -3,9 +3,9 @@
 ## Landing State
 
 - **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** P1c native closure is green; handoff to P3a/P3b.
+- **Current landing unit:** P3a-2 native header-publication closure is green; P3a-3 immutable artifact writers are next.
 - **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P1c implementation and portable native-contract boundary `e1f1e29` on `development` and `origin/development`.
+- **Last pushed green commit:** P3a-2 native cursor correction and exact qualification commit `e41e45d` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -58,6 +58,14 @@ Optional cleanup and telemetry failures retain the acknowledged primary result o
 - Offline verify reports 198 valid entries, zero corrupt headers/hashes, zero missing/dangling/B-tree/unlisted entries, zero stale/missing/invalid KV entries, and `Status: OK`. Verify log SHA-256: `47edec058973b719a207bac77ca1671916052f3dd37e0bf56b649fe0c8908bce`.
 - The disposable server was stopped; no Cargo, Rust compiler, AeorDB, or soak process remains active. No transient artifact, secret, evidence database, or production data is part of the landing diff.
 
+## Current P3a Evidence
+
+- P3a-1's checked common encoders byte-match both independent hash-width fixtures and remain disconnected from production authority.
+- P3a-2's serialized header publisher uses the shared durability coordinator, exact inactive-slot publication, full barriers/read-back, and fail-closed two-slot fencing/adoption. Its fault suite covers roughly 6,150 crash/failure prefixes.
+- Native qualification found and corrected a Windows shared-cursor regression in positional reads. Exact commit `e41e45d` passes four internal fault tests and the 216-test adjacent matrix on Linux, macOS arm64, and Windows x86_64 MSVC. Both native hosts pass the 436-fixture, 95-route, and 38-document contract gate.
+- The corrected Linux workspace/all-target closure passes 5,463 tests across 207 result groups with zero failures and seven intentionally ignored stress cases. Its log SHA-256 is `417c3bfe37314d69f7a51e975373f12e733c9fee75281eca4d1dd4433deaec88`; the suppression inventory remains exactly 1,420 reviewed occurrences after refreshing four line-only metadata entries.
+- No writer capability, service authority, route, migration destination, deployment, or live database byte is active.
+
 ## Next Action
 
-Begin Child 01 P3a writers with independent fixture equality and no-bypass architecture tests before production activation. Child 03 P3b immutable roots/read views may proceed only through its own start gate; P7 migration work remains forbidden until its own gate.
+Implement Child 01 P3a-3 immutable v1 entity and artifact envelope writers only for families with green bounded readers and independent fixtures. Keep capability activation in P3a-5 and Child 03 P3b immutable roots/read views behind their own start gates; P7 migration work remains forbidden until its gate.
