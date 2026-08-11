@@ -19,6 +19,14 @@ use aeordb::engine::v4::gc_lineage_recovery::{
   RetirementLineageRecoveryContextV1, RetirementLineageRecoveryDispositionV1, RetirementLineageRecoveryGroupV1,
   RetirementLineageRecoveryObservationV1, RetirementLineageRecoveryReconcilerV1,
 };
+use aeordb::engine::v4::gc_mark::{
+  GcMarkArtifactV1, MarkMutationJournalSegmentWriteV1, MarkMutationRecordWriteV1, decode_gc_mark_artifact,
+  encode_mark_mutation_journal_segment, mark_mutation_journal_records_v1,
+};
+use aeordb::engine::v4::gc_mark_convergence::{
+  MarkMutationJournalBufferOptionsV1, MarkMutationJournalChainStartV1, MarkMutationJournalDurableSinkV1, MarkMutationJournalOwnerV1,
+  PreparedMarkMutationJournalSegmentV1,
+};
 use aeordb::engine::v4::gc_retirement::{
   PreparedRetirementJournalSegmentV1, RetirementJournalBufferOptionsV1, RetirementJournalDurabilityReceiptV1,
   RetirementJournalDurableSinkV1, RetirementJournalOwnerV1, RetirementJournalRecordWriteV1, RetirementJournalSinkErrorV1,
@@ -44,6 +52,10 @@ fn fixture(algorithm: HashAlgorithm) -> Vec<u8> {
 
 fn evidence_fixture(algorithm: HashAlgorithm) -> Vec<u8> {
   fs::read(fixture_root().join(format!("agca-{}-corrupt-gc-evidence.bin", algorithm_name(algorithm)))).unwrap()
+}
+
+fn mark_mutation_fixture(algorithm: HashAlgorithm) -> Vec<u8> {
+  fs::read(fixture_root().join(format!("agca-{}-mark-mutation-journal-reset.bin", algorithm_name(algorithm)))).unwrap()
 }
 
 fn algorithm_name(algorithm: HashAlgorithm) -> &'static str {
@@ -174,6 +186,25 @@ fn prepared_fixture<'a>(bytes: &'a [u8], artifact_key: &'a [u8], algorithm: Hash
   }
 }
 
+fn prepared_mark_mutation_fixture<'a>(
+  bytes: &'a [u8],
+  artifact_key: &'a [u8],
+  algorithm: HashAlgorithm,
+) -> PreparedMarkMutationJournalSegmentV1<'a> {
+  let GcMarkArtifactV1::MutationJournal(segment) = decode_gc_mark_artifact(bytes, algorithm).unwrap() else {
+    panic!("expected mark-mutation fixture");
+  };
+  PreparedMarkMutationJournalSegmentV1 {
+    segment_ordinal: segment.segment_sequence,
+    generation: segment.generation,
+    first_publication_sequence: segment.first_sequence,
+    last_publication_sequence: segment.last_sequence,
+    record_count: segment.record_count,
+    artifact_key,
+    value: bytes,
+  }
+}
+
 fn fixture_record<'a>(bytes: &'a [u8], algorithm: HashAlgorithm) -> RetirementJournalRecordWriteV1<'a> {
   let hash_width = algorithm.hash_length();
   let record_start = 32 + 24 + 32 + hash_width;
@@ -239,7 +270,7 @@ impl RetirementJournalDurableSinkV1 for EvidenceFirstJournalFailureSink<'_> {
         std::io::Error::other("injected failure after durable recovery evidence"),
       ));
     }
-    self.publisher.publish_synced(segment)
+    RetirementJournalDurableSinkV1::publish_synced(self.publisher, segment)
   }
 }
 
@@ -292,17 +323,162 @@ fn exact_retry_after_reopen_returns_the_original_durable_entity_sequence_without
   let (_directory, path, _coordinator, mut publisher) = create_publisher(algorithm);
   let artifact_key = immutable_gc_artifact_key(algorithm, aeordb::engine::v4::gc::GcArtifactKindV1::RetirementJournalSegment, &expected);
   let prepared = prepared_fixture(&expected, &artifact_key, algorithm);
-  let first = publisher.publish_synced(&prepared).unwrap();
+  let first = RetirementJournalDurableSinkV1::publish_synced(&mut publisher, &prepared).unwrap();
   let selected = publisher.observe().unwrap();
   drop(publisher);
 
   let (coordinator, mut reopened) = reopen(&path);
   let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
-  let retry = reopened.publish_synced(&prepared).unwrap();
+  let retry = RetirementJournalDurableSinkV1::publish_synced(&mut reopened, &prepared).unwrap();
 
   assert_eq!(retry, first);
   assert_eq!(reopened.observe().unwrap(), selected);
   assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_frontier);
+}
+
+#[test]
+fn bounded_mark_mutation_owner_publishes_through_shared_hard_authority_at_both_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let expected = mark_mutation_fixture(algorithm);
+    let GcMarkArtifactV1::MutationJournal(journal) = decode_gc_mark_artifact(&expected, algorithm).unwrap() else {
+      panic!("expected mark-mutation fixture");
+    };
+    let records = mark_mutation_journal_records_v1(&journal, algorithm).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    let database_id: [u8; 16] = journal.database_id.try_into().unwrap();
+    let run_id: [u8; 16] = journal.run_id.try_into().unwrap();
+    let (_directory, path, coordinator, mut publisher) = create_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
+    let cancellation = CancellationToken::new();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+    let options = MarkMutationJournalBufferOptionsV1::new(2, 1024 * 1024, 2 * 1024 * 1024, 30_000).unwrap();
+    let mut owner = MarkMutationJournalOwnerV1::new_chain(
+      MarkMutationJournalChainStartV1 {
+        algorithm,
+        database_id,
+        run_id,
+        generation: journal.generation,
+        captured_publication_sequence: journal.first_sequence - 1,
+        options,
+        cancellation: &cancellation,
+      },
+      &memory,
+    )
+    .unwrap();
+    for (index, record) in records.iter().enumerate() {
+      let observation = owner.observe_committed(
+        MarkMutationRecordWriteV1 {
+          publication_sequence: record.publication_sequence,
+          mutation_id: record.mutation_id,
+          root_before: record.root_before,
+          root_after: record.root_after,
+          published_logical_key: record.published_logical_key,
+          new_incarnation: record.new_incarnation_bytes,
+          operation: record.operation,
+        },
+        u64::try_from(index + 1).unwrap(),
+      );
+      assert!(matches!(observation, aeordb::engine::v4::gc_mark_convergence::MarkMutationObservationV1::Buffered { .. }));
+    }
+    assert!(owner.flush(&mut publisher).unwrap());
+
+    let after = publisher.observe().unwrap();
+    let key = immutable_gc_artifact_key(algorithm, aeordb::engine::v4::gc::GcArtifactKindV1::MarkMutationJournalSegment, &expected);
+    let locator = publisher.locator(&key).unwrap().unwrap();
+    assert_eq!(locator.type_flags, kv_tag::GC_ARTIFACT);
+    assert_eq!(after.selected.header.slot_sequence, before.selected.header.slot_sequence + 1);
+    assert_eq!(after.selected.header.write_sequence_high_water, before.selected.header.write_sequence_high_water + 1);
+    assert_eq!(after.selected.header.entry_count, before.selected.header.entry_count + 1);
+    assert_eq!(after.selected.header.head_hash, before.selected.header.head_hash);
+    assert!(coordinator.snapshot().unwrap().hard_frontier > before_frontier);
+    assert_eq!(owner.status().last_hard_publication_sequence, after.selected.header.write_sequence_high_water);
+
+    let entity_bytes = read_entity(&path, locator.offset, locator.total_length);
+    let entity = decode_whole_entity(&entity_bytes, algorithm, after.selected.header.write_sequence_high_water).unwrap();
+    assert_eq!(entity.entry_type, EntryTypeV4::GcArtifact);
+    assert_eq!(entity.flags, WHOLE_ENTITY_V1_FLAG_SYSTEM);
+    assert_eq!(entity.key, key);
+    assert_eq!(entity.stored_value, expected);
+  }
+}
+
+#[test]
+fn mark_mutation_exact_retry_reopens_without_republication_and_mismatch_is_nonmutating() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let expected = mark_mutation_fixture(algorithm);
+  let artifact_key = immutable_gc_artifact_key(algorithm, aeordb::engine::v4::gc::GcArtifactKindV1::MarkMutationJournalSegment, &expected);
+  let valid = prepared_mark_mutation_fixture(&expected, &artifact_key, algorithm);
+  let (_directory, path, coordinator, mut publisher) = create_publisher(algorithm);
+  let before = publisher.observe().unwrap();
+  let before_length = fs::metadata(&path).unwrap().len();
+  let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
+  let mut wrong_key = valid.artifact_key.to_vec();
+  wrong_key[0] ^= 0x80;
+  let mut malformed_value = valid.value.to_vec();
+  let malformed_last = malformed_value.len() - 1;
+  malformed_value[malformed_last] ^= 0x80;
+  let checkpoint_value = fs::read(fixture_root().join("agca-blake3-256-mark-run-checkpoint-embedded.bin")).unwrap();
+  let checkpoint_key = immutable_gc_artifact_key(algorithm, aeordb::engine::v4::gc::GcArtifactKindV1::MarkRunCheckpoint, &checkpoint_value);
+  let cases = [
+    PreparedMarkMutationJournalSegmentV1 { artifact_key: &wrong_key, ..valid },
+    PreparedMarkMutationJournalSegmentV1 { segment_ordinal: valid.segment_ordinal + 1, ..valid },
+    PreparedMarkMutationJournalSegmentV1 { generation: valid.generation + 1, ..valid },
+    PreparedMarkMutationJournalSegmentV1 { first_publication_sequence: valid.first_publication_sequence + 1, ..valid },
+    PreparedMarkMutationJournalSegmentV1 { last_publication_sequence: valid.last_publication_sequence + 1, ..valid },
+    PreparedMarkMutationJournalSegmentV1 { record_count: valid.record_count + 1, ..valid },
+    PreparedMarkMutationJournalSegmentV1 { value: &malformed_value, ..valid },
+    PreparedMarkMutationJournalSegmentV1 { artifact_key: &checkpoint_key, value: &checkpoint_value, ..valid },
+  ];
+  for mismatched in cases {
+    assert!(MarkMutationJournalDurableSinkV1::publish_mark_mutation_segment_synced(&mut publisher, &mismatched).is_err());
+    assert_eq!(publisher.observe().unwrap(), before);
+    assert_eq!(fs::metadata(&path).unwrap().len(), before_length);
+    assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_frontier);
+  }
+
+  let GcMarkArtifactV1::MutationJournal(journal) = decode_gc_mark_artifact(&expected, algorithm).unwrap() else {
+    panic!("expected mark-mutation fixture");
+  };
+  let decoded_records = mark_mutation_journal_records_v1(&journal, algorithm).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+  let records = decoded_records
+    .iter()
+    .map(|record| MarkMutationRecordWriteV1 {
+      publication_sequence: record.publication_sequence,
+      mutation_id: record.mutation_id,
+      root_before: record.root_before,
+      root_after: record.root_after,
+      published_logical_key: record.published_logical_key,
+      new_incarnation: record.new_incarnation_bytes,
+      operation: record.operation,
+    })
+    .collect::<Vec<_>>();
+  let wrong_database_id = [0x91; 16];
+  let run_id: [u8; 16] = journal.run_id.try_into().unwrap();
+  let other_database = encode_mark_mutation_journal_segment(&MarkMutationJournalSegmentWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &wrong_database_id,
+    run_id: &run_id,
+    generation: journal.generation,
+    segment_ordinal: journal.segment_sequence,
+    previous_segment_hash: None,
+    records: &records,
+  })
+  .unwrap();
+  let wrong_database_prepared = prepared_mark_mutation_fixture(&other_database.value, &other_database.key, algorithm);
+  assert!(MarkMutationJournalDurableSinkV1::publish_mark_mutation_segment_synced(&mut publisher, &wrong_database_prepared).is_err());
+  assert_eq!(publisher.observe().unwrap(), before);
+  assert_eq!(fs::metadata(&path).unwrap().len(), before_length);
+  assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_frontier);
+
+  let first = MarkMutationJournalDurableSinkV1::publish_mark_mutation_segment_synced(&mut publisher, &valid).unwrap();
+  let selected = publisher.observe().unwrap();
+  drop(publisher);
+  let (reopen_coordinator, mut reopened) = reopen(&path);
+  let reopen_frontier = reopen_coordinator.snapshot().unwrap().hard_frontier;
+  let retry = MarkMutationJournalDurableSinkV1::publish_mark_mutation_segment_synced(&mut reopened, &valid).unwrap();
+  assert_eq!(retry, first);
+  assert_eq!(reopened.observe().unwrap(), selected);
+  assert_eq!(reopen_coordinator.snapshot().unwrap().hard_frontier, reopen_frontier);
 }
 
 #[test]
@@ -325,7 +501,7 @@ fn malformed_or_mismatched_prepared_segments_refuse_before_mutating_header_or_fi
   ];
 
   for prepared in cases {
-    assert!(publisher.publish_synced(&prepared).is_err());
+    assert!(RetirementJournalDurableSinkV1::publish_synced(&mut publisher, &prepared).is_err());
     assert_eq!(publisher.observe().unwrap(), before);
     assert_eq!(fs::metadata(&path).unwrap().len(), before_length);
     assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_frontier);

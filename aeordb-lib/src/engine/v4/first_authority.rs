@@ -43,6 +43,10 @@ use super::gc_state::{RetirementReasonV1, decode_retirement_journal_segment_v1, 
 use super::gc_mark::{
   GcMarkArtifactV1, MARK_CHECKPOINT_VALUE_MAX, MarkResumeContextV1, decode_gc_mark_artifact, validate_mark_checkpoint_resume_context,
 };
+use super::gc_mark_convergence::{
+  MarkMutationJournalDurabilityReceiptV1, MarkMutationJournalDurableSinkV1, MarkMutationJournalSinkErrorV1,
+  PreparedMarkMutationJournalSegmentV1,
+};
 use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceErrorV1, MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1};
 use super::namespace::{
   EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_tree_root_v0,
@@ -1227,6 +1231,54 @@ impl V4FirstAuthorityPublisher {
     retirement_journal_receipt(segment, write_sequence)
   }
 
+  fn publish_mark_mutation_journal_segment(
+    &self,
+    segment: &PreparedMarkMutationJournalSegmentV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<MarkMutationJournalDurabilityReceiptV1, MarkMutationJournalSinkErrorV1> {
+    let observation = self.observe().map_err(mark_mutation_sink_first_authority_error)?;
+    let header = &observation.selected.header;
+    let GcMarkArtifactV1::MutationJournal(decoded) =
+      decode_gc_mark_artifact(segment.value, header.hash_algorithm).map_err(mark_mutation_sink_format_error)?
+    else {
+      return Err(mark_mutation_sink_invalid("mark_mutation_artifact_kind", "prepared mark-mutation segment is another GC artifact kind"));
+    };
+    if decoded.key != segment.artifact_key
+      || decoded.segment_sequence != segment.segment_ordinal
+      || decoded.generation != segment.generation
+      || decoded.first_sequence != segment.first_publication_sequence
+      || decoded.last_sequence != segment.last_publication_sequence
+      || decoded.record_count != segment.record_count
+    {
+      return Err(mark_mutation_sink_invalid(
+        "mark_mutation_prepared_mismatch",
+        "prepared mark-mutation fields do not match the exact immutable artifact",
+      ));
+    }
+    if decoded.database_id != header.database_id {
+      return Err(mark_mutation_sink_invalid(
+        "mark_mutation_database_mismatch",
+        "mark-mutation segment belongs to another logical database",
+      ));
+    }
+    let database_id: [u8; 16] =
+      decoded.database_id.try_into().map_err(|error| MarkMutationJournalSinkErrorV1::new("mark_mutation_database_mismatch", error))?;
+    let hard_publication_sequence = self
+      .publish_immutable_gc_artifact(
+        ImmutableGcArtifactPublicationV1 {
+          kind: GcArtifactKindV1::MarkMutationJournalSegment,
+          database_id: &database_id,
+          artifact_key: segment.artifact_key,
+          value: segment.value,
+          minimum_timestamp_ms: 0,
+          committed_postcondition_code: "immutable_gc_committed_postcondition",
+        },
+        observer,
+      )
+      .map_err(mark_mutation_sink_first_authority_error)?;
+    mark_mutation_journal_receipt(segment, hard_publication_sequence)
+  }
+
   fn publish_immutable_gc_artifact(
     &self,
     request: ImmutableGcArtifactPublicationV1<'_>,
@@ -1613,6 +1665,16 @@ impl RetirementJournalDurableSinkV1 for V4FirstAuthorityPublisher {
   }
 }
 
+impl MarkMutationJournalDurableSinkV1 for V4FirstAuthorityPublisher {
+  fn publish_mark_mutation_segment_synced(
+    &mut self,
+    segment: &PreparedMarkMutationJournalSegmentV1<'_>,
+  ) -> Result<MarkMutationJournalDurabilityReceiptV1, MarkMutationJournalSinkErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_mark_mutation_journal_segment(segment, &mut observer)
+  }
+}
+
 impl CorruptGcEvidenceDurableSinkV1 for V4FirstAuthorityPublisher {
   fn publish_corrupt_evidence_synced(
     &mut self,
@@ -1768,6 +1830,49 @@ fn retirement_journal_receipt(
     ));
   }
   Ok(RetirementJournalDurabilityReceiptV1 { artifact_key: segment.artifact_key.to_vec(), stored_value_length, hard_publication_sequence })
+}
+
+fn mark_mutation_journal_receipt(
+  segment: &PreparedMarkMutationJournalSegmentV1<'_>,
+  hard_publication_sequence: u64,
+) -> Result<MarkMutationJournalDurabilityReceiptV1, MarkMutationJournalSinkErrorV1> {
+  let stored_value_length =
+    u32::try_from(segment.value.len()).map_err(|error| MarkMutationJournalSinkErrorV1::new("mark_mutation_value_length", error))?;
+  if hard_publication_sequence == 0 {
+    return Err(mark_mutation_sink_invalid("mark_mutation_publication_sequence", "mark-mutation entity has no durable v4 write sequence"));
+  }
+  Ok(MarkMutationJournalDurabilityReceiptV1 { artifact_key: segment.artifact_key.to_vec(), stored_value_length, hard_publication_sequence })
+}
+
+fn mark_mutation_sink_invalid(code: &'static str, message: &'static str) -> MarkMutationJournalSinkErrorV1 {
+  MarkMutationJournalSinkErrorV1::new(code, FirstAuthorityPublicationErrorV1::invalid(code, message))
+}
+
+fn mark_mutation_sink_format_error(error: FormatError) -> MarkMutationJournalSinkErrorV1 {
+  MarkMutationJournalSinkErrorV1::new(error.code(), error)
+}
+
+fn mark_mutation_sink_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> MarkMutationJournalSinkErrorV1 {
+  let code = match error.code() {
+    "immutable_gc_degraded_header" => "mark_mutation_degraded_header",
+    "immutable_gc_missing_authority" => "mark_mutation_missing_authority",
+    "immutable_gc_database_mismatch" => "mark_mutation_database_mismatch",
+    "immutable_gc_prepared_mismatch" => "mark_mutation_prepared_mismatch",
+    "immutable_gc_identity_collision" => "mark_mutation_identity_collision",
+    "immutable_gc_readback_missing" => "mark_mutation_readback_missing",
+    "immutable_gc_write_sequence_exhausted" => "mark_mutation_write_sequence_exhausted",
+    "immutable_gc_entry_count_overflow" => "mark_mutation_entry_count_overflow",
+    "immutable_gc_baseline_not_flushed" => "mark_mutation_baseline_not_flushed",
+    "immutable_gc_file_truncated" => "mark_mutation_file_truncated",
+    "immutable_gc_wal_overflow" => "mark_mutation_wal_overflow",
+    "immutable_gc_dependency_missing" => "mark_mutation_dependency_missing",
+    "immutable_gc_readback_mismatch" => "mark_mutation_readback_mismatch",
+    "immutable_gc_committed_postcondition" => "mark_mutation_committed_postcondition",
+    "first_authority_lock_poisoned" => "mark_mutation_authority_lock",
+    "engine_failure" => "mark_mutation_storage",
+    code => code,
+  };
+  MarkMutationJournalSinkErrorV1::new(code, error)
 }
 
 fn retirement_sink_invalid(code: &'static str, message: &'static str) -> RetirementJournalSinkErrorV1 {

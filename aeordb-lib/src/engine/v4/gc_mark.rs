@@ -293,9 +293,8 @@ pub fn mark_mutation_journal_records_v1<'a>(
   algorithm: HashAlgorithm,
 ) -> FormatResult<MarkMutationJournalRecordsV1<'a>> {
   let record_length = checked_add(40, checked_mul(6, algorithm.hash_length(), "mark mutation record width")?, "mark mutation record")?;
-  let expected_length = usize::try_from(segment.record_count)
-    .ok()
-    .and_then(|count| count.checked_mul(record_length))
+  let expected_length = (segment.record_count as usize)
+    .checked_mul(record_length)
     .ok_or_else(|| amplification_error("mark_mutation_record_count", segment.record_count as usize, MARK_JOURNAL_MAX / record_length))?;
   if segment.records.len() != expected_length {
     return Err(closure_error("mark_mutation_record_count", "mark mutation record count does not match its validated byte range"));
@@ -304,70 +303,111 @@ pub fn mark_mutation_journal_records_v1<'a>(
 }
 
 pub fn encode_mark_mutation_journal_segment(request: &MarkMutationJournalSegmentWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
-  let hash_width = request.hash_algorithm.hash_length();
-  if request.database_id.iter().all(|byte| *byte == 0)
-    || request.run_id.iter().all(|byte| *byte == 0)
-    || request.generation == 0
-    || request.segment_ordinal == 0
-    || request.records.is_empty()
+  let record_length =
+    checked_add(40, checked_mul(6, request.hash_algorithm.hash_length(), "mark mutation record width")?, "mark mutation record")?;
+  let records_length = checked_mul(request.records.len(), record_length, "mark mutation records")?;
+  let mut records = Vec::with_capacity(records_length);
+  for record in request.records {
+    encode_mark_mutation_record(&mut records, *record, request.hash_algorithm)?;
+  }
+  encode_mark_mutation_journal_segment_records_v1(
+    request.hash_algorithm,
+    request.database_id,
+    request.run_id,
+    request.generation,
+    request.segment_ordinal,
+    request.previous_segment_hash,
+    &records,
+  )
+}
+
+pub(crate) fn encode_mark_mutation_journal_segment_records_v1(
+  algorithm: HashAlgorithm,
+  database_id: &[u8; 16],
+  run_id: &[u8; 16],
+  generation: u64,
+  segment_ordinal: u64,
+  previous_segment_hash: Option<&[u8]>,
+  records: &[u8],
+) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = algorithm.hash_length();
+  if database_id.iter().all(|byte| *byte == 0)
+    || run_id.iter().all(|byte| *byte == 0)
+    || generation == 0
+    || segment_ordinal == 0
+    || records.is_empty()
   {
     return Err(identity_error("mark_mutation_journal_write_identity", "mark mutation journal identity and records must be nonzero"));
   }
-  let previous = request.previous_segment_hash;
-  if previous.is_some_and(|hash| hash.len() != hash_width || all_zero(hash)) {
+  if previous_segment_hash.is_some_and(|hash| hash.len() != hash_width || all_zero(hash)) {
     return Err(identity_error(
       "mark_mutation_journal_write_predecessor",
       "mark mutation journal predecessor does not match the selected hash width",
     ));
   }
   let record_length = checked_add(40, checked_mul(6, hash_width, "mark mutation record width")?, "mark mutation record")?;
-  let records_length = checked_mul(request.records.len(), record_length, "mark mutation records")?;
-  let body_length = checked_add(32 + hash_width, records_length, "mark mutation journal body")?;
-  let complete_length = checked_add(76, body_length, "mark mutation journal complete value")?;
-  ensure_cap("mark_mutation_journal_length", complete_length, MARK_JOURNAL_MAX)?;
-  let record_count = u32::try_from(request.records.len())
-    .map_err(|_| amplification_error("mark_mutation_record_count", request.records.len(), u32::MAX as usize))?;
-  let records_length_u32 =
-    u32::try_from(records_length).map_err(|_| amplification_error("mark_mutation_records_length", records_length, u32::MAX as usize))?;
-
+  if !records.len().is_multiple_of(record_length) {
+    return Err(trailing_error("mark_mutation_records_length", "mark mutation records do not close on a fixed record boundary"));
+  }
+  let record_count_usize = records.len() / record_length;
+  if record_count_usize > u32::MAX as usize {
+    return Err(amplification_error("mark_mutation_record_count", record_count_usize, u32::MAX as usize));
+  }
+  let record_count = record_count_usize as u32;
+  let mut first_cursor = None;
+  let mut previous_cursor: Option<(u64, &[u8])> = None;
+  for record in records.chunks_exact(record_length) {
+    let decoded = decode_mark_mutation_record(record, algorithm)?;
+    let cursor = (decoded.publication_sequence, decoded.mutation_id);
+    if previous_cursor.is_some_and(|previous| cursor <= previous) {
+      return Err(order_error("mark_mutation_record_order", "mark mutation records are duplicate or out of order"));
+    }
+    first_cursor.get_or_insert(cursor);
+    previous_cursor = Some(cursor);
+  }
+  let Some((first_sequence, _)) = first_cursor else {
+    return Err(closure_error("mark_mutation_record_count", "mark mutation segment contains no records"));
+  };
+  let Some((last_sequence, _)) = previous_cursor else {
+    return Err(closure_error("mark_mutation_record_count", "mark mutation segment contains no records"));
+  };
+  let body_length = checked_add(32 + hash_width, records.len(), "mark mutation journal body")?;
+  ensure_cap("mark_mutation_journal_length", checked_add(76, body_length, "mark mutation journal complete value")?, MARK_JOURNAL_MAX)?;
+  if records.len() > u32::MAX as usize {
+    return Err(amplification_error("mark_mutation_records_length", records.len(), u32::MAX as usize));
+  }
+  let records_length = records.len() as u32;
   let mut body = Vec::with_capacity(body_length);
-  body.extend_from_slice(&u32::from(previous.is_none()).to_le_bytes());
+  body.extend_from_slice(&u32::from(previous_segment_hash.is_none()).to_le_bytes());
   body.extend_from_slice(&1u16.to_le_bytes());
   body.extend_from_slice(&0u16.to_le_bytes());
-  body.extend_from_slice(&request.records[0].publication_sequence.to_le_bytes());
-  body.extend_from_slice(&request.records[request.records.len() - 1].publication_sequence.to_le_bytes());
+  body.extend_from_slice(&first_sequence.to_le_bytes());
+  body.extend_from_slice(&last_sequence.to_le_bytes());
   body.extend_from_slice(&record_count.to_le_bytes());
-  body.extend_from_slice(&records_length_u32.to_le_bytes());
-  match previous {
+  body.extend_from_slice(&records_length.to_le_bytes());
+  match previous_segment_hash {
     Some(hash) => body.extend_from_slice(hash),
     None => body.resize(body.len() + hash_width, 0),
   }
-  let mut previous_cursor: Option<(u64, &[u8])> = None;
-  for record in request.records {
-    if previous_cursor.is_some_and(|cursor| (record.publication_sequence, record.mutation_id) <= cursor) {
-      return Err(order_error("mark_mutation_record_order", "mark mutation records are duplicate or out of order"));
-    }
-    encode_mark_mutation_record(&mut body, *record, request.hash_algorithm)?;
-    previous_cursor = Some((record.publication_sequence, record.mutation_id));
-  }
+  body.extend_from_slice(records);
 
   let mut identity = [0u8; 40];
-  identity[..16].copy_from_slice(request.database_id);
-  identity[16..32].copy_from_slice(request.run_id);
-  identity[32..].copy_from_slice(&request.segment_ordinal.to_le_bytes());
+  identity[..16].copy_from_slice(database_id);
+  identity[16..32].copy_from_slice(run_id);
+  identity[32..].copy_from_slice(&segment_ordinal.to_le_bytes());
   let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
     kind: GcArtifactKindV1::MarkMutationJournalSegment,
-    hash_algorithm: request.hash_algorithm,
-    generation: request.generation,
+    hash_algorithm: algorithm,
+    generation,
     identity: &identity,
     body: &body,
   })?;
-  let GcMarkArtifactV1::MutationJournal(decoded) = decode_gc_mark_artifact(&encoded.value, request.hash_algorithm)? else {
+  let GcMarkArtifactV1::MutationJournal(decoded) = decode_gc_mark_artifact(&encoded.value, algorithm)? else {
     return Err(closure_error("mark_mutation_writer_readback", "encoded mark mutation segment decoded as another artifact kind"));
   };
   if decoded.key != encoded.key
-    || decoded.segment_sequence != request.segment_ordinal
-    || decoded.generation != request.generation
+    || decoded.segment_sequence != segment_ordinal
+    || decoded.generation != generation
     || decoded.record_count != record_count
   {
     return Err(closure_error("mark_mutation_writer_readback", "encoded mark mutation segment did not close against its request"));
@@ -684,7 +724,7 @@ fn decode_mark_mutation_journal(bytes: &[u8], algorithm: HashAlgorithm, key: Vec
   }
   let record_length = checked_add(40, checked_mul(6, hash_width, "mark mutation record hashes")?, "mark mutation record")?;
   let records = &body[32 + hash_width..];
-  if usize::try_from(record_count).ok().and_then(|count| count.checked_mul(record_length)) != Some(records.len()) {
+  if (record_count as usize).checked_mul(record_length) != Some(records.len()) {
     return Err(trailing_error("mark_mutation_record_count", "mark mutation record count does not match its byte range"));
   }
   let mut first_observed = None;
@@ -728,7 +768,7 @@ fn validate_mutation_payload(payload: &[u8], algorithm: HashAlgorithm) -> Format
 }
 
 fn decode_mark_mutation_record(record: &[u8], algorithm: HashAlgorithm) -> FormatResult<MarkMutationRecordV1<'_>> {
-  let payload_length = usize::try_from(u32_at(record, 0)?).map_err(|_| overflow_error("mark mutation payload length"))?;
+  let payload_length = u32_at(record, 0)? as usize;
   if payload_length.checked_add(4) != Some(record.len()) {
     return Err(trailing_error("mark_mutation_record_length", "mark mutation record framing is invalid"));
   }
@@ -777,7 +817,7 @@ fn decode_mark_mutation_payload<'a>(
   })
 }
 
-fn encode_mark_mutation_record(
+pub(crate) fn encode_mark_mutation_record(
   destination: &mut Vec<u8>,
   record: MarkMutationRecordWriteV1<'_>,
   algorithm: HashAlgorithm,
@@ -795,7 +835,7 @@ fn encode_mark_mutation_record(
   }
   decode_physical_incarnation(record.new_incarnation, algorithm)?;
   let payload_length = checked_add(36, checked_mul(6, hash_width, "mark mutation hashes")?, "mark mutation payload")?;
-  let payload_length_u32 = u32::try_from(payload_length).map_err(|_| overflow_error("mark mutation payload length"))?;
+  let payload_length_u32 = payload_length as u32;
   destination.extend_from_slice(&payload_length_u32.to_le_bytes());
   destination.extend_from_slice(&record.publication_sequence.to_le_bytes());
   destination.extend_from_slice(record.mutation_id);

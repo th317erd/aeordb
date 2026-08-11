@@ -2,10 +2,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::HashAlgorithm;
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::gc_mark::{
   GcMarkArtifactV1, MarkMutationJournalSegmentWriteV1, MarkMutationOperationV1, MarkMutationRecordWriteV1, decode_gc_mark_artifact,
   encode_mark_mutation_journal_segment, mark_mutation_journal_records_v1, validate_mark_mutation_journal_chain,
 };
+use aeordb::engine::v4::gc_mark_convergence::{
+  MarkMutationJournalBufferOptionsV1, MarkMutationJournalChainStartV1, MarkMutationJournalDurabilityReceiptV1,
+  MarkMutationJournalDurableSinkV1, MarkMutationJournalOwnerErrorV1, MarkMutationJournalOwnerV1, MarkMutationJournalSinkErrorV1,
+  MarkMutationObservationV1, PreparedMarkMutationJournalSegmentV1,
+};
+use tokio_util::sync::CancellationToken;
 
 fn fixture_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1")
@@ -77,6 +84,72 @@ fn mutation_record<'a>(
     new_incarnation: &values.incarnation,
     operation,
   }
+}
+
+fn memory_coordinator() -> MemoryCoordinator {
+  MemoryCoordinator::new(MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap())
+}
+
+#[derive(Debug)]
+struct InjectedSinkFailure;
+
+impl std::fmt::Display for InjectedSinkFailure {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("injected mark mutation sink failure")
+  }
+}
+
+impl std::error::Error for InjectedSinkFailure {}
+
+#[derive(Default)]
+struct RecordingSink {
+  attempts: Vec<Vec<u8>>,
+  publications: Vec<Vec<u8>>,
+  next_publication_sequence: u64,
+  fail_next: bool,
+  dishonest_receipt: bool,
+  receipt_sequence_override: Option<u64>,
+}
+
+impl MarkMutationJournalDurableSinkV1 for RecordingSink {
+  fn publish_mark_mutation_segment_synced(
+    &mut self,
+    segment: &PreparedMarkMutationJournalSegmentV1<'_>,
+  ) -> Result<MarkMutationJournalDurabilityReceiptV1, MarkMutationJournalSinkErrorV1> {
+    self.attempts.push(segment.value.to_vec());
+    if self.fail_next {
+      self.fail_next = false;
+      return Err(MarkMutationJournalSinkErrorV1::new("injected_mark_sink", InjectedSinkFailure));
+    }
+    self.next_publication_sequence += 1;
+    self.publications.push(segment.value.to_vec());
+    Ok(MarkMutationJournalDurabilityReceiptV1 {
+      artifact_key: if self.dishonest_receipt { vec![0xa5; segment.artifact_key.len()] } else { segment.artifact_key.to_vec() },
+      stored_value_length: segment.value.len() as u32,
+      hard_publication_sequence: self.receipt_sequence_override.unwrap_or(self.next_publication_sequence),
+    })
+  }
+}
+
+fn journal_owner<'a>(
+  algorithm: HashAlgorithm,
+  cancellation: &'a CancellationToken,
+  memory: &MemoryCoordinator,
+  options: MarkMutationJournalBufferOptionsV1,
+) -> MarkMutationJournalOwnerV1<'a> {
+  MarkMutationJournalOwnerV1::new_chain(
+    MarkMutationJournalChainStartV1 {
+      algorithm,
+      database_id: sequence(0x31),
+      run_id: sequence(0x51),
+      generation: 77,
+      captured_publication_sequence: 10,
+      options,
+      cancellation,
+    },
+    memory,
+  )
+  .unwrap()
 }
 
 #[test]
@@ -224,6 +297,336 @@ fn mutation_writer_rejects_empty_malformed_or_noncanonical_input() {
 }
 
 #[test]
+fn acknowledged_mutations_only_buffer_and_background_flush_publishes_exact_segments() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let cancellation = CancellationToken::new();
+    let memory = memory_coordinator();
+    let options = MarkMutationJournalBufferOptionsV1::new(2, 1024, 4096, 10).unwrap();
+    let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+    let mut sink = RecordingSink::default();
+    let first = mutation_values(algorithm, 0x11, 11);
+    let second = mutation_values(algorithm, 0x21, 12);
+
+    assert_eq!(
+      owner.observe_committed(mutation_record(11, &first, MarkMutationOperationV1::Create), 1),
+      MarkMutationObservationV1::Buffered { flush_due: false }
+    );
+    assert_eq!(
+      owner.observe_committed(mutation_record(12, &second, MarkMutationOperationV1::Replace), 2),
+      MarkMutationObservationV1::Buffered { flush_due: true }
+    );
+    assert!(sink.attempts.is_empty(), "writer-side observation performed journal I/O");
+    assert!(owner.poll(2, &mut sink).unwrap());
+    assert_eq!(sink.publications.len(), 1);
+
+    let status = owner.status();
+    assert_eq!(status.pending_records, 0);
+    assert_eq!(status.durable_records, 2);
+    assert_eq!(status.durable_through_publication_sequence, 12);
+    assert!(!status.incomplete);
+    assert!(!status.failed);
+    let GcMarkArtifactV1::MutationJournal(segment) = decode_gc_mark_artifact(&sink.publications[0], algorithm).unwrap() else {
+      panic!("expected published mutation segment");
+    };
+    assert_eq!(segment.record_count, 2);
+    assert_eq!(segment.first_sequence, 11);
+    assert_eq!(segment.last_sequence, 12);
+  }
+}
+
+#[test]
+fn same_publication_tail_time_flush_and_capacity_are_bounded_exactly() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(8, 2048, 4096, 10).unwrap();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let first = mutation_values(algorithm, 0x11, 11);
+  let same_publication_tail = mutation_values(algorithm, 0x21, 12);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(11, &first, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::Buffered { flush_due: false }
+  ));
+  assert!(matches!(
+    owner.observe_committed(mutation_record(11, &same_publication_tail, MarkMutationOperationV1::Replace), 2),
+    MarkMutationObservationV1::Buffered { flush_due: false }
+  ));
+  let mut sink = RecordingSink::default();
+  assert!(!owner.poll(10, &mut sink).unwrap());
+  assert!(owner.poll(11, &mut sink).unwrap());
+  let GcMarkArtifactV1::MutationJournal(segment) = decode_gc_mark_artifact(&sink.publications[0], algorithm).unwrap() else {
+    panic!("expected time-flushed mutation segment");
+  };
+  assert_eq!(segment.first_sequence, 11);
+  assert_eq!(segment.last_sequence, 11);
+
+  let capacity_options = MarkMutationJournalBufferOptionsV1::new(8, 400, 400, 30_000).unwrap();
+  let capacity_cancellation = CancellationToken::new();
+  let mut capacity_owner = journal_owner(algorithm, &capacity_cancellation, &memory, capacity_options);
+  assert!(matches!(
+    capacity_owner.observe_committed(mutation_record(11, &first, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::Buffered { .. }
+  ));
+  assert!(matches!(
+    capacity_owner.observe_committed(mutation_record(11, &same_publication_tail, MarkMutationOperationV1::Replace), 2),
+    MarkMutationObservationV1::RunIncomplete { code: "mark_mutation_capacity", .. }
+  ));
+  assert_eq!(capacity_owner.status().pending_records, 1);
+}
+
+#[test]
+fn bounded_owner_splits_same_publication_across_exactly_chained_segments() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(8, 400, 1024, 30_000).unwrap();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let first = mutation_values(algorithm, 0x11, 11);
+  let second = mutation_values(algorithm, 0x21, 12);
+  let third = mutation_values(algorithm, 0x31, 13);
+  for (record, monotonic_now_ms) in [
+    (mutation_record(11, &first, MarkMutationOperationV1::Create), 1),
+    (mutation_record(11, &second, MarkMutationOperationV1::Replace), 2),
+    (mutation_record(12, &third, MarkMutationOperationV1::Promote), 3),
+  ] {
+    assert!(matches!(owner.observe_committed(record, monotonic_now_ms), MarkMutationObservationV1::Buffered { .. }));
+  }
+  let mut sink = RecordingSink::default();
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(owner.status().pending_records, 2);
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(owner.status().pending_records, 1);
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(owner.status().pending_records, 0);
+  assert_eq!(sink.publications.len(), 3);
+
+  let decoded = sink
+    .publications
+    .iter()
+    .map(|bytes| match decode_gc_mark_artifact(bytes, algorithm).unwrap() {
+      GcMarkArtifactV1::MutationJournal(segment) => segment,
+      GcMarkArtifactV1::Checkpoint(_) => panic!("owner emitted a checkpoint"),
+    })
+    .collect::<Vec<_>>();
+  validate_mark_mutation_journal_chain(&decoded[0], &decoded[1]).unwrap();
+  validate_mark_mutation_journal_chain(&decoded[1], &decoded[2]).unwrap();
+  assert_eq!((decoded[0].first_sequence, decoded[0].last_sequence), (11, 11));
+  assert_eq!((decoded[1].first_sequence, decoded[1].last_sequence), (11, 11));
+  assert_eq!((decoded[2].first_sequence, decoded[2].last_sequence), (12, 12));
+}
+
+#[test]
+fn owner_construction_rejects_invalid_bounds_identity_cancellation_and_memory() {
+  assert!(MarkMutationJournalBufferOptionsV1::new(0, 1024, 4096, 1).is_err());
+  assert!(MarkMutationJournalBufferOptionsV1::new(1, 0, 4096, 1).is_err());
+  assert!(MarkMutationJournalBufferOptionsV1::new(1, 1024, 512, 1).is_err());
+  assert!(MarkMutationJournalBufferOptionsV1::new(1, 1024, 17 * 1024 * 1024, 1).is_err());
+
+  let algorithm = HashAlgorithm::Blake3_256;
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(1, 1024, 4096, 1).unwrap();
+  for (database_id, run_id, generation, captured_publication_sequence) in [
+    ([0; 16], sequence(0x51), 1, 1),
+    (sequence(0x31), [0; 16], 1, 1),
+    (sequence(0x31), sequence(0x51), 0, 1),
+    (sequence(0x31), sequence(0x51), 1, 0),
+  ] {
+    let cancellation = CancellationToken::new();
+    assert!(MarkMutationJournalOwnerV1::new_chain(
+      MarkMutationJournalChainStartV1 {
+        algorithm,
+        database_id,
+        run_id,
+        generation,
+        captured_publication_sequence,
+        options,
+        cancellation: &cancellation,
+      },
+      &memory,
+    )
+    .is_err());
+  }
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+  assert!(matches!(
+    MarkMutationJournalOwnerV1::new_chain(
+      MarkMutationJournalChainStartV1 {
+        algorithm,
+        database_id: sequence(0x31),
+        run_id: sequence(0x51),
+        generation: 1,
+        captured_publication_sequence: 1,
+        options,
+        cancellation: &cancellation,
+      },
+      &memory,
+    ),
+    Err(MarkMutationJournalOwnerErrorV1::Canceled)
+  ));
+}
+
+#[test]
+fn malformed_records_and_clock_regression_preserve_the_first_failure() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(8, 1024, 4096, 30_000).unwrap();
+  let cancellation = CancellationToken::new();
+  let mut malformed_owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let values = mutation_values(algorithm, 0x11, 11);
+  let mut malformed = mutation_record(11, &values, MarkMutationOperationV1::Create);
+  malformed.mutation_id = &values.mutation_id[..31];
+  let malformed_observation = malformed_owner.observe_committed(malformed, 1);
+  let (first_code, first_message) = match malformed_observation {
+    MarkMutationObservationV1::RunIncomplete { code, message } => (code, message),
+    MarkMutationObservationV1::Buffered { .. } => panic!("malformed mutation was admitted"),
+  };
+  assert_eq!(malformed_owner.status().pending_records, 0);
+  assert_eq!(malformed_owner.status().incomplete_code, Some(first_code));
+  assert_eq!(
+    malformed_owner.observe_committed(mutation_record(11, &values, MarkMutationOperationV1::Create), 2),
+    MarkMutationObservationV1::RunIncomplete { code: first_code, message: first_message }
+  );
+
+  let clock_cancellation = CancellationToken::new();
+  let mut clock_owner = journal_owner(algorithm, &clock_cancellation, &memory, options);
+  assert!(matches!(
+    clock_owner.observe_committed(mutation_record(11, &values, MarkMutationOperationV1::Create), 2),
+    MarkMutationObservationV1::Buffered { .. }
+  ));
+  let mut sink = RecordingSink::default();
+  assert!(matches!(clock_owner.poll(1, &mut sink), Err(MarkMutationJournalOwnerErrorV1::ClockRegression)));
+  assert_eq!(clock_owner.status().incomplete_code, Some("mark_mutation_clock_regression"));
+  assert!(sink.attempts.is_empty());
+}
+
+#[test]
+fn soft_sink_failure_retains_exact_bytes_and_never_restores_mark_completeness() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(1, 1024, 4096, 30_000).unwrap();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let values = mutation_values(algorithm, 0x11, 11);
+  assert_eq!(
+    owner.observe_committed(mutation_record(11, &values, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::Buffered { flush_due: true }
+  );
+  let mut sink = RecordingSink { fail_next: true, ..RecordingSink::default() };
+  assert!(matches!(owner.flush(&mut sink), Err(MarkMutationJournalOwnerErrorV1::Sink { .. })));
+  let retained = sink.attempts[0].clone();
+  assert_eq!(owner.status().pending_records, 1);
+  assert!(owner.status().incomplete);
+  assert!(!owner.status().failed);
+
+  let later = mutation_values(algorithm, 0x21, 12);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(12, &later, MarkMutationOperationV1::Replace), 2),
+    MarkMutationObservationV1::RunIncomplete { code: "mark_mutation_sink", .. }
+  ));
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(sink.attempts[1], retained);
+  assert_eq!(sink.publications, [retained]);
+  assert_eq!(owner.status().pending_records, 0);
+  assert!(owner.status().incomplete, "retry must not turn an incomplete mark back into reclaim authority");
+}
+
+#[test]
+fn background_memory_pressure_retains_evidence_and_permanently_invalidates_reclaim() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let normal_policy = MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap();
+  let options = MarkMutationJournalBufferOptionsV1::new(1, 1024, 4096, 30_000).unwrap();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let values = mutation_values(algorithm, 0x11, 11);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(11, &values, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::Buffered { flush_due: true }
+  ));
+  memory.reconfigure_policy(MemoryPolicy::new(1, 2 * 1024 * 1024, 1, 1024 * 1024).unwrap()).unwrap();
+  let mut sink = RecordingSink::default();
+  assert!(matches!(owner.flush(&mut sink), Err(MarkMutationJournalOwnerErrorV1::Memory(_))));
+  assert_eq!(owner.status().pending_records, 1);
+  assert_eq!(owner.status().incomplete_code, Some("mark_mutation_memory"));
+  assert!(sink.attempts.is_empty());
+
+  memory.reconfigure_policy(normal_policy).unwrap();
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(owner.status().pending_records, 0);
+  assert!(owner.status().incomplete);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(12, &mutation_values(algorithm, 0x21, 12), MarkMutationOperationV1::Replace), 2),
+    MarkMutationObservationV1::RunIncomplete { code: "mark_mutation_memory", .. }
+  ));
+}
+
+#[test]
+fn gaps_cancellation_pressure_and_dishonest_receipts_fail_the_run_closed() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let options = MarkMutationJournalBufferOptionsV1::new(1, 1024, 1024, 30_000).unwrap();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let skipped = mutation_values(algorithm, 0x11, 12);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(12, &skipped, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::RunIncomplete { code: "mark_mutation_gap", .. }
+  ));
+  assert_eq!(owner.status().pending_records, 0);
+
+  let cancellation = CancellationToken::new();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  cancellation.cancel();
+  let values = mutation_values(algorithm, 0x11, 11);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(11, &values, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::RunIncomplete { code: "mark_mutation_cancelled", .. }
+  ));
+
+  let cancellation = CancellationToken::new();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  assert!(matches!(
+    owner.observe_committed(mutation_record(11, &values, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::Buffered { .. }
+  ));
+  let mut dishonest = RecordingSink { dishonest_receipt: true, ..RecordingSink::default() };
+  assert!(matches!(owner.flush(&mut dishonest), Err(MarkMutationJournalOwnerErrorV1::ReceiptMismatch)));
+  assert!(owner.status().failed);
+
+  let cancellation = CancellationToken::new();
+  let mut owner = journal_owner(algorithm, &cancellation, &memory, options);
+  let mut stale_receipt = RecordingSink::default();
+  assert!(matches!(
+    owner.observe_committed(mutation_record(11, &values, MarkMutationOperationV1::Create), 1),
+    MarkMutationObservationV1::Buffered { .. }
+  ));
+  assert!(owner.flush(&mut stale_receipt).unwrap());
+  assert!(matches!(
+    owner.observe_committed(mutation_record(12, &mutation_values(algorithm, 0x21, 12), MarkMutationOperationV1::Replace), 2,),
+    MarkMutationObservationV1::Buffered { .. }
+  ));
+  stale_receipt.receipt_sequence_override = Some(owner.status().last_hard_publication_sequence);
+  assert!(matches!(owner.flush(&mut stale_receipt), Err(MarkMutationJournalOwnerErrorV1::ReceiptMismatch)));
+  assert!(owner.status().failed);
+
+  let tiny_memory = MemoryCoordinator::new(MemoryPolicy::new(1024, 2048, 1, 512).unwrap());
+  let tiny_cancellation = CancellationToken::new();
+  assert!(MarkMutationJournalOwnerV1::new_chain(
+    MarkMutationJournalChainStartV1 {
+      algorithm,
+      database_id: sequence(0x31),
+      run_id: sequence(0x51),
+      generation: 77,
+      captured_publication_sequence: 10,
+      options,
+      cancellation: &tiny_cancellation,
+    },
+    &tiny_memory,
+  )
+  .is_err());
+}
+
+#[test]
 fn mark_mutation_runtime_remains_disconnected_from_live_v3_and_service_paths() {
   let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   for relative in [
@@ -237,5 +640,6 @@ fn mark_mutation_runtime_remains_disconnected_from_live_v3_and_service_paths() {
     let source = fs::read_to_string(root.join(relative)).unwrap();
     assert!(!source.contains("encode_mark_mutation_journal_segment"), "mark writer escaped into {relative}");
     assert!(!source.contains("mark_mutation_journal_records_v1"), "mark iterator escaped into {relative}");
+    assert!(!source.contains("MarkMutationJournalOwnerV1"), "mark owner escaped into {relative}");
   }
 }
