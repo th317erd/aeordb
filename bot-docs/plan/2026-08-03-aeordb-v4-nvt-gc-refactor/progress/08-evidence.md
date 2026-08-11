@@ -3,9 +3,9 @@
 ## Landing State
 
 - **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** P3a-3 immutable artifact writers are green; P3a-4 ControlStore FileRecord publication is next.
+- **Current landing unit:** P3a-4 ControlStore FileRecord publication is locally green; exact native-host qualification remains before closure.
 - **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P3a-2 closure commit `3bfd659` on `development` and `origin/development`; P3a-3 is locally green and awaiting its coherent landing commit.
+- **Last pushed green commit:** P3a-3 immutable artifact writer commit `5b7f89c` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -69,4 +69,20 @@ Optional cleanup and telemetry failures retain the acknowledged primary result o
 
 ## Next Action
 
-Implement Child 01 P3a-4 ControlStore FileRecord publication through the shared namespace/locator and hard-durability coordinators. Keep capability activation in P3a-5 and Child 03 P3b immutable roots/read views behind their own start gates; P7 migration work remains forbidden until its gate.
+Qualify the exact P3a-4 landing commit on macOS arm64 and Windows x86_64 MSVC, record phase evidence, and close the landing unit. Keep capability activation in P3a-5 and Child 03 P3b immutable roots/read views behind their own start gates; P7 migration work remains forbidden until its gate.
+
+## P3a-4 Entry Territory
+
+- **Authority:** P2's `V3TransitionControlStore` is the sole current control producer and intentionally writes system FileRecord v0 wrappers. Its typed context owns the outer namespace guard, canonical A/B path derivation, one shared namespace transaction, hard acknowledgement, read-back, and selected-state verification. Generic file, sync, plugin, and index APIs remain unable to mint this typed authority.
+- **Target representation:** P3a-4 must preserve each validated SystemControlV1 payload byte-for-byte while publishing the frozen ordinary FileRecord v1 wrapper with `FLAG_SYSTEM`, `application/vnd.aeordb.system-control`, normal path/content/identity locators, and current content hash. Mutable kinds use inactive A/B rollover; immutable kinds use idempotent `i.ctrl` publication at sequence one.
+- **Compatibility:** the new shadow writer may accept a validated legacy FileRecord v0 slot as migration input, but every new slot it publishes is v1. Two ordinary mutable publications therefore converge both A/B wrappers without an out-of-band rewrite. The v3 transition writer and every current service caller remain unchanged until a later activation gate.
+- **Proof order:** fail first on the absent v4 writer/context; cover all twenty kinds, strict metadata and body validation before mutation, exact payload read-back, one hard acknowledgement, legacy rollover, immutable idempotency, concurrent mutable sequence selection, restart, protected typed authority, and zero production callers; then run adjacent transition/namespace/durability/system-family gates before broad closure.
+
+## P3a-4 Local Qualification
+
+- **Red proof:** `v4_control_store_writer_spec` first failed only on the absent `V4ControlStore`, typed publication context, and frozen system-control MIME constant. The preserved failure log is `/home/wyatt/.cache/codex/aeordb-tests/logs/p3a4-control-writer-red.log`.
+- **Implementation:** the disconnected `V4ControlStore` validates complete SystemControlV1 bytes before acquiring namespace authority; publishes every mutable and immutable kind through one typed `DirectoryOps` FileRecord v1 adapter; derives the canonical A/B/I path only from the typed context; uses the shared namespace/hard-durability coordinator; reads back the exact captured FileRecord chunk inventory; requires the frozen MIME, empty metadata, exact content hash, body and wrapper bounds; accepts FileRecord v0 only as validated migration input; and leaves the existing v3 transition writer unchanged and v0-only.
+- **Focused proof:** all 10 writer tests pass. They cover all twenty kinds, exact wrappers and payloads, one hard sequence per publication, mutable v0 A/B rollover, immutable v0 rollover and v1 idempotency, shutdown/reopen, invalid database/kind/mutability/CRC input before mutation, sixteen concurrent publishers with exactly one winner, noncanonical MIME/metadata/path/hash/version/flags/lengths, missing chunks, torn control payloads, typed authority, and zero production callers.
+- **Adjacent proof:** the ten-target storage/control matrix passes 203 tests; the internal library harness passes 409. The complete workspace/all-target suite passes 5,478 tests across 208 result groups with zero failures and seven intentionally ignored crash-injection cases. Preserved broad log SHA-256: `a91c46d0e06d1a9bbcbb477c6c2df9bf0dbeec1f84661fa822c13f484b153614`.
+- **Static and contract proof:** workspace/all-target checking, both Rust formatters, mdBook, `git diff --check`, the 436-fixture/95-route/38-document contract gate, the exact 1,420-entry suppression check, and all 27 suppression architecture tests are green. The suppression inventory changed only 31 source line numbers after adapter insertion; normalized records and every stable ID remain byte-equivalent.
+- **Boundary:** no v4 writer capability, service/storage caller, startup admission, route, migration destination, deployment, or live database byte is active. Native macOS/Windows qualification is the only remaining P3a-4 closure gate.

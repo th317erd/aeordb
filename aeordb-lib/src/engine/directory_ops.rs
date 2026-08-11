@@ -27,7 +27,7 @@ use crate::engine::rss_sampler::PhaseSampler;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::traversal::{TraversalIntegrity, VisitorCompletion};
-use crate::engine::v4::control_store::V3ControlPublicationContextV0;
+use crate::engine::v4::control_store::{SYSTEM_CONTROL_CONTENT_TYPE, V3ControlPublicationContextV0, V4ControlPublicationContextV1};
 use crate::engine::v4::system_control::SystemControlSlotV1;
 use crate::engine::v4::system_family::SystemFamilyClassificationV1;
 use crate::engine::SystemFamilyPolicyResolver;
@@ -2407,6 +2407,27 @@ impl<'a> DirectoryOps<'a> {
     )
   }
 
+  pub(crate) fn store_control_file_record_v1(
+    &self,
+    publication: &V4ControlPublicationContextV1<'_>,
+    target_slot: SystemControlSlotV1,
+    data: &[u8],
+  ) -> EngineResult<FileRecord> {
+    if !std::ptr::eq(self.engine, publication.engine()) {
+      return Err(EngineError::InvalidInput("v4 control publication context belongs to a different engine".to_string()));
+    }
+    let normalized = publication.target_path(target_slot)?;
+    self.store_file_internal_inner(
+      &RequestContext::system(),
+      &normalized,
+      data,
+      Some(SYSTEM_CONTROL_CONTENT_TYPE),
+      CompressionAlgorithm::None,
+      CURRENT_FILE_RECORD_VERSION,
+      false,
+    )
+  }
+
   /// Store multiple small files from fully-buffered byte vectors.
   ///
   /// **WARNING — buffered, not streaming.** Every file body is already in
@@ -2905,6 +2926,17 @@ impl<'a> DirectoryOps<'a> {
     let data = EngineFileStream::new_with_expected_total_size(file_record.chunk_hashes, self.engine, false, Some(file_record.total_size))?
       .collect_to_vec()?;
     Ok((identity, data))
+  }
+
+  pub(crate) fn read_file_record_body_bounded(&self, record: &FileRecord, maximum_bytes: u64) -> EngineResult<Vec<u8>> {
+    if record.total_size > maximum_bytes {
+      return Err(EngineError::ResourceExhausted(format!(
+        "FileRecord '{}' declares {} bytes, exceeding the {maximum_bytes}-byte buffered read limit",
+        record.path, record.total_size
+      )));
+    }
+    EngineFileStream::new_with_expected_total_size(record.chunk_hashes.clone(), self.engine, false, Some(record.total_size))?
+      .collect_to_vec()
   }
 
   /// Delete a file, storing a DeletionRecord and updating parent directories.

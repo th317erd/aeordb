@@ -802,6 +802,10 @@ name = "v3_transition_control_store_spec"
 path = "spec/engine/v3_transition_control_store_spec.rs"
 
 [[test]]
+name = "v4_control_store_writer_spec"
+path = "spec/engine/v4_control_store_writer_spec.rs"
+
+[[test]]
 name = "v3_deployment_guard_spec"
 path = "spec/engine/v3_deployment_guard_spec.rs"
 
