@@ -584,7 +584,7 @@
         - [x] Prove malformed, missing, mismatched, content-only, both-hash-width, and disconnected-service behavior against an independent model.
         - [x] Run focused, adjacent, workspace, architecture, native, documentation, and real-storage reader gates; record and land the unit.
       - [ ] P3b-2: add shadow root/admission publication through the shared durability and namespace authorities.
-        - [ ] P3b-2a: add exact NamespaceRootV1, SemanticStateRootV1, RootPublicationPrepare, and RootAdmissionCommit encoders against the independent fixtures.
+        - [x] P3b-2a: add exact NamespaceRootV1, SemanticStateRootV1, RootPublicationPrepare, and RootAdmissionCommit encoders against the independent fixtures.
         - [ ] P3b-2b: add deterministic write-once semantic-object publication with bounded exact read-back and collision refusal.
         - [ ] P3b-2c: add one shadow first-authority transaction that keeps prepared roots unadmitted and publishes the authority selector plus admission witness at one visibility/durability boundary.
         - [ ] Keep v4 capability bits 1, 2, and 5 and every service/HEAD caller disabled until the complete P3b-2 writer family is proven.
