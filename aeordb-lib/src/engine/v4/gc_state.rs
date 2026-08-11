@@ -199,6 +199,283 @@ pub struct PhysicalInventoryRecordV1<'a> {
   pub receipt_hash: Option<&'a [u8]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum RetirementReasonV1 {
+  StableKeyReplace = 1,
+  Relocation = 2,
+  Repair = 3,
+  Migration = 4,
+  PointerOrControlReplace = 5,
+}
+
+impl RetirementReasonV1 {
+  fn from_u16(value: u16) -> FormatResult<Self> {
+    match value {
+      1 => Ok(Self::StableKeyReplace),
+      2 => Ok(Self::Relocation),
+      3 => Ok(Self::Repair),
+      4 => Ok(Self::Migration),
+      5 => Ok(Self::PointerOrControlReplace),
+      _ => Err(closure_error("retirement_record_fields", format!("unknown retirement reason {value}"))),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetirementJournalRecordV1<'a> {
+  pub encoded: &'a [u8],
+  pub reason: RetirementReasonV1,
+  pub replacement_publication_sequence: u64,
+  pub retired_at_ms: u64,
+  pub old: PhysicalIncarnationV1<'a>,
+  pub replacement: PhysicalIncarnationV1<'a>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetirementJournalSegmentV1<'a> {
+  pub database_id: &'a [u8],
+  pub segment_ordinal: u64,
+  pub generation: u64,
+  pub chain_reset: bool,
+  pub first_replacement_sequence: u64,
+  pub last_replacement_sequence: u64,
+  pub record_count: u32,
+  pub previous_segment_hash: Option<&'a [u8]>,
+  pub records: &'a [u8],
+  pub key: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct RetirementJournalRecordsV1<'a> {
+  records: std::slice::ChunksExact<'a, u8>,
+  algorithm: HashAlgorithm,
+}
+
+impl<'a> Iterator for RetirementJournalRecordsV1<'a> {
+  type Item = FormatResult<RetirementJournalRecordV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.records.next().map(|record| decode_retirement_journal_record_v1(record, self.algorithm))
+  }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    self.records.size_hint()
+  }
+}
+
+impl ExactSizeIterator for RetirementJournalRecordsV1<'_> {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetirementJournalModelSummaryV1 {
+  pub segment_count: u64,
+  pub record_count: u64,
+  pub first_replacement_sequence: u64,
+  pub last_replacement_sequence: u64,
+  pub last_segment_ordinal: u64,
+  pub last_segment_hash: Vec<u8>,
+}
+
+#[derive(Debug, Error)]
+pub enum RetirementJournalModelErrorV1 {
+  #[error("retirement journal traversal was canceled")]
+  Canceled,
+  #[error("retirement journal exceeds its admitted record limit")]
+  RecordLimit,
+  #[error("the first retirement journal segment is not a chain reset")]
+  InitialReset,
+  #[error("a later retirement journal segment unexpectedly resets the chain")]
+  UnexpectedReset,
+  #[error("retirement journal segments belong to different databases")]
+  DatabaseMismatch,
+  #[error("retirement journal segment ordinals are not contiguous")]
+  SegmentOrdinal,
+  #[error("retirement journal predecessor hash does not select the prior segment")]
+  PreviousHash,
+  #[error("retirement journal segment shape is invalid")]
+  SegmentShape,
+  #[error("retirement journal records are not canonically ordered across segments")]
+  RecordOrder,
+  #[error("retirement journal counters overflowed")]
+  ArithmeticOverflow,
+  #[error(transparent)]
+  Format(#[from] FormatError),
+  #[error("retirement journal model has already failed")]
+  Failed,
+  #[error("retirement journal chain is empty")]
+  Empty,
+}
+
+impl RetirementJournalModelErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Canceled => "retirement_journal_cancelled",
+      Self::RecordLimit => "retirement_journal_record_limit",
+      Self::InitialReset => "retirement_journal_initial_reset",
+      Self::UnexpectedReset => "retirement_journal_unexpected_reset",
+      Self::DatabaseMismatch => "retirement_journal_database",
+      Self::SegmentOrdinal => "retirement_journal_segment_ordinal",
+      Self::PreviousHash => "retirement_journal_previous_hash",
+      Self::SegmentShape => "retirement_journal_segment_shape",
+      Self::RecordOrder => "retirement_journal_record_order",
+      Self::ArithmeticOverflow => "retirement_journal_arithmetic",
+      Self::Format(error) => error.code(),
+      Self::Failed => "retirement_journal_model_failed",
+      Self::Empty => "retirement_journal_empty",
+    }
+  }
+}
+
+/// Constant-memory validator for one immutable retirement-journal chain.
+///
+/// Publication and recovery remain later P4-2 units. This model has no
+/// authority to retire an incarnation or advance an audited-through watermark.
+#[derive(Debug)]
+pub struct RetirementJournalReferenceModelV1<'a> {
+  algorithm: HashAlgorithm,
+  cancellation: &'a CancellationToken,
+  maximum_records: u64,
+  database_id: Option<[u8; 16]>,
+  segment_count: u64,
+  record_count: u64,
+  first_replacement_sequence: u64,
+  last_replacement_sequence: u64,
+  last_segment_ordinal: u64,
+  last_segment_hash: Vec<u8>,
+  previous_old_incarnation: Vec<u8>,
+  failed: bool,
+}
+
+impl<'a> RetirementJournalReferenceModelV1<'a> {
+  pub fn new(algorithm: HashAlgorithm, cancellation: &'a CancellationToken, maximum_records: u64) -> Self {
+    Self {
+      algorithm,
+      cancellation,
+      maximum_records,
+      database_id: None,
+      segment_count: 0,
+      record_count: 0,
+      first_replacement_sequence: 0,
+      last_replacement_sequence: 0,
+      last_segment_ordinal: 0,
+      last_segment_hash: Vec::with_capacity(algorithm.hash_length()),
+      previous_old_incarnation: Vec::with_capacity(24 + 2 * algorithm.hash_length()),
+      failed: false,
+    }
+  }
+
+  pub fn observe_segment(&mut self, segment: &RetirementJournalSegmentV1<'_>) -> Result<(), RetirementJournalModelErrorV1> {
+    if self.failed {
+      return Err(RetirementJournalModelErrorV1::Failed);
+    }
+    match self.observe_segment_inner(segment) {
+      Ok(()) => Ok(()),
+      Err(error) => {
+        self.failed = true;
+        Err(error)
+      }
+    }
+  }
+
+  pub fn finish(self) -> Result<RetirementJournalModelSummaryV1, RetirementJournalModelErrorV1> {
+    if self.failed {
+      return Err(RetirementJournalModelErrorV1::Failed);
+    }
+    if self.cancellation.is_cancelled() {
+      return Err(RetirementJournalModelErrorV1::Canceled);
+    }
+    if self.segment_count == 0 {
+      return Err(RetirementJournalModelErrorV1::Empty);
+    }
+    Ok(RetirementJournalModelSummaryV1 {
+      segment_count: self.segment_count,
+      record_count: self.record_count,
+      first_replacement_sequence: self.first_replacement_sequence,
+      last_replacement_sequence: self.last_replacement_sequence,
+      last_segment_ordinal: self.last_segment_ordinal,
+      last_segment_hash: self.last_segment_hash,
+    })
+  }
+
+  fn observe_segment_inner(&mut self, segment: &RetirementJournalSegmentV1<'_>) -> Result<(), RetirementJournalModelErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(RetirementJournalModelErrorV1::Canceled);
+    }
+    let hash_width = self.algorithm.hash_length();
+    if segment.database_id.len() != 16
+      || segment.segment_ordinal == 0
+      || segment.generation == 0
+      || segment.first_replacement_sequence == 0
+      || segment.first_replacement_sequence > segment.last_replacement_sequence
+      || segment.record_count == 0
+      || segment.key.len() != hash_width
+      || segment.previous_segment_hash.is_some_and(|hash| hash.len() != hash_width)
+      || segment.chain_reset != segment.previous_segment_hash.is_none()
+    {
+      return Err(RetirementJournalModelErrorV1::SegmentShape);
+    }
+    let next_record_count =
+      self.record_count.checked_add(u64::from(segment.record_count)).ok_or(RetirementJournalModelErrorV1::ArithmeticOverflow)?;
+    if next_record_count > self.maximum_records {
+      return Err(RetirementJournalModelErrorV1::RecordLimit);
+    }
+    let database_id: [u8; 16] = segment.database_id.try_into().map_err(|_| RetirementJournalModelErrorV1::DatabaseMismatch)?;
+    if self.segment_count == 0 {
+      if !segment.chain_reset {
+        return Err(RetirementJournalModelErrorV1::InitialReset);
+      }
+      self.database_id = Some(database_id);
+      self.first_replacement_sequence = segment.first_replacement_sequence;
+    } else {
+      if segment.chain_reset {
+        return Err(RetirementJournalModelErrorV1::UnexpectedReset);
+      }
+      if self.database_id != Some(database_id) {
+        return Err(RetirementJournalModelErrorV1::DatabaseMismatch);
+      }
+      if self.last_segment_ordinal.checked_add(1) != Some(segment.segment_ordinal) {
+        return Err(RetirementJournalModelErrorV1::SegmentOrdinal);
+      }
+      if segment.previous_segment_hash != Some(self.last_segment_hash.as_slice()) {
+        return Err(RetirementJournalModelErrorV1::PreviousHash);
+      }
+    }
+
+    let mut segment_first_sequence = None;
+    let mut segment_last_sequence = 0;
+    for record in retirement_journal_records_v1(segment, self.algorithm)? {
+      if self.cancellation.is_cancelled() {
+        return Err(RetirementJournalModelErrorV1::Canceled);
+      }
+      let record = record?;
+      let physical_length = 24 + 2 * self.algorithm.hash_length();
+      let old_bytes = &record.encoded[24..24 + physical_length];
+      if self.last_replacement_sequence > record.replacement_publication_sequence
+        || (self.last_replacement_sequence == record.replacement_publication_sequence
+          && !self.previous_old_incarnation.is_empty()
+          && compare_physical_bytes(self.algorithm, &self.previous_old_incarnation, old_bytes)? != Ordering::Less)
+      {
+        return Err(RetirementJournalModelErrorV1::RecordOrder);
+      }
+      segment_first_sequence.get_or_insert(record.replacement_publication_sequence);
+      segment_last_sequence = record.replacement_publication_sequence;
+      self.last_replacement_sequence = record.replacement_publication_sequence;
+      self.previous_old_incarnation.clear();
+      self.previous_old_incarnation.extend_from_slice(old_bytes);
+    }
+    if segment_first_sequence != Some(segment.first_replacement_sequence) || segment_last_sequence != segment.last_replacement_sequence {
+      return Err(RetirementJournalModelErrorV1::SegmentShape);
+    }
+
+    self.segment_count = self.segment_count.checked_add(1).ok_or(RetirementJournalModelErrorV1::ArithmeticOverflow)?;
+    self.record_count = next_record_count;
+    self.last_segment_ordinal = segment.segment_ordinal;
+    self.last_segment_hash.clear();
+    self.last_segment_hash.extend_from_slice(&segment.key);
+    Ok(())
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct PhysicalInventoryManifestV1<'a> {
   pub database_id: &'a [u8],
@@ -1330,7 +1607,49 @@ fn decode_root_object_reclaim_proof(bytes: &[u8], algorithm: HashAlgorithm, key:
   Ok(GcStateArtifactV1::RootObjectReclaimProof { incarnation_count, receipt_count, key })
 }
 
-fn decode_retirement_journal(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> FormatResult<GcStateArtifactV1<'_>> {
+pub fn decode_retirement_journal_segment_v1(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<RetirementJournalSegmentV1<'_>> {
+  let key = immutable_gc_artifact_key(algorithm, GcArtifactKindV1::RetirementJournalSegment, bytes);
+  decode_retirement_journal_segment_with_key(bytes, algorithm, key)
+}
+
+pub fn retirement_journal_records_v1<'a>(
+  segment: &RetirementJournalSegmentV1<'a>,
+  algorithm: HashAlgorithm,
+) -> FormatResult<RetirementJournalRecordsV1<'a>> {
+  let record_length = 72 + 4 * algorithm.hash_length();
+  let expected_length = usize::try_from(segment.record_count)
+    .ok()
+    .and_then(|count| count.checked_mul(record_length))
+    .ok_or_else(|| amplification_error("retirement_journal_count", segment.record_count as usize, MAX_PAGE_LENGTH / record_length))?;
+  if segment.records.len() != expected_length {
+    return Err(closure_error("retirement_journal_count", "retirement record count does not match its validated byte range"));
+  }
+  Ok(RetirementJournalRecordsV1 { records: segment.records.chunks_exact(record_length), algorithm })
+}
+
+fn decode_retirement_journal_record_v1(record: &[u8], algorithm: HashAlgorithm) -> FormatResult<RetirementJournalRecordV1<'_>> {
+  let hash_width = algorithm.hash_length();
+  let record_length = 72 + 4 * hash_width;
+  if record.len() != record_length || usize::try_from(u32_at(record, 0)?).ok() != Some(record_length) || u16_at(record, 6)? != 0 {
+    return Err(reserved_error("retirement_record_length", "retirement record length/reserve is invalid"));
+  }
+  let reason = RetirementReasonV1::from_u16(u16_at(record, 4)?)?;
+  let replacement_publication_sequence = u64_at(record, 8)?;
+  let retired_at_ms = u64_at(record, 16)?;
+  let physical_length = 24 + 2 * hash_width;
+  let old = decode_physical_incarnation(&record[24..24 + physical_length], algorithm)?;
+  let replacement = decode_physical_incarnation(&record[24 + physical_length..], algorithm)?;
+  if replacement_publication_sequence == 0 || retired_at_ms == 0 || old == replacement {
+    return Err(closure_error("retirement_record_fields", "retirement record reason/time/incarnations are invalid"));
+  }
+  Ok(RetirementJournalRecordV1 { encoded: record, reason, replacement_publication_sequence, retired_at_ms, old, replacement })
+}
+
+fn decode_retirement_journal_segment_with_key(
+  bytes: &[u8],
+  algorithm: HashAlgorithm,
+  key: Vec<u8>,
+) -> FormatResult<RetirementJournalSegmentV1<'_>> {
   if bytes.len() > MAX_PAGE_LENGTH {
     return Err(amplification_error("retirement_journal_length", bytes.len(), MAX_PAGE_LENGTH));
   }
@@ -1366,24 +1685,15 @@ fn decode_retirement_journal(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8
   if usize::try_from(count).ok().and_then(|value| value.checked_mul(record_length)) != Some(records_length) {
     return Err(closure_error("retirement_journal_count", "retirement record count does not match length"));
   }
+  let previous_segment_hash = &body[32..32 + h];
   let records = &body[32 + h..];
   let mut first_observed = None;
   let mut previous: Option<(u64, &[u8])> = None;
   for record in records.chunks_exact(record_length) {
-    if usize::try_from(u32_at(record, 0)?).ok() != Some(record_length) || u16_at(record, 6)? != 0 {
-      return Err(reserved_error("retirement_record_length", "retirement record length/reserve is invalid"));
-    }
-    let reason = u16_at(record, 4)?;
-    let sequence = u64_at(record, 8)?;
-    let retired_at = u64_at(record, 16)?;
+    let decoded = decode_retirement_journal_record_v1(record, algorithm)?;
+    let sequence = decoded.replacement_publication_sequence;
     let physical_length = 24 + 2 * h;
     let old_bytes = &record[24..24 + physical_length];
-    let replacement_bytes = &record[24 + physical_length..];
-    let old = decode_physical_incarnation(old_bytes, algorithm)?;
-    let replacement = decode_physical_incarnation(replacement_bytes, algorithm)?;
-    if !(1..=5).contains(&reason) || sequence == 0 || retired_at == 0 || old == replacement {
-      return Err(closure_error("retirement_record_fields", "retirement record reason/time/incarnations are invalid"));
-    }
     if let Some((prior_sequence, prior_old)) = previous {
       if prior_sequence > sequence
         || (prior_sequence == sequence && compare_physical_bytes(algorithm, prior_old, old_bytes)? != Ordering::Less)
@@ -1397,7 +1707,23 @@ fn decode_retirement_journal(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8
   if first_observed != Some(first) || previous.map(|(sequence, _)| sequence) != Some(last) {
     return Err(closure_error("retirement_journal_order", "retirement journal first/last sequence disagrees"));
   }
-  Ok(GcStateArtifactV1::RetirementJournal { record_count: count, key })
+  Ok(RetirementJournalSegmentV1 {
+    database_id: &artifact.identity[..16],
+    segment_ordinal: u64_at(artifact.identity, 16)?,
+    generation: artifact.generation,
+    chain_reset: flags & 1 != 0,
+    first_replacement_sequence: first,
+    last_replacement_sequence: last,
+    record_count: count,
+    previous_segment_hash: (flags & 1 == 0).then_some(previous_segment_hash),
+    records,
+    key,
+  })
+}
+
+fn decode_retirement_journal(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> FormatResult<GcStateArtifactV1<'_>> {
+  let segment = decode_retirement_journal_segment_with_key(bytes, algorithm, key)?;
+  Ok(GcStateArtifactV1::RetirementJournal { record_count: segment.record_count, key: segment.key })
 }
 
 fn validate_row(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, row: &[u8], clear: bool) -> FormatResult<()> {

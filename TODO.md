@@ -621,6 +621,11 @@
         - [x] Map current WAL/KV/rebuild/verify/GC/Void producers and preserve the no-service/no-writer activation boundary.
         - [x] Prove malformed rows, role mismatch, cancellation/bounds, fixture equality, and reference-model agreement before landing.
       - [ ] P4-2: persist replacement/retirement lineage and typed corruption evidence before any v4 stable-key replacement.
+        - [x] P4-2a: expose typed zero-copy retirement-journal segments/records and a conservative lineage reference model at both hash widths.
+        - [ ] P4-2b: add one bounded retirement-journal owner with count/byte/time flushing, immutable segment chaining, and durable audited-through publication.
+        - [ ] P4-2c: make every v4 stable-key replacement, relocation, repair, migration, and pointer/control replacement enter that owner before replacement activation.
+        - [ ] P4-2d: recover missing post-watermark lower-incarnation lineage conservatively and emit the existing typed `CorruptGcEvidenceV1` contract without reclaim authority.
+        - [ ] P4-2e: prove cancellation, crash prefixes, corrupt/missing chains, ordering, resource bounds, recovery, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.

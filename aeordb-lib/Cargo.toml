@@ -702,6 +702,10 @@ name = "gc_v4_model_spec"
 path = "spec/engine/gc_v4_model_spec.rs"
 
 [[test]]
+name = "gc_v4_lineage_spec"
+path = "spec/engine/gc_v4_lineage_spec.rs"
+
+[[test]]
 name = "v4_read_pin_spec"
 path = "spec/engine/v4_read_pin_spec.rs"
 
