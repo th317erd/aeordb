@@ -85,3 +85,62 @@ fn execution_guard_fails_an_executing_hard_record_even_when_the_executor_poisons
   drop(state);
   assert!(matches!(coordinator.snapshot(), Err(DurabilityCoordinatorError::StateUnavailable)));
 }
+
+#[test]
+fn admitted_unstarted_ticket_can_be_cancelled_without_latching_or_reusing_its_sequence() {
+  let coordinator = DurabilityCoordinator::new();
+  let plan = DurabilityCommitPlan::new(
+    CommitClass::HardAuthority,
+    vec![
+      DurabilityOperation::DependencyAppend,
+      DurabilityOperation::DataBarrier,
+      DurabilityOperation::AuthorityWrite,
+      DurabilityOperation::HeaderAb,
+      DurabilityOperation::AuthorityBarrier,
+      DurabilityOperation::AuthorityReadback,
+    ],
+  )
+  .unwrap();
+  let cancelled = coordinator.admit(plan.clone()).unwrap();
+
+  coordinator.cancel_admitted(cancelled).unwrap();
+
+  let snapshot = coordinator.snapshot().unwrap();
+  assert_eq!(snapshot.hard_frontier, 0);
+  assert_eq!(snapshot.next_sequence, cancelled.sequence() + 1);
+  assert_eq!(snapshot.admitted, 0);
+  assert_eq!(snapshot.pending_hard, 0);
+  assert!(snapshot.ledger.is_empty());
+  assert!(coordinator.hard_failure().unwrap().is_none());
+  assert!(matches!(coordinator.cancel_admitted(cancelled), Err(DurabilityCoordinatorError::UnknownTicket)));
+
+  let successor = coordinator.admit(plan).unwrap();
+  assert_eq!(successor.sequence(), cancelled.sequence() + 1, "cancelled publication sequences are never reused");
+}
+
+#[test]
+fn admission_guard_cancellation_failure_latches_subsequent_hard_writes() {
+  let coordinator = DurabilityCoordinator::new();
+  let plan = DurabilityCommitPlan::new(
+    CommitClass::HardAuthority,
+    vec![
+      DurabilityOperation::DependencyAppend,
+      DurabilityOperation::DataBarrier,
+      DurabilityOperation::AuthorityWrite,
+      DurabilityOperation::HeaderAb,
+      DurabilityOperation::AuthorityBarrier,
+      DurabilityOperation::AuthorityReadback,
+    ],
+  )
+  .unwrap();
+  let cancelled = coordinator.admit(plan.clone()).unwrap();
+  coordinator.cancel_admitted(cancelled).unwrap();
+
+  coordinator.cancel_admitted_or_latch_failure(cancelled);
+
+  let failure = coordinator.hard_failure().unwrap().expect("failed guard cancellation must latch hard writes");
+  assert_eq!(failure.sequence, cancelled.sequence());
+  assert!(failure.serious);
+  assert_eq!(failure.retry_class, RetryClass::Never);
+  assert!(matches!(coordinator.admit(plan), Err(DurabilityCoordinatorError::ExecutorFailure(_))));
+}

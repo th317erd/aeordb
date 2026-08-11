@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::File;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::engine::durability_coordinator::{
   CommitClass, DurabilityCommitPlan, DurabilityCommitReceipt, DurabilityCoordinator, DurabilityCoordinatorError,
@@ -123,6 +123,93 @@ pub struct DatabaseHeaderPublisherV4 {
   io: Arc<dyn HeaderPublicationIo>,
 }
 
+pub(crate) trait HeaderPublicationDependencyV4 {
+  fn append_dependency(&mut self, publication_sequence: u64) -> Result<(), NativeDurabilityError>;
+}
+
+struct NoopHeaderPublicationDependencyV4;
+
+impl HeaderPublicationDependencyV4 for NoopHeaderPublicationDependencyV4 {
+  fn append_dependency(&mut self, _publication_sequence: u64) -> Result<(), NativeDurabilityError> {
+    Ok(())
+  }
+}
+
+/// An exact inactive-slot successor whose hard-authority ticket has been
+/// admitted while the per-file publication lock remains held.
+pub(crate) struct AdmittedDatabaseHeaderPublicationV4<'a> {
+  publisher: &'a DatabaseHeaderPublisherV4,
+  file: &'a File,
+  _authority: MutexGuard<'a, ()>,
+  ticket: crate::engine::durability_coordinator::DurabilityTicket,
+  execution_started: bool,
+  writes: Vec<(usize, [u8; DATABASE_HEADER_V4_SLOT_LENGTH])>,
+  expected_region: [u8; DATABASE_HEADER_V4_REGION_LENGTH],
+  expected_selected: SelectedDatabaseHeaderV4,
+}
+
+impl AdmittedDatabaseHeaderPublicationV4<'_> {
+  pub(crate) fn sequence(&self) -> u64 {
+    self.ticket.sequence()
+  }
+
+  pub(crate) fn commit(self) -> Result<DatabaseHeaderPublicationReceiptV4, DatabaseHeaderPublicationErrorV4> {
+    let mut dependency = NoopHeaderPublicationDependencyV4;
+    self.commit_with_dependency(&mut dependency)
+  }
+
+  pub(crate) fn commit_with_dependency(
+    mut self,
+    dependency: &mut dyn HeaderPublicationDependencyV4,
+  ) -> Result<DatabaseHeaderPublicationReceiptV4, DatabaseHeaderPublicationErrorV4> {
+    let ticket = self.ticket;
+    self.execution_started = true;
+    let mut executor = HeaderPublicationExecutor {
+      file: self.file,
+      io: self.publisher.io.as_ref(),
+      writes: &self.writes,
+      expected_region: &self.expected_region,
+      dependency,
+    };
+    if let Err(execution_error) = self.publisher.coordinator.execute_group(&[ticket], &mut executor) {
+      return match self.publisher.coordinator.take_waiter_state(ticket) {
+        Ok(DurabilityWaiterState::Failed(_)) => Err(DatabaseHeaderPublicationErrorV4::Durability(execution_error)),
+        Ok(other) => Err(DatabaseHeaderPublicationErrorV4::invalid(
+          "durability_failure_cleanup_state",
+          format!("header publication failed as {execution_error}, but waiter cleanup observed {other:?}"),
+        )),
+        Err(cleanup_error) => Err(DatabaseHeaderPublicationErrorV4::invalid(
+          "durability_failure_cleanup_failed",
+          format!("header publication failed as {execution_error}; waiter cleanup also failed: {cleanup_error}"),
+        )),
+      };
+    }
+    let durability = match self.publisher.coordinator.take_waiter_state(ticket)? {
+      DurabilityWaiterState::Succeeded(receipt) => receipt,
+      DurabilityWaiterState::Failed(failure) => {
+        return Err(DatabaseHeaderPublicationErrorV4::invalid("durability_failure", failure.message));
+      }
+      DurabilityWaiterState::Pending => {
+        return Err(DatabaseHeaderPublicationErrorV4::invalid(
+          "durability_waiter_pending",
+          "header publication remained pending after synchronous execution",
+        ));
+      }
+    };
+    let observation = DatabaseHeaderObservationV4 { region: self.expected_region, selected: self.expected_selected.clone() };
+    Ok(DatabaseHeaderPublicationReceiptV4 { durability, observation })
+  }
+}
+
+impl Drop for AdmittedDatabaseHeaderPublicationV4<'_> {
+  fn drop(&mut self) {
+    if self.execution_started {
+      return;
+    }
+    self.publisher.coordinator.cancel_admitted_or_latch_failure(self.ticket);
+  }
+}
+
 impl DatabaseHeaderPublisherV4 {
   pub fn new(coordinator: Arc<DurabilityCoordinator>) -> Self {
     Self { coordinator, publication_lock: Mutex::new(()), io: Arc::new(NativeHeaderPublicationIo) }
@@ -138,9 +225,28 @@ impl DatabaseHeaderPublisherV4 {
     &self,
     file: &File,
     expected: &DatabaseHeaderObservationV4,
-    mut candidate: DatabaseHeaderV4,
+    candidate: DatabaseHeaderV4,
   ) -> Result<DatabaseHeaderPublicationReceiptV4, DatabaseHeaderPublicationErrorV4> {
-    let _authority = match self.publication_lock.lock() {
+    self.admit_inactive_slot(file, expected, candidate)?.commit()
+  }
+
+  pub(crate) fn admit_inactive_slot<'a>(
+    &'a self,
+    file: &'a File,
+    expected: &DatabaseHeaderObservationV4,
+    candidate: DatabaseHeaderV4,
+  ) -> Result<AdmittedDatabaseHeaderPublicationV4<'a>, DatabaseHeaderPublicationErrorV4> {
+    self.admit_inactive_slot_with_dependency_bytes(file, expected, candidate, 0)
+  }
+
+  pub(crate) fn admit_inactive_slot_with_dependency_bytes<'a>(
+    &'a self,
+    file: &'a File,
+    expected: &DatabaseHeaderObservationV4,
+    mut candidate: DatabaseHeaderV4,
+    dependency_bytes: u64,
+  ) -> Result<AdmittedDatabaseHeaderPublicationV4<'a>, DatabaseHeaderPublicationErrorV4> {
+    let authority = match self.publication_lock.lock() {
       Ok(authority) => authority,
       Err(poisoned) => {
         drop(poisoned);
@@ -161,7 +267,21 @@ impl DatabaseHeaderPublisherV4 {
         "ordinary publication did not produce an exact non-degraded inactive-slot successor",
       ));
     }
-    self.publish(file, vec![(target_slot, target_bytes)], expected_region, expected_selected)
+    let plan = DurabilityCommitPlan::new(CommitClass::HardAuthority, PUBLICATION_OPERATIONS.to_vec())?;
+    let estimated_bytes = dependency_bytes.checked_add(DATABASE_HEADER_V4_SLOT_LENGTH as u64).ok_or_else(|| {
+      DatabaseHeaderPublicationErrorV4::invalid("publication_size_overflow", "header publication byte estimate overflowed")
+    })?;
+    let ticket = self.coordinator.admit_sized(plan, estimated_bytes)?;
+    Ok(AdmittedDatabaseHeaderPublicationV4 {
+      publisher: self,
+      file,
+      _authority: authority,
+      ticket,
+      execution_started: false,
+      writes: vec![(target_slot, target_bytes)],
+      expected_region,
+      expected_selected,
+    })
   }
 
   pub fn advance_writer_fence(
@@ -296,7 +416,14 @@ impl DatabaseHeaderPublisherV4 {
       }
     };
     let ticket = self.coordinator.admit_sized(plan, estimated_bytes)?;
-    let mut executor = HeaderPublicationExecutor { file, io: self.io.as_ref(), writes: &writes, expected_region: &expected_region };
+    let mut dependency = NoopHeaderPublicationDependencyV4;
+    let mut executor = HeaderPublicationExecutor {
+      file,
+      io: self.io.as_ref(),
+      writes: &writes,
+      expected_region: &expected_region,
+      dependency: &mut dependency,
+    };
     if let Err(execution_error) = self.coordinator.execute_group(&[ticket], &mut executor) {
       return match self.coordinator.take_waiter_state(ticket) {
         Ok(DurabilityWaiterState::Failed(_)) => Err(DatabaseHeaderPublicationErrorV4::Durability(execution_error)),
@@ -329,7 +456,7 @@ impl DatabaseHeaderPublisherV4 {
 
 #[cfg(test)]
 impl DatabaseHeaderPublisherV4 {
-  fn with_io(coordinator: Arc<DurabilityCoordinator>, io: Arc<dyn HeaderPublicationIo>) -> Self {
+  pub(super) fn with_io(coordinator: Arc<DurabilityCoordinator>, io: Arc<dyn HeaderPublicationIo>) -> Self {
     Self { coordinator, publication_lock: Mutex::new(()), io }
   }
 }
@@ -391,7 +518,7 @@ fn selected_slot_header(
   Ok(decode_header_region(&duplicated)?.header)
 }
 
-trait HeaderPublicationIo: fmt::Debug + Send + Sync {
+pub(super) trait HeaderPublicationIo: fmt::Debug + Send + Sync {
   fn read_observation(&self, file: &File) -> Result<DatabaseHeaderObservationV4, DatabaseHeaderPublicationErrorV4>;
   fn data_barrier(&self, file: &File) -> Result<(), NativeDurabilityError>;
   fn write_slot(&self, file: &File, slot: usize, bytes: &[u8; DATABASE_HEADER_V4_SLOT_LENGTH]) -> Result<(), NativeDurabilityError>;
@@ -432,14 +559,22 @@ struct HeaderPublicationExecutor<'a> {
   io: &'a dyn HeaderPublicationIo,
   writes: &'a [(usize, [u8; DATABASE_HEADER_V4_SLOT_LENGTH])],
   expected_region: &'a [u8; DATABASE_HEADER_V4_REGION_LENGTH],
+  dependency: &'a mut dyn HeaderPublicationDependencyV4,
 }
 
 impl DurabilityGroupExecutor for HeaderPublicationExecutor<'_> {
   type Error = NativeDurabilityError;
 
-  fn execute_group(&mut self, _sequences: &[u64], operation: DurabilityOperation) -> Result<(), Self::Error> {
+  fn execute_group(&mut self, sequences: &[u64], operation: DurabilityOperation) -> Result<(), Self::Error> {
     match operation {
-      DurabilityOperation::DependencyAppend | DurabilityOperation::HeaderAb => Ok(()),
+      DurabilityOperation::DependencyAppend => {
+        let sequence = sequences
+          .first()
+          .copied()
+          .ok_or_else(|| NativeDurabilityError::invalid(NativeDurabilityOperation::WriteAt, "header publication omitted its sequence"))?;
+        self.dependency.append_dependency(sequence)
+      }
+      DurabilityOperation::HeaderAb => Ok(()),
       DurabilityOperation::DataBarrier => self.io.data_barrier(self.file),
       DurabilityOperation::AuthorityWrite => {
         for (slot, bytes) in self.writes {

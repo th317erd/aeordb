@@ -927,6 +927,72 @@ impl DurabilityCoordinator {
     Ok(DurabilityTicket { coordinator_id: self.id, sequence })
   }
 
+  /// Retire one exact ticket before execution begins.
+  ///
+  /// Cancellation consumes the sequence permanently but does not advance the
+  /// hard frontier or latch a durability failure. It is reserved for callers
+  /// that can still prove no dependency or authority byte was mutated.
+  pub(crate) fn cancel_admitted(&self, ticket: DurabilityTicket) -> Result<(), DurabilityCoordinatorError> {
+    self.validate_ticket(ticket)?;
+    let mut state = match self.state.lock() {
+      Ok(state) => state,
+      Err(poisoned) => {
+        drop(poisoned);
+        return Err(DurabilityCoordinatorError::StateUnavailable);
+      }
+    };
+    let record = state.records.get(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+    if !matches!(record.status, CommitStatus::Admitted) {
+      return Err(DurabilityCoordinatorError::AlreadyExecuted);
+    }
+    if record.plan.class == CommitClass::HardAuthority {
+      let position = state
+        .pending_hard
+        .iter()
+        .position(|sequence| *sequence == ticket.sequence)
+        .ok_or_else(|| DurabilityCoordinatorError::InvalidPlan("admitted hard ticket is absent from the pending frontier".to_string()))?;
+      state.pending_hard.remove(position);
+    }
+    let removed = state.records.remove(&ticket.sequence).ok_or(DurabilityCoordinatorError::UnknownTicket)?;
+    drop(state);
+    drop(removed);
+    self.changed.notify_all();
+    Ok(())
+  }
+
+  /// Retire an admission guard, latching hard writes if its exact ticket can
+  /// no longer be cancelled. A guard cannot return an error from `Drop`, and
+  /// silently stranding an admitted hard ticket would block the frontier.
+  pub(crate) fn cancel_admitted_or_latch_failure(&self, ticket: DurabilityTicket) {
+    let cancellation_error = match self.cancel_admitted(ticket) {
+      Ok(()) => return,
+      Err(error) => error,
+    };
+    let mut state = match self.state.lock() {
+      Ok(state) => state,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    let failure = DurabilityFailure {
+      sequence: ticket.sequence,
+      operation: DurabilityOperation::DependencyAppend,
+      message: bounded_failure_message(format!("unexecuted durability admission could not be retired: {cancellation_error}")),
+      os_error_class: None,
+      retry_class: RetryClass::Never,
+      attempts: 0,
+      serious: true,
+      uncertain_completion: false,
+    };
+    state.pending_hard.retain(|sequence| *sequence != ticket.sequence);
+    if let Some(record) = state.records.get_mut(&ticket.sequence) {
+      record.status = CommitStatus::Failed(failure.clone());
+    }
+    if state.hard_failure.is_none() {
+      state.hard_failure = Some(failure);
+    }
+    drop(state);
+    self.changed.notify_all();
+  }
+
   pub fn select_ready_hard_group(&self, force: bool) -> Result<Vec<DurabilityTicket>, DurabilityCoordinatorError> {
     self.select_ready_hard_group_at(Instant::now(), force)
   }

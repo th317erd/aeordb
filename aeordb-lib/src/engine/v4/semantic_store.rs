@@ -191,7 +191,7 @@ fn load_semantic_file_record(
   Ok(Some(LoadedSemanticObjectV1 { path: path.to_string(), object, bytes }))
 }
 
-fn semantic_object_cap(kind_id: u16) -> FormatResult<usize> {
+pub(crate) fn semantic_object_cap(kind_id: u16) -> FormatResult<usize> {
   match kind_id {
     0x0001 => Ok(SEMANTIC_STATE_CAP),
     0x0002 => Ok(SEMANTIC_CATALOG_LEAF_CAP),

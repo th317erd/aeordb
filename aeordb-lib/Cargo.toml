@@ -694,6 +694,10 @@ name = "v4_root_migration_spec"
 path = "spec/engine/v4_root_migration_spec.rs"
 
 [[test]]
+name = "v4_first_authority_spec"
+path = "spec/engine/v4_first_authority_spec.rs"
+
+[[test]]
 name = "v4_semantic_object_store_spec"
 path = "spec/engine/v4_semantic_object_store_spec.rs"
 

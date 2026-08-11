@@ -167,6 +167,33 @@ fn ordinary_and_dual_publication_use_data_then_full_barriers_and_exact_readback(
 }
 
 #[test]
+fn admitted_inactive_publication_exposes_its_exact_ticket_and_drop_cancels_before_mutation() {
+  let source_region = fixture_region("header-blake3-256-valid-ab.bin");
+  let source = observation(source_region);
+  let (coordinator, io, publisher) = publisher_with_memory_io(source_region, None);
+  let mut candidate = source.selected.header.clone();
+  candidate.updated_at_ms += 1;
+  candidate.entry_count += 1;
+
+  let file = test_file();
+  let admitted = publisher.admit_inactive_slot(&file, &source, candidate.clone()).unwrap();
+  assert_eq!(admitted.sequence(), 1);
+  assert_eq!(coordinator.snapshot().unwrap().admitted, 1);
+  assert_eq!(io.region(), source_region, "admission alone must not mutate the selected header");
+  drop(admitted);
+
+  let snapshot = coordinator.snapshot().unwrap();
+  assert_eq!(snapshot.admitted, 0);
+  assert_eq!(snapshot.pending_hard, 0);
+  assert_eq!(snapshot.hard_frontier, 0);
+  assert!(coordinator.hard_failure().unwrap().is_none());
+  assert_eq!(io.region(), source_region);
+
+  let receipt = publisher.publish_inactive_slot(&test_file(), &source, candidate).unwrap();
+  assert_eq!(receipt.durability.sequence, 2, "cancelled ticket sequence must not be reused");
+}
+
+#[test]
 fn every_dual_publication_io_failure_latches_at_the_exact_boundary_and_stops() {
   let source_region = fixture_region("header-blake3-256-valid-ab.bin");
   let source = observation(source_region);

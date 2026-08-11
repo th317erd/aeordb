@@ -515,7 +515,7 @@ fn bounded_flush_rejects_a_corrupt_page_without_resetting_or_overwriting_it() {
   file.sync_data().unwrap();
 
   assert!(store.get(&hash).is_err(), "a corrupt positioned read must not become a missing key");
-  store.buffer_only(KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset: 2900, total_length: 64 });
+  store.buffer_only(KVEntry { type_flags: KV_TYPE_CHUNK, hash, offset: 2900, total_length: 64 }).unwrap();
   assert!(store.flush().is_err());
   assert_eq!(read_bucket(&db_path, bucket), corrupt, "flush must not reset a corrupt page and destroy rebuild evidence");
   assert!(store.needs_rebuild);

@@ -321,7 +321,7 @@ fn read_only_publication_fails_hard_without_changing_header_bytes() {
 }
 
 #[test]
-fn shadow_publisher_has_no_service_or_storage_engine_caller() {
+fn shadow_publisher_has_only_the_disconnected_first_authority_caller() {
   fn collect_rust_files(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -342,5 +342,9 @@ fn shadow_publisher_has_no_service_or_storage_engine_caller() {
     .filter(|path| path != &publisher_path)
     .filter(|path| std::fs::read_to_string(path).unwrap().contains("DatabaseHeaderPublisherV4"))
     .collect();
-  assert!(callers.is_empty(), "v4 header publication activated outside its shadow module: {callers:?}");
+  assert_eq!(
+    callers,
+    vec![source_root.join("engine/v4/first_authority.rs")],
+    "v4 header publication escaped its shadow authority: {callers:?}"
+  );
 }

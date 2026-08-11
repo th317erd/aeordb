@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::engine::durability_coordinator::{DurabilityCoordinator, NativeFileBarrierKind};
+use crate::engine::durability_coordinator::{CommitClass, DurabilityCommitReceipt, DurabilityCoordinator, NativeFileBarrierKind};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail;
@@ -88,12 +88,31 @@ pub struct DiskKVStore {
   /// A namespace mutation with a pre-admitted hard ticket owns transaction
   /// depth exclusively; legacy guards must retry after it completes.
   pub(crate) pre_admitted_transaction_active: bool,
+  /// A short first-authority transaction may stage a bounded KV delta without
+  /// exposing it through the shared read snapshot. Only the matching token can
+  /// publish or abort the batch.
+  atomic_visibility_state: Option<AtomicKvVisibilityState>,
+  next_atomic_visibility_id: u64,
   /// Current snapshot of the void_manager state, included in every hot tail
   /// flush. The engine syncs this from its VoidManager whenever voids change
   /// (GC sweep, void consumption, etc.). Hot tail load on startup populates
   /// this from disk; runtime register/consume operations on void_manager
   /// also update this field via the engine.
   pub pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AtomicKvVisibilityBatch {
+  id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AtomicKvVisibilityState {
+  id: u64,
+  maximum_unique_entries: usize,
+  baseline_entry_count: usize,
+  baseline_hot_tail_offset: u64,
+  expected_authority_sequence: u64,
 }
 
 struct PreparedPageFlush {
@@ -352,6 +371,8 @@ impl DiskKVStore {
       needs_expansion: None,
       transaction_depth: 0,
       pre_admitted_transaction_active: false,
+      atomic_visibility_state: None,
+      next_atomic_visibility_id: 1,
       pending_voids: Vec::new(),
     })
   }
@@ -560,6 +581,8 @@ impl DiskKVStore {
       needs_expansion: None,
       transaction_depth: 0,
       pre_admitted_transaction_active: false,
+      atomic_visibility_state: None,
+      next_atomic_visibility_id: 1,
       pending_voids: hot_voids,
     })
   }
@@ -722,6 +745,7 @@ impl DiskKVStore {
 
   /// Insert or update an entry.
   pub fn insert(&mut self, entry: KVEntry) -> EngineResult<()> {
+    self.require_no_atomic_visibility("ordinary KV insertion")?;
     let is_new = !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_disk(&entry.hash)?;
 
     self.write_buffer.insert(entry.hash.clone(), entry.clone());
@@ -752,6 +776,140 @@ impl DiskKVStore {
     Ok(())
   }
 
+  /// Begin one bounded batch whose entries remain absent from every published
+  /// read snapshot until a matching hard-authority receipt is supplied.
+  ///
+  /// The caller owns the KV writer exclusively for the batch lifetime. Dirty
+  /// baseline buffers are refused instead of being folded into the authority
+  /// transition or flushed implicitly.
+  pub(crate) fn begin_atomic_visibility_batch(
+    &mut self,
+    maximum_unique_entries: usize,
+    expected_authority_sequence: u64,
+  ) -> EngineResult<AtomicKvVisibilityBatch> {
+    if self.atomic_visibility_state.is_some() {
+      return Err(EngineError::ResourceExhausted("an atomic KV visibility batch is already active".to_string()));
+    }
+    if self.transaction_depth != 0 || self.pre_admitted_transaction_active {
+      return Err(EngineError::ResourceExhausted(
+        "atomic KV visibility requires exclusive ownership outside another transaction".to_string(),
+      ));
+    }
+    if !self.write_buffer.is_empty() || !self.hot_buffer.is_empty() {
+      return Err(EngineError::ResourceExhausted(
+        "atomic KV visibility requires an explicitly flushed write and hot-buffer baseline".to_string(),
+      ));
+    }
+    if maximum_unique_entries == 0 || maximum_unique_entries >= WRITE_BUFFER_THRESHOLD || maximum_unique_entries >= HOT_BUFFER_THRESHOLD {
+      return Err(EngineError::InvalidInput(format!(
+        "atomic KV visibility entry bound must be in 1..{}",
+        WRITE_BUFFER_THRESHOLD.min(HOT_BUFFER_THRESHOLD)
+      )));
+    }
+    if expected_authority_sequence == 0 {
+      return Err(EngineError::InvalidInput("atomic KV visibility requires a nonzero expected authority sequence".to_string()));
+    }
+    let id = self.next_atomic_visibility_id;
+    self.next_atomic_visibility_id = self
+      .next_atomic_visibility_id
+      .checked_add(1)
+      .ok_or_else(|| EngineError::ResourceExhausted("atomic KV visibility token space is exhausted".to_string()))?;
+    self.atomic_visibility_state = Some(AtomicKvVisibilityState {
+      id,
+      maximum_unique_entries,
+      baseline_entry_count: self.entry_count,
+      baseline_hot_tail_offset: self.hot_tail_offset,
+      expected_authority_sequence,
+    });
+    Ok(AtomicKvVisibilityBatch { id })
+  }
+
+  /// Stage one KV entry without page flush, hot-tail flush, or snapshot
+  /// publication. Physical WAL append ownership remains with the caller.
+  pub(crate) fn stage_atomic_visibility_entry(&mut self, batch: AtomicKvVisibilityBatch, entry: KVEntry) -> EngineResult<()> {
+    let state = self.require_atomic_visibility_batch(batch)?;
+    let new_staged_key = !self.write_buffer.contains_key(&entry.hash);
+    if !new_staged_key {
+      return Err(EngineError::InvalidInput("atomic KV visibility cannot stage one key more than once".to_string()));
+    }
+    if self.write_buffer.len() >= state.maximum_unique_entries {
+      return Err(EngineError::ResourceExhausted(format!(
+        "atomic KV visibility batch exceeds its {} unique-entry bound",
+        state.maximum_unique_entries
+      )));
+    }
+    let is_new = !self.entry_exists_on_disk(&entry.hash)?;
+    let next_entry_count = if is_new {
+      self
+        .entry_count
+        .checked_add(1)
+        .ok_or_else(|| EngineError::ResourceExhausted("atomic KV visibility entry count overflow".to_string()))?
+    } else {
+      self.entry_count
+    };
+    self.write_buffer.insert(entry.hash.clone(), entry.clone());
+    self.entry_count = next_entry_count;
+    self.hot_buffer.push(entry);
+    Ok(())
+  }
+
+  /// Discard the volatile KV delta. Appended WAL bytes remain unreachable raw
+  /// evidence for quarantine/recovery and are not inserted into the snapshot.
+  pub(crate) fn abort_atomic_visibility_batch(&mut self, batch: AtomicKvVisibilityBatch) -> EngineResult<()> {
+    let state = self.require_atomic_visibility_batch(batch)?;
+    self.write_buffer.clear();
+    self.hot_buffer.clear();
+    self.entry_count = state.baseline_entry_count;
+    self.hot_tail_offset = state.baseline_hot_tail_offset;
+    self.atomic_visibility_state = None;
+    Ok(())
+  }
+
+  /// Publish the staged KV delta only after the authority coordinator proves
+  /// that the exact hard sequence reached its durability frontier.
+  pub(crate) fn publish_atomic_visibility_after_authority(
+    &mut self,
+    batch: AtomicKvVisibilityBatch,
+    receipt: &DurabilityCommitReceipt,
+  ) -> EngineResult<()> {
+    self.require_atomic_visibility_batch(batch)?;
+    let state = self.require_atomic_visibility_batch(batch)?;
+    if !self.hot_buffer.is_empty() {
+      return Err(EngineError::DurabilityFailure(
+        "atomic KV visibility cannot publish before its dependency payload is completed".to_string(),
+      ));
+    }
+    if receipt.class != CommitClass::HardAuthority
+      || receipt.sequence != state.expected_authority_sequence
+      || receipt.hard_frontier < receipt.sequence
+    {
+      return Err(EngineError::DurabilityFailure(
+        "atomic KV visibility requires its exact completed hard-authority receipt at or below the proven frontier".to_string(),
+      ));
+    }
+    self.atomic_visibility_state = None;
+    self.hot_buffer.clear();
+    self.publish_buffer_only();
+    Ok(())
+  }
+
+  fn require_atomic_visibility_batch(&self, batch: AtomicKvVisibilityBatch) -> EngineResult<AtomicKvVisibilityState> {
+    match self.atomic_visibility_state {
+      Some(state) if state.id == batch.id => Ok(state),
+      Some(_) => Err(EngineError::InvalidInput("atomic KV visibility token does not own the active batch".to_string())),
+      None => Err(EngineError::InvalidInput("no atomic KV visibility batch is active".to_string())),
+    }
+  }
+
+  fn require_no_atomic_visibility(&self, operation: &str) -> EngineResult<()> {
+    if self.atomic_visibility_state.is_some() {
+      return Err(EngineError::ResourceExhausted(format!(
+        "{operation} is unavailable while an atomic visibility batch owns the KV writer"
+      )));
+    }
+    Ok(())
+  }
+
   /// Bulk insert without public snapshot publication or per-window barriers.
   ///
   /// This is only for exclusive rebuild/expansion owners. The caller must
@@ -759,6 +917,7 @@ impl DiskKVStore {
   /// resulting layout. Intermediate pages are deliberately recoverable soft
   /// state so a large rebuild does not issue one barrier per 512 records.
   pub fn bulk_insert(&mut self, entries: &[KVEntry]) -> EngineResult<()> {
+    self.require_no_atomic_visibility("bulk KV insertion")?;
     for entry in entries {
       if !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_current_layout(&entry.hash)? {
         self.entry_count += 1;
@@ -944,6 +1103,7 @@ impl DiskKVStore {
   }
 
   fn flush_with_generation_admission(&mut self, generation_owner: MemoryOwner, generation_admission: AdmissionClass) -> EngineResult<()> {
+    self.require_no_atomic_visibility("KV page flush")?;
     if self.write_buffer.is_empty() {
       return Ok(());
     }
@@ -1049,6 +1209,7 @@ impl DiskKVStore {
   }
 
   pub fn mark_deleted(&mut self, hash: &[u8]) -> EngineResult<bool> {
+    self.require_no_atomic_visibility("KV deletion")?;
     if let Some(mut entry) = self.get(hash)? {
       entry.type_flags |= KV_FLAG_DELETED;
       self.write_buffer.insert(hash.to_vec(), entry);
@@ -1061,6 +1222,7 @@ impl DiskKVStore {
   }
 
   pub fn mark_deleted_batch(&mut self, hashes: &[Vec<u8>]) -> EngineResult<()> {
+    self.require_no_atomic_visibility("batched KV deletion")?;
     // Resolve each hash from the published snapshot (or current write_buffer)
     // without taking the KV writer lock again for each candidate. The snapshot
     // backend owns any required resident-page or bounded-provider access.
@@ -1136,15 +1298,18 @@ impl DiskKVStore {
   /// Insert an entry into the write buffer without triggering auto-flush
   /// or hot buffer journaling. Used by rebuild_kv to accumulate all entries
   /// before a single flush, preventing page clobbering across flush cycles.
-  pub fn buffer_only(&mut self, entry: KVEntry) {
+  pub fn buffer_only(&mut self, entry: KVEntry) -> EngineResult<()> {
+    self.require_no_atomic_visibility("unpublished KV buffering")?;
     let is_new = !self.write_buffer.contains_key(&entry.hash);
     self.write_buffer.insert(entry.hash.clone(), entry);
     if is_new {
       self.entry_count += 1;
     }
+    Ok(())
   }
 
   pub fn update_flags(&mut self, hash: &[u8], new_flags: u8) -> EngineResult<bool> {
+    self.require_no_atomic_visibility("KV flag update")?;
     if let Some(mut entry) = self.get(hash)? {
       let entry_type = entry.type_flags & 0x0F;
       entry.type_flags = entry_type | (new_flags & 0xF0);
@@ -1157,6 +1322,7 @@ impl DiskKVStore {
   }
 
   pub fn update_offset(&mut self, hash: &[u8], new_offset: u64) -> EngineResult<bool> {
+    self.require_no_atomic_visibility("KV offset update")?;
     if let Some(mut entry) = self.get(hash)? {
       entry.offset = new_offset;
       self.write_buffer.insert(hash.to_vec(), entry);
@@ -1178,6 +1344,22 @@ impl DiskKVStore {
   }
   pub fn hot_tail_offset(&self) -> u64 {
     self.hot_tail_offset
+  }
+
+  pub(crate) fn kv_block_offset(&self) -> u64 {
+    self.kv_block_offset
+  }
+
+  pub(crate) fn kv_block_length(&self) -> u64 {
+    self.kv_block_length
+  }
+
+  pub(crate) fn clone_database_file(&self) -> EngineResult<File> {
+    Ok(self.db_file.try_clone()?)
+  }
+
+  pub(crate) fn shares_durability_coordinator(&self, coordinator: &Arc<DurabilityCoordinator>) -> bool {
+    Arc::ptr_eq(&self.durability_coordinator, coordinator)
   }
 
   /// Update the hot tail offset (called by StorageEngine after a WAL append).
@@ -1551,6 +1733,14 @@ impl DiskKVStore {
 
 impl Drop for DiskKVStore {
   fn drop(&mut self) {
+    if let Some(state) = self.atomic_visibility_state.take() {
+      self.write_buffer.clear();
+      self.hot_buffer.clear();
+      self.entry_count = state.baseline_entry_count;
+      self.hot_tail_offset = state.baseline_hot_tail_offset;
+      tracing::error!(atomic_visibility_id = state.id, "DiskKVStore discarded an uncommitted atomic visibility batch during drop");
+      return;
+    }
     if !self.write_buffer.is_empty() {
       if let Err(e) = self.flush() {
         tracing::error!("DiskKVStore: failed to flush on drop: {}", e);
@@ -1721,3 +1911,7 @@ mod internal_tests {
     assert!(!entry_overlaps_void_ranges(220, 230, &ranges));
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/disk_kv_visibility_internal_spec.rs"]
+mod disk_kv_visibility_internal_spec;

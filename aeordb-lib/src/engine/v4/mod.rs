@@ -15,6 +15,7 @@ pub mod deployment_guard;
 pub mod durability_recovery;
 pub mod entity;
 pub mod field_definition;
+pub mod first_authority;
 pub mod gc;
 pub mod gc_audit;
 pub mod gc_mark;

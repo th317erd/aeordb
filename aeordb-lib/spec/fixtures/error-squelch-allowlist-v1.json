@@ -3226,7 +3226,7 @@
     {
       "id": "esq-v1-4ea949551ec2d158fd84-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1395,
+      "line": 1577,
       "column": 25,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3236,7 +3236,7 @@
     {
       "id": "esq-v1-b5990e6dab44f241035e-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1420,
+      "line": 1602,
       "column": 22,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3246,7 +3246,7 @@
     {
       "id": "esq-v1-a4eede644110adffe720-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1513,
+      "line": 1695,
       "column": 5,
       "enclosing_item": "impl DiskKVStore::pending_hot_tail_bytes",
       "kind": "error_conversion",
@@ -3256,7 +3256,7 @@
     {
       "id": "esq-v1-07cbf56174ceb4b24285-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1526,
+      "line": 1708,
       "column": 9,
       "enclosing_item": "impl DiskKVStore::prepare_hot_tail_dependency",
       "kind": "error_conversion",
@@ -3266,7 +3266,7 @@
     {
       "id": "esq-v1-85907f46c110382617a0-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1555,
+      "line": 1745,
       "column": 7,
       "enclosing_item": "impl DiskKVStore::drop",
       "kind": "logged_error_continues",
@@ -3406,7 +3406,7 @@
     {
       "id": "esq-v1-48019cc9516e5f196dc8-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 978,
+      "line": 1044,
       "column": 29,
       "enclosing_item": "impl DurabilityCoordinator::execute_group",
       "kind": "error_conversion",
@@ -3416,7 +3416,7 @@
     {
       "id": "esq-v1-917e2d618ed61daa1844-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 988,
+      "line": 1054,
       "column": 17,
       "enclosing_item": "impl DurabilityCoordinator::execute_group",
       "kind": "default_on_error",
@@ -3426,7 +3426,7 @@
     {
       "id": "esq-v1-48019cc9516e5f196dc8-01",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1000,
+      "line": 1066,
       "column": 29,
       "enclosing_item": "impl DurabilityCoordinator::execute_group",
       "kind": "error_conversion",
@@ -3436,7 +3436,7 @@
     {
       "id": "esq-v1-917e2d618ed61daa1844-01",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1017,
+      "line": 1083,
       "column": 17,
       "enclosing_item": "impl DurabilityCoordinator::execute_group",
       "kind": "default_on_error",
@@ -3446,7 +3446,7 @@
     {
       "id": "esq-v1-48019cc9516e5f196dc8-02",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1034,
+      "line": 1100,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::execute_group",
       "kind": "error_conversion",
@@ -3456,7 +3456,7 @@
     {
       "id": "esq-v1-60b934e4a2f9cb5be269-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1060,
+      "line": 1126,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::fail_pending_hard",
       "kind": "error_conversion",
@@ -3466,7 +3466,7 @@
     {
       "id": "esq-v1-e16566859aed98a1305f-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1079,
+      "line": 1145,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::fail_pending_hard_and_take",
       "kind": "error_conversion",
@@ -3476,7 +3476,7 @@
     {
       "id": "esq-v1-97e36be6c9bccde32319-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1101,
+      "line": 1167,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::wait_for_hard_turn",
       "kind": "error_conversion",
@@ -3486,7 +3486,7 @@
     {
       "id": "esq-v1-7dbb02d61d191e079c76-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1119,
+      "line": 1185,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::wait_for_hard_turn",
       "kind": "error_conversion",
@@ -3496,7 +3496,7 @@
     {
       "id": "esq-v1-2502b194fbbfedcc1b03-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1132,
+      "line": 1198,
       "column": 26,
       "enclosing_item": "impl DurabilityCoordinator::wait_for_hard_turn",
       "kind": "default_on_error",
@@ -3506,7 +3506,7 @@
     {
       "id": "esq-v1-f4f3eeb6ae0208dadafc-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1133,
+      "line": 1199,
       "column": 23,
       "enclosing_item": "impl DurabilityCoordinator::wait_for_hard_turn",
       "kind": "default_on_error",
@@ -3516,7 +3516,7 @@
     {
       "id": "esq-v1-8daefa8bd5b836688664-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1141,
+      "line": 1207,
       "column": 31,
       "enclosing_item": "impl DurabilityCoordinator::wait_for_hard_turn",
       "kind": "error_conversion",
@@ -3526,7 +3526,7 @@
     {
       "id": "esq-v1-7dbb02d61d191e079c76-01",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1144,
+      "line": 1210,
       "column": 17,
       "enclosing_item": "impl DurabilityCoordinator::wait_for_hard_turn",
       "kind": "error_conversion",
@@ -3536,7 +3536,7 @@
     {
       "id": "esq-v1-e07a68cfec1db7697c54-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1151,
+      "line": 1217,
       "column": 17,
       "enclosing_item": "impl DurabilityCoordinator::waiter_state",
       "kind": "error_conversion",
@@ -3546,7 +3546,7 @@
     {
       "id": "esq-v1-8b0f491e5bb4f65b2bde-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1158,
+      "line": 1224,
       "column": 23,
       "enclosing_item": "impl DurabilityCoordinator::take_waiter_state",
       "kind": "error_conversion",
@@ -3556,7 +3556,7 @@
     {
       "id": "esq-v1-8d0fee7c926044ee7593-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1167,
+      "line": 1233,
       "column": 17,
       "enclosing_item": "impl DurabilityCoordinator::snapshot",
       "kind": "error_conversion",
@@ -3566,7 +3566,7 @@
     {
       "id": "esq-v1-86312a83a8bf3113e729-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1173,
+      "line": 1239,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::wait_until_idle",
       "kind": "error_conversion",
@@ -3576,7 +3576,7 @@
     {
       "id": "esq-v1-b44d38ca1e1dc014a012-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1181,
+      "line": 1247,
       "column": 9,
       "enclosing_item": "impl DurabilityCoordinator::wait_until_idle",
       "kind": "error_conversion",
@@ -3586,7 +3586,7 @@
     {
       "id": "esq-v1-6a5d2fbc75ed5fdaa0bd-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1191,
+      "line": 1257,
       "column": 17,
       "enclosing_item": "impl DurabilityCoordinator::hard_failure",
       "kind": "error_conversion",
@@ -3596,7 +3596,7 @@
     {
       "id": "esq-v1-b4d8fa66a1204dcd22c6-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1197,
+      "line": 1263,
       "column": 7,
       "enclosing_item": "impl DurabilityCoordinator::memory_reservations_active",
       "kind": "error_conversion",
@@ -3606,7 +3606,7 @@
     {
       "id": "esq-v1-d2cdbfde4ddb5a73bda0-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1215,
+      "line": 1281,
       "column": 17,
       "enclosing_item": "impl DurabilityCoordinator::select_ready_hard_group_at",
       "kind": "error_conversion",
@@ -3616,7 +3616,7 @@
     {
       "id": "esq-v1-8c247241a17a39e56a75-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1246,
+      "line": 1312,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::begin_group_execution",
       "kind": "error_conversion",
@@ -3626,7 +3626,7 @@
     {
       "id": "esq-v1-41eaca0ce1c4568a3c99-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1282,
+      "line": 1348,
       "column": 21,
       "enclosing_item": "impl DurabilityCoordinator::fail_group",
       "kind": "error_conversion",
@@ -3636,7 +3636,7 @@
     {
       "id": "esq-v1-b3c6a3b1a4e8827f52ab-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1376,
+      "line": 1442,
       "column": 21,
       "enclosing_item": "barrier_observation",
       "kind": "default_on_error",
@@ -3646,7 +3646,7 @@
     {
       "id": "esq-v1-885e86fe831e4e2bca26-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1377,
+      "line": 1443,
       "column": 20,
       "enclosing_item": "barrier_observation",
       "kind": "default_on_error",
@@ -3656,7 +3656,7 @@
     {
       "id": "esq-v1-6e0652b7110b21d60577-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1520,
+      "line": 1586,
       "column": 17,
       "enclosing_item": "select_ready_hard_group_locked",
       "kind": "default_on_error",
@@ -3666,7 +3666,7 @@
     {
       "id": "esq-v1-067b81e681cd545c73e5-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1543,
+      "line": 1609,
       "column": 25,
       "enclosing_item": "durability_record_bytes",
       "kind": "result_to_option",
@@ -3676,7 +3676,7 @@
     {
       "id": "esq-v1-d96c34479cd640fdbc34-00",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1650,
+      "line": 1716,
       "column": 11,
       "enclosing_item": "impl GroupExecutionGuard < '_ >::drop",
       "kind": "default_on_error",
@@ -3686,7 +3686,7 @@
     {
       "id": "esq-v1-d96c34479cd640fdbc34-01",
       "file": "aeordb-lib/src/engine/durability_coordinator.rs",
-      "line": 1690,
+      "line": 1756,
       "column": 9,
       "enclosing_item": "impl GroupExecutionGuard < '_ >::drop",
       "kind": "default_on_error",

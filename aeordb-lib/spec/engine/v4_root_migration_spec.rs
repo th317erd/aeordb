@@ -660,13 +660,23 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
   }
 
   let production_sources = read_rust_sources(&root.join("aeordb-lib/src"));
-  for encoder in [
-    "encode_namespace_root",
-    "encode_semantic_state_object",
-    "encode_root_publication_prepare_control",
-    "encode_root_admission_commit_control",
+  let first_authority = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/first_authority.rs")).unwrap();
+  for (encoder, expected_production_occurrences, expected_first_authority_occurrences) in [
+    ("encode_namespace_root", 3, 2),
+    ("encode_semantic_state_object", 1, 0),
+    ("encode_root_publication_prepare_control", 3, 2),
+    ("encode_root_admission_commit_control", 3, 2),
   ] {
-    assert_eq!(production_sources.matches(encoder).count(), 1, "P3b-2a encoder {encoder} gained a production caller before activation");
+    assert_eq!(
+      production_sources.matches(encoder).count(),
+      expected_production_occurrences,
+      "P3b root encoder {encoder} escaped its codec and first-authority owners"
+    );
+    assert_eq!(
+      first_authority.matches(encoder).count(),
+      expected_first_authority_occurrences,
+      "P3b root encoder {encoder} has an unexpected first-authority call shape"
+    );
   }
 
   let reference_source = fs::read_to_string(root.join("aeordb-lib/spec/engine/v4_root_migration_spec.rs")).unwrap();
