@@ -27,6 +27,7 @@ pub enum NativeDurabilityOperation {
   FileBarrier,
   ParentDirectorySync,
   DurableReplace,
+  DurableInstallNew,
   Preallocation,
   ReadBack,
   FileIdentity,
@@ -41,6 +42,7 @@ impl NativeDurabilityOperation {
       Self::FileBarrier => "file_barrier",
       Self::ParentDirectorySync => "parent_directory_sync",
       Self::DurableReplace => "durable_replace",
+      Self::DurableInstallNew => "durable_install_new",
       Self::Preallocation => "preallocation",
       Self::ReadBack => "read_back",
       Self::FileIdentity => "file_identity",
@@ -279,6 +281,76 @@ pub fn preallocate_file(file: &File, length: u64) -> NativeDurabilityResult<()> 
 
 pub fn durable_replace_native(from: impl AsRef<Path>, to: impl AsRef<Path>) -> NativeDurabilityResult<()> {
   durable_replace_with_mechanism(from.as_ref(), to.as_ref()).map(|_| ())
+}
+
+/// Durably installs `from` at a previously absent `to` without replacing an
+/// existing namespace entry. The source file must already contain its final
+/// bytes; this function barriers it before the atomic no-clobber install.
+pub fn durable_install_new_native(from: impl AsRef<Path>, to: impl AsRef<Path>) -> NativeDurabilityResult<()> {
+  let from = from.as_ref();
+  let to = to.as_ref();
+  if from == to {
+    return Err(NativeDurabilityError::invalid(NativeDurabilityOperation::DurableInstallNew, "source and destination must differ"));
+  }
+  let source_metadata =
+    std::fs::symlink_metadata(from).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableInstallNew, error))?;
+  if !source_metadata.file_type().is_file() {
+    return Err(NativeDurabilityError::invalid(
+      NativeDurabilityOperation::DurableInstallNew,
+      "source must be a regular file and not a symlink",
+    ));
+  }
+  let source_identity =
+    platform_file_identity(from).map_err(|error| remap_native_error(error, NativeDurabilityOperation::DurableInstallNew))?;
+  let source = File::open(from).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableInstallNew, error))?;
+  sync_file_all_native(&source).map_err(|error| remap_native_error(error, NativeDurabilityOperation::DurableInstallNew))?;
+
+  sync_install_parents(from, to)?;
+  std::fs::hard_link(from, to).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableInstallNew, error))?;
+
+  let post_install = (|| {
+    let destination_metadata =
+      std::fs::symlink_metadata(to).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableInstallNew, error))?;
+    if !destination_metadata.file_type().is_file() {
+      return Err(NativeDurabilityError::verification(
+        NativeDurabilityOperation::DurableInstallNew,
+        "installed destination is not a regular file",
+      ));
+    }
+    let destination_identity =
+      platform_file_identity(to).map_err(|error| remap_native_error(error, NativeDurabilityOperation::DurableInstallNew))?;
+    if !source_identity.represents_same_physical_file_as(destination_identity) {
+      return Err(NativeDurabilityError::verification(
+        NativeDurabilityOperation::DurableInstallNew,
+        "installed destination does not identify the source file",
+      ));
+    }
+    sync_install_parents(from, to)?;
+    std::fs::remove_file(from).map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::DurableInstallNew, error))?;
+    sync_install_parents(from, to)
+  })();
+  post_install.map_err(|error| NativeDurabilityError::uncertain(NativeDurabilityOperation::DurableInstallNew, error))
+}
+
+fn remap_native_error(error: NativeDurabilityError, operation: NativeDurabilityOperation) -> NativeDurabilityError {
+  if let Some(raw_error) = error.raw_os_error() {
+    return NativeDurabilityError::from_io(operation, io::Error::from_raw_os_error(raw_error));
+  }
+  match error.class() {
+    NativeDurabilityErrorClass::Unsupported => {
+      NativeDurabilityError { operation, class: NativeDurabilityErrorClass::Unsupported, message: error.message, source: error.source }
+    }
+    NativeDurabilityErrorClass::Io => {
+      NativeDurabilityError { operation, class: NativeDurabilityErrorClass::Io, message: error.message, source: error.source }
+    }
+    NativeDurabilityErrorClass::UncertainCompletion => NativeDurabilityError::uncertain(operation, error),
+    NativeDurabilityErrorClass::Verification => NativeDurabilityError::verification(operation, error.message),
+    NativeDurabilityErrorClass::InvalidInput => NativeDurabilityError::invalid(operation, error.message),
+  }
+}
+
+fn sync_install_parents(from: &Path, to: &Path) -> NativeDurabilityResult<()> {
+  sync_rename_parents(from, to).map_err(|error| remap_native_error(error, NativeDurabilityOperation::DurableInstallNew))
 }
 
 fn durable_replace_with_mechanism(from: &Path, to: &Path) -> NativeDurabilityResult<NativeDurabilityMechanism> {
@@ -556,7 +628,7 @@ fn sync_data_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
 
 #[cfg(windows)]
 fn sync_data_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
-  file.sync_data()?;
+  sync_windows_file(file)?;
   Ok(NativeDurabilityMechanism::WindowsFlushFileBuffers)
 }
 
@@ -582,8 +654,31 @@ fn sync_all_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
 
 #[cfg(windows)]
 fn sync_all_platform(file: &File) -> io::Result<NativeDurabilityMechanism> {
-  file.sync_all()?;
+  sync_windows_file(file)?;
   Ok(NativeDurabilityMechanism::WindowsFlushFileBuffers)
+}
+
+#[cfg(windows)]
+fn sync_windows_file(file: &File) -> io::Result<()> {
+  use std::os::windows::io::{AsRawHandle, FromRawHandle};
+  use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE};
+  use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile};
+
+  match file.sync_all() {
+    Ok(()) => return Ok(()),
+    Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {}
+    Err(error) => return Err(error),
+  }
+
+  // FlushFileBuffers requires a write-capable handle even when the immutable
+  // bytes were written and closed before this verification barrier.
+  let reopened_handle =
+    unsafe { ReOpenFile(file.as_raw_handle(), FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0) };
+  if reopened_handle == INVALID_HANDLE_VALUE {
+    return Err(io::Error::last_os_error());
+  }
+  let reopened = unsafe { File::from_raw_handle(reopened_handle) };
+  reopened.sync_all()
 }
 
 #[cfg(unix)]

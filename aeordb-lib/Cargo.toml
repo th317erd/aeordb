@@ -105,7 +105,10 @@ thiserror = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
+  "Win32_System_SystemServices",
   "Win32_System_ProcessStatus",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
@@ -728,6 +731,10 @@ path = "spec/engine/gc_v4_lineage_recovery_spec.rs"
 [[test]]
 name = "gc_v4_mark_runtime_spec"
 path = "spec/engine/gc_v4_mark_runtime_spec.rs"
+
+[[test]]
+name = "gc_v4_mark_workspace_spec"
+path = "spec/engine/gc_v4_mark_workspace_spec.rs"
 
 [[test]]
 name = "v4_read_pin_spec"

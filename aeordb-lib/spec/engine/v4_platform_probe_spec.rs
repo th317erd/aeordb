@@ -8,8 +8,8 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::durability::{rename_durable, sync_parent_dir};
 use aeordb::engine::native_durability::{
   NativeDurabilityError, NativeDurabilityErrorClass, NativeDurabilityMechanism, NativeDurabilityOperation, NativeOperationSupport,
-  PlatformFileIdentityDescriptorV1, durable_replace_native, platform_file_identity, preallocate_file, probe_native_durability,
-  sync_directory_native, sync_file_all_native, sync_file_data_native,
+  PlatformFileIdentityDescriptorV1, durable_install_new_native, durable_replace_native, platform_file_identity, preallocate_file,
+  probe_native_durability, sync_directory_native, sync_file_all_native, sync_file_data_native,
 };
 use aeordb::engine::v4::control_store::{ControlStoreReadV1, ControlStoreSlotsV1, select_control_store_read};
 use aeordb::engine::v4::config_value::{
@@ -186,6 +186,36 @@ fn native_primitives_preserve_identity_across_rename_and_replace_contents_durabl
 }
 
 #[test]
+fn native_durable_install_is_atomic_no_clobber_and_removes_only_its_source_name() {
+  let temp = tempfile::tempdir().unwrap();
+  let source = temp.path().join("source.bin");
+  let destination = temp.path().join("destination.bin");
+  fs::write(&source, b"new immutable payload").unwrap();
+  let read_only_source = File::open(&source).unwrap();
+  sync_file_data_native(&read_only_source).unwrap();
+  sync_file_all_native(&read_only_source).unwrap();
+
+  #[cfg(windows)]
+  if let Err(error) = sync_directory_native(temp.path()) {
+    assert_eq!(error.class(), NativeDurabilityErrorClass::Unsupported);
+    return;
+  }
+
+  durable_install_new_native(&source, &destination).unwrap();
+  assert_eq!(fs::read(&destination).unwrap(), b"new immutable payload");
+  assert!(!source.exists());
+
+  let collision_source = temp.path().join("collision-source.bin");
+  fs::write(&collision_source, b"must remain pending").unwrap();
+  let error = durable_install_new_native(&collision_source, &destination).unwrap_err();
+  assert_eq!(error.operation(), NativeDurabilityOperation::DurableInstallNew);
+  assert_eq!(error.class(), NativeDurabilityErrorClass::Io);
+  assert_eq!(error.io_error_kind(), Some(io::ErrorKind::AlreadyExists));
+  assert_eq!(fs::read(&destination).unwrap(), b"new immutable payload");
+  assert_eq!(fs::read(&collision_source).unwrap(), b"must remain pending");
+}
+
+#[test]
 fn legacy_durability_helpers_delegate_to_the_proven_native_path() {
   let temp = tempfile::tempdir().unwrap();
   let source = temp.path().join("legacy-source.bin");
@@ -272,6 +302,28 @@ fn native_failures_are_typed_and_never_reported_as_success() {
   let file = File::create(temp.path().join("zero-length.bin")).unwrap();
   assert_eq!(preallocate_file(&file, 0).unwrap_err().class(), NativeDurabilityErrorClass::InvalidInput);
   assert_eq!(durable_replace_native(&destination, &destination).unwrap_err().class(), NativeDurabilityErrorClass::InvalidInput);
+  assert_eq!(durable_install_new_native(&destination, &destination).unwrap_err().class(), NativeDurabilityErrorClass::InvalidInput);
+
+  let directory_source = temp.path().join("directory-source");
+  fs::create_dir(&directory_source).unwrap();
+  let install_target = temp.path().join("install-target");
+  let error = durable_install_new_native(&directory_source, &install_target).unwrap_err();
+  assert_eq!(error.operation(), NativeDurabilityOperation::DurableInstallNew);
+  assert_eq!(error.class(), NativeDurabilityErrorClass::InvalidInput);
+  assert!(!install_target.exists());
+
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::symlink;
+    let source_target = temp.path().join("source-target");
+    let source_link = temp.path().join("source-link");
+    fs::write(&source_target, b"target").unwrap();
+    symlink(&source_target, &source_link).unwrap();
+    let error = durable_install_new_native(&source_link, &install_target).unwrap_err();
+    assert_eq!(error.operation(), NativeDurabilityOperation::DurableInstallNew);
+    assert_eq!(error.class(), NativeDurabilityErrorClass::InvalidInput);
+    assert!(!install_target.exists());
+  }
 }
 
 #[test]

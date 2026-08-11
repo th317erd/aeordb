@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1431,
+  "maximum_occurrences": 1485,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -5364,9 +5364,69 @@
       "review": "validated-local-invariant"
     },
     {
+      "id": "esq-v1-444c6d5f148ae0bb24f4-00",
+      "file": "aeordb-lib/src/engine/kv_snapshot.rs",
+      "line": 412,
+      "column": 24,
+      "enclosing_item": "impl ReadSnapshot::visit_captured_slots",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (self . bucket_count) . map_err (| _ | EngineError :: ResourceExhausted (\"captured KV bucket count does not fit the v4 mark contract\" . to_string ()))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-d0f72a0e52e2bde3b534-00",
+      "file": "aeordb-lib/src/engine/kv_snapshot.rs",
+      "line": 431,
+      "column": 25,
+      "enclosing_item": "impl ReadSnapshot::visit_captured_slots",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bucket_index) . map_err (| _ | EngineError :: ResourceExhausted (\"captured KV bucket index does not fit the v4 mark contract\" . to_string ()))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-7ed4c10ba2f20f4ec71e-00",
+      "file": "aeordb-lib/src/engine/kv_snapshot.rs",
+      "line": 433,
+      "column": 23,
+      "enclosing_item": "impl ReadSnapshot::visit_captured_slots",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (slot_index) . map_err (| _ | EngineError :: ResourceExhausted (\"captured KV slot index does not fit the v4 mark contract\" . to_string ()))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-a048e8be110f44f7da72-00",
+      "file": "aeordb-lib/src/engine/kv_snapshot.rs",
+      "line": 449,
+      "column": 26,
+      "enclosing_item": "impl ReadSnapshot::visit_captured_slots",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (self . entry_count) . map_err (| _ | EngineError :: ResourceExhausted (\"captured KV entry count does not fit the v4 mark contract\" . to_string ()))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-7dfcf3861b61596f5d39-00",
+      "file": "aeordb-lib/src/engine/kv_snapshot.rs",
+      "line": 482,
+      "column": 25,
+      "enclosing_item": "impl ReadSnapshot::find_captured_slot",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bucket_index) . map_err (| _ | EngineError :: ResourceExhausted (\"captured KV bucket index does not fit the v4 mark contract\" . to_string ()))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-ff41dc17a8e61039ac83-00",
+      "file": "aeordb-lib/src/engine/kv_snapshot.rs",
+      "line": 484,
+      "column": 23,
+      "enclosing_item": "impl ReadSnapshot::find_captured_slot",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (slot_index) . map_err (| _ | EngineError :: ResourceExhausted (\"captured KV slot index does not fit the v4 mark contract\" . to_string ()))",
+      "review": "boundary-validation-failure"
+    },
+    {
       "id": "esq-v1-8866861645598a5c3f05-00",
       "file": "aeordb-lib/src/engine/kv_snapshot.rs",
-      "line": 421,
+      "line": 560,
       "column": 5,
       "enclosing_item": "impl ReadSnapshot::is_deleted_in_buffer",
       "kind": "default_on_error",
@@ -5656,7 +5716,7 @@
     {
       "id": "esq-v1-6f0b74f06257ef03e65d-00",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 470,
+      "line": 542,
       "column": 3,
       "enclosing_item": "parent_or_current",
       "kind": "default_on_error",
@@ -5666,7 +5726,7 @@
     {
       "id": "esq-v1-9525d4e93a60d8251120-00",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 777,
+      "line": 872,
       "column": 13,
       "enclosing_item": "native_filesystem_info",
       "kind": "default_on_error",
@@ -5676,7 +5736,7 @@
     {
       "id": "esq-v1-044e3b0b8782c67d62bc-00",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 813,
+      "line": 908,
       "column": 13,
       "enclosing_item": "native_filesystem_info",
       "kind": "default_on_error",
@@ -5686,7 +5746,7 @@
     {
       "id": "esq-v1-5a8ebed145b661415a47-00",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 867,
+      "line": 962,
       "column": 22,
       "enclosing_item": "encode_system_time",
       "kind": "default_on_error",
@@ -5696,7 +5756,7 @@
     {
       "id": "esq-v1-5a8ebed145b661415a47-01",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 870,
+      "line": 965,
       "column": 9,
       "enclosing_item": "encode_system_time",
       "kind": "default_on_error",
@@ -8814,9 +8874,39 @@
       "review": "validated-local-invariant"
     },
     {
+      "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 290,
+      "column": 33,
+      "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
+      "kind": "error_conversion",
+      "pattern": "decoded . database_id . try_into () . map_err (| _ | { retirement_sink_invalid (\"retirement_journal_database_mismatch\" , \"retirement-journal database identity has the wrong width\") })",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-f4ccba5da869e4e98393-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 709,
+      "column": 33,
+      "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
+      "kind": "error_conversion",
+      "pattern": "evidence . database_id . try_into () . map_err (| _ | { corrupt_evidence_sink_invalid (\"corrupt_gc_evidence_database\" , \"corrupt-evidence database identity has the wrong width\") })",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-e380cca4946b81a36b16-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 712,
+      "column": 32,
+      "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (evidence . detected_at_ms) . map_err (| _ | { corrupt_evidence_sink_invalid (\"corrupt_gc_evidence_timestamp\" , \"corrupt-evidence detection time is outside the storage range\") })",
+      "review": "typed-format-failure"
+    },
+    {
       "id": "esq-v1-df09a83fabeeaa08df7d-00",
       "file": "aeordb-lib/src/engine/v4/gc.rs",
-      "line": 329,
+      "line": 331,
       "column": 6,
       "enclosing_item": "decode_gc_artifact_envelope",
       "kind": "error_conversion",
@@ -8826,7 +8916,7 @@
     {
       "id": "esq-v1-008a91751cdd962343a9-00",
       "file": "aeordb-lib/src/engine/v4/gc.rs",
-      "line": 336,
+      "line": 338,
       "column": 21,
       "enclosing_item": "decode_gc_artifact_envelope",
       "kind": "error_conversion",
@@ -8836,7 +8926,7 @@
     {
       "id": "esq-v1-02d948a6d4acb513d764-00",
       "file": "aeordb-lib/src/engine/v4/gc.rs",
-      "line": 469,
+      "line": 483,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -8846,7 +8936,7 @@
     {
       "id": "esq-v1-a704213dc0d43c128101-00",
       "file": "aeordb-lib/src/engine/v4/gc.rs",
-      "line": 476,
+      "line": 490,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -8856,7 +8946,7 @@
     {
       "id": "esq-v1-1aa26ae62594c22b1d54-00",
       "file": "aeordb-lib/src/engine/v4/gc.rs",
-      "line": 483,
+      "line": 497,
       "column": 25,
       "enclosing_item": "u64_at",
       "kind": "panic_method",
@@ -8866,7 +8956,7 @@
     {
       "id": "esq-v1-3731f21d4b24604f77b8-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 311,
+      "line": 316,
       "column": 8,
       "enclosing_item": "impl AuditPageRecordIterV1 < 'a >::next",
       "kind": "result_status_probe",
@@ -8874,9 +8964,39 @@
       "review": "iterator-terminal-state"
     },
     {
+      "id": "esq-v1-fba32b0cc44f7d4df94c-00",
+      "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
+      "line": 524,
+      "column": 14,
+      "enclosing_item": "encode_corrupt_gc_evidence_v1",
+      "kind": "default_on_error",
+      "pattern": "request . observed_entry_type . unwrap_or (0)",
+      "review": "bounded-authority-default"
+    },
+    {
+      "id": "esq-v1-4d4a50b29b71e2d3b92a-00",
+      "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
+      "line": 548,
+      "column": 23,
+      "enclosing_item": "encode_corrupt_gc_evidence_v1",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (request . context . len ()) . map_err (| _ | overflow_error (\"corrupt evidence context length\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-05c61cf4bb2a8ce3bfe1-00",
+      "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
+      "line": 550,
+      "column": 23,
+      "enclosing_item": "encode_corrupt_gc_evidence_v1",
+      "kind": "error_conversion",
+      "pattern": "u16 :: try_from (evidence_count) . map_err (| _ | overflow_error (\"corrupt evidence hash count\"))",
+      "review": "typed-format-failure"
+    },
+    {
       "id": "esq-v1-024aa74798e4b302d7b5-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 485,
+      "line": 669,
       "column": 24,
       "enclosing_item": "decode_detail",
       "kind": "error_conversion",
@@ -8886,7 +9006,7 @@
     {
       "id": "esq-v1-822c81d36220c6fe36ac-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 554,
+      "line": 738,
       "column": 9,
       "enclosing_item": "record_length",
       "kind": "error_conversion",
@@ -8896,7 +9016,7 @@
     {
       "id": "esq-v1-acbe37dc1c932b002c52-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 605,
+      "line": 789,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -8906,7 +9026,7 @@
     {
       "id": "esq-v1-25622b67ba4b23fe57c1-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 606,
+      "line": 790,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -8916,7 +9036,7 @@
     {
       "id": "esq-v1-6430cdfcc29d926097b5-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 608,
+      "line": 792,
       "column": 24,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -8926,7 +9046,7 @@
     {
       "id": "esq-v1-9b56fc5fd8d087bd563f-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 702,
+      "line": 886,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -8936,7 +9056,7 @@
     {
       "id": "esq-v1-815070eac27950899c3f-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 703,
+      "line": 887,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -8946,7 +9066,7 @@
     {
       "id": "esq-v1-b2c4f06f11c6c2df6e75-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 704,
+      "line": 888,
       "column": 24,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -8956,7 +9076,7 @@
     {
       "id": "esq-v1-bec93b3eb4eff5c839e6-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 782,
+      "line": 966,
       "column": 21,
       "enclosing_item": "decode_manifest",
       "kind": "error_conversion",
@@ -8966,7 +9086,7 @@
     {
       "id": "esq-v1-c478652156798178c077-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 885,
+      "line": 1069,
       "column": 5,
       "enclosing_item": "decode_corrupt_evidence",
       "kind": "error_conversion",
@@ -8976,7 +9096,7 @@
     {
       "id": "esq-v1-b738fcad7da2fe4e4bdb-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 977,
+      "line": 1161,
       "column": 26,
       "enclosing_item": "decode_pin",
       "kind": "error_conversion",
@@ -8986,12 +9106,102 @@
     {
       "id": "esq-v1-74e1d14eb98180869147-00",
       "file": "aeordb-lib/src/engine/v4/gc_audit.rs",
-      "line": 1172,
+      "line": 1369,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",
       "pattern": "raw . try_into () . expect (\"checked audit i64 width\")",
       "review": "validated-local-invariant"
+    },
+    {
+      "id": "esq-v1-b8db5efb0881640cb084-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 213,
+      "column": 7,
+      "enclosing_item": "impl RetirementLineageRecoveryReconcilerV1 < 'a >::recover_group",
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-0031c792ca9b095a0ddc-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 272,
+      "column": 24,
+      "enclosing_item": "impl RetirementLineageRecoveryReconcilerV1 < 'a >::recover_group",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (missing_count) . map_err (| _ | RetirementLineageRecoveryErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-0f3f809887a763bb19eb-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 295,
+      "column": 9,
+      "enclosing_item": "impl RetirementLineageRecoveryReconcilerV1 < 'a >::validate_group",
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-0136f5d61d00cadcacd6-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 392,
+      "column": 33,
+      "enclosing_item": "impl RetirementLineageRecoveryReconcilerV1 < 'a >::emit_evidence",
+      "kind": "error_conversion",
+      "pattern": "evidence_digest [.. 16] . try_into () . map_err (| _ | RetirementLineageRecoveryErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-be39b6b56440459b8574-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 416,
+      "column": 31,
+      "enclosing_item": "impl RetirementLineageRecoveryReconcilerV1 < 'a >::emit_evidence",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (encoded . value . len ()) . map_err (| _ | RetirementLineageRecoveryErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-39d17df06321084dd842-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 440,
+      "column": 36,
+      "enclosing_item": "recovery_evidence_context",
+      "kind": "error_conversion",
+      "pattern": "i64 :: try_from (observation_count) . map_err (| _ | RetirementLineageRecoveryErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-d9cfa5528937a8298fd0-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 446,
+      "column": 7,
+      "enclosing_item": "recovery_evidence_context",
+      "kind": "error_conversion",
+      "pattern": "i64 :: try_from (selected_write_sequence . unwrap_or (0)) . map_err (| _ | RetirementLineageRecoveryErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-59a2d759781919cf37be-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 446,
+      "column": 21,
+      "enclosing_item": "recovery_evidence_context",
+      "kind": "default_on_error",
+      "pattern": "selected_write_sequence . unwrap_or (0)",
+      "review": "bounded-authority-default"
+    },
+    {
+      "id": "esq-v1-ab10ede5f2ea586bf852-00",
+      "file": "aeordb-lib/src/engine/v4/gc_lineage_recovery.rs",
+      "line": 451,
+      "column": 36,
+      "enclosing_item": "recovery_evidence_context",
+      "kind": "error_conversion",
+      "pattern": "i64 :: try_from (synthesized_count) . map_err (| _ | RetirementLineageRecoveryErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-b59e5f6ba768e6cc8b3d-00",
@@ -9114,41 +9324,41 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-b117ae5750ebb1e81eee-00",
+      "id": "esq-v1-e147cccbfd9e19195610-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 612,
+      "line": 617,
       "column": 22,
-      "enclosing_item": "validate_workspace_body",
+      "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
       "pattern": "usize :: try_from (byte_count_u64) . map_err (| _ | overflow_error (\"workspace bitmap byte count\"))",
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-70574fe72773cf4ec42c-00",
+      "id": "esq-v1-69bcbb18ad2fc437c9d3-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 637,
+      "line": 642,
       "column": 24,
-      "enclosing_item": "validate_workspace_body",
+      "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
       "pattern": "usize :: try_from (u32_at (body , 12) ?) . map_err (| _ | overflow_error (\"workspace records length\"))",
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-0d385c94b95bf0bb26bb-00",
+      "id": "esq-v1-92a2818b3f47bdc616e3-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 645,
+      "line": 650,
       "column": 6,
-      "enclosing_item": "validate_workspace_body",
+      "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
       "pattern": "usize :: try_from (count) . map_err (| _ | overflow_error (\"workspace record count\"))",
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-081aaebc897ff988d537-00",
+      "id": "esq-v1-b4f19423b2660f1f3478-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 651,
+      "line": 656,
       "column": 25,
-      "enclosing_item": "validate_workspace_body",
+      "enclosing_item": "validate_mark_workspace_body",
       "kind": "error_conversion",
       "pattern": "usize :: try_from (u32_at (body , cursor) ?) . map_err (| _ | overflow_error (\"workspace record length\"))",
       "review": "typed-format-failure"
@@ -9156,7 +9366,7 @@
     {
       "id": "esq-v1-eb5102060c4279ceaa4f-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 713,
+      "line": 718,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9166,7 +9376,7 @@
     {
       "id": "esq-v1-1f78f70c3414d09cda1c-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 743,
+      "line": 748,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9176,7 +9386,7 @@
     {
       "id": "esq-v1-80e805e6ba27ddfd6f21-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 755,
+      "line": 760,
       "column": 28,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9186,7 +9396,7 @@
     {
       "id": "esq-v1-5b379ba1d70e96efb50e-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 765,
+      "line": 770,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9196,7 +9406,7 @@
     {
       "id": "esq-v1-8f98f9bddae2cc901a14-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 780,
+      "line": 785,
       "column": 29,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9206,7 +9416,7 @@
     {
       "id": "esq-v1-57db0e0ad10d7ba56a7a-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 794,
+      "line": 799,
       "column": 28,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9216,7 +9426,7 @@
     {
       "id": "esq-v1-54579fd5c71ee197f885-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 803,
+      "line": 808,
       "column": 9,
       "enclosing_item": "validate_workspace_record",
       "kind": "error_conversion",
@@ -9226,7 +9436,7 @@
     {
       "id": "esq-v1-bc578c6aed0f01d7706b-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark.rs",
-      "line": 872,
+      "line": 877,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",
@@ -9234,9 +9444,299 @@
       "review": "validated-local-invariant"
     },
     {
+      "id": "esq-v1-9a7781cd98f6b9a4dd1e-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_runtime.rs",
+      "line": 83,
+      "column": 22,
+      "enclosing_item": "impl DenseMarkBitmapV1::new",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (byte_count_u64) . map_err (| _ | MarkBitmapErrorV1 :: Geometry (\"bitmap does not fit address space\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-e2563e7f78a714fbd7d5-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_runtime.rs",
+      "line": 152,
+      "column": 22,
+      "enclosing_item": "impl DenseMarkBitmapV1::position",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (bit_index / 8) . map_err (| _ | MarkBitmapErrorV1 :: Position)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-4a39c7561587839ea769-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 289,
+      "column": 16,
+      "enclosing_item": "impl DurableMarkWorkspaceV1::create",
+      "kind": "default_on_error",
+      "pattern": "options . scratch_root . as_deref () . unwrap_or (database_parent)",
+      "review": "bounded-authority-default"
+    },
+    {
+      "id": "esq-v1-758511023d97ccd9817e-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 356,
+      "column": 7,
+      "enclosing_item": "impl DurableMarkWorkspaceV1::write_object",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (stored_length) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"object length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-e9c4b4517378b346feab-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 370,
+      "column": 28,
+      "enclosing_item": "impl DurableMarkWorkspaceV1::write_object",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (size_of :: < DurableMarkWorkspaceDescriptorV1 > () + name_length) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"descriptor memory exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-58acc17e5ecfc8f0b185-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 408,
+      "column": 24,
+      "enclosing_item": "impl DurableMarkWorkspaceV1::complete",
+      "kind": "error_conversion",
+      "pattern": "u16 :: try_from (self . descriptors . len ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"object count exceeds frozen manifest width\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-d473a2a68f592425dc08-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 412,
+      "column": 7,
+      "enclosing_item": "impl DurableMarkWorkspaceV1::complete",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (manifest_length) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"manifest length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-1159eebfa1c3062842d1-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 521,
+      "column": 7,
+      "enclosing_item": "impl DurableMarkWorkspaceV1::write_object_file",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (body . len ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"object body length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-4c34e5ba13b5442df3bc-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 553,
+      "column": 18,
+      "enclosing_item": "impl DurableMarkWorkspaceV1::write_manifest_file",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (manifest . len ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"manifest length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-db637663dfd5068928f8-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 653,
+      "column": 14,
+      "enclosing_item": "create_platform_private_directory",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (size_of :: < SECURITY_ATTRIBUTES > ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows security attributes exceed u32\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-7e4345f002d6d75481b1-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 750,
+      "column": 5,
+      "enclosing_item": "windows_current_user_sid",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (size_of :: < TOKEN_USER > ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows token header exceeds u32\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-fb5ce579809e1a977f01-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 755,
+      "column": 5,
+      "enclosing_item": "windows_current_user_sid",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (required_bytes) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows token size exceeds usize\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-f2bf1c46543ddad46544-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 785,
+      "column": 13,
+      "enclosing_item": "windows_current_user_sid",
+      "kind": "error_conversion",
+      "pattern": "String :: from_utf16 (unsafe { std :: slice :: from_raw_parts (raw_sid_string , length) }) . map_err (| _ | MarkWorkspaceErrorV1 :: Path (\"Windows workspace owner SID is not valid UTF-16\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-c1311e7deaf52331056a-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 842,
+      "column": 18,
+      "enclosing_item": "enforce_run_cap",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (manifest_bytes) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"manifest length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-97de5df1eaec303d26cd-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 863,
+      "column": 18,
+      "enclosing_item": "manifest_length",
+      "kind": "default_on_error",
+      "pattern": "additional_name_length . unwrap_or (0)",
+      "review": "bounded-authority-default"
+    },
+    {
+      "id": "esq-v1-d22b83e35504b81f2c51-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 889,
+      "column": 26,
+      "enclosing_item": "encode_manifest",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (length) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"manifest length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-a99797767be0827ec260-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 900,
+      "column": 5,
+      "enclosing_item": "encode_manifest",
+      "kind": "error_conversion",
+      "pattern": "u16 :: try_from (descriptors . len ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"object count exceeds u16\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-032b73a364bece4eafde-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 916,
+      "column": 7,
+      "enclosing_item": "encode_manifest",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (descriptor . name . len ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"descriptor name exceeds u32\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-f5e552ef433f1ae77c0e-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 962,
+      "column": 20,
+      "enclosing_item": "stream_file_digest",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (read) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"readback count exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-99874e4a452f57413152-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 742,
+      "column": 29,
+      "enclosing_item": "impl RetirementJournalReplacementCoordinatorV1 < 'coordinator , 'owner >::prepare",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (batch . replacements . len ()) . map_err (| _ | RetirementJournalReplacementAdmissionErrorV1 :: Preflight (\"replacement count exceeds u32\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-3568baeb31a260286058-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 907,
+      "column": 27,
+      "enclosing_item": "retirement_journal_replacement_batch_digest_v1",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (batch . replacements . len ()) . map_err (| _ | RetirementJournalReplacementAdmissionErrorV1 :: Preflight (\"replacement count exceeds u32\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-d1ac4a4e0eccd7d04809-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 1192,
+      "column": 41,
+      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::preflight_record_batch",
+      "kind": "error_conversion",
+      "pattern": "encoded [8 .. 16] . try_into () . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-7fd6acfc452b039de5f9-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 1240,
+      "column": 39,
+      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::validate_order",
+      "kind": "error_conversion",
+      "pattern": "encoded [8 .. 16] . try_into () . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-ebca7a6d4001c52e8d58-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 1284,
+      "column": 31,
+      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::flush_pending",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (encoded . value . len ()) . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-e20f2faf36fefe6a0111-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 1321,
+      "column": 27,
+      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::encode_pending_segment",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (self . records . len ()) . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-b9ee108cf38bb1b167d3-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 1386,
+      "column": 3,
+      "enclosing_item": "required_memory_bytes",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bytes) . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-04fce5a85a12011c3fd8-00",
+      "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
+      "line": 1412,
+      "column": 30,
+      "enclosing_item": "encode_record",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (record_length) . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-16d9b5f6dc185467ecc5-00",
+      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
+      "line": 431,
+      "column": 33,
+      "enclosing_item": "impl RetirementJournalReferenceModelV1 < 'a >::observe_segment_inner",
+      "kind": "error_conversion",
+      "pattern": "segment . database_id . try_into () . map_err (| _ | RetirementJournalModelErrorV1 :: DatabaseMismatch)",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-742f474ad0a59045c7e9-00",
+      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
+      "line": 683,
+      "column": 37,
+      "enclosing_item": "impl PhysicalInventoryReferenceModelV1 < 'a >::observe_page_inner",
+      "kind": "error_conversion",
+      "pattern": "page . catalog_id . try_into () . map_err (| _ | PhysicalInventoryModelErrorV1 :: CatalogMismatch)",
+      "review": "typed-format-failure"
+    },
+    {
       "id": "esq-v1-d69c59e7f81ed968df5d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 173,
+      "line": 777,
       "column": 21,
       "enclosing_item": "decode_gc_state_artifact",
       "kind": "result_to_option",
@@ -9246,7 +9746,7 @@
     {
       "id": "esq-v1-0fad896bd02956e1a12d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 261,
+      "line": 952,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9256,7 +9756,7 @@
     {
       "id": "esq-v1-3b513984cb21ee14aeed-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 262,
+      "line": 953,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9266,7 +9766,7 @@
     {
       "id": "esq-v1-f97de65fda22feb8586d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 264,
+      "line": 955,
       "column": 24,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9276,7 +9776,7 @@
     {
       "id": "esq-v1-c3eb8bfd62ddd4af65ad-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 289,
+      "line": 980,
       "column": 33,
       "enclosing_item": "decode_page",
       "kind": "result_to_option",
@@ -9286,7 +9786,7 @@
     {
       "id": "esq-v1-7b499a11ba39e5289ab4-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 344,
+      "line": 1037,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9296,7 +9796,7 @@
     {
       "id": "esq-v1-9682f7e161e6a00d2786-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 345,
+      "line": 1038,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9306,7 +9806,7 @@
     {
       "id": "esq-v1-97f58b946df37a7fc762-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 346,
+      "line": 1039,
       "column": 24,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9314,29 +9814,49 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-75a8de7ec98ce8375199-00",
+      "id": "esq-v1-e501772c7ab0535ea704-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 368,
-      "column": 8,
-      "enclosing_item": "decode_directory",
-      "kind": "result_to_option",
-      "pattern": "usize :: try_from (u32_at (body , descriptor_start) ?) . ok ()",
-      "review": "checked-arithmetic-composition"
+      "line": 1142,
+      "column": 22,
+      "enclosing_item": "decode_gc_leaf_descriptor",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (u32_at (body , start) ?) . map_err (| _ | length_error (\"GC leaf lower fence length\"))",
+      "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-bdc2669580c8b81fdef4-00",
+      "id": "esq-v1-af505078ba65844f6bc9-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 369,
-      "column": 8,
-      "enclosing_item": "decode_directory",
-      "kind": "result_to_option",
-      "pattern": "usize :: try_from (u32_at (body , descriptor_start + 4) ?) . ok ()",
-      "review": "checked-arithmetic-composition"
+      "line": 1143,
+      "column": 22,
+      "enclosing_item": "decode_gc_leaf_descriptor",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (u32_at (body , start + 4) ?) . map_err (| _ | length_error (\"GC leaf upper fence length\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-16e0797b94b3cb0b451b-00",
+      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
+      "line": 1206,
+      "column": 22,
+      "enclosing_item": "decode_gc_internal_descriptor",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (u32_at (body , start) ?) . map_err (| _ | length_error (\"GC internal lower fence length\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-ce8580d628977ac40780-00",
+      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
+      "line": 1207,
+      "column": 22,
+      "enclosing_item": "decode_gc_internal_descriptor",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (u32_at (body , start + 4) ?) . map_err (| _ | length_error (\"GC internal upper fence length\"))",
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-b622ffee9afbd97e0268-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 437,
+      "line": 1292,
       "column": 24,
       "enclosing_item": "decode_candidate_delta",
       "kind": "error_conversion",
@@ -9346,7 +9866,7 @@
     {
       "id": "esq-v1-5e8d70d41ee7c1fca58b-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 443,
+      "line": 1298,
       "column": 6,
       "enclosing_item": "decode_candidate_delta",
       "kind": "result_to_option",
@@ -9356,7 +9876,7 @@
     {
       "id": "esq-v1-ec11fc4993531683a1ac-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 610,
+      "line": 1515,
       "column": 21,
       "enclosing_item": "decode_quarantine_manifest_body",
       "kind": "error_conversion",
@@ -9366,7 +9886,7 @@
     {
       "id": "esq-v1-2f40ba51a8085bfa2739-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 664,
+      "line": 1569,
       "column": 15,
       "enclosing_item": "decode_root_retirement_commit",
       "kind": "error_conversion",
@@ -9374,39 +9894,59 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-e28be9b6262fa3eb1ed0-00",
+      "id": "esq-v1-e08b15abd588dc35fd4e-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 737,
-      "column": 24,
-      "enclosing_item": "decode_retirement_journal",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (body , 28) ?) . map_err (| _ | length_error (\"retirement records length\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-02e81cdd26d50a59bf3c-00",
-      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 748,
-      "column": 6,
-      "enclosing_item": "decode_retirement_journal",
+      "line": 1630,
+      "column": 25,
+      "enclosing_item": "retirement_journal_records_v1",
       "kind": "result_to_option",
-      "pattern": "usize :: try_from (count) . ok ()",
+      "pattern": "usize :: try_from (segment . record_count) . ok ()",
       "review": "checked-arithmetic-composition"
     },
     {
-      "id": "esq-v1-caaf8c29cb314aa7fba7-00",
+      "id": "esq-v1-04312ac24523a9fcd63c-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 755,
-      "column": 8,
-      "enclosing_item": "decode_retirement_journal",
+      "line": 1643,
+      "column": 39,
+      "enclosing_item": "decode_retirement_journal_record_v1",
       "kind": "result_to_option",
       "pattern": "usize :: try_from (u32_at (record , 0) ?) . ok ()",
       "review": "checked-arithmetic-composition"
     },
     {
+      "id": "esq-v1-c4c90c7b9311fa46cb9b-00",
+      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
+      "line": 1684,
+      "column": 24,
+      "enclosing_item": "decode_retirement_journal_segment_with_key",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (u32_at (body , 28) ?) . map_err (| _ | length_error (\"retirement records length\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-fecf775983351342a225-00",
+      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
+      "line": 1695,
+      "column": 6,
+      "enclosing_item": "decode_retirement_journal_segment_with_key",
+      "kind": "result_to_option",
+      "pattern": "usize :: try_from (count) . ok ()",
+      "review": "checked-arithmetic-composition"
+    },
+    {
+      "id": "esq-v1-c390d9f996ec6bae97e0-00",
+      "file": "aeordb-lib/src/engine/v4/gc_state.rs",
+      "line": 1921,
+      "column": 25,
+      "enclosing_item": "physical_inventory_records_v1",
+      "kind": "result_to_option",
+      "pattern": "usize :: try_from (page . record_count) . ok ()",
+      "review": "checked-arithmetic-composition"
+    },
+    {
       "id": "esq-v1-2cee9657909643afc341-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1042,
+      "line": 2026,
       "column": 10,
       "enclosing_item": "manifest_summary",
       "kind": "panic_macro",
@@ -9416,7 +9956,7 @@
     {
       "id": "esq-v1-293e07485c6815aaa716-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1060,
+      "line": 2044,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",

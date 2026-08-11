@@ -6,9 +6,9 @@ use crate::engine::HashAlgorithm;
 
 const MARK_CHECKPOINT_VALUE_MAX: usize = 32 + 40 + 256 * 1024 + 4;
 const MARK_JOURNAL_MAX: usize = 16 * 1024 * 1024;
-const WORKSPACE_MANIFEST_MAX: usize = 8 * 1024 * 1024;
-const WORKSPACE_OBJECT_MAX: usize = 64 * 1024 * 1024;
-const WORKSPACE_OBJECT_HEADER: usize = 80;
+pub const WORKSPACE_MANIFEST_MAX: usize = 8 * 1024 * 1024;
+pub const WORKSPACE_OBJECT_MAX: usize = 64 * 1024 * 1024;
+pub const WORKSPACE_OBJECT_HEADER: usize = 80;
 const MAX_WORKSPACE_RECORD: usize = 1024 * 1024;
 const MAX_WORKSPACE_NAME: usize = 4 * 1024;
 const MARK_REQUIRED_CAPABILITY_BITS: &[usize] = &[12, 13, 14, 15, 17];
@@ -548,7 +548,7 @@ pub fn decode_mark_workspace_object(bytes: &[u8], algorithm: HashAlgorithm) -> F
     return Err(trailing_error("mark_workspace_object_body_length", "workspace object body length does not close"));
   }
   let body = &bytes[WORKSPACE_OBJECT_HEADER..WORKSPACE_OBJECT_HEADER + body_length];
-  let logical_record_count = validate_workspace_body(body, kind, generation, algorithm)?;
+  let logical_record_count = validate_mark_workspace_body(body, kind, generation, algorithm)?;
   Ok(MarkWorkspaceObjectV1 { kind, database_id, run_id, generation, checkpoint_sequence, ordinal, logical_record_count })
 }
 
@@ -594,7 +594,12 @@ pub fn validate_mark_checkpoint_workspace(
   Ok(())
 }
 
-fn validate_workspace_body(body: &[u8], kind: MarkWorkspaceObjectKindV1, generation: u64, algorithm: HashAlgorithm) -> FormatResult<u64> {
+pub fn validate_mark_workspace_body(
+  body: &[u8],
+  kind: MarkWorkspaceObjectKindV1,
+  generation: u64,
+  algorithm: HashAlgorithm,
+) -> FormatResult<u64> {
   if kind == MarkWorkspaceObjectKindV1::Bitmap {
     if body.len() < 32 {
       return Err(trailing_error("mark_workspace_bitmap_header", "bitmap body is truncated"));

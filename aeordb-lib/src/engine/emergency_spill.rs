@@ -1035,7 +1035,7 @@ fn read_small_file_no_follow(path: &Path, maximum_length: u64) -> EngineResult<V
   Ok(bytes)
 }
 
-fn open_regular_file_no_follow(path: &Path) -> EngineResult<fs::File> {
+pub(crate) fn open_regular_file_no_follow(path: &Path) -> EngineResult<fs::File> {
   reject_symlink(path, "emergency spill file")?;
   let mut options = OpenOptions::new();
   options.read(true);
