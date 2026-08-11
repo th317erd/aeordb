@@ -612,6 +612,22 @@
           - [x] Pass the complete Linux workspace/all-target suite, all-target compilation, suppression, formatting, documentation, and independent contract gates.
           - [x] Qualify the exact pushed commit on macOS arm64 and Windows x86_64 MSVC using the frozen lockfile and bounded native commands.
           - [x] Record retained activation boundaries and close P3b-3 only after every required proof is green.
+    - [ ] P4: implement bounded physical inventory, logical/physical lifecycle, quarantine, sweep, and receipt-backed Void authority without destructive activation.
+      - [x] P4-1: expose typed physical-inventory readers and build a disconnected streaming inventory/reference model.
+        - [x] Add the `gc_v4_model_spec` campaign target and demonstrate the missing typed inventory API.
+        - [x] Decode physical-inventory rows into exact incarnation, replacement, discovery, retirement, and receipt fields at both hash widths.
+        - [x] Iterate validated physical-inventory pages without allocating a page-sized record collection.
+        - [x] Replace the fixture-only one-child GC directory decoder with the frozen bounded leaf/internal descriptor model required by multi-page inventories.
+        - [x] Map current WAL/KV/rebuild/verify/GC/Void producers and preserve the no-service/no-writer activation boundary.
+        - [x] Prove malformed rows, role mismatch, cancellation/bounds, fixture equality, and reference-model agreement before landing.
+      - [ ] P4-2: persist replacement/retirement lineage and typed corruption evidence before any v4 stable-key replacement.
+      - [ ] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.
+      - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
+      - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.
+      - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
+      - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
+      - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
+      - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.

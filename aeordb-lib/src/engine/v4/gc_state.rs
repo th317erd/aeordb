@@ -1,5 +1,8 @@
 use std::cmp::Ordering;
 
+use thiserror::Error;
+use tokio_util::sync::CancellationToken;
+
 use super::gc::{
   GcArtifactKindV1, PhysicalIncarnationV1, decode_gc_artifact_envelope, decode_physical_incarnation, immutable_gc_artifact_key, u16_at,
   u32_at, u64_at,
@@ -11,6 +14,7 @@ use crate::engine::HashAlgorithm;
 const MAX_MANIFEST_LENGTH: usize = 1_024 * 1_024;
 const MAX_PAGE_LENGTH: usize = 16 * 1_024 * 1_024;
 const MAX_DIRECTORY_LENGTH: usize = 4 * 1_024 * 1_024;
+const MAX_DIRECTORY_ENTRIES: u32 = 65_536;
 const MAX_KEY_LENGTH: usize = 1_024 * 1_024;
 const MAX_DELTAS: usize = 256;
 
@@ -69,18 +73,49 @@ pub struct GcStatePageV1<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct GcPhysicalHintV1 {
+  pub wal_offset: u64,
+  pub total_length: u32,
+  pub write_sequence: u64,
+}
+
+impl GcPhysicalHintV1 {
+  pub fn is_complete(&self) -> bool {
+    self.total_length != 0
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct GcStateDirectoryEntryV1<'a> {
+  pub lower_fence: &'a [u8],
+  pub upper_fence: &'a [u8],
+  pub child_hash: &'a [u8],
+  pub child_generation: u64,
+  pub live_count: u64,
+  pub tombstone_count: u64,
+  pub page_count: u64,
+  pub logical_bytes: u64,
+  pub minimum_page_id: u64,
+  pub maximum_page_id: u64,
+  pub physical_hint: GcPhysicalHintV1,
+}
+
+#[derive(Debug, Clone)]
 pub struct GcStateDirectoryV1<'a> {
   pub role: GcDirectoryRoleV1,
   pub database_id: &'a [u8],
   pub catalog_id: &'a [u8],
   pub generation: u64,
-  pub page_id: u64,
-  pub record_count: u64,
-  pub logical_bytes: u64,
+  pub level: u16,
   pub lower_fence: &'a [u8],
   pub upper_fence: &'a [u8],
-  pub child_hash: &'a [u8],
-  pub child_generation: u64,
+  pub live_count: u64,
+  pub tombstone_count: u64,
+  pub page_count: u64,
+  pub logical_bytes: u64,
+  pub minimum_page_id: u64,
+  pub maximum_page_id: u64,
+  pub entries: Vec<GcStateDirectoryEntryV1<'a>>,
   pub key: Vec<u8>,
 }
 
@@ -139,6 +174,288 @@ pub struct RootExpiryRecordV1<'a> {
   pub evidence_expires_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalInventoryStateV1(u8);
+
+impl PhysicalInventoryStateV1 {
+  pub fn code(self) -> u8 {
+    self.0
+  }
+
+  pub fn is_active(self) -> bool {
+    self.0 == 1
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalInventoryRecordV1<'a> {
+  pub encoded: &'a [u8],
+  pub incarnation: PhysicalIncarnationV1<'a>,
+  pub state: PhysicalInventoryStateV1,
+  pub reason: u8,
+  pub replacement: Option<PhysicalIncarnationV1<'a>>,
+  pub discovered_at_ms: u64,
+  pub retirement_sequence: Option<u64>,
+  pub receipt_hash: Option<&'a [u8]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicalInventoryManifestV1<'a> {
+  pub database_id: &'a [u8],
+  pub generation: u64,
+  pub completed_at_ms: u64,
+  pub kv_layout_fingerprint: &'a [u8],
+  pub audited_wal_offset: u64,
+  pub audited_write_sequence: u64,
+  pub retirement_journal_through_sequence: u64,
+  pub directory_root: Option<&'a [u8]>,
+  pub next_page_id: u64,
+  pub active_count: u64,
+  pub retired_count: u64,
+  pub orphan_count: u64,
+  pub quarantined_count: u64,
+  pub reclaimed_count: u64,
+  pub inventoried_bytes: u64,
+  pub key: Vec<u8>,
+  record_count: u64,
+}
+
+impl PhysicalInventoryManifestV1<'_> {
+  pub fn record_count(&self) -> u64 {
+    self.record_count
+  }
+
+  pub fn is_populated(&self) -> bool {
+    self.directory_root.is_some()
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalInventoryModelSummaryV1 {
+  pub catalog_id: Option<[u8; 16]>,
+  pub page_count: u64,
+  pub record_count: u64,
+  pub inventoried_bytes: u64,
+  pub maximum_page_id: u64,
+}
+
+#[derive(Debug, Error)]
+pub enum PhysicalInventoryModelErrorV1 {
+  #[error("physical inventory traversal was canceled")]
+  Canceled,
+  #[error("physical inventory record limit is below the manifest count")]
+  RecordLimit,
+  #[error("physical inventory page belongs to another database")]
+  DatabaseMismatch,
+  #[error("physical inventory pages disagree on catalog identity")]
+  CatalogMismatch,
+  #[error("physical inventory records are not strictly ordered across pages")]
+  RecordOrder,
+  #[error("physical inventory extents overlap")]
+  ExtentOverlap,
+  #[error("physical inventory counters overflowed")]
+  ArithmeticOverflow,
+  #[error("physical inventory pages do not close against the selected manifest")]
+  ManifestAggregate,
+  #[error(transparent)]
+  Format(#[from] FormatError),
+  #[error("physical inventory model has already failed")]
+  Failed,
+}
+
+impl PhysicalInventoryModelErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Canceled => "physical_inventory_canceled",
+      Self::RecordLimit => "physical_inventory_record_limit",
+      Self::DatabaseMismatch => "physical_inventory_database",
+      Self::CatalogMismatch => "physical_inventory_catalog",
+      Self::RecordOrder => "physical_inventory_record_order",
+      Self::ExtentOverlap => "physical_inventory_extent_overlap",
+      Self::ArithmeticOverflow => "physical_inventory_arithmetic",
+      Self::ManifestAggregate => "physical_inventory_manifest_aggregate",
+      Self::Format(error) => error.code(),
+      Self::Failed => "physical_inventory_failed",
+    }
+  }
+}
+
+/// Constant-memory cross-page validator for one selected inventory manifest.
+///
+/// Storage traversal remains a P4-3 concern. This model consumes one decoded
+/// page at a time and cannot publish inventory, quarantine, or reclaim state.
+#[derive(Debug)]
+pub struct PhysicalInventoryReferenceModelV1<'a> {
+  manifest: &'a PhysicalInventoryManifestV1<'a>,
+  algorithm: HashAlgorithm,
+  cancellation: &'a CancellationToken,
+  maximum_records: u64,
+  catalog_id: Option<[u8; 16]>,
+  page_count: u64,
+  record_count: u64,
+  inventoried_bytes: u64,
+  maximum_page_id: u64,
+  state_counts: [u64; 5],
+  previous_row: Vec<u8>,
+  previous_extent_end: Option<u64>,
+  failed: bool,
+}
+
+impl<'a> PhysicalInventoryReferenceModelV1<'a> {
+  pub fn new(
+    manifest: &'a PhysicalInventoryManifestV1<'a>,
+    algorithm: HashAlgorithm,
+    cancellation: &'a CancellationToken,
+    maximum_records: u64,
+  ) -> Result<Self, PhysicalInventoryModelErrorV1> {
+    if cancellation.is_cancelled() {
+      return Err(PhysicalInventoryModelErrorV1::Canceled);
+    }
+    if manifest.record_count() > maximum_records {
+      return Err(PhysicalInventoryModelErrorV1::RecordLimit);
+    }
+    let hash_width = algorithm.hash_length();
+    if manifest.database_id.len() != 16
+      || manifest.kv_layout_fingerprint.len() != hash_width
+      || manifest.directory_root.is_some_and(|root| root.len() != hash_width)
+      || manifest.key.len() != hash_width
+    {
+      return Err(PhysicalInventoryModelErrorV1::ManifestAggregate);
+    }
+    Ok(Self {
+      manifest,
+      algorithm,
+      cancellation,
+      maximum_records,
+      catalog_id: None,
+      page_count: 0,
+      record_count: 0,
+      inventoried_bytes: 0,
+      maximum_page_id: 0,
+      state_counts: [0; 5],
+      previous_row: Vec::with_capacity(row_length(algorithm, GcDirectoryRoleV1::PhysicalInventory)),
+      previous_extent_end: None,
+      failed: false,
+    })
+  }
+
+  pub fn observe_page(&mut self, page: &GcStatePageV1<'_>) -> Result<(), PhysicalInventoryModelErrorV1> {
+    if self.failed {
+      return Err(PhysicalInventoryModelErrorV1::Failed);
+    }
+    match self.observe_page_inner(page) {
+      Ok(()) => Ok(()),
+      Err(error) => {
+        self.failed = true;
+        Err(error)
+      }
+    }
+  }
+
+  pub fn finish(self) -> Result<PhysicalInventoryModelSummaryV1, PhysicalInventoryModelErrorV1> {
+    if self.failed {
+      return Err(PhysicalInventoryModelErrorV1::Failed);
+    }
+    if self.cancellation.is_cancelled() {
+      return Err(PhysicalInventoryModelErrorV1::Canceled);
+    }
+    let expected_counts = [
+      self.manifest.active_count,
+      self.manifest.retired_count,
+      self.manifest.orphan_count,
+      self.manifest.quarantined_count,
+      self.manifest.reclaimed_count,
+    ];
+    let populated = self.manifest.is_populated();
+    if self.record_count != self.manifest.record_count()
+      || self.inventoried_bytes != self.manifest.inventoried_bytes
+      || self.state_counts != expected_counts
+      || populated != (self.page_count != 0)
+      || populated != self.catalog_id.is_some()
+      || (populated && self.maximum_page_id >= self.manifest.next_page_id)
+      || (!populated && self.maximum_page_id != 0)
+    {
+      return Err(PhysicalInventoryModelErrorV1::ManifestAggregate);
+    }
+    Ok(PhysicalInventoryModelSummaryV1 {
+      catalog_id: self.catalog_id,
+      page_count: self.page_count,
+      record_count: self.record_count,
+      inventoried_bytes: self.inventoried_bytes,
+      maximum_page_id: self.maximum_page_id,
+    })
+  }
+
+  fn observe_page_inner(&mut self, page: &GcStatePageV1<'_>) -> Result<(), PhysicalInventoryModelErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(PhysicalInventoryModelErrorV1::Canceled);
+    }
+    if page.database_id != self.manifest.database_id {
+      return Err(PhysicalInventoryModelErrorV1::DatabaseMismatch);
+    }
+    let page_catalog_id: [u8; 16] = page.catalog_id.try_into().map_err(|_| PhysicalInventoryModelErrorV1::CatalogMismatch)?;
+    if self.catalog_id.is_some_and(|catalog_id| catalog_id != page_catalog_id) {
+      return Err(PhysicalInventoryModelErrorV1::CatalogMismatch);
+    }
+    self.catalog_id = Some(page_catalog_id);
+
+    for record in physical_inventory_records_v1(page, self.algorithm)? {
+      if self.cancellation.is_cancelled() {
+        return Err(PhysicalInventoryModelErrorV1::Canceled);
+      }
+      if self.record_count >= self.maximum_records {
+        return Err(PhysicalInventoryModelErrorV1::RecordLimit);
+      }
+      let record = record?;
+      if !self.previous_row.is_empty()
+        && compare_rows(self.algorithm, GcDirectoryRoleV1::PhysicalInventory, &self.previous_row, record.encoded)? != Ordering::Less
+      {
+        return Err(PhysicalInventoryModelErrorV1::RecordOrder);
+      }
+      if self.previous_extent_end.is_some_and(|end| end > record.incarnation.wal_offset) {
+        return Err(PhysicalInventoryModelErrorV1::ExtentOverlap);
+      }
+      let extent_end = record
+        .incarnation
+        .wal_offset
+        .checked_add(u64::from(record.incarnation.entity_length))
+        .ok_or(PhysicalInventoryModelErrorV1::ArithmeticOverflow)?;
+      let state_index = usize::from(record.state.code() - 1);
+      self.state_counts[state_index] =
+        self.state_counts[state_index].checked_add(1).ok_or(PhysicalInventoryModelErrorV1::ArithmeticOverflow)?;
+      self.record_count = self.record_count.checked_add(1).ok_or(PhysicalInventoryModelErrorV1::ArithmeticOverflow)?;
+      self.previous_row.clear();
+      self.previous_row.extend_from_slice(record.encoded);
+      self.previous_extent_end = Some(extent_end);
+    }
+    self.page_count = self.page_count.checked_add(1).ok_or(PhysicalInventoryModelErrorV1::ArithmeticOverflow)?;
+    self.inventoried_bytes =
+      self.inventoried_bytes.checked_add(page.logical_bytes).ok_or(PhysicalInventoryModelErrorV1::ArithmeticOverflow)?;
+    self.maximum_page_id = self.maximum_page_id.max(page.page_id);
+    Ok(())
+  }
+}
+
+#[derive(Debug)]
+pub struct PhysicalInventoryRecordsV1<'a> {
+  rows: std::slice::ChunksExact<'a, u8>,
+  algorithm: HashAlgorithm,
+}
+
+impl<'a> Iterator for PhysicalInventoryRecordsV1<'a> {
+  type Item = FormatResult<PhysicalInventoryRecordV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.rows.next().map(|row| decode_physical_inventory_record_v1(row, self.algorithm))
+  }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    self.rows.size_hint()
+  }
+}
+
+impl ExactSizeIterator for PhysicalInventoryRecordsV1<'_> {}
+
 impl GcStateArtifactV1<'_> {
   pub fn key(&self) -> &[u8] {
     match self {
@@ -156,7 +473,7 @@ impl GcStateArtifactV1<'_> {
     match self {
       Self::Page(page) => format!("gc:page:{}:page={}:records={}", page.role.page_name(), page.page_id, page.record_count),
       Self::Directory(directory) => {
-        format!("gc:directory:{}:level=0:records={}", directory.role.directory_name(), directory.record_count)
+        format!("gc:directory:{}:level={}:records={}", directory.role.directory_name(), directory.level, directory.live_count)
       }
       Self::CandidateDelta { record_count, .. } => format!("gc:delta:candidate:records={record_count}"),
       Self::Manifest(manifest) => manifest_summary(manifest),
@@ -213,17 +530,104 @@ pub fn decode_gc_state_artifact(bytes: &[u8], algorithm: HashAlgorithm) -> Forma
   }
 }
 
+pub fn decode_physical_inventory_manifest_v1(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<PhysicalInventoryManifestV1<'_>> {
+  if bytes.len() > MAX_MANIFEST_LENGTH {
+    return Err(amplification_error("gc_manifest_length", bytes.len(), MAX_MANIFEST_LENGTH));
+  }
+  let artifact = decode_gc_artifact_envelope(bytes)?;
+  if artifact.kind != GcArtifactKindV1::PhysicalInventoryManifest {
+    return Err(kind_error("physical_inventory_manifest_kind", "artifact is not a physical-inventory manifest"));
+  }
+  if artifact.identity.len() != 24 || all_zero(&artifact.identity[..16]) || u64_at(artifact.identity, 16)? != artifact.generation {
+    return Err(identity_error(
+      "physical_inventory_manifest_identity",
+      "physical-inventory manifest database/generation identity is invalid",
+    ));
+  }
+  let body = decode_inventory_manifest_body(artifact.body, algorithm, artifact.generation)?;
+  Ok(PhysicalInventoryManifestV1 {
+    database_id: &artifact.identity[..16],
+    generation: artifact.generation,
+    completed_at_ms: body.completed_at_ms,
+    kv_layout_fingerprint: body.kv_layout_fingerprint,
+    audited_wal_offset: body.audited_wal_offset,
+    audited_write_sequence: body.audited_write_sequence,
+    retirement_journal_through_sequence: body.retirement_journal_through_sequence,
+    directory_root: body.populated().then_some(body.directory_root),
+    next_page_id: body.next_page_id,
+    active_count: body.active_count,
+    retired_count: body.retired_count,
+    orphan_count: body.orphan_count,
+    quarantined_count: body.quarantined_count,
+    reclaimed_count: body.reclaimed_count,
+    inventoried_bytes: body.inventoried_bytes,
+    key: immutable_gc_artifact_key(algorithm, artifact.kind, bytes),
+    record_count: body.record_count,
+  })
+}
+
+pub fn validate_physical_inventory_manifest_directory(
+  manifest: &PhysicalInventoryManifestV1<'_>,
+  directory: &GcStateDirectoryV1<'_>,
+) -> FormatResult<()> {
+  if !manifest.is_populated()
+    || directory.role != GcDirectoryRoleV1::PhysicalInventory
+    || directory.database_id != manifest.database_id
+    || manifest.directory_root != Some(directory.key.as_slice())
+    || directory.live_count != manifest.record_count()
+    || directory.tombstone_count != 0
+    || directory.logical_bytes != manifest.inventoried_bytes
+    || directory.maximum_page_id >= manifest.next_page_id
+  {
+    return Err(closure_error(
+      "physical_inventory_manifest_directory",
+      "physical-inventory root directory does not close against its selected manifest",
+    ));
+  }
+  Ok(())
+}
+
+pub fn validate_gc_directory_child(parent: &GcStateDirectoryV1<'_>, child: &GcStateDirectoryV1<'_>) -> FormatResult<()> {
+  let descriptor = parent.entries.iter().find(|entry| entry.child_hash == child.key);
+  if parent.level == 0
+    || child.level.checked_add(1) != Some(parent.level)
+    || parent.database_id != child.database_id
+    || parent.catalog_id != child.catalog_id
+    || parent.role != child.role
+    || descriptor.is_none_or(|entry| {
+      entry.child_generation != child.generation
+        || entry.live_count != child.live_count
+        || entry.tombstone_count != child.tombstone_count
+        || entry.page_count != child.page_count
+        || entry.logical_bytes != child.logical_bytes
+        || entry.minimum_page_id != child.minimum_page_id
+        || entry.maximum_page_id != child.maximum_page_id
+        || entry.lower_fence != child.lower_fence
+        || entry.upper_fence != child.upper_fence
+    })
+  {
+    return Err(closure_error("gc_directory_child_closure", "GC directory descriptor does not match its immutable child directory"));
+  }
+  Ok(())
+}
+
 pub fn validate_gc_directory_page(directory: &GcStateDirectoryV1<'_>, page: &GcStatePageV1<'_>) -> FormatResult<()> {
-  if directory.role != page.role
+  let descriptor = directory.entries.iter().find(|entry| entry.child_hash == page.key);
+  if directory.level != 0
     || directory.database_id != page.database_id
     || directory.catalog_id != page.catalog_id
-    || directory.page_id != page.page_id
-    || directory.child_hash != page.key
-    || directory.child_generation != page.generation
-    || directory.record_count != u64::from(page.record_count)
-    || directory.logical_bytes != page.logical_bytes
-    || directory.lower_fence != page.lower_fence
-    || directory.upper_fence != page.upper_fence
+    || directory.role != page.role
+    || descriptor.is_none_or(|entry| {
+      entry.minimum_page_id != page.page_id
+        || entry.maximum_page_id != page.page_id
+        || entry.child_generation != page.generation
+        || entry.live_count != u64::from(page.record_count)
+        || entry.tombstone_count != 0
+        || entry.page_count != 1
+        || entry.logical_bytes != page.logical_bytes
+        || entry.lower_fence != page.lower_fence
+        || entry.upper_fence != page.upper_fence
+    })
   {
     return Err(closure_error("gc_directory_page_closure", "GC directory descriptor does not match its immutable page"));
   }
@@ -338,14 +742,18 @@ fn decode_directory(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> For
     return Err(identity_error("gc_directory_identity", "GC directory database/catalog identity is zero or body is truncated"));
   }
   let body = artifact.body;
-  if u16_at(body, 0)? != 0 || u32_at(body, 8)? != 0 || u32_at(body, 12)? != 0 || u32_at(body, 76)? != 0 {
+  let level = u16_at(body, 0)?;
+  let entry_count = u32_at(body, 4)?;
+  if u32_at(body, 8)? != 0 || u32_at(body, 12)? != 0 || u32_at(body, 76)? != 0 {
     return Err(reserved_error("gc_directory_header", "GC directory reserve fields must be zero"));
   }
   let lower_length = usize::try_from(u32_at(body, 16)?).map_err(|_| length_error("GC directory lower length"))?;
   let upper_length = usize::try_from(u32_at(body, 20)?).map_err(|_| length_error("GC directory upper length"))?;
   let entries_length = usize::try_from(u32_at(body, 72)?).map_err(|_| length_error("GC directory entries length"))?;
-  if u16_at(body, 2)? != role as u16
-    || u32_at(body, 4)? != 1
+  if level > 15
+    || u16_at(body, 2)? != role as u16
+    || entry_count == 0
+    || entry_count > MAX_DIRECTORY_ENTRIES
     || lower_length == 0
     || lower_length > MAX_KEY_LENGTH
     || upper_length == 0
@@ -363,58 +771,218 @@ fn decode_directory(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> For
   let lower_fence = &body[80..80 + lower_length];
   let upper_fence = &body[80 + lower_length..descriptor_start];
   compare_fences(algorithm, role, lower_fence, upper_fence)?;
-  let fixed = 72usize.checked_add(algorithm.hash_length()).ok_or_else(|| length_error("GC descriptor width overflow"))?;
-  if entries_length != fixed + lower_length + upper_length
-    || usize::try_from(u32_at(body, descriptor_start)?).ok() != Some(lower_length)
-    || usize::try_from(u32_at(body, descriptor_start + 4)?).ok() != Some(upper_length)
-  {
-    return Err(closure_error("gc_directory_descriptor_length", "GC directory descriptor length is invalid"));
+  let entries_end = descriptor_start.checked_add(entries_length).ok_or_else(|| length_error("GC directory entries end overflow"))?;
+  let mut cursor = descriptor_start;
+  let mut entries: Vec<GcStateDirectoryEntryV1<'_>> = Vec::new();
+  entries.try_reserve_exact(entry_count as usize).map_err(|error| {
+    FormatError::new(
+      MalformedInputClass::AllocationAmplification,
+      "gc_directory_entries",
+      format!("could not reserve {entry_count} bounded descriptors: {error}"),
+    )
+  })?;
+  for _ in 0..entry_count {
+    let entry = if level == 0 {
+      decode_gc_leaf_descriptor(algorithm, role, artifact.generation, body, &mut cursor, entries_end)?
+    } else {
+      decode_gc_internal_descriptor(algorithm, role, artifact.generation, body, &mut cursor, entries_end)?
+    };
+    if let Some(previous) = entries.last() {
+      if compare_fence_values(algorithm, role, previous.upper_fence, entry.lower_fence)? != Ordering::Less {
+        return Err(order_error("gc_directory_child_order", "GC directory child ranges overlap or are not strictly ordered"));
+      }
+    }
+    entries.push(entry);
   }
-  let page_id = u64_at(body, descriptor_start + 8)?;
-  let h = algorithm.hash_length();
-  let child_hash = &body[descriptor_start + 16..descriptor_start + 16 + h];
-  let fields = descriptor_start + 16 + h;
-  let child_generation = u64_at(body, fields)?;
-  let record_count = u64_at(body, fields + 8)?;
-  let tombstones = u64_at(body, fields + 16)?;
-  let logical_bytes = u64_at(body, fields + 24)?;
-  let repeated_fences = descriptor_start + fixed;
-  if page_id == 0
-    || all_zero(child_hash)
-    || child_generation == 0
-    || child_generation > artifact.generation
-    || record_count == 0
-    || tombstones != 0
-    || logical_bytes == 0
-    || body[fields + 32..fields + 56].iter().any(|byte| *byte != 0)
+  if cursor != entries_end
+    || entries.first().map(|entry| entry.lower_fence) != Some(lower_fence)
+    || entries.last().map(|entry| entry.upper_fence) != Some(upper_fence)
   {
-    return Err(closure_error("gc_directory_descriptor", "GC directory child descriptor fields are invalid"));
+    return Err(closure_error("gc_directory_descriptor_length", "GC directory descriptors do not close against outer fences"));
   }
-  if body[repeated_fences..repeated_fences + lower_length] != *lower_fence
-    || body[repeated_fences + lower_length..] != *upper_fence
-    || u64_at(body, 24)? != record_count
-    || u64_at(body, 32)? != 0
-    || u64_at(body, 40)? != 1
+  let live_count = checked_directory_sum(entries.iter().map(|entry| entry.live_count), "GC directory live count overflow")?;
+  let tombstone_count = checked_directory_sum(entries.iter().map(|entry| entry.tombstone_count), "GC directory tombstone count overflow")?;
+  let page_count = checked_directory_sum(entries.iter().map(|entry| entry.page_count), "GC directory page count overflow")?;
+  let logical_bytes = checked_directory_sum(entries.iter().map(|entry| entry.logical_bytes), "GC directory logical bytes overflow")?;
+  let minimum_page_id =
+    entries.iter().map(|entry| entry.minimum_page_id).min().ok_or_else(|| closure_error("gc_directory_empty", "GC directory is empty"))?;
+  let maximum_page_id =
+    entries.iter().map(|entry| entry.maximum_page_id).max().ok_or_else(|| closure_error("gc_directory_empty", "GC directory is empty"))?;
+  if u64_at(body, 24)? != live_count
+    || u64_at(body, 32)? != tombstone_count
+    || u64_at(body, 40)? != page_count
     || u64_at(body, 48)? != logical_bytes
-    || u64_at(body, 56)? != page_id
-    || u64_at(body, 64)? != page_id
+    || u64_at(body, 56)? != minimum_page_id
+    || u64_at(body, 64)? != maximum_page_id
+    || tombstone_count != 0
+    || page_count == 0
   {
-    return Err(closure_error("gc_directory_aggregate", "GC directory aggregate or repeated fences disagree"));
+    return Err(closure_error("gc_directory_aggregate", "GC directory aggregate fields disagree with child descriptors"));
   }
   Ok(GcStateDirectoryV1 {
     role,
     database_id,
     catalog_id,
     generation: artifact.generation,
-    page_id,
-    record_count,
+    level,
+    lower_fence,
+    upper_fence,
+    live_count,
+    tombstone_count,
+    page_count,
     logical_bytes,
+    minimum_page_id,
+    maximum_page_id,
+    entries,
+    key,
+  })
+}
+
+fn decode_gc_leaf_descriptor<'a>(
+  algorithm: HashAlgorithm,
+  role: GcDirectoryRoleV1,
+  parent_generation: u64,
+  body: &'a [u8],
+  cursor: &mut usize,
+  end: usize,
+) -> FormatResult<GcStateDirectoryEntryV1<'a>> {
+  let hash_width = algorithm.hash_length();
+  let fixed_length = 72usize.checked_add(hash_width).ok_or_else(|| length_error("GC leaf descriptor width overflow"))?;
+  let start = *cursor;
+  if start.checked_add(fixed_length).is_none_or(|next| next > end) {
+    return Err(trailing_error("gc_directory_leaf_length", "GC leaf descriptor is truncated"));
+  }
+  let lower_length = usize::try_from(u32_at(body, start)?).map_err(|_| length_error("GC leaf lower fence length"))?;
+  let upper_length = usize::try_from(u32_at(body, start + 4)?).map_err(|_| length_error("GC leaf upper fence length"))?;
+  if lower_length == 0 || lower_length > MAX_KEY_LENGTH || upper_length == 0 || upper_length > MAX_KEY_LENGTH {
+    return Err(amplification_error("gc_directory_leaf_fence", lower_length.max(upper_length), MAX_KEY_LENGTH));
+  }
+  let page_id = u64_at(body, start + 8)?;
+  let child_hash = &body[start + 16..start + 16 + hash_width];
+  let fields = start + 16 + hash_width;
+  let child_generation = u64_at(body, fields)?;
+  let live_count = u64_at(body, fields + 8)?;
+  let tombstone_count = u64_at(body, fields + 16)?;
+  let logical_bytes = u64_at(body, fields + 24)?;
+  let physical_hint = decode_gc_physical_hint(body, fields + 32)?;
+  let fences_start = start + fixed_length;
+  let next = fences_start
+    .checked_add(lower_length)
+    .and_then(|value| value.checked_add(upper_length))
+    .ok_or_else(|| length_error("GC leaf descriptor fence end overflow"))?;
+  if next > end {
+    return Err(trailing_error("gc_directory_leaf_length", "GC leaf descriptor fences are truncated"));
+  }
+  let lower_fence = &body[fences_start..fences_start + lower_length];
+  let upper_fence = &body[fences_start + lower_length..next];
+  compare_fences(algorithm, role, lower_fence, upper_fence)?;
+  if page_id == 0
+    || all_zero(child_hash)
+    || child_generation == 0
+    || child_generation > parent_generation
+    || live_count == 0
+    || tombstone_count != 0
+    || logical_bytes == 0
+  {
+    return Err(closure_error("gc_directory_leaf", "GC leaf descriptor identity, generation, counts, or bytes are invalid"));
+  }
+  *cursor = next;
+  Ok(GcStateDirectoryEntryV1 {
     lower_fence,
     upper_fence,
     child_hash,
     child_generation,
-    key,
+    live_count,
+    tombstone_count,
+    page_count: 1,
+    logical_bytes,
+    minimum_page_id: page_id,
+    maximum_page_id: page_id,
+    physical_hint,
   })
+}
+
+fn decode_gc_internal_descriptor<'a>(
+  algorithm: HashAlgorithm,
+  role: GcDirectoryRoleV1,
+  parent_generation: u64,
+  body: &'a [u8],
+  cursor: &mut usize,
+  end: usize,
+) -> FormatResult<GcStateDirectoryEntryV1<'a>> {
+  let hash_width = algorithm.hash_length();
+  let fixed_length = 88usize.checked_add(hash_width).ok_or_else(|| length_error("GC internal descriptor width overflow"))?;
+  let start = *cursor;
+  if start.checked_add(fixed_length).is_none_or(|next| next > end) {
+    return Err(trailing_error("gc_directory_internal_length", "GC internal descriptor is truncated"));
+  }
+  let lower_length = usize::try_from(u32_at(body, start)?).map_err(|_| length_error("GC internal lower fence length"))?;
+  let upper_length = usize::try_from(u32_at(body, start + 4)?).map_err(|_| length_error("GC internal upper fence length"))?;
+  if lower_length == 0 || lower_length > MAX_KEY_LENGTH || upper_length == 0 || upper_length > MAX_KEY_LENGTH {
+    return Err(amplification_error("gc_directory_internal_fence", lower_length.max(upper_length), MAX_KEY_LENGTH));
+  }
+  let child_hash = &body[start + 8..start + 8 + hash_width];
+  let fields = start + 8 + hash_width;
+  let child_generation = u64_at(body, fields)?;
+  let live_count = u64_at(body, fields + 8)?;
+  let tombstone_count = u64_at(body, fields + 16)?;
+  let page_count = u64_at(body, fields + 24)?;
+  let logical_bytes = u64_at(body, fields + 32)?;
+  let minimum_page_id = u64_at(body, fields + 40)?;
+  let maximum_page_id = u64_at(body, fields + 48)?;
+  let physical_hint = decode_gc_physical_hint(body, fields + 56)?;
+  let fences_start = start + fixed_length;
+  let next = fences_start
+    .checked_add(lower_length)
+    .and_then(|value| value.checked_add(upper_length))
+    .ok_or_else(|| length_error("GC internal descriptor fence end overflow"))?;
+  if next > end {
+    return Err(trailing_error("gc_directory_internal_length", "GC internal descriptor fences are truncated"));
+  }
+  let lower_fence = &body[fences_start..fences_start + lower_length];
+  let upper_fence = &body[fences_start + lower_length..next];
+  compare_fences(algorithm, role, lower_fence, upper_fence)?;
+  if all_zero(child_hash)
+    || child_generation == 0
+    || child_generation > parent_generation
+    || live_count == 0
+    || tombstone_count != 0
+    || page_count == 0
+    || logical_bytes == 0
+    || minimum_page_id == 0
+    || minimum_page_id > maximum_page_id
+  {
+    return Err(closure_error("gc_directory_internal", "GC internal descriptor identity, generation, ranks, or bytes are invalid"));
+  }
+  *cursor = next;
+  Ok(GcStateDirectoryEntryV1 {
+    lower_fence,
+    upper_fence,
+    child_hash,
+    child_generation,
+    live_count,
+    tombstone_count,
+    page_count,
+    logical_bytes,
+    minimum_page_id,
+    maximum_page_id,
+    physical_hint,
+  })
+}
+
+fn decode_gc_physical_hint(body: &[u8], offset: usize) -> FormatResult<GcPhysicalHintV1> {
+  if u32_at(body, offset + 12)? != 0 {
+    return Err(reserved_error("gc_directory_physical_hint", "GC directory physical-hint reserve is nonzero"));
+  }
+  Ok(GcPhysicalHintV1 {
+    wal_offset: u64_at(body, offset)?,
+    total_length: u32_at(body, offset + 8)?,
+    write_sequence: u64_at(body, offset + 16)?,
+  })
+}
+
+fn checked_directory_sum(mut values: impl Iterator<Item = u64>, context: &'static str) -> FormatResult<u64> {
+  values.try_fold(0u64, |total, value| total.checked_add(value).ok_or_else(|| length_error(context)))
 }
 
 fn decode_candidate_delta(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> FormatResult<GcStateArtifactV1<'_>> {
@@ -478,7 +1046,10 @@ fn decode_manifest(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> Form
   let (populated, record_count, secondary_count, primary_root, secondary_root) = match artifact.kind {
     GcArtifactKindV1::RootExpiryCatalogManifest => decode_root_expiry_manifest_body(artifact.body, algorithm)?,
     GcArtifactKindV1::RootLifecycleManifest => decode_root_lifecycle_manifest_body(artifact.body, algorithm, generation)?,
-    GcArtifactKindV1::PhysicalInventoryManifest => decode_inventory_manifest_body(artifact.body, algorithm, generation)?,
+    GcArtifactKindV1::PhysicalInventoryManifest => {
+      let inventory = decode_inventory_manifest_body(artifact.body, algorithm, generation)?;
+      (inventory.populated(), inventory.record_count, 0, inventory.directory_root, None)
+    }
     GcArtifactKindV1::QuarantineManifest => decode_quarantine_manifest_body(artifact.body, algorithm, generation)?,
     _ => return Err(kind_error("gc_manifest_kind", "artifact is not a GC lifecycle manifest")),
   };
@@ -496,6 +1067,30 @@ fn decode_manifest(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> Form
 }
 
 type ManifestBody<'a> = (bool, u64, u64, &'a [u8], Option<&'a [u8]>);
+
+#[derive(Debug, Clone, Copy)]
+struct PhysicalInventoryManifestBodyV1<'a> {
+  completed_at_ms: u64,
+  kv_layout_fingerprint: &'a [u8],
+  audited_wal_offset: u64,
+  audited_write_sequence: u64,
+  retirement_journal_through_sequence: u64,
+  directory_root: &'a [u8],
+  next_page_id: u64,
+  active_count: u64,
+  retired_count: u64,
+  orphan_count: u64,
+  quarantined_count: u64,
+  reclaimed_count: u64,
+  inventoried_bytes: u64,
+  record_count: u64,
+}
+
+impl PhysicalInventoryManifestBodyV1<'_> {
+  fn populated(self) -> bool {
+    !all_zero(self.directory_root)
+  }
+}
 
 fn decode_root_expiry_manifest_body(body: &[u8], algorithm: HashAlgorithm) -> FormatResult<ManifestBody<'_>> {
   let h = algorithm.hash_length();
@@ -561,7 +1156,11 @@ fn decode_root_lifecycle_manifest_body(body: &[u8], algorithm: HashAlgorithm, ge
   Ok((candidate_count != 0 || retired_count != 0, candidate_count, retired_count, candidate_root, Some(expiry_root)))
 }
 
-fn decode_inventory_manifest_body(body: &[u8], algorithm: HashAlgorithm, generation: u64) -> FormatResult<ManifestBody<'_>> {
+fn decode_inventory_manifest_body(
+  body: &[u8],
+  algorithm: HashAlgorithm,
+  generation: u64,
+) -> FormatResult<PhysicalInventoryManifestBodyV1<'_>> {
   let h = algorithm.hash_length();
   if body.len() != 132 + 2 * h
     || u32_at(body, 0)? != 0
@@ -576,17 +1175,36 @@ fn decode_inventory_manifest_body(body: &[u8], algorithm: HashAlgorithm, generat
   {
     return Err(closure_error("inventory_manifest_header", "inventory manifest header/capture state is invalid"));
   }
-  let root = &body[76 + h..76 + 2 * h];
-  let mut count = 0u64;
-  for index in 0..5 {
-    count = count.checked_add(u64_at(body, 84 + 2 * h + index * 8)?).ok_or_else(|| length_error("inventory count overflow"))?;
-  }
-  let logical_bytes = u64_at(body, 124 + 2 * h)?;
-  let populated = !all_zero(root);
-  if populated != (count != 0) || populated != (logical_bytes != 0) {
+  let directory_root = &body[76 + h..76 + 2 * h];
+  let active_count = u64_at(body, 84 + 2 * h)?;
+  let retired_count = u64_at(body, 92 + 2 * h)?;
+  let orphan_count = u64_at(body, 100 + 2 * h)?;
+  let quarantined_count = u64_at(body, 108 + 2 * h)?;
+  let reclaimed_count = u64_at(body, 116 + 2 * h)?;
+  let record_count = [active_count, retired_count, orphan_count, quarantined_count, reclaimed_count]
+    .into_iter()
+    .try_fold(0u64, |total, count| total.checked_add(count).ok_or_else(|| length_error("inventory count overflow")))?;
+  let inventoried_bytes = u64_at(body, 124 + 2 * h)?;
+  let populated = !all_zero(directory_root);
+  if populated != (record_count != 0) || populated != (inventoried_bytes != 0) {
     return Err(closure_error("inventory_manifest_state", "inventory root/count/bytes disagree"));
   }
-  Ok((populated, count, 0, root, None))
+  Ok(PhysicalInventoryManifestBodyV1 {
+    completed_at_ms: u64_at(body, 44)?,
+    kv_layout_fingerprint: &body[52..52 + h],
+    audited_wal_offset: u64_at(body, 52 + h)?,
+    audited_write_sequence: u64_at(body, 60 + h)?,
+    retirement_journal_through_sequence: u64_at(body, 68 + h)?,
+    directory_root,
+    next_page_id: u64_at(body, 76 + 2 * h)?,
+    active_count,
+    retired_count,
+    orphan_count,
+    quarantined_count,
+    reclaimed_count,
+    inventoried_bytes,
+    record_count,
+  })
 }
 
 fn decode_quarantine_manifest_body(body: &[u8], algorithm: HashAlgorithm, generation: u64) -> FormatResult<ManifestBody<'_>> {
@@ -910,12 +1528,16 @@ pub fn decode_root_candidate_record_v1(row: &[u8], algorithm: HashAlgorithm) -> 
 }
 
 fn validate_inventory_row(algorithm: HashAlgorithm, row: &[u8]) -> FormatResult<()> {
+  decode_physical_inventory_record_v1(row, algorithm).map(|_| ())
+}
+
+pub fn decode_physical_inventory_record_v1(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<PhysicalInventoryRecordV1<'_>> {
   let h = algorithm.hash_length();
   let physical_length = 24 + 2 * h;
   if row.len() != 68 + 5 * h {
     return Err(trailing_error("inventory_row_length", "inventory row has wrong fixed length"));
   }
-  decode_physical_incarnation(&row[..physical_length], algorithm)?;
+  let incarnation = decode_physical_incarnation(&row[..physical_length], algorithm)?;
   let state = row[physical_length];
   let reason = row[physical_length + 1];
   let flags = u16_at(row, physical_length + 2)?;
@@ -923,20 +1545,51 @@ fn validate_inventory_row(algorithm: HashAlgorithm, row: &[u8]) -> FormatResult<
     return Err(kind_error("inventory_row_state", "inventory state/reason/flags are invalid"));
   }
   let replacement = &row[physical_length + 4..physical_length + 4 + physical_length];
-  if flags & 1 != 0 {
-    decode_physical_incarnation(replacement, algorithm)?;
+  let replacement = if flags & 1 != 0 {
+    Some(decode_physical_incarnation(replacement, algorithm)?)
   } else if replacement.iter().any(|byte| *byte != 0) {
     return Err(closure_error("inventory_row_replacement", "replacement is present without replacement flag"));
-  }
+  } else {
+    None
+  };
   let tail = physical_length + 4 + physical_length;
-  if u64_at(row, tail)? == 0 || (state == 1 && (u64_at(row, tail + 8)? != 0 || flags != 0)) {
+  let discovered_at_ms = u64_at(row, tail)?;
+  let retirement_sequence = u64_at(row, tail + 8)?;
+  if discovered_at_ms == 0 || (state == 1 && (retirement_sequence != 0 || flags != 0)) {
     return Err(closure_error("inventory_row_time_or_sequence", "inventory observed time/sequence is invalid"));
   }
   let receipt = &row[tail + 16..tail + 16 + h];
   if (flags & 2 != 0) != !all_zero(receipt) || (state == 5) != (flags & 2 != 0) {
     return Err(closure_error("inventory_row_receipt", "inventory receipt/state flags disagree"));
   }
-  Ok(())
+  Ok(PhysicalInventoryRecordV1 {
+    encoded: row,
+    incarnation,
+    state: PhysicalInventoryStateV1(state),
+    reason,
+    replacement,
+    discovered_at_ms,
+    retirement_sequence: (retirement_sequence != 0).then_some(retirement_sequence),
+    receipt_hash: (flags & 2 != 0).then_some(receipt),
+  })
+}
+
+pub fn physical_inventory_records_v1<'a>(
+  page: &GcStatePageV1<'a>,
+  algorithm: HashAlgorithm,
+) -> FormatResult<PhysicalInventoryRecordsV1<'a>> {
+  if page.role != GcDirectoryRoleV1::PhysicalInventory {
+    return Err(kind_error("physical_inventory_page_role", "GC state page is not a physical-inventory page"));
+  }
+  let row_length = row_length(algorithm, GcDirectoryRoleV1::PhysicalInventory);
+  let expected_length = usize::try_from(page.record_count)
+    .ok()
+    .and_then(|count| count.checked_mul(row_length))
+    .ok_or_else(|| amplification_error("physical_inventory_page_count", page.record_count as usize, MAX_PAGE_LENGTH / row_length))?;
+  if expected_length != page.records.len() {
+    return Err(closure_error("physical_inventory_page_count", "physical-inventory record count does not match its validated byte range"));
+  }
+  Ok(PhysicalInventoryRecordsV1 { rows: page.records.chunks_exact(row_length), algorithm })
 }
 
 fn compare_rows(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, left: &[u8], right: &[u8]) -> FormatResult<Ordering> {
@@ -979,7 +1632,14 @@ fn compare_physical(left: &PhysicalIncarnationV1<'_>, right: &PhysicalIncarnatio
 }
 
 fn compare_fences(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, left: &[u8], right: &[u8]) -> FormatResult<()> {
-  let ordering = match role {
+  if compare_fence_values(algorithm, role, left, right)? == Ordering::Greater {
+    return Err(order_error("gc_fence_order", "GC lower fence sorts after upper fence"));
+  }
+  Ok(())
+}
+
+fn compare_fence_values(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, left: &[u8], right: &[u8]) -> FormatResult<Ordering> {
+  Ok(match role {
     GcDirectoryRoleV1::Candidates => compare_physical_bytes(algorithm, left, right)?,
     GcDirectoryRoleV1::RootExpiry | GcDirectoryRoleV1::RootCandidates => {
       if left.len() != algorithm.hash_length() || right.len() != algorithm.hash_length() {
@@ -999,11 +1659,7 @@ fn compare_fences(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, left: &[u8]
         offset_order
       }
     }
-  };
-  if ordering == Ordering::Greater {
-    return Err(order_error("gc_fence_order", "GC lower fence sorts after upper fence"));
-  }
-  Ok(())
+  })
 }
 
 fn row_key_equals_fence(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, row: &[u8], fence: &[u8]) -> FormatResult<bool> {
