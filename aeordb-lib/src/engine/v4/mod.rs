@@ -30,6 +30,7 @@ pub mod namespace;
 pub mod parser_plan;
 pub mod position;
 pub mod reader;
+pub mod root_authority;
 pub mod scope;
 pub mod source_selector;
 pub mod system_control;

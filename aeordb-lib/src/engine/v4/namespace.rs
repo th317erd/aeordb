@@ -1,6 +1,10 @@
-use crate::engine::HashAlgorithm;
+use crate::engine::btree::{BTreeNode, is_btree_format};
+use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
+use crate::engine::entry_type::EntryType;
+use crate::engine::{CompressionAlgorithm, HashAlgorithm};
 
 use super::database_header::validate_capabilities;
+use super::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, decode_whole_entity};
 use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
@@ -13,10 +17,76 @@ const SEMANTIC_HARD_CAP: usize = 1_048_576;
 pub struct NamespaceRootV1 {
   pub root_hash: Vec<u8>,
   pub required_capabilities: [u8; 32],
-  pub namespace_schema_version: u16,
-  pub semantic_schema_version: u16,
+  pub namespace_tree_codec: u16,
+  pub semantic_state_codec: u16,
   pub namespace_tree_root: Vec<u8>,
   pub semantic_state_root: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceTreeLayoutV0 {
+  Empty,
+  Flat { child_count: usize },
+  BTreeLeaf { child_count: usize },
+  BTreeInternal { separator_count: usize, child_count: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceTreeRootV0 {
+  pub root_hash: Vec<u8>,
+  pub layout: NamespaceTreeLayoutV0,
+  pub edges: Vec<NamespaceTreeEdgeV0>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceTreeEdgeV0 {
+  Entry { name: String, entry_type: EntryType, identity: Vec<u8> },
+  BTreeNode { identity: Vec<u8> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum SemanticUnavailableReasonV1 {
+  LegacyGlobalStateNotCaptured = 1,
+  LegacyDependencyCannotBeProven = 2,
+  LegacySemanticControlCorruptOrIncomplete = 3,
+}
+
+impl SemanticUnavailableReasonV1 {
+  fn from_u16(value: u16) -> Option<Self> {
+    match value {
+      1 => Some(Self::LegacyGlobalStateNotCaptured),
+      2 => Some(Self::LegacyDependencyCannotBeProven),
+      3 => Some(Self::LegacySemanticControlCorruptOrIncomplete),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticAvailabilityV1 {
+  Complete {
+    compiler_fingerprint: Vec<u8>,
+    semantic_registry_fingerprint: Vec<u8>,
+    catalog_root: Vec<u8>,
+    catalog_record_count: u64,
+    catalog_node_count: u64,
+    definition_count: u64,
+    dependency_count: u64,
+  },
+  ContentOnly {
+    reason: SemanticUnavailableReasonV1,
+  },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticStateV1 {
+  pub object_id: Vec<u8>,
+  pub required_capabilities: [u8; 32],
+  pub semantic_catalog_codec: u16,
+  pub semantic_definition_codec: u16,
+  pub compiler_profile_version: u16,
+  pub availability: SemanticAvailabilityV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +103,115 @@ pub struct SemanticObjectV1 {
   pub kind_id: u16,
   pub kind: SemanticObjectKind,
   pub graph_edges: Vec<Vec<u8>>,
+  pub semantic_state: Option<SemanticStateV1>,
+}
+
+pub fn decode_namespace_root_entity(
+  entity_bytes: &[u8],
+  hash_algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+) -> FormatResult<NamespaceRootV1> {
+  let entity = decode_whole_entity(entity_bytes, hash_algorithm, write_sequence_high_water)?;
+  if entity.entry_type != EntryTypeV4::DirectoryIndex {
+    return Err(error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "namespace_root_entity_type",
+      format!("expected DirectoryIndex, got {:?}", entity.entry_type),
+    ));
+  }
+  if entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM || entity.compression_algorithm != CompressionAlgorithm::None {
+    return Err(error(
+      MalformedInputClass::CrossRecordClosureMismatch,
+      "namespace_root_entity_representation",
+      format!("flags {:#04x}, compression {:?}", entity.flags, entity.compression_algorithm),
+    ));
+  }
+  let root = decode_namespace_root(entity.stored_value, hash_algorithm)?;
+  if entity.key != root.root_hash {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "namespace_root_entity_key",
+      "outer entity key does not match the immutable NamespaceRoot identity",
+    ));
+  }
+  Ok(root)
+}
+
+pub fn decode_namespace_tree_root_v0(
+  entity_bytes: &[u8],
+  expected_root_hash: &[u8],
+  hash_algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+) -> FormatResult<NamespaceTreeRootV0> {
+  if expected_root_hash.len() != hash_algorithm.hash_length() {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "namespace_tree_hash_width",
+      format!("expected {}, got {}", hash_algorithm.hash_length(), expected_root_hash.len()),
+    ));
+  }
+  let entity = decode_whole_entity(entity_bytes, hash_algorithm, write_sequence_high_water)?;
+  if entity.entry_type != EntryTypeV4::DirectoryIndex {
+    return Err(error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "namespace_tree_entity_type",
+      format!("expected DirectoryIndex, got {:?}", entity.entry_type),
+    ));
+  }
+  if entity.flags != 0 || entity.compression_algorithm != CompressionAlgorithm::None {
+    return Err(error(
+      MalformedInputClass::CrossRecordClosureMismatch,
+      "namespace_tree_entity_representation",
+      format!("flags {:#04x}, compression {:?}", entity.flags, entity.compression_algorithm),
+    ));
+  }
+  if entity.key != expected_root_hash {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "namespace_tree_entity_key",
+      "outer entity key does not match the NamespaceRoot tree edge",
+    ));
+  }
+
+  let (identity_domain, layout, edges) = if entity.stored_value.is_empty() {
+    (b"dirc:".as_slice(), NamespaceTreeLayoutV0::Empty, Vec::new())
+  } else if is_btree_format(entity.stored_value) {
+    let node = BTreeNode::deserialize(entity.stored_value, hash_algorithm.hash_length(), 0)
+      .map_err(|source| tree_payload_error(source.to_string()))?;
+    let canonical = node.serialize(hash_algorithm.hash_length()).map_err(|source| tree_payload_error(source.to_string()))?;
+    if canonical != entity.stored_value {
+      return Err(tree_payload_error("B-tree root is not canonically encoded"));
+    }
+    let (layout, graph_edges) = match node {
+      BTreeNode::Leaf(leaf) => {
+        let edges = validated_child_edges(leaf.entries.iter(), hash_algorithm.hash_length())?;
+        (NamespaceTreeLayoutV0::BTreeLeaf { child_count: leaf.entries.len() }, edges)
+      }
+      BTreeNode::Internal(internal) => {
+        validate_strict_names(&internal.keys)?;
+        if internal.children.iter().any(|child| child.len() != hash_algorithm.hash_length() || all_zero(child)) {
+          return Err(tree_payload_error("B-tree root contains an invalid child edge"));
+        }
+        let edges: Vec<_> = internal.children.into_iter().map(|identity| NamespaceTreeEdgeV0::BTreeNode { identity }).collect();
+        (NamespaceTreeLayoutV0::BTreeInternal { separator_count: internal.keys.len(), child_count: edges.len() }, edges)
+      }
+    };
+    (b"btree:".as_slice(), layout, graph_edges)
+  } else {
+    let children = deserialize_child_entries(entity.stored_value, hash_algorithm.hash_length(), 0)
+      .map_err(|source| tree_payload_error(source.to_string()))?;
+    let edges = validated_child_edges(children.iter(), hash_algorithm.hash_length())?;
+    (b"dirc:".as_slice(), NamespaceTreeLayoutV0::Flat { child_count: children.len() }, edges)
+  };
+  let computed = digest_parts(hash_algorithm, &[identity_domain, entity.stored_value]);
+  if computed != expected_root_hash {
+    return Err(error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "namespace_tree_content_identity",
+      "namespace tree bytes do not match their typed content identity",
+    ));
+  }
+  Ok(NamespaceTreeRootV0 { root_hash: expected_root_hash.to_vec(), layout, edges })
 }
 
 pub fn decode_namespace_root(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<NamespaceRootV1> {
@@ -81,13 +260,13 @@ pub fn decode_namespace_root(value: &[u8], hash_algorithm: HashAlgorithm) -> For
   }
   let required_capabilities: [u8; 32] = body[4..36].try_into().expect("fixed namespace capability field");
   validate_capabilities(&required_capabilities, "namespace root")?;
-  let namespace_schema_version = u16_at(body, 36);
-  let semantic_schema_version = u16_at(body, 38);
-  if namespace_schema_version != 1 || semantic_schema_version != 1 {
+  let namespace_tree_codec = u16_at(body, 36);
+  let semantic_state_codec = u16_at(body, 38);
+  if namespace_tree_codec != 1 || semantic_state_codec != 1 {
     return Err(error(
       MalformedInputClass::UnknownMagicOrVersion,
       "namespace_root_schema",
-      format!("namespace {namespace_schema_version}, semantic {semantic_schema_version}"),
+      format!("namespace {namespace_tree_codec}, semantic {semantic_state_codec}"),
     ));
   }
 
@@ -108,8 +287,8 @@ pub fn decode_namespace_root(value: &[u8], hash_algorithm: HashAlgorithm) -> For
   Ok(NamespaceRootV1 {
     root_hash,
     required_capabilities,
-    namespace_schema_version,
-    semantic_schema_version,
+    namespace_tree_codec,
+    semantic_state_codec,
     namespace_tree_root,
     semantic_state_root,
   })
@@ -161,20 +340,48 @@ pub fn decode_semantic_object(value: &[u8], hash_algorithm: HashAlgorithm) -> Fo
   let kind_id = u16_at(value, 6);
   let item_count = u64_at(value, 20);
   let body = &value[SEMANTIC_HEADER_LENGTH..value.len() - 4];
-  let (kind, graph_edges) = match kind_id {
-    0x0001 => decode_semantic_state(body, item_count, hash_algorithm)?,
-    0x0002 => decode_catalog_leaf(body, item_count, hash_algorithm)?,
-    0x0003 => decode_catalog_internal(body, item_count, hash_algorithm)?,
-    0x0004 => decode_definition(body, item_count, hash_algorithm)?,
+  let (kind, graph_edges, state_fields) = match kind_id {
+    0x0001 => {
+      let (availability, required_capabilities, graph_edges) = decode_semantic_state(body, item_count, hash_algorithm)?;
+      let summary = match &availability {
+        SemanticAvailabilityV1::Complete { .. } => SemanticObjectKind::State { content_only_reason: None },
+        SemanticAvailabilityV1::ContentOnly { reason } => SemanticObjectKind::State { content_only_reason: Some(*reason as u16) },
+      };
+      (summary, graph_edges, Some((required_capabilities, availability)))
+    }
+    0x0002 => {
+      let (kind, graph_edges) = decode_catalog_leaf(body, item_count, hash_algorithm)?;
+      (kind, graph_edges, None)
+    }
+    0x0003 => {
+      let (kind, graph_edges) = decode_catalog_internal(body, item_count, hash_algorithm)?;
+      (kind, graph_edges, None)
+    }
+    0x0004 => {
+      let (kind, graph_edges) = decode_definition(body, item_count, hash_algorithm)?;
+      (kind, graph_edges, None)
+    }
     _ => {
       return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "semantic_kind", format!("unknown semantic kind {kind_id:#06x}")));
     }
   };
   let object_id = immutable_id(hash_algorithm, b"aeordb.semantic-object.immutable.v1\0", kind_id, value);
-  Ok(SemanticObjectV1 { object_id, kind_id, kind, graph_edges })
+  let semantic_state = state_fields.map(|(required_capabilities, availability)| SemanticStateV1 {
+    object_id: object_id.clone(),
+    required_capabilities,
+    semantic_catalog_codec: 1,
+    semantic_definition_codec: 1,
+    compiler_profile_version: 1,
+    availability,
+  });
+  Ok(SemanticObjectV1 { object_id, kind_id, kind, graph_edges, semantic_state })
 }
 
-fn decode_semantic_state(body: &[u8], item_count: u64, hash_algorithm: HashAlgorithm) -> FormatResult<(SemanticObjectKind, Vec<Vec<u8>>)> {
+fn decode_semantic_state(
+  body: &[u8],
+  item_count: u64,
+  hash_algorithm: HashAlgorithm,
+) -> FormatResult<(SemanticAvailabilityV1, [u8; 32], Vec<Vec<u8>>)> {
   let hash_width = hash_algorithm.hash_length();
   let expected_length = checked_add(112, checked_mul(3, hash_width, "semantic state hashes")?, "semantic state body")?;
   if body.len() != expected_length {
@@ -230,22 +437,33 @@ fn decode_semantic_state(body: &[u8], item_count: u64, hash_algorithm: HashAlgor
         "complete semantic state has incomplete identities or counts",
       ));
     }
+    let compiler_fingerprint = hashes[..hash_width].to_vec();
+    let semantic_registry_fingerprint = hashes[hash_width..2 * hash_width].to_vec();
     let catalog_root = hashes[2 * hash_width..3 * hash_width].to_vec();
-    Ok((SemanticObjectKind::State { content_only_reason: None }, vec![catalog_root]))
+    Ok((
+      SemanticAvailabilityV1::Complete {
+        compiler_fingerprint,
+        semantic_registry_fingerprint,
+        catalog_root: catalog_root.clone(),
+        catalog_record_count: counts[0],
+        catalog_node_count: counts[1],
+        definition_count: counts[2],
+        dependency_count: counts[3],
+      },
+      capabilities,
+      vec![catalog_root],
+    ))
   } else {
-    if !(1..=3).contains(&reason)
-      || catalog_present
-      || hashes.iter().any(|byte| *byte != 0)
-      || counts.iter().any(|count| *count != 0)
-      || item_count != 0
-    {
+    let reason = SemanticUnavailableReasonV1::from_u16(reason)
+      .ok_or_else(|| error(MalformedInputClass::UnknownTypeKindOrEnum, "semantic_state_unavailable_reason", format!("reason {reason}")))?;
+    if catalog_present || hashes.iter().any(|byte| *byte != 0) || counts.iter().any(|count| *count != 0) || item_count != 0 {
       return Err(error(
         MalformedInputClass::NoncanonicalBooleanOrOptionalPresence,
         "semantic_state_content_only_invariant",
         "content-only semantic state has forbidden authority",
       ));
     }
-    Ok((SemanticObjectKind::State { content_only_reason: Some(reason) }, Vec::new()))
+    Ok((SemanticAvailabilityV1::ContentOnly { reason }, capabilities, Vec::new()))
   }
 }
 
@@ -481,6 +699,38 @@ fn checked_add(left: usize, right: usize, context: &'static str) -> FormatResult
 
 fn all_zero(bytes: &[u8]) -> bool {
   bytes.iter().all(|byte| *byte == 0)
+}
+
+fn validated_child_edges<'a>(children: impl Iterator<Item = &'a ChildEntry>, hash_width: usize) -> FormatResult<Vec<NamespaceTreeEdgeV0>> {
+  let mut previous = None;
+  let mut edges = Vec::new();
+  for child in children {
+    if child.name.is_empty() || previous.is_some_and(|value| value >= child.name.as_str()) {
+      return Err(tree_payload_error("directory children are empty, duplicate, or out of order"));
+    }
+    if child.hash.len() != hash_width || all_zero(&child.hash) {
+      return Err(tree_payload_error("directory child contains an invalid content edge"));
+    }
+    let entry_type = EntryType::from_u8(child.entry_type).map_err(|source| tree_payload_error(source.to_string()))?;
+    edges.push(NamespaceTreeEdgeV0::Entry { name: child.name.clone(), entry_type, identity: child.hash.clone() });
+    previous = Some(child.name.as_str());
+  }
+  Ok(edges)
+}
+
+fn validate_strict_names(names: &[String]) -> FormatResult<()> {
+  let mut previous = None;
+  for name in names {
+    if name.is_empty() || previous.is_some_and(|value: &String| value >= name) {
+      return Err(tree_payload_error("B-tree separators are empty, duplicate, or out of order"));
+    }
+    previous = Some(name);
+  }
+  Ok(())
+}
+
+fn tree_payload_error(context: impl Into<String>) -> FormatError {
+  error(MalformedInputClass::CrossRecordClosureMismatch, "namespace_tree_payload", context)
 }
 
 fn u16_at(bytes: &[u8], offset: usize) -> u16 {

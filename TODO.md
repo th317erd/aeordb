@@ -575,6 +575,16 @@
         - [x] Prove all other capabilities remain disabled and current writable/peer admission still fails closed.
         - [x] Run P3a focused, adjacent, workspace, architecture, native, documentation, and shadow-storage gates; record and land the phase.
       - [x] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.
+    - [ ] P3b: add immutable v4 namespace and semantic authority before activating any selected-root service path.
+      - [ ] P3b-1: add immutable root/semantic readers and an independent reference model.
+        - [x] Map existing payload readers, outer entity framing, admission controls, future root consumers, and activation boundaries.
+        - [x] Add a failing `v4_root_migration_spec` target for exact root entity, semantic-state, and admission-witness closure.
+        - [x] Decode complete typed semantic state and root-admission evidence without consulting mutable current aliases.
+        - [x] Validate exact outer entity type/key/codec/system framing and immediate immutable root references.
+        - [x] Prove malformed, missing, mismatched, content-only, both-hash-width, and disconnected-service behavior against an independent model.
+        - [ ] Run focused, adjacent, workspace, architecture, native, documentation, and real-storage reader gates; record and land the unit.
+      - [ ] P3b-2: add shadow root/admission publication through the shared durability and namespace authorities.
+      - [ ] P3b-3: add the read-view resolver, lifecycle states, pins, and transfer closure before service activation.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
     - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
