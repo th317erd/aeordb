@@ -8,6 +8,14 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 
+use super::admission::{
+  AdmissionModeV1, BinaryCapabilityProfileV1, CapabilitySetV1, SemanticReadOnlyAdmissionV1, V4AdmissionError, V4AdmissionResult,
+  admit_v4_header,
+};
+use super::database_header::SelectedDatabaseHeaderV4;
+use super::root_authority::ImmutableNamespaceAuthorityV1;
+use super::system_family::SystemFamilyRegistryV1;
+
 const ROOT_GATE_ACCOUNTED_BASE_BYTES: u64 = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +108,7 @@ struct RootPinCoordinatorStateV1 {
 
 struct RootReadPinCoordinatorInnerV1 {
   memory_coordinator: Arc<MemoryCoordinator>,
-  hash_width: usize,
+  hash_algorithm: HashAlgorithm,
   maximum_tracked_roots: usize,
   maximum_active_pins: u64,
   failed: AtomicBool,
@@ -152,7 +160,7 @@ impl RootReadPinCoordinatorV1 {
     Ok(Self {
       inner: Arc::new(RootReadPinCoordinatorInnerV1 {
         memory_coordinator,
-        hash_width: hash_algorithm.hash_length(),
+        hash_algorithm,
         maximum_tracked_roots,
         maximum_active_pins,
         failed: AtomicBool::new(false),
@@ -163,6 +171,21 @@ impl RootReadPinCoordinatorV1 {
 
   pub fn memory_coordinator(&self) -> Arc<MemoryCoordinator> {
     Arc::clone(&self.inner.memory_coordinator)
+  }
+
+  pub fn hash_algorithm(&self) -> HashAlgorithm {
+    self.inner.hash_algorithm
+  }
+
+  pub fn validate_root_hash(&self, root_hash: &[u8]) -> Result<(), RootPinCoordinatorErrorV1> {
+    if !self.root_hash_is_valid(root_hash) {
+      return Err(RootPinCoordinatorErrorV1::InvalidRootHash);
+    }
+    Ok(())
+  }
+
+  pub fn root_hash_is_valid(&self, root_hash: &[u8]) -> bool {
+    root_hash.len() == self.inner.hash_algorithm.hash_length() && root_hash.iter().any(|byte| *byte != 0)
   }
 
   pub fn active_pin_count(&self) -> Result<u64, RootPinCoordinatorErrorV1> {
@@ -263,10 +286,7 @@ impl RootReadPinCoordinatorV1 {
     if cancellation.is_cancelled() {
       return Err(RootPinCoordinatorErrorV1::Canceled);
     }
-    if root_hash.len() != self.inner.hash_width || root_hash.iter().all(|byte| *byte == 0) {
-      return Err(RootPinCoordinatorErrorV1::InvalidRootHash);
-    }
-    Ok(())
+    self.validate_root_hash(root_hash)
   }
 
   fn root_gate(&self, root_hash: &[u8]) -> Result<Arc<RootGateV1>, RootPinCoordinatorErrorV1> {
@@ -387,4 +407,542 @@ fn readable_state(observation: RootLifecycleObservationV1) -> Result<ReadableRoo
     RootLifecycleObservationV1::Corrupt => Err(RootPinCoordinatorErrorV1::LifecycleCorrupt),
     RootLifecycleObservationV1::Unavailable => Err(RootPinCoordinatorErrorV1::LifecycleUnavailable),
   }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadViewSelectorV1<'a> {
+  CurrentHead,
+  ExplicitRoot(&'a [u8]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadViewCredentialKindV1 {
+  Ordinary,
+  Share,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadViewConcealmentV1 {
+  Reveal,
+  Conceal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentReadAuthorizationV1<T> {
+  authorization: T,
+  credential_kind: ReadViewCredentialKindV1,
+  concealment: ReadViewConcealmentV1,
+}
+
+impl<T> CurrentReadAuthorizationV1<T> {
+  pub const fn new(authorization: T, credential_kind: ReadViewCredentialKindV1, concealment: ReadViewConcealmentV1) -> Self {
+    Self { authorization, credential_kind, concealment }
+  }
+
+  pub const fn authorization(&self) -> &T {
+    &self.authorization
+  }
+
+  pub const fn credential_kind(&self) -> ReadViewCredentialKindV1 {
+    self.credential_kind
+  }
+
+  pub const fn concealment(&self) -> ReadViewConcealmentV1 {
+    self.concealment
+  }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReadViewAuthorizationErrorV1 {
+  #[error("current read authorization was denied")]
+  Denied { concealment: ReadViewConcealmentV1 },
+  #[error("current read authorization is unavailable: {message}")]
+  Unavailable { concealment: ReadViewConcealmentV1, message: String },
+  #[error("current read authorization is corrupt: {message}")]
+  Corrupt { concealment: ReadViewConcealmentV1, message: String },
+}
+
+impl ReadViewAuthorizationErrorV1 {
+  pub const fn denied(concealment: ReadViewConcealmentV1) -> Self {
+    Self::Denied { concealment }
+  }
+
+  pub fn unavailable(concealment: ReadViewConcealmentV1, message: impl Into<String>) -> Self {
+    Self::Unavailable { concealment, message: message.into() }
+  }
+
+  pub fn corrupt(concealment: ReadViewConcealmentV1, message: impl Into<String>) -> Self {
+    Self::Corrupt { concealment, message: message.into() }
+  }
+
+  pub const fn code(&self) -> &'static str {
+    match self {
+      Self::Denied { .. } => "read_authorization_denied",
+      Self::Unavailable { .. } => "read_authorization_unavailable",
+      Self::Corrupt { .. } => "read_authorization_corrupt",
+    }
+  }
+
+  pub const fn concealment(&self) -> ReadViewConcealmentV1 {
+    match self {
+      Self::Denied { concealment } | Self::Unavailable { concealment, .. } | Self::Corrupt { concealment, .. } => *concealment,
+    }
+  }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReadViewAuthorizationFailureV1 {
+  #[error("selected-root read authorization was denied")]
+  Denied,
+  #[error("selected-root read authorization is unavailable: {0}")]
+  Unavailable(String),
+  #[error("selected-root read authorization is corrupt: {0}")]
+  Corrupt(String),
+}
+
+impl ReadViewAuthorizationFailureV1 {
+  pub const fn code(&self) -> &'static str {
+    match self {
+      Self::Denied => "read_authorization_denied",
+      Self::Unavailable(_) => "read_authorization_unavailable",
+      Self::Corrupt(_) => "read_authorization_corrupt",
+    }
+  }
+}
+
+/// Request-owned authorization adapter used by the common read-view resolver.
+///
+/// Current authorization must not inspect selected-root authority. The second
+/// call may only restrict the current authorization; it must never expand it.
+pub trait ReadViewAuthorizerV1 {
+  type CurrentAuthorization;
+  type ResolvedAuthorization;
+
+  fn authorize_current(
+    &self,
+    cancellation: &CancellationToken,
+  ) -> Result<CurrentReadAuthorizationV1<Self::CurrentAuthorization>, ReadViewAuthorizationErrorV1>;
+
+  fn restrict_to_selected_root(
+    &self,
+    current: &Self::CurrentAuthorization,
+    authority: &LoadedReadAuthorityV1,
+    cancellation: &CancellationToken,
+  ) -> Result<Self::ResolvedAuthorization, ReadViewAuthorizationFailureV1>;
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReadViewSourceErrorV1 {
+  #[error("selected database header is unavailable: {0}")]
+  HeaderUnavailable(String),
+  #[error("selected database header is corrupt: {0}")]
+  HeaderCorrupt(String),
+  #[error("root has no complete admission authority")]
+  RootNotAdmitted,
+  #[error("immutable root authority is unavailable: {0}")]
+  AuthorityUnavailable(String),
+  #[error("immutable root authority is corrupt: {0}")]
+  AuthorityCorrupt(String),
+}
+
+impl ReadViewSourceErrorV1 {
+  pub const fn code(&self) -> &'static str {
+    match self {
+      Self::HeaderUnavailable(_) => "database_header_unavailable",
+      Self::HeaderCorrupt(_) => "database_header_corrupt",
+      Self::RootNotAdmitted => "invalid_namespace_root",
+      Self::AuthorityUnavailable(_) => "root_authority_unavailable",
+      Self::AuthorityCorrupt(_) => "root_authority_corrupt",
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedReadAuthorityV1 {
+  pub authority: ImmutableNamespaceAuthorityV1,
+  pub legacy_root_hash: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReadViewLifecycleErrorV1 {
+  #[error("root lifecycle authority is corrupt: {0}")]
+  Corrupt(String),
+  #[error("root lifecycle authority is unavailable: {0}")]
+  Unavailable(String),
+  #[error("root lifecycle observation was canceled")]
+  Canceled,
+}
+
+/// Storage adapter for one selected physical v4 database.
+///
+/// `capture_header` is called exactly once per resolution. Later methods must
+/// use that captured header and must not recapture mutable HEAD state.
+pub trait ReadViewAuthoritySourceV1: Send + Sync {
+  fn capture_header(&self, cancellation: &CancellationToken) -> Result<SelectedDatabaseHeaderV4, ReadViewSourceErrorV1>;
+
+  fn load_verified_authority(
+    &self,
+    header: &SelectedDatabaseHeaderV4,
+    root_hash: &[u8],
+    cancellation: &CancellationToken,
+  ) -> Result<LoadedReadAuthorityV1, ReadViewSourceErrorV1>;
+
+  fn observe_lifecycle(
+    &self,
+    header: &SelectedDatabaseHeaderV4,
+    authority: &LoadedReadAuthorityV1,
+    cancellation: &CancellationToken,
+  ) -> Result<RootLifecycleObservationV1, ReadViewLifecycleErrorV1>;
+}
+
+#[derive(Debug, Error)]
+pub enum ReadViewAuthorizedFailureV1 {
+  #[error("read-view resolution was canceled")]
+  Canceled,
+  #[error("root hash does not match the selected database")]
+  InvalidRootHash,
+  #[error("the pin coordinator uses another hash algorithm")]
+  CoordinatorHashAlgorithmMismatch,
+  #[error("share credentials can resolve only the captured current HEAD")]
+  ShareHistoricalRoot,
+  #[error("hash is not an admitted namespace root")]
+  InvalidNamespaceRoot,
+  #[error("current HEAD has no complete immutable authority")]
+  CurrentAuthorityCorrupt,
+  #[error("loaded immutable root authority disagrees with the selected header: {0}")]
+  AuthorityClosureCorrupt(&'static str),
+  #[error("selected root requires unsupported reader capabilities: {0:?}")]
+  UnsupportedCapabilities(Vec<u16>),
+  #[error("selected v4 header is not semantically readable: {0}")]
+  HeaderAdmission(#[source] V4AdmissionError),
+  #[error(transparent)]
+  Source(#[from] ReadViewSourceErrorV1),
+  #[error(transparent)]
+  Authorization(#[from] ReadViewAuthorizationFailureV1),
+  #[error(transparent)]
+  Pin(#[from] RootPinCoordinatorErrorV1),
+}
+
+impl ReadViewAuthorizedFailureV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Canceled => "read_view_canceled",
+      Self::InvalidRootHash => "invalid_root_hash",
+      Self::CoordinatorHashAlgorithmMismatch => "read_view_coordinator_mismatch",
+      Self::ShareHistoricalRoot => "share_historical_root_forbidden",
+      Self::InvalidNamespaceRoot => "invalid_namespace_root",
+      Self::CurrentAuthorityCorrupt | Self::AuthorityClosureCorrupt(_) => "root_authority_corrupt",
+      Self::UnsupportedCapabilities(_) => "unsupported_root_capabilities",
+      Self::HeaderAdmission(error) => error.code(),
+      Self::Source(error) => error.code(),
+      Self::Authorization(error) => error.code(),
+      Self::Pin(error) => error.code(),
+    }
+  }
+}
+
+#[derive(Debug, Error)]
+pub enum ReadViewResolutionErrorV1 {
+  #[error("read-view resolution was canceled before authorization")]
+  Canceled,
+  #[error(transparent)]
+  CurrentAuthorization(#[from] ReadViewAuthorizationErrorV1),
+  #[error("authorized read-view resolution failed: {failure}")]
+  Authorized {
+    #[source]
+    failure: ReadViewAuthorizedFailureV1,
+    concealment: ReadViewConcealmentV1,
+  },
+}
+
+impl ReadViewResolutionErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Canceled => "read_view_canceled",
+      Self::CurrentAuthorization(error) => error.code(),
+      Self::Authorized { failure, .. } => failure.code(),
+    }
+  }
+
+  pub const fn concealment(&self) -> Option<ReadViewConcealmentV1> {
+    match self {
+      Self::Canceled => None,
+      Self::CurrentAuthorization(error) => Some(error.concealment()),
+      Self::Authorized { concealment, .. } => Some(*concealment),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadViewRootMetadataV1 {
+  pub hash: Vec<u8>,
+  pub state: ReadableRootStateV1,
+  pub expires_at_ms: Option<i64>,
+}
+
+#[must_use = "dropping the resolved view releases its root request pin"]
+pub struct ResolvedReadViewV1<A> {
+  database_id: [u8; 16],
+  physical_instance_id: [u8; 16],
+  selected_header_slot: usize,
+  header_slot_sequence: u64,
+  write_sequence_high_water: u64,
+  root_metadata: ReadViewRootMetadataV1,
+  explicit_root: bool,
+  legacy_root_hash: Option<Vec<u8>>,
+  authority: ImmutableNamespaceAuthorityV1,
+  authorization: A,
+  credential_kind: ReadViewCredentialKindV1,
+  concealment: ReadViewConcealmentV1,
+  system_family_registry: &'static SystemFamilyRegistryV1<'static>,
+  cancellation: CancellationToken,
+  _pin: RootReadPinV1,
+}
+
+impl<A> std::fmt::Debug for ResolvedReadViewV1<A> {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("ResolvedReadViewV1")
+      .field("database_id", &hex::encode(self.database_id))
+      .field("physical_instance_id", &hex::encode(self.physical_instance_id))
+      .field("root", &self.root_metadata)
+      .field("explicit_root", &self.explicit_root)
+      .finish_non_exhaustive()
+  }
+}
+
+impl<A> ResolvedReadViewV1<A> {
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub const fn physical_instance_id(&self) -> [u8; 16] {
+    self.physical_instance_id
+  }
+
+  pub const fn selected_header_slot(&self) -> usize {
+    self.selected_header_slot
+  }
+
+  pub const fn header_slot_sequence(&self) -> u64 {
+    self.header_slot_sequence
+  }
+
+  pub const fn write_sequence_high_water(&self) -> u64 {
+    self.write_sequence_high_water
+  }
+
+  pub const fn root_metadata(&self) -> &ReadViewRootMetadataV1 {
+    &self.root_metadata
+  }
+
+  pub const fn is_explicit_root(&self) -> bool {
+    self.explicit_root
+  }
+
+  pub fn legacy_root_hash(&self) -> Option<&[u8]> {
+    self.legacy_root_hash.as_deref()
+  }
+
+  pub const fn authority(&self) -> &ImmutableNamespaceAuthorityV1 {
+    &self.authority
+  }
+
+  pub const fn authorization(&self) -> &A {
+    &self.authorization
+  }
+
+  pub const fn credential_kind(&self) -> ReadViewCredentialKindV1 {
+    self.credential_kind
+  }
+
+  pub const fn concealment(&self) -> ReadViewConcealmentV1 {
+    self.concealment
+  }
+
+  pub const fn system_family_registry(&self) -> &'static SystemFamilyRegistryV1<'static> {
+    self.system_family_registry
+  }
+
+  pub const fn cancellation(&self) -> &CancellationToken {
+    &self.cancellation
+  }
+}
+
+pub struct ReadViewResolverV1<S> {
+  authority_source: Arc<S>,
+  pin_coordinator: RootReadPinCoordinatorV1,
+  capability_profile: BinaryCapabilityProfileV1,
+}
+
+impl<S> ReadViewResolverV1<S>
+where
+  S: ReadViewAuthoritySourceV1,
+{
+  pub const fn new(
+    authority_source: Arc<S>,
+    pin_coordinator: RootReadPinCoordinatorV1,
+    capability_profile: BinaryCapabilityProfileV1,
+  ) -> Self {
+    Self { authority_source, pin_coordinator, capability_profile }
+  }
+
+  pub fn resolve<A>(
+    &self,
+    selector: ReadViewSelectorV1<'_>,
+    authorizer: &A,
+    cancellation: &CancellationToken,
+  ) -> Result<ResolvedReadViewV1<A::ResolvedAuthorization>, ReadViewResolutionErrorV1>
+  where
+    A: ReadViewAuthorizerV1,
+  {
+    if cancellation.is_cancelled() {
+      return Err(ReadViewResolutionErrorV1::Canceled);
+    }
+    let current_authorization = authorizer.authorize_current(cancellation)?;
+    let concealment = current_authorization.concealment();
+    let authorized_error = |failure| ReadViewResolutionErrorV1::Authorized { failure, concealment };
+    if cancellation.is_cancelled() {
+      return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
+    }
+
+    let header = self.authority_source.capture_header(cancellation).map_err(|error| authorized_error(error.into()))?;
+    if cancellation.is_cancelled() {
+      return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
+    }
+    if header.header.hash_algorithm != self.pin_coordinator.hash_algorithm() {
+      return Err(authorized_error(ReadViewAuthorizedFailureV1::CoordinatorHashAlgorithmMismatch));
+    }
+    let header_admission = semantic_header_admission(&header, self.capability_profile).map_err(|error| authorized_error(error))?;
+
+    let (root_hash, explicit_root) = match selector {
+      ReadViewSelectorV1::CurrentHead => (header.header.head_hash.as_slice(), false),
+      ReadViewSelectorV1::ExplicitRoot(root_hash) => (root_hash, true),
+    };
+    if !self.pin_coordinator.root_hash_is_valid(root_hash) {
+      let failure =
+        if explicit_root { ReadViewAuthorizedFailureV1::InvalidRootHash } else { ReadViewAuthorizedFailureV1::CurrentAuthorityCorrupt };
+      return Err(authorized_error(failure));
+    }
+    if current_authorization.credential_kind() == ReadViewCredentialKindV1::Share && root_hash != header.header.head_hash {
+      return Err(authorized_error(ReadViewAuthorizedFailureV1::ShareHistoricalRoot));
+    }
+    if cancellation.is_cancelled() {
+      return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
+    }
+
+    let loaded = match self.authority_source.load_verified_authority(&header, root_hash, cancellation) {
+      Ok(loaded) => loaded,
+      Err(ReadViewSourceErrorV1::RootNotAdmitted) => {
+        let failure = if explicit_root {
+          ReadViewAuthorizedFailureV1::InvalidNamespaceRoot
+        } else {
+          ReadViewAuthorizedFailureV1::CurrentAuthorityCorrupt
+        };
+        return Err(authorized_error(failure));
+      }
+      Err(error) => return Err(authorized_error(error.into())),
+    };
+    if cancellation.is_cancelled() {
+      return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
+    }
+
+    let authorization = authorizer
+      .restrict_to_selected_root(current_authorization.authorization(), &loaded, cancellation)
+      .map_err(|error| authorized_error(error.into()))?;
+    if cancellation.is_cancelled() {
+      return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
+    }
+    validate_loaded_authority(&header, root_hash, &loaded).map_err(|failure| authorized_error(failure))?;
+    validate_root_capabilities(&loaded.authority, self.capability_profile).map_err(|failure| authorized_error(failure))?;
+
+    let admission = self
+      .pin_coordinator
+      .admit_read(root_hash, cancellation, || {
+        self.authority_source.observe_lifecycle(&header, &loaded, cancellation).map_err(|error| match error {
+          ReadViewLifecycleErrorV1::Corrupt(_) => RootPinCoordinatorErrorV1::LifecycleCorrupt,
+          ReadViewLifecycleErrorV1::Unavailable(_) => RootPinCoordinatorErrorV1::LifecycleUnavailable,
+          ReadViewLifecycleErrorV1::Canceled => RootPinCoordinatorErrorV1::Canceled,
+        })
+      })
+      .map_err(|error| authorized_error(error.into()))?;
+    let root_metadata =
+      ReadViewRootMetadataV1 { hash: root_hash.to_vec(), state: admission.state, expires_at_ms: admission.state.expires_at_ms() };
+    Ok(ResolvedReadViewV1 {
+      database_id: header.header.database_id,
+      physical_instance_id: header.header.physical_instance_id,
+      selected_header_slot: header.selected_slot,
+      header_slot_sequence: header.header.slot_sequence,
+      write_sequence_high_water: header.header.write_sequence_high_water,
+      root_metadata,
+      explicit_root,
+      legacy_root_hash: loaded.legacy_root_hash,
+      authority: loaded.authority,
+      authorization,
+      credential_kind: current_authorization.credential_kind(),
+      concealment,
+      system_family_registry: header_admission.registry,
+      cancellation: cancellation.clone(),
+      _pin: admission.pin,
+    })
+  }
+}
+
+fn semantic_header_admission(
+  header: &SelectedDatabaseHeaderV4,
+  capability_profile: BinaryCapabilityProfileV1,
+) -> Result<SemanticReadOnlyAdmissionV1, ReadViewAuthorizedFailureV1> {
+  match admit_v4_header(header, AdmissionModeV1::SemanticReadOnly, capability_profile, None) {
+    Ok(V4AdmissionResult::SemanticReadOnly(admission)) => Ok(admission),
+    Ok(V4AdmissionResult::DiagnosticRaw(_) | V4AdmissionResult::Writable(_)) => {
+      Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("semantic admission returned the wrong mode"))
+    }
+    Err(error) => Err(ReadViewAuthorizedFailureV1::HeaderAdmission(error)),
+  }
+}
+
+fn validate_loaded_authority(
+  header: &SelectedDatabaseHeaderV4,
+  requested_root: &[u8],
+  loaded: &LoadedReadAuthorityV1,
+) -> Result<(), ReadViewAuthorizedFailureV1> {
+  let authority = &loaded.authority;
+  if authority.root.root_hash != requested_root || authority.admission.namespace_root != requested_root {
+    return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("requested root identity mismatch"));
+  }
+  if authority.admission.database_id != header.header.database_id {
+    return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("logical database identity mismatch"));
+  }
+  if authority.namespace_tree.root_hash != authority.root.namespace_tree_root {
+    return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("namespace-tree edge mismatch"));
+  }
+  if authority.semantic_state.object_id != authority.root.semantic_state_root {
+    return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("semantic-state edge mismatch"));
+  }
+  if authority.admission.selected_header_slot_sequence > header.header.slot_sequence
+    || authority.admission.publication_sequence > header.header.write_sequence_high_water
+  {
+    return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("admission sequence exceeds the captured header"));
+  }
+  if let Some(legacy_root_hash) = &loaded.legacy_root_hash {
+    if legacy_root_hash.len() != header.header.hash_algorithm.hash_length() || legacy_root_hash.iter().all(|byte| *byte == 0) {
+      return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("legacy root mapping is malformed"));
+    }
+  }
+  Ok(())
+}
+
+fn validate_root_capabilities(
+  authority: &ImmutableNamespaceAuthorityV1,
+  capability_profile: BinaryCapabilityProfileV1,
+) -> Result<(), ReadViewAuthorizedFailureV1> {
+  let root = CapabilitySetV1::from_bytes(authority.root.required_capabilities)
+    .map_err(|_| ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("namespace root capability set is malformed"))?;
+  let semantic = CapabilitySetV1::from_bytes(authority.semantic_state.required_capabilities)
+    .map_err(|_| ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("semantic state capability set is malformed"))?;
+  let missing = root.union(semantic).difference(capability_profile.supported_reader_capabilities);
+  if !missing.is_empty() {
+    return Err(ReadViewAuthorizedFailureV1::UnsupportedCapabilities(missing.bits()));
+  }
+  Ok(())
 }

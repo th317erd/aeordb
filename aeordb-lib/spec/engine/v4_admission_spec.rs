@@ -178,23 +178,29 @@ fn current_binary_advertises_only_proven_shadow_writers_and_refuses_v4_authority
 }
 
 #[test]
-fn current_capability_profile_has_no_production_admission_caller() {
-  fn rust_sources(path: PathBuf) -> String {
-    let mut source = String::new();
+fn only_the_disconnected_read_view_service_consumes_production_admission() {
+  fn rust_sources(path: PathBuf, sources: &mut Vec<(PathBuf, String)>) {
     for entry in fs::read_dir(path).unwrap() {
       let entry = entry.unwrap();
       if entry.file_type().unwrap().is_dir() {
-        source.push_str(&rust_sources(entry.path()));
+        rust_sources(entry.path(), sources);
       } else if entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs") {
-        source.push_str(&fs::read_to_string(entry.path()).unwrap());
+        sources.push((entry.path(), fs::read_to_string(entry.path()).unwrap()));
       }
     }
-    source
   }
 
-  let production = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
-  assert_eq!(production.matches("admit_v4_header(").count(), 1);
-  assert_eq!(production.matches("BinaryCapabilityProfileV1::current(").count(), 0);
+  let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let mut sources = Vec::new();
+  rust_sources(source_root.clone(), &mut sources);
+  let mut admission_owners: Vec<_> = sources
+    .iter()
+    .filter(|(_, source)| source.contains("admit_v4_header("))
+    .map(|(path, _)| path.strip_prefix(&source_root).unwrap().to_path_buf())
+    .collect();
+  admission_owners.sort();
+  assert_eq!(admission_owners, [PathBuf::from("engine/v4/admission.rs"), PathBuf::from("engine/v4/read_view.rs")]);
+  assert_eq!(sources.iter().map(|(_, source)| source.matches("BinaryCapabilityProfileV1::current(").count()).sum::<usize>(), 0);
 }
 
 #[test]

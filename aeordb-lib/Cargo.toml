@@ -702,6 +702,10 @@ name = "v4_read_pin_spec"
 path = "spec/engine/v4_read_pin_spec.rs"
 
 [[test]]
+name = "v4_read_view_spec"
+path = "spec/engine/v4_read_view_spec.rs"
+
+[[test]]
 name = "v4_first_authority_spec"
 path = "spec/engine/v4_first_authority_spec.rs"
 
