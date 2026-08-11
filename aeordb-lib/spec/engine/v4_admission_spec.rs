@@ -144,12 +144,26 @@ fn registry_version_and_fingerprint_drift_fail_before_semantic_or_write_authorit
 }
 
 #[test]
-fn current_binary_refuses_v4_writes_and_writer_support_covers_both_stored_floors() {
+fn current_binary_advertises_only_proven_shadow_writers_and_refuses_v4_authority() {
+  let profile = BinaryCapabilityProfileV1::current();
+  assert_eq!(profile.supported_reader_capabilities.bits(), (0..24).collect::<Vec<_>>());
+  assert_eq!(profile.supported_writer_capabilities.bits(), vec![0, 4]);
+  for bit in 0..24 {
+    assert_eq!(profile.supported_writer_capabilities.contains(bit), [0, 4].contains(&bit), "writer capability bit {bit}");
+  }
+  assert!(!profile.supported_writer_capabilities.contains(7), "immutable-only IndexArtifactV1 support is not the complete writer family");
+  assert!(!profile.supported_writer_capabilities.contains(12), "immutable-only GcArtifactV1 support is not the complete writer family");
+
   let selected = header("header-blake3-256-valid-ab.bin");
-  let error =
-    admit_v4_header(&selected, AdmissionModeV1::Writable, BinaryCapabilityProfileV1::current(), Some(identity_evidence(&selected.header)))
-      .unwrap_err();
+  let error = admit_v4_header(&selected, AdmissionModeV1::Writable, profile, Some(identity_evidence(&selected.header))).unwrap_err();
   assert_eq!(error.code(), "missing_writer_capabilities");
+  assert_eq!(error.capability_bits(), &[1, 2, 3, 5, 6, 18, 19, 21, 22]);
+
+  let mut source = PeerCapabilityViewV1::from_selected(&selected, profile);
+  source.physical_instance_id[0] ^= 1;
+  let destination = PeerCapabilityViewV1::from_selected(&selected, profile);
+  let error = admit_peer_capabilities_v4(&source, &destination).unwrap_err();
+  assert_eq!(error.code(), "peer_destination_writer_capability_mismatch");
 
   let mut extra_writer = selected.clone();
   extra_writer.header.required_writer_capabilities = CapabilitySetV1::from_bytes(extra_writer.header.required_writer_capabilities)
@@ -161,6 +175,26 @@ fn current_binary_refuses_v4_writes_and_writer_support_covers_both_stored_floors
     admit_v4_header(&extra_writer, AdmissionModeV1::Writable, profile, Some(identity_evidence(&extra_writer.header))).unwrap_err();
   assert_eq!(error.code(), "missing_writer_capabilities");
   assert_eq!(error.capability_bits(), &[23]);
+}
+
+#[test]
+fn current_capability_profile_has_no_production_admission_caller() {
+  fn rust_sources(path: PathBuf) -> String {
+    let mut source = String::new();
+    for entry in fs::read_dir(path).unwrap() {
+      let entry = entry.unwrap();
+      if entry.file_type().unwrap().is_dir() {
+        source.push_str(&rust_sources(entry.path()));
+      } else if entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs") {
+        source.push_str(&fs::read_to_string(entry.path()).unwrap());
+      }
+    }
+    source
+  }
+
+  let production = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+  assert_eq!(production.matches("admit_v4_header(").count(), 1);
+  assert_eq!(production.matches("BinaryCapabilityProfileV1::current(").count(), 0);
 }
 
 #[test]

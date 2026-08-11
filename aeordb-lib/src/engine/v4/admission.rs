@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use super::contract_generated::CAPABILITY_BITS;
+use super::contract_generated::{CAPABILITY_BITS, capability_bit};
 use super::database_header::{DatabaseHeaderV4, SelectedDatabaseHeaderV4};
 use super::system_family::{SystemFamilyRegistryV1, embedded_system_family_registry};
 use crate::engine::HashAlgorithm;
@@ -74,6 +74,12 @@ impl CapabilitySetV1 {
   pub fn bits(self) -> Vec<u16> {
     (0..KNOWN_CAPABILITY_COUNT).filter(|bit| self.contains(*bit)).collect()
   }
+
+  const fn with_known_bit(mut self, bit: u16) -> Self {
+    let bit = bit as usize;
+    self.0[bit / 8] |= 1 << (bit % 8);
+    self
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,13 +93,15 @@ impl BinaryCapabilityProfileV1 {
     Self { supported_reader_capabilities, supported_writer_capabilities }
   }
 
-  /// P1b can decode every frozen v4 family, but no v4 writer is active yet.
+  /// Advertise only byte writers whose independent fixture and publication
+  /// gates are complete. This profile does not activate a service caller.
   pub const fn current() -> Self {
     let mut reader = [0u8; CAPABILITY_WIDTH];
     reader[0] = 0xff;
     reader[1] = 0xff;
     reader[2] = 0xff;
-    Self::new(CapabilitySetV1(reader), CapabilitySetV1::empty())
+    let writer = CapabilitySetV1::empty().with_known_bit(capability_bit::WHOLE_ENTITY_V1).with_known_bit(capability_bit::SYSTEM_CONTROL_V1);
+    Self::new(CapabilitySetV1(reader), writer)
   }
 }
 

@@ -373,7 +373,7 @@ fn whole_entity_length_preflight_is_exact_and_rejects_oversized_components_witho
 }
 
 #[test]
-fn production_writer_surface_remains_disconnected_from_fixture_generation_and_service_activation() {
+fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconnected_from_service_activation() {
   let reference_manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/v4-reference/Cargo.toml")).unwrap();
   assert!(!reference_manifest.contains("aeordb-lib"));
   assert!(!reference_manifest.contains("path = \"../../aeordb-lib\""));
@@ -389,7 +389,10 @@ fn production_writer_surface_remains_disconnected_from_fixture_generation_and_se
   assert!(!reference_sources.contains("encode_immutable_gc_artifact"));
 
   let admission = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/admission.rs")).unwrap();
-  assert!(admission.contains("Self::new(CapabilitySetV1(reader), CapabilitySetV1::empty())"));
+  assert!(admission.contains(".with_known_bit(capability_bit::WHOLE_ENTITY_V1)"));
+  assert!(admission.contains(".with_known_bit(capability_bit::SYSTEM_CONTROL_V1)"));
+  assert!(!admission.contains("capability_bit::INDEX_ARTIFACT_V1"));
+  assert!(!admission.contains("capability_bit::GC_ARTIFACT_V1"));
   let storage_engine = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/storage_engine.rs")).unwrap();
   assert!(!storage_engine.contains("encode_database_header_slot"));
   assert!(!storage_engine.contains("encode_whole_entity"));

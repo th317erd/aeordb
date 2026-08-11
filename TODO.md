@@ -569,6 +569,11 @@
         - [x] Prove validation-before-mutation, sequence serialization, idempotency, hard acknowledgement, restart, and no production caller.
         - [x] Run focused, adjacent, workspace, architecture, native, documentation, and real-world shadow-write gates; record and land the unit.
       - [ ] P3a-5: activate only the writer capabilities proven by exact readers/writers and keep namespace/index/GC/migration service activation disabled.
+        - [x] Map capability-profile producers, writable/peer consumers, exact P3a writers, and service-activation boundaries.
+        - [x] Add and demonstrate the failure-first exact writer-capability profile test.
+        - [x] Advertise only WholeEntityV1 and SystemControlV1 writers; keep partial immutable-only IndexArtifactV1 and GcArtifactV1 support disabled.
+        - [x] Prove all other capabilities remain disabled and current writable/peer admission still fails closed.
+        - [ ] Run P3a focused, adjacent, workspace, architecture, native, documentation, and shadow-storage gates; record and land the phase.
       - [ ] Run the P3a narrow, adjacent, workspace, architecture, native, and real-world shadow-write gates; record and land the phase.
     - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
     - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
