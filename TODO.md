@@ -631,7 +631,12 @@
             - [x] Preserve the prior selected watermark unless the full reset-to-tip chain and exact scan boundary close successfully.
             - [x] Bind the resulting handoff to the candidate physical-inventory manifest without adding a second mutable journal authority.
             - [x] Prove cancellation, bounds, gaps, corruption, orphaned crash prefixes, manifest mismatch, and architecture isolation before landing.
-        - [ ] P4-2c: make every v4 stable-key replacement, relocation, repair, migration, and pointer/control replacement enter that owner before replacement activation.
+        - [x] P4-2c: make every v4 stable-key replacement, relocation, repair, migration, and pointer/control replacement enter that owner before replacement activation.
+          - [x] Add one plural replacement-batch contract with a shared reserved publication sequence and per-incarnation frozen reason.
+          - [x] Preflight the complete batch without mutation, requiring canonical stable keys, non-overlapping old/new extents, forward v4 write sequence, and journal order.
+          - [x] Return a non-constructible activation permit only after every record has entered the bounded retirement owner.
+          - [x] Preserve explicit soft-durability status, permit retry after activation failure without duplicate journal append, and refuse activation after partial or dishonest admission.
+          - [x] Prove all five reasons, both hash widths, malformed/canceled/resource/failure paths, and no live v3/service activation.
         - [ ] P4-2d: recover missing post-watermark lower-incarnation lineage conservatively and emit the existing typed `CorruptGcEvidenceV1` contract without reclaim authority.
         - [ ] P4-2e: prove cancellation, crash prefixes, corrupt/missing chains, ordering, resource bounds, recovery, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.

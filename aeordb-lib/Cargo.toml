@@ -718,6 +718,10 @@ name = "gc_v4_inventory_retirement_spec"
 path = "spec/engine/gc_v4_inventory_retirement_spec.rs"
 
 [[test]]
+name = "gc_v4_replacement_spec"
+path = "spec/engine/gc_v4_replacement_spec.rs"
+
+[[test]]
 name = "v4_read_pin_spec"
 path = "spec/engine/v4_read_pin_spec.rs"
 

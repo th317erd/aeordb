@@ -22,6 +22,7 @@ use super::gc_state::{
   PhysicalInventoryManifestV1, RetirementJournalModelErrorV1, RetirementJournalModelSummaryV1, RetirementJournalReferenceModelV1,
   RetirementJournalSegmentV1, RetirementReasonV1, decode_retirement_journal_segment_v1,
 };
+use super::hash::digest_parts;
 use super::reader::{FormatError, MalformedInputClass};
 use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
@@ -518,6 +519,428 @@ impl RetirementJournalOwnerErrorV1 {
       _ => false,
     }
   }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetirementJournalReplacementV1<'a> {
+  pub reason: RetirementReasonV1,
+  pub old_incarnation: &'a [u8],
+  pub replacement_incarnation: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetirementJournalReplacementBatchV1<'a> {
+  pub replacement_publication_sequence: u64,
+  pub retired_at_ms: u64,
+  pub replacements: &'a [RetirementJournalReplacementV1<'a>],
+}
+
+#[must_use = "replacement activation journal state may contain a deferred durability failure"]
+#[derive(Debug)]
+pub enum RetirementJournalActivationJournalStateV1 {
+  Buffered,
+  HardPublished { hard_publication_sequence: u64 },
+  BufferedAfterSinkFailure { source: RetirementJournalSinkErrorV1 },
+}
+
+impl RetirementJournalActivationJournalStateV1 {
+  pub const fn code(&self) -> &'static str {
+    match self {
+      Self::Buffered => "buffered",
+      Self::HardPublished { .. } => "hard_published",
+      Self::BufferedAfterSinkFailure { .. } => "buffered_after_sink_failure",
+    }
+  }
+
+  pub const fn deferred_sink_error(&self) -> Option<&RetirementJournalSinkErrorV1> {
+    match self {
+      Self::BufferedAfterSinkFailure { source } => Some(source),
+      Self::Buffered | Self::HardPublished { .. } => None,
+    }
+  }
+}
+
+#[must_use = "replacement activation requires this admitted retirement permit"]
+#[derive(Debug)]
+pub struct RetirementJournalActivationPermitV1 {
+  hash_algorithm: HashAlgorithm,
+  replacement_publication_sequence: u64,
+  retired_at_ms: u64,
+  replacement_count: u32,
+  reason_counts: [u32; 5],
+  batch_digest: Vec<u8>,
+}
+
+impl RetirementJournalActivationPermitV1 {
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
+  pub const fn replacement_publication_sequence(&self) -> u64 {
+    self.replacement_publication_sequence
+  }
+
+  pub const fn retired_at_ms(&self) -> u64 {
+    self.retired_at_ms
+  }
+
+  pub const fn replacement_count(&self) -> u32 {
+    self.replacement_count
+  }
+
+  pub const fn reason_count(&self, reason: RetirementReasonV1) -> u32 {
+    self.reason_counts[retirement_reason_index(reason)]
+  }
+
+  pub fn batch_digest(&self) -> &[u8] {
+    &self.batch_digest
+  }
+}
+
+#[must_use = "prepared retirement admission must be activated or retained for retry"]
+#[derive(Debug)]
+pub struct PreparedRetirementJournalReplacementV1 {
+  permit: RetirementJournalActivationPermitV1,
+  journal_state: RetirementJournalActivationJournalStateV1,
+}
+
+impl PreparedRetirementJournalReplacementV1 {
+  pub fn permit(&self) -> &RetirementJournalActivationPermitV1 {
+    &self.permit
+  }
+
+  pub fn journal_state(&self) -> &RetirementJournalActivationJournalStateV1 {
+    &self.journal_state
+  }
+
+  pub fn activate<T, E, F>(self, activate: F) -> Result<RetirementJournalReplacementOutcomeV1<T>, RetirementJournalReplacementErrorV1<E>>
+  where
+    F: FnOnce(&RetirementJournalActivationPermitV1) -> Result<T, E>,
+  {
+    match activate(&self.permit) {
+      Ok(output) => Ok(RetirementJournalReplacementOutcomeV1 { output, journal_state: self.journal_state }),
+      Err(source) => Err(RetirementJournalReplacementErrorV1::Activation { source, prepared: self }),
+    }
+  }
+}
+
+#[must_use = "replacement outcome may contain a deferred retirement-journal durability failure"]
+#[derive(Debug)]
+pub struct RetirementJournalReplacementOutcomeV1<T> {
+  pub output: T,
+  pub journal_state: RetirementJournalActivationJournalStateV1,
+}
+
+#[derive(Debug, ThisError)]
+pub enum RetirementJournalReplacementAdmissionErrorV1 {
+  #[error("v4 retirement replacement batch failed preflight: {0}")]
+  Preflight(&'static str),
+  #[error("retirement journal rejected a replacement batch after admitting {admitted_records} records: {source}")]
+  Journal {
+    #[source]
+    source: RetirementJournalOwnerErrorV1,
+    admitted_records: u32,
+  },
+}
+
+impl RetirementJournalReplacementAdmissionErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Preflight(_) => "retirement_replacement_preflight",
+      Self::Journal { source, .. } => source.code(),
+    }
+  }
+
+  pub const fn admitted_records(&self) -> u32 {
+    match self {
+      Self::Preflight(_) => 0,
+      Self::Journal { admitted_records, .. } => *admitted_records,
+    }
+  }
+}
+
+#[derive(Debug)]
+pub enum RetirementJournalReplacementErrorV1<E> {
+  Admission(RetirementJournalReplacementAdmissionErrorV1),
+  Activation { source: E, prepared: PreparedRetirementJournalReplacementV1 },
+}
+
+impl<E> RetirementJournalReplacementErrorV1<E> {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Admission(source) => source.code(),
+      Self::Activation { .. } => "retirement_replacement_activation",
+    }
+  }
+
+  pub const fn admitted_records(&self) -> u32 {
+    match self {
+      Self::Admission(source) => source.admitted_records(),
+      Self::Activation { prepared, .. } => prepared.permit.replacement_count,
+    }
+  }
+
+  pub fn into_activation_failure(self) -> Option<(E, PreparedRetirementJournalReplacementV1)> {
+    match self {
+      Self::Activation { source, prepared } => Some((source, prepared)),
+      Self::Admission(_) => None,
+    }
+  }
+}
+
+impl<E: Display> Display for RetirementJournalReplacementErrorV1<E> {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Admission(source) => Display::fmt(source, formatter),
+      Self::Activation { source, .. } => write!(formatter, "v4 replacement activation failed after retirement admission: {source}"),
+    }
+  }
+}
+
+impl<E: Error + 'static> Error for RetirementJournalReplacementErrorV1<E> {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Admission(source) => Some(source),
+      Self::Activation { source, .. } => Some(source),
+    }
+  }
+}
+
+impl<E> From<RetirementJournalReplacementAdmissionErrorV1> for RetirementJournalReplacementErrorV1<E> {
+  fn from(source: RetirementJournalReplacementAdmissionErrorV1) -> Self {
+    Self::Admission(source)
+  }
+}
+
+/// The sole future v4 stable-key replacement boundary.
+///
+/// The caller must reserve the hard authority publication sequence and append
+/// each replacement entity before entering this coordinator. Every exact old
+/// and replacement incarnation is then admitted to the bounded retirement
+/// owner before the activation callback can run. The current v3 mutation
+/// acknowledgement cannot construct this input because it lacks the v4
+/// integrity digest and entity write sequence.
+pub struct RetirementJournalReplacementCoordinatorV1<'coordinator, 'owner> {
+  owner: &'coordinator mut RetirementJournalOwnerV1<'owner>,
+  sink: &'coordinator mut dyn RetirementJournalDurableSinkV1,
+}
+
+impl<'coordinator, 'owner> RetirementJournalReplacementCoordinatorV1<'coordinator, 'owner> {
+  pub fn new(
+    owner: &'coordinator mut RetirementJournalOwnerV1<'owner>,
+    sink: &'coordinator mut dyn RetirementJournalDurableSinkV1,
+  ) -> Self {
+    Self { owner, sink }
+  }
+
+  pub fn prepare(
+    &mut self,
+    batch: RetirementJournalReplacementBatchV1<'_>,
+    monotonic_now_ms: u64,
+  ) -> Result<PreparedRetirementJournalReplacementV1, RetirementJournalReplacementAdmissionErrorV1> {
+    let (reason_counts, batch_digest) = self.preflight_batch(&batch, monotonic_now_ms)?;
+    let replacement_count = u32::try_from(batch.replacements.len())
+      .map_err(|_| RetirementJournalReplacementAdmissionErrorV1::Preflight("replacement count exceeds u32"))?;
+    let mut admitted_records = 0u32;
+    let mut deferred_sink_error = None;
+
+    for (index, replacement) in batch.replacements.iter().enumerate() {
+      let record = RetirementJournalRecordWriteV1 {
+        reason: replacement.reason,
+        replacement_publication_sequence: batch.replacement_publication_sequence,
+        retired_at_ms: batch.retired_at_ms,
+        old_incarnation: replacement.old_incarnation,
+        replacement_incarnation: replacement.replacement_incarnation,
+      };
+      match self.owner.append(record, monotonic_now_ms, self.sink) {
+        Ok(()) => {
+          admitted_records = admitted_records
+            .checked_add(1)
+            .ok_or(RetirementJournalReplacementAdmissionErrorV1::Preflight("admitted replacement count overflowed"))?;
+        }
+        Err(RetirementJournalOwnerErrorV1::Sink { source, incoming_record_retained: true }) if index + 1 == batch.replacements.len() => {
+          admitted_records = admitted_records
+            .checked_add(1)
+            .ok_or(RetirementJournalReplacementAdmissionErrorV1::Preflight("admitted replacement count overflowed"))?;
+          deferred_sink_error = Some(source);
+        }
+        Err(source) => {
+          if source.incoming_record_retained() {
+            admitted_records = admitted_records
+              .checked_add(1)
+              .ok_or(RetirementJournalReplacementAdmissionErrorV1::Preflight("admitted replacement count overflowed"))?;
+          }
+          return Err(RetirementJournalReplacementAdmissionErrorV1::Journal { source, admitted_records });
+        }
+      }
+    }
+
+    if admitted_records != replacement_count {
+      return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("not every replacement entered retirement ownership"));
+    }
+    let status = self.owner.status();
+    let journal_state = match deferred_sink_error {
+      Some(source) => RetirementJournalActivationJournalStateV1::BufferedAfterSinkFailure { source },
+      None if status.pending_records == 0 => {
+        RetirementJournalActivationJournalStateV1::HardPublished { hard_publication_sequence: status.last_hard_publication_sequence }
+      }
+      None => RetirementJournalActivationJournalStateV1::Buffered,
+    };
+    Ok(PreparedRetirementJournalReplacementV1 {
+      permit: RetirementJournalActivationPermitV1 {
+        hash_algorithm: self.owner.algorithm,
+        replacement_publication_sequence: batch.replacement_publication_sequence,
+        retired_at_ms: batch.retired_at_ms,
+        replacement_count,
+        reason_counts,
+        batch_digest,
+      },
+      journal_state,
+    })
+  }
+
+  pub fn execute<T, E, F>(
+    self,
+    batch: RetirementJournalReplacementBatchV1<'_>,
+    monotonic_now_ms: u64,
+    activate: F,
+  ) -> Result<RetirementJournalReplacementOutcomeV1<T>, RetirementJournalReplacementErrorV1<E>>
+  where
+    F: FnOnce(&RetirementJournalActivationPermitV1) -> Result<T, E>,
+  {
+    let prepared = {
+      let mut coordinator = self;
+      coordinator.prepare(batch, monotonic_now_ms)?
+    };
+    prepared.activate(activate)
+  }
+
+  fn preflight_batch(
+    &self,
+    batch: &RetirementJournalReplacementBatchV1<'_>,
+    monotonic_now_ms: u64,
+  ) -> Result<([u32; 5], Vec<u8>), RetirementJournalReplacementAdmissionErrorV1> {
+    if batch.replacements.is_empty() {
+      return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("replacement batch is empty"));
+    }
+    if batch.replacement_publication_sequence == 0 || batch.retired_at_ms == 0 {
+      return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("publication sequence and retirement time must be nonzero"));
+    }
+    self.owner.ensure_operable().map_err(|source| RetirementJournalReplacementAdmissionErrorV1::Journal { source, admitted_records: 0 })?;
+    if self.owner.last_observed_at_ms.is_some_and(|previous| monotonic_now_ms < previous) {
+      return Err(RetirementJournalReplacementAdmissionErrorV1::Journal {
+        source: RetirementJournalOwnerErrorV1::ClockRegression,
+        admitted_records: 0,
+      });
+    }
+
+    let algorithm = self.owner.algorithm;
+    let batch_digest = retirement_journal_replacement_batch_digest_v1(batch, algorithm)?;
+    let mut previous_old = if self.owner.last_old_incarnation.is_empty() {
+      None
+    } else {
+      Some(decode_physical_incarnation(&self.owner.last_old_incarnation, algorithm).map_err(|source| {
+        RetirementJournalReplacementAdmissionErrorV1::Journal { source: RetirementJournalOwnerErrorV1::from(source), admitted_records: 0 }
+      })?)
+    };
+    let mut previous_sequence = self.owner.last_record_sequence;
+    let mut previous_logical_key: Option<&[u8]> = None;
+    let mut reason_counts = [0u32; 5];
+
+    for replacement in batch.replacements {
+      let record = RetirementJournalRecordWriteV1 {
+        reason: replacement.reason,
+        replacement_publication_sequence: batch.replacement_publication_sequence,
+        retired_at_ms: batch.retired_at_ms,
+        old_incarnation: replacement.old_incarnation,
+        replacement_incarnation: replacement.replacement_incarnation,
+      };
+      encode_record(record, algorithm)
+        .map_err(|source| RetirementJournalReplacementAdmissionErrorV1::Journal { source, admitted_records: 0 })?;
+      let old = decode_physical_incarnation(replacement.old_incarnation, algorithm).map_err(|source| {
+        RetirementJournalReplacementAdmissionErrorV1::Journal { source: RetirementJournalOwnerErrorV1::from(source), admitted_records: 0 }
+      })?;
+      let next = decode_physical_incarnation(replacement.replacement_incarnation, algorithm).map_err(|source| {
+        RetirementJournalReplacementAdmissionErrorV1::Journal { source: RetirementJournalOwnerErrorV1::from(source), admitted_records: 0 }
+      })?;
+      if old.logical_key != next.logical_key {
+        return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("old and replacement logical keys differ"));
+      }
+      if old.entry_type != next.entry_type {
+        return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("old and replacement entry types differ"));
+      }
+      if next.write_sequence <= old.write_sequence {
+        return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("replacement write sequence does not advance"));
+      }
+      if physical_extents_overlap(&old, &next) {
+        return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("old and replacement WAL extents overlap"));
+      }
+      if previous_logical_key.is_some_and(|previous| previous >= old.logical_key) {
+        return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("replacement stable keys are not strictly ordered and unique"));
+      }
+      if previous_sequence > batch.replacement_publication_sequence
+        || (previous_sequence == batch.replacement_publication_sequence
+          && previous_old.as_ref().is_some_and(|previous| compare_physical_incarnations_v1(previous, &old) != Ordering::Less))
+      {
+        return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("replacement records violate journal order"));
+      }
+      previous_sequence = batch.replacement_publication_sequence;
+      previous_old = Some(old);
+      previous_logical_key = Some(old.logical_key);
+      let count = &mut reason_counts[retirement_reason_index(replacement.reason)];
+      *count =
+        count.checked_add(1).ok_or(RetirementJournalReplacementAdmissionErrorV1::Preflight("replacement reason count overflowed"))?;
+    }
+    Ok((reason_counts, batch_digest))
+  }
+}
+
+/// Produce the exact bounded rolling identity carried by an activation permit.
+///
+/// The chaining form avoids materializing a replacement batch while binding
+/// the shared publication metadata and every canonical encoded retirement
+/// record in order.
+pub fn retirement_journal_replacement_batch_digest_v1(
+  batch: &RetirementJournalReplacementBatchV1<'_>,
+  algorithm: HashAlgorithm,
+) -> Result<Vec<u8>, RetirementJournalReplacementAdmissionErrorV1> {
+  let replacement_count = u32::try_from(batch.replacements.len())
+    .map_err(|_| RetirementJournalReplacementAdmissionErrorV1::Preflight("replacement count exceeds u32"))?;
+  let sequence = batch.replacement_publication_sequence.to_le_bytes();
+  let retired_at = batch.retired_at_ms.to_le_bytes();
+  let count = replacement_count.to_le_bytes();
+  let mut digest = digest_parts(algorithm, &[b"aeordb.retirement-replacement-batch.v1\0", &sequence, &retired_at, &count]);
+  for replacement in batch.replacements {
+    let encoded = encode_record(
+      RetirementJournalRecordWriteV1 {
+        reason: replacement.reason,
+        replacement_publication_sequence: batch.replacement_publication_sequence,
+        retired_at_ms: batch.retired_at_ms,
+        old_incarnation: replacement.old_incarnation,
+        replacement_incarnation: replacement.replacement_incarnation,
+      },
+      algorithm,
+    )
+    .map_err(|source| RetirementJournalReplacementAdmissionErrorV1::Journal { source, admitted_records: 0 })?;
+    digest = digest_parts(algorithm, &[b"aeordb.retirement-replacement-batch-step.v1\0", &digest, &encoded]);
+  }
+  Ok(digest)
+}
+
+const fn retirement_reason_index(reason: RetirementReasonV1) -> usize {
+  match reason {
+    RetirementReasonV1::StableKeyReplace => 0,
+    RetirementReasonV1::Relocation => 1,
+    RetirementReasonV1::Repair => 2,
+    RetirementReasonV1::Migration => 3,
+    RetirementReasonV1::PointerOrControlReplace => 4,
+  }
+}
+
+fn physical_extents_overlap(left: &PhysicalIncarnationV1<'_>, right: &PhysicalIncarnationV1<'_>) -> bool {
+  let left_end = left.wal_offset + u64::from(left.entity_length);
+  let right_end = right.wal_offset + u64::from(right.entity_length);
+  left.wal_offset < right_end && right.wal_offset < left_end
 }
 
 pub struct RetirementJournalOwnerV1<'a> {
