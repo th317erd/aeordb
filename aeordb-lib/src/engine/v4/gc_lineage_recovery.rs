@@ -204,6 +204,9 @@ impl<'a> RetirementLineageRecoveryReconcilerV1<'a> {
     if owner.hash_algorithm() != self.algorithm || owner.database_id() != self.context.database_id {
       return Err(RetirementLineageRecoveryErrorV1::InvalidContext("retirement owner belongs to another database or hash profile"));
     }
+    owner
+      .preflight_operation(monotonic_now_ms)
+      .map_err(|source| RetirementLineageRecoveryErrorV1::Journal { source, admitted_records: 0 })?;
 
     let selected = match decode_physical_incarnation(group.selected_incarnation, self.algorithm) {
       Ok(selected) => selected,

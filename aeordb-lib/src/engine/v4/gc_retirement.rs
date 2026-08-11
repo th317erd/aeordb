@@ -1184,10 +1184,7 @@ impl<'a> RetirementJournalOwnerV1<'a> {
     records: impl IntoIterator<Item = RetirementJournalRecordWriteV1<'record>>,
     monotonic_now_ms: u64,
   ) -> Result<(), RetirementJournalOwnerErrorV1> {
-    self.ensure_operable()?;
-    if self.last_observed_at_ms.is_some_and(|previous| monotonic_now_ms < previous) {
-      return Err(RetirementJournalOwnerErrorV1::ClockRegression);
-    }
+    self.preflight_operation(monotonic_now_ms)?;
     let mut previous_sequence = self.last_record_sequence;
     let mut previous_old = self.last_old_incarnation.clone();
     for record in records {
@@ -1212,11 +1209,16 @@ impl<'a> RetirementJournalOwnerV1<'a> {
   }
 
   fn preflight(&mut self, monotonic_now_ms: u64) -> Result<(), RetirementJournalOwnerErrorV1> {
+    self.preflight_operation(monotonic_now_ms)?;
+    self.last_observed_at_ms = Some(monotonic_now_ms);
+    Ok(())
+  }
+
+  pub(crate) fn preflight_operation(&self, monotonic_now_ms: u64) -> Result<(), RetirementJournalOwnerErrorV1> {
     self.ensure_operable()?;
     if self.last_observed_at_ms.is_some_and(|previous| monotonic_now_ms < previous) {
       return Err(RetirementJournalOwnerErrorV1::ClockRegression);
     }
-    self.last_observed_at_ms = Some(monotonic_now_ms);
     Ok(())
   }
 

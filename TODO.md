@@ -620,7 +620,7 @@
         - [x] Replace the fixture-only one-child GC directory decoder with the frozen bounded leaf/internal descriptor model required by multi-page inventories.
         - [x] Map current WAL/KV/rebuild/verify/GC/Void producers and preserve the no-service/no-writer activation boundary.
         - [x] Prove malformed rows, role mismatch, cancellation/bounds, fixture equality, and reference-model agreement before landing.
-      - [ ] P4-2: persist replacement/retirement lineage and typed corruption evidence before any v4 stable-key replacement.
+      - [x] P4-2: persist replacement/retirement lineage and typed corruption evidence before any v4 stable-key replacement.
         - [x] P4-2a: expose typed zero-copy retirement-journal segments/records and a conservative lineage reference model at both hash widths.
         - [x] P4-2b: add one bounded retirement-journal owner with count/byte/time flushing, immutable segment chaining, and durable audited-through publication.
           - [x] P4-2b1: add the bounded memory-admitted owner, exact immutable encoder, restart summary, and hard-sync sink/receipt contract.
@@ -638,7 +638,13 @@
           - [x] Preserve explicit soft-durability status, permit retry after activation failure without duplicate journal append, and refuse activation after partial or dishonest admission.
           - [x] Prove all five reasons, both hash widths, malformed/canceled/resource/failure paths, and no live v3/service activation.
         - [x] P4-2d: recover missing post-watermark lower-incarnation lineage conservatively and emit the existing typed `CorruptGcEvidenceV1` contract without reclaim authority.
-        - [ ] P4-2e: prove cancellation, crash prefixes, corrupt/missing chains, ordering, resource bounds, recovery, architecture isolation, and retained-or-leaked failure direction.
+        - [x] P4-2e: prove cancellation, crash prefixes, corrupt/missing chains, ordering, resource bounds, recovery, architecture isolation, and retained-or-leaked failure direction.
+          - [x] Refuse invalid recovery context and mismatched owner database/hash profile before evidence or journal mutation.
+          - [x] Prove exact 64-incarnation admission, amplified-family protection, and canonical cross-family ordering without database-scale memory.
+          - [x] Latch dishonest evidence/journal receipts and preserve retained pending bytes without converting retry uncertainty into success.
+          - [x] Require refreshed physical observations after retained journal retry, then complete idempotently without duplicate lineage.
+          - [x] Hard-publish evidence before an injected journal failure, reopen with only diagnosis selected, and retry through the same real publisher.
+          - [x] Re-run corrupt/missing-chain, cancellation, crash-prefix, architecture, broad regression, strict-lint-delta, and full-library gates.
       - [ ] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.

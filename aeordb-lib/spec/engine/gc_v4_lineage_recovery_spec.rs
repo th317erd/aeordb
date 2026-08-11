@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::HashAlgorithm;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::gc::{GcArtifactKindV1, decode_physical_incarnation};
 use aeordb::engine::v4::gc_audit::{
   AuditArtifactV1, CorruptGcEvidenceDurabilityReceiptV1, CorruptGcEvidenceDurableSinkV1, CorruptGcEvidenceSinkErrorV1,
@@ -74,6 +74,7 @@ struct RecordingJournalSink {
   publications: Vec<Vec<u8>>,
   next_publication_sequence: u64,
   fail_next: bool,
+  wrong_receipt: bool,
 }
 
 impl RetirementJournalDurableSinkV1 for RecordingJournalSink {
@@ -88,7 +89,7 @@ impl RetirementJournalDurableSinkV1 for RecordingJournalSink {
     self.next_publication_sequence += 1;
     self.publications.push(segment.value.to_vec());
     Ok(RetirementJournalDurabilityReceiptV1 {
-      artifact_key: segment.artifact_key.to_vec(),
+      artifact_key: if self.wrong_receipt { vec![0xA5; segment.artifact_key.len()] } else { segment.artifact_key.to_vec() },
       stored_value_length: segment.value.len() as u32,
       hard_publication_sequence: self.next_publication_sequence,
     })
@@ -583,6 +584,303 @@ fn dishonest_evidence_receipt_latches_recovery_before_any_retirement_append() {
       .code(),
     "retirement_lineage_recovery_failed"
   );
+}
+
+#[test]
+fn invalid_context_and_owner_identity_refuse_before_evidence_or_journal_mutation() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let base = context();
+  let invalid_contexts = [
+    RetirementLineageRecoveryContextV1 { database_id: [0; 16], ..base },
+    RetirementLineageRecoveryContextV1 { run_id: [0; 16], ..base },
+    RetirementLineageRecoveryContextV1 { generation: 0, ..base },
+    RetirementLineageRecoveryContextV1 { detected_at_ms: 0, ..base },
+    RetirementLineageRecoveryContextV1 { detected_at_ms: -1, ..base },
+    RetirementLineageRecoveryContextV1 { recovery_publication_sequence: 0, ..base },
+  ];
+  for invalid in invalid_contexts {
+    assert_eq!(
+      RetirementLineageRecoveryReconcilerV1::new(algorithm, invalid, &cancellation).err().unwrap().code(),
+      "retirement_lineage_recovery_context"
+    );
+  }
+
+  let old = physical_incarnation(algorithm, 0x41, 0x11, 10_000, 7);
+  let selected = physical_incarnation(algorithm, 0x41, 0x12, 20_000, 8);
+  let observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &old, retirement_present: true },
+    RetirementLineageRecoveryObservationV1 { incarnation: &selected, retirement_present: false },
+  ];
+  let group = RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &observations };
+  let memory = memory_coordinator();
+  let mut sink = RecordingRecoverySink::default();
+  let mut recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, base, &cancellation).unwrap();
+
+  let mut wrong_algorithm_owner = new_owner(HashAlgorithm::Sha512, &cancellation, &memory);
+  assert_eq!(
+    recovery.recover_group(group, 100, &mut wrong_algorithm_owner, &mut sink).unwrap_err().code(),
+    "retirement_lineage_recovery_context"
+  );
+  drop(wrong_algorithm_owner);
+  let mut wrong_database_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    [0x44; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(4_096, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  assert_eq!(
+    recovery.recover_group(group, 100, &mut wrong_database_owner, &mut sink).unwrap_err().code(),
+    "retirement_lineage_recovery_context"
+  );
+  drop(wrong_database_owner);
+  assert!(sink.evidence.publications.is_empty());
+  assert!(sink.journal.publications.is_empty());
+
+  let mut owner = new_owner(algorithm, &cancellation, &memory);
+  let outcome = recovery.recover_group(group, 100, &mut owner, &mut sink).unwrap();
+  assert_eq!(outcome.disposition, RetirementLineageRecoveryDispositionV1::AlreadyComplete);
+  assert!(!outcome.authorizes_reclaim());
+}
+
+#[test]
+fn exact_incarnation_bound_is_admitted_without_extra_gc_memory_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let cancellation = CancellationToken::new();
+    let memory = memory_coordinator();
+    let mut owner = new_owner(algorithm, &cancellation, &memory);
+    let reserved_before = memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes;
+    let mut sink = RecordingRecoverySink::default();
+    let mut recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, context(), &cancellation).unwrap();
+    let maximum: Vec<_> =
+      (0..64).map(|index| physical_incarnation(algorithm, 0x41, index as u8 + 1, 10_000 + index * 256, index + 1)).collect();
+    let maximum_observations: Vec<_> = maximum
+      .iter()
+      .enumerate()
+      .map(|(index, incarnation)| RetirementLineageRecoveryObservationV1 { incarnation, retirement_present: index + 1 != maximum.len() })
+      .collect();
+    let outcome = recovery
+      .recover_group(
+        RetirementLineageRecoveryGroupV1 { selected_incarnation: maximum.last().unwrap(), observations: &maximum_observations },
+        100,
+        &mut owner,
+        &mut sink,
+      )
+      .unwrap();
+    assert_eq!(outcome.disposition, RetirementLineageRecoveryDispositionV1::AlreadyComplete);
+    assert!(!outcome.authorizes_reclaim());
+    assert!(sink.evidence.publications.is_empty());
+    assert!(sink.journal.publications.is_empty());
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, reserved_before);
+  }
+}
+
+#[test]
+fn cross_group_order_rejects_duplicates_and_regressions_without_advancing_invalid_state() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut owner = new_owner(algorithm, &cancellation, &memory);
+  let mut sink = RecordingRecoverySink::default();
+  let mut recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, context(), &cancellation).unwrap();
+  let first_old = physical_incarnation(algorithm, 0x41, 0x11, 10_000, 1);
+  let first_selected = physical_incarnation(algorithm, 0x41, 0x12, 11_000, 2);
+  let first_observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &first_old, retirement_present: true },
+    RetirementLineageRecoveryObservationV1 { incarnation: &first_selected, retirement_present: false },
+  ];
+  let first_group = RetirementLineageRecoveryGroupV1 { selected_incarnation: &first_selected, observations: &first_observations };
+  let outcome = recovery.recover_group(first_group, 100, &mut owner, &mut sink).unwrap();
+  assert_eq!(outcome.disposition, RetirementLineageRecoveryDispositionV1::AlreadyComplete);
+  assert!(!outcome.authorizes_reclaim());
+
+  let duplicate = recovery.recover_group(first_group, 100, &mut owner, &mut sink).unwrap();
+  assert_eq!(
+    duplicate.disposition,
+    RetirementLineageRecoveryDispositionV1::Protected { issue: RetirementLineageRecoveryIssueV1::NoncanonicalObservationOrder }
+  );
+  let next_old = physical_incarnation(algorithm, 0x42, 0x21, 100_000, 1);
+  let next_selected = physical_incarnation(algorithm, 0x42, 0x22, 101_000, 2);
+  let next_observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &next_old, retirement_present: true },
+    RetirementLineageRecoveryObservationV1 { incarnation: &next_selected, retirement_present: false },
+  ];
+  assert_eq!(
+    recovery
+      .recover_group(
+        RetirementLineageRecoveryGroupV1 { selected_incarnation: &next_selected, observations: &next_observations },
+        100,
+        &mut owner,
+        &mut sink,
+      )
+      .unwrap()
+      .disposition,
+    RetirementLineageRecoveryDispositionV1::AlreadyComplete
+  );
+  let regressed_old = physical_incarnation(algorithm, 0x40, 0x31, 110_000, 1);
+  let regressed_selected = physical_incarnation(algorithm, 0x40, 0x32, 111_000, 2);
+  let regressed_observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &regressed_old, retirement_present: true },
+    RetirementLineageRecoveryObservationV1 { incarnation: &regressed_selected, retirement_present: false },
+  ];
+  let regressed = recovery
+    .recover_group(
+      RetirementLineageRecoveryGroupV1 { selected_incarnation: &regressed_selected, observations: &regressed_observations },
+      100,
+      &mut owner,
+      &mut sink,
+    )
+    .unwrap();
+  assert_eq!(
+    regressed.disposition,
+    RetirementLineageRecoveryDispositionV1::Protected { issue: RetirementLineageRecoveryIssueV1::NoncanonicalObservationOrder }
+  );
+  assert!(sink.journal.publications.is_empty());
+  assert_eq!(sink.evidence.publications.len(), 2);
+}
+
+#[test]
+fn cancellation_between_groups_stops_before_new_evidence_or_journal_state() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut owner = new_owner(algorithm, &cancellation, &memory);
+  let mut sink = RecordingRecoverySink::default();
+  let mut recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, context(), &cancellation).unwrap();
+  let first_old = physical_incarnation(algorithm, 0x41, 0x11, 10_000, 1);
+  let first_selected = physical_incarnation(algorithm, 0x41, 0x12, 11_000, 2);
+  let first_observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &first_old, retirement_present: true },
+    RetirementLineageRecoveryObservationV1 { incarnation: &first_selected, retirement_present: false },
+  ];
+  let first = recovery
+    .recover_group(
+      RetirementLineageRecoveryGroupV1 { selected_incarnation: &first_selected, observations: &first_observations },
+      100,
+      &mut owner,
+      &mut sink,
+    )
+    .unwrap();
+  assert_eq!(first.disposition, RetirementLineageRecoveryDispositionV1::AlreadyComplete);
+  cancellation.cancel();
+  let next_old = physical_incarnation(algorithm, 0x42, 0x21, 20_000, 1);
+  let next_selected = physical_incarnation(algorithm, 0x42, 0x22, 21_000, 2);
+  let next_observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &next_old, retirement_present: false },
+    RetirementLineageRecoveryObservationV1 { incarnation: &next_selected, retirement_present: false },
+  ];
+  assert_eq!(
+    recovery
+      .recover_group(
+        RetirementLineageRecoveryGroupV1 { selected_incarnation: &next_selected, observations: &next_observations },
+        101,
+        &mut owner,
+        &mut sink,
+      )
+      .unwrap_err()
+      .code(),
+    "retirement_lineage_recovery_cancelled"
+  );
+  assert!(sink.evidence.publications.is_empty());
+  assert!(sink.journal.publications.is_empty());
+  assert_eq!(owner.status().pending_records, 0);
+}
+
+#[test]
+fn dishonest_journal_receipt_latches_owner_and_refreshed_input_cannot_report_success() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut owner = new_owner(algorithm, &cancellation, &memory);
+  let mut sink = RecordingRecoverySink {
+    journal: RecordingJournalSink { wrong_receipt: true, ..RecordingJournalSink::default() },
+    ..RecordingRecoverySink::default()
+  };
+  let old = physical_incarnation(algorithm, 0x41, 0x11, 10_000, 7);
+  let selected = physical_incarnation(algorithm, 0x41, 0x12, 20_000, 8);
+  let observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &old, retirement_present: false },
+    RetirementLineageRecoveryObservationV1 { incarnation: &selected, retirement_present: false },
+  ];
+  let mut recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, context(), &cancellation).unwrap();
+  let error = recovery
+    .recover_group(
+      RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &observations },
+      100,
+      &mut owner,
+      &mut sink,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "retirement_journal_receipt");
+  assert_eq!(error.admitted_records(), 1);
+  assert_eq!(owner.status().pending_records, 1);
+  assert_eq!(sink.evidence.publications.len(), 1);
+
+  let refreshed = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &old, retirement_present: true },
+    RetirementLineageRecoveryObservationV1 { incarnation: &selected, retirement_present: false },
+  ];
+  assert_eq!(
+    recovery
+      .recover_group(
+        RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &refreshed },
+        100,
+        &mut owner,
+        &mut sink,
+      )
+      .unwrap_err()
+      .code(),
+    "retirement_journal_owner_failed"
+  );
+  assert_eq!(sink.evidence.publications.len(), 1);
+}
+
+#[test]
+fn retained_sink_failure_requires_exact_flush_and_refreshed_observations() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let cancellation = CancellationToken::new();
+  let memory = memory_coordinator();
+  let mut owner = new_owner(algorithm, &cancellation, &memory);
+  let mut sink = RecordingRecoverySink {
+    journal: RecordingJournalSink { fail_next: true, ..RecordingJournalSink::default() },
+    ..RecordingRecoverySink::default()
+  };
+  let old = physical_incarnation(algorithm, 0x41, 0x11, 10_000, 7);
+  let selected = physical_incarnation(algorithm, 0x41, 0x12, 20_000, 8);
+  let stale = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &old, retirement_present: false },
+    RetirementLineageRecoveryObservationV1 { incarnation: &selected, retirement_present: false },
+  ];
+  let group = RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &stale };
+  let mut recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, context(), &cancellation).unwrap();
+  assert_eq!(recovery.recover_group(group, 100, &mut owner, &mut sink).unwrap_err().code(), "retirement_journal_sink");
+  assert_eq!(owner.status().pending_records, 1);
+  assert_eq!(sink.evidence.publications.len(), 1);
+  assert!(owner.flush(&mut sink).unwrap());
+  assert_eq!(owner.status().pending_records, 0);
+  assert_eq!(sink.journal.publications.len(), 1);
+
+  assert_eq!(recovery.recover_group(group, 100, &mut owner, &mut sink).unwrap_err().code(), "retirement_journal_record_order");
+  let refreshed = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &old, retirement_present: true },
+    RetirementLineageRecoveryObservationV1 { incarnation: &selected, retirement_present: false },
+  ];
+  let outcome = recovery
+    .recover_group(
+      RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &refreshed },
+      100,
+      &mut owner,
+      &mut sink,
+    )
+    .unwrap();
+  assert_eq!(outcome.disposition, RetirementLineageRecoveryDispositionV1::AlreadyComplete);
+  assert!(!outcome.authorizes_reclaim());
+  assert_eq!(sink.evidence.publications.len(), 1);
+  assert_eq!(sink.journal.publications.len(), 1);
 }
 
 fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {

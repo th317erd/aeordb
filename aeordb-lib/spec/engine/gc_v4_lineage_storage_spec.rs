@@ -12,14 +12,16 @@ use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, Databa
 use aeordb::engine::v4::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, decode_whole_entity};
 use aeordb::engine::v4::first_authority::{FirstAuthorityPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher};
 use aeordb::engine::v4::gc::immutable_gc_artifact_key;
-use aeordb::engine::v4::gc_audit::{CorruptGcEvidenceDurableSinkV1, decode_audit_artifact};
+use aeordb::engine::v4::gc_audit::{
+  CorruptGcEvidenceDurabilityReceiptV1, CorruptGcEvidenceDurableSinkV1, CorruptGcEvidenceSinkErrorV1, decode_audit_artifact,
+};
 use aeordb::engine::v4::gc_lineage_recovery::{
   RetirementLineageRecoveryContextV1, RetirementLineageRecoveryDispositionV1, RetirementLineageRecoveryGroupV1,
   RetirementLineageRecoveryObservationV1, RetirementLineageRecoveryReconcilerV1,
 };
 use aeordb::engine::v4::gc_retirement::{
-  PreparedRetirementJournalSegmentV1, RetirementJournalBufferOptionsV1, RetirementJournalDurableSinkV1, RetirementJournalOwnerV1,
-  RetirementJournalRecordWriteV1,
+  PreparedRetirementJournalSegmentV1, RetirementJournalBufferOptionsV1, RetirementJournalDurabilityReceiptV1,
+  RetirementJournalDurableSinkV1, RetirementJournalOwnerV1, RetirementJournalRecordWriteV1, RetirementJournalSinkErrorV1,
 };
 use aeordb::engine::v4::gc_state::{RetirementReasonV1, decode_retirement_journal_segment_v1};
 use aeordb::engine::v4::hash::digest_parts;
@@ -204,6 +206,41 @@ fn physical_incarnation(algorithm: HashAlgorithm, logical_key_byte: u8, digest_b
   bytes[2 * hash_width + 20] = 3;
   bytes[2 * hash_width + 21] = 1;
   bytes
+}
+
+struct EvidenceFirstJournalFailureSink<'a> {
+  publisher: &'a mut V4FirstAuthorityPublisher,
+  evidence_key: Option<Vec<u8>>,
+  journal_key: Option<Vec<u8>>,
+  fail_journal_once: bool,
+}
+
+impl CorruptGcEvidenceDurableSinkV1 for EvidenceFirstJournalFailureSink<'_> {
+  fn publish_corrupt_evidence_synced(
+    &mut self,
+    artifact_key: &[u8],
+    value: &[u8],
+  ) -> Result<CorruptGcEvidenceDurabilityReceiptV1, CorruptGcEvidenceSinkErrorV1> {
+    self.evidence_key = Some(artifact_key.to_vec());
+    self.publisher.publish_corrupt_evidence_synced(artifact_key, value)
+  }
+}
+
+impl RetirementJournalDurableSinkV1 for EvidenceFirstJournalFailureSink<'_> {
+  fn publish_synced(
+    &mut self,
+    segment: &PreparedRetirementJournalSegmentV1<'_>,
+  ) -> Result<RetirementJournalDurabilityReceiptV1, RetirementJournalSinkErrorV1> {
+    self.journal_key = Some(segment.artifact_key.to_vec());
+    if self.fail_journal_once {
+      self.fail_journal_once = false;
+      return Err(RetirementJournalSinkErrorV1::new(
+        "injected_recovery_journal_failure",
+        std::io::Error::other("injected failure after durable recovery evidence"),
+      ));
+    }
+    self.publisher.publish_synced(segment)
+  }
 }
 
 #[test]
@@ -414,4 +451,94 @@ fn recovery_uses_one_real_publisher_for_evidence_and_retirement_then_reopens_bot
   assert_eq!(reopened.observe().unwrap(), after);
   assert!(reopened.locator(&evidence_key).unwrap().is_some());
   assert!(reopened.locator(&journal_key).unwrap().is_some());
+}
+
+#[test]
+fn evidence_first_journal_failure_reopens_protected_and_exact_retry_finishes_once() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, path, _coordinator, mut publisher) = create_publisher(algorithm);
+  let before = publisher.observe().unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(4_096, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let old = physical_incarnation(algorithm, 0x41, 0x11, 10_000, 7);
+  let selected = physical_incarnation(algorithm, 0x41, 0x12, 20_000, 8);
+  let observations = [
+    RetirementLineageRecoveryObservationV1 { incarnation: &old, retirement_present: false },
+    RetirementLineageRecoveryObservationV1 { incarnation: &selected, retirement_present: false },
+  ];
+  let context = RetirementLineageRecoveryContextV1 {
+    database_id: database_id(),
+    run_id: [0x71; 16],
+    generation: 500,
+    detected_at_ms: 1_700_000_500_000,
+    recovery_publication_sequence: 9_000,
+  };
+  let mut recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, context, &cancellation).unwrap();
+  let mut sink =
+    EvidenceFirstJournalFailureSink { publisher: &mut publisher, evidence_key: None, journal_key: None, fail_journal_once: true };
+
+  let error = recovery
+    .recover_group(
+      RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &observations },
+      100,
+      &mut owner,
+      &mut sink,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "retirement_journal_sink");
+  assert_eq!(error.admitted_records(), 1);
+  let evidence_key = sink.evidence_key.take().unwrap();
+  let journal_key = sink.journal_key.take().unwrap();
+  drop(sink);
+  assert!(publisher.locator(&evidence_key).unwrap().is_some());
+  assert!(publisher.locator(&journal_key).unwrap().is_none());
+  let evidence_only = publisher.observe().unwrap();
+  assert_eq!(evidence_only.selected.header.write_sequence_high_water, before.selected.header.write_sequence_high_water + 1);
+  drop(owner);
+  drop(recovery);
+  drop(publisher);
+
+  let (_reopen_coordinator, mut reopened) = reopen(&path);
+  assert_eq!(reopened.observe().unwrap(), evidence_only);
+  assert!(reopened.locator(&evidence_key).unwrap().is_some());
+  assert!(reopened.locator(&journal_key).unwrap().is_none());
+  let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id(),
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(4_096, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut retry_recovery = RetirementLineageRecoveryReconcilerV1::new(algorithm, context, &cancellation).unwrap();
+  let outcome = retry_recovery
+    .recover_group(
+      RetirementLineageRecoveryGroupV1 { selected_incarnation: &selected, observations: &observations },
+      100,
+      &mut retry_owner,
+      &mut reopened,
+    )
+    .unwrap();
+  assert_eq!(outcome.disposition, RetirementLineageRecoveryDispositionV1::Synthesized { record_count: 1 });
+  assert!(!outcome.authorizes_reclaim());
+  assert_eq!(outcome.evidence_receipt.unwrap().artifact_key, evidence_key);
+  assert_eq!(retry_owner.status().last_segment_hash, journal_key);
+  assert!(reopened.locator(&evidence_key).unwrap().is_some());
+  assert!(reopened.locator(&journal_key).unwrap().is_some());
+  assert_eq!(
+    reopened.observe().unwrap().selected.header.write_sequence_high_water,
+    evidence_only.selected.header.write_sequence_high_water + 1
+  );
 }
