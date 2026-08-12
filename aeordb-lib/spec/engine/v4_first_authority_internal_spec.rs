@@ -4220,6 +4220,50 @@ fn physical_quarantine_cancellation_corrupt_support_and_memory_pressure_never_se
 }
 
 #[test]
+fn corrupt_prior_quarantine_control_manifest_or_support_cannot_advance_authority() {
+  for case in ["control", "manifest", "support"] {
+    let (_directory, _path, _coordinator, mut publisher) = create_environment(&format!("physical-quarantine-corrupt-{case}"), None);
+    let algorithm = HashAlgorithm::Blake3_256;
+    let database_id = [0x31; 16];
+    let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+    let cancellation = CancellationToken::new();
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      algorithm,
+      database_id,
+      1,
+      401,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let prepared = prepare_guarded_physical_quarantine(&mut publisher, &mut retirement_owner, &cancellation, &memory);
+    let corrupt_key = match case {
+      "control" => gc_active_control_key(algorithm, GcArtifactKindV1::QuarantineActiveControl, &database_id, 0).unwrap(),
+      "manifest" => prepared.prior_manifest_key.clone(),
+      "support" => prepared.lifecycle_manifest.key.clone(),
+      _ => unreachable!(),
+    };
+    corrupt_last_entity_byte(&publisher, &corrupt_key);
+    let mut verifier = ExactPhysicalQuarantineAuthorityVerifierV1 {
+      called: false,
+      fail: false,
+      expected_prior_manifest_hash: prepared.prior_manifest_key.clone(),
+      expected_next_manifest_hash: prepared.manifest.key.clone(),
+      expected_request: prepared.authority_snapshot.clone(),
+      snapshot: prepared.authority_snapshot.clone(),
+    };
+
+    let error = publisher.publish_physical_quarantine(prepared.request(&cancellation), &mut verifier, &mut retirement_owner).unwrap_err();
+
+    assert!(error.committed_receipt().is_none(), "case {case}");
+    assert!(!verifier.called, "case {case}");
+    assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none(), "case {case}");
+    assert!(publisher.locator(&prepared.control.key).unwrap().is_none(), "case {case}");
+  }
+}
+
+#[test]
 fn physical_quarantine_refuses_when_selected_prior_authority_advances_after_qualification() {
   let (_directory, _path, _coordinator, mut publisher) = create_environment("physical-quarantine-prior-advance", None);
   let algorithm = HashAlgorithm::Blake3_256;
