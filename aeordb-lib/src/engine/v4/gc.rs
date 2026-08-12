@@ -557,6 +557,40 @@ pub fn decode_physical_incarnation(bytes: &[u8], algorithm: HashAlgorithm) -> Fo
   })
 }
 
+pub(crate) fn encode_physical_incarnation_into(
+  destination: &mut [u8],
+  incarnation: &PhysicalIncarnationV1<'_>,
+  algorithm: HashAlgorithm,
+) -> FormatResult<()> {
+  let hash_width = algorithm.hash_length();
+  if destination.len() != 24 + 2 * hash_width
+    || incarnation.logical_key.len() != hash_width
+    || incarnation.integrity_or_legacy_digest.len() != hash_width
+  {
+    return Err(error(
+      MalformedInputClass::TruncationOrTrailingBytes,
+      "physical_incarnation_length",
+      "physical incarnation write has a mismatched hash width",
+    ));
+  }
+  destination[..hash_width].copy_from_slice(incarnation.logical_key);
+  destination[hash_width..2 * hash_width].copy_from_slice(incarnation.integrity_or_legacy_digest);
+  destination[2 * hash_width..2 * hash_width + 8].copy_from_slice(&incarnation.wal_offset.to_le_bytes());
+  destination[2 * hash_width + 8..2 * hash_width + 16].copy_from_slice(&incarnation.write_sequence.to_le_bytes());
+  destination[2 * hash_width + 16..2 * hash_width + 20].copy_from_slice(&incarnation.entity_length.to_le_bytes());
+  destination[2 * hash_width + 20] = incarnation.entry_type;
+  destination[2 * hash_width + 21] = incarnation.entity_version;
+  let decoded = decode_physical_incarnation(destination, algorithm)?;
+  if decoded != *incarnation {
+    return Err(error(
+      MalformedInputClass::CrossRecordClosureMismatch,
+      "physical_incarnation_roundtrip",
+      "encoded physical incarnation differs from its request",
+    ));
+  }
+  Ok(())
+}
+
 pub fn compare_physical_incarnations_v1(left: &PhysicalIncarnationV1<'_>, right: &PhysicalIncarnationV1<'_>) -> Ordering {
   left
     .logical_key

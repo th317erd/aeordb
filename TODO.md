@@ -707,6 +707,11 @@
           - [x] Prove pre-selector retention, selector-last commit uncertainty, exact retry, cleanup/lineage failure receipts, and absence of any locator/Void/removal caller.
         - [x] P4-5d: prove cancellation, pin/authority races, malformed/corrupt state, capacity, crash prefixes, restart, and retained-or-leaked failure direction.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
+        - [x] P4-6a: expose exact both-width sweep proposal/outcome/receipt iterators and writers matching the frozen independent fixtures.
+        - [ ] P4-6b: qualify and hard-publish bounded proposals from exact selected quarantine authority without granting removal authority.
+        - [ ] P4-6c: execute one plural, guarded locator-removal boundary through a caller-owned v4 mutation authority and retain exact per-incarnation outcomes.
+        - [ ] P4-6d: hard-publish commit/recovered receipts only after caller-verified selected Void authority and reconcile every crash prefix idempotently.
+        - [ ] P4-6e: prove cancellation, corruption, authority/pin races, partial removal, dishonest receipts, restart, and retained-or-leaked failure direction.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.

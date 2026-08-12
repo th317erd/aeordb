@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use super::gc::{
   EncodedImmutableGcArtifactV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, PhysicalIncarnationV1, compare_physical_incarnations_v1,
   checked_immutable_gc_artifact_encoded_length, decode_gc_artifact_envelope, decode_physical_incarnation, encode_immutable_gc_artifact,
-  immutable_gc_artifact_key,
+  encode_physical_incarnation_into, immutable_gc_artifact_key,
 };
 use super::gc_state::{
   GcDirectoryRoleV1, GcStateDirectoryEntryV1, GcStateDirectoryV1, GcStateManifestV1, GcStatePageV1, MAXIMUM_GC_DIRECTORY_ENTRIES_V1,
@@ -1188,28 +1188,12 @@ fn validate_candidate_delta_record_write_v1(record: &CandidateDeltaRecordWriteV1
 }
 
 fn encode_physical_incarnation(destination: &mut [u8], incarnation: &PhysicalIncarnationV1<'_>, hash_width: usize) -> FormatResult<()> {
-  if destination.len() != 24 + 2 * hash_width
-    || incarnation.logical_key.len() != hash_width
-    || incarnation.integrity_or_legacy_digest.len() != hash_width
-  {
-    return Err(closure_error("physical_incarnation_length", "physical incarnation write has a mismatched hash width"));
-  }
-  destination[..hash_width].copy_from_slice(incarnation.logical_key);
-  destination[hash_width..2 * hash_width].copy_from_slice(incarnation.integrity_or_legacy_digest);
-  put_u64(destination, 2 * hash_width, incarnation.wal_offset);
-  put_u64(destination, 2 * hash_width + 8, incarnation.write_sequence);
-  put_u32(destination, 2 * hash_width + 16, incarnation.entity_length);
-  destination[2 * hash_width + 20] = incarnation.entry_type;
-  destination[2 * hash_width + 21] = incarnation.entity_version;
-  decode_physical_incarnation(
-    destination,
-    match hash_width {
-      32 => HashAlgorithm::Blake3_256,
-      64 => HashAlgorithm::Sha512,
-      _ => return Err(closure_error("physical_incarnation_length", "unsupported physical incarnation hash width")),
-    },
-  )?;
-  Ok(())
+  let algorithm = match hash_width {
+    32 => HashAlgorithm::Blake3_256,
+    64 => HashAlgorithm::Sha512,
+    _ => return Err(closure_error("physical_incarnation_length", "unsupported physical incarnation hash width")),
+  };
+  encode_physical_incarnation_into(destination, incarnation, algorithm)
 }
 
 fn capabilities_exact(capabilities: &[u8], enabled: &[usize]) -> bool {

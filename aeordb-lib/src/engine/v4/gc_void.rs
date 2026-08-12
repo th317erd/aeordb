@@ -2,8 +2,9 @@ use std::cmp::Ordering;
 
 use super::contract_generated::capability_bit;
 use super::gc::{
-  GcArtifactEnvelopeV1, GcArtifactKindV1, decode_gc_artifact_envelope, decode_physical_incarnation, immutable_gc_artifact_key, u16_at,
-  u32_at, u64_at,
+  EncodedImmutableGcArtifactV1, GcArtifactEnvelopeV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, PhysicalIncarnationV1,
+  compare_physical_incarnations_v1, decode_gc_artifact_envelope, decode_physical_incarnation, encode_immutable_gc_artifact,
+  encode_physical_incarnation_into, immutable_gc_artifact_key, u16_at, u32_at, u64_at,
 };
 use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
@@ -76,6 +77,7 @@ pub struct SweepProposalV1<'a> {
   pub database_id: &'a [u8],
   pub batch_id: &'a [u8],
   pub generation: u64,
+  pub created_at_ms: i64,
   pub quarantine_manifest_hash: &'a [u8],
   pub candidate_count: u32,
   pub candidates: &'a [u8],
@@ -88,6 +90,7 @@ pub struct SweepReceiptV1<'a> {
   pub database_id: &'a [u8],
   pub batch_id: &'a [u8],
   pub generation: u64,
+  pub reclaim_committed_at_ms: i64,
   pub proposal_hash: &'a [u8],
   pub void_catalog_hash: &'a [u8],
   pub outcome_count: u32,
@@ -97,6 +100,182 @@ pub struct SweepReceiptV1<'a> {
   pub failed_count: u64,
   pub outcomes: &'a [u8],
   pub key: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum SweepOutcomeClassV1 {
+  Reclaimed = 1,
+  SkippedReachable = 2,
+  SkippedChanged = 3,
+  SkippedPinned = 4,
+  SkippedPolicy = 5,
+  FailedIo = 6,
+  FailedCorrupt = 7,
+}
+
+impl SweepOutcomeClassV1 {
+  pub fn from_u16(value: u16) -> Option<Self> {
+    match value {
+      1 => Some(Self::Reclaimed),
+      2 => Some(Self::SkippedReachable),
+      3 => Some(Self::SkippedChanged),
+      4 => Some(Self::SkippedPinned),
+      5 => Some(Self::SkippedPolicy),
+      6 => Some(Self::FailedIo),
+      7 => Some(Self::FailedCorrupt),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SweepReceiptOutcomeV1<'a> {
+  pub incarnation: PhysicalIncarnationV1<'a>,
+  pub outcome: SweepOutcomeClassV1,
+  pub stable_reason_detail: u16,
+  pub resulting_void_offset: u64,
+  pub resulting_void_length: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SweepProposalWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8; 16],
+  pub batch_id: &'a [u8; 16],
+  pub generation: u64,
+  pub created_at_ms: i64,
+  pub quarantine_manifest_hash: &'a [u8],
+  pub candidates: &'a [PhysicalIncarnationV1<'a>],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SweepReceiptOutcomeWriteV1<'a> {
+  pub incarnation: PhysicalIncarnationV1<'a>,
+  pub outcome: SweepOutcomeClassV1,
+  pub stable_reason_detail: u16,
+  pub resulting_void_offset: u64,
+  pub resulting_void_length: u32,
+}
+
+impl<'a> From<&SweepReceiptOutcomeV1<'a>> for SweepReceiptOutcomeWriteV1<'a> {
+  fn from(value: &SweepReceiptOutcomeV1<'a>) -> Self {
+    Self {
+      incarnation: value.incarnation,
+      outcome: value.outcome,
+      stable_reason_detail: value.stable_reason_detail,
+      resulting_void_offset: value.resulting_void_offset,
+      resulting_void_length: value.resulting_void_length,
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SweepReceiptWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub recovered: bool,
+  pub database_id: &'a [u8; 16],
+  pub batch_id: &'a [u8; 16],
+  pub generation: u64,
+  pub reclaim_committed_at_ms: i64,
+  pub proposal_hash: &'a [u8],
+  pub void_catalog_hash: &'a [u8],
+  pub outcomes: &'a [SweepReceiptOutcomeWriteV1<'a>],
+}
+
+impl<'a> SweepProposalV1<'a> {
+  pub fn candidate_records(&self, algorithm: HashAlgorithm) -> FormatResult<SweepProposalCandidateRecordsV1<'a>> {
+    let record_length = 24 + 2 * algorithm.hash_length();
+    let record_count = self.candidate_count as usize;
+    if self.quarantine_manifest_hash.len() != algorithm.hash_length()
+      || record_count == 0
+      || record_count > MAX_CANDIDATES
+      || record_count.checked_mul(record_length) != Some(self.candidates.len())
+    {
+      return Err(closure_error("sweep_proposal_records", "sweep proposal candidate records do not match their declared shape"));
+    }
+    Ok(SweepProposalCandidateRecordsV1 { rows: self.candidates.chunks_exact(record_length), algorithm, previous: None, failed: false })
+  }
+}
+
+#[derive(Debug)]
+pub struct SweepProposalCandidateRecordsV1<'a> {
+  rows: std::slice::ChunksExact<'a, u8>,
+  algorithm: HashAlgorithm,
+  previous: Option<PhysicalIncarnationV1<'a>>,
+  failed: bool,
+}
+
+impl<'a> Iterator for SweepProposalCandidateRecordsV1<'a> {
+  type Item = FormatResult<PhysicalIncarnationV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.failed {
+      return None;
+    }
+    let row = self.rows.next()?;
+    let incarnation = match decode_physical_incarnation(row, self.algorithm) {
+      Ok(incarnation) => incarnation,
+      Err(error) => {
+        self.failed = true;
+        return Some(Err(error));
+      }
+    };
+    if self.previous.is_some_and(|previous| compare_physical_incarnations_v1(&previous, &incarnation) != Ordering::Less) {
+      self.failed = true;
+      return Some(Err(order_error("sweep_proposal_order", "sweep candidates are duplicate or out of order")));
+    }
+    self.previous = Some(incarnation);
+    Some(Ok(incarnation))
+  }
+}
+
+impl<'a> SweepReceiptV1<'a> {
+  pub fn outcome_records(&self, algorithm: HashAlgorithm) -> FormatResult<SweepReceiptOutcomeRecordsV1<'a>> {
+    let record_length = 48 + 2 * algorithm.hash_length();
+    let record_count = self.outcome_count as usize;
+    if self.proposal_hash.len() != algorithm.hash_length()
+      || self.void_catalog_hash.len() != algorithm.hash_length()
+      || record_count == 0
+      || record_count > MAX_CANDIDATES
+      || record_count.checked_mul(record_length) != Some(self.outcomes.len())
+    {
+      return Err(closure_error("sweep_receipt_records", "sweep receipt outcome records do not match their declared shape"));
+    }
+    Ok(SweepReceiptOutcomeRecordsV1 { rows: self.outcomes.chunks_exact(record_length), algorithm, previous: None, failed: false })
+  }
+}
+
+#[derive(Debug)]
+pub struct SweepReceiptOutcomeRecordsV1<'a> {
+  rows: std::slice::ChunksExact<'a, u8>,
+  algorithm: HashAlgorithm,
+  previous: Option<PhysicalIncarnationV1<'a>>,
+  failed: bool,
+}
+
+impl<'a> Iterator for SweepReceiptOutcomeRecordsV1<'a> {
+  type Item = FormatResult<SweepReceiptOutcomeV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.failed {
+      return None;
+    }
+    let row = self.rows.next()?;
+    let outcome = match decode_sweep_receipt_outcome_v1(row, self.algorithm) {
+      Ok(outcome) => outcome,
+      Err(error) => {
+        self.failed = true;
+        return Some(Err(error));
+      }
+    };
+    if self.previous.is_some_and(|previous| compare_physical_incarnations_v1(&previous, &outcome.incarnation) != Ordering::Less) {
+      self.failed = true;
+      return Some(Err(order_error("sweep_receipt_order", "sweep outcomes are duplicate or out of order")));
+    }
+    self.previous = Some(outcome.incarnation);
+    Some(Ok(outcome))
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -293,16 +472,20 @@ fn decode_sweep_proposal(artifact: GcArtifactEnvelopeV1<'_>, algorithm: HashAlgo
   if body[32 + hash_width..32 + 2 * hash_width] != digest {
     return Err(error(MalformedInputClass::ChecksumOrIntegrityMismatch, "sweep_proposal_digest", "sweep proposal digest does not match"));
   }
-  validate_physical_order(records, record_length, algorithm)?;
-  Ok(SweepProposalV1 {
+  let proposal = SweepProposalV1 {
     database_id,
     batch_id,
     generation: artifact.generation,
+    created_at_ms: i64_at(body, 8)?,
     quarantine_manifest_hash: &body[16..16 + hash_width],
     candidate_count: count,
     candidates: records,
     key,
-  })
+  };
+  for candidate in proposal.candidate_records(algorithm)? {
+    candidate?;
+  }
+  Ok(proposal)
 }
 
 fn decode_sweep_receipt(artifact: GcArtifactEnvelopeV1<'_>, algorithm: HashAlgorithm, key: Vec<u8>) -> FormatResult<SweepReceiptV1<'_>> {
@@ -339,69 +522,225 @@ fn decode_sweep_receipt(artifact: GcArtifactEnvelopeV1<'_>, algorithm: HashAlgor
   if records_length != expected_records || checked_add(64 + 2 * hash_width, records_length, "sweep receipt body")? != body.len() {
     return Err(trailing_error("sweep_receipt_length", "sweep outcome lengths do not close"));
   }
-  let outcomes = &body[64 + 2 * hash_width..];
-  let physical_length = 24 + 2 * hash_width;
-  let mut reclaimed_count = 0u64;
-  let mut reclaimed_bytes = 0u64;
-  let mut skipped_count = 0u64;
-  let mut failed_count = 0u64;
-  let mut previous: Option<&[u8]> = None;
-  for record in outcomes.chunks_exact(record_length) {
-    let physical = decode_physical_incarnation(&record[..physical_length], algorithm)?;
-    if let Some(prior) = previous {
-      if compare_physical_bytes(prior, &record[..physical_length], algorithm)? != Ordering::Less {
-        return Err(order_error("sweep_receipt_order", "sweep outcomes are duplicate or out of order"));
-      }
-    }
-    let outcome = u16_at(record, physical_length)?;
-    let reason = u16_at(record, physical_length + 2)?;
-    let offset = u64_at(record, physical_length + 8)?;
-    let length = u32_at(record, physical_length + 16)?;
-    if !(1..=7).contains(&outcome) {
-      return Err(kind_error("sweep_receipt_outcome", "unknown sweep outcome"));
-    }
-    if u32_at(record, physical_length + 4)? != 0 || u32_at(record, physical_length + 20)? != 0 {
-      return Err(reserved_error("sweep_receipt_outcome_reserved", "sweep outcome reserve is nonzero"));
-    }
-    if (outcome == 1) != (offset != 0 && length != 0)
-      || outcome == 1 && (offset != physical.wal_offset || length != physical.entity_length || reason != 0)
-      || outcome != 1 && (offset != 0 || length != 0 || reason == 0)
-    {
-      return Err(closure_error("sweep_receipt_outcome_fields", "sweep outcome result does not match its class/incarnation"));
-    }
-    match outcome {
-      1 => {
-        reclaimed_count = reclaimed_count.checked_add(1).ok_or_else(|| overflow_error("reclaimed count"))?;
-        reclaimed_bytes = reclaimed_bytes.checked_add(u64::from(length)).ok_or_else(|| overflow_error("reclaimed byte total"))?;
-      }
-      2..=5 => skipped_count = skipped_count.checked_add(1).ok_or_else(|| overflow_error("skipped count"))?,
-      6..=7 => failed_count = failed_count.checked_add(1).ok_or_else(|| overflow_error("failed count"))?,
-      _ => return Err(kind_error("sweep_receipt_outcome", "unknown sweep outcome")),
-    }
-    previous = Some(&record[..physical_length]);
-  }
-  if u64_at(body, 32 + 2 * hash_width)? != reclaimed_count
-    || u64_at(body, 40 + 2 * hash_width)? != reclaimed_bytes
-    || u64_at(body, 48 + 2 * hash_width)? != skipped_count
-    || u64_at(body, 56 + 2 * hash_width)? != failed_count
-  {
-    return Err(closure_error("sweep_receipt_totals", "sweep receipt counters do not match outcomes"));
-  }
-  Ok(SweepReceiptV1 {
+  let receipt = SweepReceiptV1 {
     recovered,
     database_id,
     batch_id,
     generation: artifact.generation,
+    reclaim_committed_at_ms: i64_at(body, 8)?,
     proposal_hash: &body[16..16 + hash_width],
     void_catalog_hash: &body[16 + hash_width..16 + 2 * hash_width],
     outcome_count: count,
-    reclaimed_count,
-    reclaimed_bytes,
-    skipped_count,
-    failed_count,
-    outcomes,
+    reclaimed_count: u64_at(body, 32 + 2 * hash_width)?,
+    reclaimed_bytes: u64_at(body, 40 + 2 * hash_width)?,
+    skipped_count: u64_at(body, 48 + 2 * hash_width)?,
+    failed_count: u64_at(body, 56 + 2 * hash_width)?,
+    outcomes: &body[64 + 2 * hash_width..],
     key,
-  })
+  };
+  let mut reclaimed_count = 0u64;
+  let mut reclaimed_bytes = 0u64;
+  let mut skipped_count = 0u64;
+  let mut failed_count = 0u64;
+  for outcome in receipt.outcome_records(algorithm)? {
+    let outcome = outcome?;
+    match outcome.outcome {
+      SweepOutcomeClassV1::Reclaimed => {
+        reclaimed_count = reclaimed_count.checked_add(1).ok_or_else(|| overflow_error("reclaimed count"))?;
+        reclaimed_bytes =
+          reclaimed_bytes.checked_add(u64::from(outcome.resulting_void_length)).ok_or_else(|| overflow_error("reclaimed byte total"))?;
+      }
+      SweepOutcomeClassV1::SkippedReachable
+      | SweepOutcomeClassV1::SkippedChanged
+      | SweepOutcomeClassV1::SkippedPinned
+      | SweepOutcomeClassV1::SkippedPolicy => {
+        skipped_count = skipped_count.checked_add(1).ok_or_else(|| overflow_error("skipped count"))?;
+      }
+      SweepOutcomeClassV1::FailedIo | SweepOutcomeClassV1::FailedCorrupt => {
+        failed_count = failed_count.checked_add(1).ok_or_else(|| overflow_error("failed count"))?;
+      }
+    }
+  }
+  if receipt.reclaimed_count != reclaimed_count
+    || receipt.reclaimed_bytes != reclaimed_bytes
+    || receipt.skipped_count != skipped_count
+    || receipt.failed_count != failed_count
+  {
+    return Err(closure_error("sweep_receipt_totals", "sweep receipt counters do not match outcomes"));
+  }
+  Ok(receipt)
+}
+
+pub fn decode_sweep_receipt_outcome_v1(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<SweepReceiptOutcomeV1<'_>> {
+  let physical_length = 24 + 2 * algorithm.hash_length();
+  if row.len() != physical_length + 24 {
+    return Err(trailing_error("sweep_receipt_outcome_length", "sweep outcome has the wrong fixed length"));
+  }
+  let incarnation = decode_physical_incarnation(&row[..physical_length], algorithm)?;
+  let outcome = SweepOutcomeClassV1::from_u16(u16_at(row, physical_length)?)
+    .ok_or_else(|| kind_error("sweep_receipt_outcome", "unknown sweep outcome"))?;
+  let stable_reason_detail = u16_at(row, physical_length + 2)?;
+  let resulting_void_offset = u64_at(row, physical_length + 8)?;
+  let resulting_void_length = u32_at(row, physical_length + 16)?;
+  if u32_at(row, physical_length + 4)? != 0 || u32_at(row, physical_length + 20)? != 0 {
+    return Err(reserved_error("sweep_receipt_outcome_reserved", "sweep outcome reserve is nonzero"));
+  }
+  if (outcome == SweepOutcomeClassV1::Reclaimed) != (resulting_void_offset != 0 && resulting_void_length != 0)
+    || outcome == SweepOutcomeClassV1::Reclaimed
+      && (resulting_void_offset != incarnation.wal_offset
+        || resulting_void_length != incarnation.entity_length
+        || stable_reason_detail != 0)
+    || outcome != SweepOutcomeClassV1::Reclaimed && (resulting_void_offset != 0 || resulting_void_length != 0 || stable_reason_detail == 0)
+  {
+    return Err(closure_error("sweep_receipt_outcome_fields", "sweep outcome result does not match its class/incarnation"));
+  }
+  Ok(SweepReceiptOutcomeV1 { incarnation, outcome, stable_reason_detail, resulting_void_offset, resulting_void_length })
+}
+
+pub fn encode_sweep_proposal_v1(request: &SweepProposalWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.database_id.iter().all(|byte| *byte == 0)
+    || request.batch_id.iter().all(|byte| *byte == 0)
+    || request.generation == 0
+    || request.created_at_ms <= 0
+    || request.quarantine_manifest_hash.len() != hash_width
+    || all_zero(request.quarantine_manifest_hash)
+    || request.candidates.is_empty()
+    || request.candidates.len() > MAX_CANDIDATES
+  {
+    return Err(identity_error("sweep_proposal_write", "sweep proposal write identity, time, generation, hash, or count is invalid"));
+  }
+  let record_length = 24 + 2 * hash_width;
+  let records_length =
+    request.candidates.len().checked_mul(record_length).ok_or_else(|| overflow_error("sweep proposal records length"))?;
+  let mut records = vec![0u8; records_length];
+  let mut previous = None;
+  for (index, candidate) in request.candidates.iter().enumerate() {
+    if previous.is_some_and(|prior| compare_physical_incarnations_v1(&prior, candidate) != Ordering::Less) {
+      return Err(order_error("sweep_proposal_order", "sweep candidates are duplicate or out of order"));
+    }
+    let start = index * record_length;
+    encode_physical_incarnation_into(&mut records[start..start + record_length], candidate, request.hash_algorithm)?;
+    previous = Some(*candidate);
+  }
+  let fixed_length = 32 + 2 * hash_width;
+  let body_length = fixed_length.checked_add(records_length).ok_or_else(|| overflow_error("sweep proposal body length"))?;
+  let mut body = vec![0u8; body_length];
+  put_u16(&mut body, 4, 1);
+  put_i64(&mut body, 8, request.created_at_ms);
+  body[16..16 + hash_width].copy_from_slice(request.quarantine_manifest_hash);
+  put_u64(&mut body, 16 + hash_width, request.generation);
+  put_u32(&mut body, 24 + hash_width, request.candidates.len() as u32);
+  put_u32(&mut body, 28 + hash_width, records_length as u32);
+  let digest = digest_parts(request.hash_algorithm, &[b"aeordb.sweep-proposal.v1\0", &records]);
+  body[32 + hash_width..fixed_length].copy_from_slice(&digest);
+  body[fixed_length..].copy_from_slice(&records);
+  let mut identity = [0u8; 32];
+  identity[..16].copy_from_slice(request.database_id);
+  identity[16..].copy_from_slice(request.batch_id);
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::SweepProposal,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let SweepVoidArtifactV1::SweepProposal(decoded) = decode_sweep_void_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("sweep_proposal_write", "encoded sweep proposal decoded as another artifact kind"));
+  };
+  if decoded.key != encoded.key || decoded.candidate_count as usize != request.candidates.len() {
+    return Err(closure_error("sweep_proposal_write", "encoded sweep proposal disagrees with its request"));
+  }
+  Ok(encoded)
+}
+
+pub fn encode_sweep_receipt_v1(request: &SweepReceiptWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.database_id.iter().all(|byte| *byte == 0)
+    || request.batch_id.iter().all(|byte| *byte == 0)
+    || request.generation == 0
+    || request.reclaim_committed_at_ms <= 0
+    || request.proposal_hash.len() != hash_width
+    || request.void_catalog_hash.len() != hash_width
+    || all_zero(request.proposal_hash)
+    || all_zero(request.void_catalog_hash)
+    || request.outcomes.is_empty()
+    || request.outcomes.len() > MAX_CANDIDATES
+  {
+    return Err(identity_error("sweep_receipt_write", "sweep receipt write identity, time, generation, hashes, or count is invalid"));
+  }
+  let record_length = 48 + 2 * hash_width;
+  let records_length = request.outcomes.len().checked_mul(record_length).ok_or_else(|| overflow_error("sweep receipt records length"))?;
+  let mut records = vec![0u8; records_length];
+  let mut previous = None;
+  let mut reclaimed_count = 0u64;
+  let mut reclaimed_bytes = 0u64;
+  let mut skipped_count = 0u64;
+  let mut failed_count = 0u64;
+  for (index, outcome) in request.outcomes.iter().enumerate() {
+    if previous.is_some_and(|prior| compare_physical_incarnations_v1(&prior, &outcome.incarnation) != Ordering::Less) {
+      return Err(order_error("sweep_receipt_order", "sweep outcomes are duplicate or out of order"));
+    }
+    let start = index * record_length;
+    let record = &mut records[start..start + record_length];
+    encode_physical_incarnation_into(&mut record[..24 + 2 * hash_width], &outcome.incarnation, request.hash_algorithm)?;
+    put_u16(record, 24 + 2 * hash_width, outcome.outcome as u16);
+    put_u16(record, 26 + 2 * hash_width, outcome.stable_reason_detail);
+    put_u64(record, 32 + 2 * hash_width, outcome.resulting_void_offset);
+    put_u32(record, 40 + 2 * hash_width, outcome.resulting_void_length);
+    let decoded = decode_sweep_receipt_outcome_v1(record, request.hash_algorithm)?;
+    match decoded.outcome {
+      SweepOutcomeClassV1::Reclaimed => {
+        reclaimed_count = reclaimed_count.checked_add(1).ok_or_else(|| overflow_error("reclaimed count"))?;
+        reclaimed_bytes =
+          reclaimed_bytes.checked_add(u64::from(decoded.resulting_void_length)).ok_or_else(|| overflow_error("reclaimed byte total"))?;
+      }
+      SweepOutcomeClassV1::SkippedReachable
+      | SweepOutcomeClassV1::SkippedChanged
+      | SweepOutcomeClassV1::SkippedPinned
+      | SweepOutcomeClassV1::SkippedPolicy => {
+        skipped_count = skipped_count.checked_add(1).ok_or_else(|| overflow_error("skipped count"))?;
+      }
+      SweepOutcomeClassV1::FailedIo | SweepOutcomeClassV1::FailedCorrupt => {
+        failed_count = failed_count.checked_add(1).ok_or_else(|| overflow_error("failed count"))?;
+      }
+    }
+    previous = Some(outcome.incarnation);
+  }
+  let fixed_length = 64 + 2 * hash_width;
+  let body_length = fixed_length.checked_add(records_length).ok_or_else(|| overflow_error("sweep receipt body length"))?;
+  let mut body = vec![0u8; body_length];
+  put_u32(&mut body, 0, u32::from(request.recovered));
+  put_u16(&mut body, 4, 1);
+  put_i64(&mut body, 8, request.reclaim_committed_at_ms);
+  body[16..16 + hash_width].copy_from_slice(request.proposal_hash);
+  body[16 + hash_width..16 + 2 * hash_width].copy_from_slice(request.void_catalog_hash);
+  put_u64(&mut body, 16 + 2 * hash_width, request.generation);
+  put_u32(&mut body, 24 + 2 * hash_width, request.outcomes.len() as u32);
+  put_u32(&mut body, 28 + 2 * hash_width, records_length as u32);
+  put_u64(&mut body, 32 + 2 * hash_width, reclaimed_count);
+  put_u64(&mut body, 40 + 2 * hash_width, reclaimed_bytes);
+  put_u64(&mut body, 48 + 2 * hash_width, skipped_count);
+  put_u64(&mut body, 56 + 2 * hash_width, failed_count);
+  body[fixed_length..].copy_from_slice(&records);
+  let mut identity = [0u8; 32];
+  identity[..16].copy_from_slice(request.database_id);
+  identity[16..].copy_from_slice(request.batch_id);
+  let kind = if request.recovered { GcArtifactKindV1::RecoveredSweepReceipt } else { GcArtifactKindV1::SweepCommitReceipt };
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let SweepVoidArtifactV1::SweepReceipt(decoded) = decode_sweep_void_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("sweep_receipt_write", "encoded sweep receipt decoded as another artifact kind"));
+  };
+  if decoded.key != encoded.key || decoded.outcome_count as usize != request.outcomes.len() || decoded.recovered != request.recovered {
+    return Err(closure_error("sweep_receipt_write", "encoded sweep receipt disagrees with its request"));
+  }
+  Ok(encoded)
 }
 
 fn decode_void_extent_page(
@@ -941,36 +1280,6 @@ pub fn validate_void_settlement_closure(
   Ok(())
 }
 
-fn validate_physical_order(records: &[u8], record_length: usize, algorithm: HashAlgorithm) -> FormatResult<()> {
-  let mut previous = None;
-  for record in records.chunks_exact(record_length) {
-    decode_physical_incarnation(record, algorithm)?;
-    if let Some(prior) = previous {
-      if compare_physical_bytes(prior, record, algorithm)? != Ordering::Less {
-        return Err(order_error("sweep_proposal_order", "sweep candidates are duplicate or out of order"));
-      }
-    }
-    previous = Some(record);
-  }
-  Ok(())
-}
-
-fn compare_physical_bytes(left: &[u8], right: &[u8], algorithm: HashAlgorithm) -> FormatResult<Ordering> {
-  let left = decode_physical_incarnation(left, algorithm)?;
-  let right = decode_physical_incarnation(right, algorithm)?;
-  Ok(
-    left
-      .logical_key
-      .cmp(right.logical_key)
-      .then_with(|| left.integrity_or_legacy_digest.cmp(right.integrity_or_legacy_digest))
-      .then_with(|| left.wal_offset.cmp(&right.wal_offset))
-      .then_with(|| left.write_sequence.cmp(&right.write_sequence))
-      .then_with(|| left.entity_length.cmp(&right.entity_length))
-      .then_with(|| left.entry_type.cmp(&right.entry_type))
-      .then_with(|| left.entity_version.cmp(&right.entity_version)),
-  )
-}
-
 fn validate_exact_capabilities(bytes: &[u8]) -> FormatResult<()> {
   let mut expected = [0u8; 32];
   for bit in VOID_CAPABILITY_BITS {
@@ -995,6 +1304,22 @@ fn validate_exact_capabilities(bytes: &[u8]) -> FormatResult<()> {
 fn i64_at(bytes: &[u8], offset: usize) -> FormatResult<i64> {
   let raw = bytes.get(offset..offset + 8).ok_or_else(|| trailing_error("sweep_void_truncated", format!("i64 at offset {offset}")))?;
   Ok(i64::from_le_bytes(raw.try_into().expect("checked sweep/Void i64 width")))
+}
+
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+  bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+  bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+  bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_i64(bytes: &mut [u8], offset: usize, value: i64) {
+  bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 fn all_zero(bytes: &[u8]) -> bool {
