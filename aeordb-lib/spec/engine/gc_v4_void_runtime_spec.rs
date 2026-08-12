@@ -71,6 +71,9 @@ enum ReceiptMutation {
   Search,
   Repair,
   Cancel,
+  ProposalSequenceOrder,
+  ReceiptSequenceOrder,
+  ReceiptBeforeProposal,
 }
 
 #[derive(Default)]
@@ -90,6 +93,7 @@ impl VoidReclaimReceiptAuthorityV1 for ExactReceiptAuthority {
     if self.mutation == ReceiptMutation::Fail {
       return Err(VoidReclaimReceiptAuthorityErrorV1::new("void_runtime_test_authority", "injected receipt authority failure"));
     }
+    let reclaim_commit_sequence = request.extent.reclaim_commit_sequence;
     let mut snapshot = VoidReclaimReceiptAuthoritySnapshotV1 {
       database_id: request.database_id.try_into().unwrap(),
       selected_manifest_key: request.selected_manifest_key.to_vec(),
@@ -97,10 +101,10 @@ impl VoidReclaimReceiptAuthorityV1 for ExactReceiptAuthority {
       origin_sweep_proposal_hash: request.extent.origin_sweep_proposal_hash.to_vec(),
       origin_quarantine_manifest_hash: request.extent.origin_quarantine_manifest_hash.to_vec(),
       reclaimed_incarnation_digest: request.extent.reclaimed_incarnation_digest.to_vec(),
-      proposal_write_sequence: 41,
+      proposal_write_sequence: reclaim_commit_sequence - 1,
       receipt_hash: vec![0x91; request.hash_algorithm.hash_length()],
-      receipt_write_sequence: 43,
-      reclaim_commit_sequence: request.extent.reclaim_commit_sequence,
+      receipt_write_sequence: reclaim_commit_sequence + 1,
+      reclaim_commit_sequence,
       receipt_reclaimed_offset: request.extent.offset,
       receipt_reclaimed_length: request.extent.length,
       exact_proposal_receipt_current: !self.omit_receipt,
@@ -119,6 +123,9 @@ impl VoidReclaimReceiptAuthorityV1 for ExactReceiptAuthority {
       ReceiptMutation::Search => snapshot.receipt_search_complete = false,
       ReceiptMutation::Repair => snapshot.repair_latch_clear = false,
       ReceiptMutation::Cancel => request.cancellation.cancel(),
+      ReceiptMutation::ProposalSequenceOrder => snapshot.proposal_write_sequence = snapshot.reclaim_commit_sequence,
+      ReceiptMutation::ReceiptSequenceOrder => snapshot.receipt_write_sequence = snapshot.reclaim_commit_sequence,
+      ReceiptMutation::ReceiptBeforeProposal => snapshot.receipt_write_sequence = snapshot.proposal_write_sequence - 1,
     }
     Ok(snapshot)
   }
@@ -259,6 +266,9 @@ fn overlapping_claims_and_missing_or_conflicting_receipts_fail_closed() {
     (false, 0, ReceiptMutation::Lineage, "void_runtime_receipt_authority_incomplete"),
     (false, 0, ReceiptMutation::Search, "void_runtime_receipt_authority_incomplete"),
     (false, 0, ReceiptMutation::Repair, "void_runtime_receipt_authority_incomplete"),
+    (false, 0, ReceiptMutation::ProposalSequenceOrder, "void_runtime_receipt_authority_incomplete"),
+    (false, 0, ReceiptMutation::ReceiptSequenceOrder, "void_runtime_receipt_authority_incomplete"),
+    (false, 0, ReceiptMutation::ReceiptBeforeProposal, "void_runtime_receipt_authority_incomplete"),
     (false, 0, ReceiptMutation::Cancel, "void_runtime_canceled"),
     (false, 0, ReceiptMutation::Fail, "void_runtime_test_authority"),
   ];

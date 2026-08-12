@@ -153,6 +153,7 @@ impl VoidReclaimReceiptAuthorityV1 for TestVoidReclaimReceiptAuthorityV1 {
         "injected receipt-authority reconstruction failure",
       ));
     }
+    let reclaim_commit_sequence = request.extent.reclaim_commit_sequence;
     Ok(VoidReclaimReceiptAuthoritySnapshotV1 {
       database_id: request.database_id.try_into().unwrap(),
       selected_manifest_key: request.selected_manifest_key.to_vec(),
@@ -160,10 +161,10 @@ impl VoidReclaimReceiptAuthorityV1 for TestVoidReclaimReceiptAuthorityV1 {
       origin_sweep_proposal_hash: request.extent.origin_sweep_proposal_hash.to_vec(),
       origin_quarantine_manifest_hash: request.extent.origin_quarantine_manifest_hash.to_vec(),
       reclaimed_incarnation_digest: request.extent.reclaimed_incarnation_digest.to_vec(),
-      proposal_write_sequence: 81,
+      proposal_write_sequence: reclaim_commit_sequence - 1,
       receipt_hash: digest_parts(request.hash_algorithm, &[b"runtime receipt", request.extent.origin_sweep_proposal_hash]),
-      receipt_write_sequence: 82,
-      reclaim_commit_sequence: request.extent.reclaim_commit_sequence,
+      receipt_write_sequence: reclaim_commit_sequence + 1,
+      reclaim_commit_sequence,
       receipt_reclaimed_offset: request.extent.offset,
       receipt_reclaimed_length: request.extent.length,
       exact_proposal_receipt_current: true,
@@ -1987,7 +1988,17 @@ fn selected_void_runtime_reconstructs_settled_returned_space_after_restart() {
   assert_eq!(state.free_bytes(), harness.consumption.returned_bytes());
   assert_eq!(state.outstanding_claim_count(), 0);
   assert_eq!(state.candidate_extents().len(), harness.consumption.returned_extents().len());
+  assert!(!state.candidate_window_truncated());
   assert_eq!(runtime_authority.recheck_calls, harness.consumption.returned_extents().len());
+  for (candidate, returned) in state.candidate_extents().iter().zip(harness.consumption.returned_extents()) {
+    assert_eq!(candidate.offset, returned.offset);
+    assert_eq!(candidate.length, returned.length);
+    assert_eq!(candidate.origin_sweep_proposal_hash, returned.origin_sweep_proposal_hash);
+    assert_eq!(candidate.origin_quarantine_manifest_hash, returned.origin_quarantine_manifest_hash);
+    assert_eq!(candidate.reclaimed_incarnation_digest, returned.reclaimed_incarnation_digest);
+    assert_eq!(candidate.reclaim_commit_sequence, returned.reclaim_commit_sequence);
+    assert_eq!(candidate.void_generation, returned.void_generation);
+  }
   drop(state);
   drop(retirement_owner);
   let path = harness.path.clone();
@@ -2012,7 +2023,17 @@ fn selected_void_runtime_reconstructs_settled_returned_space_after_restart() {
   assert_eq!(restarted.selected_manifest_key(), result_manifest_key);
   assert_eq!(restarted.free_count(), expected_free_count);
   assert_eq!(restarted.outstanding_claim_count(), 0);
+  assert!(!restarted.candidate_window_truncated());
   assert_eq!(restart_authority.recheck_calls, usize::try_from(expected_free_count).unwrap());
+  for (candidate, returned) in restarted.candidate_extents().iter().zip(harness.consumption.returned_extents()) {
+    assert_eq!(candidate.offset, returned.offset);
+    assert_eq!(candidate.length, returned.length);
+    assert_eq!(candidate.origin_sweep_proposal_hash, returned.origin_sweep_proposal_hash);
+    assert_eq!(candidate.origin_quarantine_manifest_hash, returned.origin_quarantine_manifest_hash);
+    assert_eq!(candidate.reclaimed_incarnation_digest, returned.reclaimed_incarnation_digest);
+    assert_eq!(candidate.reclaim_commit_sequence, returned.reclaim_commit_sequence);
+    assert_eq!(candidate.void_generation, returned.void_generation);
+  }
 }
 
 #[test]
@@ -2146,6 +2167,31 @@ fn every_void_claim_settlement_publication_failure_restarts_as_source_or_exact_r
         selector_committed,
         "target {target_publication}, failure {failure:?}, error {error:?}"
       );
+      let mut restart_runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+      let restart_state = reopened
+        .reconstruct_void_reusable_state(
+          VoidReusableStateReconstructionRequestV1 {
+            cancellation: &harness.cancellation,
+            memory: &harness.memory,
+            limits: void_runtime_limits(),
+          },
+          &mut restart_runtime_authority,
+        )
+        .unwrap()
+        .unwrap();
+      if selector_committed {
+        assert_eq!(restart_state.free_count(), u64::try_from(harness.consumption.returned_extents().len()).unwrap());
+        assert_eq!(restart_state.free_bytes(), harness.consumption.returned_bytes());
+        assert_eq!(restart_state.outstanding_claim_count(), 0);
+        assert_eq!(restart_state.candidate_extents().len(), harness.consumption.returned_extents().len());
+        assert_eq!(restart_runtime_authority.recheck_calls, harness.consumption.returned_extents().len());
+      } else {
+        assert_eq!(restart_state.free_count(), 0);
+        assert_eq!(restart_state.outstanding_claim_count(), 1);
+        assert!(restart_state.candidate_extents().is_empty());
+        assert_eq!(restart_runtime_authority.recheck_calls, 0);
+      }
+      drop(restart_state);
       let existing_settlement_write_sequence = if reopened.locator(&settlement_key).unwrap().is_some() {
         Some(stored_gc_artifact_write_sequence(&reopened, &settlement_key, GcArtifactKindV1::VoidClaimSettlementReceipt))
       } else {
@@ -2186,6 +2232,32 @@ fn every_void_claim_settlement_publication_failure_restarts_as_source_or_exact_r
         "target {target_publication}, failure {failure:?}"
       );
       assert!(reopened.locator(&settlement_key).unwrap().is_some(), "target {target_publication}, failure {failure:?}");
+      let mut retry_runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+      let retry_state = reopened
+        .reconstruct_void_reusable_state(
+          VoidReusableStateReconstructionRequestV1 {
+            cancellation: &harness.cancellation,
+            memory: &harness.memory,
+            limits: void_runtime_limits(),
+          },
+          &mut retry_runtime_authority,
+        )
+        .unwrap()
+        .unwrap();
+      assert_eq!(retry_state.free_count(), u64::try_from(harness.consumption.returned_extents().len()).unwrap());
+      assert_eq!(retry_state.free_bytes(), harness.consumption.returned_bytes());
+      assert_eq!(retry_state.outstanding_claim_count(), 0);
+      assert_eq!(retry_state.candidate_extents().len(), harness.consumption.returned_extents().len());
+      assert_eq!(retry_runtime_authority.recheck_calls, harness.consumption.returned_extents().len());
+      for (candidate, returned) in retry_state.candidate_extents().iter().zip(harness.consumption.returned_extents()) {
+        assert_eq!(candidate.offset, returned.offset);
+        assert_eq!(candidate.length, returned.length);
+        assert_eq!(candidate.origin_sweep_proposal_hash, returned.origin_sweep_proposal_hash);
+        assert_eq!(candidate.origin_quarantine_manifest_hash, returned.origin_quarantine_manifest_hash);
+        assert_eq!(candidate.reclaimed_incarnation_digest, returned.reclaimed_incarnation_digest);
+        assert_eq!(candidate.reclaim_commit_sequence, returned.reclaim_commit_sequence);
+        assert_eq!(candidate.void_generation, returned.void_generation);
+      }
     }
   }
 }
@@ -2725,6 +2797,27 @@ fn every_void_claim_selector_failure_restarts_as_exactly_source_or_claimed() {
     let (_restart_coordinator, mut reopened) = reopen(&path);
     let expected_selected = if selector_may_have_committed { &prepared.result_manifest.key } else { &source.manifest.key };
     assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(expected_selected.clone()), "failure {failure:?}");
+    let restart_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    let mut restart_runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+    let restart_state = reopened
+      .reconstruct_void_reusable_state(
+        VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &restart_memory, limits: void_runtime_limits() },
+        &mut restart_runtime_authority,
+      )
+      .unwrap()
+      .unwrap();
+    if selector_may_have_committed {
+      assert_eq!(restart_state.free_count(), 0, "failure {failure:?}");
+      assert_eq!(restart_state.outstanding_claim_count(), 1, "failure {failure:?}");
+      assert!(restart_state.candidate_extents().is_empty(), "failure {failure:?}");
+      assert_eq!(restart_runtime_authority.recheck_calls, 0, "failure {failure:?}");
+    } else {
+      assert_eq!(restart_state.free_count(), 1, "failure {failure:?}");
+      assert_eq!(restart_state.outstanding_claim_count(), 0, "failure {failure:?}");
+      assert_eq!(restart_state.candidate_extents().len(), 1, "failure {failure:?}");
+      assert_eq!(restart_runtime_authority.recheck_calls, 1, "failure {failure:?}");
+    }
+    drop(restart_state);
     let retry_cancellation = CancellationToken::new();
     let retry_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
     let mut retry_owner = RetirementJournalOwnerV1::new_chain(
@@ -2746,6 +2839,22 @@ fn every_void_claim_selector_failure_restarts_as_exactly_source_or_claimed() {
     assert_eq!(retry.idempotent(), selector_may_have_committed, "failure {failure:?}");
     assert_eq!(retry.claim_key(), prepared.claim.key, "failure {failure:?}");
     assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(prepared.result_manifest.key.clone()), "failure {failure:?}");
+    let mut retry_runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+    let retry_state = reopened
+      .reconstruct_void_reusable_state(
+        VoidReusableStateReconstructionRequestV1 {
+          cancellation: &retry_cancellation,
+          memory: &retry_memory,
+          limits: void_runtime_limits(),
+        },
+        &mut retry_runtime_authority,
+      )
+      .unwrap()
+      .unwrap();
+    assert_eq!(retry_state.free_count(), 0, "failure {failure:?}");
+    assert_eq!(retry_state.outstanding_claim_count(), 1, "failure {failure:?}");
+    assert!(retry_state.candidate_extents().is_empty(), "failure {failure:?}");
+    assert_eq!(retry_runtime_authority.recheck_calls, 0, "failure {failure:?}");
   }
 }
 

@@ -600,9 +600,9 @@ fn validate_receipt_authority(
     && snapshot.receipt_hash.len() == hash_width
     && snapshot.receipt_hash.iter().any(|byte| *byte != 0)
     && snapshot.proposal_write_sequence != 0
-    && snapshot.receipt_write_sequence != 0
     && snapshot.reclaim_commit_sequence == request.extent.reclaim_commit_sequence
-    && snapshot.reclaim_commit_sequence != 0;
+    && snapshot.reclaim_commit_sequence > snapshot.proposal_write_sequence
+    && snapshot.receipt_write_sequence > snapshot.reclaim_commit_sequence;
   let receipt_end = snapshot.receipt_reclaimed_offset.checked_add(u64::from(snapshot.receipt_reclaimed_length));
   let extent_end = request.extent.offset.checked_add(u64::from(request.extent.length));
   let range_contains_extent = match (receipt_end, extent_end) {

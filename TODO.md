@@ -731,7 +731,7 @@
           - [x] Reject a validly encoded but semantically conflicting claimed receipt against a live partial-removal completion.
           - [x] Remove impossible post-global-exclusion cleanup branches and prove valid plural outcomes return one completion while operation failures return none.
           - [x] Re-run cancellation, corruption, authority drift, crash-prefix, architecture-isolation, resource, and retained-or-leaked gates before closing P4-6.
-      - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
+      - [x] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
         - [x] P4-7a: expose exact both-width Void extent/catalog/claim/settlement writers and iterators, and converge Void directory nodes on the shared multi-child GC directory codec.
         - [x] P4-7b: validate the complete Void support closure with bounded memory/cancellation, hard-publish receipt-backed support, and select its A/B control last while allocator admission remains blocked until exact receipt reconciliation.
           - [x] Add a compile-red public contract for one disconnected Void support publisher and selector-last catalog owner.
@@ -766,7 +766,12 @@
           - [x] Reselect and closure-validate one A/B Void catalog under first authority; return no reusable state for absent authority and no authority for missing/corrupt/unreceipted support.
           - [x] Prove source, outstanding-claim, settled, empty, stale-cache, cancellation, resource-bound, and restart behavior without calling live v3 `VoidManager`, hot-tail, gap recovery, service startup, routes, tasks, or destructive GC.
           - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
-        - [ ] P4-7f: prove partial use, crash recovery, cancellation, corruption, overlapping/substituted ranges, stale caches, resource bounds, restart, native behavior, and retained-or-leaked failure direction without enabling destructive service GC.
+        - [x] P4-7f: prove partial use, crash recovery, cancellation, corruption, overlapping/substituted ranges, stale caches, resource bounds, restart, native behavior, and retained-or-leaked failure direction without enabling destructive service GC.
+          - [x] Reject receipt evidence unless its durable sequence chain is strictly proposal -> locator-removal commit -> sweep receipt.
+          - [x] Reconstruct exact source-or-outstanding-claim authority after every claim-selector crash prefix, then prove idempotent retry selects only the exact claim.
+          - [x] Reconstruct exact outstanding-claim-or-settled authority after every settlement crash prefix, then prove retry exposes only receipt-backed returned fragments.
+          - [x] Cross-check exact partial-use returned extent provenance before and after restart, with no stale candidate cache.
+          - [x] Re-run cancellation, corruption, overlap/substitution, memory, architecture, native, and retained-or-leaked qualification gates before closing P4-7.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
     - [ ] P5: implement immutable index definitions, ordered pages, catalogs, sparse fixed-point NVT, compaction, and corruption fallback; eliminate v0 whole-index publication amplification when the active set exceeds the clean-cache cap.
