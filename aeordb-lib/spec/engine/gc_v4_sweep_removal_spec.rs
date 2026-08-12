@@ -47,6 +47,8 @@ fn locator_removal_has_one_disconnected_guarded_owner_and_no_receipt_or_void_aut
   assert!(method.contains("with_global_exclusion"));
   assert!(method.contains("root_state.lock"));
   assert!(method.contains("remove_sweep_locators"));
+  assert!(!method.contains("CommittedExclusion"));
+  assert!(!method.contains("CompoundExclusion"));
   for forbidden in
     ["encode_sweep_receipt_v1", "VoidManager", "VoidCatalog", "replace_all", "run_gc", "server::", "DirectoryOps", "StorageEngine"]
   {

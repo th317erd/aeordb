@@ -341,6 +341,288 @@ fn sweep_locator_removal_completion_preserves_both_frozen_hash_widths() {
 }
 
 #[test]
+fn sweep_receipt_commit_time_cannot_predate_the_durable_proposal() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x32; 16];
+  let batch_id = [0x92; 16];
+  let logical_key = digest_parts(algorithm, &[b"sweep temporal logical key"]);
+  let integrity = digest_parts(algorithm, &[b"sweep temporal integrity"]);
+  let quarantine_manifest_hash = digest_parts(algorithm, &[b"sweep temporal quarantine"]);
+  let candidates = [PhysicalIncarnationV1 {
+    logical_key: &logical_key,
+    integrity_or_legacy_digest: &integrity,
+    wal_offset: 12_288,
+    write_sequence: 78,
+    entity_length: 768,
+    entry_type: 1,
+    entity_version: 1,
+  }];
+  let proposal_artifact = encode_sweep_proposal_v1(&SweepProposalWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    batch_id: &batch_id,
+    generation: 104,
+    created_at_ms: 1_700_000_090_000,
+    quarantine_manifest_hash: &quarantine_manifest_hash,
+    candidates: &candidates,
+  })
+  .unwrap();
+  let SweepVoidArtifactV1::SweepProposal(proposal) = decode_sweep_void_artifact(&proposal_artifact.value, algorithm).unwrap() else {
+    panic!("encoded sweep proposal must decode as a proposal")
+  };
+  let cancellation = CancellationToken::new();
+  let request = SweepReceiptVoidAuthorityRequestV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    batch_id: &batch_id,
+    generation: proposal.generation,
+    proposal_hash: &proposal_artifact.key,
+    proposal_write_sequence: 418,
+    proposal: &proposal,
+    recovery: true,
+    cancellation: &cancellation,
+  };
+  let reclaimed = SweepLocatorRemovalOutcomeV1 {
+    ordinal: 0,
+    outcome: SweepOutcomeClassV1::Reclaimed,
+    stable_reason_detail: 0,
+    resulting_void_offset: candidates[0].wal_offset,
+    resulting_void_length: candidates[0].entity_length,
+  };
+  let void_catalog_hash = digest_parts(algorithm, &[b"sweep temporal Void catalog"]);
+  let mut authority = test_sweep_receipt_void_authority(&void_catalog_hash, vec![reclaimed]);
+  authority.snapshot.reclaim_committed_at_ms = proposal.created_at_ms - 1;
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(1 << 20, 2 << 20, 1, 1 << 16).unwrap());
+  let baseline_reserved = memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes;
+  let reservation = reserve_sweep_receipt_reconciliation_v1(algorithm, proposal.candidate_count, &memory).unwrap();
+
+  let error = prepare_sweep_receipt_reconciliation_v1(request, &authority.snapshot, &[reclaimed], reservation).unwrap_err();
+  assert_eq!(error.code(), "sweep_receipt_time");
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, baseline_reserved);
+}
+
+#[test]
+fn partial_sweep_receipt_preserves_every_outcome_and_restarts_idempotently() {
+  let (_directory, path, _coordinator, publisher) = create_environment("partial-sweep-receipt", None);
+  publish_first_authority(&publisher);
+  let observation = publisher.observe().unwrap();
+  let algorithm = observation.selected.header.hash_algorithm;
+  let database_id = observation.selected.header.database_id;
+  let batch_id = [0x93; 16];
+  let logical_keys = [vec![0x11; algorithm.hash_length()], vec![0x22; algorithm.hash_length()], vec![0x33; algorithm.hash_length()]];
+  let integrity_digests = [vec![0x44; algorithm.hash_length()], vec![0x55; algorithm.hash_length()], vec![0x66; algorithm.hash_length()]];
+  let candidates = [
+    PhysicalIncarnationV1 {
+      logical_key: &logical_keys[0],
+      integrity_or_legacy_digest: &integrity_digests[0],
+      wal_offset: 16_384,
+      write_sequence: 81,
+      entity_length: 512,
+      entry_type: 1,
+      entity_version: 1,
+    },
+    PhysicalIncarnationV1 {
+      logical_key: &logical_keys[1],
+      integrity_or_legacy_digest: &integrity_digests[1],
+      wal_offset: 20_480,
+      write_sequence: 82,
+      entity_length: 768,
+      entry_type: 1,
+      entity_version: 1,
+    },
+    PhysicalIncarnationV1 {
+      logical_key: &logical_keys[2],
+      integrity_or_legacy_digest: &integrity_digests[2],
+      wal_offset: 24_576,
+      write_sequence: 83,
+      entity_length: 1_024,
+      entry_type: 1,
+      entity_version: 1,
+    },
+  ];
+  let quarantine_manifest_hash = digest_parts(algorithm, &[b"partial sweep quarantine"]);
+  let proposal_artifact = encode_sweep_proposal_v1(&SweepProposalWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    batch_id: &batch_id,
+    generation: 105,
+    created_at_ms: 1_700_000_089_500,
+    quarantine_manifest_hash: &quarantine_manifest_hash,
+    candidates: &candidates,
+  })
+  .unwrap();
+  let proposal_write_sequence = publisher
+    .publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::SweepProposal,
+        database_id: &database_id,
+        artifact_key: &proposal_artifact.key,
+        value: &proposal_artifact.value,
+        minimum_timestamp_ms: 1_700_000_089_500,
+        committed_postcondition_code: "test_partial_sweep_proposal",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  let SweepVoidArtifactV1::SweepProposal(proposal) = decode_sweep_void_artifact(&proposal_artifact.value, algorithm).unwrap() else {
+    panic!("encoded sweep proposal must decode as a proposal")
+  };
+  let outcomes = [
+    SweepLocatorRemovalOutcomeV1 {
+      ordinal: 0,
+      outcome: SweepOutcomeClassV1::Reclaimed,
+      stable_reason_detail: 0,
+      resulting_void_offset: candidates[0].wal_offset,
+      resulting_void_length: candidates[0].entity_length,
+    },
+    SweepLocatorRemovalOutcomeV1 {
+      ordinal: 1,
+      outcome: SweepOutcomeClassV1::SkippedPinned,
+      stable_reason_detail: 41,
+      resulting_void_offset: 0,
+      resulting_void_length: 0,
+    },
+    SweepLocatorRemovalOutcomeV1 {
+      ordinal: 2,
+      outcome: SweepOutcomeClassV1::FailedIo,
+      stable_reason_detail: 42,
+      resulting_void_offset: 0,
+      resulting_void_length: 0,
+    },
+  ];
+  let cancellation = CancellationToken::new();
+  let removal_request = SweepLocatorRemovalAuthorityRequestV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    batch_id: &batch_id,
+    generation: proposal.generation,
+    proposal_hash: &proposal_artifact.key,
+    proposal_write_sequence,
+    quarantine_manifest_hash: &quarantine_manifest_hash,
+    proposal: &proposal,
+    cancellation: &cancellation,
+  };
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap());
+  let removal_memory = reserve_sweep_locator_removal_results_v1(&memory, proposal.candidate_count).unwrap();
+  let completion = complete_sweep_locator_removal_v1(removal_request, outcomes.to_vec(), removal_memory).unwrap();
+  let void_catalog_hash = digest_parts(algorithm, &[b"partial sweep selected Void catalog"]);
+  let mut authority = test_sweep_receipt_void_authority(&void_catalog_hash, outcomes.to_vec());
+  let request = SweepReceiptReconciliationRequestV1 {
+    source: SweepReceiptReconciliationSourceV1::Completion(&completion),
+    cancellation: &cancellation,
+    memory: &memory,
+  };
+  let receipt = publisher.reconcile_sweep_receipt(request, &mut authority).unwrap();
+  let expected_outcomes = [
+    SweepReceiptOutcomeWriteV1 {
+      incarnation: candidates[0],
+      outcome: outcomes[0].outcome,
+      stable_reason_detail: outcomes[0].stable_reason_detail,
+      resulting_void_offset: outcomes[0].resulting_void_offset,
+      resulting_void_length: outcomes[0].resulting_void_length,
+    },
+    SweepReceiptOutcomeWriteV1 {
+      incarnation: candidates[1],
+      outcome: outcomes[1].outcome,
+      stable_reason_detail: outcomes[1].stable_reason_detail,
+      resulting_void_offset: outcomes[1].resulting_void_offset,
+      resulting_void_length: outcomes[1].resulting_void_length,
+    },
+    SweepReceiptOutcomeWriteV1 {
+      incarnation: candidates[2],
+      outcome: outcomes[2].outcome,
+      stable_reason_detail: outcomes[2].stable_reason_detail,
+      resulting_void_offset: outcomes[2].resulting_void_offset,
+      resulting_void_length: outcomes[2].resulting_void_length,
+    },
+  ];
+  let expected_receipt = encode_sweep_receipt_v1(&SweepReceiptWriteV1 {
+    hash_algorithm: algorithm,
+    recovered: false,
+    database_id: &database_id,
+    batch_id: &batch_id,
+    generation: proposal.generation,
+    reclaim_committed_at_ms: authority.snapshot.reclaim_committed_at_ms,
+    proposal_hash: &proposal_artifact.key,
+    void_catalog_hash: &void_catalog_hash,
+    outcomes: &expected_outcomes,
+  })
+  .unwrap();
+  assert_eq!(receipt.receipt_key, expected_receipt.key);
+  assert!(!receipt.recovered);
+  assert_eq!(authority.recheck_calls, 1);
+  assert_eq!(authority.recovery_calls, 0);
+  assert!(publisher.locator(&receipt.receipt_key).unwrap().is_some());
+
+  drop(publisher);
+  let (_restart_coordinator, reopened) = reopen(&path);
+  let restart_cancellation = CancellationToken::new();
+  let restart_request = SweepReceiptReconciliationRequestV1 {
+    source: SweepReceiptReconciliationSourceV1::Recovery(SweepReceiptRecoveryIdentityV1 {
+      hash_algorithm: algorithm,
+      database_id: &database_id,
+      proposal_hash: &proposal_artifact.key,
+      proposal_write_sequence,
+    }),
+    cancellation: &restart_cancellation,
+    memory: &memory,
+  };
+  let mut restart_authority = test_sweep_receipt_void_authority(&void_catalog_hash, outcomes.to_vec());
+  restart_authority.snapshot.allocator_admission_blocked = false;
+  restart_authority.snapshot.existing_receipt = Some(ExistingSweepReceiptAuthorityV1 {
+    receipt_hash: receipt.receipt_key.clone(),
+    receipt_write_sequence: receipt.hard_publication_sequence,
+  });
+  let restarted_receipt = reopened.reconcile_sweep_receipt(restart_request, &mut restart_authority).unwrap();
+  assert_eq!(restarted_receipt, receipt);
+  assert_eq!(restart_authority.recheck_calls, 1);
+  assert_eq!(restart_authority.recovery_calls, 0);
+
+  let mut conflicting_outcomes = expected_outcomes;
+  conflicting_outcomes[1].outcome = SweepOutcomeClassV1::SkippedPolicy;
+  conflicting_outcomes[1].stable_reason_detail = 77;
+  let conflicting_receipt = encode_sweep_receipt_v1(&SweepReceiptWriteV1 {
+    hash_algorithm: algorithm,
+    recovered: false,
+    database_id: &database_id,
+    batch_id: &batch_id,
+    generation: proposal.generation,
+    reclaim_committed_at_ms: authority.snapshot.reclaim_committed_at_ms,
+    proposal_hash: &proposal_artifact.key,
+    void_catalog_hash: &void_catalog_hash,
+    outcomes: &conflicting_outcomes,
+  })
+  .unwrap();
+  let conflicting_sequence = reopened
+    .publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::SweepCommitReceipt,
+        database_id: &database_id,
+        artifact_key: &conflicting_receipt.key,
+        value: &conflicting_receipt.value,
+        minimum_timestamp_ms: u64::try_from(authority.snapshot.reclaim_committed_at_ms).unwrap(),
+        committed_postcondition_code: "test_conflicting_partial_sweep_receipt",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  let before_dishonest_reconcile = reopened.observe().unwrap();
+  let mut dishonest_authority = test_sweep_receipt_void_authority(&void_catalog_hash, outcomes.to_vec());
+  dishonest_authority.snapshot.allocator_admission_blocked = false;
+  dishonest_authority.snapshot.existing_receipt =
+    Some(ExistingSweepReceiptAuthorityV1 { receipt_hash: conflicting_receipt.key, receipt_write_sequence: conflicting_sequence });
+  let dishonest_request = SweepReceiptReconciliationRequestV1 {
+    source: SweepReceiptReconciliationSourceV1::Completion(&completion),
+    cancellation: &restart_cancellation,
+    memory: &memory,
+  };
+  let dishonest_error = reopened.reconcile_sweep_receipt(dishonest_request, &mut dishonest_authority).unwrap_err();
+  assert_eq!(dishonest_error.code(), "sweep_receipt_existing_conflict");
+  assert_eq!(dishonest_authority.recovery_calls, 0);
+  assert_eq!(reopened.observe().unwrap(), before_dishonest_reconcile);
+}
+
+#[test]
 fn sweep_receipt_recovery_fails_closed_and_hard_publishes_exactly_once() {
   let (_directory, _path, _coordinator, publisher) = create_environment("sweep-receipt-recovery", None);
   publish_first_authority(&publisher);

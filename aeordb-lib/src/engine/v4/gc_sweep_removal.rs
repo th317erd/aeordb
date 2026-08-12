@@ -177,18 +177,6 @@ pub enum SweepLocatorRemovalErrorV1 {
   Memory(#[from] MemoryCoordinatorError),
   #[error("sweep locator removal integer conversion failed: {0}")]
   IntegerConversion(#[from] TryFromIntError),
-  #[error("sweep locator removal completed, but releasing request-pin exclusion failed: {source}")]
-  CommittedExclusion {
-    #[source]
-    source: RootPinCoordinatorErrorV1,
-    completion: Box<SweepLocatorRemovalCompletionPermitV1>,
-  },
-  #[error("sweep locator removal failed with {operation}; releasing request-pin exclusion also failed with {exclusion}")]
-  CompoundExclusion {
-    #[source]
-    operation: Box<SweepLocatorRemovalErrorV1>,
-    exclusion: RootPinCoordinatorErrorV1,
-  },
 }
 
 impl SweepLocatorRemovalErrorV1 {
@@ -202,23 +190,6 @@ impl SweepLocatorRemovalErrorV1 {
       Self::Format(source) => source.code(),
       Self::Memory(_) => "sweep_removal_memory",
       Self::IntegerConversion(_) => "sweep_removal_integer_conversion",
-      Self::CommittedExclusion { .. } => "sweep_removal_committed_exclusion",
-      Self::CompoundExclusion { operation, .. } => operation.code(),
-    }
-  }
-
-  pub fn committed_completion(&self) -> Option<&SweepLocatorRemovalCompletionPermitV1> {
-    match self {
-      Self::CommittedExclusion { completion, .. } => Some(completion),
-      Self::Invalid { .. }
-      | Self::AuthorityRecheck(_)
-      | Self::Authority(_)
-      | Self::Quarantine(_)
-      | Self::Pin(_)
-      | Self::Format(_)
-      | Self::Memory(_)
-      | Self::IntegerConversion(_)
-      | Self::CompoundExclusion { .. } => None,
     }
   }
 

@@ -192,6 +192,12 @@ pub(crate) fn validate_sweep_receipt_void_authority_v1(
       "selected Void catalog identity, generation, or durable commit time is invalid",
     ));
   }
+  if snapshot.reclaim_committed_at_ms < request.proposal.created_at_ms {
+    return Err(SweepReceiptReconciliationErrorV1::invalid(
+      "sweep_receipt_time",
+      "selected Void catalog commit time predates the durable sweep proposal",
+    ));
+  }
   if !snapshot.selected_void_catalog_current
     || !snapshot.proposal_catalog_closure_complete
     || !snapshot.reclaimed_extents_exact

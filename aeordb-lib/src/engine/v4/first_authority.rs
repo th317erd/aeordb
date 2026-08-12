@@ -3406,8 +3406,7 @@ impl V4FirstAuthorityPublisher {
       .ok_or_else(|| SweepLocatorRemovalErrorV1::invalid("sweep_removal_read_size", "guarded read estimate overflowed"))?;
     let _read_memory = memory.reserve(MemoryOwner::GarbageCollection, u64::try_from(read_scratch_bytes)?, AdmissionClass::Maintenance)?;
     let mut result_memory = Some(reserve_sweep_locator_removal_results_v1(&memory, qualified_proposal.candidate_count)?);
-    let mut locked_result = None;
-    let exclusion_result = request.pin_coordinator.with_global_exclusion(request.cancellation, || {
+    let operation_result = request.pin_coordinator.with_global_exclusion(request.cancellation, || {
       let operation_result = (|| {
         let _authority = self.root_state.lock().map_err(|poisoned| {
           drop(poisoned);
@@ -3558,22 +3557,9 @@ impl V4FirstAuthorityPublisher {
         })?;
         complete_sweep_locator_removal_v1(authority_request, outcomes, admitted_result_memory)
       })();
-      locked_result = Some(operation_result);
-      Ok(())
-    });
-    match (locked_result, exclusion_result) {
-      (Some(result), Ok(())) => result,
-      (None, Err(source)) => Err(SweepLocatorRemovalErrorV1::Pin(source)),
-      (Some(Ok(completion)), Err(source)) => {
-        Err(SweepLocatorRemovalErrorV1::CommittedExclusion { source, completion: Box::new(completion) })
-      }
-      (Some(Err(operation)), Err(exclusion)) => {
-        Err(SweepLocatorRemovalErrorV1::CompoundExclusion { operation: Box::new(operation), exclusion })
-      }
-      (None, Ok(())) => {
-        Err(SweepLocatorRemovalErrorV1::invalid("sweep_removal_internal", "global request-pin exclusion returned no removal result"))
-      }
-    }
+      Ok(operation_result)
+    })?;
+    operation_result
   }
 
   /// Reconcile one live or restart-discovered sweep into exactly one semantic

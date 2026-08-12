@@ -706,7 +706,7 @@
           - [x] Revalidate exact durable support, selected prior authority, complete-mark/inventory/lineage/lifecycle bases, locator identity, task/audit pins, and final reachability before selector publication.
           - [x] Prove pre-selector retention, selector-last commit uncertainty, exact retry, cleanup/lineage failure receipts, and absence of any locator/Void/removal caller.
         - [x] P4-5d: prove cancellation, pin/authority races, malformed/corrupt state, capacity, crash prefixes, restart, and retained-or-leaked failure direction.
-      - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
+      - [x] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
         - [x] P4-6a: expose exact both-width sweep proposal/outcome/receipt iterators and writers matching the frozen independent fixtures.
         - [x] P4-6b: qualify and hard-publish bounded proposals from exact selected quarantine authority without granting removal authority.
           - [x] Bind every emitted eligible intent into the transition and quarantine publication permits with one canonical both-width digest.
@@ -725,7 +725,12 @@
           - [x] Reconstruct bounded recovery outcomes and hard-publish exactly one semantic receipt per batch through first authority.
           - [x] Make exact existing commit/recovered receipts idempotent and reject conflicting receipt evidence without making any extent reusable.
           - [x] Prove every pre/post-catalog and pre/post-receipt crash prefix, cancellation, corruption, pressure, dishonest authority, and architecture isolation.
-        - [ ] P4-6e: prove cancellation, corruption, authority/pin races, partial removal, dishonest receipts, restart, and retained-or-leaked failure direction.
+        - [x] P4-6e: prove cancellation, corruption, authority/pin races, partial removal, dishonest receipts, restart, and retained-or-leaked failure direction.
+          - [x] Reject a selected Void/reclaim commit timestamp that predates the durable sweep proposal, before recovery or receipt publication.
+          - [x] Carry a mixed reclaimed/skipped/failed batch through bounded completion, hard receipt publication, and restart-idempotent reuse with exact totals and outcomes.
+          - [x] Reject a validly encoded but semantically conflicting claimed receipt against a live partial-removal completion.
+          - [x] Remove impossible post-global-exclusion cleanup branches and prove valid plural outcomes return one completion while operation failures return none.
+          - [x] Re-run cancellation, corruption, authority drift, crash-prefix, architecture-isolation, resource, and retained-or-leaked gates before closing P4-6.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
