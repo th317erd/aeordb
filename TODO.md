@@ -776,7 +776,11 @@
         - [x] P4-8a: freeze one non-destructive `GcRunContext`, phase/status model, progress sink, and shared executor; reject destructive v4 activation before any phase owner runs.
           - [x] Prove exact phase order, monotonic progress, cancellation, malformed context/budget refusal, terminal-state behavior, sink behavior, and destructive-gate isolation.
           - [x] Keep the first unit disconnected from routes, tasks, CLI, live v3 collection, and destructive v4 publication while freezing the adapter contract.
-        - [ ] P4-8b: add conservative GC/Void verify, repair-ticket, backup, and migration-reset inspection through the shared run context.
+        - [x] P4-8b: add conservative GC/Void verify, repair-ticket, backup, and migration-reset inspection through the shared run context.
+          - [x] P4-8b1: dispatch every frozen GC/Void artifact, control, and workspace family through one bounded read-only inspector; unknown, malformed, missing-active, and wrong-key state must fail conservative completion.
+          - [x] P4-8b2: convert deterministic authoritative corruption into bounded deduplicated repair-ticket/path-latch proposals without publishing or mutating live repair state.
+          - [x] P4-8b3: freeze physical-copy inclusion, logical-backup omission, and destination migration reset-to-`never_marked` decisions without importing source GC state or evidence.
+          - [x] Prove cancellation, pressure, item limits, duplicate/conflicting observations, both hash widths, malformed artifacts/controls/workspaces, and architecture isolation before connecting adapters.
         - [ ] P4-8c: route CLI, synchronous HTTP compatibility, scheduled/task, repair-follow-up, and embedded entry points through one executor without duplicating traversal or cancellation.
         - [ ] P4-8d: project one run status into tasks, health, metrics, SSE, Dashboard, and operations/API documentation with root-only disclosure.
         - [ ] P4-8e: complete bounded non-destructive resource, corruption, cancellation, concurrent-load, real-world, soak, and native-platform qualification.

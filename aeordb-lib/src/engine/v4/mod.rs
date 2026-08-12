@@ -20,6 +20,7 @@ pub mod gc;
 pub mod gc_audit;
 pub mod gc_lifecycle;
 pub mod gc_lineage_recovery;
+pub mod gc_maintenance;
 pub mod gc_mark;
 pub mod gc_mark_convergence;
 pub mod gc_mark_runtime;

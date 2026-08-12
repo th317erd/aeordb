@@ -373,6 +373,10 @@ pub struct GcRunPhaseReporterV1<'a> {
 }
 
 impl GcRunPhaseReporterV1<'_> {
+  pub fn cancellation(&self) -> &CancellationToken {
+    self.context.cancellation()
+  }
+
   pub fn capture_basis(&mut self, basis: GcRunBasisV1) -> Result<(), GcRunErrorV1> {
     if self.status.phase != Some(GcRunPhaseV1::Prepare) {
       return Err(GcRunErrorV1::invalid("gc_run_basis_phase", "GC basis may only be captured during preparation"));
