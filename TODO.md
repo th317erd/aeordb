@@ -758,7 +758,14 @@
           - [x] Reject generic settlement publication, duplicate/conflicting receipts, stale permits, substituted ranges, dishonest evidence, resource pressure, and every pre/post-selector crash prefix.
           - [x] Keep the new owner disconnected from live v3 `VoidManager`, service startup, routes, tasks, and destructive GC until P4-7e/P4-8 activation proof.
           - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
-        - [ ] P4-7e: derive startup and in-memory reusable-space state only from one closure-valid selected receipt-backed catalog minus outstanding claims; keep raw hot-tail and gap evidence non-authoritative.
+        - [x] P4-7e: derive startup and in-memory reusable-space state only from one closure-valid selected receipt-backed catalog minus outstanding claims; keep raw hot-tail and gap evidence non-authoritative.
+          - [x] Add a compile-red public contract for one disconnected first-authority reconstruction owner and one bounded, non-authorizing reusable-state snapshot.
+          - [x] Traverse outstanding claims first under explicit artifact/extent/memory bounds; reject duplicate, overlapping, malformed, canceled, and pressure-refused claim state.
+          - [x] Stream every free extent through exact sweep proposal/quarantine/incarnation/commit-sequence receipt authority and reject claim/free overlap or conflicting receipt evidence.
+          - [x] Retain only a bounded allocation-candidate window while preserving exact selected catalog/control identity and manifest totals.
+          - [x] Reselect and closure-validate one A/B Void catalog under first authority; return no reusable state for absent authority and no authority for missing/corrupt/unreceipted support.
+          - [x] Prove source, outstanding-claim, settled, empty, stale-cache, cancellation, resource-bound, and restart behavior without calling live v3 `VoidManager`, hot-tail, gap recovery, service startup, routes, tasks, or destructive GC.
+          - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
         - [ ] P4-7f: prove partial use, crash recovery, cancellation, corruption, overlapping/substituted ranges, stale caches, resource bounds, restart, native behavior, and retained-or-leaked failure direction without enabling destructive service GC.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.

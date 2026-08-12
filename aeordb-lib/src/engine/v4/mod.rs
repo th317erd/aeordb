@@ -37,6 +37,7 @@ pub mod gc_sweep_removal;
 pub mod gc_void;
 pub mod gc_void_claim;
 pub mod gc_void_publication;
+pub mod gc_void_runtime;
 pub mod gc_void_settlement;
 pub mod hash;
 pub mod header_publication;

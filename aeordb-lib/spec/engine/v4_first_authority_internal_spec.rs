@@ -63,6 +63,10 @@ use crate::engine::v4::gc_void_publication::{
   VoidCatalogClosureLimitsV1, VoidCatalogPublicationAuthorityErrorV1, VoidCatalogPublicationAuthorityRequestV1,
   VoidCatalogPublicationAuthoritySnapshotV1, VoidCatalogPublicationAuthorityV1,
 };
+use crate::engine::v4::gc_void_runtime::{
+  VoidReclaimReceiptAuthorityErrorV1, VoidReclaimReceiptAuthorityRequestV1, VoidReclaimReceiptAuthoritySnapshotV1,
+  VoidReclaimReceiptAuthorityV1, VoidReusableStateLimitsV1,
+};
 use crate::engine::v4::gc_void_settlement::{
   VoidClaimAllocationDispositionV1, VoidClaimAllocationLimitsV1, VoidClaimAllocationOwnerV1, VoidClaimAllocationSinkV1,
   VoidClaimConsumptionOutcomeV1, VoidClaimDurableUseV1, VoidClaimSettlementAuthorityErrorV1, VoidClaimSettlementAuthorityRequestV1,
@@ -129,6 +133,51 @@ fn test_void_catalog_publication_authority() -> TestVoidCatalogPublicationAuthor
     fail_recheck: false,
     recheck_calls: 0,
   }
+}
+
+#[derive(Default)]
+struct TestVoidReclaimReceiptAuthorityV1 {
+  recheck_calls: usize,
+  fail_recheck: bool,
+}
+
+impl VoidReclaimReceiptAuthorityV1 for TestVoidReclaimReceiptAuthorityV1 {
+  fn recheck_void_reclaim_receipt_authority(
+    &mut self,
+    request: VoidReclaimReceiptAuthorityRequestV1<'_>,
+  ) -> Result<VoidReclaimReceiptAuthoritySnapshotV1, VoidReclaimReceiptAuthorityErrorV1> {
+    self.recheck_calls += 1;
+    if self.fail_recheck {
+      return Err(VoidReclaimReceiptAuthorityErrorV1::new(
+        "void_runtime_test_recheck",
+        "injected receipt-authority reconstruction failure",
+      ));
+    }
+    Ok(VoidReclaimReceiptAuthoritySnapshotV1 {
+      database_id: request.database_id.try_into().unwrap(),
+      selected_manifest_key: request.selected_manifest_key.to_vec(),
+      selected_generation: request.selected_generation,
+      origin_sweep_proposal_hash: request.extent.origin_sweep_proposal_hash.to_vec(),
+      origin_quarantine_manifest_hash: request.extent.origin_quarantine_manifest_hash.to_vec(),
+      reclaimed_incarnation_digest: request.extent.reclaimed_incarnation_digest.to_vec(),
+      proposal_write_sequence: 81,
+      receipt_hash: digest_parts(request.hash_algorithm, &[b"runtime receipt", request.extent.origin_sweep_proposal_hash]),
+      receipt_write_sequence: 82,
+      reclaim_commit_sequence: request.extent.reclaim_commit_sequence,
+      receipt_reclaimed_offset: request.extent.offset,
+      receipt_reclaimed_length: request.extent.length,
+      exact_proposal_receipt_current: true,
+      locator_removal_durable: true,
+      replacement_lineage_complete: true,
+      receipt_search_complete: true,
+      conflicting_receipt_count: 0,
+      repair_latch_clear: true,
+    })
+  }
+}
+
+fn void_runtime_limits() -> VoidReusableStateLimitsV1 {
+  VoidReusableStateLimitsV1 { maximum_support_artifacts: 8, maximum_outstanding_claim_extents: 8, maximum_candidate_extents: 8 }
 }
 
 struct TestVoidClaimAdmissionAuthorityV1 {
@@ -714,6 +763,135 @@ fn selected_void_catalog_manifest_key(publisher: &V4FirstAuthorityPublisher) -> 
   select_void_catalog_control(&publisher.file, &kv, &observation.selected.header).unwrap().map(|control| control.target_manifest_hash)
 }
 
+#[test]
+fn selected_void_runtime_reconstructs_source_and_restart_without_v3_evidence() {
+  let (_directory, path, _coordinator, mut publisher) = create_environment("void-runtime-source", None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let cancellation = CancellationToken::new();
+  let mut absent_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  assert!(publisher
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &memory, limits: void_runtime_limits() },
+      &mut absent_authority,
+    )
+    .unwrap()
+    .is_none());
+  assert_eq!(absent_authority.recheck_calls, 0);
+
+  let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &source);
+  let mut publication_authority = test_void_catalog_publication_authority();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let _publication_receipt = publisher
+    .publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut publication_authority, &mut retirement_owner)
+    .unwrap();
+  let mut receipt_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let state = publisher
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &memory, limits: void_runtime_limits() },
+      &mut receipt_authority,
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(state.selected_manifest_key(), source.manifest.key);
+  assert_eq!(state.free_count(), 1);
+  assert_eq!(state.free_bytes(), 512);
+  assert_eq!(state.outstanding_claim_count(), 0);
+  assert_eq!(state.candidate_extents().len(), 1);
+  assert_eq!(receipt_authority.recheck_calls, 1);
+  drop(state);
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  let mut canceled_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  assert_eq!(
+    publisher
+      .reconstruct_void_reusable_state(
+        VoidReusableStateReconstructionRequestV1 { cancellation: &canceled, memory: &memory, limits: void_runtime_limits() },
+        &mut canceled_authority,
+      )
+      .unwrap_err()
+      .code(),
+    "void_runtime_canceled"
+  );
+  assert_eq!(canceled_authority.recheck_calls, 0);
+  let mut failed_authority = TestVoidReclaimReceiptAuthorityV1 { fail_recheck: true, ..Default::default() };
+  assert_eq!(
+    publisher
+      .reconstruct_void_reusable_state(
+        VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &memory, limits: void_runtime_limits() },
+        &mut failed_authority,
+      )
+      .unwrap_err()
+      .code(),
+    "void_runtime_free_support"
+  );
+  assert_eq!(failed_authority.recheck_calls, 1);
+  drop(retirement_owner);
+  drop(publisher);
+
+  let (_restart_coordinator, reopened) = reopen(&path);
+  let restart_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let mut restart_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let restarted = reopened
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &restart_memory, limits: void_runtime_limits() },
+      &mut restart_authority,
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(restarted.selected_manifest_key(), source.manifest.key);
+  assert_eq!(restarted.free_count(), 1);
+  assert_eq!(restarted.candidate_extents().len(), 1);
+  assert_eq!(restart_authority.recheck_calls, 1);
+}
+
+#[test]
+fn selected_void_runtime_refuses_corrupt_support_without_receipt_authority() {
+  let (_directory, _path, _coordinator, mut publisher) = create_environment("void-runtime-corrupt-support", None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let cancellation = CancellationToken::new();
+  let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &source);
+  let mut publication_authority = test_void_catalog_publication_authority();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let _publication_receipt = publisher
+    .publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut publication_authority, &mut retirement_owner)
+    .unwrap();
+  corrupt_last_entity_byte(&publisher, &source.directory.key);
+  let reserved_before_reconstruction = memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes;
+
+  let mut receipt_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let error = publisher
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &memory, limits: void_runtime_limits() },
+      &mut receipt_authority,
+    )
+    .unwrap_err();
+  assert!(matches!(error.code(), "integrity_hash_mismatch" | "void_runtime_free_support"));
+  assert_eq!(receipt_authority.recheck_calls, 0);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, reserved_before_reconstruction);
+}
+
 struct PreparedVoidClaimAdmissionV1 {
   claim: EncodedImmutableGcArtifactV1,
   claim_directory: EncodedImmutableGcArtifactV1,
@@ -959,6 +1137,17 @@ fn void_claim_selects_source_minus_claim_before_returning_exact_allocation_autho
     publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
   assert_eq!(source_receipt.manifest_key, source.manifest.key);
   assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(source.manifest.key.clone()));
+  let mut source_runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let source_runtime_state = publisher
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &memory, limits: void_runtime_limits() },
+      &mut source_runtime_authority,
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(source_runtime_state.selected_manifest_key(), source.manifest.key);
+  assert_eq!(source_runtime_state.free_count(), 1);
+  drop(source_runtime_state);
 
   let prepared = prepare_void_claim_admission(&source);
   let bypass_error = publisher
@@ -1005,6 +1194,21 @@ fn void_claim_selects_source_minus_claim_before_returning_exact_allocation_autho
   assert_eq!(permit.generation(), 2);
   assert!(!permit.idempotent());
   assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(prepared.result_manifest.key.clone()));
+  let mut runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let outstanding_state = publisher
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 { cancellation: &cancellation, memory: &memory, limits: void_runtime_limits() },
+      &mut runtime_authority,
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(outstanding_state.selected_manifest_key(), prepared.result_manifest.key);
+  assert_eq!(outstanding_state.free_count(), 0);
+  assert_eq!(outstanding_state.outstanding_claim_count(), 1);
+  assert_eq!(outstanding_state.claimed_bytes(), 512);
+  assert!(outstanding_state.candidate_extents().is_empty());
+  assert_eq!(runtime_authority.recheck_calls, 0);
+  drop(outstanding_state);
   drop(permit);
   drop(retirement_owner);
   drop(publisher);
@@ -1029,7 +1233,19 @@ fn void_claim_selects_source_minus_claim_before_returning_exact_allocation_autho
   assert_eq!(retry_authority.recheck_calls, 0, "exact selected retry must not rerun stale source authority");
   assert!(retry.idempotent());
   assert_eq!(retry.claim_key(), prepared.claim.key);
-  assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(prepared.result_manifest.key));
+  assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(prepared.result_manifest.key.clone()));
+  let mut runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let restarted = reopened
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 { cancellation: &retry_cancellation, memory: &retry_memory, limits: void_runtime_limits() },
+      &mut runtime_authority,
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(restarted.selected_manifest_key(), prepared.result_manifest.key);
+  assert_eq!(restarted.outstanding_claim_count(), 1);
+  assert!(restarted.candidate_extents().is_empty());
+  assert_eq!(runtime_authority.recheck_calls, 0);
 }
 
 struct MixedVoidClaimAllocationSinkV1 {
@@ -1718,6 +1934,85 @@ fn stored_gc_artifact_write_sequence(publisher: &V4FirstAuthorityPublisher, key:
   .unwrap()
   .unwrap();
   decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water).unwrap().write_sequence
+}
+
+#[test]
+fn selected_void_runtime_reconstructs_settled_returned_space_after_restart() {
+  let mut harness = prepare_void_claim_settlement_harness("void-runtime-settled");
+  let source_manifest_key = harness.consumption.source_manifest_key().to_vec();
+  let mut settlement_authority = test_void_claim_settlement_authority(&source_manifest_key, harness.consumption.source_control_sequence());
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    harness.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &harness.cancellation,
+    &harness.memory,
+  )
+  .unwrap();
+  let _settlement_receipt = harness
+    .publisher
+    .settle_void_claim(
+      &harness.consumption,
+      VoidClaimSettlementPublicationRequestV1 {
+        result_manifest: &harness.result_manifest,
+        result_control: &harness.result_control,
+        settlement: &harness.settlement,
+        publication_timestamp_ms: 1_700_000_080_017,
+        monotonic_now_ms: 3,
+        cancellation: &harness.cancellation,
+        memory: &harness.memory,
+        transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+      },
+      &mut settlement_authority,
+      &mut retirement_owner,
+    )
+    .unwrap();
+  let mut runtime_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let state = harness
+    .publisher
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 {
+        cancellation: &harness.cancellation,
+        memory: &harness.memory,
+        limits: void_runtime_limits(),
+      },
+      &mut runtime_authority,
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(state.selected_manifest_key(), harness.result_manifest.key);
+  assert_eq!(state.free_count(), u64::try_from(harness.consumption.returned_extents().len()).unwrap());
+  assert_eq!(state.free_bytes(), harness.consumption.returned_bytes());
+  assert_eq!(state.outstanding_claim_count(), 0);
+  assert_eq!(state.candidate_extents().len(), harness.consumption.returned_extents().len());
+  assert_eq!(runtime_authority.recheck_calls, harness.consumption.returned_extents().len());
+  drop(state);
+  drop(retirement_owner);
+  let path = harness.path.clone();
+  let result_manifest_key = harness.result_manifest.key.clone();
+  let expected_free_count = u64::try_from(harness.consumption.returned_extents().len()).unwrap();
+  drop(harness.publisher);
+
+  let (_restart_coordinator, reopened) = reopen(&path);
+  let restart_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let mut restart_authority = TestVoidReclaimReceiptAuthorityV1::default();
+  let restarted = reopened
+    .reconstruct_void_reusable_state(
+      VoidReusableStateReconstructionRequestV1 {
+        cancellation: &harness.cancellation,
+        memory: &restart_memory,
+        limits: void_runtime_limits(),
+      },
+      &mut restart_authority,
+    )
+    .unwrap()
+    .unwrap();
+  assert_eq!(restarted.selected_manifest_key(), result_manifest_key);
+  assert_eq!(restarted.free_count(), expected_free_count);
+  assert_eq!(restarted.outstanding_claim_count(), 0);
+  assert_eq!(restart_authority.recheck_calls, usize::try_from(expected_free_count).unwrap());
 }
 
 #[test]

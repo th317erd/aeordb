@@ -73,6 +73,11 @@ use super::gc_void_publication::{
   VoidCatalogClosureLimitsV1, VoidCatalogClosureSummaryV1, VoidCatalogClosureValidatorV1, VoidCatalogPublicationAuthorityRequestV1,
   VoidCatalogPublicationAuthorityV1, VoidCatalogPublicationErrorV1, validate_void_catalog_publication_authority_v1,
 };
+pub use super::gc_void_runtime::VoidReusableStateReconstructionRequestV1;
+use super::gc_void_runtime::{
+  VoidReclaimReceiptAuthorityV1, VoidReusableSpaceStateV1, VoidReusableStateErrorV1, VoidReusableStateIdentityV1,
+  VoidReusableStateValidatorV1,
+};
 use super::gc_void_settlement::{
   VoidClaimConsumptionOutcomeV1, VoidClaimConsumptionPermitV1, VoidClaimSettlementAuthorityRequestV1, VoidClaimSettlementAuthorityV1,
   VoidClaimSettlementHardPublicationReceiptV1, VoidClaimSettlementPublicationErrorV1, VoidClaimSettlementPublicationRequestV1,
@@ -1473,9 +1478,11 @@ struct PhysicalQuarantineLockedPublicationV1 {
 
 struct SelectedVoidCatalogControlV1 {
   stored_value: Vec<u8>,
+  control_key: Vec<u8>,
   target_manifest_hash: Vec<u8>,
   control_sequence: u64,
   write_sequence: u64,
+  slot: u8,
 }
 
 struct VoidCatalogLockedPublicationV1 {
@@ -4162,6 +4169,92 @@ impl V4FirstAuthorityPublisher {
     Ok(SweepProposalHardPublicationReceiptV1 { proposal_key: request.permit.proposal().key.clone(), hard_publication_sequence })
   }
 
+  /// Reconstruct one bounded observation of the selected, receipt-backed Void
+  /// catalog. This does not expose overwrite authority; durable claim
+  /// admission remains the only allocator entry point.
+  pub fn reconstruct_void_reusable_state(
+    &self,
+    request: VoidReusableStateReconstructionRequestV1<'_>,
+    authority: &mut dyn VoidReclaimReceiptAuthorityV1,
+  ) -> Result<Option<VoidReusableSpaceStateV1>, VoidReusableStateErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(VoidReusableStateErrorV1::Canceled);
+    }
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      VoidReusableStateErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(VoidReusableStateErrorV1::invalid(
+        "void_runtime_database_authority",
+        "Void reusable-state reconstruction requires selected non-degraded first authority",
+      ));
+    }
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let Some(selected_control) = select_void_catalog_control(&self.file, &kv, header)? else {
+      return Ok(None);
+    };
+    let control = decode_gc_active_control(&selected_control.stored_value, header.hash_algorithm)?;
+    if control.kind != GcArtifactKindV1::VoidCatalogActiveControl
+      || control.database_id != header.database_id
+      || control.target_manifest_hash != selected_control.target_manifest_hash
+      || control.sequence != selected_control.control_sequence
+      || control.slot != selected_control.slot
+    {
+      return Err(VoidReusableStateErrorV1::invalid(
+        "void_runtime_control_identity",
+        "selected Void control identity changed or differs from its durable representation",
+      ));
+    }
+    let reader =
+      VoidCatalogSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: request.memory, cancellation: request.cancellation };
+    let manifest_entity = reader.load_entity(&selected_control.target_manifest_hash, GcArtifactKindV1::VoidCatalogManifest)?;
+    let manifest_whole_entity = decode_whole_entity(&manifest_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    let SweepVoidArtifactV1::VoidCatalog(manifest) = decode_sweep_void_artifact(manifest_whole_entity.stored_value, header.hash_algorithm)?
+    else {
+      return Err(VoidReusableStateErrorV1::invalid(
+        "void_runtime_manifest_kind",
+        "selected Void manifest key resolves to another GC artifact kind",
+      ));
+    };
+    if manifest.key != selected_control.target_manifest_hash
+      || manifest.database_id != header.database_id
+      || manifest.generation != control.generation
+    {
+      return Err(VoidReusableStateErrorV1::invalid(
+        "void_runtime_manifest_identity",
+        "selected Void manifest identity or generation differs from first authority",
+      ));
+    }
+    let mut validator = VoidReusableStateValidatorV1::new(
+      &manifest,
+      header.hash_algorithm,
+      VoidReusableStateIdentityV1 {
+        selected_manifest_key: &selected_control.target_manifest_hash,
+        selected_control_key: &selected_control.control_key,
+        selected_control_sequence: selected_control.control_sequence,
+        selected_control_write_sequence: selected_control.write_sequence,
+        selected_control_slot: selected_control.slot,
+      },
+      request.cancellation.clone(),
+      request.limits,
+      request.memory,
+    )?;
+    if !manifest.claim_root.iter().all(|byte| *byte == 0) {
+      let mut observer = VoidReusableClaimsObserverV1 { validator: &mut validator };
+      reader.revalidate_subtree(manifest.claim_root, GcDirectoryRoleV1::Claims, None, 0, &mut observer)?;
+    }
+    validator.finish_claims()?;
+    if !manifest.free_root.iter().all(|byte| *byte == 0) {
+      let mut observer = VoidReusableFreeObserverV1 { validator: &mut validator, authority };
+      reader.revalidate_subtree(manifest.free_root, GcDirectoryRoleV1::FreeExtents, None, 0, &mut observer)?;
+    }
+    Ok(Some(validator.finish()?))
+  }
+
   /// Select one complete Void catalog after all immutable support is durable.
   /// The returned receipt deliberately keeps reuse blocked until the separate
   /// sweep-receipt reconciler proves the exact selected catalog.
@@ -6722,6 +6815,33 @@ impl VoidCatalogSupportObserverV1 for VoidClaimSettlementResultTransitionObserve
   }
 }
 
+struct VoidReusableClaimsObserverV1<'a, 'b> {
+  validator: &'a mut VoidReusableStateValidatorV1<'b>,
+}
+
+impl VoidCatalogSupportObserverV1 for VoidReusableClaimsObserverV1<'_, '_> {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1> {
+    self
+      .validator
+      .observe_claim_encoded(bytes)
+      .map_err(|source| VoidCatalogPublicationErrorV1::invalid("void_runtime_claim_support", format!("{}: {source}", source.code())))
+  }
+}
+
+struct VoidReusableFreeObserverV1<'a, 'b> {
+  validator: &'a mut VoidReusableStateValidatorV1<'b>,
+  authority: &'a mut dyn VoidReclaimReceiptAuthorityV1,
+}
+
+impl VoidCatalogSupportObserverV1 for VoidReusableFreeObserverV1<'_, '_> {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1> {
+    self
+      .validator
+      .observe_free_encoded(bytes, self.authority)
+      .map_err(|source| VoidCatalogPublicationErrorV1::invalid("void_runtime_free_support", format!("{}: {source}", source.code())))
+  }
+}
+
 impl VoidCatalogSupportReadContextV1<'_> {
   fn revalidate_subtree(
     &self,
@@ -7672,9 +7792,11 @@ fn select_void_catalog_control(
     .ok_or_else(|| VoidCatalogPublicationErrorV1::invalid("void_publication_authority_internal", "selected Void control slot is absent"))?;
   Ok(Some(SelectedVoidCatalogControlV1 {
     stored_value: stored.stored_value.clone(),
+    control_key: keys[usize::from(selected_slot)].clone(),
     target_manifest_hash: stored.target_manifest_hash.clone(),
     control_sequence: stored.control_sequence,
     write_sequence: stored.write_sequence,
+    slot: selected_slot,
   }))
 }
 
