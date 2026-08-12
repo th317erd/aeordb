@@ -677,7 +677,7 @@
           - [x] Prove and harden the Windows private-workspace ACL as the platform equivalent of Unix 0700/0600 before native closure.
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
         - [x] P4-4a: expose complete borrowed lifecycle artifacts and exact both-width encoders/closure validation without activating a writer.
-        - [ ] P4-4b: implement one bounded two-complete-mark transition model with frozen/effective grace, authority evidence, reachability clearing, and deterministic cap refusal.
+        - [x] P4-4b: implement one bounded two-complete-mark transition model with frozen/effective grace, authority evidence, reachability clearing, and deterministic cap refusal.
         - [ ] P4-4c: hard-publish retirement evidence and selected lifecycle authority before a root becomes logically retired, through the shared replacement boundary.
         - [ ] P4-4d: attach root-object reclaim proof and bounded optional expiry retention without evicting mandatory retirement evidence.
         - [ ] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.

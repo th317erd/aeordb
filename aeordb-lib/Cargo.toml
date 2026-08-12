@@ -705,6 +705,10 @@ name = "gc_v4_root_lifecycle_spec"
 path = "spec/engine/gc_v4_root_lifecycle_spec.rs"
 
 [[test]]
+name = "gc_v4_root_transition_spec"
+path = "spec/engine/gc_v4_root_transition_spec.rs"
+
+[[test]]
 name = "gc_v4_model_spec"
 path = "spec/engine/gc_v4_model_spec.rs"
 
