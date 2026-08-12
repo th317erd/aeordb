@@ -30,6 +30,7 @@ pub mod gc_quarantine_transition;
 pub mod gc_retirement;
 pub mod gc_root_reclaim;
 pub mod gc_root_transition;
+pub mod gc_run;
 pub mod gc_state;
 pub mod gc_sweep;
 pub mod gc_sweep_reconciliation;

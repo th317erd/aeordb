@@ -773,6 +773,13 @@
           - [x] Cross-check exact partial-use returned extent provenance before and after restart, with no stale candidate cache.
           - [x] Re-run cancellation, corruption, overlap/substitution, memory, architecture, native, and retained-or-leaked qualification gates before closing P4-7.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
+        - [ ] P4-8a: freeze one non-destructive `GcRunContext`, phase/status model, progress sink, and shared executor; reject destructive v4 activation before any phase owner runs.
+          - [ ] Prove exact phase order, monotonic progress, cancellation, malformed context/budget refusal, terminal-state behavior, sink behavior, and destructive-gate isolation.
+          - [ ] Keep the first unit disconnected from routes, tasks, CLI, live v3 collection, and destructive v4 publication while freezing the adapter contract.
+        - [ ] P4-8b: add conservative GC/Void verify, repair-ticket, backup, and migration-reset inspection through the shared run context.
+        - [ ] P4-8c: route CLI, synchronous HTTP compatibility, scheduled/task, repair-follow-up, and embedded entry points through one executor without duplicating traversal or cancellation.
+        - [ ] P4-8d: project one run status into tasks, health, metrics, SSE, Dashboard, and operations/API documentation with root-only disclosure.
+        - [ ] P4-8e: complete bounded non-destructive resource, corruption, cancellation, concurrent-load, real-world, soak, and native-platform qualification.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
     - [ ] P5: implement immutable index definitions, ordered pages, catalogs, sparse fixed-point NVT, compaction, and corruption fallback; eliminate v0 whole-index publication amplification when the active set exceeds the clean-cache cap.
     - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
