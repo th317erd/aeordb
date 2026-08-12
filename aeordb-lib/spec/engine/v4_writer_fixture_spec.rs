@@ -401,7 +401,7 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
 
   let production_sources = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
   assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 1);
-  let expected_gc_writer_surface = [("gc.rs", 1), ("gc_audit.rs", 1), ("gc_mark.rs", 2), ("gc_retirement.rs", 1)];
+  let expected_gc_writer_surface = [("gc.rs", 1), ("gc_audit.rs", 1), ("gc_lifecycle.rs", 3), ("gc_mark.rs", 2), ("gc_retirement.rs", 1)];
   assert_eq!(
     production_sources.matches("encode_immutable_gc_artifact(").count(),
     expected_gc_writer_surface.iter().map(|(_, expected_count)| expected_count).sum::<usize>()

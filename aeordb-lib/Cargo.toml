@@ -701,6 +701,10 @@ name = "v4_lifecycle_reader_spec"
 path = "spec/engine/v4_lifecycle_reader_spec.rs"
 
 [[test]]
+name = "gc_v4_root_lifecycle_spec"
+path = "spec/engine/gc_v4_root_lifecycle_spec.rs"
+
+[[test]]
 name = "gc_v4_model_spec"
 path = "spec/engine/gc_v4_model_spec.rs"
 
