@@ -699,7 +699,7 @@
         - [x] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.
         - [x] P4-5a: expose exact borrowed quarantine candidate/delta/manifest codecs and bounded graph-closure validation at both hash widths.
-        - [ ] P4-5b: implement one constant-memory two-complete-mark transition model with frozen/effective grace and exact incarnation identity.
+        - [x] P4-5b: implement one constant-memory two-complete-mark transition model with frozen/effective grace and exact incarnation identity.
         - [ ] P4-5c: hard-publish candidate support and select quarantine authority last under global request-pin and first-authority exclusion with final reachability checks.
         - [ ] P4-5d: prove cancellation, pin/authority races, malformed/corrupt state, capacity, crash prefixes, restart, and retained-or-leaked failure direction.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.

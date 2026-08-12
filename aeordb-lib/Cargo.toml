@@ -721,6 +721,10 @@ name = "gc_v4_quarantine_spec"
 path = "spec/engine/gc_v4_quarantine_spec.rs"
 
 [[test]]
+name = "gc_v4_quarantine_transition_spec"
+path = "spec/engine/gc_v4_quarantine_transition_spec.rs"
+
+[[test]]
 name = "gc_v4_state_writer_spec"
 path = "spec/engine/gc_v4_state_writer_spec.rs"
 
