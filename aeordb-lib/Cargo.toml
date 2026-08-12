@@ -709,6 +709,10 @@ name = "gc_v4_root_transition_spec"
 path = "spec/engine/gc_v4_root_transition_spec.rs"
 
 [[test]]
+name = "gc_v4_root_retirement_publication_spec"
+path = "spec/engine/gc_v4_root_retirement_publication_spec.rs"
+
+[[test]]
 name = "gc_v4_state_writer_spec"
 path = "spec/engine/gc_v4_state_writer_spec.rs"
 

@@ -681,7 +681,11 @@
         - [ ] P4-4c: hard-publish retirement evidence and selected lifecycle authority before a root becomes logically retired, through the shared replacement boundary.
           - [x] P4-4c1: add reusable exact GC page/directory writers and both-width independent-fixture proof for lifecycle catalogs.
           - [x] P4-4c2: generalize A/B GC control replacement publication so mark and lifecycle controls share one durable authority path.
-          - [ ] P4-4c3: publish retirement commit, catalog closure, manifests, and lifecycle control under the root retirement-exclusion guard with final evidence rechecks.
+          - [x] P4-4c3: publish retirement commit, catalog closure, manifests, and lifecycle control under the root retirement-exclusion guard with final evidence rechecks.
+            - [x] P4-4c3a: hard-publish and validate bounded streamed candidate/expiry support artifacts without selecting lifecycle authority.
+            - [x] P4-4c3b: add the typed full-authority recheck boundary and hold root-pin plus first-authority exclusion through lifecycle-control linearization.
+            - [x] P4-4c3c: publish retirement commit and exact manifest closure before the selector, with committed-result and post-control lineage reporting.
+            - [x] P4-4c3d: prove pending-before-selector and retired-after-selector behavior with a focused compile-red crash-direction test.
           - [ ] P4-4c4: prove every crash prefix, exact retry, restart selection, pin/authority exclusion, and committed-failure result.
         - [ ] P4-4d: attach root-object reclaim proof and bounded optional expiry retention without evicting mandatory retirement evidence.
         - [ ] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.

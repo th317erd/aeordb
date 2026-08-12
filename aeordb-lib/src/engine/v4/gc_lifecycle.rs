@@ -8,10 +8,11 @@ use super::gc::{
   immutable_gc_artifact_key, u16_at, u64_at,
 };
 use super::gc_state::{
-  GcDirectoryRoleV1, GcStateDirectoryV1, GcStatePageV1, RootCandidateRecordV1, RootExpiryRecordV1, RootExpiryStateV1,
-  decode_gc_state_artifact, decode_root_candidate_record_v1, decode_root_expiry_record_v1,
+  GcDirectoryRoleV1, GcStateDirectoryEntryV1, GcStateDirectoryV1, GcStatePageV1, RootCandidateRecordV1, RootExpiryRecordV1,
+  RootExpiryStateV1, decode_gc_state_artifact, decode_root_candidate_record_v1, decode_root_expiry_record_v1,
 };
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::HashAlgorithm;
 
 const ROOT_LIFECYCLE_CAPABILITIES: &[usize] = &[12, 17];
@@ -96,6 +97,509 @@ pub struct RootLifecycleModelSummaryV1 {
   pub expiry_count: u64,
   pub mandatory_expiry_count: u64,
   pub optional_expiry_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootLifecycleSupportClosureV1 {
+  hash_algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  lifecycle_manifest_hash: Vec<u8>,
+  expiry_manifest_hash: Option<Vec<u8>>,
+  candidate_directory_hash: Option<Vec<u8>>,
+  expiry_directory_hash: Option<Vec<u8>>,
+  lifecycle_generation: u64,
+  source_complete_mark_generation: u64,
+  support_artifact_count: u64,
+  retirement_commit_hash: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootLifecycleSupportLimitsV1 {
+  pub maximum_candidate_records: u64,
+  pub maximum_expiry_records: u64,
+  pub maximum_support_artifacts: u64,
+}
+
+impl RootLifecycleSupportClosureV1 {
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub fn lifecycle_manifest_hash(&self) -> &[u8] {
+    &self.lifecycle_manifest_hash
+  }
+
+  pub fn expiry_manifest_hash(&self) -> Option<&[u8]> {
+    self.expiry_manifest_hash.as_deref()
+  }
+
+  pub fn candidate_directory_hash(&self) -> Option<&[u8]> {
+    self.candidate_directory_hash.as_deref()
+  }
+
+  pub fn expiry_directory_hash(&self) -> Option<&[u8]> {
+    self.expiry_directory_hash.as_deref()
+  }
+
+  pub const fn lifecycle_generation(&self) -> u64 {
+    self.lifecycle_generation
+  }
+
+  pub const fn source_complete_mark_generation(&self) -> u64 {
+    self.source_complete_mark_generation
+  }
+
+  pub const fn support_artifact_count(&self) -> u64 {
+    self.support_artifact_count
+  }
+
+  pub fn retirement_commit_hash(&self) -> Option<&[u8]> {
+    self.retirement_commit_hash.as_deref()
+  }
+}
+
+#[derive(Debug, Error)]
+pub enum RootLifecycleSupportClosureErrorV1 {
+  #[error("root-lifecycle support closure configuration is invalid: {0}")]
+  InvalidConfiguration(&'static str),
+  #[error("root-lifecycle support closure was canceled")]
+  Canceled,
+  #[error("root-lifecycle support closure exceeded its artifact limit")]
+  ArtifactLimit,
+  #[error("root-lifecycle support closure contains an unsupported artifact")]
+  ArtifactKind,
+  #[error("root-lifecycle support artifacts are not in child-before-parent order")]
+  ArtifactOrder,
+  #[error("root-lifecycle support directory does not describe the exact observed children")]
+  DirectoryClosure,
+  #[error("root-lifecycle support closure does not end at its manifest roots")]
+  ManifestClosure,
+  #[error("root-lifecycle support closure does not prove the exact requested retirement")]
+  RetirementClosure,
+  #[error(transparent)]
+  Model(#[from] RootLifecycleModelErrorV1),
+  #[error(transparent)]
+  Format(#[from] FormatError),
+  #[error(transparent)]
+  Memory(#[from] MemoryCoordinatorError),
+  #[error("root-lifecycle support closure validator has already failed")]
+  Failed,
+}
+
+impl RootLifecycleSupportClosureErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::InvalidConfiguration(_) => "root_lifecycle_support_configuration",
+      Self::Canceled => "root_lifecycle_support_canceled",
+      Self::ArtifactLimit => "root_lifecycle_support_artifact_limit",
+      Self::ArtifactKind => "root_lifecycle_support_artifact_kind",
+      Self::ArtifactOrder => "root_lifecycle_support_artifact_order",
+      Self::DirectoryClosure => "root_lifecycle_support_directory_closure",
+      Self::ManifestClosure => "root_lifecycle_support_manifest_closure",
+      Self::RetirementClosure => "root_lifecycle_support_retirement_closure",
+      Self::Model(source) => source.code(),
+      Self::Format(source) => source.code(),
+      Self::Memory(_) => "root_lifecycle_support_memory",
+      Self::Failed => "root_lifecycle_support_failed",
+    }
+  }
+}
+
+struct RootLifecycleChildSummaryV1 {
+  lower_fence: Vec<u8>,
+  upper_fence: Vec<u8>,
+  child_hash: Vec<u8>,
+  child_generation: u64,
+  live_count: u64,
+  tombstone_count: u64,
+  page_count: u64,
+  logical_bytes: u64,
+  minimum_page_id: u64,
+  maximum_page_id: u64,
+  accounted_bytes: u64,
+}
+
+struct RootLifecycleRoleClosureV1 {
+  levels: [Vec<RootLifecycleChildSummaryV1>; 17],
+  expected_root: Option<Vec<u8>>,
+  observed_root: bool,
+}
+
+impl RootLifecycleRoleClosureV1 {
+  fn new(expected_root: Option<&[u8]>) -> Self {
+    Self { levels: std::array::from_fn(|_| Vec::new()), expected_root: expected_root.map(ToOwned::to_owned), observed_root: false }
+  }
+}
+
+pub struct RootLifecycleSupportClosureBuilderV1<'a> {
+  manifest: &'a RootLifecycleManifestV1<'a>,
+  expiry_manifest: Option<&'a RootExpiryManifestV1<'a>>,
+  retirement: Option<&'a RootRetirementCommitV1<'a>>,
+  algorithm: HashAlgorithm,
+  model: Option<RootLifecycleReferenceModelV1<'a>>,
+  candidate: RootLifecycleRoleClosureV1,
+  expiry: RootLifecycleRoleClosureV1,
+  cancellation: &'a CancellationToken,
+  maximum_support_artifacts: u64,
+  support_artifact_count: u64,
+  retirement_expiry_match: bool,
+  memory: MemoryReservation,
+  failed: bool,
+}
+
+impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
+  pub fn new(
+    manifest: &'a RootLifecycleManifestV1<'a>,
+    expiry_manifest: Option<&'a RootExpiryManifestV1<'a>>,
+    algorithm: HashAlgorithm,
+    cancellation: &'a CancellationToken,
+    limits: RootLifecycleSupportLimitsV1,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, RootLifecycleSupportClosureErrorV1> {
+    Self::new_inner(manifest, expiry_manifest, None, algorithm, cancellation, limits, memory)
+  }
+
+  pub fn new_for_retirement(
+    manifest: &'a RootLifecycleManifestV1<'a>,
+    expiry_manifest: &'a RootExpiryManifestV1<'a>,
+    retirement: &'a RootRetirementCommitV1<'a>,
+    algorithm: HashAlgorithm,
+    cancellation: &'a CancellationToken,
+    limits: RootLifecycleSupportLimitsV1,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, RootLifecycleSupportClosureErrorV1> {
+    Self::new_inner(manifest, Some(expiry_manifest), Some(retirement), algorithm, cancellation, limits, memory)
+  }
+
+  fn new_inner(
+    manifest: &'a RootLifecycleManifestV1<'a>,
+    expiry_manifest: Option<&'a RootExpiryManifestV1<'a>>,
+    retirement: Option<&'a RootRetirementCommitV1<'a>>,
+    algorithm: HashAlgorithm,
+    cancellation: &'a CancellationToken,
+    limits: RootLifecycleSupportLimitsV1,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, RootLifecycleSupportClosureErrorV1> {
+    if limits.maximum_support_artifacts == 0 {
+      return Err(RootLifecycleSupportClosureErrorV1::InvalidConfiguration("support artifact limit must be nonzero"));
+    }
+    if manifest.database_id.len() != 16 {
+      return Err(RootLifecycleSupportClosureErrorV1::InvalidConfiguration("lifecycle database identity has the wrong width"));
+    }
+    if cancellation.is_cancelled() {
+      return Err(RootLifecycleSupportClosureErrorV1::Canceled);
+    }
+    if retirement.is_some_and(|value| {
+      value.database_id != manifest.database_id
+        || value.final_mark_generation != manifest.source_complete_mark_generation
+        || value.authority_root_set_digest != manifest.authority_root_set_digest
+        || value.committed_at_ms > manifest.published_at_ms
+    }) {
+      return Err(RootLifecycleSupportClosureErrorV1::RetirementClosure);
+    }
+    let model = RootLifecycleReferenceModelV1::new(
+      manifest,
+      expiry_manifest,
+      algorithm,
+      cancellation,
+      limits.maximum_candidate_records,
+      limits.maximum_expiry_records,
+    )?;
+    let expiry_directory_hash = expiry_manifest.and_then(|value| value.directory_root_hash);
+    Ok(Self {
+      manifest,
+      expiry_manifest,
+      retirement,
+      algorithm,
+      model: Some(model),
+      candidate: RootLifecycleRoleClosureV1::new(manifest.candidate_directory_hash),
+      expiry: RootLifecycleRoleClosureV1::new(expiry_directory_hash),
+      cancellation,
+      maximum_support_artifacts: limits.maximum_support_artifacts,
+      support_artifact_count: 0,
+      retirement_expiry_match: false,
+      memory: memory.reserve(MemoryOwner::GarbageCollection, 0, AdmissionClass::Maintenance)?,
+      failed: false,
+    })
+  }
+
+  pub fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    if self.failed {
+      return Err(RootLifecycleSupportClosureErrorV1::Failed);
+    }
+    match self.observe_encoded_inner(bytes) {
+      Ok(()) => Ok(()),
+      Err(error) => {
+        self.failed = true;
+        Err(error)
+      }
+    }
+  }
+
+  pub fn finish(mut self) -> Result<RootLifecycleSupportClosureV1, RootLifecycleSupportClosureErrorV1> {
+    if self.failed {
+      return Err(RootLifecycleSupportClosureErrorV1::Failed);
+    }
+    if self.cancellation.is_cancelled() {
+      return Err(RootLifecycleSupportClosureErrorV1::Canceled);
+    }
+    let model = self.model.take().ok_or(RootLifecycleSupportClosureErrorV1::Failed)?;
+    let _summary = model.finish()?;
+    require_role_finished(&self.candidate)?;
+    require_role_finished(&self.expiry)?;
+    if self.retirement.is_some() && !self.retirement_expiry_match {
+      return Err(RootLifecycleSupportClosureErrorV1::RetirementClosure);
+    }
+    let mut database_id = [0u8; 16];
+    database_id.copy_from_slice(self.manifest.database_id);
+    Ok(RootLifecycleSupportClosureV1 {
+      hash_algorithm: self.algorithm,
+      database_id,
+      lifecycle_manifest_hash: self.manifest.key.clone(),
+      expiry_manifest_hash: self.expiry_manifest.map(|value| value.key.clone()),
+      candidate_directory_hash: self.manifest.candidate_directory_hash.map(ToOwned::to_owned),
+      expiry_directory_hash: self.expiry_manifest.and_then(|value| value.directory_root_hash).map(ToOwned::to_owned),
+      lifecycle_generation: self.manifest.generation,
+      source_complete_mark_generation: self.manifest.source_complete_mark_generation,
+      support_artifact_count: self.support_artifact_count,
+      retirement_commit_hash: self.retirement.map(|value| value.key.clone()),
+    })
+  }
+
+  fn observe_encoded_inner(&mut self, bytes: &[u8]) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(RootLifecycleSupportClosureErrorV1::Canceled);
+    }
+    if self.support_artifact_count >= self.maximum_support_artifacts {
+      return Err(RootLifecycleSupportClosureErrorV1::ArtifactLimit);
+    }
+    self.memory.check_admission()?;
+    let artifact = decode_gc_state_artifact(bytes, self.algorithm)?;
+    match artifact {
+      super::gc_state::GcStateArtifactV1::Page(page) => {
+        match page.role {
+          GcDirectoryRoleV1::RootCandidates => {
+            self.model_mut()?.observe_candidate_page(&page)?;
+            self.observe_retirement_candidate_page(&page)?;
+          }
+          GcDirectoryRoleV1::RootExpiry => {
+            self.model_mut()?.observe_expiry_page(&page)?;
+            self.observe_retirement_expiry_page(&page)?;
+          }
+          GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+            return Err(RootLifecycleSupportClosureErrorV1::ArtifactKind);
+          }
+        }
+        let summary = child_summary_from_page(&page)?;
+        self.push_summary(page.role, 0, summary)?;
+      }
+      super::gc_state::GcStateArtifactV1::Directory(directory) => {
+        if !matches!(directory.role, GcDirectoryRoleV1::RootCandidates | GcDirectoryRoleV1::RootExpiry) {
+          return Err(RootLifecycleSupportClosureErrorV1::ArtifactKind);
+        }
+        self.observe_directory(&directory)?;
+      }
+      super::gc_state::GcStateArtifactV1::Manifest(_)
+      | super::gc_state::GcStateArtifactV1::CandidateDelta { .. }
+      | super::gc_state::GcStateArtifactV1::RootRetirementCommit { .. }
+      | super::gc_state::GcStateArtifactV1::RootObjectReclaimProof { .. }
+      | super::gc_state::GcStateArtifactV1::RetirementJournal { .. } => {
+        return Err(RootLifecycleSupportClosureErrorV1::ArtifactKind);
+      }
+    }
+    self.support_artifact_count = self.support_artifact_count.checked_add(1).ok_or(RootLifecycleSupportClosureErrorV1::ArtifactLimit)?;
+    Ok(())
+  }
+
+  fn observe_directory(&mut self, directory: &GcStateDirectoryV1<'_>) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    let level = usize::from(directory.level);
+    if level >= 17 {
+      return Err(RootLifecycleSupportClosureErrorV1::ArtifactOrder);
+    }
+    let (released_bytes, is_expected_root, root_already_observed) = {
+      let role = self.role_mut(directory.role)?;
+      let children = &role.levels[level];
+      if children.len() != directory.entries.len() {
+        return Err(RootLifecycleSupportClosureErrorV1::ArtifactOrder);
+      }
+      if !children.iter().zip(&directory.entries).all(|(child, descriptor)| child_matches_descriptor(child, descriptor)) {
+        return Err(RootLifecycleSupportClosureErrorV1::DirectoryClosure);
+      }
+      let released_bytes = children
+        .iter()
+        .try_fold(0u64, |total, child| total.checked_add(child.accounted_bytes))
+        .ok_or(RootLifecycleSupportClosureErrorV1::ArtifactLimit)?;
+      role.levels[level].clear();
+      (released_bytes, role.expected_root.as_deref() == Some(directory.key.as_slice()), role.observed_root)
+    };
+    self.memory.shrink(released_bytes)?;
+
+    if is_expected_root {
+      if root_already_observed {
+        return Err(RootLifecycleSupportClosureErrorV1::ManifestClosure);
+      }
+      match directory.role {
+        GcDirectoryRoleV1::RootCandidates => validate_root_lifecycle_candidate_directory(self.manifest, directory)?,
+        GcDirectoryRoleV1::RootExpiry => {
+          let expiry = self.expiry_manifest.ok_or(RootLifecycleSupportClosureErrorV1::ManifestClosure)?;
+          validate_root_expiry_manifest_directory(expiry, directory)?;
+        }
+        GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+          return Err(RootLifecycleSupportClosureErrorV1::ArtifactKind);
+        }
+      }
+      self.role_mut(directory.role)?.observed_root = true;
+    }
+    let summary = child_summary_from_directory(directory)?;
+    self.push_summary(directory.role, level + 1, summary)
+  }
+
+  fn push_summary(
+    &mut self,
+    role: GcDirectoryRoleV1,
+    level: usize,
+    summary: RootLifecycleChildSummaryV1,
+  ) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    if level >= 17 {
+      return Err(RootLifecycleSupportClosureErrorV1::ArtifactOrder);
+    }
+    self.memory.grow(summary.accounted_bytes)?;
+    self.role_mut(role)?.levels[level].push(summary);
+    Ok(())
+  }
+
+  fn role_mut(&mut self, role: GcDirectoryRoleV1) -> Result<&mut RootLifecycleRoleClosureV1, RootLifecycleSupportClosureErrorV1> {
+    match role {
+      GcDirectoryRoleV1::RootCandidates => Ok(&mut self.candidate),
+      GcDirectoryRoleV1::RootExpiry => Ok(&mut self.expiry),
+      GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => Err(RootLifecycleSupportClosureErrorV1::ArtifactKind),
+    }
+  }
+
+  fn model_mut(&mut self) -> Result<&mut RootLifecycleReferenceModelV1<'a>, RootLifecycleSupportClosureErrorV1> {
+    self.model.as_mut().ok_or(RootLifecycleSupportClosureErrorV1::Failed)
+  }
+
+  fn observe_retirement_candidate_page(&self, page: &GcStatePageV1<'_>) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    let Some(retirement) = self.retirement else {
+      return Ok(());
+    };
+    let row_length = 36 + 3 * self.algorithm.hash_length();
+    for row in page.records.chunks_exact(row_length) {
+      if decode_root_candidate_record_v1(row, self.algorithm)?.namespace_root_hash == retirement.namespace_root_hash {
+        return Err(RootLifecycleSupportClosureErrorV1::RetirementClosure);
+      }
+    }
+    Ok(())
+  }
+
+  fn observe_retirement_expiry_page(&mut self, page: &GcStatePageV1<'_>) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    let Some(retirement) = self.retirement else {
+      return Ok(());
+    };
+    let row_length = 40 + 3 * self.algorithm.hash_length();
+    for row in page.records.chunks_exact(row_length) {
+      let record = decode_root_expiry_record_v1(row, self.algorithm)?;
+      if record.namespace_root_hash != retirement.namespace_root_hash {
+        continue;
+      }
+      if self.retirement_expiry_match
+        || record.state != RootExpiryStateV1::LogicallyRetired
+        || record.retired_at_ms != retirement.committed_at_ms
+        || record.last_pending_since_ms != retirement.pending_since_ms
+      {
+        return Err(RootLifecycleSupportClosureErrorV1::RetirementClosure);
+      }
+      validate_root_expiry_retirement_commit(&record, retirement)?;
+      self.retirement_expiry_match = true;
+    }
+    Ok(())
+  }
+}
+
+fn child_summary_from_page(page: &GcStatePageV1<'_>) -> Result<RootLifecycleChildSummaryV1, RootLifecycleSupportClosureErrorV1> {
+  let accounted_bytes = child_summary_accounted_bytes(page.lower_fence, page.upper_fence, &page.key)?;
+  Ok(RootLifecycleChildSummaryV1 {
+    lower_fence: page.lower_fence.to_vec(),
+    upper_fence: page.upper_fence.to_vec(),
+    child_hash: page.key.clone(),
+    child_generation: page.generation,
+    live_count: u64::from(page.record_count),
+    tombstone_count: 0,
+    page_count: 1,
+    logical_bytes: page.logical_bytes,
+    minimum_page_id: page.page_id,
+    maximum_page_id: page.page_id,
+    accounted_bytes,
+  })
+}
+
+fn child_summary_from_directory(
+  directory: &GcStateDirectoryV1<'_>,
+) -> Result<RootLifecycleChildSummaryV1, RootLifecycleSupportClosureErrorV1> {
+  let accounted_bytes = child_summary_accounted_bytes(directory.lower_fence, directory.upper_fence, &directory.key)?;
+  Ok(RootLifecycleChildSummaryV1 {
+    lower_fence: directory.lower_fence.to_vec(),
+    upper_fence: directory.upper_fence.to_vec(),
+    child_hash: directory.key.clone(),
+    child_generation: directory.generation,
+    live_count: directory.live_count,
+    tombstone_count: directory.tombstone_count,
+    page_count: directory.page_count,
+    logical_bytes: directory.logical_bytes,
+    minimum_page_id: directory.minimum_page_id,
+    maximum_page_id: directory.maximum_page_id,
+    accounted_bytes,
+  })
+}
+
+fn child_summary_accounted_bytes(
+  lower_fence: &[u8],
+  upper_fence: &[u8],
+  child_hash: &[u8],
+) -> Result<u64, RootLifecycleSupportClosureErrorV1> {
+  let bytes = lower_fence
+    .len()
+    .checked_add(upper_fence.len())
+    .and_then(|value| value.checked_add(child_hash.len()))
+    .and_then(|value| value.checked_add(std::mem::size_of::<RootLifecycleChildSummaryV1>()))
+    .ok_or(RootLifecycleSupportClosureErrorV1::ArtifactLimit)?;
+  match u64::try_from(bytes) {
+    Ok(bytes) => Ok(bytes),
+    Err(error) => Err(artifact_limit_from_size_conversion(error)),
+  }
+}
+
+fn artifact_limit_from_size_conversion(_source: std::num::TryFromIntError) -> RootLifecycleSupportClosureErrorV1 {
+  RootLifecycleSupportClosureErrorV1::ArtifactLimit
+}
+
+fn child_matches_descriptor(child: &RootLifecycleChildSummaryV1, descriptor: &GcStateDirectoryEntryV1<'_>) -> bool {
+  child.lower_fence == descriptor.lower_fence
+    && child.upper_fence == descriptor.upper_fence
+    && child.child_hash == descriptor.child_hash
+    && child.child_generation == descriptor.child_generation
+    && child.live_count == descriptor.live_count
+    && child.tombstone_count == descriptor.tombstone_count
+    && child.page_count == descriptor.page_count
+    && child.logical_bytes == descriptor.logical_bytes
+    && child.minimum_page_id == descriptor.minimum_page_id
+    && child.maximum_page_id == descriptor.maximum_page_id
+}
+
+fn require_role_finished(role: &RootLifecycleRoleClosureV1) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+  let mut summaries = role.levels.iter().flatten();
+  let first = summaries.next();
+  let exactly_one = first.is_some() && summaries.next().is_none();
+  match role.expected_root.as_deref() {
+    None if !role.observed_root && first.is_none() => Ok(()),
+    Some(expected_root) if role.observed_root && exactly_one && first.is_some_and(|summary| summary.child_hash == expected_root) => Ok(()),
+    None | Some(_) => Err(RootLifecycleSupportClosureErrorV1::ManifestClosure),
+  }
 }
 
 #[derive(Debug, Error)]

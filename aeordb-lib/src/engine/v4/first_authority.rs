@@ -39,7 +39,10 @@ use super::gc_retirement::{
   RetirementJournalOwnerV1, RetirementJournalReplacementAdmissionErrorV1, RetirementJournalReplacementBatchV1,
   RetirementJournalReplacementCoordinatorV1, RetirementJournalReplacementV1, RetirementJournalSinkErrorV1,
 };
-use super::gc_state::{RetirementReasonV1, decode_retirement_journal_segment_v1, retirement_journal_records_v1};
+use super::gc_state::{
+  GcDirectoryRoleV1, GcStateArtifactV1, RetirementReasonV1, decode_gc_state_artifact, decode_retirement_journal_segment_v1,
+  retirement_journal_records_v1,
+};
 use super::gc_mark::{
   GcMarkArtifactV1, MARK_CHECKPOINT_VALUE_MAX, MarkResumeContextV1, decode_gc_mark_artifact, validate_mark_checkpoint_resume_context,
 };
@@ -48,11 +51,17 @@ use super::gc_mark_convergence::{
   PreparedMarkMutationJournalSegmentV1,
 };
 use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceErrorV1, MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1};
+use super::gc_lifecycle::{
+  RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_retirement_commit_v1,
+  validate_root_lifecycle_expiry_manifest,
+};
+use super::gc_root_transition::RootRetirementIntentV1;
 use super::namespace::{
   EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_tree_root_v0,
   decode_semantic_object, encode_namespace_root,
 };
 use super::reader::FormatError;
+use super::read_view::{RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1};
 use super::root_authority::{
   RootAdmissionCommitV1, RootAuthorityKindV1, RootPublicationPrepareV1, decode_root_admission_commit, encode_root_admission_commit_control,
   encode_root_publication_prepare_control,
@@ -134,6 +143,244 @@ pub struct MarkRunCheckpointPublicationReceiptV1 {
   pub lineage_state: MarkRunCheckpointLineageStateV1,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RootLifecycleSupportPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub artifact: &'a EncodedImmutableGcArtifactV1,
+  pub publication_timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootLifecycleSupportPublicationReceiptV1 {
+  pub artifact_key: Vec<u8>,
+  pub artifact_kind: GcArtifactKindV1,
+  pub hard_publication_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RootRetirementAuthorityRecheckRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: [u8; 16],
+  pub namespace_root_hash: &'a [u8],
+  pub expected_authority_root_set_digest: &'a [u8],
+  pub final_mark_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootRetirementAuthoritySnapshotV1 {
+  pub target_is_authoritative: bool,
+  pub authority_root_set_digest: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct RootRetirementAuthorityRecheckErrorV1 {
+  code: String,
+  message: String,
+}
+
+impl RootRetirementAuthorityRecheckErrorV1 {
+  pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    Self { code: code.into(), message: message.into() }
+  }
+
+  pub fn code(&self) -> &str {
+    &self.code
+  }
+}
+
+impl Display for RootRetirementAuthorityRecheckErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}: {}", self.code, self.message)
+  }
+}
+
+impl Error for RootRetirementAuthorityRecheckErrorV1 {}
+
+pub trait RootRetirementAuthorityVerifierV1 {
+  /// Recheck every caller-owned authority root while first-authority and the
+  /// target root's read-pin gate are excluded. Implementations must not
+  /// reenter either coordinator from this callback.
+  fn recheck_authority_roots(
+    &mut self,
+    request: RootRetirementAuthorityRecheckRequestV1<'_>,
+  ) -> Result<RootRetirementAuthoritySnapshotV1, RootRetirementAuthorityRecheckErrorV1>;
+}
+
+#[derive(Clone, Copy)]
+pub struct RootRetirementPublicationRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub intent: &'a RootRetirementIntentV1,
+  pub support_closure: &'a RootLifecycleSupportClosureV1,
+  pub retirement_commit: &'a EncodedImmutableGcArtifactV1,
+  pub expiry_manifest: &'a EncodedImmutableGcArtifactV1,
+  pub lifecycle_manifest: &'a EncodedImmutableGcArtifactV1,
+  pub lifecycle_control: &'a EncodedGcActiveControlV1,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+  pub cancellation: &'a CancellationToken,
+  pub pin_coordinator: &'a RootReadPinCoordinatorV1,
+}
+
+#[derive(Debug)]
+pub enum RootRetirementLineageStateV1 {
+  NotRequired,
+  HardPublished { hard_publication_sequence: u64 },
+  BufferedAfterFlushFailure { code: &'static str, message: String },
+  MissingAfterCommit { code: &'static str, message: String },
+}
+
+impl RootRetirementLineageStateV1 {
+  pub const fn code(&self) -> &'static str {
+    match self {
+      Self::NotRequired => "not_required",
+      Self::HardPublished { .. } => "hard_published",
+      Self::BufferedAfterFlushFailure { .. } => "buffered_after_flush_failure",
+      Self::MissingAfterCommit { .. } => "missing_after_commit",
+    }
+  }
+}
+
+#[must_use = "a root-retirement receipt classifies the logical commit point and retained replacement lineage"]
+#[derive(Debug)]
+pub struct RootRetirementPublicationReceiptV1 {
+  pub namespace_root_hash: Vec<u8>,
+  pub retirement_commit_key: Vec<u8>,
+  pub retirement_commit_write_sequence: u64,
+  pub expiry_manifest_key: Vec<u8>,
+  pub expiry_manifest_write_sequence: u64,
+  pub lifecycle_manifest_key: Vec<u8>,
+  pub lifecycle_manifest_write_sequence: u64,
+  pub lifecycle_control_key: Vec<u8>,
+  pub lifecycle_control_write_sequence: u64,
+  pub lifecycle_control_slot: u8,
+  pub lineage_state: RootRetirementLineageStateV1,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+#[derive(Debug)]
+pub enum RootRetirementPublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Committed { code: &'static str, message: String, receipt: Box<RootRetirementPublicationReceiptV1> },
+  Format(FormatError),
+  Authority(FirstAuthorityPublicationErrorV1),
+  Pin(RootPinCoordinatorErrorV1),
+  AuthorityRecheck(RootRetirementAuthorityRecheckErrorV1),
+  RetirementAdmission(RetirementJournalReplacementAdmissionErrorV1),
+  RetirementOwner(RetirementJournalOwnerErrorV1),
+}
+
+impl RootRetirementPublicationErrorV1 {
+  pub fn code(&self) -> &str {
+    match self {
+      Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
+      Self::Format(source) => source.code(),
+      Self::Authority(source) => source.code(),
+      Self::Pin(source) => source.code(),
+      Self::AuthorityRecheck(source) => source.code(),
+      Self::RetirementAdmission(source) => source.code(),
+      Self::RetirementOwner(source) => source.code(),
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+
+  fn committed(code: &'static str, message: impl Into<String>, receipt: RootRetirementPublicationReceiptV1) -> Self {
+    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
+  }
+
+  pub fn committed_receipt(&self) -> Option<&RootRetirementPublicationReceiptV1> {
+    match self {
+      Self::Committed { receipt, .. } => Some(receipt),
+      Self::Invalid { .. }
+      | Self::Format(_)
+      | Self::Authority(_)
+      | Self::Pin(_)
+      | Self::AuthorityRecheck(_)
+      | Self::RetirementAdmission(_)
+      | Self::RetirementOwner(_) => None,
+    }
+  }
+}
+
+impl Display for RootRetirementPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Committed { code, message, receipt } => write!(
+        formatter,
+        "{code}: root {} retired at lifecycle control sequence {}, but post-commit handling failed: {message}",
+        hex::encode(&receipt.namespace_root_hash),
+        receipt.lifecycle_control_write_sequence,
+      ),
+      Self::Format(source) => write!(formatter, "root-retirement format error: {source}"),
+      Self::Authority(source) => write!(formatter, "root-retirement authority error: {source}"),
+      Self::Pin(source) => write!(formatter, "root-retirement pin error: {source}"),
+      Self::AuthorityRecheck(source) => write!(formatter, "root-retirement external authority error: {source}"),
+      Self::RetirementAdmission(source) => write!(formatter, "root-retirement lineage admission error: {source}"),
+      Self::RetirementOwner(source) => write!(formatter, "root-retirement lineage owner error: {source}"),
+    }
+  }
+}
+
+impl Error for RootRetirementPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Format(source) => Some(source),
+      Self::Authority(source) => Some(source),
+      Self::Pin(source) => Some(source),
+      Self::AuthorityRecheck(source) => Some(source),
+      Self::RetirementAdmission(source) => Some(source),
+      Self::RetirementOwner(source) => Some(source),
+      Self::Invalid { .. } | Self::Committed { .. } => None,
+    }
+  }
+}
+
+impl From<FormatError> for RootRetirementPublicationErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for RootRetirementPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<EngineError> for RootRetirementPublicationErrorV1 {
+  fn from(source: EngineError) -> Self {
+    Self::Authority(FirstAuthorityPublicationErrorV1::Engine(source))
+  }
+}
+
+impl From<RootPinCoordinatorErrorV1> for RootRetirementPublicationErrorV1 {
+  fn from(source: RootPinCoordinatorErrorV1) -> Self {
+    Self::Pin(source)
+  }
+}
+
+impl From<RootRetirementAuthorityRecheckErrorV1> for RootRetirementPublicationErrorV1 {
+  fn from(source: RootRetirementAuthorityRecheckErrorV1) -> Self {
+    Self::AuthorityRecheck(source)
+  }
+}
+
+impl From<RetirementJournalReplacementAdmissionErrorV1> for RootRetirementPublicationErrorV1 {
+  fn from(source: RetirementJournalReplacementAdmissionErrorV1) -> Self {
+    Self::RetirementAdmission(source)
+  }
+}
+
+impl From<RetirementJournalOwnerErrorV1> for RootRetirementPublicationErrorV1 {
+  fn from(source: RetirementJournalOwnerErrorV1) -> Self {
+    Self::RetirementOwner(source)
+  }
 }
 
 #[derive(Debug)]
@@ -515,6 +762,23 @@ struct StoredGcControlEntityV1 {
   integrity_hash: Vec<u8>,
 }
 
+struct ValidatedRootRetirementPublicationV1<'a> {
+  lifecycle_control: GcActiveControlV1<'a>,
+}
+
+struct SelectedRootLifecycleControlV1 {
+  stored_value: Vec<u8>,
+  target_manifest_hash: Vec<u8>,
+}
+
+struct RootRetirementLockedPublicationV1 {
+  retirement_commit_write_sequence: u64,
+  expiry_manifest_write_sequence: u64,
+  lifecycle_manifest_write_sequence: u64,
+  control: GcControlPublicationV1,
+  committed_failure: Option<(GcControlPublicationFailureV1, String)>,
+}
+
 struct ChargedSelectionEntityV1 {
   bytes: Vec<u8>,
   _memory: MemoryReservation,
@@ -726,6 +990,18 @@ impl From<GcControlPublicationErrorV1> for MarkRunCheckpointPublicationErrorV1 {
   fn from(source: GcControlPublicationErrorV1) -> Self {
     match source {
       GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.mark_run_code(), message },
+      GcControlPublicationErrorV1::Format(source) => Self::Format(source),
+      GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
+      GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
+      GcControlPublicationErrorV1::RetirementOwner(source) => Self::RetirementOwner(source),
+    }
+  }
+}
+
+impl From<GcControlPublicationErrorV1> for RootRetirementPublicationErrorV1 {
+  fn from(source: GcControlPublicationErrorV1) -> Self {
+    match source {
+      GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
       GcControlPublicationErrorV1::Format(source) => Self::Format(source),
       GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
       GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
@@ -1132,7 +1408,20 @@ impl V4FirstAuthorityPublisher {
   }
 
   fn publish_gc_active_control(
-    &mut self,
+    &self,
+    request: GcControlPublicationRequestV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<GcControlPublicationOutcomeV1, GcControlPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      GcControlPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    self.publish_gc_active_control_locked(request, retirement_owner, observer)
+  }
+
+  fn publish_gc_active_control_locked(
+    &self,
     request: GcControlPublicationRequestV1<'_>,
     retirement_owner: &mut RetirementJournalOwnerV1<'_>,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
@@ -1141,10 +1430,6 @@ impl V4FirstAuthorityPublisher {
     let encoded_control = request.encoded_control;
     let publication_timestamp_ms = request.publication_timestamp_ms;
     let monotonic_now_ms = request.monotonic_now_ms;
-    let _authority = self.root_state.lock().map_err(|poisoned| {
-      drop(poisoned);
-      GcControlPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
-    })?;
     let observation = self.observe()?;
     let header = &observation.selected.header;
     if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
@@ -1498,6 +1783,411 @@ impl V4FirstAuthorityPublisher {
     mark_mutation_journal_receipt(segment, hard_publication_sequence)
   }
 
+  pub fn publish_root_retirement(
+    &mut self,
+    request: RootRetirementPublicationRequestV1<'_>,
+    authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  ) -> Result<RootRetirementPublicationReceiptV1, RootRetirementPublicationErrorV1> {
+    self.publish_root_retirement_with_control_observer(
+      request,
+      authority_verifier,
+      retirement_owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+  }
+
+  fn publish_root_retirement_with_control_observer(
+    &mut self,
+    request: RootRetirementPublicationRequestV1<'_>,
+    authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<RootRetirementPublicationReceiptV1, RootRetirementPublicationErrorV1> {
+    let validated = validate_root_retirement_publication(&request)?;
+    if request.cancellation.is_cancelled() {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_canceled",
+        "root retirement was canceled before authority exclusion",
+      ));
+    }
+    if request.pin_coordinator.hash_algorithm() != request.hash_algorithm {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_pin_identity",
+        "root-pin coordinator hash profile differs from the retirement closure",
+      ));
+    }
+    if retirement_owner.hash_algorithm() != request.hash_algorithm
+      || retirement_owner.database_id() != request.support_closure.database_id()
+    {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_lineage_identity",
+        "retirement lineage owner differs from the retirement closure database or hash profile",
+      ));
+    }
+    self.verify_root_retirement_support_is_durable(&request)?;
+
+    retirement_owner.flush(self)?;
+    let mut locked_result = None;
+    let exclusion_result =
+      request.pin_coordinator.with_retirement_exclusion(&request.intent.namespace_root_hash, request.cancellation, || {
+        locked_result =
+          Some(self.publish_root_retirement_excluded(&request, &validated, authority_verifier, retirement_owner, control_observer));
+        Ok(())
+      });
+    let exclusion_error = exclusion_result.err();
+    let (locked, exclusion_error) = match (locked_result, exclusion_error) {
+      (Some(Ok(locked)), exclusion_error) => (locked, exclusion_error),
+      (Some(Err(operation_error)), Some(exclusion_error)) => {
+        return Err(RootRetirementPublicationErrorV1::invalid(
+          "root_retirement_exclusion_cleanup",
+          format!("retirement failed with {operation_error}; releasing the exclusion also failed with {exclusion_error}"),
+        ));
+      }
+      (None, Some(exclusion_error)) => {
+        return Err(RootRetirementPublicationErrorV1::Pin(exclusion_error));
+      }
+      (Some(Err(error)), None) => return Err(error),
+      (None, None) => {
+        return Err(RootRetirementPublicationErrorV1::invalid("root_retirement_internal", "retirement exclusion returned no result"));
+      }
+    };
+
+    let mut committed_failure = locked.committed_failure.map(|(failure, message)| (failure.code(), message));
+    if let Some(error) = exclusion_error {
+      if committed_failure.is_none() {
+        committed_failure = Some(("root_retirement_committed_pin_cleanup", error.to_string()));
+      }
+    }
+    let lineage_state = if locked.control.replaced_control {
+      match retirement_owner.flush(self) {
+        Ok(true) => RootRetirementLineageStateV1::HardPublished {
+          hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence,
+        },
+        Ok(false) => RootRetirementLineageStateV1::MissingAfterCommit {
+          code: "root_retirement_lineage_missing",
+          message: "lifecycle control replacement committed without retained retirement lineage".to_string(),
+        },
+        Err(source) => RootRetirementLineageStateV1::BufferedAfterFlushFailure { code: source.code(), message: source.to_string() },
+      }
+    } else {
+      RootRetirementLineageStateV1::NotRequired
+    };
+    if !matches!(lineage_state, RootRetirementLineageStateV1::NotRequired | RootRetirementLineageStateV1::HardPublished { .. })
+      && committed_failure.is_none()
+    {
+      committed_failure = Some(("root_retirement_committed_lineage", "retirement lineage did not hard-publish".to_string()));
+    }
+    let observation = if matches!(lineage_state, RootRetirementLineageStateV1::HardPublished { .. }) {
+      match self.observe() {
+        Ok(observation) => observation,
+        Err(source) => {
+          if committed_failure.is_none() {
+            committed_failure = Some(("root_retirement_committed_lineage_readback", source.to_string()));
+          }
+          locked.control.observation
+        }
+      }
+    } else {
+      locked.control.observation
+    };
+    let receipt = RootRetirementPublicationReceiptV1 {
+      namespace_root_hash: request.intent.namespace_root_hash.clone(),
+      retirement_commit_key: request.retirement_commit.key.clone(),
+      retirement_commit_write_sequence: locked.retirement_commit_write_sequence,
+      expiry_manifest_key: request.expiry_manifest.key.clone(),
+      expiry_manifest_write_sequence: locked.expiry_manifest_write_sequence,
+      lifecycle_manifest_key: request.lifecycle_manifest.key.clone(),
+      lifecycle_manifest_write_sequence: locked.lifecycle_manifest_write_sequence,
+      lifecycle_control_key: request.lifecycle_control.key.clone(),
+      lifecycle_control_write_sequence: locked.control.control_write_sequence,
+      lifecycle_control_slot: locked.control.control_slot,
+      lineage_state,
+      observation,
+      idempotent: locked.control.idempotent,
+    };
+    if let Some((code, message)) = committed_failure {
+      return Err(RootRetirementPublicationErrorV1::committed(code, message, receipt));
+    }
+    Ok(receipt)
+  }
+
+  fn verify_root_retirement_support_is_durable(
+    &self,
+    request: &RootRetirementPublicationRequestV1<'_>,
+  ) -> Result<(), RootRetirementPublicationErrorV1> {
+    let lifecycle = decode_root_lifecycle_manifest_v1(&request.lifecycle_manifest.value, request.hash_algorithm)?;
+    let expiry = decode_root_expiry_manifest_v1(&request.expiry_manifest.value, request.hash_algorithm)?;
+    let retirement = decode_root_retirement_commit_v1(&request.retirement_commit.value, request.hash_algorithm)?;
+    let memory = request.pin_coordinator.memory_coordinator();
+    let mut builder = super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1::new_for_retirement(
+      &lifecycle,
+      &expiry,
+      &retirement,
+      request.hash_algorithm,
+      request.cancellation,
+      super::gc_lifecycle::RootLifecycleSupportLimitsV1 {
+        maximum_candidate_records: lifecycle.candidate_count,
+        maximum_expiry_records: expiry.record_count,
+        maximum_support_artifacts: request.support_closure.support_artifact_count(),
+      },
+      &memory,
+    )
+    .map_err(root_retirement_support_error)?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.hash_algorithm != request.hash_algorithm
+      || header.database_id != request.support_closure.database_id()
+    {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_database_authority",
+        "selected first authority is degraded or differs from the retirement closure",
+      ));
+    }
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    if let Some(root) = request.support_closure.candidate_directory_hash() {
+      revalidate_root_lifecycle_support_subtree(
+        &self.file,
+        &kv,
+        header,
+        root,
+        GcDirectoryRoleV1::RootCandidates,
+        None,
+        0,
+        &mut builder,
+        &memory,
+      )?;
+    }
+    if let Some(root) = request.support_closure.expiry_directory_hash() {
+      revalidate_root_lifecycle_support_subtree(
+        &self.file,
+        &kv,
+        header,
+        root,
+        GcDirectoryRoleV1::RootExpiry,
+        None,
+        0,
+        &mut builder,
+        &memory,
+      )?;
+    }
+    let observed = builder.finish().map_err(root_retirement_support_error)?;
+    if observed != *request.support_closure {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_changed",
+        "durable root-lifecycle support closure differs from the validated request closure",
+      ));
+    }
+    Ok(())
+  }
+
+  fn publish_root_retirement_excluded(
+    &self,
+    request: &RootRetirementPublicationRequestV1<'_>,
+    validated: &ValidatedRootRetirementPublicationV1<'_>,
+    authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<RootRetirementLockedPublicationV1, RootRetirementPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      RootRetirementPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    let database_id = request.support_closure.database_id();
+    if observation.selected.redundancy_degraded || header.hash_algorithm != request.hash_algorithm || header.database_id != database_id {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_database_authority",
+        "selected first authority is degraded or differs from the retirement closure",
+      ));
+    }
+    if header.head_hash == request.intent.namespace_root_hash {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_current_head",
+        "the selected HEAD cannot be logically retired",
+      ));
+    }
+    if request.cancellation.is_cancelled() {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_canceled",
+        "root retirement was canceled during final authority recheck",
+      ));
+    }
+
+    let selected_control = {
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      select_root_lifecycle_control(&self.file, &kv, header)?
+    };
+    let exact_retry = selected_control.stored_value == request.lifecycle_control.value
+      && selected_control.target_manifest_hash == request.lifecycle_manifest.key;
+    if !exact_retry {
+      if selected_control.target_manifest_hash != request.intent.prior_lifecycle_manifest_hash {
+        return Err(RootRetirementPublicationErrorV1::invalid(
+          "root_retirement_prior_lifecycle_changed",
+          "selected lifecycle authority no longer matches the retirement intent",
+        ));
+      }
+      let admission_payload = {
+        let kv = self.lock_kv()?;
+        validate_kv_header_alignment(&kv, header)?;
+        load_system_file(&self.file, &kv, header, SystemControlKindV1::RootAdmissionCommit, &request.intent.namespace_root_hash)?
+      };
+      let admission = decode_root_admission_commit(&admission_payload, header.hash_algorithm)?;
+      if admission.database_id != header.database_id
+        || admission.namespace_root != request.intent.namespace_root_hash
+        || digest_parts(header.hash_algorithm, &[&admission_payload]) != request.intent.admission_commit_payload_hash
+      {
+        return Err(RootRetirementPublicationErrorV1::invalid(
+          "root_retirement_admission_changed",
+          "root admission evidence no longer matches the frozen retirement intent",
+        ));
+      }
+      let authority = authority_verifier.recheck_authority_roots(RootRetirementAuthorityRecheckRequestV1 {
+        hash_algorithm: header.hash_algorithm,
+        database_id: header.database_id,
+        namespace_root_hash: &request.intent.namespace_root_hash,
+        expected_authority_root_set_digest: &request.intent.authority_root_set_digest,
+        final_mark_generation: request.intent.final_mark_generation,
+      })?;
+      if authority.target_is_authoritative || authority.authority_root_set_digest != request.intent.authority_root_set_digest {
+        return Err(RootRetirementPublicationErrorV1::invalid(
+          "root_retirement_authority_changed",
+          "caller-owned authority roots changed or now retain the retirement target",
+        ));
+      }
+    }
+
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    let retirement_commit_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::RootRetirementCommit,
+        database_id: &database_id,
+        artifact_key: &request.retirement_commit.key,
+        value: &request.retirement_commit.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "root_retirement_commit_committed_postcondition",
+      },
+      &mut observer,
+    )?;
+    let expiry_manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::RootExpiryCatalogManifest,
+        database_id: &database_id,
+        artifact_key: &request.expiry_manifest.key,
+        value: &request.expiry_manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "root_expiry_manifest_committed_postcondition",
+      },
+      &mut observer,
+    )?;
+    let lifecycle_manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::RootLifecycleManifest,
+        database_id: &database_id,
+        artifact_key: &request.lifecycle_manifest.key,
+        value: &request.lifecycle_manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "root_lifecycle_manifest_committed_postcondition",
+      },
+      &mut observer,
+    )?;
+    let control = self.publish_gc_active_control_locked(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::RootLifecycleActiveControl,
+        encoded_control: request.lifecycle_control,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      retirement_owner,
+      control_observer,
+    )?;
+    let (control, committed_failure) = match control {
+      GcControlPublicationOutcomeV1::Complete(control) => (control, None),
+      GcControlPublicationOutcomeV1::CommittedFailure { publication, failure, message } => (publication, Some((failure, message))),
+    };
+    debug_assert_eq!(control.control_slot, validated.lifecycle_control.slot);
+    Ok(RootRetirementLockedPublicationV1 {
+      retirement_commit_write_sequence,
+      expiry_manifest_write_sequence,
+      lifecycle_manifest_write_sequence,
+      control,
+      committed_failure,
+    })
+  }
+
+  /// Hard-publish one immutable page or directory used by a future root-
+  /// lifecycle manifest. This method never selects lifecycle authority.
+  pub fn publish_root_lifecycle_support_artifact(
+    &self,
+    request: RootLifecycleSupportPublicationRequestV1<'_>,
+  ) -> Result<RootLifecycleSupportPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    let observation = self.observe()?;
+    let algorithm = observation.selected.header.hash_algorithm;
+    let decoded = decode_gc_state_artifact(&request.artifact.value, algorithm)?;
+    let (kind, database_id, role) = match &decoded {
+      GcStateArtifactV1::Page(page) => {
+        let kind = match page.role {
+          GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
+          GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
+          GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+            return Err(FirstAuthorityPublicationErrorV1::invalid(
+              "root_lifecycle_support_role",
+              "root-lifecycle support publication rejects non-lifecycle page roles",
+            ));
+          }
+        };
+        (kind, page.database_id, page.role)
+      }
+      GcStateArtifactV1::Directory(directory) => {
+        if !matches!(directory.role, GcDirectoryRoleV1::RootCandidates | GcDirectoryRoleV1::RootExpiry) {
+          return Err(FirstAuthorityPublicationErrorV1::invalid(
+            "root_lifecycle_support_role",
+            "root-lifecycle support publication rejects non-lifecycle directory roles",
+          ));
+        }
+        (GcArtifactKindV1::GcArtifactDirectoryNode, directory.database_id, directory.role)
+      }
+      GcStateArtifactV1::Manifest(_)
+      | GcStateArtifactV1::CandidateDelta { .. }
+      | GcStateArtifactV1::RootRetirementCommit { .. }
+      | GcStateArtifactV1::RootObjectReclaimProof { .. }
+      | GcStateArtifactV1::RetirementJournal { .. } => {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "root_lifecycle_support_kind",
+          "root-lifecycle support publication accepts only candidate/expiry pages and directories",
+        ));
+      }
+    };
+    if database_id != request.database_id || decoded.key() != request.artifact.key {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "root_lifecycle_support_identity",
+        "root-lifecycle support artifact database or canonical key disagrees with its request",
+      ));
+    }
+    debug_assert!(matches!(role, GcDirectoryRoleV1::RootCandidates | GcDirectoryRoleV1::RootExpiry));
+
+    let hard_publication_sequence = self.publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind,
+        database_id: request.database_id,
+        artifact_key: &request.artifact.key,
+        value: &request.artifact.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "root_lifecycle_support_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    Ok(RootLifecycleSupportPublicationReceiptV1 {
+      artifact_key: request.artifact.key.clone(),
+      artifact_kind: kind,
+      hard_publication_sequence,
+    })
+  }
+
   fn publish_immutable_gc_artifact(
     &self,
     request: ImmutableGcArtifactPublicationV1<'_>,
@@ -1507,6 +2197,14 @@ impl V4FirstAuthorityPublisher {
       drop(poisoned);
       FirstAuthorityPublicationErrorV1::StateLockPoisoned
     })?;
+    self.publish_immutable_gc_artifact_locked(request, observer)
+  }
+
+  fn publish_immutable_gc_artifact_locked(
+    &self,
+    request: ImmutableGcArtifactPublicationV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<u64, FirstAuthorityPublicationErrorV1> {
     let observation = self.observe()?;
     let header = &observation.selected.header;
     if observation.selected.redundancy_degraded {
@@ -2797,6 +3495,348 @@ fn gc_control_keys(
   database_id: &[u8; 16],
 ) -> Result<[Vec<u8>; 2], GcControlPublicationErrorV1> {
   Ok([gc_active_control_key(algorithm, kind, database_id, 0)?, gc_active_control_key(algorithm, kind, database_id, 1)?])
+}
+
+struct ChargedRootLifecycleSupportEntityV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+fn revalidate_root_lifecycle_support_subtree(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+  expected_role: GcDirectoryRoleV1,
+  expected_level: Option<u16>,
+  depth: u16,
+  builder: &mut super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1<'_>,
+  memory: &MemoryCoordinator,
+) -> Result<(), RootRetirementPublicationErrorV1> {
+  if depth > 16 {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_depth",
+      "durable root-lifecycle support directory exceeds depth 16",
+    ));
+  }
+  let directory_entity = load_root_lifecycle_support_entity(file, kv, header, key, GcArtifactKindV1::GcArtifactDirectoryNode, memory)?;
+  let entity = decode_whole_entity(&directory_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  let GcStateArtifactV1::Directory(directory) = decode_gc_state_artifact(entity.stored_value, header.hash_algorithm)? else {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_kind",
+      "root-lifecycle support directory key resolves to another GC artifact kind",
+    ));
+  };
+  if directory.key != key || directory.role != expected_role || expected_level.is_some_and(|level| level != directory.level) {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_changed",
+      "durable root-lifecycle directory identity, role, or level differs from its parent descriptor",
+    ));
+  }
+  for descriptor in &directory.entries {
+    if directory.level == 0 {
+      revalidate_root_lifecycle_support_page(file, kv, header, descriptor.child_hash, expected_role, builder, memory)?;
+    } else {
+      revalidate_root_lifecycle_support_subtree(
+        file,
+        kv,
+        header,
+        descriptor.child_hash,
+        expected_role,
+        Some(directory.level - 1),
+        depth + 1,
+        builder,
+        memory,
+      )?;
+    }
+  }
+  builder.observe_encoded(entity.stored_value).map_err(root_retirement_support_error)
+}
+
+fn revalidate_root_lifecycle_support_page(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+  expected_role: GcDirectoryRoleV1,
+  builder: &mut super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1<'_>,
+  memory: &MemoryCoordinator,
+) -> Result<(), RootRetirementPublicationErrorV1> {
+  let kind = match expected_role {
+    GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
+    GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
+    GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_role",
+        "root-retirement closure cannot contain non-lifecycle page roles",
+      ));
+    }
+  };
+  let page_entity = load_root_lifecycle_support_entity(file, kv, header, key, kind, memory)?;
+  let entity = decode_whole_entity(&page_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  let GcStateArtifactV1::Page(page) = decode_gc_state_artifact(entity.stored_value, header.hash_algorithm)? else {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_kind",
+      "root-lifecycle support page key resolves to another GC artifact kind",
+    ));
+  };
+  if page.key != key || page.role != expected_role {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_changed",
+      "durable root-lifecycle page identity or role differs from its parent descriptor",
+    ));
+  }
+  builder.observe_encoded(entity.stored_value).map_err(root_retirement_support_error)
+}
+
+fn load_root_lifecycle_support_entity(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+  expected_kind: GcArtifactKindV1,
+  memory: &MemoryCoordinator,
+) -> Result<ChargedRootLifecycleSupportEntityV1, RootRetirementPublicationErrorV1> {
+  let Some(locator) = kv.get(key)? else {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_missing",
+      format!("root-lifecycle support artifact {} is absent", hex::encode(key)),
+    ));
+  };
+  if locator.type_flags != kv_tag::GC_ARTIFACT {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_collision",
+      "root-lifecycle support key resolves to another KV role",
+    ));
+  }
+  let maximum_value_length = expected_kind.immutable_maximum_encoded_length().ok_or_else(|| {
+    RootRetirementPublicationErrorV1::invalid("root_retirement_support_kind", "root-lifecycle support role has no immutable cap")
+  })?;
+  let maximum_entity_length = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, key.len(), maximum_value_length)?;
+  let locator_length = usize::try_from(locator.total_length).map_err(|error| {
+    RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_length",
+      format!("root-lifecycle support locator length exceeds usize: {error}"),
+    )
+  })?;
+  if locator_length > maximum_entity_length {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_length",
+      format!("root-lifecycle support entity length {locator_length} exceeds its {maximum_entity_length}-byte role cap"),
+    ));
+  }
+  let reservation = memory
+    .reserve(
+      MemoryOwner::GarbageCollection,
+      u64::try_from(locator_length).map_err(|error| {
+        RootRetirementPublicationErrorV1::invalid(
+          "root_retirement_support_length",
+          format!("root-lifecycle support length cannot be accounted: {error}"),
+        )
+      })?,
+      AdmissionClass::Maintenance,
+    )
+    .map_err(|error| RootRetirementPublicationErrorV1::invalid("root_retirement_support_memory", error.to_string()))?;
+  let bytes = read_entity_bounded(file, kv, key, maximum_entity_length, header.write_sequence_high_water)?.ok_or_else(|| {
+    RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_missing",
+      format!("root-lifecycle support artifact {} disappeared", hex::encode(key)),
+    )
+  })?;
+  let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  if entity.entry_type != EntryTypeV4::GcArtifact
+    || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+    || entity.compression_algorithm != CompressionAlgorithm::None
+    || entity.key != key
+  {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_representation",
+      "root-lifecycle support artifact is not one canonical system GC WholeEntity",
+    ));
+  }
+  let envelope = decode_gc_artifact_envelope(entity.stored_value)?;
+  if envelope.kind != expected_kind {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_kind",
+      "root-lifecycle support artifact kind differs from its directory role",
+    ));
+  }
+  Ok(ChargedRootLifecycleSupportEntityV1 { bytes, _memory: reservation })
+}
+
+fn root_retirement_support_error(source: super::gc_lifecycle::RootLifecycleSupportClosureErrorV1) -> RootRetirementPublicationErrorV1 {
+  RootRetirementPublicationErrorV1::Invalid { code: source.code(), message: source.to_string() }
+}
+
+fn validate_root_retirement_publication<'a>(
+  request: &'a RootRetirementPublicationRequestV1<'_>,
+) -> Result<ValidatedRootRetirementPublicationV1<'a>, RootRetirementPublicationErrorV1> {
+  let retirement = decode_root_retirement_commit_v1(&request.retirement_commit.value, request.hash_algorithm)?;
+  let expiry_manifest = decode_root_expiry_manifest_v1(&request.expiry_manifest.value, request.hash_algorithm)?;
+  let lifecycle_manifest = decode_root_lifecycle_manifest_v1(&request.lifecycle_manifest.value, request.hash_algorithm)?;
+  let lifecycle_control = decode_gc_active_control(&request.lifecycle_control.value, request.hash_algorithm)?;
+  let database_id = request.support_closure.database_id();
+  if request.retirement_commit.key != retirement.key
+    || request.expiry_manifest.key != expiry_manifest.key
+    || request.lifecycle_manifest.key != lifecycle_manifest.key
+    || request.lifecycle_control.key != lifecycle_control.key
+  {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_prepared_identity",
+      "prepared retirement artifact keys differ from their canonical bytes",
+    ));
+  }
+  if request.support_closure.hash_algorithm() != request.hash_algorithm
+    || retirement.database_id != database_id
+    || expiry_manifest.database_id != database_id
+    || lifecycle_manifest.database_id != database_id
+    || lifecycle_control.database_id != database_id
+  {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_prepared_database",
+      "retirement artifacts disagree on database identity or hash profile",
+    ));
+  }
+  if request.support_closure.lifecycle_manifest_hash() != request.lifecycle_manifest.key
+    || request.support_closure.expiry_manifest_hash() != Some(request.expiry_manifest.key.as_slice())
+    || request.support_closure.retirement_commit_hash() != Some(request.retirement_commit.key.as_slice())
+    || request.support_closure.lifecycle_generation() != lifecycle_manifest.generation
+    || request.support_closure.source_complete_mark_generation() != lifecycle_manifest.source_complete_mark_generation
+  {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_support_closure",
+      "bounded support closure does not bind the exact retirement manifests and evidence",
+    ));
+  }
+  validate_root_lifecycle_expiry_manifest(&lifecycle_manifest, &expiry_manifest)?;
+  if expiry_manifest.generation != lifecycle_manifest.generation
+    || lifecycle_manifest.source_complete_mark_generation != request.intent.final_mark_generation
+    || lifecycle_manifest.authority_root_set_digest != request.intent.authority_root_set_digest
+    || lifecycle_control.kind != GcArtifactKindV1::RootLifecycleActiveControl
+    || lifecycle_control.generation != lifecycle_manifest.generation
+    || lifecycle_control.target_manifest_hash != request.lifecycle_manifest.key
+  {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_manifest_closure",
+      "retirement manifests, complete mark, authority digest, and lifecycle selector do not close exactly",
+    ));
+  }
+  if retirement.namespace_root_hash != request.intent.namespace_root_hash
+    || retirement.committed_at_ms != request.intent.committed_at_ms
+    || retirement.pending_since_ms != request.intent.pending_since_ms
+    || retirement.grace_at_pending_ms != request.intent.grace_at_pending_ms
+    || retirement.final_mark_generation != request.intent.final_mark_generation
+    || retirement.reason != request.intent.reason
+    || retirement.prior_lifecycle_manifest_hash != request.intent.prior_lifecycle_manifest_hash
+    || retirement.authority_root_set_digest != request.intent.authority_root_set_digest
+    || retirement.admission_commit_payload_hash != request.intent.admission_commit_payload_hash
+  {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_intent_changed",
+      "retirement commit differs from the exact frozen transition intent",
+    ));
+  }
+  let committed_at_ms = u64::try_from(retirement.committed_at_ms).map_err(|error| {
+    RootRetirementPublicationErrorV1::invalid("root_retirement_timestamp", format!("retirement commit time is negative: {error}"))
+  })?;
+  let published_at_ms = u64::try_from(lifecycle_manifest.published_at_ms).map_err(|error| {
+    RootRetirementPublicationErrorV1::invalid("root_retirement_timestamp", format!("lifecycle publication time is negative: {error}"))
+  })?;
+  if request.publication_timestamp_ms < committed_at_ms || request.publication_timestamp_ms < published_at_ms {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_timestamp",
+      "hard-publication timestamp precedes the retirement commit or lifecycle manifest",
+    ));
+  }
+  Ok(ValidatedRootRetirementPublicationV1 { lifecycle_control })
+}
+
+fn select_root_lifecycle_control(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+) -> Result<SelectedRootLifecycleControlV1, RootRetirementPublicationErrorV1> {
+  let keys = gc_control_keys(header.hash_algorithm, GcArtifactKindV1::RootLifecycleActiveControl, &header.database_id)?;
+  let controls = [
+    load_gc_control_entity(file, kv, GcArtifactKindV1::RootLifecycleActiveControl, &keys[0], header)?,
+    load_gc_control_entity(file, kv, GcArtifactKindV1::RootLifecycleActiveControl, &keys[1], header)?,
+  ];
+  let closure_valid = [
+    match &controls[0] {
+      Some(control) => root_lifecycle_manifest_is_present(file, kv, header, &control.target_manifest_hash)?,
+      None => false,
+    },
+    match &controls[1] {
+      Some(control) => root_lifecycle_manifest_is_present(file, kv, header, &control.target_manifest_hash)?,
+      None => false,
+    },
+  ];
+  let selected_slot = match (&controls[0], &controls[1]) {
+    (Some(a), Some(b)) => {
+      let a_control = decode_gc_active_control(&a.stored_value, header.hash_algorithm)?;
+      let b_control = decode_gc_active_control(&b.stored_value, header.hash_algorithm)?;
+      select_gc_active_control(&a_control, closure_valid[0], &b_control, closure_valid[1])?.map(|control| control.slot)
+    }
+    (Some(_), None) if closure_valid[0] => Some(0),
+    (None, Some(_)) if closure_valid[1] => Some(1),
+    (Some(_), None) | (None, Some(_)) | (None, None) => None,
+  }
+  .ok_or_else(|| {
+    RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_lifecycle_unavailable",
+      "no complete root-lifecycle A/B control is selectable",
+    )
+  })?;
+  let stored = controls[usize::from(selected_slot)].as_ref().ok_or_else(|| {
+    RootRetirementPublicationErrorV1::invalid("root_retirement_lifecycle_internal", "selected lifecycle control slot is absent")
+  })?;
+  Ok(SelectedRootLifecycleControlV1 {
+    stored_value: stored.stored_value.clone(),
+    target_manifest_hash: stored.target_manifest_hash.clone(),
+  })
+}
+
+fn root_lifecycle_manifest_is_present(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+) -> Result<bool, RootRetirementPublicationErrorV1> {
+  let Some(locator) = kv.get(key)? else {
+    return Ok(false);
+  };
+  if locator.type_flags != kv_tag::GC_ARTIFACT {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_lifecycle_collision",
+      "root-lifecycle manifest key resolves to another KV role",
+    ));
+  }
+  let maximum_value_length = GcArtifactKindV1::RootLifecycleManifest.immutable_maximum_encoded_length().ok_or_else(|| {
+    RootRetirementPublicationErrorV1::invalid("root_retirement_lifecycle_kind", "lifecycle manifest has no immutable cap")
+  })?;
+  let maximum_entity_length = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, key.len(), maximum_value_length)?;
+  let bytes = read_entity_bounded(file, kv, key, maximum_entity_length, header.write_sequence_high_water)?.ok_or_else(|| {
+    RootRetirementPublicationErrorV1::invalid("root_retirement_lifecycle_missing", "lifecycle manifest locator disappeared")
+  })?;
+  let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  if entity.entry_type != EntryTypeV4::GcArtifact
+    || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+    || entity.compression_algorithm != CompressionAlgorithm::None
+    || entity.key != key
+  {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_lifecycle_representation",
+      "selected lifecycle manifest is not one canonical system GC WholeEntity",
+    ));
+  }
+  let manifest = decode_root_lifecycle_manifest_v1(entity.stored_value, header.hash_algorithm)?;
+  if manifest.database_id != header.database_id || manifest.key != key {
+    return Err(RootRetirementPublicationErrorV1::invalid(
+      "root_retirement_lifecycle_representation",
+      "selected lifecycle manifest identity differs from its control target",
+    ));
+  }
+  Ok(true)
 }
 
 fn load_gc_control_entity(
