@@ -470,7 +470,10 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
             self.observe_retirement_expiry_page(&page)?;
             self.observe_reclaim_expiry_page(&page)?;
           }
-          GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+          GcDirectoryRoleV1::Candidates
+          | GcDirectoryRoleV1::PhysicalInventory
+          | GcDirectoryRoleV1::FreeExtents
+          | GcDirectoryRoleV1::Claims => {
             return Err(RootLifecycleSupportClosureErrorV1::ArtifactKind);
           }
         }
@@ -528,7 +531,10 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
           let expiry = self.expiry_manifest.ok_or(RootLifecycleSupportClosureErrorV1::ManifestClosure)?;
           validate_root_expiry_manifest_directory(expiry, directory)?;
         }
-        GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+        GcDirectoryRoleV1::Candidates
+        | GcDirectoryRoleV1::PhysicalInventory
+        | GcDirectoryRoleV1::FreeExtents
+        | GcDirectoryRoleV1::Claims => {
           return Err(RootLifecycleSupportClosureErrorV1::ArtifactKind);
         }
       }
@@ -556,7 +562,9 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
     match role {
       GcDirectoryRoleV1::RootCandidates => Ok(&mut self.candidate),
       GcDirectoryRoleV1::RootExpiry => Ok(&mut self.expiry),
-      GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => Err(RootLifecycleSupportClosureErrorV1::ArtifactKind),
+      GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory | GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => {
+        Err(RootLifecycleSupportClosureErrorV1::ArtifactKind)
+      }
     }
   }
 

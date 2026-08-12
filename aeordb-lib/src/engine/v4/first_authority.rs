@@ -3920,7 +3920,10 @@ impl V4FirstAuthorityPublisher {
         let kind = match page.role {
           GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
           GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
-          GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+          GcDirectoryRoleV1::Candidates
+          | GcDirectoryRoleV1::PhysicalInventory
+          | GcDirectoryRoleV1::FreeExtents
+          | GcDirectoryRoleV1::Claims => {
             return Err(FirstAuthorityPublicationErrorV1::invalid(
               "root_lifecycle_support_role",
               "root-lifecycle support publication rejects non-lifecycle page roles",
@@ -5495,7 +5498,7 @@ impl RootLifecycleSupportReadContextV1<'_> {
     let kind = match expected_role {
       GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
       GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
-      GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+      GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory | GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => {
         return Err(RootRetirementPublicationErrorV1::invalid(
           "root_retirement_support_role",
           "root-retirement closure cannot contain non-lifecycle page roles",

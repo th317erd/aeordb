@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1488,
+  "maximum_occurrences": 1483,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 4400,
+      "line": 4403,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 4403,
+      "line": 4406,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -9746,7 +9746,7 @@
     {
       "id": "esq-v1-16d9b5f6dc185467ecc5-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 469,
+      "line": 477,
       "column": 33,
       "enclosing_item": "impl RetirementJournalReferenceModelV1 < 'a >::observe_segment_inner",
       "kind": "error_conversion",
@@ -9756,7 +9756,7 @@
     {
       "id": "esq-v1-742f474ad0a59045c7e9-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 721,
+      "line": 729,
       "column": 37,
       "enclosing_item": "impl PhysicalInventoryReferenceModelV1 < 'a >::observe_page_inner",
       "kind": "error_conversion",
@@ -9766,7 +9766,7 @@
     {
       "id": "esq-v1-d69c59e7f81ed968df5d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1096,
+      "line": 1121,
       "column": 21,
       "enclosing_item": "decode_gc_state_artifact",
       "kind": "result_to_option",
@@ -9776,7 +9776,7 @@
     {
       "id": "esq-v1-0fad896bd02956e1a12d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1271,
+      "line": 1296,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9786,7 +9786,7 @@
     {
       "id": "esq-v1-3b513984cb21ee14aeed-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1272,
+      "line": 1297,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9796,7 +9796,7 @@
     {
       "id": "esq-v1-f97de65fda22feb8586d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1274,
+      "line": 1299,
       "column": 24,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9806,7 +9806,7 @@
     {
       "id": "esq-v1-c3eb8bfd62ddd4af65ad-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1299,
+      "line": 1324,
       "column": 33,
       "enclosing_item": "decode_page",
       "kind": "result_to_option",
@@ -9816,7 +9816,7 @@
     {
       "id": "esq-v1-7b499a11ba39e5289ab4-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1356,
+      "line": 1381,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9826,7 +9826,7 @@
     {
       "id": "esq-v1-9682f7e161e6a00d2786-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1357,
+      "line": 1382,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9836,7 +9836,7 @@
     {
       "id": "esq-v1-97f58b946df37a7fc762-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1358,
+      "line": 1383,
       "column": 24,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9846,7 +9846,7 @@
     {
       "id": "esq-v1-e501772c7ab0535ea704-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1461,
+      "line": 1491,
       "column": 22,
       "enclosing_item": "decode_gc_leaf_descriptor",
       "kind": "error_conversion",
@@ -9856,7 +9856,7 @@
     {
       "id": "esq-v1-af505078ba65844f6bc9-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1462,
+      "line": 1492,
       "column": 22,
       "enclosing_item": "decode_gc_leaf_descriptor",
       "kind": "error_conversion",
@@ -9866,7 +9866,7 @@
     {
       "id": "esq-v1-16e0797b94b3cb0b451b-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1525,
+      "line": 1556,
       "column": 22,
       "enclosing_item": "decode_gc_internal_descriptor",
       "kind": "error_conversion",
@@ -9876,7 +9876,7 @@
     {
       "id": "esq-v1-ce8580d628977ac40780-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1526,
+      "line": 1557,
       "column": 22,
       "enclosing_item": "decode_gc_internal_descriptor",
       "kind": "error_conversion",
@@ -9886,7 +9886,7 @@
     {
       "id": "esq-v1-b622ffee9afbd97e0268-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1611,
+      "line": 1645,
       "column": 24,
       "enclosing_item": "decode_candidate_delta",
       "kind": "error_conversion",
@@ -9896,7 +9896,7 @@
     {
       "id": "esq-v1-5e8d70d41ee7c1fca58b-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1617,
+      "line": 1651,
       "column": 6,
       "enclosing_item": "decode_candidate_delta",
       "kind": "result_to_option",
@@ -9906,7 +9906,7 @@
     {
       "id": "esq-v1-ec11fc4993531683a1ac-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1834,
+      "line": 1868,
       "column": 21,
       "enclosing_item": "decode_quarantine_manifest_body",
       "kind": "error_conversion",
@@ -9916,7 +9916,7 @@
     {
       "id": "esq-v1-2f40ba51a8085bfa2739-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1888,
+      "line": 1922,
       "column": 15,
       "enclosing_item": "decode_root_retirement_commit",
       "kind": "error_conversion",
@@ -9926,7 +9926,7 @@
     {
       "id": "esq-v1-e08b15abd588dc35fd4e-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1949,
+      "line": 1983,
       "column": 25,
       "enclosing_item": "retirement_journal_records_v1",
       "kind": "result_to_option",
@@ -9936,7 +9936,7 @@
     {
       "id": "esq-v1-04312ac24523a9fcd63c-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1962,
+      "line": 1996,
       "column": 39,
       "enclosing_item": "decode_retirement_journal_record_v1",
       "kind": "result_to_option",
@@ -9946,7 +9946,7 @@
     {
       "id": "esq-v1-c4c90c7b9311fa46cb9b-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 2003,
+      "line": 2037,
       "column": 24,
       "enclosing_item": "decode_retirement_journal_segment_with_key",
       "kind": "error_conversion",
@@ -9956,7 +9956,7 @@
     {
       "id": "esq-v1-fecf775983351342a225-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 2014,
+      "line": 2048,
       "column": 6,
       "enclosing_item": "decode_retirement_journal_segment_with_key",
       "kind": "result_to_option",
@@ -9966,7 +9966,7 @@
     {
       "id": "esq-v1-c390d9f996ec6bae97e0-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 2240,
+      "line": 2277,
       "column": 25,
       "enclosing_item": "physical_inventory_records_v1",
       "kind": "result_to_option",
@@ -9976,7 +9976,7 @@
     {
       "id": "esq-v1-2cee9657909643afc341-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 2345,
+      "line": 2401,
       "column": 10,
       "enclosing_item": "manifest_summary",
       "kind": "panic_macro",
@@ -9986,7 +9986,7 @@
     {
       "id": "esq-v1-293e07485c6815aaa716-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 2363,
+      "line": 2419,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",
@@ -9996,7 +9996,7 @@
     {
       "id": "esq-v1-8d6d39b85fe103b3dcf6-00",
       "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 467,
+      "line": 634,
       "column": 24,
       "enclosing_item": "decode_sweep_proposal",
       "kind": "error_conversion",
@@ -10006,7 +10006,7 @@
     {
       "id": "esq-v1-cac2a5f8853ad56e4c0e-00",
       "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 522,
+      "line": 689,
       "column": 24,
       "enclosing_item": "decode_sweep_receipt",
       "kind": "error_conversion",
@@ -10016,7 +10016,7 @@
     {
       "id": "esq-v1-bda6db3d8f661410e770-00",
       "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 779,
+      "line": 1188,
       "column": 24,
       "enclosing_item": "decode_void_extent_page",
       "kind": "error_conversion",
@@ -10024,59 +10024,9 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-88ed9826e35ede3561d7-00",
-      "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 864,
-      "column": 22,
-      "enclosing_item": "decode_void_directory",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (body , 16) ?) . map_err (| _ | overflow_error (\"Void lower fence length\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-1c1a8de80cc5c8f43d60-00",
-      "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 865,
-      "column": 22,
-      "enclosing_item": "decode_void_directory",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (body , 20) ?) . map_err (| _ | overflow_error (\"Void upper fence length\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-1ae09f865fe93b760cbd-00",
-      "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 871,
-      "column": 24,
-      "enclosing_item": "decode_void_directory",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (body , 72) ?) . map_err (| _ | overflow_error (\"Void directory entries length\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-2c1c95c8ae3c8197aa7b-00",
-      "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 880,
-      "column": 28,
-      "enclosing_item": "decode_void_directory",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (body , cursor) ?) . map_err (| _ | overflow_error (\"Void child lower fence length\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-ef0796340acfed522341-00",
-      "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 881,
-      "column": 28,
-      "enclosing_item": "decode_void_directory",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (body , cursor + 4) ?) . map_err (| _ | overflow_error (\"Void child upper fence length\"))",
-      "review": "typed-format-failure"
-    },
-    {
       "id": "esq-v1-17552d779c522eba4715-00",
       "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 1016,
+      "line": 1358,
       "column": 24,
       "enclosing_item": "decode_void_claim",
       "kind": "error_conversion",
@@ -10086,7 +10036,7 @@
     {
       "id": "esq-v1-331167a3de78ecfdfdc8-00",
       "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 1049,
+      "line": 1375,
       "column": 20,
       "enclosing_item": "decode_void_claim",
       "kind": "error_conversion",
@@ -10096,7 +10046,7 @@
     {
       "id": "esq-v1-b24006f641070e023998-00",
       "file": "aeordb-lib/src/engine/v4/gc_void.rs",
-      "line": 1308,
+      "line": 1660,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",

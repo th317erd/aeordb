@@ -8,6 +8,7 @@ use super::gc::{
 };
 use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
+use super::gc_state::{GcDirectoryRoleV1, GcStateArtifactV1, GcStateDirectoryV1, decode_gc_state_artifact, validate_gc_directory_child};
 use crate::engine::HashAlgorithm;
 
 const MAX_MANIFEST_LENGTH: usize = 1024 * 1024;
@@ -20,30 +21,6 @@ const VOID_CAPABILITY_BITS: &[usize] = &[
   capability_bit::PHYSICAL_INVENTORY_V1 as usize,
   capability_bit::RECEIPT_BACKED_VOID_V1 as usize,
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u16)]
-pub enum VoidDirectoryRoleV1 {
-  FreeExtents = 4,
-  Claims = 5,
-}
-
-impl VoidDirectoryRoleV1 {
-  pub fn from_u16(value: u16) -> Option<Self> {
-    match value {
-      4 => Some(Self::FreeExtents),
-      5 => Some(Self::Claims),
-      _ => None,
-    }
-  }
-
-  pub fn name(self) -> &'static str {
-    match self {
-      Self::FreeExtents => "void-free-extents",
-      Self::Claims => "void-claims",
-    }
-  }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -293,20 +270,33 @@ pub struct VoidExtentPageV1<'a> {
   pub key: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub struct VoidDirectoryV1<'a> {
-  pub role: VoidDirectoryRoleV1,
-  pub database_id: &'a [u8],
-  pub catalog_id: &'a [u8],
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoidExtentRecordV1<'a> {
+  pub offset: u64,
+  pub length: u32,
+  pub origin_sweep_proposal_hash: &'a [u8],
+  pub origin_quarantine_manifest_hash: &'a [u8],
+  pub reclaimed_incarnation_digest: &'a [u8],
+  pub reclaim_commit_sequence: u64,
+  pub void_generation: u64,
+}
+
+#[derive(Debug)]
+pub struct VoidExtentRecordsV1<'a> {
+  rows: std::slice::ChunksExact<'a, u8>,
+  algorithm: HashAlgorithm,
+  previous_end: Option<u64>,
+  failed: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VoidExtentPageWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8; 16],
+  pub catalog_id: &'a [u8; 16],
   pub generation: u64,
-  pub child_generation: u64,
   pub page_id: u64,
-  pub live_count: u64,
-  pub logical_bytes: u64,
-  pub lower_fence: &'a [u8],
-  pub upper_fence: &'a [u8],
-  pub child_hash: &'a [u8],
-  pub key: Vec<u8>,
+  pub extents: &'a [VoidExtentRecordV1<'a>],
 }
 
 #[derive(Debug, Clone)]
@@ -320,7 +310,40 @@ pub struct VoidCatalogManifestV1<'a> {
   pub free_bytes: u64,
   pub claim_count: u64,
   pub claimed_bytes: u64,
+  pub next_page_id: u64,
+  pub previous_control_sequence: u64,
   pub key: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VoidCatalogManifestWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8; 16],
+  pub generation: u64,
+  pub published_at_ms: i64,
+  pub free_root: Option<&'a [u8]>,
+  pub claim_root: Option<&'a [u8]>,
+  pub next_page_id: u64,
+  pub free_count: u64,
+  pub free_bytes: u64,
+  pub claim_count: u64,
+  pub claimed_bytes: u64,
+  pub previous_control_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoidClaimExtentV1<'a> {
+  pub offset: u64,
+  pub length: u32,
+  pub origin_sweep_proposal_hash: &'a [u8],
+}
+
+#[derive(Debug)]
+pub struct VoidClaimExtentsV1<'a> {
+  rows: std::slice::ChunksExact<'a, u8>,
+  algorithm: HashAlgorithm,
+  previous_end: Option<u64>,
+  failed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +352,9 @@ pub struct VoidClaimV1<'a> {
   pub database_id: &'a [u8],
   pub claim_id: &'a [u8],
   pub generation: u64,
+  pub created_at_ms: i64,
+  pub requesting_boot_id: &'a [u8],
+  pub requesting_task_or_batch_id: &'a [u8],
   pub source_manifest_hash: &'a [u8],
   pub extent_count: u32,
   pub total_bytes: u64,
@@ -337,11 +363,25 @@ pub struct VoidClaimV1<'a> {
   pub key: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct VoidClaimWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8; 16],
+  pub claim_id: &'a [u8; 16],
+  pub generation: u64,
+  pub created_at_ms: i64,
+  pub requesting_boot_id: &'a [u8; 16],
+  pub requesting_task_or_batch_id: &'a [u8; 16],
+  pub source_manifest_hash: &'a [u8],
+  pub extents: &'a [VoidClaimExtentV1<'a>],
+}
+
 #[derive(Debug, Clone)]
 pub struct VoidClaimSettlementV1<'a> {
   pub database_id: &'a [u8],
   pub claim_id: &'a [u8],
   pub generation: u64,
+  pub settled_at_ms: i64,
   pub recovered: bool,
   pub outcome: VoidClaimSettlementOutcomeV1,
   pub source_manifest_hash: &'a [u8],
@@ -350,7 +390,126 @@ pub struct VoidClaimSettlementV1<'a> {
   pub unused_count: u32,
   pub used_bytes: u64,
   pub returned_bytes: u64,
+  pub evidence_digest: &'a [u8],
   pub key: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VoidClaimSettlementWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: &'a [u8; 16],
+  pub claim_id: &'a [u8; 16],
+  pub generation: u64,
+  pub outcome: VoidClaimSettlementOutcomeV1,
+  pub settled_at_ms: i64,
+  pub source_manifest_hash: &'a [u8],
+  pub result_manifest_hash: &'a [u8],
+  pub used_count: u32,
+  pub unused_count: u32,
+  pub used_bytes: u64,
+  pub returned_bytes: u64,
+  pub evidence_digest: &'a [u8],
+}
+
+impl<'a> VoidExtentPageV1<'a> {
+  pub fn extent_records(&self) -> FormatResult<VoidExtentRecordsV1<'a>> {
+    let row_length = 32 + 3 * self.hash_algorithm.hash_length();
+    let maximum_records = (MAX_PAGE_LENGTH.saturating_sub(80)) / row_length;
+    if self.record_count == 0
+      || self.record_count as usize > maximum_records
+      || (self.record_count as usize).checked_mul(row_length) != Some(self.records.len())
+    {
+      return Err(closure_error("void_extent_records", "Void extent records do not match their declared shape"));
+    }
+    Ok(VoidExtentRecordsV1 {
+      rows: self.records.chunks_exact(row_length),
+      algorithm: self.hash_algorithm,
+      previous_end: None,
+      failed: false,
+    })
+  }
+}
+
+impl<'a> Iterator for VoidExtentRecordsV1<'a> {
+  type Item = FormatResult<VoidExtentRecordV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.failed {
+      return None;
+    }
+    let row = self.rows.next()?;
+    let extent = match decode_void_extent_record_v1(row, self.algorithm) {
+      Ok(extent) => extent,
+      Err(error) => {
+        self.failed = true;
+        return Some(Err(error));
+      }
+    };
+    if self.previous_end.is_some_and(|end| end > extent.offset) {
+      self.failed = true;
+      return Some(Err(order_error("void_extent_page_order", "Void extents overlap or are out of order")));
+    }
+    self.previous_end = extent.offset.checked_add(u64::from(extent.length));
+    Some(Ok(extent))
+  }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    if self.failed {
+      (0, Some(0))
+    } else {
+      self.rows.size_hint()
+    }
+  }
+}
+
+impl<'a> VoidClaimV1<'a> {
+  pub fn extent_records(&self) -> FormatResult<VoidClaimExtentsV1<'a>> {
+    let row_length = 16 + self.hash_algorithm.hash_length();
+    if self.extent_count == 0
+      || self.extent_count as usize > MAX_CANDIDATES
+      || (self.extent_count as usize).checked_mul(row_length) != Some(self.extents.len())
+    {
+      return Err(closure_error("void_claim_records", "Void claim extents do not match their declared shape"));
+    }
+    Ok(VoidClaimExtentsV1 {
+      rows: self.extents.chunks_exact(row_length),
+      algorithm: self.hash_algorithm,
+      previous_end: None,
+      failed: false,
+    })
+  }
+}
+
+impl<'a> Iterator for VoidClaimExtentsV1<'a> {
+  type Item = FormatResult<VoidClaimExtentV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.failed {
+      return None;
+    }
+    let row = self.rows.next()?;
+    let extent = match decode_void_claim_extent_v1(row, self.algorithm) {
+      Ok(extent) => extent,
+      Err(error) => {
+        self.failed = true;
+        return Some(Err(error));
+      }
+    };
+    if self.previous_end.is_some_and(|end| end > extent.offset) {
+      self.failed = true;
+      return Some(Err(order_error("void_claim_extent", "Void claim extents overlap or are out of order")));
+    }
+    self.previous_end = extent.offset.checked_add(u64::from(extent.length));
+    Some(Ok(extent))
+  }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    if self.failed {
+      (0, Some(0))
+    } else {
+      self.rows.size_hint()
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -358,7 +517,7 @@ pub enum SweepVoidArtifactV1<'a> {
   SweepProposal(SweepProposalV1<'a>),
   SweepReceipt(SweepReceiptV1<'a>),
   VoidExtentPage(VoidExtentPageV1<'a>),
-  VoidDirectory(VoidDirectoryV1<'a>),
+  VoidDirectory(GcStateDirectoryV1<'a>),
   VoidCatalog(VoidCatalogManifestV1<'a>),
   VoidClaim(VoidClaimV1<'a>),
   VoidClaimSettlement(VoidClaimSettlementV1<'a>),
@@ -389,7 +548,7 @@ impl SweepVoidArtifactV1<'_> {
         value.failed_count
       ),
       Self::VoidExtentPage(value) => format!("gc:page:void-free-extents:records={}", value.record_count),
-      Self::VoidDirectory(value) => format!("gc:directory:{}:records={}", value.role.name(), value.live_count),
+      Self::VoidDirectory(value) => format!("gc:directory:{}:records={}", value.role.directory_name(), value.live_count),
       Self::VoidCatalog(value) => format!(
         "gc:manifest:void-catalog:{}:free={}:claims={}:generation={}",
         if value.free_count == 0 && value.claim_count == 0 { "empty" } else { "populated" },
@@ -428,7 +587,15 @@ pub fn decode_sweep_void_artifact(bytes: &[u8], algorithm: HashAlgorithm) -> For
       decode_sweep_receipt(envelope, algorithm, key).map(SweepVoidArtifactV1::SweepReceipt)
     }
     GcArtifactKindV1::VoidExtentPage => decode_void_extent_page(envelope, algorithm, key).map(SweepVoidArtifactV1::VoidExtentPage),
-    GcArtifactKindV1::GcArtifactDirectoryNode => decode_void_directory(envelope, algorithm, key).map(SweepVoidArtifactV1::VoidDirectory),
+    GcArtifactKindV1::GcArtifactDirectoryNode => {
+      let GcStateArtifactV1::Directory(directory) = decode_gc_state_artifact(bytes, algorithm)? else {
+        return Err(kind_error("void_directory_kind", "shared GC directory decoder returned another artifact kind"));
+      };
+      if !matches!(directory.role, GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims) {
+        return Err(kind_error("void_directory_role", "artifact directory role is not a Void role"));
+      }
+      Ok(SweepVoidArtifactV1::VoidDirectory(directory))
+    }
     GcArtifactKindV1::VoidCatalogManifest => decode_void_catalog(envelope, algorithm, key).map(SweepVoidArtifactV1::VoidCatalog),
     GcArtifactKindV1::VoidClaim => decode_void_claim(envelope, bytes.len(), algorithm, key).map(SweepVoidArtifactV1::VoidClaim),
     GcArtifactKindV1::VoidClaimSettlementReceipt => {
@@ -744,6 +911,248 @@ pub fn encode_sweep_receipt_v1(request: &SweepReceiptWriteV1<'_>) -> FormatResul
   Ok(encoded)
 }
 
+pub fn encode_void_extent_page_v1(request: &VoidExtentPageWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  if request.database_id.iter().all(|byte| *byte == 0)
+    || request.catalog_id.iter().all(|byte| *byte == 0)
+    || request.generation == 0
+    || request.page_id == 0
+    || request.extents.is_empty()
+  {
+    return Err(identity_error("void_extent_page_write", "Void extent page identity, generation, page ID, or count is invalid"));
+  }
+  let hash_width = request.hash_algorithm.hash_length();
+  let row_length = 32 + 3 * hash_width;
+  let records_length = checked_mul(request.extents.len(), row_length, "Void extent page records")?;
+  let body_length = checked_add(80, records_length, "Void extent page body")?;
+  ensure_cap("void_extent_page_write", body_length, MAX_PAGE_LENGTH)?;
+  let mut records = vec![0u8; records_length];
+  let mut total_bytes = 0u64;
+  let mut previous_end = None;
+  for (index, extent) in request.extents.iter().enumerate() {
+    let start = index * row_length;
+    encode_void_extent_record_into(&mut records[start..start + row_length], extent, request.hash_algorithm)?;
+    let decoded = decode_void_extent_record_v1(&records[start..start + row_length], request.hash_algorithm)?;
+    if previous_end.is_some_and(|end| end > decoded.offset) {
+      return Err(order_error("void_extent_page_order", "Void extents overlap or are out of order"));
+    }
+    previous_end = decoded.offset.checked_add(u64::from(decoded.length));
+    total_bytes = total_bytes.checked_add(u64::from(decoded.length)).ok_or_else(|| overflow_error("Void extent byte total"))?;
+  }
+  let lower_offset = request.extents[0].offset;
+  let upper_offset = request.extents[request.extents.len() - 1].offset;
+  let count = usize_to_u32(request.extents.len(), "Void extent page count")?;
+  let mut body = vec![0u8; body_length];
+  put_u16(&mut body, 4, 1);
+  put_u16(&mut body, 6, GcDirectoryRoleV1::FreeExtents as u16);
+  put_u32(&mut body, 8, 8);
+  put_u32(&mut body, 12, 8);
+  put_u32(&mut body, 16, count);
+  put_u32(&mut body, 20, count);
+  put_u64(&mut body, 24, usize_to_u64(records_length));
+  put_u64(&mut body, 32, total_bytes);
+  put_u64(&mut body, 64, lower_offset);
+  put_u64(&mut body, 72, upper_offset);
+  body[80..].copy_from_slice(&records);
+  let mut identity = Vec::with_capacity(42);
+  identity.extend_from_slice(request.database_id);
+  identity.extend_from_slice(request.catalog_id);
+  identity.extend_from_slice(&(GcDirectoryRoleV1::FreeExtents as u16).to_le_bytes());
+  identity.extend_from_slice(&request.page_id.to_le_bytes());
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::VoidExtentPage,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let SweepVoidArtifactV1::VoidExtentPage(decoded) = decode_sweep_void_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("void_extent_page_write", "encoded Void extent page decoded as another artifact kind"));
+  };
+  if decoded.key != encoded.key || decoded.record_count != count || decoded.total_bytes != total_bytes {
+    return Err(closure_error("void_extent_page_write", "encoded Void extent page disagrees with its request"));
+  }
+  Ok(encoded)
+}
+
+fn encode_void_extent_record_into(target: &mut [u8], extent: &VoidExtentRecordV1<'_>, algorithm: HashAlgorithm) -> FormatResult<()> {
+  let hash_width = algorithm.hash_length();
+  if target.len() != 32 + 3 * hash_width
+    || extent.origin_sweep_proposal_hash.len() != hash_width
+    || extent.origin_quarantine_manifest_hash.len() != hash_width
+    || extent.reclaimed_incarnation_digest.len() != hash_width
+  {
+    return Err(closure_error("void_extent_write", "Void extent hashes or destination have the wrong width"));
+  }
+  put_u64(target, 0, extent.offset);
+  put_u32(target, 8, extent.length);
+  target[16..16 + hash_width].copy_from_slice(extent.origin_sweep_proposal_hash);
+  target[16 + hash_width..16 + 2 * hash_width].copy_from_slice(extent.origin_quarantine_manifest_hash);
+  target[16 + 2 * hash_width..16 + 3 * hash_width].copy_from_slice(extent.reclaimed_incarnation_digest);
+  put_u64(target, 16 + 3 * hash_width, extent.reclaim_commit_sequence);
+  put_u64(target, 24 + 3 * hash_width, extent.void_generation);
+  decode_void_extent_record_v1(target, algorithm).map(|_| ())
+}
+
+pub fn encode_void_catalog_manifest_v1(request: &VoidCatalogManifestWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  let root_is_valid = |root: Option<&[u8]>, count: u64, bytes: u64| match root {
+    Some(root) => root.len() == hash_width && !all_zero(root) && count > 0 && bytes > 0,
+    None => count == 0 && bytes == 0,
+  };
+  if request.database_id.iter().all(|byte| *byte == 0)
+    || request.generation == 0
+    || request.published_at_ms <= 0
+    || request.next_page_id == 0
+    || !root_is_valid(request.free_root, request.free_count, request.free_bytes)
+    || !root_is_valid(request.claim_root, request.claim_count, request.claimed_bytes)
+    || (request.generation == 1) != (request.previous_control_sequence == 0)
+  {
+    return Err(closure_error("void_catalog_write", "Void catalog identity, roots, counts, or prior control are invalid"));
+  }
+  let mut body = vec![0u8; 92 + 2 * hash_width];
+  write_exact_capabilities(&mut body[4..36]);
+  put_i64(&mut body, 36, request.published_at_ms);
+  if let Some(root) = request.free_root {
+    body[44..44 + hash_width].copy_from_slice(root);
+  }
+  if let Some(root) = request.claim_root {
+    body[44 + hash_width..44 + 2 * hash_width].copy_from_slice(root);
+  }
+  put_u64(&mut body, 44 + 2 * hash_width, request.next_page_id);
+  put_u64(&mut body, 52 + 2 * hash_width, request.free_count);
+  put_u64(&mut body, 60 + 2 * hash_width, request.free_bytes);
+  put_u64(&mut body, 68 + 2 * hash_width, request.claim_count);
+  put_u64(&mut body, 76 + 2 * hash_width, request.claimed_bytes);
+  put_u64(&mut body, 84 + 2 * hash_width, request.previous_control_sequence);
+  let mut identity = Vec::with_capacity(24);
+  identity.extend_from_slice(request.database_id);
+  identity.extend_from_slice(&request.generation.to_le_bytes());
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogManifest,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let SweepVoidArtifactV1::VoidCatalog(decoded) = decode_sweep_void_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("void_catalog_write", "encoded Void catalog decoded as another artifact kind"));
+  };
+  if decoded.key != encoded.key || decoded.next_page_id != request.next_page_id {
+    return Err(closure_error("void_catalog_write", "encoded Void catalog disagrees with its request"));
+  }
+  Ok(encoded)
+}
+
+pub fn encode_void_claim_v1(request: &VoidClaimWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.database_id.iter().all(|byte| *byte == 0)
+    || request.claim_id.iter().all(|byte| *byte == 0)
+    || request.requesting_boot_id.iter().all(|byte| *byte == 0)
+    || request.requesting_task_or_batch_id.iter().all(|byte| *byte == 0)
+    || request.generation == 0
+    || request.created_at_ms <= 0
+    || request.source_manifest_hash.len() != hash_width
+    || all_zero(request.source_manifest_hash)
+    || request.extents.is_empty()
+    || request.extents.len() > MAX_CANDIDATES
+  {
+    return Err(identity_error("void_claim_write", "Void claim identity, requester, source, time, generation, or count is invalid"));
+  }
+  let row_length = 16 + hash_width;
+  let records_length = checked_mul(request.extents.len(), row_length, "Void claim extents")?;
+  let body_length = checked_add(56 + hash_width, records_length, "Void claim body")?;
+  ensure_cap("void_claim_write", body_length, MAX_SWEEP_LENGTH)?;
+  let mut records = vec![0u8; records_length];
+  let mut previous_end = None;
+  for (index, extent) in request.extents.iter().enumerate() {
+    let start = index * row_length;
+    let row = &mut records[start..start + row_length];
+    if extent.origin_sweep_proposal_hash.len() != hash_width {
+      return Err(closure_error("void_claim_extent_write", "Void claim proposal hash has the wrong width"));
+    }
+    put_u64(row, 0, extent.offset);
+    put_u32(row, 8, extent.length);
+    row[16..].copy_from_slice(extent.origin_sweep_proposal_hash);
+    let decoded = decode_void_claim_extent_v1(row, request.hash_algorithm)?;
+    if previous_end.is_some_and(|end| end > decoded.offset) {
+      return Err(order_error("void_claim_extent", "Void claim extents overlap or are out of order"));
+    }
+    previous_end = decoded.offset.checked_add(u64::from(decoded.length));
+  }
+  let count = usize_to_u32(request.extents.len(), "Void claim count")?;
+  let mut body = vec![0u8; body_length];
+  put_u16(&mut body, 4, 1);
+  put_i64(&mut body, 8, request.created_at_ms);
+  body[16..32].copy_from_slice(request.requesting_boot_id);
+  body[32..48].copy_from_slice(request.requesting_task_or_batch_id);
+  body[48..48 + hash_width].copy_from_slice(request.source_manifest_hash);
+  put_u32(&mut body, 48 + hash_width, count);
+  put_u32(&mut body, 52 + hash_width, usize_to_u32(records_length, "Void claim extents length")?);
+  body[56 + hash_width..].copy_from_slice(&records);
+  let mut identity = [0u8; 32];
+  identity[..16].copy_from_slice(request.database_id);
+  identity[16..].copy_from_slice(request.claim_id);
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::VoidClaim,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let SweepVoidArtifactV1::VoidClaim(decoded) = decode_sweep_void_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("void_claim_write", "encoded Void claim decoded as another artifact kind"));
+  };
+  if decoded.key != encoded.key || decoded.extent_count != count {
+    return Err(closure_error("void_claim_write", "encoded Void claim disagrees with its request"));
+  }
+  Ok(encoded)
+}
+
+pub fn encode_void_claim_settlement_v1(request: &VoidClaimSettlementWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.database_id.iter().all(|byte| *byte == 0)
+    || request.claim_id.iter().all(|byte| *byte == 0)
+    || request.generation == 0
+    || request.settled_at_ms <= 0
+    || request.source_manifest_hash.len() != hash_width
+    || request.result_manifest_hash.len() != hash_width
+    || request.evidence_digest.len() != hash_width
+    || all_zero(request.source_manifest_hash)
+    || all_zero(request.result_manifest_hash)
+    || all_zero(request.evidence_digest)
+  {
+    return Err(identity_error("void_settlement_write", "Void settlement identity, time, generation, or hashes are invalid"));
+  }
+  let mut body = vec![0u8; 40 + 3 * hash_width];
+  put_u32(&mut body, 0, u32::from(request.outcome == VoidClaimSettlementOutcomeV1::Recovered));
+  put_u16(&mut body, 4, request.outcome as u16);
+  put_i64(&mut body, 8, request.settled_at_ms);
+  body[16..16 + hash_width].copy_from_slice(request.source_manifest_hash);
+  body[16 + hash_width..16 + 2 * hash_width].copy_from_slice(request.result_manifest_hash);
+  put_u32(&mut body, 16 + 2 * hash_width, request.used_count);
+  put_u32(&mut body, 20 + 2 * hash_width, request.unused_count);
+  put_u64(&mut body, 24 + 2 * hash_width, request.used_bytes);
+  put_u64(&mut body, 32 + 2 * hash_width, request.returned_bytes);
+  body[40 + 2 * hash_width..].copy_from_slice(request.evidence_digest);
+  let mut identity = [0u8; 32];
+  identity[..16].copy_from_slice(request.database_id);
+  identity[16..].copy_from_slice(request.claim_id);
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::VoidClaimSettlementReceipt,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let SweepVoidArtifactV1::VoidClaimSettlement(decoded) = decode_sweep_void_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("void_settlement_write", "encoded Void settlement decoded as another artifact kind"));
+  };
+  if decoded.key != encoded.key || decoded.outcome != request.outcome {
+    return Err(closure_error("void_settlement_write", "encoded Void settlement disagrees with its request"));
+  }
+  Ok(encoded)
+}
+
 fn decode_void_extent_page(
   artifact: GcArtifactEnvelopeV1<'_>,
   algorithm: HashAlgorithm,
@@ -759,13 +1168,13 @@ fn decode_void_extent_page(
   let page_id = u64_at(artifact.identity, 34)?;
   if all_zero(database_id)
     || all_zero(catalog_id)
-    || u16_at(artifact.identity, 32)? != VoidDirectoryRoleV1::FreeExtents as u16
+    || u16_at(artifact.identity, 32)? != GcDirectoryRoleV1::FreeExtents as u16
     || page_id == 0
   {
     return Err(identity_error("void_extent_page_identity", "Void extent page identity is invalid"));
   }
   let body = artifact.body;
-  if u32_at(body, 0)? != 0 || u16_at(body, 6)? != VoidDirectoryRoleV1::FreeExtents as u16 || body[40..64].iter().any(|byte| *byte != 0) {
+  if u32_at(body, 0)? != 0 || u16_at(body, 6)? != GcDirectoryRoleV1::FreeExtents as u16 || body[40..64].iter().any(|byte| *byte != 0) {
     return Err(reserved_error("void_extent_page_reserved", "Void extent page flags, role, or reserve is invalid"));
   }
   if u16_at(body, 4)? != 1 {
@@ -788,7 +1197,7 @@ fn decode_void_extent_page(
   let mut first = None;
   let mut last = None;
   for row in records.chunks_exact(row_length) {
-    let extent = decode_void_extent(row, algorithm)?;
+    let extent = decode_void_extent_record_v1(row, algorithm)?;
     if previous_end.is_some_and(|end| end > extent.offset) {
       return Err(order_error("void_extent_page_order", "Void extents overlap or are out of order"));
     }
@@ -815,13 +1224,7 @@ fn decode_void_extent_page(
   })
 }
 
-struct VoidExtentView<'a> {
-  offset: u64,
-  length: u32,
-  proposal_hash: &'a [u8],
-}
-
-fn decode_void_extent(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<VoidExtentView<'_>> {
+pub fn decode_void_extent_record_v1(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<VoidExtentRecordV1<'_>> {
   let hash_width = algorithm.hash_length();
   if row.len() != 32 + 3 * hash_width {
     return Err(trailing_error("void_extent_length", "Void extent row has wrong fixed length"));
@@ -840,93 +1243,14 @@ fn decode_void_extent(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<Void
   {
     return Err(identity_error("void_extent_fields", "Void extent identity, range, or publication sequence is invalid"));
   }
-  Ok(VoidExtentView { offset, length, proposal_hash: &row[16..16 + hash_width] })
-}
-
-fn decode_void_directory(artifact: GcArtifactEnvelopeV1<'_>, algorithm: HashAlgorithm, key: Vec<u8>) -> FormatResult<VoidDirectoryV1<'_>> {
-  if artifact.identity.len() != 34 || artifact.body.len() < 80 {
-    return Err(closure_error("void_directory_shape", "Void directory identity or body shape is invalid"));
-  }
-  let role = VoidDirectoryRoleV1::from_u16(u16_at(artifact.identity, 32)?)
-    .ok_or_else(|| kind_error("void_directory_role", "artifact directory role is not a Void role"))?;
-  let database_id = &artifact.identity[..16];
-  let catalog_id = &artifact.identity[16..32];
-  if all_zero(database_id) || all_zero(catalog_id) {
-    return Err(identity_error("void_directory_identity", "Void directory database/catalog IDs must be nonzero"));
-  }
-  let body = artifact.body;
-  if u16_at(body, 0)? != 0 || u32_at(body, 8)? != 0 || u32_at(body, 12)? != 0 || u32_at(body, 76)? != 0 {
-    return Err(reserved_error("void_directory_reserved", "Void directory reserve fields must be zero"));
-  }
-  if u16_at(body, 2)? != role as u16 || u32_at(body, 4)? != 1 {
-    return Err(kind_error("void_directory_codec", "Void directory role/codec does not match identity"));
-  }
-  let lower_length = usize::try_from(u32_at(body, 16)?).map_err(|_| overflow_error("Void lower fence length"))?;
-  let upper_length = usize::try_from(u32_at(body, 20)?).map_err(|_| overflow_error("Void upper fence length"))?;
-  if lower_length == 0 || upper_length == 0 {
-    return Err(closure_error("void_directory_fences", "Void directory fences must be nonempty"));
-  }
-  let hash_width = algorithm.hash_length();
-  let descriptor_fixed = 72 + hash_width;
-  let entries_length = usize::try_from(u32_at(body, 72)?).map_err(|_| overflow_error("Void directory entries length"))?;
-  if entries_length != checked_add(descriptor_fixed, lower_length + upper_length, "Void directory descriptor")?
-    || checked_add(80 + lower_length + upper_length, entries_length, "Void directory body")? != body.len()
-  {
-    return Err(trailing_error("void_directory_length", "Void directory lengths do not close"));
-  }
-  let lower_fence = &body[80..80 + lower_length];
-  let upper_fence = &body[80 + lower_length..80 + lower_length + upper_length];
-  let cursor = 80 + lower_length + upper_length;
-  let child_lower_length = usize::try_from(u32_at(body, cursor)?).map_err(|_| overflow_error("Void child lower fence length"))?;
-  let child_upper_length = usize::try_from(u32_at(body, cursor + 4)?).map_err(|_| overflow_error("Void child upper fence length"))?;
-  if child_lower_length != lower_length || child_upper_length != upper_length {
-    return Err(closure_error("void_directory_descriptor_fences", "Void child fence lengths disagree"));
-  }
-  let page_id = u64_at(body, cursor + 8)?;
-  let child_hash = &body[cursor + 16..cursor + 16 + hash_width];
-  let fields = cursor + 16 + hash_width;
-  let child_generation = u64_at(body, fields)?;
-  let live_count = u64_at(body, fields + 8)?;
-  let logical_bytes = u64_at(body, fields + 24)?;
-  let key_start = cursor + descriptor_fixed;
-  let fences_ordered = match role {
-    VoidDirectoryRoleV1::FreeExtents if lower_length == 8 && upper_length == 8 => u64_at(lower_fence, 0)? <= u64_at(upper_fence, 0)?,
-    VoidDirectoryRoleV1::Claims if lower_length == 16 && upper_length == 16 => lower_fence <= upper_fence,
-    _ => false,
-  };
-  let expected_page_count = u64::from(role == VoidDirectoryRoleV1::FreeExtents);
-  if all_zero(child_hash)
-    || child_generation == 0
-    || child_generation > artifact.generation
-    || live_count == 0
-    || logical_bytes == 0
-    || !fences_ordered
-    || (role == VoidDirectoryRoleV1::FreeExtents) != (page_id != 0)
-    || body[fields + 32..fields + 56].iter().any(|byte| *byte != 0)
-    || body[key_start..key_start + lower_length] != *lower_fence
-    || body[key_start + lower_length..] != *upper_fence
-    || u64_at(body, 24)? != live_count
-    || u64_at(body, 32)? != 0
-    || u64_at(body, 40)? != expected_page_count
-    || u64_at(body, 48)? != logical_bytes
-    || u64_at(body, 56)? != page_id
-    || u64_at(body, 64)? != page_id
-  {
-    return Err(closure_error("void_directory_descriptor", "Void directory aggregate, descriptor, or fences are invalid"));
-  }
-  Ok(VoidDirectoryV1 {
-    role,
-    database_id,
-    catalog_id,
-    generation: artifact.generation,
-    child_generation,
-    page_id,
-    live_count,
-    logical_bytes,
-    lower_fence,
-    upper_fence,
-    child_hash,
-    key,
+  Ok(VoidExtentRecordV1 {
+    offset,
+    length,
+    origin_sweep_proposal_hash: &row[16..16 + hash_width],
+    origin_quarantine_manifest_hash: &row[16 + hash_width..16 + 2 * hash_width],
+    reclaimed_incarnation_digest: &row[16 + 2 * hash_width..16 + 3 * hash_width],
+    reclaim_commit_sequence: u64_at(row, 16 + 3 * hash_width)?,
+    void_generation: u64_at(row, 24 + 3 * hash_width)?,
   })
 }
 
@@ -978,8 +1302,26 @@ fn decode_void_catalog(
     free_bytes,
     claim_count,
     claimed_bytes,
+    next_page_id,
+    previous_control_sequence,
     key,
   })
+}
+
+pub fn decode_void_claim_extent_v1(row: &[u8], algorithm: HashAlgorithm) -> FormatResult<VoidClaimExtentV1<'_>> {
+  let hash_width = algorithm.hash_length();
+  if row.len() != 16 + hash_width {
+    return Err(trailing_error("void_claim_extent_length", "Void claim extent row has wrong fixed length"));
+  }
+  let offset = u64_at(row, 0)?;
+  let length = u32_at(row, 8)?;
+  if u32_at(row, 12)? != 0 {
+    return Err(reserved_error("void_claim_extent_reserved", "Void claim extent reserve is nonzero"));
+  }
+  if offset < 2_048 || length == 0 || offset.checked_add(u64::from(length)).is_none() || all_zero(&row[16..]) {
+    return Err(identity_error("void_claim_extent", "Void claim extent range or origin is invalid"));
+  }
+  Ok(VoidClaimExtentV1 { offset, length, origin_sweep_proposal_hash: &row[16..] })
 }
 
 fn decode_void_claim(
@@ -1018,37 +1360,28 @@ fn decode_void_claim(
     return Err(trailing_error("void_claim_length", "Void claim extent lengths do not close"));
   }
   let extents = &body[56 + hash_width..];
-  let mut total_bytes = 0u64;
-  let mut previous_end = None;
-  for record in extents.chunks_exact(record_length) {
-    let offset = u64_at(record, 0)?;
-    let length = u32_at(record, 8)?;
-    if u32_at(record, 12)? != 0 {
-      return Err(reserved_error("void_claim_extent_reserved", "Void claim extent reserve is nonzero"));
-    }
-    if offset < 2_048
-      || length == 0
-      || all_zero(&record[16..])
-      || offset.checked_add(u64::from(length)).is_none()
-      || previous_end.is_some_and(|end| end > offset)
-    {
-      return Err(order_error("void_claim_extent", "Void claim extents are invalid, overlapping, or out of order"));
-    }
-    previous_end = Some(offset + u64::from(length));
-    total_bytes = total_bytes.checked_add(u64::from(length)).ok_or_else(|| overflow_error("Void claim byte total"))?;
-  }
-  Ok(VoidClaimV1 {
+  let mut claim = VoidClaimV1 {
     hash_algorithm: algorithm,
     database_id,
     claim_id,
     generation: artifact.generation,
+    created_at_ms: i64_at(body, 8)?,
+    requesting_boot_id: &body[16..32],
+    requesting_task_or_batch_id: &body[32..48],
     source_manifest_hash: &body[48..48 + hash_width],
     extent_count: count,
-    total_bytes,
+    total_bytes: 0,
     extents,
     stored_length: u64::try_from(complete_length).map_err(|_| overflow_error("Void claim stored length"))?,
     key,
-  })
+  };
+  let mut total_bytes = 0u64;
+  for extent in claim.extent_records()? {
+    let extent = extent?;
+    total_bytes = total_bytes.checked_add(u64::from(extent.length)).ok_or_else(|| overflow_error("Void claim byte total"))?;
+  }
+  claim.total_bytes = total_bytes;
+  Ok(claim)
 }
 
 fn decode_void_claim_settlement(
@@ -1097,6 +1430,7 @@ fn decode_void_claim_settlement(
     database_id,
     claim_id,
     generation: artifact.generation,
+    settled_at_ms: i64_at(body, 8)?,
     recovered,
     outcome,
     source_manifest_hash,
@@ -1105,6 +1439,7 @@ fn decode_void_claim_settlement(
     unused_count,
     used_bytes,
     returned_bytes,
+    evidence_digest: &body[40 + 2 * hash_width..],
     key,
   })
 }
@@ -1113,30 +1448,40 @@ pub fn validate_void_directory_child(directory: &SweepVoidArtifactV1<'_>, child:
   let SweepVoidArtifactV1::VoidDirectory(directory) = directory else {
     return Err(kind_error("void_directory_closure", "parent is not a Void directory"));
   };
-  let valid = match (directory.role, child) {
-    (VoidDirectoryRoleV1::FreeExtents, SweepVoidArtifactV1::VoidExtentPage(page)) => {
-      directory.database_id == page.database_id
+  if let SweepVoidArtifactV1::VoidDirectory(child) = child {
+    return validate_gc_directory_child(directory, child);
+  }
+  let descriptor = directory.entries.iter().find(|entry| entry.child_hash == child.key());
+  let valid = descriptor.is_some_and(|descriptor| match (directory.role, child) {
+    (GcDirectoryRoleV1::FreeExtents, SweepVoidArtifactV1::VoidExtentPage(page)) => {
+      directory.level == 0
+        && directory.database_id == page.database_id
         && directory.catalog_id == page.catalog_id
-        && directory.child_generation == page.generation
-        && directory.page_id == page.page_id
-        && directory.live_count == u64::from(page.record_count)
-        && directory.logical_bytes == page.total_bytes
-        && directory.lower_fence == page.lower_offset.to_le_bytes()
-        && directory.upper_fence == page.upper_offset.to_le_bytes()
-        && directory.child_hash == page.key
+        && descriptor.child_generation == page.generation
+        && descriptor.minimum_page_id == page.page_id
+        && descriptor.maximum_page_id == page.page_id
+        && descriptor.live_count == u64::from(page.record_count)
+        && descriptor.tombstone_count == 0
+        && descriptor.page_count == 1
+        && descriptor.logical_bytes == page.total_bytes
+        && descriptor.lower_fence == page.lower_offset.to_le_bytes()
+        && descriptor.upper_fence == page.upper_offset.to_le_bytes()
     }
-    (VoidDirectoryRoleV1::Claims, SweepVoidArtifactV1::VoidClaim(claim)) => {
-      directory.database_id == claim.database_id
-        && directory.child_generation == claim.generation
-        && directory.page_id == 0
-        && directory.live_count == 1
-        && directory.logical_bytes == claim.stored_length
-        && directory.lower_fence == claim.claim_id
-        && directory.upper_fence == claim.claim_id
-        && directory.child_hash == claim.key
+    (GcDirectoryRoleV1::Claims, SweepVoidArtifactV1::VoidClaim(claim)) => {
+      directory.level == 0
+        && directory.database_id == claim.database_id
+        && descriptor.child_generation == claim.generation
+        && descriptor.minimum_page_id == 0
+        && descriptor.maximum_page_id == 0
+        && descriptor.live_count == 1
+        && descriptor.tombstone_count == 0
+        && descriptor.page_count == 0
+        && descriptor.logical_bytes == claim.stored_length
+        && descriptor.lower_fence == claim.claim_id
+        && descriptor.upper_fence == claim.claim_id
     }
     _ => false,
-  };
+  });
   if !valid {
     return Err(closure_error("void_directory_closure", "Void directory descriptor does not match its child"));
   }
@@ -1148,14 +1493,16 @@ pub fn validate_void_manifest_root(manifest: &SweepVoidArtifactV1<'_>, directory
     return Err(kind_error("void_manifest_root_closure", "closure requires a Void catalog and directory"));
   };
   let valid = manifest.database_id == directory.database_id
-    && manifest.generation == directory.child_generation
+    && directory.generation >= manifest.generation
+    && (directory.level != 0 || directory.entries.iter().all(|entry| entry.child_generation == manifest.generation))
     && match directory.role {
-      VoidDirectoryRoleV1::FreeExtents => {
+      GcDirectoryRoleV1::FreeExtents => {
         manifest.free_root == directory.key && manifest.free_count == directory.live_count && manifest.free_bytes == directory.logical_bytes
       }
-      VoidDirectoryRoleV1::Claims => {
+      GcDirectoryRoleV1::Claims => {
         manifest.claim_root == directory.key && manifest.claim_count == directory.live_count && manifest.claimed_bytes > 0
       }
+      _ => false,
     };
   if !valid {
     return Err(closure_error("void_manifest_root_closure", "Void catalog root/count/bytes do not match directory"));
@@ -1173,23 +1520,21 @@ pub fn validate_void_claim_source(
   else {
     return Err(kind_error("void_claim_source_closure", "closure requires a Void claim, source catalog, and source extent page"));
   };
-  let hash_width = claim.source_manifest_hash.len();
-  let claim_record_length = 16 + hash_width;
-  let source_record_length = 32 + 3 * hash_width;
   if claim.hash_algorithm != source_page.hash_algorithm {
     return Err(closure_error("void_claim_source_closure", "Void claim and source page use different hash algorithms"));
   }
   let mut every_extent_is_available = true;
-  for claimed in claim.extents.chunks_exact(claim_record_length) {
-    let claimed_offset = u64_at(claimed, 0)?;
-    let claimed_length = u32_at(claimed, 8)?;
-    let claimed_end = claimed_offset.checked_add(u64::from(claimed_length)).ok_or_else(|| overflow_error("claimed Void extent end"))?;
-    let claimed_proposal = &claimed[16..];
+  for claimed in claim.extent_records()? {
+    let claimed = claimed?;
+    let claimed_end = claimed.offset.checked_add(u64::from(claimed.length)).ok_or_else(|| overflow_error("claimed Void extent end"))?;
     let mut found = false;
-    for available in source_page.records.chunks_exact(source_record_length) {
-      let extent = decode_void_extent(available, source_page.hash_algorithm)?;
+    for available in source_page.extent_records()? {
+      let extent = available?;
       let available_end = extent.offset.checked_add(u64::from(extent.length)).ok_or_else(|| overflow_error("available Void extent end"))?;
-      if claimed_offset >= extent.offset && claimed_end <= available_end && claimed_proposal == extent.proposal_hash {
+      if claimed.offset >= extent.offset
+        && claimed_end <= available_end
+        && claimed.origin_sweep_proposal_hash == extent.origin_sweep_proposal_hash
+      {
         found = true;
         break;
       }
@@ -1303,6 +1648,13 @@ fn validate_exact_capabilities(bytes: &[u8]) -> FormatResult<()> {
   Ok(())
 }
 
+fn write_exact_capabilities(bytes: &mut [u8]) {
+  debug_assert_eq!(bytes.len(), 32);
+  for bit in VOID_CAPABILITY_BITS {
+    bytes[bit / 8] |= 1 << (bit % 8);
+  }
+}
+
 fn i64_at(bytes: &[u8], offset: usize) -> FormatResult<i64> {
   let raw = bytes.get(offset..offset + 8).ok_or_else(|| trailing_error("sweep_void_truncated", format!("i64 at offset {offset}")))?;
   Ok(i64::from_le_bytes(raw.try_into().expect("checked sweep/Void i64 width")))
@@ -1341,6 +1693,17 @@ fn checked_add(left: usize, right: usize, context: &'static str) -> FormatResult
 
 fn checked_mul(left: usize, right: usize, context: &'static str) -> FormatResult<usize> {
   left.checked_mul(right).ok_or_else(|| overflow_error(context))
+}
+
+fn usize_to_u32(value: usize, context: &'static str) -> FormatResult<u32> {
+  if value > u32::MAX as usize {
+    return Err(overflow_error(context));
+  }
+  Ok(value as u32)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+  value as u64
 }
 
 fn amplification_error(code: &'static str, actual: usize, cap: usize) -> FormatError {

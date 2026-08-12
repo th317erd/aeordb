@@ -29,6 +29,7 @@ fn page_and_directory_names(role: GcDirectoryRoleV1) -> (&'static str, &'static 
     GcDirectoryRoleV1::PhysicalInventory => ("physical-inventory-page-valid", "physical-inventory-directory-valid"),
     GcDirectoryRoleV1::RootCandidates => ("root-candidate-page-valid", "root-candidates-directory-valid"),
     GcDirectoryRoleV1::RootExpiry => ("root-expiry-page-valid", "root-expiry-directory-valid"),
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => panic!("specialized Void roles do not use generic GC pages"),
   }
 }
 
@@ -38,6 +39,7 @@ fn row_length(algorithm: HashAlgorithm, role: GcDirectoryRoleV1) -> usize {
     GcDirectoryRoleV1::PhysicalInventory => 68 + 5 * algorithm.hash_length(),
     GcDirectoryRoleV1::RootCandidates => 36 + 3 * algorithm.hash_length(),
     GcDirectoryRoleV1::RootExpiry => 40 + 3 * algorithm.hash_length(),
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => panic!("specialized Void roles do not use generic GC rows"),
   }
 }
 

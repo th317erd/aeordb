@@ -25,6 +25,8 @@ pub enum GcDirectoryRoleV1 {
   Candidates = 1,
   RootExpiry = 2,
   PhysicalInventory = 3,
+  FreeExtents = 4,
+  Claims = 5,
   RootCandidates = 8,
 }
 
@@ -34,6 +36,8 @@ impl GcDirectoryRoleV1 {
       Self::Candidates => "candidates",
       Self::RootExpiry => "root-expiry",
       Self::PhysicalInventory => "physical-inventory",
+      Self::FreeExtents => "void-free-extents",
+      Self::Claims => "void-claims",
       Self::RootCandidates => "root-candidates",
     }
   }
@@ -43,6 +47,8 @@ impl GcDirectoryRoleV1 {
       Self::Candidates => "candidate",
       Self::RootExpiry => "root-expiry",
       Self::PhysicalInventory => "physical-inventory",
+      Self::FreeExtents => "void-free-extent",
+      Self::Claims => "void-claim",
       Self::RootCandidates => "root-candidate",
     }
   }
@@ -52,6 +58,8 @@ impl GcDirectoryRoleV1 {
       1 => Ok(Self::Candidates),
       2 => Ok(Self::RootExpiry),
       3 => Ok(Self::PhysicalInventory),
+      4 => Ok(Self::FreeExtents),
+      5 => Ok(Self::Claims),
       8 => Ok(Self::RootCandidates),
       _ => Err(kind_error("gc_directory_role", format!("unknown GC directory role {value}"))),
     }
@@ -813,6 +821,7 @@ impl GcStateArtifactV1<'_> {
 
 pub fn encode_gc_state_page_v1(request: &GcStatePageWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
   validate_gc_state_writer_identity(request.database_id, request.catalog_id, request.generation, "gc_page_identity")?;
+  let artifact_kind = gc_state_page_kind(request.role)?;
   if request.page_id == 0 {
     return Err(identity_error("gc_page_identity", "GC page ID must be nonzero"));
   }
@@ -878,7 +887,7 @@ pub fn encode_gc_state_page_v1(request: &GcStatePageWriteV1<'_>) -> FormatResult
   identity.extend_from_slice(&(request.role as u16).to_le_bytes());
   identity.extend_from_slice(&request.page_id.to_le_bytes());
   let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
-    kind: gc_state_page_kind(request.role),
+    kind: artifact_kind,
     hash_algorithm: request.hash_algorithm,
     generation: request.generation,
     identity: &identity,
@@ -911,7 +920,8 @@ pub fn encode_gc_state_directory_v1(request: &GcStateDirectoryWriteV1<'_>) -> Fo
   let mut tombstone_count = 0u64;
   let mut page_count = 0u64;
   let mut logical_bytes = 0u64;
-  let mut minimum_page_id = u64::MAX;
+  let page_backed = gc_directory_role_is_page_backed(request.role);
+  let mut minimum_page_id = if page_backed { u64::MAX } else { 0 };
   let mut maximum_page_id = 0u64;
   let mut previous_upper: Option<&[u8]> = None;
   for entry in request.entries {
@@ -922,17 +932,22 @@ pub fn encode_gc_state_directory_v1(request: &GcStateDirectoryWriteV1<'_>) -> Fo
       }
     }
     previous_upper = Some(entry.upper_fence);
+    let valid_page_shape = if page_backed {
+      entry.page_count > 0
+        && entry.minimum_page_id > 0
+        && entry.minimum_page_id <= entry.maximum_page_id
+        && (request.level != 0 || (entry.page_count == 1 && entry.minimum_page_id == entry.maximum_page_id))
+    } else {
+      entry.page_count == 0 && entry.minimum_page_id == 0 && entry.maximum_page_id == 0
+    };
     if entry.child_hash.len() != hash_width
       || all_zero(entry.child_hash)
       || entry.child_generation == 0
       || entry.child_generation > request.generation
       || entry.live_count == 0
       || entry.tombstone_count != 0
-      || entry.page_count == 0
       || entry.logical_bytes == 0
-      || entry.minimum_page_id == 0
-      || entry.minimum_page_id > entry.maximum_page_id
-      || (request.level == 0 && (entry.page_count != 1 || entry.minimum_page_id != entry.maximum_page_id))
+      || !valid_page_shape
     {
       let code = if request.level == 0 { "gc_directory_leaf" } else { "gc_directory_internal" };
       return Err(closure_error(code, "GC directory child identity, generation, counts, or bytes are invalid"));
@@ -1042,13 +1057,20 @@ fn validate_gc_state_writer_identity(database_id: &[u8], catalog_id: &[u8], gene
   Ok(())
 }
 
-fn gc_state_page_kind(role: GcDirectoryRoleV1) -> GcArtifactKindV1 {
+fn gc_state_page_kind(role: GcDirectoryRoleV1) -> FormatResult<GcArtifactKindV1> {
   match role {
-    GcDirectoryRoleV1::Candidates => GcArtifactKindV1::CandidatePage,
-    GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
-    GcDirectoryRoleV1::PhysicalInventory => GcArtifactKindV1::PhysicalInventoryPage,
-    GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
+    GcDirectoryRoleV1::Candidates => Ok(GcArtifactKindV1::CandidatePage),
+    GcDirectoryRoleV1::RootExpiry => Ok(GcArtifactKindV1::RootExpiryPage),
+    GcDirectoryRoleV1::PhysicalInventory => Ok(GcArtifactKindV1::PhysicalInventoryPage),
+    GcDirectoryRoleV1::RootCandidates => Ok(GcArtifactKindV1::RootCandidatePage),
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => {
+      Err(kind_error("gc_page_role", "specialized Void roles cannot use the generic GC state page writer"))
+    }
   }
+}
+
+fn gc_directory_role_is_page_backed(role: GcDirectoryRoleV1) -> bool {
+  role != GcDirectoryRoleV1::Claims
 }
 
 fn gc_state_row_fence(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, row: &[u8]) -> FormatResult<Vec<u8>> {
@@ -1062,6 +1084,9 @@ fn gc_state_row_fence(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, row: &[
       fence.extend_from_slice(&row[2 * hash_width..2 * hash_width + 8]);
       fence.extend_from_slice(&row[..physical_length]);
       fence
+    }
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => {
+      return Err(kind_error("gc_page_role", "specialized Void roles cannot use generic GC state rows"));
     }
   })
 }
@@ -1414,6 +1439,11 @@ fn decode_directory(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> For
     entries.iter().map(|entry| entry.minimum_page_id).min().ok_or_else(|| closure_error("gc_directory_empty", "GC directory is empty"))?;
   let maximum_page_id =
     entries.iter().map(|entry| entry.maximum_page_id).max().ok_or_else(|| closure_error("gc_directory_empty", "GC directory is empty"))?;
+  let page_shape_is_valid = if gc_directory_role_is_page_backed(role) {
+    page_count > 0 && minimum_page_id > 0 && minimum_page_id <= maximum_page_id
+  } else {
+    page_count == 0 && minimum_page_id == 0 && maximum_page_id == 0
+  };
   if u64_at(body, 24)? != live_count
     || u64_at(body, 32)? != tombstone_count
     || u64_at(body, 40)? != page_count
@@ -1421,7 +1451,7 @@ fn decode_directory(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> For
     || u64_at(body, 56)? != minimum_page_id
     || u64_at(body, 64)? != maximum_page_id
     || tombstone_count != 0
-    || page_count == 0
+    || !page_shape_is_valid
   {
     return Err(closure_error("gc_directory_aggregate", "GC directory aggregate fields disagree with child descriptors"));
   }
@@ -1482,7 +1512,8 @@ fn decode_gc_leaf_descriptor<'a>(
   let lower_fence = &body[fences_start..fences_start + lower_length];
   let upper_fence = &body[fences_start + lower_length..next];
   compare_fences(algorithm, role, lower_fence, upper_fence)?;
-  if page_id == 0
+  let page_shape_is_valid = if gc_directory_role_is_page_backed(role) { page_id > 0 } else { page_id == 0 };
+  if !page_shape_is_valid
     || all_zero(child_hash)
     || child_generation == 0
     || child_generation > parent_generation
@@ -1500,7 +1531,7 @@ fn decode_gc_leaf_descriptor<'a>(
     child_generation,
     live_count,
     tombstone_count,
-    page_count: 1,
+    page_count: u64::from(page_shape_is_valid && page_id > 0),
     logical_bytes,
     minimum_page_id: page_id,
     maximum_page_id: page_id,
@@ -1548,15 +1579,18 @@ fn decode_gc_internal_descriptor<'a>(
   let lower_fence = &body[fences_start..fences_start + lower_length];
   let upper_fence = &body[fences_start + lower_length..next];
   compare_fences(algorithm, role, lower_fence, upper_fence)?;
+  let page_shape_is_valid = if gc_directory_role_is_page_backed(role) {
+    page_count > 0 && minimum_page_id > 0 && minimum_page_id <= maximum_page_id
+  } else {
+    page_count == 0 && minimum_page_id == 0 && maximum_page_id == 0
+  };
   if all_zero(child_hash)
     || child_generation == 0
     || child_generation > parent_generation
     || live_count == 0
     || tombstone_count != 0
-    || page_count == 0
     || logical_bytes == 0
-    || minimum_page_id == 0
-    || minimum_page_id > maximum_page_id
+    || !page_shape_is_valid
   {
     return Err(closure_error("gc_directory_internal", "GC internal descriptor identity, generation, ranks, or bytes are invalid"));
   }
@@ -2061,6 +2095,9 @@ fn validate_row(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, row: &[u8], c
     GcDirectoryRoleV1::RootExpiry => validate_root_expiry_row(algorithm, row),
     GcDirectoryRoleV1::PhysicalInventory => validate_inventory_row(algorithm, row),
     GcDirectoryRoleV1::RootCandidates => validate_root_candidate_row(algorithm, row),
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => {
+      Err(kind_error("gc_page_role", "specialized Void roles cannot use generic GC state rows"))
+    }
   }
 }
 
@@ -2260,6 +2297,9 @@ fn compare_rows(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, left: &[u8], 
       let right_physical = decode_physical_incarnation(&right[..physical_length], algorithm)?;
       Ok(left_physical.wal_offset.cmp(&right_physical.wal_offset).then_with(|| compare_physical(&left_physical, &right_physical)))
     }
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => {
+      Err(kind_error("gc_page_role", "specialized Void roles cannot use generic GC state rows"))
+    }
   }
 }
 
@@ -2306,6 +2346,18 @@ fn compare_fence_values(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, left:
         offset_order
       }
     }
+    GcDirectoryRoleV1::FreeExtents => {
+      if left.len() != 8 || right.len() != 8 {
+        return Err(closure_error("void_extent_key_length", "Void extent fence must be one WAL offset"));
+      }
+      u64_at(left, 0)?.cmp(&u64_at(right, 0)?)
+    }
+    GcDirectoryRoleV1::Claims => {
+      if left.len() != 16 || right.len() != 16 {
+        return Err(closure_error("void_claim_key_length", "Void claim fence must be one claim ID"));
+      }
+      left.cmp(right)
+    }
   })
 }
 
@@ -2318,6 +2370,9 @@ fn row_key_equals_fence(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, row: 
       let physical_length = 24 + 2 * h;
       Ok(fence.len() == 8 + physical_length && fence[..8] == row[2 * h..2 * h + 8] && fence[8..] == row[..physical_length])
     }
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => {
+      Err(kind_error("gc_page_role", "specialized Void roles cannot use generic GC state rows"))
+    }
   }
 }
 
@@ -2328,6 +2383,7 @@ fn row_length(algorithm: HashAlgorithm, role: GcDirectoryRoleV1) -> usize {
     GcDirectoryRoleV1::RootExpiry => 40 + 3 * h,
     GcDirectoryRoleV1::PhysicalInventory => 68 + 5 * h,
     GcDirectoryRoleV1::RootCandidates => 36 + 3 * h,
+    GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims => 0,
   }
 }
 

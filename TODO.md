@@ -732,6 +732,12 @@
           - [x] Remove impossible post-global-exclusion cleanup branches and prove valid plural outcomes return one completion while operation failures return none.
           - [x] Re-run cancellation, corruption, authority drift, crash-prefix, architecture-isolation, resource, and retained-or-leaked gates before closing P4-6.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
+        - [ ] P4-7a: expose exact both-width Void extent/catalog/claim/settlement writers and iterators, and converge Void directory nodes on the shared multi-child GC directory codec.
+        - [ ] P4-7b: validate the complete Void support closure with bounded memory/cancellation, hard-publish receipt-backed support, and select its A/B control last while allocator admission remains blocked until exact receipt reconciliation.
+        - [ ] P4-7c: qualify an exact bounded free-extent claim, hard-publish immutable claim evidence, and select a catalog that removes all claimed ranges before returning allocation authority.
+        - [ ] P4-7d: consume only durable claim subranges through one bounded allocator owner, then hard-publish settlement/abandonment and a claim-free result catalog after used locators are durable.
+        - [ ] P4-7e: derive startup and in-memory reusable-space state only from one closure-valid selected receipt-backed catalog minus outstanding claims; keep raw hot-tail and gap evidence non-authoritative.
+        - [ ] P4-7f: prove partial use, crash recovery, cancellation, corruption, overlapping/substituted ranges, stale caches, resource bounds, restart, native behavior, and retained-or-leaked failure direction without enabling destructive service GC.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
     - [ ] P5: implement immutable index definitions, ordered pages, catalogs, sparse fixed-point NVT, compaction, and corruption fallback; eliminate v0 whole-index publication amplification when the active set exceeds the clean-cache cap.
