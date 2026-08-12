@@ -773,9 +773,9 @@
           - [x] Cross-check exact partial-use returned extent provenance before and after restart, with no stale candidate cache.
           - [x] Re-run cancellation, corruption, overlap/substitution, memory, architecture, native, and retained-or-leaked qualification gates before closing P4-7.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
-        - [ ] P4-8a: freeze one non-destructive `GcRunContext`, phase/status model, progress sink, and shared executor; reject destructive v4 activation before any phase owner runs.
-          - [ ] Prove exact phase order, monotonic progress, cancellation, malformed context/budget refusal, terminal-state behavior, sink behavior, and destructive-gate isolation.
-          - [ ] Keep the first unit disconnected from routes, tasks, CLI, live v3 collection, and destructive v4 publication while freezing the adapter contract.
+        - [x] P4-8a: freeze one non-destructive `GcRunContext`, phase/status model, progress sink, and shared executor; reject destructive v4 activation before any phase owner runs.
+          - [x] Prove exact phase order, monotonic progress, cancellation, malformed context/budget refusal, terminal-state behavior, sink behavior, and destructive-gate isolation.
+          - [x] Keep the first unit disconnected from routes, tasks, CLI, live v3 collection, and destructive v4 publication while freezing the adapter contract.
         - [ ] P4-8b: add conservative GC/Void verify, repair-ticket, backup, and migration-reset inspection through the shared run context.
         - [ ] P4-8c: route CLI, synchronous HTTP compatibility, scheduled/task, repair-follow-up, and embedded entry points through one executor without duplicating traversal or cancellation.
         - [ ] P4-8d: project one run status into tasks, health, metrics, SSE, Dashboard, and operations/API documentation with root-only disclosure.
