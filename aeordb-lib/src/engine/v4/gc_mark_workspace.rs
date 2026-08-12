@@ -348,6 +348,10 @@ impl DurableMarkWorkspaceClosureV1 {
     &self.workspace_path
   }
 
+  pub fn checkpoint_workspace_path(&self) -> Result<String, MarkWorkspaceErrorV1> {
+    canonical_checkpoint_workspace_path(&self.workspace_path)
+  }
+
   pub fn checkpoint_directory(&self) -> &Path {
     &self.checkpoint_directory
   }
@@ -371,6 +375,18 @@ impl DurableMarkWorkspaceClosureV1 {
   pub const fn logical_record_count(&self) -> u64 {
     self.logical_record_count
   }
+}
+
+fn canonical_checkpoint_workspace_path(path: &Path) -> Result<String, MarkWorkspaceErrorV1> {
+  let native = path.to_str().ok_or_else(|| MarkWorkspaceErrorV1::Path("workspace path is not canonical UTF-8".to_string()))?;
+  #[cfg(windows)]
+  let canonical = native.replace('\\', "/");
+  #[cfg(not(windows))]
+  let canonical = native.to_string();
+  if !super::gc_mark::canonical_workspace_path(&canonical) {
+    return Err(MarkWorkspaceErrorV1::Path("workspace path cannot be represented by the frozen checkpoint format".to_string()));
+  }
+  Ok(canonical)
 }
 
 pub struct DurableMarkWorkspaceV1 {
@@ -644,6 +660,8 @@ impl DurableMarkWorkspaceV1 {
       validate_private_directory(object_directory, "object directory")?;
     }
     let mut file = create_new_regular_file_no_follow(path).map_err(|error| MarkWorkspaceErrorV1::Path(error.to_string()))?;
+    secure_platform_private_regular_file(path)?;
+    validate_private_regular_file(path, &file, "new workspace object")?;
     preallocate_file(&file, pending.stored_length).map_err(|error| MarkWorkspaceErrorV1::Durability(Box::new(error)))?;
 
     let mut header = [0u8; WORKSPACE_OBJECT_HEADER];
@@ -693,6 +711,8 @@ impl DurableMarkWorkspaceV1 {
   fn write_manifest_file(&self, path: &Path, manifest: &[u8]) -> Result<(), MarkWorkspaceErrorV1> {
     let length = u64::try_from(manifest.len()).map_err(|_| MarkWorkspaceErrorV1::Capacity("manifest length exceeds u64".to_string()))?;
     let mut file = create_new_regular_file_no_follow(path).map_err(|error| MarkWorkspaceErrorV1::Path(error.to_string()))?;
+    secure_platform_private_regular_file(path)?;
+    validate_private_regular_file(path, &file, "new workspace manifest")?;
     preallocate_file(&file, length).map_err(|error| MarkWorkspaceErrorV1::Durability(Box::new(error)))?;
     for chunk in manifest.chunks(OBJECT_IO_CHUNK_BYTES) {
       if self.cancellation.is_cancelled() {
@@ -784,7 +804,7 @@ fn read_charged_regular_file(
   }
   let mut file = open_regular_file_no_follow(path).map_err(|error| MarkWorkspaceErrorV1::Path(error.to_string()))?;
   let metadata = file.metadata().map_err(|source| MarkWorkspaceErrorV1::Io { operation: role, source })?;
-  validate_private_regular_file(path, &metadata, role)?;
+  validate_private_regular_file(path, &file, role)?;
   let length = match usize::try_from(metadata.len()) {
     Ok(length) => length,
     Err(error) => return Err(MarkWorkspaceErrorV1::Capacity(format!("{role} length exceeds usize: {error}"))),
@@ -841,10 +861,13 @@ fn validate_private_directory_readonly(path: &Path, role: &str) -> Result<(), Ma
       return Err(MarkWorkspaceErrorV1::Path(format!("{role} is not private (mode {:04o}): {}", mode & 0o7777, path.display())));
     }
   }
+  #[cfg(windows)]
+  validate_windows_private_directory_security(path, role)?;
   Ok(())
 }
 
-fn validate_private_regular_file(path: &Path, metadata: &fs::Metadata, role: &str) -> Result<(), MarkWorkspaceErrorV1> {
+fn validate_private_regular_file(path: &Path, file: &fs::File, role: &str) -> Result<(), MarkWorkspaceErrorV1> {
+  let metadata = file.metadata().map_err(|source| MarkWorkspaceErrorV1::Io { operation: "private regular-file metadata", source })?;
   if !metadata.is_file() {
     return Err(MarkWorkspaceErrorV1::Path(format!("{role} is not a regular file: {}", path.display())));
   }
@@ -856,6 +879,8 @@ fn validate_private_regular_file(path: &Path, metadata: &fs::Metadata, role: &st
       return Err(MarkWorkspaceErrorV1::Path(format!("{role} is not private (mode {:04o}): {}", mode & 0o7777, path.display())));
     }
   }
+  #[cfg(windows)]
+  validate_windows_private_file_security(file, WindowsPrivateObjectKind::RegularFile, role, path)?;
   Ok(())
 }
 
@@ -928,8 +953,18 @@ fn validate_private_directory(path: &Path, role: &str) -> Result<(), MarkWorkspa
     }
   }
   #[cfg(windows)]
-  enforce_windows_private_directory(path)?;
+  validate_windows_private_directory_security(path, role)?;
   Ok(())
+}
+
+#[cfg(not(windows))]
+fn secure_platform_private_regular_file(_path: &Path) -> Result<(), MarkWorkspaceErrorV1> {
+  Ok(())
+}
+
+#[cfg(windows)]
+fn secure_platform_private_regular_file(path: &Path) -> Result<(), MarkWorkspaceErrorV1> {
+  set_windows_private_security(path, WindowsPrivateObjectKind::RegularFile, "private regular-file security")
 }
 
 #[cfg(not(windows))]
@@ -942,7 +977,7 @@ fn create_platform_private_directory(path: &Path) -> Result<(), MarkWorkspaceErr
   use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
   use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 
-  let descriptor = WindowsPrivateSecurityDescriptor::new()?;
+  let descriptor = WindowsPrivateSecurityDescriptor::new(WindowsPrivateObjectKind::Directory)?;
   let path = windows_path(path)?;
   let attributes = SECURITY_ATTRIBUTES {
     nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
@@ -961,13 +996,68 @@ fn create_platform_private_directory(path: &Path) -> Result<(), MarkWorkspaceErr
 }
 
 #[cfg(windows)]
-fn enforce_windows_private_directory(path: &Path) -> Result<(), MarkWorkspaceErrorV1> {
-  use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
+#[derive(Clone, Copy)]
+enum WindowsPrivateObjectKind {
+  Directory,
+  RegularFile,
+}
 
-  let descriptor = WindowsPrivateSecurityDescriptor::new()?;
+#[cfg(windows)]
+fn set_windows_private_security(path: &Path, kind: WindowsPrivateObjectKind, operation: &'static str) -> Result<(), MarkWorkspaceErrorV1> {
+  use windows_sys::Win32::Security::{
+    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+  };
+
+  let descriptor = WindowsPrivateSecurityDescriptor::new(kind)?;
   let path = windows_path(path)?;
-  if unsafe { SetFileSecurityW(path.as_ptr(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, descriptor.as_ptr()) } == 0 {
-    return Err(MarkWorkspaceErrorV1::Io { operation: "private directory ACL", source: std::io::Error::last_os_error() });
+  let security_information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+  if unsafe { SetFileSecurityW(path.as_ptr(), security_information, descriptor.as_ptr()) } == 0 {
+    return Err(MarkWorkspaceErrorV1::Io { operation, source: std::io::Error::last_os_error() });
+  }
+  Ok(())
+}
+
+#[cfg(windows)]
+fn validate_windows_private_directory_security(path: &Path, role: &str) -> Result<(), MarkWorkspaceErrorV1> {
+  use std::fs::OpenOptions;
+  use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+  use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE,
+  };
+
+  let directory = OpenOptions::new()
+    .read(true)
+    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+    .open(path)
+    .map_err(|source| MarkWorkspaceErrorV1::Io { operation: "private directory security handle", source })?;
+  let metadata =
+    directory.metadata().map_err(|source| MarkWorkspaceErrorV1::Io { operation: "private directory handle metadata", source })?;
+  if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    return Err(MarkWorkspaceErrorV1::Path(format!("{role} is not a no-follow directory: {}", path.display())));
+  }
+  validate_windows_private_file_security(&directory, WindowsPrivateObjectKind::Directory, role, path)
+}
+
+#[cfg(windows)]
+fn validate_windows_private_file_security(
+  file: &fs::File,
+  kind: WindowsPrivateObjectKind,
+  role: &str,
+  path: &Path,
+) -> Result<(), MarkWorkspaceErrorV1> {
+  use std::os::windows::io::AsRawHandle;
+
+  let expected = WindowsPrivateSecurityDescriptor::new(kind)?;
+  let actual = WindowsFileSecurityDescriptor::read(file.as_raw_handle().cast())?;
+  let expected_sddl = windows_security_descriptor_sddl(expected.as_ptr())?;
+  let actual_sddl = windows_security_descriptor_sddl(actual.as_ptr())?;
+  if actual_sddl != expected_sddl {
+    return Err(MarkWorkspaceErrorV1::Path(format!(
+      "{role} is not private (expected {expected_sddl}, observed {actual_sddl}): {}",
+      path.display()
+    )));
   }
   Ok(())
 }
@@ -977,20 +1067,32 @@ struct WindowsPrivateSecurityDescriptor(WindowsLocalAllocation);
 
 #[cfg(windows)]
 impl WindowsPrivateSecurityDescriptor {
-  fn new() -> Result<Self, MarkWorkspaceErrorV1> {
+  fn new(kind: WindowsPrivateObjectKind) -> Result<Self, MarkWorkspaceErrorV1> {
     use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 
     let current_user_sid = windows_current_user_sid()?;
+    let inheritance = match kind {
+      WindowsPrivateObjectKind::Directory => "OICI",
+      WindowsPrivateObjectKind::RegularFile => "",
+    };
     let sddl_capacity = current_user_sid
       .len()
-      .checked_add(37)
+      .checked_mul(2)
+      .and_then(|length| length.checked_add(inheritance.len()))
+      .and_then(|length| length.checked_add(43))
       .ok_or_else(|| MarkWorkspaceErrorV1::Capacity("Windows private SDDL length overflow".to_string()))?;
     let mut sddl = String::new();
     sddl.try_reserve_exact(sddl_capacity).map_err(|error| MarkWorkspaceErrorV1::Allocation(error.to_string()))?;
-    sddl.push_str("D:P(A;OICI;FA;;;");
+    sddl.push_str("O:");
     sddl.push_str(&current_user_sid);
-    sddl.push_str(")(A;OICI;FA;;;SY)");
+    sddl.push_str("D:P(A;");
+    sddl.push_str(inheritance);
+    sddl.push_str(";FA;;;");
+    sddl.push_str(&current_user_sid);
+    sddl.push_str(")(A;");
+    sddl.push_str(inheritance);
+    sddl.push_str(";FA;;;SY)");
     let mut encoded_sddl = Vec::new();
     encoded_sddl.try_reserve_exact(sddl.len() + 1).map_err(|error| MarkWorkspaceErrorV1::Allocation(error.to_string()))?;
     encoded_sddl.extend(sddl.encode_utf16());
@@ -1016,6 +1118,98 @@ impl WindowsPrivateSecurityDescriptor {
   fn as_ptr(&self) -> *mut core::ffi::c_void {
     self.0 .0
   }
+}
+
+#[cfg(windows)]
+struct WindowsFileSecurityDescriptor {
+  words: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl WindowsFileSecurityDescriptor {
+  fn read(handle: windows_sys::Win32::Foundation::HANDLE) -> Result<Self, MarkWorkspaceErrorV1> {
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, GetKernelObjectSecurity, OWNER_SECURITY_INFORMATION};
+
+    let requested = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut required_bytes = 0u32;
+    let sizing_result = unsafe { GetKernelObjectSecurity(handle, requested, std::ptr::null_mut(), 0, &mut required_bytes) };
+    if sizing_result == 0 {
+      let source = std::io::Error::last_os_error();
+      if source.raw_os_error() != Some(122) {
+        return Err(MarkWorkspaceErrorV1::Io { operation: "private security descriptor sizing", source });
+      }
+    }
+    if required_bytes == 0 {
+      return Err(MarkWorkspaceErrorV1::State("Windows returned an empty private security descriptor size"));
+    }
+    let required_bytes_usize = usize::try_from(required_bytes)
+      .map_err(|_| MarkWorkspaceErrorV1::Capacity("Windows security descriptor exceeds usize".to_string()))?;
+    let word_count = required_bytes_usize
+      .checked_add(size_of::<usize>() - 1)
+      .and_then(|bytes| bytes.checked_div(size_of::<usize>()))
+      .ok_or_else(|| MarkWorkspaceErrorV1::Capacity("Windows security descriptor allocation overflow".to_string()))?;
+    let mut words = Vec::new();
+    words.try_reserve_exact(word_count).map_err(|error| MarkWorkspaceErrorV1::Allocation(error.to_string()))?;
+    words.resize(word_count, 0usize);
+    let allocated_bytes = word_count
+      .checked_mul(size_of::<usize>())
+      .and_then(|bytes| u32::try_from(bytes).ok())
+      .ok_or_else(|| MarkWorkspaceErrorV1::Capacity("Windows security descriptor allocation exceeds u32".to_string()))?;
+    let mut observed_bytes = required_bytes;
+    if unsafe { GetKernelObjectSecurity(handle, requested, words.as_mut_ptr().cast(), allocated_bytes, &mut observed_bytes) } == 0 {
+      return Err(MarkWorkspaceErrorV1::Io { operation: "private security descriptor readback", source: std::io::Error::last_os_error() });
+    }
+    if observed_bytes > allocated_bytes {
+      return Err(MarkWorkspaceErrorV1::State("Windows security descriptor grew after sizing"));
+    }
+    Ok(Self { words })
+  }
+
+  fn as_ptr(&self) -> *mut core::ffi::c_void {
+    self.words.as_ptr().cast_mut().cast()
+  }
+}
+
+#[cfg(windows)]
+fn windows_security_descriptor_sddl(descriptor: *mut core::ffi::c_void) -> Result<String, MarkWorkspaceErrorV1> {
+  use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+  use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
+  use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
+
+  let mut raw_sddl = std::ptr::null_mut();
+  let mut length = 0u32;
+  if unsafe {
+    ConvertSecurityDescriptorToStringSecurityDescriptorW(
+      descriptor,
+      SECURITY_DESCRIPTOR_REVISION,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+      &mut raw_sddl,
+      &mut length,
+    )
+  } == 0
+  {
+    return Err(MarkWorkspaceErrorV1::Io {
+      operation: "private security descriptor normalization",
+      source: std::io::Error::last_os_error(),
+    });
+  }
+  if raw_sddl.is_null() || length == 0 {
+    return Err(MarkWorkspaceErrorV1::State("Windows returned an empty normalized security descriptor"));
+  }
+  let allocation = WindowsLocalAllocation(raw_sddl.cast());
+  let maximum_length = usize::try_from(length)
+    .map_err(|_| MarkWorkspaceErrorV1::Capacity("Windows normalized security descriptor length exceeds usize".to_string()))?;
+  let mut string_length = 0usize;
+  while string_length < maximum_length && unsafe { *raw_sddl.add(string_length) } != 0 {
+    string_length += 1;
+  }
+  if string_length == maximum_length {
+    return Err(MarkWorkspaceErrorV1::State("Windows normalized security descriptor is not NUL terminated"));
+  }
+  let sddl = String::from_utf16(unsafe { std::slice::from_raw_parts(raw_sddl, string_length) })
+    .map_err(|_| MarkWorkspaceErrorV1::Path("Windows normalized security descriptor is not valid UTF-16".to_string()))?;
+  drop(allocation);
+  Ok(sddl)
 }
 
 #[cfg(windows)]

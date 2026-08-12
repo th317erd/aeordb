@@ -512,7 +512,7 @@ fn prepare_mark_checkpoint(
     active_bitmap_bit_count: 512,
     kv_bucket_count: 8,
     kv_slots_per_bucket: 64,
-    workspace_path: closure.workspace_path().to_str().unwrap(),
+    workspace_path: &closure.checkpoint_workspace_path().unwrap(),
     workspace_id: [run_byte.wrapping_add(0x20); 16],
     workspace_manifest_digest: closure.manifest_digest(),
     mutation_journal_head: &[0xB1; 32],

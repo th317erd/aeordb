@@ -241,7 +241,7 @@ fn prepare_checkpoint(
   )
   .unwrap();
   let closure = workspace.complete().unwrap();
-  let workspace_path = closure.workspace_path().to_str().unwrap();
+  let workspace_path = closure.checkpoint_workspace_path().unwrap();
   let checkpoint = encode_mark_run_checkpoint(&MarkRunCheckpointWriteV1 {
     hash_algorithm: algorithm,
     database_id: &database_id(),
@@ -266,7 +266,7 @@ fn prepare_checkpoint(
     active_bitmap_bit_count: 512,
     kv_bucket_count: 8,
     kv_slots_per_bucket: 64,
-    workspace_path,
+    workspace_path: &workspace_path,
     workspace_id: [run_byte.wrapping_add(0x20); 16],
     workspace_manifest_digest: closure.manifest_digest(),
     mutation_journal_head: &sequence_vec(0xB1, algorithm.hash_length()),

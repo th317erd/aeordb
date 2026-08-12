@@ -104,6 +104,7 @@ fn checkpoint_for_workspace_digest(
   workspace_manifest_digest: [u8; 32],
 ) -> aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1 {
   let run_id = sequence::<16>(0x51);
+  let workspace_path = closure.checkpoint_workspace_path().unwrap();
   encode_mark_run_checkpoint(&MarkRunCheckpointWriteV1 {
     hash_algorithm: algorithm,
     database_id: &sequence::<16>(0x31),
@@ -128,7 +129,7 @@ fn checkpoint_for_workspace_digest(
     active_bitmap_bit_count: 512,
     kv_bucket_count: 8,
     kv_slots_per_bucket: 64,
-    workspace_path: closure.workspace_path().to_str().unwrap(),
+    workspace_path: &workspace_path,
     workspace_id: sequence::<16>(0xA1),
     workspace_manifest_digest,
     mutation_journal_head: &sequence_vec(0xB1, algorithm.hash_length()),
@@ -818,6 +819,85 @@ fn preexisting_owned_workspace_directories_must_remain_private() {
   .unwrap_err();
   assert_eq!(error.code(), "mark_workspace_path");
   assert!(error.to_string().contains("private"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_checkpoint_paths_are_canonical_and_broadened_workspace_security_is_rejected() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let memory = memory_coordinator();
+  for broadened in ["workspace", "manifest"] {
+    let directory = tempdir().unwrap();
+    let database = database_file(directory.path(), &format!("broad-windows-{broadened}-dacl.aeordb"));
+    let scratch = directory.path().join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let mut writer = DurableMarkWorkspaceV1::create(
+      &database,
+      identity(algorithm),
+      basis(algorithm),
+      options(&scratch),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap();
+    let closure = writer.complete().unwrap();
+    let canonical_path = closure.checkpoint_workspace_path().unwrap();
+    assert!(!canonical_path.contains('\\'));
+    assert!(PathBuf::from(&canonical_path).is_absolute());
+    let encoded = checkpoint_for_workspace(algorithm, &closure);
+    let checkpoint = decoded_checkpoint(algorithm, &encoded);
+    let broadened_path = if broadened == "workspace" { closure.workspace_path() } else { closure.manifest_path() };
+    install_broad_windows_dacl(broadened_path);
+    drop(writer);
+
+    let error = ReopenedMarkWorkspaceV1::open(
+      &checkpoint,
+      &resume_context(algorithm, &checkpoint),
+      MarkWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "mark_workspace_path");
+    assert!(error.to_string().contains("private"));
+  }
+}
+
+#[cfg(windows)]
+fn install_broad_windows_dacl(path: &Path) {
+  use std::os::windows::ffi::OsStrExt;
+
+  use windows_sys::Win32::Foundation::LocalFree;
+  use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+  use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
+  use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
+
+  let mut encoded_path: Vec<u16> = path.as_os_str().encode_wide().collect();
+  encoded_path.push(0);
+  let mut encoded_sddl: Vec<u16> = "D:P(A;OICI;FA;;;WD)".encode_utf16().collect();
+  encoded_sddl.push(0);
+  let mut descriptor = std::ptr::null_mut();
+  assert_ne!(
+    unsafe {
+      ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        encoded_sddl.as_ptr(),
+        SECURITY_DESCRIPTOR_REVISION,
+        &mut descriptor,
+        std::ptr::null_mut(),
+      )
+    },
+    0,
+    "failed to construct the deliberately broad Windows DACL: {}",
+    std::io::Error::last_os_error()
+  );
+  assert!(!descriptor.is_null());
+  assert_ne!(
+    unsafe { SetFileSecurityW(encoded_path.as_ptr(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, descriptor) },
+    0,
+    "failed to install the deliberately broad Windows DACL: {}",
+    std::io::Error::last_os_error()
+  );
+  assert!(unsafe { LocalFree(descriptor) }.is_null(), "failed to free the test security descriptor");
 }
 
 fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {

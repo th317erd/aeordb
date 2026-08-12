@@ -1413,7 +1413,7 @@ fn canonical_relative_name(name: &str) -> bool {
     && name.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn canonical_workspace_path(path: &str) -> bool {
+pub(super) fn canonical_workspace_path(path: &str) -> bool {
   if path.is_empty() || path.contains('\\') || path.as_bytes().contains(&0) || path.len() > 1 && path.ends_with('/') {
     return false;
   }

@@ -2273,8 +2273,8 @@ fn validate_mark_run_checkpoint_publication<'a>(
       "mark checkpoint key or complete resumable state is invalid",
     ));
   }
-  let workspace_path = request.workspace.workspace_path().to_str().ok_or_else(|| {
-    MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_workspace_path", "durable workspace path is not canonical UTF-8")
+  let workspace_path = request.workspace.checkpoint_workspace_path().map_err(|error| {
+    MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_workspace_path", format!("durable workspace path is invalid: {error}"))
   })?;
   if checkpoint.workspace_path != workspace_path || checkpoint.workspace_manifest_digest != request.workspace.manifest_digest() {
     return Err(MarkRunCheckpointPublicationErrorV1::invalid(

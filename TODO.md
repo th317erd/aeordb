@@ -612,6 +612,7 @@
           - [x] Pass the complete Linux workspace/all-target suite, all-target compilation, suppression, formatting, documentation, and independent contract gates.
           - [x] Qualify the exact pushed commit on macOS arm64 and Windows x86_64 MSVC using the frozen lockfile and bounded native commands.
           - [x] Record retained activation boundaries and close P3b-3 only after every required proof is green.
+    - [ ] P3c: implement the shadow clone, bounded capture, root map, migration lease/progress, reconciliation, and cutover-journal substrate without service activation.
     - [ ] P4: implement bounded physical inventory, logical/physical lifecycle, quarantine, sweep, and receipt-backed Void authority without destructive activation.
       - [x] P4-1: expose typed physical-inventory readers and build a disconnected streaming inventory/reference model.
         - [x] Add the `gc_v4_model_spec` campaign target and demonstrate the missing typed inventory API.
@@ -645,7 +646,7 @@
           - [x] Require refreshed physical observations after retained journal retry, then complete idempotently without duplicate lineage.
           - [x] Hard-publish evidence before an injected journal failure, reopen with only diagnosis selected, and retry through the same real publisher.
           - [x] Re-run corrupt/missing-chain, cancellation, crash-prefix, architecture, broad regression, strict-lint-delta, and full-library gates.
-      - [ ] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.
+      - [x] P4-3: implement the bounded bitmap, streamed visitor, workspace, checkpoint, mutation convergence, and resume state machine.
         - [x] P4-3a: add a fully reserved dense bitmap and a cancellation-aware captured KV bucket/slot visitor with exact identity and layout checks.
         - [x] P4-3b: write private no-follow AGWO objects and AGCW manifests through bounded, checksummed, synced workspace files.
           - [x] Reproduce the missing writer with both-width golden object/manifest closure tests before production code.
@@ -672,19 +673,23 @@
           - [x] P4-3d2: own bounded recoverable-soft mutation buffering and hard segment publication without making an acknowledged user write depend on journal I/O.
           - [x] P4-3d3: stream journal/workspace mutation runs through one bounded reconciler, restart on gaps/layout drift/starvation, and require a guarded empty second drain before final publication.
           - [x] P4-3d4: prove cancellation, malformed chains, dishonest receipts, failed soft publication, exact retry/resume, concurrent final-guard exclusion, and no live v3/service/destructive activation.
-        - [ ] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.
-          - [ ] Prove and, if necessary, harden the Windows private-workspace ACL as the platform equivalent of Unix 0700/0600 before native closure.
+        - [x] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.
+          - [x] Prove and harden the Windows private-workspace ACL as the platform equivalent of Unix 0700/0600 before native closure.
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
-    - [ ] P5: eliminate the v0 whole-index publication amplification reproduced by the P2b-3 forced-eviction workload; immutable page publication must remain bounded when the active index set exceeds the clean-cache cap.
-    - [ ] P6/P7: make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
-    - [ ] P7: preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
-    - [ ] P7: bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
-    - [ ] P8: expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
+    - [ ] P5: implement immutable index definitions, ordered pages, catalogs, sparse fixed-point NVT, compaction, and corruption fallback; eliminate v0 whole-index publication amplification when the active set exceeds the clean-cache cap.
+    - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
+    - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
+      - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
+      - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
+      - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
+    - [ ] P8: execute side-by-side migration preflight, copied-production rehearsal, native release qualification, canary, and explicitly authorized operator cutover.
+      - [ ] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
+    - [ ] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish complete release/soak/copy evidence.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
   - [x] Reconcile dedicated IndexArtifacts with current snapshot, backup, and replication behavior.

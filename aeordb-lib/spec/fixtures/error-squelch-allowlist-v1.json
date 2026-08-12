@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1484,
+  "maximum_occurrences": 1488,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -9456,7 +9456,7 @@
     {
       "id": "esq-v1-4a39c7561587839ea769-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 430,
+      "line": 446,
       "column": 16,
       "enclosing_item": "impl DurableMarkWorkspaceV1::create",
       "kind": "default_on_error",
@@ -9466,7 +9466,7 @@
     {
       "id": "esq-v1-758511023d97ccd9817e-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 497,
+      "line": 513,
       "column": 7,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_object",
       "kind": "error_conversion",
@@ -9476,7 +9476,7 @@
     {
       "id": "esq-v1-e9c4b4517378b346feab-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 511,
+      "line": 527,
       "column": 28,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_object",
       "kind": "error_conversion",
@@ -9486,7 +9486,7 @@
     {
       "id": "esq-v1-58acc17e5ecfc8f0b185-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 549,
+      "line": 565,
       "column": 24,
       "enclosing_item": "impl DurableMarkWorkspaceV1::complete",
       "kind": "error_conversion",
@@ -9496,7 +9496,7 @@
     {
       "id": "esq-v1-d473a2a68f592425dc08-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 553,
+      "line": 569,
       "column": 7,
       "enclosing_item": "impl DurableMarkWorkspaceV1::complete",
       "kind": "error_conversion",
@@ -9506,7 +9506,7 @@
     {
       "id": "esq-v1-1159eebfa1c3062842d1-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 662,
+      "line": 680,
       "column": 7,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_object_file",
       "kind": "error_conversion",
@@ -9516,7 +9516,7 @@
     {
       "id": "esq-v1-4c34e5ba13b5442df3bc-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 694,
+      "line": 712,
       "column": 18,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_manifest_file",
       "kind": "error_conversion",
@@ -9526,7 +9526,7 @@
     {
       "id": "esq-v1-db637663dfd5068928f8-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 948,
+      "line": 983,
       "column": 14,
       "enclosing_item": "create_platform_private_directory",
       "kind": "error_conversion",
@@ -9534,9 +9534,49 @@
       "review": "typed-format-failure"
     },
     {
+      "id": "esq-v1-abd46733e8ff04e604f9-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 1145,
+      "column": 32,
+      "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (required_bytes) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows security descriptor exceeds usize\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-b33af3e5bdd077f78c2d-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 1156,
+      "column": 25,
+      "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
+      "kind": "result_to_option",
+      "pattern": "u32 :: try_from (bytes) . ok ()",
+      "review": "checked-arithmetic-composition"
+    },
+    {
+      "id": "esq-v1-d386edc621c70c7766f3-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 1200,
+      "column": 24,
+      "enclosing_item": "windows_security_descriptor_sddl",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (length) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows normalized security descriptor length exceeds usize\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-d228ce7342486996a6f3-00",
+      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
+      "line": 1209,
+      "column": 14,
+      "enclosing_item": "windows_security_descriptor_sddl",
+      "kind": "error_conversion",
+      "pattern": "String :: from_utf16 (unsafe { std :: slice :: from_raw_parts (raw_sddl , string_length) }) . map_err (| _ | MarkWorkspaceErrorV1 :: Path (\"Windows normalized security descriptor is not valid UTF-16\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
       "id": "esq-v1-7e4345f002d6d75481b1-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1045,
+      "line": 1239,
       "column": 5,
       "enclosing_item": "windows_current_user_sid",
       "kind": "error_conversion",
@@ -9546,7 +9586,7 @@
     {
       "id": "esq-v1-fb5ce579809e1a977f01-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1050,
+      "line": 1244,
       "column": 5,
       "enclosing_item": "windows_current_user_sid",
       "kind": "error_conversion",
@@ -9556,7 +9596,7 @@
     {
       "id": "esq-v1-f2bf1c46543ddad46544-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1080,
+      "line": 1274,
       "column": 13,
       "enclosing_item": "windows_current_user_sid",
       "kind": "error_conversion",
@@ -9566,7 +9606,7 @@
     {
       "id": "esq-v1-c1311e7deaf52331056a-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1137,
+      "line": 1331,
       "column": 18,
       "enclosing_item": "enforce_run_cap",
       "kind": "error_conversion",
@@ -9576,7 +9616,7 @@
     {
       "id": "esq-v1-97de5df1eaec303d26cd-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1158,
+      "line": 1352,
       "column": 18,
       "enclosing_item": "manifest_length",
       "kind": "default_on_error",
@@ -9586,7 +9626,7 @@
     {
       "id": "esq-v1-d22b83e35504b81f2c51-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1184,
+      "line": 1378,
       "column": 26,
       "enclosing_item": "encode_manifest",
       "kind": "error_conversion",
@@ -9596,7 +9636,7 @@
     {
       "id": "esq-v1-a99797767be0827ec260-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1195,
+      "line": 1389,
       "column": 5,
       "enclosing_item": "encode_manifest",
       "kind": "error_conversion",
@@ -9606,7 +9646,7 @@
     {
       "id": "esq-v1-032b73a364bece4eafde-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1211,
+      "line": 1405,
       "column": 7,
       "enclosing_item": "encode_manifest",
       "kind": "error_conversion",
@@ -9616,7 +9656,7 @@
     {
       "id": "esq-v1-f5e552ef433f1ae77c0e-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1257,
+      "line": 1451,
       "column": 20,
       "enclosing_item": "stream_file_digest",
       "kind": "error_conversion",
