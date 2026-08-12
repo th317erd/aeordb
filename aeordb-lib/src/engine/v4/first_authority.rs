@@ -545,7 +545,197 @@ struct ValidatedMarkRunClosureV1 {
   workspace: ReopenedMarkWorkspaceV1,
 }
 
-struct MarkRunControlPublicationV1 {
+#[derive(Clone, Copy, Debug)]
+enum GcControlPublicationFailureV1 {
+  MissingAuthority,
+  ControlDatabase,
+  BaselineNotFlushed,
+  ControlKind,
+  ControlKey,
+  ControlSlot,
+  ControlSequence,
+  WriteSequenceExhausted,
+  FileTruncated,
+  ControlWrite,
+  ControlReadback,
+  WalOverflow,
+  EntryCountOverflow,
+  WalPrefix,
+  DependencySize,
+  RetirementActivation,
+  PhysicalIncarnation,
+  ControlCollision,
+  ControlMissing,
+  ControlRepresentation,
+  ControlAmbiguous,
+  CommittedDependencyMissing,
+  CommittedVisibilityFailure,
+  CommittedPostconditionFailure,
+  CommittedReadbackFailure,
+}
+
+impl GcControlPublicationFailureV1 {
+  const fn code(self) -> &'static str {
+    match self {
+      Self::MissingAuthority => "gc_control_missing_authority",
+      Self::ControlDatabase => "gc_control_database",
+      Self::BaselineNotFlushed => "gc_control_baseline_not_flushed",
+      Self::ControlKind => "gc_control_kind",
+      Self::ControlKey => "gc_control_key",
+      Self::ControlSlot => "gc_control_slot",
+      Self::ControlSequence => "gc_control_sequence",
+      Self::WriteSequenceExhausted => "gc_control_write_sequence_exhausted",
+      Self::FileTruncated => "gc_control_file_truncated",
+      Self::ControlWrite => "gc_control_write",
+      Self::ControlReadback => "gc_control_readback",
+      Self::WalOverflow => "gc_control_wal_overflow",
+      Self::EntryCountOverflow => "gc_control_entry_count_overflow",
+      Self::WalPrefix => "gc_control_wal_prefix",
+      Self::DependencySize => "gc_control_dependency_size",
+      Self::RetirementActivation => "gc_control_retirement_activation",
+      Self::PhysicalIncarnation => "gc_control_physical_incarnation",
+      Self::ControlCollision => "gc_control_collision",
+      Self::ControlMissing => "gc_control_missing",
+      Self::ControlRepresentation => "gc_control_representation",
+      Self::ControlAmbiguous => "gc_control_ambiguous",
+      Self::CommittedDependencyMissing => "gc_control_committed_dependency_missing",
+      Self::CommittedVisibilityFailure => "gc_control_committed_visibility_failure",
+      Self::CommittedPostconditionFailure => "gc_control_committed_postcondition_failure",
+      Self::CommittedReadbackFailure => "gc_control_committed_readback_failure",
+    }
+  }
+
+  const fn mark_run_code(self) -> &'static str {
+    match self {
+      Self::MissingAuthority => "mark_checkpoint_missing_authority",
+      Self::ControlDatabase => "mark_checkpoint_control_database",
+      Self::BaselineNotFlushed => "mark_checkpoint_baseline_not_flushed",
+      Self::ControlKind => "mark_checkpoint_control_kind",
+      Self::ControlKey => "mark_checkpoint_control_key",
+      Self::ControlSlot => "mark_checkpoint_control_slot",
+      Self::ControlSequence => "mark_checkpoint_control_sequence",
+      Self::WriteSequenceExhausted => "mark_checkpoint_write_sequence_exhausted",
+      Self::FileTruncated => "mark_checkpoint_file_truncated",
+      Self::ControlWrite => "mark_checkpoint_control_write",
+      Self::ControlReadback => "mark_checkpoint_control_readback",
+      Self::WalOverflow => "mark_checkpoint_wal_overflow",
+      Self::EntryCountOverflow => "mark_checkpoint_entry_count_overflow",
+      Self::WalPrefix => "mark_checkpoint_wal_prefix",
+      Self::DependencySize => "mark_checkpoint_dependency_size",
+      Self::RetirementActivation => "mark_checkpoint_retirement_activation",
+      Self::PhysicalIncarnation => "mark_checkpoint_physical_incarnation",
+      Self::ControlCollision => "mark_checkpoint_control_collision",
+      Self::ControlMissing => "mark_checkpoint_control_missing",
+      Self::ControlRepresentation => "mark_checkpoint_control_representation",
+      Self::ControlAmbiguous => "mark_checkpoint_control_ambiguous",
+      Self::CommittedDependencyMissing => "mark_checkpoint_control_committed_dependency_missing",
+      Self::CommittedVisibilityFailure => "mark_checkpoint_control_committed_visibility_failure",
+      Self::CommittedPostconditionFailure => "mark_checkpoint_control_committed_postcondition_failure",
+      Self::CommittedReadbackFailure => "mark_checkpoint_control_committed_readback_failure",
+    }
+  }
+}
+
+#[derive(Debug)]
+enum GcControlPublicationErrorV1 {
+  Invalid { failure: GcControlPublicationFailureV1, message: String },
+  Format(FormatError),
+  Authority(FirstAuthorityPublicationErrorV1),
+  RetirementAdmission(RetirementJournalReplacementAdmissionErrorV1),
+  RetirementOwner(RetirementJournalOwnerErrorV1),
+}
+
+impl GcControlPublicationErrorV1 {
+  fn code(&self) -> &'static str {
+    match self {
+      Self::Invalid { failure, .. } => failure.code(),
+      Self::Format(source) => source.code(),
+      Self::Authority(source) => source.code(),
+      Self::RetirementAdmission(source) => source.code(),
+      Self::RetirementOwner(source) => source.code(),
+    }
+  }
+
+  fn invalid(failure: GcControlPublicationFailureV1, message: impl Into<String>) -> Self {
+    Self::Invalid { failure, message: message.into() }
+  }
+}
+
+impl Display for GcControlPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    let code = self.code();
+    match self {
+      Self::Invalid { message, .. } => write!(formatter, "{code}: {message}"),
+      Self::Format(source) => write!(formatter, "{code}: GC control format error: {source}"),
+      Self::Authority(source) => write!(formatter, "{code}: GC control authority error: {source}"),
+      Self::RetirementAdmission(source) => write!(formatter, "{code}: GC control retirement admission error: {source}"),
+      Self::RetirementOwner(source) => write!(formatter, "{code}: GC control retirement owner error: {source}"),
+    }
+  }
+}
+
+impl Error for GcControlPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Format(source) => Some(source),
+      Self::Authority(source) => Some(source),
+      Self::RetirementAdmission(source) => Some(source),
+      Self::RetirementOwner(source) => Some(source),
+      Self::Invalid { .. } => None,
+    }
+  }
+}
+
+impl From<FormatError> for GcControlPublicationErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for GcControlPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<EngineError> for GcControlPublicationErrorV1 {
+  fn from(source: EngineError) -> Self {
+    Self::Authority(FirstAuthorityPublicationErrorV1::Engine(source))
+  }
+}
+
+impl From<DatabaseHeaderPublicationErrorV4> for GcControlPublicationErrorV1 {
+  fn from(source: DatabaseHeaderPublicationErrorV4) -> Self {
+    Self::Authority(FirstAuthorityPublicationErrorV1::Header(source))
+  }
+}
+
+impl From<RetirementJournalReplacementAdmissionErrorV1> for GcControlPublicationErrorV1 {
+  fn from(source: RetirementJournalReplacementAdmissionErrorV1) -> Self {
+    Self::RetirementAdmission(source)
+  }
+}
+
+impl From<RetirementJournalOwnerErrorV1> for GcControlPublicationErrorV1 {
+  fn from(source: RetirementJournalOwnerErrorV1) -> Self {
+    Self::RetirementOwner(source)
+  }
+}
+
+impl From<GcControlPublicationErrorV1> for MarkRunCheckpointPublicationErrorV1 {
+  fn from(source: GcControlPublicationErrorV1) -> Self {
+    match source {
+      GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.mark_run_code(), message },
+      GcControlPublicationErrorV1::Format(source) => Self::Format(source),
+      GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
+      GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
+      GcControlPublicationErrorV1::RetirementOwner(source) => Self::RetirementOwner(source),
+    }
+  }
+}
+
+#[derive(Debug)]
+struct GcControlPublicationV1 {
   control_write_sequence: u64,
   control_slot: u8,
   replaced_control: bool,
@@ -553,14 +743,27 @@ struct MarkRunControlPublicationV1 {
   idempotent: bool,
 }
 
-enum MarkRunControlPublicationOutcomeV1 {
-  Complete(MarkRunControlPublicationV1),
-  CommittedFailure { publication: MarkRunControlPublicationV1, code: &'static str, message: String },
+#[derive(Clone, Copy)]
+struct GcControlPublicationRequestV1<'a> {
+  expected_control_kind: GcArtifactKindV1,
+  encoded_control: &'a EncodedGcActiveControlV1,
+  publication_timestamp_ms: u64,
+  monotonic_now_ms: u64,
 }
 
-enum MarkRunControlDependencyOutcomeV1 {
+#[derive(Debug)]
+enum GcControlPublicationOutcomeV1 {
+  Complete(GcControlPublicationV1),
+  CommittedFailure { publication: GcControlPublicationV1, failure: GcControlPublicationFailureV1, message: String },
+}
+
+enum GcControlDependencyOutcomeV1 {
   Complete(super::header_publication::DatabaseHeaderPublicationReceiptV4),
-  CommittedFailure { publication: super::header_publication::DatabaseHeaderPublicationReceiptV4, code: &'static str, message: String },
+  CommittedFailure {
+    publication: super::header_publication::DatabaseHeaderPublicationReceiptV4,
+    failure: GcControlPublicationFailureV1,
+    message: String,
+  },
 }
 
 struct BufferedOnlyRetirementSinkV1;
@@ -830,7 +1033,7 @@ impl V4FirstAuthorityPublisher {
     retirement_owner: &mut RetirementJournalOwnerV1<'_>,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<MarkRunCheckpointPublicationReceiptV1, MarkRunCheckpointPublicationErrorV1> {
-    let (checkpoint, control) = validate_mark_run_checkpoint_publication(&request)?;
+    let (checkpoint, _) = validate_mark_run_checkpoint_publication(&request)?;
     if retirement_owner.hash_algorithm() != request.hash_algorithm || retirement_owner.database_id() != checkpoint.database_id {
       return Err(MarkRunCheckpointPublicationErrorV1::invalid(
         "mark_checkpoint_retirement_owner",
@@ -858,17 +1061,23 @@ impl V4FirstAuthorityPublisher {
       &mut observer,
     )?;
 
-    let control_publication = self.publish_mark_run_control(
-      request.control,
-      &control,
-      request.publication_timestamp_ms,
-      request.monotonic_now_ms,
-      retirement_owner,
-      control_observer,
-    )?;
+    let control_publication = self
+      .publish_gc_active_control(
+        GcControlPublicationRequestV1 {
+          expected_control_kind: GcArtifactKindV1::MarkRunActiveControl,
+          encoded_control: request.control,
+          publication_timestamp_ms: request.publication_timestamp_ms,
+          monotonic_now_ms: request.monotonic_now_ms,
+        },
+        retirement_owner,
+        control_observer,
+      )
+      .map_err(MarkRunCheckpointPublicationErrorV1::from)?;
     let (control_publication, mut committed_failure) = match control_publication {
-      MarkRunControlPublicationOutcomeV1::Complete(publication) => (publication, None),
-      MarkRunControlPublicationOutcomeV1::CommittedFailure { publication, code, message } => (publication, Some((code, message))),
+      GcControlPublicationOutcomeV1::Complete(publication) => (publication, None),
+      GcControlPublicationOutcomeV1::CommittedFailure { publication, failure, message } => {
+        (publication, Some((failure.mark_run_code(), message)))
+      }
     };
     let lineage_state = if control_publication.replaced_control {
       match retirement_owner.flush(self) {
@@ -922,31 +1131,42 @@ impl V4FirstAuthorityPublisher {
     Ok(receipt)
   }
 
-  fn publish_mark_run_control(
+  fn publish_gc_active_control(
     &mut self,
-    encoded_control: &EncodedGcActiveControlV1,
-    control: &GcActiveControlV1<'_>,
-    publication_timestamp_ms: u64,
-    monotonic_now_ms: u64,
+    request: GcControlPublicationRequestV1<'_>,
     retirement_owner: &mut RetirementJournalOwnerV1<'_>,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
-  ) -> Result<MarkRunControlPublicationOutcomeV1, MarkRunCheckpointPublicationErrorV1> {
+  ) -> Result<GcControlPublicationOutcomeV1, GcControlPublicationErrorV1> {
+    let expected_control_kind = request.expected_control_kind;
+    let encoded_control = request.encoded_control;
+    let publication_timestamp_ms = request.publication_timestamp_ms;
+    let monotonic_now_ms = request.monotonic_now_ms;
     let _authority = self.root_state.lock().map_err(|poisoned| {
       drop(poisoned);
-      MarkRunCheckpointPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+      GcControlPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
     })?;
     let observation = self.observe()?;
     let header = &observation.selected.header;
     if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
-      return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-        "mark_checkpoint_missing_authority",
-        "mark control publication requires selected non-degraded first authority",
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::MissingAuthority,
+        "GC control publication requires selected non-degraded first authority",
       ));
     }
-    if header.hash_algorithm != retirement_owner.hash_algorithm() || control.database_id != header.database_id {
-      return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-        "mark_checkpoint_control_database",
-        "mark control, retirement owner, and selected database authority disagree",
+    let control = decode_gc_active_control(&encoded_control.value, header.hash_algorithm)?;
+    if !expected_control_kind.is_control() || control.kind != expected_control_kind || control.key != encoded_control.key {
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::ControlKind,
+        "prepared and expected GC control identities disagree",
+      ));
+    }
+    if header.hash_algorithm != retirement_owner.hash_algorithm()
+      || retirement_owner.database_id() != header.database_id
+      || control.database_id != header.database_id
+    {
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::ControlDatabase,
+        "GC control, retirement owner, and selected database authority disagree",
       ));
     }
 
@@ -955,25 +1175,25 @@ impl V4FirstAuthorityPublisher {
     kv.flush()?;
     validate_kv_header_alignment(&kv, header)?;
     if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
-      return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-        "mark_checkpoint_baseline_not_flushed",
-        "mark control publication requires an empty KV write and hot-buffer baseline",
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::BaselineNotFlushed,
+        "GC control publication requires an empty KV write and hot-buffer baseline",
       ));
     }
 
-    let control_keys = mark_run_control_keys(header.hash_algorithm, &header.database_id)?;
+    let control_keys = gc_control_keys(header.hash_algorithm, expected_control_kind, &header.database_id)?;
     if encoded_control.key != control_keys[usize::from(control.slot)] {
-      return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-        "mark_checkpoint_control_key",
-        "prepared mark control key does not match its database and slot",
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::ControlKey,
+        "prepared GC control key does not match its kind, database, and slot",
       ));
     }
-    let stored_a = load_gc_control_entity(&self.file, &kv, &control_keys[0], header)?;
-    let stored_b = load_gc_control_entity(&self.file, &kv, &control_keys[1], header)?;
+    let stored_a = load_gc_control_entity(&self.file, &kv, expected_control_kind, &control_keys[0], header)?;
+    let stored_b = load_gc_control_entity(&self.file, &kv, expected_control_kind, &control_keys[1], header)?;
     let stored_controls = [stored_a, stored_b];
     if let Some(existing) = &stored_controls[usize::from(control.slot)] {
       if existing.stored_value == encoded_control.value {
-        return Ok(MarkRunControlPublicationOutcomeV1::Complete(MarkRunControlPublicationV1 {
+        return Ok(GcControlPublicationOutcomeV1::Complete(GcControlPublicationV1 {
           control_write_sequence: existing.write_sequence,
           control_slot: control.slot,
           replaced_control: false,
@@ -983,23 +1203,23 @@ impl V4FirstAuthorityPublisher {
       }
     }
 
-    let required_slot = required_mark_run_control_slot(&stored_controls)?;
+    let required_slot = required_gc_control_slot(&stored_controls)?;
     if control.slot != required_slot {
-      return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-        "mark_checkpoint_control_slot",
-        format!("mark control must publish slot {required_slot}, got {}", control.slot),
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::ControlSlot,
+        format!("GC control must publish slot {required_slot}, got {}", control.slot),
       ));
     }
     let maximum_control_sequence = stored_controls.iter().flatten().map(|stored| stored.control_sequence).fold(0, u64::max);
     if control.sequence <= maximum_control_sequence {
-      return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-        "mark_checkpoint_control_sequence",
-        "mark control sequence does not advance the selected A/B pair",
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::ControlSequence,
+        "GC control sequence does not advance the selected A/B pair",
       ));
     }
 
     let write_sequence = header.write_sequence_high_water.checked_add(1).ok_or_else(|| {
-      MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_write_sequence_exhausted", "v4 write sequence is exhausted")
+      GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::WriteSequenceExhausted, "v4 write sequence is exhausted")
     })?;
     let mut reservation_candidate = header.clone();
     reservation_candidate.updated_at_ms = header.updated_at_ms.max(publication_timestamp_ms);
@@ -1020,18 +1240,18 @@ impl V4FirstAuthorityPublisher {
     let replacement_entity = decode_whole_entity(&entity_bytes, header.hash_algorithm, write_sequence)?;
     let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
     if append_start < header.hot_tail_offset {
-      return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-        "mark_checkpoint_file_truncated",
+      return Err(GcControlPublicationErrorV1::invalid(
+        GcControlPublicationFailureV1::FileTruncated,
         "database length precedes the selected v4 hot-tail offset",
       ));
     }
     write_file_at_native(&self.file, append_start, &entity_bytes)
-      .map_err(|source| MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_control_write", source.to_string()))?;
+      .map_err(|source| GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::ControlWrite, source.to_string()))?;
     verify_file_bytes_native(&self.file, append_start, &entity_bytes)
-      .map_err(|source| MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_control_readback", source.to_string()))?;
-    let expected_hot_tail_offset = append_start
-      .checked_add(entity_bytes.len() as u64)
-      .ok_or_else(|| MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_wal_overflow", "mark control WAL offset overflowed"))?;
+      .map_err(|source| GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::ControlReadback, source.to_string()))?;
+    let expected_hot_tail_offset = append_start.checked_add(entity_bytes.len() as u64).ok_or_else(|| {
+      GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::WalOverflow, "GC control WAL offset overflowed")
+    })?;
     let expected_existing = stored_controls[usize::from(control.slot)].as_ref().map(|stored| &stored.locator);
     let replacement_incarnation = encode_v4_physical_incarnation(
       header.hash_algorithm,
@@ -1070,17 +1290,16 @@ impl V4FirstAuthorityPublisher {
       None
     };
 
-    let entry_count = header
-      .entry_count
-      .checked_add(u64::from(expected_existing.is_none()))
-      .ok_or_else(|| MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_entry_count_overflow", "v4 entry count overflowed"))?;
+    let entry_count = header.entry_count.checked_add(u64::from(expected_existing.is_none())).ok_or_else(|| {
+      GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::EntryCountOverflow, "v4 entry count overflowed")
+    })?;
     let entities = [PreparedWholeEntityV1 { key: encoded_control.key.clone(), kv_type: kv_tag::GC_ARTIFACT, bytes: entity_bytes }];
     let orphan_prefix_bytes = append_start.checked_sub(header.hot_tail_offset).ok_or_else(|| {
-      MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_wal_prefix", "mark control append precedes the selected hot tail")
+      GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::WalPrefix, "GC control append precedes the selected hot tail")
     })?;
     let dependency_bytes = entity_dependency_bytes(&entities, header.hash_algorithm.hash_length())?
       .checked_add(orphan_prefix_bytes)
-      .ok_or_else(|| MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_dependency_size", "dependency bytes overflowed"))?;
+      .ok_or_else(|| GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::DependencySize, "dependency bytes overflowed"))?;
     let mut candidate = header.clone();
     candidate.updated_at_ms = header.updated_at_ms.max(publication_timestamp_ms);
     candidate.write_sequence_high_water = write_sequence;
@@ -1092,7 +1311,7 @@ impl V4FirstAuthorityPublisher {
     let batch = kv.begin_atomic_visibility_batch(1, authority_sequence)?;
     let publication = if let Some(prepared) = prepared_retirement {
       match prepared.activate(|_| {
-        commit_mark_run_control_dependency(
+        commit_gc_control_dependency(
           &self.file,
           &mut kv,
           admitted,
@@ -1108,8 +1327,8 @@ impl V4FirstAuthorityPublisher {
         Ok(outcome) => outcome.output,
         Err(source) => {
           let Some((source, prepared)) = source.into_activation_failure() else {
-            return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-              "mark_checkpoint_retirement_activation",
+            return Err(GcControlPublicationErrorV1::invalid(
+              GcControlPublicationFailureV1::RetirementActivation,
               "prepared retirement activation returned an admission error",
             ));
           };
@@ -1121,7 +1340,7 @@ impl V4FirstAuthorityPublisher {
         }
       }
     } else {
-      commit_mark_run_control_dependency(
+      commit_gc_control_dependency(
         &self.file,
         &mut kv,
         admitted,
@@ -1135,18 +1354,18 @@ impl V4FirstAuthorityPublisher {
       )?
     };
     let (publication, committed_failure) = match publication {
-      MarkRunControlDependencyOutcomeV1::Complete(publication) => (publication, None),
-      MarkRunControlDependencyOutcomeV1::CommittedFailure { publication, code, message } => (publication, Some((code, message))),
+      GcControlDependencyOutcomeV1::Complete(publication) => (publication, None),
+      GcControlDependencyOutcomeV1::CommittedFailure { publication, failure, message } => (publication, Some((failure, message))),
     };
-    let control_publication = MarkRunControlPublicationV1 {
+    let control_publication = GcControlPublicationV1 {
       control_write_sequence: write_sequence,
       control_slot: control.slot,
       replaced_control: expected_existing.is_some(),
       observation: publication.observation,
       idempotent: false,
     };
-    if let Some((code, message)) = committed_failure {
-      return Ok(MarkRunControlPublicationOutcomeV1::CommittedFailure { publication: control_publication, code, message });
+    if let Some((failure, message)) = committed_failure {
+      return Ok(GcControlPublicationOutcomeV1::CommittedFailure { publication: control_publication, failure, message });
     }
     let stored = match read_entity_bounded(
       &self.file,
@@ -1157,28 +1376,28 @@ impl V4FirstAuthorityPublisher {
     ) {
       Ok(Some(stored)) => stored,
       Ok(None) => {
-        return Ok(MarkRunControlPublicationOutcomeV1::CommittedFailure {
+        return Ok(GcControlPublicationOutcomeV1::CommittedFailure {
           publication: control_publication,
-          code: "mark_checkpoint_control_committed_readback_failure",
-          message: "published mark control is absent".to_string(),
+          failure: GcControlPublicationFailureV1::CommittedReadbackFailure,
+          message: "published GC control is absent".to_string(),
         });
       }
       Err(source) => {
-        return Ok(MarkRunControlPublicationOutcomeV1::CommittedFailure {
+        return Ok(GcControlPublicationOutcomeV1::CommittedFailure {
           publication: control_publication,
-          code: "mark_checkpoint_control_committed_readback_failure",
+          failure: GcControlPublicationFailureV1::CommittedReadbackFailure,
           message: source.to_string(),
         });
       }
     };
     if stored != entities[0].bytes {
-      return Ok(MarkRunControlPublicationOutcomeV1::CommittedFailure {
+      return Ok(GcControlPublicationOutcomeV1::CommittedFailure {
         publication: control_publication,
-        code: "mark_checkpoint_control_committed_readback_failure",
-        message: "published mark control differs from its exact prepared bytes".to_string(),
+        failure: GcControlPublicationFailureV1::CommittedReadbackFailure,
+        message: "published GC control differs from its exact prepared bytes".to_string(),
       });
     }
-    Ok(MarkRunControlPublicationOutcomeV1::Complete(control_publication))
+    Ok(GcControlPublicationOutcomeV1::Complete(control_publication))
   }
 
   fn publish_retirement_journal_segment(
@@ -2572,46 +2791,48 @@ fn classify_workspace_selection_error(
   }
 }
 
-fn mark_run_control_keys(algorithm: HashAlgorithm, database_id: &[u8; 16]) -> Result<[Vec<u8>; 2], MarkRunCheckpointPublicationErrorV1> {
-  Ok([
-    gc_active_control_key(algorithm, GcArtifactKindV1::MarkRunActiveControl, database_id, 0)?,
-    gc_active_control_key(algorithm, GcArtifactKindV1::MarkRunActiveControl, database_id, 1)?,
-  ])
+fn gc_control_keys(
+  algorithm: HashAlgorithm,
+  kind: GcArtifactKindV1,
+  database_id: &[u8; 16],
+) -> Result<[Vec<u8>; 2], GcControlPublicationErrorV1> {
+  Ok([gc_active_control_key(algorithm, kind, database_id, 0)?, gc_active_control_key(algorithm, kind, database_id, 1)?])
 }
 
 fn load_gc_control_entity(
   file: &File,
   kv: &DiskKVStore,
+  expected_kind: GcArtifactKindV1,
   key: &[u8],
   header: &DatabaseHeaderV4,
-) -> Result<Option<StoredGcControlEntityV1>, MarkRunCheckpointPublicationErrorV1> {
+) -> Result<Option<StoredGcControlEntityV1>, GcControlPublicationErrorV1> {
   let Some(locator) = kv.get(key)? else {
     return Ok(None);
   };
   if locator.type_flags != kv_tag::GC_ARTIFACT {
-    return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-      "mark_checkpoint_control_collision",
-      "mark control key resolves to another KV role",
+    return Err(GcControlPublicationErrorV1::invalid(
+      GcControlPublicationFailureV1::ControlCollision,
+      "GC control key resolves to another KV role",
     ));
   }
   let entity_bytes = read_entity_bounded(file, kv, key, FIRST_AUTHORITY_CONTROL_ENTITY_CAP, header.write_sequence_high_water)?
-    .ok_or_else(|| MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_control_missing", "mark control locator disappeared"))?;
+    .ok_or_else(|| GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::ControlMissing, "GC control locator disappeared"))?;
   let entity = decode_whole_entity(&entity_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
   if entity.entry_type != EntryTypeV4::GcArtifact
     || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
     || entity.compression_algorithm != CompressionAlgorithm::None
     || entity.key != key
   {
-    return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-      "mark_checkpoint_control_representation",
-      "stored mark control is not one canonical system GC WholeEntity",
+    return Err(GcControlPublicationErrorV1::invalid(
+      GcControlPublicationFailureV1::ControlRepresentation,
+      "stored GC control is not one canonical system GC WholeEntity",
     ));
   }
   let control = decode_gc_active_control(entity.stored_value, header.hash_algorithm)?;
-  if control.kind != GcArtifactKindV1::MarkRunActiveControl || control.key != key {
-    return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-      "mark_checkpoint_control_representation",
-      "stored GC entity is not the canonical mark-run control for its key",
+  if control.kind != expected_kind || control.key != key {
+    return Err(GcControlPublicationErrorV1::invalid(
+      GcControlPublicationFailureV1::ControlRepresentation,
+      "stored GC entity is not the expected canonical control for its key",
     ));
   }
   let stored_value = entity.stored_value.to_vec();
@@ -2632,16 +2853,16 @@ fn load_gc_control_entity(
   }))
 }
 
-fn required_mark_run_control_slot(controls: &[Option<StoredGcControlEntityV1>; 2]) -> Result<u8, MarkRunCheckpointPublicationErrorV1> {
+fn required_gc_control_slot(controls: &[Option<StoredGcControlEntityV1>; 2]) -> Result<u8, GcControlPublicationErrorV1> {
   match (&controls[0], &controls[1]) {
     (None, None) => Ok(0),
     (Some(_), None) => Ok(1),
     (None, Some(_)) => Ok(0),
     (Some(a), Some(b)) => {
       if a.control_sequence == b.control_sequence && (a.generation != b.generation || a.target_manifest_hash != b.target_manifest_hash) {
-        return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-          "mark_checkpoint_control_ambiguous",
-          "equal A/B control sequences disagree on generation or checkpoint target",
+        return Err(GcControlPublicationErrorV1::invalid(
+          GcControlPublicationFailureV1::ControlAmbiguous,
+          "equal A/B control sequences disagree on generation or target manifest",
         ));
       }
       if a.control_sequence < b.control_sequence {
@@ -2661,19 +2882,19 @@ fn encode_v4_physical_incarnation(
   write_sequence: u64,
   entity_length: usize,
   entry_type: EntryTypeV4,
-) -> Result<Vec<u8>, MarkRunCheckpointPublicationErrorV1> {
+) -> Result<Vec<u8>, GcControlPublicationErrorV1> {
   if logical_key.len() != algorithm.hash_length()
     || integrity_hash.len() != algorithm.hash_length()
     || wal_offset == 0
     || write_sequence == 0
   {
-    return Err(MarkRunCheckpointPublicationErrorV1::invalid(
-      "mark_checkpoint_physical_incarnation",
-      "mark control incarnation identity, offset, or sequence is invalid",
+    return Err(GcControlPublicationErrorV1::invalid(
+      GcControlPublicationFailureV1::PhysicalIncarnation,
+      "GC control incarnation identity, offset, or sequence is invalid",
     ));
   }
   let entity_length = u32::try_from(entity_length).map_err(|error| {
-    MarkRunCheckpointPublicationErrorV1::invalid("mark_checkpoint_physical_incarnation", format!("entity length exceeds u32: {error}"))
+    GcControlPublicationErrorV1::invalid(GcControlPublicationFailureV1::PhysicalIncarnation, format!("entity length exceeds u32: {error}"))
   })?;
   let mut incarnation = Vec::with_capacity(24 + 2 * logical_key.len());
   incarnation.extend_from_slice(logical_key);
@@ -2689,7 +2910,7 @@ fn encode_v4_physical_incarnation(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn commit_mark_run_control_dependency(
+fn commit_gc_control_dependency(
   file: &File,
   kv: &mut DiskKVStore,
   admitted: super::header_publication::AdmittedDatabaseHeaderPublicationV4<'_>,
@@ -2700,7 +2921,7 @@ fn commit_mark_run_control_dependency(
   expected_hot_tail_offset: u64,
   expected_existing: Option<&KVEntry>,
   observer: &mut dyn FirstAuthorityDependencyObserverV1,
-) -> Result<MarkRunControlDependencyOutcomeV1, FirstAuthorityPublicationErrorV1> {
+) -> Result<GcControlDependencyOutcomeV1, FirstAuthorityPublicationErrorV1> {
   let (publication_result, append_completed) = {
     let mut dependency = FirstAuthorityDependencyV1 {
       file,
@@ -2726,33 +2947,32 @@ fn commit_mark_run_control_dependency(
     }
   };
   if !append_completed {
-    let abort_message = kv.abort_atomic_visibility_batch(batch).err().map(|error| format!("; visibility rollback also failed: {error}"));
-    let rollback_failure_suffix = match abort_message {
-      Some(message) => message,
-      None => String::new(),
+    let rollback_failure_suffix = match kv.abort_atomic_visibility_batch(batch) {
+      Ok(()) => String::new(),
+      Err(error) => format!("; visibility rollback also failed: {error}"),
     };
-    return Ok(MarkRunControlDependencyOutcomeV1::CommittedFailure {
+    return Ok(GcControlDependencyOutcomeV1::CommittedFailure {
       publication,
-      code: "mark_checkpoint_control_committed_dependency_missing",
-      message: format!("header publication completed without the exact mark control dependency{rollback_failure_suffix}"),
+      failure: GcControlPublicationFailureV1::CommittedDependencyMissing,
+      message: format!("header publication completed without the exact GC control dependency{rollback_failure_suffix}"),
     });
   }
   kv.complete_hot_tail_dependency();
   if let Err(error) = kv.publish_atomic_visibility_after_authority(batch, &publication.durability) {
-    return Ok(MarkRunControlDependencyOutcomeV1::CommittedFailure {
+    return Ok(GcControlDependencyOutcomeV1::CommittedFailure {
       publication,
-      code: "mark_checkpoint_control_committed_visibility_failure",
+      failure: GcControlPublicationFailureV1::CommittedVisibilityFailure,
       message: error.to_string(),
     });
   }
   if let Err(error) = observer.authority_committed(kv, entities) {
-    return Ok(MarkRunControlDependencyOutcomeV1::CommittedFailure {
+    return Ok(GcControlDependencyOutcomeV1::CommittedFailure {
       publication,
-      code: "mark_checkpoint_control_committed_postcondition_failure",
+      failure: GcControlPublicationFailureV1::CommittedPostconditionFailure,
       message: error.to_string(),
     });
   }
-  Ok(MarkRunControlDependencyOutcomeV1::Complete(publication))
+  Ok(GcControlDependencyOutcomeV1::Complete(publication))
 }
 
 fn validate_kv_header_alignment(kv: &DiskKVStore, header: &DatabaseHeaderV4) -> Result<(), FirstAuthorityPublicationErrorV1> {

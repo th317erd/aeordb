@@ -14,6 +14,7 @@ use crate::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, Retirem
 use crate::engine::v4::gc::{
   EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlWriteV1, GcArtifactKindV1, encode_gc_active_control,
 };
+use crate::engine::v4::gc_lifecycle::{RootLifecycleManifestWriteV1, encode_root_lifecycle_manifest_v1};
 use crate::engine::v4::gc_mark::{MarkRunCheckpointWriteV1, encode_mark_run_checkpoint};
 use crate::engine::v4::gc_mark_workspace::{
   DurableMarkWorkspaceClosureV1, DurableMarkWorkspaceV1, MarkWorkspaceBasisV1, MarkWorkspaceIdentityV1, MarkWorkspaceOptionsV1,
@@ -614,6 +615,128 @@ fn post_commit_failure_returns_the_exact_committed_receipt_and_retry_is_idempote
   assert_eq!(retry.publication_sequence, committed_sequence);
   assert_eq!(retry.namespace_root.root_hash, committed_root);
   assert_eq!(coordinator.snapshot().unwrap().next_sequence, committed_sequence + 1);
+}
+
+#[test]
+fn root_lifecycle_and_mark_controls_share_one_kind_scoped_replacement_path() {
+  let (_directory, _path, _coordinator, mut publisher) = create_environment("shared-gc-control", None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap());
+  let cancellation = CancellationToken::new();
+  let database_id = [0x31; 16];
+  let mut owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    database_id,
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(8, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+
+  let mut last_control = None;
+  for sequence in 1..=3u64 {
+    let generation = 500 + sequence;
+    let timestamp_ms = 1_700_000_500_000 + sequence;
+    let manifest = encode_root_lifecycle_manifest_v1(&RootLifecycleManifestWriteV1 {
+      hash_algorithm: HashAlgorithm::Blake3_256,
+      database_id: &database_id,
+      generation,
+      published_at_ms: i64::try_from(timestamp_ms).unwrap(),
+      source_complete_mark_generation: generation,
+      authority_root_set_digest: &[0x41; 32],
+      candidate_directory_hash: None,
+      root_expiry_manifest_hash: None,
+      next_page_id: 1,
+      candidate_count: 0,
+      pending_count: 0,
+      retired_evidence_count: 0,
+      candidate_bytes: 0,
+      expiry_bytes: 0,
+    })
+    .unwrap();
+    publisher
+      .publish_immutable_gc_artifact(
+        ImmutableGcArtifactPublicationV1 {
+          kind: GcArtifactKindV1::RootLifecycleManifest,
+          database_id: &database_id,
+          artifact_key: &manifest.key,
+          value: &manifest.value,
+          minimum_timestamp_ms: timestamp_ms,
+          committed_postcondition_code: "root_lifecycle_manifest_committed_postcondition",
+        },
+        &mut NoopFirstAuthorityDependencyObserverV1,
+      )
+      .unwrap();
+    let control = encode_gc_active_control(&GcActiveControlWriteV1 {
+      kind: GcArtifactKindV1::RootLifecycleActiveControl,
+      hash_algorithm: HashAlgorithm::Blake3_256,
+      database_id: &database_id,
+      slot: u8::try_from((sequence - 1) % 2).unwrap(),
+      sequence,
+      generation,
+      target_manifest_hash: &manifest.key,
+    })
+    .unwrap();
+    let outcome = publisher
+      .publish_gc_active_control(
+        GcControlPublicationRequestV1 {
+          expected_control_kind: GcArtifactKindV1::RootLifecycleActiveControl,
+          encoded_control: &control,
+          publication_timestamp_ms: timestamp_ms,
+          monotonic_now_ms: timestamp_ms,
+        },
+        &mut owner,
+        &mut NoopFirstAuthorityDependencyObserverV1,
+      )
+      .unwrap();
+    let GcControlPublicationOutcomeV1::Complete(publication) = outcome else {
+      panic!("lifecycle control publication unexpectedly reported a committed failure");
+    };
+    assert_eq!(publication.control_slot, u8::try_from((sequence - 1) % 2).unwrap());
+    assert_eq!(publication.replaced_control, sequence == 3);
+    assert!(!publication.idempotent);
+    last_control = Some((control, timestamp_ms));
+  }
+
+  assert_eq!(owner.status().pending_records, 1);
+  let mark_control_key = gc_active_control_key(HashAlgorithm::Blake3_256, GcArtifactKindV1::MarkRunActiveControl, &database_id, 0).unwrap();
+  assert!(publisher.locator(&mark_control_key).unwrap().is_none());
+  let (last_control, timestamp_ms) = last_control.unwrap();
+  let retry = publisher
+    .publish_gc_active_control(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::RootLifecycleActiveControl,
+        encoded_control: &last_control,
+        publication_timestamp_ms: timestamp_ms,
+        monotonic_now_ms: timestamp_ms,
+      },
+      &mut owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  let GcControlPublicationOutcomeV1::Complete(retry) = retry else {
+    panic!("exact lifecycle control retry unexpectedly reported a committed failure");
+  };
+  assert!(retry.idempotent);
+  assert_eq!(owner.status().pending_records, 1);
+
+  let before_wrong_kind = publisher.observe().unwrap();
+  let wrong_kind = publisher
+    .publish_gc_active_control(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::MarkRunActiveControl,
+        encoded_control: &last_control,
+        publication_timestamp_ms: timestamp_ms,
+        monotonic_now_ms: timestamp_ms,
+      },
+      &mut owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap_err();
+  assert_eq!(wrong_kind.code(), "gc_control_kind");
+  assert_eq!(publisher.observe().unwrap(), before_wrong_kind);
 }
 
 #[test]
