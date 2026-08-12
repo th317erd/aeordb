@@ -647,13 +647,15 @@ fn order_exact_identity_prior_coverage_and_candidate_generation_are_mandatory() 
 #[test]
 fn quarantine_transition_remains_disconnected_from_live_service_and_destructive_gc() {
   let source = fs::read_to_string(source_path("src/engine/v4/gc_quarantine_transition.rs")).unwrap();
+  let publication_source = fs::read_to_string(source_path("src/engine/v4/gc_quarantine_publication.rs")).unwrap();
   for forbidden in ["StorageEngine", "DirectoryOps", "AppState", "server::", "VoidManager", "run_gc", "remove_entry"] {
     assert!(!source.contains(forbidden), "transition model unexpectedly references {forbidden}");
+    assert!(!publication_source.contains(forbidden), "publication qualifier unexpectedly references {forbidden}");
   }
   let source_root = source_path("src");
   let mut production_uses = Vec::new();
   collect_production_uses(&source_root, &mut production_uses);
-  assert_eq!(production_uses, vec![source_path("src/engine/v4/mod.rs")]);
+  assert_eq!(production_uses, vec![source_path("src/engine/v4/gc_quarantine_publication.rs"), source_path("src/engine/v4/mod.rs")]);
 }
 
 fn source_path(relative: &str) -> PathBuf {

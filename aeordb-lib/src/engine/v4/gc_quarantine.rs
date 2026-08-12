@@ -11,6 +11,7 @@ use super::gc_state::{
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
+use crate::engine::v4::hash::digest_parts;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -247,6 +248,13 @@ pub struct QuarantineClosureSummaryV1 {
   pub delta_count: u64,
   pub delta_record_count: u64,
   pub delta_bytes: u64,
+  manifest_key: Vec<u8>,
+}
+
+impl QuarantineClosureSummaryV1 {
+  pub fn manifest_key(&self) -> &[u8] {
+    &self.manifest_key
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -467,6 +475,7 @@ impl<'a> QuarantineClosureValidatorV1<'a> {
       delta_count: self.delta_count,
       delta_record_count: self.delta_record_count,
       delta_bytes: self.delta_bytes,
+      manifest_key: try_copy_bytes(&self.manifest.key)?,
     })
   }
 
@@ -932,25 +941,8 @@ pub fn encode_candidate_delta_v1(request: &CandidateDeltaWriteV1<'_>) -> FormatR
   }
   for (index, record) in request.records.iter().enumerate() {
     let start = 16 + hash_width + index * record_length;
-    body[start] = match record.operation {
-      CandidateDeltaOperationV1::Set => 1,
-      CandidateDeltaOperationV1::Clear => 2,
-    };
-    let candidate_start = start + 4;
-    match record.operation {
-      CandidateDeltaOperationV1::Set => {
-        let encoded = encode_physical_quarantine_candidate_v1(&record.candidate)?;
-        body[candidate_start..candidate_start + encoded.len()].copy_from_slice(&encoded);
-      }
-      CandidateDeltaOperationV1::Clear => {
-        encode_physical_incarnation(
-          &mut body[candidate_start..candidate_start + 24 + 2 * hash_width],
-          &record.candidate.incarnation,
-          hash_width,
-        )?;
-        put_u16(&mut body, candidate_start + 24 + 2 * hash_width, record.candidate.class as u16);
-      }
-    }
+    let encoded = encode_candidate_delta_record_v1(record, request.hash_algorithm)?;
+    body[start..start + record_length].copy_from_slice(&encoded);
   }
   let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
     kind: GcArtifactKindV1::CandidateDelta,
@@ -961,6 +953,41 @@ pub fn encode_candidate_delta_v1(request: &CandidateDeltaWriteV1<'_>) -> FormatR
   })?;
   decode_candidate_delta_v1(&encoded.value, request.hash_algorithm)?;
   Ok(encoded)
+}
+
+pub fn encode_candidate_delta_record_v1(record: &CandidateDeltaRecordWriteV1<'_>, algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+  validate_candidate_delta_record_write_v1(record, algorithm)?;
+  let hash_width = algorithm.hash_length();
+  let mut encoded = vec![0; 56 + 2 * hash_width];
+  encoded[0] = match record.operation {
+    CandidateDeltaOperationV1::Set => 1,
+    CandidateDeltaOperationV1::Clear => 2,
+  };
+  let candidate_start = 4;
+  match record.operation {
+    CandidateDeltaOperationV1::Set => {
+      let candidate = encode_physical_quarantine_candidate_v1(&record.candidate)?;
+      encoded[candidate_start..candidate_start + candidate.len()].copy_from_slice(&candidate);
+    }
+    CandidateDeltaOperationV1::Clear => {
+      encode_physical_incarnation(
+        &mut encoded[candidate_start..candidate_start + 24 + 2 * hash_width],
+        &record.candidate.incarnation,
+        hash_width,
+      )?;
+      put_u16(&mut encoded, candidate_start + 24 + 2 * hash_width, record.candidate.class as u16);
+    }
+  }
+  decode_candidate_delta_record_v1(&encoded, algorithm)?;
+  Ok(encoded)
+}
+
+pub(crate) fn initial_candidate_mutation_digest_v1(algorithm: HashAlgorithm) -> Vec<u8> {
+  digest_parts(algorithm, &[b"aeordb:v4:physical-quarantine-mutations:v1"])
+}
+
+pub(crate) fn extend_candidate_mutation_digest_v1(algorithm: HashAlgorithm, prior: &[u8], encoded_record: &[u8]) -> Vec<u8> {
+  digest_parts(algorithm, &[b"aeordb:v4:physical-quarantine-mutation-step:v1", prior, encoded_record])
 }
 
 pub fn decode_quarantine_manifest_v1(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<QuarantineManifestV1<'_>> {

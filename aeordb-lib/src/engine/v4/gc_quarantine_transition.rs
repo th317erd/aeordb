@@ -11,8 +11,10 @@ use tokio_util::sync::CancellationToken;
 use super::gc::{PhysicalIncarnationV1, compare_physical_incarnations_v1};
 use super::gc_quarantine::{
   CandidateDeltaOperationV1, CandidateDeltaRecordWriteV1, PhysicalQuarantineCandidateClassV1, PhysicalQuarantineCandidateV1,
-  PhysicalQuarantineCandidateWriteV1, QuarantineManifestV1,
+  PhysicalQuarantineCandidateWriteV1, QuarantineManifestV1, encode_candidate_delta_record_v1, extend_candidate_mutation_digest_v1,
+  initial_candidate_mutation_digest_v1,
 };
+use super::reader::FormatError;
 use crate::engine::HashAlgorithm;
 
 pub const REQUIRED_PHYSICAL_QUARANTINE_COMPLETE_MARKS_V1: u8 = 2;
@@ -212,6 +214,77 @@ pub struct PhysicalQuarantineTransitionSummaryV1 {
   pub capacity_blocked: bool,
 }
 
+#[derive(Debug)]
+pub struct PhysicalQuarantineTransitionPublicationPermitV1 {
+  hash_algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  prior_manifest_hash: Vec<u8>,
+  mark_generation: u64,
+  completed_at_ms: u64,
+  authority_root_set_digest: Vec<u8>,
+  semantic_state_digest: Vec<u8>,
+  kv_layout_fingerprint: Vec<u8>,
+  mark_result_digest: Vec<u8>,
+  captured_root_lifecycle_manifest: Vec<u8>,
+  mutation_count: u64,
+  mutation_digest: Vec<u8>,
+  summary: PhysicalQuarantineTransitionSummaryV1,
+}
+
+impl PhysicalQuarantineTransitionPublicationPermitV1 {
+  pub fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
+  pub fn database_id(&self) -> &[u8; 16] {
+    &self.database_id
+  }
+
+  pub fn prior_manifest_hash(&self) -> &[u8] {
+    &self.prior_manifest_hash
+  }
+
+  pub fn mark_generation(&self) -> u64 {
+    self.mark_generation
+  }
+
+  pub fn completed_at_ms(&self) -> u64 {
+    self.completed_at_ms
+  }
+
+  pub fn authority_root_set_digest(&self) -> &[u8] {
+    &self.authority_root_set_digest
+  }
+
+  pub fn semantic_state_digest(&self) -> &[u8] {
+    &self.semantic_state_digest
+  }
+
+  pub fn kv_layout_fingerprint(&self) -> &[u8] {
+    &self.kv_layout_fingerprint
+  }
+
+  pub fn mark_result_digest(&self) -> &[u8] {
+    &self.mark_result_digest
+  }
+
+  pub fn captured_root_lifecycle_manifest(&self) -> &[u8] {
+    &self.captured_root_lifecycle_manifest
+  }
+
+  pub fn mutation_count(&self) -> u64 {
+    self.mutation_count
+  }
+
+  pub fn mutation_digest(&self) -> &[u8] {
+    &self.mutation_digest
+  }
+
+  pub fn summary(&self) -> PhysicalQuarantineTransitionSummaryV1 {
+    self.summary
+  }
+}
+
 #[derive(Debug, Error)]
 pub enum PhysicalQuarantineTransitionErrorV1 {
   #[error("invalid physical-quarantine transition configuration: {0}")]
@@ -242,6 +315,8 @@ pub enum PhysicalQuarantineTransitionErrorV1 {
   ArithmeticConversion(std::num::TryFromIntError),
   #[error("physical-quarantine transition allocation failed: {0}")]
   Allocation(std::collections::TryReserveError),
+  #[error("physical-quarantine transition mutation encoding failed: {0}")]
+  Format(#[from] FormatError),
   #[error("physical-quarantine transition does not close against its prior manifest")]
   ManifestAggregate,
   #[error("physical-quarantine transition model has already failed")]
@@ -263,6 +338,7 @@ impl PhysicalQuarantineTransitionErrorV1 {
       Self::RecordLimit => "physical_quarantine_transition_limit",
       Self::Arithmetic | Self::ArithmeticConversion(_) => "physical_quarantine_transition_arithmetic",
       Self::Allocation(_) => "physical_quarantine_transition_allocation",
+      Self::Format(source) => source.code(),
       Self::ManifestAggregate => "physical_quarantine_transition_manifest",
       Self::Failed => "physical_quarantine_transition_failed",
     }
@@ -287,6 +363,8 @@ pub struct PhysicalQuarantineTransitionModelV1<'a> {
   indeterminate_count: u64,
   capacity_blocked: bool,
   previous_incarnation: Option<PhysicalIncarnationStateV1>,
+  mutation_count: u64,
+  mutation_digest: Vec<u8>,
   failed: bool,
 }
 
@@ -371,6 +449,8 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
       indeterminate_count: 0,
       capacity_blocked: false,
       previous_incarnation: None,
+      mutation_count: 0,
+      mutation_digest: initial_candidate_mutation_digest_v1(context.hash_algorithm),
       failed: false,
     })
   }
@@ -382,7 +462,10 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
     if self.failed {
       return Err(PhysicalQuarantineTransitionErrorV1::Failed);
     }
-    match self.observe_inner(observation) {
+    match self.observe_inner(observation).and_then(|transition| {
+      self.record_mutation(&transition)?;
+      Ok(transition)
+    }) {
       Ok(transition) => Ok(transition),
       Err(error) => {
         self.failed = true;
@@ -392,6 +475,31 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
   }
 
   pub fn finish(self) -> Result<PhysicalQuarantineTransitionSummaryV1, PhysicalQuarantineTransitionErrorV1> {
+    self.completion_summary()
+  }
+
+  pub fn finish_for_publication(self) -> Result<PhysicalQuarantineTransitionPublicationPermitV1, PhysicalQuarantineTransitionErrorV1> {
+    let summary = self.completion_summary()?;
+    let database_id: [u8; 16] =
+      self.context.prior_manifest.database_id.try_into().map_err(|_| PhysicalQuarantineTransitionErrorV1::ManifestAggregate)?;
+    Ok(PhysicalQuarantineTransitionPublicationPermitV1 {
+      hash_algorithm: self.context.hash_algorithm,
+      database_id,
+      prior_manifest_hash: try_copy_bytes(&self.context.prior_manifest.key)?,
+      mark_generation: self.context.mark_generation,
+      completed_at_ms: self.context.completed_at_ms,
+      authority_root_set_digest: try_copy_bytes(self.context.authority_root_set_digest)?,
+      semantic_state_digest: try_copy_bytes(self.context.semantic_state_digest)?,
+      kv_layout_fingerprint: try_copy_bytes(self.context.kv_layout_fingerprint)?,
+      mark_result_digest: try_copy_bytes(self.context.mark_result_digest)?,
+      captured_root_lifecycle_manifest: try_copy_bytes(self.context.captured_root_lifecycle_manifest)?,
+      mutation_count: self.mutation_count,
+      mutation_digest: self.mutation_digest,
+      summary,
+    })
+  }
+
+  fn completion_summary(&self) -> Result<PhysicalQuarantineTransitionSummaryV1, PhysicalQuarantineTransitionErrorV1> {
     if self.failed {
       return Err(PhysicalQuarantineTransitionErrorV1::Failed);
     }
@@ -470,6 +578,27 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
         self.confirm_unreachable(&observation.incarnation, observation.prior_candidate, class)
       }
     }
+  }
+
+  fn record_mutation(&mut self, transition: &PhysicalQuarantineTransitionV1) -> Result<(), PhysicalQuarantineTransitionErrorV1> {
+    let record = match transition {
+      PhysicalQuarantineTransitionV1::CandidateStarted(candidate) | PhysicalQuarantineTransitionV1::CandidateRestarted(candidate) => {
+        Some(candidate.as_delta_write_request())
+      }
+      PhysicalQuarantineTransitionV1::CandidateCleared(candidate) => Some(candidate.as_delta_write_request()),
+      PhysicalQuarantineTransitionV1::Retained
+      | PhysicalQuarantineTransitionV1::CandidateConfirmed(_)
+      | PhysicalQuarantineTransitionV1::SweepEligible(_)
+      | PhysicalQuarantineTransitionV1::CapacityDeferred
+      | PhysicalQuarantineTransitionV1::IndeterminateRetained { .. } => None,
+    };
+    let Some(record) = record else {
+      return Ok(());
+    };
+    let encoded = encode_candidate_delta_record_v1(&record, self.context.hash_algorithm)?;
+    self.mutation_digest = extend_candidate_mutation_digest_v1(self.context.hash_algorithm, &self.mutation_digest, &encoded);
+    self.mutation_count = checked_increment(self.mutation_count)?;
+    Ok(())
   }
 
   fn clear_or_retain(
