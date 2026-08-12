@@ -15,7 +15,7 @@ use crate::engine::HashAlgorithm;
 const MAX_MANIFEST_LENGTH: usize = 1_024 * 1_024;
 const MAX_PAGE_LENGTH: usize = 16 * 1_024 * 1_024;
 const MAX_DIRECTORY_LENGTH: usize = 4 * 1_024 * 1_024;
-const MAX_DIRECTORY_ENTRIES: u32 = 65_536;
+pub const MAXIMUM_GC_DIRECTORY_ENTRIES_V1: u32 = 65_536;
 const MAX_KEY_LENGTH: usize = 1_024 * 1_024;
 const MAX_DELTAS: usize = 256;
 
@@ -898,8 +898,8 @@ pub fn encode_gc_state_directory_v1(request: &GcStateDirectoryWriteV1<'_>) -> Fo
   if request.entries.is_empty() {
     return Err(closure_error("gc_directory_entries", "GC directory must contain at least one child"));
   }
-  if request.entries.len() > MAX_DIRECTORY_ENTRIES as usize {
-    return Err(amplification_error("gc_directory_entries", request.entries.len(), MAX_DIRECTORY_ENTRIES as usize));
+  if request.entries.len() > MAXIMUM_GC_DIRECTORY_ENTRIES_V1 as usize {
+    return Err(amplification_error("gc_directory_entries", request.entries.len(), MAXIMUM_GC_DIRECTORY_ENTRIES_V1 as usize));
   }
 
   let hash_width = request.hash_algorithm.hash_length();
@@ -1359,7 +1359,7 @@ fn decode_directory(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) -> For
   if level > 15
     || u16_at(body, 2)? != role as u16
     || entry_count == 0
-    || entry_count > MAX_DIRECTORY_ENTRIES
+    || entry_count > MAXIMUM_GC_DIRECTORY_ENTRIES_V1
     || lower_length == 0
     || lower_length > MAX_KEY_LENGTH
     || upper_length == 0
@@ -1604,7 +1604,7 @@ fn decode_candidate_delta(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) 
     return Err(identity_error("candidate_delta_identity", "candidate delta identity/body is invalid"));
   }
   let body = artifact.body;
-  if u32_at(body, 0)? != 0 || u16_at(body, 6)? != 0 || body[16..16 + h].iter().any(|byte| *byte != 0) {
+  if u32_at(body, 0)? != 0 || u16_at(body, 6)? != 0 {
     return Err(reserved_error("candidate_delta_header", "candidate delta reserve fields must be zero"));
   }
   let count = u32_at(body, 8)?;
