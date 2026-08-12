@@ -1,5 +1,6 @@
 use super::*;
 
+use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -20,17 +21,23 @@ use crate::engine::v4::gc::{
 use crate::engine::v4::gc_lifecycle::{
   RootExpiryManifestWriteV1, RootExpiryRecordWriteV1, RootLifecycleManifestWriteV1, RootLifecycleSupportClosureBuilderV1,
   RootLifecycleSupportLimitsV1, RootRetirementCommitWriteV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1,
-  decode_root_retirement_commit_v1, encode_root_expiry_manifest_v1, encode_root_expiry_record_v1, encode_root_lifecycle_manifest_v1,
-  encode_root_retirement_commit_v1,
+  decode_root_object_reclaim_proof_v1, decode_root_retirement_commit_v1, encode_root_expiry_manifest_v1, encode_root_expiry_record_v1,
+  encode_root_lifecycle_manifest_v1, encode_root_retirement_commit_v1,
 };
 use crate::engine::v4::gc_mark::{MarkRunCheckpointWriteV1, encode_mark_run_checkpoint};
+use crate::engine::v4::gc_root_reclaim::{
+  RootExpiryRetentionContextV1, RootExpiryRetentionModelV1, RootExpiryRetentionPermitV1, RootExpiryRetentionSelectionV1,
+  RootObjectReclaimEvidenceVerificationErrorV1, RootObjectReclaimEvidenceVerificationRequestV1, RootObjectReclaimEvidenceVerifierV1,
+  RootObjectReclaimQualificationRequestV1, qualify_root_object_reclaim_v1,
+};
 use crate::engine::v4::gc_mark_workspace::{
   DurableMarkWorkspaceClosureV1, DurableMarkWorkspaceV1, MarkWorkspaceBasisV1, MarkWorkspaceIdentityV1, MarkWorkspaceOptionsV1,
 };
 use crate::engine::v4::header_publication::HeaderPublicationIo;
 use crate::engine::v4::gc_state::{
   GcDirectoryRoleV1, GcPhysicalHintV1, GcStateArtifactV1, GcStateDirectoryEntryWriteV1, GcStateDirectoryWriteV1, GcStatePageWriteV1,
-  RootExpiryStateV1, decode_gc_state_artifact, encode_gc_state_directory_v1, encode_gc_state_page_v1,
+  RootExpiryStateV1, decode_gc_state_artifact, decode_physical_inventory_manifest_v1, decode_root_expiry_record_v1,
+  encode_gc_state_directory_v1, encode_gc_state_page_v1,
 };
 use crate::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use crate::engine::v4::read_view::RootLifecycleObservationV1;
@@ -314,6 +321,14 @@ fn create_environment(
   name: &str,
   failure: Option<FirstAuthorityFailurePoint>,
 ) -> (tempfile::TempDir, PathBuf, Arc<DurabilityCoordinator>, V4FirstAuthorityPublisher) {
+  create_environment_for_database(name, failure, [0x31; 16])
+}
+
+fn create_environment_for_database(
+  name: &str,
+  failure: Option<FirstAuthorityFailurePoint>,
+  database_id: [u8; 16],
+) -> (tempfile::TempDir, PathBuf, Arc<DurabilityCoordinator>, V4FirstAuthorityPublisher) {
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join(format!("{name}.aeordb"));
   let mut file = std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
@@ -324,7 +339,7 @@ fn create_environment(
     slot_sequence: 1,
     created_at_ms: 1_700_000_000_000,
     updated_at_ms: 1_700_000_000_000,
-    database_id: [0x31; 16],
+    database_id,
     write_sequence_high_water: 1,
     required_reader_capabilities: [0; 32],
     kv_block_offset: DATABASE_HEADER_V4_DATA_OFFSET,
@@ -453,9 +468,13 @@ fn seed_namespace_tree_collision(publisher: &V4FirstAuthorityPublisher, request:
 }
 
 fn request() -> FirstAuthorityPublicationRequestV1 {
+  request_for_database([0x31; 16])
+}
+
+fn request_for_database(database_id: [u8; 16]) -> FirstAuthorityPublicationRequestV1 {
   let algorithm = HashAlgorithm::Blake3_256;
   FirstAuthorityPublicationRequestV1 {
-    database_id: [0x31; 16],
+    database_id,
     transaction_id: [0x61; 16],
     created_at_ms: 1_700_000_000_100,
     namespace_tree: PreparedNamespaceTreeV0 { root_hash: digest_parts(algorithm, &[b"dirc:"]), stored_value: Vec::new() },
@@ -527,6 +546,7 @@ struct PreparedGuardedRootRetirementV1 {
   intent: RootRetirementIntentV1,
   support_closure: RootLifecycleSupportClosureV1,
   retirement_commit: EncodedImmutableGcArtifactV1,
+  expiry_record: Vec<u8>,
   expiry_manifest: EncodedImmutableGcArtifactV1,
   lifecycle_manifest: EncodedImmutableGcArtifactV1,
   lifecycle_control: EncodedGcActiveControlV1,
@@ -644,8 +664,19 @@ fn publish_empty_lifecycle_authority(
   generation: u64,
   timestamp_ms: u64,
 ) -> EncodedImmutableGcArtifactV1 {
+  publish_empty_lifecycle_authority_for_database(publisher, retirement_owner, slot, sequence, generation, timestamp_ms, [0x31; 16])
+}
+
+fn publish_empty_lifecycle_authority_for_database(
+  publisher: &V4FirstAuthorityPublisher,
+  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  slot: u8,
+  sequence: u64,
+  generation: u64,
+  timestamp_ms: u64,
+  database_id: [u8; 16],
+) -> EncodedImmutableGcArtifactV1 {
   let algorithm = HashAlgorithm::Blake3_256;
-  let database_id = [0x31; 16];
   let authority_root_set_digest = digest_parts(algorithm, &[b"prior complete authority roots", &generation.to_le_bytes()]);
   let manifest = encode_root_lifecycle_manifest_v1(&RootLifecycleManifestWriteV1 {
     hash_algorithm: algorithm,
@@ -714,13 +745,24 @@ fn prepare_guarded_root_retirement(
   memory: &Arc<MemoryCoordinator>,
   publish_support: bool,
 ) -> PreparedGuardedRootRetirementV1 {
+  prepare_guarded_root_retirement_for_database(publisher, retirement_owner, cancellation, memory, publish_support, [0x31; 16])
+}
+
+fn prepare_guarded_root_retirement_for_database(
+  publisher: &mut V4FirstAuthorityPublisher,
+  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  cancellation: &CancellationToken,
+  memory: &Arc<MemoryCoordinator>,
+  publish_support: bool,
+  database_id: [u8; 16],
+) -> PreparedGuardedRootRetirementV1 {
   let algorithm = HashAlgorithm::Blake3_256;
-  let database_id = [0x31; 16];
-  let first_authority = publisher.publish(&request()).unwrap();
+  let first_authority = publisher.publish(&request_for_database(database_id)).unwrap();
   let target_root_hash = first_authority.namespace_root.root_hash;
   let admission_commit_payload_hash = digest_parts(algorithm, &[&first_authority.admission_control]);
-  publish_empty_lifecycle_authority(publisher, retirement_owner, 0, 1, 3, 1_700_000_050_000);
-  let prior_lifecycle_manifest = publish_empty_lifecycle_authority(publisher, retirement_owner, 1, 2, 4, 1_700_000_060_000);
+  publish_empty_lifecycle_authority_for_database(publisher, retirement_owner, 0, 1, 3, 1_700_000_050_000, database_id);
+  let prior_lifecycle_manifest =
+    publish_empty_lifecycle_authority_for_database(publisher, retirement_owner, 1, 2, 4, 1_700_000_060_000, database_id);
   assert_eq!(retirement_owner.status().pending_records, 0);
 
   let authority_root_set_digest = digest_parts(algorithm, &[b"complete authority roots after final mark"]);
@@ -888,11 +930,422 @@ fn prepare_guarded_root_retirement(
     intent,
     support_closure,
     retirement_commit,
+    expiry_record,
     expiry_manifest,
     lifecycle_manifest,
     lifecycle_control,
     pin_coordinator,
   }
+}
+
+struct ExactRootReclaimEvidenceVerifierV1 {
+  expected_database_id: [u8; 16],
+  expected_root_hash: Vec<u8>,
+  called: bool,
+}
+
+impl RootObjectReclaimEvidenceVerifierV1 for ExactRootReclaimEvidenceVerifierV1 {
+  fn verify_root_object_reclaim(
+    &mut self,
+    request: RootObjectReclaimEvidenceVerificationRequestV1<'_>,
+  ) -> Result<(), RootObjectReclaimEvidenceVerificationErrorV1> {
+    self.called = true;
+    assert_eq!(request.database_id, self.expected_database_id);
+    assert_eq!(request.namespace_root_hash, self.expected_root_hash);
+    assert!(request.final_physical_inventory_generation > request.latest_sweep_receipt_generation);
+    assert_eq!(request.root_object_incarnation_count, 2);
+    assert_eq!(request.sweep_receipt_count, 3);
+    Ok(())
+  }
+}
+
+struct DatabaseRootRetirementAuthorityVerifierV1 {
+  expected_database_id: [u8; 16],
+  expected_root_hash: Vec<u8>,
+  expected_authority_root_set_digest: Vec<u8>,
+}
+
+impl RootRetirementAuthorityVerifierV1 for DatabaseRootRetirementAuthorityVerifierV1 {
+  fn recheck_authority_roots(
+    &mut self,
+    request: RootRetirementAuthorityRecheckRequestV1<'_>,
+  ) -> Result<RootRetirementAuthoritySnapshotV1, RootRetirementAuthorityRecheckErrorV1> {
+    assert_eq!(request.database_id, self.expected_database_id);
+    assert_eq!(request.namespace_root_hash, self.expected_root_hash);
+    assert_eq!(request.expected_authority_root_set_digest, self.expected_authority_root_set_digest);
+    Ok(RootRetirementAuthoritySnapshotV1 {
+      target_is_authoritative: false,
+      authority_root_set_digest: self.expected_authority_root_set_digest.clone(),
+    })
+  }
+}
+
+struct PreparedGuardedRootReclaimV1 {
+  retention_permit: RootExpiryRetentionPermitV1,
+  support_closure: RootLifecycleSupportClosureV1,
+  root_object_reclaim_proof: EncodedImmutableGcArtifactV1,
+  expiry_page: EncodedImmutableGcArtifactV1,
+  expiry_directory: EncodedImmutableGcArtifactV1,
+  expiry_manifest: EncodedImmutableGcArtifactV1,
+  lifecycle_manifest: EncodedImmutableGcArtifactV1,
+  lifecycle_control: EncodedGcActiveControlV1,
+  publication_timestamp_ms: u64,
+}
+
+impl PreparedGuardedRootReclaimV1 {
+  fn request<'a>(
+    &'a self,
+    cancellation: &'a CancellationToken,
+    pin_coordinator: &'a RootReadPinCoordinatorV1,
+  ) -> RootReclaimPublicationRequestV1<'a> {
+    RootReclaimPublicationRequestV1 {
+      hash_algorithm: HashAlgorithm::Blake3_256,
+      retention_permit: &self.retention_permit,
+      support_closure: &self.support_closure,
+      root_object_reclaim_proof: &self.root_object_reclaim_proof,
+      expiry_manifest: &self.expiry_manifest,
+      lifecycle_manifest: &self.lifecycle_manifest,
+      lifecycle_control: &self.lifecycle_control,
+      publication_timestamp_ms: self.publication_timestamp_ms,
+      monotonic_now_ms: self.publication_timestamp_ms,
+      cancellation,
+      pin_coordinator,
+    }
+  }
+}
+
+fn prepare_guarded_root_reclaim(
+  publisher: &V4FirstAuthorityPublisher,
+  retirement: &PreparedGuardedRootRetirementV1,
+  database_id: [u8; 16],
+  physical_inventory_bytes: &[u8],
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> PreparedGuardedRootReclaimV1 {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let physical_inventory = decode_physical_inventory_manifest_v1(physical_inventory_bytes, algorithm).unwrap();
+  assert_eq!(physical_inventory.database_id, database_id);
+  let retirement_commit = decode_root_retirement_commit_v1(&retirement.retirement_commit.value, algorithm).unwrap();
+  let prior_expiry_record = decode_root_expiry_record_v1(&retirement.expiry_record, algorithm).unwrap();
+  let prior_expiry_manifest = decode_root_expiry_manifest_v1(&retirement.expiry_manifest.value, algorithm).unwrap();
+  let prior_lifecycle_manifest = decode_root_lifecycle_manifest_v1(&retirement.lifecycle_manifest.value, algorithm).unwrap();
+  let inventory_completed_at_ms = i64::try_from(physical_inventory.completed_at_ms).unwrap();
+  let reclaimed_at_ms = inventory_completed_at_ms.max(retirement_commit.committed_at_ms) + 1_000;
+  let retention_ms = prior_expiry_manifest.retention_ms;
+  let root_object_incarnation_digest = digest_parts(algorithm, &[b"qualified root-object incarnations"]);
+  let sweep_receipt_merkle_root = digest_parts(algorithm, &[b"qualified sweep receipts"]);
+  let absence_digest = digest_parts(algorithm, &[b"qualified final root-object absence"]);
+  let mut evidence_verifier = ExactRootReclaimEvidenceVerifierV1 {
+    expected_database_id: database_id,
+    expected_root_hash: retirement.target_root_hash.clone(),
+    called: false,
+  };
+  let qualified = qualify_root_object_reclaim_v1(
+    RootObjectReclaimQualificationRequestV1 {
+      hash_algorithm: algorithm,
+      prior_expiry: &prior_expiry_record,
+      retirement: &retirement_commit,
+      final_physical_inventory: &physical_inventory,
+      proof_id: &[0xa1; 16],
+      reclaimed_at_ms,
+      latest_sweep_receipt_generation: physical_inventory.generation - 1,
+      root_object_incarnation_digest: &root_object_incarnation_digest,
+      root_object_incarnation_count: 2,
+      sweep_receipt_merkle_root: &sweep_receipt_merkle_root,
+      sweep_receipt_count: 3,
+      absence_digest: &absence_digest,
+      retention_ms,
+    },
+    cancellation,
+    &mut evidence_verifier,
+  )
+  .unwrap();
+  assert!(evidence_verifier.called);
+  let completed_at_ms = reclaimed_at_ms + 1;
+  let mut retention_model = RootExpiryRetentionModelV1::new(
+    RootExpiryRetentionContextV1 {
+      hash_algorithm: algorithm,
+      prior_lifecycle: &prior_lifecycle_manifest,
+      prior_expiry: &prior_expiry_manifest,
+      lifecycle_generation: prior_lifecycle_manifest.generation + 1,
+      completed_at_ms,
+      retention_ms,
+      optional_byte_budget: prior_expiry_manifest.optional_byte_budget,
+      maximum_records: 1,
+      selection: RootExpiryRetentionSelectionV1::KeepAll,
+      qualified_reclaim: &qualified,
+    },
+    cancellation,
+  )
+  .unwrap();
+  retention_model.observe(&prior_expiry_record).unwrap();
+  let retention_permit = retention_model.finish().unwrap();
+  let root_object_reclaim_proof = qualified.encoded_proof().clone();
+  let expiry_record = qualified.encoded_expiry_record().to_vec();
+  let catalog_id = [0x72; 16];
+  let generation = retention_permit.lifecycle_generation();
+  let expiry_page = encode_gc_state_page_v1(&GcStatePageWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootExpiry,
+    database_id: &database_id,
+    catalog_id: &catalog_id,
+    generation,
+    page_id: 2,
+    records: &[&expiry_record],
+  })
+  .unwrap();
+  let GcStateArtifactV1::Page(decoded_page) = decode_gc_state_artifact(&expiry_page.value, algorithm).unwrap() else {
+    unreachable!();
+  };
+  let directory_entries = [GcStateDirectoryEntryWriteV1 {
+    lower_fence: decoded_page.lower_fence,
+    upper_fence: decoded_page.upper_fence,
+    child_hash: &expiry_page.key,
+    child_generation: decoded_page.generation,
+    live_count: u64::from(decoded_page.record_count),
+    tombstone_count: 0,
+    page_count: 1,
+    logical_bytes: decoded_page.logical_bytes,
+    minimum_page_id: decoded_page.page_id,
+    maximum_page_id: decoded_page.page_id,
+    physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+  }];
+  let expiry_directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootExpiry,
+    database_id: &database_id,
+    catalog_id: &catalog_id,
+    generation,
+    level: 0,
+    entries: &directory_entries,
+  })
+  .unwrap();
+  for artifact in [&expiry_page, &expiry_directory] {
+    publisher
+      .publish_root_lifecycle_support_artifact(RootLifecycleSupportPublicationRequestV1 {
+        database_id: &database_id,
+        artifact,
+        publication_timestamp_ms: u64::try_from(completed_at_ms).unwrap(),
+      })
+      .unwrap();
+  }
+  let summary = retention_permit.summary();
+  let expiry_manifest = encode_root_expiry_manifest_v1(&RootExpiryManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation,
+    retention_ms: retention_permit.retention_ms(),
+    optional_byte_budget: retention_permit.optional_byte_budget(),
+    directory_root_hash: Some(&expiry_directory.key),
+    next_page_id: 3,
+    record_count: summary.resulting_count,
+    logical_bytes: summary.resulting_bytes,
+    mandatory_count: summary.resulting_mandatory_count,
+    mandatory_bytes: summary.resulting_mandatory_bytes,
+    optional_count: summary.resulting_optional_count,
+    optional_bytes: summary.resulting_optional_bytes,
+    oldest_retired_at_ms: summary.oldest_retired_at_ms,
+    newest_retired_at_ms: summary.newest_retired_at_ms,
+  })
+  .unwrap();
+  let lifecycle_manifest = encode_root_lifecycle_manifest_v1(&RootLifecycleManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation,
+    published_at_ms: completed_at_ms,
+    source_complete_mark_generation: prior_lifecycle_manifest.source_complete_mark_generation,
+    authority_root_set_digest: prior_lifecycle_manifest.authority_root_set_digest,
+    candidate_directory_hash: prior_lifecycle_manifest.candidate_directory_hash,
+    root_expiry_manifest_hash: Some(&expiry_manifest.key),
+    next_page_id: prior_lifecycle_manifest.next_page_id,
+    candidate_count: prior_lifecycle_manifest.candidate_count,
+    pending_count: prior_lifecycle_manifest.pending_count,
+    retired_evidence_count: summary.resulting_count,
+    candidate_bytes: prior_lifecycle_manifest.candidate_bytes,
+    expiry_bytes: summary.resulting_bytes,
+  })
+  .unwrap();
+  let proof = decode_root_object_reclaim_proof_v1(&root_object_reclaim_proof.value, algorithm).unwrap();
+  let expiry = decode_root_expiry_manifest_v1(&expiry_manifest.value, algorithm).unwrap();
+  let lifecycle = decode_root_lifecycle_manifest_v1(&lifecycle_manifest.value, algorithm).unwrap();
+  let mut closure_builder = RootLifecycleSupportClosureBuilderV1::new_for_reclaim(
+    &lifecycle,
+    &expiry,
+    &proof,
+    algorithm,
+    cancellation,
+    RootLifecycleSupportLimitsV1 { maximum_candidate_records: 0, maximum_expiry_records: 1, maximum_support_artifacts: 2 },
+    memory,
+  )
+  .unwrap();
+  closure_builder.observe_encoded(&expiry_page.value).unwrap();
+  closure_builder.observe_encoded(&expiry_directory.value).unwrap();
+  let support_closure = closure_builder.finish().unwrap();
+  let lifecycle_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::RootLifecycleActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: 1,
+    sequence: 4,
+    generation,
+    target_manifest_hash: &lifecycle_manifest.key,
+  })
+  .unwrap();
+  PreparedGuardedRootReclaimV1 {
+    retention_permit,
+    support_closure,
+    root_object_reclaim_proof,
+    expiry_page,
+    expiry_directory,
+    expiry_manifest,
+    lifecycle_manifest,
+    lifecycle_control,
+    publication_timestamp_ms: u64::try_from(completed_at_ms).unwrap(),
+  }
+}
+
+fn substitute_guarded_root_reclaim_expiry_row(
+  publisher: &V4FirstAuthorityPublisher,
+  reclaim: &mut PreparedGuardedRootReclaimV1,
+  database_id: [u8; 16],
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let GcStateArtifactV1::Page(prior_page) = decode_gc_state_artifact(&reclaim.expiry_page.value, algorithm).unwrap() else {
+    unreachable!();
+  };
+  let prior_record = decode_root_expiry_record_v1(prior_page.records, algorithm).unwrap();
+  let substituted_record = encode_root_expiry_record_v1(&RootExpiryRecordWriteV1 {
+    hash_algorithm: algorithm,
+    namespace_root_hash: prior_record.namespace_root_hash,
+    retired_at_ms: prior_record.retired_at_ms,
+    last_pending_since_ms: prior_record.last_pending_since_ms,
+    final_mark_generation: prior_record.final_mark_generation,
+    reason: prior_record.reason + 1,
+    state: prior_record.state,
+    retirement_commit_hash: prior_record.retirement_commit_hash,
+    root_object_reclaim_proof_hash: prior_record.root_object_reclaim_proof_hash,
+    evidence_expires_at_ms: prior_record.evidence_expires_at_ms,
+  })
+  .unwrap();
+  let expiry_page = encode_gc_state_page_v1(&GcStatePageWriteV1 {
+    hash_algorithm: algorithm,
+    role: prior_page.role,
+    database_id: &database_id,
+    catalog_id: prior_page.catalog_id,
+    generation: prior_page.generation,
+    page_id: prior_page.page_id,
+    records: &[&substituted_record],
+  })
+  .unwrap();
+  let GcStateArtifactV1::Page(decoded_page) = decode_gc_state_artifact(&expiry_page.value, algorithm).unwrap() else {
+    unreachable!();
+  };
+  let directory_entries = [GcStateDirectoryEntryWriteV1 {
+    lower_fence: decoded_page.lower_fence,
+    upper_fence: decoded_page.upper_fence,
+    child_hash: &expiry_page.key,
+    child_generation: decoded_page.generation,
+    live_count: u64::from(decoded_page.record_count),
+    tombstone_count: 0,
+    page_count: 1,
+    logical_bytes: decoded_page.logical_bytes,
+    minimum_page_id: decoded_page.page_id,
+    maximum_page_id: decoded_page.page_id,
+    physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+  }];
+  let expiry_directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootExpiry,
+    database_id: &database_id,
+    catalog_id: prior_page.catalog_id,
+    generation: prior_page.generation,
+    level: 0,
+    entries: &directory_entries,
+  })
+  .unwrap();
+  for artifact in [&expiry_page, &expiry_directory] {
+    publisher
+      .publish_root_lifecycle_support_artifact(RootLifecycleSupportPublicationRequestV1 {
+        database_id: &database_id,
+        artifact,
+        publication_timestamp_ms: reclaim.publication_timestamp_ms,
+      })
+      .unwrap();
+  }
+
+  let prior_expiry = decode_root_expiry_manifest_v1(&reclaim.expiry_manifest.value, algorithm).unwrap();
+  let expiry_manifest = encode_root_expiry_manifest_v1(&RootExpiryManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation: prior_expiry.generation,
+    retention_ms: prior_expiry.retention_ms,
+    optional_byte_budget: prior_expiry.optional_byte_budget,
+    directory_root_hash: Some(&expiry_directory.key),
+    next_page_id: prior_expiry.next_page_id,
+    record_count: prior_expiry.record_count,
+    logical_bytes: prior_expiry.logical_bytes,
+    mandatory_count: prior_expiry.mandatory_count,
+    mandatory_bytes: prior_expiry.mandatory_bytes,
+    optional_count: prior_expiry.optional_count,
+    optional_bytes: prior_expiry.optional_bytes,
+    oldest_retired_at_ms: prior_expiry.oldest_retired_at_ms,
+    newest_retired_at_ms: prior_expiry.newest_retired_at_ms,
+  })
+  .unwrap();
+  let prior_lifecycle = decode_root_lifecycle_manifest_v1(&reclaim.lifecycle_manifest.value, algorithm).unwrap();
+  let lifecycle_manifest = encode_root_lifecycle_manifest_v1(&RootLifecycleManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation: prior_lifecycle.generation,
+    published_at_ms: prior_lifecycle.published_at_ms,
+    source_complete_mark_generation: prior_lifecycle.source_complete_mark_generation,
+    authority_root_set_digest: prior_lifecycle.authority_root_set_digest,
+    candidate_directory_hash: prior_lifecycle.candidate_directory_hash,
+    root_expiry_manifest_hash: Some(&expiry_manifest.key),
+    next_page_id: prior_lifecycle.next_page_id,
+    candidate_count: prior_lifecycle.candidate_count,
+    pending_count: prior_lifecycle.pending_count,
+    retired_evidence_count: prior_lifecycle.retired_evidence_count,
+    candidate_bytes: prior_lifecycle.candidate_bytes,
+    expiry_bytes: prior_lifecycle.expiry_bytes,
+  })
+  .unwrap();
+  let proof = decode_root_object_reclaim_proof_v1(&reclaim.root_object_reclaim_proof.value, algorithm).unwrap();
+  let expiry = decode_root_expiry_manifest_v1(&expiry_manifest.value, algorithm).unwrap();
+  let lifecycle = decode_root_lifecycle_manifest_v1(&lifecycle_manifest.value, algorithm).unwrap();
+  let mut closure_builder = RootLifecycleSupportClosureBuilderV1::new_for_reclaim(
+    &lifecycle,
+    &expiry,
+    &proof,
+    algorithm,
+    cancellation,
+    RootLifecycleSupportLimitsV1 { maximum_candidate_records: 0, maximum_expiry_records: 1, maximum_support_artifacts: 2 },
+    memory,
+  )
+  .unwrap();
+  closure_builder.observe_encoded(&expiry_page.value).unwrap();
+  closure_builder.observe_encoded(&expiry_directory.value).unwrap();
+  let support_closure = closure_builder.finish().unwrap();
+  let prior_control = decode_gc_active_control(&reclaim.lifecycle_control.value, algorithm).unwrap();
+  let lifecycle_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: prior_control.kind,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: prior_control.slot,
+    sequence: prior_control.sequence,
+    generation: prior_control.generation,
+    target_manifest_hash: &lifecycle_manifest.key,
+  })
+  .unwrap();
+
+  reclaim.support_closure = support_closure;
+  reclaim.expiry_page = expiry_page;
+  reclaim.expiry_directory = expiry_directory;
+  reclaim.expiry_manifest = expiry_manifest;
+  reclaim.lifecycle_manifest = lifecycle_manifest;
+  reclaim.lifecycle_control = lifecycle_control;
 }
 
 fn selected_root_lifecycle_manifest_key(publisher: &V4FirstAuthorityPublisher) -> Vec<u8> {
@@ -1278,6 +1731,225 @@ fn guarded_root_retirement_selects_control_last_and_exact_retry_does_not_recheck
     ],
     before_retry_locators,
   );
+}
+
+#[test]
+fn guarded_root_reclaim_selects_control_last_without_removing_any_physical_entity() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let physical_inventory_bytes = fs::read(
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1/agca-blake3-256-physical-inventory-manifest-populated.bin"),
+  )
+  .unwrap();
+  let physical_inventory = decode_physical_inventory_manifest_v1(&physical_inventory_bytes, algorithm).unwrap();
+  let database_id: [u8; 16] = physical_inventory.database_id.try_into().unwrap();
+  let (_directory, _path, coordinator, mut publisher) = create_environment_for_database("guarded-root-reclaim", None, database_id);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id,
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let retirement =
+    prepare_guarded_root_retirement_for_database(&mut publisher, &mut retirement_owner, &cancellation, &memory, true, database_id);
+  let target_locator = publisher.locator(&retirement.target_root_hash).unwrap().unwrap();
+  let mut authority_verifier = DatabaseRootRetirementAuthorityVerifierV1 {
+    expected_database_id: database_id,
+    expected_root_hash: retirement.target_root_hash.clone(),
+    expected_authority_root_set_digest: retirement.intent.authority_root_set_digest.clone(),
+  };
+  let _retirement_receipt =
+    publisher.publish_root_retirement(retirement.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap();
+  let reclaim = prepare_guarded_root_reclaim(&publisher, &retirement, database_id, &physical_inventory_bytes, &cancellation, &memory);
+  assert!(publisher.locator(&reclaim.expiry_page.key).unwrap().is_some());
+  assert!(publisher.locator(&reclaim.expiry_directory.key).unwrap().is_some());
+  let before = publisher.observe().unwrap();
+
+  let receipt = publisher.publish_root_reclaim(reclaim.request(&cancellation, &retirement.pin_coordinator), &mut retirement_owner).unwrap();
+
+  assert!(!receipt.idempotent);
+  assert_eq!(receipt.namespace_root_hash, retirement.target_root_hash);
+  assert_eq!(receipt.lifecycle_control_slot, 1);
+  assert!(receipt.root_object_reclaim_proof_write_sequence < receipt.expiry_manifest_write_sequence);
+  assert!(receipt.expiry_manifest_write_sequence < receipt.lifecycle_manifest_write_sequence);
+  assert!(receipt.lifecycle_manifest_write_sequence < receipt.lifecycle_control_write_sequence);
+  assert!(matches!(receipt.lineage_state, RootReclaimLineageStateV1::HardPublished { .. }));
+  assert_eq!(selected_root_lifecycle_manifest_key(&publisher), reclaim.lifecycle_manifest.key);
+  assert_eq!(publisher.locator(&retirement.target_root_hash).unwrap().unwrap(), target_locator);
+  assert!(publisher.locator(&reclaim.root_object_reclaim_proof.key).unwrap().is_some());
+  assert!(publisher.locator(&reclaim.expiry_manifest.key).unwrap().is_some());
+  assert!(publisher.locator(&reclaim.lifecycle_manifest.key).unwrap().is_some());
+  assert!(publisher.locator(&reclaim.lifecycle_control.key).unwrap().is_some());
+  assert!(publisher.observe().unwrap().selected.header.slot_sequence > before.selected.header.slot_sequence);
+
+  let before_retry = publisher.observe().unwrap();
+  let before_retry_frontier = coordinator.snapshot().unwrap().hard_frontier;
+  let retry = publisher.publish_root_reclaim(reclaim.request(&cancellation, &retirement.pin_coordinator), &mut retirement_owner).unwrap();
+  assert!(retry.idempotent);
+  assert!(matches!(retry.lineage_state, RootReclaimLineageStateV1::NotRequired));
+  assert_eq!(publisher.observe().unwrap(), before_retry);
+  assert_eq!(coordinator.snapshot().unwrap().hard_frontier, before_retry_frontier);
+  assert_eq!(publisher.locator(&retirement.target_root_hash).unwrap().unwrap(), target_locator);
+}
+
+#[test]
+fn guarded_root_reclaim_rejects_an_aggregate_identical_substituted_expiry_catalog() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let physical_inventory_bytes = fs::read(
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1/agca-blake3-256-physical-inventory-manifest-populated.bin"),
+  )
+  .unwrap();
+  let physical_inventory = decode_physical_inventory_manifest_v1(&physical_inventory_bytes, algorithm).unwrap();
+  let database_id: [u8; 16] = physical_inventory.database_id.try_into().unwrap();
+  let (_directory, _path, _coordinator, mut publisher) = create_environment_for_database("substituted-root-reclaim", None, database_id);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id,
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let retirement =
+    prepare_guarded_root_retirement_for_database(&mut publisher, &mut retirement_owner, &cancellation, &memory, true, database_id);
+  let mut authority_verifier = DatabaseRootRetirementAuthorityVerifierV1 {
+    expected_database_id: database_id,
+    expected_root_hash: retirement.target_root_hash.clone(),
+    expected_authority_root_set_digest: retirement.intent.authority_root_set_digest.clone(),
+  };
+  let _retirement_receipt =
+    publisher.publish_root_retirement(retirement.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap();
+  let mut reclaim = prepare_guarded_root_reclaim(&publisher, &retirement, database_id, &physical_inventory_bytes, &cancellation, &memory);
+  substitute_guarded_root_reclaim_expiry_row(&publisher, &mut reclaim, database_id, &cancellation, &memory);
+
+  let error =
+    publisher.publish_root_reclaim(reclaim.request(&cancellation, &retirement.pin_coordinator), &mut retirement_owner).unwrap_err();
+
+  assert_eq!(error.code(), "root_reclaim_support_closure");
+  assert!(error.committed_receipt().is_none());
+  assert!(publisher.locator(&reclaim.root_object_reclaim_proof.key).unwrap().is_none());
+  assert!(publisher.locator(&reclaim.expiry_manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&reclaim.lifecycle_manifest.key).unwrap().is_none());
+}
+
+#[test]
+fn guarded_root_reclaim_rejects_stale_lifecycle_before_publishing_the_proof() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let physical_inventory_bytes = fs::read(
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1/agca-blake3-256-physical-inventory-manifest-populated.bin"),
+  )
+  .unwrap();
+  let physical_inventory = decode_physical_inventory_manifest_v1(&physical_inventory_bytes, algorithm).unwrap();
+  let database_id: [u8; 16] = physical_inventory.database_id.try_into().unwrap();
+  let (_directory, _path, _coordinator, mut publisher) = create_environment_for_database("stale-root-reclaim", None, database_id);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id,
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let retirement =
+    prepare_guarded_root_retirement_for_database(&mut publisher, &mut retirement_owner, &cancellation, &memory, true, database_id);
+  let mut authority_verifier = DatabaseRootRetirementAuthorityVerifierV1 {
+    expected_database_id: database_id,
+    expected_root_hash: retirement.target_root_hash.clone(),
+    expected_authority_root_set_digest: retirement.intent.authority_root_set_digest.clone(),
+  };
+  let _retirement_receipt =
+    publisher.publish_root_retirement(retirement.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap();
+  let reclaim = prepare_guarded_root_reclaim(&publisher, &retirement, database_id, &physical_inventory_bytes, &cancellation, &memory);
+  let stale_manifest = publish_empty_lifecycle_authority_for_database(
+    &publisher,
+    &mut retirement_owner,
+    1,
+    4,
+    8,
+    reclaim.publication_timestamp_ms,
+    database_id,
+  );
+
+  let error =
+    publisher.publish_root_reclaim(reclaim.request(&cancellation, &retirement.pin_coordinator), &mut retirement_owner).unwrap_err();
+
+  assert_eq!(error.code(), "root_reclaim_prior_lifecycle_changed");
+  assert!(error.committed_receipt().is_none());
+  assert_eq!(selected_root_lifecycle_manifest_key(&publisher), stale_manifest.key);
+  assert!(publisher.locator(&reclaim.root_object_reclaim_proof.key).unwrap().is_none());
+  assert!(publisher.locator(&reclaim.expiry_manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&reclaim.lifecycle_manifest.key).unwrap().is_none());
+}
+
+#[test]
+fn uncertain_root_reclaim_selector_returns_a_committed_receipt_and_reopens_selected() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let physical_inventory_bytes = fs::read(
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1/agca-blake3-256-physical-inventory-manifest-populated.bin"),
+  )
+  .unwrap();
+  let physical_inventory = decode_physical_inventory_manifest_v1(&physical_inventory_bytes, algorithm).unwrap();
+  let database_id: [u8; 16] = physical_inventory.database_id.try_into().unwrap();
+  let (_directory, path, coordinator, mut publisher) = create_environment_for_database("uncertain-root-reclaim", None, database_id);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id,
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let retirement =
+    prepare_guarded_root_retirement_for_database(&mut publisher, &mut retirement_owner, &cancellation, &memory, true, database_id);
+  let mut authority_verifier = DatabaseRootRetirementAuthorityVerifierV1 {
+    expected_database_id: database_id,
+    expected_root_hash: retirement.target_root_hash.clone(),
+    expected_authority_root_set_digest: retirement.intent.authority_root_set_digest.clone(),
+  };
+  let _retirement_receipt =
+    publisher.publish_root_retirement(retirement.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap();
+  let reclaim = prepare_guarded_root_reclaim(&publisher, &retirement, database_id, &physical_inventory_bytes, &cancellation, &memory);
+  publisher = V4FirstAuthorityPublisher {
+    file: publisher.file,
+    kv: publisher.kv,
+    header_publisher: DatabaseHeaderPublisherV4::with_io(
+      coordinator.clone(),
+      Arc::new(NthHeaderPublicationFaultIo::new(FirstAuthorityFailurePoint::Verify, 5)),
+    ),
+    root_state: publisher.root_state,
+  };
+
+  let error =
+    publisher.publish_root_reclaim(reclaim.request(&cancellation, &retirement.pin_coordinator), &mut retirement_owner).unwrap_err();
+
+  let receipt = error.committed_receipt().expect("uncertain selected reclaim needs an exact committed receipt");
+  assert_eq!(receipt.lifecycle_manifest_key, reclaim.lifecycle_manifest.key);
+  assert!(matches!(receipt.lineage_state, RootReclaimLineageStateV1::BufferedAfterFlushFailure { .. }));
+  assert!(coordinator.hard_failure().unwrap().is_some());
+  drop(retirement_owner);
+  drop(publisher);
+
+  let (_restart_coordinator, reopened) = reopen(&path);
+  assert_eq!(selected_root_lifecycle_manifest_key(&reopened), reclaim.lifecycle_manifest.key);
+  assert!(reopened.locator(&reclaim.root_object_reclaim_proof.key).unwrap().is_some());
+  assert!(reopened.locator(&retirement.target_root_hash).unwrap().is_some());
 }
 
 #[test]

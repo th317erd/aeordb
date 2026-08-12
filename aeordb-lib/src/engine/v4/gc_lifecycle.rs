@@ -11,11 +11,22 @@ use super::gc_state::{
   GcDirectoryRoleV1, GcStateDirectoryEntryV1, GcStateDirectoryV1, GcStatePageV1, RootCandidateRecordV1, RootExpiryRecordV1,
   RootExpiryStateV1, decode_gc_state_artifact, decode_root_candidate_record_v1, decode_root_expiry_record_v1,
 };
+use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::HashAlgorithm;
 
 const ROOT_LIFECYCLE_CAPABILITIES: &[usize] = &[12, 17];
+const ROOT_EXPIRY_RESULT_DIGEST_DOMAIN: &[u8] = b"aeordb.root-expiry-result.v1\0";
+const ROOT_EXPIRY_RESULT_DIGEST_STEP_DOMAIN: &[u8] = b"aeordb.root-expiry-result-step.v1\0";
+
+pub(crate) fn root_expiry_result_digest_start(hash_algorithm: HashAlgorithm) -> Vec<u8> {
+  digest_parts(hash_algorithm, &[ROOT_EXPIRY_RESULT_DIGEST_DOMAIN])
+}
+
+pub(crate) fn root_expiry_result_digest_step(hash_algorithm: HashAlgorithm, current: &[u8], encoded_record: &[u8]) -> Vec<u8> {
+  digest_parts(hash_algorithm, &[ROOT_EXPIRY_RESULT_DIGEST_STEP_DOMAIN, current, encoded_record])
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootExpiryManifestV1<'a> {
@@ -111,6 +122,8 @@ pub struct RootLifecycleSupportClosureV1 {
   source_complete_mark_generation: u64,
   support_artifact_count: u64,
   retirement_commit_hash: Option<Vec<u8>>,
+  root_object_reclaim_proof_hash: Option<Vec<u8>>,
+  root_expiry_result_digest: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +173,14 @@ impl RootLifecycleSupportClosureV1 {
   pub fn retirement_commit_hash(&self) -> Option<&[u8]> {
     self.retirement_commit_hash.as_deref()
   }
+
+  pub fn root_object_reclaim_proof_hash(&self) -> Option<&[u8]> {
+    self.root_object_reclaim_proof_hash.as_deref()
+  }
+
+  pub fn root_expiry_result_digest(&self) -> Option<&[u8]> {
+    self.root_expiry_result_digest.as_deref()
+  }
 }
 
 #[derive(Debug, Error)]
@@ -180,6 +201,8 @@ pub enum RootLifecycleSupportClosureErrorV1 {
   ManifestClosure,
   #[error("root-lifecycle support closure does not prove the exact requested retirement")]
   RetirementClosure,
+  #[error("root-lifecycle support closure does not prove the exact requested root-object reclaim")]
+  ReclaimClosure,
   #[error(transparent)]
   Model(#[from] RootLifecycleModelErrorV1),
   #[error(transparent)]
@@ -201,6 +224,7 @@ impl RootLifecycleSupportClosureErrorV1 {
       Self::DirectoryClosure => "root_lifecycle_support_directory_closure",
       Self::ManifestClosure => "root_lifecycle_support_manifest_closure",
       Self::RetirementClosure => "root_lifecycle_support_retirement_closure",
+      Self::ReclaimClosure => "root_lifecycle_support_reclaim_closure",
       Self::Model(source) => source.code(),
       Self::Format(source) => source.code(),
       Self::Memory(_) => "root_lifecycle_support_memory",
@@ -239,6 +263,7 @@ pub struct RootLifecycleSupportClosureBuilderV1<'a> {
   manifest: &'a RootLifecycleManifestV1<'a>,
   expiry_manifest: Option<&'a RootExpiryManifestV1<'a>>,
   retirement: Option<&'a RootRetirementCommitV1<'a>>,
+  reclaim: Option<&'a RootObjectReclaimProofV1<'a>>,
   algorithm: HashAlgorithm,
   model: Option<RootLifecycleReferenceModelV1<'a>>,
   candidate: RootLifecycleRoleClosureV1,
@@ -247,8 +272,17 @@ pub struct RootLifecycleSupportClosureBuilderV1<'a> {
   maximum_support_artifacts: u64,
   support_artifact_count: u64,
   retirement_expiry_match: bool,
+  reclaim_expiry_match: bool,
+  reclaim_expiry_result_digest: Option<Vec<u8>>,
   memory: MemoryReservation,
   failed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RootLifecycleSupportPurposeV1<'a> {
+  General,
+  Retirement(&'a RootRetirementCommitV1<'a>),
+  Reclaim(&'a RootObjectReclaimProofV1<'a>),
 }
 
 impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
@@ -260,7 +294,7 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
     limits: RootLifecycleSupportLimitsV1,
     memory: &MemoryCoordinator,
   ) -> Result<Self, RootLifecycleSupportClosureErrorV1> {
-    Self::new_inner(manifest, expiry_manifest, None, algorithm, cancellation, limits, memory)
+    Self::new_inner(manifest, expiry_manifest, RootLifecycleSupportPurposeV1::General, algorithm, cancellation, limits, memory)
   }
 
   pub fn new_for_retirement(
@@ -272,18 +306,51 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
     limits: RootLifecycleSupportLimitsV1,
     memory: &MemoryCoordinator,
   ) -> Result<Self, RootLifecycleSupportClosureErrorV1> {
-    Self::new_inner(manifest, Some(expiry_manifest), Some(retirement), algorithm, cancellation, limits, memory)
+    Self::new_inner(
+      manifest,
+      Some(expiry_manifest),
+      RootLifecycleSupportPurposeV1::Retirement(retirement),
+      algorithm,
+      cancellation,
+      limits,
+      memory,
+    )
   }
 
-  fn new_inner(
+  pub fn new_for_reclaim(
     manifest: &'a RootLifecycleManifestV1<'a>,
-    expiry_manifest: Option<&'a RootExpiryManifestV1<'a>>,
-    retirement: Option<&'a RootRetirementCommitV1<'a>>,
+    expiry_manifest: &'a RootExpiryManifestV1<'a>,
+    reclaim: &'a RootObjectReclaimProofV1<'a>,
     algorithm: HashAlgorithm,
     cancellation: &'a CancellationToken,
     limits: RootLifecycleSupportLimitsV1,
     memory: &MemoryCoordinator,
   ) -> Result<Self, RootLifecycleSupportClosureErrorV1> {
+    Self::new_inner(
+      manifest,
+      Some(expiry_manifest),
+      RootLifecycleSupportPurposeV1::Reclaim(reclaim),
+      algorithm,
+      cancellation,
+      limits,
+      memory,
+    )
+  }
+
+  fn new_inner(
+    manifest: &'a RootLifecycleManifestV1<'a>,
+    expiry_manifest: Option<&'a RootExpiryManifestV1<'a>>,
+    purpose: RootLifecycleSupportPurposeV1<'a>,
+    algorithm: HashAlgorithm,
+    cancellation: &'a CancellationToken,
+    limits: RootLifecycleSupportLimitsV1,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, RootLifecycleSupportClosureErrorV1> {
+    let (retirement, reclaim) = match purpose {
+      RootLifecycleSupportPurposeV1::General => (None, None),
+      RootLifecycleSupportPurposeV1::Retirement(retirement) => (Some(retirement), None),
+      RootLifecycleSupportPurposeV1::Reclaim(reclaim) => (None, Some(reclaim)),
+    };
     if limits.maximum_support_artifacts == 0 {
       return Err(RootLifecycleSupportClosureErrorV1::InvalidConfiguration("support artifact limit must be nonzero"));
     }
@@ -301,6 +368,9 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
     }) {
       return Err(RootLifecycleSupportClosureErrorV1::RetirementClosure);
     }
+    if reclaim.is_some_and(|value| value.database_id != manifest.database_id || value.reclaimed_at_ms > manifest.published_at_ms) {
+      return Err(RootLifecycleSupportClosureErrorV1::ReclaimClosure);
+    }
     let model = RootLifecycleReferenceModelV1::new(
       manifest,
       expiry_manifest,
@@ -314,6 +384,7 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
       manifest,
       expiry_manifest,
       retirement,
+      reclaim,
       algorithm,
       model: Some(model),
       candidate: RootLifecycleRoleClosureV1::new(manifest.candidate_directory_hash),
@@ -322,6 +393,8 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
       maximum_support_artifacts: limits.maximum_support_artifacts,
       support_artifact_count: 0,
       retirement_expiry_match: false,
+      reclaim_expiry_match: false,
+      reclaim_expiry_result_digest: reclaim.map(|_| root_expiry_result_digest_start(algorithm)),
       memory: memory.reserve(MemoryOwner::GarbageCollection, 0, AdmissionClass::Maintenance)?,
       failed: false,
     })
@@ -354,6 +427,9 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
     if self.retirement.is_some() && !self.retirement_expiry_match {
       return Err(RootLifecycleSupportClosureErrorV1::RetirementClosure);
     }
+    if self.reclaim.is_some() && !self.reclaim_expiry_match {
+      return Err(RootLifecycleSupportClosureErrorV1::ReclaimClosure);
+    }
     let mut database_id = [0u8; 16];
     database_id.copy_from_slice(self.manifest.database_id);
     Ok(RootLifecycleSupportClosureV1 {
@@ -367,6 +443,8 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
       source_complete_mark_generation: self.manifest.source_complete_mark_generation,
       support_artifact_count: self.support_artifact_count,
       retirement_commit_hash: self.retirement.map(|value| value.key.clone()),
+      root_object_reclaim_proof_hash: self.reclaim.map(|value| value.key.clone()),
+      root_expiry_result_digest: self.reclaim_expiry_result_digest,
     })
   }
 
@@ -385,10 +463,12 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
           GcDirectoryRoleV1::RootCandidates => {
             self.model_mut()?.observe_candidate_page(&page)?;
             self.observe_retirement_candidate_page(&page)?;
+            self.observe_reclaim_candidate_page(&page)?;
           }
           GcDirectoryRoleV1::RootExpiry => {
             self.model_mut()?.observe_expiry_page(&page)?;
             self.observe_retirement_expiry_page(&page)?;
+            self.observe_reclaim_expiry_page(&page)?;
           }
           GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
             return Err(RootLifecycleSupportClosureErrorV1::ArtifactKind);
@@ -516,6 +596,41 @@ impl<'a> RootLifecycleSupportClosureBuilderV1<'a> {
       }
       validate_root_expiry_retirement_commit(&record, retirement)?;
       self.retirement_expiry_match = true;
+    }
+    Ok(())
+  }
+
+  fn observe_reclaim_candidate_page(&self, page: &GcStatePageV1<'_>) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    let Some(reclaim) = self.reclaim else {
+      return Ok(());
+    };
+    let row_length = 36 + 3 * self.algorithm.hash_length();
+    for row in page.records.chunks_exact(row_length) {
+      if decode_root_candidate_record_v1(row, self.algorithm)?.namespace_root_hash == reclaim.namespace_root_hash {
+        return Err(RootLifecycleSupportClosureErrorV1::ReclaimClosure);
+      }
+    }
+    Ok(())
+  }
+
+  fn observe_reclaim_expiry_page(&mut self, page: &GcStatePageV1<'_>) -> Result<(), RootLifecycleSupportClosureErrorV1> {
+    let Some(reclaim) = self.reclaim else {
+      return Ok(());
+    };
+    let row_length = 40 + 3 * self.algorithm.hash_length();
+    for row in page.records.chunks_exact(row_length) {
+      let record = decode_root_expiry_record_v1(row, self.algorithm)?;
+      if let Some(current) = self.reclaim_expiry_result_digest.take() {
+        self.reclaim_expiry_result_digest = Some(root_expiry_result_digest_step(self.algorithm, &current, row));
+      }
+      if record.namespace_root_hash != reclaim.namespace_root_hash {
+        continue;
+      }
+      if self.reclaim_expiry_match {
+        return Err(RootLifecycleSupportClosureErrorV1::ReclaimClosure);
+      }
+      validate_root_expiry_reclaim_proof(&record, reclaim)?;
+      self.reclaim_expiry_match = true;
     }
     Ok(())
   }

@@ -695,7 +695,7 @@
         - [ ] P4-4d: attach root-object reclaim proof and bounded optional expiry retention without evicting mandatory retirement evidence.
           - [x] P4-4d1: qualify exact receipt/inventory absence evidence into a non-constructible reclaim permit and checked proof/row transition.
           - [x] P4-4d2: stream the root-ordered expiry catalog through one failure-latching retention model that drops expired evidence and validates the maximal newest set fitting the optional byte budget.
-          - [ ] P4-4d3: hard-publish the reclaim proof, rebuilt catalog support, manifests, and lifecycle selector last under the shared authority guard without activating physical reclaim.
+          - [x] P4-4d3: hard-publish the reclaim proof, rebuilt catalog support, manifests, and lifecycle selector last under the shared authority guard without activating physical reclaim.
         - [ ] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.

@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::gc_lifecycle::{
-  RootExpiryRecordWriteV1, RootRetirementCommitWriteV1, decode_root_object_reclaim_proof_v1, decode_root_retirement_commit_v1,
-  encode_root_expiry_record_v1, encode_root_retirement_commit_v1, validate_root_expiry_reclaim_proof,
+  RootExpiryManifestWriteV1, RootExpiryRecordWriteV1, RootLifecycleManifestWriteV1, RootLifecycleSupportClosureBuilderV1,
+  RootLifecycleSupportLimitsV1, RootRetirementCommitWriteV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1,
+  decode_root_object_reclaim_proof_v1, decode_root_retirement_commit_v1, encode_root_expiry_manifest_v1, encode_root_expiry_record_v1,
+  encode_root_lifecycle_manifest_v1, encode_root_retirement_commit_v1, validate_root_expiry_reclaim_proof,
 };
 use aeordb::engine::v4::gc_root_reclaim::{
   RootExpiryRetentionActionV1, RootExpiryRetentionContextV1, RootExpiryRetentionCutoffV1, RootExpiryRetentionModelV1,
@@ -12,7 +14,12 @@ use aeordb::engine::v4::gc_root_reclaim::{
   RootObjectReclaimEvidenceVerifierV1, RootObjectReclaimQualificationRequestV1, qualify_root_object_reclaim_v1,
 };
 use aeordb::engine::v4::gc_lifecycle::{RootExpiryManifestV1, RootLifecycleManifestV1};
-use aeordb::engine::v4::gc_state::{RootExpiryRecordV1, RootExpiryStateV1, decode_physical_inventory_manifest_v1, decode_root_expiry_record_v1};
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use aeordb::engine::v4::gc_state::{
+  GcDirectoryRoleV1, GcPhysicalHintV1, GcStateDirectoryEntryWriteV1, GcStateDirectoryWriteV1, GcStatePageWriteV1, RootExpiryRecordV1,
+  RootExpiryStateV1, decode_gc_state_artifact, decode_physical_inventory_manifest_v1, decode_root_expiry_record_v1,
+  encode_gc_state_directory_v1, encode_gc_state_page_v1,
+};
 use aeordb::engine::v4::hash::digest_parts;
 use tokio_util::sync::CancellationToken;
 
@@ -65,6 +72,106 @@ struct ReclaimCase {
   sweep_receipt_merkle_root: Vec<u8>,
   absence_digest: Vec<u8>,
   reclaimed_at_ms: i64,
+}
+
+struct ReclaimSupport {
+  expiry_page: aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
+  expiry_directory: aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
+  expiry_manifest: aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
+  lifecycle_manifest: aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
+}
+
+fn reclaim_support(
+  algorithm: HashAlgorithm,
+  database_id: &[u8],
+  authority_root_set_digest: &[u8],
+  generation: u64,
+  published_at_ms: i64,
+  retention_ms: u64,
+  optional_byte_budget: u64,
+  expiry_record: &[u8],
+) -> ReclaimSupport {
+  let hash_width = algorithm.hash_length();
+  let decoded_record = decode_root_expiry_record_v1(expiry_record, algorithm).unwrap();
+  let catalog_id = [0xb1; 16];
+  let expiry_page = encode_gc_state_page_v1(&GcStatePageWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootExpiry,
+    database_id,
+    catalog_id: &catalog_id,
+    generation,
+    page_id: 1,
+    records: &[expiry_record],
+  })
+  .unwrap();
+  let page = match decode_gc_state_artifact(&expiry_page.value, algorithm).unwrap() {
+    aeordb::engine::v4::gc_state::GcStateArtifactV1::Page(page) => page,
+    _ => unreachable!(),
+  };
+  let directory_entries = [GcStateDirectoryEntryWriteV1 {
+    lower_fence: page.lower_fence,
+    upper_fence: page.upper_fence,
+    child_hash: &expiry_page.key,
+    child_generation: page.generation,
+    live_count: u64::from(page.record_count),
+    tombstone_count: 0,
+    page_count: 1,
+    logical_bytes: page.logical_bytes,
+    minimum_page_id: page.page_id,
+    maximum_page_id: page.page_id,
+    physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+  }];
+  let expiry_directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootExpiry,
+    database_id,
+    catalog_id: &catalog_id,
+    generation,
+    level: 0,
+    entries: &directory_entries,
+  })
+  .unwrap();
+  let row_bytes = u64::try_from(40 + 3 * hash_width).unwrap();
+  let (mandatory_count, optional_count) = match decoded_record.state {
+    RootExpiryStateV1::LogicallyRetired => (1, 0),
+    RootExpiryStateV1::PhysicallyReclaimed => (0, 1),
+  };
+  let expiry_manifest = encode_root_expiry_manifest_v1(&RootExpiryManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id,
+    generation,
+    retention_ms,
+    optional_byte_budget,
+    directory_root_hash: Some(&expiry_directory.key),
+    next_page_id: 2,
+    record_count: 1,
+    logical_bytes: row_bytes,
+    mandatory_count,
+    mandatory_bytes: mandatory_count * row_bytes,
+    optional_count,
+    optional_bytes: optional_count * row_bytes,
+    oldest_retired_at_ms: Some(decoded_record.retired_at_ms),
+    newest_retired_at_ms: Some(decoded_record.retired_at_ms),
+  })
+  .unwrap();
+  let lifecycle_manifest = encode_root_lifecycle_manifest_v1(&RootLifecycleManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id,
+    generation,
+    published_at_ms,
+    source_complete_mark_generation: decoded_record.final_mark_generation,
+    authority_root_set_digest,
+    candidate_directory_hash: None,
+    root_expiry_manifest_hash: Some(&expiry_manifest.key),
+    next_page_id: 1,
+    candidate_count: 0,
+    pending_count: 0,
+    retired_evidence_count: 1,
+    candidate_bytes: 0,
+    expiry_bytes: row_bytes,
+  })
+  .unwrap();
+  ReclaimSupport { expiry_page, expiry_directory, expiry_manifest, lifecycle_manifest }
 }
 
 fn reclaim_case(algorithm: HashAlgorithm) -> ReclaimCase {
@@ -239,6 +346,172 @@ fn qualified_reclaim_binds_exact_inventory_receipts_proof_and_optional_row_at_bo
     assert_eq!(replacement.evidence_expires_at_ms, Some(values.reclaimed_at_ms + i64::try_from(RETENTION_MS).unwrap()));
     validate_root_expiry_reclaim_proof(&replacement, &proof).unwrap();
   }
+}
+
+#[test]
+fn reclaim_support_closure_binds_the_exact_proof_and_rebuilt_expiry_graph_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let values = reclaim_case(algorithm);
+    let inventory = decode_physical_inventory_manifest_v1(&values.inventory_bytes, algorithm).unwrap();
+    let retirement = decode_root_retirement_commit_v1(&values.retirement_bytes, algorithm).unwrap();
+    let prior_expiry = decode_root_expiry_record_v1(&values.prior_expiry_bytes, algorithm).unwrap();
+    let cancellation = CancellationToken::new();
+    let mut verifier = RecordingVerifier { calls: 0, fail: false, cancel_after_verify: None };
+    let qualified = qualify_root_object_reclaim_v1(
+      RootObjectReclaimQualificationRequestV1 {
+        hash_algorithm: algorithm,
+        prior_expiry: &prior_expiry,
+        retirement: &retirement,
+        final_physical_inventory: &inventory,
+        proof_id: &values.proof_id,
+        reclaimed_at_ms: values.reclaimed_at_ms,
+        latest_sweep_receipt_generation: inventory.generation - 1,
+        root_object_incarnation_digest: &values.root_incarnation_digest,
+        root_object_incarnation_count: 2,
+        sweep_receipt_merkle_root: &values.sweep_receipt_merkle_root,
+        sweep_receipt_count: 3,
+        absence_digest: &values.absence_digest,
+        retention_ms: RETENTION_MS,
+      },
+      &cancellation,
+      &mut verifier,
+    )
+    .unwrap();
+    let authority_root_set_digest = digest_parts(algorithm, &[b"reclaim support authority roots"]);
+    let support = reclaim_support(
+      algorithm,
+      inventory.database_id,
+      &authority_root_set_digest,
+      42,
+      values.reclaimed_at_ms + 1,
+      RETENTION_MS,
+      16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+      qualified.encoded_expiry_record(),
+    );
+    let lifecycle = decode_root_lifecycle_manifest_v1(&support.lifecycle_manifest.value, algorithm).unwrap();
+    let expiry = decode_root_expiry_manifest_v1(&support.expiry_manifest.value, algorithm).unwrap();
+    let proof = decode_root_object_reclaim_proof_v1(&qualified.encoded_proof().value, algorithm).unwrap();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(16 * 1024 * 1024, 32 * 1024 * 1024, 1, 1024 * 1024).unwrap());
+    let mut builder = RootLifecycleSupportClosureBuilderV1::new_for_reclaim(
+      &lifecycle,
+      &expiry,
+      &proof,
+      algorithm,
+      &cancellation,
+      RootLifecycleSupportLimitsV1 { maximum_candidate_records: 0, maximum_expiry_records: 1, maximum_support_artifacts: 2 },
+      &memory,
+    )
+    .unwrap();
+    builder.observe_encoded(&support.expiry_page.value).unwrap();
+    builder.observe_encoded(&support.expiry_directory.value).unwrap();
+    let closure = builder.finish().unwrap();
+
+    assert_eq!(closure.lifecycle_manifest_hash(), support.lifecycle_manifest.key);
+    assert_eq!(closure.expiry_manifest_hash(), Some(support.expiry_manifest.key.as_slice()));
+    assert_eq!(closure.root_object_reclaim_proof_hash(), Some(qualified.encoded_proof().key.as_slice()));
+  }
+}
+
+#[test]
+fn reclaim_support_closure_rejects_missing_mandatory_or_mismatched_target_evidence() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let values = reclaim_case(algorithm);
+  let inventory = decode_physical_inventory_manifest_v1(&values.inventory_bytes, algorithm).unwrap();
+  let retirement = decode_root_retirement_commit_v1(&values.retirement_bytes, algorithm).unwrap();
+  let prior_expiry = decode_root_expiry_record_v1(&values.prior_expiry_bytes, algorithm).unwrap();
+  let cancellation = CancellationToken::new();
+  let mut verifier = RecordingVerifier { calls: 0, fail: false, cancel_after_verify: None };
+  let qualified = qualify_root_object_reclaim_v1(
+    RootObjectReclaimQualificationRequestV1 {
+      hash_algorithm: algorithm,
+      prior_expiry: &prior_expiry,
+      retirement: &retirement,
+      final_physical_inventory: &inventory,
+      proof_id: &values.proof_id,
+      reclaimed_at_ms: values.reclaimed_at_ms,
+      latest_sweep_receipt_generation: inventory.generation - 1,
+      root_object_incarnation_digest: &values.root_incarnation_digest,
+      root_object_incarnation_count: 2,
+      sweep_receipt_merkle_root: &values.sweep_receipt_merkle_root,
+      sweep_receipt_count: 3,
+      absence_digest: &values.absence_digest,
+      retention_ms: RETENTION_MS,
+    },
+    &cancellation,
+    &mut verifier,
+  )
+  .unwrap();
+  let authority_root_set_digest = digest_parts(algorithm, &[b"reclaim support authority roots"]);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 * 1024 * 1024, 32 * 1024 * 1024, 1, 1024 * 1024).unwrap());
+  let proof = decode_root_object_reclaim_proof_v1(&qualified.encoded_proof().value, algorithm).unwrap();
+  let assert_reclaim_closure_error = |support: &ReclaimSupport, proof, expected_code| {
+    let lifecycle = decode_root_lifecycle_manifest_v1(&support.lifecycle_manifest.value, algorithm).unwrap();
+    let expiry = decode_root_expiry_manifest_v1(&support.expiry_manifest.value, algorithm).unwrap();
+    let mut builder = RootLifecycleSupportClosureBuilderV1::new_for_reclaim(
+      &lifecycle,
+      &expiry,
+      proof,
+      algorithm,
+      &cancellation,
+      RootLifecycleSupportLimitsV1 { maximum_candidate_records: 0, maximum_expiry_records: 1, maximum_support_artifacts: 2 },
+      &memory,
+    )
+    .unwrap();
+    if let Err(error) = builder.observe_encoded(&support.expiry_page.value) {
+      assert_eq!(error.code(), expected_code);
+      return;
+    }
+    builder.observe_encoded(&support.expiry_directory.value).unwrap();
+    assert_eq!(builder.finish().unwrap_err().code(), expected_code);
+  };
+
+  let mandatory_support = reclaim_support(
+    algorithm,
+    inventory.database_id,
+    &authority_root_set_digest,
+    42,
+    values.reclaimed_at_ms + 1,
+    RETENTION_MS,
+    16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+    &values.prior_expiry_bytes,
+  );
+  assert_reclaim_closure_error(&mandatory_support, &proof, "root_expiry_reclaim_proof");
+
+  let other_root = vec![0xe1; algorithm.hash_length()];
+  let other_row = expiry_row(
+    algorithm,
+    &other_root,
+    prior_expiry.retired_at_ms,
+    RootExpiryStateV1::PhysicallyReclaimed,
+    prior_expiry.retirement_commit_hash,
+    Some(&qualified.encoded_proof().key),
+    Some(qualified.evidence_expires_at_ms()),
+  );
+  let missing_support = reclaim_support(
+    algorithm,
+    inventory.database_id,
+    &authority_root_set_digest,
+    42,
+    values.reclaimed_at_ms + 1,
+    RETENTION_MS,
+    16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+    &other_row,
+  );
+  assert_reclaim_closure_error(&missing_support, &proof, "root_lifecycle_support_reclaim_closure");
+
+  let valid_support = reclaim_support(
+    algorithm,
+    inventory.database_id,
+    &authority_root_set_digest,
+    42,
+    values.reclaimed_at_ms + 1,
+    RETENTION_MS,
+    16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+    qualified.encoded_expiry_record(),
+  );
+  let mut mismatched_proof = proof.clone();
+  mismatched_proof.key = digest_parts(algorithm, &[b"mismatched root-object reclaim proof"]);
+  assert_reclaim_closure_error(&valid_support, &mismatched_proof, "root_expiry_reclaim_proof");
 }
 
 #[test]
@@ -450,11 +723,22 @@ fn retention_stream_drops_expired_and_oldest_optional_rows_while_preserving_ever
         RootExpiryRetentionActionV1::RetainedOptional,
       ],
     );
-    let summary = model.finish().unwrap();
+    let permit = model.finish().unwrap();
+    let summary = permit.summary();
     assert_eq!((summary.prior_count, summary.resulting_count), (5, 3));
     assert_eq!((summary.resulting_mandatory_count, summary.resulting_optional_count), (1, 2));
     assert_eq!((summary.expired_count, summary.budget_evicted_count, summary.reclaimed_count), (1, 1, 1));
     assert_eq!(summary.resulting_optional_bytes, 2 * row_bytes);
+    assert_eq!(permit.hash_algorithm(), algorithm);
+    assert_eq!(permit.database_id().as_slice(), inventory.database_id);
+    assert_eq!(permit.prior_lifecycle_manifest_hash(), lifecycle.key);
+    assert_eq!(permit.prior_expiry_manifest_hash(), expiry.key);
+    assert_eq!(permit.namespace_root_hash(), target_prior.namespace_root_hash);
+    assert_eq!(permit.lifecycle_generation(), lifecycle.generation + 1);
+    assert_eq!(permit.completed_at_ms(), completed_at_ms);
+    assert_eq!(permit.retention_ms(), RETENTION_MS);
+    assert_eq!(permit.optional_byte_budget(), 2 * row_bytes);
+    assert_eq!(permit.root_object_reclaim_proof_hash(), qualified.encoded_proof().key);
   }
 }
 

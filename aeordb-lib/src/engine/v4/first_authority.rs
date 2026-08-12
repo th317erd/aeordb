@@ -52,9 +52,10 @@ use super::gc_mark_convergence::{
 };
 use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceErrorV1, MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1};
 use super::gc_lifecycle::{
-  RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_retirement_commit_v1,
-  validate_root_lifecycle_expiry_manifest,
+  RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
+  decode_root_retirement_commit_v1, validate_root_lifecycle_expiry_manifest,
 };
+use super::gc_root_reclaim::RootExpiryRetentionPermitV1;
 use super::gc_root_transition::RootRetirementIntentV1;
 use super::namespace::{
   EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_tree_root_v0,
@@ -223,6 +224,21 @@ pub struct RootRetirementPublicationRequestV1<'a> {
   pub pin_coordinator: &'a RootReadPinCoordinatorV1,
 }
 
+#[derive(Clone, Copy)]
+pub struct RootReclaimPublicationRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub retention_permit: &'a RootExpiryRetentionPermitV1,
+  pub support_closure: &'a RootLifecycleSupportClosureV1,
+  pub root_object_reclaim_proof: &'a EncodedImmutableGcArtifactV1,
+  pub expiry_manifest: &'a EncodedImmutableGcArtifactV1,
+  pub lifecycle_manifest: &'a EncodedImmutableGcArtifactV1,
+  pub lifecycle_control: &'a EncodedGcActiveControlV1,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+  pub cancellation: &'a CancellationToken,
+  pub pin_coordinator: &'a RootReadPinCoordinatorV1,
+}
+
 #[derive(Debug)]
 pub enum RootRetirementLineageStateV1 {
   NotRequired,
@@ -256,6 +272,26 @@ pub struct RootRetirementPublicationReceiptV1 {
   pub lifecycle_control_write_sequence: u64,
   pub lifecycle_control_slot: u8,
   pub lineage_state: RootRetirementLineageStateV1,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+pub type RootReclaimLineageStateV1 = RootRetirementLineageStateV1;
+
+#[must_use = "a root-reclaim receipt classifies the selector commit point and retained replacement lineage"]
+#[derive(Debug)]
+pub struct RootReclaimPublicationReceiptV1 {
+  pub namespace_root_hash: Vec<u8>,
+  pub root_object_reclaim_proof_key: Vec<u8>,
+  pub root_object_reclaim_proof_write_sequence: u64,
+  pub expiry_manifest_key: Vec<u8>,
+  pub expiry_manifest_write_sequence: u64,
+  pub lifecycle_manifest_key: Vec<u8>,
+  pub lifecycle_manifest_write_sequence: u64,
+  pub lifecycle_control_key: Vec<u8>,
+  pub lifecycle_control_write_sequence: u64,
+  pub lifecycle_control_slot: u8,
+  pub lineage_state: RootReclaimLineageStateV1,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
 }
@@ -338,6 +374,118 @@ impl Error for RootRetirementPublicationErrorV1 {
       Self::RetirementOwner(source) => Some(source),
       Self::Invalid { .. } | Self::Committed { .. } => None,
     }
+  }
+}
+
+#[derive(Debug)]
+pub enum RootReclaimPublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Committed { code: &'static str, message: String, receipt: Box<RootReclaimPublicationReceiptV1> },
+  Format(FormatError),
+  Authority(FirstAuthorityPublicationErrorV1),
+  Pin(RootPinCoordinatorErrorV1),
+  RetirementAdmission(RetirementJournalReplacementAdmissionErrorV1),
+  RetirementOwner(RetirementJournalOwnerErrorV1),
+}
+
+impl RootReclaimPublicationErrorV1 {
+  pub fn code(&self) -> &str {
+    match self {
+      Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
+      Self::Format(source) => source.code(),
+      Self::Authority(source) => source.code(),
+      Self::Pin(source) => source.code(),
+      Self::RetirementAdmission(source) => source.code(),
+      Self::RetirementOwner(source) => source.code(),
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+
+  fn committed(code: &'static str, message: impl Into<String>, receipt: RootReclaimPublicationReceiptV1) -> Self {
+    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
+  }
+
+  pub fn committed_receipt(&self) -> Option<&RootReclaimPublicationReceiptV1> {
+    match self {
+      Self::Committed { receipt, .. } => Some(receipt),
+      Self::Invalid { .. }
+      | Self::Format(_)
+      | Self::Authority(_)
+      | Self::Pin(_)
+      | Self::RetirementAdmission(_)
+      | Self::RetirementOwner(_) => None,
+    }
+  }
+}
+
+impl Display for RootReclaimPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Committed { code, message, receipt } => write!(
+        formatter,
+        "{code}: root {} reclaimed at lifecycle control sequence {}, but post-commit handling failed: {message}",
+        hex::encode(&receipt.namespace_root_hash),
+        receipt.lifecycle_control_write_sequence,
+      ),
+      Self::Format(source) => write!(formatter, "root-reclaim format error: {source}"),
+      Self::Authority(source) => write!(formatter, "root-reclaim authority error: {source}"),
+      Self::Pin(source) => write!(formatter, "root-reclaim pin error: {source}"),
+      Self::RetirementAdmission(source) => write!(formatter, "root-reclaim lineage admission error: {source}"),
+      Self::RetirementOwner(source) => write!(formatter, "root-reclaim lineage owner error: {source}"),
+    }
+  }
+}
+
+impl Error for RootReclaimPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Format(source) => Some(source),
+      Self::Authority(source) => Some(source),
+      Self::Pin(source) => Some(source),
+      Self::RetirementAdmission(source) => Some(source),
+      Self::RetirementOwner(source) => Some(source),
+      Self::Invalid { .. } | Self::Committed { .. } => None,
+    }
+  }
+}
+
+impl From<FormatError> for RootReclaimPublicationErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for RootReclaimPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<EngineError> for RootReclaimPublicationErrorV1 {
+  fn from(source: EngineError) -> Self {
+    Self::Authority(FirstAuthorityPublicationErrorV1::Engine(source))
+  }
+}
+
+impl From<RootPinCoordinatorErrorV1> for RootReclaimPublicationErrorV1 {
+  fn from(source: RootPinCoordinatorErrorV1) -> Self {
+    Self::Pin(source)
+  }
+}
+
+impl From<RetirementJournalReplacementAdmissionErrorV1> for RootReclaimPublicationErrorV1 {
+  fn from(source: RetirementJournalReplacementAdmissionErrorV1) -> Self {
+    Self::RetirementAdmission(source)
+  }
+}
+
+impl From<RetirementJournalOwnerErrorV1> for RootReclaimPublicationErrorV1 {
+  fn from(source: RetirementJournalOwnerErrorV1) -> Self {
+    Self::RetirementOwner(source)
   }
 }
 
@@ -779,6 +927,18 @@ struct RootRetirementLockedPublicationV1 {
   committed_failure: Option<(GcControlPublicationFailureV1, String)>,
 }
 
+struct ValidatedRootReclaimPublicationV1<'a> {
+  lifecycle_control: GcActiveControlV1<'a>,
+}
+
+struct RootReclaimLockedPublicationV1 {
+  root_object_reclaim_proof_write_sequence: u64,
+  expiry_manifest_write_sequence: u64,
+  lifecycle_manifest_write_sequence: u64,
+  control: GcControlPublicationV1,
+  committed_failure: Option<(GcControlPublicationFailureV1, String)>,
+}
+
 struct ChargedSelectionEntityV1 {
   bytes: Vec<u8>,
   _memory: MemoryReservation,
@@ -1002,6 +1162,18 @@ impl From<GcControlPublicationErrorV1> for MarkRunCheckpointPublicationErrorV1 {
 }
 
 impl From<GcControlPublicationErrorV1> for RootRetirementPublicationErrorV1 {
+  fn from(source: GcControlPublicationErrorV1) -> Self {
+    match source {
+      GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
+      GcControlPublicationErrorV1::Format(source) => Self::Format(source),
+      GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
+      GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
+      GcControlPublicationErrorV1::RetirementOwner(source) => Self::RetirementOwner(source),
+    }
+  }
+}
+
+impl From<GcControlPublicationErrorV1> for RootReclaimPublicationErrorV1 {
   fn from(source: GcControlPublicationErrorV1) -> Self {
     match source {
       GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
@@ -2103,6 +2275,333 @@ impl V4FirstAuthorityPublisher {
       control,
       committed_failure,
     })
+  }
+
+  pub fn publish_root_reclaim(
+    &mut self,
+    request: RootReclaimPublicationRequestV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  ) -> Result<RootReclaimPublicationReceiptV1, RootReclaimPublicationErrorV1> {
+    self.publish_root_reclaim_with_control_observer(request, retirement_owner, &mut NoopFirstAuthorityDependencyObserverV1)
+  }
+
+  fn publish_root_reclaim_with_control_observer(
+    &mut self,
+    request: RootReclaimPublicationRequestV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<RootReclaimPublicationReceiptV1, RootReclaimPublicationErrorV1> {
+    let validated = validate_root_reclaim_publication(&request)?;
+    if request.cancellation.is_cancelled() {
+      return Err(RootReclaimPublicationErrorV1::invalid("root_reclaim_canceled", "root reclaim was canceled before authority exclusion"));
+    }
+    if request.pin_coordinator.hash_algorithm() != request.hash_algorithm {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_pin_identity",
+        "root-pin coordinator hash profile differs from the reclaim closure",
+      ));
+    }
+    if retirement_owner.hash_algorithm() != request.hash_algorithm
+      || retirement_owner.database_id() != request.support_closure.database_id()
+    {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_lineage_identity",
+        "retirement lineage owner differs from the reclaim closure database or hash profile",
+      ));
+    }
+    self.verify_root_reclaim_support_is_durable(&request)?;
+
+    retirement_owner.flush(self)?;
+    let mut locked_result = None;
+    let exclusion_result =
+      request.pin_coordinator.with_retirement_exclusion(request.retention_permit.namespace_root_hash(), request.cancellation, || {
+        locked_result = Some(self.publish_root_reclaim_excluded(&request, &validated, retirement_owner, control_observer));
+        Ok(())
+      });
+    let exclusion_error = exclusion_result.err();
+    let (locked, exclusion_error) = match (locked_result, exclusion_error) {
+      (Some(Ok(locked)), exclusion_error) => (locked, exclusion_error),
+      (Some(Err(operation_error)), Some(exclusion_error)) => {
+        return Err(RootReclaimPublicationErrorV1::invalid(
+          "root_reclaim_exclusion_cleanup",
+          format!("reclaim failed with {operation_error}; releasing the exclusion also failed with {exclusion_error}"),
+        ));
+      }
+      (None, Some(exclusion_error)) => return Err(RootReclaimPublicationErrorV1::Pin(exclusion_error)),
+      (Some(Err(error)), None) => return Err(error),
+      (None, None) => {
+        return Err(RootReclaimPublicationErrorV1::invalid("root_reclaim_internal", "reclaim exclusion returned no result"));
+      }
+    };
+
+    let mut committed_failure = locked.committed_failure.map(|(failure, message)| (failure.code(), message));
+    if let Some(error) = exclusion_error {
+      if let Some((_, message)) = &mut committed_failure {
+        message.push_str(&format!("; releasing the root reclaim exclusion also failed: {error}"));
+      } else {
+        committed_failure = Some(("root_reclaim_committed_pin_cleanup", error.to_string()));
+      }
+    }
+    let lineage_state = if locked.control.replaced_control {
+      match retirement_owner.flush(self) {
+        Ok(true) => {
+          RootReclaimLineageStateV1::HardPublished { hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence }
+        }
+        Ok(false) => RootReclaimLineageStateV1::MissingAfterCommit {
+          code: "root_reclaim_lineage_missing",
+          message: "lifecycle control replacement committed without retained retirement lineage".to_string(),
+        },
+        Err(source) => RootReclaimLineageStateV1::BufferedAfterFlushFailure { code: source.code(), message: source.to_string() },
+      }
+    } else {
+      RootReclaimLineageStateV1::NotRequired
+    };
+    if !matches!(lineage_state, RootReclaimLineageStateV1::NotRequired | RootReclaimLineageStateV1::HardPublished { .. })
+      && committed_failure.is_none()
+    {
+      committed_failure = Some(("root_reclaim_committed_lineage", "reclaim lineage did not hard-publish".to_string()));
+    }
+    let observation = if matches!(lineage_state, RootReclaimLineageStateV1::HardPublished { .. }) {
+      match self.observe() {
+        Ok(observation) => observation,
+        Err(source) => {
+          if committed_failure.is_none() {
+            committed_failure = Some(("root_reclaim_committed_lineage_readback", source.to_string()));
+          }
+          locked.control.observation
+        }
+      }
+    } else {
+      locked.control.observation
+    };
+    let receipt = RootReclaimPublicationReceiptV1 {
+      namespace_root_hash: request.retention_permit.namespace_root_hash().to_vec(),
+      root_object_reclaim_proof_key: request.root_object_reclaim_proof.key.clone(),
+      root_object_reclaim_proof_write_sequence: locked.root_object_reclaim_proof_write_sequence,
+      expiry_manifest_key: request.expiry_manifest.key.clone(),
+      expiry_manifest_write_sequence: locked.expiry_manifest_write_sequence,
+      lifecycle_manifest_key: request.lifecycle_manifest.key.clone(),
+      lifecycle_manifest_write_sequence: locked.lifecycle_manifest_write_sequence,
+      lifecycle_control_key: request.lifecycle_control.key.clone(),
+      lifecycle_control_write_sequence: locked.control.control_write_sequence,
+      lifecycle_control_slot: locked.control.control_slot,
+      lineage_state,
+      observation,
+      idempotent: locked.control.idempotent,
+    };
+    if let Some((code, message)) = committed_failure {
+      return Err(RootReclaimPublicationErrorV1::committed(code, message, receipt));
+    }
+    Ok(receipt)
+  }
+
+  fn verify_root_reclaim_support_is_durable(
+    &self,
+    request: &RootReclaimPublicationRequestV1<'_>,
+  ) -> Result<(), RootReclaimPublicationErrorV1> {
+    let lifecycle = decode_root_lifecycle_manifest_v1(&request.lifecycle_manifest.value, request.hash_algorithm)?;
+    let expiry = decode_root_expiry_manifest_v1(&request.expiry_manifest.value, request.hash_algorithm)?;
+    let proof = decode_root_object_reclaim_proof_v1(&request.root_object_reclaim_proof.value, request.hash_algorithm)?;
+    let memory = request.pin_coordinator.memory_coordinator();
+    let mut builder = super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1::new_for_reclaim(
+      &lifecycle,
+      &expiry,
+      &proof,
+      request.hash_algorithm,
+      request.cancellation,
+      super::gc_lifecycle::RootLifecycleSupportLimitsV1 {
+        maximum_candidate_records: lifecycle.candidate_count,
+        maximum_expiry_records: expiry.record_count,
+        maximum_support_artifacts: request.support_closure.support_artifact_count(),
+      },
+      &memory,
+    )
+    .map_err(root_reclaim_support_error)?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.hash_algorithm != request.hash_algorithm
+      || header.database_id != request.support_closure.database_id()
+    {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_database_authority",
+        "selected first authority is degraded or differs from the reclaim closure",
+      ));
+    }
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let support_reader = RootLifecycleSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: &memory };
+    if let Some(root) = request.support_closure.candidate_directory_hash() {
+      support_reader
+        .revalidate_subtree(root, GcDirectoryRoleV1::RootCandidates, None, 0, &mut builder)
+        .map_err(root_reclaim_from_retirement_error)?;
+    }
+    if let Some(root) = request.support_closure.expiry_directory_hash() {
+      support_reader
+        .revalidate_subtree(root, GcDirectoryRoleV1::RootExpiry, None, 0, &mut builder)
+        .map_err(root_reclaim_from_retirement_error)?;
+    }
+    let observed = builder.finish().map_err(root_reclaim_support_error)?;
+    if observed != *request.support_closure {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_support_changed",
+        "durable root-lifecycle support closure differs from the validated request closure",
+      ));
+    }
+    Ok(())
+  }
+
+  fn publish_root_reclaim_excluded(
+    &self,
+    request: &RootReclaimPublicationRequestV1<'_>,
+    validated: &ValidatedRootReclaimPublicationV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<RootReclaimLockedPublicationV1, RootReclaimPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      RootReclaimPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    let database_id = request.support_closure.database_id();
+    if observation.selected.redundancy_degraded || header.hash_algorithm != request.hash_algorithm || header.database_id != database_id {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_database_authority",
+        "selected first authority is degraded or differs from the reclaim closure",
+      ));
+    }
+    if header.head_hash == request.retention_permit.namespace_root_hash() {
+      return Err(RootReclaimPublicationErrorV1::invalid("root_reclaim_current_head", "the selected HEAD cannot be physically reclaimed"));
+    }
+    if request.cancellation.is_cancelled() {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_canceled",
+        "root reclaim was canceled during final authority recheck",
+      ));
+    }
+
+    let selected_control = {
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      select_root_lifecycle_control(&self.file, &kv, header).map_err(root_reclaim_from_retirement_error)?
+    };
+    let exact_retry = selected_control.stored_value == request.lifecycle_control.value
+      && selected_control.target_manifest_hash == request.lifecycle_manifest.key;
+    if !exact_retry {
+      if selected_control.target_manifest_hash != request.retention_permit.prior_lifecycle_manifest_hash() {
+        return Err(RootReclaimPublicationErrorV1::invalid(
+          "root_reclaim_prior_lifecycle_changed",
+          "selected lifecycle authority no longer matches the retention permit",
+        ));
+      }
+      self.validate_root_reclaim_prior_authority(request, header)?;
+    }
+
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    let root_object_reclaim_proof_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::RootObjectReclaimProof,
+        database_id: &database_id,
+        artifact_key: &request.root_object_reclaim_proof.key,
+        value: &request.root_object_reclaim_proof.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "root_reclaim_proof_committed_postcondition",
+      },
+      &mut observer,
+    )?;
+    let expiry_manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::RootExpiryCatalogManifest,
+        database_id: &database_id,
+        artifact_key: &request.expiry_manifest.key,
+        value: &request.expiry_manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "root_reclaim_expiry_manifest_committed_postcondition",
+      },
+      &mut observer,
+    )?;
+    let lifecycle_manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::RootLifecycleManifest,
+        database_id: &database_id,
+        artifact_key: &request.lifecycle_manifest.key,
+        value: &request.lifecycle_manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "root_reclaim_lifecycle_manifest_committed_postcondition",
+      },
+      &mut observer,
+    )?;
+    let control = self.publish_gc_active_control_locked(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::RootLifecycleActiveControl,
+        encoded_control: request.lifecycle_control,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      retirement_owner,
+      control_observer,
+    )?;
+    let (control, committed_failure) = match control {
+      GcControlPublicationOutcomeV1::Complete(control) => (control, None),
+      GcControlPublicationOutcomeV1::CommittedFailure { publication, failure, message } => (publication, Some((failure, message))),
+    };
+    debug_assert_eq!(control.control_slot, validated.lifecycle_control.slot);
+    Ok(RootReclaimLockedPublicationV1 {
+      root_object_reclaim_proof_write_sequence,
+      expiry_manifest_write_sequence,
+      lifecycle_manifest_write_sequence,
+      control,
+      committed_failure,
+    })
+  }
+
+  fn validate_root_reclaim_prior_authority(
+    &self,
+    request: &RootReclaimPublicationRequestV1<'_>,
+    header: &DatabaseHeaderV4,
+  ) -> Result<(), RootReclaimPublicationErrorV1> {
+    let memory = request.pin_coordinator.memory_coordinator();
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let support_reader = RootLifecycleSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: &memory };
+    let prior_lifecycle_entity = support_reader
+      .load_entity(request.retention_permit.prior_lifecycle_manifest_hash(), GcArtifactKindV1::RootLifecycleManifest)
+      .map_err(root_reclaim_from_retirement_error)?;
+    let prior_lifecycle_whole =
+      decode_whole_entity(&prior_lifecycle_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    let prior_lifecycle = decode_root_lifecycle_manifest_v1(prior_lifecycle_whole.stored_value, header.hash_algorithm)?;
+    if prior_lifecycle.root_expiry_manifest_hash != Some(request.retention_permit.prior_expiry_manifest_hash()) {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_prior_expiry_changed",
+        "selected prior lifecycle does not reference the permit's exact expiry manifest",
+      ));
+    }
+    let prior_expiry_entity = support_reader
+      .load_entity(request.retention_permit.prior_expiry_manifest_hash(), GcArtifactKindV1::RootExpiryCatalogManifest)
+      .map_err(root_reclaim_from_retirement_error)?;
+    let prior_expiry_whole = decode_whole_entity(&prior_expiry_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    let prior_expiry = decode_root_expiry_manifest_v1(prior_expiry_whole.stored_value, header.hash_algorithm)?;
+    validate_root_lifecycle_expiry_manifest(&prior_lifecycle, &prior_expiry)?;
+
+    let next_lifecycle = decode_root_lifecycle_manifest_v1(&request.lifecycle_manifest.value, request.hash_algorithm)?;
+    if prior_lifecycle.key != request.retention_permit.prior_lifecycle_manifest_hash()
+      || prior_expiry.key != request.retention_permit.prior_expiry_manifest_hash()
+      || prior_lifecycle.generation >= next_lifecycle.generation
+      || prior_lifecycle.source_complete_mark_generation != next_lifecycle.source_complete_mark_generation
+      || prior_lifecycle.authority_root_set_digest != next_lifecycle.authority_root_set_digest
+      || prior_lifecycle.candidate_directory_hash != next_lifecycle.candidate_directory_hash
+      || prior_lifecycle.next_page_id != next_lifecycle.next_page_id
+      || prior_lifecycle.candidate_count != next_lifecycle.candidate_count
+      || prior_lifecycle.pending_count != next_lifecycle.pending_count
+      || prior_lifecycle.candidate_bytes != next_lifecycle.candidate_bytes
+    {
+      return Err(RootReclaimPublicationErrorV1::invalid(
+        "root_reclaim_prior_lifecycle_changed",
+        "reclaim attempted to change non-expiry lifecycle authority or did not advance its generation",
+      ));
+    }
+    Ok(())
   }
 
   /// Hard-publish one immutable page or directory used by a future root-
@@ -3645,6 +4144,117 @@ impl RootLifecycleSupportReadContextV1<'_> {
 
 fn root_retirement_support_error(source: super::gc_lifecycle::RootLifecycleSupportClosureErrorV1) -> RootRetirementPublicationErrorV1 {
   RootRetirementPublicationErrorV1::Invalid { code: source.code(), message: source.to_string() }
+}
+
+fn root_reclaim_support_error(source: super::gc_lifecycle::RootLifecycleSupportClosureErrorV1) -> RootReclaimPublicationErrorV1 {
+  RootReclaimPublicationErrorV1::Invalid { code: source.code(), message: source.to_string() }
+}
+
+fn root_reclaim_from_retirement_error(source: RootRetirementPublicationErrorV1) -> RootReclaimPublicationErrorV1 {
+  match source {
+    RootRetirementPublicationErrorV1::Invalid { code, message } => RootReclaimPublicationErrorV1::Invalid { code, message },
+    RootRetirementPublicationErrorV1::Format(source) => RootReclaimPublicationErrorV1::Format(source),
+    RootRetirementPublicationErrorV1::Authority(source) => RootReclaimPublicationErrorV1::Authority(source),
+    RootRetirementPublicationErrorV1::Pin(source) => RootReclaimPublicationErrorV1::Pin(source),
+    RootRetirementPublicationErrorV1::RetirementAdmission(source) => RootReclaimPublicationErrorV1::RetirementAdmission(source),
+    RootRetirementPublicationErrorV1::RetirementOwner(source) => RootReclaimPublicationErrorV1::RetirementOwner(source),
+    RootRetirementPublicationErrorV1::AuthorityRecheck(source) => RootReclaimPublicationErrorV1::invalid(
+      "root_reclaim_support_authority_recheck",
+      format!("unexpected retirement authority recheck error while reading reclaim support: {source}"),
+    ),
+    RootRetirementPublicationErrorV1::Committed { code, message, .. } => RootReclaimPublicationErrorV1::invalid(
+      "root_reclaim_support_committed_error",
+      format!("unexpected committed retirement error {code} while reading reclaim support: {message}"),
+    ),
+  }
+}
+
+fn validate_root_reclaim_publication<'a>(
+  request: &'a RootReclaimPublicationRequestV1<'_>,
+) -> Result<ValidatedRootReclaimPublicationV1<'a>, RootReclaimPublicationErrorV1> {
+  let proof = decode_root_object_reclaim_proof_v1(&request.root_object_reclaim_proof.value, request.hash_algorithm)?;
+  let expiry_manifest = decode_root_expiry_manifest_v1(&request.expiry_manifest.value, request.hash_algorithm)?;
+  let lifecycle_manifest = decode_root_lifecycle_manifest_v1(&request.lifecycle_manifest.value, request.hash_algorithm)?;
+  let lifecycle_control = decode_gc_active_control(&request.lifecycle_control.value, request.hash_algorithm)?;
+  let database_id = request.support_closure.database_id();
+  if request.root_object_reclaim_proof.key != proof.key
+    || request.expiry_manifest.key != expiry_manifest.key
+    || request.lifecycle_manifest.key != lifecycle_manifest.key
+    || request.lifecycle_control.key != lifecycle_control.key
+  {
+    return Err(RootReclaimPublicationErrorV1::invalid(
+      "root_reclaim_prepared_identity",
+      "prepared reclaim artifact keys differ from their canonical bytes",
+    ));
+  }
+  if request.retention_permit.hash_algorithm() != request.hash_algorithm
+    || request.support_closure.hash_algorithm() != request.hash_algorithm
+    || request.retention_permit.database_id() != database_id
+    || proof.database_id != database_id
+    || expiry_manifest.database_id != database_id
+    || lifecycle_manifest.database_id != database_id
+    || lifecycle_control.database_id != database_id
+  {
+    return Err(RootReclaimPublicationErrorV1::invalid(
+      "root_reclaim_prepared_database",
+      "reclaim permit, closure, artifacts, and hash profile disagree on database identity",
+    ));
+  }
+  if request.support_closure.lifecycle_manifest_hash() != request.lifecycle_manifest.key
+    || request.support_closure.expiry_manifest_hash() != Some(request.expiry_manifest.key.as_slice())
+    || request.support_closure.root_object_reclaim_proof_hash() != Some(request.root_object_reclaim_proof.key.as_slice())
+    || request.support_closure.lifecycle_generation() != lifecycle_manifest.generation
+    || request.retention_permit.root_object_reclaim_proof_hash() != request.root_object_reclaim_proof.key
+    || request.support_closure.root_expiry_result_digest() != Some(request.retention_permit.resulting_expiry_records_digest())
+    || request.retention_permit.namespace_root_hash() != proof.namespace_root_hash
+  {
+    return Err(RootReclaimPublicationErrorV1::invalid(
+      "root_reclaim_support_closure",
+      "bounded support closure and retention permit do not bind the exact reclaim manifests and proof",
+    ));
+  }
+  validate_root_lifecycle_expiry_manifest(&lifecycle_manifest, &expiry_manifest)?;
+  let summary = request.retention_permit.summary();
+  if lifecycle_manifest.generation != request.retention_permit.lifecycle_generation()
+    || expiry_manifest.generation != lifecycle_manifest.generation
+    || lifecycle_manifest.published_at_ms != request.retention_permit.completed_at_ms()
+    || expiry_manifest.retention_ms != request.retention_permit.retention_ms()
+    || expiry_manifest.optional_byte_budget != request.retention_permit.optional_byte_budget()
+    || expiry_manifest.record_count != summary.resulting_count
+    || expiry_manifest.logical_bytes != summary.resulting_bytes
+    || expiry_manifest.mandatory_count != summary.resulting_mandatory_count
+    || expiry_manifest.mandatory_bytes != summary.resulting_mandatory_bytes
+    || expiry_manifest.optional_count != summary.resulting_optional_count
+    || expiry_manifest.optional_bytes != summary.resulting_optional_bytes
+    || expiry_manifest.oldest_retired_at_ms != summary.oldest_retired_at_ms
+    || expiry_manifest.newest_retired_at_ms != summary.newest_retired_at_ms
+    || lifecycle_manifest.retired_evidence_count != summary.resulting_count
+    || lifecycle_manifest.expiry_bytes != summary.resulting_bytes
+    || lifecycle_control.kind != GcArtifactKindV1::RootLifecycleActiveControl
+    || lifecycle_control.generation != lifecycle_manifest.generation
+    || lifecycle_control.target_manifest_hash != request.lifecycle_manifest.key
+  {
+    return Err(RootReclaimPublicationErrorV1::invalid(
+      "root_reclaim_manifest_closure",
+      "reclaim permit aggregates, manifests, and lifecycle selector do not close exactly",
+    ));
+  }
+  if proof.reclaimed_at_ms > request.retention_permit.completed_at_ms() {
+    return Err(RootReclaimPublicationErrorV1::invalid("root_reclaim_timestamp", "reclaim proof time follows retention completion"));
+  }
+  let completed_at_ms = u64::try_from(request.retention_permit.completed_at_ms()).map_err(|error| {
+    RootReclaimPublicationErrorV1::invalid("root_reclaim_timestamp", format!("retention completion time is negative: {error}"))
+  })?;
+  let published_at_ms = u64::try_from(lifecycle_manifest.published_at_ms).map_err(|error| {
+    RootReclaimPublicationErrorV1::invalid("root_reclaim_timestamp", format!("lifecycle publication time is negative: {error}"))
+  })?;
+  if request.publication_timestamp_ms < completed_at_ms || request.publication_timestamp_ms < published_at_ms {
+    return Err(RootReclaimPublicationErrorV1::invalid(
+      "root_reclaim_timestamp",
+      "hard-publication timestamp precedes retention completion or the lifecycle manifest",
+    ));
+  }
+  Ok(ValidatedRootReclaimPublicationV1 { lifecycle_control })
 }
 
 fn validate_root_retirement_publication<'a>(

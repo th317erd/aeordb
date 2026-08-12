@@ -690,6 +690,8 @@ fn root_retirement_publication_remains_confined_to_disconnected_first_authority(
   let symbols = [
     "publish_root_retirement",
     "RootRetirementPublicationRequestV1",
+    "publish_root_reclaim",
+    "RootReclaimPublicationRequestV1",
     "RootRetirementAuthorityVerifierV1",
     "publish_root_lifecycle_support_artifact",
   ];

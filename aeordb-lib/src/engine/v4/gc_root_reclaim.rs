@@ -4,8 +4,8 @@ use tokio_util::sync::CancellationToken;
 use super::gc::EncodedImmutableGcArtifactV1;
 use super::gc_lifecycle::{
   RootExpiryManifestV1, RootExpiryRecordWriteV1, RootLifecycleManifestV1, RootObjectReclaimProofWriteV1, RootRetirementCommitV1,
-  encode_root_expiry_record_v1, encode_root_object_reclaim_proof_v1, validate_root_expiry_reclaim_proof,
-  validate_root_expiry_retirement_commit, validate_root_lifecycle_expiry_manifest,
+  encode_root_expiry_record_v1, encode_root_object_reclaim_proof_v1, validate_root_expiry_reclaim_proof, root_expiry_result_digest_start,
+  root_expiry_result_digest_step, validate_root_expiry_retirement_commit, validate_root_lifecycle_expiry_manifest,
 };
 use super::gc_state::{PhysicalInventoryManifestV1, RootExpiryRecordV1, RootExpiryStateV1, decode_root_expiry_record_v1};
 use super::reader::FormatError;
@@ -148,6 +148,72 @@ pub struct RootExpiryRetentionSummaryV1 {
   pub reclaimed_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootExpiryRetentionPermitV1 {
+  summary: RootExpiryRetentionSummaryV1,
+  hash_algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  prior_lifecycle_manifest_hash: Vec<u8>,
+  prior_expiry_manifest_hash: Vec<u8>,
+  lifecycle_generation: u64,
+  completed_at_ms: i64,
+  retention_ms: u64,
+  optional_byte_budget: u64,
+  namespace_root_hash: Vec<u8>,
+  root_object_reclaim_proof_hash: Vec<u8>,
+  resulting_expiry_records_digest: Vec<u8>,
+}
+
+impl RootExpiryRetentionPermitV1 {
+  pub const fn summary(&self) -> &RootExpiryRetentionSummaryV1 {
+    &self.summary
+  }
+
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub fn prior_lifecycle_manifest_hash(&self) -> &[u8] {
+    &self.prior_lifecycle_manifest_hash
+  }
+
+  pub fn prior_expiry_manifest_hash(&self) -> &[u8] {
+    &self.prior_expiry_manifest_hash
+  }
+
+  pub const fn lifecycle_generation(&self) -> u64 {
+    self.lifecycle_generation
+  }
+
+  pub const fn completed_at_ms(&self) -> i64 {
+    self.completed_at_ms
+  }
+
+  pub const fn retention_ms(&self) -> u64 {
+    self.retention_ms
+  }
+
+  pub const fn optional_byte_budget(&self) -> u64 {
+    self.optional_byte_budget
+  }
+
+  pub fn namespace_root_hash(&self) -> &[u8] {
+    &self.namespace_root_hash
+  }
+
+  pub fn root_object_reclaim_proof_hash(&self) -> &[u8] {
+    &self.root_object_reclaim_proof_hash
+  }
+
+  pub fn resulting_expiry_records_digest(&self) -> &[u8] {
+    &self.resulting_expiry_records_digest
+  }
+}
+
 #[derive(Debug, Error)]
 pub enum RootExpiryRetentionErrorV1 {
   #[error("invalid root-expiry retention configuration: {0}")]
@@ -216,6 +282,8 @@ pub struct RootExpiryRetentionModelV1<'a> {
   target_reason: u16,
   target_retirement_commit_hash: Vec<u8>,
   target_evidence_expires_at_ms: i64,
+  target_expiry_record: Vec<u8>,
+  resulting_expiry_records_digest: Vec<u8>,
   previous_root_hash: Vec<u8>,
   prior_count: u64,
   prior_bytes: u64,
@@ -285,6 +353,8 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
     {
       return Err(RootExpiryRetentionErrorV1::Target);
     }
+    let target_expiry_record = context.qualified_reclaim.encoded_expiry_record().to_vec();
+    let resulting_expiry_records_digest = root_expiry_result_digest_start(context.hash_algorithm);
 
     Ok(Self {
       context,
@@ -297,6 +367,8 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
       target_reason: target_replacement.reason,
       target_retirement_commit_hash: target_replacement.retirement_commit_hash.to_vec(),
       target_evidence_expires_at_ms,
+      target_expiry_record,
+      resulting_expiry_records_digest,
       previous_root_hash: Vec::with_capacity(hash_width),
       prior_count: 0,
       prior_bytes: 0,
@@ -335,7 +407,7 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
     }
   }
 
-  pub fn finish(self) -> Result<RootExpiryRetentionSummaryV1, RootExpiryRetentionErrorV1> {
+  pub fn finish(self) -> Result<RootExpiryRetentionPermitV1, RootExpiryRetentionErrorV1> {
     if self.failed {
       return Err(RootExpiryRetentionErrorV1::Failed);
     }
@@ -378,7 +450,7 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
       self.resulting_mandatory_count.checked_add(self.resulting_optional_count).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
     let resulting_bytes =
       self.resulting_mandatory_bytes.checked_add(self.resulting_optional_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
-    Ok(RootExpiryRetentionSummaryV1 {
+    let summary = RootExpiryRetentionSummaryV1 {
       prior_count: self.prior_count,
       prior_bytes: self.prior_bytes,
       resulting_count,
@@ -392,6 +464,26 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
       expired_count: self.expired_count,
       budget_evicted_count: self.budget_evicted_count,
       reclaimed_count: self.reclaimed_count,
+    };
+    let mut database_id = [0u8; 16];
+    database_id.copy_from_slice(self.context.prior_lifecycle.database_id);
+    let target_proof = super::gc_lifecycle::decode_root_object_reclaim_proof_v1(
+      &self.context.qualified_reclaim.encoded_proof.value,
+      self.context.hash_algorithm,
+    )?;
+    Ok(RootExpiryRetentionPermitV1 {
+      summary,
+      hash_algorithm: self.context.hash_algorithm,
+      database_id,
+      prior_lifecycle_manifest_hash: self.context.prior_lifecycle.key.clone(),
+      prior_expiry_manifest_hash: self.context.prior_expiry.key.clone(),
+      lifecycle_generation: self.context.lifecycle_generation,
+      completed_at_ms: self.context.completed_at_ms,
+      retention_ms: self.context.retention_ms,
+      optional_byte_budget: self.context.optional_byte_budget,
+      namespace_root_hash: self.target_root_hash,
+      root_object_reclaim_proof_hash: target_proof.key,
+      resulting_expiry_records_digest: self.resulting_expiry_records_digest,
     })
   }
 
@@ -415,6 +507,7 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
     match record.state {
       RootExpiryStateV1::LogicallyRetired => {
         self.add_resulting_mandatory(record.retired_at_ms)?;
+        self.digest_retained_record(record)?;
         Ok(RootExpiryRetentionActionV1::RetainedMandatory)
       }
       RootExpiryStateV1::PhysicallyReclaimed => self.observe_optional(record),
@@ -438,6 +531,8 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
     self.target_seen = true;
     self.reclaimed_count = checked_increment(self.reclaimed_count)?;
     self.add_resulting_optional(record.retired_at_ms, self.target_evidence_expires_at_ms, record.namespace_root_hash)?;
+    self.resulting_expiry_records_digest =
+      root_expiry_result_digest_step(self.context.hash_algorithm, &self.resulting_expiry_records_digest, &self.target_expiry_record);
     Ok(RootExpiryRetentionActionV1::ReclaimedAndRetained)
   }
 
@@ -452,7 +547,26 @@ impl<'a> RootExpiryRetentionModelV1<'a> {
       return Ok(RootExpiryRetentionActionV1::DroppedForBudget);
     }
     self.add_resulting_optional(record.retired_at_ms, expires_at_ms, record.namespace_root_hash)?;
+    self.digest_retained_record(record)?;
     Ok(RootExpiryRetentionActionV1::RetainedOptional)
+  }
+
+  fn digest_retained_record(&mut self, record: &RootExpiryRecordV1<'_>) -> Result<(), RootExpiryRetentionErrorV1> {
+    let encoded = encode_root_expiry_record_v1(&RootExpiryRecordWriteV1 {
+      hash_algorithm: self.context.hash_algorithm,
+      namespace_root_hash: record.namespace_root_hash,
+      retired_at_ms: record.retired_at_ms,
+      last_pending_since_ms: record.last_pending_since_ms,
+      final_mark_generation: record.final_mark_generation,
+      reason: record.reason,
+      state: record.state,
+      retirement_commit_hash: record.retirement_commit_hash,
+      root_object_reclaim_proof_hash: record.root_object_reclaim_proof_hash,
+      evidence_expires_at_ms: record.evidence_expires_at_ms,
+    })?;
+    self.resulting_expiry_records_digest =
+      root_expiry_result_digest_step(self.context.hash_algorithm, &self.resulting_expiry_records_digest, &encoded);
+    Ok(())
   }
 
   fn selection_retains(&self, evidence_expires_at_ms: i64, namespace_root_hash: &[u8]) -> bool {
