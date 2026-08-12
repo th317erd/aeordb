@@ -409,7 +409,7 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
     ("gc_quarantine.rs", 2),
     ("gc_retirement.rs", 1),
     ("gc_state.rs", 2),
-    ("gc_void.rs", 2),
+    ("gc_void.rs", 6),
   ];
   assert_eq!(
     production_sources.matches("encode_immutable_gc_artifact(").count(),

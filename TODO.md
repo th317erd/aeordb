@@ -749,7 +749,15 @@
           - [x] Publish replacement support and claim evidence before the manifest, select the inactive control last, and return no authority before that commit point.
           - [x] Prove exact retry, every selector crash prefix, corrupt/missing support, stale authority, pressure refusal, and architecture isolation without activating the allocator.
           - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
-        - [ ] P4-7d: consume only durable claim subranges through one bounded allocator owner, then hard-publish settlement/abandonment and a claim-free result catalog after used locators are durable.
+        - [x] P4-7d: consume only durable claim subranges through one bounded allocator owner, then hard-publish settlement/abandonment and a claim-free result catalog after used locators are durable.
+          - [x] Add a compile-red public contract for one non-cloneable allocator owner that consumes only a private durable claim-admission permit.
+          - [x] Allocate deterministic bounded subranges, retain exact provenance, and classify every attempted range as durably used, definitely unused, or uncertain/quarantined.
+          - [x] Require caller-owned exact durable-locator and quarantine evidence; cancellation, callback failure, or ambiguous writes must never return bytes to reusable authority.
+          - [x] Stream-validate the selected outstanding-claim source and claim-free result closure, preserving all unrelated free extents and claims while returning only proven unused fragments.
+          - [x] Hard-publish result support, select the inactive Void control only after used locators and uncertain-range quarantine are durable, and hard-publish one immutable settlement receipt with restart-idempotent recovery.
+          - [x] Reject generic settlement publication, duplicate/conflicting receipts, stale permits, substituted ranges, dishonest evidence, resource pressure, and every pre/post-selector crash prefix.
+          - [x] Keep the new owner disconnected from live v3 `VoidManager`, service startup, routes, tasks, and destructive GC until P4-7e/P4-8 activation proof.
+          - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
         - [ ] P4-7e: derive startup and in-memory reusable-space state only from one closure-valid selected receipt-backed catalog minus outstanding claims; keep raw hot-tail and gap evidence non-authoritative.
         - [ ] P4-7f: prove partial use, crash recovery, cancellation, corruption, overlapping/substituted ranges, stale caches, resource bounds, restart, native behavior, and retained-or-leaked failure direction without enabling destructive service GC.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.

@@ -51,8 +51,9 @@ use crate::engine::v4::gc_sweep_reconciliation::{
 };
 use crate::engine::v4::gc_void::{
   SweepOutcomeClassV1, SweepProposalWriteV1, SweepReceiptOutcomeWriteV1, SweepReceiptWriteV1, SweepVoidArtifactV1,
-  VoidCatalogManifestWriteV1, VoidClaimExtentV1, VoidClaimWriteV1, VoidExtentPageWriteV1, VoidExtentRecordV1, decode_sweep_void_artifact,
-  encode_sweep_proposal_v1, encode_sweep_receipt_v1, encode_void_catalog_manifest_v1, encode_void_claim_v1, encode_void_extent_page_v1,
+  VoidCatalogManifestWriteV1, VoidClaimExtentV1, VoidClaimSettlementOutcomeV1, VoidClaimSettlementWriteV1, VoidClaimWriteV1,
+  VoidExtentPageWriteV1, VoidExtentRecordV1, decode_sweep_void_artifact, encode_sweep_proposal_v1, encode_sweep_receipt_v1,
+  encode_void_catalog_manifest_v1, encode_void_claim_settlement_v1, encode_void_claim_v1, encode_void_extent_page_v1,
 };
 use crate::engine::v4::gc_void_claim::{
   VoidClaimAdmissionAuthorityErrorV1, VoidClaimAdmissionAuthorityRequestV1, VoidClaimAdmissionAuthoritySnapshotV1,
@@ -61,6 +62,12 @@ use crate::engine::v4::gc_void_claim::{
 use crate::engine::v4::gc_void_publication::{
   VoidCatalogClosureLimitsV1, VoidCatalogPublicationAuthorityErrorV1, VoidCatalogPublicationAuthorityRequestV1,
   VoidCatalogPublicationAuthoritySnapshotV1, VoidCatalogPublicationAuthorityV1,
+};
+use crate::engine::v4::gc_void_settlement::{
+  VoidClaimAllocationDispositionV1, VoidClaimAllocationLimitsV1, VoidClaimAllocationOwnerV1, VoidClaimAllocationSinkV1,
+  VoidClaimConsumptionOutcomeV1, VoidClaimDurableUseV1, VoidClaimSettlementAuthorityErrorV1, VoidClaimSettlementAuthorityRequestV1,
+  VoidClaimSettlementAuthoritySnapshotV1, VoidClaimSettlementAuthorityV1, VoidClaimSettlementPublicationRequestV1,
+  VoidClaimSettlementTransitionLimitsV1, VoidClaimSettlementTransitionValidatorV1, VoidClaimSubrangeV1, VoidClaimWriteFailureV1,
 };
 use crate::engine::v4::gc_root_reclaim::{
   RootExpiryRetentionContextV1, RootExpiryRetentionModelV1, RootExpiryRetentionPermitV1, RootExpiryRetentionSelectionV1,
@@ -166,6 +173,65 @@ fn test_void_claim_admission_authority(source_manifest_hash: &[u8], source_contr
     },
     expected_source_manifest_hash: source_manifest_hash.to_vec(),
     expected_source_control_sequence: source_control_sequence,
+    fail_recheck: false,
+    recheck_calls: 0,
+  }
+}
+
+struct TestVoidClaimSettlementAuthorityV1 {
+  snapshot: VoidClaimSettlementAuthoritySnapshotV1,
+  expected_source_manifest_hash: Vec<u8>,
+  expected_source_control_sequence: u64,
+  cancel_during_recheck: Option<CancellationToken>,
+  fail_recheck: bool,
+  recheck_calls: usize,
+}
+
+impl VoidClaimSettlementAuthorityV1 for TestVoidClaimSettlementAuthorityV1 {
+  fn recheck_void_claim_settlement_authority(
+    &mut self,
+    request: VoidClaimSettlementAuthorityRequestV1<'_>,
+  ) -> Result<VoidClaimSettlementAuthoritySnapshotV1, VoidClaimSettlementAuthorityErrorV1> {
+    self.recheck_calls += 1;
+    assert_eq!(request.source_manifest.key, self.expected_source_manifest_hash);
+    assert_eq!(request.consumption.source_control_sequence(), self.expected_source_control_sequence);
+    assert_eq!(request.transition.claim_key, request.claim.key);
+    assert_eq!(request.transition.evidence_digest, request.consumption.evidence_digest());
+    if let Some(cancellation) = self.cancel_during_recheck.as_ref() {
+      cancellation.cancel();
+    }
+    if self.fail_recheck {
+      return Err(VoidClaimSettlementAuthorityErrorV1::new(
+        "void_claim_settlement_test_recheck",
+        "injected caller-owned Void settlement authority failure",
+      ));
+    }
+    Ok(self.snapshot.clone())
+  }
+}
+
+fn test_void_claim_settlement_authority(source_manifest_hash: &[u8], source_control_sequence: u64) -> TestVoidClaimSettlementAuthorityV1 {
+  TestVoidClaimSettlementAuthorityV1 {
+    snapshot: VoidClaimSettlementAuthoritySnapshotV1 {
+      selected_source_manifest_hash: source_manifest_hash.to_vec(),
+      selected_source_control_sequence: source_control_sequence,
+      source_catalog_receipt_backed: true,
+      source_catalog_closure_current: true,
+      claim_outstanding_exact: true,
+      durable_used_locators_exact: true,
+      uncertain_ranges_quarantined: true,
+      replacement_lineage_complete: true,
+      allocator_settlement_excluded: true,
+      no_other_settlement_active: true,
+      memory_coordinator_current: true,
+      receipt_search_complete: true,
+      conflicting_receipt_count: 0,
+      existing_receipt: None,
+      repair_latch_clear: true,
+    },
+    expected_source_manifest_hash: source_manifest_hash.to_vec(),
+    expected_source_control_sequence: source_control_sequence,
+    cancel_during_recheck: None,
     fail_recheck: false,
     recheck_calls: 0,
   }
@@ -964,6 +1030,1271 @@ fn void_claim_selects_source_minus_claim_before_returning_exact_allocation_autho
   assert!(retry.idempotent());
   assert_eq!(retry.claim_key(), prepared.claim.key);
   assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(prepared.result_manifest.key));
+}
+
+struct MixedVoidClaimAllocationSinkV1 {
+  calls: u32,
+}
+
+impl VoidClaimAllocationSinkV1 for MixedVoidClaimAllocationSinkV1 {
+  fn consume_void_claim_subrange(&mut self, request: VoidClaimSubrangeV1<'_>) -> Result<VoidClaimDurableUseV1, VoidClaimWriteFailureV1> {
+    let call = self.calls;
+    self.calls += 1;
+    match call {
+      0 => Ok(VoidClaimDurableUseV1 {
+        logical_key: vec![0x51; 32],
+        integrity_digest: vec![0x52; 32],
+        wal_offset: request.offset,
+        write_sequence: 91,
+        entity_length: request.length,
+        entry_type: 1,
+        entity_version: 1,
+      }),
+      1 => Err(VoidClaimWriteFailureV1::DefinitelyUnwritten { reason_code: 7 }),
+      2 => Err(VoidClaimWriteFailureV1::PossiblyWritten { reason_code: 9, evidence_digest: vec![0x53; 32] }),
+      _ => panic!("unexpected allocation call"),
+    }
+  }
+}
+
+fn prepare_void_claim_allocation_permit(
+  name: &str,
+  hash_algorithm: HashAlgorithm,
+) -> (tempfile::TempDir, MemoryCoordinator, CancellationToken, VoidClaimAdmissionPermitV1) {
+  let (directory, _path, _coordinator, mut publisher) = create_environment(name, None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &source);
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut source_authority = test_void_catalog_publication_authority();
+  let _ =
+    publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
+  let prepared = prepare_void_claim_admission(&source);
+  publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &source.database_id,
+      artifact: &prepared.claim_directory,
+      publication_timestamp_ms: 1_700_000_080_015,
+    })
+    .unwrap();
+  let mut claim_authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+  let mut permit =
+    publisher.admit_void_claim(prepared.request(&cancellation, &memory, 4, 2), &mut claim_authority, &mut retirement_owner).unwrap();
+  if hash_algorithm != HashAlgorithm::Blake3_256 {
+    let hash_width = hash_algorithm.hash_length();
+    permit.hash_algorithm = hash_algorithm;
+    permit.claim_key = vec![0x61; hash_width];
+    permit.source_manifest_key = vec![0x62; hash_width];
+    permit.result_manifest_key = vec![0x63; hash_width];
+    permit.result_control_key = vec![0x64; hash_width];
+    for extent in permit.claimed_extents.iter_mut() {
+      extent.origin_sweep_proposal_hash = vec![0x65; hash_width];
+      extent.origin_quarantine_manifest_hash = vec![0x66; hash_width];
+      extent.reclaimed_incarnation_digest = vec![0x67; hash_width];
+    }
+  }
+  (directory, memory, cancellation, permit)
+}
+
+struct DurableThenUnusedVoidClaimSinkV1 {
+  hash_algorithm: HashAlgorithm,
+  calls: u32,
+}
+
+impl VoidClaimAllocationSinkV1 for DurableThenUnusedVoidClaimSinkV1 {
+  fn consume_void_claim_subrange(&mut self, request: VoidClaimSubrangeV1<'_>) -> Result<VoidClaimDurableUseV1, VoidClaimWriteFailureV1> {
+    self.calls += 1;
+    if self.calls == 1 {
+      return Ok(VoidClaimDurableUseV1 {
+        logical_key: vec![0x71; self.hash_algorithm.hash_length()],
+        integrity_digest: vec![0x72; self.hash_algorithm.hash_length()],
+        wal_offset: request.offset,
+        write_sequence: 101,
+        entity_length: request.length,
+        entry_type: 1,
+        entity_version: 1,
+      });
+    }
+    Err(VoidClaimWriteFailureV1::DefinitelyUnwritten { reason_code: 7 })
+  }
+}
+
+struct InvalidDurableVoidClaimSinkV1;
+
+impl VoidClaimAllocationSinkV1 for InvalidDurableVoidClaimSinkV1 {
+  fn consume_void_claim_subrange(&mut self, request: VoidClaimSubrangeV1<'_>) -> Result<VoidClaimDurableUseV1, VoidClaimWriteFailureV1> {
+    Ok(VoidClaimDurableUseV1 {
+      logical_key: vec![0x81; 32],
+      integrity_digest: vec![0x82; 32],
+      wal_offset: request.offset + 1,
+      write_sequence: 102,
+      entity_length: request.length,
+      entry_type: 1,
+      entity_version: 1,
+    })
+  }
+}
+
+struct InvalidFailureVoidClaimSinkV1;
+
+impl VoidClaimAllocationSinkV1 for InvalidFailureVoidClaimSinkV1 {
+  fn consume_void_claim_subrange(&mut self, _request: VoidClaimSubrangeV1<'_>) -> Result<VoidClaimDurableUseV1, VoidClaimWriteFailureV1> {
+    Err(VoidClaimWriteFailureV1::DefinitelyUnwritten { reason_code: 0 })
+  }
+}
+
+struct CancelingUncertainVoidClaimSinkV1 {
+  cancellation: CancellationToken,
+  hash_width: usize,
+}
+
+impl VoidClaimAllocationSinkV1 for CancelingUncertainVoidClaimSinkV1 {
+  fn consume_void_claim_subrange(&mut self, _request: VoidClaimSubrangeV1<'_>) -> Result<VoidClaimDurableUseV1, VoidClaimWriteFailureV1> {
+    self.cancellation.cancel();
+    Err(VoidClaimWriteFailureV1::PossiblyWritten { reason_code: 9, evidence_digest: vec![0x91; self.hash_width] })
+  }
+}
+
+#[test]
+fn void_claim_allocator_is_deterministic_and_bounded_at_both_hash_widths() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, memory, cancellation, permit) =
+      prepare_void_claim_allocation_permit(&format!("void-claim-both-widths-{hash_algorithm:?}"), hash_algorithm);
+    let reserved_before_owner = memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes;
+    let mut owner =
+      VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 2 }, &memory, cancellation).unwrap();
+    let mut sink = DurableThenUnusedVoidClaimSinkV1 { hash_algorithm, calls: 0 };
+    assert!(matches!(
+      owner.consume(128, &mut sink).unwrap(),
+      VoidClaimAllocationDispositionV1::Durable { ordinal: 0, wal_offset: 8_192, entity_length: 128, write_sequence: 101 }
+    ));
+    assert!(matches!(
+      owner.consume(64, &mut sink).unwrap(),
+      VoidClaimAllocationDispositionV1::DefinitelyUnused { ordinal: 1, offset: 8_320, length: 64, reason_code: 7 }
+    ));
+    assert_eq!(owner.consume(1, &mut sink).unwrap_err().code(), "void_claim_allocation_limit");
+    let consumption = owner.finish().unwrap();
+    assert_eq!(consumption.outcome(), VoidClaimConsumptionOutcomeV1::Settled);
+    assert_eq!(consumption.used_bytes(), 128);
+    assert_eq!(consumption.returned_bytes(), 384);
+    assert_eq!(consumption.uncertain_bytes(), 0);
+    assert_eq!(consumption.evidence_digest().len(), hash_algorithm.hash_length());
+    drop(consumption);
+    assert!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes < reserved_before_owner);
+  }
+}
+
+#[test]
+fn void_claim_zero_durable_use_abandons_the_complete_claim_to_quarantine_at_both_hash_widths() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, memory, cancellation, permit) =
+      prepare_void_claim_allocation_permit(&format!("void-claim-abandon-{hash_algorithm:?}"), hash_algorithm);
+    let owner =
+      VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 4 }, &memory, cancellation).unwrap();
+    let consumption = owner.finish().unwrap();
+    assert_eq!(consumption.outcome(), VoidClaimConsumptionOutcomeV1::AbandonedToQuarantine);
+    assert!(consumption.durable_uses().is_empty());
+    assert!(consumption.returned_extents().is_empty());
+    assert_eq!(consumption.returned_bytes(), 0);
+    assert_eq!(consumption.uncertain_bytes(), consumption.claimed_bytes());
+    assert_eq!(consumption.evidence_digest().len(), hash_algorithm.hash_length());
+  }
+}
+
+#[test]
+fn void_claim_malformed_or_ambiguous_sink_results_latch_the_owner_and_never_return_bytes() {
+  let cases: [(&str, Box<dyn VoidClaimAllocationSinkV1>); 2] =
+    [("durable", Box::new(InvalidDurableVoidClaimSinkV1)), ("failure", Box::new(InvalidFailureVoidClaimSinkV1))];
+  for (name, mut sink) in cases {
+    let (_directory, memory, cancellation, permit) = prepare_void_claim_allocation_permit(name, HashAlgorithm::Blake3_256);
+    let mut owner =
+      VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 4 }, &memory, cancellation).unwrap();
+    let error = owner.consume(64, sink.as_mut()).unwrap_err();
+    assert!(matches!(error.code(), "void_claim_allocation_durable_receipt" | "void_claim_allocation_sink_failure"));
+    assert_eq!(owner.consume(1, sink.as_mut()).unwrap_err().code(), "void_claim_allocation_failed");
+    assert_eq!(owner.finish().unwrap_err().code(), "void_claim_allocation_failed");
+  }
+}
+
+#[test]
+fn void_claim_cancellation_after_a_possible_write_retains_the_entire_outstanding_claim() {
+  let (_directory, memory, cancellation, permit) = prepare_void_claim_allocation_permit("void-claim-cancel", HashAlgorithm::Blake3_256);
+  let mut owner =
+    VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 4 }, &memory, cancellation.clone()).unwrap();
+  let mut sink = CancelingUncertainVoidClaimSinkV1 { cancellation, hash_width: HashAlgorithm::Blake3_256.hash_length() };
+  assert!(matches!(
+    owner.consume(64, &mut sink).unwrap(),
+    VoidClaimAllocationDispositionV1::Uncertain { ordinal: 0, offset: 8_192, length: 64, reason_code: 9 }
+  ));
+  assert_eq!(owner.finish().unwrap_err().code(), "void_claim_allocation_canceled");
+}
+
+#[test]
+fn void_claim_allocation_limits_and_memory_pressure_refuse_before_reusable_authority_exists() {
+  for maximum_allocations in [0, 4_097] {
+    let (_directory, memory, cancellation, permit) =
+      prepare_void_claim_allocation_permit(&format!("void-claim-limit-{maximum_allocations}"), HashAlgorithm::Blake3_256);
+    assert_eq!(
+      VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations }, &memory, cancellation,)
+        .unwrap_err()
+        .code(),
+      "void_claim_allocation_limits"
+    );
+  }
+
+  let (_directory, permit_memory, cancellation, permit) =
+    prepare_void_claim_allocation_permit("void-claim-memory", HashAlgorithm::Blake3_256);
+  let constrained_memory = MemoryCoordinator::new(MemoryPolicy::new(128, 192, 1, 64).unwrap());
+  assert_eq!(
+    VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 4_096 }, &constrained_memory, cancellation,)
+      .unwrap_err()
+      .code(),
+    "void_claim_allocation_memory"
+  );
+  assert_eq!(permit_memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, 0);
+  assert_eq!(constrained_memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, 0);
+
+  let (_directory, memory, cancellation, mut malformed_permit) =
+    prepare_void_claim_allocation_permit("void-claim-malformed-permit", HashAlgorithm::Blake3_256);
+  malformed_permit.claimed_extents[0].origin_quarantine_manifest_hash.fill(0);
+  assert_eq!(
+    VoidClaimAllocationOwnerV1::new(malformed_permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 1 }, &memory, cancellation,)
+      .unwrap_err()
+      .code(),
+    "void_claim_allocation_permit"
+  );
+
+  let (_directory, memory, cancellation, mut oversized_permit) =
+    prepare_void_claim_allocation_permit("void-claim-oversized-permit", HashAlgorithm::Blake3_256);
+  oversized_permit.claimed_extents = vec![oversized_permit.claimed_extents[0].clone(); 4_097].into_boxed_slice();
+  assert_eq!(
+    VoidClaimAllocationOwnerV1::new(oversized_permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 1 }, &memory, cancellation,)
+      .unwrap_err()
+      .code(),
+    "void_claim_allocation_permit"
+  );
+
+  let (_directory, memory, cancellation, permit) =
+    prepare_void_claim_allocation_permit("void-claim-pre-canceled", HashAlgorithm::Blake3_256);
+  cancellation.cancel();
+  assert_eq!(
+    VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 1 }, &memory, cancellation,)
+      .unwrap_err()
+      .code(),
+    "void_claim_allocation_canceled"
+  );
+}
+
+#[test]
+fn void_claim_allocator_partitions_durable_returned_and_uncertain_bytes_without_live_v3_state() {
+  let (_directory, path, _coordinator, mut publisher) = create_environment("void-claim-allocation", None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &source);
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut source_authority = test_void_catalog_publication_authority();
+  let _source_receipt =
+    publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
+
+  let prepared = prepare_void_claim_admission(&source);
+  publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &source.database_id,
+      artifact: &prepared.claim_directory,
+      publication_timestamp_ms: 1_700_000_080_015,
+    })
+    .unwrap();
+  let mut claim_authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+  let permit =
+    publisher.admit_void_claim(prepared.request(&cancellation, &memory, 4, 2), &mut claim_authority, &mut retirement_owner).unwrap();
+  assert_ne!(permit.claimed_extents()[0].reclaim_commit_sequence, 0);
+  assert_eq!(permit.claimed_extents()[0].void_generation, 1);
+  assert_eq!(permit.claimed_extents()[0].origin_quarantine_manifest_hash.len(), 32);
+  assert!(permit.claimed_extents()[0].origin_quarantine_manifest_hash.iter().any(|byte| *byte != 0));
+  assert_eq!(permit.claimed_extents()[0].reclaimed_incarnation_digest.len(), 32);
+  assert!(permit.claimed_extents()[0].reclaimed_incarnation_digest.iter().any(|byte| *byte != 0));
+
+  let reserved_before_owner = memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes;
+  let mut owner =
+    VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 4 }, &memory, cancellation.clone()).unwrap();
+  assert!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes > reserved_before_owner);
+  let mut sink = MixedVoidClaimAllocationSinkV1 { calls: 0 };
+  assert!(matches!(
+    owner.consume(128, &mut sink).unwrap(),
+    VoidClaimAllocationDispositionV1::Durable { wal_offset: 8_192, entity_length: 128, write_sequence: 91, .. }
+  ));
+  assert!(matches!(
+    owner.consume(64, &mut sink).unwrap(),
+    VoidClaimAllocationDispositionV1::DefinitelyUnused { offset: 8_320, length: 64, reason_code: 7, .. }
+  ));
+  assert!(matches!(
+    owner.consume(32, &mut sink).unwrap(),
+    VoidClaimAllocationDispositionV1::Uncertain { offset: 8_384, length: 32, reason_code: 9, .. }
+  ));
+  let consumption = owner.finish().unwrap();
+  assert_eq!(consumption.outcome(), VoidClaimConsumptionOutcomeV1::Settled);
+  assert_eq!(consumption.used_bytes(), 128);
+  assert_eq!(consumption.returned_bytes(), 352);
+  assert_eq!(consumption.uncertain_bytes(), 32);
+  assert_eq!(consumption.returned_extents().len(), 2);
+  assert_eq!(consumption.uncertain_extents().len(), 1);
+  assert_eq!(consumption.durable_uses().len(), 1);
+  assert_eq!(consumption.used_bytes() + consumption.returned_bytes() + consumption.uncertain_bytes(), consumption.claimed_bytes());
+  assert_eq!(consumption.evidence_digest().len(), 32);
+
+  let result_catalog_id = [0xe1; 16];
+  let returned_records: Vec<_> = consumption.returned_extents().iter().map(|extent| extent.as_record()).collect();
+  let result_page = encode_void_extent_page_v1(&VoidExtentPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    catalog_id: &result_catalog_id,
+    generation: 3,
+    page_id: 2,
+    extents: &returned_records,
+  })
+  .unwrap();
+  let lower_fence = returned_records.first().unwrap().offset.to_le_bytes();
+  let upper_fence = returned_records.last().unwrap().offset.to_le_bytes();
+  let result_directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: GcDirectoryRoleV1::FreeExtents,
+    database_id: &source.database_id,
+    catalog_id: &result_catalog_id,
+    generation: 3,
+    level: 0,
+    entries: &[GcStateDirectoryEntryWriteV1 {
+      lower_fence: &lower_fence,
+      upper_fence: &upper_fence,
+      child_hash: &result_page.key,
+      child_generation: 3,
+      live_count: 2,
+      tombstone_count: 0,
+      page_count: 1,
+      logical_bytes: consumption.returned_bytes(),
+      minimum_page_id: 2,
+      maximum_page_id: 2,
+      physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }],
+  })
+  .unwrap();
+  let result_manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    generation: 3,
+    published_at_ms: 1_700_000_080_016,
+    free_root: Some(&result_directory.key),
+    claim_root: None,
+    next_page_id: 3,
+    free_count: 2,
+    free_bytes: consumption.returned_bytes(),
+    claim_count: 0,
+    claimed_bytes: 0,
+    previous_control_sequence: consumption.source_control_sequence(),
+  })
+  .unwrap();
+  let source_artifact = decode_sweep_void_artifact(&prepared.result_manifest.value, HashAlgorithm::Blake3_256).unwrap();
+  let result_artifact = decode_sweep_void_artifact(&result_manifest.value, HashAlgorithm::Blake3_256).unwrap();
+  let claim_artifact = decode_sweep_void_artifact(&prepared.claim.value, HashAlgorithm::Blake3_256).unwrap();
+  let mut transition = VoidClaimSettlementTransitionValidatorV1::new(
+    &source_artifact,
+    &result_artifact,
+    &claim_artifact,
+    &consumption,
+    CancellationToken::new(),
+    VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+    &memory,
+  )
+  .unwrap();
+  transition.observe_source_encoded(&prepared.claim.value).unwrap();
+  transition.observe_source_encoded(&prepared.claim_directory.value).unwrap();
+  transition.finish_source().unwrap();
+  transition.observe_result_encoded(&result_page.value).unwrap();
+  transition.observe_result_encoded(&result_directory.value).unwrap();
+  let summary = transition.finish().unwrap();
+  assert_eq!(summary.used_count, 1);
+  assert_eq!(summary.unused_count, 2);
+  assert_eq!(summary.returned_bytes, 352);
+  assert_eq!(summary.uncertain_bytes, 32);
+  assert_eq!(summary.result_closure.outstanding_claim_count, 0);
+
+  for artifact in [&result_page, &result_directory] {
+    publisher
+      .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+        database_id: &source.database_id,
+        artifact,
+        publication_timestamp_ms: 1_700_000_080_017,
+      })
+      .unwrap();
+  }
+  let result_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogActiveControl,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    slot: 0,
+    sequence: 3,
+    generation: 3,
+    target_manifest_hash: &result_manifest.key,
+  })
+  .unwrap();
+  let settlement = encode_void_claim_settlement_v1(&VoidClaimSettlementWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    claim_id: &consumption.claim_id(),
+    generation: 3,
+    outcome: VoidClaimSettlementOutcomeV1::Settled,
+    settled_at_ms: 1_700_000_080_017,
+    source_manifest_hash: consumption.source_manifest_key(),
+    result_manifest_hash: &result_manifest.key,
+    used_count: u32::try_from(consumption.durable_uses().len()).unwrap(),
+    unused_count: u32::try_from(consumption.returned_extents().len()).unwrap(),
+    used_bytes: consumption.used_bytes(),
+    returned_bytes: consumption.returned_bytes(),
+    evidence_digest: consumption.evidence_digest(),
+  })
+  .unwrap();
+  let generic_error = publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &source.database_id,
+      artifact: &settlement,
+      publication_timestamp_ms: 1_700_000_080_017,
+    })
+    .unwrap_err();
+  assert_eq!(generic_error.code(), "void_support_kind");
+  assert!(publisher.locator(&settlement.key).unwrap().is_none());
+  let settlement_cancellation = CancellationToken::new();
+  let publication_request = VoidClaimSettlementPublicationRequestV1 {
+    result_manifest: &result_manifest,
+    result_control: &result_control,
+    settlement: &settlement,
+    publication_timestamp_ms: 1_700_000_080_017,
+    monotonic_now_ms: 3,
+    cancellation: &settlement_cancellation,
+    memory: &memory,
+    transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+  };
+  let mut settlement_authority =
+    test_void_claim_settlement_authority(consumption.source_manifest_key(), consumption.source_control_sequence());
+  let receipt = publisher.settle_void_claim(&consumption, publication_request, &mut settlement_authority, &mut retirement_owner).unwrap();
+  assert_eq!(settlement_authority.recheck_calls, 1);
+  assert_eq!(receipt.result_manifest_key, result_manifest.key);
+  assert_eq!(receipt.settlement_key, settlement.key);
+  assert_ne!(receipt.settlement_write_sequence, 0);
+  assert_eq!(receipt.outcome, VoidClaimConsumptionOutcomeV1::Settled);
+  assert!(!receipt.idempotent);
+  assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(result_manifest.key.clone()));
+  assert!(publisher.locator(&settlement.key).unwrap().is_some());
+
+  let mut conflicting_receipt_authority =
+    test_void_claim_settlement_authority(consumption.source_manifest_key(), consumption.source_control_sequence());
+  conflicting_receipt_authority.snapshot.existing_receipt =
+    Some(crate::engine::v4::gc_void_settlement::ExistingVoidClaimSettlementReceiptV1 {
+      receipt_hash: settlement.key.clone(),
+      receipt_write_sequence: receipt.settlement_write_sequence + 1,
+    });
+  let conflict =
+    publisher.settle_void_claim(&consumption, publication_request, &mut conflicting_receipt_authority, &mut retirement_owner).unwrap_err();
+  assert_eq!(conflict.code(), "void_claim_settlement_existing_conflict");
+  assert!(conflict.committed_receipt().is_none());
+
+  settlement_authority.snapshot.existing_receipt = Some(crate::engine::v4::gc_void_settlement::ExistingVoidClaimSettlementReceiptV1 {
+    receipt_hash: settlement.key.clone(),
+    receipt_write_sequence: receipt.settlement_write_sequence,
+  });
+  drop(retirement_owner);
+  drop(publisher);
+  let (_restart_coordinator, mut reopened) = reopen(&path);
+  let mut retry_retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &settlement_cancellation,
+    &memory,
+  )
+  .unwrap();
+  let retry =
+    reopened.settle_void_claim(&consumption, publication_request, &mut settlement_authority, &mut retry_retirement_owner).unwrap();
+  assert_eq!(settlement_authority.recheck_calls, 2);
+  assert_eq!(retry.settlement_write_sequence, receipt.settlement_write_sequence);
+  assert!(retry.idempotent);
+  assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(result_manifest.key.clone()));
+  drop(consumption);
+  assert!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes < reserved_before_owner);
+}
+
+struct PreparedVoidClaimSettlementHarnessV1 {
+  _directory: tempfile::TempDir,
+  path: PathBuf,
+  coordinator: Arc<DurabilityCoordinator>,
+  publisher: V4FirstAuthorityPublisher,
+  memory: MemoryCoordinator,
+  cancellation: CancellationToken,
+  database_id: [u8; 16],
+  consumption: VoidClaimConsumptionPermitV1,
+  result_manifest: EncodedImmutableGcArtifactV1,
+  result_control: EncodedGcActiveControlV1,
+  settlement: EncodedImmutableGcArtifactV1,
+}
+
+fn prepare_void_claim_settlement_harness(name: &str) -> PreparedVoidClaimSettlementHarnessV1 {
+  let (directory, path, coordinator, mut publisher) = create_environment(name, None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &source);
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut source_authority = test_void_catalog_publication_authority();
+  let _source_receipt =
+    publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
+  let prepared_claim = prepare_void_claim_admission(&source);
+  publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &source.database_id,
+      artifact: &prepared_claim.claim_directory,
+      publication_timestamp_ms: 1_700_000_080_015,
+    })
+    .unwrap();
+  let mut claim_authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+  let permit =
+    publisher.admit_void_claim(prepared_claim.request(&cancellation, &memory, 4, 2), &mut claim_authority, &mut retirement_owner).unwrap();
+  let mut allocation_owner =
+    VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 4 }, &memory, cancellation.clone()).unwrap();
+  let mut sink = MixedVoidClaimAllocationSinkV1 { calls: 0 };
+  let _durable = allocation_owner.consume(128, &mut sink).unwrap();
+  let _unused = allocation_owner.consume(64, &mut sink).unwrap();
+  let _uncertain = allocation_owner.consume(32, &mut sink).unwrap();
+  let consumption = allocation_owner.finish().unwrap();
+
+  let result_catalog_id = [0xe2; 16];
+  let returned_records: Vec<_> = consumption.returned_extents().iter().map(|extent| extent.as_record()).collect();
+  let result_page = encode_void_extent_page_v1(&VoidExtentPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    catalog_id: &result_catalog_id,
+    generation: 3,
+    page_id: 2,
+    extents: &returned_records,
+  })
+  .unwrap();
+  let lower_fence = returned_records.first().unwrap().offset.to_le_bytes();
+  let upper_fence = returned_records.last().unwrap().offset.to_le_bytes();
+  let result_directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: GcDirectoryRoleV1::FreeExtents,
+    database_id: &source.database_id,
+    catalog_id: &result_catalog_id,
+    generation: 3,
+    level: 0,
+    entries: &[GcStateDirectoryEntryWriteV1 {
+      lower_fence: &lower_fence,
+      upper_fence: &upper_fence,
+      child_hash: &result_page.key,
+      child_generation: 3,
+      live_count: u64::try_from(returned_records.len()).unwrap(),
+      tombstone_count: 0,
+      page_count: 1,
+      logical_bytes: consumption.returned_bytes(),
+      minimum_page_id: 2,
+      maximum_page_id: 2,
+      physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }],
+  })
+  .unwrap();
+  let result_manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    generation: 3,
+    published_at_ms: 1_700_000_080_017,
+    free_root: Some(&result_directory.key),
+    claim_root: None,
+    next_page_id: 3,
+    free_count: u64::try_from(returned_records.len()).unwrap(),
+    free_bytes: consumption.returned_bytes(),
+    claim_count: 0,
+    claimed_bytes: 0,
+    previous_control_sequence: consumption.source_control_sequence(),
+  })
+  .unwrap();
+  for artifact in [&result_page, &result_directory] {
+    publisher
+      .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+        database_id: &source.database_id,
+        artifact,
+        publication_timestamp_ms: 1_700_000_080_017,
+      })
+      .unwrap();
+  }
+  let result_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogActiveControl,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    slot: 0,
+    sequence: 3,
+    generation: 3,
+    target_manifest_hash: &result_manifest.key,
+  })
+  .unwrap();
+  let settlement = encode_void_claim_settlement_v1(&VoidClaimSettlementWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    claim_id: &consumption.claim_id(),
+    generation: 3,
+    outcome: VoidClaimSettlementOutcomeV1::Settled,
+    settled_at_ms: 1_700_000_080_017,
+    source_manifest_hash: consumption.source_manifest_key(),
+    result_manifest_hash: &result_manifest.key,
+    used_count: u32::try_from(consumption.durable_uses().len()).unwrap(),
+    unused_count: u32::try_from(consumption.returned_extents().len()).unwrap(),
+    used_bytes: consumption.used_bytes(),
+    returned_bytes: consumption.returned_bytes(),
+    evidence_digest: consumption.evidence_digest(),
+  })
+  .unwrap();
+  drop(retirement_owner);
+  PreparedVoidClaimSettlementHarnessV1 {
+    _directory: directory,
+    path,
+    coordinator,
+    publisher,
+    memory,
+    cancellation,
+    database_id: source.database_id,
+    consumption,
+    result_manifest,
+    result_control,
+    settlement,
+  }
+}
+
+fn stored_gc_artifact_write_sequence(publisher: &V4FirstAuthorityPublisher, key: &[u8], kind: GcArtifactKindV1) -> u64 {
+  let observation = publisher.observe().unwrap();
+  let header = &observation.selected.header;
+  let kv = publisher.lock_kv().unwrap();
+  let bytes = read_entity_bounded(
+    &publisher.file,
+    &kv,
+    key,
+    crate::engine::v4::entity::checked_whole_entity_encoded_length(
+      header.hash_algorithm,
+      key.len(),
+      kind.immutable_maximum_encoded_length().unwrap(),
+    )
+    .unwrap(),
+    header.write_sequence_high_water,
+  )
+  .unwrap()
+  .unwrap();
+  decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water).unwrap().write_sequence
+}
+
+#[test]
+fn void_claim_settlement_refuses_every_stale_or_incomplete_caller_authority_before_selection() {
+  type AuthorityMutation = fn(&mut TestVoidClaimSettlementAuthorityV1);
+  let cases: [(&str, AuthorityMutation, &str); 14] = [
+    ("source-manifest", |authority| authority.snapshot.selected_source_manifest_hash.fill(0x99), "void_claim_settlement_source_authority"),
+    ("source-sequence", |authority| authority.snapshot.selected_source_control_sequence += 1, "void_claim_settlement_source_authority"),
+    ("receipt-backed", |authority| authority.snapshot.source_catalog_receipt_backed = false, "void_claim_settlement_authority_incomplete"),
+    ("closure", |authority| authority.snapshot.source_catalog_closure_current = false, "void_claim_settlement_authority_incomplete"),
+    ("claim", |authority| authority.snapshot.claim_outstanding_exact = false, "void_claim_settlement_authority_incomplete"),
+    ("durable-locators", |authority| authority.snapshot.durable_used_locators_exact = false, "void_claim_settlement_authority_incomplete"),
+    (
+      "uncertain-quarantine",
+      |authority| authority.snapshot.uncertain_ranges_quarantined = false,
+      "void_claim_settlement_authority_incomplete",
+    ),
+    ("lineage", |authority| authority.snapshot.replacement_lineage_complete = false, "void_claim_settlement_authority_incomplete"),
+    (
+      "allocator-exclusion",
+      |authority| authority.snapshot.allocator_settlement_excluded = false,
+      "void_claim_settlement_authority_incomplete",
+    ),
+    ("sole-settlement", |authority| authority.snapshot.no_other_settlement_active = false, "void_claim_settlement_authority_incomplete"),
+    ("memory", |authority| authority.snapshot.memory_coordinator_current = false, "void_claim_settlement_authority_incomplete"),
+    ("receipt-search", |authority| authority.snapshot.receipt_search_complete = false, "void_claim_settlement_authority_incomplete"),
+    ("receipt-conflict", |authority| authority.snapshot.conflicting_receipt_count = 1, "void_claim_settlement_authority_incomplete"),
+    ("repair", |authority| authority.snapshot.repair_latch_clear = false, "void_claim_settlement_authority_incomplete"),
+  ];
+  for (name, mutate_authority, expected_code) in cases {
+    let mut harness = prepare_void_claim_settlement_harness(&format!("void-settlement-authority-{name}"));
+    let source_manifest_key = harness.consumption.source_manifest_key().to_vec();
+    let mut authority = test_void_claim_settlement_authority(&source_manifest_key, harness.consumption.source_control_sequence());
+    mutate_authority(&mut authority);
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      harness.database_id,
+      1,
+      1,
+      RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+      &harness.cancellation,
+      &harness.memory,
+    )
+    .unwrap();
+    let request = VoidClaimSettlementPublicationRequestV1 {
+      result_manifest: &harness.result_manifest,
+      result_control: &harness.result_control,
+      settlement: &harness.settlement,
+      publication_timestamp_ms: 1_700_000_080_017,
+      monotonic_now_ms: 3,
+      cancellation: &harness.cancellation,
+      memory: &harness.memory,
+      transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+    };
+
+    let error = harness.publisher.settle_void_claim(&harness.consumption, request, &mut authority, &mut retirement_owner).unwrap_err();
+
+    assert_eq!(error.code(), expected_code, "authority case {name}");
+    assert_eq!(authority.recheck_calls, 1, "authority case {name}");
+    assert!(harness.publisher.locator(&harness.result_manifest.key).unwrap().is_none(), "authority case {name}");
+    assert!(harness.publisher.locator(&harness.settlement.key).unwrap().is_none(), "authority case {name}");
+    assert_eq!(selected_void_catalog_manifest_key(&harness.publisher), Some(source_manifest_key), "authority case {name}");
+  }
+}
+
+#[test]
+fn every_void_claim_settlement_publication_failure_restarts_as_source_or_exact_result() {
+  let failures = [
+    FirstAuthorityFailurePoint::DataBarrier,
+    FirstAuthorityFailurePoint::HeaderWriteBefore,
+    FirstAuthorityFailurePoint::HeaderWriteAfter,
+    FirstAuthorityFailurePoint::FullBarrier,
+    FirstAuthorityFailurePoint::Verify,
+  ];
+  for target_publication in 1..=5 {
+    for failure in failures {
+      let mut harness = prepare_void_claim_settlement_harness(&format!("void-settlement-{target_publication}-{failure:?}"));
+      harness.publisher.header_publisher = DatabaseHeaderPublisherV4::with_io(
+        harness.coordinator.clone(),
+        Arc::new(NthHeaderPublicationFaultIo::new(failure, target_publication)),
+      );
+      let source_manifest_key = harness.consumption.source_manifest_key().to_vec();
+      let result_manifest_key = harness.result_manifest.key.clone();
+      let settlement_key = harness.settlement.key.clone();
+      let mut authority = test_void_claim_settlement_authority(&source_manifest_key, harness.consumption.source_control_sequence());
+      let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+        HashAlgorithm::Blake3_256,
+        harness.database_id,
+        1,
+        1,
+        RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+        &harness.cancellation,
+        &harness.memory,
+      )
+      .unwrap();
+      let request = VoidClaimSettlementPublicationRequestV1 {
+        result_manifest: &harness.result_manifest,
+        result_control: &harness.result_control,
+        settlement: &harness.settlement,
+        publication_timestamp_ms: 1_700_000_080_017,
+        monotonic_now_ms: 3,
+        cancellation: &harness.cancellation,
+        memory: &harness.memory,
+        transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+      };
+
+      let error = match harness.publisher.settle_void_claim(&harness.consumption, request, &mut authority, &mut retirement_owner) {
+        Ok(receipt) => panic!("target {target_publication}, failure {failure:?} did not inject: {receipt:?}"),
+        Err(error) => error,
+      };
+
+      assert!(harness.coordinator.hard_failure().unwrap().is_some(), "target {target_publication}, failure {failure:?}");
+      drop(retirement_owner);
+      drop(harness.publisher);
+
+      let (_restart_coordinator, mut reopened) = reopen(&harness.path);
+      let selected = selected_void_catalog_manifest_key(&reopened).unwrap();
+      assert!(
+        selected == source_manifest_key || selected == result_manifest_key,
+        "target {target_publication}, failure {failure:?} selected neither complete authority"
+      );
+      let selector_committed = selected == result_manifest_key;
+      if target_publication <= 2 {
+        assert!(!selector_committed, "target {target_publication}, failure {failure:?}");
+      }
+      if target_publication > 4 {
+        assert!(selector_committed, "target {target_publication}, failure {failure:?}");
+      }
+      assert_eq!(
+        error.committed_receipt().is_some(),
+        selector_committed,
+        "target {target_publication}, failure {failure:?}, error {error:?}"
+      );
+      let existing_settlement_write_sequence = if reopened.locator(&settlement_key).unwrap().is_some() {
+        Some(stored_gc_artifact_write_sequence(&reopened, &settlement_key, GcArtifactKindV1::VoidClaimSettlementReceipt))
+      } else {
+        None
+      };
+      let mut retry_authority = test_void_claim_settlement_authority(&source_manifest_key, harness.consumption.source_control_sequence());
+      if let Some(receipt_write_sequence) = existing_settlement_write_sequence {
+        retry_authority.snapshot.existing_receipt = Some(crate::engine::v4::gc_void_settlement::ExistingVoidClaimSettlementReceiptV1 {
+          receipt_hash: settlement_key.clone(),
+          receipt_write_sequence,
+        });
+      }
+      let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+        HashAlgorithm::Blake3_256,
+        harness.database_id,
+        1,
+        1,
+        RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+        &harness.cancellation,
+        &harness.memory,
+      )
+      .unwrap();
+      let retry_request = VoidClaimSettlementPublicationRequestV1 {
+        result_manifest: &harness.result_manifest,
+        result_control: &harness.result_control,
+        settlement: &harness.settlement,
+        publication_timestamp_ms: 1_700_000_080_017,
+        monotonic_now_ms: 4,
+        cancellation: &harness.cancellation,
+        memory: &harness.memory,
+        transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+      };
+      let retry = reopened.settle_void_claim(&harness.consumption, retry_request, &mut retry_authority, &mut retry_owner).unwrap();
+      assert_eq!(retry.idempotent, existing_settlement_write_sequence.is_some(), "target {target_publication}, failure {failure:?}");
+      assert_eq!(
+        selected_void_catalog_manifest_key(&reopened),
+        Some(result_manifest_key),
+        "target {target_publication}, failure {failure:?}"
+      );
+      assert!(reopened.locator(&settlement_key).unwrap().is_some(), "target {target_publication}, failure {failure:?}");
+    }
+  }
+}
+
+#[test]
+fn void_claim_settlement_cancellation_corrupt_support_and_memory_pressure_keep_the_claim_selected() {
+  for case in ["canceled", "canceled-after-recheck", "corrupt-support", "memory-pressure"] {
+    let mut harness = prepare_void_claim_settlement_harness(&format!("void-settlement-{case}"));
+    let source_manifest_key = harness.consumption.source_manifest_key().to_vec();
+    let request_cancellation = CancellationToken::new();
+    if case == "canceled" {
+      request_cancellation.cancel();
+    }
+    if case == "corrupt-support" {
+      let result = decode_sweep_void_artifact(&harness.result_manifest.value, HashAlgorithm::Blake3_256).unwrap();
+      let SweepVoidArtifactV1::VoidCatalog(result_manifest) = result else {
+        panic!("prepared settlement result did not decode as a Void catalog");
+      };
+      corrupt_last_entity_byte(&harness.publisher, result_manifest.free_root);
+    }
+    let constrained_memory = MemoryCoordinator::new(MemoryPolicy::new(128, 192, 1, 64).unwrap());
+    let request_memory = if case == "memory-pressure" { &constrained_memory } else { &harness.memory };
+    let owner_cancellation = CancellationToken::new();
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      harness.database_id,
+      1,
+      1,
+      RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+      &owner_cancellation,
+      &harness.memory,
+    )
+    .unwrap();
+    let request = VoidClaimSettlementPublicationRequestV1 {
+      result_manifest: &harness.result_manifest,
+      result_control: &harness.result_control,
+      settlement: &harness.settlement,
+      publication_timestamp_ms: 1_700_000_080_017,
+      monotonic_now_ms: 3,
+      cancellation: &request_cancellation,
+      memory: request_memory,
+      transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+    };
+    let mut authority = test_void_claim_settlement_authority(&source_manifest_key, harness.consumption.source_control_sequence());
+    if case == "canceled-after-recheck" {
+      authority.cancel_during_recheck = Some(request_cancellation.clone());
+    }
+
+    let error = harness.publisher.settle_void_claim(&harness.consumption, request, &mut authority, &mut retirement_owner).unwrap_err();
+
+    let expected_code = match case {
+      "canceled" => "void_claim_settlement_canceled",
+      "canceled-after-recheck" => "void_claim_settlement_canceled",
+      "corrupt-support" => "void_claim_settlement_result_support",
+      "memory-pressure" => "void_claim_settlement_source_support",
+      _ => unreachable!(),
+    };
+    assert_eq!(error.code(), expected_code, "case {case}: {error:?}");
+    assert!(error.committed_receipt().is_none(), "case {case}");
+    assert_eq!(authority.recheck_calls, usize::from(case == "canceled-after-recheck"), "case {case}");
+    assert!(harness.publisher.locator(&harness.result_manifest.key).unwrap().is_none(), "case {case}");
+    assert!(harness.publisher.locator(&harness.settlement.key).unwrap().is_none(), "case {case}");
+    assert_eq!(selected_void_catalog_manifest_key(&harness.publisher), Some(source_manifest_key), "case {case}");
+    assert_eq!(constrained_memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, 0, "case {case}");
+  }
+}
+
+#[test]
+fn void_claim_abandonment_selects_no_reusable_bytes_and_restarts_idempotently() {
+  let (directory, path, _coordinator, mut publisher) = create_environment("void-settlement-abandonment", None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &source);
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut source_authority = test_void_catalog_publication_authority();
+  let _ =
+    publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
+  let prepared = prepare_void_claim_admission(&source);
+  publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &source.database_id,
+      artifact: &prepared.claim_directory,
+      publication_timestamp_ms: 1_700_000_080_015,
+    })
+    .unwrap();
+  let mut claim_authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+  let permit =
+    publisher.admit_void_claim(prepared.request(&cancellation, &memory, 4, 2), &mut claim_authority, &mut retirement_owner).unwrap();
+  let owner =
+    VoidClaimAllocationOwnerV1::new(permit, VoidClaimAllocationLimitsV1 { maximum_allocations: 4 }, &memory, cancellation.clone()).unwrap();
+  let consumption = owner.finish().unwrap();
+  assert_eq!(consumption.outcome(), VoidClaimConsumptionOutcomeV1::AbandonedToQuarantine);
+  assert_eq!(consumption.used_bytes(), 0);
+  assert_eq!(consumption.returned_bytes(), 0);
+  assert_eq!(consumption.uncertain_bytes(), consumption.claimed_bytes());
+
+  let source_artifact = decode_sweep_void_artifact(&prepared.result_manifest.value, HashAlgorithm::Blake3_256).unwrap();
+  let SweepVoidArtifactV1::VoidCatalog(source_manifest) = source_artifact else {
+    panic!("selected claim catalog did not decode as a Void catalog");
+  };
+  let result_manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    generation: 3,
+    published_at_ms: 1_700_000_080_017,
+    free_root: None,
+    claim_root: None,
+    next_page_id: source_manifest.next_page_id,
+    free_count: 0,
+    free_bytes: 0,
+    claim_count: 0,
+    claimed_bytes: 0,
+    previous_control_sequence: consumption.source_control_sequence(),
+  })
+  .unwrap();
+  let result_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogActiveControl,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    slot: 1 - consumption.source_control_slot(),
+    sequence: consumption.source_control_sequence() + 1,
+    generation: 3,
+    target_manifest_hash: &result_manifest.key,
+  })
+  .unwrap();
+  let settlement = encode_void_claim_settlement_v1(&VoidClaimSettlementWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &source.database_id,
+    claim_id: &consumption.claim_id(),
+    generation: 3,
+    outcome: VoidClaimSettlementOutcomeV1::AbandonedToQuarantine,
+    settled_at_ms: 1_700_000_080_017,
+    source_manifest_hash: consumption.source_manifest_key(),
+    result_manifest_hash: &result_manifest.key,
+    used_count: 0,
+    unused_count: 0,
+    used_bytes: 0,
+    returned_bytes: 0,
+    evidence_digest: consumption.evidence_digest(),
+  })
+  .unwrap();
+  let request = VoidClaimSettlementPublicationRequestV1 {
+    result_manifest: &result_manifest,
+    result_control: &result_control,
+    settlement: &settlement,
+    publication_timestamp_ms: 1_700_000_080_017,
+    monotonic_now_ms: 3,
+    cancellation: &cancellation,
+    memory: &memory,
+    transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+  };
+  let mut authority = test_void_claim_settlement_authority(consumption.source_manifest_key(), consumption.source_control_sequence());
+  let receipt = publisher.settle_void_claim(&consumption, request, &mut authority, &mut retirement_owner).unwrap();
+  assert_eq!(receipt.outcome, VoidClaimConsumptionOutcomeV1::AbandonedToQuarantine);
+  assert_eq!(receipt.result_manifest_key, result_manifest.key);
+  assert_ne!(receipt.settlement_write_sequence, 0);
+  assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(result_manifest.key.clone()));
+
+  authority.snapshot.existing_receipt = Some(crate::engine::v4::gc_void_settlement::ExistingVoidClaimSettlementReceiptV1 {
+    receipt_hash: settlement.key.clone(),
+    receipt_write_sequence: receipt.settlement_write_sequence,
+  });
+  drop(retirement_owner);
+  drop(publisher);
+  let (_restart_coordinator, mut reopened) = reopen(&path);
+  let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let retry = reopened.settle_void_claim(&consumption, request, &mut authority, &mut retry_owner).unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.settlement_write_sequence, receipt.settlement_write_sequence);
+  assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(result_manifest.key));
+  drop(directory);
+}
+
+#[test]
+fn void_claim_settlement_rejects_closure_valid_substituted_returned_ranges_before_authority() {
+  let mut harness = prepare_void_claim_settlement_harness("void-settlement-substituted-range");
+  let source_manifest_key = harness.consumption.source_manifest_key().to_vec();
+  let catalog_id = [0xe3; 16];
+  let mut returned_extents = harness.consumption.returned_extents().to_vec();
+  returned_extents[0].offset += 1;
+  let returned_records: Vec<_> = returned_extents.iter().map(|extent| extent.as_record()).collect();
+  let page = encode_void_extent_page_v1(&VoidExtentPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &harness.database_id,
+    catalog_id: &catalog_id,
+    generation: 3,
+    page_id: 22,
+    extents: &returned_records,
+  })
+  .unwrap();
+  let lower_fence = returned_records.first().unwrap().offset.to_le_bytes();
+  let upper_fence = returned_records.last().unwrap().offset.to_le_bytes();
+  let directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: GcDirectoryRoleV1::FreeExtents,
+    database_id: &harness.database_id,
+    catalog_id: &catalog_id,
+    generation: 3,
+    level: 0,
+    entries: &[GcStateDirectoryEntryWriteV1 {
+      lower_fence: &lower_fence,
+      upper_fence: &upper_fence,
+      child_hash: &page.key,
+      child_generation: 3,
+      live_count: u64::try_from(returned_records.len()).unwrap(),
+      tombstone_count: 0,
+      page_count: 1,
+      logical_bytes: harness.consumption.returned_bytes(),
+      minimum_page_id: 22,
+      maximum_page_id: 22,
+      physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }],
+  })
+  .unwrap();
+  for artifact in [&page, &directory] {
+    harness
+      .publisher
+      .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+        database_id: &harness.database_id,
+        artifact,
+        publication_timestamp_ms: 1_700_000_080_017,
+      })
+      .unwrap();
+  }
+  let result_manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &harness.database_id,
+    generation: 3,
+    published_at_ms: 1_700_000_080_017,
+    free_root: Some(&directory.key),
+    claim_root: None,
+    next_page_id: 23,
+    free_count: u64::try_from(returned_records.len()).unwrap(),
+    free_bytes: harness.consumption.returned_bytes(),
+    claim_count: 0,
+    claimed_bytes: 0,
+    previous_control_sequence: harness.consumption.source_control_sequence(),
+  })
+  .unwrap();
+  let result_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogActiveControl,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &harness.database_id,
+    slot: 1 - harness.consumption.source_control_slot(),
+    sequence: harness.consumption.source_control_sequence() + 1,
+    generation: 3,
+    target_manifest_hash: &result_manifest.key,
+  })
+  .unwrap();
+  let settlement = encode_void_claim_settlement_v1(&VoidClaimSettlementWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &harness.database_id,
+    claim_id: &harness.consumption.claim_id(),
+    generation: 3,
+    outcome: VoidClaimSettlementOutcomeV1::Settled,
+    settled_at_ms: 1_700_000_080_017,
+    source_manifest_hash: harness.consumption.source_manifest_key(),
+    result_manifest_hash: &result_manifest.key,
+    used_count: u32::try_from(harness.consumption.durable_uses().len()).unwrap(),
+    unused_count: u32::try_from(harness.consumption.returned_extents().len()).unwrap(),
+    used_bytes: harness.consumption.used_bytes(),
+    returned_bytes: harness.consumption.returned_bytes(),
+    evidence_digest: harness.consumption.evidence_digest(),
+  })
+  .unwrap();
+  let mut authority = test_void_claim_settlement_authority(&source_manifest_key, harness.consumption.source_control_sequence());
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    harness.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &harness.cancellation,
+    &harness.memory,
+  )
+  .unwrap();
+  let request = VoidClaimSettlementPublicationRequestV1 {
+    result_manifest: &result_manifest,
+    result_control: &result_control,
+    settlement: &settlement,
+    publication_timestamp_ms: 1_700_000_080_017,
+    monotonic_now_ms: 3,
+    cancellation: &harness.cancellation,
+    memory: &harness.memory,
+    transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+  };
+
+  let error = harness.publisher.settle_void_claim(&harness.consumption, request, &mut authority, &mut retirement_owner).unwrap_err();
+
+  assert_eq!(error.code(), "void_settlement_transition_result");
+  assert_eq!(authority.recheck_calls, 0);
+  assert!(harness.publisher.locator(&result_manifest.key).unwrap().is_none());
+  assert!(harness.publisher.locator(&settlement.key).unwrap().is_none());
+  assert_eq!(selected_void_catalog_manifest_key(&harness.publisher), Some(source_manifest_key));
+}
+
+#[test]
+fn void_claim_settlement_rejects_a_stale_consumption_permit_after_durable_authority_advances() {
+  let mut harness = prepare_void_claim_settlement_harness("void-settlement-stale-permit");
+  let stale_source_manifest_key = harness.consumption.source_manifest_key().to_vec();
+  let alternate_manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &harness.database_id,
+    generation: 3,
+    published_at_ms: 1_700_000_080_017,
+    free_root: None,
+    claim_root: None,
+    next_page_id: 30,
+    free_count: 0,
+    free_bytes: 0,
+    claim_count: 0,
+    claimed_bytes: 0,
+    previous_control_sequence: harness.consumption.source_control_sequence(),
+  })
+  .unwrap();
+  harness
+    .publisher
+    .publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::VoidCatalogManifest,
+        database_id: &harness.database_id,
+        artifact_key: &alternate_manifest.key,
+        value: &alternate_manifest.value,
+        minimum_timestamp_ms: 1_700_000_080_017,
+        committed_postcondition_code: "void_settlement_stale_test_manifest",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  let alternate_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogActiveControl,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    database_id: &harness.database_id,
+    slot: 1 - harness.consumption.source_control_slot(),
+    sequence: harness.consumption.source_control_sequence() + 1,
+    generation: 3,
+    target_manifest_hash: &alternate_manifest.key,
+  })
+  .unwrap();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    harness.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(1, 1 << 20, 30_000),
+    &harness.cancellation,
+    &harness.memory,
+  )
+  .unwrap();
+  let outcome = harness
+    .publisher
+    .publish_gc_active_control(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::VoidCatalogActiveControl,
+        encoded_control: &alternate_control,
+        publication_timestamp_ms: 1_700_000_080_017,
+        monotonic_now_ms: 3,
+      },
+      &mut retirement_owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  assert!(matches!(outcome, GcControlPublicationOutcomeV1::Complete(_)));
+  retirement_owner.flush(&mut harness.publisher).unwrap();
+  assert_eq!(selected_void_catalog_manifest_key(&harness.publisher), Some(alternate_manifest.key.clone()));
+
+  let mut authority = test_void_claim_settlement_authority(&stale_source_manifest_key, harness.consumption.source_control_sequence());
+  let request = VoidClaimSettlementPublicationRequestV1 {
+    result_manifest: &harness.result_manifest,
+    result_control: &harness.result_control,
+    settlement: &harness.settlement,
+    publication_timestamp_ms: 1_700_000_080_017,
+    monotonic_now_ms: 4,
+    cancellation: &harness.cancellation,
+    memory: &harness.memory,
+    transition_limits: VoidClaimSettlementTransitionLimitsV1 { maximum_support_artifacts_per_catalog: 4 },
+  };
+  let error = harness.publisher.settle_void_claim(&harness.consumption, request, &mut authority, &mut retirement_owner).unwrap_err();
+
+  assert_eq!(error.code(), "void_claim_settlement_source_changed");
+  assert_eq!(authority.recheck_calls, 0);
+  assert!(harness.publisher.locator(&harness.result_manifest.key).unwrap().is_none());
+  assert!(harness.publisher.locator(&harness.settlement.key).unwrap().is_none());
+  assert_eq!(selected_void_catalog_manifest_key(&harness.publisher), Some(alternate_manifest.key));
 }
 
 #[test]

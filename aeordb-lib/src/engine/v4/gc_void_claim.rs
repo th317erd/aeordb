@@ -31,7 +31,11 @@ pub struct VoidClaimTransitionLimitsV1 {
 pub struct VoidClaimAdmittedExtentV1 {
   pub offset: u64,
   pub length: u32,
+  pub reclaim_commit_sequence: u64,
+  pub void_generation: u64,
   pub origin_sweep_proposal_hash: Vec<u8>,
+  pub origin_quarantine_manifest_hash: Vec<u8>,
+  pub reclaimed_incarnation_digest: Vec<u8>,
 }
 
 pub struct VoidClaimTransitionSummaryV1 {
@@ -233,7 +237,7 @@ impl<'a> VoidClaimTransitionValidatorV1<'a> {
 
     let claim_extent_count = usize::try_from(claim.extent_count)?;
     let accounted_bytes = claim_extent_count
-      .checked_mul(std::mem::size_of::<VoidClaimAdmittedExtentV1>() + hash_width)
+      .checked_mul(std::mem::size_of::<VoidClaimAdmittedExtentV1>() + 3 * hash_width)
       .and_then(|bytes| bytes.checked_add(5 * hash_width + 3 * hash_width + 16))
       .ok_or_else(|| VoidClaimTransitionErrorV1::invalid("void_claim_transition_memory", "claim memory accounting overflowed"))?;
     let claim_memory = memory.reserve(MemoryOwner::GarbageCollection, u64::try_from(accounted_bytes)?, AdmissionClass::Maintenance)?;
@@ -247,7 +251,15 @@ impl<'a> VoidClaimTransitionValidatorV1<'a> {
       let mut origin_sweep_proposal_hash = Vec::new();
       origin_sweep_proposal_hash.try_reserve_exact(extent.origin_sweep_proposal_hash.len())?;
       origin_sweep_proposal_hash.extend_from_slice(extent.origin_sweep_proposal_hash);
-      claimed_extents.push(VoidClaimAdmittedExtentV1 { offset: extent.offset, length: extent.length, origin_sweep_proposal_hash });
+      claimed_extents.push(VoidClaimAdmittedExtentV1 {
+        offset: extent.offset,
+        length: extent.length,
+        reclaim_commit_sequence: 0,
+        void_generation: 0,
+        origin_sweep_proposal_hash,
+        origin_quarantine_manifest_hash: Vec::new(),
+        reclaimed_incarnation_digest: Vec::new(),
+      });
     }
 
     let closure_limits = VoidCatalogClosureLimitsV1 { maximum_support_artifacts: limits.maximum_support_artifacts_per_catalog };
@@ -439,28 +451,37 @@ impl<'a> VoidClaimTransitionValidatorV1<'a> {
       .checked_add(u64::from(source.length))
       .ok_or_else(|| VoidClaimTransitionErrorV1::invalid("void_claim_transition_source_extent", "source extent end overflowed"))?;
     let mut cursor = source.offset;
-    while let Some(claimed) = self.claimed_extents.get(self.next_claimed_extent) {
-      if claimed.offset >= source_end {
+    while self.next_claimed_extent < self.claimed_extents.len() {
+      let claimed_index = self.next_claimed_extent;
+      let claimed_offset = self.claimed_extents[claimed_index].offset;
+      let claimed_length = self.claimed_extents[claimed_index].length;
+      if claimed_offset >= source_end {
         break;
       }
-      if claimed.offset < cursor {
+      if claimed_offset < cursor {
         return Err(VoidClaimTransitionErrorV1::invalid(
           "void_claim_transition_unavailable",
           "claimed ranges overlap or start outside selected free-space authority",
         ));
       }
-      let claimed_end = claimed
-        .offset
-        .checked_add(u64::from(claimed.length))
+      let claimed_end = claimed_offset
+        .checked_add(u64::from(claimed_length))
         .ok_or_else(|| VoidClaimTransitionErrorV1::invalid("void_claim_transition_claim_extent", "claimed extent end overflowed"))?;
-      if claimed_end > source_end || claimed.origin_sweep_proposal_hash != source.origin_sweep_proposal_hash {
+      if claimed_end > source_end || self.claimed_extents[claimed_index].origin_sweep_proposal_hash != source.origin_sweep_proposal_hash {
         return Err(VoidClaimTransitionErrorV1::invalid(
           "void_claim_transition_unavailable",
           "claimed range is not contained in one source extent with exact sweep provenance",
         ));
       }
-      if cursor < claimed.offset {
-        self.push_expected_free_fragment(source, cursor, claimed.offset - cursor)?;
+      let claimed = &mut self.claimed_extents[claimed_index];
+      claimed.reclaim_commit_sequence = source.reclaim_commit_sequence;
+      claimed.void_generation = source.void_generation;
+      claimed.origin_quarantine_manifest_hash.try_reserve_exact(source.origin_quarantine_manifest_hash.len())?;
+      claimed.origin_quarantine_manifest_hash.extend_from_slice(source.origin_quarantine_manifest_hash);
+      claimed.reclaimed_incarnation_digest.try_reserve_exact(source.reclaimed_incarnation_digest.len())?;
+      claimed.reclaimed_incarnation_digest.extend_from_slice(source.reclaimed_incarnation_digest);
+      if cursor < claimed_offset {
+        self.push_expected_free_fragment(source, cursor, claimed_offset - cursor)?;
       }
       cursor = claimed_end;
       self.next_claimed_extent += 1;

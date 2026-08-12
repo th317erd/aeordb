@@ -64,7 +64,7 @@ use super::gc_sweep_reconciliation::{
   prepare_sweep_receipt_reconciliation_v1, reserve_sweep_receipt_reconciliation_v1, validate_existing_sweep_receipt_v1,
   validate_sweep_receipt_void_authority_v1,
 };
-use super::gc_void::{SweepVoidArtifactV1, decode_sweep_void_artifact};
+use super::gc_void::{SweepVoidArtifactV1, VoidClaimSettlementOutcomeV1, decode_sweep_void_artifact};
 use super::gc_void_claim::{
   VoidClaimAdmissionAuthorityRequestV1, VoidClaimAdmissionAuthorityV1, VoidClaimAdmissionErrorV1, VoidClaimAdmittedExtentV1,
   VoidClaimTransitionLimitsV1, VoidClaimTransitionSummaryV1, VoidClaimTransitionValidatorV1, validate_void_claim_admission_authority_v1,
@@ -72,6 +72,11 @@ use super::gc_void_claim::{
 use super::gc_void_publication::{
   VoidCatalogClosureLimitsV1, VoidCatalogClosureSummaryV1, VoidCatalogClosureValidatorV1, VoidCatalogPublicationAuthorityRequestV1,
   VoidCatalogPublicationAuthorityV1, VoidCatalogPublicationErrorV1, validate_void_catalog_publication_authority_v1,
+};
+use super::gc_void_settlement::{
+  VoidClaimConsumptionOutcomeV1, VoidClaimConsumptionPermitV1, VoidClaimSettlementAuthorityRequestV1, VoidClaimSettlementAuthorityV1,
+  VoidClaimSettlementHardPublicationReceiptV1, VoidClaimSettlementPublicationErrorV1, VoidClaimSettlementPublicationRequestV1,
+  VoidClaimSettlementTransitionSummaryV1, VoidClaimSettlementTransitionValidatorV1, validate_void_claim_settlement_authority_v1,
 };
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
@@ -260,6 +265,7 @@ pub struct VoidClaimAdmissionPermitV1 {
   result_manifest_key: Vec<u8>,
   result_manifest_write_sequence: u64,
   result_control_key: Vec<u8>,
+  result_control_sequence: u64,
   result_control_write_sequence: u64,
   result_control_slot: u8,
   generation: u64,
@@ -277,6 +283,7 @@ impl std::fmt::Debug for VoidClaimAdmissionPermitV1 {
       .debug_struct("VoidClaimAdmissionPermitV1")
       .field("claim_key", &hex::encode(&self.claim_key))
       .field("result_manifest_key", &hex::encode(&self.result_manifest_key))
+      .field("result_control_sequence", &self.result_control_sequence)
       .field("result_control_write_sequence", &self.result_control_write_sequence)
       .field("claimed_extent_count", &self.claimed_extents.len())
       .field("claimed_bytes", &self.claimed_bytes)
@@ -324,6 +331,10 @@ impl VoidClaimAdmissionPermitV1 {
 
   pub const fn result_control_write_sequence(&self) -> u64 {
     self.result_control_write_sequence
+  }
+
+  pub const fn result_control_sequence(&self) -> u64 {
+    self.result_control_sequence
   }
 
   pub const fn result_control_slot(&self) -> u8 {
@@ -1464,6 +1475,7 @@ struct SelectedVoidCatalogControlV1 {
   stored_value: Vec<u8>,
   target_manifest_hash: Vec<u8>,
   control_sequence: u64,
+  write_sequence: u64,
 }
 
 struct VoidCatalogLockedPublicationV1 {
@@ -1477,8 +1489,22 @@ struct VoidClaimLockedAdmissionV1 {
   claim_generation: u64,
   transition: VoidClaimTransitionSummaryV1,
   result_manifest_write_sequence: u64,
+  result_control_sequence: u64,
   control: GcControlPublicationV1,
   committed_failure: Option<(GcControlPublicationFailureV1, String)>,
+}
+
+struct VoidClaimLockedSettlementV1 {
+  result_manifest_write_sequence: u64,
+  control: GcControlPublicationV1,
+  settlement_preexisting: bool,
+  committed_failure: Option<(GcControlPublicationFailureV1, String)>,
+}
+
+struct VerifiedVoidClaimSettlementTransitionV1 {
+  source_entity: ChargedVoidCatalogSupportEntityV1,
+  claim_entity: ChargedVoidCatalogSupportEntityV1,
+  transition: VoidClaimSettlementTransitionSummaryV1,
 }
 
 struct VerifiedVoidClaimTransitionV1 {
@@ -1746,6 +1772,18 @@ impl From<GcControlPublicationErrorV1> for VoidCatalogPublicationErrorV1 {
 }
 
 impl From<GcControlPublicationErrorV1> for VoidClaimAdmissionErrorV1 {
+  fn from(source: GcControlPublicationErrorV1) -> Self {
+    match source {
+      GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
+      GcControlPublicationErrorV1::Format(source) => Self::Format(source),
+      GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
+      GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
+      GcControlPublicationErrorV1::RetirementOwner(source) => Self::RetirementOwner(source),
+    }
+  }
+}
+
+impl From<GcControlPublicationErrorV1> for VoidClaimSettlementPublicationErrorV1 {
   fn from(source: GcControlPublicationErrorV1) -> Self {
     match source {
       GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
@@ -4578,6 +4616,7 @@ impl V4FirstAuthorityPublisher {
       result_manifest_key,
       result_manifest_write_sequence: locked.result_manifest_write_sequence,
       result_control_key: request.result_control.key.clone(),
+      result_control_sequence: locked.result_control_sequence,
       result_control_write_sequence: locked.control.control_write_sequence,
       result_control_slot: locked.control.control_slot,
       generation: locked.claim_generation,
@@ -4619,7 +4658,7 @@ impl V4FirstAuthorityPublisher {
         "retirement lineage owner differs from selected first authority",
       ));
     }
-    let (claim, result_manifest, _result_control) = validate_void_claim_admission_request(request, header)?;
+    let (claim, result_manifest, result_control) = validate_void_claim_admission_request(request, header)?;
     let selected_control = {
       let kv = self.lock_kv()?;
       validate_kv_header_alignment(&kv, header)?;
@@ -4738,6 +4777,7 @@ impl V4FirstAuthorityPublisher {
       claim_generation: claim.generation,
       transition: verified.transition,
       result_manifest_write_sequence,
+      result_control_sequence: result_control.sequence,
       control,
       committed_failure,
     })
@@ -4819,6 +4859,408 @@ impl V4FirstAuthorityPublisher {
     }
     let transition = validator.finish()?;
     Ok(VerifiedVoidClaimTransitionV1 { source_entity, claim_write_sequence, transition })
+  }
+
+  /// Select a claim-free Void catalog only after every used locator and every
+  /// uncertain range has independent durable evidence. The immutable
+  /// settlement receipt is published after selector and lineage durability.
+  pub fn settle_void_claim(
+    &mut self,
+    consumption: &VoidClaimConsumptionPermitV1,
+    request: VoidClaimSettlementPublicationRequestV1<'_>,
+    authority: &mut dyn VoidClaimSettlementAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  ) -> Result<VoidClaimSettlementHardPublicationReceiptV1, VoidClaimSettlementPublicationErrorV1> {
+    self.settle_void_claim_with_control_observer(
+      consumption,
+      request,
+      authority,
+      retirement_owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+  }
+
+  fn settle_void_claim_with_control_observer(
+    &mut self,
+    consumption: &VoidClaimConsumptionPermitV1,
+    request: VoidClaimSettlementPublicationRequestV1<'_>,
+    authority: &mut dyn VoidClaimSettlementAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<VoidClaimSettlementHardPublicationReceiptV1, VoidClaimSettlementPublicationErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_canceled",
+        "Void claim settlement was canceled before authority selection",
+      ));
+    }
+    let observation = self.observe()?;
+    if retirement_owner.hash_algorithm() != observation.selected.header.hash_algorithm
+      || retirement_owner.database_id() != observation.selected.header.database_id
+      || consumption.hash_algorithm() != observation.selected.header.hash_algorithm
+      || consumption.database_id() != observation.selected.header.database_id
+    {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_lineage_identity",
+        "settlement permit or retirement lineage owner differs from selected first authority",
+      ));
+    }
+    retirement_owner.flush(self)?;
+    let locked = self.settle_void_claim_locked(consumption, &request, authority, retirement_owner, control_observer)?;
+    let mut committed_failure = locked.committed_failure.map(|(failure, message)| (failure.code(), message));
+    let lineage_state = if locked.control.replaced_control {
+      match retirement_owner.flush(self) {
+        Ok(true) => RootRetirementLineageStateV1::HardPublished {
+          hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence,
+        },
+        Ok(false) => RootRetirementLineageStateV1::MissingAfterCommit {
+          code: "void_claim_settlement_lineage_missing",
+          message: "Void claim settlement control committed without retained replacement lineage".to_string(),
+        },
+        Err(source) => RootRetirementLineageStateV1::BufferedAfterFlushFailure { code: source.code(), message: source.to_string() },
+      }
+    } else {
+      RootRetirementLineageStateV1::NotRequired
+    };
+    if !matches!(lineage_state, RootRetirementLineageStateV1::NotRequired | RootRetirementLineageStateV1::HardPublished { .. })
+      && committed_failure.is_none()
+    {
+      committed_failure =
+        Some(("void_claim_settlement_committed_lineage", "Void claim settlement replacement lineage did not hard-publish".to_string()));
+    }
+    let observation = match self.observe() {
+      Ok(observation) => observation,
+      Err(source) => {
+        let receipt = VoidClaimSettlementHardPublicationReceiptV1 {
+          result_manifest_key: request.result_manifest.key.clone(),
+          result_manifest_write_sequence: locked.result_manifest_write_sequence,
+          result_control_key: request.result_control.key.clone(),
+          result_control_write_sequence: locked.control.control_write_sequence,
+          result_control_slot: locked.control.control_slot,
+          settlement_key: request.settlement.key.clone(),
+          settlement_write_sequence: 0,
+          outcome: consumption.outcome(),
+          lineage_state,
+          observation: locked.control.observation,
+          idempotent: false,
+        };
+        return Err(VoidClaimSettlementPublicationErrorV1::committed(
+          "void_claim_settlement_committed_readback",
+          source.to_string(),
+          receipt,
+        ));
+      }
+    };
+    let mut receipt = VoidClaimSettlementHardPublicationReceiptV1 {
+      result_manifest_key: request.result_manifest.key.clone(),
+      result_manifest_write_sequence: locked.result_manifest_write_sequence,
+      result_control_key: request.result_control.key.clone(),
+      result_control_write_sequence: locked.control.control_write_sequence,
+      result_control_slot: locked.control.control_slot,
+      settlement_key: request.settlement.key.clone(),
+      settlement_write_sequence: 0,
+      outcome: consumption.outcome(),
+      lineage_state,
+      observation,
+      idempotent: false,
+    };
+    if let Some((code, message)) = committed_failure {
+      return Err(VoidClaimSettlementPublicationErrorV1::committed(code, message, receipt));
+    }
+    let settlement_artifact = decode_sweep_void_artifact(&request.settlement.value, consumption.hash_algorithm())?;
+    let SweepVoidArtifactV1::VoidClaimSettlement(settlement) = settlement_artifact else {
+      return Err(VoidClaimSettlementPublicationErrorV1::committed(
+        "void_claim_settlement_receipt_kind",
+        "selected claim-free result has a settlement artifact of another kind",
+        receipt,
+      ));
+    };
+    let settlement_timestamp_ms = u64::try_from(settlement.settled_at_ms)?;
+    let settlement_write_sequence = match self.publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::VoidClaimSettlementReceipt,
+        database_id: &consumption.database_id(),
+        artifact_key: &request.settlement.key,
+        value: &request.settlement.value,
+        minimum_timestamp_ms: settlement_timestamp_ms.max(request.publication_timestamp_ms),
+        committed_postcondition_code: "void_claim_settlement_receipt_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    ) {
+      Ok(sequence) => sequence,
+      Err(source) => {
+        return Err(VoidClaimSettlementPublicationErrorV1::committed(
+          "void_claim_settlement_committed_receipt",
+          source.to_string(),
+          receipt,
+        ));
+      }
+    };
+    receipt.settlement_write_sequence = settlement_write_sequence;
+    receipt.idempotent = locked.control.idempotent && locked.settlement_preexisting;
+    receipt.observation = match self.observe() {
+      Ok(observation) => observation,
+      Err(source) => {
+        return Err(VoidClaimSettlementPublicationErrorV1::committed(
+          "void_claim_settlement_committed_receipt_readback",
+          source.to_string(),
+          receipt,
+        ));
+      }
+    };
+    Ok(receipt)
+  }
+
+  fn settle_void_claim_locked(
+    &self,
+    consumption: &VoidClaimConsumptionPermitV1,
+    request: &VoidClaimSettlementPublicationRequestV1<'_>,
+    authority: &mut dyn VoidClaimSettlementAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<VoidClaimLockedSettlementV1, VoidClaimSettlementPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      VoidClaimSettlementPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.head_hash.iter().all(|byte| *byte == 0)
+      || header.hash_algorithm != consumption.hash_algorithm()
+      || header.database_id != consumption.database_id()
+    {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_database_authority",
+        "selected first authority is absent, degraded, or differs from the settlement permit",
+      ));
+    }
+    if retirement_owner.hash_algorithm() != header.hash_algorithm || retirement_owner.database_id() != header.database_id {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_lineage_identity",
+        "retirement lineage owner differs from selected first authority",
+      ));
+    }
+    let result_control = decode_gc_active_control(&request.result_control.value, header.hash_algorithm)?;
+    let result_artifact = decode_sweep_void_artifact(&request.result_manifest.value, header.hash_algorithm)?;
+    let SweepVoidArtifactV1::VoidCatalog(result_manifest) = &result_artifact else {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_result_kind",
+        "result manifest bytes decode as another GC artifact kind",
+      ));
+    };
+    if request.result_manifest.key != result_manifest.key
+      || result_control.kind != GcArtifactKindV1::VoidCatalogActiveControl
+      || result_control.database_id != consumption.database_id()
+      || result_control.target_manifest_hash != request.result_manifest.key
+      || result_control.generation != result_manifest.generation
+      || result_control.sequence
+        != consumption.source_control_sequence().checked_add(1).ok_or_else(|| {
+          VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_control_sequence", "control sequence overflowed")
+        })?
+      || result_control.slot == consumption.source_control_slot()
+      || result_control.key != request.result_control.key
+    {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_result_control",
+        "result manifest and inactive control do not form the next Void authority",
+      ));
+    }
+    let selected_control = {
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      select_void_catalog_control(&self.file, &kv, header)
+        .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_source_control", source.to_string()))?
+    }
+    .ok_or_else(|| {
+      VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_source_missing",
+        "settlement requires one selected outstanding-claim Void catalog",
+      )
+    })?;
+    let selected_decoded = decode_gc_active_control(&selected_control.stored_value, header.hash_algorithm)?;
+    let exact_retry =
+      selected_control.stored_value == request.result_control.value && selected_control.target_manifest_hash == request.result_manifest.key;
+    if !exact_retry
+      && (selected_control.target_manifest_hash != consumption.source_manifest_key()
+        || selected_control.control_sequence != consumption.source_control_sequence()
+        || selected_control.write_sequence != consumption.source_control_write_sequence()
+        || selected_decoded.key != consumption.source_control_key()
+        || selected_decoded.slot != consumption.source_control_slot())
+    {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_source_changed",
+        "physically selected Void source differs from the consumed claim permit",
+      ));
+    }
+
+    let verified = self.verify_void_claim_settlement_transition_is_durable(consumption, request, header)?;
+    let source_whole = decode_whole_entity(&verified.source_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    let source_artifact = decode_sweep_void_artifact(source_whole.stored_value, header.hash_algorithm)?;
+    let SweepVoidArtifactV1::VoidCatalog(source_manifest) = &source_artifact else {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_source_kind",
+        "durable source manifest decoded as another GC artifact kind",
+      ));
+    };
+    let claim_whole = decode_whole_entity(&verified.claim_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    let claim_artifact = decode_sweep_void_artifact(claim_whole.stored_value, header.hash_algorithm)?;
+    let SweepVoidArtifactV1::VoidClaim(claim) = &claim_artifact else {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_claim_kind",
+        "durable claim decoded as another GC artifact kind",
+      ));
+    };
+    validate_requested_void_claim_settlement(consumption, request, source_manifest, result_manifest, claim)?;
+    let authority_request = VoidClaimSettlementAuthorityRequestV1 {
+      source_manifest,
+      result_manifest,
+      claim,
+      transition: &verified.transition,
+      consumption,
+      cancellation: request.cancellation,
+    };
+    let snapshot = authority.recheck_void_claim_settlement_authority(authority_request)?;
+    validate_void_claim_settlement_authority_v1(authority_request, &snapshot)?;
+    let settlement_preexisting = if let Some(existing) = snapshot.existing_receipt.as_ref() {
+      if !exact_retry || existing.receipt_hash != request.settlement.key {
+        return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+          "void_claim_settlement_existing_conflict",
+          "existing settlement receipt differs from the exact selected result",
+        ));
+      }
+      let kv = self.lock_kv()?;
+      let reader =
+        VoidCatalogSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: request.memory, cancellation: request.cancellation };
+      let entity = reader
+        .load_entity(&existing.receipt_hash, GcArtifactKindV1::VoidClaimSettlementReceipt)
+        .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_existing", source.to_string()))?;
+      let whole = decode_whole_entity(&entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+      if whole.write_sequence != existing.receipt_write_sequence || whole.stored_value != request.settlement.value {
+        return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+          "void_claim_settlement_existing_conflict",
+          "existing settlement receipt sequence or bytes differ from the exact request",
+        ));
+      }
+      true
+    } else {
+      false
+    };
+    if request.cancellation.is_cancelled() {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_canceled",
+        "Void claim settlement was canceled after final authority recheck",
+      ));
+    }
+    let result_manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::VoidCatalogManifest,
+        database_id: &header.database_id,
+        artifact_key: &request.result_manifest.key,
+        value: &request.result_manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "void_claim_settlement_manifest_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    let control = self.publish_gc_active_control_locked(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::VoidCatalogActiveControl,
+        encoded_control: request.result_control,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      retirement_owner,
+      control_observer,
+    )?;
+    let (control, committed_failure) = match control {
+      GcControlPublicationOutcomeV1::Complete(control) => (control, None),
+      GcControlPublicationOutcomeV1::CommittedFailure { publication, failure, message } => (publication, Some((failure, message))),
+    };
+    Ok(VoidClaimLockedSettlementV1 { result_manifest_write_sequence, control, settlement_preexisting, committed_failure })
+  }
+
+  fn verify_void_claim_settlement_transition_is_durable(
+    &self,
+    consumption: &VoidClaimConsumptionPermitV1,
+    request: &VoidClaimSettlementPublicationRequestV1<'_>,
+    header: &DatabaseHeaderV4,
+  ) -> Result<VerifiedVoidClaimSettlementTransitionV1, VoidClaimSettlementPublicationErrorV1> {
+    let result_artifact = decode_sweep_void_artifact(&request.result_manifest.value, header.hash_algorithm)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let reader =
+      VoidCatalogSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: request.memory, cancellation: request.cancellation };
+    let source_entity = reader
+      .load_entity(consumption.source_manifest_key(), GcArtifactKindV1::VoidCatalogManifest)
+      .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_source_support", source.to_string()))?;
+    let source_whole = decode_whole_entity(&source_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    if source_whole.write_sequence != consumption.source_manifest_write_sequence() {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_source_sequence",
+        "durable source manifest sequence differs from the consumption permit",
+      ));
+    }
+    let source_artifact = decode_sweep_void_artifact(source_whole.stored_value, header.hash_algorithm)?;
+    let claim_entity = reader
+      .load_entity(consumption.claim_key(), GcArtifactKindV1::VoidClaim)
+      .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_claim_support", source.to_string()))?;
+    let claim_whole = decode_whole_entity(&claim_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    if claim_whole.write_sequence != consumption.claim_write_sequence() {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_claim_sequence",
+        "durable claim sequence differs from the consumption permit",
+      ));
+    }
+    let claim_artifact = decode_sweep_void_artifact(claim_whole.stored_value, header.hash_algorithm)?;
+    let mut validator = VoidClaimSettlementTransitionValidatorV1::new(
+      &source_artifact,
+      &result_artifact,
+      &claim_artifact,
+      consumption,
+      request.cancellation.clone(),
+      request.transition_limits,
+      request.memory,
+    )?;
+    let SweepVoidArtifactV1::VoidCatalog(source_manifest) = &source_artifact else {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_source_kind",
+        "source manifest key resolves to another GC artifact kind",
+      ));
+    };
+    if source_manifest.free_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimSettlementSourceTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(source_manifest.free_root, GcDirectoryRoleV1::FreeExtents, None, 0, &mut observer)
+        .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_source_support", source.to_string()))?;
+    }
+    if source_manifest.claim_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimSettlementSourceTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(source_manifest.claim_root, GcDirectoryRoleV1::Claims, None, 0, &mut observer)
+        .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_source_support", source.to_string()))?;
+    }
+    validator.finish_source()?;
+    let SweepVoidArtifactV1::VoidCatalog(result_manifest) = &result_artifact else {
+      return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+        "void_claim_settlement_result_kind",
+        "result manifest bytes decode as another GC artifact kind",
+      ));
+    };
+    if result_manifest.free_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimSettlementResultTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(result_manifest.free_root, GcDirectoryRoleV1::FreeExtents, None, 0, &mut observer)
+        .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_result_support", source.to_string()))?;
+    }
+    if result_manifest.claim_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimSettlementResultTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(result_manifest.claim_root, GcDirectoryRoleV1::Claims, None, 0, &mut observer)
+        .map_err(|source| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_result_support", source.to_string()))?;
+    }
+    let transition = validator.finish()?;
+    Ok(VerifiedVoidClaimSettlementTransitionV1 { source_entity, claim_entity, transition })
   }
 
   /// Hard-publish one immutable page or directory used by a future root-
@@ -6256,6 +6698,30 @@ impl VoidCatalogSupportObserverV1 for VoidClaimResultTransitionObserverV1<'_, '_
   }
 }
 
+struct VoidClaimSettlementSourceTransitionObserverV1<'a, 'b> {
+  validator: &'a mut VoidClaimSettlementTransitionValidatorV1<'b>,
+}
+
+impl VoidCatalogSupportObserverV1 for VoidClaimSettlementSourceTransitionObserverV1<'_, '_> {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1> {
+    self.validator.observe_source_encoded(bytes).map_err(|source| {
+      VoidCatalogPublicationErrorV1::invalid("void_claim_settlement_transition_support", format!("{}: {source}", source.code()))
+    })
+  }
+}
+
+struct VoidClaimSettlementResultTransitionObserverV1<'a, 'b> {
+  validator: &'a mut VoidClaimSettlementTransitionValidatorV1<'b>,
+}
+
+impl VoidCatalogSupportObserverV1 for VoidClaimSettlementResultTransitionObserverV1<'_, '_> {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1> {
+    self.validator.observe_result_encoded(bytes).map_err(|source| {
+      VoidCatalogPublicationErrorV1::invalid("void_claim_settlement_transition_support", format!("{}: {source}", source.code()))
+    })
+  }
+}
+
 impl VoidCatalogSupportReadContextV1<'_> {
   fn revalidate_subtree(
     &self,
@@ -7021,6 +7487,68 @@ fn validate_void_claim_admission_request<'a>(
   Ok((claim, result_manifest, result_control))
 }
 
+fn validate_requested_void_claim_settlement(
+  consumption: &VoidClaimConsumptionPermitV1,
+  request: &VoidClaimSettlementPublicationRequestV1<'_>,
+  source_manifest: &super::gc_void::VoidCatalogManifestV1<'_>,
+  result_manifest: &super::gc_void::VoidCatalogManifestV1<'_>,
+  claim: &super::gc_void::VoidClaimV1<'_>,
+) -> Result<(), VoidClaimSettlementPublicationErrorV1> {
+  let SweepVoidArtifactV1::VoidClaimSettlement(settlement) =
+    decode_sweep_void_artifact(&request.settlement.value, consumption.hash_algorithm())?
+  else {
+    return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+      "void_claim_settlement_receipt_kind",
+      "settlement bytes decode as another GC artifact kind",
+    ));
+  };
+  let expected_outcome = match consumption.outcome() {
+    VoidClaimConsumptionOutcomeV1::Settled => VoidClaimSettlementOutcomeV1::Settled,
+    VoidClaimConsumptionOutcomeV1::AbandonedToQuarantine => VoidClaimSettlementOutcomeV1::AbandonedToQuarantine,
+  };
+  let settled_at_ms = u64::try_from(settlement.settled_at_ms).map_err(|source| {
+    VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_timestamp", format!("settlement time is negative: {source}"))
+  })?;
+  let result_published_at_ms = u64::try_from(result_manifest.published_at_ms).map_err(|source| {
+    VoidClaimSettlementPublicationErrorV1::invalid(
+      "void_claim_settlement_timestamp",
+      format!("result catalog publication time is negative: {source}"),
+    )
+  })?;
+  if request.settlement.key != settlement.key
+    || settlement.database_id != consumption.database_id()
+    || settlement.claim_id != consumption.claim_id()
+    || settlement.generation != result_manifest.generation
+    || settlement.outcome != expected_outcome
+    || settlement.recovered
+    || settlement.source_manifest_hash != source_manifest.key
+    || settlement.result_manifest_hash != result_manifest.key
+    || settlement.used_count != u32::try_from(consumption.durable_uses().len())?
+    || settlement.unused_count != u32::try_from(consumption.returned_extents().len())?
+    || settlement.used_bytes != consumption.used_bytes()
+    || settlement.returned_bytes != consumption.returned_bytes()
+    || settlement.evidence_digest != consumption.evidence_digest()
+    || source_manifest.key != consumption.source_manifest_key()
+    || source_manifest.generation != consumption.generation()
+    || claim.key != consumption.claim_key()
+    || claim.claim_id != consumption.claim_id()
+    || claim.generation != consumption.generation()
+    || result_manifest.generation
+      != source_manifest
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| VoidClaimSettlementPublicationErrorV1::invalid("void_claim_settlement_generation", "result generation overflowed"))?
+    || settled_at_ms < result_published_at_ms
+    || request.publication_timestamp_ms < settled_at_ms
+  {
+    return Err(VoidClaimSettlementPublicationErrorV1::invalid(
+      "void_claim_settlement_receipt_identity",
+      "settlement receipt, claim, catalogs, outcome, evidence, aggregates, generation, or time do not close exactly",
+    ));
+  }
+  Ok(())
+}
+
 fn validate_void_catalog_publication_request(request: &VoidCatalogPublicationRequestV1<'_>) -> Result<(), VoidCatalogPublicationErrorV1> {
   let algorithm = request.completion.hash_algorithm();
   let SweepVoidArtifactV1::VoidCatalog(manifest) = decode_sweep_void_artifact(&request.manifest.value, algorithm)? else {
@@ -7146,6 +7674,7 @@ fn select_void_catalog_control(
     stored_value: stored.stored_value.clone(),
     target_manifest_hash: stored.target_manifest_hash.clone(),
     control_sequence: stored.control_sequence,
+    write_sequence: stored.write_sequence,
   }))
 }
 
