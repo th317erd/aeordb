@@ -25,6 +25,7 @@ pub mod gc_mark_convergence;
 pub mod gc_mark_runtime;
 pub mod gc_mark_workspace;
 pub mod gc_retirement;
+pub mod gc_root_reclaim;
 pub mod gc_root_transition;
 pub mod gc_state;
 pub mod gc_void;
