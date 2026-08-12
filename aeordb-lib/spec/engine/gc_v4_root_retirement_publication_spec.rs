@@ -50,6 +50,17 @@ fn support_limits(maximum_support_artifacts: u64) -> RootLifecycleSupportLimitsV
   RootLifecycleSupportLimitsV1 { maximum_candidate_records: 1, maximum_expiry_records: 2, maximum_support_artifacts }
 }
 
+fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
+  for entry in fs::read_dir(root).unwrap() {
+    let entry = entry.unwrap();
+    if entry.file_type().unwrap().is_dir() {
+      rust_sources(&entry.path(), sources);
+    } else if entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs") {
+      sources.push(entry.path());
+    }
+  }
+}
+
 struct PreparedRetirementSupportV1 {
   retirement: aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
   expiry_page: aeordb::engine::v4::gc::EncodedImmutableGcArtifactV1,
@@ -670,4 +681,31 @@ fn guarded_retirement_rejects_the_current_head_before_publishing_authority() {
   assert!(publisher.locator(&prepared.expiry_manifest.key).unwrap().is_none());
   assert!(publisher.locator(&prepared.lifecycle_manifest.key).unwrap().is_none());
   assert!(publisher.locator(&prepared.lifecycle_control.key).unwrap().is_none());
+}
+
+#[test]
+fn root_retirement_publication_remains_confined_to_disconnected_first_authority() {
+  let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let owner = source_root.join("engine/v4/first_authority.rs");
+  let symbols = [
+    "publish_root_retirement",
+    "RootRetirementPublicationRequestV1",
+    "RootRetirementAuthorityVerifierV1",
+    "publish_root_lifecycle_support_artifact",
+  ];
+  let mut sources = Vec::new();
+  rust_sources(&source_root, &mut sources);
+  let mut violations = Vec::new();
+  for path in sources {
+    if path == owner {
+      continue;
+    }
+    let source = fs::read_to_string(&path).unwrap();
+    for symbol in symbols {
+      if source.contains(symbol) {
+        violations.push((path.strip_prefix(&source_root).unwrap().to_owned(), symbol));
+      }
+    }
+  }
+  assert!(violations.is_empty(), "root-retirement publication escaped disconnected first-authority ownership: {violations:?}");
 }

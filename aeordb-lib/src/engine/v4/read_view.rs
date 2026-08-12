@@ -112,6 +112,8 @@ struct RootReadPinCoordinatorInnerV1 {
   maximum_tracked_roots: usize,
   maximum_active_pins: u64,
   failed: AtomicBool,
+  #[cfg(test)]
+  fail_next_cleanup: AtomicBool,
   state: Mutex<RootPinCoordinatorStateV1>,
 }
 
@@ -164,6 +166,8 @@ impl RootReadPinCoordinatorV1 {
         maximum_tracked_roots,
         maximum_active_pins,
         failed: AtomicBool::new(false),
+        #[cfg(test)]
+        fail_next_cleanup: AtomicBool::new(false),
         state: Mutex::new(RootPinCoordinatorStateV1 { root_gates: BTreeMap::new(), active_pin_count: 0 }),
       }),
     })
@@ -194,6 +198,11 @@ impl RootReadPinCoordinatorV1 {
 
   pub fn tracked_root_count(&self) -> Result<usize, RootPinCoordinatorErrorV1> {
     Ok(self.lock_state()?.root_gates.len())
+  }
+
+  #[cfg(test)]
+  pub(crate) fn fail_next_cleanup_for_test(&self) {
+    self.inner.fail_next_cleanup.store(true, Ordering::Release);
   }
 
   /// Observe lifecycle and acquire the pin under one root guard.
@@ -320,6 +329,10 @@ impl RootReadPinCoordinatorV1 {
   }
 
   fn cleanup_root_gate(&self, root_gate: &Arc<RootGateV1>) -> Result<(), RootPinCoordinatorErrorV1> {
+    #[cfg(test)]
+    if self.inner.fail_next_cleanup.swap(false, Ordering::AcqRel) {
+      return Err(RootPinCoordinatorErrorV1::AccountingCorrupt("injected root-pin cleanup failure"));
+    }
     let active_pins = self.lock_root_gate(root_gate)?;
     if *active_pins != 0 {
       return Ok(());
@@ -813,7 +826,7 @@ where
     if header.header.hash_algorithm != self.pin_coordinator.hash_algorithm() {
       return Err(authorized_error(ReadViewAuthorizedFailureV1::CoordinatorHashAlgorithmMismatch));
     }
-    let header_admission = semantic_header_admission(&header, self.capability_profile).map_err(|error| authorized_error(error))?;
+    let header_admission = semantic_header_admission(&header, self.capability_profile).map_err(authorized_error)?;
 
     let (root_hash, explicit_root) = match selector {
       ReadViewSelectorV1::CurrentHead => (header.header.head_hash.as_slice(), false),
@@ -853,8 +866,8 @@ where
     if cancellation.is_cancelled() {
       return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
     }
-    validate_loaded_authority(&header, root_hash, &loaded).map_err(|failure| authorized_error(failure))?;
-    validate_root_capabilities(&loaded.authority, self.capability_profile).map_err(|failure| authorized_error(failure))?;
+    validate_loaded_authority(&header, root_hash, &loaded).map_err(authorized_error)?;
+    validate_root_capabilities(&loaded.authority, self.capability_profile).map_err(authorized_error)?;
 
     let admission = self
       .pin_coordinator

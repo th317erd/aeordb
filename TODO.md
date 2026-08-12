@@ -678,7 +678,7 @@
       - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
         - [x] P4-4a: expose complete borrowed lifecycle artifacts and exact both-width encoders/closure validation without activating a writer.
         - [x] P4-4b: implement one bounded two-complete-mark transition model with frozen/effective grace, authority evidence, reachability clearing, and deterministic cap refusal.
-        - [ ] P4-4c: hard-publish retirement evidence and selected lifecycle authority before a root becomes logically retired, through the shared replacement boundary.
+        - [x] P4-4c: hard-publish retirement evidence and selected lifecycle authority before a root becomes logically retired, through the shared replacement boundary.
           - [x] P4-4c1: add reusable exact GC page/directory writers and both-width independent-fixture proof for lifecycle catalogs.
           - [x] P4-4c2: generalize A/B GC control replacement publication so mark and lifecycle controls share one durable authority path.
           - [x] P4-4c3: publish retirement commit, catalog closure, manifests, and lifecycle control under the root retirement-exclusion guard with final evidence rechecks.
@@ -686,7 +686,12 @@
             - [x] P4-4c3b: add the typed full-authority recheck boundary and hold root-pin plus first-authority exclusion through lifecycle-control linearization.
             - [x] P4-4c3c: publish retirement commit and exact manifest closure before the selector, with committed-result and post-control lineage reporting.
             - [x] P4-4c3d: prove pending-before-selector and retired-after-selector behavior with a focused compile-red crash-direction test.
-          - [ ] P4-4c4: prove every crash prefix, exact retry, restart selection, pin/authority exclusion, and committed-failure result.
+          - [x] P4-4c4: prove every crash prefix, exact retry, restart selection, pin/authority exclusion, and committed-failure result.
+            - [x] Inject every final-selector dependency and header failure phase and require restart to select exactly the prior or requested lifecycle.
+            - [x] Retain replacement lineage when an uncertain header failure nevertheless selects the requested lifecycle control.
+            - [x] Prove a racing read pin cannot enter during retirement exclusion and observes retirement after the selector wins.
+            - [x] Prove post-selector lineage and pin-cleanup failures return the exact committed retirement receipt.
+            - [x] Close architecture isolation, static analysis, focused/broad restart gates, and the P4-4c landing evidence.
         - [ ] P4-4d: attach root-object reclaim proof and bounded optional expiry retention without evicting mandatory retirement evidence.
         - [ ] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.

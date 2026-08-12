@@ -833,6 +833,7 @@ enum GcControlPublicationFailureV1 {
   ControlRepresentation,
   ControlAmbiguous,
   CommittedDependencyMissing,
+  CommittedAuthorityUncertain,
   CommittedVisibilityFailure,
   CommittedPostconditionFailure,
   CommittedReadbackFailure,
@@ -863,6 +864,7 @@ impl GcControlPublicationFailureV1 {
       Self::ControlRepresentation => "gc_control_representation",
       Self::ControlAmbiguous => "gc_control_ambiguous",
       Self::CommittedDependencyMissing => "gc_control_committed_dependency_missing",
+      Self::CommittedAuthorityUncertain => "gc_control_committed_authority_uncertain",
       Self::CommittedVisibilityFailure => "gc_control_committed_visibility_failure",
       Self::CommittedPostconditionFailure => "gc_control_committed_postcondition_failure",
       Self::CommittedReadbackFailure => "gc_control_committed_readback_failure",
@@ -893,6 +895,7 @@ impl GcControlPublicationFailureV1 {
       Self::ControlRepresentation => "mark_checkpoint_control_representation",
       Self::ControlAmbiguous => "mark_checkpoint_control_ambiguous",
       Self::CommittedDependencyMissing => "mark_checkpoint_control_committed_dependency_missing",
+      Self::CommittedAuthorityUncertain => "mark_checkpoint_control_committed_authority_uncertain",
       Self::CommittedVisibilityFailure => "mark_checkpoint_control_committed_visibility_failure",
       Self::CommittedPostconditionFailure => "mark_checkpoint_control_committed_postcondition_failure",
       Self::CommittedReadbackFailure => "mark_checkpoint_control_committed_readback_failure",
@@ -1034,12 +1037,12 @@ enum GcControlPublicationOutcomeV1 {
 }
 
 enum GcControlDependencyOutcomeV1 {
-  Complete(super::header_publication::DatabaseHeaderPublicationReceiptV4),
-  CommittedFailure {
-    publication: super::header_publication::DatabaseHeaderPublicationReceiptV4,
-    failure: GcControlPublicationFailureV1,
-    message: String,
-  },
+  Complete(GcControlDependencyPublicationV1),
+  CommittedFailure { publication: GcControlDependencyPublicationV1, failure: GcControlPublicationFailureV1, message: String },
+}
+
+struct GcControlDependencyPublicationV1 {
+  observation: DatabaseHeaderObservationV4,
 }
 
 struct BufferedOnlyRetirementSinkV1;
@@ -1855,7 +1858,9 @@ impl V4FirstAuthorityPublisher {
 
     let mut committed_failure = locked.committed_failure.map(|(failure, message)| (failure.code(), message));
     if let Some(error) = exclusion_error {
-      if committed_failure.is_none() {
+      if let Some((_, message)) = &mut committed_failure {
+        message.push_str(&format!("; releasing the root retirement exclusion also failed: {error}"));
+      } else {
         committed_failure = Some(("root_retirement_committed_pin_cleanup", error.to_string()));
       }
     }
@@ -1947,31 +1952,12 @@ impl V4FirstAuthorityPublisher {
     }
     let kv = self.lock_kv()?;
     validate_kv_header_alignment(&kv, header)?;
+    let support_reader = RootLifecycleSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: &memory };
     if let Some(root) = request.support_closure.candidate_directory_hash() {
-      revalidate_root_lifecycle_support_subtree(
-        &self.file,
-        &kv,
-        header,
-        root,
-        GcDirectoryRoleV1::RootCandidates,
-        None,
-        0,
-        &mut builder,
-        &memory,
-      )?;
+      support_reader.revalidate_subtree(root, GcDirectoryRoleV1::RootCandidates, None, 0, &mut builder)?;
     }
     if let Some(root) = request.support_closure.expiry_directory_hash() {
-      revalidate_root_lifecycle_support_subtree(
-        &self.file,
-        &kv,
-        header,
-        root,
-        GcDirectoryRoleV1::RootExpiry,
-        None,
-        0,
-        &mut builder,
-        &memory,
-      )?;
+      support_reader.revalidate_subtree(root, GcDirectoryRoleV1::RootExpiry, None, 0, &mut builder)?;
     }
     let observed = builder.finish().map_err(root_retirement_support_error)?;
     if observed != *request.support_closure {
@@ -3502,166 +3488,159 @@ struct ChargedRootLifecycleSupportEntityV1 {
   _memory: MemoryReservation,
 }
 
-fn revalidate_root_lifecycle_support_subtree(
-  file: &File,
-  kv: &DiskKVStore,
-  header: &DatabaseHeaderV4,
-  key: &[u8],
-  expected_role: GcDirectoryRoleV1,
-  expected_level: Option<u16>,
-  depth: u16,
-  builder: &mut super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1<'_>,
-  memory: &MemoryCoordinator,
-) -> Result<(), RootRetirementPublicationErrorV1> {
-  if depth > 16 {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_depth",
-      "durable root-lifecycle support directory exceeds depth 16",
-    ));
-  }
-  let directory_entity = load_root_lifecycle_support_entity(file, kv, header, key, GcArtifactKindV1::GcArtifactDirectoryNode, memory)?;
-  let entity = decode_whole_entity(&directory_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
-  let GcStateArtifactV1::Directory(directory) = decode_gc_state_artifact(entity.stored_value, header.hash_algorithm)? else {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_kind",
-      "root-lifecycle support directory key resolves to another GC artifact kind",
-    ));
-  };
-  if directory.key != key || directory.role != expected_role || expected_level.is_some_and(|level| level != directory.level) {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_changed",
-      "durable root-lifecycle directory identity, role, or level differs from its parent descriptor",
-    ));
-  }
-  for descriptor in &directory.entries {
-    if directory.level == 0 {
-      revalidate_root_lifecycle_support_page(file, kv, header, descriptor.child_hash, expected_role, builder, memory)?;
-    } else {
-      revalidate_root_lifecycle_support_subtree(
-        file,
-        kv,
-        header,
-        descriptor.child_hash,
-        expected_role,
-        Some(directory.level - 1),
-        depth + 1,
-        builder,
-        memory,
-      )?;
-    }
-  }
-  builder.observe_encoded(entity.stored_value).map_err(root_retirement_support_error)
+struct RootLifecycleSupportReadContextV1<'a> {
+  file: &'a File,
+  kv: &'a DiskKVStore,
+  header: &'a DatabaseHeaderV4,
+  memory: &'a MemoryCoordinator,
 }
 
-fn revalidate_root_lifecycle_support_page(
-  file: &File,
-  kv: &DiskKVStore,
-  header: &DatabaseHeaderV4,
-  key: &[u8],
-  expected_role: GcDirectoryRoleV1,
-  builder: &mut super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1<'_>,
-  memory: &MemoryCoordinator,
-) -> Result<(), RootRetirementPublicationErrorV1> {
-  let kind = match expected_role {
-    GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
-    GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
-    GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+impl RootLifecycleSupportReadContextV1<'_> {
+  fn revalidate_subtree(
+    &self,
+    key: &[u8],
+    expected_role: GcDirectoryRoleV1,
+    expected_level: Option<u16>,
+    depth: u16,
+    builder: &mut super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1<'_>,
+  ) -> Result<(), RootRetirementPublicationErrorV1> {
+    if depth > 16 {
       return Err(RootRetirementPublicationErrorV1::invalid(
-        "root_retirement_support_role",
-        "root-retirement closure cannot contain non-lifecycle page roles",
+        "root_retirement_support_depth",
+        "durable root-lifecycle support directory exceeds depth 16",
       ));
     }
-  };
-  let page_entity = load_root_lifecycle_support_entity(file, kv, header, key, kind, memory)?;
-  let entity = decode_whole_entity(&page_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
-  let GcStateArtifactV1::Page(page) = decode_gc_state_artifact(entity.stored_value, header.hash_algorithm)? else {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_kind",
-      "root-lifecycle support page key resolves to another GC artifact kind",
-    ));
-  };
-  if page.key != key || page.role != expected_role {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_changed",
-      "durable root-lifecycle page identity or role differs from its parent descriptor",
-    ));
+    let directory_entity = self.load_entity(key, GcArtifactKindV1::GcArtifactDirectoryNode)?;
+    let entity = decode_whole_entity(&directory_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    let GcStateArtifactV1::Directory(directory) = decode_gc_state_artifact(entity.stored_value, self.header.hash_algorithm)? else {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_kind",
+        "root-lifecycle support directory key resolves to another GC artifact kind",
+      ));
+    };
+    if directory.key != key || directory.role != expected_role || expected_level.is_some_and(|level| level != directory.level) {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_changed",
+        "durable root-lifecycle directory identity, role, or level differs from its parent descriptor",
+      ));
+    }
+    for descriptor in &directory.entries {
+      if directory.level == 0 {
+        self.revalidate_page(descriptor.child_hash, expected_role, builder)?;
+      } else {
+        self.revalidate_subtree(descriptor.child_hash, expected_role, Some(directory.level - 1), depth + 1, builder)?;
+      }
+    }
+    builder.observe_encoded(entity.stored_value).map_err(root_retirement_support_error)
   }
-  builder.observe_encoded(entity.stored_value).map_err(root_retirement_support_error)
-}
 
-fn load_root_lifecycle_support_entity(
-  file: &File,
-  kv: &DiskKVStore,
-  header: &DatabaseHeaderV4,
-  key: &[u8],
-  expected_kind: GcArtifactKindV1,
-  memory: &MemoryCoordinator,
-) -> Result<ChargedRootLifecycleSupportEntityV1, RootRetirementPublicationErrorV1> {
-  let Some(locator) = kv.get(key)? else {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_missing",
-      format!("root-lifecycle support artifact {} is absent", hex::encode(key)),
-    ));
-  };
-  if locator.type_flags != kv_tag::GC_ARTIFACT {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_collision",
-      "root-lifecycle support key resolves to another KV role",
-    ));
+  fn revalidate_page(
+    &self,
+    key: &[u8],
+    expected_role: GcDirectoryRoleV1,
+    builder: &mut super::gc_lifecycle::RootLifecycleSupportClosureBuilderV1<'_>,
+  ) -> Result<(), RootRetirementPublicationErrorV1> {
+    let kind = match expected_role {
+      GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
+      GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
+      GcDirectoryRoleV1::Candidates | GcDirectoryRoleV1::PhysicalInventory => {
+        return Err(RootRetirementPublicationErrorV1::invalid(
+          "root_retirement_support_role",
+          "root-retirement closure cannot contain non-lifecycle page roles",
+        ));
+      }
+    };
+    let page_entity = self.load_entity(key, kind)?;
+    let entity = decode_whole_entity(&page_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    let GcStateArtifactV1::Page(page) = decode_gc_state_artifact(entity.stored_value, self.header.hash_algorithm)? else {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_kind",
+        "root-lifecycle support page key resolves to another GC artifact kind",
+      ));
+    };
+    if page.key != key || page.role != expected_role {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_changed",
+        "durable root-lifecycle page identity or role differs from its parent descriptor",
+      ));
+    }
+    builder.observe_encoded(entity.stored_value).map_err(root_retirement_support_error)
   }
-  let maximum_value_length = expected_kind.immutable_maximum_encoded_length().ok_or_else(|| {
-    RootRetirementPublicationErrorV1::invalid("root_retirement_support_kind", "root-lifecycle support role has no immutable cap")
-  })?;
-  let maximum_entity_length = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, key.len(), maximum_value_length)?;
-  let locator_length = usize::try_from(locator.total_length).map_err(|error| {
-    RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_length",
-      format!("root-lifecycle support locator length exceeds usize: {error}"),
-    )
-  })?;
-  if locator_length > maximum_entity_length {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_length",
-      format!("root-lifecycle support entity length {locator_length} exceeds its {maximum_entity_length}-byte role cap"),
-    ));
-  }
-  let reservation = memory
-    .reserve(
-      MemoryOwner::GarbageCollection,
-      u64::try_from(locator_length).map_err(|error| {
+
+  fn load_entity(
+    &self,
+    key: &[u8],
+    expected_kind: GcArtifactKindV1,
+  ) -> Result<ChargedRootLifecycleSupportEntityV1, RootRetirementPublicationErrorV1> {
+    let Some(locator) = self.kv.get(key)? else {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_missing",
+        format!("root-lifecycle support artifact {} is absent", hex::encode(key)),
+      ));
+    };
+    if locator.type_flags != kv_tag::GC_ARTIFACT {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_collision",
+        "root-lifecycle support key resolves to another KV role",
+      ));
+    }
+    let maximum_value_length = expected_kind.immutable_maximum_encoded_length().ok_or_else(|| {
+      RootRetirementPublicationErrorV1::invalid("root_retirement_support_kind", "root-lifecycle support role has no immutable cap")
+    })?;
+    let maximum_entity_length =
+      super::entity::checked_whole_entity_encoded_length(self.header.hash_algorithm, key.len(), maximum_value_length)?;
+    let locator_length = usize::try_from(locator.total_length).map_err(|error| {
+      RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_length",
+        format!("root-lifecycle support locator length exceeds usize: {error}"),
+      )
+    })?;
+    if locator_length > maximum_entity_length {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_length",
+        format!("root-lifecycle support entity length {locator_length} exceeds its {maximum_entity_length}-byte role cap"),
+      ));
+    }
+    let reservation = self
+      .memory
+      .reserve(
+        MemoryOwner::GarbageCollection,
+        u64::try_from(locator_length).map_err(|error| {
+          RootRetirementPublicationErrorV1::invalid(
+            "root_retirement_support_length",
+            format!("root-lifecycle support length cannot be accounted: {error}"),
+          )
+        })?,
+        AdmissionClass::Maintenance,
+      )
+      .map_err(|error| RootRetirementPublicationErrorV1::invalid("root_retirement_support_memory", error.to_string()))?;
+    let bytes =
+      read_entity_bounded(self.file, self.kv, key, maximum_entity_length, self.header.write_sequence_high_water)?.ok_or_else(|| {
         RootRetirementPublicationErrorV1::invalid(
-          "root_retirement_support_length",
-          format!("root-lifecycle support length cannot be accounted: {error}"),
+          "root_retirement_support_missing",
+          format!("root-lifecycle support artifact {} disappeared", hex::encode(key)),
         )
-      })?,
-      AdmissionClass::Maintenance,
-    )
-    .map_err(|error| RootRetirementPublicationErrorV1::invalid("root_retirement_support_memory", error.to_string()))?;
-  let bytes = read_entity_bounded(file, kv, key, maximum_entity_length, header.write_sequence_high_water)?.ok_or_else(|| {
-    RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_missing",
-      format!("root-lifecycle support artifact {} disappeared", hex::encode(key)),
-    )
-  })?;
-  let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
-  if entity.entry_type != EntryTypeV4::GcArtifact
-    || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
-    || entity.compression_algorithm != CompressionAlgorithm::None
-    || entity.key != key
-  {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_representation",
-      "root-lifecycle support artifact is not one canonical system GC WholeEntity",
-    ));
+      })?;
+    let entity = decode_whole_entity(&bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    if entity.entry_type != EntryTypeV4::GcArtifact
+      || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || entity.compression_algorithm != CompressionAlgorithm::None
+      || entity.key != key
+    {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_representation",
+        "root-lifecycle support artifact is not one canonical system GC WholeEntity",
+      ));
+    }
+    let envelope = decode_gc_artifact_envelope(entity.stored_value)?;
+    if envelope.kind != expected_kind {
+      return Err(RootRetirementPublicationErrorV1::invalid(
+        "root_retirement_support_kind",
+        "root-lifecycle support artifact kind differs from its directory role",
+      ));
+    }
+    Ok(ChargedRootLifecycleSupportEntityV1 { bytes, _memory: reservation })
   }
-  let envelope = decode_gc_artifact_envelope(entity.stored_value)?;
-  if envelope.kind != expected_kind {
-    return Err(RootRetirementPublicationErrorV1::invalid(
-      "root_retirement_support_kind",
-      "root-lifecycle support artifact kind differs from its directory role",
-    ));
-  }
-  Ok(ChargedRootLifecycleSupportEntityV1 { bytes, _memory: reservation })
 }
 
 fn root_retirement_support_error(source: super::gc_lifecycle::RootLifecycleSupportClosureErrorV1) -> RootRetirementPublicationErrorV1 {
@@ -3962,6 +3941,7 @@ fn commit_gc_control_dependency(
   expected_existing: Option<&KVEntry>,
   observer: &mut dyn FirstAuthorityDependencyObserverV1,
 ) -> Result<GcControlDependencyOutcomeV1, FirstAuthorityPublicationErrorV1> {
+  let expected_observation = admitted.expected_observation();
   let (publication_result, append_completed) = {
     let mut dependency = FirstAuthorityDependencyV1 {
       file,
@@ -3982,7 +3962,33 @@ fn commit_gc_control_dependency(
   let publication = match publication_result {
     Ok(publication) => publication,
     Err(error) => {
-      kv.abort_atomic_visibility_batch(batch)?;
+      let abort_result = kv.abort_atomic_visibility_batch(batch);
+      let observed = match observe_database_header_v4(file) {
+        Ok(observed) => observed,
+        Err(observed_error) => {
+          return Err(FirstAuthorityPublicationErrorV1::invalid(
+            "gc_control_failure_observation",
+            format!("GC control publication failed as {error}; selected-header reconciliation also failed: {observed_error}"),
+          ));
+        }
+      };
+      if append_completed && observed == expected_observation {
+        let abort_message = match &abort_result {
+          Ok(()) => String::new(),
+          Err(abort_error) => format!("; volatile KV rollback also failed: {abort_error}"),
+        };
+        return Ok(GcControlDependencyOutcomeV1::CommittedFailure {
+          publication: GcControlDependencyPublicationV1 { observation: observed },
+          failure: GcControlPublicationFailureV1::CommittedAuthorityUncertain,
+          message: format!("the exact GC control header is selected after an uncertain durability failure: {error}{abort_message}"),
+        });
+      }
+      if let Err(abort_error) = abort_result {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "gc_control_failure_rollback",
+          format!("GC control publication failed as {error}; volatile KV rollback also failed: {abort_error}"),
+        ));
+      }
       return Err(error.into());
     }
   };
@@ -3992,7 +3998,7 @@ fn commit_gc_control_dependency(
       Err(error) => format!("; visibility rollback also failed: {error}"),
     };
     return Ok(GcControlDependencyOutcomeV1::CommittedFailure {
-      publication,
+      publication: GcControlDependencyPublicationV1 { observation: publication.observation },
       failure: GcControlPublicationFailureV1::CommittedDependencyMissing,
       message: format!("header publication completed without the exact GC control dependency{rollback_failure_suffix}"),
     });
@@ -4000,19 +4006,19 @@ fn commit_gc_control_dependency(
   kv.complete_hot_tail_dependency();
   if let Err(error) = kv.publish_atomic_visibility_after_authority(batch, &publication.durability) {
     return Ok(GcControlDependencyOutcomeV1::CommittedFailure {
-      publication,
+      publication: GcControlDependencyPublicationV1 { observation: publication.observation },
       failure: GcControlPublicationFailureV1::CommittedVisibilityFailure,
       message: error.to_string(),
     });
   }
   if let Err(error) = observer.authority_committed(kv, entities) {
     return Ok(GcControlDependencyOutcomeV1::CommittedFailure {
-      publication,
+      publication: GcControlDependencyPublicationV1 { observation: publication.observation },
       failure: GcControlPublicationFailureV1::CommittedPostconditionFailure,
       message: error.to_string(),
     });
   }
-  Ok(GcControlDependencyOutcomeV1::Complete(publication))
+  Ok(GcControlDependencyOutcomeV1::Complete(GcControlDependencyPublicationV1 { observation: publication.observation }))
 }
 
 fn validate_kv_header_alignment(kv: &DiskKVStore, header: &DatabaseHeaderV4) -> Result<(), FirstAuthorityPublicationErrorV1> {

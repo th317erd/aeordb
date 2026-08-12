@@ -1,7 +1,10 @@
 use super::*;
 
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Barrier, mpsc};
+use std::time::Duration;
 
 use crate::engine::hot_tail::{HotTailPayload, read_hot_tail_checked};
 use crate::engine::kv_stages::initial_block_size;
@@ -50,6 +53,66 @@ struct FaultingNativeHeaderPublicationIo {
 impl FaultingNativeHeaderPublicationIo {
   fn injected(operation: NativeDurabilityOperation) -> NativeDurabilityError {
     NativeDurabilityError::operation_io(operation, std::io::Error::other("injected first-authority publication failure"))
+  }
+}
+
+#[derive(Debug)]
+struct NthHeaderPublicationFaultIo {
+  failure: FirstAuthorityFailurePoint,
+  target_publication: usize,
+  current_publication: AtomicUsize,
+}
+
+impl NthHeaderPublicationFaultIo {
+  fn new(failure: FirstAuthorityFailurePoint, target_publication: usize) -> Self {
+    Self { failure, target_publication, current_publication: AtomicUsize::new(0) }
+  }
+
+  fn is_target(&self) -> bool {
+    self.current_publication.load(AtomicOrdering::SeqCst) == self.target_publication
+  }
+
+  fn injected(operation: NativeDurabilityOperation) -> NativeDurabilityError {
+    NativeDurabilityError::operation_io(operation, std::io::Error::other("injected final-selector publication failure"))
+  }
+}
+
+impl HeaderPublicationIo for NthHeaderPublicationFaultIo {
+  fn read_observation(&self, file: &File) -> Result<DatabaseHeaderObservationV4, DatabaseHeaderPublicationErrorV4> {
+    observe_database_header_v4(file)
+  }
+
+  fn data_barrier(&self, file: &File) -> Result<(), NativeDurabilityError> {
+    let publication = self.current_publication.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+    if publication == self.target_publication && matches!(self.failure, FirstAuthorityFailurePoint::DataBarrier) {
+      return Err(Self::injected(NativeDurabilityOperation::DataBarrier));
+    }
+    sync_file_data_native(file)
+  }
+
+  fn write_slot(&self, file: &File, slot: usize, bytes: &[u8; DATABASE_HEADER_V4_SLOT_LENGTH]) -> Result<(), NativeDurabilityError> {
+    if self.is_target() && matches!(self.failure, FirstAuthorityFailurePoint::HeaderWriteBefore) {
+      return Err(Self::injected(NativeDurabilityOperation::WriteAt));
+    }
+    write_file_at_native(file, (slot * DATABASE_HEADER_V4_SLOT_LENGTH) as u64, bytes)?;
+    if self.is_target() && matches!(self.failure, FirstAuthorityFailurePoint::HeaderWriteAfter) {
+      return Err(Self::injected(NativeDurabilityOperation::WriteAt));
+    }
+    Ok(())
+  }
+
+  fn full_barrier(&self, file: &File) -> Result<(), NativeDurabilityError> {
+    if self.is_target() && matches!(self.failure, FirstAuthorityFailurePoint::FullBarrier) {
+      return Err(Self::injected(NativeDurabilityOperation::FileBarrier));
+    }
+    sync_file_all_native(file)
+  }
+
+  fn verify_region(&self, file: &File, expected: &[u8; DATABASE_HEADER_V4_REGION_LENGTH]) -> Result<(), NativeDurabilityError> {
+    if self.is_target() && matches!(self.failure, FirstAuthorityFailurePoint::Verify) {
+      return Err(Self::injected(NativeDurabilityOperation::ReadBack));
+    }
+    verify_file_bytes_native(file, 0, expected)
   }
 }
 
@@ -496,6 +559,48 @@ struct ExactRootRetirementAuthorityVerifierV1 {
   target_is_authoritative: bool,
 }
 
+struct BlockingRootRetirementAuthorityVerifierV1 {
+  entered: Arc<Barrier>,
+  release: Arc<Barrier>,
+  expected_root_hash: Vec<u8>,
+  expected_authority_root_set_digest: Vec<u8>,
+}
+
+struct CleanupFailingRootRetirementAuthorityVerifierV1 {
+  pin_coordinator: RootReadPinCoordinatorV1,
+  expected_authority_root_set_digest: Vec<u8>,
+}
+
+impl RootRetirementAuthorityVerifierV1 for CleanupFailingRootRetirementAuthorityVerifierV1 {
+  fn recheck_authority_roots(
+    &mut self,
+    request: RootRetirementAuthorityRecheckRequestV1<'_>,
+  ) -> Result<RootRetirementAuthoritySnapshotV1, RootRetirementAuthorityRecheckErrorV1> {
+    assert_eq!(request.expected_authority_root_set_digest, self.expected_authority_root_set_digest);
+    self.pin_coordinator.fail_next_cleanup_for_test();
+    Ok(RootRetirementAuthoritySnapshotV1 {
+      target_is_authoritative: false,
+      authority_root_set_digest: self.expected_authority_root_set_digest.clone(),
+    })
+  }
+}
+
+impl RootRetirementAuthorityVerifierV1 for BlockingRootRetirementAuthorityVerifierV1 {
+  fn recheck_authority_roots(
+    &mut self,
+    request: RootRetirementAuthorityRecheckRequestV1<'_>,
+  ) -> Result<RootRetirementAuthoritySnapshotV1, RootRetirementAuthorityRecheckErrorV1> {
+    assert_eq!(request.namespace_root_hash, self.expected_root_hash);
+    assert_eq!(request.expected_authority_root_set_digest, self.expected_authority_root_set_digest);
+    self.entered.wait();
+    self.release.wait();
+    Ok(RootRetirementAuthoritySnapshotV1 {
+      target_is_authoritative: false,
+      authority_root_set_digest: self.expected_authority_root_set_digest.clone(),
+    })
+  }
+}
+
 impl RootRetirementAuthorityVerifierV1 for ExactRootRetirementAuthorityVerifierV1 {
   fn recheck_authority_roots(
     &mut self,
@@ -794,6 +899,19 @@ fn selected_root_lifecycle_manifest_key(publisher: &V4FirstAuthorityPublisher) -
   let observation = publisher.observe().unwrap();
   let kv = publisher.kv.lock().unwrap();
   select_root_lifecycle_control(&publisher.file, &kv, &observation.selected.header).unwrap().target_manifest_hash
+}
+
+fn corrupt_last_entity_byte(publisher: &V4FirstAuthorityPublisher, key: &[u8]) {
+  let locator = publisher.locator(key).unwrap().expect("corruption target must be durably published");
+  let offset = locator.offset + u64::from(locator.total_length) - 1;
+  let mut file = publisher.file.try_clone().unwrap();
+  file.seek(SeekFrom::Start(offset)).unwrap();
+  let mut byte = [0u8; 1];
+  file.read_exact(&mut byte).unwrap();
+  byte[0] ^= 0x80;
+  file.seek(SeekFrom::Start(offset)).unwrap();
+  file.write_all(&byte).unwrap();
+  file.sync_all().unwrap();
 }
 
 struct PreparedMarkCheckpointV1 {
@@ -1387,7 +1505,162 @@ fn guarded_root_retirement_refuses_when_selected_prior_lifecycle_advances() {
 
 #[test]
 fn root_retirement_failure_before_selector_keeps_prior_lifecycle_selected_across_restart() {
-  let (_directory, path, coordinator, mut publisher) = create_environment("root-retirement-before-selector", None);
+  for phase in [DependencyFailurePhase::BeforeEntity, DependencyFailurePhase::EntityWritten, DependencyFailurePhase::EntityStaged] {
+    let (_directory, path, coordinator, mut publisher) = create_environment(&format!("root-retirement-before-selector-{phase:?}"), None);
+    let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+    let cancellation = CancellationToken::new();
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      [0x31; 16],
+      1,
+      401,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let prepared = prepare_guarded_root_retirement(&mut publisher, &mut retirement_owner, &cancellation, &memory, true);
+    let old_control_locator = publisher.locator(&prepared.lifecycle_control.key).unwrap().unwrap();
+    let mut authority_verifier = ExactRootRetirementAuthorityVerifierV1 {
+      called: false,
+      expected_root_hash: prepared.target_root_hash.clone(),
+      expected_authority_root_set_digest: prepared.intent.authority_root_set_digest.clone(),
+      returned_authority_root_set_digest: None,
+      target_is_authoritative: false,
+    };
+    let mut observer = FailingDependencyObserver { phase, entity_index: 0 };
+
+    let error = publisher
+      .publish_root_retirement_with_control_observer(
+        prepared.request(&cancellation),
+        &mut authority_verifier,
+        &mut retirement_owner,
+        &mut observer,
+      )
+      .unwrap_err();
+
+    assert_eq!(error.code(), "durability_failure", "phase {phase:?}");
+    assert!(error.committed_receipt().is_none(), "phase {phase:?}");
+    assert!(authority_verifier.called, "phase {phase:?}");
+    assert_eq!(selected_root_lifecycle_manifest_key(&publisher), prepared.prior_lifecycle_manifest_key, "phase {phase:?}");
+    assert_eq!(publisher.locator(&prepared.lifecycle_control.key).unwrap().unwrap(), old_control_locator, "phase {phase:?}");
+    assert!(publisher.locator(&prepared.retirement_commit.key).unwrap().is_some(), "phase {phase:?}");
+    assert!(publisher.locator(&prepared.expiry_manifest.key).unwrap().is_some(), "phase {phase:?}");
+    assert!(publisher.locator(&prepared.lifecycle_manifest.key).unwrap().is_some(), "phase {phase:?}");
+    assert_eq!(retirement_owner.status().pending_records, 0, "phase {phase:?}");
+    assert_eq!(retirement_owner.status().durable_records, 0, "phase {phase:?}");
+    assert!(coordinator.hard_failure().unwrap().is_some(), "phase {phase:?}");
+    drop(retirement_owner);
+    drop(publisher);
+
+    let (_restart_coordinator, mut reopened) = reopen(&path);
+    assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.prior_lifecycle_manifest_key, "phase {phase:?}");
+    let retry_cancellation = CancellationToken::new();
+    let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      [0x31; 16],
+      1,
+      401,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      &retry_cancellation,
+      &memory,
+    )
+    .unwrap();
+    authority_verifier.called = false;
+    let retry = reopened.publish_root_retirement(prepared.request(&retry_cancellation), &mut authority_verifier, &mut retry_owner).unwrap();
+    assert!(authority_verifier.called, "phase {phase:?}");
+    assert!(!retry.idempotent, "phase {phase:?}");
+    assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.lifecycle_manifest.key, "phase {phase:?}");
+    assert!(matches!(retry.lineage_state, RootRetirementLineageStateV1::HardPublished { .. }), "phase {phase:?}");
+  }
+}
+
+#[test]
+fn every_final_selector_header_failure_restarts_as_exactly_pending_or_retired_and_retains_uncertain_lineage() {
+  let failures = [
+    FirstAuthorityFailurePoint::DataBarrier,
+    FirstAuthorityFailurePoint::HeaderWriteBefore,
+    FirstAuthorityFailurePoint::HeaderWriteAfter,
+    FirstAuthorityFailurePoint::FullBarrier,
+    FirstAuthorityFailurePoint::Verify,
+  ];
+  for failure in failures {
+    let (_directory, path, coordinator, mut publisher) = create_environment(&format!("root-retirement-selector-{failure:?}"), None);
+    let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+    let cancellation = CancellationToken::new();
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      [0x31; 16],
+      1,
+      401,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let prepared = prepare_guarded_root_retirement(&mut publisher, &mut retirement_owner, &cancellation, &memory, true);
+    publisher = V4FirstAuthorityPublisher {
+      file: publisher.file,
+      kv: publisher.kv,
+      header_publisher: DatabaseHeaderPublisherV4::with_io(coordinator.clone(), Arc::new(NthHeaderPublicationFaultIo::new(failure, 5))),
+      root_state: publisher.root_state,
+    };
+    let mut authority_verifier = ExactRootRetirementAuthorityVerifierV1 {
+      called: false,
+      expected_root_hash: prepared.target_root_hash.clone(),
+      expected_authority_root_set_digest: prepared.intent.authority_root_set_digest.clone(),
+      returned_authority_root_set_digest: None,
+      target_is_authoritative: false,
+    };
+
+    let error =
+      publisher.publish_root_retirement(prepared.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap_err();
+
+    assert!(authority_verifier.called, "failure {failure:?}");
+    assert!(coordinator.hard_failure().unwrap().is_some(), "failure {failure:?}");
+    let selector_may_have_committed = matches!(
+      failure,
+      FirstAuthorityFailurePoint::HeaderWriteAfter | FirstAuthorityFailurePoint::FullBarrier | FirstAuthorityFailurePoint::Verify
+    );
+    if selector_may_have_committed {
+      let receipt = error.committed_receipt().expect("a selected uncertain lifecycle control needs an exact committed receipt");
+      assert_eq!(receipt.lifecycle_manifest_key, prepared.lifecycle_manifest.key, "failure {failure:?}");
+      assert!(matches!(receipt.lineage_state, RootRetirementLineageStateV1::BufferedAfterFlushFailure { .. }), "failure {failure:?}");
+      assert_eq!(retirement_owner.status().pending_records, 1, "failure {failure:?}");
+    } else {
+      assert!(error.committed_receipt().is_none(), "failure {failure:?}");
+      assert_eq!(retirement_owner.status().pending_records, 0, "failure {failure:?}");
+    }
+    drop(retirement_owner);
+    drop(publisher);
+
+    let (_restart_coordinator, mut reopened) = reopen(&path);
+    let selected_manifest = selected_root_lifecycle_manifest_key(&reopened);
+    let expected_manifest =
+      if selector_may_have_committed { &prepared.lifecycle_manifest.key } else { &prepared.prior_lifecycle_manifest_key };
+    assert_eq!(&selected_manifest, expected_manifest, "failure {failure:?}");
+    let retry_cancellation = CancellationToken::new();
+    let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      [0x31; 16],
+      1,
+      401,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      &retry_cancellation,
+      &memory,
+    )
+    .unwrap();
+    authority_verifier.called = false;
+    let retry = reopened.publish_root_retirement(prepared.request(&retry_cancellation), &mut authority_verifier, &mut retry_owner).unwrap();
+    assert_eq!(retry.idempotent, selector_may_have_committed, "failure {failure:?}");
+    assert_eq!(authority_verifier.called, !selector_may_have_committed, "failure {failure:?}");
+    assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.lifecycle_manifest.key, "failure {failure:?}");
+  }
+}
+
+#[test]
+fn racing_read_pin_cannot_enter_until_retirement_selects_the_new_lifecycle() {
+  let (_directory, _path, _coordinator, mut publisher) = create_environment("root-retirement-racing-pin", None);
   let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
   let cancellation = CancellationToken::new();
   let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
@@ -1401,7 +1674,68 @@ fn root_retirement_failure_before_selector_keeps_prior_lifecycle_selected_across
   )
   .unwrap();
   let prepared = prepare_guarded_root_retirement(&mut publisher, &mut retirement_owner, &cancellation, &memory, true);
-  let old_control_locator = publisher.locator(&prepared.lifecycle_control.key).unwrap().unwrap();
+  let verifier_entered = Arc::new(Barrier::new(2));
+  let verifier_release = Arc::new(Barrier::new(2));
+  let mut authority_verifier = BlockingRootRetirementAuthorityVerifierV1 {
+    entered: verifier_entered.clone(),
+    release: verifier_release.clone(),
+    expected_root_hash: prepared.target_root_hash.clone(),
+    expected_authority_root_set_digest: prepared.intent.authority_root_set_digest.clone(),
+  };
+  let pin_started = Arc::new(Barrier::new(2));
+  let (lifecycle_callback_sender, lifecycle_callback_receiver) = mpsc::channel();
+
+  std::thread::scope(|scope| {
+    let retirement =
+      scope.spawn(|| publisher.publish_root_retirement(prepared.request(&cancellation), &mut authority_verifier, &mut retirement_owner));
+    verifier_entered.wait();
+
+    let pin_coordinator = prepared.pin_coordinator.clone();
+    let pin_root = prepared.target_root_hash.clone();
+    let pin_started_thread = pin_started.clone();
+    let pin_cancellation = CancellationToken::new();
+    let pin = scope.spawn(move || {
+      pin_started_thread.wait();
+      pin_coordinator.admit_read(&pin_root, &pin_cancellation, || {
+        lifecycle_callback_sender.send(()).unwrap();
+        Ok(RootLifecycleObservationV1::LogicallyRetired)
+      })
+    });
+    pin_started.wait();
+    assert!(
+      matches!(lifecycle_callback_receiver.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)),
+      "a new read reached lifecycle admission while retirement held the root exclusion"
+    );
+
+    verifier_release.wait();
+    let retirement_receipt = retirement.join().unwrap().unwrap();
+    lifecycle_callback_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+    let pin_error = pin.join().unwrap().unwrap_err();
+    assert_eq!(pin_error.code(), "root_expired");
+    assert_eq!(retirement_receipt.lifecycle_manifest_key, prepared.lifecycle_manifest.key);
+  });
+
+  assert_eq!(selected_root_lifecycle_manifest_key(&publisher), prepared.lifecycle_manifest.key);
+  assert_eq!(prepared.pin_coordinator.active_pin_count().unwrap(), 0);
+  assert_eq!(prepared.pin_coordinator.tracked_root_count().unwrap(), 0);
+}
+
+#[test]
+fn post_selector_lineage_failure_returns_the_exact_committed_retirement_receipt() {
+  let (_directory, path, _coordinator, mut publisher) = create_environment("root-retirement-buffered-lineage", None);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let prepared = prepare_guarded_root_retirement(&mut publisher, &mut retirement_owner, &cancellation, &memory, true);
   let mut authority_verifier = ExactRootRetirementAuthorityVerifierV1 {
     called: false,
     expected_root_hash: prepared.target_root_hash.clone(),
@@ -1409,7 +1743,7 @@ fn root_retirement_failure_before_selector_keeps_prior_lifecycle_selected_across
     returned_authority_root_set_digest: None,
     target_is_authoritative: false,
   };
-  let mut observer = FailingDependencyObserver { phase: DependencyFailurePhase::BeforeEntity, entity_index: 0 };
+  let mut observer = CancelRetirementAfterCommitObserver { cancellation: cancellation.clone() };
 
   let error = publisher
     .publish_root_retirement_with_control_observer(
@@ -1420,22 +1754,21 @@ fn root_retirement_failure_before_selector_keeps_prior_lifecycle_selected_across
     )
     .unwrap_err();
 
-  assert_eq!(error.code(), "durability_failure");
-  assert!(error.committed_receipt().is_none());
+  assert_eq!(error.code(), "root_retirement_committed_lineage");
+  let receipt = error.committed_receipt().expect("selected lifecycle authority requires a committed receipt");
+  assert_eq!(receipt.lifecycle_manifest_key, prepared.lifecycle_manifest.key);
+  assert!(matches!(
+    receipt.lineage_state,
+    RootRetirementLineageStateV1::BufferedAfterFlushFailure { code: "retirement_journal_cancelled", .. }
+  ));
   assert!(authority_verifier.called);
-  assert_eq!(selected_root_lifecycle_manifest_key(&publisher), prepared.prior_lifecycle_manifest_key);
-  assert_eq!(publisher.locator(&prepared.lifecycle_control.key).unwrap().unwrap(), old_control_locator);
-  assert!(publisher.locator(&prepared.retirement_commit.key).unwrap().is_some());
-  assert!(publisher.locator(&prepared.expiry_manifest.key).unwrap().is_some());
-  assert!(publisher.locator(&prepared.lifecycle_manifest.key).unwrap().is_some());
-  assert_eq!(retirement_owner.status().pending_records, 0);
-  assert_eq!(retirement_owner.status().durable_records, 0);
-  assert!(coordinator.hard_failure().unwrap().is_some());
+  assert_eq!(retirement_owner.status().pending_records, 1);
+  assert_eq!(selected_root_lifecycle_manifest_key(&publisher), prepared.lifecycle_manifest.key);
   drop(retirement_owner);
   drop(publisher);
 
   let (_restart_coordinator, mut reopened) = reopen(&path);
-  assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.prior_lifecycle_manifest_key);
+  assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.lifecycle_manifest.key);
   let retry_cancellation = CancellationToken::new();
   let mut retry_owner = RetirementJournalOwnerV1::new_chain(
     HashAlgorithm::Blake3_256,
@@ -1449,10 +1782,133 @@ fn root_retirement_failure_before_selector_keeps_prior_lifecycle_selected_across
   .unwrap();
   authority_verifier.called = false;
   let retry = reopened.publish_root_retirement(prepared.request(&retry_cancellation), &mut authority_verifier, &mut retry_owner).unwrap();
-  assert!(authority_verifier.called);
-  assert!(!retry.idempotent);
+  assert!(retry.idempotent);
+  assert!(!authority_verifier.called);
+}
+
+#[test]
+fn post_selector_pin_cleanup_failure_returns_the_exact_committed_retirement_receipt() {
+  let (_directory, path, _coordinator, mut publisher) = create_environment("root-retirement-pin-cleanup", None);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let prepared = prepare_guarded_root_retirement(&mut publisher, &mut retirement_owner, &cancellation, &memory, true);
+  let mut authority_verifier = CleanupFailingRootRetirementAuthorityVerifierV1 {
+    pin_coordinator: prepared.pin_coordinator.clone(),
+    expected_authority_root_set_digest: prepared.intent.authority_root_set_digest.clone(),
+  };
+
+  let error =
+    publisher.publish_root_retirement(prepared.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap_err();
+
+  assert_eq!(error.code(), "root_retirement_committed_pin_cleanup");
+  let receipt = error.committed_receipt().expect("pin cleanup failure happened after lifecycle selection");
+  assert_eq!(receipt.lifecycle_manifest_key, prepared.lifecycle_manifest.key);
+  assert!(matches!(receipt.lineage_state, RootRetirementLineageStateV1::HardPublished { .. }));
+  assert_eq!(selected_root_lifecycle_manifest_key(&publisher), prepared.lifecycle_manifest.key);
+  drop(retirement_owner);
+  drop(publisher);
+
+  let (_restart_coordinator, reopened) = reopen(&path);
   assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.lifecycle_manifest.key);
-  assert!(matches!(retry.lineage_state, RootRetirementLineageStateV1::HardPublished { .. }));
+}
+
+#[test]
+fn selector_uncertainty_and_pin_cleanup_failure_preserve_the_receipt_and_both_diagnostics() {
+  let (_directory, path, coordinator, mut publisher) = create_environment("root-retirement-selector-and-pin-cleanup", None);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let prepared = prepare_guarded_root_retirement(&mut publisher, &mut retirement_owner, &cancellation, &memory, true);
+  publisher = V4FirstAuthorityPublisher {
+    file: publisher.file,
+    kv: publisher.kv,
+    header_publisher: DatabaseHeaderPublisherV4::with_io(
+      coordinator,
+      Arc::new(NthHeaderPublicationFaultIo::new(FirstAuthorityFailurePoint::Verify, 5)),
+    ),
+    root_state: publisher.root_state,
+  };
+  let mut authority_verifier = CleanupFailingRootRetirementAuthorityVerifierV1 {
+    pin_coordinator: prepared.pin_coordinator.clone(),
+    expected_authority_root_set_digest: prepared.intent.authority_root_set_digest.clone(),
+  };
+
+  let error =
+    publisher.publish_root_retirement(prepared.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap_err();
+
+  assert_eq!(error.code(), "gc_control_committed_authority_uncertain");
+  let receipt = error.committed_receipt().expect("combined post-selector failures must preserve the committed retirement receipt");
+  assert_eq!(receipt.lifecycle_manifest_key, prepared.lifecycle_manifest.key);
+  assert!(matches!(receipt.lineage_state, RootRetirementLineageStateV1::BufferedAfterFlushFailure { .. }));
+  assert!(error.to_string().contains("releasing the root retirement exclusion also failed"));
+  drop(retirement_owner);
+  drop(publisher);
+
+  let (_restart_coordinator, reopened) = reopen(&path);
+  assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.lifecycle_manifest.key);
+}
+
+#[test]
+fn corrupt_prior_control_manifest_or_support_locator_cannot_advance_logical_retirement() {
+  for case in ["control", "manifest", "support"] {
+    let (_directory, _path, _coordinator, mut publisher) = create_environment(&format!("root-retirement-corrupt-{case}"), None);
+    let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+    let cancellation = CancellationToken::new();
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      [0x31; 16],
+      1,
+      401,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let prepared = prepare_guarded_root_retirement(&mut publisher, &mut retirement_owner, &cancellation, &memory, true);
+    let corrupt_key = match case {
+      "control" => gc_active_control_key(HashAlgorithm::Blake3_256, GcArtifactKindV1::RootLifecycleActiveControl, &[0x31; 16], 1).unwrap(),
+      "manifest" => prepared.prior_lifecycle_manifest_key.clone(),
+      "support" => prepared.support_closure.expiry_directory_hash().unwrap().to_vec(),
+      _ => unreachable!(),
+    };
+    corrupt_last_entity_byte(&publisher, &corrupt_key);
+    let mut authority_verifier = ExactRootRetirementAuthorityVerifierV1 {
+      called: false,
+      expected_root_hash: prepared.target_root_hash.clone(),
+      expected_authority_root_set_digest: prepared.intent.authority_root_set_digest.clone(),
+      returned_authority_root_set_digest: None,
+      target_is_authoritative: false,
+    };
+
+    let error =
+      publisher.publish_root_retirement(prepared.request(&cancellation), &mut authority_verifier, &mut retirement_owner).unwrap_err();
+
+    assert!(error.committed_receipt().is_none(), "case {case}");
+    assert!(!authority_verifier.called, "case {case}");
+    assert!(publisher.locator(&prepared.retirement_commit.key).unwrap().is_none(), "case {case}");
+    assert!(publisher.locator(&prepared.expiry_manifest.key).unwrap().is_none(), "case {case}");
+    assert!(publisher.locator(&prepared.lifecycle_manifest.key).unwrap().is_none(), "case {case}");
+    assert_eq!(retirement_owner.status().pending_records, 0, "case {case}");
+  }
 }
 
 #[test]

@@ -153,6 +153,10 @@ impl AdmittedDatabaseHeaderPublicationV4<'_> {
     self.ticket.sequence()
   }
 
+  pub(crate) fn expected_observation(&self) -> DatabaseHeaderObservationV4 {
+    DatabaseHeaderObservationV4 { region: self.expected_region, selected: self.expected_selected.clone() }
+  }
+
   pub(crate) fn commit(self) -> Result<DatabaseHeaderPublicationReceiptV4, DatabaseHeaderPublicationErrorV4> {
     let mut dependency = NoopHeaderPublicationDependencyV4;
     self.commit_with_dependency(&mut dependency)
