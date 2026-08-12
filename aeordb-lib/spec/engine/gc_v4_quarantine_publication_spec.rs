@@ -1,13 +1,21 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use aeordb::engine::durability_coordinator::DurabilityCoordinator;
+use aeordb::engine::kv_stages::initial_block_size;
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
-use aeordb::engine::v4::gc::PhysicalIncarnationV1;
+use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
+use aeordb::engine::v4::first_authority::{
+  FirstAuthorityPublicationRequestV1, PhysicalQuarantineSupportPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher,
+};
+use aeordb::engine::v4::gc::{EncodedImmutableGcArtifactV1, PhysicalIncarnationV1};
 use aeordb::engine::v4::gc_quarantine::{
-  CandidateDeltaRecordWriteV1, CandidateDeltaWriteV1, PhysicalQuarantineCandidateClassV1, QuarantineClosureLimitsV1,
-  QuarantineClosureValidatorV1, QuarantineManifestWriteV1, decode_quarantine_manifest_v1, encode_candidate_delta_v1,
-  encode_quarantine_manifest_v1,
+  CandidateDeltaOperationV1, CandidateDeltaRecordWriteV1, CandidateDeltaWriteV1, PhysicalQuarantineCandidateClassV1,
+  PhysicalQuarantineCandidateWriteV1, QuarantineClosureLimitsV1, QuarantineClosureValidatorV1, QuarantineManifestWriteV1,
+  decode_quarantine_manifest_v1, encode_candidate_delta_v1, encode_physical_quarantine_candidate_v1, encode_quarantine_manifest_v1,
 };
 use aeordb::engine::v4::gc_quarantine_publication::{
   PhysicalQuarantinePublicationQualificationRequestV1, qualify_physical_quarantine_publication_v1,
@@ -16,7 +24,12 @@ use aeordb::engine::v4::gc_quarantine_transition::{
   PhysicalQuarantineObservationV1, PhysicalQuarantineReachabilityV1, PhysicalQuarantineTransitionContextV1,
   PhysicalQuarantineTransitionModelV1, PhysicalQuarantineTransitionV1,
 };
-use aeordb::engine::v4::gc_state::{GcStateArtifactV1, GcStateManifestV1, decode_gc_state_artifact};
+use aeordb::engine::v4::gc_state::{
+  GcDirectoryRoleV1, GcStateArtifactV1, GcStateManifestV1, GcStatePageWriteV1, decode_gc_state_artifact, encode_gc_state_page_v1,
+};
+use aeordb::engine::v4::hash::digest_parts;
+use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
+use aeordb::engine::DiskKVStore;
 use tokio_util::sync::CancellationToken;
 
 const DATABASE_ID: [u8; 16] = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40];
@@ -47,6 +60,86 @@ fn capabilities() -> [u8; 32] {
 
 fn memory_coordinator() -> MemoryCoordinator {
   MemoryCoordinator::new(MemoryPolicy::new(16 * 1024 * 1024, 32 * 1024 * 1024, 1, 1024 * 1024).unwrap())
+}
+
+fn initial_header(algorithm: HashAlgorithm, kv_block_length: u64) -> DatabaseHeaderV4 {
+  DatabaseHeaderV4 {
+    hash_algorithm: algorithm,
+    slot_sequence: 1,
+    created_at_ms: 1_700_000_000_000,
+    updated_at_ms: 1_700_000_000_000,
+    database_id: DATABASE_ID,
+    write_sequence_high_water: 1,
+    required_reader_capabilities: [0; 32],
+    kv_block_offset: DATABASE_HEADER_V4_DATA_OFFSET,
+    kv_block_length,
+    kv_block_version: DiskKVStore::CURRENT_KV_BLOCK_VERSION,
+    kv_block_stage: 0,
+    resize_in_progress: false,
+    resize_target_stage: 0,
+    nvt_offset: DATABASE_HEADER_V4_DATA_OFFSET + kv_block_length,
+    nvt_length: 0,
+    nvt_version: 1,
+    backup_type: 0,
+    hot_tail_offset: DATABASE_HEADER_V4_DATA_OFFSET + kv_block_length,
+    buffer_kvs_offset: 0,
+    buffer_nvt_offset: 0,
+    entry_count: 0,
+    head_hash: vec![0; algorithm.hash_length()],
+    base_hash: vec![0; algorithm.hash_length()],
+    target_hash: vec![0; algorithm.hash_length()],
+    required_writer_capabilities: [0; 32],
+    system_family_registry_version: 1,
+    system_family_registry_fingerprint: vec![0x41; algorithm.hash_length()],
+    writer_fence_epoch: 1,
+    physical_instance_id: [0x51; 16],
+  }
+}
+
+fn publisher() -> (tempfile::TempDir, V4FirstAuthorityPublisher) {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("quarantine-publication.aeordb");
+  let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(path).unwrap();
+  let algorithm = HashAlgorithm::Blake3_256;
+  let kv_block_length = initial_block_size() as u64;
+  let header = initial_header(algorithm, kv_block_length);
+  let slot = encode_database_header_slot(&header).unwrap();
+  file.seek(SeekFrom::Start(0)).unwrap();
+  file.write_all(&slot).unwrap();
+  file.write_all(&slot).unwrap();
+  let coordinator = Arc::new(DurabilityCoordinator::new());
+  let kv = DiskKVStore::create_with_coordinator(
+    file.try_clone().unwrap(),
+    algorithm,
+    header.kv_block_offset,
+    header.hot_tail_offset,
+    0,
+    coordinator.clone(),
+  )
+  .unwrap();
+  file.sync_all().unwrap();
+  (directory, V4FirstAuthorityPublisher::new(kv, coordinator).unwrap())
+}
+
+fn first_authority_request() -> FirstAuthorityPublicationRequestV1 {
+  let algorithm = HashAlgorithm::Blake3_256;
+  FirstAuthorityPublicationRequestV1 {
+    database_id: DATABASE_ID,
+    transaction_id: [0x61; 16],
+    created_at_ms: 1_700_000_000_100,
+    namespace_tree: PreparedNamespaceTreeV0 { root_hash: digest_parts(algorithm, &[b"dirc:"]), stored_value: Vec::new() },
+    semantic_state: encode_semantic_state_object(
+      &SemanticStateWriteV1 {
+        required_capabilities: [0; 32],
+        availability: SemanticAvailabilityV1::ContentOnly { reason: SemanticUnavailableReasonV1::LegacyGlobalStateNotCaptured },
+      },
+      algorithm,
+    )
+    .unwrap(),
+    required_capabilities: [0; 32],
+    typed_closure_digest: digest_parts(algorithm, &[b"typed test closure"]),
+    authority_identity: b"HEAD".to_vec(),
+  }
 }
 
 fn lifecycle_bytes(algorithm: HashAlgorithm) -> Vec<u8> {
@@ -331,4 +424,111 @@ fn omitted_delta_aggregate_drift_and_cancellation_fail_closed() {
     .code(),
     "quarantine_publication_canceled",
   );
+}
+
+#[test]
+fn support_publication_accepts_only_quarantine_pages_directories_and_deltas_without_selecting_authority() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, publisher) = publisher();
+  publisher.publish(&first_authority_request()).unwrap();
+  let before = publisher.observe().unwrap();
+  let logical_key = digest_parts(algorithm, &[b"physical candidate logical key"]);
+  let integrity = digest_parts(algorithm, &[b"physical candidate integrity"]);
+  let candidate = PhysicalQuarantineCandidateWriteV1 {
+    hash_algorithm: algorithm,
+    incarnation: PhysicalIncarnationV1 {
+      logical_key: &logical_key,
+      integrity_or_legacy_digest: &integrity,
+      wal_offset: 4_096,
+      write_sequence: 7,
+      entity_length: 512,
+      entry_type: 1,
+      entity_version: 1,
+    },
+    class: PhysicalQuarantineCandidateClassV1::RetiredLowerIncarnation,
+    pending_since_ms: 1_700_000_000_000,
+    first_unreachable_generation: 5,
+    grace_at_pending_ms: 86_400_000,
+  };
+  let row = encode_physical_quarantine_candidate_v1(&candidate).unwrap();
+  let page = encode_gc_state_page_v1(&GcStatePageWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::Candidates,
+    database_id: &DATABASE_ID,
+    catalog_id: &[0x71; 16],
+    generation: 6,
+    page_id: 1,
+    records: &[&row],
+  })
+  .unwrap();
+  let delta_record = CandidateDeltaRecordWriteV1 { operation: CandidateDeltaOperationV1::Set, candidate };
+  let delta = encode_candidate_delta_v1(&CandidateDeltaWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: DATABASE_ID,
+    mark_generation: 6,
+    delta_ordinal: 1,
+    previous_delta_hash: None,
+    records: &[delta_record],
+  })
+  .unwrap();
+  let directory_bytes = fs::read(fixture_root().join("agca-blake3-256-candidates-directory-valid.bin")).unwrap();
+  let directory_key = decode_gc_state_artifact(&directory_bytes, algorithm).unwrap().key().to_vec();
+  let candidate_directory = EncodedImmutableGcArtifactV1 { key: directory_key, value: directory_bytes };
+
+  for artifact in [&page, &candidate_directory, &delta] {
+    let first = publisher
+      .publish_physical_quarantine_support_artifact(PhysicalQuarantineSupportPublicationRequestV1 {
+        database_id: &DATABASE_ID,
+        artifact,
+        publication_timestamp_ms: 1_700_000_100_000,
+      })
+      .unwrap();
+    let retry = publisher
+      .publish_physical_quarantine_support_artifact(PhysicalQuarantineSupportPublicationRequestV1 {
+        database_id: &DATABASE_ID,
+        artifact,
+        publication_timestamp_ms: 1_700_000_100_000,
+      })
+      .unwrap();
+    assert_eq!(first, retry);
+    assert_eq!(first.artifact_key, artifact.key);
+    assert!(publisher.locator(&artifact.key).unwrap().is_some());
+  }
+  assert_eq!(publisher.observe().unwrap().selected.header.head_hash, before.selected.header.head_hash);
+
+  let wrong_database_id = [0x99; 16];
+  let error = publisher
+    .publish_physical_quarantine_support_artifact(PhysicalQuarantineSupportPublicationRequestV1 {
+      database_id: &wrong_database_id,
+      artifact: &page,
+      publication_timestamp_ms: 1_700_000_100_001,
+    })
+    .unwrap_err();
+  assert_eq!(error.code(), "quarantine_support_identity");
+
+  let lifecycle_bytes = lifecycle_bytes(algorithm);
+  let lifecycle = lifecycle_manifest(&lifecycle_bytes, algorithm);
+  let lifecycle_artifact = EncodedImmutableGcArtifactV1 { key: lifecycle.key.clone(), value: lifecycle_bytes };
+  let error = publisher
+    .publish_physical_quarantine_support_artifact(PhysicalQuarantineSupportPublicationRequestV1 {
+      database_id: &DATABASE_ID,
+      artifact: &lifecycle_artifact,
+      publication_timestamp_ms: 1_700_000_100_001,
+    })
+    .unwrap_err();
+  assert_eq!(error.code(), "quarantine_support_kind");
+  assert!(publisher.locator(&lifecycle_artifact.key).unwrap().is_none());
+
+  let root_page_bytes = fs::read(fixture_root().join("agca-blake3-256-root-candidate-page-valid.bin")).unwrap();
+  let root_page_key = decode_gc_state_artifact(&root_page_bytes, algorithm).unwrap().key().to_vec();
+  let root_page = EncodedImmutableGcArtifactV1 { key: root_page_key, value: root_page_bytes };
+  let error = publisher
+    .publish_physical_quarantine_support_artifact(PhysicalQuarantineSupportPublicationRequestV1 {
+      database_id: &DATABASE_ID,
+      artifact: &root_page,
+      publication_timestamp_ms: 1_700_000_100_002,
+    })
+    .unwrap_err();
+  assert_eq!(error.code(), "quarantine_support_kind");
+  assert!(publisher.locator(&root_page.key).unwrap().is_none());
 }

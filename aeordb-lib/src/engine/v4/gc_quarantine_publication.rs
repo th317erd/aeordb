@@ -36,6 +36,7 @@ pub struct PhysicalQuarantinePublicationPermitV1 {
   resulting_candidate_count: u64,
   resulting_candidate_bytes: u64,
   eligible_count: u64,
+  support_closure: QuarantineClosureSummaryV1,
 }
 
 impl PhysicalQuarantinePublicationPermitV1 {
@@ -73,6 +74,10 @@ impl PhysicalQuarantinePublicationPermitV1 {
 
   pub fn eligible_count(&self) -> u64 {
     self.eligible_count
+  }
+
+  pub fn support_closure(&self) -> &QuarantineClosureSummaryV1 {
+    &self.support_closure
   }
 }
 
@@ -138,6 +143,7 @@ pub fn qualify_physical_quarantine_publication_v1(
     resulting_candidate_count: summary.resulting_candidate_count,
     resulting_candidate_bytes: summary.resulting_candidate_bytes,
     eligible_count: summary.eligible_count,
+    support_closure: request.support_closure.clone(),
   })
 }
 

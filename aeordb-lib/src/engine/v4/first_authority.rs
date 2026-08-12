@@ -51,6 +51,7 @@ use super::gc_mark_convergence::{
   PreparedMarkMutationJournalSegmentV1,
 };
 use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceErrorV1, MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1};
+use super::gc_quarantine::decode_candidate_delta_v1;
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
   decode_root_retirement_commit_v1, validate_root_lifecycle_expiry_manifest,
@@ -155,6 +156,20 @@ pub struct RootLifecycleSupportPublicationRequestV1<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootLifecycleSupportPublicationReceiptV1 {
+  pub artifact_key: Vec<u8>,
+  pub artifact_kind: GcArtifactKindV1,
+  pub hard_publication_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PhysicalQuarantineSupportPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub artifact: &'a EncodedImmutableGcArtifactV1,
+  pub publication_timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhysicalQuarantineSupportPublicationReceiptV1 {
   pub artifact_key: Vec<u8>,
   pub artifact_kind: GcArtifactKindV1,
   pub hard_publication_sequence: u64,
@@ -2602,6 +2617,62 @@ impl V4FirstAuthorityPublisher {
       ));
     }
     Ok(())
+  }
+
+  /// Hard-publish one immutable page, directory, or delta used by a future
+  /// physical-quarantine manifest. This method never selects quarantine
+  /// authority.
+  pub fn publish_physical_quarantine_support_artifact(
+    &self,
+    request: PhysicalQuarantineSupportPublicationRequestV1<'_>,
+  ) -> Result<PhysicalQuarantineSupportPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    let observation = self.observe()?;
+    let algorithm = observation.selected.header.hash_algorithm;
+    let decoded = decode_gc_state_artifact(&request.artifact.value, algorithm)?;
+    let (kind, database_id) = match &decoded {
+      GcStateArtifactV1::Page(page) if page.role == GcDirectoryRoleV1::Candidates => (GcArtifactKindV1::CandidatePage, page.database_id),
+      GcStateArtifactV1::Directory(directory) if directory.role == GcDirectoryRoleV1::Candidates => {
+        (GcArtifactKindV1::GcArtifactDirectoryNode, directory.database_id)
+      }
+      GcStateArtifactV1::CandidateDelta { .. } => {
+        let delta = decode_candidate_delta_v1(&request.artifact.value, algorithm)?;
+        (GcArtifactKindV1::CandidateDelta, delta.database_id)
+      }
+      GcStateArtifactV1::Page(_)
+      | GcStateArtifactV1::Directory(_)
+      | GcStateArtifactV1::Manifest(_)
+      | GcStateArtifactV1::RootRetirementCommit { .. }
+      | GcStateArtifactV1::RootObjectReclaimProof { .. }
+      | GcStateArtifactV1::RetirementJournal { .. } => {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "quarantine_support_kind",
+          "physical-quarantine support publication accepts only candidate pages, candidate directories, and candidate deltas",
+        ));
+      }
+    };
+    if database_id != request.database_id || decoded.key() != request.artifact.key {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "quarantine_support_identity",
+        "physical-quarantine support artifact database or canonical key disagrees with its request",
+      ));
+    }
+
+    let hard_publication_sequence = self.publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind,
+        database_id: request.database_id,
+        artifact_key: &request.artifact.key,
+        value: &request.artifact.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "quarantine_support_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    Ok(PhysicalQuarantineSupportPublicationReceiptV1 {
+      artifact_key: request.artifact.key.clone(),
+      artifact_kind: kind,
+      hard_publication_sequence,
+    })
   }
 
   /// Hard-publish one immutable page or directory used by a future root-
