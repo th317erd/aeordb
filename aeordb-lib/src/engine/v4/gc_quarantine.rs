@@ -240,6 +240,7 @@ impl<'a> QuarantineManifestWriteV1<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuarantineClosureSummaryV1 {
+  pub support_artifact_count: u64,
   pub base_page_count: u64,
   pub base_record_count: u64,
   pub base_logical_bytes: u64,
@@ -467,6 +468,7 @@ impl<'a> QuarantineClosureValidatorV1<'a> {
       return Err(closure_error("quarantine_closure_totals", "quarantine observed delta count does not close against the manifest").into());
     }
     Ok(QuarantineClosureSummaryV1 {
+      support_artifact_count: self.support_artifact_count,
       base_page_count: self.base_page_count,
       base_record_count: self.base_record_count,
       base_logical_bytes: self.base_logical_bytes,

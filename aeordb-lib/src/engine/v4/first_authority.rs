@@ -52,6 +52,7 @@ use super::gc_mark_convergence::{
 };
 use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceErrorV1, MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1};
 use super::gc_quarantine::decode_candidate_delta_v1;
+use super::gc_quarantine_publication::PhysicalQuarantinePublicationPermitV1;
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
   decode_root_retirement_commit_v1, validate_root_lifecycle_expiry_manifest,
@@ -173,6 +174,210 @@ pub struct PhysicalQuarantineSupportPublicationReceiptV1 {
   pub artifact_key: Vec<u8>,
   pub artifact_kind: GcArtifactKindV1,
   pub hard_publication_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PhysicalQuarantineAuthorityRecheckRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: [u8; 16],
+  pub prior_manifest_hash: &'a [u8],
+  pub next_manifest_hash: &'a [u8],
+  pub mark_generation: u64,
+  pub expected_authority_root_set_digest: &'a [u8],
+  pub expected_semantic_state_digest: &'a [u8],
+  pub expected_kv_layout_fingerprint: &'a [u8],
+  pub expected_mark_result_digest: &'a [u8],
+  pub expected_root_lifecycle_manifest: &'a [u8],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhysicalQuarantineAuthoritySnapshotV1 {
+  pub selected_complete_mark_generation: u64,
+  pub authority_root_set_digest: Vec<u8>,
+  pub semantic_state_digest: Vec<u8>,
+  pub kv_layout_fingerprint: Vec<u8>,
+  pub mark_result_digest: Vec<u8>,
+  pub selected_root_lifecycle_manifest: Vec<u8>,
+  pub physical_inventory_and_lineage_complete: bool,
+  pub all_candidate_incarnations_exact_and_unreachable: bool,
+  pub task_and_audit_pins_absent: bool,
+}
+
+#[derive(Debug)]
+pub struct PhysicalQuarantineAuthorityRecheckErrorV1 {
+  code: String,
+  message: String,
+}
+
+impl PhysicalQuarantineAuthorityRecheckErrorV1 {
+  pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    Self { code: code.into(), message: message.into() }
+  }
+
+  pub fn code(&self) -> &str {
+    &self.code
+  }
+}
+
+impl Display for PhysicalQuarantineAuthorityRecheckErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}: {}", self.code, self.message)
+  }
+}
+
+impl Error for PhysicalQuarantineAuthorityRecheckErrorV1 {}
+
+pub trait PhysicalQuarantineAuthorityVerifierV1 {
+  /// Recheck complete-mark, physical-inventory, retirement-lineage,
+  /// lifecycle, locator, task, and audit authority while all request-pin
+  /// admission and first-authority publication are excluded. Implementations
+  /// must not reenter either coordinator from this callback.
+  fn recheck_physical_quarantine_authority(
+    &mut self,
+    request: PhysicalQuarantineAuthorityRecheckRequestV1<'_>,
+  ) -> Result<PhysicalQuarantineAuthoritySnapshotV1, PhysicalQuarantineAuthorityRecheckErrorV1>;
+}
+
+#[derive(Clone, Copy)]
+pub struct PhysicalQuarantinePublicationRequestV1<'a> {
+  pub permit: &'a PhysicalQuarantinePublicationPermitV1,
+  pub quarantine_manifest: &'a EncodedImmutableGcArtifactV1,
+  pub quarantine_control: &'a EncodedGcActiveControlV1,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+  pub cancellation: &'a CancellationToken,
+  pub pin_coordinator: &'a RootReadPinCoordinatorV1,
+}
+
+pub type PhysicalQuarantineLineageStateV1 = RootRetirementLineageStateV1;
+
+#[must_use = "a physical-quarantine receipt classifies the selector commit point and retained replacement lineage"]
+#[derive(Debug)]
+pub struct PhysicalQuarantinePublicationReceiptV1 {
+  pub quarantine_manifest_key: Vec<u8>,
+  pub quarantine_manifest_write_sequence: u64,
+  pub quarantine_control_key: Vec<u8>,
+  pub quarantine_control_write_sequence: u64,
+  pub quarantine_control_slot: u8,
+  pub lineage_state: PhysicalQuarantineLineageStateV1,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+#[derive(Debug)]
+pub enum PhysicalQuarantinePublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Committed { code: &'static str, message: String, receipt: Box<PhysicalQuarantinePublicationReceiptV1> },
+  Format(FormatError),
+  Authority(FirstAuthorityPublicationErrorV1),
+  Pin(RootPinCoordinatorErrorV1),
+  AuthorityRecheck(PhysicalQuarantineAuthorityRecheckErrorV1),
+  RetirementAdmission(RetirementJournalReplacementAdmissionErrorV1),
+  RetirementOwner(RetirementJournalOwnerErrorV1),
+}
+
+impl PhysicalQuarantinePublicationErrorV1 {
+  pub fn code(&self) -> &str {
+    match self {
+      Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
+      Self::Format(source) => source.code(),
+      Self::Authority(source) => source.code(),
+      Self::Pin(source) => source.code(),
+      Self::AuthorityRecheck(source) => source.code(),
+      Self::RetirementAdmission(source) => source.code(),
+      Self::RetirementOwner(source) => source.code(),
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+
+  fn committed(code: &'static str, message: impl Into<String>, receipt: PhysicalQuarantinePublicationReceiptV1) -> Self {
+    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
+  }
+
+  pub fn committed_receipt(&self) -> Option<&PhysicalQuarantinePublicationReceiptV1> {
+    match self {
+      Self::Committed { receipt, .. } => Some(receipt),
+      Self::Invalid { .. }
+      | Self::Format(_)
+      | Self::Authority(_)
+      | Self::Pin(_)
+      | Self::AuthorityRecheck(_)
+      | Self::RetirementAdmission(_)
+      | Self::RetirementOwner(_) => None,
+    }
+  }
+}
+
+impl Display for PhysicalQuarantinePublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Committed { code, message, receipt } => write!(
+        formatter,
+        "{code}: physical quarantine committed at control sequence {}, but post-commit handling failed: {message}",
+        receipt.quarantine_control_write_sequence,
+      ),
+      Self::Format(source) => write!(formatter, "physical-quarantine format error: {source}"),
+      Self::Authority(source) => write!(formatter, "physical-quarantine authority error: {source}"),
+      Self::Pin(source) => write!(formatter, "physical-quarantine pin error: {source}"),
+      Self::AuthorityRecheck(source) => write!(formatter, "physical-quarantine external authority error: {source}"),
+      Self::RetirementAdmission(source) => write!(formatter, "physical-quarantine lineage admission error: {source}"),
+      Self::RetirementOwner(source) => write!(formatter, "physical-quarantine lineage owner error: {source}"),
+    }
+  }
+}
+
+impl Error for PhysicalQuarantinePublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Format(source) => Some(source),
+      Self::Authority(source) => Some(source),
+      Self::Pin(source) => Some(source),
+      Self::AuthorityRecheck(source) => Some(source),
+      Self::RetirementAdmission(source) => Some(source),
+      Self::RetirementOwner(source) => Some(source),
+      Self::Invalid { .. } | Self::Committed { .. } => None,
+    }
+  }
+}
+
+impl From<FormatError> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<RootPinCoordinatorErrorV1> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: RootPinCoordinatorErrorV1) -> Self {
+    Self::Pin(source)
+  }
+}
+
+impl From<PhysicalQuarantineAuthorityRecheckErrorV1> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: PhysicalQuarantineAuthorityRecheckErrorV1) -> Self {
+    Self::AuthorityRecheck(source)
+  }
+}
+
+impl From<RetirementJournalReplacementAdmissionErrorV1> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: RetirementJournalReplacementAdmissionErrorV1) -> Self {
+    Self::RetirementAdmission(source)
+  }
+}
+
+impl From<RetirementJournalOwnerErrorV1> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: RetirementJournalOwnerErrorV1) -> Self {
+    Self::RetirementOwner(source)
+  }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -954,6 +1159,22 @@ struct RootReclaimLockedPublicationV1 {
   committed_failure: Option<(GcControlPublicationFailureV1, String)>,
 }
 
+struct ValidatedPhysicalQuarantinePublicationV1<'a> {
+  manifest: super::gc_quarantine::QuarantineManifestV1<'a>,
+  control: GcActiveControlV1<'a>,
+}
+
+struct SelectedPhysicalQuarantineControlV1 {
+  stored_value: Vec<u8>,
+  target_manifest_hash: Vec<u8>,
+}
+
+struct PhysicalQuarantineLockedPublicationV1 {
+  quarantine_manifest_write_sequence: u64,
+  control: GcControlPublicationV1,
+  committed_failure: Option<(GcControlPublicationFailureV1, String)>,
+}
+
 struct ChargedSelectionEntityV1 {
   bytes: Vec<u8>,
   _memory: MemoryReservation,
@@ -1189,6 +1410,18 @@ impl From<GcControlPublicationErrorV1> for RootRetirementPublicationErrorV1 {
 }
 
 impl From<GcControlPublicationErrorV1> for RootReclaimPublicationErrorV1 {
+  fn from(source: GcControlPublicationErrorV1) -> Self {
+    match source {
+      GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
+      GcControlPublicationErrorV1::Format(source) => Self::Format(source),
+      GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
+      GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
+      GcControlPublicationErrorV1::RetirementOwner(source) => Self::RetirementOwner(source),
+    }
+  }
+}
+
+impl From<GcControlPublicationErrorV1> for PhysicalQuarantinePublicationErrorV1 {
   fn from(source: GcControlPublicationErrorV1) -> Self {
     match source {
       GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
@@ -1971,6 +2204,317 @@ impl V4FirstAuthorityPublisher {
       )
       .map_err(mark_mutation_sink_first_authority_error)?;
     mark_mutation_journal_receipt(segment, hard_publication_sequence)
+  }
+
+  pub fn publish_physical_quarantine(
+    &mut self,
+    request: PhysicalQuarantinePublicationRequestV1<'_>,
+    authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  ) -> Result<PhysicalQuarantinePublicationReceiptV1, PhysicalQuarantinePublicationErrorV1> {
+    self.publish_physical_quarantine_with_control_observer(
+      request,
+      authority_verifier,
+      retirement_owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+  }
+
+  fn publish_physical_quarantine_with_control_observer(
+    &mut self,
+    request: PhysicalQuarantinePublicationRequestV1<'_>,
+    authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<PhysicalQuarantinePublicationReceiptV1, PhysicalQuarantinePublicationErrorV1> {
+    let validated = validate_physical_quarantine_publication(&request)?;
+    if request.cancellation.is_cancelled() {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_publication_canceled",
+        "physical-quarantine publication was canceled before authority exclusion",
+      ));
+    }
+    if request.pin_coordinator.hash_algorithm() != request.permit.hash_algorithm() {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_publication_pin_identity",
+        "request-pin coordinator hash profile differs from the quarantine publication permit",
+      ));
+    }
+    if retirement_owner.hash_algorithm() != request.permit.hash_algorithm()
+      || retirement_owner.database_id() != *request.permit.database_id()
+    {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_publication_lineage_identity",
+        "retirement lineage owner differs from the quarantine database or hash profile",
+      ));
+    }
+    retirement_owner.flush(self)?;
+
+    let mut locked_result = None;
+    let exclusion_result = request.pin_coordinator.with_global_exclusion(request.cancellation, || {
+      locked_result =
+        Some(self.publish_physical_quarantine_excluded(&request, &validated, authority_verifier, retirement_owner, control_observer));
+      Ok(())
+    });
+    let exclusion_error = exclusion_result.err();
+    let (locked, exclusion_error) = match (locked_result, exclusion_error) {
+      (Some(Ok(locked)), exclusion_error) => (locked, exclusion_error),
+      (Some(Err(operation_error)), Some(exclusion_error)) => {
+        return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+          "quarantine_publication_exclusion_cleanup",
+          format!("quarantine publication failed with {operation_error}; releasing global exclusion also failed with {exclusion_error}"),
+        ));
+      }
+      (None, Some(error)) => return Err(PhysicalQuarantinePublicationErrorV1::Pin(error)),
+      (Some(Err(error)), None) => return Err(error),
+      (None, None) => {
+        return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+          "quarantine_publication_internal",
+          "global request-pin exclusion returned no publication result",
+        ));
+      }
+    };
+
+    let mut committed_failure = locked.committed_failure.map(|(failure, message)| (failure.code(), message));
+    if let Some(error) = exclusion_error {
+      if let Some((_, message)) = &mut committed_failure {
+        message.push_str(&format!("; releasing global request-pin exclusion also failed: {error}"));
+      } else {
+        committed_failure = Some(("quarantine_publication_committed_pin_cleanup", error.to_string()));
+      }
+    }
+    let lineage_state = if locked.control.replaced_control {
+      match retirement_owner.flush(self) {
+        Ok(true) => PhysicalQuarantineLineageStateV1::HardPublished {
+          hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence,
+        },
+        Ok(false) => PhysicalQuarantineLineageStateV1::MissingAfterCommit {
+          code: "quarantine_publication_lineage_missing",
+          message: "quarantine control replacement committed without retained retirement lineage".to_string(),
+        },
+        Err(source) => PhysicalQuarantineLineageStateV1::BufferedAfterFlushFailure { code: source.code(), message: source.to_string() },
+      }
+    } else {
+      PhysicalQuarantineLineageStateV1::NotRequired
+    };
+    if !matches!(lineage_state, PhysicalQuarantineLineageStateV1::NotRequired | PhysicalQuarantineLineageStateV1::HardPublished { .. })
+      && committed_failure.is_none()
+    {
+      committed_failure =
+        Some(("quarantine_publication_committed_lineage", "quarantine replacement lineage did not hard-publish".to_string()));
+    }
+    let observation = if matches!(lineage_state, PhysicalQuarantineLineageStateV1::HardPublished { .. }) {
+      match self.observe() {
+        Ok(observation) => observation,
+        Err(source) => {
+          if committed_failure.is_none() {
+            committed_failure = Some(("quarantine_publication_committed_lineage_readback", source.to_string()));
+          }
+          locked.control.observation.clone()
+        }
+      }
+    } else {
+      locked.control.observation.clone()
+    };
+    let receipt = PhysicalQuarantinePublicationReceiptV1 {
+      quarantine_manifest_key: request.quarantine_manifest.key.clone(),
+      quarantine_manifest_write_sequence: locked.quarantine_manifest_write_sequence,
+      quarantine_control_key: request.quarantine_control.key.clone(),
+      quarantine_control_write_sequence: locked.control.control_write_sequence,
+      quarantine_control_slot: locked.control.control_slot,
+      lineage_state,
+      observation,
+      idempotent: locked.control.idempotent,
+    };
+    if let Some((code, message)) = committed_failure {
+      return Err(PhysicalQuarantinePublicationErrorV1::committed(code, message, receipt));
+    }
+    Ok(receipt)
+  }
+
+  fn verify_physical_quarantine_support_is_durable(
+    &self,
+    request: &PhysicalQuarantinePublicationRequestV1<'_>,
+    validated: &ValidatedPhysicalQuarantinePublicationV1<'_>,
+  ) -> Result<(), PhysicalQuarantinePublicationErrorV1> {
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.hash_algorithm != request.permit.hash_algorithm()
+      || header.database_id != *request.permit.database_id()
+    {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_publication_database_authority",
+        "selected first authority is degraded or differs from the quarantine publication permit",
+      ));
+    }
+    let memory = request.pin_coordinator.memory_coordinator();
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let reader = PhysicalQuarantineSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: &memory };
+    let lifecycle_entity =
+      reader.load_entity(validated.manifest.captured_root_lifecycle_manifest, GcArtifactKindV1::RootLifecycleManifest)?;
+    let lifecycle_whole = decode_whole_entity(&lifecycle_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    let GcStateArtifactV1::Manifest(lifecycle) = decode_gc_state_artifact(lifecycle_whole.stored_value, header.hash_algorithm)? else {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_lifecycle_kind",
+        "captured root-lifecycle key resolves to another GC artifact kind",
+      ));
+    };
+    if lifecycle.key != validated.manifest.captured_root_lifecycle_manifest || lifecycle.database_id != validated.manifest.database_id {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_lifecycle_changed",
+        "captured root-lifecycle manifest identity differs from the quarantine basis",
+      ));
+    }
+
+    let root_entity = match validated.manifest.candidate_directory_root {
+      Some(root) => Some(reader.load_entity(root, GcArtifactKindV1::GcArtifactDirectoryNode)?),
+      None => None,
+    };
+    let root_directory = match &root_entity {
+      Some(entity) => {
+        let whole = decode_whole_entity(&entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+        let GcStateArtifactV1::Directory(directory) = decode_gc_state_artifact(whole.stored_value, header.hash_algorithm)? else {
+          return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+            "quarantine_support_kind",
+            "candidate-directory root resolves to another GC artifact kind",
+          ));
+        };
+        Some(directory)
+      }
+      None => None,
+    };
+    let maximum_support_artifacts = request.permit.support_closure().support_artifact_count.max(1);
+    let mut validator = super::gc_quarantine::QuarantineClosureValidatorV1::new(
+      &validated.manifest,
+      root_directory.as_ref(),
+      &lifecycle,
+      header.hash_algorithm,
+      request.cancellation.clone(),
+      super::gc_quarantine::QuarantineClosureLimitsV1 { maximum_support_artifacts },
+      &memory,
+    )
+    .map_err(physical_quarantine_support_error)?;
+    if let Some(root) = root_directory.as_ref() {
+      reader.revalidate_subtree(root, 0, &mut validator)?;
+    }
+    for delta_hash in validated.manifest.delta_hashes.chunks_exact(header.hash_algorithm.hash_length()) {
+      let delta_entity = reader.load_entity(delta_hash, GcArtifactKindV1::CandidateDelta)?;
+      let whole = decode_whole_entity(&delta_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+      validator.observe_delta(whole.stored_value).map_err(physical_quarantine_support_error)?;
+    }
+    let observed = validator.finish().map_err(physical_quarantine_support_error)?;
+    if observed != *request.permit.support_closure() {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_changed",
+        "durable physical-quarantine support closure differs from the qualified publication permit",
+      ));
+    }
+    Ok(())
+  }
+
+  fn publish_physical_quarantine_excluded(
+    &self,
+    request: &PhysicalQuarantinePublicationRequestV1<'_>,
+    validated: &ValidatedPhysicalQuarantinePublicationV1<'_>,
+    authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<PhysicalQuarantineLockedPublicationV1, PhysicalQuarantinePublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      PhysicalQuarantinePublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.hash_algorithm != request.permit.hash_algorithm()
+      || header.database_id != *request.permit.database_id()
+    {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_publication_database_authority",
+        "selected first authority is degraded or differs from the quarantine publication permit",
+      ));
+    }
+    if request.cancellation.is_cancelled() {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_publication_canceled",
+        "physical-quarantine publication was canceled during final authority recheck",
+      ));
+    }
+    self.verify_physical_quarantine_support_is_durable(request, validated)?;
+    let selected_control = {
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      select_physical_quarantine_control(&self.file, &kv, header)?
+    };
+    let exact_retry = selected_control.stored_value == request.quarantine_control.value
+      && selected_control.target_manifest_hash == request.quarantine_manifest.key;
+    if !exact_retry {
+      if selected_control.target_manifest_hash != request.permit.prior_manifest_hash() {
+        return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+          "quarantine_publication_prior_authority_changed",
+          "selected quarantine authority no longer matches the qualified prior manifest",
+        ));
+      }
+      let authority = authority_verifier.recheck_physical_quarantine_authority(PhysicalQuarantineAuthorityRecheckRequestV1 {
+        hash_algorithm: header.hash_algorithm,
+        database_id: header.database_id,
+        prior_manifest_hash: request.permit.prior_manifest_hash(),
+        next_manifest_hash: request.permit.next_manifest_hash(),
+        mark_generation: request.permit.mark_generation(),
+        expected_authority_root_set_digest: validated.manifest.authority_root_set_digest,
+        expected_semantic_state_digest: validated.manifest.semantic_state_digest,
+        expected_kv_layout_fingerprint: validated.manifest.kv_layout_fingerprint,
+        expected_mark_result_digest: validated.manifest.mark_result_digest,
+        expected_root_lifecycle_manifest: validated.manifest.captured_root_lifecycle_manifest,
+      })?;
+      if authority.selected_complete_mark_generation != request.permit.mark_generation()
+        || authority.authority_root_set_digest != validated.manifest.authority_root_set_digest
+        || authority.semantic_state_digest != validated.manifest.semantic_state_digest
+        || authority.kv_layout_fingerprint != validated.manifest.kv_layout_fingerprint
+        || authority.mark_result_digest != validated.manifest.mark_result_digest
+        || authority.selected_root_lifecycle_manifest != validated.manifest.captured_root_lifecycle_manifest
+        || !authority.physical_inventory_and_lineage_complete
+        || !authority.all_candidate_incarnations_exact_and_unreachable
+        || !authority.task_and_audit_pins_absent
+      {
+        return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+          "quarantine_publication_authority_changed",
+          "complete-mark, inventory, lineage, lifecycle, locator, task, or audit authority changed before publication",
+        ));
+      }
+    }
+
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    let quarantine_manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::QuarantineManifest,
+        database_id: request.permit.database_id(),
+        artifact_key: &request.quarantine_manifest.key,
+        value: &request.quarantine_manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "quarantine_manifest_committed_postcondition",
+      },
+      &mut observer,
+    )?;
+    let control = self.publish_gc_active_control_locked(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::QuarantineActiveControl,
+        encoded_control: request.quarantine_control,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      retirement_owner,
+      control_observer,
+    )?;
+    let (control, committed_failure) = match control {
+      GcControlPublicationOutcomeV1::Complete(control) => (control, None),
+      GcControlPublicationOutcomeV1::CommittedFailure { publication, failure, message } => (publication, Some((failure, message))),
+    };
+    debug_assert_eq!(control.control_slot, validated.control.slot);
+    Ok(PhysicalQuarantineLockedPublicationV1 { quarantine_manifest_write_sequence, control, committed_failure })
   }
 
   pub fn publish_root_retirement(
@@ -4058,6 +4602,157 @@ struct ChargedRootLifecycleSupportEntityV1 {
   _memory: MemoryReservation,
 }
 
+struct ChargedPhysicalQuarantineSupportEntityV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+struct PhysicalQuarantineSupportReadContextV1<'a> {
+  file: &'a File,
+  kv: &'a DiskKVStore,
+  header: &'a DatabaseHeaderV4,
+  memory: &'a MemoryCoordinator,
+}
+
+impl PhysicalQuarantineSupportReadContextV1<'_> {
+  fn revalidate_subtree(
+    &self,
+    directory: &super::gc_state::GcStateDirectoryV1<'_>,
+    depth: u16,
+    validator: &mut super::gc_quarantine::QuarantineClosureValidatorV1<'_>,
+  ) -> Result<(), PhysicalQuarantinePublicationErrorV1> {
+    if depth > 16 {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_depth",
+        "durable physical-quarantine candidate directory exceeds depth 16",
+      ));
+    }
+    if directory.role != GcDirectoryRoleV1::Candidates {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_role",
+        "physical-quarantine base graph contains a non-candidate directory",
+      ));
+    }
+    for descriptor in &directory.entries {
+      if directory.level == 0 {
+        self.revalidate_page(descriptor.child_hash, validator)?;
+      } else {
+        let child_entity = self.load_entity(descriptor.child_hash, GcArtifactKindV1::GcArtifactDirectoryNode)?;
+        let child_whole = decode_whole_entity(&child_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+        let GcStateArtifactV1::Directory(child) = decode_gc_state_artifact(child_whole.stored_value, self.header.hash_algorithm)? else {
+          return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+            "quarantine_support_kind",
+            "candidate directory descriptor resolves to another GC artifact kind",
+          ));
+        };
+        if child.key != descriptor.child_hash || child.level + 1 != directory.level {
+          return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+            "quarantine_support_changed",
+            "durable candidate directory identity or level differs from its parent descriptor",
+          ));
+        }
+        self.revalidate_subtree(&child, depth + 1, validator)?;
+        validator.observe_base_directory(&child).map_err(physical_quarantine_support_error)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn revalidate_page(
+    &self,
+    key: &[u8],
+    validator: &mut super::gc_quarantine::QuarantineClosureValidatorV1<'_>,
+  ) -> Result<(), PhysicalQuarantinePublicationErrorV1> {
+    let page_entity = self.load_entity(key, GcArtifactKindV1::CandidatePage)?;
+    let page_whole = decode_whole_entity(&page_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    let GcStateArtifactV1::Page(page) = decode_gc_state_artifact(page_whole.stored_value, self.header.hash_algorithm)? else {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_kind",
+        "candidate page key resolves to another GC artifact kind",
+      ));
+    };
+    if page.key != key || page.role != GcDirectoryRoleV1::Candidates {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_changed",
+        "durable candidate page identity or role differs from its parent descriptor",
+      ));
+    }
+    validator.observe_base_page(&page).map_err(physical_quarantine_support_error)
+  }
+
+  fn load_entity(
+    &self,
+    key: &[u8],
+    expected_kind: GcArtifactKindV1,
+  ) -> Result<ChargedPhysicalQuarantineSupportEntityV1, PhysicalQuarantinePublicationErrorV1> {
+    let Some(locator) = self.kv.get(key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_missing",
+        format!("physical-quarantine support artifact {} is absent", hex::encode(key)),
+      ));
+    };
+    if locator.type_flags != kv_tag::GC_ARTIFACT {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_collision",
+        "physical-quarantine support key resolves to another KV role",
+      ));
+    }
+    let maximum_value_length = expected_kind.immutable_maximum_encoded_length().ok_or_else(|| {
+      PhysicalQuarantinePublicationErrorV1::invalid("quarantine_support_kind", "physical-quarantine support role has no immutable cap")
+    })?;
+    let maximum_entity_length =
+      super::entity::checked_whole_entity_encoded_length(self.header.hash_algorithm, key.len(), maximum_value_length)?;
+    let locator_length = usize::try_from(locator.total_length).map_err(|error| {
+      PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_length",
+        format!("physical-quarantine support locator length exceeds usize: {error}"),
+      )
+    })?;
+    if locator_length > maximum_entity_length {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_length",
+        format!("physical-quarantine support entity length {locator_length} exceeds its {maximum_entity_length}-byte role cap"),
+      ));
+    }
+    let reservation_bytes = u64::try_from(locator_length).map_err(|error| {
+      PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_length",
+        format!("physical-quarantine support length cannot be accounted: {error}"),
+      )
+    })?;
+    let reservation = self
+      .memory
+      .reserve(MemoryOwner::GarbageCollection, reservation_bytes, AdmissionClass::Maintenance)
+      .map_err(|error| PhysicalQuarantinePublicationErrorV1::invalid("quarantine_support_memory", error.to_string()))?;
+    let bytes =
+      read_entity_bounded(self.file, self.kv, key, maximum_entity_length, self.header.write_sequence_high_water)?.ok_or_else(|| {
+        PhysicalQuarantinePublicationErrorV1::invalid(
+          "quarantine_support_missing",
+          format!("physical-quarantine support artifact {} disappeared", hex::encode(key)),
+        )
+      })?;
+    let entity = decode_whole_entity(&bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    if entity.entry_type != EntryTypeV4::GcArtifact
+      || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || entity.compression_algorithm != CompressionAlgorithm::None
+      || entity.key != key
+    {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_representation",
+        "physical-quarantine support artifact is not one canonical system GC WholeEntity",
+      ));
+    }
+    let envelope = decode_gc_artifact_envelope(entity.stored_value)?;
+    if envelope.kind != expected_kind {
+      return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+        "quarantine_support_kind",
+        "physical-quarantine support artifact kind differs from its requested role",
+      ));
+    }
+    Ok(ChargedPhysicalQuarantineSupportEntityV1 { bytes, _memory: reservation })
+  }
+}
+
 struct RootLifecycleSupportReadContextV1<'a> {
   file: &'a File,
   kv: &'a DiskKVStore,
@@ -4240,6 +4935,60 @@ fn root_reclaim_from_retirement_error(source: RootRetirementPublicationErrorV1) 
   }
 }
 
+fn physical_quarantine_support_error(source: super::gc_quarantine::QuarantineClosureErrorV1) -> PhysicalQuarantinePublicationErrorV1 {
+  PhysicalQuarantinePublicationErrorV1::Invalid { code: source.code(), message: source.to_string() }
+}
+
+fn validate_physical_quarantine_publication<'a>(
+  request: &'a PhysicalQuarantinePublicationRequestV1<'_>,
+) -> Result<ValidatedPhysicalQuarantinePublicationV1<'a>, PhysicalQuarantinePublicationErrorV1> {
+  let manifest = super::gc_quarantine::decode_quarantine_manifest_v1(&request.quarantine_manifest.value, request.permit.hash_algorithm())?;
+  let control = decode_gc_active_control(&request.quarantine_control.value, request.permit.hash_algorithm())?;
+  if manifest.key != request.quarantine_manifest.key || control.key != request.quarantine_control.key {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_prepared_identity",
+      "prepared quarantine manifest or control key differs from its canonical bytes",
+    ));
+  }
+  if manifest.hash_algorithm != request.permit.hash_algorithm()
+    || manifest.database_id != request.permit.database_id()
+    || manifest.key != request.permit.next_manifest_hash()
+    || manifest.mark_generation != request.permit.mark_generation()
+    || request.permit.support_closure().manifest_key() != manifest.key
+  {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_permit",
+      "quarantine manifest differs from the exact qualified publication permit",
+    ));
+  }
+  if manifest.candidate_count != request.permit.resulting_candidate_count()
+    || manifest.candidate_bytes != request.permit.resulting_candidate_bytes()
+    || manifest.eligible_count_hint != request.permit.eligible_count()
+  {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_aggregates",
+      "quarantine manifest aggregates differ from the completed transition",
+    ));
+  }
+  if control.kind != GcArtifactKindV1::QuarantineActiveControl
+    || control.database_id != manifest.database_id
+    || control.generation != manifest.mark_generation
+    || control.target_manifest_hash != manifest.key
+  {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_control",
+      "quarantine selector does not target the exact qualified manifest",
+    ));
+  }
+  if request.publication_timestamp_ms < manifest.completed_at_ms {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_timestamp",
+      "hard-publication timestamp precedes quarantine transition completion",
+    ));
+  }
+  Ok(ValidatedPhysicalQuarantinePublicationV1 { manifest, control })
+}
+
 fn validate_root_reclaim_publication<'a>(
   request: &'a RootReclaimPublicationRequestV1<'_>,
 ) -> Result<ValidatedRootReclaimPublicationV1<'a>, RootReclaimPublicationErrorV1> {
@@ -4409,6 +5158,103 @@ fn validate_root_retirement_publication<'a>(
     ));
   }
   Ok(ValidatedRootRetirementPublicationV1 { lifecycle_control })
+}
+
+fn select_physical_quarantine_control(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+) -> Result<SelectedPhysicalQuarantineControlV1, PhysicalQuarantinePublicationErrorV1> {
+  let keys = gc_control_keys(header.hash_algorithm, GcArtifactKindV1::QuarantineActiveControl, &header.database_id)?;
+  let controls = [
+    load_gc_control_entity(file, kv, GcArtifactKindV1::QuarantineActiveControl, &keys[0], header)?,
+    load_gc_control_entity(file, kv, GcArtifactKindV1::QuarantineActiveControl, &keys[1], header)?,
+  ];
+  let closure_valid = [
+    match &controls[0] {
+      Some(control) => physical_quarantine_manifest_is_present(file, kv, header, &control.target_manifest_hash)?,
+      None => false,
+    },
+    match &controls[1] {
+      Some(control) => physical_quarantine_manifest_is_present(file, kv, header, &control.target_manifest_hash)?,
+      None => false,
+    },
+  ];
+  let selected_slot = match (&controls[0], &controls[1]) {
+    (Some(a), Some(b)) => {
+      let a_control = decode_gc_active_control(&a.stored_value, header.hash_algorithm)?;
+      let b_control = decode_gc_active_control(&b.stored_value, header.hash_algorithm)?;
+      select_gc_active_control(&a_control, closure_valid[0], &b_control, closure_valid[1])?.map(|control| control.slot)
+    }
+    (Some(_), None) if closure_valid[0] => Some(0),
+    (None, Some(_)) if closure_valid[1] => Some(1),
+    (Some(_), None) | (None, Some(_)) | (None, None) => None,
+  }
+  .ok_or_else(|| {
+    PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_authority_unavailable",
+      "no complete physical-quarantine A/B control is selectable",
+    )
+  })?;
+  let stored = controls[usize::from(selected_slot)].as_ref().ok_or_else(|| {
+    PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_authority_internal",
+      "selected physical-quarantine control slot is absent",
+    )
+  })?;
+  Ok(SelectedPhysicalQuarantineControlV1 {
+    stored_value: stored.stored_value.clone(),
+    target_manifest_hash: stored.target_manifest_hash.clone(),
+  })
+}
+
+fn physical_quarantine_manifest_is_present(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+) -> Result<bool, PhysicalQuarantinePublicationErrorV1> {
+  let Some(locator) = kv.get(key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+    return Ok(false);
+  };
+  if locator.type_flags != kv_tag::GC_ARTIFACT {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_manifest_collision",
+      "physical-quarantine manifest key resolves to another KV role",
+    ));
+  }
+  let maximum_value_length = GcArtifactKindV1::QuarantineManifest.immutable_maximum_encoded_length().ok_or_else(|| {
+    PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_manifest_kind",
+      "physical-quarantine manifest has no immutable cap",
+    )
+  })?;
+  let maximum_entity_length = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, key.len(), maximum_value_length)?;
+  let bytes = read_entity_bounded(file, kv, key, maximum_entity_length, header.write_sequence_high_water)?.ok_or_else(|| {
+    PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_manifest_missing",
+      "physical-quarantine manifest locator disappeared",
+    )
+  })?;
+  let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  if entity.entry_type != EntryTypeV4::GcArtifact
+    || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+    || entity.compression_algorithm != CompressionAlgorithm::None
+    || entity.key != key
+  {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_manifest_representation",
+      "selected physical-quarantine manifest is not one canonical system GC WholeEntity",
+    ));
+  }
+  let manifest = super::gc_quarantine::decode_quarantine_manifest_v1(entity.stored_value, header.hash_algorithm)?;
+  if manifest.database_id != header.database_id || manifest.key != key {
+    return Err(PhysicalQuarantinePublicationErrorV1::invalid(
+      "quarantine_publication_manifest_representation",
+      "selected physical-quarantine manifest identity differs from its control target",
+    ));
+  }
+  Ok(true)
 }
 
 fn select_root_lifecycle_control(

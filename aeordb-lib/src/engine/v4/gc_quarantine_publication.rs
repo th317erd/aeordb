@@ -201,8 +201,10 @@ fn validate_aggregates(
   request: &PhysicalQuarantinePublicationQualificationRequestV1<'_>,
   summary: PhysicalQuarantineTransitionSummaryV1,
 ) -> Result<(), PhysicalQuarantinePublicationQualificationErrorV1> {
-  let record_bytes = u64::try_from(52usize + 2 * request.next_manifest.hash_algorithm.hash_length())
-    .map_err(|_| PhysicalQuarantinePublicationQualificationErrorV1::Arithmetic)?;
+  let record_bytes = match request.next_manifest.hash_algorithm {
+    HashAlgorithm::Blake3_256 | HashAlgorithm::Sha256 | HashAlgorithm::Sha3_256 => 116,
+    HashAlgorithm::Sha512 | HashAlgorithm::Sha3_512 => 180,
+  };
   let eligible_bytes =
     summary.eligible_count.checked_mul(record_bytes).ok_or(PhysicalQuarantinePublicationQualificationErrorV1::Arithmetic)?;
   if request.next_manifest.candidate_count != summary.resulting_candidate_count

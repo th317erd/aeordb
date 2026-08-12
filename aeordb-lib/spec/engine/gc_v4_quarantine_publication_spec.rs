@@ -38,6 +38,17 @@ fn fixture_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/gc-artifact-v1")
 }
 
+fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
+  for entry in fs::read_dir(root).unwrap() {
+    let entry = entry.unwrap();
+    if entry.file_type().unwrap().is_dir() {
+      rust_sources(&entry.path(), sources);
+    } else if entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs") {
+      sources.push(entry.path());
+    }
+  }
+}
+
 fn algorithm_name(algorithm: HashAlgorithm) -> &'static str {
   match algorithm {
     HashAlgorithm::Blake3_256 => "blake3-256",
@@ -531,4 +542,20 @@ fn support_publication_accepts_only_quarantine_pages_directories_and_deltas_with
     .unwrap_err();
   assert_eq!(error.code(), "quarantine_support_kind");
   assert!(publisher.locator(&root_page.key).unwrap().is_none());
+}
+
+#[test]
+fn quarantine_finalizer_remains_confined_to_disconnected_first_authority_without_physical_removal() {
+  let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let mut sources = Vec::new();
+  rust_sources(&source_root, &mut sources);
+  let mut finalizer_owners =
+    sources.iter().filter(|path| fs::read_to_string(path).unwrap().contains("publish_physical_quarantine(")).cloned().collect::<Vec<_>>();
+  finalizer_owners.sort();
+  assert_eq!(finalizer_owners, vec![source_root.join("engine/v4/first_authority.rs")]);
+
+  let authority_source = fs::read_to_string(&finalizer_owners[0]).unwrap();
+  for forbidden in ["VoidManager", "remove_entry", "remove_locator", "run_gc", "server::", "DirectoryOps", "StorageEngine"] {
+    assert!(!authority_source.contains(forbidden), "quarantine finalizer authority unexpectedly references {forbidden}");
+  }
 }

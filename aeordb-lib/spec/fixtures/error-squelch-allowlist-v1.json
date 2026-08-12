@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 1894,
+      "line": 2142,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 3098,
+      "line": 3713,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 3101,
+      "line": 3716,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -10796,7 +10796,7 @@
     {
       "id": "esq-v1-80be8890bb381ba75842-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 309,
+      "line": 365,
       "column": 27,
       "enclosing_item": "impl RootReadPinCoordinatorV1::root_gate",
       "kind": "error_conversion",
@@ -10806,7 +10806,7 @@
     {
       "id": "esq-v1-a48f46e6f0adf8feb11f-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 318,
+      "line": 374,
       "column": 5,
       "enclosing_item": "impl RootReadPinCoordinatorV1::lock_state",
       "kind": "error_conversion",
@@ -10816,7 +10816,7 @@
     {
       "id": "esq-v1-e2b10039c27153492842-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 325,
+      "line": 381,
       "column": 5,
       "enclosing_item": "impl RootReadPinCoordinatorV1::lock_root_gate",
       "kind": "error_conversion",
@@ -10826,7 +10826,7 @@
     {
       "id": "esq-v1-d4fa923d4cc7107f974e-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 396,
+      "line": 452,
       "column": 5,
       "enclosing_item": "impl RootReadPinV1::drop",
       "kind": "logged_error_continues",
@@ -10836,7 +10836,7 @@
     {
       "id": "esq-v1-f3cbb059b0684ff18be3-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 412,
+      "line": 468,
       "column": 32,
       "enclosing_item": "readable_state",
       "kind": "error_conversion",
@@ -10846,7 +10846,7 @@
     {
       "id": "esq-v1-cca4aa854c71b6848fed-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 952,
+      "line": 1008,
       "column": 14,
       "enclosing_item": "validate_root_capabilities",
       "kind": "error_conversion",
@@ -10856,7 +10856,7 @@
     {
       "id": "esq-v1-8e07aab909c0b553b8cd-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 954,
+      "line": 1010,
       "column": 18,
       "enclosing_item": "validate_root_capabilities",
       "kind": "error_conversion",

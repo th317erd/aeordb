@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -220,10 +220,7 @@ impl RootReadPinCoordinatorV1 {
     observe_lifecycle: impl FnOnce() -> Result<RootLifecycleObservationV1, RootPinCoordinatorErrorV1>,
   ) -> Result<RootReadAdmissionV1, RootPinCoordinatorErrorV1> {
     self.validate_operation(root_hash, cancellation)?;
-    let _global_admission = self.inner.global_admission_gate.read().map_err(|_| {
-      self.inner.failed.store(true, Ordering::Release);
-      RootPinCoordinatorErrorV1::LockPoisoned
-    })?;
+    let _global_admission = self.lock_global_admission()?;
     self.validate_operation(root_hash, cancellation)?;
     let root_gate = self.root_gate(root_hash)?;
     let mut active_pins = self.lock_root_gate(&root_gate)?;
@@ -283,10 +280,7 @@ impl RootReadPinCoordinatorV1 {
     retire: impl FnOnce() -> Result<T, RootPinCoordinatorErrorV1>,
   ) -> Result<T, RootPinCoordinatorErrorV1> {
     self.validate_operation(root_hash, cancellation)?;
-    let _global_admission = self.inner.global_admission_gate.read().map_err(|_| {
-      self.inner.failed.store(true, Ordering::Release);
-      RootPinCoordinatorErrorV1::LockPoisoned
-    })?;
+    let _global_admission = self.lock_global_admission()?;
     self.validate_operation(root_hash, cancellation)?;
     let root_gate = self.root_gate(root_hash)?;
     let active_pins = self.lock_root_gate(&root_gate)?;
@@ -318,10 +312,7 @@ impl RootReadPinCoordinatorV1 {
     if cancellation.is_cancelled() {
       return Err(RootPinCoordinatorErrorV1::Canceled);
     }
-    let _global_exclusion = self.inner.global_admission_gate.write().map_err(|_| {
-      self.inner.failed.store(true, Ordering::Release);
-      RootPinCoordinatorErrorV1::LockPoisoned
-    })?;
+    let _global_exclusion = self.lock_global_exclusion()?;
     if cancellation.is_cancelled() {
       return Err(RootPinCoordinatorErrorV1::Canceled);
     }
@@ -339,6 +330,28 @@ impl RootReadPinCoordinatorV1 {
       return Err(RootPinCoordinatorErrorV1::Canceled);
     }
     self.validate_root_hash(root_hash)
+  }
+
+  fn lock_global_admission(&self) -> Result<RwLockReadGuard<'_, ()>, RootPinCoordinatorErrorV1> {
+    match self.inner.global_admission_gate.read() {
+      Ok(guard) => Ok(guard),
+      Err(poisoned) => {
+        drop(poisoned);
+        self.inner.failed.store(true, Ordering::Release);
+        Err(RootPinCoordinatorErrorV1::LockPoisoned)
+      }
+    }
+  }
+
+  fn lock_global_exclusion(&self) -> Result<RwLockWriteGuard<'_, ()>, RootPinCoordinatorErrorV1> {
+    match self.inner.global_admission_gate.write() {
+      Ok(guard) => Ok(guard),
+      Err(poisoned) => {
+        drop(poisoned);
+        self.inner.failed.store(true, Ordering::Release);
+        Err(RootPinCoordinatorErrorV1::LockPoisoned)
+      }
+    }
   }
 
   fn root_gate(&self, root_hash: &[u8]) -> Result<Arc<RootGateV1>, RootPinCoordinatorErrorV1> {

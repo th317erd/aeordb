@@ -480,8 +480,11 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
 
   pub fn finish_for_publication(self) -> Result<PhysicalQuarantineTransitionPublicationPermitV1, PhysicalQuarantineTransitionErrorV1> {
     let summary = self.completion_summary()?;
-    let database_id: [u8; 16] =
-      self.context.prior_manifest.database_id.try_into().map_err(|_| PhysicalQuarantineTransitionErrorV1::ManifestAggregate)?;
+    let mut database_id = [0u8; 16];
+    if self.context.prior_manifest.database_id.len() != database_id.len() {
+      return Err(PhysicalQuarantineTransitionErrorV1::ManifestAggregate);
+    }
+    database_id.copy_from_slice(self.context.prior_manifest.database_id);
     Ok(PhysicalQuarantineTransitionPublicationPermitV1 {
       hash_algorithm: self.context.hash_algorithm,
       database_id,
