@@ -675,7 +675,7 @@
           - [x] P4-3d4: prove cancellation, malformed chains, dishonest receipts, failed soft publication, exact retry/resume, concurrent final-guard exclusion, and no live v3/service/destructive activation.
         - [x] P4-3e: close cancellation, crash-prefix, corruption, scratch-capacity, memory, architecture, native-platform, and real-world non-destructive proof.
           - [x] Prove and harden the Windows private-workspace ACL as the platform equivalent of Unix 0700/0600 before native closure.
-      - [ ] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
+      - [x] P4-4: implement logical root candidate, retirement, expiry, and reclaim-proof lifecycle.
         - [x] P4-4a: expose complete borrowed lifecycle artifacts and exact both-width encoders/closure validation without activating a writer.
         - [x] P4-4b: implement one bounded two-complete-mark transition model with frozen/effective grace, authority evidence, reachability clearing, and deterministic cap refusal.
         - [x] P4-4c: hard-publish retirement evidence and selected lifecycle authority before a root becomes logically retired, through the shared replacement boundary.
@@ -692,11 +692,11 @@
             - [x] Prove a racing read pin cannot enter during retirement exclusion and observes retirement after the selector wins.
             - [x] Prove post-selector lineage and pin-cleanup failures return the exact committed retirement receipt.
             - [x] Close architecture isolation, static analysis, focused/broad restart gates, and the P4-4c landing evidence.
-        - [ ] P4-4d: attach root-object reclaim proof and bounded optional expiry retention without evicting mandatory retirement evidence.
+        - [x] P4-4d: attach root-object reclaim proof and bounded optional expiry retention without evicting mandatory retirement evidence.
           - [x] P4-4d1: qualify exact receipt/inventory absence evidence into a non-constructible reclaim permit and checked proof/row transition.
           - [x] P4-4d2: stream the root-ordered expiry catalog through one failure-latching retention model that drops expired evidence and validates the maximal newest set fitting the optional byte budget.
           - [x] P4-4d3: hard-publish the reclaim proof, rebuilt catalog support, manifests, and lifecycle selector last under the shared authority guard without activating physical reclaim.
-        - [ ] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.
+        - [x] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
