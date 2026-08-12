@@ -732,7 +732,7 @@
           - [x] Remove impossible post-global-exclusion cleanup branches and prove valid plural outcomes return one completion while operation failures return none.
           - [x] Re-run cancellation, corruption, authority drift, crash-prefix, architecture-isolation, resource, and retained-or-leaked gates before closing P4-6.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
-        - [ ] P4-7a: expose exact both-width Void extent/catalog/claim/settlement writers and iterators, and converge Void directory nodes on the shared multi-child GC directory codec.
+        - [x] P4-7a: expose exact both-width Void extent/catalog/claim/settlement writers and iterators, and converge Void directory nodes on the shared multi-child GC directory codec.
         - [ ] P4-7b: validate the complete Void support closure with bounded memory/cancellation, hard-publish receipt-backed support, and select its A/B control last while allocator admission remains blocked until exact receipt reconciliation.
         - [ ] P4-7c: qualify an exact bounded free-extent claim, hard-publish immutable claim evidence, and select a catalog that removes all claimed ranges before returning allocation authority.
         - [ ] P4-7d: consume only durable claim subranges through one bounded allocator owner, then hard-publish settlement/abandonment and a claim-free result catalog after used locators are durable.
