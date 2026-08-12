@@ -3,8 +3,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::gc::EncodedImmutableGcArtifactV1;
 use super::gc_lifecycle::{
-  RootExpiryRecordWriteV1, RootObjectReclaimProofWriteV1, RootRetirementCommitV1, encode_root_expiry_record_v1,
-  encode_root_object_reclaim_proof_v1, validate_root_expiry_reclaim_proof, validate_root_expiry_retirement_commit,
+  RootExpiryManifestV1, RootExpiryRecordWriteV1, RootLifecycleManifestV1, RootObjectReclaimProofWriteV1, RootRetirementCommitV1,
+  encode_root_expiry_record_v1, encode_root_object_reclaim_proof_v1, validate_root_expiry_reclaim_proof,
+  validate_root_expiry_retirement_commit, validate_root_lifecycle_expiry_manifest,
 };
 use super::gc_state::{PhysicalInventoryManifestV1, RootExpiryRecordV1, RootExpiryStateV1, decode_root_expiry_record_v1};
 use super::reader::FormatError;
@@ -95,6 +96,425 @@ impl QualifiedRootObjectReclaimV1 {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootExpiryRetentionCutoffV1 {
+  pub evidence_expires_at_ms: i64,
+  pub namespace_root_hash: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootExpiryRetentionSelectionV1 {
+  KeepAll,
+  AtOrAfter(RootExpiryRetentionCutoffV1),
+}
+
+#[derive(Debug)]
+pub struct RootExpiryRetentionContextV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub prior_lifecycle: &'a RootLifecycleManifestV1<'a>,
+  pub prior_expiry: &'a RootExpiryManifestV1<'a>,
+  pub lifecycle_generation: u64,
+  pub completed_at_ms: i64,
+  pub retention_ms: u64,
+  pub optional_byte_budget: u64,
+  pub maximum_records: u64,
+  pub selection: RootExpiryRetentionSelectionV1,
+  pub qualified_reclaim: &'a QualifiedRootObjectReclaimV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootExpiryRetentionActionV1 {
+  RetainedMandatory,
+  RetainedOptional,
+  ReclaimedAndRetained,
+  DroppedExpired,
+  DroppedForBudget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootExpiryRetentionSummaryV1 {
+  pub prior_count: u64,
+  pub prior_bytes: u64,
+  pub resulting_count: u64,
+  pub resulting_bytes: u64,
+  pub resulting_mandatory_count: u64,
+  pub resulting_mandatory_bytes: u64,
+  pub resulting_optional_count: u64,
+  pub resulting_optional_bytes: u64,
+  pub oldest_retired_at_ms: Option<i64>,
+  pub newest_retired_at_ms: Option<i64>,
+  pub expired_count: u64,
+  pub budget_evicted_count: u64,
+  pub reclaimed_count: u64,
+}
+
+#[derive(Debug, Error)]
+pub enum RootExpiryRetentionErrorV1 {
+  #[error("invalid root-expiry retention configuration: {0}")]
+  InvalidConfiguration(&'static str),
+  #[error("root-expiry retention was canceled")]
+  Canceled,
+  #[error("root-expiry retention generation is stale")]
+  StaleGeneration,
+  #[error("root-expiry retention input does not close against its selected manifest")]
+  ManifestAggregate,
+  #[error("root-expiry retention rows are not in strict NamespaceRoot order")]
+  RecordOrder,
+  #[error("root-expiry retention exceeded its record limit")]
+  RecordLimit,
+  #[error("root-expiry retention did not apply and retain the exact qualified reclaim")]
+  Target,
+  #[error("root-expiry retained optional evidence exceeds its byte budget")]
+  Budget,
+  #[error("root-expiry retention evicted evidence even though another row fits")]
+  Nonmaximal,
+  #[error("root-expiry retention accounting overflowed or underflowed")]
+  Arithmetic,
+  #[error("root-expiry retention integer conversion failed: {0}")]
+  IntegerConversion(#[from] std::num::TryFromIntError),
+  #[error(transparent)]
+  Format(Box<FormatError>),
+  #[error("root-expiry retention model has already failed")]
+  Failed,
+}
+
+impl RootExpiryRetentionErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::InvalidConfiguration(_) => "root_expiry_retention_configuration",
+      Self::Canceled => "root_expiry_retention_canceled",
+      Self::StaleGeneration => "root_expiry_retention_generation",
+      Self::ManifestAggregate => "root_expiry_retention_manifest",
+      Self::RecordOrder => "root_expiry_retention_order",
+      Self::RecordLimit => "root_expiry_retention_limit",
+      Self::Target => "root_expiry_retention_target",
+      Self::Budget => "root_expiry_retention_budget",
+      Self::Nonmaximal => "root_expiry_retention_nonmaximal",
+      Self::Arithmetic => "root_expiry_retention_arithmetic",
+      Self::IntegerConversion(_) => "root_expiry_retention_arithmetic",
+      Self::Format(source) => source.code(),
+      Self::Failed => "root_expiry_retention_failed",
+    }
+  }
+}
+
+impl From<FormatError> for RootExpiryRetentionErrorV1 {
+  fn from(error: FormatError) -> Self {
+    Self::Format(Box::new(error))
+  }
+}
+
+#[derive(Debug)]
+pub struct RootExpiryRetentionModelV1<'a> {
+  context: RootExpiryRetentionContextV1<'a>,
+  cancellation: &'a CancellationToken,
+  row_bytes: u64,
+  target_root_hash: Vec<u8>,
+  target_retired_at_ms: i64,
+  target_last_pending_since_ms: i64,
+  target_final_mark_generation: u64,
+  target_reason: u16,
+  target_retirement_commit_hash: Vec<u8>,
+  target_evidence_expires_at_ms: i64,
+  previous_root_hash: Vec<u8>,
+  prior_count: u64,
+  prior_bytes: u64,
+  prior_mandatory_count: u64,
+  prior_mandatory_bytes: u64,
+  prior_optional_count: u64,
+  prior_optional_bytes: u64,
+  prior_oldest_retired_at_ms: Option<i64>,
+  prior_newest_retired_at_ms: Option<i64>,
+  resulting_mandatory_count: u64,
+  resulting_mandatory_bytes: u64,
+  resulting_optional_count: u64,
+  resulting_optional_bytes: u64,
+  oldest_retained_optional_expires_at_ms: Option<i64>,
+  oldest_retained_optional_root_hash: Vec<u8>,
+  resulting_oldest_retired_at_ms: Option<i64>,
+  resulting_newest_retired_at_ms: Option<i64>,
+  expired_count: u64,
+  budget_evicted_count: u64,
+  reclaimed_count: u64,
+  target_seen: bool,
+  failed: bool,
+}
+
+impl<'a> RootExpiryRetentionModelV1<'a> {
+  pub fn new(context: RootExpiryRetentionContextV1<'a>, cancellation: &'a CancellationToken) -> Result<Self, RootExpiryRetentionErrorV1> {
+    if cancellation.is_cancelled() {
+      return Err(RootExpiryRetentionErrorV1::Canceled);
+    }
+    if context.maximum_records == 0 || context.retention_ms == 0 || context.completed_at_ms <= 0 {
+      return Err(RootExpiryRetentionErrorV1::InvalidConfiguration("record limit, retention, and completion time must be positive"));
+    }
+    if context.lifecycle_generation <= context.prior_lifecycle.generation
+      || context.prior_expiry.generation != context.prior_lifecycle.generation
+    {
+      return Err(RootExpiryRetentionErrorV1::StaleGeneration);
+    }
+    validate_root_lifecycle_expiry_manifest(context.prior_lifecycle, context.prior_expiry)?;
+    let hash_width = context.hash_algorithm.hash_length();
+    if context.prior_lifecycle.database_id != context.prior_expiry.database_id
+      || context.prior_lifecycle.database_id.len() != 16
+      || !valid_hash(context.prior_lifecycle.key.as_slice(), hash_width)
+      || !valid_hash(context.prior_expiry.key.as_slice(), hash_width)
+    {
+      return Err(RootExpiryRetentionErrorV1::ManifestAggregate);
+    }
+    let row_bytes = u64::try_from(40usize + 3 * hash_width)?;
+    validate_prior_expiry_aggregates(context.prior_expiry, row_bytes, context.maximum_records)?;
+    if let RootExpiryRetentionSelectionV1::AtOrAfter(cutoff) = &context.selection {
+      if cutoff.evidence_expires_at_ms <= context.completed_at_ms || !valid_hash(&cutoff.namespace_root_hash, hash_width) {
+        return Err(RootExpiryRetentionErrorV1::InvalidConfiguration(
+          "retention cutoff must identify nonexpired evidence with a valid root hash",
+        ));
+      }
+    }
+
+    let target_replacement = decode_root_expiry_record_v1(context.qualified_reclaim.encoded_expiry_record(), context.hash_algorithm)?;
+    let target_proof =
+      super::gc_lifecycle::decode_root_object_reclaim_proof_v1(&context.qualified_reclaim.encoded_proof.value, context.hash_algorithm)?;
+    validate_root_expiry_reclaim_proof(&target_replacement, &target_proof)?;
+    let target_evidence_expires_at_ms = target_replacement.evidence_expires_at_ms.ok_or(RootExpiryRetentionErrorV1::Target)?;
+    let retention_ms = i64::try_from(context.retention_ms)?;
+    if target_proof.database_id != context.prior_lifecycle.database_id
+      || target_proof.reclaimed_at_ms > context.completed_at_ms
+      || target_proof.reclaimed_at_ms.checked_add(retention_ms) != Some(target_evidence_expires_at_ms)
+      || target_evidence_expires_at_ms <= context.completed_at_ms
+    {
+      return Err(RootExpiryRetentionErrorV1::Target);
+    }
+
+    Ok(Self {
+      context,
+      cancellation,
+      row_bytes,
+      target_root_hash: target_replacement.namespace_root_hash.to_vec(),
+      target_retired_at_ms: target_replacement.retired_at_ms,
+      target_last_pending_since_ms: target_replacement.last_pending_since_ms,
+      target_final_mark_generation: target_replacement.final_mark_generation,
+      target_reason: target_replacement.reason,
+      target_retirement_commit_hash: target_replacement.retirement_commit_hash.to_vec(),
+      target_evidence_expires_at_ms,
+      previous_root_hash: Vec::with_capacity(hash_width),
+      prior_count: 0,
+      prior_bytes: 0,
+      prior_mandatory_count: 0,
+      prior_mandatory_bytes: 0,
+      prior_optional_count: 0,
+      prior_optional_bytes: 0,
+      prior_oldest_retired_at_ms: None,
+      prior_newest_retired_at_ms: None,
+      resulting_mandatory_count: 0,
+      resulting_mandatory_bytes: 0,
+      resulting_optional_count: 0,
+      resulting_optional_bytes: 0,
+      oldest_retained_optional_expires_at_ms: None,
+      oldest_retained_optional_root_hash: Vec::with_capacity(hash_width),
+      resulting_oldest_retired_at_ms: None,
+      resulting_newest_retired_at_ms: None,
+      expired_count: 0,
+      budget_evicted_count: 0,
+      reclaimed_count: 0,
+      target_seen: false,
+      failed: false,
+    })
+  }
+
+  pub fn observe(&mut self, record: &RootExpiryRecordV1<'_>) -> Result<RootExpiryRetentionActionV1, RootExpiryRetentionErrorV1> {
+    if self.failed {
+      return Err(RootExpiryRetentionErrorV1::Failed);
+    }
+    match self.observe_inner(record) {
+      Ok(action) => Ok(action),
+      Err(error) => {
+        self.failed = true;
+        Err(error)
+      }
+    }
+  }
+
+  pub fn finish(self) -> Result<RootExpiryRetentionSummaryV1, RootExpiryRetentionErrorV1> {
+    if self.failed {
+      return Err(RootExpiryRetentionErrorV1::Failed);
+    }
+    if self.cancellation.is_cancelled() {
+      return Err(RootExpiryRetentionErrorV1::Canceled);
+    }
+    if !self.target_seen || self.reclaimed_count != 1 {
+      return Err(RootExpiryRetentionErrorV1::Target);
+    }
+    if self.prior_count != self.context.prior_expiry.record_count
+      || self.prior_bytes != self.context.prior_expiry.logical_bytes
+      || self.prior_mandatory_count != self.context.prior_expiry.mandatory_count
+      || self.prior_mandatory_bytes != self.context.prior_expiry.mandatory_bytes
+      || self.prior_optional_count != self.context.prior_expiry.optional_count
+      || self.prior_optional_bytes != self.context.prior_expiry.optional_bytes
+      || self.prior_oldest_retired_at_ms != self.context.prior_expiry.oldest_retired_at_ms
+      || self.prior_newest_retired_at_ms != self.context.prior_expiry.newest_retired_at_ms
+    {
+      return Err(RootExpiryRetentionErrorV1::ManifestAggregate);
+    }
+    if self.resulting_optional_bytes > self.context.optional_byte_budget {
+      return Err(RootExpiryRetentionErrorV1::Budget);
+    }
+    if self.budget_evicted_count != 0
+      && self.resulting_optional_bytes.checked_add(self.row_bytes).is_some_and(|bytes| bytes <= self.context.optional_byte_budget)
+    {
+      return Err(RootExpiryRetentionErrorV1::Nonmaximal);
+    }
+    if self.budget_evicted_count == 0 && !matches!(self.context.selection, RootExpiryRetentionSelectionV1::KeepAll) {
+      return Err(RootExpiryRetentionErrorV1::Nonmaximal);
+    }
+    if let RootExpiryRetentionSelectionV1::AtOrAfter(cutoff) = &self.context.selection {
+      if self.oldest_retained_optional_expires_at_ms != Some(cutoff.evidence_expires_at_ms)
+        || self.oldest_retained_optional_root_hash != cutoff.namespace_root_hash
+      {
+        return Err(RootExpiryRetentionErrorV1::Nonmaximal);
+      }
+    }
+    let resulting_count =
+      self.resulting_mandatory_count.checked_add(self.resulting_optional_count).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+    let resulting_bytes =
+      self.resulting_mandatory_bytes.checked_add(self.resulting_optional_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+    Ok(RootExpiryRetentionSummaryV1 {
+      prior_count: self.prior_count,
+      prior_bytes: self.prior_bytes,
+      resulting_count,
+      resulting_bytes,
+      resulting_mandatory_count: self.resulting_mandatory_count,
+      resulting_mandatory_bytes: self.resulting_mandatory_bytes,
+      resulting_optional_count: self.resulting_optional_count,
+      resulting_optional_bytes: self.resulting_optional_bytes,
+      oldest_retired_at_ms: self.resulting_oldest_retired_at_ms,
+      newest_retired_at_ms: self.resulting_newest_retired_at_ms,
+      expired_count: self.expired_count,
+      budget_evicted_count: self.budget_evicted_count,
+      reclaimed_count: self.reclaimed_count,
+    })
+  }
+
+  fn observe_inner(&mut self, record: &RootExpiryRecordV1<'_>) -> Result<RootExpiryRetentionActionV1, RootExpiryRetentionErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(RootExpiryRetentionErrorV1::Canceled);
+    }
+    if self.prior_count >= self.context.maximum_records {
+      return Err(RootExpiryRetentionErrorV1::RecordLimit);
+    }
+    if !self.previous_root_hash.is_empty() && self.previous_root_hash.as_slice() >= record.namespace_root_hash {
+      return Err(RootExpiryRetentionErrorV1::RecordOrder);
+    }
+    self.observe_prior_aggregate(record)?;
+    self.previous_root_hash.clear();
+    self.previous_root_hash.extend_from_slice(record.namespace_root_hash);
+
+    if record.namespace_root_hash == self.target_root_hash {
+      return self.observe_target(record);
+    }
+    match record.state {
+      RootExpiryStateV1::LogicallyRetired => {
+        self.add_resulting_mandatory(record.retired_at_ms)?;
+        Ok(RootExpiryRetentionActionV1::RetainedMandatory)
+      }
+      RootExpiryStateV1::PhysicallyReclaimed => self.observe_optional(record),
+    }
+  }
+
+  fn observe_target(&mut self, record: &RootExpiryRecordV1<'_>) -> Result<RootExpiryRetentionActionV1, RootExpiryRetentionErrorV1> {
+    if self.target_seen
+      || record.state != RootExpiryStateV1::LogicallyRetired
+      || record.retired_at_ms != self.target_retired_at_ms
+      || record.last_pending_since_ms != self.target_last_pending_since_ms
+      || record.final_mark_generation != self.target_final_mark_generation
+      || record.reason != self.target_reason
+      || record.retirement_commit_hash != self.target_retirement_commit_hash
+      || record.root_object_reclaim_proof_hash.is_some()
+      || record.evidence_expires_at_ms.is_some()
+      || !self.selection_retains(self.target_evidence_expires_at_ms, record.namespace_root_hash)
+    {
+      return Err(RootExpiryRetentionErrorV1::Target);
+    }
+    self.target_seen = true;
+    self.reclaimed_count = checked_increment(self.reclaimed_count)?;
+    self.add_resulting_optional(record.retired_at_ms, self.target_evidence_expires_at_ms, record.namespace_root_hash)?;
+    Ok(RootExpiryRetentionActionV1::ReclaimedAndRetained)
+  }
+
+  fn observe_optional(&mut self, record: &RootExpiryRecordV1<'_>) -> Result<RootExpiryRetentionActionV1, RootExpiryRetentionErrorV1> {
+    let expires_at_ms = record.evidence_expires_at_ms.ok_or(RootExpiryRetentionErrorV1::ManifestAggregate)?;
+    if expires_at_ms <= self.context.completed_at_ms {
+      self.expired_count = checked_increment(self.expired_count)?;
+      return Ok(RootExpiryRetentionActionV1::DroppedExpired);
+    }
+    if !self.selection_retains(expires_at_ms, record.namespace_root_hash) {
+      self.budget_evicted_count = checked_increment(self.budget_evicted_count)?;
+      return Ok(RootExpiryRetentionActionV1::DroppedForBudget);
+    }
+    self.add_resulting_optional(record.retired_at_ms, expires_at_ms, record.namespace_root_hash)?;
+    Ok(RootExpiryRetentionActionV1::RetainedOptional)
+  }
+
+  fn selection_retains(&self, evidence_expires_at_ms: i64, namespace_root_hash: &[u8]) -> bool {
+    match &self.context.selection {
+      RootExpiryRetentionSelectionV1::KeepAll => true,
+      RootExpiryRetentionSelectionV1::AtOrAfter(cutoff) => {
+        (evidence_expires_at_ms, namespace_root_hash) >= (cutoff.evidence_expires_at_ms, cutoff.namespace_root_hash.as_slice())
+      }
+    }
+  }
+
+  fn observe_prior_aggregate(&mut self, record: &RootExpiryRecordV1<'_>) -> Result<(), RootExpiryRetentionErrorV1> {
+    self.prior_count = checked_increment(self.prior_count)?;
+    self.prior_bytes = self.prior_bytes.checked_add(self.row_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+    match record.state {
+      RootExpiryStateV1::LogicallyRetired => {
+        self.prior_mandatory_count = checked_increment(self.prior_mandatory_count)?;
+        self.prior_mandatory_bytes =
+          self.prior_mandatory_bytes.checked_add(self.row_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+      }
+      RootExpiryStateV1::PhysicallyReclaimed => {
+        self.prior_optional_count = checked_increment(self.prior_optional_count)?;
+        self.prior_optional_bytes = self.prior_optional_bytes.checked_add(self.row_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+      }
+    }
+    update_time_bounds(&mut self.prior_oldest_retired_at_ms, &mut self.prior_newest_retired_at_ms, record.retired_at_ms);
+    Ok(())
+  }
+
+  fn add_resulting_mandatory(&mut self, retired_at_ms: i64) -> Result<(), RootExpiryRetentionErrorV1> {
+    self.resulting_mandatory_count = checked_increment(self.resulting_mandatory_count)?;
+    self.resulting_mandatory_bytes =
+      self.resulting_mandatory_bytes.checked_add(self.row_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+    update_time_bounds(&mut self.resulting_oldest_retired_at_ms, &mut self.resulting_newest_retired_at_ms, retired_at_ms);
+    Ok(())
+  }
+
+  fn add_resulting_optional(
+    &mut self,
+    retired_at_ms: i64,
+    evidence_expires_at_ms: i64,
+    namespace_root_hash: &[u8],
+  ) -> Result<(), RootExpiryRetentionErrorV1> {
+    self.resulting_optional_count = checked_increment(self.resulting_optional_count)?;
+    self.resulting_optional_bytes =
+      self.resulting_optional_bytes.checked_add(self.row_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+    let replaces_oldest = match self.oldest_retained_optional_expires_at_ms {
+      None => true,
+      Some(oldest_expires_at_ms) => {
+        (evidence_expires_at_ms, namespace_root_hash) < (oldest_expires_at_ms, self.oldest_retained_optional_root_hash.as_slice())
+      }
+    };
+    if replaces_oldest {
+      self.oldest_retained_optional_expires_at_ms = Some(evidence_expires_at_ms);
+      self.oldest_retained_optional_root_hash.clear();
+      self.oldest_retained_optional_root_hash.extend_from_slice(namespace_root_hash);
+    }
+    update_time_bounds(&mut self.resulting_oldest_retired_at_ms, &mut self.resulting_newest_retired_at_ms, retired_at_ms);
+    Ok(())
+  }
+}
+
 #[derive(Debug, Error)]
 pub enum RootObjectReclaimQualificationErrorV1 {
   #[error("root-object reclaim qualification was canceled")]
@@ -109,6 +529,8 @@ pub enum RootObjectReclaimQualificationErrorV1 {
   InventoryOrder,
   #[error("root-object reclaim evidence has an invalid or overflowing time")]
   Time,
+  #[error("root-object reclaim integer conversion failed: {0}")]
+  IntegerConversion(#[from] std::num::TryFromIntError),
   #[error(transparent)]
   Verification(#[from] RootObjectReclaimEvidenceVerificationErrorV1),
   #[error(transparent)]
@@ -124,6 +546,7 @@ impl RootObjectReclaimQualificationErrorV1 {
       Self::InvalidEvidence => "root_reclaim_evidence",
       Self::InventoryOrder => "root_reclaim_inventory_order",
       Self::Time => "root_reclaim_time",
+      Self::IntegerConversion(_) => "root_reclaim_time",
       Self::Verification(source) => source.code(),
       Self::Format(source) => source.code(),
     }
@@ -180,9 +603,8 @@ pub fn qualify_root_object_reclaim_v1(
     return Err(RootObjectReclaimQualificationErrorV1::InventoryOrder);
   }
 
-  let inventory_completed_at_ms =
-    i64::try_from(request.final_physical_inventory.completed_at_ms).map_err(|_| RootObjectReclaimQualificationErrorV1::Time)?;
-  let retention_ms = i64::try_from(request.retention_ms).map_err(|_| RootObjectReclaimQualificationErrorV1::Time)?;
+  let inventory_completed_at_ms = i64::try_from(request.final_physical_inventory.completed_at_ms)?;
+  let retention_ms = i64::try_from(request.retention_ms)?;
   let evidence_expires_at_ms = request.reclaimed_at_ms.checked_add(retention_ms).ok_or(RootObjectReclaimQualificationErrorV1::Time)?;
   if request.retention_ms == 0
     || inventory_completed_at_ms <= 0
@@ -247,4 +669,38 @@ pub fn qualify_root_object_reclaim_v1(
 
 fn valid_hash(value: &[u8], hash_width: usize) -> bool {
   value.len() == hash_width && value.iter().any(|byte| *byte != 0)
+}
+
+fn validate_prior_expiry_aggregates(
+  expiry: &RootExpiryManifestV1<'_>,
+  row_bytes: u64,
+  maximum_records: u64,
+) -> Result<(), RootExpiryRetentionErrorV1> {
+  if expiry.record_count == 0 || expiry.record_count > maximum_records || expiry.directory_root_hash.is_none() {
+    return Err(RootExpiryRetentionErrorV1::ManifestAggregate);
+  }
+  let mandatory_bytes = expiry.mandatory_count.checked_mul(row_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+  let optional_bytes = expiry.optional_count.checked_mul(row_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+  let record_count = expiry.mandatory_count.checked_add(expiry.optional_count).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+  let logical_bytes = mandatory_bytes.checked_add(optional_bytes).ok_or(RootExpiryRetentionErrorV1::Arithmetic)?;
+  if mandatory_bytes != expiry.mandatory_bytes
+    || optional_bytes != expiry.optional_bytes
+    || record_count != expiry.record_count
+    || logical_bytes != expiry.logical_bytes
+    || expiry.oldest_retired_at_ms.is_none()
+    || expiry.newest_retired_at_ms.is_none()
+    || expiry.oldest_retired_at_ms > expiry.newest_retired_at_ms
+  {
+    return Err(RootExpiryRetentionErrorV1::ManifestAggregate);
+  }
+  Ok(())
+}
+
+fn checked_increment(value: u64) -> Result<u64, RootExpiryRetentionErrorV1> {
+  value.checked_add(1).ok_or(RootExpiryRetentionErrorV1::Arithmetic)
+}
+
+fn update_time_bounds(oldest: &mut Option<i64>, newest: &mut Option<i64>, value: i64) {
+  *oldest = Some(oldest.map_or(value, |current| current.min(value)));
+  *newest = Some(newest.map_or(value, |current| current.max(value)));
 }
