@@ -85,7 +85,8 @@ pulled back from quarantine.
 ### Physical Incarnation Lifecycle
 
 `active -> first-unreachable candidate -> confirmed candidate -> sweep proposed
--> locator removed -> receipt -> Void published -> optionally claimed`
+-> locator removed -> Void selected with allocator blocked -> receipt
+-> allocator-eligible Void -> optionally claimed`
 
 Every incarnation independently requires two complete marks, frozen/effective
 grace, final exact identity/reachability/pin checks, and hard receipt-backed
@@ -202,9 +203,12 @@ the whole derived type.
    replacement lineage, and physical bounds under a short exclusive guard.
 3. Hard-publish immutable proposal, execute bounded removals, and record per-
    incarnation outcomes.
-4. Hard-publish receipt before publishing any corresponding reusable extent.
-5. Crash recovery resumes idempotently from proposal/receipt evidence and may
-   retain/leak uncertain extents.
+4. Select the exact receipt-targeted Void catalog while allocator admission
+   remains blocked, then hard-publish the commit receipt before any caller may
+   allocate from the corresponding extents.
+5. Crash recovery validates an unreceipted selected catalog and publishes one
+   recovered receipt before allocator admission or another sweep; ambiguity
+   retains/leaks the affected extents.
 
 The frozen SweepProposal body formula is
 `32 + 2H + count * (24 + 2H)`. P0 fixtures check both hash widths and reject any

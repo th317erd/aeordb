@@ -719,7 +719,12 @@
           - [x] Execute one plural removal callback and validate one canonically ordered result for every proposal candidate.
           - [x] Return a non-constructible completion permit bound to the proposal hash/write sequence without publishing a receipt or reusable Void extent.
           - [x] Prove cancellation, stale/corrupt/substituted authority, active pins, malformed outcomes, bounded memory, and architecture isolation before landing P4-6c.
-        - [ ] P4-6d: hard-publish commit/recovered receipts only after caller-verified selected Void authority and reconcile every crash prefix idempotently.
+        - [x] P4-6d: hard-publish commit/recovered receipts only after caller-verified selected Void authority and reconcile every crash prefix idempotently.
+          - [x] Add one reconciliation source contract for a live P4-6c completion or a restart-discovered durable proposal.
+          - [x] Require caller-owned proof of the exact selected Void catalog, proposal/catalog closure, durable locator state, blocked allocator admission, complete receipt search, and repair state.
+          - [x] Reconstruct bounded recovery outcomes and hard-publish exactly one semantic receipt per batch through first authority.
+          - [x] Make exact existing commit/recovered receipts idempotent and reject conflicting receipt evidence without making any extent reusable.
+          - [x] Prove every pre/post-catalog and pre/post-receipt crash prefix, cancellation, corruption, pressure, dishonest authority, and architecture isolation.
         - [ ] P4-6e: prove cancellation, corruption, authority/pin races, partial removal, dishonest receipts, restart, and retained-or-leaked failure direction.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
       - [ ] P4-8: integrate verify/repair/task/API/metrics/SSE/Dashboard and complete non-destructive resource/soak proof.

@@ -59,6 +59,11 @@ use super::gc_sweep_removal::{
   SweepLocatorRemovalAuthorityRequestV1, SweepLocatorRemovalAuthorityV1, SweepLocatorRemovalCompletionPermitV1, SweepLocatorRemovalErrorV1,
   complete_sweep_locator_removal_v1, reserve_sweep_locator_removal_results_v1, validate_sweep_locator_removal_snapshot_v1,
 };
+use super::gc_sweep_reconciliation::{
+  SweepReceiptReconciliationErrorV1, SweepReceiptReconciliationSourceV1, SweepReceiptVoidAuthorityRequestV1, SweepReceiptVoidAuthorityV1,
+  prepare_sweep_receipt_reconciliation_v1, reserve_sweep_receipt_reconciliation_v1, validate_existing_sweep_receipt_v1,
+  validate_sweep_receipt_void_authority_v1,
+};
 use super::gc_void::{SweepVoidArtifactV1, decode_sweep_void_artifact};
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
@@ -291,6 +296,23 @@ pub struct SweepLocatorRemovalRequestV1<'a> {
   pub hard_publication: &'a SweepProposalHardPublicationReceiptV1,
   pub cancellation: &'a CancellationToken,
   pub pin_coordinator: &'a RootReadPinCoordinatorV1,
+}
+
+#[derive(Clone, Copy)]
+pub struct SweepReceiptReconciliationRequestV1<'a> {
+  pub source: SweepReceiptReconciliationSourceV1<'a>,
+  pub cancellation: &'a CancellationToken,
+  pub memory: &'a MemoryCoordinator,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SweepReceiptHardPublicationReceiptV1 {
+  pub receipt_key: Vec<u8>,
+  pub hard_publication_sequence: u64,
+  pub recovered: bool,
+  pub void_catalog_hash: Vec<u8>,
+  pub void_catalog_generation: u64,
+  pub reclaim_committed_at_ms: i64,
 }
 
 #[derive(Debug)]
@@ -3552,6 +3574,261 @@ impl V4FirstAuthorityPublisher {
         Err(SweepLocatorRemovalErrorV1::invalid("sweep_removal_internal", "global request-pin exclusion returned no removal result"))
       }
     }
+  }
+
+  /// Reconcile one live or restart-discovered sweep into exactly one semantic
+  /// receipt after a caller-owned authority proves the receipt-backed Void
+  /// catalog is selected. Until this returns, allocator admission must remain
+  /// blocked. The receipt itself never grants reusable-space authority.
+  pub fn reconcile_sweep_receipt(
+    &self,
+    request: SweepReceiptReconciliationRequestV1<'_>,
+    void_authority: &mut dyn SweepReceiptVoidAuthorityV1,
+  ) -> Result<SweepReceiptHardPublicationReceiptV1, SweepReceiptReconciliationErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_canceled",
+        "sweep receipt reconciliation was canceled before memory admission",
+      ));
+    }
+    let completion = match request.source {
+      SweepReceiptReconciliationSourceV1::Completion(completion) => Some(completion),
+      SweepReceiptReconciliationSourceV1::Recovery(_) => None,
+    };
+    let (hash_algorithm, database_id, proposal_hash, proposal_write_sequence, recovery) = match request.source {
+      SweepReceiptReconciliationSourceV1::Completion(completion) => {
+        (completion.hash_algorithm(), completion.database_id(), completion.proposal_hash(), completion.proposal_write_sequence(), false)
+      }
+      SweepReceiptReconciliationSourceV1::Recovery(identity) => {
+        (identity.hash_algorithm, *identity.database_id, identity.proposal_hash, identity.proposal_write_sequence, true)
+      }
+    };
+    if proposal_hash.len() != hash_algorithm.hash_length() || proposal_hash.iter().all(|byte| *byte == 0) || proposal_write_sequence == 0 {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_proposal_identity",
+        "sweep receipt proposal hash or hard-publication sequence is invalid",
+      ));
+    }
+
+    let proposal_entity_scratch = super::entity::checked_whole_entity_encoded_length(
+      hash_algorithm,
+      proposal_hash.len(),
+      GcArtifactKindV1::SweepProposal
+        .immutable_maximum_encoded_length()
+        .ok_or_else(|| SweepReceiptReconciliationErrorV1::invalid("sweep_receipt_proposal_kind", "proposal has no immutable role cap"))?,
+    )?;
+    let receipt_entity_scratch = super::entity::checked_whole_entity_encoded_length(
+      hash_algorithm,
+      hash_algorithm.hash_length(),
+      GcArtifactKindV1::RecoveredSweepReceipt
+        .immutable_maximum_encoded_length()
+        .ok_or_else(|| SweepReceiptReconciliationErrorV1::invalid("sweep_receipt_kind", "receipt has no immutable role cap"))?,
+    )?;
+    let read_scratch_bytes = proposal_entity_scratch
+      .checked_add(receipt_entity_scratch)
+      .ok_or_else(|| SweepReceiptReconciliationErrorV1::invalid("sweep_receipt_read_size", "receipt read estimate overflowed"))?;
+    let _read_memory =
+      request.memory.reserve(MemoryOwner::GarbageCollection, u64::try_from(read_scratch_bytes)?, AdmissionClass::Maintenance)?;
+
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      SweepReceiptReconciliationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    if request.cancellation.is_cancelled() {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_canceled",
+        "sweep receipt reconciliation was canceled after first-authority exclusion",
+      ));
+    }
+
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.head_hash.iter().all(|byte| *byte == 0)
+      || header.hash_algorithm != hash_algorithm
+      || header.database_id != database_id
+    {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_database_authority",
+        "selected first authority is absent, degraded, or differs from the receipt source",
+      ));
+    }
+
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let proposal_locator = kv.get(proposal_hash).map_err(FirstAuthorityPublicationErrorV1::from)?.ok_or_else(|| {
+      SweepReceiptReconciliationErrorV1::invalid("sweep_receipt_proposal_missing", "durable sweep proposal locator is absent")
+    })?;
+    if proposal_locator.type_flags != kv_tag::GC_ARTIFACT {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_proposal_collision",
+        "durable sweep proposal key resolves to another KV role",
+      ));
+    }
+    let proposal_bytes = read_entity_bounded(&self.file, &kv, proposal_hash, proposal_entity_scratch, header.write_sequence_high_water)?
+      .ok_or_else(|| SweepReceiptReconciliationErrorV1::invalid("sweep_receipt_proposal_missing", "durable sweep proposal disappeared"))?;
+    let proposal_entity = decode_whole_entity(&proposal_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    if proposal_entity.entry_type != EntryTypeV4::GcArtifact
+      || proposal_entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || proposal_entity.compression_algorithm != CompressionAlgorithm::None
+      || proposal_entity.key != proposal_hash
+      || proposal_entity.write_sequence != proposal_write_sequence
+    {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_proposal_changed",
+        "durable sweep proposal representation or write sequence differs from its receipt source",
+      ));
+    }
+    let SweepVoidArtifactV1::SweepProposal(proposal) = decode_sweep_void_artifact(proposal_entity.stored_value, header.hash_algorithm)?
+    else {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_proposal_kind",
+        "durable sweep proposal decoded as another GC artifact kind",
+      ));
+    };
+    if proposal.key != proposal_hash || proposal.database_id != database_id {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_proposal_identity",
+        "durable sweep proposal belongs to another database or canonical key",
+      ));
+    }
+    if let Some(completion) = completion {
+      if proposal.batch_id != completion.batch_id()
+        || proposal.generation != completion.generation()
+        || proposal.quarantine_manifest_hash != completion.quarantine_manifest_hash()
+        || proposal.candidate_count != u32::try_from(completion.outcomes().len())?
+      {
+        return Err(SweepReceiptReconciliationErrorV1::invalid(
+          "sweep_receipt_completion_changed",
+          "durable proposal identity differs from the live locator-removal completion",
+        ));
+      }
+    }
+    drop(kv);
+
+    let authority_request = SweepReceiptVoidAuthorityRequestV1 {
+      hash_algorithm: header.hash_algorithm,
+      database_id: &database_id,
+      batch_id: proposal.batch_id.try_into()?,
+      generation: proposal.generation,
+      proposal_hash,
+      proposal_write_sequence,
+      proposal: &proposal,
+      recovery,
+      cancellation: request.cancellation,
+    };
+    let snapshot = void_authority.recheck_sweep_receipt_void_authority(authority_request)?;
+    validate_sweep_receipt_void_authority_v1(authority_request, &snapshot)?;
+    if request.cancellation.is_cancelled() {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_canceled",
+        "sweep receipt reconciliation was canceled after selected-Void recheck",
+      ));
+    }
+
+    if let Some(existing) = snapshot.existing_receipt.as_ref() {
+      let kv = self.lock_kv()?;
+      let existing_locator = kv.get(&existing.receipt_hash).map_err(FirstAuthorityPublicationErrorV1::from)?.ok_or_else(|| {
+        SweepReceiptReconciliationErrorV1::invalid("sweep_receipt_existing_missing", "claimed existing receipt locator is absent")
+      })?;
+      if existing_locator.type_flags != kv_tag::GC_ARTIFACT {
+        return Err(SweepReceiptReconciliationErrorV1::invalid(
+          "sweep_receipt_existing_collision",
+          "claimed existing receipt key resolves to another KV role",
+        ));
+      }
+      let existing_bytes =
+        read_entity_bounded(&self.file, &kv, &existing.receipt_hash, receipt_entity_scratch, header.write_sequence_high_water)?
+          .ok_or_else(|| {
+            SweepReceiptReconciliationErrorV1::invalid("sweep_receipt_existing_missing", "claimed existing receipt disappeared")
+          })?;
+      let existing_entity = decode_whole_entity(&existing_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+      if existing_entity.entry_type != EntryTypeV4::GcArtifact
+        || existing_entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+        || existing_entity.compression_algorithm != CompressionAlgorithm::None
+        || existing_entity.key != existing.receipt_hash
+        || existing_entity.write_sequence != existing.receipt_write_sequence
+      {
+        return Err(SweepReceiptReconciliationErrorV1::invalid(
+          "sweep_receipt_existing_changed",
+          "claimed existing receipt representation or write sequence changed",
+        ));
+      }
+      let SweepVoidArtifactV1::SweepReceipt(existing_receipt) =
+        decode_sweep_void_artifact(existing_entity.stored_value, header.hash_algorithm)?
+      else {
+        return Err(SweepReceiptReconciliationErrorV1::invalid(
+          "sweep_receipt_existing_kind",
+          "claimed existing receipt decoded as another GC artifact kind",
+        ));
+      };
+      if existing_receipt.key != existing.receipt_hash {
+        return Err(SweepReceiptReconciliationErrorV1::invalid(
+          "sweep_receipt_existing_conflict",
+          "claimed existing receipt canonical key differs from its selected locator",
+        ));
+      }
+      validate_existing_sweep_receipt_v1(
+        authority_request,
+        &snapshot,
+        &existing_receipt,
+        completion.map(SweepLocatorRemovalCompletionPermitV1::outcomes),
+      )?;
+      return Ok(SweepReceiptHardPublicationReceiptV1 {
+        receipt_key: existing.receipt_hash.clone(),
+        hard_publication_sequence: existing.receipt_write_sequence,
+        recovered: existing_receipt.recovered,
+        void_catalog_hash: snapshot.selected_void_catalog_hash,
+        void_catalog_generation: snapshot.selected_void_catalog_generation,
+        reclaim_committed_at_ms: snapshot.reclaim_committed_at_ms,
+      });
+    }
+
+    let receipt_memory = reserve_sweep_receipt_reconciliation_v1(header.hash_algorithm, proposal.candidate_count, request.memory)?;
+    let recovered_outcomes = if recovery { Some(void_authority.recover_sweep_receipt_outcomes(authority_request)?) } else { None };
+    if request.cancellation.is_cancelled() {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_canceled",
+        "sweep receipt reconciliation was canceled after outcome recovery",
+      ));
+    }
+    let outcomes = match (recovered_outcomes.as_deref(), completion) {
+      (Some(outcomes), None) => outcomes,
+      (None, Some(completion)) => completion.outcomes(),
+      _ => {
+        return Err(SweepReceiptReconciliationErrorV1::invalid(
+          "sweep_receipt_outcomes",
+          "receipt source supplied an ambiguous or incomplete outcome set",
+        ));
+      }
+    };
+    let prepared = prepare_sweep_receipt_reconciliation_v1(authority_request, &snapshot, outcomes, receipt_memory)?;
+    if request.cancellation.is_cancelled() {
+      return Err(SweepReceiptReconciliationErrorV1::invalid(
+        "sweep_receipt_canceled",
+        "sweep receipt reconciliation was canceled before hard publication",
+      ));
+    }
+    let receipt_kind = if prepared.recovered { GcArtifactKindV1::RecoveredSweepReceipt } else { GcArtifactKindV1::SweepCommitReceipt };
+    let hard_publication_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: receipt_kind,
+        database_id: &database_id,
+        artifact_key: &prepared.artifact.key,
+        value: &prepared.artifact.value,
+        minimum_timestamp_ms: u64::try_from(prepared.reclaim_committed_at_ms)?,
+        committed_postcondition_code: "sweep_receipt_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    Ok(SweepReceiptHardPublicationReceiptV1 {
+      receipt_key: prepared.artifact.key,
+      hard_publication_sequence,
+      recovered: prepared.recovered,
+      void_catalog_hash: prepared.void_catalog_hash,
+      void_catalog_generation: prepared.void_catalog_generation,
+      reclaim_committed_at_ms: prepared.reclaim_committed_at_ms,
+    })
   }
 
   /// Hard-publish one already-qualified sweep proposal after independently

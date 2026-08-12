@@ -276,14 +276,33 @@ pub(crate) fn complete_sweep_locator_removal_v1(
   outcomes: Vec<SweepLocatorRemovalOutcomeV1>,
   memory: MemoryReservation,
 ) -> Result<SweepLocatorRemovalCompletionPermitV1, SweepLocatorRemovalErrorV1> {
-  let candidate_count = usize::try_from(request.proposal.candidate_count)?;
+  validate_sweep_locator_removal_outcomes_v1(request.hash_algorithm, request.proposal, &outcomes)?;
+  Ok(SweepLocatorRemovalCompletionPermitV1 {
+    hash_algorithm: request.hash_algorithm,
+    database_id: *request.database_id,
+    batch_id: *request.batch_id,
+    generation: request.generation,
+    proposal_hash: request.proposal_hash.to_vec(),
+    proposal_write_sequence: request.proposal_write_sequence,
+    quarantine_manifest_hash: request.quarantine_manifest_hash.to_vec(),
+    outcomes: outcomes.into_boxed_slice(),
+    _memory: memory,
+  })
+}
+
+pub(crate) fn validate_sweep_locator_removal_outcomes_v1(
+  hash_algorithm: HashAlgorithm,
+  proposal: &SweepProposalV1<'_>,
+  outcomes: &[SweepLocatorRemovalOutcomeV1],
+) -> Result<(), SweepLocatorRemovalErrorV1> {
+  let candidate_count = usize::try_from(proposal.candidate_count)?;
   if candidate_count == 0 || outcomes.len() != candidate_count {
     return Err(SweepLocatorRemovalErrorV1::invalid(
       "sweep_removal_outcome_count",
       "caller-owned removal authority did not return one outcome per proposal candidate",
     ));
   }
-  let mut candidates = request.proposal.candidate_records(request.hash_algorithm)?;
+  let mut candidates = proposal.candidate_records(hash_algorithm)?;
   for (index, outcome) in outcomes.iter().enumerate() {
     let candidate = candidates.next().ok_or_else(|| {
       SweepLocatorRemovalErrorV1::invalid("sweep_removal_outcome_count", "proposal candidates ended before removal outcomes")
@@ -314,15 +333,5 @@ pub(crate) fn complete_sweep_locator_removal_v1(
       "proposal contains candidates beyond the returned removal outcomes",
     ));
   }
-  Ok(SweepLocatorRemovalCompletionPermitV1 {
-    hash_algorithm: request.hash_algorithm,
-    database_id: *request.database_id,
-    batch_id: *request.batch_id,
-    generation: request.generation,
-    proposal_hash: request.proposal_hash.to_vec(),
-    proposal_write_sequence: request.proposal_write_sequence,
-    quarantine_manifest_hash: request.quarantine_manifest_hash.to_vec(),
-    outcomes: outcomes.into_boxed_slice(),
-    _memory: memory,
-  })
+  Ok(())
 }

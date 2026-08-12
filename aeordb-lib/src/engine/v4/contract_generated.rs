@@ -6,7 +6,7 @@ pub const CONTRACT_REGISTRY_SHA256: &str = "58a18bedee5816ec90f64b9f316b9571a31b
 pub const CONTRACT_REGISTRY_BLAKE3: &str = "1357a2300aad97ec5a5c1f91f0b62dff609a9c903900e5d47c4a26df70019a04";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
-pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d69c6a0f154ceeffac0bbbe632d994bd982ca82265f2f149cd771590f65b01c9";
+pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";
 
 pub const SEMANTICS_REGISTRY_SHA256: &str = "27fd69c6e3f086b24cf48c9abda6349b2cb16392cca4d9c83120125bccde846f";
 
@@ -808,7 +808,7 @@ pub const HARD_TRANSITIONS: &[HardTransitionContract] = &[
   HardTransitionContract { id: 4, name: "index_active_generation", selector: "selected index operation/registry control", crash_before: "previous generation or authoritative fallback", crash_after: "new generation used only with valid coverage" },
   HardTransitionContract { id: 5, name: "gc_mark_publication", selector: "selected GC run/checkpoint control", crash_before: "no quarantine eligibility from incomplete mark", crash_after: "complete mark becomes one eligibility observation" },
   HardTransitionContract { id: 6, name: "root_lifecycle_retirement", selector: "selected root lifecycle state", crash_before: "root remains pending/readable", crash_after: "retired root returns deterministic gone before physical reclaim" },
-  HardTransitionContract { id: 7, name: "sweep_void_publication", selector: "selected sweep receipt then selected Void catalog", crash_before: "space leaks and is not allocatable", crash_after: "only receipt-backed ranges become allocator authority" },
+  HardTransitionContract { id: 7, name: "sweep_void_publication", selector: "selected Void catalog with allocator blocked, then durable sweep receipt", crash_before: "space leaks and an unreceipted catalog remains allocation-blocked", crash_after: "only receipt-backed ranges become allocator authority" },
   HardTransitionContract { id: 8, name: "void_claim_settlement", selector: "selected Void catalog minus durable immutable claims", crash_before: "claimed range remains unavailable", crash_after: "settled claim has exactly one owner or returns to catalog" },
   HardTransitionContract { id: 9, name: "durability_latch", selector: "selected durability-latch control", crash_before: "ambiguous write is recovered or startup fails closed", crash_after: "database opens read-only until explicit repair clears latch" },
   HardTransitionContract { id: 10, name: "side_by_side_cutover", selector: "external cutover A/B journal plus physical database identity", crash_before: "v3 remains production authority", crash_after: "v4 becomes authority only after verified durable replace" },

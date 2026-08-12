@@ -3,9 +3,9 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
-  "architecture_registry_sha256": "d69c6a0f154ceeffac0bbbe632d994bd982ca82265f2f149cd771590f65b01c9",
-  "generated_rust_sha256": "da2065cf8f568daad209621b77e41be8c02a639b2dc5e429be46e12e5da90710",
-  "generated_rust_bytes": 61465,
+  "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
+  "generated_rust_sha256": "a3e2e0b1d885e04d51f670d8b53bcb8c2752caabe01e935b91f2c9838997bed5",
+  "generated_rust_bytes": 61519,
   "counts": {
     "route_classes": 7,
     "configuration_properties": 41,

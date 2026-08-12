@@ -313,6 +313,7 @@ pub struct VoidDirectoryV1<'a> {
 pub struct VoidCatalogManifestV1<'a> {
   pub database_id: &'a [u8],
   pub generation: u64,
+  pub published_at_ms: i64,
   pub free_root: &'a [u8],
   pub claim_root: &'a [u8],
   pub free_count: u64,
@@ -970,6 +971,7 @@ fn decode_void_catalog(
   Ok(VoidCatalogManifestV1 {
     database_id,
     generation: artifact.generation,
+    published_at_ms: i64_at(body, 36)?,
     free_root,
     claim_root,
     free_count,

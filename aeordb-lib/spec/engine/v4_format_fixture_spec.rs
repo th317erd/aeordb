@@ -1925,6 +1925,11 @@ fn sweep_and_void_closure_rejects_detached_or_corrupt_authority() {
   validate_sweep_receipt_closure(&proposal, &recovered, &outstanding_manifest).unwrap();
   validate_void_settlement_closure(&settlement, &claim, &outstanding_manifest, &settled_manifest).unwrap();
 
+  let SweepVoidArtifactV1::VoidCatalog(source_catalog) = &source_manifest else {
+    panic!("expected source Void catalog");
+  };
+  assert_eq!(source_catalog.published_at_ms, 1_700_000_201_001);
+
   assert_eq!(
     validate_void_manifest_root(&settled_manifest, &source_directory).unwrap_err().class(),
     MalformedInputClass::CrossRecordClosureMismatch
