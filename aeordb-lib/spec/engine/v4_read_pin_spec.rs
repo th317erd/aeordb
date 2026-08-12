@@ -345,3 +345,67 @@ fn lifecycle_lookup_for_one_root_does_not_block_an_unrelated_root() {
   assert_eq!(coordinator.active_pin_count().unwrap(), 0);
   assert_eq!(coordinator.tracked_root_count().unwrap(), 0);
 }
+
+#[test]
+fn global_exclusion_refuses_any_active_request_pin_without_running_the_action() {
+  let coordinator = build_coordinator(4, 4);
+  let active = coordinator.admit_read(&root(19), &CancellationToken::new(), || Ok(RootLifecycleObservationV1::Live)).unwrap();
+  let actions = AtomicUsize::new(0);
+
+  let error = coordinator
+    .with_global_exclusion(&CancellationToken::new(), || {
+      actions.fetch_add(1, Ordering::SeqCst);
+      Ok(())
+    })
+    .unwrap_err();
+
+  assert_eq!(error.code(), "request_pinned");
+  assert_eq!(actions.load(Ordering::SeqCst), 0);
+  drop(active);
+  coordinator
+    .with_global_exclusion(&CancellationToken::new(), || {
+      actions.fetch_add(1, Ordering::SeqCst);
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(actions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn global_exclusion_blocks_new_read_admission_until_its_final_recheck_finishes() {
+  let coordinator = Arc::new(build_coordinator(4, 4));
+  let authority_retired = Arc::new(AtomicBool::new(false));
+  let (exclusion_entered_sender, exclusion_entered_receiver) = mpsc::channel();
+  let (release_exclusion_sender, release_exclusion_receiver) = mpsc::channel();
+  let exclusion_coordinator = Arc::clone(&coordinator);
+  let exclusion_retired = Arc::clone(&authority_retired);
+  let exclusion = thread::spawn(move || {
+    exclusion_coordinator.with_global_exclusion(&CancellationToken::new(), || {
+      exclusion_entered_sender.send(()).unwrap();
+      release_exclusion_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+      exclusion_retired.store(true, Ordering::SeqCst);
+      Ok(())
+    })
+  });
+  exclusion_entered_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+
+  let (read_started_sender, read_started_receiver) = mpsc::channel();
+  let (read_result_sender, read_result_receiver) = mpsc::channel();
+  let read_coordinator = Arc::clone(&coordinator);
+  let read_retired = Arc::clone(&authority_retired);
+  let read = thread::spawn(move || {
+    read_started_sender.send(()).unwrap();
+    let result = read_coordinator.admit_read(&root(20), &CancellationToken::new(), || {
+      Ok(if read_retired.load(Ordering::SeqCst) { RootLifecycleObservationV1::LogicallyRetired } else { RootLifecycleObservationV1::Live })
+    });
+    read_result_sender.send(result.map(|admission| admission.state).map_err(|error| error.code())).unwrap();
+  });
+  read_started_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+  assert!(read_result_receiver.recv_timeout(Duration::from_millis(100)).is_err());
+
+  release_exclusion_sender.send(()).unwrap();
+  exclusion.join().unwrap().unwrap();
+  assert_eq!(read_result_receiver.recv_timeout(Duration::from_secs(2)).unwrap(), Err("root_expired"));
+  read.join().unwrap();
+  assert_eq!(coordinator.active_pin_count().unwrap(), 0);
+}

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -74,6 +74,8 @@ pub enum RootPinCoordinatorErrorV1 {
   PinLimit,
   #[error("root has active request pins")]
   RootPinned,
+  #[error("the database has active request pins")]
+  RequestPinned,
 }
 
 impl RootPinCoordinatorErrorV1 {
@@ -91,6 +93,7 @@ impl RootPinCoordinatorErrorV1 {
       Self::RootLimit => "read_pin_root_limit",
       Self::PinLimit => "read_pin_limit",
       Self::RootPinned => "root_pinned",
+      Self::RequestPinned => "request_pinned",
     }
   }
 }
@@ -114,6 +117,7 @@ struct RootReadPinCoordinatorInnerV1 {
   failed: AtomicBool,
   #[cfg(test)]
   fail_next_cleanup: AtomicBool,
+  global_admission_gate: RwLock<()>,
   state: Mutex<RootPinCoordinatorStateV1>,
 }
 
@@ -168,6 +172,7 @@ impl RootReadPinCoordinatorV1 {
         failed: AtomicBool::new(false),
         #[cfg(test)]
         fail_next_cleanup: AtomicBool::new(false),
+        global_admission_gate: RwLock::new(()),
         state: Mutex::new(RootPinCoordinatorStateV1 { root_gates: BTreeMap::new(), active_pin_count: 0 }),
       }),
     })
@@ -214,6 +219,11 @@ impl RootReadPinCoordinatorV1 {
     cancellation: &CancellationToken,
     observe_lifecycle: impl FnOnce() -> Result<RootLifecycleObservationV1, RootPinCoordinatorErrorV1>,
   ) -> Result<RootReadAdmissionV1, RootPinCoordinatorErrorV1> {
+    self.validate_operation(root_hash, cancellation)?;
+    let _global_admission = self.inner.global_admission_gate.read().map_err(|_| {
+      self.inner.failed.store(true, Ordering::Release);
+      RootPinCoordinatorErrorV1::LockPoisoned
+    })?;
     self.validate_operation(root_hash, cancellation)?;
     let root_gate = self.root_gate(root_hash)?;
     let mut active_pins = self.lock_root_gate(&root_gate)?;
@@ -273,6 +283,11 @@ impl RootReadPinCoordinatorV1 {
     retire: impl FnOnce() -> Result<T, RootPinCoordinatorErrorV1>,
   ) -> Result<T, RootPinCoordinatorErrorV1> {
     self.validate_operation(root_hash, cancellation)?;
+    let _global_admission = self.inner.global_admission_gate.read().map_err(|_| {
+      self.inner.failed.store(true, Ordering::Release);
+      RootPinCoordinatorErrorV1::LockPoisoned
+    })?;
+    self.validate_operation(root_hash, cancellation)?;
     let root_gate = self.root_gate(root_hash)?;
     let active_pins = self.lock_root_gate(&root_gate)?;
     if cancellation.is_cancelled() {
@@ -286,6 +301,34 @@ impl RootReadPinCoordinatorV1 {
     let result = retire();
     drop(active_pins);
     self.finish_with_cleanup(&root_gate, result)
+  }
+
+  /// Run a database-wide final recheck while excluding all new request-pin
+  /// admission. Existing request pins cause a bounded refusal.
+  ///
+  /// The callback must not reenter this coordinator.
+  pub fn with_global_exclusion<T>(
+    &self,
+    cancellation: &CancellationToken,
+    action: impl FnOnce() -> Result<T, RootPinCoordinatorErrorV1>,
+  ) -> Result<T, RootPinCoordinatorErrorV1> {
+    if self.inner.failed.load(Ordering::Acquire) {
+      return Err(RootPinCoordinatorErrorV1::AccountingCorrupt("the coordinator previously failed"));
+    }
+    if cancellation.is_cancelled() {
+      return Err(RootPinCoordinatorErrorV1::Canceled);
+    }
+    let _global_exclusion = self.inner.global_admission_gate.write().map_err(|_| {
+      self.inner.failed.store(true, Ordering::Release);
+      RootPinCoordinatorErrorV1::LockPoisoned
+    })?;
+    if cancellation.is_cancelled() {
+      return Err(RootPinCoordinatorErrorV1::Canceled);
+    }
+    if self.lock_state()?.active_pin_count != 0 {
+      return Err(RootPinCoordinatorErrorV1::RequestPinned);
+    }
+    action()
   }
 
   fn validate_operation(&self, root_hash: &[u8], cancellation: &CancellationToken) -> Result<(), RootPinCoordinatorErrorV1> {

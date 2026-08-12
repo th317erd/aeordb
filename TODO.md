@@ -701,6 +701,10 @@
         - [x] P4-5a: expose exact borrowed quarantine candidate/delta/manifest codecs and bounded graph-closure validation at both hash widths.
         - [x] P4-5b: implement one constant-memory two-complete-mark transition model with frozen/effective grace and exact incarnation identity.
         - [ ] P4-5c: hard-publish candidate support and select quarantine authority last under global request-pin and first-authority exclusion with final reachability checks.
+          - [x] Extend the shared root-read pin coordinator with one bounded global admission exclusion; do not introduce a second request-pin path.
+          - [ ] Add restricted quarantine support publication and a non-constructible permit binding transition, closure, manifest, and prior authority.
+          - [ ] Revalidate exact durable support, selected prior authority, complete-mark/inventory/lineage/lifecycle bases, locator identity, task/audit pins, and final reachability before selector publication.
+          - [ ] Prove pre-selector retention, selector-last commit uncertainty, exact retry, cleanup/lineage failure receipts, and absence of any locator/Void/removal caller.
         - [ ] P4-5d: prove cancellation, pin/authority races, malformed/corrupt state, capacity, crash prefixes, restart, and retained-or-leaked failure direction.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
