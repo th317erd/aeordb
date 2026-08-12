@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::File;
+use std::num::TryFromIntError;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::engine::durability_coordinator::DurabilityCoordinator;
@@ -53,6 +54,8 @@ use super::gc_mark_convergence::{
 use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceErrorV1, MarkWorkspaceReopenOptionsV1, ReopenedMarkWorkspaceV1};
 use super::gc_quarantine::decode_candidate_delta_v1;
 use super::gc_quarantine_publication::PhysicalQuarantinePublicationPermitV1;
+use super::gc_sweep::SweepProposalPublicationPermitV1;
+use super::gc_void::{SweepVoidArtifactV1, decode_sweep_void_artifact};
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
   decode_root_retirement_commit_v1, validate_root_lifecycle_expiry_manifest,
@@ -262,6 +265,87 @@ pub struct PhysicalQuarantinePublicationReceiptV1 {
   pub lineage_state: PhysicalQuarantineLineageStateV1,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct SweepProposalHardPublicationRequestV1<'a> {
+  pub permit: &'a SweepProposalPublicationPermitV1,
+  pub publication_timestamp_ms: u64,
+  pub cancellation: &'a CancellationToken,
+}
+
+#[must_use = "a hard-published sweep proposal remains non-authoritative until guarded locator removal records outcomes"]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SweepProposalHardPublicationReceiptV1 {
+  pub proposal_key: Vec<u8>,
+  pub hard_publication_sequence: u64,
+}
+
+#[derive(Debug)]
+pub enum SweepProposalHardPublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  CreationTime(TryFromIntError),
+  Format(FormatError),
+  Authority(FirstAuthorityPublicationErrorV1),
+  Quarantine(PhysicalQuarantinePublicationErrorV1),
+}
+
+impl SweepProposalHardPublicationErrorV1 {
+  pub fn code(&self) -> &str {
+    match self {
+      Self::Invalid { code, .. } => code,
+      Self::CreationTime(_) => "sweep_proposal_publication_time",
+      Self::Format(source) => source.code(),
+      Self::Authority(source) => source.code(),
+      Self::Quarantine(source) => source.code(),
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+}
+
+impl Display for SweepProposalHardPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::CreationTime(source) => write!(formatter, "qualified sweep proposal creation time is outside its persisted range: {source}"),
+      Self::Format(source) => write!(formatter, "sweep proposal format error: {source}"),
+      Self::Authority(source) => write!(formatter, "sweep proposal authority error: {source}"),
+      Self::Quarantine(source) => write!(formatter, "sweep proposal quarantine error: {source}"),
+    }
+  }
+}
+
+impl Error for SweepProposalHardPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Format(source) => Some(source),
+      Self::Authority(source) => Some(source),
+      Self::Quarantine(source) => Some(source),
+      Self::CreationTime(source) => Some(source),
+      Self::Invalid { .. } => None,
+    }
+  }
+}
+
+impl From<FormatError> for SweepProposalHardPublicationErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for SweepProposalHardPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<PhysicalQuarantinePublicationErrorV1> for SweepProposalHardPublicationErrorV1 {
+  fn from(source: PhysicalQuarantinePublicationErrorV1) -> Self {
+    Self::Quarantine(source)
+  }
 }
 
 #[derive(Debug)]
@@ -3217,6 +3301,95 @@ impl V4FirstAuthorityPublisher {
       artifact_kind: kind,
       hard_publication_sequence,
     })
+  }
+
+  /// Hard-publish one already-qualified sweep proposal after independently
+  /// reselecting its exact quarantine authority. This method appends immutable
+  /// evidence only; it exposes no locator-removal or Void authority.
+  pub fn publish_sweep_proposal(
+    &self,
+    request: SweepProposalHardPublicationRequestV1<'_>,
+  ) -> Result<SweepProposalHardPublicationReceiptV1, SweepProposalHardPublicationErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(SweepProposalHardPublicationErrorV1::invalid(
+        "sweep_proposal_publication_canceled",
+        "sweep proposal publication was canceled before authority selection",
+      ));
+    }
+    let SweepVoidArtifactV1::SweepProposal(proposal) =
+      decode_sweep_void_artifact(&request.permit.proposal().value, request.permit.hash_algorithm())?
+    else {
+      return Err(SweepProposalHardPublicationErrorV1::invalid(
+        "sweep_proposal_publication_kind",
+        "qualified sweep proposal bytes decode as another artifact kind",
+      ));
+    };
+    let created_at_ms = match u64::try_from(proposal.created_at_ms) {
+      Ok(created_at_ms) => created_at_ms,
+      Err(source) => return Err(SweepProposalHardPublicationErrorV1::CreationTime(source)),
+    };
+    if proposal.key != request.permit.proposal().key
+      || proposal.database_id != request.permit.database_id()
+      || proposal.batch_id != request.permit.batch_id()
+      || proposal.generation != request.permit.generation()
+      || proposal.quarantine_manifest_hash != request.permit.quarantine_manifest_hash()
+      || proposal.candidate_count != request.permit.candidate_count()
+      || request.publication_timestamp_ms < created_at_ms
+    {
+      return Err(SweepProposalHardPublicationErrorV1::invalid(
+        "sweep_proposal_publication_identity",
+        "qualified sweep proposal identity or publication time differs from its permit",
+      ));
+    }
+
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      SweepProposalHardPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.hash_algorithm != request.permit.hash_algorithm()
+      || header.database_id != *request.permit.database_id()
+    {
+      return Err(SweepProposalHardPublicationErrorV1::invalid(
+        "sweep_proposal_publication_database_authority",
+        "selected first authority is degraded or differs from the sweep proposal permit",
+      ));
+    }
+    let selected_control = {
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      select_physical_quarantine_control(&self.file, &kv, header)?
+    };
+    let selected = decode_gc_active_control(&selected_control.stored_value, header.hash_algorithm)?;
+    if selected.kind != GcArtifactKindV1::QuarantineActiveControl
+      || selected.target_manifest_hash != request.permit.quarantine_manifest_hash()
+      || selected.generation != request.permit.generation()
+    {
+      return Err(SweepProposalHardPublicationErrorV1::invalid(
+        "sweep_proposal_publication_quarantine_changed",
+        "physically selected quarantine authority differs from the qualified proposal",
+      ));
+    }
+    if request.cancellation.is_cancelled() {
+      return Err(SweepProposalHardPublicationErrorV1::invalid(
+        "sweep_proposal_publication_canceled",
+        "sweep proposal publication was canceled after authority selection",
+      ));
+    }
+    let hard_publication_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::SweepProposal,
+        database_id: request.permit.database_id(),
+        artifact_key: &request.permit.proposal().key,
+        value: &request.permit.proposal().value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "sweep_proposal_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    Ok(SweepProposalHardPublicationReceiptV1 { proposal_key: request.permit.proposal().key.clone(), hard_publication_sequence })
   }
 
   /// Hard-publish one immutable page or directory used by a future root-

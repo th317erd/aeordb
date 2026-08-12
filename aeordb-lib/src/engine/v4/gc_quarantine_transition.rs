@@ -11,9 +11,10 @@ use tokio_util::sync::CancellationToken;
 use super::gc::{PhysicalIncarnationV1, compare_physical_incarnations_v1};
 use super::gc_quarantine::{
   CandidateDeltaOperationV1, CandidateDeltaRecordWriteV1, PhysicalQuarantineCandidateClassV1, PhysicalQuarantineCandidateV1,
-  PhysicalQuarantineCandidateWriteV1, QuarantineManifestV1, encode_candidate_delta_record_v1, extend_candidate_mutation_digest_v1,
-  initial_candidate_mutation_digest_v1,
+  PhysicalQuarantineCandidateWriteV1, QuarantineManifestV1, encode_candidate_delta_record_v1, encode_physical_quarantine_candidate_v1,
+  extend_candidate_mutation_digest_v1, initial_candidate_mutation_digest_v1,
 };
+use super::hash::digest_parts;
 use super::reader::FormatError;
 use crate::engine::HashAlgorithm;
 
@@ -228,6 +229,7 @@ pub struct PhysicalQuarantineTransitionPublicationPermitV1 {
   captured_root_lifecycle_manifest: Vec<u8>,
   mutation_count: u64,
   mutation_digest: Vec<u8>,
+  eligible_intent_digest: Vec<u8>,
   summary: PhysicalQuarantineTransitionSummaryV1,
 }
 
@@ -278,6 +280,10 @@ impl PhysicalQuarantineTransitionPublicationPermitV1 {
 
   pub fn mutation_digest(&self) -> &[u8] {
     &self.mutation_digest
+  }
+
+  pub fn eligible_intent_digest(&self) -> &[u8] {
+    &self.eligible_intent_digest
   }
 
   pub fn summary(&self) -> PhysicalQuarantineTransitionSummaryV1 {
@@ -365,6 +371,7 @@ pub struct PhysicalQuarantineTransitionModelV1<'a> {
   previous_incarnation: Option<PhysicalIncarnationStateV1>,
   mutation_count: u64,
   mutation_digest: Vec<u8>,
+  eligible_intent_digest: Vec<u8>,
   failed: bool,
 }
 
@@ -425,7 +432,9 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
     let expected_candidate_bytes =
       context.prior_manifest.candidate_count.checked_mul(candidate_record_bytes).ok_or(PhysicalQuarantineTransitionErrorV1::Arithmetic)?;
     if expected_candidate_bytes != context.prior_manifest.candidate_bytes
-      || (context.prior_manifest.candidate_directory_root.is_some() != (context.prior_manifest.candidate_count != 0))
+      || (context.prior_manifest.candidate_count != 0
+        && context.prior_manifest.candidate_directory_root.is_none()
+        && context.prior_manifest.delta_count == 0)
       || context.prior_manifest.eligible_count_hint > context.prior_manifest.candidate_count
       || context.prior_manifest.eligible_bytes_hint > context.prior_manifest.candidate_bytes
     {
@@ -451,6 +460,7 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
       previous_incarnation: None,
       mutation_count: 0,
       mutation_digest: initial_candidate_mutation_digest_v1(context.hash_algorithm),
+      eligible_intent_digest: initial_sweep_intent_digest_v1(context.hash_algorithm),
       failed: false,
     })
   }
@@ -498,6 +508,7 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
       captured_root_lifecycle_manifest: try_copy_bytes(self.context.captured_root_lifecycle_manifest)?,
       mutation_count: self.mutation_count,
       mutation_digest: self.mutation_digest,
+      eligible_intent_digest: self.eligible_intent_digest,
       summary,
     })
   }
@@ -584,6 +595,9 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
   }
 
   fn record_mutation(&mut self, transition: &PhysicalQuarantineTransitionV1) -> Result<(), PhysicalQuarantineTransitionErrorV1> {
+    if let PhysicalQuarantineTransitionV1::SweepEligible(intent) = transition {
+      self.eligible_intent_digest = extend_sweep_intent_digest_v1(self.context.hash_algorithm, &self.eligible_intent_digest, intent)?;
+    }
     let record = match transition {
       PhysicalQuarantineTransitionV1::CandidateStarted(candidate) | PhysicalQuarantineTransitionV1::CandidateRestarted(candidate) => {
         Some(candidate.as_delta_write_request())
@@ -693,6 +707,36 @@ impl<'a> PhysicalQuarantineTransitionModelV1<'a> {
       grace_at_pending_ms: self.context.current_configured_grace_ms,
     })
   }
+}
+
+pub fn initial_sweep_intent_digest_v1(algorithm: HashAlgorithm) -> Vec<u8> {
+  digest_parts(algorithm, &[b"aeordb.physical-sweep-intents.v1\0"])
+}
+
+pub fn extend_sweep_intent_digest_v1(
+  algorithm: HashAlgorithm,
+  previous_digest: &[u8],
+  intent: &PhysicalSweepIntentV1,
+) -> Result<Vec<u8>, FormatError> {
+  let candidate = encode_physical_quarantine_candidate_v1(&intent.candidate.as_write_request())?;
+  Ok(digest_parts(
+    algorithm,
+    &[
+      b"aeordb.physical-sweep-intent.v1\0",
+      previous_digest,
+      &candidate,
+      &intent.confirming_mark_generation.to_le_bytes(),
+      &intent.confirmed_at_ms.to_le_bytes(),
+      &intent.effective_grace_ms.to_le_bytes(),
+      &intent.eligible_at_ms.to_le_bytes(),
+      &intent.prior_quarantine_manifest_hash,
+      &intent.authority_root_set_digest,
+      &intent.semantic_state_digest,
+      &intent.kv_layout_fingerprint,
+      &intent.mark_result_digest,
+      &intent.captured_root_lifecycle_manifest,
+    ],
+  ))
 }
 
 fn validate_incarnation(value: &PhysicalIncarnationV1<'_>, hash_width: usize) -> Result<(), PhysicalQuarantineTransitionErrorV1> {

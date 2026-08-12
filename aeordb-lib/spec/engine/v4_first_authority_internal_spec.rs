@@ -16,7 +16,8 @@ use crate::engine::v4::database_header::{
 };
 use crate::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1, RetirementJournalRecordWriteV1};
 use crate::engine::v4::gc::{
-  EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlWriteV1, GcArtifactKindV1, encode_gc_active_control,
+  EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlWriteV1, GcArtifactKindV1, PhysicalIncarnationV1,
+  encode_gc_active_control,
 };
 use crate::engine::v4::gc_lifecycle::{
   RootExpiryManifestWriteV1, RootExpiryRecordWriteV1, RootLifecycleManifestWriteV1, RootLifecycleSupportClosureBuilderV1,
@@ -26,13 +27,18 @@ use crate::engine::v4::gc_lifecycle::{
 };
 use crate::engine::v4::gc_mark::{MarkRunCheckpointWriteV1, encode_mark_run_checkpoint};
 use crate::engine::v4::gc_quarantine::{
-  QuarantineClosureLimitsV1, QuarantineClosureValidatorV1, QuarantineManifestWriteV1, decode_quarantine_manifest_v1,
-  encode_quarantine_manifest_v1,
+  CandidateDeltaWriteV1, PhysicalQuarantineCandidateClassV1, QuarantineClosureLimitsV1, QuarantineClosureValidatorV1,
+  QuarantineManifestWriteV1, decode_physical_quarantine_candidate_v1, decode_quarantine_manifest_v1, encode_candidate_delta_v1,
+  encode_physical_quarantine_candidate_v1, encode_quarantine_manifest_v1,
 };
 use crate::engine::v4::gc_quarantine_publication::{
   PhysicalQuarantinePublicationQualificationRequestV1, qualify_physical_quarantine_publication_v1,
 };
-use crate::engine::v4::gc_quarantine_transition::{PhysicalQuarantineTransitionContextV1, PhysicalQuarantineTransitionModelV1};
+use crate::engine::v4::gc_quarantine_transition::{
+  PhysicalQuarantineObservationV1, PhysicalQuarantineReachabilityV1, PhysicalQuarantineTransitionContextV1,
+  PhysicalQuarantineTransitionModelV1, PhysicalQuarantineTransitionV1,
+};
+use crate::engine::v4::gc_sweep::{SweepProposalQualificationRequestV1, qualify_sweep_proposal_v1};
 use crate::engine::v4::gc_root_reclaim::{
   RootExpiryRetentionContextV1, RootExpiryRetentionModelV1, RootExpiryRetentionPermitV1, RootExpiryRetentionSelectionV1,
   RootObjectReclaimEvidenceVerificationErrorV1, RootObjectReclaimEvidenceVerificationRequestV1, RootObjectReclaimEvidenceVerifierV1,
@@ -4101,6 +4107,368 @@ fn guarded_physical_quarantine_selects_control_last_and_exact_retry_skips_stale_
   assert!(retry.idempotent);
   assert!(!verifier.called);
   assert_eq!(publisher.observe().unwrap(), before_retry);
+}
+
+#[test]
+fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is_retry_safe() {
+  let (_directory, _path, _coordinator, mut publisher) = create_environment("sweep-proposal-publication", None);
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x31; 16];
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    database_id,
+    1,
+    501,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+
+  let empty = prepare_guarded_physical_quarantine(&mut publisher, &mut retirement_owner, &cancellation, &memory);
+  let mut empty_verifier = ExactPhysicalQuarantineAuthorityVerifierV1 {
+    called: false,
+    fail: false,
+    expected_prior_manifest_hash: empty.prior_manifest_key.clone(),
+    expected_next_manifest_hash: empty.manifest.key.clone(),
+    expected_request: empty.authority_snapshot.clone(),
+    snapshot: empty.authority_snapshot.clone(),
+  };
+  let _empty_receipt =
+    publisher.publish_physical_quarantine(empty.request(&cancellation), &mut empty_verifier, &mut retirement_owner).unwrap();
+
+  let GcStateArtifactV1::Manifest(lifecycle) = decode_gc_state_artifact(&empty.lifecycle_manifest.value, algorithm).unwrap() else {
+    panic!("root lifecycle support must decode as a manifest")
+  };
+  let empty_manifest = decode_quarantine_manifest_v1(&empty.manifest.value, algorithm).unwrap();
+  let candidate_authority = digest_parts(algorithm, &[b"candidate quarantine authority roots"]);
+  let candidate_semantic = digest_parts(algorithm, &[b"candidate quarantine semantic state"]);
+  let candidate_layout = digest_parts(algorithm, &[b"candidate quarantine KV layout"]);
+  let candidate_mark = digest_parts(algorithm, &[b"candidate quarantine mark result"]);
+  let candidate_completed_at_ms = 1_700_000_080_000;
+  let mut candidate_model = PhysicalQuarantineTransitionModelV1::new(
+    PhysicalQuarantineTransitionContextV1 {
+      hash_algorithm: algorithm,
+      prior_manifest: &empty_manifest,
+      mark_generation: 102,
+      completed_at_ms: candidate_completed_at_ms,
+      current_configured_grace_ms: 0,
+      authority_root_set_digest: &candidate_authority,
+      semantic_state_digest: &candidate_semantic,
+      kv_layout_fingerprint: &candidate_layout,
+      mark_result_digest: &candidate_mark,
+      captured_root_lifecycle_manifest: &empty.lifecycle_manifest.key,
+      maximum_incarnations: 1,
+      maximum_candidates: 1,
+      mark_complete: true,
+      destructive_gc_enabled: true,
+      mark_authority_healthy: true,
+      physical_inventory_healthy: true,
+      root_lifecycle_healthy: true,
+    },
+    &cancellation,
+  )
+  .unwrap();
+  let logical_key = digest_parts(algorithm, &[b"eligible candidate logical key"]);
+  let integrity = digest_parts(algorithm, &[b"eligible candidate integrity"]);
+  let incarnation = PhysicalIncarnationV1 {
+    logical_key: &logical_key,
+    integrity_or_legacy_digest: &integrity,
+    wal_offset: 8_192,
+    write_sequence: 77,
+    entity_length: 512,
+    entry_type: 1,
+    entity_version: 1,
+  };
+  let PhysicalQuarantineTransitionV1::CandidateStarted(candidate) = candidate_model
+    .observe(PhysicalQuarantineObservationV1 {
+      incarnation,
+      prior_candidate: None,
+      reachability: PhysicalQuarantineReachabilityV1::ConfirmedUnreachable {
+        class: PhysicalQuarantineCandidateClassV1::RetiredLowerIncarnation,
+      },
+    })
+    .unwrap()
+  else {
+    panic!("the first complete unreachable mark must start a candidate")
+  };
+  let candidate_records = [candidate.as_delta_write_request()];
+  let candidate_delta = encode_candidate_delta_v1(&CandidateDeltaWriteV1 {
+    hash_algorithm: algorithm,
+    database_id,
+    mark_generation: 102,
+    delta_ordinal: 1,
+    previous_delta_hash: None,
+    records: &candidate_records,
+  })
+  .unwrap();
+  publisher
+    .publish_physical_quarantine_support_artifact(PhysicalQuarantineSupportPublicationRequestV1 {
+      database_id: &database_id,
+      artifact: &candidate_delta,
+      publication_timestamp_ms: candidate_completed_at_ms,
+    })
+    .unwrap();
+  let candidate_transition = candidate_model.finish_for_publication().unwrap();
+  let candidate_record_bytes = u64::try_from(52 + 2 * algorithm.hash_length()).unwrap();
+  let candidate_manifest_artifact = encode_quarantine_manifest_v1(&QuarantineManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id,
+    mark_generation: 102,
+    completed_at_ms: candidate_completed_at_ms,
+    required_capabilities: empty_manifest.required_capabilities,
+    authority_root_set_digest: &candidate_authority,
+    semantic_state_digest: &candidate_semantic,
+    kv_layout_fingerprint: &candidate_layout,
+    mark_result_digest: &candidate_mark,
+    candidate_directory_root: None,
+    captured_root_lifecycle_manifest: &empty.lifecycle_manifest.key,
+    candidate_count: 1,
+    candidate_bytes: candidate_record_bytes,
+    eligible_count_hint: 0,
+    eligible_bytes_hint: 0,
+    next_candidate_page_id: 1,
+    delta_hashes: &candidate_delta.key,
+  })
+  .unwrap();
+  let candidate_manifest = decode_quarantine_manifest_v1(&candidate_manifest_artifact.value, algorithm).unwrap();
+  let mut candidate_closure = QuarantineClosureValidatorV1::new(
+    &candidate_manifest,
+    None,
+    &lifecycle,
+    algorithm,
+    cancellation.clone(),
+    QuarantineClosureLimitsV1 { maximum_support_artifacts: 2 },
+    &memory,
+  )
+  .unwrap();
+  candidate_closure.observe_delta(&candidate_delta.value).unwrap();
+  let candidate_closure = candidate_closure.finish().unwrap();
+  let candidate_permit = qualify_physical_quarantine_publication_v1(PhysicalQuarantinePublicationQualificationRequestV1 {
+    prior_manifest: &empty_manifest,
+    next_manifest: &candidate_manifest,
+    support_closure: &candidate_closure,
+    transition: &candidate_transition,
+    appended_delta: Some(&candidate_delta.value),
+    cancellation: &cancellation,
+  })
+  .unwrap();
+  let candidate_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::QuarantineActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: 0,
+    sequence: 3,
+    generation: 102,
+    target_manifest_hash: &candidate_manifest_artifact.key,
+  })
+  .unwrap();
+  let candidate_snapshot = PhysicalQuarantineAuthoritySnapshotV1 {
+    selected_complete_mark_generation: 102,
+    authority_root_set_digest: candidate_authority,
+    semantic_state_digest: candidate_semantic,
+    kv_layout_fingerprint: candidate_layout,
+    mark_result_digest: candidate_mark,
+    selected_root_lifecycle_manifest: empty.lifecycle_manifest.key.clone(),
+    physical_inventory_and_lineage_complete: true,
+    all_candidate_incarnations_exact_and_unreachable: true,
+    task_and_audit_pins_absent: true,
+  };
+  let candidate_prepared = PreparedGuardedPhysicalQuarantineV1 {
+    permit: candidate_permit,
+    manifest: candidate_manifest_artifact.clone(),
+    control: candidate_control,
+    lifecycle_manifest: empty.lifecycle_manifest.clone(),
+    pin_coordinator: empty.pin_coordinator.clone(),
+    authority_snapshot: candidate_snapshot.clone(),
+    prior_manifest_key: empty.manifest.key.clone(),
+    publication_timestamp_ms: candidate_completed_at_ms + 1,
+  };
+  let mut candidate_verifier = ExactPhysicalQuarantineAuthorityVerifierV1 {
+    called: false,
+    fail: false,
+    expected_prior_manifest_hash: candidate_prepared.prior_manifest_key.clone(),
+    expected_next_manifest_hash: candidate_prepared.manifest.key.clone(),
+    expected_request: candidate_snapshot.clone(),
+    snapshot: candidate_snapshot,
+  };
+  let _candidate_receipt = publisher
+    .publish_physical_quarantine(candidate_prepared.request(&cancellation), &mut candidate_verifier, &mut retirement_owner)
+    .unwrap();
+
+  let prior_candidate_bytes = encode_physical_quarantine_candidate_v1(&candidate.as_write_request()).unwrap();
+  let prior_candidate = decode_physical_quarantine_candidate_v1(&prior_candidate_bytes, algorithm, false).unwrap();
+  let eligible_authority = digest_parts(algorithm, &[b"eligible quarantine authority roots"]);
+  let eligible_semantic = digest_parts(algorithm, &[b"eligible quarantine semantic state"]);
+  let eligible_layout = digest_parts(algorithm, &[b"eligible quarantine KV layout"]);
+  let eligible_mark = digest_parts(algorithm, &[b"eligible quarantine mark result"]);
+  let eligible_completed_at_ms = candidate_completed_at_ms + 1;
+  let mut eligible_model = PhysicalQuarantineTransitionModelV1::new(
+    PhysicalQuarantineTransitionContextV1 {
+      hash_algorithm: algorithm,
+      prior_manifest: &candidate_manifest,
+      mark_generation: 103,
+      completed_at_ms: eligible_completed_at_ms,
+      current_configured_grace_ms: 0,
+      authority_root_set_digest: &eligible_authority,
+      semantic_state_digest: &eligible_semantic,
+      kv_layout_fingerprint: &eligible_layout,
+      mark_result_digest: &eligible_mark,
+      captured_root_lifecycle_manifest: &empty.lifecycle_manifest.key,
+      maximum_incarnations: 1,
+      maximum_candidates: 1,
+      mark_complete: true,
+      destructive_gc_enabled: true,
+      mark_authority_healthy: true,
+      physical_inventory_healthy: true,
+      root_lifecycle_healthy: true,
+    },
+    &cancellation,
+  )
+  .unwrap();
+  let PhysicalQuarantineTransitionV1::SweepEligible(intent) = eligible_model
+    .observe(PhysicalQuarantineObservationV1 {
+      incarnation: prior_candidate.incarnation,
+      prior_candidate: Some(&prior_candidate),
+      reachability: PhysicalQuarantineReachabilityV1::ConfirmedUnreachable { class: prior_candidate.class },
+    })
+    .unwrap()
+  else {
+    panic!("the second complete unreachable mark must emit one exact sweep intent")
+  };
+  let eligible_transition = eligible_model.finish_for_publication().unwrap();
+  let eligible_manifest_artifact = encode_quarantine_manifest_v1(&QuarantineManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id,
+    mark_generation: 103,
+    completed_at_ms: eligible_completed_at_ms,
+    required_capabilities: candidate_manifest.required_capabilities,
+    authority_root_set_digest: &eligible_authority,
+    semantic_state_digest: &eligible_semantic,
+    kv_layout_fingerprint: &eligible_layout,
+    mark_result_digest: &eligible_mark,
+    candidate_directory_root: None,
+    captured_root_lifecycle_manifest: &empty.lifecycle_manifest.key,
+    candidate_count: 1,
+    candidate_bytes: candidate_record_bytes,
+    eligible_count_hint: 1,
+    eligible_bytes_hint: candidate_record_bytes,
+    next_candidate_page_id: 1,
+    delta_hashes: &candidate_delta.key,
+  })
+  .unwrap();
+  let eligible_manifest = decode_quarantine_manifest_v1(&eligible_manifest_artifact.value, algorithm).unwrap();
+  let mut eligible_closure = QuarantineClosureValidatorV1::new(
+    &eligible_manifest,
+    None,
+    &lifecycle,
+    algorithm,
+    cancellation.clone(),
+    QuarantineClosureLimitsV1 { maximum_support_artifacts: 2 },
+    &memory,
+  )
+  .unwrap();
+  eligible_closure.observe_delta(&candidate_delta.value).unwrap();
+  let eligible_closure = eligible_closure.finish().unwrap();
+  let eligible_permit = qualify_physical_quarantine_publication_v1(PhysicalQuarantinePublicationQualificationRequestV1 {
+    prior_manifest: &candidate_manifest,
+    next_manifest: &eligible_manifest,
+    support_closure: &eligible_closure,
+    transition: &eligible_transition,
+    appended_delta: None,
+    cancellation: &cancellation,
+  })
+  .unwrap();
+  let batch_id = [0x91; 16];
+  let sweep_permit = qualify_sweep_proposal_v1(SweepProposalQualificationRequestV1 {
+    quarantine_publication: &eligible_permit,
+    quarantine_manifest: &eligible_manifest,
+    batch_id: &batch_id,
+    created_at_ms: i64::try_from(eligible_completed_at_ms + 1).unwrap(),
+    intents: std::slice::from_ref(&intent),
+    cancellation: &cancellation,
+  })
+  .unwrap();
+  let publication_request = SweepProposalHardPublicationRequestV1 {
+    permit: &sweep_permit,
+    publication_timestamp_ms: eligible_completed_at_ms + 1,
+    cancellation: &cancellation,
+  };
+  let error = publisher.publish_sweep_proposal(publication_request).unwrap_err();
+  assert_eq!(error.code(), "sweep_proposal_publication_quarantine_changed");
+  assert!(publisher.locator(&sweep_permit.proposal().key).unwrap().is_none());
+
+  let eligible_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::QuarantineActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: 1,
+    sequence: 4,
+    generation: 103,
+    target_manifest_hash: &eligible_manifest_artifact.key,
+  })
+  .unwrap();
+  let eligible_snapshot = PhysicalQuarantineAuthoritySnapshotV1 {
+    selected_complete_mark_generation: 103,
+    authority_root_set_digest: eligible_authority,
+    semantic_state_digest: eligible_semantic,
+    kv_layout_fingerprint: eligible_layout,
+    mark_result_digest: eligible_mark,
+    selected_root_lifecycle_manifest: empty.lifecycle_manifest.key.clone(),
+    physical_inventory_and_lineage_complete: true,
+    all_candidate_incarnations_exact_and_unreachable: true,
+    task_and_audit_pins_absent: true,
+  };
+  let eligible_prepared = PreparedGuardedPhysicalQuarantineV1 {
+    permit: eligible_permit,
+    manifest: eligible_manifest_artifact,
+    control: eligible_control,
+    lifecycle_manifest: empty.lifecycle_manifest,
+    pin_coordinator: empty.pin_coordinator,
+    authority_snapshot: eligible_snapshot.clone(),
+    prior_manifest_key: candidate_prepared.manifest.key,
+    publication_timestamp_ms: eligible_completed_at_ms + 1,
+  };
+  let mut eligible_verifier = ExactPhysicalQuarantineAuthorityVerifierV1 {
+    called: false,
+    fail: false,
+    expected_prior_manifest_hash: eligible_prepared.prior_manifest_key.clone(),
+    expected_next_manifest_hash: eligible_prepared.manifest.key.clone(),
+    expected_request: eligible_snapshot.clone(),
+    snapshot: eligible_snapshot,
+  };
+  let _eligible_receipt =
+    publisher.publish_physical_quarantine(eligible_prepared.request(&cancellation), &mut eligible_verifier, &mut retirement_owner).unwrap();
+
+  let selected_before = selected_physical_quarantine_manifest_key(&publisher);
+  let original_manifest_locator = publisher.locator(&eligible_prepared.manifest.key).unwrap().unwrap();
+  let mut corrupted_manifest_locator = original_manifest_locator.clone();
+  corrupted_manifest_locator.type_flags = KV_TYPE_CHUNK;
+  publisher.kv.lock().unwrap().insert(corrupted_manifest_locator).unwrap();
+  let error = publisher.publish_sweep_proposal(publication_request).unwrap_err();
+  assert_eq!(error.code(), "quarantine_publication_manifest_collision");
+  assert!(publisher.locator(&sweep_permit.proposal().key).unwrap().is_none());
+  publisher.kv.lock().unwrap().insert(original_manifest_locator).unwrap();
+
+  let first = publisher.publish_sweep_proposal(publication_request).unwrap();
+  let retry = publisher.publish_sweep_proposal(publication_request).unwrap();
+  assert_eq!(first, retry);
+  assert_eq!(first.proposal_key, sweep_permit.proposal().key);
+  assert!(publisher.locator(&first.proposal_key).unwrap().is_some());
+  assert_eq!(selected_physical_quarantine_manifest_key(&publisher), selected_before);
+
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  let error = publisher
+    .publish_sweep_proposal(SweepProposalHardPublicationRequestV1 {
+      permit: &sweep_permit,
+      publication_timestamp_ms: eligible_completed_at_ms + 1,
+      cancellation: &canceled,
+    })
+    .unwrap_err();
+  assert_eq!(error.code(), "sweep_proposal_publication_canceled");
 }
 
 #[test]

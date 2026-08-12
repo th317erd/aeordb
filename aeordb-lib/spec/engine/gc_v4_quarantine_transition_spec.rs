@@ -201,6 +201,61 @@ fn zero_grace_still_requires_two_complete_marks_at_both_hash_widths() {
 }
 
 #[test]
+fn a_delta_only_candidate_manifest_can_advance_to_its_second_complete_mark() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let width = algorithm.hash_length();
+  let required_capabilities = capabilities();
+  let authority = sequence(width, 0x51);
+  let semantic = sequence(width, 0x71);
+  let layout = sequence(width, 0x91);
+  let result = sequence(width, 0xb1);
+  let lifecycle = sequence(width, 0xe1);
+  let delta_hash = sequence(width, 0xd1);
+  let record_bytes = u64::try_from(52 + 2 * width).unwrap();
+  let manifest_bytes = encode_quarantine_manifest_v1(&QuarantineManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: DATABASE_ID,
+    mark_generation: 100,
+    completed_at_ms: 1_000,
+    required_capabilities: &required_capabilities,
+    authority_root_set_digest: &authority,
+    semantic_state_digest: &semantic,
+    kv_layout_fingerprint: &layout,
+    mark_result_digest: &result,
+    candidate_directory_root: None,
+    captured_root_lifecycle_manifest: &lifecycle,
+    candidate_count: 1,
+    candidate_bytes: record_bytes,
+    eligible_count_hint: 0,
+    eligible_bytes_hint: 0,
+    next_candidate_page_id: 1,
+    delta_hashes: &delta_hash,
+  })
+  .unwrap()
+  .value;
+  let manifest = decode_quarantine_manifest_v1(&manifest_bytes, algorithm).unwrap();
+  let candidate_bytes =
+    candidate_bytes!(algorithm, 0x11, 0x31, 4_096, PhysicalQuarantineCandidateClassV1::RetiredLowerIncarnation, 1_000, 100, 0);
+  let candidate = decode_physical_quarantine_candidate_v1(&candidate_bytes, algorithm, false).unwrap();
+  let inputs = TransitionInputs::new(algorithm);
+  let cancellation = CancellationToken::new();
+  let mut model =
+    PhysicalQuarantineTransitionModelV1::new(transition_context!(inputs, algorithm, &manifest, 101, 1_000, 0, 1, 1), &cancellation)
+      .unwrap();
+
+  let transition = model
+    .observe(PhysicalQuarantineObservationV1 {
+      incarnation: candidate.incarnation,
+      prior_candidate: Some(&candidate),
+      reachability: PhysicalQuarantineReachabilityV1::ConfirmedUnreachable { class: candidate.class },
+    })
+    .unwrap();
+
+  assert!(matches!(transition, PhysicalQuarantineTransitionV1::SweepEligible(_)));
+  assert_eq!(model.finish().unwrap().eligible_count, 1);
+}
+
+#[test]
 fn effective_grace_uses_the_larger_frozen_or_current_value_and_checks_overflow() {
   let algorithm = HashAlgorithm::Blake3_256;
   let encoded_candidate =
@@ -655,7 +710,14 @@ fn quarantine_transition_remains_disconnected_from_live_service_and_destructive_
   let source_root = source_path("src");
   let mut production_uses = Vec::new();
   collect_production_uses(&source_root, &mut production_uses);
-  assert_eq!(production_uses, vec![source_path("src/engine/v4/gc_quarantine_publication.rs"), source_path("src/engine/v4/mod.rs")]);
+  assert_eq!(
+    production_uses,
+    vec![
+      source_path("src/engine/v4/gc_quarantine_publication.rs"),
+      source_path("src/engine/v4/gc_sweep.rs"),
+      source_path("src/engine/v4/mod.rs"),
+    ]
+  );
 }
 
 fn source_path(relative: &str) -> PathBuf {

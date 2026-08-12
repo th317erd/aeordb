@@ -708,7 +708,11 @@
         - [x] P4-5d: prove cancellation, pin/authority races, malformed/corrupt state, capacity, crash prefixes, restart, and retained-or-leaked failure direction.
       - [ ] P4-6: implement sweep proposals, receipts, idempotent recovery, and retained-or-leaked crash outcomes.
         - [x] P4-6a: expose exact both-width sweep proposal/outcome/receipt iterators and writers matching the frozen independent fixtures.
-        - [ ] P4-6b: qualify and hard-publish bounded proposals from exact selected quarantine authority without granting removal authority.
+        - [x] P4-6b: qualify and hard-publish bounded proposals from exact selected quarantine authority without granting removal authority.
+          - [x] Bind every emitted eligible intent into the transition and quarantine publication permits with one canonical both-width digest.
+          - [x] Qualify one strictly ordered, maximum-4,096 proposal against exact selected-quarantine identity, timing, grace, authority basis, and intent digest.
+          - [x] Hard-publish the immutable proposal only after independently re-reading the exact selected quarantine manifest; expose no locator-removal authority.
+          - [x] Prove malformed/stale/substituted intents, cancellation, authority drift, retry, and architecture isolation before landing P4-6b.
         - [ ] P4-6c: execute one plural, guarded locator-removal boundary through a caller-owned v4 mutation authority and retain exact per-incarnation outcomes.
         - [ ] P4-6d: hard-publish commit/recovered receipts only after caller-verified selected Void authority and reconcile every crash prefix idempotently.
         - [ ] P4-6e: prove cancellation, corruption, authority/pin races, partial removal, dishonest receipts, restart, and retained-or-leaked failure direction.
