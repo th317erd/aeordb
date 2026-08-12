@@ -753,6 +753,10 @@ name = "gc_v4_void_publication_spec"
 path = "spec/engine/gc_v4_void_publication_spec.rs"
 
 [[test]]
+name = "gc_v4_void_claim_spec"
+path = "spec/engine/gc_v4_void_claim_spec.rs"
+
+[[test]]
 name = "gc_v4_state_writer_spec"
 path = "spec/engine/gc_v4_state_writer_spec.rs"
 

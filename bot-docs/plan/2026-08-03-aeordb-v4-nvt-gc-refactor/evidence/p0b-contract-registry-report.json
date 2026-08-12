@@ -4,7 +4,7 @@
   "stage": "p0b-complete-independent-contract-freeze",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
   "source_sha256": "58a18bedee5816ec90f64b9f316b9571a31b6cbce818d174f83bad9e06102300",
-  "fixture_manifest_sha256": "2b7af4d67d06113343bdf627403e4b9bcb92cba8bee2751f5f1712e8d6e54b0d",
+  "fixture_manifest_sha256": "5a157bf89aaf256ecc9a66c927d075c8e1174a5f550ef7e3afaff43ada7a57f7",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 21,

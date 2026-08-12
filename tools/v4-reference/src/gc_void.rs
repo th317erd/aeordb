@@ -51,6 +51,8 @@ struct VoidExtent {
 #[derive(Debug)]
 struct DecodedVoidManifest {
   generation: u64,
+  #[cfg(test)]
+  published_at_ms: i64,
   free_count: u64,
   #[cfg(test)]
   free_bytes: u64,
@@ -244,7 +246,7 @@ pub fn observe(profile: HashProfile, bytes: &[u8]) -> (String, Option<String>) {
       decode_void_extent_page(profile, bytes).map(|extents| format!("gc:page:void-free-extents:records={}", extents.len()))
     }
     Some(GcKind::VoidClaim) => {
-      decode_void_claim(profile, bytes).map(|(count, total, _)| format!("gc:claim:void:extents={count}:bytes={total}"))
+      decode_void_claim(profile, bytes).map(|(count, total, _, _)| format!("gc:claim:void:extents={count}:bytes={total}"))
     }
     Some(GcKind::GcArtifactDirectoryNode) => {
       decode_directory(profile, bytes).map(|directory| format!("gc:directory:{}:records={}", directory.role.name(), directory.live_count))
@@ -786,6 +788,8 @@ fn decode_void_manifest(profile: HashProfile, bytes: &[u8]) -> Result<DecodedVoi
   }
   Ok(DecodedVoidManifest {
     generation: artifact.generation,
+    #[cfg(test)]
+    published_at_ms: read_i64(body, 36)?,
     free_count,
     #[cfg(test)]
     free_bytes,
@@ -804,7 +808,8 @@ fn build_void_claim(profile: HashProfile, source_manifest: &[u8], extent: &VoidE
   let record_length = 16 + h;
   let mut body = vec![0u8; 56 + h + record_length];
   put_u16(&mut body, 4, 1);
-  put_i64(&mut body, 8, 1_700_000_201_500);
+  // The immutable claim cannot postdate the replacement catalog that roots it.
+  put_i64(&mut body, 8, 1_700_000_201_001);
   body[16..32].copy_from_slice(&boot_id());
   body[32..48].copy_from_slice(&batch_id());
   body[48..48 + h].copy_from_slice(source_manifest);
@@ -819,7 +824,7 @@ fn build_void_claim(profile: HashProfile, source_manifest: &[u8], extent: &VoidE
   build_gc_value(GcKind::VoidClaim, 2, &identity, &body)
 }
 
-fn decode_void_claim(profile: HashProfile, bytes: &[u8]) -> Result<(usize, u64, Vec<u8>), &'static str> {
+fn decode_void_claim(profile: HashProfile, bytes: &[u8]) -> Result<(usize, u64, Vec<u8>, i64), &'static str> {
   let artifact = decode_gc_value(bytes, MAX_SWEEP_LENGTH)?;
   let h = profile.width();
   let record_length = 16 + h;
@@ -864,7 +869,7 @@ fn decode_void_claim(profile: HashProfile, bytes: &[u8]) -> Result<(usize, u64, 
     previous_end = Some(offset + u64::from(length));
     total = total.checked_add(u64::from(length)).ok_or("void_claim_total")?;
   }
-  Ok((count, total, body[48..48 + h].to_vec()))
+  Ok((count, total, body[48..48 + h].to_vec(), read_i64(body, 8)?))
 }
 
 fn build_settlement_receipt(
@@ -966,10 +971,11 @@ fn validate_fixture_closure(profile: HashProfile, cases: &[GcFixtureCase]) -> Re
   {
     return Err("source_manifest_closure");
   }
-  let (claim_count, claim_bytes, claim_source) = decode_void_claim(profile, claim)?;
+  let (claim_count, claim_bytes, claim_source, claim_created_at_ms) = decode_void_claim(profile, claim)?;
   if claim_count != 1
     || claim_bytes != u64::from(source_extents[0].length)
     || claim_source != immutable_key(profile, GcKind::VoidCatalogManifest, source_manifest)
+    || claim_created_at_ms < source.published_at_ms
   {
     return Err("claim_source_closure");
   }
@@ -987,6 +993,7 @@ fn validate_fixture_closure(profile: HashProfile, cases: &[GcFixtureCase]) -> Re
     || outstanding.free_bytes != remaining_bytes
     || outstanding.claim_count != claim_count as u64
     || outstanding.claimed_bytes != claim_bytes
+    || outstanding.published_at_ms < claim_created_at_ms
   {
     return Err("outstanding_manifest_closure");
   }

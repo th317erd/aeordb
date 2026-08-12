@@ -51,8 +51,12 @@ use crate::engine::v4::gc_sweep_reconciliation::{
 };
 use crate::engine::v4::gc_void::{
   SweepOutcomeClassV1, SweepProposalWriteV1, SweepReceiptOutcomeWriteV1, SweepReceiptWriteV1, SweepVoidArtifactV1,
-  VoidCatalogManifestWriteV1, VoidExtentPageWriteV1, VoidExtentRecordV1, decode_sweep_void_artifact, encode_sweep_proposal_v1,
-  encode_sweep_receipt_v1, encode_void_catalog_manifest_v1, encode_void_extent_page_v1,
+  VoidCatalogManifestWriteV1, VoidClaimExtentV1, VoidClaimWriteV1, VoidExtentPageWriteV1, VoidExtentRecordV1, decode_sweep_void_artifact,
+  encode_sweep_proposal_v1, encode_sweep_receipt_v1, encode_void_catalog_manifest_v1, encode_void_claim_v1, encode_void_extent_page_v1,
+};
+use crate::engine::v4::gc_void_claim::{
+  VoidClaimAdmissionAuthorityErrorV1, VoidClaimAdmissionAuthorityRequestV1, VoidClaimAdmissionAuthoritySnapshotV1,
+  VoidClaimAdmissionAuthorityV1, VoidClaimTransitionLimitsV1,
 };
 use crate::engine::v4::gc_void_publication::{
   VoidCatalogClosureLimitsV1, VoidCatalogPublicationAuthorityErrorV1, VoidCatalogPublicationAuthorityRequestV1,
@@ -115,6 +119,53 @@ fn test_void_catalog_publication_authority() -> TestVoidCatalogPublicationAuthor
       conflicting_receipt_count: 0,
       repair_latch_clear: true,
     },
+    fail_recheck: false,
+    recheck_calls: 0,
+  }
+}
+
+struct TestVoidClaimAdmissionAuthorityV1 {
+  snapshot: VoidClaimAdmissionAuthoritySnapshotV1,
+  expected_source_manifest_hash: Vec<u8>,
+  expected_source_control_sequence: u64,
+  fail_recheck: bool,
+  recheck_calls: usize,
+}
+
+impl VoidClaimAdmissionAuthorityV1 for TestVoidClaimAdmissionAuthorityV1 {
+  fn recheck_void_claim_admission_authority(
+    &mut self,
+    request: VoidClaimAdmissionAuthorityRequestV1<'_>,
+  ) -> Result<VoidClaimAdmissionAuthoritySnapshotV1, VoidClaimAdmissionAuthorityErrorV1> {
+    self.recheck_calls += 1;
+    assert_eq!(request.source_manifest.key, self.expected_source_manifest_hash);
+    assert_eq!(request.selected_source_control_sequence, self.expected_source_control_sequence);
+    assert_eq!(request.transition.claim_key, request.claim.key);
+    if self.fail_recheck {
+      return Err(VoidClaimAdmissionAuthorityErrorV1::new(
+        "void_claim_admission_test_recheck",
+        "injected caller-owned Void claim authority failure",
+      ));
+    }
+    Ok(self.snapshot.clone())
+  }
+}
+
+fn test_void_claim_admission_authority(source_manifest_hash: &[u8], source_control_sequence: u64) -> TestVoidClaimAdmissionAuthorityV1 {
+  TestVoidClaimAdmissionAuthorityV1 {
+    snapshot: VoidClaimAdmissionAuthoritySnapshotV1 {
+      selected_source_manifest_hash: source_manifest_hash.to_vec(),
+      selected_source_control_sequence: source_control_sequence,
+      source_catalog_receipt_backed: true,
+      source_catalog_closure_current: true,
+      allocator_admission_excluded: true,
+      no_other_claim_admission_active: true,
+      in_memory_void_authority_current: true,
+      conflicting_receipt_count: 0,
+      repair_latch_clear: true,
+    },
+    expected_source_manifest_hash: source_manifest_hash.to_vec(),
+    expected_source_control_sequence: source_control_sequence,
     fail_recheck: false,
     recheck_calls: 0,
   }
@@ -597,6 +648,110 @@ fn selected_void_catalog_manifest_key(publisher: &V4FirstAuthorityPublisher) -> 
   select_void_catalog_control(&publisher.file, &kv, &observation.selected.header).unwrap().map(|control| control.target_manifest_hash)
 }
 
+struct PreparedVoidClaimAdmissionV1 {
+  claim: EncodedImmutableGcArtifactV1,
+  claim_directory: EncodedImmutableGcArtifactV1,
+  result_manifest: EncodedImmutableGcArtifactV1,
+  result_control: EncodedGcActiveControlV1,
+}
+
+impl PreparedVoidClaimAdmissionV1 {
+  fn request<'a>(
+    &'a self,
+    cancellation: &'a CancellationToken,
+    memory: &'a MemoryCoordinator,
+    maximum_support_artifacts_per_catalog: u64,
+    monotonic_now_ms: u64,
+  ) -> VoidClaimAdmissionRequestV1<'a> {
+    VoidClaimAdmissionRequestV1 {
+      claim: &self.claim,
+      result_manifest: &self.result_manifest,
+      result_control: &self.result_control,
+      publication_timestamp_ms: 1_700_000_080_015,
+      monotonic_now_ms,
+      cancellation,
+      memory,
+      transition_limits: VoidClaimTransitionLimitsV1 { maximum_support_artifacts_per_catalog },
+    }
+  }
+}
+
+fn prepare_void_claim_admission(source: &PreparedVoidCatalogPublicationV1) -> PreparedVoidClaimAdmissionV1 {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let claim_id = [0xa1; 16];
+  let requesting_boot_id = [0xb1; 16];
+  let requesting_task_or_batch_id = [0xc1; 16];
+  let claims_catalog_id = [0xd1; 16];
+  let SweepVoidArtifactV1::VoidExtentPage(source_page) = decode_sweep_void_artifact(&source.extent_page.value, algorithm).unwrap() else {
+    panic!("prepared source extent page must decode")
+  };
+  let source_extent = source_page.extent_records().unwrap().next().unwrap().unwrap();
+  let claim = encode_void_claim_v1(&VoidClaimWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &source.database_id,
+    claim_id: &claim_id,
+    generation: 2,
+    created_at_ms: 1_700_000_080_013,
+    requesting_boot_id: &requesting_boot_id,
+    requesting_task_or_batch_id: &requesting_task_or_batch_id,
+    source_manifest_hash: &source.manifest.key,
+    extents: &[VoidClaimExtentV1 {
+      offset: source_extent.offset,
+      length: source_extent.length,
+      origin_sweep_proposal_hash: source_extent.origin_sweep_proposal_hash,
+    }],
+  })
+  .unwrap();
+  let claim_directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::Claims,
+    database_id: &source.database_id,
+    catalog_id: &claims_catalog_id,
+    generation: 2,
+    level: 0,
+    entries: &[GcStateDirectoryEntryWriteV1 {
+      lower_fence: &claim_id,
+      upper_fence: &claim_id,
+      child_hash: &claim.key,
+      child_generation: 2,
+      live_count: 1,
+      tombstone_count: 0,
+      page_count: 0,
+      logical_bytes: u64::try_from(claim.value.len()).unwrap(),
+      minimum_page_id: 0,
+      maximum_page_id: 0,
+      physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }],
+  })
+  .unwrap();
+  let result_manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &source.database_id,
+    generation: 2,
+    published_at_ms: 1_700_000_080_014,
+    free_root: None,
+    claim_root: Some(&claim_directory.key),
+    next_page_id: 2,
+    free_count: 0,
+    free_bytes: 0,
+    claim_count: 1,
+    claimed_bytes: u64::from(source_extent.length),
+    previous_control_sequence: 1,
+  })
+  .unwrap();
+  let result_control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &source.database_id,
+    slot: 1,
+    sequence: 2,
+    generation: 2,
+    target_manifest_hash: &result_manifest.key,
+  })
+  .unwrap();
+  PreparedVoidClaimAdmissionV1 { claim, claim_directory, result_manifest, result_control }
+}
+
 #[test]
 fn void_catalog_support_publishes_before_selector_and_retry_remains_reuse_blocked() {
   let (_directory, path, _coordinator, mut publisher) = create_environment("void-catalog-publication", None);
@@ -713,6 +868,259 @@ fn void_catalog_support_publishes_before_selector_and_retry_remains_reuse_blocke
   assert!(retry.idempotent);
   assert!(retry.receipt_reconciliation_required);
   assert!(retry.reuse_blocked);
+}
+
+#[test]
+fn void_claim_selects_source_minus_claim_before_returning_exact_allocation_authority() {
+  let (_directory, path, _coordinator, mut publisher) = create_environment("void-claim-admission", None);
+  publish_first_authority(&publisher);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &source);
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut source_authority = test_void_catalog_publication_authority();
+  let source_receipt =
+    publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
+  assert_eq!(source_receipt.manifest_key, source.manifest.key);
+  assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(source.manifest.key.clone()));
+
+  let prepared = prepare_void_claim_admission(&source);
+  let bypass_error = publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &source.database_id,
+      artifact: &prepared.claim,
+      publication_timestamp_ms: 1_700_000_080_015,
+    })
+    .unwrap_err();
+  assert_eq!(bypass_error.code(), "void_support_claim_owner");
+  assert!(publisher.locator(&prepared.claim.key).unwrap().is_none());
+  publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &source.database_id,
+      artifact: &prepared.claim_directory,
+      publication_timestamp_ms: 1_700_000_080_015,
+    })
+    .unwrap();
+
+  let mut claim_authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+  claim_authority.snapshot.allocator_admission_excluded = false;
+  let refused =
+    publisher.admit_void_claim(prepared.request(&cancellation, &memory, 4, 2), &mut claim_authority, &mut retirement_owner).unwrap_err();
+  assert_eq!(refused.code(), "void_claim_admission_authority_incomplete");
+  assert_eq!(claim_authority.recheck_calls, 1);
+  assert!(publisher.locator(&prepared.claim.key).unwrap().is_some(), "failed admission may retain only immutable claim evidence");
+  assert!(publisher.locator(&prepared.result_manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&prepared.result_control.key).unwrap().is_none());
+  assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(source.manifest.key.clone()));
+
+  claim_authority.snapshot.allocator_admission_excluded = true;
+  let permit =
+    publisher.admit_void_claim(prepared.request(&cancellation, &memory, 4, 3), &mut claim_authority, &mut retirement_owner).unwrap();
+  assert_eq!(claim_authority.recheck_calls, 2);
+  assert_eq!(permit.database_id(), source.database_id);
+  assert_eq!(permit.claim_key(), prepared.claim.key);
+  assert_eq!(permit.source_manifest_key(), source.manifest.key);
+  assert_eq!(permit.result_manifest_key(), prepared.result_manifest.key);
+  assert_eq!(permit.result_control_key(), prepared.result_control.key);
+  assert_eq!(permit.claimed_extents().len(), 1);
+  assert_eq!(permit.claimed_extents()[0].offset, 8_192);
+  assert_eq!(permit.claimed_extents()[0].length, 512);
+  assert_eq!(permit.claimed_bytes(), 512);
+  assert_eq!(permit.generation(), 2);
+  assert!(!permit.idempotent());
+  assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(prepared.result_manifest.key.clone()));
+  drop(permit);
+  drop(retirement_owner);
+  drop(publisher);
+
+  let (_restart_coordinator, mut reopened) = reopen(&path);
+  let retry_cancellation = CancellationToken::new();
+  let retry_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    source.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &retry_cancellation,
+    &retry_memory,
+  )
+  .unwrap();
+  let mut retry_authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+  retry_authority.fail_recheck = true;
+  let retry =
+    reopened.admit_void_claim(prepared.request(&retry_cancellation, &retry_memory, 4, 4), &mut retry_authority, &mut retry_owner).unwrap();
+  assert_eq!(retry_authority.recheck_calls, 0, "exact selected retry must not rerun stale source authority");
+  assert!(retry.idempotent());
+  assert_eq!(retry.claim_key(), prepared.claim.key);
+  assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(prepared.result_manifest.key));
+}
+
+#[test]
+fn void_claim_refuses_every_stale_or_incomplete_caller_authority_before_selection() {
+  type AuthorityMutation = fn(&mut TestVoidClaimAdmissionAuthorityV1);
+  let cases: [(&str, AuthorityMutation, &str); 10] = [
+    ("source-manifest", |authority| authority.snapshot.selected_source_manifest_hash.fill(0x99), "void_claim_admission_source_authority"),
+    ("source-sequence", |authority| authority.snapshot.selected_source_control_sequence += 1, "void_claim_admission_source_authority"),
+    ("receipt", |authority| authority.snapshot.source_catalog_receipt_backed = false, "void_claim_admission_authority_incomplete"),
+    ("closure", |authority| authority.snapshot.source_catalog_closure_current = false, "void_claim_admission_authority_incomplete"),
+    ("allocator", |authority| authority.snapshot.allocator_admission_excluded = false, "void_claim_admission_authority_incomplete"),
+    ("claim-owner", |authority| authority.snapshot.no_other_claim_admission_active = false, "void_claim_admission_authority_incomplete"),
+    (
+      "memory-authority",
+      |authority| authority.snapshot.in_memory_void_authority_current = false,
+      "void_claim_admission_authority_incomplete",
+    ),
+    ("receipt-conflict", |authority| authority.snapshot.conflicting_receipt_count = 1, "void_claim_admission_authority_incomplete"),
+    ("repair-latch", |authority| authority.snapshot.repair_latch_clear = false, "void_claim_admission_authority_incomplete"),
+    ("callback-error", |authority| authority.fail_recheck = true, "void_claim_admission_test_recheck"),
+  ];
+
+  for (name, mutate_authority, expected_code) in cases {
+    let (_directory, _path, _coordinator, mut publisher) = create_environment(&format!("void-claim-authority-{name}"), None);
+    publish_first_authority(&publisher);
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+    publish_prepared_void_catalog_support(&publisher, &source);
+    let cancellation = CancellationToken::new();
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      source.database_id,
+      1,
+      1,
+      RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let mut source_authority = test_void_catalog_publication_authority();
+    let source_receipt =
+      publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
+    assert_eq!(source_receipt.manifest_key, source.manifest.key, "authority case {name}");
+    let prepared = prepare_void_claim_admission(&source);
+    publisher
+      .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+        database_id: &source.database_id,
+        artifact: &prepared.claim_directory,
+        publication_timestamp_ms: 1_700_000_080_015,
+      })
+      .unwrap();
+    let mut authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+    mutate_authority(&mut authority);
+
+    let error =
+      publisher.admit_void_claim(prepared.request(&cancellation, &memory, 4, 2), &mut authority, &mut retirement_owner).unwrap_err();
+
+    assert_eq!(error.code(), expected_code, "authority case {name}");
+    assert_eq!(authority.recheck_calls, 1, "authority case {name}");
+    assert!(publisher.locator(&prepared.claim.key).unwrap().is_some(), "authority case {name}");
+    assert!(publisher.locator(&prepared.result_manifest.key).unwrap().is_none(), "authority case {name}");
+    assert!(publisher.locator(&prepared.result_control.key).unwrap().is_none(), "authority case {name}");
+    assert_eq!(selected_void_catalog_manifest_key(&publisher), Some(source.manifest.key.clone()), "authority case {name}");
+  }
+}
+
+#[test]
+fn every_void_claim_selector_failure_restarts_as_exactly_source_or_claimed() {
+  let failures = [
+    FirstAuthorityFailurePoint::DataBarrier,
+    FirstAuthorityFailurePoint::HeaderWriteBefore,
+    FirstAuthorityFailurePoint::HeaderWriteAfter,
+    FirstAuthorityFailurePoint::FullBarrier,
+    FirstAuthorityFailurePoint::Verify,
+  ];
+  for failure in failures {
+    let (_directory, path, coordinator, mut publisher) = create_environment(&format!("void-claim-selector-{failure:?}"), None);
+    publish_first_authority(&publisher);
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    let source = prepare_void_catalog_publication(&publisher, &memory, 0);
+    publish_prepared_void_catalog_support(&publisher, &source);
+    let cancellation = CancellationToken::new();
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      source.database_id,
+      1,
+      1,
+      RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let mut source_authority = test_void_catalog_publication_authority();
+    let _source_receipt =
+      publisher.publish_void_catalog(source.request(&cancellation, &memory, 2, 1), &mut source_authority, &mut retirement_owner).unwrap();
+    let prepared = prepare_void_claim_admission(&source);
+    publisher
+      .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+        database_id: &source.database_id,
+        artifact: &prepared.claim_directory,
+        publication_timestamp_ms: 1_700_000_080_015,
+      })
+      .unwrap();
+    publisher = V4FirstAuthorityPublisher {
+      file: publisher.file,
+      kv: publisher.kv,
+      header_publisher: DatabaseHeaderPublisherV4::with_io(coordinator.clone(), Arc::new(NthHeaderPublicationFaultIo::new(failure, 4))),
+      root_state: publisher.root_state,
+    };
+    let mut authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+
+    let error =
+      publisher.admit_void_claim(prepared.request(&cancellation, &memory, 4, 2), &mut authority, &mut retirement_owner).unwrap_err();
+
+    assert_eq!(authority.recheck_calls, 1, "failure {failure:?}");
+    assert!(coordinator.hard_failure().unwrap().is_some(), "failure {failure:?}");
+    let selector_may_have_committed = matches!(
+      failure,
+      FirstAuthorityFailurePoint::HeaderWriteAfter | FirstAuthorityFailurePoint::FullBarrier | FirstAuthorityFailurePoint::Verify
+    );
+    if selector_may_have_committed {
+      let permit = error
+        .committed_permit()
+        .unwrap_or_else(|| panic!("uncertain claimed Void authority requires an exact permit for {failure:?}: {error:?}"));
+      assert_eq!(permit.claim_key(), prepared.claim.key, "failure {failure:?}");
+      assert_eq!(permit.result_manifest_key(), prepared.result_manifest.key, "failure {failure:?}");
+    } else {
+      assert!(error.committed_permit().is_none(), "failure {failure:?}");
+    }
+    drop(retirement_owner);
+    drop(publisher);
+
+    let (_restart_coordinator, mut reopened) = reopen(&path);
+    let expected_selected = if selector_may_have_committed { &prepared.result_manifest.key } else { &source.manifest.key };
+    assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(expected_selected.clone()), "failure {failure:?}");
+    let retry_cancellation = CancellationToken::new();
+    let retry_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      source.database_id,
+      1,
+      1,
+      RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+      &retry_cancellation,
+      &retry_memory,
+    )
+    .unwrap();
+    let mut retry_authority = test_void_claim_admission_authority(&source.manifest.key, 1);
+    retry_authority.fail_recheck = selector_may_have_committed;
+    let retry = reopened
+      .admit_void_claim(prepared.request(&retry_cancellation, &retry_memory, 4, 3), &mut retry_authority, &mut retry_owner)
+      .unwrap();
+    assert_eq!(retry_authority.recheck_calls, if selector_may_have_committed { 0 } else { 1 }, "failure {failure:?}");
+    assert_eq!(retry.idempotent(), selector_may_have_committed, "failure {failure:?}");
+    assert_eq!(retry.claim_key(), prepared.claim.key, "failure {failure:?}");
+    assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(prepared.result_manifest.key.clone()), "failure {failure:?}");
+  }
 }
 
 #[test]

@@ -65,6 +65,10 @@ use super::gc_sweep_reconciliation::{
   validate_sweep_receipt_void_authority_v1,
 };
 use super::gc_void::{SweepVoidArtifactV1, decode_sweep_void_artifact};
+use super::gc_void_claim::{
+  VoidClaimAdmissionAuthorityRequestV1, VoidClaimAdmissionAuthorityV1, VoidClaimAdmissionErrorV1, VoidClaimAdmittedExtentV1,
+  VoidClaimTransitionLimitsV1, VoidClaimTransitionSummaryV1, VoidClaimTransitionValidatorV1, validate_void_claim_admission_authority_v1,
+};
 use super::gc_void_publication::{
   VoidCatalogClosureLimitsV1, VoidCatalogClosureSummaryV1, VoidCatalogClosureValidatorV1, VoidCatalogPublicationAuthorityRequestV1,
   VoidCatalogPublicationAuthorityV1, VoidCatalogPublicationErrorV1, validate_void_catalog_publication_authority_v1,
@@ -231,6 +235,124 @@ pub struct VoidCatalogPublicationReceiptV1 {
   pub receipt_reconciliation_required: bool,
   pub reuse_blocked: bool,
   pub idempotent: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct VoidClaimAdmissionRequestV1<'a> {
+  pub claim: &'a EncodedImmutableGcArtifactV1,
+  pub result_manifest: &'a EncodedImmutableGcArtifactV1,
+  pub result_control: &'a EncodedGcActiveControlV1,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+  pub cancellation: &'a CancellationToken,
+  pub memory: &'a MemoryCoordinator,
+  pub transition_limits: VoidClaimTransitionLimitsV1,
+}
+
+#[must_use = "a Void claim permit is the only authority to consume its exact selected, durably reserved extents"]
+pub struct VoidClaimAdmissionPermitV1 {
+  hash_algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  claim_id: [u8; 16],
+  claim_key: Vec<u8>,
+  claim_write_sequence: u64,
+  source_manifest_key: Vec<u8>,
+  result_manifest_key: Vec<u8>,
+  result_manifest_write_sequence: u64,
+  result_control_key: Vec<u8>,
+  result_control_write_sequence: u64,
+  result_control_slot: u8,
+  generation: u64,
+  claimed_bytes: u64,
+  claimed_extents: Box<[VoidClaimAdmittedExtentV1]>,
+  lineage_state: RootRetirementLineageStateV1,
+  observation: DatabaseHeaderObservationV4,
+  idempotent: bool,
+  _memory: MemoryReservation,
+}
+
+impl std::fmt::Debug for VoidClaimAdmissionPermitV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("VoidClaimAdmissionPermitV1")
+      .field("claim_key", &hex::encode(&self.claim_key))
+      .field("result_manifest_key", &hex::encode(&self.result_manifest_key))
+      .field("result_control_write_sequence", &self.result_control_write_sequence)
+      .field("claimed_extent_count", &self.claimed_extents.len())
+      .field("claimed_bytes", &self.claimed_bytes)
+      .field("idempotent", &self.idempotent)
+      .finish_non_exhaustive()
+  }
+}
+
+impl VoidClaimAdmissionPermitV1 {
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub const fn claim_id(&self) -> [u8; 16] {
+    self.claim_id
+  }
+
+  pub fn claim_key(&self) -> &[u8] {
+    &self.claim_key
+  }
+
+  pub const fn claim_write_sequence(&self) -> u64 {
+    self.claim_write_sequence
+  }
+
+  pub fn source_manifest_key(&self) -> &[u8] {
+    &self.source_manifest_key
+  }
+
+  pub fn result_manifest_key(&self) -> &[u8] {
+    &self.result_manifest_key
+  }
+
+  pub const fn result_manifest_write_sequence(&self) -> u64 {
+    self.result_manifest_write_sequence
+  }
+
+  pub fn result_control_key(&self) -> &[u8] {
+    &self.result_control_key
+  }
+
+  pub const fn result_control_write_sequence(&self) -> u64 {
+    self.result_control_write_sequence
+  }
+
+  pub const fn result_control_slot(&self) -> u8 {
+    self.result_control_slot
+  }
+
+  pub const fn generation(&self) -> u64 {
+    self.generation
+  }
+
+  pub const fn claimed_bytes(&self) -> u64 {
+    self.claimed_bytes
+  }
+
+  pub fn claimed_extents(&self) -> &[VoidClaimAdmittedExtentV1] {
+    &self.claimed_extents
+  }
+
+  pub const fn lineage_state(&self) -> &RootRetirementLineageStateV1 {
+    &self.lineage_state
+  }
+
+  pub const fn observation(&self) -> &DatabaseHeaderObservationV4 {
+    &self.observation
+  }
+
+  pub const fn idempotent(&self) -> bool {
+    self.idempotent
+  }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1350,6 +1472,21 @@ struct VoidCatalogLockedPublicationV1 {
   committed_failure: Option<(GcControlPublicationFailureV1, String)>,
 }
 
+struct VoidClaimLockedAdmissionV1 {
+  claim_write_sequence: u64,
+  claim_generation: u64,
+  transition: VoidClaimTransitionSummaryV1,
+  result_manifest_write_sequence: u64,
+  control: GcControlPublicationV1,
+  committed_failure: Option<(GcControlPublicationFailureV1, String)>,
+}
+
+struct VerifiedVoidClaimTransitionV1 {
+  source_entity: ChargedVoidCatalogSupportEntityV1,
+  claim_write_sequence: u64,
+  transition: VoidClaimTransitionSummaryV1,
+}
+
 struct ChargedSelectionEntityV1 {
   bytes: Vec<u8>,
   _memory: MemoryReservation,
@@ -1597,6 +1734,18 @@ impl From<GcControlPublicationErrorV1> for RootReclaimPublicationErrorV1 {
 }
 
 impl From<GcControlPublicationErrorV1> for VoidCatalogPublicationErrorV1 {
+  fn from(source: GcControlPublicationErrorV1) -> Self {
+    match source {
+      GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
+      GcControlPublicationErrorV1::Format(source) => Self::Format(source),
+      GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
+      GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
+      GcControlPublicationErrorV1::RetirementOwner(source) => Self::RetirementOwner(source),
+    }
+  }
+}
+
+impl From<GcControlPublicationErrorV1> for VoidClaimAdmissionErrorV1 {
   fn from(source: GcControlPublicationErrorV1) -> Self {
     match source {
       GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
@@ -4280,8 +4429,8 @@ impl V4FirstAuthorityPublisher {
     validator.finish().map_err(Into::into)
   }
 
-  /// Hard-publish one immutable page, directory, or outstanding claim used by
-  /// a future Void catalog. This method never selects Void authority.
+  /// Hard-publish one immutable page or directory used by a future Void
+  /// catalog. Claims are restricted to the selector-owning admission path.
   pub fn publish_void_catalog_support_artifact(
     &self,
     request: VoidCatalogSupportPublicationRequestV1<'_>,
@@ -4291,7 +4440,12 @@ impl V4FirstAuthorityPublisher {
     let decoded = decode_sweep_void_artifact(&request.artifact.value, algorithm)?;
     let (kind, database_id) = match &decoded {
       SweepVoidArtifactV1::VoidExtentPage(page) => (GcArtifactKindV1::VoidExtentPage, page.database_id),
-      SweepVoidArtifactV1::VoidClaim(claim) => (GcArtifactKindV1::VoidClaim, claim.database_id),
+      SweepVoidArtifactV1::VoidClaim(claim) => {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "void_support_claim_owner",
+          format!("generic Void support rejects claim publication outside claim admission for database {}", hex::encode(claim.database_id)),
+        ));
+      }
       SweepVoidArtifactV1::VoidDirectory(directory)
         if matches!(directory.role, GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims) =>
       {
@@ -4309,7 +4463,7 @@ impl V4FirstAuthorityPublisher {
       | SweepVoidArtifactV1::VoidClaimSettlement(_) => {
         return Err(FirstAuthorityPublicationErrorV1::invalid(
           "void_support_kind",
-          "Void support publication accepts only extent pages, outstanding claims, and their directories",
+          "Void support publication accepts only extent pages and Void directories",
         ));
       }
     };
@@ -4335,6 +4489,336 @@ impl V4FirstAuthorityPublisher {
       artifact_kind: kind,
       hard_publication_sequence,
     })
+  }
+
+  /// Reserve exact selected free extents by selecting a replacement catalog
+  /// that removes them and contains their immutable outstanding claim.
+  pub fn admit_void_claim(
+    &mut self,
+    request: VoidClaimAdmissionRequestV1<'_>,
+    authority: &mut dyn VoidClaimAdmissionAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  ) -> Result<VoidClaimAdmissionPermitV1, VoidClaimAdmissionErrorV1> {
+    self.admit_void_claim_with_control_observer(request, authority, retirement_owner, &mut NoopFirstAuthorityDependencyObserverV1)
+  }
+
+  fn admit_void_claim_with_control_observer(
+    &mut self,
+    request: VoidClaimAdmissionRequestV1<'_>,
+    authority: &mut dyn VoidClaimAdmissionAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<VoidClaimAdmissionPermitV1, VoidClaimAdmissionErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_canceled",
+        "Void claim admission was canceled before authority selection",
+      ));
+    }
+    let observation = self.observe()?;
+    if retirement_owner.hash_algorithm() != observation.selected.header.hash_algorithm
+      || retirement_owner.database_id() != observation.selected.header.database_id
+    {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_lineage_identity",
+        "retirement lineage owner differs from selected first authority",
+      ));
+    }
+    retirement_owner.flush(self)?;
+    let locked = self.admit_void_claim_locked(&request, authority, retirement_owner, control_observer)?;
+    let mut committed_failure = locked.committed_failure.map(|(failure, message)| (failure.code(), message));
+    let lineage_state = if locked.control.replaced_control {
+      match retirement_owner.flush(self) {
+        Ok(true) => RootRetirementLineageStateV1::HardPublished {
+          hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence,
+        },
+        Ok(false) => RootRetirementLineageStateV1::MissingAfterCommit {
+          code: "void_claim_admission_lineage_missing",
+          message: "Void claim control replacement committed without retained retirement lineage".to_string(),
+        },
+        Err(source) => RootRetirementLineageStateV1::BufferedAfterFlushFailure { code: source.code(), message: source.to_string() },
+      }
+    } else {
+      RootRetirementLineageStateV1::NotRequired
+    };
+    if !matches!(lineage_state, RootRetirementLineageStateV1::NotRequired | RootRetirementLineageStateV1::HardPublished { .. })
+      && committed_failure.is_none()
+    {
+      committed_failure =
+        Some(("void_claim_admission_committed_lineage", "Void claim replacement lineage did not hard-publish".to_string()));
+    }
+    let observation = if matches!(lineage_state, RootRetirementLineageStateV1::HardPublished { .. }) {
+      match self.observe() {
+        Ok(observation) => observation,
+        Err(source) => {
+          if committed_failure.is_none() {
+            committed_failure = Some(("void_claim_admission_committed_lineage_readback", source.to_string()));
+          }
+          locked.control.observation
+        }
+      }
+    } else {
+      locked.control.observation
+    };
+    let algorithm = observation.selected.header.hash_algorithm;
+    let database_id = observation.selected.header.database_id;
+    let claim_key = locked.transition.claim_key.clone();
+    let source_manifest_key = locked.transition.source_manifest_key.clone();
+    let result_manifest_key = locked.transition.result_manifest_key.clone();
+    let claim_id = locked.transition.claim_id;
+    let claimed_bytes = locked.transition.claimed_bytes;
+    let (claimed_extents, memory) = locked.transition.into_claimed_extents_with_memory();
+    let permit = VoidClaimAdmissionPermitV1 {
+      hash_algorithm: algorithm,
+      database_id,
+      claim_id,
+      claim_key,
+      claim_write_sequence: locked.claim_write_sequence,
+      source_manifest_key,
+      result_manifest_key,
+      result_manifest_write_sequence: locked.result_manifest_write_sequence,
+      result_control_key: request.result_control.key.clone(),
+      result_control_write_sequence: locked.control.control_write_sequence,
+      result_control_slot: locked.control.control_slot,
+      generation: locked.claim_generation,
+      claimed_bytes,
+      claimed_extents,
+      lineage_state,
+      observation,
+      idempotent: locked.control.idempotent,
+      _memory: memory,
+    };
+    if let Some((code, message)) = committed_failure {
+      return Err(VoidClaimAdmissionErrorV1::committed(code, message, permit));
+    }
+    Ok(permit)
+  }
+
+  fn admit_void_claim_locked(
+    &self,
+    request: &VoidClaimAdmissionRequestV1<'_>,
+    authority: &mut dyn VoidClaimAdmissionAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<VoidClaimLockedAdmissionV1, VoidClaimAdmissionErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      VoidClaimAdmissionErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_database_authority",
+        "selected first authority is absent or degraded",
+      ));
+    }
+    if retirement_owner.hash_algorithm() != header.hash_algorithm || retirement_owner.database_id() != header.database_id {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_lineage_identity",
+        "retirement lineage owner differs from selected first authority",
+      ));
+    }
+    let (claim, result_manifest, _result_control) = validate_void_claim_admission_request(request, header)?;
+    let selected_control = {
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      select_void_catalog_control(&self.file, &kv, header).map_err(|source| VoidClaimAdmissionErrorV1::support(&source))?
+    }
+    .ok_or_else(|| {
+      VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_source_missing",
+        "claim admission requires one selected receipt-backed source Void catalog",
+      )
+    })?;
+    let exact_retry =
+      selected_control.stored_value == request.result_control.value && selected_control.target_manifest_hash == request.result_manifest.key;
+    let selected_source_control_sequence = if exact_retry {
+      result_manifest.previous_control_sequence
+    } else {
+      if selected_control.target_manifest_hash != claim.source_manifest_hash
+        || selected_control.control_sequence != result_manifest.previous_control_sequence
+      {
+        return Err(VoidClaimAdmissionErrorV1::invalid(
+          "void_claim_admission_source_changed",
+          "physically selected Void source differs from the claim and replacement predecessor",
+        ));
+      }
+      selected_control.control_sequence
+    };
+
+    let claim_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::VoidClaim,
+        database_id: &header.database_id,
+        artifact_key: &request.claim.key,
+        value: &request.claim.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "void_claim_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    let post_claim_observation = self.observe()?;
+    let post_claim_header = &post_claim_observation.selected.header;
+    if post_claim_observation.selected.redundancy_degraded
+      || post_claim_header.hash_algorithm != header.hash_algorithm
+      || post_claim_header.database_id != header.database_id
+    {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_database_changed",
+        "first authority changed or degraded after immutable claim publication",
+      ));
+    }
+    let verified = self.verify_void_claim_transition_is_durable(request, post_claim_header, claim_write_sequence)?;
+    let source_entity =
+      decode_whole_entity(&verified.source_entity.bytes, post_claim_header.hash_algorithm, post_claim_header.write_sequence_high_water)?;
+    let SweepVoidArtifactV1::VoidCatalog(source_manifest) =
+      decode_sweep_void_artifact(source_entity.stored_value, post_claim_header.hash_algorithm)?
+    else {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_source_kind",
+        "selected source key resolves to another GC artifact kind",
+      ));
+    };
+    if !exact_retry {
+      if request.cancellation.is_cancelled() {
+        return Err(VoidClaimAdmissionErrorV1::invalid(
+          "void_claim_admission_canceled",
+          "Void claim admission was canceled during final authority recheck",
+        ));
+      }
+      let snapshot = authority.recheck_void_claim_admission_authority(VoidClaimAdmissionAuthorityRequestV1 {
+        source_manifest: &source_manifest,
+        result_manifest: &result_manifest,
+        claim: &claim,
+        transition: &verified.transition,
+        selected_source_control_sequence,
+        cancellation: request.cancellation,
+      })?;
+      validate_void_claim_admission_authority_v1(
+        VoidClaimAdmissionAuthorityRequestV1 {
+          source_manifest: &source_manifest,
+          result_manifest: &result_manifest,
+          claim: &claim,
+          transition: &verified.transition,
+          selected_source_control_sequence,
+          cancellation: request.cancellation,
+        },
+        &snapshot,
+      )?;
+    }
+
+    let result_manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::VoidCatalogManifest,
+        database_id: &header.database_id,
+        artifact_key: &request.result_manifest.key,
+        value: &request.result_manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "void_claim_manifest_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    let control = self.publish_gc_active_control_locked(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::VoidCatalogActiveControl,
+        encoded_control: request.result_control,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      retirement_owner,
+      control_observer,
+    )?;
+    let (control, committed_failure) = match control {
+      GcControlPublicationOutcomeV1::Complete(control) => (control, None),
+      GcControlPublicationOutcomeV1::CommittedFailure { publication, failure, message } => (publication, Some((failure, message))),
+    };
+    Ok(VoidClaimLockedAdmissionV1 {
+      claim_write_sequence: verified.claim_write_sequence,
+      claim_generation: claim.generation,
+      transition: verified.transition,
+      result_manifest_write_sequence,
+      control,
+      committed_failure,
+    })
+  }
+
+  fn verify_void_claim_transition_is_durable(
+    &self,
+    request: &VoidClaimAdmissionRequestV1<'_>,
+    header: &DatabaseHeaderV4,
+    claim_write_sequence: u64,
+  ) -> Result<VerifiedVoidClaimTransitionV1, VoidClaimAdmissionErrorV1> {
+    let claim_artifact = decode_sweep_void_artifact(&request.claim.value, header.hash_algorithm)?;
+    let result_artifact = decode_sweep_void_artifact(&request.result_manifest.value, header.hash_algorithm)?;
+    let SweepVoidArtifactV1::VoidClaim(claim) = &claim_artifact else {
+      return Err(VoidClaimAdmissionErrorV1::invalid("void_claim_admission_claim_kind", "claim bytes decode as another GC artifact kind"));
+    };
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let reader =
+      VoidCatalogSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: request.memory, cancellation: request.cancellation };
+    let source_entity = reader
+      .load_entity(claim.source_manifest_hash, GcArtifactKindV1::VoidCatalogManifest)
+      .map_err(|source| VoidClaimAdmissionErrorV1::support(&source))?;
+    let source_whole = decode_whole_entity(&source_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    let source_artifact = decode_sweep_void_artifact(source_whole.stored_value, header.hash_algorithm)?;
+    let durable_claim_entity =
+      reader.load_entity(&request.claim.key, GcArtifactKindV1::VoidClaim).map_err(|source| VoidClaimAdmissionErrorV1::support(&source))?;
+    let durable_claim = decode_whole_entity(&durable_claim_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    if durable_claim.write_sequence != claim_write_sequence || durable_claim.stored_value != request.claim.value {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_claim_changed",
+        "durable claim sequence or bytes differ from the requested immutable claim",
+      ));
+    }
+    let mut validator = VoidClaimTransitionValidatorV1::new(
+      &source_artifact,
+      &result_artifact,
+      &claim_artifact,
+      request.cancellation.clone(),
+      request.transition_limits,
+      request.memory,
+    )?;
+    let SweepVoidArtifactV1::VoidCatalog(source_manifest) = &source_artifact else {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_source_kind",
+        "source manifest key resolves to another GC artifact kind",
+      ));
+    };
+    if source_manifest.free_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimSourceTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(source_manifest.free_root, GcDirectoryRoleV1::FreeExtents, None, 0, &mut observer)
+        .map_err(|source| VoidClaimAdmissionErrorV1::support(&source))?;
+    }
+    if source_manifest.claim_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimSourceTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(source_manifest.claim_root, GcDirectoryRoleV1::Claims, None, 0, &mut observer)
+        .map_err(|source| VoidClaimAdmissionErrorV1::support(&source))?;
+    }
+    validator.finish_source()?;
+    let SweepVoidArtifactV1::VoidCatalog(result_manifest) = &result_artifact else {
+      return Err(VoidClaimAdmissionErrorV1::invalid(
+        "void_claim_admission_result_kind",
+        "result manifest bytes decode as another GC artifact kind",
+      ));
+    };
+    if result_manifest.free_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimResultTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(result_manifest.free_root, GcDirectoryRoleV1::FreeExtents, None, 0, &mut observer)
+        .map_err(|source| VoidClaimAdmissionErrorV1::support(&source))?;
+    }
+    if result_manifest.claim_root.iter().any(|byte| *byte != 0) {
+      let mut observer = VoidClaimResultTransitionObserverV1 { validator: &mut validator };
+      reader
+        .revalidate_subtree(result_manifest.claim_root, GcDirectoryRoleV1::Claims, None, 0, &mut observer)
+        .map_err(|source| VoidClaimAdmissionErrorV1::support(&source))?;
+    }
+    let transition = validator.finish()?;
+    Ok(VerifiedVoidClaimTransitionV1 { source_entity, claim_write_sequence, transition })
   }
 
   /// Hard-publish one immutable page or directory used by a future root-
@@ -5736,6 +6220,42 @@ struct VoidCatalogSupportReadContextV1<'a> {
   cancellation: &'a CancellationToken,
 }
 
+trait VoidCatalogSupportObserverV1 {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1>;
+}
+
+impl VoidCatalogSupportObserverV1 for VoidCatalogClosureValidatorV1<'_> {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1> {
+    VoidCatalogClosureValidatorV1::observe_encoded(self, bytes).map_err(Into::into)
+  }
+}
+
+struct VoidClaimSourceTransitionObserverV1<'a, 'b> {
+  validator: &'a mut VoidClaimTransitionValidatorV1<'b>,
+}
+
+impl VoidCatalogSupportObserverV1 for VoidClaimSourceTransitionObserverV1<'_, '_> {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1> {
+    self
+      .validator
+      .observe_source_encoded(bytes)
+      .map_err(|source| VoidCatalogPublicationErrorV1::invalid("void_claim_transition_support", format!("{}: {source}", source.code())))
+  }
+}
+
+struct VoidClaimResultTransitionObserverV1<'a, 'b> {
+  validator: &'a mut VoidClaimTransitionValidatorV1<'b>,
+}
+
+impl VoidCatalogSupportObserverV1 for VoidClaimResultTransitionObserverV1<'_, '_> {
+  fn observe_encoded(&mut self, bytes: &[u8]) -> Result<(), VoidCatalogPublicationErrorV1> {
+    self
+      .validator
+      .observe_result_encoded(bytes)
+      .map_err(|source| VoidCatalogPublicationErrorV1::invalid("void_claim_transition_support", format!("{}: {source}", source.code())))
+  }
+}
+
 impl VoidCatalogSupportReadContextV1<'_> {
   fn revalidate_subtree(
     &self,
@@ -5743,7 +6263,7 @@ impl VoidCatalogSupportReadContextV1<'_> {
     expected_role: GcDirectoryRoleV1,
     expected_level: Option<u16>,
     depth: u16,
-    validator: &mut VoidCatalogClosureValidatorV1<'_>,
+    validator: &mut dyn VoidCatalogSupportObserverV1,
   ) -> Result<(), VoidCatalogPublicationErrorV1> {
     if self.cancellation.is_cancelled() {
       return Err(VoidCatalogPublicationErrorV1::invalid("void_publication_canceled", "Void support validation was canceled"));
@@ -5783,7 +6303,7 @@ impl VoidCatalogSupportReadContextV1<'_> {
     &self,
     key: &[u8],
     expected_role: GcDirectoryRoleV1,
-    validator: &mut VoidCatalogClosureValidatorV1<'_>,
+    validator: &mut dyn VoidCatalogSupportObserverV1,
   ) -> Result<(), VoidCatalogPublicationErrorV1> {
     let expected_kind = match expected_role {
       GcDirectoryRoleV1::FreeExtents => GcArtifactKindV1::VoidExtentPage,
@@ -6454,6 +6974,51 @@ fn validate_root_retirement_publication<'a>(
     ));
   }
   Ok(ValidatedRootRetirementPublicationV1 { lifecycle_control })
+}
+
+fn validate_void_claim_admission_request<'a>(
+  request: &'a VoidClaimAdmissionRequestV1<'a>,
+  header: &DatabaseHeaderV4,
+) -> Result<(super::gc_void::VoidClaimV1<'a>, super::gc_void::VoidCatalogManifestV1<'a>, GcActiveControlV1<'a>), VoidClaimAdmissionErrorV1>
+{
+  let SweepVoidArtifactV1::VoidClaim(claim) = decode_sweep_void_artifact(&request.claim.value, header.hash_algorithm)? else {
+    return Err(VoidClaimAdmissionErrorV1::invalid("void_claim_admission_claim_kind", "claim bytes decode as another GC artifact kind"));
+  };
+  let SweepVoidArtifactV1::VoidCatalog(result_manifest) =
+    decode_sweep_void_artifact(&request.result_manifest.value, header.hash_algorithm)?
+  else {
+    return Err(VoidClaimAdmissionErrorV1::invalid(
+      "void_claim_admission_result_kind",
+      "result manifest bytes decode as another GC artifact kind",
+    ));
+  };
+  let result_control = decode_gc_active_control(&request.result_control.value, header.hash_algorithm)?;
+  let claim_created_at_ms = u64::try_from(claim.created_at_ms).map_err(|source| {
+    VoidClaimAdmissionErrorV1::invalid("void_claim_admission_timestamp", format!("claim creation time is negative: {source}"))
+  })?;
+  let result_published_at_ms = u64::try_from(result_manifest.published_at_ms).map_err(|source| {
+    VoidClaimAdmissionErrorV1::invalid("void_claim_admission_timestamp", format!("result catalog publication time is negative: {source}"))
+  })?;
+  if claim.key != request.claim.key
+    || result_manifest.key != request.result_manifest.key
+    || claim.database_id != header.database_id
+    || result_manifest.database_id != header.database_id
+    || result_manifest.previous_control_sequence == 0
+    || result_control.kind != GcArtifactKindV1::VoidCatalogActiveControl
+    || result_control.key != request.result_control.key
+    || result_control.database_id != header.database_id
+    || result_control.generation != result_manifest.generation
+    || result_control.target_manifest_hash != result_manifest.key
+    || result_control.sequence <= result_manifest.previous_control_sequence
+    || request.publication_timestamp_ms < claim_created_at_ms
+    || request.publication_timestamp_ms < result_published_at_ms
+  {
+    return Err(VoidClaimAdmissionErrorV1::invalid(
+      "void_claim_admission_identity",
+      "claim, result manifest, control, sequence, or publication time do not close exactly",
+    ));
+  }
+  Ok((claim, result_manifest, result_control))
 }
 
 fn validate_void_catalog_publication_request(request: &VoidCatalogPublicationRequestV1<'_>) -> Result<(), VoidCatalogPublicationErrorV1> {

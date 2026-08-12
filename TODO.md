@@ -741,7 +741,14 @@
           - [x] Hard-publish pages, directories, and claims independently; publish the manifest and inactive A/B control under first authority with the control selected last.
           - [x] Return no allocator or claim permit, and prove cancellation, missing/corrupt/substituted support, stale prior authority, selector uncertainty, restart, idempotence, and retained-or-leaked outcomes.
           - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
-        - [ ] P4-7c: qualify an exact bounded free-extent claim, hard-publish immutable claim evidence, and select a catalog that removes all claimed ranges before returning allocation authority.
+        - [x] P4-7c: qualify an exact bounded free-extent claim, hard-publish immutable claim evidence, and select a catalog that removes all claimed ranges before returning allocation authority.
+          - [x] Add a compile-red public contract for one claim-admission owner and one nonconstructible exact allocation permit.
+          - [x] Stream-validate the selected source and replacement closures with bounded memory/cancellation, proving replacement free extents equal source minus the exact claim.
+          - [x] Preserve every prior outstanding claim, add exactly the requested immutable claim, and reject duplicate, overlapping, substituted, or unavailable ranges.
+          - [x] Remove claim publication from the generic Void-support API; hard-publish claims only through claim admission.
+          - [x] Publish replacement support and claim evidence before the manifest, select the inactive control last, and return no authority before that commit point.
+          - [x] Prove exact retry, every selector crash prefix, corrupt/missing support, stale authority, pressure refusal, and architecture isolation without activating the allocator.
+          - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
         - [ ] P4-7d: consume only durable claim subranges through one bounded allocator owner, then hard-publish settlement/abandonment and a claim-free result catalog after used locators are durable.
         - [ ] P4-7e: derive startup and in-memory reusable-space state only from one closure-valid selected receipt-backed catalog minus outstanding claims; keep raw hot-tail and gap evidence non-authoritative.
         - [ ] P4-7f: prove partial use, crash recovery, cancellation, corruption, overlapping/substituted ranges, stale caches, resource bounds, restart, native behavior, and retained-or-leaked failure direction without enabling destructive service GC.
