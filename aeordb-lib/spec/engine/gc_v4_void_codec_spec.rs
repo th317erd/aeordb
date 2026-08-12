@@ -9,7 +9,7 @@ use aeordb::engine::v4::gc_state::{
 use aeordb::engine::v4::gc_void::{
   SweepVoidArtifactV1, VoidCatalogManifestWriteV1, VoidClaimSettlementWriteV1, VoidClaimWriteV1, VoidExtentPageWriteV1,
   decode_sweep_void_artifact, encode_void_catalog_manifest_v1, encode_void_claim_settlement_v1, encode_void_claim_v1,
-  encode_void_extent_page_v1,
+  encode_void_extent_page_v1, validate_void_manifest_root,
 };
 use aeordb::engine::v4::reader::MalformedInputClass;
 
@@ -206,6 +206,69 @@ fn assert_directory_fixture(profile: &str, name: &str, algorithm: HashAlgorithm)
   })
   .unwrap();
   assert_eq!(encoded.value, bytes, "{profile} {name}");
+}
+
+#[test]
+fn void_manifest_accepts_older_copy_on_write_roots_but_rejects_future_roots() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let manifest_bytes = fixture("blake3-256", "void-catalog-source");
+  let directory_bytes = fixture("blake3-256", "void-free-directory-source");
+  let SweepVoidArtifactV1::VoidCatalog(source_manifest) = decode_sweep_void_artifact(&manifest_bytes, algorithm).unwrap() else {
+    panic!("expected source Void catalog")
+  };
+  let GcStateArtifactV1::Directory(source_directory) = decode_gc_state_artifact(&directory_bytes, algorithm).unwrap() else {
+    panic!("expected source Void directory")
+  };
+  let database_id: [u8; 16] = source_manifest.database_id.try_into().unwrap();
+
+  let manifest_generation = source_manifest.generation + 1;
+  for (directory_generation, should_pass) in [(source_directory.generation, true), (manifest_generation + 1, false)] {
+    let entries = source_directory
+      .entries
+      .iter()
+      .map(|entry| GcStateDirectoryEntryWriteV1 {
+        lower_fence: entry.lower_fence,
+        upper_fence: entry.upper_fence,
+        child_hash: entry.child_hash,
+        child_generation: entry.child_generation,
+        live_count: entry.live_count,
+        tombstone_count: entry.tombstone_count,
+        page_count: entry.page_count,
+        logical_bytes: entry.logical_bytes,
+        minimum_page_id: entry.minimum_page_id,
+        maximum_page_id: entry.maximum_page_id,
+        physical_hint: entry.physical_hint,
+      })
+      .collect::<Vec<_>>();
+    let directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+      hash_algorithm: algorithm,
+      role: source_directory.role,
+      database_id: source_directory.database_id,
+      catalog_id: source_directory.catalog_id,
+      generation: directory_generation,
+      level: source_directory.level,
+      entries: &entries,
+    })
+    .unwrap();
+    let manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+      hash_algorithm: algorithm,
+      database_id: &database_id,
+      generation: manifest_generation,
+      published_at_ms: source_manifest.published_at_ms,
+      free_root: Some(&directory.key),
+      claim_root: None,
+      next_page_id: source_manifest.next_page_id,
+      free_count: source_manifest.free_count,
+      free_bytes: source_manifest.free_bytes,
+      claim_count: 0,
+      claimed_bytes: 0,
+      previous_control_sequence: 1,
+    })
+    .unwrap();
+    let decoded_manifest = decode_sweep_void_artifact(&manifest.value, algorithm).unwrap();
+    let decoded_directory = decode_sweep_void_artifact(&directory.value, algorithm).unwrap();
+    assert_eq!(validate_void_manifest_root(&decoded_manifest, &decoded_directory).is_ok(), should_pass);
+  }
 }
 
 #[test]

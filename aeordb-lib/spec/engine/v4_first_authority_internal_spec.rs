@@ -41,7 +41,7 @@ use crate::engine::v4::gc_quarantine_transition::{
 use crate::engine::v4::gc_sweep::{SweepProposalQualificationRequestV1, qualify_sweep_proposal_v1};
 use crate::engine::v4::gc_sweep_removal::{
   SweepLocatorRemovalAuthorityErrorV1, SweepLocatorRemovalAuthorityRequestV1, SweepLocatorRemovalAuthoritySnapshotV1,
-  SweepLocatorRemovalAuthorityV1, SweepLocatorRemovalOutcomeV1, complete_sweep_locator_removal_v1,
+  SweepLocatorRemovalAuthorityV1, SweepLocatorRemovalBatchOutcomeV1, SweepLocatorRemovalOutcomeV1, complete_sweep_locator_removal_v1,
   reserve_sweep_locator_removal_results_v1,
 };
 use crate::engine::v4::gc_sweep_reconciliation::{
@@ -51,7 +51,12 @@ use crate::engine::v4::gc_sweep_reconciliation::{
 };
 use crate::engine::v4::gc_void::{
   SweepOutcomeClassV1, SweepProposalWriteV1, SweepReceiptOutcomeWriteV1, SweepReceiptWriteV1, SweepVoidArtifactV1,
-  decode_sweep_void_artifact, encode_sweep_proposal_v1, encode_sweep_receipt_v1,
+  VoidCatalogManifestWriteV1, VoidExtentPageWriteV1, VoidExtentRecordV1, decode_sweep_void_artifact, encode_sweep_proposal_v1,
+  encode_sweep_receipt_v1, encode_void_catalog_manifest_v1, encode_void_extent_page_v1,
+};
+use crate::engine::v4::gc_void_publication::{
+  VoidCatalogClosureLimitsV1, VoidCatalogPublicationAuthorityErrorV1, VoidCatalogPublicationAuthorityRequestV1,
+  VoidCatalogPublicationAuthoritySnapshotV1, VoidCatalogPublicationAuthorityV1,
 };
 use crate::engine::v4::gc_root_reclaim::{
   RootExpiryRetentionContextV1, RootExpiryRetentionModelV1, RootExpiryRetentionPermitV1, RootExpiryRetentionSelectionV1,
@@ -70,6 +75,50 @@ use crate::engine::v4::gc_state::{
 use crate::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use crate::engine::v4::read_view::RootLifecycleObservationV1;
 use tokio_util::sync::CancellationToken;
+
+struct TestVoidCatalogPublicationAuthorityV1 {
+  snapshot: VoidCatalogPublicationAuthoritySnapshotV1,
+  fail_recheck: bool,
+  recheck_calls: usize,
+}
+
+impl VoidCatalogPublicationAuthorityV1 for TestVoidCatalogPublicationAuthorityV1 {
+  fn recheck_void_catalog_publication_authority(
+    &mut self,
+    request: VoidCatalogPublicationAuthorityRequestV1<'_>,
+  ) -> Result<VoidCatalogPublicationAuthoritySnapshotV1, VoidCatalogPublicationAuthorityErrorV1> {
+    self.recheck_calls += 1;
+    assert_eq!(request.selected_prior_manifest_hash, None);
+    assert_eq!(request.selected_prior_control_sequence, 0);
+    assert!(request.closure.free_extent_count > 0);
+    if self.fail_recheck {
+      return Err(VoidCatalogPublicationAuthorityErrorV1::new(
+        "void_publication_test_recheck",
+        "injected caller-owned Void publication authority failure",
+      ));
+    }
+    Ok(self.snapshot.clone())
+  }
+}
+
+fn test_void_catalog_publication_authority() -> TestVoidCatalogPublicationAuthorityV1 {
+  TestVoidCatalogPublicationAuthorityV1 {
+    snapshot: VoidCatalogPublicationAuthoritySnapshotV1 {
+      selected_prior_manifest_hash: None,
+      selected_prior_control_sequence: 0,
+      exact_locator_removal_completion_current: true,
+      prior_free_extents_preserved: true,
+      prior_outstanding_claims_preserved: true,
+      no_unexplained_free_extents_added: true,
+      allocator_admission_blocked: true,
+      receipt_reconciliation_required: true,
+      conflicting_receipt_count: 0,
+      repair_latch_clear: true,
+    },
+    fail_recheck: false,
+    recheck_calls: 0,
+  }
+}
 
 struct TestSweepLocatorRemovalAuthorityV1 {
   snapshot: SweepLocatorRemovalAuthoritySnapshotV1,
@@ -107,12 +156,12 @@ impl SweepLocatorRemovalAuthorityV1 for TestSweepLocatorRemovalAuthorityV1 {
     Ok(self.snapshot.clone())
   }
 
-  fn remove_sweep_locators(&mut self, request: SweepLocatorRemovalAuthorityRequestV1<'_>) -> Vec<SweepLocatorRemovalOutcomeV1> {
+  fn remove_sweep_locators(&mut self, request: SweepLocatorRemovalAuthorityRequestV1<'_>) -> SweepLocatorRemovalBatchOutcomeV1 {
     self.remove_calls += 1;
     if self.cancel_during_remove {
       request.cancellation.cancel();
     }
-    self.outcomes.clone()
+    SweepLocatorRemovalBatchOutcomeV1 { reclaim_commit_sequence: request.proposal_write_sequence + 1, outcomes: self.outcomes.clone() }
   }
 }
 
@@ -268,13 +317,16 @@ fn sweep_locator_removal_completion_preserves_both_frozen_hash_widths() {
     let reservation = reserve_sweep_locator_removal_results_v1(&memory, proposal.candidate_count).unwrap();
     let completion = complete_sweep_locator_removal_v1(
       request,
-      vec![SweepLocatorRemovalOutcomeV1 {
-        ordinal: 0,
-        outcome: SweepOutcomeClassV1::Reclaimed,
-        stable_reason_detail: 0,
-        resulting_void_offset: 8_192,
-        resulting_void_length: 512,
-      }],
+      SweepLocatorRemovalBatchOutcomeV1 {
+        reclaim_commit_sequence: request.proposal_write_sequence + 1,
+        outcomes: vec![SweepLocatorRemovalOutcomeV1 {
+          ordinal: 0,
+          outcome: SweepOutcomeClassV1::Reclaimed,
+          stable_reason_detail: 0,
+          resulting_void_offset: 8_192,
+          resulting_void_length: 512,
+        }],
+      },
       reservation,
     )
     .unwrap();
@@ -282,7 +334,16 @@ fn sweep_locator_removal_completion_preserves_both_frozen_hash_widths() {
     assert_eq!(completion.proposal_hash(), artifact.key);
     assert_eq!(completion.quarantine_manifest_hash(), quarantine_manifest_hash);
     assert_eq!(completion.proposal_write_sequence(), 417);
+    assert_eq!(completion.reclaim_commit_sequence(), 418);
     assert_eq!(completion.outcomes().len(), 1);
+    let invalid_sequence_memory = reserve_sweep_locator_removal_results_v1(&memory, proposal.candidate_count).unwrap();
+    let invalid_sequence = complete_sweep_locator_removal_v1(
+      request,
+      SweepLocatorRemovalBatchOutcomeV1 { reclaim_commit_sequence: 417, outcomes: completion.outcomes().to_vec() },
+      invalid_sequence_memory,
+    )
+    .unwrap_err();
+    assert_eq!(invalid_sequence.code(), "sweep_removal_commit_sequence");
 
     let void_catalog_hash = digest_parts(algorithm, &[b"both-width sweep receipt catalog"]);
     let authority = test_sweep_receipt_void_authority(&void_catalog_hash, completion.outcomes().to_vec());
@@ -337,6 +398,472 @@ fn sweep_locator_removal_completion_preserves_both_frozen_hash_widths() {
         .code(),
       "sweep_receipt_existing_conflict"
     );
+  }
+}
+
+struct PreparedVoidCatalogPublicationV1 {
+  database_id: [u8; 16],
+  completion: SweepLocatorRemovalCompletionPermitV1,
+  extent_page: EncodedImmutableGcArtifactV1,
+  directory: EncodedImmutableGcArtifactV1,
+  manifest: EncodedImmutableGcArtifactV1,
+  control: EncodedGcActiveControlV1,
+}
+
+impl PreparedVoidCatalogPublicationV1 {
+  fn request<'a>(
+    &'a self,
+    cancellation: &'a CancellationToken,
+    memory: &'a MemoryCoordinator,
+    maximum_support_artifacts: u64,
+    monotonic_now_ms: u64,
+  ) -> VoidCatalogPublicationRequestV1<'a> {
+    VoidCatalogPublicationRequestV1 {
+      completion: &self.completion,
+      manifest: &self.manifest,
+      control: &self.control,
+      publication_timestamp_ms: 1_700_000_080_012,
+      monotonic_now_ms,
+      cancellation,
+      memory,
+      closure_limits: VoidCatalogClosureLimitsV1 { maximum_support_artifacts },
+    }
+  }
+}
+
+fn prepare_void_catalog_publication(
+  publisher: &V4FirstAuthorityPublisher,
+  completion_memory: &MemoryCoordinator,
+  reclaim_commit_sequence_delta: u64,
+) -> PreparedVoidCatalogPublicationV1 {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x31; 16];
+  let batch_id = [0x91; 16];
+  let catalog_id = [0x81; 16];
+  let logical_key = digest_parts(algorithm, &[b"Void publication logical key"]);
+  let integrity = digest_parts(algorithm, &[b"Void publication integrity"]);
+  let quarantine_manifest_hash = digest_parts(algorithm, &[b"Void publication quarantine"]);
+  let candidate = PhysicalIncarnationV1 {
+    logical_key: &logical_key,
+    integrity_or_legacy_digest: &integrity,
+    wal_offset: 8_192,
+    write_sequence: 77,
+    entity_length: 512,
+    entry_type: 1,
+    entity_version: 1,
+  };
+  let proposal_artifact = encode_sweep_proposal_v1(&SweepProposalWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    batch_id: &batch_id,
+    generation: 103,
+    created_at_ms: 1_700_000_080_001,
+    quarantine_manifest_hash: &quarantine_manifest_hash,
+    candidates: &[candidate],
+  })
+  .unwrap();
+  let proposal_write_sequence = publisher
+    .publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::SweepProposal,
+        database_id: &database_id,
+        artifact_key: &proposal_artifact.key,
+        value: &proposal_artifact.value,
+        minimum_timestamp_ms: 1_700_000_080_001,
+        committed_postcondition_code: "test_void_proposal_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  let SweepVoidArtifactV1::SweepProposal(proposal) = decode_sweep_void_artifact(&proposal_artifact.value, algorithm).unwrap() else {
+    panic!("encoded sweep proposal must decode")
+  };
+  let cancellation = CancellationToken::new();
+  let completion = complete_sweep_locator_removal_v1(
+    SweepLocatorRemovalAuthorityRequestV1 {
+      hash_algorithm: algorithm,
+      database_id: &database_id,
+      batch_id: &batch_id,
+      generation: proposal.generation,
+      proposal_hash: &proposal_artifact.key,
+      proposal_write_sequence,
+      quarantine_manifest_hash: &quarantine_manifest_hash,
+      proposal: &proposal,
+      cancellation: &cancellation,
+    },
+    SweepLocatorRemovalBatchOutcomeV1 {
+      reclaim_commit_sequence: proposal_write_sequence + 1,
+      outcomes: vec![SweepLocatorRemovalOutcomeV1 {
+        ordinal: 0,
+        outcome: SweepOutcomeClassV1::Reclaimed,
+        stable_reason_detail: 0,
+        resulting_void_offset: candidate.wal_offset,
+        resulting_void_length: candidate.entity_length,
+      }],
+    },
+    reserve_sweep_locator_removal_results_v1(&completion_memory, 1).unwrap(),
+  )
+  .unwrap();
+  let mut encoded_incarnation = vec![0u8; 24 + 2 * algorithm.hash_length()];
+  crate::engine::v4::gc::encode_physical_incarnation_into(&mut encoded_incarnation, &candidate, algorithm).unwrap();
+  let incarnation_digest = digest_parts(algorithm, &[&encoded_incarnation]);
+  let extent_page = encode_void_extent_page_v1(&VoidExtentPageWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    catalog_id: &catalog_id,
+    generation: 1,
+    page_id: 1,
+    extents: &[VoidExtentRecordV1 {
+      offset: candidate.wal_offset,
+      length: candidate.entity_length,
+      origin_sweep_proposal_hash: &proposal_artifact.key,
+      origin_quarantine_manifest_hash: &quarantine_manifest_hash,
+      reclaimed_incarnation_digest: &incarnation_digest,
+      reclaim_commit_sequence: completion.reclaim_commit_sequence().checked_add(reclaim_commit_sequence_delta).unwrap(),
+      void_generation: 1,
+    }],
+  })
+  .unwrap();
+  let SweepVoidArtifactV1::VoidExtentPage(decoded_page) = decode_sweep_void_artifact(&extent_page.value, algorithm).unwrap() else {
+    panic!("encoded Void page must decode")
+  };
+  let lower_fence = decoded_page.lower_offset.to_le_bytes();
+  let upper_fence = decoded_page.upper_offset.to_le_bytes();
+  let directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::FreeExtents,
+    database_id: &database_id,
+    catalog_id: &catalog_id,
+    generation: 1,
+    level: 0,
+    entries: &[GcStateDirectoryEntryWriteV1 {
+      lower_fence: &lower_fence,
+      upper_fence: &upper_fence,
+      child_hash: &extent_page.key,
+      child_generation: 1,
+      live_count: 1,
+      tombstone_count: 0,
+      page_count: 1,
+      logical_bytes: u64::from(candidate.entity_length),
+      minimum_page_id: 1,
+      maximum_page_id: 1,
+      physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }],
+  })
+  .unwrap();
+  let manifest = encode_void_catalog_manifest_v1(&VoidCatalogManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation: 1,
+    published_at_ms: 1_700_000_080_011,
+    free_root: Some(&directory.key),
+    claim_root: None,
+    next_page_id: 2,
+    free_count: 1,
+    free_bytes: u64::from(candidate.entity_length),
+    claim_count: 0,
+    claimed_bytes: 0,
+    previous_control_sequence: 0,
+  })
+  .unwrap();
+  let control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::VoidCatalogActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: 0,
+    sequence: 1,
+    generation: 1,
+    target_manifest_hash: &manifest.key,
+  })
+  .unwrap();
+  PreparedVoidCatalogPublicationV1 { database_id, completion, extent_page, directory, manifest, control }
+}
+
+fn publish_prepared_void_catalog_support(publisher: &V4FirstAuthorityPublisher, prepared: &PreparedVoidCatalogPublicationV1) {
+  for artifact in [&prepared.extent_page, &prepared.directory] {
+    publisher
+      .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+        database_id: &prepared.database_id,
+        artifact,
+        publication_timestamp_ms: 1_700_000_080_010,
+      })
+      .unwrap();
+  }
+}
+
+fn selected_void_catalog_manifest_key(publisher: &V4FirstAuthorityPublisher) -> Option<Vec<u8>> {
+  let observation = publisher.observe().unwrap();
+  let kv = publisher.lock_kv().unwrap();
+  select_void_catalog_control(&publisher.file, &kv, &observation.selected.header).unwrap().map(|control| control.target_manifest_hash)
+}
+
+#[test]
+fn void_catalog_support_publishes_before_selector_and_retry_remains_reuse_blocked() {
+  let (_directory, path, _coordinator, mut publisher) = create_environment("void-catalog-publication", None);
+  publish_first_authority(&publisher);
+  let completion_memory = MemoryCoordinator::new(MemoryPolicy::new(4 << 20, 8 << 20, 1, 1 << 20).unwrap());
+  let prepared = prepare_void_catalog_publication(&publisher, &completion_memory, 0);
+  let publication_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let mut authority = test_void_catalog_publication_authority();
+  let cancellation = CancellationToken::new();
+  publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &prepared.database_id,
+      artifact: &prepared.extent_page,
+      publication_timestamp_ms: 1_700_000_080_010,
+    })
+    .unwrap();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    prepared.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &publication_memory,
+  )
+  .unwrap();
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  let canceled_error = publisher
+    .publish_void_catalog(prepared.request(&canceled, &publication_memory, 2, 1), &mut authority, &mut retirement_owner)
+    .unwrap_err();
+  assert_eq!(canceled_error.code(), "void_publication_canceled");
+  assert_eq!(authority.recheck_calls, 0);
+
+  let publication_request = prepared.request(&cancellation, &publication_memory, 2, 1);
+  let missing_error = publisher.publish_void_catalog(publication_request, &mut authority, &mut retirement_owner).unwrap_err();
+  assert_eq!(missing_error.code(), "void_publication_support_missing");
+  assert_eq!(authority.recheck_calls, 0);
+  assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&prepared.control.key).unwrap().is_none());
+
+  publisher
+    .publish_void_catalog_support_artifact(VoidCatalogSupportPublicationRequestV1 {
+      database_id: &prepared.database_id,
+      artifact: &prepared.directory,
+      publication_timestamp_ms: 1_700_000_080_010,
+    })
+    .unwrap();
+  let limited_error = publisher
+    .publish_void_catalog(prepared.request(&cancellation, &publication_memory, 1, 1), &mut authority, &mut retirement_owner)
+    .unwrap_err();
+  assert_eq!(limited_error.code(), "void_closure_artifact_limit");
+  assert_eq!(authority.recheck_calls, 0);
+  assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&prepared.control.key).unwrap().is_none());
+
+  let constrained_memory = MemoryCoordinator::new(MemoryPolicy::new(128, 192, 1, 64).unwrap());
+  let pressure_error = publisher
+    .publish_void_catalog(prepared.request(&cancellation, &constrained_memory, 2, 1), &mut authority, &mut retirement_owner)
+    .unwrap_err();
+  assert!(matches!(pressure_error.code(), "void_publication_digest_memory" | "void_publication_support_memory"));
+  assert_eq!(authority.recheck_calls, 0);
+  assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&prepared.control.key).unwrap().is_none());
+
+  authority.snapshot.allocator_admission_blocked = false;
+  let authority_error = publisher
+    .publish_void_catalog(prepared.request(&cancellation, &publication_memory, 2, 1), &mut authority, &mut retirement_owner)
+    .unwrap_err();
+  assert_eq!(authority_error.code(), "void_publication_authority_changed");
+  assert_eq!(authority.recheck_calls, 1);
+  assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&prepared.control.key).unwrap().is_none());
+  authority.snapshot.allocator_admission_blocked = true;
+
+  let error = publisher
+    .publish_void_catalog_with_control_observer(
+      prepared.request(&cancellation, &publication_memory, 2, 1),
+      &mut authority,
+      &mut retirement_owner,
+      &mut FailingPostCommitObserver,
+    )
+    .unwrap_err();
+  let receipt = error.committed_receipt().expect("a selected Void catalog must return its exact receipt after post-commit failure");
+  assert_eq!(error.code(), "gc_control_committed_postcondition_failure");
+  assert_eq!(authority.recheck_calls, 2);
+  assert!(receipt.receipt_reconciliation_required);
+  assert!(receipt.reuse_blocked);
+  assert!(!receipt.idempotent);
+  assert_eq!(receipt.manifest_key, prepared.manifest.key);
+  assert_eq!(receipt.control_key, prepared.control.key);
+  drop(retirement_owner);
+  drop(publisher);
+
+  let (_coordinator, mut reopened) = reopen(&path);
+  let retry_cancellation = CancellationToken::new();
+  let retry_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    prepared.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &retry_cancellation,
+    &retry_memory,
+  )
+  .unwrap();
+  let mut retry_authority = test_void_catalog_publication_authority();
+  retry_authority.fail_recheck = true;
+  let retry = reopened
+    .publish_void_catalog(prepared.request(&retry_cancellation, &retry_memory, 2, 2), &mut retry_authority, &mut retry_owner)
+    .unwrap();
+  assert_eq!(retry_authority.recheck_calls, 0, "exact selected retry must not rerun stale external authority");
+  assert!(retry.idempotent);
+  assert!(retry.receipt_reconciliation_required);
+  assert!(retry.reuse_blocked);
+}
+
+#[test]
+fn corrupt_void_support_refuses_before_manifest_or_selector_publication() {
+  let (_directory, _path, _coordinator, mut publisher) = create_environment("void-catalog-corrupt-support", None);
+  publish_first_authority(&publisher);
+  let completion_memory = MemoryCoordinator::new(MemoryPolicy::new(4 << 20, 8 << 20, 1, 1 << 20).unwrap());
+  let prepared = prepare_void_catalog_publication(&publisher, &completion_memory, 0);
+  publish_prepared_void_catalog_support(&publisher, &prepared);
+  corrupt_last_entity_byte(&publisher, &prepared.directory.key);
+
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    prepared.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut authority = test_void_catalog_publication_authority();
+
+  let error =
+    publisher.publish_void_catalog(prepared.request(&cancellation, &memory, 2, 1), &mut authority, &mut retirement_owner).unwrap_err();
+
+  assert!(matches!(error, VoidCatalogPublicationErrorV1::Format(_) | VoidCatalogPublicationErrorV1::Authority(_)));
+  assert_eq!(authority.recheck_calls, 0);
+  assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&prepared.control.key).unwrap().is_none());
+  assert_eq!(selected_void_catalog_manifest_key(&publisher), None);
+}
+
+#[test]
+fn void_extent_commit_sequence_must_match_the_exact_locator_removal_completion() {
+  let (_directory, _path, _coordinator, mut publisher) = create_environment("void-catalog-commit-sequence", None);
+  publish_first_authority(&publisher);
+  let completion_memory = MemoryCoordinator::new(MemoryPolicy::new(4 << 20, 8 << 20, 1, 1 << 20).unwrap());
+  let prepared = prepare_void_catalog_publication(&publisher, &completion_memory, 1);
+  publish_prepared_void_catalog_support(&publisher, &prepared);
+
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    prepared.database_id,
+    1,
+    1,
+    RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let mut authority = test_void_catalog_publication_authority();
+
+  let error =
+    publisher.publish_void_catalog(prepared.request(&cancellation, &memory, 2, 1), &mut authority, &mut retirement_owner).unwrap_err();
+
+  assert_eq!(error.code(), "void_closure_sweep_extents");
+  assert_eq!(authority.recheck_calls, 0);
+  assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none());
+  assert!(publisher.locator(&prepared.control.key).unwrap().is_none());
+  assert_eq!(selected_void_catalog_manifest_key(&publisher), None);
+}
+
+#[test]
+fn every_void_selector_failure_restarts_as_exactly_prior_or_selected_and_reuse_blocked() {
+  let failures = [
+    FirstAuthorityFailurePoint::DataBarrier,
+    FirstAuthorityFailurePoint::HeaderWriteBefore,
+    FirstAuthorityFailurePoint::HeaderWriteAfter,
+    FirstAuthorityFailurePoint::FullBarrier,
+    FirstAuthorityFailurePoint::Verify,
+  ];
+  for failure in failures {
+    let (_directory, path, coordinator, mut publisher) = create_environment(&format!("void-catalog-selector-{failure:?}"), None);
+    publish_first_authority(&publisher);
+    let completion_memory = MemoryCoordinator::new(MemoryPolicy::new(4 << 20, 8 << 20, 1, 1 << 20).unwrap());
+    let prepared = prepare_void_catalog_publication(&publisher, &completion_memory, 0);
+    publish_prepared_void_catalog_support(&publisher, &prepared);
+    publisher = V4FirstAuthorityPublisher {
+      file: publisher.file,
+      kv: publisher.kv,
+      header_publisher: DatabaseHeaderPublisherV4::with_io(coordinator.clone(), Arc::new(NthHeaderPublicationFaultIo::new(failure, 3))),
+      root_state: publisher.root_state,
+    };
+    let cancellation = CancellationToken::new();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      prepared.database_id,
+      1,
+      1,
+      RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+      &cancellation,
+      &memory,
+    )
+    .unwrap();
+    let mut authority = test_void_catalog_publication_authority();
+
+    let error =
+      publisher.publish_void_catalog(prepared.request(&cancellation, &memory, 2, 1), &mut authority, &mut retirement_owner).unwrap_err();
+
+    assert_eq!(authority.recheck_calls, 1, "failure {failure:?}");
+    assert!(coordinator.hard_failure().unwrap().is_some(), "failure {failure:?}");
+    let selector_may_have_committed = matches!(
+      failure,
+      FirstAuthorityFailurePoint::HeaderWriteAfter | FirstAuthorityFailurePoint::FullBarrier | FirstAuthorityFailurePoint::Verify
+    );
+    if selector_may_have_committed {
+      let receipt = error
+        .committed_receipt()
+        .unwrap_or_else(|| panic!("uncertain selected Void authority requires an exact receipt for {failure:?}: {error:?}"));
+      assert_eq!(receipt.manifest_key, prepared.manifest.key, "failure {failure:?}");
+      assert!(receipt.receipt_reconciliation_required, "failure {failure:?}");
+      assert!(receipt.reuse_blocked, "failure {failure:?}");
+    } else {
+      assert!(error.committed_receipt().is_none(), "failure {failure:?}");
+    }
+    drop(retirement_owner);
+    drop(publisher);
+
+    let (_restart_coordinator, mut reopened) = reopen(&path);
+    let expected_selected = selector_may_have_committed.then(|| prepared.manifest.key.clone());
+    assert_eq!(selected_void_catalog_manifest_key(&reopened), expected_selected, "failure {failure:?}");
+    let retry_cancellation = CancellationToken::new();
+    let retry_memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    let mut retry_owner = RetirementJournalOwnerV1::new_chain(
+      HashAlgorithm::Blake3_256,
+      prepared.database_id,
+      1,
+      1,
+      RetirementJournalBufferOptionsV1::new(256, 1 << 20, 30_000),
+      &retry_cancellation,
+      &retry_memory,
+    )
+    .unwrap();
+    let mut retry_authority = test_void_catalog_publication_authority();
+    retry_authority.fail_recheck = selector_may_have_committed;
+
+    let retry = reopened
+      .publish_void_catalog(prepared.request(&retry_cancellation, &retry_memory, 2, 2), &mut retry_authority, &mut retry_owner)
+      .unwrap();
+
+    assert_eq!(retry_authority.recheck_calls, if selector_may_have_committed { 0 } else { 1 }, "failure {failure:?}");
+    assert_eq!(retry.idempotent, selector_may_have_committed, "failure {failure:?}");
+    assert!(retry.receipt_reconciliation_required, "failure {failure:?}");
+    assert!(retry.reuse_blocked, "failure {failure:?}");
+    assert_eq!(selected_void_catalog_manifest_key(&reopened), Some(prepared.manifest.key.clone()), "failure {failure:?}");
   }
 }
 
@@ -504,7 +1031,12 @@ fn partial_sweep_receipt_preserves_every_outcome_and_restarts_idempotently() {
   };
   let memory = MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap());
   let removal_memory = reserve_sweep_locator_removal_results_v1(&memory, proposal.candidate_count).unwrap();
-  let completion = complete_sweep_locator_removal_v1(removal_request, outcomes.to_vec(), removal_memory).unwrap();
+  let completion = complete_sweep_locator_removal_v1(
+    removal_request,
+    SweepLocatorRemovalBatchOutcomeV1 { reclaim_commit_sequence: proposal_write_sequence + 1, outcomes: outcomes.to_vec() },
+    removal_memory,
+  )
+  .unwrap();
   let void_catalog_hash = digest_parts(algorithm, &[b"partial sweep selected Void catalog"]);
   let mut authority = test_sweep_receipt_void_authority(&void_catalog_hash, outcomes.to_vec());
   let request = SweepReceiptReconciliationRequestV1 {

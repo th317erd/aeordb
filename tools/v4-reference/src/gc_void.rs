@@ -644,7 +644,7 @@ fn build_directory(
   identity.extend_from_slice(&database_id());
   identity.extend_from_slice(&catalog_id(role));
   identity.extend_from_slice(&(role as u16).to_le_bytes());
-  build_gc_value(GcKind::GcArtifactDirectoryNode, generation + 10, &identity, &body)
+  build_gc_value(GcKind::GcArtifactDirectoryNode, generation, &identity, &body)
 }
 
 fn decode_directory(profile: HashProfile, bytes: &[u8]) -> Result<DecodedDirectory, &'static str> {

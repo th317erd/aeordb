@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::v4::first_authority::{SweepLocatorRemovalRequestV1, V4FirstAuthorityPublisher};
-use aeordb::engine::v4::gc_sweep_removal::{SweepLocatorRemovalAuthorityV1, SweepLocatorRemovalCompletionPermitV1, SweepLocatorRemovalErrorV1};
+use aeordb::engine::v4::gc_sweep_removal::{
+  SweepLocatorRemovalAuthorityV1, SweepLocatorRemovalBatchOutcomeV1, SweepLocatorRemovalCompletionPermitV1, SweepLocatorRemovalErrorV1,
+};
 
 #[allow(dead_code)]
 fn assert_single_guarded_boundary_contract(
@@ -26,6 +28,9 @@ fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
 
 #[test]
 fn locator_removal_has_one_disconnected_guarded_owner_and_no_receipt_or_void_authority() {
+  let batch = SweepLocatorRemovalBatchOutcomeV1 { reclaim_commit_sequence: 42, outcomes: Vec::new() };
+  assert_eq!(batch.reclaim_commit_sequence, 42);
+
   let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let mut sources = Vec::new();
   rust_sources(&source_root, &mut sources);
@@ -47,6 +52,7 @@ fn locator_removal_has_one_disconnected_guarded_owner_and_no_receipt_or_void_aut
   assert!(method.contains("with_global_exclusion"));
   assert!(method.contains("root_state.lock"));
   assert!(method.contains("remove_sweep_locators"));
+  assert!(method.contains("complete_sweep_locator_removal"));
   assert!(!method.contains("CommittedExclusion"));
   assert!(!method.contains("CompoundExclusion"));
   for forbidden in

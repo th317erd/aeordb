@@ -733,7 +733,14 @@
           - [x] Re-run cancellation, corruption, authority drift, crash-prefix, architecture-isolation, resource, and retained-or-leaked gates before closing P4-6.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
         - [x] P4-7a: expose exact both-width Void extent/catalog/claim/settlement writers and iterators, and converge Void directory nodes on the shared multi-child GC directory codec.
-        - [ ] P4-7b: validate the complete Void support closure with bounded memory/cancellation, hard-publish receipt-backed support, and select its A/B control last while allocator admission remains blocked until exact receipt reconciliation.
+        - [x] P4-7b: validate the complete Void support closure with bounded memory/cancellation, hard-publish receipt-backed support, and select its A/B control last while allocator admission remains blocked until exact receipt reconciliation.
+          - [x] Add a compile-red public contract for one disconnected Void support publisher and selector-last catalog owner.
+          - [x] Stream and revalidate both free-extent and outstanding-claim trees through role-aware depth, artifact-count, memory, cancellation, aggregate, ordering, and overlap bounds.
+          - [x] Correct copy-on-write root generation validation so a manifest may retain older immutable support but never reference a future generation.
+          - [x] Bind the proposed catalog to one exact durable sweep removal completion and caller-owned blocked-allocator/receipt-reconciliation authority.
+          - [x] Hard-publish pages, directories, and claims independently; publish the manifest and inactive A/B control under first authority with the control selected last.
+          - [x] Return no allocator or claim permit, and prove cancellation, missing/corrupt/substituted support, stale prior authority, selector uncertainty, restart, idempotence, and retained-or-leaked outcomes.
+          - [x] Run the complete P4 matrix, architecture/suppression/contract/docs gates, broad library tests, and native macOS/Windows qualification before landing.
         - [ ] P4-7c: qualify an exact bounded free-extent claim, hard-publish immutable claim evidence, and select a catalog that removes all claimed ranges before returning allocation authority.
         - [ ] P4-7d: consume only durable claim subranges through one bounded allocator owner, then hard-publish settlement/abandonment and a claim-free result catalog after used locators are durable.
         - [ ] P4-7e: derive startup and in-memory reusable-space state only from one closure-valid selected receipt-backed catalog minus outstanding claims; keep raw hot-tail and gap evidence non-authoritative.

@@ -57,6 +57,13 @@ pub struct SweepLocatorRemovalOutcomeV1 {
   pub resulting_void_length: u32,
 }
 
+#[must_use = "the durable locator-removal sequence and every outcome must be bound into Void publication or retained for recovery"]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SweepLocatorRemovalBatchOutcomeV1 {
+  pub reclaim_commit_sequence: u64,
+  pub outcomes: Vec<SweepLocatorRemovalOutcomeV1>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[error("{message}")]
 pub struct SweepLocatorRemovalAuthorityErrorV1 {
@@ -93,7 +100,11 @@ pub trait SweepLocatorRemovalAuthorityV1 {
   /// must occupy its proposal ordinal using one frozen outcome class. A process
   /// crash is reconciled later from the durable proposal. Implementations must
   /// not reenter the first-authority or request-pin guards held by the caller.
-  fn remove_sweep_locators(&mut self, request: SweepLocatorRemovalAuthorityRequestV1<'_>) -> Vec<SweepLocatorRemovalOutcomeV1>;
+  /// `reclaim_commit_sequence` must be one durable, globally monotonic v4 write
+  /// sequence assigned after every returned locator outcome is durable. It must
+  /// strictly advance `request.proposal_write_sequence`; gaps are valid, but
+  /// sequence reuse and wrap are forbidden.
+  fn remove_sweep_locators(&mut self, request: SweepLocatorRemovalAuthorityRequestV1<'_>) -> SweepLocatorRemovalBatchOutcomeV1;
 }
 
 #[must_use = "locator-removal outcomes must be consumed by receipt/Void reconciliation or retained for retry"]
@@ -104,6 +115,7 @@ pub struct SweepLocatorRemovalCompletionPermitV1 {
   generation: u64,
   proposal_hash: Vec<u8>,
   proposal_write_sequence: u64,
+  reclaim_commit_sequence: u64,
   quarantine_manifest_hash: Vec<u8>,
   outcomes: Box<[SweepLocatorRemovalOutcomeV1]>,
   _memory: MemoryReservation,
@@ -119,6 +131,7 @@ impl Debug for SweepLocatorRemovalCompletionPermitV1 {
       .field("generation", &self.generation)
       .field("proposal_hash", &hex::encode(&self.proposal_hash))
       .field("proposal_write_sequence", &self.proposal_write_sequence)
+      .field("reclaim_commit_sequence", &self.reclaim_commit_sequence)
       .field("quarantine_manifest_hash", &hex::encode(&self.quarantine_manifest_hash))
       .field("outcome_count", &self.outcomes.len())
       .finish()
@@ -148,6 +161,10 @@ impl SweepLocatorRemovalCompletionPermitV1 {
 
   pub const fn proposal_write_sequence(&self) -> u64 {
     self.proposal_write_sequence
+  }
+
+  pub const fn reclaim_commit_sequence(&self) -> u64 {
+    self.reclaim_commit_sequence
   }
 
   pub fn quarantine_manifest_hash(&self) -> &[u8] {
@@ -244,10 +261,16 @@ pub(crate) fn validate_sweep_locator_removal_snapshot_v1(
 
 pub(crate) fn complete_sweep_locator_removal_v1(
   request: SweepLocatorRemovalAuthorityRequestV1<'_>,
-  outcomes: Vec<SweepLocatorRemovalOutcomeV1>,
+  batch_outcome: SweepLocatorRemovalBatchOutcomeV1,
   memory: MemoryReservation,
 ) -> Result<SweepLocatorRemovalCompletionPermitV1, SweepLocatorRemovalErrorV1> {
-  validate_sweep_locator_removal_outcomes_v1(request.hash_algorithm, request.proposal, &outcomes)?;
+  if batch_outcome.reclaim_commit_sequence <= request.proposal_write_sequence {
+    return Err(SweepLocatorRemovalErrorV1::invalid(
+      "sweep_removal_commit_sequence",
+      "locator-removal commit sequence must advance the durable sweep proposal sequence",
+    ));
+  }
+  validate_sweep_locator_removal_outcomes_v1(request.hash_algorithm, request.proposal, &batch_outcome.outcomes)?;
   Ok(SweepLocatorRemovalCompletionPermitV1 {
     hash_algorithm: request.hash_algorithm,
     database_id: *request.database_id,
@@ -255,8 +278,9 @@ pub(crate) fn complete_sweep_locator_removal_v1(
     generation: request.generation,
     proposal_hash: request.proposal_hash.to_vec(),
     proposal_write_sequence: request.proposal_write_sequence,
+    reclaim_commit_sequence: batch_outcome.reclaim_commit_sequence,
     quarantine_manifest_hash: request.quarantine_manifest_hash.to_vec(),
-    outcomes: outcomes.into_boxed_slice(),
+    outcomes: batch_outcome.outcomes.into_boxed_slice(),
     _memory: memory,
   })
 }

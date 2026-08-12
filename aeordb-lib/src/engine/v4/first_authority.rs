@@ -65,6 +65,10 @@ use super::gc_sweep_reconciliation::{
   validate_sweep_receipt_void_authority_v1,
 };
 use super::gc_void::{SweepVoidArtifactV1, decode_sweep_void_artifact};
+use super::gc_void_publication::{
+  VoidCatalogClosureLimitsV1, VoidCatalogClosureSummaryV1, VoidCatalogClosureValidatorV1, VoidCatalogPublicationAuthorityRequestV1,
+  VoidCatalogPublicationAuthorityV1, VoidCatalogPublicationErrorV1, validate_void_catalog_publication_authority_v1,
+};
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
   decode_root_retirement_commit_v1, validate_root_lifecycle_expiry_manifest,
@@ -186,6 +190,47 @@ pub struct PhysicalQuarantineSupportPublicationReceiptV1 {
   pub artifact_key: Vec<u8>,
   pub artifact_kind: GcArtifactKindV1,
   pub hard_publication_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VoidCatalogSupportPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub artifact: &'a EncodedImmutableGcArtifactV1,
+  pub publication_timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoidCatalogSupportPublicationReceiptV1 {
+  pub artifact_key: Vec<u8>,
+  pub artifact_kind: GcArtifactKindV1,
+  pub hard_publication_sequence: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct VoidCatalogPublicationRequestV1<'a> {
+  pub completion: &'a SweepLocatorRemovalCompletionPermitV1,
+  pub manifest: &'a EncodedImmutableGcArtifactV1,
+  pub control: &'a EncodedGcActiveControlV1,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+  pub cancellation: &'a CancellationToken,
+  pub memory: &'a MemoryCoordinator,
+  pub closure_limits: VoidCatalogClosureLimitsV1,
+}
+
+#[must_use = "a selected Void catalog remains blocked until this exact catalog is reconciled into a sweep receipt"]
+#[derive(Debug)]
+pub struct VoidCatalogPublicationReceiptV1 {
+  pub manifest_key: Vec<u8>,
+  pub manifest_write_sequence: u64,
+  pub control_key: Vec<u8>,
+  pub control_write_sequence: u64,
+  pub control_slot: u8,
+  pub lineage_state: RootRetirementLineageStateV1,
+  pub observation: DatabaseHeaderObservationV4,
+  pub receipt_reconciliation_required: bool,
+  pub reuse_blocked: bool,
+  pub idempotent: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1293,6 +1338,18 @@ struct PhysicalQuarantineLockedPublicationV1 {
   committed_failure: Option<(GcControlPublicationFailureV1, String)>,
 }
 
+struct SelectedVoidCatalogControlV1 {
+  stored_value: Vec<u8>,
+  target_manifest_hash: Vec<u8>,
+  control_sequence: u64,
+}
+
+struct VoidCatalogLockedPublicationV1 {
+  manifest_write_sequence: u64,
+  control: GcControlPublicationV1,
+  committed_failure: Option<(GcControlPublicationFailureV1, String)>,
+}
+
 struct ChargedSelectionEntityV1 {
   bytes: Vec<u8>,
   _memory: MemoryReservation,
@@ -1528,6 +1585,18 @@ impl From<GcControlPublicationErrorV1> for RootRetirementPublicationErrorV1 {
 }
 
 impl From<GcControlPublicationErrorV1> for RootReclaimPublicationErrorV1 {
+  fn from(source: GcControlPublicationErrorV1) -> Self {
+    match source {
+      GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
+      GcControlPublicationErrorV1::Format(source) => Self::Format(source),
+      GcControlPublicationErrorV1::Authority(source) => Self::Authority(source),
+      GcControlPublicationErrorV1::RetirementAdmission(source) => Self::RetirementAdmission(source),
+      GcControlPublicationErrorV1::RetirementOwner(source) => Self::RetirementOwner(source),
+    }
+  }
+}
+
+impl From<GcControlPublicationErrorV1> for VoidCatalogPublicationErrorV1 {
   fn from(source: GcControlPublicationErrorV1) -> Self {
     match source {
       GcControlPublicationErrorV1::Invalid { failure, message } => Self::Invalid { code: failure.code(), message },
@@ -3551,11 +3620,11 @@ impl V4FirstAuthorityPublisher {
             "sweep locator removal was canceled after the final authority recheck",
           ));
         }
-        let outcomes = removal_authority.remove_sweep_locators(authority_request);
+        let batch_outcome = removal_authority.remove_sweep_locators(authority_request);
         let admitted_result_memory = result_memory.take().ok_or_else(|| {
           SweepLocatorRemovalErrorV1::invalid("sweep_removal_internal", "admitted sweep result memory was already consumed")
         })?;
-        complete_sweep_locator_removal_v1(authority_request, outcomes, admitted_result_memory)
+        complete_sweep_locator_removal_v1(authority_request, batch_outcome, admitted_result_memory)
       })();
       Ok(operation_result)
     })?;
@@ -3904,6 +3973,368 @@ impl V4FirstAuthorityPublisher {
       &mut NoopFirstAuthorityDependencyObserverV1,
     )?;
     Ok(SweepProposalHardPublicationReceiptV1 { proposal_key: request.permit.proposal().key.clone(), hard_publication_sequence })
+  }
+
+  /// Select one complete Void catalog after all immutable support is durable.
+  /// The returned receipt deliberately keeps reuse blocked until the separate
+  /// sweep-receipt reconciler proves the exact selected catalog.
+  pub fn publish_void_catalog(
+    &mut self,
+    request: VoidCatalogPublicationRequestV1<'_>,
+    authority: &mut dyn VoidCatalogPublicationAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  ) -> Result<VoidCatalogPublicationReceiptV1, VoidCatalogPublicationErrorV1> {
+    self.publish_void_catalog_with_control_observer(request, authority, retirement_owner, &mut NoopFirstAuthorityDependencyObserverV1)
+  }
+
+  fn publish_void_catalog_with_control_observer(
+    &mut self,
+    request: VoidCatalogPublicationRequestV1<'_>,
+    authority: &mut dyn VoidCatalogPublicationAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<VoidCatalogPublicationReceiptV1, VoidCatalogPublicationErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_canceled",
+        "Void catalog publication was canceled before authority selection",
+      ));
+    }
+    if retirement_owner.hash_algorithm() != request.completion.hash_algorithm()
+      || retirement_owner.database_id() != request.completion.database_id()
+    {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_lineage_identity",
+        "retirement lineage owner differs from the completed sweep database or hash profile",
+      ));
+    }
+    validate_void_catalog_publication_request(&request)?;
+    retirement_owner.flush(self)?;
+
+    let locked = self.publish_void_catalog_locked(&request, authority, retirement_owner, control_observer)?;
+    let mut committed_failure = locked.committed_failure.map(|(failure, message)| (failure.code(), message));
+    let lineage_state = if locked.control.replaced_control {
+      match retirement_owner.flush(self) {
+        Ok(true) => RootRetirementLineageStateV1::HardPublished {
+          hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence,
+        },
+        Ok(false) => RootRetirementLineageStateV1::MissingAfterCommit {
+          code: "void_publication_lineage_missing",
+          message: "Void control replacement committed without retained retirement lineage".to_string(),
+        },
+        Err(source) => RootRetirementLineageStateV1::BufferedAfterFlushFailure { code: source.code(), message: source.to_string() },
+      }
+    } else {
+      RootRetirementLineageStateV1::NotRequired
+    };
+    if !matches!(lineage_state, RootRetirementLineageStateV1::NotRequired | RootRetirementLineageStateV1::HardPublished { .. })
+      && committed_failure.is_none()
+    {
+      committed_failure = Some(("void_publication_committed_lineage", "Void replacement lineage did not hard-publish".to_string()));
+    }
+    let observation = if matches!(lineage_state, RootRetirementLineageStateV1::HardPublished { .. }) {
+      match self.observe() {
+        Ok(observation) => observation,
+        Err(source) => {
+          if committed_failure.is_none() {
+            committed_failure = Some(("void_publication_committed_lineage_readback", source.to_string()));
+          }
+          locked.control.observation
+        }
+      }
+    } else {
+      locked.control.observation
+    };
+    let receipt = VoidCatalogPublicationReceiptV1 {
+      manifest_key: request.manifest.key.clone(),
+      manifest_write_sequence: locked.manifest_write_sequence,
+      control_key: request.control.key.clone(),
+      control_write_sequence: locked.control.control_write_sequence,
+      control_slot: locked.control.control_slot,
+      lineage_state,
+      observation,
+      receipt_reconciliation_required: true,
+      reuse_blocked: true,
+      idempotent: locked.control.idempotent,
+    };
+    if let Some((code, message)) = committed_failure {
+      return Err(VoidCatalogPublicationErrorV1::committed(code, message, receipt));
+    }
+    Ok(receipt)
+  }
+
+  fn publish_void_catalog_locked(
+    &self,
+    request: &VoidCatalogPublicationRequestV1<'_>,
+    authority: &mut dyn VoidCatalogPublicationAuthorityV1,
+    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<VoidCatalogLockedPublicationV1, VoidCatalogPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      VoidCatalogPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.head_hash.iter().all(|byte| *byte == 0)
+      || header.hash_algorithm != request.completion.hash_algorithm()
+      || header.database_id != request.completion.database_id()
+    {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_database_authority",
+        "selected first authority is absent, degraded, or differs from the completed sweep",
+      ));
+    }
+    if request.cancellation.is_cancelled() {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_canceled",
+        "Void catalog publication was canceled during final authority recheck",
+      ));
+    }
+    let closure = self.verify_void_catalog_support_is_durable(request)?;
+    let SweepVoidArtifactV1::VoidCatalog(manifest) = decode_sweep_void_artifact(&request.manifest.value, header.hash_algorithm)? else {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_manifest_kind",
+        "proposed Void manifest bytes decode as another GC artifact kind",
+      ));
+    };
+    let selected_control = {
+      let kv = self.lock_kv()?;
+      validate_kv_header_alignment(&kv, header)?;
+      select_void_catalog_control(&self.file, &kv, header)?
+    };
+    let exact_retry = selected_control
+      .as_ref()
+      .is_some_and(|selected| selected.stored_value == request.control.value && selected.target_manifest_hash == request.manifest.key);
+    if !exact_retry {
+      let selected_prior_manifest_hash = selected_control.as_ref().map(|selected| selected.target_manifest_hash.as_slice());
+      let selected_prior_control_sequence = selected_control.as_ref().map_or(0, |selected| selected.control_sequence);
+      if selected_prior_control_sequence != manifest.previous_control_sequence
+        || manifest.previous_control_sequence == 0 && selected_prior_manifest_hash.is_some()
+        || manifest.previous_control_sequence != 0 && selected_prior_manifest_hash.is_none()
+      {
+        return Err(VoidCatalogPublicationErrorV1::invalid(
+          "void_publication_prior_authority",
+          "physically selected prior Void authority differs from the proposed manifest predecessor",
+        ));
+      }
+      let authority_snapshot = authority.recheck_void_catalog_publication_authority(VoidCatalogPublicationAuthorityRequestV1 {
+        completion: request.completion,
+        manifest: &manifest,
+        closure: &closure,
+        selected_prior_manifest_hash,
+        selected_prior_control_sequence,
+        cancellation: request.cancellation,
+      })?;
+      validate_void_catalog_publication_authority_v1(
+        VoidCatalogPublicationAuthorityRequestV1 {
+          completion: request.completion,
+          manifest: &manifest,
+          closure: &closure,
+          selected_prior_manifest_hash,
+          selected_prior_control_sequence,
+          cancellation: request.cancellation,
+        },
+        &authority_snapshot,
+      )?;
+    }
+
+    let database_id = request.completion.database_id();
+    let manifest_write_sequence = self.publish_immutable_gc_artifact_locked(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::VoidCatalogManifest,
+        database_id: &database_id,
+        artifact_key: &request.manifest.key,
+        value: &request.manifest.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "void_manifest_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    let control = self.publish_gc_active_control_locked(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::VoidCatalogActiveControl,
+        encoded_control: request.control,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      retirement_owner,
+      control_observer,
+    )?;
+    let (control, committed_failure) = match control {
+      GcControlPublicationOutcomeV1::Complete(control) => (control, None),
+      GcControlPublicationOutcomeV1::CommittedFailure { publication, failure, message } => (publication, Some((failure, message))),
+    };
+    Ok(VoidCatalogLockedPublicationV1 { manifest_write_sequence, control, committed_failure })
+  }
+
+  fn verify_void_catalog_support_is_durable(
+    &self,
+    request: &VoidCatalogPublicationRequestV1<'_>,
+  ) -> Result<VoidCatalogClosureSummaryV1, VoidCatalogPublicationErrorV1> {
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.hash_algorithm != request.completion.hash_algorithm()
+      || header.database_id != request.completion.database_id()
+    {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_database_authority",
+        "selected first authority is degraded or differs from the proposed Void catalog",
+      ));
+    }
+    let SweepVoidArtifactV1::VoidCatalog(manifest) = decode_sweep_void_artifact(&request.manifest.value, header.hash_algorithm)? else {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_manifest_kind",
+        "proposed Void manifest bytes decode as another GC artifact kind",
+      ));
+    };
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let reader =
+      VoidCatalogSupportReadContextV1 { file: &self.file, kv: &kv, header, memory: request.memory, cancellation: request.cancellation };
+    let proposal_entity = reader.load_entity(request.completion.proposal_hash(), GcArtifactKindV1::SweepProposal)?;
+    let proposal_whole = decode_whole_entity(&proposal_entity.bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    if proposal_whole.write_sequence != request.completion.proposal_write_sequence() {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_proposal_sequence",
+        "durable sweep proposal write sequence differs from its locator-removal completion",
+      ));
+    }
+    let SweepVoidArtifactV1::SweepProposal(proposal) = decode_sweep_void_artifact(proposal_whole.stored_value, header.hash_algorithm)?
+    else {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_proposal_kind",
+        "durable sweep proposal key resolves to another GC artifact kind",
+      ));
+    };
+    let candidate_count = usize::try_from(proposal.candidate_count).map_err(|source| {
+      VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_proposal_identity",
+        format!("durable sweep proposal candidate count exceeds usize: {source}"),
+      )
+    })?;
+    if proposal.key != request.completion.proposal_hash()
+      || proposal.database_id != request.completion.database_id()
+      || proposal.batch_id != request.completion.batch_id()
+      || proposal.generation != request.completion.generation()
+      || proposal.quarantine_manifest_hash != request.completion.quarantine_manifest_hash()
+      || candidate_count != request.completion.outcomes().len()
+    {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_proposal_identity",
+        "durable sweep proposal identity or candidate count differs from its locator-removal completion",
+      ));
+    }
+
+    let digest_memory_bytes =
+      request.completion.outcomes().len().checked_mul(std::mem::size_of::<Vec<u8>>() + header.hash_algorithm.hash_length()).ok_or_else(
+        || VoidCatalogPublicationErrorV1::invalid("void_publication_digest_memory", "incarnation digest memory size overflowed"),
+      )?;
+    let digest_memory_bytes = u64::try_from(digest_memory_bytes).map_err(|source| {
+      VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_digest_memory",
+        format!("incarnation digest memory size exceeds u64: {source}"),
+      )
+    })?;
+    let _digest_memory = request
+      .memory
+      .reserve(MemoryOwner::GarbageCollection, digest_memory_bytes, AdmissionClass::Maintenance)
+      .map_err(|source| VoidCatalogPublicationErrorV1::invalid("void_publication_digest_memory", source.to_string()))?;
+    let mut reclaimed_incarnation_digests = Vec::new();
+    reclaimed_incarnation_digests.try_reserve_exact(request.completion.outcomes().len())?;
+    for (index, candidate) in proposal.candidate_records(header.hash_algorithm)?.enumerate() {
+      let candidate = candidate?;
+      let outcome =
+        request.completion.outcomes().get(index).ok_or_else(|| {
+          VoidCatalogPublicationErrorV1::invalid("void_publication_outcomes", "sweep completion omits a proposal outcome")
+        })?;
+      if outcome.ordinal as usize != index {
+        return Err(VoidCatalogPublicationErrorV1::invalid(
+          "void_publication_outcomes",
+          "sweep completion outcomes are not in exact proposal order",
+        ));
+      }
+      if outcome.outcome == super::gc_void::SweepOutcomeClassV1::Reclaimed {
+        let mut encoded = vec![0u8; 24 + 2 * header.hash_algorithm.hash_length()];
+        super::gc::encode_physical_incarnation_into(&mut encoded, &candidate, header.hash_algorithm)?;
+        reclaimed_incarnation_digests.push(digest_parts(header.hash_algorithm, &[&encoded]));
+      }
+    }
+
+    let mut validator = VoidCatalogClosureValidatorV1::new(
+      &manifest,
+      header.hash_algorithm,
+      request.cancellation.clone(),
+      request.closure_limits,
+      request.memory,
+    )?;
+    validator.bind_sweep_completion_with_incarnation_digests(request.completion, &reclaimed_incarnation_digests)?;
+    if manifest.free_root.iter().any(|byte| *byte != 0) {
+      reader.revalidate_subtree(manifest.free_root, GcDirectoryRoleV1::FreeExtents, None, 0, &mut validator)?;
+    }
+    if manifest.claim_root.iter().any(|byte| *byte != 0) {
+      reader.revalidate_subtree(manifest.claim_root, GcDirectoryRoleV1::Claims, None, 0, &mut validator)?;
+    }
+    validator.finish().map_err(Into::into)
+  }
+
+  /// Hard-publish one immutable page, directory, or outstanding claim used by
+  /// a future Void catalog. This method never selects Void authority.
+  pub fn publish_void_catalog_support_artifact(
+    &self,
+    request: VoidCatalogSupportPublicationRequestV1<'_>,
+  ) -> Result<VoidCatalogSupportPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    let observation = self.observe()?;
+    let algorithm = observation.selected.header.hash_algorithm;
+    let decoded = decode_sweep_void_artifact(&request.artifact.value, algorithm)?;
+    let (kind, database_id) = match &decoded {
+      SweepVoidArtifactV1::VoidExtentPage(page) => (GcArtifactKindV1::VoidExtentPage, page.database_id),
+      SweepVoidArtifactV1::VoidClaim(claim) => (GcArtifactKindV1::VoidClaim, claim.database_id),
+      SweepVoidArtifactV1::VoidDirectory(directory)
+        if matches!(directory.role, GcDirectoryRoleV1::FreeExtents | GcDirectoryRoleV1::Claims) =>
+      {
+        (GcArtifactKindV1::GcArtifactDirectoryNode, directory.database_id)
+      }
+      SweepVoidArtifactV1::VoidDirectory(_) => {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "void_support_role",
+          "Void support publication rejects non-Void directory roles",
+        ));
+      }
+      SweepVoidArtifactV1::SweepProposal(_)
+      | SweepVoidArtifactV1::SweepReceipt(_)
+      | SweepVoidArtifactV1::VoidCatalog(_)
+      | SweepVoidArtifactV1::VoidClaimSettlement(_) => {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "void_support_kind",
+          "Void support publication accepts only extent pages, outstanding claims, and their directories",
+        ));
+      }
+    };
+    if database_id != request.database_id || decoded.key() != request.artifact.key {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "void_support_identity",
+        "Void support artifact database or canonical key disagrees with its request",
+      ));
+    }
+    let hard_publication_sequence = self.publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind,
+        database_id: request.database_id,
+        artifact_key: &request.artifact.key,
+        value: &request.artifact.value,
+        minimum_timestamp_ms: request.publication_timestamp_ms,
+        committed_postcondition_code: "void_support_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )?;
+    Ok(VoidCatalogSupportPublicationReceiptV1 {
+      artifact_key: request.artifact.key.clone(),
+      artifact_kind: kind,
+      hard_publication_sequence,
+    })
   }
 
   /// Hard-publish one immutable page or directory used by a future root-
@@ -5292,6 +5723,181 @@ struct ChargedRootLifecycleSupportEntityV1 {
   _memory: MemoryReservation,
 }
 
+struct ChargedVoidCatalogSupportEntityV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+struct VoidCatalogSupportReadContextV1<'a> {
+  file: &'a File,
+  kv: &'a DiskKVStore,
+  header: &'a DatabaseHeaderV4,
+  memory: &'a MemoryCoordinator,
+  cancellation: &'a CancellationToken,
+}
+
+impl VoidCatalogSupportReadContextV1<'_> {
+  fn revalidate_subtree(
+    &self,
+    key: &[u8],
+    expected_role: GcDirectoryRoleV1,
+    expected_level: Option<u16>,
+    depth: u16,
+    validator: &mut VoidCatalogClosureValidatorV1<'_>,
+  ) -> Result<(), VoidCatalogPublicationErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(VoidCatalogPublicationErrorV1::invalid("void_publication_canceled", "Void support validation was canceled"));
+    }
+    if depth > 16 {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_depth",
+        "durable Void support directory exceeds depth 16",
+      ));
+    }
+    let directory_entity = self.load_entity(key, GcArtifactKindV1::GcArtifactDirectoryNode)?;
+    let entity = decode_whole_entity(&directory_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    let SweepVoidArtifactV1::VoidDirectory(directory) = decode_sweep_void_artifact(entity.stored_value, self.header.hash_algorithm)? else {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_kind",
+        "Void directory key resolves to another GC artifact kind",
+      ));
+    };
+    if directory.key != key || directory.role != expected_role || expected_level.is_some_and(|level| level != directory.level) {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_changed",
+        "durable Void directory identity, role, or level differs from its parent descriptor",
+      ));
+    }
+    for descriptor in &directory.entries {
+      if directory.level == 0 {
+        self.revalidate_leaf(descriptor.child_hash, expected_role, validator)?;
+      } else {
+        self.revalidate_subtree(descriptor.child_hash, expected_role, Some(directory.level - 1), depth + 1, validator)?;
+      }
+    }
+    validator.observe_encoded(entity.stored_value)?;
+    Ok(())
+  }
+
+  fn revalidate_leaf(
+    &self,
+    key: &[u8],
+    expected_role: GcDirectoryRoleV1,
+    validator: &mut VoidCatalogClosureValidatorV1<'_>,
+  ) -> Result<(), VoidCatalogPublicationErrorV1> {
+    let expected_kind = match expected_role {
+      GcDirectoryRoleV1::FreeExtents => GcArtifactKindV1::VoidExtentPage,
+      GcDirectoryRoleV1::Claims => GcArtifactKindV1::VoidClaim,
+      GcDirectoryRoleV1::Candidates
+      | GcDirectoryRoleV1::PhysicalInventory
+      | GcDirectoryRoleV1::RootCandidates
+      | GcDirectoryRoleV1::RootExpiry => {
+        return Err(VoidCatalogPublicationErrorV1::invalid(
+          "void_publication_support_role",
+          "Void closure cannot contain a non-Void leaf role",
+        ));
+      }
+    };
+    let leaf_entity = self.load_entity(key, expected_kind)?;
+    let entity = decode_whole_entity(&leaf_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    let leaf = decode_sweep_void_artifact(entity.stored_value, self.header.hash_algorithm)?;
+    let leaf_matches = match (&leaf, expected_role) {
+      (SweepVoidArtifactV1::VoidExtentPage(page), GcDirectoryRoleV1::FreeExtents) => page.key == key,
+      (SweepVoidArtifactV1::VoidClaim(claim), GcDirectoryRoleV1::Claims) => claim.key == key,
+      _ => false,
+    };
+    if !leaf_matches {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_changed",
+        "durable Void leaf identity or role differs from its parent descriptor",
+      ));
+    }
+    validator.observe_encoded(entity.stored_value)?;
+    Ok(())
+  }
+
+  fn load_entity(
+    &self,
+    key: &[u8],
+    expected_kind: GcArtifactKindV1,
+  ) -> Result<ChargedVoidCatalogSupportEntityV1, VoidCatalogPublicationErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_canceled",
+        "Void support validation was canceled before a durable read",
+      ));
+    }
+    let Some(locator) = self.kv.get(key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_missing",
+        format!("Void support artifact {} is absent", hex::encode(key)),
+      ));
+    };
+    if locator.type_flags != kv_tag::GC_ARTIFACT {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_collision",
+        "Void support key resolves to another KV role",
+      ));
+    }
+    let maximum_value_length = expected_kind
+      .immutable_maximum_encoded_length()
+      .ok_or_else(|| VoidCatalogPublicationErrorV1::invalid("void_publication_support_kind", "Void support role has no immutable cap"))?;
+    let maximum_entity_length =
+      super::entity::checked_whole_entity_encoded_length(self.header.hash_algorithm, key.len(), maximum_value_length)?;
+    let locator_length = usize::try_from(locator.total_length).map_err(|source| {
+      VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_length",
+        format!("Void support locator length exceeds usize: {source}"),
+      )
+    })?;
+    if locator_length > maximum_entity_length {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_length",
+        format!("Void support entity length {locator_length} exceeds its {maximum_entity_length}-byte role cap"),
+      ));
+    }
+    let reservation = self
+      .memory
+      .reserve(
+        MemoryOwner::GarbageCollection,
+        u64::try_from(locator_length).map_err(|source| {
+          VoidCatalogPublicationErrorV1::invalid(
+            "void_publication_support_length",
+            format!("Void support length cannot be accounted: {source}"),
+          )
+        })?,
+        AdmissionClass::Maintenance,
+      )
+      .map_err(|source| VoidCatalogPublicationErrorV1::invalid("void_publication_support_memory", source.to_string()))?;
+    let bytes =
+      read_entity_bounded(self.file, self.kv, key, maximum_entity_length, self.header.write_sequence_high_water)?.ok_or_else(|| {
+        VoidCatalogPublicationErrorV1::invalid(
+          "void_publication_support_missing",
+          format!("Void support artifact {} disappeared", hex::encode(key)),
+        )
+      })?;
+    let entity = decode_whole_entity(&bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    if entity.entry_type != EntryTypeV4::GcArtifact
+      || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || entity.compression_algorithm != CompressionAlgorithm::None
+      || entity.key != key
+    {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_representation",
+        "Void support artifact is not one canonical system GC WholeEntity",
+      ));
+    }
+    let envelope = decode_gc_artifact_envelope(entity.stored_value)?;
+    if envelope.kind != expected_kind {
+      return Err(VoidCatalogPublicationErrorV1::invalid(
+        "void_publication_support_kind",
+        "Void support artifact kind differs from its requested role",
+      ));
+    }
+    Ok(ChargedVoidCatalogSupportEntityV1 { bytes, _memory: reservation })
+  }
+}
+
 struct ChargedPhysicalQuarantineSupportEntityV1 {
   bytes: Vec<u8>,
   _memory: MemoryReservation,
@@ -5850,6 +6456,37 @@ fn validate_root_retirement_publication<'a>(
   Ok(ValidatedRootRetirementPublicationV1 { lifecycle_control })
 }
 
+fn validate_void_catalog_publication_request(request: &VoidCatalogPublicationRequestV1<'_>) -> Result<(), VoidCatalogPublicationErrorV1> {
+  let algorithm = request.completion.hash_algorithm();
+  let SweepVoidArtifactV1::VoidCatalog(manifest) = decode_sweep_void_artifact(&request.manifest.value, algorithm)? else {
+    return Err(VoidCatalogPublicationErrorV1::invalid(
+      "void_publication_manifest_kind",
+      "proposed Void manifest bytes decode as another GC artifact kind",
+    ));
+  };
+  let control = decode_gc_active_control(&request.control.value, algorithm)?;
+  let published_at_ms = u64::try_from(manifest.published_at_ms).map_err(|source| {
+    VoidCatalogPublicationErrorV1::invalid("void_publication_timestamp", format!("Void manifest publication time is negative: {source}"))
+  })?;
+  if manifest.key != request.manifest.key
+    || manifest.database_id != request.completion.database_id()
+    || control.kind != GcArtifactKindV1::VoidCatalogActiveControl
+    || control.key != request.control.key
+    || control.database_id != manifest.database_id
+    || control.generation != manifest.generation
+    || control.target_manifest_hash != manifest.key
+    || control.sequence <= manifest.previous_control_sequence
+    || request.publication_timestamp_ms < published_at_ms
+    || !request.completion.outcomes().iter().any(|outcome| outcome.outcome == super::gc_void::SweepOutcomeClassV1::Reclaimed)
+  {
+    return Err(VoidCatalogPublicationErrorV1::invalid(
+      "void_publication_identity",
+      "Void manifest, control, sweep completion, sequence, or publication time do not close exactly",
+    ));
+  }
+  Ok(())
+}
+
 fn select_physical_quarantine_control(
   file: &File,
   kv: &DiskKVStore,
@@ -5896,6 +6533,103 @@ fn select_physical_quarantine_control(
     stored_value: stored.stored_value.clone(),
     target_manifest_hash: stored.target_manifest_hash.clone(),
   })
+}
+
+fn select_void_catalog_control(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+) -> Result<Option<SelectedVoidCatalogControlV1>, VoidCatalogPublicationErrorV1> {
+  let keys = gc_control_keys(header.hash_algorithm, GcArtifactKindV1::VoidCatalogActiveControl, &header.database_id)?;
+  let controls = [
+    load_gc_control_entity(file, kv, GcArtifactKindV1::VoidCatalogActiveControl, &keys[0], header)?,
+    load_gc_control_entity(file, kv, GcArtifactKindV1::VoidCatalogActiveControl, &keys[1], header)?,
+  ];
+  let closure_valid = [
+    match &controls[0] {
+      Some(control) => void_catalog_manifest_is_present(file, kv, header, &control.target_manifest_hash)?,
+      None => false,
+    },
+    match &controls[1] {
+      Some(control) => void_catalog_manifest_is_present(file, kv, header, &control.target_manifest_hash)?,
+      None => false,
+    },
+  ];
+  let selected_slot = match (&controls[0], &controls[1]) {
+    (Some(a), Some(b)) => {
+      let a_control = decode_gc_active_control(&a.stored_value, header.hash_algorithm)?;
+      let b_control = decode_gc_active_control(&b.stored_value, header.hash_algorithm)?;
+      select_gc_active_control(&a_control, closure_valid[0], &b_control, closure_valid[1])?.map(|control| control.slot)
+    }
+    (Some(_), None) if closure_valid[0] => Some(0),
+    (None, Some(_)) if closure_valid[1] => Some(1),
+    (Some(_), None) | (None, Some(_)) | (None, None) => None,
+  };
+  let Some(selected_slot) = selected_slot else {
+    if controls.iter().all(Option::is_none) {
+      return Ok(None);
+    }
+    return Err(VoidCatalogPublicationErrorV1::invalid(
+      "void_publication_authority_unavailable",
+      "no complete Void-catalog A/B control is selectable",
+    ));
+  };
+  let stored = controls[usize::from(selected_slot)]
+    .as_ref()
+    .ok_or_else(|| VoidCatalogPublicationErrorV1::invalid("void_publication_authority_internal", "selected Void control slot is absent"))?;
+  Ok(Some(SelectedVoidCatalogControlV1 {
+    stored_value: stored.stored_value.clone(),
+    target_manifest_hash: stored.target_manifest_hash.clone(),
+    control_sequence: stored.control_sequence,
+  }))
+}
+
+fn void_catalog_manifest_is_present(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+) -> Result<bool, VoidCatalogPublicationErrorV1> {
+  let Some(locator) = kv.get(key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+    return Ok(false);
+  };
+  if locator.type_flags != kv_tag::GC_ARTIFACT {
+    return Err(VoidCatalogPublicationErrorV1::invalid(
+      "void_publication_manifest_collision",
+      "Void catalog manifest key resolves to another KV role",
+    ));
+  }
+  let maximum_value_length = GcArtifactKindV1::VoidCatalogManifest.immutable_maximum_encoded_length().ok_or_else(|| {
+    VoidCatalogPublicationErrorV1::invalid("void_publication_manifest_kind", "Void catalog manifest has no immutable cap")
+  })?;
+  let maximum_entity_length = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, key.len(), maximum_value_length)?;
+  let bytes = read_entity_bounded(file, kv, key, maximum_entity_length, header.write_sequence_high_water)?.ok_or_else(|| {
+    VoidCatalogPublicationErrorV1::invalid("void_publication_manifest_missing", "Void catalog manifest locator disappeared")
+  })?;
+  let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  if entity.entry_type != EntryTypeV4::GcArtifact
+    || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+    || entity.compression_algorithm != CompressionAlgorithm::None
+    || entity.key != key
+  {
+    return Err(VoidCatalogPublicationErrorV1::invalid(
+      "void_publication_manifest_representation",
+      "selected Void catalog manifest is not one canonical system GC WholeEntity",
+    ));
+  }
+  let SweepVoidArtifactV1::VoidCatalog(manifest) = decode_sweep_void_artifact(entity.stored_value, header.hash_algorithm)? else {
+    return Err(VoidCatalogPublicationErrorV1::invalid(
+      "void_publication_manifest_kind",
+      "selected Void catalog key resolves to another GC artifact kind",
+    ));
+  };
+  if manifest.database_id != header.database_id || manifest.key != key {
+    return Err(VoidCatalogPublicationErrorV1::invalid(
+      "void_publication_manifest_representation",
+      "selected Void catalog manifest identity differs from its control target",
+    ));
+  }
+  Ok(true)
 }
 
 fn physical_quarantine_manifest_is_present(

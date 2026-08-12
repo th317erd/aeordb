@@ -1493,8 +1493,7 @@ pub fn validate_void_manifest_root(manifest: &SweepVoidArtifactV1<'_>, directory
     return Err(kind_error("void_manifest_root_closure", "closure requires a Void catalog and directory"));
   };
   let valid = manifest.database_id == directory.database_id
-    && directory.generation >= manifest.generation
-    && (directory.level != 0 || directory.entries.iter().all(|entry| entry.child_generation == manifest.generation))
+    && directory.generation <= manifest.generation
     && match directory.role {
       GcDirectoryRoleV1::FreeExtents => {
         manifest.free_root == directory.key && manifest.free_count == directory.live_count && manifest.free_bytes == directory.logical_bytes

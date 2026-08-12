@@ -35,6 +35,7 @@ pub mod gc_sweep;
 pub mod gc_sweep_reconciliation;
 pub mod gc_sweep_removal;
 pub mod gc_void;
+pub mod gc_void_publication;
 pub mod hash;
 pub mod header_publication;
 pub mod index_artifact;
