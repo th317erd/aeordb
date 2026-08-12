@@ -737,6 +737,10 @@ name = "gc_v4_sweep_publication_spec"
 path = "spec/engine/gc_v4_sweep_publication_spec.rs"
 
 [[test]]
+name = "gc_v4_sweep_removal_spec"
+path = "spec/engine/gc_v4_sweep_removal_spec.rs"
+
+[[test]]
 name = "gc_v4_state_writer_spec"
 path = "spec/engine/gc_v4_state_writer_spec.rs"
 

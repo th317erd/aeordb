@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::engine::hot_tail::{HotTailPayload, read_hot_tail_checked};
 use crate::engine::kv_stages::initial_block_size;
-use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use crate::engine::native_durability::{sync_file_all_native, sync_file_data_native};
 use crate::engine::v4::database_header::{
   DATABASE_HEADER_V4_DATA_OFFSET, DATABASE_HEADER_V4_REGION_LENGTH, DATABASE_HEADER_V4_SLOT_LENGTH, encode_database_header_slot,
@@ -39,6 +39,14 @@ use crate::engine::v4::gc_quarantine_transition::{
   PhysicalQuarantineTransitionModelV1, PhysicalQuarantineTransitionV1,
 };
 use crate::engine::v4::gc_sweep::{SweepProposalQualificationRequestV1, qualify_sweep_proposal_v1};
+use crate::engine::v4::gc_sweep_removal::{
+  SweepLocatorRemovalAuthorityErrorV1, SweepLocatorRemovalAuthorityRequestV1, SweepLocatorRemovalAuthoritySnapshotV1,
+  SweepLocatorRemovalAuthorityV1, SweepLocatorRemovalOutcomeV1, complete_sweep_locator_removal_v1,
+  reserve_sweep_locator_removal_results_v1,
+};
+use crate::engine::v4::gc_void::{
+  SweepOutcomeClassV1, SweepProposalWriteV1, SweepVoidArtifactV1, decode_sweep_void_artifact, encode_sweep_proposal_v1,
+};
 use crate::engine::v4::gc_root_reclaim::{
   RootExpiryRetentionContextV1, RootExpiryRetentionModelV1, RootExpiryRetentionPermitV1, RootExpiryRetentionSelectionV1,
   RootObjectReclaimEvidenceVerificationErrorV1, RootObjectReclaimEvidenceVerificationRequestV1, RootObjectReclaimEvidenceVerifierV1,
@@ -56,6 +64,148 @@ use crate::engine::v4::gc_state::{
 use crate::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use crate::engine::v4::read_view::RootLifecycleObservationV1;
 use tokio_util::sync::CancellationToken;
+
+struct TestSweepLocatorRemovalAuthorityV1 {
+  snapshot: SweepLocatorRemovalAuthoritySnapshotV1,
+  outcomes: Vec<SweepLocatorRemovalOutcomeV1>,
+  fail_recheck: bool,
+  cancel_during_recheck: bool,
+  cancel_during_remove: bool,
+  recheck_barriers: Option<(Arc<Barrier>, Arc<Barrier>)>,
+  recheck_calls: usize,
+  remove_calls: usize,
+  observed_proposal_hash: Vec<u8>,
+  observed_proposal_write_sequence: u64,
+  observed_candidate_count: u32,
+}
+
+impl SweepLocatorRemovalAuthorityV1 for TestSweepLocatorRemovalAuthorityV1 {
+  fn recheck_sweep_locator_removal_authority(
+    &mut self,
+    request: SweepLocatorRemovalAuthorityRequestV1<'_>,
+  ) -> Result<SweepLocatorRemovalAuthoritySnapshotV1, SweepLocatorRemovalAuthorityErrorV1> {
+    self.recheck_calls += 1;
+    self.observed_proposal_hash = request.proposal_hash.to_vec();
+    self.observed_proposal_write_sequence = request.proposal_write_sequence;
+    self.observed_candidate_count = request.proposal.candidate_count;
+    if let Some((entered, release)) = &self.recheck_barriers {
+      entered.wait();
+      release.wait();
+    }
+    if self.cancel_during_recheck {
+      request.cancellation.cancel();
+    }
+    if self.fail_recheck {
+      return Err(SweepLocatorRemovalAuthorityErrorV1::new("sweep_removal_test_recheck", "injected caller-owned sweep authority failure"));
+    }
+    Ok(self.snapshot.clone())
+  }
+
+  fn remove_sweep_locators(&mut self, request: SweepLocatorRemovalAuthorityRequestV1<'_>) -> Vec<SweepLocatorRemovalOutcomeV1> {
+    self.remove_calls += 1;
+    if self.cancel_during_remove {
+      request.cancellation.cancel();
+    }
+    self.outcomes.clone()
+  }
+}
+
+fn test_sweep_locator_removal_authority(
+  quarantine_manifest_hash: &[u8],
+  generation: u64,
+  outcomes: Vec<SweepLocatorRemovalOutcomeV1>,
+) -> TestSweepLocatorRemovalAuthorityV1 {
+  TestSweepLocatorRemovalAuthorityV1 {
+    snapshot: SweepLocatorRemovalAuthoritySnapshotV1 {
+      selected_quarantine_manifest_hash: quarantine_manifest_hash.to_vec(),
+      selected_mark_generation: generation,
+      lifecycle_current: true,
+      all_candidates_still_grace_eligible: true,
+      all_candidate_incarnations_exact_and_unreachable: true,
+      all_locator_and_replacement_states_match: true,
+      replacement_lineage_complete: true,
+      all_physical_ranges_valid: true,
+      request_pin_coordinator_current: true,
+      task_and_audit_pins_absent: true,
+      protected_family_policy_allows: true,
+      repair_latch_clear: true,
+    },
+    outcomes,
+    fail_recheck: false,
+    cancel_during_recheck: false,
+    cancel_during_remove: false,
+    recheck_barriers: None,
+    recheck_calls: 0,
+    remove_calls: 0,
+    observed_proposal_hash: Vec::new(),
+    observed_proposal_write_sequence: 0,
+    observed_candidate_count: 0,
+  }
+}
+
+#[test]
+fn sweep_locator_removal_completion_preserves_both_frozen_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let database_id = [0x31; 16];
+    let batch_id = [0x91; 16];
+    let logical_key = digest_parts(algorithm, &[b"sweep completion logical key"]);
+    let integrity = digest_parts(algorithm, &[b"sweep completion integrity"]);
+    let quarantine_manifest_hash = digest_parts(algorithm, &[b"sweep completion quarantine"]);
+    let candidates = [PhysicalIncarnationV1 {
+      logical_key: &logical_key,
+      integrity_or_legacy_digest: &integrity,
+      wal_offset: 8_192,
+      write_sequence: 77,
+      entity_length: 512,
+      entry_type: 1,
+      entity_version: 1,
+    }];
+    let artifact = encode_sweep_proposal_v1(&SweepProposalWriteV1 {
+      hash_algorithm: algorithm,
+      database_id: &database_id,
+      batch_id: &batch_id,
+      generation: 103,
+      created_at_ms: 1_700_000_080_001,
+      quarantine_manifest_hash: &quarantine_manifest_hash,
+      candidates: &candidates,
+    })
+    .unwrap();
+    let SweepVoidArtifactV1::SweepProposal(proposal) = decode_sweep_void_artifact(&artifact.value, algorithm).unwrap() else {
+      panic!("encoded sweep proposal must decode as a proposal")
+    };
+    let cancellation = CancellationToken::new();
+    let request = SweepLocatorRemovalAuthorityRequestV1 {
+      hash_algorithm: algorithm,
+      database_id: &database_id,
+      batch_id: &batch_id,
+      generation: 103,
+      proposal_hash: &artifact.key,
+      proposal_write_sequence: 417,
+      quarantine_manifest_hash: &quarantine_manifest_hash,
+      proposal: &proposal,
+      cancellation: &cancellation,
+    };
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(1 << 20, 2 << 20, 1, 1 << 16).unwrap());
+    let reservation = reserve_sweep_locator_removal_results_v1(&memory, proposal.candidate_count).unwrap();
+    let completion = complete_sweep_locator_removal_v1(
+      request,
+      vec![SweepLocatorRemovalOutcomeV1 {
+        ordinal: 0,
+        outcome: SweepOutcomeClassV1::Reclaimed,
+        stable_reason_detail: 0,
+        resulting_void_offset: 8_192,
+        resulting_void_length: 512,
+      }],
+      reservation,
+    )
+    .unwrap();
+    assert_eq!(completion.hash_algorithm(), algorithm);
+    assert_eq!(completion.proposal_hash(), artifact.key);
+    assert_eq!(completion.quarantine_manifest_hash(), quarantine_manifest_hash);
+    assert_eq!(completion.proposal_write_sequence(), 417);
+    assert_eq!(completion.outcomes().len(), 1);
+  }
+}
 
 #[derive(Clone, Copy, Debug)]
 enum FirstAuthorityFailurePoint {
@@ -4458,6 +4608,213 @@ fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is
   assert_eq!(first.proposal_key, sweep_permit.proposal().key);
   assert!(publisher.locator(&first.proposal_key).unwrap().is_some());
   assert_eq!(selected_physical_quarantine_manifest_key(&publisher), selected_before);
+
+  let removal_request = SweepLocatorRemovalRequestV1 {
+    permit: &sweep_permit,
+    hard_publication: &first,
+    cancellation: &cancellation,
+    pin_coordinator: &eligible_prepared.pin_coordinator,
+  };
+  let reclaimed = SweepLocatorRemovalOutcomeV1 {
+    ordinal: 0,
+    outcome: SweepOutcomeClassV1::Reclaimed,
+    stable_reason_detail: 0,
+    resulting_void_offset: 8_192,
+    resulting_void_length: 512,
+  };
+
+  let active_root = digest_parts(algorithm, &[b"active read while sweep removal waits"]);
+  let active_read =
+    eligible_prepared.pin_coordinator.admit_read(&active_root, &cancellation, || Ok(RootLifecycleObservationV1::Live)).unwrap();
+  let mut pinned_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  let error = publisher.execute_sweep_locator_removals(removal_request, &mut pinned_authority).unwrap_err();
+  assert_eq!(error.code(), "request_pinned");
+  assert_eq!(pinned_authority.recheck_calls, 0);
+  assert_eq!(pinned_authority.remove_calls, 0);
+  drop(active_read);
+
+  let recheck_entered = Arc::new(Barrier::new(2));
+  let recheck_release = Arc::new(Barrier::new(2));
+  let mut racing_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  racing_authority.recheck_barriers = Some((recheck_entered.clone(), recheck_release.clone()));
+  let read_started = Arc::new(Barrier::new(2));
+  let (lifecycle_callback_sender, lifecycle_callback_receiver) = mpsc::channel();
+  std::thread::scope(|scope| {
+    let removal = scope.spawn(|| publisher.execute_sweep_locator_removals(removal_request, &mut racing_authority));
+    recheck_entered.wait();
+
+    let pin_coordinator = eligible_prepared.pin_coordinator.clone();
+    let read_started_thread = read_started.clone();
+    let read_cancellation = CancellationToken::new();
+    let read = scope.spawn(move || {
+      read_started_thread.wait();
+      pin_coordinator.admit_read(&digest_parts(algorithm, &[b"racing sweep removal read"]), &read_cancellation, || {
+        lifecycle_callback_sender.send(()).unwrap();
+        Ok(RootLifecycleObservationV1::Live)
+      })
+    });
+    read_started.wait();
+    assert!(
+      matches!(lifecycle_callback_receiver.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)),
+      "a new read reached lifecycle admission while sweep removal held global exclusion"
+    );
+
+    recheck_release.wait();
+    drop(removal.join().unwrap().unwrap());
+    lifecycle_callback_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+    drop(read.join().unwrap().unwrap());
+  });
+  assert_eq!(racing_authority.recheck_calls, 1);
+  assert_eq!(racing_authority.remove_calls, 1);
+  assert_eq!(eligible_prepared.pin_coordinator.active_pin_count().unwrap(), 0);
+
+  let constrained_memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128, 192, 1, 64).unwrap()));
+  let constrained_pins = RootReadPinCoordinatorV1::new(constrained_memory, algorithm, 1, 1).unwrap();
+  let constrained_request = SweepLocatorRemovalRequestV1 { pin_coordinator: &constrained_pins, ..removal_request };
+  let mut constrained_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  let error = publisher.execute_sweep_locator_removals(constrained_request, &mut constrained_authority).unwrap_err();
+  assert_eq!(error.code(), "sweep_removal_memory");
+  assert_eq!(constrained_authority.recheck_calls, 0);
+
+  for case in [
+    "manifest",
+    "generation",
+    "lifecycle",
+    "grace",
+    "incarnation",
+    "locator",
+    "lineage",
+    "range",
+    "request-pins",
+    "pins",
+    "policy",
+    "repair",
+  ] {
+    let mut stale_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+    match case {
+      "manifest" => stale_authority.snapshot.selected_quarantine_manifest_hash[0] ^= 0xFF,
+      "generation" => stale_authority.snapshot.selected_mark_generation += 1,
+      "lifecycle" => stale_authority.snapshot.lifecycle_current = false,
+      "grace" => stale_authority.snapshot.all_candidates_still_grace_eligible = false,
+      "incarnation" => stale_authority.snapshot.all_candidate_incarnations_exact_and_unreachable = false,
+      "locator" => stale_authority.snapshot.all_locator_and_replacement_states_match = false,
+      "lineage" => stale_authority.snapshot.replacement_lineage_complete = false,
+      "range" => stale_authority.snapshot.all_physical_ranges_valid = false,
+      "request-pins" => stale_authority.snapshot.request_pin_coordinator_current = false,
+      "pins" => stale_authority.snapshot.task_and_audit_pins_absent = false,
+      "policy" => stale_authority.snapshot.protected_family_policy_allows = false,
+      "repair" => stale_authority.snapshot.repair_latch_clear = false,
+      _ => unreachable!(),
+    }
+    let error = publisher.execute_sweep_locator_removals(removal_request, &mut stale_authority).unwrap_err();
+    assert_eq!(error.code(), "sweep_removal_authority_changed", "case {case}");
+    assert_eq!(stale_authority.recheck_calls, 1, "case {case}");
+    assert_eq!(stale_authority.remove_calls, 0, "case {case}");
+  }
+
+  let mut refused_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  refused_authority.fail_recheck = true;
+  let error = publisher.execute_sweep_locator_removals(removal_request, &mut refused_authority).unwrap_err();
+  assert_eq!(error.code(), "sweep_removal_test_recheck");
+  assert_eq!(refused_authority.remove_calls, 0);
+
+  let cancellation_after_recheck = CancellationToken::new();
+  let cancellation_request = SweepLocatorRemovalRequestV1 { cancellation: &cancellation_after_recheck, ..removal_request };
+  let mut canceling_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  canceling_authority.cancel_during_recheck = true;
+  let error = publisher.execute_sweep_locator_removals(cancellation_request, &mut canceling_authority).unwrap_err();
+  assert_eq!(error.code(), "sweep_removal_canceled");
+  assert_eq!(canceling_authority.recheck_calls, 1);
+  assert_eq!(canceling_authority.remove_calls, 0);
+
+  let pre_canceled = CancellationToken::new();
+  pre_canceled.cancel();
+  let pre_canceled_request = SweepLocatorRemovalRequestV1 { cancellation: &pre_canceled, ..removal_request };
+  let mut pre_canceled_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  let error = publisher.execute_sweep_locator_removals(pre_canceled_request, &mut pre_canceled_authority).unwrap_err();
+  assert_eq!(error.code(), "sweep_removal_canceled");
+  assert_eq!(pre_canceled_authority.recheck_calls, 0);
+  assert_eq!(pre_canceled_authority.remove_calls, 0);
+
+  for (case, outcomes, expected_code) in [
+    ("missing", vec![], "sweep_removal_outcome_count"),
+    ("extra", vec![reclaimed, reclaimed], "sweep_removal_outcome_count"),
+    ("order", vec![SweepLocatorRemovalOutcomeV1 { ordinal: 1, ..reclaimed }], "sweep_removal_outcome_order"),
+    ("reclaimed-reason", vec![SweepLocatorRemovalOutcomeV1 { stable_reason_detail: 1, ..reclaimed }], "sweep_removal_outcome_shape"),
+    ("reclaimed-offset", vec![SweepLocatorRemovalOutcomeV1 { resulting_void_offset: 8_193, ..reclaimed }], "sweep_removal_outcome_shape"),
+    ("reclaimed-length", vec![SweepLocatorRemovalOutcomeV1 { resulting_void_length: 511, ..reclaimed }], "sweep_removal_outcome_shape"),
+    (
+      "skipped-reason",
+      vec![SweepLocatorRemovalOutcomeV1 {
+        outcome: SweepOutcomeClassV1::SkippedChanged,
+        resulting_void_offset: 0,
+        resulting_void_length: 0,
+        ..reclaimed
+      }],
+      "sweep_removal_outcome_shape",
+    ),
+    (
+      "skipped-extent",
+      vec![SweepLocatorRemovalOutcomeV1 { outcome: SweepOutcomeClassV1::SkippedChanged, stable_reason_detail: 1, ..reclaimed }],
+      "sweep_removal_outcome_shape",
+    ),
+  ] {
+    let mut malformed_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, outcomes);
+    let error = publisher.execute_sweep_locator_removals(removal_request, &mut malformed_authority).unwrap_err();
+    assert_eq!(error.code(), expected_code, "case {case}");
+    assert_eq!(malformed_authority.remove_calls, 1, "case {case}");
+  }
+
+  let wrong_publication = SweepProposalHardPublicationReceiptV1 {
+    proposal_key: first.proposal_key.clone(),
+    hard_publication_sequence: first.hard_publication_sequence + 1,
+  };
+  let wrong_publication_request = SweepLocatorRemovalRequestV1 { hard_publication: &wrong_publication, ..removal_request };
+  let mut wrong_publication_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  let error = publisher.execute_sweep_locator_removals(wrong_publication_request, &mut wrong_publication_authority).unwrap_err();
+  assert_eq!(error.code(), "sweep_removal_proposal_changed");
+  assert_eq!(wrong_publication_authority.recheck_calls, 0);
+
+  let original_proposal_locator = publisher.locator(&first.proposal_key).unwrap().unwrap();
+  let mut corrupt_proposal_locator = original_proposal_locator.clone();
+  corrupt_proposal_locator.type_flags = KV_TYPE_CHUNK;
+  publisher.kv.lock().unwrap().insert(corrupt_proposal_locator).unwrap();
+  let mut corrupt_proposal_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  let error = publisher.execute_sweep_locator_removals(removal_request, &mut corrupt_proposal_authority).unwrap_err();
+  assert_eq!(error.code(), "sweep_removal_proposal_collision");
+  assert_eq!(corrupt_proposal_authority.recheck_calls, 0);
+  publisher.kv.lock().unwrap().insert(original_proposal_locator).unwrap();
+
+  let cancellation_during_remove = CancellationToken::new();
+  let during_remove_request = SweepLocatorRemovalRequestV1 { cancellation: &cancellation_during_remove, ..removal_request };
+  let mut during_remove_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  during_remove_authority.cancel_during_remove = true;
+  let canceled_completion = publisher.execute_sweep_locator_removals(during_remove_request, &mut during_remove_authority).unwrap();
+  assert!(cancellation_during_remove.is_cancelled());
+  assert_eq!(canceled_completion.outcomes(), &[reclaimed]);
+  drop(canceled_completion);
+
+  let observation_before_removal = publisher.observe().unwrap();
+  let reserved_before_removal = memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes;
+  let mut exact_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  let completion = publisher.execute_sweep_locator_removals(removal_request, &mut exact_authority).unwrap();
+  assert_eq!(exact_authority.recheck_calls, 1);
+  assert_eq!(exact_authority.remove_calls, 1);
+  assert_eq!(exact_authority.observed_proposal_hash, first.proposal_key);
+  assert_eq!(exact_authority.observed_proposal_write_sequence, first.hard_publication_sequence);
+  assert_eq!(exact_authority.observed_candidate_count, 1);
+  assert_eq!(completion.hash_algorithm(), algorithm);
+  assert_eq!(completion.database_id(), database_id);
+  assert_eq!(completion.batch_id(), batch_id);
+  assert_eq!(completion.generation(), 103);
+  assert_eq!(completion.proposal_hash(), sweep_permit.proposal().key);
+  assert_eq!(completion.proposal_write_sequence(), first.hard_publication_sequence);
+  assert_eq!(completion.quarantine_manifest_hash(), eligible_prepared.manifest.key);
+  assert_eq!(completion.outcomes(), &[reclaimed]);
+  assert_eq!(publisher.observe().unwrap(), observation_before_removal);
+  assert!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes > reserved_before_removal);
+  drop(completion);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::GarbageCollection).unwrap().reserved_bytes, reserved_before_removal,);
 
   let canceled = CancellationToken::new();
   canceled.cancel();

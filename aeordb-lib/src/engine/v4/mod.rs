@@ -32,6 +32,7 @@ pub mod gc_root_reclaim;
 pub mod gc_root_transition;
 pub mod gc_state;
 pub mod gc_sweep;
+pub mod gc_sweep_removal;
 pub mod gc_void;
 pub mod hash;
 pub mod header_publication;

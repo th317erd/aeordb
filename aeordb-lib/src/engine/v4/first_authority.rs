@@ -55,6 +55,10 @@ use super::gc_mark_workspace::{DurableMarkWorkspaceClosureV1, MarkWorkspaceError
 use super::gc_quarantine::decode_candidate_delta_v1;
 use super::gc_quarantine_publication::PhysicalQuarantinePublicationPermitV1;
 use super::gc_sweep::SweepProposalPublicationPermitV1;
+use super::gc_sweep_removal::{
+  SweepLocatorRemovalAuthorityRequestV1, SweepLocatorRemovalAuthorityV1, SweepLocatorRemovalCompletionPermitV1, SweepLocatorRemovalErrorV1,
+  complete_sweep_locator_removal_v1, reserve_sweep_locator_removal_results_v1, validate_sweep_locator_removal_snapshot_v1,
+};
 use super::gc_void::{SweepVoidArtifactV1, decode_sweep_void_artifact};
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
@@ -279,6 +283,14 @@ pub struct SweepProposalHardPublicationRequestV1<'a> {
 pub struct SweepProposalHardPublicationReceiptV1 {
   pub proposal_key: Vec<u8>,
   pub hard_publication_sequence: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct SweepLocatorRemovalRequestV1<'a> {
+  pub permit: &'a SweepProposalPublicationPermitV1,
+  pub hard_publication: &'a SweepProposalHardPublicationReceiptV1,
+  pub cancellation: &'a CancellationToken,
+  pub pin_coordinator: &'a RootReadPinCoordinatorV1,
 }
 
 #[derive(Debug)]
@@ -3301,6 +3313,245 @@ impl V4FirstAuthorityPublisher {
       artifact_kind: kind,
       hard_publication_sequence,
     })
+  }
+
+  /// Execute one guarded, plural locator-removal boundary against an exact
+  /// hard-published proposal. The caller-owned authority performs the actual
+  /// v4 mutation and returns complete proposal-ordered outcomes. This method
+  /// publishes no sweep receipt and grants no reusable Void authority.
+  pub fn execute_sweep_locator_removals(
+    &self,
+    request: SweepLocatorRemovalRequestV1<'_>,
+    removal_authority: &mut dyn SweepLocatorRemovalAuthorityV1,
+  ) -> Result<SweepLocatorRemovalCompletionPermitV1, SweepLocatorRemovalErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(SweepLocatorRemovalErrorV1::invalid(
+        "sweep_removal_canceled",
+        "sweep locator removal was canceled before memory admission",
+      ));
+    }
+    if request.pin_coordinator.hash_algorithm() != request.permit.hash_algorithm()
+      || request.hard_publication.proposal_key != request.permit.proposal().key
+      || request.hard_publication.hard_publication_sequence == 0
+    {
+      return Err(SweepLocatorRemovalErrorV1::invalid(
+        "sweep_removal_identity",
+        "request-pin identity or hard-publication receipt differs from the qualified proposal",
+      ));
+    }
+    let SweepVoidArtifactV1::SweepProposal(qualified_proposal) =
+      decode_sweep_void_artifact(&request.permit.proposal().value, request.permit.hash_algorithm())?
+    else {
+      return Err(SweepLocatorRemovalErrorV1::invalid(
+        "sweep_removal_proposal_kind",
+        "qualified sweep proposal bytes decode as another artifact kind",
+      ));
+    };
+    if qualified_proposal.key != request.permit.proposal().key
+      || qualified_proposal.database_id != request.permit.database_id()
+      || qualified_proposal.batch_id != request.permit.batch_id()
+      || qualified_proposal.generation != request.permit.generation()
+      || qualified_proposal.quarantine_manifest_hash != request.permit.quarantine_manifest_hash()
+      || qualified_proposal.candidate_count != request.permit.candidate_count()
+    {
+      return Err(SweepLocatorRemovalErrorV1::invalid(
+        "sweep_removal_identity",
+        "qualified proposal identity differs from its non-constructible permit",
+      ));
+    }
+    let memory = request.pin_coordinator.memory_coordinator();
+    let maximum_proposal_value_length = GcArtifactKindV1::SweepProposal
+      .immutable_maximum_encoded_length()
+      .ok_or_else(|| SweepLocatorRemovalErrorV1::invalid("sweep_removal_proposal_kind", "sweep proposal has no immutable role cap"))?;
+    let proposal_entity_scratch = super::entity::checked_whole_entity_encoded_length(
+      request.permit.hash_algorithm(),
+      request.permit.proposal().key.len(),
+      maximum_proposal_value_length,
+    )?;
+    let quarantine_manifest_entity_scratch = super::entity::checked_whole_entity_encoded_length(
+      request.permit.hash_algorithm(),
+      request.permit.quarantine_manifest_hash().len(),
+      GcArtifactKindV1::QuarantineManifest.immutable_maximum_encoded_length().ok_or_else(|| {
+        SweepLocatorRemovalErrorV1::invalid("sweep_removal_quarantine_kind", "quarantine manifest has no immutable role cap")
+      })?,
+    )?;
+    let control_entity_scratch = FIRST_AUTHORITY_CONTROL_ENTITY_CAP
+      .checked_mul(2)
+      .ok_or_else(|| SweepLocatorRemovalErrorV1::invalid("sweep_removal_read_size", "control read estimate overflowed"))?;
+    let read_scratch_bytes = proposal_entity_scratch
+      .checked_add(quarantine_manifest_entity_scratch)
+      .and_then(|bytes| bytes.checked_add(control_entity_scratch))
+      .ok_or_else(|| SweepLocatorRemovalErrorV1::invalid("sweep_removal_read_size", "guarded read estimate overflowed"))?;
+    let _read_memory = memory.reserve(MemoryOwner::GarbageCollection, u64::try_from(read_scratch_bytes)?, AdmissionClass::Maintenance)?;
+    let mut result_memory = Some(reserve_sweep_locator_removal_results_v1(&memory, qualified_proposal.candidate_count)?);
+    let mut locked_result = None;
+    let exclusion_result = request.pin_coordinator.with_global_exclusion(request.cancellation, || {
+      let operation_result = (|| {
+        let _authority = self.root_state.lock().map_err(|poisoned| {
+          drop(poisoned);
+          SweepLocatorRemovalErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+        })?;
+        if request.cancellation.is_cancelled() {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_canceled",
+            "sweep locator removal was canceled after authority exclusion",
+          ));
+        }
+
+        let observation = self.observe()?;
+        let header = &observation.selected.header;
+        if observation.selected.redundancy_degraded
+          || header.head_hash.iter().all(|byte| *byte == 0)
+          || header.hash_algorithm != request.permit.hash_algorithm()
+          || header.database_id != *request.permit.database_id()
+        {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_database_authority",
+            "selected first authority is absent, degraded, or differs from the sweep proposal",
+          ));
+        }
+
+        let kv = self.lock_kv()?;
+        validate_kv_header_alignment(&kv, header)?;
+        let selected_control = select_physical_quarantine_control(&self.file, &kv, header)?;
+        let selected = decode_gc_active_control(&selected_control.stored_value, header.hash_algorithm)?;
+        if selected.kind != GcArtifactKindV1::QuarantineActiveControl
+          || selected.target_manifest_hash != request.permit.quarantine_manifest_hash()
+          || selected.generation != request.permit.generation()
+        {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_quarantine_changed",
+            "physically selected quarantine authority differs from the durable proposal",
+          ));
+        }
+
+        let quarantine_manifest_key = request.permit.quarantine_manifest_hash();
+        let quarantine_manifest_locator =
+          kv.get(quarantine_manifest_key).map_err(FirstAuthorityPublicationErrorV1::from)?.ok_or_else(|| {
+            SweepLocatorRemovalErrorV1::invalid(
+              "sweep_removal_quarantine_missing",
+              "selected physical-quarantine manifest locator is absent",
+            )
+          })?;
+        if quarantine_manifest_locator.type_flags != kv_tag::GC_ARTIFACT {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_quarantine_collision",
+            "selected physical-quarantine manifest key resolves to another KV role",
+          ));
+        }
+        let quarantine_manifest_bytes = read_entity_bounded(
+          &self.file,
+          &kv,
+          quarantine_manifest_key,
+          quarantine_manifest_entity_scratch,
+          header.write_sequence_high_water,
+        )?
+        .ok_or_else(|| {
+          SweepLocatorRemovalErrorV1::invalid("sweep_removal_quarantine_missing", "selected physical-quarantine manifest disappeared")
+        })?;
+        let quarantine_manifest_entity =
+          decode_whole_entity(&quarantine_manifest_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+        if quarantine_manifest_entity.entry_type != EntryTypeV4::GcArtifact
+          || quarantine_manifest_entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+          || quarantine_manifest_entity.compression_algorithm != CompressionAlgorithm::None
+          || quarantine_manifest_entity.key != quarantine_manifest_key
+        {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_quarantine_changed",
+            "selected physical-quarantine manifest is not one canonical system GC WholeEntity",
+          ));
+        }
+        let quarantine_manifest =
+          super::gc_quarantine::decode_quarantine_manifest_v1(quarantine_manifest_entity.stored_value, header.hash_algorithm)?;
+        if quarantine_manifest.key != quarantine_manifest_key
+          || quarantine_manifest.database_id != header.database_id
+          || quarantine_manifest.mark_generation != request.permit.generation()
+          || quarantine_manifest.eligible_count_hint != u64::from(request.permit.candidate_count())
+        {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_quarantine_changed",
+            "selected physical-quarantine manifest identity, generation, or eligible count differs from the proposal",
+          ));
+        }
+
+        let proposal_key = request.permit.proposal().key.as_slice();
+        let proposal_locator = kv.get(proposal_key).map_err(FirstAuthorityPublicationErrorV1::from)?.ok_or_else(|| {
+          SweepLocatorRemovalErrorV1::invalid("sweep_removal_proposal_missing", "hard-published sweep proposal locator is absent")
+        })?;
+        if proposal_locator.type_flags != kv_tag::GC_ARTIFACT {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_proposal_collision",
+            "hard-published sweep proposal key resolves to another KV role",
+          ));
+        }
+        let proposal_bytes = read_entity_bounded(&self.file, &kv, proposal_key, proposal_entity_scratch, header.write_sequence_high_water)?
+          .ok_or_else(|| {
+            SweepLocatorRemovalErrorV1::invalid("sweep_removal_proposal_missing", "hard-published sweep proposal disappeared")
+          })?;
+        let proposal_entity = decode_whole_entity(&proposal_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+        if proposal_entity.entry_type != EntryTypeV4::GcArtifact
+          || proposal_entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+          || proposal_entity.compression_algorithm != CompressionAlgorithm::None
+          || proposal_entity.key != proposal_key
+          || proposal_entity.stored_value != request.permit.proposal().value
+          || proposal_entity.write_sequence != request.hard_publication.hard_publication_sequence
+        {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_proposal_changed",
+            "persisted sweep proposal representation or write sequence differs from its hard-publication receipt",
+          ));
+        }
+        let SweepVoidArtifactV1::SweepProposal(persisted_proposal) =
+          decode_sweep_void_artifact(proposal_entity.stored_value, header.hash_algorithm)?
+        else {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_proposal_kind",
+            "persisted sweep proposal decoded as another GC artifact kind",
+          ));
+        };
+        drop(kv);
+
+        let authority_request = SweepLocatorRemovalAuthorityRequestV1 {
+          hash_algorithm: header.hash_algorithm,
+          database_id: request.permit.database_id(),
+          batch_id: request.permit.batch_id(),
+          generation: request.permit.generation(),
+          proposal_hash: proposal_key,
+          proposal_write_sequence: request.hard_publication.hard_publication_sequence,
+          quarantine_manifest_hash: request.permit.quarantine_manifest_hash(),
+          proposal: &persisted_proposal,
+          cancellation: request.cancellation,
+        };
+        let snapshot = removal_authority.recheck_sweep_locator_removal_authority(authority_request)?;
+        validate_sweep_locator_removal_snapshot_v1(authority_request, &snapshot)?;
+        if request.cancellation.is_cancelled() {
+          return Err(SweepLocatorRemovalErrorV1::invalid(
+            "sweep_removal_canceled",
+            "sweep locator removal was canceled after the final authority recheck",
+          ));
+        }
+        let outcomes = removal_authority.remove_sweep_locators(authority_request);
+        let admitted_result_memory = result_memory.take().ok_or_else(|| {
+          SweepLocatorRemovalErrorV1::invalid("sweep_removal_internal", "admitted sweep result memory was already consumed")
+        })?;
+        complete_sweep_locator_removal_v1(authority_request, outcomes, admitted_result_memory)
+      })();
+      locked_result = Some(operation_result);
+      Ok(())
+    });
+    match (locked_result, exclusion_result) {
+      (Some(result), Ok(())) => result,
+      (None, Err(source)) => Err(SweepLocatorRemovalErrorV1::Pin(source)),
+      (Some(Ok(completion)), Err(source)) => {
+        Err(SweepLocatorRemovalErrorV1::CommittedExclusion { source, completion: Box::new(completion) })
+      }
+      (Some(Err(operation)), Err(exclusion)) => {
+        Err(SweepLocatorRemovalErrorV1::CompoundExclusion { operation: Box::new(operation), exclusion })
+      }
+      (None, Ok(())) => {
+        Err(SweepLocatorRemovalErrorV1::invalid("sweep_removal_internal", "global request-pin exclusion returned no removal result"))
+      }
+    }
   }
 
   /// Hard-publish one already-qualified sweep proposal after independently

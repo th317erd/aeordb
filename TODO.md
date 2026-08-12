@@ -713,7 +713,12 @@
           - [x] Qualify one strictly ordered, maximum-4,096 proposal against exact selected-quarantine identity, timing, grace, authority basis, and intent digest.
           - [x] Hard-publish the immutable proposal only after independently re-reading the exact selected quarantine manifest; expose no locator-removal authority.
           - [x] Prove malformed/stale/substituted intents, cancellation, authority drift, retry, and architecture isolation before landing P4-6b.
-        - [ ] P4-6c: execute one plural, guarded locator-removal boundary through a caller-owned v4 mutation authority and retain exact per-incarnation outcomes.
+        - [x] P4-6c: execute one plural, guarded locator-removal boundary through a caller-owned v4 mutation authority and retain exact per-incarnation outcomes.
+          - [x] Reopen the exact hard-published proposal and selected quarantine manifest under global request-pin plus first-authority exclusion.
+          - [x] Require one caller-owned authority to recheck lifecycle, exact incarnation, locator, replacement-lineage, physical-range, pin, protected-family, and repair-latch state before mutation.
+          - [x] Execute one plural removal callback and validate one canonically ordered result for every proposal candidate.
+          - [x] Return a non-constructible completion permit bound to the proposal hash/write sequence without publishing a receipt or reusable Void extent.
+          - [x] Prove cancellation, stale/corrupt/substituted authority, active pins, malformed outcomes, bounded memory, and architecture isolation before landing P4-6c.
         - [ ] P4-6d: hard-publish commit/recovered receipts only after caller-verified selected Void authority and reconcile every crash prefix idempotently.
         - [ ] P4-6e: prove cancellation, corruption, authority/pin races, partial removal, dishonest receipts, restart, and retained-or-leaked failure direction.
       - [ ] P4-7: implement selected Void catalogs, immutable claims, settlement, and allocator integration.
