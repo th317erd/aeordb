@@ -9746,7 +9746,7 @@
     {
       "id": "esq-v1-16d9b5f6dc185467ecc5-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 431,
+      "line": 469,
       "column": 33,
       "enclosing_item": "impl RetirementJournalReferenceModelV1 < 'a >::observe_segment_inner",
       "kind": "error_conversion",
@@ -9756,7 +9756,7 @@
     {
       "id": "esq-v1-742f474ad0a59045c7e9-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 683,
+      "line": 721,
       "column": 37,
       "enclosing_item": "impl PhysicalInventoryReferenceModelV1 < 'a >::observe_page_inner",
       "kind": "error_conversion",
@@ -9766,7 +9766,7 @@
     {
       "id": "esq-v1-d69c59e7f81ed968df5d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 777,
+      "line": 1096,
       "column": 21,
       "enclosing_item": "decode_gc_state_artifact",
       "kind": "result_to_option",
@@ -9776,7 +9776,7 @@
     {
       "id": "esq-v1-0fad896bd02956e1a12d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 952,
+      "line": 1271,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9786,7 +9786,7 @@
     {
       "id": "esq-v1-3b513984cb21ee14aeed-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 953,
+      "line": 1272,
       "column": 22,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9796,7 +9796,7 @@
     {
       "id": "esq-v1-f97de65fda22feb8586d-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 955,
+      "line": 1274,
       "column": 24,
       "enclosing_item": "decode_page",
       "kind": "error_conversion",
@@ -9806,7 +9806,7 @@
     {
       "id": "esq-v1-c3eb8bfd62ddd4af65ad-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 980,
+      "line": 1299,
       "column": 33,
       "enclosing_item": "decode_page",
       "kind": "result_to_option",
@@ -9816,7 +9816,7 @@
     {
       "id": "esq-v1-7b499a11ba39e5289ab4-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1037,
+      "line": 1356,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9826,7 +9826,7 @@
     {
       "id": "esq-v1-9682f7e161e6a00d2786-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1038,
+      "line": 1357,
       "column": 22,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9836,7 +9836,7 @@
     {
       "id": "esq-v1-97f58b946df37a7fc762-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1039,
+      "line": 1358,
       "column": 24,
       "enclosing_item": "decode_directory",
       "kind": "error_conversion",
@@ -9846,7 +9846,7 @@
     {
       "id": "esq-v1-e501772c7ab0535ea704-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1142,
+      "line": 1461,
       "column": 22,
       "enclosing_item": "decode_gc_leaf_descriptor",
       "kind": "error_conversion",
@@ -9856,7 +9856,7 @@
     {
       "id": "esq-v1-af505078ba65844f6bc9-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1143,
+      "line": 1462,
       "column": 22,
       "enclosing_item": "decode_gc_leaf_descriptor",
       "kind": "error_conversion",
@@ -9866,7 +9866,7 @@
     {
       "id": "esq-v1-16e0797b94b3cb0b451b-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1206,
+      "line": 1525,
       "column": 22,
       "enclosing_item": "decode_gc_internal_descriptor",
       "kind": "error_conversion",
@@ -9876,7 +9876,7 @@
     {
       "id": "esq-v1-ce8580d628977ac40780-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1207,
+      "line": 1526,
       "column": 22,
       "enclosing_item": "decode_gc_internal_descriptor",
       "kind": "error_conversion",
@@ -9886,7 +9886,7 @@
     {
       "id": "esq-v1-b622ffee9afbd97e0268-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1292,
+      "line": 1611,
       "column": 24,
       "enclosing_item": "decode_candidate_delta",
       "kind": "error_conversion",
@@ -9896,7 +9896,7 @@
     {
       "id": "esq-v1-5e8d70d41ee7c1fca58b-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1298,
+      "line": 1617,
       "column": 6,
       "enclosing_item": "decode_candidate_delta",
       "kind": "result_to_option",
@@ -9906,7 +9906,7 @@
     {
       "id": "esq-v1-ec11fc4993531683a1ac-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1515,
+      "line": 1834,
       "column": 21,
       "enclosing_item": "decode_quarantine_manifest_body",
       "kind": "error_conversion",
@@ -9916,7 +9916,7 @@
     {
       "id": "esq-v1-2f40ba51a8085bfa2739-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1569,
+      "line": 1888,
       "column": 15,
       "enclosing_item": "decode_root_retirement_commit",
       "kind": "error_conversion",
@@ -9926,7 +9926,7 @@
     {
       "id": "esq-v1-e08b15abd588dc35fd4e-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1630,
+      "line": 1949,
       "column": 25,
       "enclosing_item": "retirement_journal_records_v1",
       "kind": "result_to_option",
@@ -9936,7 +9936,7 @@
     {
       "id": "esq-v1-04312ac24523a9fcd63c-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1643,
+      "line": 1962,
       "column": 39,
       "enclosing_item": "decode_retirement_journal_record_v1",
       "kind": "result_to_option",
@@ -9946,7 +9946,7 @@
     {
       "id": "esq-v1-c4c90c7b9311fa46cb9b-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1684,
+      "line": 2003,
       "column": 24,
       "enclosing_item": "decode_retirement_journal_segment_with_key",
       "kind": "error_conversion",
@@ -9956,7 +9956,7 @@
     {
       "id": "esq-v1-fecf775983351342a225-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1695,
+      "line": 2014,
       "column": 6,
       "enclosing_item": "decode_retirement_journal_segment_with_key",
       "kind": "result_to_option",
@@ -9966,7 +9966,7 @@
     {
       "id": "esq-v1-c390d9f996ec6bae97e0-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 1921,
+      "line": 2240,
       "column": 25,
       "enclosing_item": "physical_inventory_records_v1",
       "kind": "result_to_option",
@@ -9976,7 +9976,7 @@
     {
       "id": "esq-v1-2cee9657909643afc341-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 2026,
+      "line": 2345,
       "column": 10,
       "enclosing_item": "manifest_summary",
       "kind": "panic_macro",
@@ -9986,7 +9986,7 @@
     {
       "id": "esq-v1-293e07485c6815aaa716-00",
       "file": "aeordb-lib/src/engine/v4/gc_state.rs",
-      "line": 2044,
+      "line": 2363,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",

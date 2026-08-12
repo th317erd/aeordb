@@ -4,8 +4,9 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::gc::{
-  GcArtifactKindV1, PhysicalIncarnationV1, compare_physical_incarnations_v1, decode_gc_artifact_envelope, decode_physical_incarnation,
-  immutable_gc_artifact_key, u16_at, u32_at, u64_at,
+  EncodedImmutableGcArtifactV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, PhysicalIncarnationV1, compare_physical_incarnations_v1,
+  decode_gc_artifact_envelope, decode_physical_incarnation, encode_immutable_gc_artifact, immutable_gc_artifact_key, u16_at, u32_at,
+  u64_at,
 };
 use super::contract_generated::root_retirement_reason_v1;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
@@ -72,11 +73,48 @@ pub struct GcStatePageV1<'a> {
   pub key: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcPhysicalHintV1 {
   pub wal_offset: u64,
   pub total_length: u32,
   pub write_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GcStatePageWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub role: GcDirectoryRoleV1,
+  pub database_id: &'a [u8],
+  pub catalog_id: &'a [u8],
+  pub generation: u64,
+  pub page_id: u64,
+  pub records: &'a [&'a [u8]],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GcStateDirectoryEntryWriteV1<'a> {
+  pub lower_fence: &'a [u8],
+  pub upper_fence: &'a [u8],
+  pub child_hash: &'a [u8],
+  pub child_generation: u64,
+  pub live_count: u64,
+  pub tombstone_count: u64,
+  pub page_count: u64,
+  pub logical_bytes: u64,
+  pub minimum_page_id: u64,
+  pub maximum_page_id: u64,
+  pub physical_hint: GcPhysicalHintV1,
+}
+
+#[derive(Debug, Clone)]
+pub struct GcStateDirectoryWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub role: GcDirectoryRoleV1,
+  pub database_id: &'a [u8],
+  pub catalog_id: &'a [u8],
+  pub generation: u64,
+  pub level: u16,
+  pub entries: &'a [GcStateDirectoryEntryWriteV1<'a>],
 }
 
 impl GcPhysicalHintV1 {
@@ -770,6 +808,287 @@ impl GcStateArtifactV1<'_> {
       }
       Self::RetirementJournal { record_count, .. } => format!("gc:journal:retirement:records={record_count}"),
     }
+  }
+}
+
+pub fn encode_gc_state_page_v1(request: &GcStatePageWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  validate_gc_state_writer_identity(request.database_id, request.catalog_id, request.generation, "gc_page_identity")?;
+  if request.page_id == 0 {
+    return Err(identity_error("gc_page_identity", "GC page ID must be nonzero"));
+  }
+  if request.records.is_empty() {
+    return Err(closure_error("gc_page_records", "GC page must contain at least one record"));
+  }
+
+  let expected_row_length = row_length(request.hash_algorithm, request.role);
+  let mut records_length = 0usize;
+  let mut previous: Option<&[u8]> = None;
+  for row in request.records {
+    if row.len() != expected_row_length {
+      validate_row(request.hash_algorithm, request.role, row, false)?;
+      return Err(closure_error("gc_page_records_length", "GC page row has the wrong fixed length"));
+    }
+    validate_row(request.hash_algorithm, request.role, row, false)?;
+    if let Some(prior) = previous {
+      if compare_rows(request.hash_algorithm, request.role, prior, row)? != Ordering::Less {
+        return Err(order_error("gc_page_record_order", "GC page rows are not strictly ordered"));
+      }
+    }
+    previous = Some(row);
+    records_length = records_length.checked_add(row.len()).ok_or_else(|| length_error("GC page records length overflow"))?;
+  }
+
+  let lower_fence = gc_state_row_fence(request.hash_algorithm, request.role, request.records[0])?;
+  let upper_fence = gc_state_row_fence(request.hash_algorithm, request.role, request.records[request.records.len() - 1])?;
+  let body_length = 64usize
+    .checked_add(lower_fence.len())
+    .and_then(|length| length.checked_add(upper_fence.len()))
+    .and_then(|length| length.checked_add(records_length))
+    .ok_or_else(|| length_error("GC page body length overflow"))?;
+  if body_length > MAX_PAGE_LENGTH {
+    return Err(amplification_error("gc_page_length", body_length, MAX_PAGE_LENGTH));
+  }
+  let record_count = gc_writer_u32(request.records.len(), "GC page record count exceeds u32")?;
+  let lower_length = gc_writer_u32(lower_fence.len(), "GC page lower-fence length exceeds u32")?;
+  let upper_length = gc_writer_u32(upper_fence.len(), "GC page upper-fence length exceeds u32")?;
+  let logical_bytes = gc_writer_u64(records_length, "GC page logical byte count exceeds u64")?;
+
+  let mut body = vec![0u8; body_length];
+  put_u16_v1(&mut body, 4, 1);
+  put_u16_v1(&mut body, 6, request.role as u16);
+  put_u32_v1(&mut body, 8, lower_length);
+  put_u32_v1(&mut body, 12, upper_length);
+  put_u32_v1(&mut body, 16, record_count);
+  put_u32_v1(&mut body, 20, record_count);
+  put_u64_v1(&mut body, 24, logical_bytes);
+  put_u64_v1(&mut body, 32, logical_bytes);
+  let mut cursor = 64;
+  body[cursor..cursor + lower_fence.len()].copy_from_slice(&lower_fence);
+  cursor += lower_fence.len();
+  body[cursor..cursor + upper_fence.len()].copy_from_slice(&upper_fence);
+  cursor += upper_fence.len();
+  for row in request.records {
+    body[cursor..cursor + row.len()].copy_from_slice(row);
+    cursor += row.len();
+  }
+
+  let mut identity = Vec::with_capacity(42);
+  identity.extend_from_slice(request.database_id);
+  identity.extend_from_slice(request.catalog_id);
+  identity.extend_from_slice(&(request.role as u16).to_le_bytes());
+  identity.extend_from_slice(&request.page_id.to_le_bytes());
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: gc_state_page_kind(request.role),
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let GcStateArtifactV1::Page(_) = decode_gc_state_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("gc_page_encoded_kind", "encoded GC page did not decode as a page"));
+  };
+  Ok(encoded)
+}
+
+pub fn encode_gc_state_directory_v1(request: &GcStateDirectoryWriteV1<'_>) -> FormatResult<EncodedImmutableGcArtifactV1> {
+  validate_gc_state_writer_identity(request.database_id, request.catalog_id, request.generation, "gc_directory_identity")?;
+  if request.level > 15 {
+    return Err(closure_error("gc_directory_level", "GC directory level exceeds the frozen maximum"));
+  }
+  if request.entries.is_empty() {
+    return Err(closure_error("gc_directory_entries", "GC directory must contain at least one child"));
+  }
+  if request.entries.len() > MAX_DIRECTORY_ENTRIES as usize {
+    return Err(amplification_error("gc_directory_entries", request.entries.len(), MAX_DIRECTORY_ENTRIES as usize));
+  }
+
+  let hash_width = request.hash_algorithm.hash_length();
+  let descriptor_fixed_length = if request.level == 0 { 72usize } else { 88usize }
+    .checked_add(hash_width)
+    .ok_or_else(|| length_error("GC directory descriptor width overflow"))?;
+  let mut entries_length = 0usize;
+  let mut live_count = 0u64;
+  let mut tombstone_count = 0u64;
+  let mut page_count = 0u64;
+  let mut logical_bytes = 0u64;
+  let mut minimum_page_id = u64::MAX;
+  let mut maximum_page_id = 0u64;
+  let mut previous_upper: Option<&[u8]> = None;
+  for entry in request.entries {
+    compare_fences(request.hash_algorithm, request.role, entry.lower_fence, entry.upper_fence)?;
+    if let Some(prior) = previous_upper {
+      if compare_fence_values(request.hash_algorithm, request.role, prior, entry.lower_fence)? != Ordering::Less {
+        return Err(order_error("gc_directory_child_order", "GC directory child ranges overlap or are not strictly ordered"));
+      }
+    }
+    previous_upper = Some(entry.upper_fence);
+    if entry.child_hash.len() != hash_width
+      || all_zero(entry.child_hash)
+      || entry.child_generation == 0
+      || entry.child_generation > request.generation
+      || entry.live_count == 0
+      || entry.tombstone_count != 0
+      || entry.page_count == 0
+      || entry.logical_bytes == 0
+      || entry.minimum_page_id == 0
+      || entry.minimum_page_id > entry.maximum_page_id
+      || (request.level == 0 && (entry.page_count != 1 || entry.minimum_page_id != entry.maximum_page_id))
+    {
+      let code = if request.level == 0 { "gc_directory_leaf" } else { "gc_directory_internal" };
+      return Err(closure_error(code, "GC directory child identity, generation, counts, or bytes are invalid"));
+    }
+    entries_length = entries_length
+      .checked_add(descriptor_fixed_length)
+      .and_then(|length| length.checked_add(entry.lower_fence.len()))
+      .and_then(|length| length.checked_add(entry.upper_fence.len()))
+      .ok_or_else(|| length_error("GC directory entries length overflow"))?;
+    live_count = live_count.checked_add(entry.live_count).ok_or_else(|| length_error("GC directory live count overflow"))?;
+    tombstone_count =
+      tombstone_count.checked_add(entry.tombstone_count).ok_or_else(|| length_error("GC directory tombstone count overflow"))?;
+    page_count = page_count.checked_add(entry.page_count).ok_or_else(|| length_error("GC directory page count overflow"))?;
+    logical_bytes = logical_bytes.checked_add(entry.logical_bytes).ok_or_else(|| length_error("GC directory logical bytes overflow"))?;
+    minimum_page_id = minimum_page_id.min(entry.minimum_page_id);
+    maximum_page_id = maximum_page_id.max(entry.maximum_page_id);
+  }
+
+  let lower_fence = request.entries[0].lower_fence;
+  let upper_fence = request.entries[request.entries.len() - 1].upper_fence;
+  let body_length = 80usize
+    .checked_add(lower_fence.len())
+    .and_then(|length| length.checked_add(upper_fence.len()))
+    .and_then(|length| length.checked_add(entries_length))
+    .ok_or_else(|| length_error("GC directory body length overflow"))?;
+  if body_length > MAX_DIRECTORY_LENGTH {
+    return Err(amplification_error("gc_directory_length", body_length, MAX_DIRECTORY_LENGTH));
+  }
+  let entry_count = gc_writer_u32(request.entries.len(), "GC directory entry count exceeds u32")?;
+  let lower_length = gc_writer_u32(lower_fence.len(), "GC directory lower-fence length exceeds u32")?;
+  let upper_length = gc_writer_u32(upper_fence.len(), "GC directory upper-fence length exceeds u32")?;
+  let encoded_entries_length = gc_writer_u32(entries_length, "GC directory entries length exceeds u32")?;
+
+  let mut body = vec![0u8; body_length];
+  put_u16_v1(&mut body, 0, request.level);
+  put_u16_v1(&mut body, 2, request.role as u16);
+  put_u32_v1(&mut body, 4, entry_count);
+  put_u32_v1(&mut body, 16, lower_length);
+  put_u32_v1(&mut body, 20, upper_length);
+  put_u64_v1(&mut body, 24, live_count);
+  put_u64_v1(&mut body, 32, tombstone_count);
+  put_u64_v1(&mut body, 40, page_count);
+  put_u64_v1(&mut body, 48, logical_bytes);
+  put_u64_v1(&mut body, 56, minimum_page_id);
+  put_u64_v1(&mut body, 64, maximum_page_id);
+  put_u32_v1(&mut body, 72, encoded_entries_length);
+  let mut cursor = 80;
+  body[cursor..cursor + lower_fence.len()].copy_from_slice(lower_fence);
+  cursor += lower_fence.len();
+  body[cursor..cursor + upper_fence.len()].copy_from_slice(upper_fence);
+  cursor += upper_fence.len();
+  for entry in request.entries {
+    put_u32_v1(&mut body, cursor, gc_writer_u32(entry.lower_fence.len(), "GC directory child lower-fence length exceeds u32")?);
+    put_u32_v1(&mut body, cursor + 4, gc_writer_u32(entry.upper_fence.len(), "GC directory child upper-fence length exceeds u32")?);
+    let fields = if request.level == 0 {
+      put_u64_v1(&mut body, cursor + 8, entry.minimum_page_id);
+      body[cursor + 16..cursor + 16 + hash_width].copy_from_slice(entry.child_hash);
+      cursor + 16 + hash_width
+    } else {
+      body[cursor + 8..cursor + 8 + hash_width].copy_from_slice(entry.child_hash);
+      cursor + 8 + hash_width
+    };
+    put_u64_v1(&mut body, fields, entry.child_generation);
+    put_u64_v1(&mut body, fields + 8, entry.live_count);
+    put_u64_v1(&mut body, fields + 16, entry.tombstone_count);
+    let physical_hint_offset = if request.level == 0 {
+      put_u64_v1(&mut body, fields + 24, entry.logical_bytes);
+      fields + 32
+    } else {
+      put_u64_v1(&mut body, fields + 24, entry.page_count);
+      put_u64_v1(&mut body, fields + 32, entry.logical_bytes);
+      put_u64_v1(&mut body, fields + 40, entry.minimum_page_id);
+      put_u64_v1(&mut body, fields + 48, entry.maximum_page_id);
+      fields + 56
+    };
+    put_u64_v1(&mut body, physical_hint_offset, entry.physical_hint.wal_offset);
+    put_u32_v1(&mut body, physical_hint_offset + 8, entry.physical_hint.total_length);
+    put_u64_v1(&mut body, physical_hint_offset + 16, entry.physical_hint.write_sequence);
+    cursor += descriptor_fixed_length;
+    body[cursor..cursor + entry.lower_fence.len()].copy_from_slice(entry.lower_fence);
+    cursor += entry.lower_fence.len();
+    body[cursor..cursor + entry.upper_fence.len()].copy_from_slice(entry.upper_fence);
+    cursor += entry.upper_fence.len();
+  }
+
+  let mut identity = Vec::with_capacity(34);
+  identity.extend_from_slice(request.database_id);
+  identity.extend_from_slice(request.catalog_id);
+  identity.extend_from_slice(&(request.role as u16).to_le_bytes());
+  let encoded = encode_immutable_gc_artifact(&ImmutableGcArtifactWriteV1 {
+    kind: GcArtifactKindV1::GcArtifactDirectoryNode,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  let GcStateArtifactV1::Directory(_) = decode_gc_state_artifact(&encoded.value, request.hash_algorithm)? else {
+    return Err(closure_error("gc_directory_encoded_kind", "encoded GC directory did not decode as a directory"));
+  };
+  Ok(encoded)
+}
+
+fn validate_gc_state_writer_identity(database_id: &[u8], catalog_id: &[u8], generation: u64, code: &'static str) -> FormatResult<()> {
+  if database_id.len() != 16 || catalog_id.len() != 16 || all_zero(database_id) || all_zero(catalog_id) || generation == 0 {
+    return Err(identity_error(code, "GC state database/catalog identity or generation is invalid"));
+  }
+  Ok(())
+}
+
+fn gc_state_page_kind(role: GcDirectoryRoleV1) -> GcArtifactKindV1 {
+  match role {
+    GcDirectoryRoleV1::Candidates => GcArtifactKindV1::CandidatePage,
+    GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
+    GcDirectoryRoleV1::PhysicalInventory => GcArtifactKindV1::PhysicalInventoryPage,
+    GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
+  }
+}
+
+fn gc_state_row_fence(algorithm: HashAlgorithm, role: GcDirectoryRoleV1, row: &[u8]) -> FormatResult<Vec<u8>> {
+  let hash_width = algorithm.hash_length();
+  Ok(match role {
+    GcDirectoryRoleV1::Candidates => row[..24 + 2 * hash_width].to_vec(),
+    GcDirectoryRoleV1::RootExpiry | GcDirectoryRoleV1::RootCandidates => row[..hash_width].to_vec(),
+    GcDirectoryRoleV1::PhysicalInventory => {
+      let physical_length = 24 + 2 * hash_width;
+      let mut fence = Vec::with_capacity(8 + physical_length);
+      fence.extend_from_slice(&row[2 * hash_width..2 * hash_width + 8]);
+      fence.extend_from_slice(&row[..physical_length]);
+      fence
+    }
+  })
+}
+
+fn put_u16_v1(target: &mut [u8], offset: usize, value: u16) {
+  target[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32_v1(target: &mut [u8], offset: usize, value: u32) {
+  target[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64_v1(target: &mut [u8], offset: usize, value: u64) {
+  target[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn gc_writer_u32(value: usize, context: &'static str) -> FormatResult<u32> {
+  match u32::try_from(value) {
+    Ok(value) => Ok(value),
+    Err(error) => Err(length_error(format!("{context}: {error}"))),
+  }
+}
+
+fn gc_writer_u64(value: usize, context: &'static str) -> FormatResult<u64> {
+  match u64::try_from(value) {
+    Ok(value) => Ok(value),
+    Err(error) => Err(length_error(format!("{context}: {error}"))),
   }
 }
 

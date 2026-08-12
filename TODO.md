@@ -679,6 +679,10 @@
         - [x] P4-4a: expose complete borrowed lifecycle artifacts and exact both-width encoders/closure validation without activating a writer.
         - [x] P4-4b: implement one bounded two-complete-mark transition model with frozen/effective grace, authority evidence, reachability clearing, and deterministic cap refusal.
         - [ ] P4-4c: hard-publish retirement evidence and selected lifecycle authority before a root becomes logically retired, through the shared replacement boundary.
+          - [x] P4-4c1: add reusable exact GC page/directory writers and both-width independent-fixture proof for lifecycle catalogs.
+          - [ ] P4-4c2: generalize A/B GC control replacement publication so mark and lifecycle controls share one durable authority path.
+          - [ ] P4-4c3: publish retirement commit, catalog closure, manifests, and lifecycle control under the root retirement-exclusion guard with final evidence rechecks.
+          - [ ] P4-4c4: prove every crash prefix, exact retry, restart selection, pin/authority exclusion, and committed-failure result.
         - [ ] P4-4d: attach root-object reclaim proof and bounded optional expiry retention without evicting mandatory retirement evidence.
         - [ ] P4-4e: prove pin/authority races, cancellation, malformed state, capacity, crash prefixes, restart, architecture isolation, and retained-or-leaked failure direction.
       - [ ] P4-5: implement physical quarantine with exact incarnation and final authority/pin/reachability guards.
