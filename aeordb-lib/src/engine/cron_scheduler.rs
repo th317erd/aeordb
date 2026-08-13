@@ -10,7 +10,7 @@ use crate::engine::event_bus::EventBus;
 use crate::engine::namespace_mutation::NamespaceMutationKind;
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::task_queue::{TaskQueue, TaskStatus};
+use crate::engine::task_queue::{TaskOriginV1, TaskQueue, TaskStatus};
 
 const CRON_CONFIG_PATH: &str = "/.aeordb-config/cron.json";
 const CRON_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
@@ -364,7 +364,7 @@ pub fn run_cron_tick(queue: &TaskQueue, engine: &StorageEngine) -> EngineResult<
       continue;
     }
 
-    tasks.push(queue.enqueue(&schedule.task_type, schedule.args)?);
+    tasks.push(queue.enqueue_with_origin(&schedule.task_type, schedule.args, TaskOriginV1::Scheduled)?);
     result.tasks_enqueued = result
       .tasks_enqueued
       .checked_add(1)

@@ -7,7 +7,7 @@ use aeordb::engine::engine_event::{
 use aeordb::engine::event_bus::EventBus;
 use aeordb::engine::config_resolver::ConfigurationFamily;
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
-use aeordb::engine::task_queue::{TaskQueue, TaskStatus};
+use aeordb::engine::task_queue::{TaskOriginV1, TaskQueue, TaskStatus};
 use aeordb::engine::task_worker::{
   process_next_task, process_next_task_with_cancel_and_pre_execute_hook, process_next_task_with_post_dequeue_hook,
   process_next_task_with_pre_execute_hook,
@@ -16,6 +16,28 @@ use aeordb::engine::{RequestContext, system_store};
 use aeordb::plugins::PluginManager;
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn every_gc_task_origin_completes_through_the_worker_entry_point() {
+  for origin in [TaskOriginV1::Direct, TaskOriginV1::Scheduled, TaskOriginV1::RepairFollowUp] {
+    let (engine, _temporary) = create_temp_engine_for_tests();
+    let queue = TaskQueue::new(engine.clone());
+    let plugin_manager = PluginManager::new(engine.clone());
+    let event_bus = Arc::new(EventBus::new());
+    let mut events = event_bus.subscribe();
+    let task = queue.enqueue_with_origin("gc", serde_json::json!({"dry_run": true}), origin).unwrap();
+
+    assert!(process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap());
+
+    let completed = queue.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(completed.origin, origin);
+    assert_eq!(completed.status, TaskStatus::Completed);
+    assert_eq!(events.try_recv().unwrap().event_type, EVENT_TASKS_STARTED);
+    let completed_event = events.try_recv().unwrap();
+    assert_eq!(completed_event.event_type, EVENT_TASKS_COMPLETED);
+    assert!(completed_event.payload["summary"].as_str().is_some_and(|summary| summary.contains("dry_run=true")));
+  }
+}
 
 #[test]
 fn running_task_keeps_the_policy_generation_captured_before_dequeue() {

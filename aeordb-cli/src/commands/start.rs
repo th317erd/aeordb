@@ -810,7 +810,7 @@ fn combine_primary_and_shutdown_error(primary: String, shutdown_errors: &[String
 }
 
 /// Listen for shutdown signals (SIGINT and SIGTERM on Unix, Ctrl+C everywhere).
-async fn shutdown_signal() -> Result<(), String> {
+pub(crate) async fn shutdown_signal() -> Result<(), String> {
   let ctrl_c = async { tokio::signal::ctrl_c().await.map_err(|error| format!("failed to install or receive Ctrl+C: {error}")) };
 
   #[cfg(unix)]

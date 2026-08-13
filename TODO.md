@@ -781,7 +781,10 @@
           - [x] P4-8b2: convert deterministic authoritative corruption into bounded deduplicated repair-ticket/path-latch proposals without publishing or mutating live repair state.
           - [x] P4-8b3: freeze physical-copy inclusion, logical-backup omission, and destination migration reset-to-`never_marked` decisions without importing source GC state or evidence.
           - [x] Prove cancellation, pressure, item limits, duplicate/conflicting observations, both hash widths, malformed artifacts/controls/workspaces, and architecture isolation before connecting adapters.
-        - [ ] P4-8c: route CLI, synchronous HTTP compatibility, scheduled/task, repair-follow-up, and embedded entry points through one executor without duplicating traversal or cancellation.
+        - [x] P4-8c: route CLI, synchronous HTTP compatibility, scheduled/task, repair-follow-up, and embedded entry points through one executor without duplicating traversal or cancellation.
+          - [x] P4-8c1: place the legacy-v3 collector behind the shared five-phase executor through a sealed compatibility admission while preserving the public v4 destructive refusal.
+          - [x] P4-8c2: carry explicit invocation provenance from CLI, synchronous HTTP, queued tasks, scheduled cadence, repair follow-up, and embedded callers into one run request/context.
+          - [x] P4-8c3: prove shared cancellation, error classification, response compatibility, legacy task decoding, and architecture closure with no direct production traversal bypass.
         - [ ] P4-8d: project one run status into tasks, health, metrics, SSE, Dashboard, and operations/API documentation with root-only disclosure.
         - [ ] P4-8e: complete bounded non-destructive resource, corruption, cancellation, concurrent-load, real-world, soak, and native-platform qualification.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.

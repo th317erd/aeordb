@@ -78,6 +78,10 @@ name = "status_spec"
 path = "spec/status_spec.rs"
 
 [[test]]
+name = "gc_cli_spec"
+path = "spec/gc_cli_spec.rs"
+
+[[test]]
 name = "start_spec"
 path = "spec/start_spec.rs"
 

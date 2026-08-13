@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1483,
+  "maximum_occurrences": 1477,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -4056,7 +4056,7 @@
     {
       "id": "esq-v1-4c9889b5ed088821aefd-00",
       "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 94,
+      "line": 125,
       "column": 5,
       "enclosing_item": "impl GcRecheckGuard < '_ >::drop",
       "kind": "logged_error_continues",
@@ -4064,69 +4064,9 @@
       "review": "unwind-cleanup-evidence"
     },
     {
-      "id": "esq-v1-7fc8c07346c88d9748c8-00",
-      "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 198,
-      "column": 16,
-      "enclosing_item": "gc_mark_internal",
-      "kind": "result_status_probe",
-      "pattern": "std :: env :: var (\"AEORDB_GC_TIMING\") . is_ok ()",
-      "review": "presence-feature-toggle"
-    },
-    {
-      "id": "esq-v1-b57b6b0c420d15feabf4-00",
-      "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 374,
-      "column": 16,
-      "enclosing_item": "walk_versions_bfs",
-      "kind": "result_status_probe",
-      "pattern": "std :: env :: var (\"AEORDB_GC_TIMING\") . is_ok ()",
-      "review": "presence-feature-toggle"
-    },
-    {
-      "id": "esq-v1-ae9adaa629d68e3ff800-00",
-      "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 667,
-      "column": 15,
-      "enclosing_item": "mark_entry_recursive",
-      "kind": "result_status_probe",
-      "pattern": "std :: env :: var (\"AEORDB_GC_DEBUG_SYSTEM\") . is_ok ()",
-      "review": "presence-feature-toggle"
-    },
-    {
-      "id": "esq-v1-8c0dede817cc547a4c1c-00",
-      "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 821,
-      "column": 16,
-      "enclosing_item": "gc_sweep_internal",
-      "kind": "result_status_probe",
-      "pattern": "std :: env :: var (\"AEORDB_GC_TIMING\") . is_ok ()",
-      "review": "presence-feature-toggle"
-    },
-    {
-      "id": "esq-v1-dd9ae23f77a985649b88-00",
-      "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 1060,
-      "column": 24,
-      "enclosing_item": "run_gc_internal",
-      "kind": "result_status_probe",
-      "pattern": "std :: env :: var (\"AEORDB_GC_TIMING\") . is_ok ()",
-      "review": "presence-feature-toggle"
-    },
-    {
-      "id": "esq-v1-dd9ae23f77a985649b88-01",
-      "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 1131,
-      "column": 8,
-      "enclosing_item": "run_gc_internal",
-      "kind": "result_status_probe",
-      "pattern": "std :: env :: var (\"AEORDB_GC_TIMING\") . is_ok ()",
-      "review": "presence-feature-toggle"
-    },
-    {
       "id": "esq-v1-0574570573dca9161d61-00",
       "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 1319,
+      "line": 1551,
       "column": 20,
       "enclosing_item": "reserve_gc_workspace",
       "kind": "error_conversion",
@@ -8016,7 +7956,7 @@
     {
       "id": "esq-v1-6aa77db0e8b927acb4d1-00",
       "file": "aeordb-lib/src/engine/task_queue.rs",
-      "line": 461,
+      "line": 486,
       "column": 7,
       "enclosing_item": "impl TaskQueue::is_cancelled",
       "kind": "logged_error_continues",
@@ -8026,7 +7966,7 @@
     {
       "id": "esq-v1-61b8d9ba9dc74b5c7f47-00",
       "file": "aeordb-lib/src/engine/task_queue.rs",
-      "line": 545,
+      "line": 570,
       "column": 27,
       "enclosing_item": "impl TaskQueue::prune_completed",
       "kind": "result_to_option",
@@ -8036,7 +7976,7 @@
     {
       "id": "esq-v1-10d7d44be036a14c46ce-00",
       "file": "aeordb-lib/src/engine/task_queue.rs",
-      "line": 565,
+      "line": 590,
       "column": 25,
       "enclosing_item": "impl TaskQueue::prune_completed",
       "kind": "default_on_error",
@@ -8046,7 +7986,7 @@
     {
       "id": "esq-v1-278db44dfcbef09c4b5f-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 81,
+      "line": 82,
       "column": 3,
       "enclosing_item": "optional_task_usize",
       "kind": "error_conversion",
@@ -8056,7 +7996,7 @@
     {
       "id": "esq-v1-164f853bbeaa4b68c677-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 194,
+      "line": 195,
       "column": 7,
       "enclosing_item": "impl RunningTaskRecovery < '_ >::drop",
       "kind": "logged_error_continues",
@@ -8066,7 +8006,7 @@
     {
       "id": "esq-v1-2fe8120b516c90e402e2-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 289,
+      "line": 290,
       "column": 9,
       "enclosing_item": "run_task_scheduler",
       "kind": "logged_error_continues",
@@ -8076,7 +8016,7 @@
     {
       "id": "esq-v1-4a172b2f0c6861a2770e-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 316,
+      "line": 317,
       "column": 5,
       "enclosing_item": "task_worker_iteration_delay",
       "kind": "logged_error_continues",
@@ -8086,7 +8026,7 @@
     {
       "id": "esq-v1-d3fda925ae2dd4981806-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 550,
+      "line": 551,
       "column": 5,
       "enclosing_item": "finish_task_iteration",
       "kind": "logged_error_continues",
@@ -8096,7 +8036,7 @@
     {
       "id": "esq-v1-50074db335bcb511edb1-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 859,
+      "line": 860,
       "column": 35,
       "enclosing_item": "execute_reindex",
       "kind": "default_on_error",
@@ -8106,7 +8046,7 @@
     {
       "id": "esq-v1-145d25b3f8551dd2fc64-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 1042,
+      "line": 1043,
       "column": 3,
       "enclosing_item": "reindex_path_retained_bytes_for_length",
       "kind": "result_to_option",
@@ -8116,7 +8056,7 @@
     {
       "id": "esq-v1-770c392984893abad41e-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 1256,
+      "line": 1257,
       "column": 23,
       "enclosing_item": "collect_current_file_record_paths",
       "kind": "result_to_option",
@@ -8126,7 +8066,7 @@
     {
       "id": "esq-v1-d914e8deafd54b1f5784-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 1276,
+      "line": 1277,
       "column": 11,
       "enclosing_item": "collect_current_file_record_paths",
       "kind": "logged_error_continues",
@@ -8136,7 +8076,7 @@
     {
       "id": "esq-v1-f417a75a6761e749949b-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 1346,
+      "line": 1353,
       "column": 20,
       "enclosing_item": "execute_backup",
       "kind": "default_on_error",
@@ -8146,7 +8086,7 @@
     {
       "id": "esq-v1-ae70c14a15c470cf6012-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 1377,
+      "line": 1384,
       "column": 7,
       "enclosing_item": "execute_backup",
       "kind": "logged_error_continues",
@@ -8156,7 +8096,7 @@
     {
       "id": "esq-v1-bb3e477210d56e89e0e9-00",
       "file": "aeordb-lib/src/engine/task_worker.rs",
-      "line": 1454,
+      "line": 1461,
       "column": 5,
       "enclosing_item": "enforce_backup_retention",
       "kind": "logged_error_continues",
@@ -13616,7 +13556,7 @@
     {
       "id": "esq-v1-20d8c597b339fec82922-00",
       "file": "aeordb-lib/src/server/gc_routes.rs",
-      "line": 31,
+      "line": 47,
       "column": 17,
       "enclosing_item": "run_gc_endpoint",
       "kind": "default_on_error",

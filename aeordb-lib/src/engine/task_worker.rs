@@ -9,7 +9,7 @@ use crate::engine::engine_event::{
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::event_bus::EventBus;
-use crate::engine::gc::run_gc_with_cancellation;
+use crate::engine::gc::{execute_gc_run, GcExecutionRequestV1};
 use crate::engine::index_store::{
   IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL, DEFAULT_INDEX_BUFFER_FLUSH_WRITES,
 };
@@ -21,7 +21,8 @@ use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
 use crate::engine::run_configuration::MaintenanceRunConfiguration;
 use crate::engine::storage_engine::StorageEngine;
-use crate::engine::task_queue::{ProgressInfo, TaskQueue, TaskRecord, TaskStatus};
+use crate::engine::task_queue::{ProgressInfo, TaskOriginV1, TaskQueue, TaskRecord, TaskStatus};
+use crate::engine::v4::gc_run::{GcRunInvocationV1, NoopGcRunProgressSinkV1};
 use crate::plugins::PluginManager;
 
 /// Maximum completed tasks to keep after pruning.
@@ -1321,9 +1322,15 @@ fn execute_gc(
   cancel: &tokio_util::sync::CancellationToken,
 ) -> EngineResult<String> {
   let dry_run = optional_task_bool(&task.args, "dry_run", false)?;
+  let invocation = match task.origin {
+    TaskOriginV1::Direct => GcRunInvocationV1::Task,
+    TaskOriginV1::Scheduled => GcRunInvocationV1::Scheduled,
+    TaskOriginV1::RepairFollowUp => GcRunInvocationV1::RepairFollowUp,
+  };
 
   let ctx = RequestContext::system();
-  let result = run_gc_with_cancellation(engine, &ctx, dry_run, cancel)?;
+  let result =
+    execute_gc_run(engine, &ctx, GcExecutionRequestV1::new(invocation, dry_run, cancel.clone(), Arc::new(NoopGcRunProgressSinkV1)))?.result;
 
   let mut message = format!(
     "gc completed: {} garbage entries, {} bytes reclaimed, dry_run={}",

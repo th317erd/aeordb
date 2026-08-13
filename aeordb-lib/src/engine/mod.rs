@@ -188,7 +188,7 @@ pub use directory_ops::{
   JsonMergeBatchResult, JsonMergeFilePatch, JsonMergeFileResult, JsonMergedFile,
 };
 pub use indexing_pipeline::IndexingPipeline;
-pub use task_queue::{TaskQueue, TaskRecord, TaskStatus, ProgressInfo};
+pub use task_queue::{ProgressInfo, TaskOriginV1, TaskQueue, TaskRecord, TaskStatus};
 pub use query_engine::{
   QueryOp, FieldQuery, QueryNode, QueryStrategy, Query, QueryResult, QueryEngine, QueryBuilder, FieldQueryBuilder,
   should_use_bitmap_compositing, FuzzyOptions, Fuzziness, FuzzyAlgorithm, SortField, SortDirection, PaginatedResult, QueryMeta,

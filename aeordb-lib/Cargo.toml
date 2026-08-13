@@ -825,6 +825,14 @@ name = "gc_v4_run_context_spec"
 path = "spec/engine/gc_v4_run_context_spec.rs"
 
 [[test]]
+name = "gc_v4_execution_path_spec"
+path = "spec/engine/gc_v4_execution_path_spec.rs"
+
+[[test]]
+name = "gc_v4_entry_path_spec"
+path = "spec/engine/gc_v4_entry_path_spec.rs"
+
+[[test]]
 name = "gc_v4_maintenance_inspection_spec"
 path = "spec/engine/gc_v4_maintenance_inspection_spec.rs"
 

@@ -394,7 +394,10 @@ async fn main() {
       commands::verify::run(&database, repair, force_fix_in_place, yes);
     }
     Commands::Gc { database, dry_run } => {
-      commands::gc::run(&database, dry_run);
+      if let Err(error) = commands::gc::run(&database, dry_run).await {
+        eprintln!("{error}");
+        std::process::exit(1);
+      }
     }
     Commands::Probe {
       database,

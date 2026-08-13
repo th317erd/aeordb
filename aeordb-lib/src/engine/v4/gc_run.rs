@@ -366,6 +366,12 @@ pub trait GcRunOperationV1 {
   fn execute_phase(&mut self, phase: GcRunPhaseV1, reporter: &mut GcRunPhaseReporterV1<'_>) -> Result<GcRunPhaseOutcomeV1, GcRunErrorV1>;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GcRunExecutionPolicyV1 {
+  V4,
+  LegacyV3Compatibility,
+}
+
 pub struct GcRunPhaseReporterV1<'a> {
   context: &'a GcRunContextV1,
   phase_index: usize,
@@ -443,6 +449,25 @@ impl GcRunPhaseReporterV1<'_> {
 }
 
 pub fn execute_gc_run_v1(context: &GcRunContextV1, operation: &mut dyn GcRunOperationV1) -> Result<GcRunStatusV1, GcRunErrorV1> {
+  execute_gc_run_with_policy_v1(context, operation, GcRunExecutionPolicyV1::V4)
+}
+
+/// Transitional bridge for the one legacy-v3 GC adapter. This uses the same
+/// phase executor while preserving existing v3 reclamation until v4 sweep is
+/// explicitly activated. Production architecture tests keep this crate-only
+/// admission confined to `engine::gc`.
+pub(crate) fn execute_legacy_v3_gc_run_v1(
+  context: &GcRunContextV1,
+  operation: &mut dyn GcRunOperationV1,
+) -> Result<GcRunStatusV1, GcRunErrorV1> {
+  execute_gc_run_with_policy_v1(context, operation, GcRunExecutionPolicyV1::LegacyV3Compatibility)
+}
+
+fn execute_gc_run_with_policy_v1(
+  context: &GcRunContextV1,
+  operation: &mut dyn GcRunOperationV1,
+  policy: GcRunExecutionPolicyV1,
+) -> Result<GcRunStatusV1, GcRunErrorV1> {
   match context.started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire) {
     Ok(false) => {}
     Err(true) => return Err(GcRunErrorV1::invalid("gc_run_context_reused", "GC run context and identity may be executed only once")),
@@ -454,7 +479,7 @@ pub fn execute_gc_run_v1(context: &GcRunContextV1, operation: &mut dyn GcRunOper
     }
   }
   let mut status = initial_status(context);
-  if context.mode == GcRunModeV1::Destructive {
+  if context.mode == GcRunModeV1::Destructive && policy == GcRunExecutionPolicyV1::V4 {
     let error = GcRunErrorV1::invalid(
       "gc_run_destructive_disabled",
       "destructive v4 garbage collection is disabled until the P4-9 operator activation gate",
@@ -484,7 +509,11 @@ pub fn execute_gc_run_v1(context: &GcRunContextV1, operation: &mut dyn GcRunOper
       let mut reporter = GcRunPhaseReporterV1 { context, phase_index, status: &mut status };
       match operation.execute_phase(phase, &mut reporter) {
         Ok(outcome) => {
-          if phase == GcRunPhaseV1::Prepare && matches!(outcome, GcRunPhaseOutcomeV1::Continue) && context.basis.get().is_none() {
+          if policy == GcRunExecutionPolicyV1::V4
+            && phase == GcRunPhaseV1::Prepare
+            && matches!(outcome, GcRunPhaseOutcomeV1::Continue)
+            && context.basis.get().is_none()
+          {
             let error = GcRunErrorV1::invalid("gc_run_basis_missing", "GC preparation completed without a frozen authority basis");
             publish_terminal(context, reporter.status, GcRunStateV1::Failed, &error);
             return Err(error);

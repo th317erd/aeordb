@@ -915,7 +915,14 @@ fn gc_recheck_normal_completion_cannot_return_to_drop_only_teardown() {
   let gc_source = std::fs::read_to_string(package.join("src/engine/gc.rs")).unwrap();
   let storage_source = std::fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
 
-  assert!(gc_source.contains("guard.finish(primary_result)"), "normal GC completion must explicitly combine primary and teardown results");
+  assert!(gc_source.contains("guard.finish(Ok(result))"), "normal GC completion must explicitly combine primary and teardown results");
+  assert!(
+    gc_source.contains("if self.teardown_armed"),
+    "phase failure and cancellation must retain explicit unwind teardown rather than abandoning recheck state"
+  );
+  let unwind_recheck = gc_source.find("drop(self.recheck_guard.take())").expect("unwind must explicitly retire recheck state");
+  let unwind_namespace = gc_source.find("drop(self.namespace_guard.take())").expect("unwind must explicitly release namespace authority");
+  assert!(unwind_recheck < unwind_namespace, "unwind must retire recheck state before admitting another namespace writer");
   assert!(
     gc_source.contains("GC recheck teardown also failed; preserving the primary GC error"),
     "teardown failure must retain primary-error precedence"

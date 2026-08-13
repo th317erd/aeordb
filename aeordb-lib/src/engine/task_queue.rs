@@ -81,6 +81,17 @@ pub enum TaskStatus {
   Cancelled,
 }
 
+/// Persisted provenance for task execution. Legacy records predate this field
+/// and decode as direct queue submissions.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOriginV1 {
+  #[default]
+  Direct,
+  Scheduled,
+  RepairFollowUp,
+}
+
 /// A persisted background task record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
@@ -90,6 +101,9 @@ pub struct TaskRecord {
   pub task_type: String,
   /// Arbitrary JSON arguments for the task.
   pub args: serde_json::Value,
+  /// Doorway that durably submitted this task.
+  #[serde(default)]
+  pub origin: TaskOriginV1,
   /// Current lifecycle status.
   pub status: TaskStatus,
   /// When the task was enqueued (ms since epoch).
@@ -197,6 +211,11 @@ impl TaskQueue {
   ///
   /// Returns the created [`TaskRecord`] including the generated UUID.
   pub fn enqueue(&self, task_type: &str, args: serde_json::Value) -> EngineResult<TaskRecord> {
+    self.enqueue_with_origin(task_type, args, TaskOriginV1::Direct)
+  }
+
+  /// Create a task with explicit persisted invocation provenance.
+  pub fn enqueue_with_origin(&self, task_type: &str, args: serde_json::Value, origin: TaskOriginV1) -> EngineResult<TaskRecord> {
     // Serialize the entire enqueue operation so concurrent enqueues cannot
     // interleave registry reads and writes (which would lose entries).
     let _state_guard = self.lock_state("enqueue")?;
@@ -206,6 +225,7 @@ impl TaskQueue {
       id: id.clone(),
       task_type: task_type.to_string(),
       args,
+      origin,
       status: TaskStatus::Pending,
       created_at: chrono::Utc::now().timestamp_millis(),
       started_at: None,
@@ -235,6 +255,11 @@ impl TaskQueue {
     })?;
 
     Ok(record)
+  }
+
+  /// Queue the required non-destructive GC proof after an explicit repair.
+  pub fn enqueue_gc_repair_follow_up(&self) -> EngineResult<TaskRecord> {
+    self.enqueue_with_origin("gc", serde_json::json!({"dry_run": true}), TaskOriginV1::RepairFollowUp)
   }
 
   /// Load all tasks and return the oldest pending one (FIFO order).

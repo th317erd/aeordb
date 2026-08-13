@@ -6,7 +6,7 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::entry_type::EntryType;
 use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
 use aeordb::engine::request_context::RequestContext;
-use aeordb::engine::task_queue::{TaskQueue, TaskStatus};
+use aeordb::engine::task_queue::{TaskOriginV1, TaskQueue, TaskStatus};
 use aeordb::server::create_temp_engine_for_tests;
 
 // ---------------------------------------------------------------------------
@@ -432,7 +432,9 @@ fn cron_tick_enqueues_due_work_once_and_reports_deduplication() {
   assert_eq!(first.tasks_deduplicated, 1);
   assert_eq!(second.tasks_enqueued, 0);
   assert_eq!(second.tasks_deduplicated, 2);
-  assert_eq!(queue.list_tasks().unwrap().len(), 1);
+  let tasks = queue.list_tasks().unwrap();
+  assert_eq!(tasks.len(), 1);
+  assert_eq!(tasks[0].origin, TaskOriginV1::Scheduled);
 }
 
 #[test]
