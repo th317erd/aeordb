@@ -3226,7 +3226,7 @@
     {
       "id": "esq-v1-4ea949551ec2d158fd84-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1577,
+      "line": 1576,
       "column": 25,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3236,7 +3236,7 @@
     {
       "id": "esq-v1-b5990e6dab44f241035e-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1602,
+      "line": 1601,
       "column": 22,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3246,7 +3246,7 @@
     {
       "id": "esq-v1-a4eede644110adffe720-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1695,
+      "line": 1694,
       "column": 5,
       "enclosing_item": "impl DiskKVStore::pending_hot_tail_bytes",
       "kind": "error_conversion",
@@ -3256,7 +3256,7 @@
     {
       "id": "esq-v1-07cbf56174ceb4b24285-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1708,
+      "line": 1707,
       "column": 9,
       "enclosing_item": "impl DiskKVStore::prepare_hot_tail_dependency",
       "kind": "error_conversion",
@@ -3266,7 +3266,7 @@
     {
       "id": "esq-v1-85907f46c110382617a0-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1745,
+      "line": 1744,
       "column": 7,
       "enclosing_item": "impl DiskKVStore::drop",
       "kind": "logged_error_continues",
@@ -5376,7 +5376,7 @@
     {
       "id": "esq-v1-f70582b672d51c15a38d-00",
       "file": "aeordb-lib/src/engine/kv_store.rs",
-      "line": 131,
+      "line": 132,
       "column": 7,
       "enclosing_item": "impl KVStore::get",
       "kind": "broad_err_pattern",
@@ -5386,7 +5386,7 @@
     {
       "id": "esq-v1-ca6aaa75792225218e9e-00",
       "file": "aeordb-lib/src/engine/kv_store.rs",
-      "line": 144,
+      "line": 145,
       "column": 7,
       "enclosing_item": "impl KVStore::remove",
       "kind": "broad_err_pattern",
@@ -5396,7 +5396,7 @@
     {
       "id": "esq-v1-4314802e5b94dc9a64d5-00",
       "file": "aeordb-lib/src/engine/kv_store.rs",
-      "line": 177,
+      "line": 180,
       "column": 7,
       "enclosing_item": "impl KVStore::update_offset",
       "kind": "broad_err_pattern",
@@ -5406,12 +5406,22 @@
     {
       "id": "esq-v1-4598bce5494bda49c18c-00",
       "file": "aeordb-lib/src/engine/kv_store.rs",
-      "line": 189,
+      "line": 192,
       "column": 7,
       "enclosing_item": "impl KVStore::update_flags",
       "kind": "broad_err_pattern",
       "pattern": "Err (_)",
       "review": "derived-cache-or-search-miss"
+    },
+    {
+      "id": "esq-v1-bedaded464ed0803225a-00",
+      "file": "aeordb-lib/src/engine/legacy_nvt_v1.rs",
+      "line": 34,
+      "column": 18,
+      "enclosing_item": "impl ConverterHolder::clone",
+      "kind": "panic_method",
+      "pattern": "deserialize_converter (& serialized) . expect (\"converter roundtrip clone should never fail\")",
+      "review": "validated-local-invariant"
     },
     {
       "id": "esq-v1-51161bc3302a3f1806f6-00",
@@ -6102,16 +6112,6 @@
       "kind": "default_on_error",
       "pattern": "text_bytes . iter () . rposition (| & b | b != 0) . map (| last | & text_bytes [..= last]) . unwrap_or (text_bytes)",
       "review": "optional-data-default"
-    },
-    {
-      "id": "esq-v1-e2eac71faf3c20230929-00",
-      "file": "aeordb-lib/src/engine/nvt.rs",
-      "line": 32,
-      "column": 18,
-      "enclosing_item": "impl ConverterHolder::clone",
-      "kind": "panic_method",
-      "pattern": "deserialize_converter (& serialized) . expect (\"converter roundtrip clone should never fail\")",
-      "review": "validated-local-invariant"
     },
     {
       "id": "esq-v1-1bfb7d502c43664f4c35-00",
@@ -8456,7 +8456,7 @@
     {
       "id": "esq-v1-fd921a64c6d4308b4589-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 196,
+      "line": 195,
       "column": 3,
       "enclosing_item": "acquire_deployment_inspection_lock",
       "kind": "error_conversion",
@@ -8466,7 +8466,7 @@
     {
       "id": "esq-v1-677144c40cf9e6b27307-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 300,
+      "line": 299,
       "column": 7,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::open_with_hot_tail_policy",
       "kind": "logged_error_continues",
@@ -8476,7 +8476,7 @@
     {
       "id": "esq-v1-c25abc9bb349987d9df0-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 322,
+      "line": 321,
       "column": 60,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::read_hot_tail_layout",
       "kind": "panic_method",
@@ -8486,7 +8486,7 @@
     {
       "id": "esq-v1-a36ea5f59489c62b8fc6-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 325,
+      "line": 324,
       "column": 42,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::read_hot_tail_layout",
       "kind": "panic_method",
@@ -8496,7 +8496,7 @@
     {
       "id": "esq-v1-76d584cf119e2ac9232d-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 326,
+      "line": 325,
       "column": 41,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::read_hot_tail_layout",
       "kind": "panic_method",
@@ -8506,7 +8506,7 @@
     {
       "id": "esq-v1-68fc213feed0ba715b29-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 367,
+      "line": 366,
       "column": 26,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::read_file_bounded",
       "kind": "error_conversion",
@@ -8516,7 +8516,7 @@
     {
       "id": "esq-v1-e2c1474da041486189ca-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 386,
+      "line": 385,
       "column": 35,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::read_file_bounded",
       "kind": "error_conversion",
@@ -8526,7 +8526,7 @@
     {
       "id": "esq-v1-d158686f869be16e142f-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 440,
+      "line": 439,
       "column": 35,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::load_configuration_history",
       "kind": "error_conversion",
@@ -8536,7 +8536,7 @@
     {
       "id": "esq-v1-c5df3da0e78a7ab8e5a5-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 553,
+      "line": 552,
       "column": 39,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::lookup_hot_entry",
       "kind": "panic_method",
@@ -8546,7 +8546,7 @@
     {
       "id": "esq-v1-83342e3d14017c139b00-00",
       "file": "aeordb-lib/src/engine/v4/deployment_guard.rs",
-      "line": 554,
+      "line": 553,
       "column": 45,
       "enclosing_item": "impl ReadOnlyV3TransitionControlStore::lookup_hot_entry",
       "kind": "panic_method",

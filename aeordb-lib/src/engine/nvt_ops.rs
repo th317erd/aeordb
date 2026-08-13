@@ -1,5 +1,5 @@
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::nvt::NormalizedVectorTable;
+use crate::engine::legacy_nvt_v1::LegacyNvtV1;
 
 /// A bitmask over NVT buckets. One bit per bucket.
 /// Used for compositing query results across multiple indexes.
@@ -30,7 +30,8 @@ impl NVTMask {
   }
 
   /// Create a mask from an NVT: bit on if bucket has entries.
-  pub fn from_nvt(nvt: &NormalizedVectorTable) -> Self {
+  pub fn from_nvt(nvt: &impl AsRef<LegacyNvtV1>) -> Self {
+    let nvt = nvt.as_ref();
     let bucket_count = nvt.bucket_count();
     let mut mask = Self::new(bucket_count);
     for index in 0..bucket_count {

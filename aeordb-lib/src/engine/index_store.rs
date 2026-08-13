@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::field_index_v0_nvt::FieldIndexV0Nvt;
 use crate::engine::index_config::{create_converter_from_config, IndexFieldConfig, PathIndexConfig};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
-use crate::engine::nvt::NormalizedVectorTable;
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::request_context::RequestContext;
@@ -60,7 +60,7 @@ pub struct FieldIndex {
   pub field_name: String,
   pub converter: Box<dyn ScalarConverter>,
   pub entries: Vec<IndexEntry>,
-  pub nvt: NormalizedVectorTable,
+  pub nvt: FieldIndexV0Nvt,
   /// Raw field values keyed by file_hash. Used by fuzzy query recheck
   /// to avoid re-loading files from storage.
   ///
@@ -1162,7 +1162,7 @@ impl FieldIndex {
   /// Create an empty index with the given converter.
   pub fn new(field_name: String, converter: Box<dyn ScalarConverter>) -> Self {
     let nvt_converter = deserialize_converter(&converter.serialize()).expect("converter roundtrip for NVT should never fail");
-    let nvt = NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT);
+    let nvt = FieldIndexV0Nvt::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT);
     FieldIndex { field_name, converter, entries: Vec::new(), nvt, values: HashMap::new(), values_cover_entries: true, dirty: false }
   }
 
@@ -1670,7 +1670,7 @@ impl FieldIndex {
 
       if has_nvt_section {
         cursor += 4;
-        let nvt_result = NormalizedVectorTable::deserialize(&data[cursor..cursor + nvt_length]);
+        let nvt_result = FieldIndexV0Nvt::deserialize(&data[cursor..cursor + nvt_length]);
         cursor += nvt_length;
         nvt_result.ok()
       } else {
@@ -1751,7 +1751,7 @@ impl FieldIndex {
       Some(deserialized_nvt) => deserialized_nvt,
       None => {
         let nvt_converter = deserialize_converter(&converter.serialize()).expect("converter roundtrip for NVT should never fail");
-        NormalizedVectorTable::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT)
+        FieldIndexV0Nvt::new(nvt_converter, DEFAULT_NVT_BUCKET_COUNT)
       }
     };
 

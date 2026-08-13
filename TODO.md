@@ -797,6 +797,18 @@
           - [x] P4-8e5: reopen and verify the real database, retain bounded resource/latency/result evidence, run broad/static gates, and land the qualification unit.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
     - [ ] P5: implement immutable index definitions, ordered pages, catalogs, sparse fixed-point NVT, compaction, and corruption fallback; eliminate v0 whole-index publication amplification when the active set exceeds the clean-cache cap.
+      - [x] P5-1: separate byte-frozen legacy NVT, KV NVT, and v0 field-index NVT ownership without changing persisted bytes or KV behavior.
+        - [x] Refresh every production/test NVT consumer and establish the combined v0/KV characterization baseline.
+        - [x] Add the red `index_v1_reference_spec` ownership and byte-identity contract.
+        - [x] Implement explicit legacy, KV, and v0 field-index compatibility owners while retaining the public migration facade.
+        - [x] Run narrow, adjacent, broad, static, architecture, and real-world gates; record evidence and land the unit.
+      - [ ] P5-2: implement converter, strategy, source, and definition registries with an independent reference model.
+      - [ ] P5-3: implement scope catalog, value/state stores, document identity, and immutable manifest codecs.
+      - [ ] P5-4: implement artifact directories and ordered page readers/writers.
+      - [ ] P5-5: implement bounded COW insert/delete/split/merge/compaction.
+      - [ ] P5-6: implement sparse fixed-point NVT tiles, fallback, and best-effort healing.
+      - [ ] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.
+      - [ ] P5-8: qualify shadow build, restart, corruption fallback, memory bounds, and full validation.
     - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

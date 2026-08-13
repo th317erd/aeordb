@@ -7,12 +7,11 @@ use std::sync::Arc;
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::kv_page_provider::KvPageProvider;
+use aeordb::engine::kv_nvt::KvNvt;
 use aeordb::engine::kv_pages::{MAX_ENTRIES_PER_PAGE, page_size, serialize_page};
 use aeordb::engine::kv_snapshot::ReadSnapshot;
 use aeordb::engine::kv_store::{KV_FLAG_DELETED, KV_TYPE_CHUNK, KVEntry};
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
-use aeordb::engine::nvt::NormalizedVectorTable;
-use aeordb::engine::scalar_converter::HashConverter;
 use aeordb::engine::v4::gc_mark_runtime::{DenseMarkBitmapV1, MarkBitmapErrorV1, MarkSlotPositionV1};
 use tokio_util::sync::CancellationToken;
 use tempfile::tempdir;
@@ -21,11 +20,11 @@ fn memory_coordinator() -> MemoryCoordinator {
   MemoryCoordinator::new(MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap())
 }
 
-fn nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
-  Arc::new(NormalizedVectorTable::new(Box::new(HashConverter), bucket_count))
+fn nvt(bucket_count: usize) -> Arc<KvNvt> {
+  Arc::new(KvNvt::new(bucket_count))
 }
 
-fn entry_for_bucket(nvt: &NormalizedVectorTable, bucket: usize, seed_start: u64, deleted: bool) -> KVEntry {
+fn entry_for_bucket(nvt: &KvNvt, bucket: usize, seed_start: u64, deleted: bool) -> KVEntry {
   for seed in seed_start..seed_start + 100_000 {
     let hash = blake3::hash(&seed.to_le_bytes()).as_bytes().to_vec();
     if nvt.bucket_for_value(&hash) == bucket {

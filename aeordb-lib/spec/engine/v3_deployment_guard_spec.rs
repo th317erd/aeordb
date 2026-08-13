@@ -17,8 +17,7 @@ use aeordb::engine::{EntryType, HashAlgorithm, StorageEngine};
 use aeordb::engine::directory_ops::file_path_hash;
 use aeordb::engine::kv_pages::bucket_page_offset;
 use aeordb::engine::kv_stages::stage_params;
-use aeordb::engine::nvt::NormalizedVectorTable;
-use aeordb::engine::scalar_converter::HashConverter;
+use aeordb::engine::kv_nvt::KvNvt;
 
 fn canonical_utf8(value: &str) -> Vec<u8> {
   let mut encoded = Vec::with_capacity(5 + value.len());
@@ -213,7 +212,7 @@ fn corrupt_control_kv_page_fails_closed_instead_of_skipping_persistent_authority
   let (_, bucket_count) = stage_params(header.kv_block_stage as usize, aeordb::engine::kv_pages::page_size(hash_length));
   let path = system_control_path(SystemControlKindV1::DurabilityLatch, &[], SystemControlSlotV1::A).unwrap();
   let path_key = file_path_hash(&path, &header.hash_algo).unwrap();
-  let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
+  let nvt = KvNvt::new(bucket_count);
   let page_offset = header.kv_block_offset + bucket_page_offset(nvt.bucket_for_value(&path_key), hash_length);
   let mut file = fs::OpenOptions::new().read(true).write(true).open(&database).unwrap();
   file.seek(SeekFrom::Start(page_offset)).unwrap();

@@ -30,10 +30,9 @@ use crate::engine::file_header::{FileHeader, HEADER_REGION_SIZE};
 use crate::engine::file_record::FileRecord;
 use crate::engine::hot_tail::{HOT_TAIL_FORMAT_VERSION, HOT_TAIL_MAGIC, WRITE_RECORD_VERSION};
 use crate::engine::kv_pages::{bucket_page_offset, find_entry_in_page_data, page_size};
+use crate::engine::kv_nvt::KvNvt;
 use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
-use crate::engine::nvt::NormalizedVectorTable;
-use crate::engine::scalar_converter::HashConverter;
 
 pub const DEPLOYMENT_CAPABILITY_PROTOCOL_V1: u16 = 1;
 pub const TRANSITION_RECOVERY_CAPABILITY_V1: &str = "aeordb.v3-transition-recovery.v1";
@@ -511,7 +510,7 @@ impl ReadOnlyV3TransitionControlStore {
     if let Some(entry) = self.lookup_hot_entry(key)? {
       return Ok((entry.type_flags & KV_FLAG_DELETED == 0).then_some(entry));
     }
-    let nvt = NormalizedVectorTable::new(Box::new(HashConverter), self.bucket_count);
+    let nvt = KvNvt::new(self.bucket_count);
     let bucket = nvt.bucket_for_value(key);
     let page_offset = self
       .header

@@ -5,12 +5,11 @@ use aeordb::engine::errors::EngineError;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::hot_tail;
 use aeordb::engine::kv_pages::*;
+use aeordb::engine::kv_nvt::KvNvt;
 use aeordb::engine::memory_coordinator::{HostMemorySample, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::native_durability::{
   NativeDurabilityError, NativeDurabilityOperation, NativeDurabilityResult, sync_file_all_native, sync_file_data_native,
 };
-use aeordb::engine::nvt::NormalizedVectorTable;
-use aeordb::engine::scalar_converter::HashConverter;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_FLAG_DELETED, KV_FLAG_PENDING};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
@@ -455,7 +454,7 @@ fn bounded_flush_reservation_refusal_changes_no_page_bytes_and_keeps_the_buffer_
   store.activate_bounded_pages(constrained, 0).unwrap();
 
   let hash = make_hash(23);
-  let nvt = NormalizedVectorTable::new(Box::new(HashConverter), store.bucket_count());
+  let nvt = KvNvt::new(store.bucket_count());
   let bucket = nvt.bucket_for_value(&hash);
   let before = read_bucket(&db_path, bucket);
   store.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash: hash.clone(), offset: 2300, total_length: 64 }).unwrap();
@@ -481,7 +480,7 @@ fn bounded_flush_barrier_failure_after_page_overwrite_is_durability_critical() {
   store.activate_bounded_pages(memory_coordinator(), page_size(32) as u64 * 2).unwrap();
 
   let hash = make_hash(31);
-  let nvt = NormalizedVectorTable::new(Box::new(HashConverter), store.bucket_count());
+  let nvt = KvNvt::new(store.bucket_count());
   let bucket = nvt.bucket_for_value(&hash);
   let before = read_bucket(&db_path, bucket);
   let old_snapshot = store.snapshot_handle().load_full();
@@ -505,7 +504,7 @@ fn bounded_flush_rejects_a_corrupt_page_without_resetting_or_overwriting_it() {
   store.activate_bounded_pages(memory_coordinator(), 0).unwrap();
 
   let hash = make_hash(29);
-  let nvt = NormalizedVectorTable::new(Box::new(HashConverter), store.bucket_count());
+  let nvt = KvNvt::new(store.bucket_count());
   let bucket = nvt.bucket_for_value(&hash);
   let mut corrupt = read_bucket(&db_path, bucket);
   corrupt[0] = 0x7f;

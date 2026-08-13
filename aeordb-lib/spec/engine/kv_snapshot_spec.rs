@@ -6,11 +6,10 @@ use std::sync::Arc;
 use aeordb::engine::disk_kv_store::DiskKVStore;
 use aeordb::engine::hash_algorithm::HashAlgorithm;
 use aeordb::engine::kv_page_provider::KvPageProvider;
+use aeordb::engine::kv_nvt::KvNvt;
 use aeordb::engine::kv_pages::{bucket_page_offset, page_size};
 use aeordb::engine::kv_snapshot::ReadSnapshot;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_FLAG_DELETED};
-use aeordb::engine::nvt::NormalizedVectorTable;
-use aeordb::engine::scalar_converter::HashConverter;
 use tempfile::tempdir;
 
 // ============================================================================
@@ -79,8 +78,8 @@ fn create_flushed_store(dir: &std::path::Path, entries: &[KVEntry]) -> (usize, A
   (bucket_count, Arc::new(pages))
 }
 
-fn make_nvt(bucket_count: usize) -> Arc<NormalizedVectorTable> {
-  Arc::new(NormalizedVectorTable::new(Box::new(HashConverter), bucket_count))
+fn make_nvt(bucket_count: usize) -> Arc<KvNvt> {
+  Arc::new(KvNvt::new(bucket_count))
 }
 
 #[test]

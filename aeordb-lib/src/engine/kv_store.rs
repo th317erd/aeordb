@@ -1,7 +1,6 @@
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
-use crate::engine::nvt::NormalizedVectorTable;
-use crate::engine::scalar_converter::HashConverter;
+use crate::engine::kv_nvt::KvNvt;
 
 // Lower 4 bits - type
 pub const KV_TYPE_CHUNK: u8 = 0x0;
@@ -53,12 +52,12 @@ pub struct KVStore {
   version: u8,
   hash_algo: HashAlgorithm,
   entries: Vec<KVEntry>,
-  nvt: NormalizedVectorTable,
+  nvt: KvNvt,
 }
 
 impl KVStore {
   pub fn new(hash_algo: HashAlgorithm, initial_nvt_buckets: usize) -> Self {
-    KVStore { version: 1, hash_algo, entries: Vec::new(), nvt: NormalizedVectorTable::new(Box::new(HashConverter), initial_nvt_buckets) }
+    KVStore { version: 1, hash_algo, entries: Vec::new(), nvt: KvNvt::new(initial_nvt_buckets) }
   }
 
   pub fn insert(&mut self, entry: KVEntry) {
@@ -92,21 +91,23 @@ impl KVStore {
     // Shift offsets of all buckets whose start is at or after insert_index
     for i in 0..bucket_count {
       let bucket = self.nvt.get_bucket(i);
+      let bucket_offset = bucket.kv_block_offset;
+      let bucket_entry_count = bucket.entry_count;
       if i == bucket_index {
         // This is the bucket we're inserting into
-        if bucket.entry_count == 0 {
+        if bucket_entry_count == 0 {
           // Bucket was empty — set it up
           self.nvt.update_bucket(i, insert_index as u64, 1);
         } else {
           // Bucket already has entries — just increment count
           // The offset stays the same if insert_index == bucket start,
           // or the bucket already accounts for this position
-          let new_offset = bucket.kv_block_offset.min(insert_index as u64);
-          self.nvt.update_bucket(i, new_offset, bucket.entry_count + 1);
+          let new_offset = bucket_offset.min(insert_index as u64);
+          self.nvt.update_bucket(i, new_offset, bucket_entry_count + 1);
         }
-      } else if bucket.kv_block_offset as usize >= insert_index && bucket.entry_count > 0 {
+      } else if bucket_offset as usize >= insert_index && bucket_entry_count > 0 {
         // This bucket starts after the insertion point — shift offset by 1
-        self.nvt.update_bucket(i, bucket.kv_block_offset + 1, bucket.entry_count);
+        self.nvt.update_bucket(i, bucket_offset + 1, bucket_entry_count);
       }
     }
   }
@@ -152,17 +153,19 @@ impl KVStore {
 
     for i in 0..bucket_count {
       let bucket = self.nvt.get_bucket(i);
-      if bucket.entry_count == 0 {
+      let bucket_offset = bucket.kv_block_offset;
+      let bucket_entry_count = bucket.entry_count;
+      if bucket_entry_count == 0 {
         continue;
       }
       if i == bucket_index {
-        if bucket.entry_count <= 1 {
+        if bucket_entry_count <= 1 {
           self.nvt.update_bucket(i, 0, 0);
         } else {
-          self.nvt.update_bucket(i, bucket.kv_block_offset, bucket.entry_count - 1);
+          self.nvt.update_bucket(i, bucket_offset, bucket_entry_count - 1);
         }
-      } else if bucket.kv_block_offset as usize > remove_index {
-        self.nvt.update_bucket(i, bucket.kv_block_offset - 1, bucket.entry_count);
+      } else if bucket_offset as usize > remove_index {
+        self.nvt.update_bucket(i, bucket_offset - 1, bucket_entry_count);
       }
     }
   }
@@ -218,7 +221,7 @@ impl KVStore {
     self.hash_algo
   }
 
-  pub fn nvt(&self) -> &NormalizedVectorTable {
+  pub fn nvt(&self) -> &KvNvt {
     &self.nvt
   }
 
@@ -312,7 +315,7 @@ impl KVStore {
       return Err(EngineError::CorruptEntry { offset: 0, reason: "KVStore data too short for NVT section".to_string() });
     }
 
-    let nvt = NormalizedVectorTable::deserialize(&data[cursor..cursor + nvt_length])?;
+    let nvt = KvNvt::deserialize(&data[cursor..cursor + nvt_length])?;
 
     Ok(KVStore { version, hash_algo, entries, nvt })
   }

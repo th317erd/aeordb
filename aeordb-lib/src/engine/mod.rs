@@ -36,6 +36,7 @@ pub mod entry_scanner;
 pub mod entry_type;
 pub mod errors;
 pub mod event_bus;
+pub mod field_index_v0_nvt;
 pub mod file_header;
 pub mod file_record;
 pub mod fuzzy;
@@ -57,6 +58,7 @@ pub mod integrity_scanner;
 pub mod json_parser;
 pub mod json_store;
 pub mod kv_expand;
+pub mod kv_nvt;
 pub mod kv_page_provider;
 pub mod kv_pages;
 pub(crate) mod kv_rebuild_workspace;
@@ -64,6 +66,7 @@ pub mod kv_resize;
 pub mod kv_snapshot;
 pub mod kv_stages;
 pub mod kv_store;
+pub mod legacy_nvt_v1;
 pub mod lifecycle_config;
 pub mod lost_found;
 pub mod memory_coordinator;
@@ -144,11 +147,14 @@ pub use kv_pages::{
   stage_for_count,
 };
 pub use kv_snapshot::ReadSnapshot;
+pub use kv_nvt::KvNvt;
 pub use kv_store::{
   KVEntry, KVStore, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_TYPE_DIRECTORY, KV_TYPE_DELETION, KV_TYPE_SNAPSHOT, KV_TYPE_VOID, KV_TYPE_HEAD,
   KV_TYPE_FORK, KV_TYPE_VERSION, KV_TYPE_SYMLINK, KV_FLAG_PENDING, KV_FLAG_DELETED,
 };
 pub use nvt::{NVTBucket, NormalizedVectorTable};
+pub use field_index_v0_nvt::FieldIndexV0Nvt;
+pub use legacy_nvt_v1::LegacyNvtV1;
 pub use nvt_ops::NVTMask;
 pub use query_runtime::{QueryRuntimePolicy, QueryRuntimeSnapshot};
 pub use scalar_converter::{

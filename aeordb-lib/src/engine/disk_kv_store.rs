@@ -10,13 +10,12 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::hot_tail;
 use crate::engine::kv_pages::*;
+use crate::engine::kv_nvt::KvNvt;
 use crate::engine::kv_page_provider::{KvPageProvider, KvPageProviderStats};
 use crate::engine::kv_snapshot::{KvPageSet, KvTypeCounts, ReadSnapshot};
 use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, HostMemorySample, MemoryCoordinator, MemoryOwner, MemoryPolicy};
-use crate::engine::nvt::NormalizedVectorTable;
-use crate::engine::scalar_converter::HashConverter;
 
 /// Number of buffered writes before auto-flush to KV bucket pages.
 const WRITE_BUFFER_THRESHOLD: usize = 512;
@@ -41,7 +40,7 @@ const BOOTSTRAP_GENERATION_EMERGENCY_BYTES: u64 = 1024 * 1024;
 /// Lookup flow: write_buffer → NVT bucket → disk page scan.
 pub struct DiskKVStore {
   /// NVT for O(1) bucket lookup from hash bytes.
-  nvt: NormalizedVectorTable,
+  nvt: KvNvt,
   /// Write buffer: absorbs recent inserts before flushing to disk.
   write_buffer: HashMap<Vec<u8>, KVEntry>,
   /// File handle for the main .aeordb database file.
@@ -77,7 +76,7 @@ pub struct DiskKVStore {
   /// writer lets bounded snapshots publish without rescanning every page.
   page_type_counts: KvTypeCounts,
   /// Shared NVT wrapped in Arc — re-cloned only on flush/resize.
-  shared_nvt: Arc<NormalizedVectorTable>,
+  shared_nvt: Arc<KvNvt>,
   /// Set to true when a corrupt KV page requires an authoritative WAL rebuild.
   pub needs_rebuild: bool,
   /// Set to Some(target_stage) when the KV block needs expansion.
@@ -326,7 +325,7 @@ impl DiskKVStore {
       .execute_recoverable_file_barrier(&db_file, NativeFileBarrierKind::Data, (bucket_count * psize) as u64)
       .map_err(|error| EngineError::DurabilityFailure(error.to_string()))?;
 
-    let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
+    let nvt = KvNvt::new(bucket_count);
     let shared_nvt = Arc::new(nvt.clone());
     let bootstrap_provider = KvPageProvider::new(
       db_file.try_clone()?,
@@ -483,7 +482,7 @@ impl DiskKVStore {
 
     tracing::debug!(kv_block_offset, kv_block_length, hot_tail_offset, stage, bucket_count, hot_entry_count, "DiskKVStore::open");
 
-    let nvt = NormalizedVectorTable::new(Box::new(HashConverter), bucket_count);
+    let nvt = KvNvt::new(bucket_count);
     let shared_nvt = Arc::new(nvt.clone());
 
     // Pre-populate write buffer with hot entries (not yet flushed to pages)
@@ -1586,7 +1585,7 @@ impl DiskKVStore {
     self.kv_block_length = new_block_length;
     self.stage = target_stage;
     self.bucket_count = new_bucket_count;
-    self.nvt = NormalizedVectorTable::new(Box::new(HashConverter), new_bucket_count);
+    self.nvt = KvNvt::new(new_bucket_count);
     self.hot_tail_offset = new_hot_tail;
     self.entry_count = 0;
     self.pending_voids = pending_voids;

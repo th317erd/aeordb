@@ -8,8 +8,8 @@ use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::kv_page_provider::KvPageSnapshot;
 use crate::engine::kv_pages::{MAX_ENTRIES_PER_PAGE, deserialize_page, find_entry_in_page_data, live_type_counts_in_page};
+use crate::engine::kv_nvt::KvNvt;
 use crate::engine::kv_store::{KVEntry, KV_FLAG_DELETED};
-use crate::engine::nvt::NormalizedVectorTable;
 
 pub type KvPageSet = Arc<Vec<Arc<[u8]>>>;
 pub type KvTypeCounts = [usize; 16];
@@ -59,7 +59,7 @@ pub struct ReadSnapshot {
   /// Frozen copy of the write buffer at snapshot creation time.
   buffer: HashMap<Vec<u8>, KVEntry>,
   /// Shared NVT for O(1) bucket lookup.
-  nvt: Arc<NormalizedVectorTable>,
+  nvt: Arc<KvNvt>,
   /// Number of NVT buckets (cached from nvt for convenience).
   bucket_count: usize,
   /// Hash algorithm (determines hash_length for page layout).
@@ -98,7 +98,7 @@ impl ReadSnapshot {
   /// immutable KV pages.
   pub fn new(
     buffer: HashMap<Vec<u8>, KVEntry>,
-    nvt: Arc<NormalizedVectorTable>,
+    nvt: Arc<KvNvt>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
@@ -123,7 +123,7 @@ impl ReadSnapshot {
   /// already applied bucket-local count deltas.
   pub fn new_with_page_type_counts(
     buffer: HashMap<Vec<u8>, KVEntry>,
-    nvt: Arc<NormalizedVectorTable>,
+    nvt: Arc<KvNvt>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
@@ -145,7 +145,7 @@ impl ReadSnapshot {
 
   pub fn from_bounded_pages(
     buffer: HashMap<Vec<u8>, KVEntry>,
-    nvt: Arc<NormalizedVectorTable>,
+    nvt: Arc<KvNvt>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
@@ -165,7 +165,7 @@ impl ReadSnapshot {
 
   pub fn from_bounded_pages_with_type_counts(
     buffer: HashMap<Vec<u8>, KVEntry>,
-    nvt: Arc<NormalizedVectorTable>,
+    nvt: Arc<KvNvt>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
@@ -178,7 +178,7 @@ impl ReadSnapshot {
 
   pub fn unavailable(
     buffer: HashMap<Vec<u8>, KVEntry>,
-    nvt: Arc<NormalizedVectorTable>,
+    nvt: Arc<KvNvt>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
@@ -248,7 +248,7 @@ impl ReadSnapshot {
   pub fn republish_with_buffer(
     &self,
     buffer: HashMap<Vec<u8>, KVEntry>,
-    nvt: Arc<NormalizedVectorTable>,
+    nvt: Arc<KvNvt>,
     bucket_count: usize,
     hash_algo: HashAlgorithm,
     entry_count: usize,
@@ -623,7 +623,6 @@ mod tests {
   use crate::engine::hash_algorithm::HashAlgorithm;
   use crate::engine::kv_pages::serialize_page;
   use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD};
-  use crate::engine::scalar_converter::HashConverter;
 
   fn entry(hash_byte: u8, entry_type: u8, deleted: bool) -> KVEntry {
     KVEntry {
@@ -637,7 +636,7 @@ mod tests {
   fn snapshot_with(buffer: HashMap<Vec<u8>, KVEntry>) -> ReadSnapshot {
     let page = serialize_page(&[entry(1, KV_TYPE_CHUNK, false), entry(2, KV_TYPE_FILE_RECORD, false)], 32);
     let pages = Arc::new(vec![Arc::<[u8]>::from(page.into_boxed_slice())]);
-    let nvt = Arc::new(NormalizedVectorTable::new(Box::new(HashConverter), 1));
+    let nvt = Arc::new(KvNvt::new(1));
     ReadSnapshot::new(buffer, nvt, 1, HashAlgorithm::Blake3_256, 2, pages).unwrap()
   }
 
