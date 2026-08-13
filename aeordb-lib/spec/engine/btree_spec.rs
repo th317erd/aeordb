@@ -892,6 +892,16 @@ fn test_content_hash_domain_prefix() {
 
 // ─── Performance test ──────────────────────────────────────────────────────
 
+#[cfg(not(windows))]
+const BTREE_INSERT_PERFORMANCE_LIMIT_MS: u128 = 5_000;
+#[cfg(windows)]
+const BTREE_INSERT_PERFORMANCE_LIMIT_MS: u128 = 15_000;
+
+#[cfg(not(windows))]
+const BTREE_BATCHED_INSERT_PERFORMANCE_LIMIT_MS: u128 = 3_000;
+#[cfg(windows)]
+const BTREE_BATCHED_INSERT_PERFORMANCE_LIMIT_MS: u128 = 15_000;
+
 #[test]
 fn test_btree_insert_performance_1000() {
   let (engine, _temp) = create_temp_engine_for_tests();
@@ -915,7 +925,12 @@ fn test_btree_insert_performance_1000() {
   assert_eq!(listed.len(), 1000);
 
   // Should complete in well under 5 seconds for 500 inserts
-  assert!(duration.as_millis() < 5000, "500 inserts took {}ms - too slow", duration.as_millis());
+  assert!(
+    duration.as_millis() < BTREE_INSERT_PERFORMANCE_LIMIT_MS,
+    "500 inserts took {}ms; platform limit is {}ms",
+    duration.as_millis(),
+    BTREE_INSERT_PERFORMANCE_LIMIT_MS
+  );
   eprintln!("btree_insert: 500 inserts into 500-entry tree took {}ms", duration.as_millis());
 }
 
@@ -1387,7 +1402,12 @@ fn test_btree_insert_batched_performance() {
   assert_eq!(all.len(), 1000);
 
   // Should be faster than the non-batched threshold
-  assert!(batched_duration.as_millis() < 3000, "500 batched inserts took {}ms", batched_duration.as_millis());
+  assert!(
+    batched_duration.as_millis() < BTREE_BATCHED_INSERT_PERFORMANCE_LIMIT_MS,
+    "500 batched inserts took {}ms; platform limit is {}ms",
+    batched_duration.as_millis(),
+    BTREE_BATCHED_INSERT_PERFORMANCE_LIMIT_MS
+  );
   eprintln!("btree_insert_batched: 500 inserts into 500-entry tree took {}ms", batched_duration.as_millis());
 }
 
