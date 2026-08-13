@@ -2,7 +2,7 @@
 # contract: ConverterDefinitionV1
 # hash: blake3-256 (32 bytes)
 # expected: converter:dmetaphone_primary_v0:semantics=32780
-# canonical key: d96ca855f81751b57df3c2b5a2e244c6a4ea5c2bfd57babdf9ed24c5778a3851
+# canonical key: 58da6df62842ca5bbc05982cf27d01060eef18b72a229132c810230a8ddd4ce0
 # relation: semantic-family:migration-v0
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: ACNV canonical-definition envelope
@@ -15,6 +15,6 @@
 00000020: 0c800c80400000000c800c800c800c80
 00000030: 0c800c800c8001000000000000000000
 00000040: 00001000000000000000010000001000
-00000050: 000040000000000057a924fb5ceb7e62
-00000060: 66a0dbee51333df5515bfd4e227f4b33
-00000070: f2d7e81056fd35dc
+00000050: 00004000000000009f74e6b62ef02e41
+00000060: 2f2e89c0ff339529613143cda3f27ccd
+00000070: 03527f1ef96f93a1

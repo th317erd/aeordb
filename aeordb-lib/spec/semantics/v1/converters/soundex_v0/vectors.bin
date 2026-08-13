@@ -1,3 +1,4 @@
 AEOR-SEMANTICS-VECTORS-V1
 name=soundex_v0
 capture=production-v0-tokenizer-and-little-endian-digest-scalar;empty=no_tokens;duplicates=sorted_unique
+coordinate_mapping=zero:0000000000000000,half:8000000000000000,max:ffffffffffffffff

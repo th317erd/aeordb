@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
@@ -8,10 +9,18 @@ use crate::engine::HashAlgorithm;
 
 use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value, encode_canonical_value};
 use super::field_definition::{ConverterDefinitionV1, decode_converter_definition};
+use super::index_converter_v0::{MigrationConverterErrorClassV0, compile_migration_value_v0};
 use super::index_semantic_registry::{ConverterRegistryEntryV1, converter_registry_entry};
+use super::text_fold::{TextFoldErrorClassV1, fold_characters, is_alphanumeric};
 
 const EXACT_POSTING_DOMAIN: &[u8] = b"aeordb.typed-exact-posting.v1\0";
 const EXACT_COORDINATE_DOMAIN: &[u8] = b"aeordb.index.exact-coordinate.v1\0";
+const TOKEN_COORDINATE_DOMAIN: &[u8] = b"aeordb.index.token-coordinate.v1\0";
+const WORD_TRIGRAM_CLASS: u8 = 0x01;
+const SUBSTRING_TRIGRAM_CLASS: u8 = 0x02;
+const SOUNDEX_CLASS: u8 = 0x03;
+const DOUBLE_METAPHONE_PRIMARY_CLASS: u8 = 0x04;
+const DOUBLE_METAPHONE_ALTERNATE_CLASS: u8 = 0x05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexSemanticErrorClassV1 {
@@ -160,24 +169,21 @@ impl<'a> ConverterRuntimeV1<'a> {
         ([left], [right]) if *left <= 1 && *right <= 1 => Ok(left.cmp(right)),
         _ => Err(malformed_key("bool posting key must be one canonical byte")),
       },
-      0x0009..=0x000c => Ok(left.cmp(right)),
+      0x0009..=0x000c => {
+        validate_corrected_token_key(self.definition.converter_id, left)?;
+        validate_corrected_token_key(self.definition.converter_id, right)?;
+        Ok(left.cmp(right))
+      }
+      0x8001..=0x800d => Ok(left.cmp(right)),
       _ => Err(error(
         IndexSemanticErrorClassV1::UnsupportedDefinition,
-        "legacy_converter_runtime_pending",
-        format!("migration converter 0x{:04x} requires its isolated v0 adapter", self.definition.converter_id),
+        "converter_runtime_missing",
+        format!("converter 0x{:04x} has no runtime", self.definition.converter_id),
       )),
     }
   }
 
   fn compile_value(&self, value: &CanonicalConfigValueV1) -> IndexSemanticResultV1<CompiledSourceValueV1> {
-    if !self.definition.corrected {
-      return Err(error(
-        IndexSemanticErrorClassV1::UnsupportedDefinition,
-        "legacy_converter_runtime_pending",
-        format!("migration converter 0x{:04x} requires its isolated v0 adapter", self.definition.converter_id),
-      ));
-    }
-
     let normalized_value;
     let value = if self.definition.converter_id == 0x0006
       && matches!(value, CanonicalConfigValueV1::FloatBits(bits) if *bits == (-0.0f64).to_bits())
@@ -189,6 +195,60 @@ impl<'a> ConverterRuntimeV1<'a> {
     };
     let canonical_value = encode_source(value)?;
     self.enforce_input_limit(canonical_value.len())?;
+    if !self.definition.corrected {
+      let migrated = compile_migration_value_v0(&self.definition, value).map_err(|source| {
+        let class = match source.class() {
+          MigrationConverterErrorClassV0::InvalidSourceValue => IndexSemanticErrorClassV1::InvalidSourceValue,
+          MigrationConverterErrorClassV0::ResourceLimit => IndexSemanticErrorClassV1::ResourceLimit,
+          MigrationConverterErrorClassV0::UnsupportedDefinition => IndexSemanticErrorClassV1::UnsupportedDefinition,
+        };
+        error(class, source.code(), source.context())
+      })?;
+      let mut postings = Vec::new();
+      postings.try_reserve_exact(migrated.len()).map_err(|source| {
+        error(
+          IndexSemanticErrorClassV1::ResourceLimit,
+          "converter_posting_reserve",
+          format!("cannot reserve bounded migration posting output: {source}"),
+        )
+      })?;
+      for (expansion_ordinal, posting) in migrated.into_iter().enumerate() {
+        let expansion_ordinal = u32::try_from(expansion_ordinal)
+          .map_err(|source| limit_context("converter_expansion_ordinal", format!("posting ordinal exceeds u32: {source}")))?;
+        postings.push(CompiledPostingKeyV1 { posting_key: posting.posting_key, coordinate: posting.coordinate, expansion_ordinal });
+      }
+      self.enforce_posting_limits(&postings)?;
+      return Ok(CompiledSourceValueV1 { canonical_value, postings });
+    }
+
+    if matches!(self.definition.converter_id, 0x0009..=0x000c) {
+      let text = require_string(value)?;
+      let posting_keys = compile_corrected_tokens(self.definition.converter_id, text, self.definition.max_output_values as usize)?;
+      let mut postings = Vec::new();
+      postings.try_reserve_exact(posting_keys.len()).map_err(|source| {
+        error(
+          IndexSemanticErrorClassV1::ResourceLimit,
+          "converter_posting_reserve",
+          format!("cannot reserve bounded corrected token output: {source}"),
+        )
+      })?;
+      for (expansion_ordinal, posting_key) in posting_keys.into_iter().enumerate() {
+        let expansion_ordinal = u32::try_from(expansion_ordinal)
+          .map_err(|source| limit_context("converter_expansion_ordinal", format!("posting ordinal exceeds u32: {source}")))?;
+        let coordinate_digest = digest_blake3(TOKEN_COORDINATE_DOMAIN, &posting_key);
+        let coordinate = u64::from_be_bytes(coordinate_digest[..8].try_into().map_err(|source| {
+          error(
+            IndexSemanticErrorClassV1::UnsupportedDefinition,
+            "token_coordinate_digest",
+            format!("BLAKE3 token digest lacks eight bytes: {source}"),
+          )
+        })?);
+        postings.push(CompiledPostingKeyV1 { posting_key, coordinate, expansion_ordinal });
+      }
+      self.enforce_posting_limits(&postings)?;
+      return Ok(CompiledSourceValueV1 { canonical_value, postings });
+    }
+
     let (posting_key, coordinate) = match self.definition.converter_id {
       0x0001 => compile_exact(&canonical_value)?,
       0x0002 => {
@@ -222,13 +282,6 @@ impl<'a> ConverterRuntimeV1<'a> {
         let value = require_bool(value)?;
         (vec![u8::from(value)], if value { u64::MAX } else { 0 })
       }
-      0x0009..=0x000c => {
-        return Err(error(
-          IndexSemanticErrorClassV1::UnsupportedDefinition,
-          "token_converter_runtime_pending",
-          format!("token converter 0x{:04x} requires its frozen expansion runtime", self.definition.converter_id),
-        ));
-      }
       converter_id => {
         return Err(error(
           IndexSemanticErrorClassV1::UnsupportedDefinition,
@@ -238,8 +291,9 @@ impl<'a> ConverterRuntimeV1<'a> {
       }
     };
 
-    self.enforce_output_limits(&posting_key)?;
-    Ok(CompiledSourceValueV1 { canonical_value, postings: vec![CompiledPostingKeyV1 { posting_key, coordinate, expansion_ordinal: 0 }] })
+    let postings = vec![CompiledPostingKeyV1 { posting_key, coordinate, expansion_ordinal: 0 }];
+    self.enforce_posting_limits(&postings)?;
+    Ok(CompiledSourceValueV1 { canonical_value, postings })
   }
 
   fn enforce_input_limit(&self, length: usize) -> IndexSemanticResultV1<()> {
@@ -249,15 +303,226 @@ impl<'a> ConverterRuntimeV1<'a> {
     Ok(())
   }
 
-  fn enforce_output_limits(&self, posting_key: &[u8]) -> IndexSemanticResultV1<()> {
-    if posting_key.len() as u64 > u64::from(self.definition.max_output_value_bytes) {
-      return Err(limit_error("converter_single_output_limit", posting_key.len() as u64, self.definition.max_output_value_bytes as u64));
+  fn enforce_posting_limits(&self, postings: &[CompiledPostingKeyV1]) -> IndexSemanticResultV1<()> {
+    if postings.len() > self.definition.max_output_values as usize {
+      return Err(limit_error("converter_output_count_limit", postings.len() as u64, u64::from(self.definition.max_output_values)));
     }
-    if posting_key.len() as u64 > self.definition.max_total_output_bytes {
-      return Err(limit_error("converter_total_output_limit", posting_key.len() as u64, self.definition.max_total_output_bytes));
+    let mut total_output_bytes = 0u64;
+    for posting in postings {
+      let posting_length = posting.posting_key.len() as u64;
+      if posting_length > u64::from(self.definition.max_output_value_bytes) {
+        return Err(limit_error("converter_single_output_limit", posting_length, u64::from(self.definition.max_output_value_bytes)));
+      }
+      total_output_bytes = total_output_bytes
+        .checked_add(posting_length)
+        .ok_or_else(|| limit_context("converter_total_output_overflow", "posting byte count overflowed u64"))?;
+      if total_output_bytes > self.definition.max_total_output_bytes {
+        return Err(limit_error("converter_total_output_limit", total_output_bytes, self.definition.max_total_output_bytes));
+      }
     }
     Ok(())
   }
+}
+
+fn compile_corrected_tokens(converter_id: u16, text: &str, maximum_values: usize) -> IndexSemanticResultV1<Vec<Vec<u8>>> {
+  let folded = if converter_id == 0x0009 { fold_characters(text).map_err(text_fold_error)? } else { Vec::new() };
+  let mut postings = Vec::new();
+  let estimated_postings = folded.len().saturating_mul(3).saturating_add(1);
+  postings.try_reserve(maximum_values.min(estimated_postings)).map_err(token_reserve_error)?;
+  let mut seen = HashSet::new();
+  seen.try_reserve(maximum_values).map_err(token_reserve_error)?;
+
+  match converter_id {
+    0x0009 => {
+      let mut start = 0usize;
+      while start < folded.len() {
+        while start < folded.len() && !is_alphanumeric(folded[start]).map_err(text_fold_error)? {
+          start += 1;
+        }
+        let mut end = start;
+        while end < folded.len() && is_alphanumeric(folded[end]).map_err(text_fold_error)? {
+          end += 1;
+        }
+        if start < end {
+          let word = &folded[start..end];
+          for window_start in 0..word.len().saturating_add(1) {
+            let characters = [
+              padded_word_character(word, window_start),
+              padded_word_character(word, window_start + 1),
+              padded_word_character(word, window_start + 2),
+            ];
+            push_corrected_token(&mut postings, &mut seen, token_key(WORD_TRIGRAM_CLASS, &characters)?, maximum_values)?;
+          }
+        }
+        start = end.saturating_add(1);
+      }
+      for window in folded.windows(3) {
+        push_corrected_token(&mut postings, &mut seen, token_key(SUBSTRING_TRIGRAM_CLASS, window)?, maximum_values)?;
+      }
+    }
+    0x000a..=0x000c => {
+      let class = match converter_id {
+        0x000a => SOUNDEX_CLASS,
+        0x000b => DOUBLE_METAPHONE_PRIMARY_CLASS,
+        _ => DOUBLE_METAPHONE_ALTERNATE_CLASS,
+      };
+      let mut ascii_word = String::new();
+      ascii_word.try_reserve(text.len()).map_err(token_reserve_error)?;
+      let mut inside_word = false;
+      for character in text.chars() {
+        if is_alphanumeric(character).map_err(text_fold_error)? {
+          inside_word = true;
+          if character.is_ascii_alphabetic() {
+            ascii_word.push(character);
+          }
+        } else if inside_word {
+          push_corrected_phonetic(&mut postings, &mut seen, converter_id, class, &ascii_word, maximum_values)?;
+          ascii_word.clear();
+          inside_word = false;
+        }
+      }
+      if inside_word {
+        push_corrected_phonetic(&mut postings, &mut seen, converter_id, class, &ascii_word, maximum_values)?;
+      }
+    }
+    _ => {
+      return Err(error(
+        IndexSemanticErrorClassV1::UnsupportedDefinition,
+        "token_converter_unknown",
+        format!("converter 0x{converter_id:04x} is not a corrected token converter"),
+      ));
+    }
+  }
+  Ok(postings)
+}
+
+fn padded_word_character(word: &[char], position: usize) -> char {
+  if position < 2 {
+    return ' ';
+  }
+  match word.get(position - 2) {
+    Some(character) => *character,
+    None => ' ',
+  }
+}
+
+fn token_key(class: u8, characters: &[char]) -> IndexSemanticResultV1<Vec<u8>> {
+  let encoded_length = characters.iter().map(|character| character.len_utf8()).sum::<usize>();
+  let mut posting_key = Vec::new();
+  posting_key.try_reserve_exact(encoded_length.saturating_add(1)).map_err(token_reserve_error)?;
+  posting_key.push(class);
+  let mut buffer = [0u8; 4];
+  for character in characters {
+    posting_key.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+  }
+  Ok(posting_key)
+}
+
+fn nonempty_code(value: String) -> Option<String> {
+  if value.is_empty() {
+    None
+  } else {
+    Some(value)
+  }
+}
+
+fn push_corrected_phonetic(
+  postings: &mut Vec<Vec<u8>>,
+  seen: &mut HashSet<Vec<u8>>,
+  converter_id: u16,
+  class: u8,
+  ascii_word: &str,
+  maximum_values: usize,
+) -> IndexSemanticResultV1<()> {
+  if ascii_word.is_empty() {
+    return Ok(());
+  }
+  let code = match converter_id {
+    0x000a => nonempty_code(crate::engine::phonetic::soundex(ascii_word)),
+    0x000b => nonempty_code(crate::engine::phonetic::dmetaphone_primary(ascii_word)),
+    _ => crate::engine::phonetic::dmetaphone_alt(ascii_word),
+  };
+  let Some(code) = code else {
+    return Ok(());
+  };
+  let mut posting_key = Vec::new();
+  posting_key.try_reserve_exact(code.len().saturating_add(1)).map_err(token_reserve_error)?;
+  posting_key.push(class);
+  posting_key.extend_from_slice(code.as_bytes());
+  push_corrected_token(postings, seen, posting_key, maximum_values)
+}
+
+fn push_corrected_token(
+  postings: &mut Vec<Vec<u8>>,
+  seen: &mut HashSet<Vec<u8>>,
+  posting_key: Vec<u8>,
+  maximum_values: usize,
+) -> IndexSemanticResultV1<()> {
+  if seen.contains(&posting_key) {
+    return Ok(());
+  }
+  if postings.len() >= maximum_values {
+    return Err(limit_error("converter_output_count_limit", postings.len() as u64 + 1, maximum_values as u64));
+  }
+  if postings.len() == postings.capacity() {
+    postings.try_reserve(1).map_err(token_reserve_error)?;
+  }
+  let mut seen_key = Vec::new();
+  seen_key.try_reserve_exact(posting_key.len()).map_err(token_reserve_error)?;
+  seen_key.extend_from_slice(&posting_key);
+  seen.insert(seen_key);
+  postings.push(posting_key);
+  Ok(())
+}
+
+fn validate_corrected_token_key(converter_id: u16, value: &[u8]) -> IndexSemanticResultV1<()> {
+  let Some((&class, payload)) = value.split_first() else {
+    return Err(malformed_key("corrected token posting key is empty"));
+  };
+  match converter_id {
+    0x0009 => {
+      if !matches!(class, WORD_TRIGRAM_CLASS | SUBSTRING_TRIGRAM_CLASS) {
+        return Err(malformed_key("trigram posting key has an unknown class"));
+      }
+      let text = std::str::from_utf8(payload).map_err(|source| malformed_key(format!("trigram posting key is invalid UTF-8: {source}")))?;
+      if text.chars().count() != 3 {
+        return Err(malformed_key("trigram posting key must contain exactly three Unicode scalars"));
+      }
+    }
+    0x000a => {
+      if class != SOUNDEX_CLASS || payload.len() != 4 || !payload[0].is_ascii_uppercase() || !payload[1..].iter().all(u8::is_ascii_digit) {
+        return Err(malformed_key("Soundex posting key must be class 03, one uppercase ASCII letter, and three digits"));
+      }
+    }
+    0x000b | 0x000c => {
+      let expected_class = if converter_id == 0x000b { DOUBLE_METAPHONE_PRIMARY_CLASS } else { DOUBLE_METAPHONE_ALTERNATE_CLASS };
+      if class != expected_class
+        || payload.is_empty()
+        || payload.len() > 4
+        || !payload.iter().all(|byte| byte.is_ascii_uppercase() || *byte == b'0')
+      {
+        return Err(malformed_key("Double Metaphone posting key has the wrong class or noncanonical code"));
+      }
+    }
+    _ => return Err(malformed_key("converter does not own a corrected token posting key")),
+  }
+  Ok(())
+}
+
+fn token_reserve_error(source: std::collections::TryReserveError) -> IndexSemanticErrorV1 {
+  error(
+    IndexSemanticErrorClassV1::ResourceLimit,
+    "converter_token_reserve",
+    format!("cannot reserve bounded corrected token workspace: {source}"),
+  )
+}
+
+fn text_fold_error(source: super::text_fold::TextFoldErrorV1) -> IndexSemanticErrorV1 {
+  let class = match source.class() {
+    TextFoldErrorClassV1::MalformedTable => IndexSemanticErrorClassV1::UnsupportedDefinition,
+    TextFoldErrorClassV1::ResourceLimit => IndexSemanticErrorClassV1::ResourceLimit,
+  };
+  error(class, source.code(), source.context())
 }
 
 fn compile_exact(canonical: &[u8]) -> IndexSemanticResultV1<(Vec<u8>, u64)> {
@@ -427,6 +692,10 @@ fn malformed_key(context: impl Into<String>) -> IndexSemanticErrorV1 {
 
 fn limit_error(code: &'static str, observed: u64, maximum: u64) -> IndexSemanticErrorV1 {
   error(IndexSemanticErrorClassV1::ResourceLimit, code, format!("observed {observed} exceeds {maximum}"))
+}
+
+fn limit_context(code: &'static str, context: impl Into<String>) -> IndexSemanticErrorV1 {
+  error(IndexSemanticErrorClassV1::ResourceLimit, code, context)
 }
 
 fn error(class: IndexSemanticErrorClassV1, code: &'static str, context: impl Into<String>) -> IndexSemanticErrorV1 {

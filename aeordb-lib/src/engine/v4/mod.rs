@@ -45,6 +45,7 @@ pub mod hash;
 pub mod header_publication;
 pub mod index_artifact;
 pub mod index_converter;
+pub mod index_converter_v0;
 pub mod index_definition_runtime;
 pub mod index_nvt;
 pub mod index_page;
@@ -62,6 +63,7 @@ pub mod semantic_store;
 pub mod source_selector;
 pub mod system_control;
 pub mod system_family;
+pub mod text_fold;
 pub mod transfer_closure;
 pub mod value_store;
 

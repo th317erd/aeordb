@@ -9,4 +9,4 @@
 
 ## Normative Behavior
 
-Tokenize Unicode alphanumeric runs, retain ASCII letters for Aeor Soundex v1, and emit class-prefixed nonempty four-character codes. Deduplicate first occurrence within one source ordinal.
+Tokenize Unicode alphanumeric runs, retain ASCII letters for Aeor Soundex v1, and emit class 03 followed by each nonempty four-character code. Deduplicate first occurrence within one source ordinal. Coordinate is the first eight bytes of BLAKE3("aeordb.index.token-coordinate.v1\0" || complete class-prefixed token), interpreted big-endian.

@@ -1,3 +1,4 @@
 AEOR-SEMANTICS-VECTORS-V1
 name=string_v0
 capture=default-range;at_min=0.0;at_max=1.0;short=0.0;equal_range=0.5
+coordinate_mapping=zero:0000000000000000,half:8000000000000000,max:ffffffffffffffff

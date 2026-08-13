@@ -69,119 +69,119 @@
       "id": 9,
       "name": "unicode_trigram_v1",
       "corrected": true,
-      "fingerprint_blake3": "73b5a657c326e75e2efe888e739aa895b163eb5efd0031a44326d57f9ec70986"
+      "fingerprint_blake3": "3704bcb4afa0de8d11603414ce8ca66cb78c6ee7870c39ca6ef0a88c2ac7e6cf"
     },
     {
       "kind": "converter",
       "id": 10,
       "name": "soundex_ascii_v1",
       "corrected": true,
-      "fingerprint_blake3": "63238ebac150beade6da179d6177ddb8ce37fb11e92c27d66544bf0d285a9509"
+      "fingerprint_blake3": "6862b41910dde576b8fd0fb00f9c88b165acc2c45fbb349b8d357e2117bf0466"
     },
     {
       "kind": "converter",
       "id": 11,
       "name": "double_metaphone_primary_ascii_v1",
       "corrected": true,
-      "fingerprint_blake3": "97ec34fb7371ee29eb0d0098d7199f8f7db9c90d79cd622d22af3738d1d2cdab"
+      "fingerprint_blake3": "4f9a30c920c8161de9e95fb313e4b63faf6ae0ee8352d6246ce60c38607a038c"
     },
     {
       "kind": "converter",
       "id": 12,
       "name": "double_metaphone_alt_ascii_v1",
       "corrected": true,
-      "fingerprint_blake3": "c7f89014ae455dbb8a96a37d6228d96d842f4c0af9bc098d936d9253f77fe0ad"
+      "fingerprint_blake3": "60a7a0820701fa4d3d7194951e95e398d584fadb1a34ce4b8396f5db77178e12"
     },
     {
       "kind": "converter",
       "id": 32769,
       "name": "hash_v0",
       "corrected": false,
-      "fingerprint_blake3": "caaa7d9f566071d46145427005f4fd0b7e9a238e865026faec82bc54b38797b0"
+      "fingerprint_blake3": "cc6d47ab366e310053999ccd112346e78414a4713d8762ae98fd4e1dfd704ada"
     },
     {
       "kind": "converter",
       "id": 32770,
       "name": "u8_v0",
       "corrected": false,
-      "fingerprint_blake3": "29a656ea077831c261b4a6ca8c7d1a1b0693a90fc975ca2c5d5aa64906539e46"
+      "fingerprint_blake3": "805cef62c2c596c01d331f891d4766bb5950517e93601882e9f283a57945f396"
     },
     {
       "kind": "converter",
       "id": 32771,
       "name": "u16_v0",
       "corrected": false,
-      "fingerprint_blake3": "36e7c63b1f20027099304b1c370b92480a17358b2b27f97c66ff501e8ca560c0"
+      "fingerprint_blake3": "a95ea562eb12a61fec4aa4e3fd7d1a15939ecc09466ffca2c7716ac4fc875a0c"
     },
     {
       "kind": "converter",
       "id": 32772,
       "name": "u32_v0",
       "corrected": false,
-      "fingerprint_blake3": "b6dca785dea23630e88adbef7d3b289e845b43f2941dda0200bc53138a2ea2a3"
+      "fingerprint_blake3": "9f96cbe12b64f541bebb9d85c9a970561d9a8340226fc97a43d230db67c05aa4"
     },
     {
       "kind": "converter",
       "id": 32773,
       "name": "u64_v0",
       "corrected": false,
-      "fingerprint_blake3": "a126ded1e9203b3f4a6fbfa5b82ca10f64d1f1495e1ef695a2ae0bdf315e3a35"
+      "fingerprint_blake3": "c2a96070690d7352c103548b3d4b70deff30f111fac093c9514da9bf472e95d2"
     },
     {
       "kind": "converter",
       "id": 32774,
       "name": "i64_v0",
       "corrected": false,
-      "fingerprint_blake3": "3519369b2fbde8669043737b58d573a3a2eb961c86070ff4a91637d4cac51670"
+      "fingerprint_blake3": "0d0eb400c1d5536a93087b3e6067c2dc3255b8db57e171b0c6db8a9ea4873607"
     },
     {
       "kind": "converter",
       "id": 32775,
       "name": "f64_v0",
       "corrected": false,
-      "fingerprint_blake3": "b19ed38c5a463d7b794f7c52146eb3c6d803d0e56cfde68caf838c18050c8dde"
+      "fingerprint_blake3": "2b96922aafc4055f21af2219df7299f30ef73cb4d26693a084beb594337845f6"
     },
     {
       "kind": "converter",
       "id": 32776,
       "name": "string_v0",
       "corrected": false,
-      "fingerprint_blake3": "929100edf27232e802f362ea578a00c240d35804416b71517cc744bdefa31f6b"
+      "fingerprint_blake3": "08d23dc6c3b198269799ebd2af4eadaaab881328e4633a25662cb048d7ed303d"
     },
     {
       "kind": "converter",
       "id": 32777,
       "name": "timestamp_v0",
       "corrected": false,
-      "fingerprint_blake3": "03595fa861b7755963e2d8765783da559c111b8462c0d0313c97ed980918be18"
+      "fingerprint_blake3": "c33ba8e14805a3e271b5781e3914e428ccdfbedec9f3d5026f6d4f2b95ce4cc6"
     },
     {
       "kind": "converter",
       "id": 32778,
       "name": "trigram_v0",
       "corrected": false,
-      "fingerprint_blake3": "ed24f08a2201711a1c07d1ef615affa1aac76604a67656d90c3b51efc196e874"
+      "fingerprint_blake3": "76f3684bb0d5bfcbaaa2238e3e8685f30c7bc379ab285db14d9bdb933b11ca47"
     },
     {
       "kind": "converter",
       "id": 32779,
       "name": "soundex_v0",
       "corrected": false,
-      "fingerprint_blake3": "0edfdb982a26c161a9536c41339213e3fb418c42b53c18286828a28224830c3c"
+      "fingerprint_blake3": "9a42f10dd2e3771bbbd8bda82c2b100b92e9fe199282c34fb07386e6f6e17afc"
     },
     {
       "kind": "converter",
       "id": 32780,
       "name": "dmetaphone_primary_v0",
       "corrected": false,
-      "fingerprint_blake3": "57a924fb5ceb7e6266a0dbee51333df5515bfd4e227f4b33f2d7e81056fd35dc"
+      "fingerprint_blake3": "9f74e6b62ef02e412f2e89c0ff339529613143cda3f27ccd03527f1ef96f93a1"
     },
     {
       "kind": "converter",
       "id": 32781,
       "name": "dmetaphone_alt_v0",
       "corrected": false,
-      "fingerprint_blake3": "378c7655d1b1ac86001b15887cffe0d4f71f30a7dbe0c6d94ee2564e1ca38381"
+      "fingerprint_blake3": "3dee9f9938cd01275f704c844d4379c1d058e4faee5f0f3d1ac640984e823654"
     },
     {
       "kind": "strategy",

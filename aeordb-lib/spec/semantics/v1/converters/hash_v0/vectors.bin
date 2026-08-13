@@ -2,3 +2,4 @@ AEOR-SEMANTICS-VECTORS-V1
 name=hash_v0
 in=;scalar_bits=0000000000000000
 in=ffffffffffffffff;scalar_bits=000000000000f03f
+coordinate_mapping=zero:0000000000000000,half:8000000000000000,max:ffffffffffffffff

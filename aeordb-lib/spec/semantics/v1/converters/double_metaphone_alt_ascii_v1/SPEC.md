@@ -9,4 +9,4 @@
 
 ## Normative Behavior
 
-Tokenize Unicode alphanumeric runs and emit only a nonempty alternate Aeor Double Metaphone v1 code that differs from primary. No primary fallback is emitted.
+Tokenize Unicode alphanumeric runs and emit class 05 followed only by each nonempty alternate Aeor Double Metaphone v1 code that differs from primary. No primary fallback is emitted. Deduplicate first occurrence within one source ordinal. Coordinate is the first eight bytes of BLAKE3("aeordb.index.token-coordinate.v1\0" || complete class-prefixed token), interpreted big-endian.

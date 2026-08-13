@@ -2,7 +2,7 @@
 # contract: FieldIndexDefinitionV1
 # hash: blake3-256 (32 bytes)
 # expected: field-index:trigram_v0_strategy:converter=trigram_v0:operations=0x360
-# canonical key: b26d32a4b129d1daf30a51637468f930f3fed867bc305a66d22d14d3bb1d0764
+# canonical key: a2596ffbee66034f650c39bd3019c609f234e0912fd0e9b4b8abaa459fa07365
 # relation: strategy-family:migration-v0
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AFIX canonical-definition envelope
@@ -27,6 +27,6 @@
 000000e0: 0000000a800a800a800a800a800a800a
 000000f0: 80010000000000000000000000100000
 00000100: 00000000000100000010000000400000
-00000110: 000000ed24f08a2201711a1c07d1ef61
-00000120: 5affa1aac76604a67656d90c3b51efc1
-00000130: 96e874
+00000110: 00000076f3684bb0d5bfcbaaa2238e3e
+00000120: 8685f30c7bc379ab285db14d9bdb933b
+00000130: 11ca47

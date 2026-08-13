@@ -237,6 +237,36 @@ fn corrected_runtime(name: &str) -> ConverterRuntimeV1<'static> {
   ConverterRuntimeV1::from_encoded(bytes, HashAlgorithm::Blake3_256).unwrap()
 }
 
+fn token_coordinate_reference(posting_key: &[u8]) -> u64 {
+  let mut hasher = blake3::Hasher::new();
+  hasher.update(b"aeordb.index.token-coordinate.v1\0");
+  hasher.update(posting_key);
+  let digest = hasher.finalize();
+  u64::from_be_bytes(digest.as_bytes()[..8].try_into().unwrap())
+}
+
+fn migration_scalar_coordinate_reference(scalar: f64) -> Option<u64> {
+  if scalar <= 0.0 {
+    return Some(0);
+  }
+  if scalar >= 1.0 {
+    return Some(u64::MAX);
+  }
+  if !scalar.is_finite() {
+    return None;
+  }
+
+  let bits = scalar.to_bits();
+  let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+  if exponent_bits == 0 {
+    return Some(0);
+  }
+  let significand = (1u128 << 52) | u128::from(bits & ((1u64 << 52) - 1));
+  let shift = exponent_bits - 1023 + 12;
+  let coordinate = if shift >= 0 { significand << shift } else { significand >> -shift };
+  u64::try_from(coordinate).ok()
+}
+
 #[test]
 fn v1_converter_and_strategy_registries_are_closed_and_match_frozen_definitions() {
   let converters = converter_registry();
@@ -303,6 +333,244 @@ fn corrected_scalar_converters_share_canonical_source_and_query_compilation() {
     assert_eq!(source.postings[0].coordinate, expected_coordinate, "{name}");
     assert_eq!(source.postings[0].expansion_ordinal, 0);
   }
+}
+
+#[test]
+fn corrected_token_converters_match_ratified_classes_coordinates_order_and_deduplication() {
+  let cases = [
+    (
+      "unicode_trigram_v1",
+      "A.B",
+      vec![
+        (hex::decode("01202061").unwrap(), 0x4b8b_1a4f_6b2a_2862),
+        (hex::decode("01206120").unwrap(), 0x8f1b_5ce7_7914_2e26),
+        (hex::decode("01202062").unwrap(), 0x14a7_ef9a_a466_e426),
+        (hex::decode("01206220").unwrap(), 0x2796_91f7_fe5b_feaf),
+        (hex::decode("02612e62").unwrap(), 0x36d1_4394_6826_8084),
+      ],
+    ),
+    ("soundex_ascii_v1", "Robert-Rupert Robert", vec![(hex::decode("0352313633").unwrap(), 0x0dc0_93c8_c500_2637)]),
+    ("double_metaphone_primary_ascii_v1", "Smith Smith", vec![(hex::decode("04534d30").unwrap(), 0x4efb_65f8_2095_b1de)]),
+    ("double_metaphone_alt_ascii_v1", "Smith Schmidt Schmidt", vec![(hex::decode("05534d5454").unwrap(), 0x07a7_6593_4571_acdd)]),
+  ];
+
+  for (name, source, expected) in cases {
+    let runtime = corrected_runtime(name);
+    let value = CanonicalConfigValueV1::String(source.to_string());
+    let compiled = runtime.compile_source_value(&value).unwrap();
+    assert_eq!(compiled, runtime.compile_query_literal(&value).unwrap(), "{name}");
+    assert_eq!(compiled.postings.len(), expected.len(), "{name}");
+    for (ordinal, (posting, (expected_key, expected_coordinate))) in compiled.postings.iter().zip(expected).enumerate() {
+      assert_eq!(posting.posting_key, expected_key, "{name} posting {ordinal}");
+      assert_eq!(posting.coordinate, expected_coordinate, "{name} posting {ordinal}");
+      assert_eq!(posting.coordinate, token_coordinate_reference(&posting.posting_key), "{name} posting {ordinal}");
+      assert_eq!(posting.expansion_ordinal, ordinal as u32, "{name} posting {ordinal}");
+    }
+  }
+}
+
+#[test]
+fn corrected_trigram_preserves_first_occurrence_across_word_and_substring_classes() {
+  let runtime = corrected_runtime("unicode_trigram_v1");
+  let compiled = runtime.compile_source_value(&CanonicalConfigValueV1::String("aaaa".to_string())).unwrap();
+  let expected = ["01202061", "01206161", "01616161", "01616120", "02616161"];
+  assert_eq!(compiled.postings.len(), expected.len());
+  for (ordinal, (posting, expected)) in compiled.postings.iter().zip(expected).enumerate() {
+    assert_eq!(posting.posting_key, hex::decode(expected).unwrap());
+    assert_eq!(posting.expansion_ordinal, ordinal as u32);
+  }
+}
+
+#[test]
+fn corrected_tokens_cover_empty_short_unicode_and_strict_ascii_phonetic_edges() {
+  for name in ["unicode_trigram_v1", "soundex_ascii_v1", "double_metaphone_primary_ascii_v1", "double_metaphone_alt_ascii_v1"] {
+    let runtime = corrected_runtime(name);
+    let value = CanonicalConfigValueV1::String(String::new());
+    assert!(runtime.compile_source_value(&value).unwrap().postings.is_empty(), "{name}");
+    assert_eq!(runtime.compile_source_value(&value).unwrap(), runtime.compile_query_literal(&value).unwrap(), "{name}");
+  }
+
+  let trigram = corrected_runtime("unicode_trigram_v1");
+  for (source, expected) in [
+    (".", Vec::<&str>::new()),
+    ("ab", vec!["01202061", "01206162", "01616220"]),
+    ("é", vec!["012020c3a9", "0120c3a920"]),
+    ("İ", vec!["01202069", "01206920"]),
+  ] {
+    let value = CanonicalConfigValueV1::String(source.to_string());
+    let compiled = trigram.compile_source_value(&value).unwrap();
+    assert_eq!(compiled, trigram.compile_query_literal(&value).unwrap(), "{source:?}");
+    assert_eq!(compiled.postings.len(), expected.len(), "{source:?}");
+    for (posting, expected) in compiled.postings.iter().zip(expected) {
+      assert_eq!(posting.posting_key, hex::decode(expected).unwrap(), "{source:?}");
+      assert_eq!(posting.coordinate, token_coordinate_reference(&posting.posting_key), "{source:?}");
+    }
+  }
+
+  for name in ["soundex_ascii_v1", "double_metaphone_primary_ascii_v1", "double_metaphone_alt_ascii_v1"] {
+    let runtime = corrected_runtime(name);
+    let non_ascii = CanonicalConfigValueV1::String("K".to_string());
+    assert!(runtime.compile_source_value(&non_ascii).unwrap().postings.is_empty(), "{name} must retain source ASCII letters only");
+  }
+}
+
+#[test]
+fn token_compilation_is_independent_of_prior_source_order() {
+  let source_values = ["A.B", "Schmidt", "Robert-Rupert", "aaaa", "İstanbul"];
+  for name in ["unicode_trigram_v1", "soundex_ascii_v1", "double_metaphone_primary_ascii_v1", "double_metaphone_alt_ascii_v1"] {
+    let runtime = corrected_runtime(name);
+    let forward = source_values
+      .iter()
+      .map(|source| runtime.compile_source_value(&CanonicalConfigValueV1::String((*source).to_string())).unwrap())
+      .collect::<Vec<_>>();
+    let reverse = source_values
+      .iter()
+      .rev()
+      .map(|source| runtime.compile_source_value(&CanonicalConfigValueV1::String((*source).to_string())).unwrap())
+      .collect::<Vec<_>>();
+    assert_eq!(forward, reverse.into_iter().rev().collect::<Vec<_>>(), "{name}");
+  }
+}
+
+#[test]
+fn corrected_token_converters_reject_malformed_posting_keys_and_fail_limits_atomically() {
+  let trigram = corrected_runtime("unicode_trigram_v1");
+  for malformed in [vec![], vec![3, b'a', b'b', b'c'], vec![1, 0xff], vec![1, b'a', b'b']] {
+    let error = trigram.compare_posting_keys(&malformed, &[1, b'a', b'b', b'c']).unwrap_err();
+    assert_eq!(error.class(), IndexSemanticErrorClassV1::MalformedPostingKey);
+  }
+  for (name, malformed, valid) in [
+    ("soundex_ascii_v1", vec![3, b'R', b'1'], vec![3, b'R', b'1', b'6', b'3']),
+    ("double_metaphone_primary_ascii_v1", vec![5, b'S'], vec![4, b'S', b'M', b'0']),
+    ("double_metaphone_alt_ascii_v1", vec![5, b's'], vec![5, b'S', b'M', b'T', b'T']),
+  ] {
+    let error = corrected_runtime(name).compare_posting_keys(&malformed, &valid).unwrap_err();
+    assert_eq!(error.class(), IndexSemanticErrorClassV1::MalformedPostingKey, "{name}");
+  }
+
+  let mut count_limited = converter_fixture("unicode_trigram_v1");
+  count_limited[72..76].copy_from_slice(&1u32.to_le_bytes());
+  let runtime = ConverterRuntimeV1::from_encoded(Box::leak(count_limited.into_boxed_slice()), HashAlgorithm::Blake3_256).unwrap();
+  let error = runtime.compile_source_value(&CanonicalConfigValueV1::String("A.B".to_string())).unwrap_err();
+  assert_eq!(error.class(), IndexSemanticErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "converter_output_count_limit");
+
+  let mut total_limited = converter_fixture("soundex_ascii_v1");
+  total_limited[80..88].copy_from_slice(&4u64.to_le_bytes());
+  let runtime = ConverterRuntimeV1::from_encoded(Box::leak(total_limited.into_boxed_slice()), HashAlgorithm::Blake3_256).unwrap();
+  let error = runtime.compile_source_value(&CanonicalConfigValueV1::String("Robert".to_string())).unwrap_err();
+  assert_eq!(error.class(), IndexSemanticErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "converter_total_output_limit");
+}
+
+#[test]
+fn migration_v0_adapters_use_the_ratified_fixed_coordinate_mapping_and_share_query_compilation() {
+  let cases = [
+    ("hash_v0", vec![0xff; 8]),
+    ("u8_v0", vec![128]),
+    ("u16_v0", 32_768u16.to_be_bytes().to_vec()),
+    ("u32_v0", 1u32.to_be_bytes().to_vec()),
+    ("u64_v0", 1u64.to_be_bytes().to_vec()),
+    ("i64_v0", 0i64.to_be_bytes().to_vec()),
+    ("f64_v0", 0.5f64.to_be_bytes().to_vec()),
+    ("string_v0", b"middle".to_vec()),
+    ("timestamp_v0", 2_051_222_400_000i64.to_be_bytes().to_vec()),
+    ("trigram_v0", b"alpha".to_vec()),
+    ("soundex_v0", b"Robert".to_vec()),
+    ("dmetaphone_primary_v0", b"Smith".to_vec()),
+    ("dmetaphone_alt_v0", b"Schmidt".to_vec()),
+  ];
+
+  for (name, bytes) in cases {
+    let runtime = corrected_runtime(name);
+    let value = CanonicalConfigValueV1::Bytes(bytes);
+    let source = runtime.compile_source_value(&value).unwrap();
+    assert_eq!(source, runtime.compile_query_literal(&value).unwrap(), "{name}");
+    assert!(!source.postings.is_empty(), "{name}");
+  }
+
+  let hash = corrected_runtime("hash_v0");
+  assert_eq!(
+    hash.compile_source_value(&CanonicalConfigValueV1::Bytes(Vec::new())).unwrap().postings[0].coordinate,
+    migration_scalar_coordinate_reference(0.0).unwrap()
+  );
+  assert_eq!(
+    hash.compile_source_value(&CanonicalConfigValueV1::Bytes(vec![0xff; 8])).unwrap().postings[0].coordinate,
+    migration_scalar_coordinate_reference(1.0).unwrap()
+  );
+  let float = corrected_runtime("f64_v0");
+  assert_eq!(
+    float.compile_source_value(&CanonicalConfigValueV1::Bytes(0.5f64.to_be_bytes().to_vec())).unwrap().postings[0].coordinate,
+    migration_scalar_coordinate_reference(0.5).unwrap()
+  );
+  assert_eq!(
+    float.compile_source_value(&CanonicalConfigValueV1::Bytes(0.1f64.to_be_bytes().to_vec())).unwrap().postings[0].coordinate,
+    migration_scalar_coordinate_reference(0.1).unwrap()
+  );
+}
+
+#[test]
+fn migration_scalar_reference_freezes_ieee_boundaries_without_float_to_integer_casts() {
+  assert_eq!(migration_scalar_coordinate_reference(-1.0), Some(0));
+  assert_eq!(migration_scalar_coordinate_reference(0.0), Some(0));
+  assert_eq!(migration_scalar_coordinate_reference(f64::from_bits(1)), Some(0));
+  assert_eq!(migration_scalar_coordinate_reference(0.5), Some(1u64 << 63));
+  assert_eq!(migration_scalar_coordinate_reference(f64::from_bits(1.0f64.to_bits() - 1)), Some(u64::MAX - 2_047));
+  assert_eq!(migration_scalar_coordinate_reference(1.0), Some(u64::MAX));
+  assert_eq!(migration_scalar_coordinate_reference(f64::INFINITY), Some(u64::MAX));
+  assert_eq!(migration_scalar_coordinate_reference(f64::NAN), None);
+}
+
+#[test]
+fn migration_v0_adapter_rejects_a_nonfinite_derived_scalar_instead_of_assigning_a_coordinate() {
+  let mut definition = converter_fixture("f64_v0");
+  definition[120..128].copy_from_slice(&f64::NAN.to_le_bytes());
+  definition[128..136].copy_from_slice(&1.0f64.to_le_bytes());
+  let runtime = ConverterRuntimeV1::from_encoded(Box::leak(definition.into_boxed_slice()), HashAlgorithm::Blake3_256).unwrap();
+  let error = runtime.compile_source_value(&CanonicalConfigValueV1::Bytes(0.5f64.to_be_bytes().to_vec())).unwrap_err();
+  assert_eq!(error.class(), IndexSemanticErrorClassV1::InvalidSourceValue);
+  assert_eq!(error.code(), "legacy_scalar_nonfinite");
+}
+
+#[test]
+fn migration_v0_adapter_preserves_invalid_utf8_reversed_ranges_and_atomic_limits() {
+  for name in ["trigram_v0", "soundex_v0", "dmetaphone_primary_v0", "dmetaphone_alt_v0"] {
+    let runtime = corrected_runtime(name);
+    let value = CanonicalConfigValueV1::Bytes(vec![0xff]);
+    assert!(runtime.compile_source_value(&value).unwrap().postings.is_empty(), "{name}");
+  }
+
+  let mut unsigned_definition = converter_fixture("u16_v0");
+  unsigned_definition[120..122].copy_from_slice(&2u16.to_le_bytes());
+  unsigned_definition[122..124].copy_from_slice(&1u16.to_le_bytes());
+  let unsigned = ConverterRuntimeV1::from_encoded(Box::leak(unsigned_definition.into_boxed_slice()), HashAlgorithm::Blake3_256).unwrap();
+  let unsigned_posting =
+    unsigned.compile_source_value(&CanonicalConfigValueV1::Bytes(3u16.to_be_bytes().to_vec())).unwrap().postings.remove(0);
+  assert_eq!(unsigned_posting.coordinate, migration_scalar_coordinate_reference(1.0 / 65_535.0).unwrap());
+
+  let mut float_definition = converter_fixture("f64_v0");
+  float_definition[120..128].copy_from_slice(&1.0f64.to_le_bytes());
+  float_definition[128..136].copy_from_slice(&0.0f64.to_le_bytes());
+  let float = ConverterRuntimeV1::from_encoded(Box::leak(float_definition.into_boxed_slice()), HashAlgorithm::Blake3_256).unwrap();
+  let float_posting =
+    float.compile_source_value(&CanonicalConfigValueV1::Bytes(0.25f64.to_be_bytes().to_vec())).unwrap().postings.remove(0);
+  assert_eq!(float_posting.coordinate, migration_scalar_coordinate_reference(0.75).unwrap());
+
+  let mut count_limited = converter_fixture("trigram_v0");
+  count_limited[72..76].copy_from_slice(&1u32.to_le_bytes());
+  let runtime = ConverterRuntimeV1::from_encoded(Box::leak(count_limited.into_boxed_slice()), HashAlgorithm::Blake3_256).unwrap();
+  let error = runtime.compile_source_value(&CanonicalConfigValueV1::Bytes(b"abc".to_vec())).unwrap_err();
+  assert_eq!(error.class(), IndexSemanticErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "converter_output_count_limit");
+
+  let mut truncated_parameters = converter_fixture("u64_v0");
+  truncated_parameters.pop();
+  let truncated_length = truncated_parameters.len() as u32;
+  truncated_parameters[8..12].copy_from_slice(&truncated_length.to_le_bytes());
+  truncated_parameters[56..60].copy_from_slice(&15u32.to_le_bytes());
+  let error = ConverterRuntimeV1::from_encoded(Box::leak(truncated_parameters.into_boxed_slice()), HashAlgorithm::Blake3_256).unwrap_err();
+  assert_eq!(error.class(), IndexSemanticErrorClassV1::UnsupportedDefinition);
+  assert_eq!(error.code(), "converter_definition_invalid");
 }
 
 #[test]

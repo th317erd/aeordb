@@ -9,4 +9,4 @@
 
 ## Normative Behavior
 
-Preserve whitespace tokenization, Aeor Soundex v0, sorted/deduplicated codes, and BLAKE3 code scalar interpreted little-endian.
+Preserve whitespace tokenization, Aeor Soundex v0, sorted/deduplicated codes, and BLAKE3 code scalar interpreted little-endian. Legacy scalar conversion to the fixed u64 coordinate is exact: scalar <= 0 maps to 0, scalar >= 1 maps to u64::MAX, and a finite interior scalar maps to floor(scalar * 2^64) by IEEE-754 decomposition and integer arithmetic. A nonfinite interior result is invalid rather than assigned a coordinate.

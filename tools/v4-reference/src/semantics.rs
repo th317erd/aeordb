@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 const DOMAIN: &[u8] = b"aeordb.builtin-semantics.v1\0";
 const BUNDLE_FILES: [&str; 4] = ["SPEC.md", "invalid.bin", "properties.json", "vectors.bin"];
+const TEXT_FOLD_TABLE: &[u8] = include_bytes!("../../../aeordb-lib/spec/semantics/v1/aeor-text-fold-unicode-17.bin");
+const TEXT_FOLD_TABLE_BLAKE3: &str = "9f1bdd82a6142ddc3824e125c28ab941de2ac9b98fd7eaffaa5b85a3f6f884d2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -115,11 +117,18 @@ pub fn fingerprint(descriptor: BundleDescriptor) -> [u8; 32] {
     input.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     input.extend_from_slice(bytes);
   }
+  if descriptor.kind == BundleKind::Converter && descriptor.id == 0x0009 && descriptor.corrected {
+    input.extend_from_slice(&(TEXT_FOLD_TABLE.len() as u32).to_le_bytes());
+    input.extend_from_slice(TEXT_FOLD_TABLE);
+  }
   *blake3::hash(&input).as_bytes()
 }
 
 pub fn generate(spec_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
   let root = semantics_root(spec_root);
+  let text_fold_table_path = root.join("aeor-text-fold-unicode-17.bin");
+  crate::text_fold::generate(&text_fold_table_path)?;
+  verify_text_fold_table(&text_fold_table_path)?;
   for descriptor in all_descriptors() {
     let directory = root.join(bundle_directory(descriptor));
     fs::create_dir_all(&directory)?;
@@ -133,6 +142,7 @@ pub fn generate(spec_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn verify(spec_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
   let root = semantics_root(spec_root);
+  verify_text_fold_table(&root.join("aeor-text-fold-unicode-17.bin"))?;
   for descriptor in all_descriptors() {
     let directory = root.join(bundle_directory(descriptor));
     for (name, expected) in bundle_files(descriptor) {
@@ -153,6 +163,18 @@ fn semantics_root(spec_root: &Path) -> std::path::PathBuf {
   spec_root.join("semantics/v1")
 }
 
+fn verify_text_fold_table(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+  let actual = fs::read(path)?;
+  if actual != TEXT_FOLD_TABLE {
+    return Err("checked-in AeorTextFoldV1 table differs from the canonical independent fixture".into());
+  }
+  let metadata = crate::text_fold::validate(&actual)?;
+  if hex::encode(metadata.blake3) != TEXT_FOLD_TABLE_BLAKE3 {
+    return Err("AeorTextFoldV1 checksum differs from the semantic bundle contract".into());
+  }
+  Ok(())
+}
+
 fn bundle_directory(descriptor: BundleDescriptor) -> String {
   let family = match descriptor.kind {
     BundleKind::Converter => "converters",
@@ -167,6 +189,13 @@ fn bundle_files(descriptor: BundleDescriptor) -> Vec<(&'static str, String)> {
     BundleKind::Strategy => "strategy",
   };
   let stability = if descriptor.corrected { "corrected-v1" } else { "migration-only-v0-adapter" };
+  let normative_behavior = match (descriptor.kind, descriptor.corrected) {
+    (BundleKind::Converter, false) => format!(
+      "{} Legacy scalar conversion to the fixed u64 coordinate is exact: scalar <= 0 maps to 0, scalar >= 1 maps to u64::MAX, and a finite interior scalar maps to floor(scalar * 2^64) by IEEE-754 decomposition and integer arithmetic. A nonfinite interior result is invalid rather than assigned a coordinate.",
+      semantic_spec(descriptor)
+    ),
+    _ => semantic_spec(descriptor).to_string(),
+  };
   vec![
     (
       "SPEC.md",
@@ -175,7 +204,7 @@ fn bundle_files(descriptor: BundleDescriptor) -> Vec<(&'static str, String)> {
         descriptor.name,
         descriptor.id,
         descriptor.purpose,
-        semantic_spec(descriptor)
+        normative_behavior
       ),
     ),
     (
@@ -231,16 +260,16 @@ fn semantic_spec(descriptor: BundleDescriptor) -> &'static str {
       "Accept bool only. Posting key 00 is false and 01 is true. Coordinate is zero for false and u64::MAX for true."
     }
     (BundleKind::Converter, 0x0009, true) => {
-      "Apply frozen Unicode lowercase with no normalization. Emit class 01 word trigrams from alphanumeric words padded with two leading spaces and one trailing space, then class 02 substring trigrams over the complete folded scalar sequence without padding or boundary removal. Deduplicate within one source ordinal in first-occurrence order. Coordinate hashes the complete class-prefixed token."
+      "Apply the frozen Unicode 17.0.0 lowercase and alphanumeric table with BLAKE3 9f1bdd82a6142ddc3824e125c28ab941de2ac9b98fd7eaffaa5b85a3f6f884d2 and no normalization. Emit class 01 word trigrams from alphanumeric words padded with two leading spaces and one trailing space, then class 02 substring trigrams over the complete folded scalar sequence without padding or boundary removal. Deduplicate within one source ordinal in first-occurrence order. Coordinate is the first eight bytes of BLAKE3(\"aeordb.index.token-coordinate.v1\\0\" || complete class-prefixed token), interpreted big-endian."
     }
     (BundleKind::Converter, 0x000a, true) => {
-      "Tokenize Unicode alphanumeric runs, retain ASCII letters for Aeor Soundex v1, and emit class-prefixed nonempty four-character codes. Deduplicate first occurrence within one source ordinal."
+      "Tokenize Unicode alphanumeric runs, retain ASCII letters for Aeor Soundex v1, and emit class 03 followed by each nonempty four-character code. Deduplicate first occurrence within one source ordinal. Coordinate is the first eight bytes of BLAKE3(\"aeordb.index.token-coordinate.v1\\0\" || complete class-prefixed token), interpreted big-endian."
     }
     (BundleKind::Converter, 0x000b, true) => {
-      "Tokenize Unicode alphanumeric runs, retain ASCII letters, and emit the nonempty Aeor Double Metaphone v1 primary code. Deduplicate first occurrence within one source ordinal."
+      "Tokenize Unicode alphanumeric runs, retain ASCII letters, and emit class 04 followed by each nonempty Aeor Double Metaphone v1 primary code. Deduplicate first occurrence within one source ordinal. Coordinate is the first eight bytes of BLAKE3(\"aeordb.index.token-coordinate.v1\\0\" || complete class-prefixed token), interpreted big-endian."
     }
     (BundleKind::Converter, 0x000c, true) => {
-      "Tokenize Unicode alphanumeric runs and emit only a nonempty alternate Aeor Double Metaphone v1 code that differs from primary. No primary fallback is emitted."
+      "Tokenize Unicode alphanumeric runs and emit class 05 followed only by each nonempty alternate Aeor Double Metaphone v1 code that differs from primary. No primary fallback is emitted. Deduplicate first occurrence within one source ordinal. Coordinate is the first eight bytes of BLAKE3(\"aeordb.index.token-coordinate.v1\\0\" || complete class-prefixed token), interpreted big-endian."
     }
     (BundleKind::Converter, 0x8001, false) => {
       "Preserve HashConverter v0: inputs shorter than eight bytes map to scalar 0.0; otherwise the first eight bytes are big-endian u64 divided in f64 by u64::MAX. It is not order preserving."
@@ -293,13 +322,13 @@ fn valid_vectors(descriptor: BundleDescriptor) -> &'static str {
     (BundleKind::Converter, 0x0006, true) => "in_f64=-0;key=0000000000000000;coordinate=8000000000000000\nin_f64=1;key=000000000000f03f;coordinate=bff0000000000000",
     (BundleKind::Converter, 0x0007, true) => "in=1970-01-01T00:00:00Z;key=0000000000000000;coordinate=8000000000000000\nin=1970-01-01T01:00:00+01:00;key=0000000000000000;coordinate=8000000000000000",
     (BundleKind::Converter, 0x0008, true) => "in=false;key=00;coordinate=0000000000000000\nin=true;key=01;coordinate=ffffffffffffffff",
-    (BundleKind::Converter, 0x0009, true) => "in=A.B;word=0120206120,0120206220;substring=02612e62\nin=aaaa;word=01202061,01206161,01616161,01616120;substring=02616161",
-    (BundleKind::Converter, 0x000a, true) => "in=Robert;codes=R163\nin=Rupert;codes=R163\nin=Ashcraft;codes=A261",
-    (BundleKind::Converter, 0x000b, true) => "in=empty;codes=\nin=Smith;codes=SM0",
-    (BundleKind::Converter, 0x000c, true) => "in=Smith;codes=\nin=Schmidt;codes=SMTT",
-    (BundleKind::Converter, 0x8001, false) => "in=;scalar_bits=0000000000000000\nin=ffffffffffffffff;scalar_bits=000000000000f03f",
-    (BundleKind::Converter, 0x8002..=0x8009, false) => "capture=default-range;at_min=0.0;at_max=1.0;short=0.0;equal_range=0.5",
-    (BundleKind::Converter, 0x800a..=0x800d, false) => "capture=production-v0-tokenizer-and-little-endian-digest-scalar;empty=no_tokens;duplicates=sorted_unique",
+    (BundleKind::Converter, 0x0009, true) => "domain=aeordb.index.token-coordinate.v1\\0\nin=A.B;word=01202061@4b8b1a4f6b2a2862,01206120@8f1b5ce779142e26,01202062@14a7ef9aa466e426,01206220@279691f7fe5bfeaf;substring=02612e62@36d1439468268084\nin=aaaa;word=01202061@4b8b1a4f6b2a2862,01206161@0177735c6cbbbe68,01616161@c13ac2540d0be1ab,01616120@c3dbe7587f326766;substring=02616161@e75d77919708a111",
+    (BundleKind::Converter, 0x000a, true) => "domain=aeordb.index.token-coordinate.v1\\0;class=03\nin=Robert;postings=0352313633@0dc093c8c5002637\nin=Rupert;postings=0352313633@0dc093c8c5002637\nin=Ashcraft;postings=0341323631@faecce9f8a46f86b",
+    (BundleKind::Converter, 0x000b, true) => "domain=aeordb.index.token-coordinate.v1\\0;class=04\nin=;postings=\nin=Smith;postings=04534d30@4efb65f82095b1de",
+    (BundleKind::Converter, 0x000c, true) => "domain=aeordb.index.token-coordinate.v1\\0;class=05\nin=Smith;postings=\nin=Schmidt;postings=05534d5454@07a765934571acdd",
+    (BundleKind::Converter, 0x8001, false) => "in=;scalar_bits=0000000000000000\nin=ffffffffffffffff;scalar_bits=000000000000f03f\ncoordinate_mapping=zero:0000000000000000,half:8000000000000000,max:ffffffffffffffff",
+    (BundleKind::Converter, 0x8002..=0x8009, false) => "capture=default-range;at_min=0.0;at_max=1.0;short=0.0;equal_range=0.5\ncoordinate_mapping=zero:0000000000000000,half:8000000000000000,max:ffffffffffffffff",
+    (BundleKind::Converter, 0x800a..=0x800d, false) => "capture=production-v0-tokenizer-and-little-endian-digest-scalar;empty=no_tokens;duplicates=sorted_unique\ncoordinate_mapping=zero:0000000000000000,half:8000000000000000,max:ffffffffffffffff",
     (BundleKind::Strategy, _, _) => "empty=defined\nduplicate_documents=deduplicated_after_boolean_composition\ncoordinate_collision=complete-key-and-value-recheck",
     _ => "empty=defined\nboundary=min|max\nduplicate=preserve-source-ordinal",
   }
@@ -352,6 +381,16 @@ mod tests {
     names.dedup();
     assert_eq!(names.len(), descriptors.len());
     assert!(descriptors.iter().all(|row| fingerprint(*row) != [0; 32]));
+  }
+
+  #[test]
+  fn unicode_trigram_fingerprint_binds_the_frozen_text_fold_table() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../aeordb-lib/spec/semantics/v1/aeor-text-fold-unicode-17.bin");
+    verify_text_fold_table(&path).unwrap();
+    let metadata = crate::text_fold::validate(TEXT_FOLD_TABLE).unwrap();
+    assert_eq!(metadata.mapping_count, 1_488);
+    assert_eq!(metadata.alphanumeric_range_count, 844);
+    assert_eq!(metadata.byte_length, 36_564);
   }
 
   #[test]

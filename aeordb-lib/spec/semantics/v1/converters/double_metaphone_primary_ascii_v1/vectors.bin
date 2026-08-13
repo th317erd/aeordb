@@ -1,4 +1,5 @@
 AEOR-SEMANTICS-VECTORS-V1
 name=double_metaphone_primary_ascii_v1
-in=empty;codes=
-in=Smith;codes=SM0
+domain=aeordb.index.token-coordinate.v1\0;class=04
+in=;postings=
+in=Smith;postings=04534d30@4efb65f82095b1de

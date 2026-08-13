@@ -1,5 +1,6 @@
 AEOR-SEMANTICS-VECTORS-V1
 name=soundex_ascii_v1
-in=Robert;codes=R163
-in=Rupert;codes=R163
-in=Ashcraft;codes=A261
+domain=aeordb.index.token-coordinate.v1\0;class=03
+in=Robert;postings=0352313633@0dc093c8c5002637
+in=Rupert;postings=0352313633@0dc093c8c5002637
+in=Ashcraft;postings=0341323631@faecce9f8a46f86b

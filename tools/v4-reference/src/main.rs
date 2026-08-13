@@ -20,6 +20,7 @@ mod selector;
 mod semantics;
 mod system_control;
 mod system_family;
+mod text_fold;
 mod value_store;
 
 use std::collections::BTreeMap;
@@ -222,7 +223,9 @@ struct SelectedSlot {
 
 fn main() -> DynResult<()> {
   let mut args = env::args().skip(1);
-  let command = args.next().ok_or("usage: aeordb-v4-reference <generate|verify|generate-contracts|check-contracts> <paths...>")?;
+  let command = args.next().ok_or(
+    "usage: aeordb-v4-reference <generate|verify|generate-contracts|check-contracts|generate-text-fold|verify-text-fold> <paths...>",
+  )?;
   match command.as_str() {
     "generate" | "verify" => {
       let fixture_root = PathBuf::from(args.next().ok_or("missing fixture root")?);
@@ -247,6 +250,25 @@ fn main() -> DynResult<()> {
         contract_gen::generate(&registry, &system_family, &architecture, &output)
       } else {
         contract_gen::check(&registry, &system_family, &architecture, &output)
+      }
+    }
+    "generate-text-fold" | "verify-text-fold" => {
+      let path = PathBuf::from(args.next().ok_or("missing AeorTextFoldV1 table path")?);
+      if args.next().is_some() {
+        return Err("unexpected extra argument".into());
+      }
+      if command == "generate-text-fold" {
+        text_fold::generate(&path)
+      } else {
+        let metadata = text_fold::verify(&path)?;
+        println!(
+          "AeorTextFoldV1: PASS ({} mappings, {} alphanumeric ranges, {} bytes, blake3={})",
+          metadata.mapping_count,
+          metadata.alphanumeric_range_count,
+          metadata.byte_length,
+          hex::encode(metadata.blake3)
+        );
+        Ok(())
       }
     }
     _ => Err(format!("unknown command: {command}").into()),

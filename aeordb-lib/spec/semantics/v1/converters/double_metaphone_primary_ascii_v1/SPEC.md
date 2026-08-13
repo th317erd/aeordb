@@ -9,4 +9,4 @@
 
 ## Normative Behavior
 
-Tokenize Unicode alphanumeric runs, retain ASCII letters, and emit the nonempty Aeor Double Metaphone v1 primary code. Deduplicate first occurrence within one source ordinal.
+Tokenize Unicode alphanumeric runs, retain ASCII letters, and emit class 04 followed by each nonempty Aeor Double Metaphone v1 primary code. Deduplicate first occurrence within one source ordinal. Coordinate is the first eight bytes of BLAKE3("aeordb.index.token-coordinate.v1\0" || complete class-prefixed token), interpreted big-endian.
