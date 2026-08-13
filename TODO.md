@@ -845,7 +845,11 @@
           - [x] Merge eligible adjacent pages while retaining the lower PageId, retiring all consumed IDs, and rewriting only changed outward posting links.
           - [x] Preserve tombstones by default; drop them only for an exact immutable-page proof and represent fully retired directory roots explicitly.
           - [x] Prove malformed windows/proofs, missing neighbors, no-op eligibility, workspace limits, deterministic output, and directory retirement propagation.
-        - [ ] P5-5e: validate the resulting path/link/count/generation closure, enforce page/directory/resource bounds, and prove deterministic randomized mutations against the independent model.
+        - [x] P5-5e: validate the resulting path/link/count/generation closure, enforce page/directory/resource bounds, and prove deterministic randomized mutations against the independent model.
+          - [x] Freeze one storage-neutral whole-plan validation request and success summary for later P6 publication admission.
+          - [x] Validate exact source/replacement, allocation/retirement, page-link, directory dependency, root aggregate, generation, and PageId closure.
+          - [x] Reject mutated plans, duplicate/detached artifacts, inconsistent counters, broken dependency order, and resource amplification before publication can consume them.
+          - [x] Run deterministic randomized insert/replace/tombstone/split/compact/merge sequences against an independent logical model at both hash widths.
         - [ ] P5-5f: run narrow, affected, broad, static, architecture, native-platform, and shadow real-world COW gates; record evidence and land the unit.
       - [ ] P5-6: implement sparse fixed-point NVT tiles, fallback, and best-effort healing.
       - [ ] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 use std::ops::Range;
 
@@ -166,6 +166,41 @@ pub struct ArtifactDirectoryMutationPlanV1 {
   pub minimum_page_id: u64,
   pub maximum_page_id: u64,
   pub artifacts: Vec<EncodedImmutableIndexArtifactV1>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexCopyOnWriteClosureRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub generation: u64,
+  pub initial_next_page_id: u64,
+  pub source_pages: &'a [&'a [u8]],
+  pub paths: &'a [ArtifactDirectoryPathV1<'a>],
+  pub page_plan: &'a OrderedPageMutationPlanV1,
+  pub directory_plan: &'a ArtifactDirectoryMutationPlanV1,
+  pub page_layout: IndexPageLayoutV1,
+  pub directory_layout: IndexDirectoryLayoutV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexCopyOnWriteClosureSummaryV1 {
+  pub owner_id: Vec<u8>,
+  pub role: OrderedIndexRoleV1,
+  pub generation: u64,
+  pub root_key: Option<Vec<u8>>,
+  pub live_count: u64,
+  pub tombstone_count: u64,
+  pub page_count: u64,
+  pub logical_bytes: u64,
+  pub minimum_page_id: u64,
+  pub maximum_page_id: u64,
+  pub next_page_id: u64,
+  pub page_artifact_count: usize,
+  pub directory_artifact_count: usize,
+  pub source_page_bytes: usize,
+  pub directory_path_bytes: usize,
+  pub page_artifact_bytes: usize,
+  pub directory_artifact_bytes: usize,
+  pub retained_encoded_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -635,6 +670,7 @@ pub fn rewrite_artifact_directory_paths_v1(
       ),
     ));
   }
+  validate_directory_path_input_workspace(request.paths, request.layout.maximum_workspace_bytes)?;
 
   let replacement_entries = validate_page_replacement_outputs(request)?;
   let graph = validate_directory_path_graph(request, &replacement_entries)?;
@@ -670,6 +706,7 @@ pub fn rewrite_artifact_directory_paths_v1(
         &graph.owner_id,
         graph.role,
         &rewritten_entries,
+        request.layout.target_bytes,
         &mut artifacts,
         &mut retained_artifact_bytes,
       )?;
@@ -692,12 +729,26 @@ pub fn rewrite_artifact_directory_paths_v1(
       .checked_add(1)
       .filter(|level| *level <= 15)
       .ok_or_else(|| amplification_error("index_cow_directory_depth", "recursive directory split would exceed level 15"))?;
+    let target_groups = partition_directory_entries(request.hash_algorithm, root_level, &root_entries, request.layout.target_bytes)?;
+    let root_target_bytes = if target_groups.len() < root_entries.len() {
+      request.layout.target_bytes
+    } else {
+      let hard_groups = partition_directory_entries(request.hash_algorithm, root_level, &root_entries, request.layout.hard_artifact_bytes)?;
+      if hard_groups.len() >= root_entries.len() {
+        return Err(amplification_error(
+          "index_cow_directory_nonreducing_root",
+          "directory descriptors cannot form a smaller hard-cap-bounded parent level",
+        ));
+      }
+      request.layout.hard_artifact_bytes
+    };
     root_entries = encode_directory_entry_groups(
       request,
       root_level,
       &graph.owner_id,
       graph.role,
       &root_entries,
+      root_target_bytes,
       &mut artifacts,
       &mut retained_artifact_bytes,
     )?;
@@ -731,6 +782,601 @@ pub fn rewrite_artifact_directory_paths_v1(
     maximum_page_id: root.maximum_page_id,
     artifacts,
   })
+}
+
+pub fn validate_index_copy_on_write_closure_v1(
+  request: &IndexCopyOnWriteClosureRequestV1<'_>,
+) -> FormatResult<IndexCopyOnWriteClosureSummaryV1> {
+  validate_layout(request.page_layout)?;
+  validate_directory_layout(request.directory_layout)?;
+  if request.generation == 0 {
+    return Err(identity_error("index_cow_closure_generation", "copy-on-write closure generation is zero"));
+  }
+  if request.source_pages.is_empty() || request.source_pages.len() > INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1 {
+    return Err(amplification_error(
+      "index_cow_closure_source_count",
+      format!(
+        "{} source pages are outside the 1..={} closure bound",
+        request.source_pages.len(),
+        INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1
+      ),
+    ));
+  }
+  let directory_path_bytes = validate_directory_path_input_workspace(request.paths, request.directory_layout.maximum_workspace_bytes)?;
+  let page_closure = validate_page_plan_closure(request)?;
+  let directory_artifact_bytes = validate_directory_plan_closure(request, &page_closure)?;
+  let retained_encoded_bytes = page_closure
+    .source_page_bytes
+    .checked_add(directory_path_bytes)
+    .and_then(|bytes| bytes.checked_add(page_closure.page_artifact_bytes))
+    .and_then(|bytes| bytes.checked_add(directory_artifact_bytes))
+    .ok_or_else(|| arithmetic_error("index_cow_closure_retained_bytes", "retained encoded byte count overflowed"))?;
+  if retained_encoded_bytes > request.directory_layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_closure_retained_workspace",
+      format!(
+        "{retained_encoded_bytes} retained encoded bytes exceed the {}-byte complete-operation cap",
+        request.directory_layout.maximum_workspace_bytes
+      ),
+    ));
+  }
+  let root_key = request.directory_plan.root_key.as_deref().map(|key| copy_fallible_bytes(key, "closure root key")).transpose()?;
+
+  Ok(IndexCopyOnWriteClosureSummaryV1 {
+    owner_id: page_closure.owner_id,
+    role: page_closure.role,
+    generation: request.generation,
+    root_key,
+    live_count: request.directory_plan.live_count,
+    tombstone_count: request.directory_plan.tombstone_count,
+    page_count: request.directory_plan.page_count,
+    logical_bytes: request.directory_plan.logical_bytes,
+    minimum_page_id: request.directory_plan.minimum_page_id,
+    maximum_page_id: request.directory_plan.maximum_page_id,
+    next_page_id: request.page_plan.next_page_id,
+    page_artifact_count: page_closure.output_pages.len(),
+    directory_artifact_count: request.directory_plan.artifacts.len(),
+    source_page_bytes: page_closure.source_page_bytes,
+    directory_path_bytes,
+    page_artifact_bytes: page_closure.page_artifact_bytes,
+    directory_artifact_bytes,
+    retained_encoded_bytes,
+  })
+}
+
+#[derive(Debug)]
+struct ValidatedPageClosureV1<'a> {
+  role: OrderedIndexRoleV1,
+  owner_id: Vec<u8>,
+  source_keys: BTreeSet<Vec<u8>>,
+  output_pages: Vec<OrderedPageV1<'a>>,
+  source_page_bytes: usize,
+  page_artifact_bytes: usize,
+}
+
+fn validate_page_plan_closure<'a>(request: &'a IndexCopyOnWriteClosureRequestV1<'_>) -> FormatResult<ValidatedPageClosureV1<'a>> {
+  if request.page_plan.replacements.len() != request.source_pages.len() {
+    return Err(closure_error("index_cow_closure_source_count", "source-page count does not match the page replacement count"));
+  }
+  let mut sources = Vec::new();
+  if let Err(error) = sources.try_reserve_exact(request.source_pages.len()) {
+    return Err(amplification_error("index_cow_closure_sources", format!("source-page reservation failed: {error}")));
+  }
+  let mut source_bytes = 0usize;
+  for bytes in request.source_pages {
+    source_bytes = source_bytes
+      .checked_add(bytes.len())
+      .ok_or_else(|| arithmetic_error("index_cow_closure_source_bytes", "source-page bytes overflowed"))?;
+    if source_bytes > request.page_layout.maximum_workspace_bytes {
+      return Err(amplification_error(
+        "index_cow_closure_source_workspace",
+        format!("source-page bytes exceed the {}-byte operation cap", request.page_layout.maximum_workspace_bytes),
+      ));
+    }
+    sources.push(decode_ordered_page(bytes, request.hash_algorithm)?);
+  }
+  let first = sources.first().ok_or_else(|| closure_error("index_cow_closure_source_count", "copy-on-write closure has no source page"))?;
+  let role = first.role;
+  let owner_id = copy_fallible_bytes(first.owner_id, "closure owner")?;
+  let mut sources_by_key = BTreeMap::new();
+  let mut source_keys = BTreeSet::new();
+  let mut source_page_ids = BTreeSet::new();
+  let mut observed_source_page_id_high_water = 0u64;
+  for (source_index, source) in sources.iter().enumerate() {
+    if source.role != role || source.owner_id != owner_id || source.generation >= request.generation {
+      return Err(identity_error(
+        "index_cow_closure_source_identity",
+        "source pages disagree on owner or role, or are not older than the closure generation",
+      ));
+    }
+    if !source_keys.insert(source.key.clone()) || sources_by_key.insert(source.key.clone(), source_index).is_some() {
+      return Err(closure_error("index_cow_closure_duplicate_source", "copy-on-write closure repeats one immutable source page"));
+    }
+    if role.uses_page_id() && !source_page_ids.insert(source.page_id) {
+      return Err(closure_error("index_cow_closure_duplicate_page_id", "source pages reuse one stable PageId"));
+    }
+    if role.uses_page_id() {
+      observed_source_page_id_high_water =
+        observed_source_page_id_high_water.max(source.page_id).max(source.previous_page_id).max(source.next_page_id);
+    }
+  }
+
+  validate_page_id_deltas(request, role, &source_page_ids, observed_source_page_id_high_water)?;
+  let output_count = request.page_plan.replacements.iter().try_fold(0usize, |count, replacement| {
+    count
+      .checked_add(replacement.artifacts.len())
+      .ok_or_else(|| arithmetic_error("index_cow_closure_output_count", "page artifact count overflowed"))
+  })?;
+  let output_metadata_bytes = output_count
+    .checked_mul(size_of::<OrderedPageV1<'_>>())
+    .ok_or_else(|| arithmetic_error("index_cow_closure_output_count", "page output metadata bytes overflowed"))?;
+  if output_metadata_bytes > request.page_layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_closure_output_count",
+      format!("page output metadata exceeds the {}-byte operation cap", request.page_layout.maximum_workspace_bytes),
+    ));
+  }
+  let mut output_pages = Vec::new();
+  if let Err(error) = output_pages.try_reserve_exact(output_count) {
+    return Err(amplification_error("index_cow_closure_outputs", format!("page-output reservation failed: {error}")));
+  }
+  let mut output_bytes = 0usize;
+  let mut output_keys = BTreeSet::new();
+  let mut output_page_ids = BTreeSet::new();
+  let mut allocated_page_ids = BTreeSet::new();
+  for page_id in &request.page_plan.allocated_page_ids {
+    allocated_page_ids.insert(*page_id);
+  }
+  for (replacement_index, replacement) in request.page_plan.replacements.iter().enumerate() {
+    if sources.get(replacement_index).is_none_or(|source| source.key != replacement.source_key) {
+      return Err(closure_error("index_cow_closure_source_order", "replacement order does not match the exact supplied source-page order"));
+    }
+    let source_index = sources_by_key
+      .get(replacement.source_key.as_slice())
+      .ok_or_else(|| closure_error("index_cow_closure_unknown_source", "page replacement names a source outside the supplied closure"))?;
+    let source = &sources[*source_index];
+    if !replacement_matches_source(replacement, source) {
+      return Err(closure_error(
+        "index_cow_closure_source_summary",
+        "page replacement does not exactly summarize its immutable source page",
+      ));
+    }
+    if replacement.source_retired != replacement.artifacts.is_empty() {
+      return Err(closure_error(
+        "index_cow_closure_retirement_output",
+        "retired page replacement presence disagrees with its output artifacts",
+      ));
+    }
+    let mut previous_output: Option<&OrderedPageV1<'_>> = None;
+    let mut retains_source_page_id = false;
+    for artifact in &replacement.artifacts {
+      output_bytes = output_bytes
+        .checked_add(artifact.value.len())
+        .ok_or_else(|| arithmetic_error("index_cow_closure_output_bytes", "page artifact bytes overflowed"))?;
+      if artifact.value.len() > request.page_layout.hard_artifact_bytes || output_bytes > request.page_layout.maximum_workspace_bytes {
+        return Err(amplification_error(
+          "index_cow_closure_page_workspace",
+          format!("page artifacts exceed the {}-byte operation cap", request.page_layout.maximum_workspace_bytes),
+        ));
+      }
+      let page = decode_ordered_page(&artifact.value, request.hash_algorithm)?;
+      if page.key != artifact.key
+        || page.role != role
+        || page.owner_id != owner_id
+        || page.generation != request.generation
+        || !output_keys.insert(page.key.clone())
+      {
+        return Err(closure_error(
+          "index_cow_closure_page_output",
+          "page output has a duplicate or inconsistent key, owner, role, or generation",
+        ));
+      }
+      if let Some(previous) = previous_output {
+        if compare_order_keys(request.hash_algorithm, role, previous.upper_fence, page.lower_fence)? != Ordering::Less {
+          return Err(closure_error("index_cow_closure_page_order", "one replacement emits overlapping or unordered pages"));
+        }
+      }
+      if role.uses_page_id() {
+        retains_source_page_id |= page.page_id == source.page_id;
+        if !output_page_ids.insert(page.page_id) {
+          return Err(closure_error("index_cow_closure_duplicate_output_page_id", "page outputs reuse one stable PageId"));
+        }
+        if !source_page_ids.contains(&page.page_id) && !allocated_page_ids.contains(&page.page_id) {
+          return Err(identity_error("index_cow_closure_unallocated_page_id", "page output uses neither a source nor an allocated PageId"));
+        }
+        if page.page_id >= request.page_plan.next_page_id
+          || page.previous_page_id >= request.page_plan.next_page_id
+          || page.next_page_id >= request.page_plan.next_page_id
+        {
+          return Err(identity_error(
+            "index_cow_closure_page_id_high_water",
+            "page output reaches or exceeds the next PageId high-water mark",
+          ));
+        }
+      }
+      output_pages.push(page);
+      previous_output = output_pages.last();
+    }
+    if role.uses_page_id() {
+      let retirement_set_contains_source = request.page_plan.retired_page_ids.iter().any(|page_id| *page_id == source.page_id);
+      if replacement.source_retired != retirement_set_contains_source || replacement.source_retired == retains_source_page_id {
+        return Err(closure_error(
+          "index_cow_closure_source_retirement",
+          "source retirement flag, retirement set, and stable PageId survival disagree",
+        ));
+      }
+    }
+  }
+  if sources_by_key.len() != request.page_plan.replacements.len() {
+    return Err(closure_error("index_cow_closure_missing_source", "not every supplied source page has one replacement"));
+  }
+  validate_page_id_output_closure(request, role, &source_page_ids, &output_page_ids)?;
+  validate_output_posting_links(request, &source_page_ids, &output_pages)?;
+  Ok(ValidatedPageClosureV1 {
+    role,
+    owner_id,
+    source_keys,
+    output_pages,
+    source_page_bytes: source_bytes,
+    page_artifact_bytes: output_bytes,
+  })
+}
+
+fn validate_page_id_deltas(
+  request: &IndexCopyOnWriteClosureRequestV1<'_>,
+  role: OrderedIndexRoleV1,
+  source_page_ids: &BTreeSet<u64>,
+  observed_source_page_id_high_water: u64,
+) -> FormatResult<()> {
+  if !role.uses_page_id() {
+    if request.initial_next_page_id != 0
+      || request.page_plan.next_page_id != 0
+      || !request.page_plan.allocated_page_ids.is_empty()
+      || !request.page_plan.retired_page_ids.is_empty()
+    {
+      return Err(identity_error("index_cow_closure_scope_page_id", "scope-page closure carries PageId state"));
+    }
+    return Ok(());
+  }
+  if source_page_ids.is_empty() {
+    return Err(closure_error("index_cow_closure_source_page_id", "PageId-bearing closure has no source PageIds"));
+  }
+  if request.initial_next_page_id == 0 || request.initial_next_page_id <= observed_source_page_id_high_water {
+    return Err(identity_error("index_cow_closure_initial_page_id", "initial next PageId does not exceed every supplied source PageId"));
+  }
+  let allocation_count = request
+    .page_plan
+    .next_page_id
+    .checked_sub(request.initial_next_page_id)
+    .ok_or_else(|| identity_error("index_cow_closure_page_id_regression", "next PageId regressed below the initial high-water mark"))?;
+  let allocation_count = usize::try_from(allocation_count).map_err(|source| {
+    amplification_error("index_cow_closure_allocation_count", format!("allocated PageId count is not representable: {source}"))
+  })?;
+  if request.page_plan.allocated_page_ids.len() != allocation_count {
+    return Err(closure_error("index_cow_closure_allocation_range", "allocated PageId list does not exactly cover the high-water advance"));
+  }
+  for (offset, page_id) in request.page_plan.allocated_page_ids.iter().enumerate() {
+    let expected = request
+      .initial_next_page_id
+      .checked_add(u64::try_from(offset).map_err(|source| {
+        amplification_error("index_cow_closure_allocation_count", format!("allocated PageId offset is not representable: {source}"))
+      })?)
+      .ok_or_else(|| arithmetic_error("index_cow_closure_allocation_range", "allocated PageId range overflowed"))?;
+    if *page_id != expected {
+      return Err(closure_error("index_cow_closure_allocation_range", "allocated PageIds are not one exact contiguous range"));
+    }
+  }
+  for pair in request.page_plan.retired_page_ids.windows(2) {
+    if pair[0] >= pair[1] {
+      return Err(closure_error("index_cow_closure_retirement_order", "retired PageIds are duplicate or not strictly ordered"));
+    }
+  }
+  if request.page_plan.retired_page_ids.iter().any(|page_id| {
+    *page_id == 0
+      || (*page_id >= request.initial_next_page_id && *page_id < request.page_plan.next_page_id)
+      || !source_page_ids.contains(page_id)
+  }) {
+    return Err(closure_error(
+      "index_cow_closure_retirement_set",
+      "retired PageIds include zero, an allocated identity, or a PageId outside the source closure",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_page_id_output_closure(
+  request: &IndexCopyOnWriteClosureRequestV1<'_>,
+  role: OrderedIndexRoleV1,
+  source_page_ids: &BTreeSet<u64>,
+  output_page_ids: &BTreeSet<u64>,
+) -> FormatResult<()> {
+  if !role.uses_page_id() {
+    return Ok(());
+  }
+  let mut expected_retired = Vec::new();
+  if let Err(error) = expected_retired.try_reserve_exact(source_page_ids.len()) {
+    return Err(amplification_error("index_cow_closure_retirement_set", format!("retired PageId reservation failed: {error}")));
+  }
+  for page_id in source_page_ids.difference(output_page_ids) {
+    expected_retired.push(*page_id);
+  }
+  if expected_retired != request.page_plan.retired_page_ids {
+    return Err(closure_error(
+      "index_cow_closure_retirement_set",
+      "retired PageIds do not exactly equal source PageIds absent from output",
+    ));
+  }
+  for allocated in &request.page_plan.allocated_page_ids {
+    if !output_page_ids.contains(allocated) {
+      return Err(closure_error("index_cow_closure_allocated_page_missing", "an allocated PageId has no output page"));
+    }
+  }
+  Ok(())
+}
+
+fn validate_output_posting_links(
+  request: &IndexCopyOnWriteClosureRequestV1<'_>,
+  source_page_ids: &BTreeSet<u64>,
+  output_pages: &[OrderedPageV1<'_>],
+) -> FormatResult<()> {
+  if output_pages.first().is_none_or(|page| page.role != OrderedIndexRoleV1::Posting) {
+    return Ok(());
+  }
+  let mut output_by_page_id = BTreeMap::new();
+  let mut retired = BTreeSet::new();
+  let mut allocated = BTreeSet::new();
+  for (index, page) in output_pages.iter().enumerate() {
+    output_by_page_id.insert(page.page_id, index);
+  }
+  for page_id in &request.page_plan.retired_page_ids {
+    retired.insert(*page_id);
+  }
+  for page_id in &request.page_plan.allocated_page_ids {
+    allocated.insert(*page_id);
+  }
+  for page in output_pages {
+    for linked_page_id in [page.previous_page_id, page.next_page_id] {
+      if linked_page_id == 0 {
+        continue;
+      }
+      if retired.contains(&linked_page_id)
+        || (source_page_ids.contains(&linked_page_id) && !output_by_page_id.contains_key(&linked_page_id))
+        || (allocated.contains(&linked_page_id) && !output_by_page_id.contains_key(&linked_page_id))
+      {
+        return Err(closure_error("index_cow_closure_detached_link", "page output links to a retired or absent affected PageId"));
+      }
+    }
+    if let Some(previous_index) = output_by_page_id.get(&page.previous_page_id) {
+      validate_posting_page_link(&output_pages[*previous_index], page, request.hash_algorithm)?;
+    }
+    if let Some(next_index) = output_by_page_id.get(&page.next_page_id) {
+      validate_posting_page_link(page, &output_pages[*next_index], request.hash_algorithm)?;
+    }
+  }
+  Ok(())
+}
+
+fn validate_directory_plan_closure(
+  request: &IndexCopyOnWriteClosureRequestV1<'_>,
+  page_closure: &ValidatedPageClosureV1<'_>,
+) -> FormatResult<usize> {
+  let directory_request = ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    page_plan: request.page_plan,
+    paths: request.paths,
+    layout: request.directory_layout,
+  };
+  let replacement_entries = validate_page_replacement_outputs(&directory_request)?;
+  let graph = validate_directory_path_graph(&directory_request, &replacement_entries)?;
+  if request.directory_plan.source_root_key != graph.source_root_key {
+    return Err(closure_error("index_cow_closure_source_root", "directory plan source root disagrees with the supplied paths"));
+  }
+
+  let mut source_child_summaries = BTreeMap::new();
+  let mut affected_directory_keys = BTreeSet::new();
+  for path in request.paths {
+    for bytes in path.directories {
+      let directory = decode_artifact_directory(bytes, request.hash_algorithm)?;
+      affected_directory_keys.insert(directory.key.clone());
+      for entry in &directory.entries {
+        let summary = OwnedDirectoryEntryV1::from_existing(entry)?;
+        if let Some(previous) = source_child_summaries.insert(entry.child_hash.to_vec(), summary.clone()) {
+          if previous != summary {
+            return Err(closure_error(
+              "index_cow_closure_source_child_collision",
+              "one source child hash has inconsistent directory summaries",
+            ));
+          }
+        }
+      }
+    }
+  }
+
+  let mut new_page_summaries = BTreeMap::new();
+  let mut page_reference_counts: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+  for page in &page_closure.output_pages {
+    if new_page_summaries.insert(page.key.clone(), OwnedDirectoryEntryV1::from_page(page)?).is_some() {
+      return Err(closure_error("index_cow_closure_duplicate_page_key", "one output page key appears more than once"));
+    }
+    page_reference_counts.insert(page.key.clone(), 0u64);
+  }
+
+  let mut directory_bytes = 0usize;
+  let mut new_directory_summaries = BTreeMap::new();
+  let mut directory_reference_counts: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+  for artifact in &request.directory_plan.artifacts {
+    directory_bytes = directory_bytes
+      .checked_add(artifact.value.len())
+      .ok_or_else(|| arithmetic_error("index_cow_closure_directory_bytes", "directory artifact bytes overflowed"))?;
+    if artifact.value.len() > request.directory_layout.hard_artifact_bytes
+      || directory_bytes > request.directory_layout.maximum_workspace_bytes
+    {
+      return Err(amplification_error(
+        "index_cow_closure_directory_workspace",
+        format!("directory artifacts exceed the {}-byte operation cap", request.directory_layout.maximum_workspace_bytes),
+      ));
+    }
+    let directory = decode_artifact_directory(&artifact.value, request.hash_algorithm)?;
+    if directory.key != artifact.key
+      || directory.owner_id != page_closure.owner_id
+      || directory.role != page_closure.role
+      || directory.generation != request.generation
+      || new_directory_summaries.contains_key(directory.key.as_slice())
+    {
+      return Err(closure_error(
+        "index_cow_closure_directory_output",
+        "directory output has a duplicate or inconsistent key, owner, role, or generation",
+      ));
+    }
+    for entry in &directory.entries {
+      if entry.physical_hint != (PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 }) {
+        return Err(closure_error("index_cow_closure_physical_hint", "rewritten directory descriptors retain a physical hint"));
+      }
+      let expected = if let Some(summary) = new_page_summaries.get(entry.child_hash) {
+        let count = page_reference_counts
+          .get_mut(entry.child_hash)
+          .ok_or_else(|| closure_error("index_cow_closure_page_reference", "new page reference counter is missing"))?;
+        *count = count
+          .checked_add(1)
+          .ok_or_else(|| arithmetic_error("index_cow_closure_page_reference", "new page reference count overflowed"))?;
+        summary
+      } else if let Some(summary) = new_directory_summaries.get(entry.child_hash) {
+        let count = directory_reference_counts
+          .get_mut(entry.child_hash)
+          .ok_or_else(|| closure_error("index_cow_closure_directory_reference", "new directory reference counter is missing"))?;
+        *count = count
+          .checked_add(1)
+          .ok_or_else(|| arithmetic_error("index_cow_closure_directory_reference", "new directory reference count overflowed"))?;
+        summary
+      } else {
+        if page_closure.source_keys.contains(entry.child_hash) || affected_directory_keys.contains(entry.child_hash) {
+          return Err(closure_error("index_cow_closure_stale_child", "rewritten directory still references an affected source artifact"));
+        }
+        source_child_summaries.get(entry.child_hash).ok_or_else(|| {
+          closure_error("index_cow_closure_unknown_child", "rewritten directory references an unknown or out-of-order child")
+        })?
+      };
+      if !directory_entry_matches_owned(entry, expected) {
+        return Err(closure_error("index_cow_closure_child_summary", "rewritten child descriptor disagrees with its exact child summary"));
+      }
+    }
+    let key = directory.key.clone();
+    new_directory_summaries.insert(key.clone(), OwnedDirectoryEntryV1::from_directory(&directory)?);
+    directory_reference_counts.insert(key, 0u64);
+  }
+
+  validate_directory_root_closure(
+    request.hash_algorithm,
+    request.directory_plan,
+    &new_page_summaries,
+    &page_reference_counts,
+    &new_directory_summaries,
+    &directory_reference_counts,
+  )?;
+  Ok(directory_bytes)
+}
+
+fn validate_directory_root_closure(
+  hash_algorithm: HashAlgorithm,
+  plan: &ArtifactDirectoryMutationPlanV1,
+  new_page_summaries: &BTreeMap<Vec<u8>, OwnedDirectoryEntryV1>,
+  page_reference_counts: &BTreeMap<Vec<u8>, u64>,
+  new_directory_summaries: &BTreeMap<Vec<u8>, OwnedDirectoryEntryV1>,
+  directory_reference_counts: &BTreeMap<Vec<u8>, u64>,
+) -> FormatResult<()> {
+  let Some(root_key) = &plan.root_key else {
+    if plan.root_level != 0
+      || plan.live_count != 0
+      || plan.tombstone_count != 0
+      || plan.page_count != 0
+      || plan.logical_bytes != 0
+      || plan.minimum_page_id != 0
+      || plan.maximum_page_id != 0
+      || !plan.artifacts.is_empty()
+      || !new_page_summaries.is_empty()
+      || !new_directory_summaries.is_empty()
+    {
+      return Err(closure_error("index_cow_closure_absent_root", "absent directory root retains artifacts or nonzero aggregate state"));
+    }
+    return Ok(());
+  };
+  let root = new_directory_summaries
+    .get(root_key.as_slice())
+    .ok_or_else(|| closure_error("index_cow_closure_root_missing", "directory root key is absent from dependency-ordered output"))?;
+  let root_artifact = plan
+    .artifacts
+    .last()
+    .filter(|artifact| artifact.key == *root_key)
+    .ok_or_else(|| closure_error("index_cow_closure_root_order", "directory root is not the final dependency-ordered artifact"))?;
+  let root_node = decode_artifact_directory(&root_artifact.value, hash_algorithm)?;
+  if plan.root_level != root_node.level
+    || plan.live_count != root.live_count
+    || plan.tombstone_count != root.tombstone_count
+    || plan.page_count != root.page_count
+    || plan.logical_bytes != root.logical_bytes
+    || plan.minimum_page_id != root.minimum_page_id
+    || plan.maximum_page_id != root.maximum_page_id
+  {
+    return Err(closure_error("index_cow_closure_root_summary", "directory plan root or aggregate summary is inconsistent"));
+  }
+  if page_reference_counts.values().any(|count| *count != 1) {
+    return Err(closure_error("index_cow_closure_page_reference", "an output page is detached or referenced more than once"));
+  }
+  for (key, count) in directory_reference_counts {
+    let expected = u64::from(key.as_slice() != root_key.as_slice());
+    if *count != expected {
+      return Err(closure_error(
+        "index_cow_closure_directory_reference",
+        "a directory output is detached, multiply referenced, or treats a non-root artifact as root",
+      ));
+    }
+  }
+  Ok(())
+}
+
+fn validate_directory_path_input_workspace(paths: &[ArtifactDirectoryPathV1<'_>], maximum_workspace_bytes: usize) -> FormatResult<usize> {
+  let mut path_bytes = 0usize;
+  for path in paths {
+    path_bytes = path.directories.iter().try_fold(path_bytes, |bytes, directory| {
+      bytes
+        .checked_add(directory.len())
+        .ok_or_else(|| arithmetic_error("index_cow_directory_path_bytes", "directory path input bytes overflowed"))
+    })?;
+    if path_bytes > maximum_workspace_bytes {
+      return Err(amplification_error(
+        "index_cow_directory_path_workspace",
+        format!("directory path inputs exceed the {maximum_workspace_bytes}-byte operation cap"),
+      ));
+    }
+  }
+  Ok(path_bytes)
+}
+
+fn replacement_matches_source(replacement: &OrderedPageReplacementV1, source: &OrderedPageV1<'_>) -> bool {
+  replacement.source_key == source.key
+    && replacement.source_page_id == source.page_id
+    && replacement.source_role == source.role
+    && replacement.source_owner_id == source.owner_id
+    && replacement.source_generation == source.generation
+    && replacement.source_lower_fence == source.lower_fence
+    && replacement.source_upper_fence == source.upper_fence
+    && replacement.source_live_count == u64::from(source.live_count)
+    && replacement.source_tombstone_count == u64::from(source.tombstone_count)
+    && replacement.source_logical_bytes == source.logical_live_bytes
+}
+
+fn directory_entry_matches_owned(entry: &ArtifactDirectoryEntryV1<'_>, expected: &OwnedDirectoryEntryV1) -> bool {
+  entry.lower_fence == expected.lower_fence
+    && entry.upper_fence == expected.upper_fence
+    && entry.child_hash == expected.child_hash
+    && entry.child_generation == expected.child_generation
+    && entry.live_count == expected.live_count
+    && entry.tombstone_count == expected.tombstone_count
+    && entry.page_count == expected.page_count
+    && entry.logical_bytes == expected.logical_bytes
+    && entry.minimum_page_id == expected.minimum_page_id
+    && entry.maximum_page_id == expected.maximum_page_id
 }
 
 fn validate_page_replacement_outputs(
@@ -999,13 +1645,14 @@ fn encode_directory_entry_groups(
   owner_id: &[u8],
   role: OrderedIndexRoleV1,
   entries: &[OwnedDirectoryEntryV1],
+  target_bytes: usize,
   artifacts: &mut Vec<EncodedImmutableIndexArtifactV1>,
   retained_artifact_bytes: &mut usize,
 ) -> FormatResult<Vec<OwnedDirectoryEntryV1>> {
   if entries.is_empty() {
     return Ok(Vec::new());
   }
-  let groups = partition_directory_entries(request.hash_algorithm, level, entries, request.layout.target_bytes)?;
+  let groups = partition_directory_entries(request.hash_algorithm, level, entries, target_bytes)?;
   let mut summaries = Vec::new();
   if let Err(error) = summaries.try_reserve_exact(groups.len()) {
     return Err(amplification_error("index_cow_directory_summary_workspace", format!("directory-summary reservation failed: {error}")));

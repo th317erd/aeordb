@@ -1,14 +1,17 @@
 use aeordb::engine::HashAlgorithm;
+use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_copy_on_write::{
-  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, OrderedPageCompactionWindowRequestV1, OrderedPageMutationKindV1,
-  OrderedPageMutationRequestV1, TombstoneDropProofV1, compact_ordered_page_window_v1, default_index_directory_layout_v1,
-  default_index_page_layout_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
+  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteClosureRequestV1, OrderedPageCompactionWindowRequestV1,
+  OrderedPageMutationKindV1, OrderedPageMutationRequestV1, TombstoneDropProofV1, compact_ordered_page_window_v1,
+  default_index_directory_layout_v1, default_index_page_layout_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
+  validate_index_copy_on_write_closure_v1,
 };
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
   decode_artifact_directory, decode_ordered_page, decode_ordered_record, decode_posting_record, encode_artifact_directory,
   encode_ordered_page, encode_posting_record, ordered_record_order_key, validate_posting_page_link,
 };
+use aeordb::engine::v4::index_record::{ScopeDocumentRecordV1, encode_scope_document_record};
 use aeordb::engine::v4::reader::MalformedInputClass;
 
 fn owner(hash_algorithm: HashAlgorithm) -> Vec<u8> {
@@ -53,6 +56,32 @@ fn posting_page(
   .value
 }
 
+fn scope_document_record(hash_algorithm: HashAlgorithm, document_ordinal: u64, path: &str) -> Vec<u8> {
+  let file_key = digest_parts(hash_algorithm, &[b"file:", path.as_bytes()]);
+  let record_revision_hash = digest_parts(hash_algorithm, &[b"revision:", path.as_bytes()]);
+  encode_scope_document_record(
+    &ScopeDocumentRecordV1 { tombstone: false, document_ordinal, file_key: &file_key, record_revision_hash: &record_revision_hash, path },
+    hash_algorithm,
+  )
+  .unwrap()
+}
+
+fn scope_page(hash_algorithm: HashAlgorithm, owner_id: &[u8], generation: u64, records: &[Vec<u8>]) -> Vec<u8> {
+  let record_slices = records.iter().map(Vec::as_slice).collect::<Vec<_>>();
+  encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm,
+    role: OrderedIndexRoleV1::ScopeOrdinal,
+    owner_id,
+    generation,
+    page_id: 0,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &record_slices,
+  })
+  .unwrap()
+  .value
+}
+
 fn decoded_coordinates(page: &[u8], hash_algorithm: HashAlgorithm) -> Vec<(u64, bool)> {
   decode_ordered_page(page, hash_algorithm)
     .unwrap()
@@ -79,6 +108,17 @@ fn leaf_directory(
   pages: &[&[u8]],
   physical_hint: PhysicalHintV1,
 ) -> Vec<u8> {
+  leaf_directory_for_role(hash_algorithm, OrderedIndexRoleV1::Posting, owner_id, generation, pages, physical_hint)
+}
+
+fn leaf_directory_for_role(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  owner_id: &[u8],
+  generation: u64,
+  pages: &[&[u8]],
+  physical_hint: PhysicalHintV1,
+) -> Vec<u8> {
   let decoded_pages = pages.iter().map(|page| decode_ordered_page(page, hash_algorithm).unwrap()).collect::<Vec<_>>();
   let entries = decoded_pages
     .iter()
@@ -96,16 +136,9 @@ fn leaf_directory(
       physical_hint,
     })
     .collect::<Vec<_>>();
-  encode_artifact_directory(&ArtifactDirectoryWriteV1 {
-    hash_algorithm,
-    role: OrderedIndexRoleV1::Posting,
-    owner_id,
-    generation,
-    level: 0,
-    entries: &entries,
-  })
-  .unwrap()
-  .value
+  encode_artifact_directory(&ArtifactDirectoryWriteV1 { hash_algorithm, role, owner_id, generation, level: 0, entries: &entries })
+    .unwrap()
+    .value
 }
 
 fn internal_directory(
@@ -1178,6 +1211,20 @@ fn cow_compaction_can_retire_a_fully_proven_tombstone_window_and_its_directory_r
   assert_eq!(directory_plan.root_key, None);
   assert_eq!((directory_plan.live_count, directory_plan.tombstone_count, directory_plan.page_count), (0, 0, 0));
   assert!(directory_plan.artifacts.is_empty());
+  let summary = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    initial_next_page_id: 40,
+    source_pages: &source_pages,
+    paths: &paths,
+    page_plan: &page_plan,
+    directory_plan: &directory_plan,
+    page_layout: default_index_page_layout_v1(),
+    directory_layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(summary.root_key, None);
+  assert_eq!((summary.live_count, summary.tombstone_count, summary.page_count), (0, 0, 0));
 }
 
 #[test]
@@ -1436,4 +1483,855 @@ fn cow_compaction_counts_retained_source_summaries_in_its_peak_workspace() {
   .unwrap_err();
   assert_eq!(error.code(), "index_cow_compaction_workspace_exceeded");
   assert_eq!(error.class(), MalformedInputClass::AllocationAmplification);
+}
+
+#[test]
+fn cow_whole_plan_validator_closes_source_pages_directory_and_root_summary() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let source_records = vec![posting_record(1, 1, 16, false), posting_record(3, 3, 16, false)];
+    let source_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 0, &source_records);
+    let source_root = leaf_directory(
+      hash_algorithm,
+      &owner_id,
+      7,
+      &[&source_page],
+      PhysicalHintV1 { wal_offset: 400, total_length: 500, write_sequence: 6 },
+    );
+    let inserted = posting_record(2, 2, 16, false);
+    let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+      hash_algorithm,
+      source_page: &source_page,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      mutation: OrderedPageMutationKindV1::UpsertLive(&inserted),
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap();
+    let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+    let directories = [&source_root[..]];
+    let paths = [ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &directories }];
+    let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      page_plan: &page_plan,
+      paths: &paths,
+      layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    let source_pages = [&source_page[..]];
+    let request = IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      initial_next_page_id: 40,
+      source_pages: &source_pages,
+      paths: &paths,
+      page_plan: &page_plan,
+      directory_plan: &directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    };
+
+    let summary = validate_index_copy_on_write_closure_v1(&request).unwrap();
+    assert_eq!(summary.owner_id, owner_id);
+    assert_eq!(summary.role, OrderedIndexRoleV1::Posting);
+    assert_eq!(summary.generation, 8);
+    assert_eq!(summary.root_key, directory_plan.root_key);
+    assert_eq!(summary.live_count, 3);
+    assert_eq!(summary.tombstone_count, 0);
+    assert_eq!(summary.page_count, 1);
+    assert_eq!(summary.next_page_id, 40);
+    assert_eq!(summary.page_artifact_count, 1);
+    assert_eq!(summary.directory_artifact_count, 1);
+    assert_eq!(summary.source_page_bytes, source_page.len());
+    assert_eq!(summary.directory_path_bytes, source_root.len());
+    assert_eq!(summary.page_artifact_bytes, page_plan.replacements[0].artifacts[0].value.len());
+    assert_eq!(summary.directory_artifact_bytes, directory_plan.artifacts[0].value.len());
+    assert_eq!(
+      summary.retained_encoded_bytes,
+      summary.source_page_bytes + summary.directory_path_bytes + summary.page_artifact_bytes + summary.directory_artifact_bytes
+    );
+  }
+}
+
+#[test]
+fn cow_whole_plan_validator_closes_scope_pages_without_page_id_state() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let source_page = scope_page(
+      hash_algorithm,
+      &owner_id,
+      7,
+      &[scope_document_record(hash_algorithm, 1, "/a"), scope_document_record(hash_algorithm, 3, "/c")],
+    );
+    let source_root = leaf_directory_for_role(
+      hash_algorithm,
+      OrderedIndexRoleV1::ScopeOrdinal,
+      &owner_id,
+      7,
+      &[&source_page],
+      PhysicalHintV1 { wal_offset: 400, total_length: 500, write_sequence: 6 },
+    );
+    let inserted = scope_document_record(hash_algorithm, 2, "/b");
+    let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+      hash_algorithm,
+      source_page: &source_page,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 0,
+      mutation: OrderedPageMutationKindV1::UpsertLive(&inserted),
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap();
+    assert_eq!(page_plan.next_page_id, 0);
+    assert!(page_plan.allocated_page_ids.is_empty());
+    assert!(page_plan.retired_page_ids.is_empty());
+
+    let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+    let directories = [&source_root[..]];
+    let paths = [ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &directories }];
+    let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      page_plan: &page_plan,
+      paths: &paths,
+      layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    let source_pages = [&source_page[..]];
+    let summary = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      initial_next_page_id: 0,
+      source_pages: &source_pages,
+      paths: &paths,
+      page_plan: &page_plan,
+      directory_plan: &directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+
+    assert_eq!(summary.owner_id, owner_id);
+    assert_eq!(summary.role, OrderedIndexRoleV1::ScopeOrdinal);
+    assert_eq!(summary.live_count, 3);
+    assert_eq!(summary.tombstone_count, 0);
+    assert_eq!(summary.page_count, 1);
+    assert_eq!(summary.minimum_page_id, 0);
+    assert_eq!(summary.maximum_page_id, 0);
+    assert_eq!(summary.next_page_id, 0);
+  }
+}
+
+#[test]
+fn cow_whole_plan_validator_rejects_mutated_page_and_root_authority() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let source_page =
+    posting_page(hash_algorithm, &owner_id, 7, 10, 0, 0, &[posting_record(1, 1, 16, false), posting_record(3, 3, 16, false)]);
+  let source_root =
+    leaf_directory(hash_algorithm, &owner_id, 7, &[&source_page], PhysicalHintV1 { wal_offset: 400, total_length: 500, write_sequence: 6 });
+  let inserted = posting_record(2, 2, 16, false);
+  let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+    hash_algorithm,
+    source_page: &source_page,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    mutation: OrderedPageMutationKindV1::UpsertLive(&inserted),
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+  let path_nodes = [&source_root[..]];
+  let paths = [ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &path_nodes }];
+  let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    page_plan: &page_plan,
+    paths: &paths,
+    layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+  let source_pages = [&source_page[..]];
+  let validate = |candidate_page_plan, candidate_directory_plan| {
+    validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      initial_next_page_id: 40,
+      source_pages: &source_pages,
+      paths: &paths,
+      page_plan: candidate_page_plan,
+      directory_plan: candidate_directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    })
+  };
+
+  let mut missing_allocation = page_plan.clone();
+  missing_allocation.next_page_id = 41;
+  assert_eq!(validate(&missing_allocation, &directory_plan).unwrap_err().code(), "index_cow_closure_allocation_range");
+
+  let mut forged_retirement = page_plan.clone();
+  forged_retirement.retired_page_ids.push(10);
+  assert_eq!(validate(&forged_retirement, &directory_plan).unwrap_err().code(), "index_cow_closure_source_retirement");
+
+  let mut forged_page_key = page_plan.clone();
+  forged_page_key.replacements[0].artifacts[0].key[0] ^= 0x80;
+  assert_eq!(validate(&forged_page_key, &directory_plan).unwrap_err().code(), "index_cow_closure_page_output");
+
+  let mut transferred_stable_id = page_plan.clone();
+  let output = decode_ordered_page(&transferred_stable_id.replacements[0].artifacts[0].value, hash_algorithm).unwrap();
+  let output_records = output.records.iter().map(|record| record.unwrap()).collect::<Vec<_>>();
+  let output_record_bytes = output_records.iter().map(|record| record.encoded).collect::<Vec<_>>();
+  transferred_stable_id.replacements[0].artifacts[0] = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm,
+    role: output.role,
+    owner_id: output.owner_id,
+    generation: output.generation,
+    page_id: 40,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &output_record_bytes,
+  })
+  .unwrap();
+  transferred_stable_id.allocated_page_ids = vec![40];
+  transferred_stable_id.next_page_id = 41;
+  let transferred_directory = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    page_plan: &transferred_stable_id,
+    paths: &paths,
+    layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(validate(&transferred_stable_id, &transferred_directory).unwrap_err().code(), "index_cow_closure_source_retirement");
+
+  let mut forged_root_key = directory_plan.clone();
+  forged_root_key.root_key.as_mut().unwrap()[0] ^= 0x80;
+  assert_eq!(validate(&page_plan, &forged_root_key).unwrap_err().code(), "index_cow_closure_root_missing");
+
+  let mut forged_root_count = directory_plan.clone();
+  forged_root_count.live_count += 1;
+  assert_eq!(validate(&page_plan, &forged_root_count).unwrap_err().code(), "index_cow_closure_root_summary");
+
+  let mut duplicate_directory = directory_plan.clone();
+  duplicate_directory.artifacts.push(duplicate_directory.artifacts[0].clone());
+  assert_eq!(validate(&page_plan, &duplicate_directory).unwrap_err().code(), "index_cow_closure_directory_output");
+}
+
+#[test]
+fn cow_whole_plan_validator_requires_dependency_order_for_rewritten_directories() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let source_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 0, &[posting_record(1, 1, 16, false)]);
+  let source_leaf =
+    leaf_directory(hash_algorithm, &owner_id, 7, &[&source_page], PhysicalHintV1 { wal_offset: 1, total_length: 2, write_sequence: 3 });
+  let source_root =
+    internal_directory(hash_algorithm, &owner_id, 7, &[&source_leaf], PhysicalHintV1 { wal_offset: 4, total_length: 5, write_sequence: 6 });
+  let inserted = posting_record(2, 2, 16, false);
+  let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+    hash_algorithm,
+    source_page: &source_page,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    mutation: OrderedPageMutationKindV1::UpsertLive(&inserted),
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+  let path_nodes = [&source_root[..], &source_leaf[..]];
+  let paths = [ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &path_nodes }];
+  let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    page_plan: &page_plan,
+    paths: &paths,
+    layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(directory_plan.artifacts.len(), 2);
+  let source_pages = [&source_page[..]];
+  validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    initial_next_page_id: 40,
+    source_pages: &source_pages,
+    paths: &paths,
+    page_plan: &page_plan,
+    directory_plan: &directory_plan,
+    page_layout: default_index_page_layout_v1(),
+    directory_layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+
+  let mut reversed = directory_plan.clone();
+  reversed.artifacts.reverse();
+  let error = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    initial_next_page_id: 40,
+    source_pages: &source_pages,
+    paths: &paths,
+    page_plan: &page_plan,
+    directory_plan: &reversed,
+    page_layout: default_index_page_layout_v1(),
+    directory_layout: default_index_directory_layout_v1(),
+  })
+  .unwrap_err();
+  assert_eq!(error.code(), "index_cow_closure_unknown_child");
+}
+
+#[test]
+fn cow_whole_plan_validator_binds_source_order_and_outward_page_id_high_water() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let source_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 30, &[posting_record(1, 1, 60_000, false)]);
+  let next_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 60, &[posting_record(100, 100, 16, false)]);
+  let inserted = posting_record(2, 2, 60_000, false);
+  let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+    hash_algorithm,
+    source_page: &source_page,
+    next_posting_page: Some(&next_page),
+    generation: 8,
+    next_page_id: 70,
+    mutation: OrderedPageMutationKindV1::UpsertLive(&inserted),
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(page_plan.replacements.len(), 2);
+  let source_root = leaf_directory(
+    hash_algorithm,
+    &owner_id,
+    7,
+    &[&source_page, &next_page],
+    PhysicalHintV1 { wal_offset: 1, total_length: 2, write_sequence: 3 },
+  );
+  let path_nodes = [&source_root[..]];
+  let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+  let next_key = decode_ordered_page(&next_page, hash_algorithm).unwrap().key;
+  let paths = [
+    ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &path_nodes },
+    ArtifactDirectoryPathV1 { source_page_key: &next_key, directories: &path_nodes },
+  ];
+  let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    page_plan: &page_plan,
+    paths: &paths,
+    layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+  let source_pages = [source_page.as_slice(), next_page.as_slice()];
+  let request = |source_pages: &[&[u8]], initial_next_page_id| {
+    validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      initial_next_page_id,
+      source_pages,
+      paths: &paths,
+      page_plan: &page_plan,
+      directory_plan: &directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    })
+  };
+  request(&source_pages, 70).unwrap();
+
+  let reversed_sources = [next_page.as_slice(), source_page.as_slice()];
+  assert_eq!(request(&reversed_sources, 70).unwrap_err().code(), "index_cow_closure_source_order");
+  assert_eq!(request(&source_pages, 50).unwrap_err().code(), "index_cow_closure_initial_page_id");
+}
+
+#[test]
+fn directory_cow_rejects_aggregate_path_input_amplification_before_decoding() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let source_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 0, &[posting_record(1, 1, 16, false)]);
+  let inserted = posting_record(2, 2, 100_000, false);
+  let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+    hash_algorithm,
+    source_page: &source_page,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    mutation: OrderedPageMutationKindV1::UpsertLive(&inserted),
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(page_plan.replacements.len(), 1);
+  let oversized_directory = vec![0u8; 4 * 1_024 * 1_024 + 1];
+  let path_nodes = [oversized_directory.as_slice(); 16];
+  let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+  let paths = [ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &path_nodes }];
+
+  let error = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    page_plan: &page_plan,
+    paths: &paths,
+    layout: default_index_directory_layout_v1(),
+  })
+  .unwrap_err();
+  assert_eq!(error.code(), "index_cow_directory_path_workspace");
+  assert_eq!(error.class(), MalformedInputClass::AllocationAmplification);
+}
+
+fn property_page_layout() -> aeordb::engine::v4::index_copy_on_write::IndexPageLayoutV1 {
+  aeordb::engine::v4::index_copy_on_write::IndexPageLayoutV1 {
+    target_bytes: 4 * 1_024,
+    split_above_bytes: 6 * 1_024,
+    merge_below_bytes: 3_584,
+    ..default_index_page_layout_v1()
+  }
+}
+
+fn property_directory_layout() -> aeordb::engine::v4::index_copy_on_write::IndexDirectoryLayoutV1 {
+  aeordb::engine::v4::index_copy_on_write::IndexDirectoryLayoutV1 { target_bytes: 4 * 1_024, ..default_index_directory_layout_v1() }
+}
+
+fn property_page_index(pages: &[Vec<u8>], hash_algorithm: HashAlgorithm, coordinate: u64) -> usize {
+  pages
+    .iter()
+    .position(|page| decoded_coordinates(page, hash_algorithm).last().is_some_and(|record| record.0 >= coordinate))
+    .unwrap_or(pages.len() - 1)
+}
+
+fn property_assert_model(pages: &[Vec<u8>], hash_algorithm: HashAlgorithm, expected_live: &std::collections::BTreeSet<u64>) {
+  let mut observed_live = std::collections::BTreeSet::new();
+  let mut previous_coordinate = None;
+  for (index, bytes) in pages.iter().enumerate() {
+    let page = decode_ordered_page(bytes, hash_algorithm).unwrap();
+    assert_eq!(
+      page.previous_page_id,
+      index.checked_sub(1).map_or(0, |previous| { decode_ordered_page(&pages[previous], hash_algorithm).unwrap().page_id })
+    );
+    assert_eq!(page.next_page_id, pages.get(index + 1).map_or(0, |next| decode_ordered_page(next, hash_algorithm).unwrap().page_id));
+    for (coordinate, tombstone) in decoded_coordinates(bytes, hash_algorithm) {
+      assert!(previous_coordinate.is_none_or(|previous| previous < coordinate));
+      previous_coordinate = Some(coordinate);
+      if !tombstone {
+        assert!(observed_live.insert(coordinate));
+      }
+    }
+  }
+  assert_eq!(&observed_live, expected_live);
+}
+
+fn property_apply_plan(
+  hash_algorithm: HashAlgorithm,
+  generation: u64,
+  initial_next_page_id: u64,
+  page_layout: aeordb::engine::v4::index_copy_on_write::IndexPageLayoutV1,
+  page_plan: &aeordb::engine::v4::index_copy_on_write::OrderedPageMutationPlanV1,
+  pages: &mut Vec<Vec<u8>>,
+  directory_artifacts: &mut std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+  root_key: &mut Vec<u8>,
+) {
+  let source_keys = page_plan.replacements.iter().map(|replacement| replacement.source_key.clone()).collect::<Vec<_>>();
+  let source_pages = source_keys
+    .iter()
+    .map(|source_key| {
+      pages.iter().find(|page| decode_ordered_page(page, hash_algorithm).unwrap().key == *source_key).map(Vec::as_slice).unwrap()
+    })
+    .collect::<Vec<_>>();
+  let path_values = source_keys
+    .iter()
+    .map(|source_key| property_directory_path(hash_algorithm, directory_artifacts, root_key, source_key).unwrap())
+    .collect::<Vec<_>>();
+  let path_node_references = path_values.iter().map(|nodes| nodes.iter().map(Vec::as_slice).collect::<Vec<_>>()).collect::<Vec<_>>();
+  let paths = source_keys
+    .iter()
+    .zip(&path_node_references)
+    .map(|(source_key, directories)| ArtifactDirectoryPathV1 { source_page_key: source_key, directories })
+    .collect::<Vec<_>>();
+  let directory_layout = property_directory_layout();
+  let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation,
+    page_plan,
+    paths: &paths,
+    layout: directory_layout,
+  })
+  .unwrap();
+  let summary = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+    hash_algorithm,
+    generation,
+    initial_next_page_id,
+    source_pages: &source_pages,
+    paths: &paths,
+    page_plan,
+    directory_plan: &directory_plan,
+    page_layout,
+    directory_layout,
+  })
+  .unwrap();
+  assert_eq!(
+    summary.page_count,
+    u64::try_from(pages.len()).unwrap() + u64::try_from(page_plan.allocated_page_ids.len()).unwrap()
+      - u64::try_from(page_plan.retired_page_ids.len()).unwrap()
+  );
+
+  let replacements = page_plan
+    .replacements
+    .iter()
+    .map(|replacement| {
+      (replacement.source_key.clone(), replacement.artifacts.iter().map(|artifact| artifact.value.clone()).collect::<Vec<_>>())
+    })
+    .collect::<std::collections::BTreeMap<_, _>>();
+  let mut rewritten_pages = Vec::new();
+  for page in pages.iter() {
+    let key = decode_ordered_page(page, hash_algorithm).unwrap().key;
+    if let Some(outputs) = replacements.get(&key) {
+      rewritten_pages.extend(outputs.iter().cloned());
+    } else {
+      rewritten_pages.push(page.clone());
+    }
+  }
+  rewritten_pages.sort_by_key(|page| decoded_coordinates(page, hash_algorithm)[0].0);
+  *pages = rewritten_pages;
+  for artifact in &directory_plan.artifacts {
+    directory_artifacts.insert(artifact.key.clone(), artifact.value.clone());
+  }
+  *root_key = directory_plan.root_key.unwrap();
+}
+
+fn property_directory_path(
+  hash_algorithm: HashAlgorithm,
+  directory_artifacts: &std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+  current_key: &[u8],
+  source_page_key: &[u8],
+) -> Option<Vec<Vec<u8>>> {
+  let current = directory_artifacts.get(current_key)?;
+  let directory = decode_artifact_directory(current, hash_algorithm).ok()?;
+  if directory.level == 0 {
+    if directory.entries.iter().any(|entry| entry.child_hash == source_page_key) {
+      return Some(vec![current.clone()]);
+    }
+    return None;
+  }
+  for entry in &directory.entries {
+    if let Some(mut suffix) = property_directory_path(hash_algorithm, directory_artifacts, entry.child_hash, source_page_key) {
+      let mut path = Vec::with_capacity(suffix.len() + 1);
+      path.push(current.clone());
+      path.append(&mut suffix);
+      return Some(path);
+    }
+  }
+  None
+}
+
+fn property_next_random(state: &mut u64) -> u64 {
+  *state ^= *state << 13;
+  *state ^= *state >> 7;
+  *state ^= *state << 17;
+  *state
+}
+
+#[test]
+fn cow_randomized_mutations_splits_compaction_and_merges_match_an_independent_model() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let page_layout = property_page_layout();
+    let mut generation = 2u64;
+    let mut next_page_id = 2u64;
+    let initial_record = posting_record(1, 1, 512, false);
+    let initial_page = posting_page(hash_algorithm, &owner_id, 1, 1, 0, 0, &[initial_record]);
+    let mut pages = vec![initial_page];
+    let initial_root = leaf_directory(
+      hash_algorithm,
+      &owner_id,
+      1,
+      &[pages[0].as_slice()],
+      PhysicalHintV1 { wal_offset: 1, total_length: 2, write_sequence: 3 },
+    );
+    let mut root_key = decode_artifact_directory(&initial_root, hash_algorithm).unwrap().key;
+    let mut directory_artifacts = std::collections::BTreeMap::from([(root_key.clone(), initial_root)]);
+    let mut expected_live = std::collections::BTreeSet::from([1u64]);
+    let mut random_state = 0x9e37_79b9_7f4a_7c15u64 ^ u64::try_from(hash_algorithm.hash_length()).unwrap();
+    let mut coordinates = (2u64..=56).collect::<Vec<_>>();
+    for index in (1..coordinates.len()).rev() {
+      let swap_index = usize::try_from(property_next_random(&mut random_state) % u64::try_from(index + 1).unwrap()).unwrap();
+      coordinates.swap(index, swap_index);
+    }
+    let mut saw_split = false;
+    for coordinate in coordinates {
+      let page_index = property_page_index(&pages, hash_algorithm, coordinate);
+      let inserted = posting_record(coordinate, coordinate, 512, false);
+      let next_page = pages.get(page_index + 1).map(Vec::as_slice);
+      let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+        hash_algorithm,
+        source_page: &pages[page_index],
+        next_posting_page: next_page,
+        generation,
+        next_page_id,
+        mutation: OrderedPageMutationKindV1::UpsertLive(&inserted),
+        layout: page_layout,
+      })
+      .unwrap();
+      saw_split |= !page_plan.allocated_page_ids.is_empty();
+      property_apply_plan(
+        hash_algorithm,
+        generation,
+        next_page_id,
+        page_layout,
+        &page_plan,
+        &mut pages,
+        &mut directory_artifacts,
+        &mut root_key,
+      );
+      next_page_id = page_plan.next_page_id;
+      expected_live.insert(coordinate);
+      property_assert_model(&pages, hash_algorithm, &expected_live);
+      generation += 1;
+    }
+    assert!(saw_split);
+    assert!(decode_artifact_directory(directory_artifacts.get(&root_key).unwrap(), hash_algorithm).unwrap().level > 0);
+
+    for _ in 0..32 {
+      let coordinate = 2 + property_next_random(&mut random_state) % 127;
+      let delete = property_next_random(&mut random_state) & 3 == 0 && expected_live.contains(&coordinate);
+      let page_index = property_page_index(&pages, hash_algorithm, coordinate);
+      let record = posting_record(coordinate, coordinate, 512, delete);
+      let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+        hash_algorithm,
+        source_page: &pages[page_index],
+        next_posting_page: pages.get(page_index + 1).map(Vec::as_slice),
+        generation,
+        next_page_id,
+        mutation: if delete {
+          OrderedPageMutationKindV1::TombstoneExisting(&record)
+        } else {
+          OrderedPageMutationKindV1::UpsertLive(&record)
+        },
+        layout: page_layout,
+      })
+      .unwrap();
+      if page_plan.is_unchanged() {
+        assert!(!delete && expected_live.contains(&coordinate));
+      } else {
+        property_apply_plan(
+          hash_algorithm,
+          generation,
+          next_page_id,
+          page_layout,
+          &page_plan,
+          &mut pages,
+          &mut directory_artifacts,
+          &mut root_key,
+        );
+        next_page_id = page_plan.next_page_id;
+      }
+      if delete {
+        expected_live.remove(&coordinate);
+      } else {
+        expected_live.insert(coordinate);
+      }
+      property_assert_model(&pages, hash_algorithm, &expected_live);
+      generation += 1;
+    }
+
+    let retirement_coordinates = pages
+      .iter()
+      .map(|page| decoded_coordinates(page, hash_algorithm))
+      .find(|records| !records.iter().any(|record| record.0 == 1) && records.iter().any(|record| !record.1))
+      .unwrap()
+      .into_iter()
+      .filter_map(|record| (!record.1).then_some(record.0))
+      .collect::<Vec<_>>();
+    for coordinate in retirement_coordinates {
+      let page_index = property_page_index(&pages, hash_algorithm, coordinate);
+      let tombstone = posting_record(coordinate, coordinate, 512, true);
+      let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+        hash_algorithm,
+        source_page: &pages[page_index],
+        next_posting_page: pages.get(page_index + 1).map(Vec::as_slice),
+        generation,
+        next_page_id,
+        mutation: OrderedPageMutationKindV1::TombstoneExisting(&tombstone),
+        layout: page_layout,
+      })
+      .unwrap();
+      property_apply_plan(
+        hash_algorithm,
+        generation,
+        next_page_id,
+        page_layout,
+        &page_plan,
+        &mut pages,
+        &mut directory_artifacts,
+        &mut root_key,
+      );
+      next_page_id = page_plan.next_page_id;
+      expected_live.remove(&coordinate);
+      property_assert_model(&pages, hash_algorithm, &expected_live);
+      generation += 1;
+    }
+
+    let mut saw_retirement = false;
+    loop {
+      let Some(page_index) = pages.iter().position(|page| decode_ordered_page(page, hash_algorithm).unwrap().tombstone_count > 0) else {
+        break;
+      };
+      let source = decode_ordered_page(&pages[page_index], hash_algorithm).unwrap();
+      let proof_page_keys = [source.key.as_slice()];
+      let source_pages = [pages[page_index].as_slice()];
+      let proof = TombstoneDropProofV1 {
+        owner_id: &owner_id,
+        source_page_keys: &proof_page_keys,
+        coverage_epoch_id: 1,
+        covered_through_sequence: generation,
+        journal_contiguous_through_sequence: generation,
+        pin_safe_through_generation: source.generation,
+      };
+      let page_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+        hash_algorithm,
+        source_pages: &source_pages,
+        previous_posting_page: page_index.checked_sub(1).map(|index| pages[index].as_slice()),
+        next_posting_page: pages.get(page_index + 1).map(Vec::as_slice),
+        generation,
+        next_page_id,
+        tombstone_drop_proof: Some(&proof),
+        layout: page_layout,
+      })
+      .unwrap();
+      assert!(!page_plan.is_unchanged());
+      saw_retirement |= !page_plan.retired_page_ids.is_empty();
+      property_apply_plan(
+        hash_algorithm,
+        generation,
+        next_page_id,
+        page_layout,
+        &page_plan,
+        &mut pages,
+        &mut directory_artifacts,
+        &mut root_key,
+      );
+      next_page_id = page_plan.next_page_id;
+      property_assert_model(&pages, hash_algorithm, &expected_live);
+      generation += 1;
+    }
+    assert!(saw_retirement);
+
+    let merge_trim_coordinates = pages
+      .iter()
+      .take(2)
+      .flat_map(|page| {
+        decoded_coordinates(page, hash_algorithm)
+          .into_iter()
+          .filter_map(|record| (!record.1).then_some(record.0))
+          .skip(1)
+          .collect::<Vec<_>>()
+      })
+      .collect::<Vec<_>>();
+    for coordinate in merge_trim_coordinates {
+      let page_index = property_page_index(&pages, hash_algorithm, coordinate);
+      let tombstone = posting_record(coordinate, coordinate, 512, true);
+      let page_plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+        hash_algorithm,
+        source_page: &pages[page_index],
+        next_posting_page: pages.get(page_index + 1).map(Vec::as_slice),
+        generation,
+        next_page_id,
+        mutation: OrderedPageMutationKindV1::TombstoneExisting(&tombstone),
+        layout: page_layout,
+      })
+      .unwrap();
+      property_apply_plan(
+        hash_algorithm,
+        generation,
+        next_page_id,
+        page_layout,
+        &page_plan,
+        &mut pages,
+        &mut directory_artifacts,
+        &mut root_key,
+      );
+      next_page_id = page_plan.next_page_id;
+      expected_live.remove(&coordinate);
+      property_assert_model(&pages, hash_algorithm, &expected_live);
+      generation += 1;
+    }
+    loop {
+      let Some(page_index) = pages.iter().position(|page| decode_ordered_page(page, hash_algorithm).unwrap().tombstone_count > 0) else {
+        break;
+      };
+      let source = decode_ordered_page(&pages[page_index], hash_algorithm).unwrap();
+      let proof_page_keys = [source.key.as_slice()];
+      let source_pages = [pages[page_index].as_slice()];
+      let proof = TombstoneDropProofV1 {
+        owner_id: &owner_id,
+        source_page_keys: &proof_page_keys,
+        coverage_epoch_id: 1,
+        covered_through_sequence: generation,
+        journal_contiguous_through_sequence: generation,
+        pin_safe_through_generation: source.generation,
+      };
+      let page_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+        hash_algorithm,
+        source_pages: &source_pages,
+        previous_posting_page: page_index.checked_sub(1).map(|index| pages[index].as_slice()),
+        next_posting_page: pages.get(page_index + 1).map(Vec::as_slice),
+        generation,
+        next_page_id,
+        tombstone_drop_proof: Some(&proof),
+        layout: page_layout,
+      })
+      .unwrap();
+      property_apply_plan(
+        hash_algorithm,
+        generation,
+        next_page_id,
+        page_layout,
+        &page_plan,
+        &mut pages,
+        &mut directory_artifacts,
+        &mut root_key,
+      );
+      next_page_id = page_plan.next_page_id;
+      property_assert_model(&pages, hash_algorithm, &expected_live);
+      generation += 1;
+    }
+
+    let mut saw_merge = false;
+    'merge_passes: loop {
+      for page_index in 0..pages.len().saturating_sub(1) {
+        let source_pages = [pages[page_index].as_slice(), pages[page_index + 1].as_slice()];
+        let page_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+          hash_algorithm,
+          source_pages: &source_pages,
+          previous_posting_page: page_index.checked_sub(1).map(|index| pages[index].as_slice()),
+          next_posting_page: pages.get(page_index + 2).map(Vec::as_slice),
+          generation,
+          next_page_id,
+          tombstone_drop_proof: None,
+          layout: page_layout,
+        })
+        .unwrap();
+        if page_plan.is_unchanged() {
+          continue;
+        }
+        saw_merge = true;
+        property_apply_plan(
+          hash_algorithm,
+          generation,
+          next_page_id,
+          page_layout,
+          &page_plan,
+          &mut pages,
+          &mut directory_artifacts,
+          &mut root_key,
+        );
+        next_page_id = page_plan.next_page_id;
+        property_assert_model(&pages, hash_algorithm, &expected_live);
+        generation += 1;
+        continue 'merge_passes;
+      }
+      break;
+    }
+    assert!(saw_merge);
+    property_assert_model(&pages, hash_algorithm, &expected_live);
+  }
 }
