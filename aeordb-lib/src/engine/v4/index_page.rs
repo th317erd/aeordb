@@ -3,7 +3,11 @@ use std::collections::BTreeMap;
 
 use crate::engine::HashAlgorithm;
 
-use super::index_artifact::{decode_immutable_index_artifact, u16_at, u32_at, u64_at};
+use super::index_artifact::{
+  EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1,
+  checked_immutable_index_artifact_encoded_length, decode_immutable_index_artifact, encode_immutable_index_artifact, u16_at, u32_at,
+  u64_at,
+};
 use super::index_record::{
   DocumentStateOwnerV1, decode_canonical_value_record_prefix, decode_document_state_record_prefix, decode_scope_document_record_prefix,
   decode_scope_reverse_record_prefix,
@@ -68,7 +72,7 @@ impl OrderedIndexRoleV1 {
     }
   }
 
-  fn owner_class(self) -> u8 {
+  pub fn owner_class(self) -> u8 {
     match self {
       Self::ScopeOrdinal | Self::ScopeReverse => 1,
       Self::Value | Self::ValueDocumentState => 2,
@@ -76,7 +80,7 @@ impl OrderedIndexRoleV1 {
     }
   }
 
-  fn key_codec(self) -> u16 {
+  pub fn key_codec(self) -> u16 {
     match self {
       Self::ScopeOrdinal | Self::ValueDocumentState | Self::IndexDocumentState => 1,
       Self::ScopeReverse => 2,
@@ -86,7 +90,17 @@ impl OrderedIndexRoleV1 {
     }
   }
 
-  fn uses_page_id(self) -> bool {
+  pub fn child_kind(self) -> ImmutableIndexArtifactKindV1 {
+    match self {
+      Self::ScopeOrdinal | Self::ScopeReverse => ImmutableIndexArtifactKindV1::ScopeCatalogPage,
+      Self::Value => ImmutableIndexArtifactKindV1::ValuePage,
+      Self::ValueDocumentState | Self::IndexDocumentState => ImmutableIndexArtifactKindV1::DocumentStatePage,
+      Self::Posting => ImmutableIndexArtifactKindV1::PostingPage,
+      Self::NvtTile => ImmutableIndexArtifactKindV1::NvtTile,
+    }
+  }
+
+  pub fn uses_page_id(self) -> bool {
     !matches!(self, Self::ScopeOrdinal | Self::ScopeReverse | Self::NvtTile)
   }
 }
@@ -106,6 +120,53 @@ impl PhysicalHintV1 {
   pub fn matches(self, wal_offset: u64, total_length: u32, write_sequence: u64) -> bool {
     self.is_complete() && self.wal_offset == wal_offset && self.total_length == total_length && self.write_sequence == write_sequence
   }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactDirectoryEntryWriteV1<'a> {
+  pub lower_fence: &'a [u8],
+  pub upper_fence: &'a [u8],
+  pub child_hash: &'a [u8],
+  pub child_generation: u64,
+  pub live_count: u64,
+  pub tombstone_count: u64,
+  pub page_count: u64,
+  pub logical_bytes: u64,
+  pub minimum_page_id: u64,
+  pub maximum_page_id: u64,
+  pub physical_hint: PhysicalHintV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactDirectoryWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub role: OrderedIndexRoleV1,
+  pub owner_id: &'a [u8],
+  pub generation: u64,
+  pub level: u16,
+  pub entries: &'a [ArtifactDirectoryEntryWriteV1<'a>],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedPageWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub role: OrderedIndexRoleV1,
+  pub owner_id: &'a [u8],
+  pub generation: u64,
+  pub page_id: u64,
+  pub previous_page_id: u64,
+  pub next_page_id: u64,
+  pub records: &'a [&'a [u8]],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostingRecordV1<'a> {
+  pub tombstone: bool,
+  pub coordinate: u64,
+  pub document_ordinal: u64,
+  pub source_value_ordinal: u32,
+  pub expansion_ordinal: u32,
+  pub posting_key: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +285,8 @@ pub struct OrderedPageV1<'a> {
   pub owner_id: &'a [u8],
   pub generation: u64,
   pub page_id: u64,
+  pub previous_page_id: u64,
+  pub next_page_id: u64,
   pub lower_fence: &'a [u8],
   pub upper_fence: &'a [u8],
   pub live_count: u32,
@@ -282,9 +345,9 @@ pub fn decode_artifact_directory(value: &[u8], hash_algorithm: HashAlgorithm) ->
   let level = u16_at(body, 0)?;
   let key_codec = u16_at(body, 2)?;
   let entry_count = u32_at(body, 4)?;
-  let lower_length = usize::try_from(u32_at(body, 16)?).map_err(|_| length_error("directory lower-fence length conversion"))?;
-  let upper_length = usize::try_from(u32_at(body, 20)?).map_err(|_| length_error("directory upper-fence length conversion"))?;
-  let entries_length = usize::try_from(u32_at(body, 72)?).map_err(|_| length_error("directory entry length conversion"))?;
+  let lower_length = checked_usize_from_u32(u32_at(body, 16)?, "directory lower-fence length")?;
+  let upper_length = checked_usize_from_u32(u32_at(body, 20)?, "directory upper-fence length")?;
+  let entries_length = checked_usize_from_u32(u32_at(body, 72)?, "directory entry length")?;
   if level > 15 {
     return Err(amplification_error("directory level exceeds 15"));
   }
@@ -389,8 +452,8 @@ fn decode_leaf_descriptor<'a>(
   if start.checked_add(fixed).is_none_or(|next| next > end) {
     return Err(truncated_error("leaf directory descriptor is truncated"));
   }
-  let lower_length = usize::try_from(u32_at(body, start)?).map_err(|_| length_error("leaf lower-fence length conversion"))?;
-  let upper_length = usize::try_from(u32_at(body, start + 4)?).map_err(|_| length_error("leaf upper-fence length conversion"))?;
+  let lower_length = checked_usize_from_u32(u32_at(body, start)?, "leaf lower-fence length")?;
+  let upper_length = checked_usize_from_u32(u32_at(body, start + 4)?, "leaf upper-fence length")?;
   validate_key_length(lower_length)?;
   validate_key_length(upper_length)?;
   let page_id = u64_at(body, start + 8)?;
@@ -453,8 +516,8 @@ fn decode_internal_descriptor<'a>(
   if start.checked_add(fixed).is_none_or(|next| next > end) {
     return Err(truncated_error("internal directory descriptor is truncated"));
   }
-  let lower_length = usize::try_from(u32_at(body, start)?).map_err(|_| length_error("internal lower-fence length conversion"))?;
-  let upper_length = usize::try_from(u32_at(body, start + 4)?).map_err(|_| length_error("internal upper-fence length conversion"))?;
+  let lower_length = checked_usize_from_u32(u32_at(body, start)?, "internal lower-fence length")?;
+  let upper_length = checked_usize_from_u32(u32_at(body, start + 4)?, "internal upper-fence length")?;
   validate_key_length(lower_length)?;
   validate_key_length(upper_length)?;
   let child_hash = &body[start + 8..start + 8 + hash_width];
@@ -516,6 +579,402 @@ fn decode_physical_hint(body: &[u8], offset: usize) -> FormatResult<PhysicalHint
   Ok(PhysicalHintV1 { wal_offset, total_length, write_sequence })
 }
 
+pub fn encode_artifact_directory(request: &ArtifactDirectoryWriteV1<'_>) -> FormatResult<EncodedImmutableIndexArtifactV1> {
+  validate_owner(request.owner_id, request.hash_algorithm, "directory owner")?;
+  if request.generation == 0 {
+    return Err(identity_error("directory generation is zero"));
+  }
+  if request.level > 15 {
+    return Err(amplification_error("directory level exceeds 15"));
+  }
+  if request.entries.is_empty() || request.entries.len() > MAX_DIRECTORY_ENTRIES as usize {
+    return Err(amplification_error("directory entry count is outside 1..=65536"));
+  }
+
+  let hash_width = request.hash_algorithm.hash_length();
+  let descriptor_fixed_length = if request.level == 0 { 72usize.checked_add(hash_width) } else { 88usize.checked_add(hash_width) }
+    .ok_or_else(|| length_error("directory descriptor fixed length overflow"))?;
+  let mut entries_length = 0usize;
+  let mut live_count = 0u64;
+  let mut tombstone_count = 0u64;
+  let mut page_count = 0u64;
+  let mut logical_bytes = 0u64;
+  let mut minimum_page_id = request.entries[0].minimum_page_id;
+  let mut maximum_page_id = request.entries[0].maximum_page_id;
+  let mut previous_upper_fence = None;
+  for entry in request.entries {
+    validate_directory_write_entry(request, entry)?;
+    if let Some(previous_upper_fence) = previous_upper_fence {
+      if compare_order_keys(request.hash_algorithm, request.role, previous_upper_fence, entry.lower_fence)? != Ordering::Less {
+        return Err(order_error("directory child ranges overlap or are not strictly ordered"));
+      }
+    }
+    previous_upper_fence = Some(entry.upper_fence);
+    let descriptor_length = descriptor_fixed_length
+      .checked_add(entry.lower_fence.len())
+      .and_then(|length| length.checked_add(entry.upper_fence.len()))
+      .ok_or_else(|| length_error("directory descriptor length overflow"))?;
+    entries_length = entries_length.checked_add(descriptor_length).ok_or_else(|| length_error("directory entries length overflow"))?;
+    live_count = live_count.checked_add(entry.live_count).ok_or_else(|| length_error("directory live-count overflow"))?;
+    tombstone_count =
+      tombstone_count.checked_add(entry.tombstone_count).ok_or_else(|| length_error("directory tombstone-count overflow"))?;
+    page_count = page_count.checked_add(entry.page_count).ok_or_else(|| length_error("directory page-count overflow"))?;
+    logical_bytes = logical_bytes.checked_add(entry.logical_bytes).ok_or_else(|| length_error("directory logical-byte overflow"))?;
+    minimum_page_id = minimum_page_id.min(entry.minimum_page_id);
+    maximum_page_id = maximum_page_id.max(entry.maximum_page_id);
+  }
+
+  let lower_fence = request.entries[0].lower_fence;
+  let upper_fence = request.entries[request.entries.len() - 1].upper_fence;
+  let body_length = 80usize
+    .checked_add(lower_fence.len())
+    .and_then(|length| length.checked_add(upper_fence.len()))
+    .and_then(|length| length.checked_add(entries_length))
+    .ok_or_else(|| length_error("directory body length overflow"))?;
+  let identity_length = hash_width.checked_add(2).ok_or_else(|| length_error("directory identity length overflow"))?;
+  checked_immutable_index_artifact_encoded_length(ImmutableIndexArtifactKindV1::ArtifactDirectoryNode, identity_length, body_length)?;
+
+  let mut identity = allocate_zeroed(identity_length, "directory identity")?;
+  identity[..hash_width].copy_from_slice(request.owner_id);
+  identity[hash_width] = request.role.owner_class();
+  identity[hash_width + 1] = request.role.id();
+
+  let mut body = allocate_zeroed(body_length, "directory body")?;
+  write_u16(&mut body, 0, request.level)?;
+  write_u16(&mut body, 2, request.role.key_codec())?;
+  write_u32(&mut body, 4, checked_u32(request.entries.len(), "directory entry count")?)?;
+  write_u32(&mut body, 16, checked_u32(lower_fence.len(), "directory lower-fence length")?)?;
+  write_u32(&mut body, 20, checked_u32(upper_fence.len(), "directory upper-fence length")?)?;
+  write_u64(&mut body, 24, live_count)?;
+  write_u64(&mut body, 32, tombstone_count)?;
+  write_u64(&mut body, 40, page_count)?;
+  write_u64(&mut body, 48, logical_bytes)?;
+  write_u64(&mut body, 56, minimum_page_id)?;
+  write_u64(&mut body, 64, maximum_page_id)?;
+  write_u32(&mut body, 72, checked_u32(entries_length, "directory entries length")?)?;
+  let mut cursor = 80usize;
+  write_bytes(&mut body, cursor, lower_fence, "directory lower fence")?;
+  cursor += lower_fence.len();
+  write_bytes(&mut body, cursor, upper_fence, "directory upper fence")?;
+  cursor += upper_fence.len();
+  for entry in request.entries {
+    cursor = encode_directory_descriptor(&mut body, cursor, hash_width, request.level, entry)?;
+  }
+  if cursor != body.len() {
+    return Err(closure_error("encoded directory descriptors do not consume the body"));
+  }
+
+  let encoded = encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+    kind: ImmutableIndexArtifactKindV1::ArtifactDirectoryNode,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  decode_artifact_directory(&encoded.value, request.hash_algorithm)?;
+  Ok(encoded)
+}
+
+fn validate_directory_write_entry(request: &ArtifactDirectoryWriteV1<'_>, entry: &ArtifactDirectoryEntryWriteV1<'_>) -> FormatResult<()> {
+  validate_key_length(entry.lower_fence.len())?;
+  validate_key_length(entry.upper_fence.len())?;
+  validate_descriptor_fences(request.hash_algorithm, request.role, entry.lower_fence, entry.upper_fence)?;
+  validate_hash(entry.child_hash, request.hash_algorithm, "directory child hash")?;
+  if entry.child_generation == 0 || entry.child_generation > request.generation {
+    return Err(closure_error("directory child generation is zero or newer than its parent"));
+  }
+  if entry.live_count.checked_add(entry.tombstone_count).is_none_or(|count| count == 0) || entry.logical_bytes == 0 {
+    return Err(closure_error("directory child counts or logical size are invalid"));
+  }
+  if request.level == 0 {
+    if entry.page_count != 1 || entry.minimum_page_id != entry.maximum_page_id {
+      return Err(closure_error("leaf descriptor must describe exactly one page identity"));
+    }
+  } else if entry.page_count == 0 || entry.minimum_page_id > entry.maximum_page_id {
+    return Err(closure_error("internal descriptor page count or range is invalid"));
+  }
+  if request.role.uses_page_id() {
+    if entry.minimum_page_id == 0 {
+      return Err(closure_error("directory role requires nonzero page IDs"));
+    }
+  } else if entry.minimum_page_id != 0 || entry.maximum_page_id != 0 {
+    return Err(closure_error("directory role forbids page IDs"));
+  }
+  Ok(())
+}
+
+fn encode_directory_descriptor(
+  body: &mut [u8],
+  start: usize,
+  hash_width: usize,
+  level: u16,
+  entry: &ArtifactDirectoryEntryWriteV1<'_>,
+) -> FormatResult<usize> {
+  write_u32(body, start, checked_u32(entry.lower_fence.len(), "descriptor lower-fence length")?)?;
+  write_u32(body, start + 4, checked_u32(entry.upper_fence.len(), "descriptor upper-fence length")?)?;
+  let fixed_length = if level == 0 {
+    write_u64(body, start + 8, entry.minimum_page_id)?;
+    write_bytes(body, start + 16, entry.child_hash, "leaf child hash")?;
+    let fields = start + 16 + hash_width;
+    write_u64(body, fields, entry.child_generation)?;
+    write_u64(body, fields + 8, entry.live_count)?;
+    write_u64(body, fields + 16, entry.tombstone_count)?;
+    write_u64(body, fields + 24, entry.logical_bytes)?;
+    write_physical_hint(body, fields + 32, entry.physical_hint)?;
+    72usize.checked_add(hash_width).ok_or_else(|| length_error("leaf descriptor fixed length overflow"))?
+  } else {
+    write_bytes(body, start + 8, entry.child_hash, "internal child hash")?;
+    let fields = start + 8 + hash_width;
+    write_u64(body, fields, entry.child_generation)?;
+    write_u64(body, fields + 8, entry.live_count)?;
+    write_u64(body, fields + 16, entry.tombstone_count)?;
+    write_u64(body, fields + 24, entry.page_count)?;
+    write_u64(body, fields + 32, entry.logical_bytes)?;
+    write_u64(body, fields + 40, entry.minimum_page_id)?;
+    write_u64(body, fields + 48, entry.maximum_page_id)?;
+    write_physical_hint(body, fields + 56, entry.physical_hint)?;
+    88usize.checked_add(hash_width).ok_or_else(|| length_error("internal descriptor fixed length overflow"))?
+  };
+  let mut cursor = start.checked_add(fixed_length).ok_or_else(|| length_error("directory descriptor cursor overflow"))?;
+  write_bytes(body, cursor, entry.lower_fence, "descriptor lower fence")?;
+  cursor += entry.lower_fence.len();
+  write_bytes(body, cursor, entry.upper_fence, "descriptor upper fence")?;
+  cursor += entry.upper_fence.len();
+  Ok(cursor)
+}
+
+fn write_physical_hint(body: &mut [u8], offset: usize, hint: PhysicalHintV1) -> FormatResult<()> {
+  write_u64(body, offset, hint.wal_offset)?;
+  write_u32(body, offset + 8, hint.total_length)?;
+  write_u64(body, offset + 16, hint.write_sequence)
+}
+
+pub fn encode_ordered_page(request: &OrderedPageWriteV1<'_>) -> FormatResult<EncodedImmutableIndexArtifactV1> {
+  validate_owner(request.owner_id, request.hash_algorithm, "ordered-page owner")?;
+  if request.generation == 0 {
+    return Err(identity_error("ordered-page generation is zero"));
+  }
+  validate_page_identity_and_links(request)?;
+  let scan = scan_record_slices(request.hash_algorithm, request.role, request.records)?;
+  let lower_fence = record_order_key(&scan.first)?;
+  let upper_fence = record_order_key(&scan.last)?;
+  validate_descriptor_fences(request.hash_algorithm, request.role, &lower_fence, &upper_fence)?;
+
+  let kind = page_kind(request.role)?;
+  let identity_length = page_identity_length(request.role, request.hash_algorithm.hash_length(), lower_fence.len())?;
+  let body_length = 96usize
+    .checked_add(lower_fence.len())
+    .and_then(|length| length.checked_add(upper_fence.len()))
+    .and_then(|length| length.checked_add(scan.records_length))
+    .ok_or_else(|| length_error("ordered-page body length overflow"))?;
+  checked_immutable_index_artifact_encoded_length(kind, identity_length, body_length)?;
+
+  let identity = encode_page_identity(request, &lower_fence, identity_length)?;
+  let mut body = allocate_zeroed(body_length, "ordered-page body")?;
+  write_u16(&mut body, 4, 1)?;
+  write_u16(&mut body, 6, request.role.key_codec())?;
+  write_u64(&mut body, 8, request.previous_page_id)?;
+  write_u64(&mut body, 16, request.next_page_id)?;
+  write_u32(&mut body, 24, checked_u32(lower_fence.len(), "ordered-page lower-fence length")?)?;
+  write_u32(&mut body, 28, checked_u32(upper_fence.len(), "ordered-page upper-fence length")?)?;
+  write_u32(&mut body, 32, scan.record_count)?;
+  write_u32(&mut body, 36, scan.live_count)?;
+  write_u32(&mut body, 40, scan.record_count - scan.live_count)?;
+  write_u64(
+    &mut body,
+    48,
+    u64::try_from(scan.records_length).map_err(|source| length_error(format!("ordered-page record bytes do not fit u64: {source}")))?,
+  )?;
+  write_u64(&mut body, 56, scan.logical_live_bytes)?;
+  if request.role == OrderedIndexRoleV1::Posting {
+    write_u64(&mut body, 64, scan.first.coordinate)?;
+    write_u64(&mut body, 72, scan.last.coordinate)?;
+  }
+  let mut cursor = 96usize;
+  write_bytes(&mut body, cursor, &lower_fence, "ordered-page lower fence")?;
+  cursor += lower_fence.len();
+  write_bytes(&mut body, cursor, &upper_fence, "ordered-page upper fence")?;
+  cursor += upper_fence.len();
+  for record in request.records {
+    write_bytes(&mut body, cursor, record, "ordered-page record")?;
+    cursor += record.len();
+  }
+  if cursor != body.len() {
+    return Err(closure_error("encoded ordered-page records do not consume the body"));
+  }
+
+  let encoded = encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+    kind,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  decode_ordered_page(&encoded.value, request.hash_algorithm)?;
+  Ok(encoded)
+}
+
+fn validate_page_identity_and_links(request: &OrderedPageWriteV1<'_>) -> FormatResult<()> {
+  match request.role {
+    OrderedIndexRoleV1::ScopeOrdinal | OrderedIndexRoleV1::ScopeReverse => {
+      if request.page_id != 0 {
+        return Err(identity_error("scope-catalog pages must use page ID zero"));
+      }
+    }
+    OrderedIndexRoleV1::Value
+    | OrderedIndexRoleV1::ValueDocumentState
+    | OrderedIndexRoleV1::Posting
+    | OrderedIndexRoleV1::IndexDocumentState => {
+      if request.page_id == 0 {
+        return Err(identity_error("ordered-page role requires a nonzero page ID"));
+      }
+    }
+    OrderedIndexRoleV1::NvtTile => return Err(kind_error("NVT tiles are not ordered pages")),
+  }
+  if request.role != OrderedIndexRoleV1::Posting && (request.previous_page_id != 0 || request.next_page_id != 0) {
+    return Err(reserve_error("non-posting page links are nonzero"));
+  }
+  if request.role == OrderedIndexRoleV1::Posting && (request.previous_page_id == request.page_id || request.next_page_id == request.page_id)
+  {
+    return Err(closure_error("posting page links form a self-cycle"));
+  }
+  Ok(())
+}
+
+fn page_kind(role: OrderedIndexRoleV1) -> FormatResult<ImmutableIndexArtifactKindV1> {
+  if role == OrderedIndexRoleV1::NvtTile {
+    return Err(kind_error("NVT tiles are not ordered pages"));
+  }
+  Ok(role.child_kind())
+}
+
+fn page_identity_length(role: OrderedIndexRoleV1, hash_width: usize, lower_fence_length: usize) -> FormatResult<usize> {
+  match role {
+    OrderedIndexRoleV1::ScopeOrdinal | OrderedIndexRoleV1::ScopeReverse => hash_width
+      .checked_add(1)
+      .and_then(|length| length.checked_add(lower_fence_length))
+      .ok_or_else(|| length_error("scope-page identity length overflow")),
+    OrderedIndexRoleV1::Value | OrderedIndexRoleV1::Posting => {
+      hash_width.checked_add(8).ok_or_else(|| length_error("ID-page identity length overflow"))
+    }
+    OrderedIndexRoleV1::ValueDocumentState | OrderedIndexRoleV1::IndexDocumentState => {
+      hash_width.checked_add(16).ok_or_else(|| length_error("state-page identity length overflow"))
+    }
+    OrderedIndexRoleV1::NvtTile => Err(kind_error("NVT tiles are not ordered pages")),
+  }
+}
+
+fn encode_page_identity(request: &OrderedPageWriteV1<'_>, lower_fence: &[u8], length: usize) -> FormatResult<Vec<u8>> {
+  let hash_width = request.hash_algorithm.hash_length();
+  let mut identity = allocate_zeroed(length, "ordered-page identity")?;
+  identity[..hash_width].copy_from_slice(request.owner_id);
+  match request.role {
+    OrderedIndexRoleV1::ScopeOrdinal | OrderedIndexRoleV1::ScopeReverse => {
+      identity[hash_width] = request.role.id();
+      write_bytes(&mut identity, hash_width + 1, lower_fence, "scope-page identity fence")?;
+    }
+    OrderedIndexRoleV1::Value | OrderedIndexRoleV1::Posting => write_u64(&mut identity, hash_width, request.page_id)?,
+    OrderedIndexRoleV1::ValueDocumentState | OrderedIndexRoleV1::IndexDocumentState => {
+      identity[hash_width] = request.role.owner_class();
+      write_u64(&mut identity, hash_width + 8, request.page_id)?;
+    }
+    OrderedIndexRoleV1::NvtTile => return Err(kind_error("NVT tiles are not ordered pages")),
+  }
+  Ok(identity)
+}
+
+struct RecordSliceScanV1<'a> {
+  first: OrderedRecordV1<'a>,
+  last: OrderedRecordV1<'a>,
+  record_count: u32,
+  live_count: u32,
+  records_length: usize,
+  logical_live_bytes: u64,
+}
+
+fn scan_record_slices<'a>(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  records: &[&'a [u8]],
+) -> FormatResult<RecordSliceScanV1<'a>> {
+  if records.is_empty() {
+    return Err(closure_error("ordered page has no records"));
+  }
+  let record_count = checked_u32(records.len(), "ordered-page record count")?;
+  let mut first = None;
+  let mut previous: Option<OrderedRecordV1<'a>> = None;
+  let mut live_count = 0u32;
+  let mut records_length = 0usize;
+  let mut logical_live_bytes = 0u64;
+  for encoded in records {
+    let mut cursor = 0usize;
+    let record = decode_record(hash_algorithm, role, encoded, &mut cursor)?;
+    if cursor != encoded.len() {
+      return Err(truncated_error("one ordered-page record contains trailing bytes"));
+    }
+    if let Some(previous) = &previous {
+      if compare_records(hash_algorithm, role, previous, &record)? != Ordering::Less {
+        return Err(order_error("ordered-page records are not strictly ordered"));
+      }
+    }
+    records_length = records_length.checked_add(encoded.len()).ok_or_else(|| length_error("ordered-page record length overflow"))?;
+    if !record.tombstone {
+      live_count = live_count.checked_add(1).ok_or_else(|| length_error("ordered-page live count overflow"))?;
+      let encoded_length =
+        u64::try_from(encoded.len()).map_err(|source| length_error(format!("ordered-page record length does not fit u64: {source}")))?;
+      logical_live_bytes =
+        logical_live_bytes.checked_add(encoded_length).ok_or_else(|| length_error("ordered-page logical-byte overflow"))?;
+    }
+    if first.is_none() {
+      first = Some(record.clone());
+    }
+    previous = Some(record);
+  }
+  Ok(RecordSliceScanV1 {
+    first: first.ok_or_else(|| closure_error("ordered page has no first record"))?,
+    last: previous.ok_or_else(|| closure_error("ordered page has no last record"))?,
+    record_count,
+    live_count,
+    records_length,
+    logical_live_bytes,
+  })
+}
+
+fn record_order_key(record: &OrderedRecordV1<'_>) -> FormatResult<Vec<u8>> {
+  match &record.sort_key {
+    RecordSortKeyV1::Contiguous(key) => copy_fallible(key, "ordered record key"),
+    RecordSortKeyV1::Posting { coordinate, key, document_ordinal, suffix } => {
+      let length = 24usize.checked_add(key.len()).ok_or_else(|| length_error("posting order-key length overflow"))?;
+      validate_key_length(length)?;
+      let mut encoded = allocate_zeroed(length, "posting order key")?;
+      write_u64(&mut encoded, 0, *coordinate)?;
+      write_bytes(&mut encoded, 8, key, "posting order key")?;
+      write_u64(&mut encoded, 8 + key.len(), *document_ordinal)?;
+      write_bytes(&mut encoded, 16 + key.len(), suffix, "posting order suffix")?;
+      Ok(encoded)
+    }
+  }
+}
+
+pub fn validate_posting_page_link(left: &OrderedPageV1<'_>, right: &OrderedPageV1<'_>, hash_algorithm: HashAlgorithm) -> FormatResult<()> {
+  if left.role != OrderedIndexRoleV1::Posting || right.role != OrderedIndexRoleV1::Posting {
+    return Err(closure_error("adjacent posting-link validation received a non-posting page"));
+  }
+  validate_owner(left.owner_id, hash_algorithm, "left posting-page owner")?;
+  validate_owner(right.owner_id, hash_algorithm, "right posting-page owner")?;
+  if left.owner_id != right.owner_id
+    || left.page_id == right.page_id
+    || left.next_page_id != right.page_id
+    || right.previous_page_id != left.page_id
+  {
+    return Err(closure_error("adjacent posting pages disagree on owner, identity, or bidirectional links"));
+  }
+  if compare_order_keys(hash_algorithm, OrderedIndexRoleV1::Posting, left.upper_fence, right.lower_fence)? != Ordering::Less {
+    return Err(order_error("adjacent posting pages overlap or are not strictly ordered"));
+  }
+  Ok(())
+}
+
 pub fn decode_ordered_page(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<OrderedPageV1<'_>> {
   let artifact = decode_immutable_index_artifact(value, hash_algorithm, MAX_ARTIFACT_LENGTH)?;
   let hash_width = hash_algorithm.hash_length();
@@ -533,12 +992,12 @@ pub fn decode_ordered_page(value: &[u8], hash_algorithm: HashAlgorithm) -> Forma
   if body.len() < 96 {
     return Err(truncated_error("ordered-page body is shorter than its fixed header"));
   }
-  let lower_length = usize::try_from(u32_at(body, 24)?).map_err(|_| length_error("page lower-fence length conversion"))?;
-  let upper_length = usize::try_from(u32_at(body, 28)?).map_err(|_| length_error("page upper-fence length conversion"))?;
+  let lower_length = checked_usize_from_u32(u32_at(body, 24)?, "page lower-fence length")?;
+  let upper_length = checked_usize_from_u32(u32_at(body, 28)?, "page upper-fence length")?;
   let record_count = u32_at(body, 32)?;
   let live_count = u32_at(body, 36)?;
   let tombstone_count = u32_at(body, 40)?;
-  let records_length = usize::try_from(u64_at(body, 48)?).map_err(|_| length_error("page record length conversion"))?;
+  let records_length = checked_usize_from_u64(u64_at(body, 48)?, "page record length")?;
   if u32_at(body, 0)? != 0 || body[80..96].iter().any(|byte| *byte != 0) {
     return Err(reserve_error("ordered-page flags or reserves are nonzero"));
   }
@@ -548,8 +1007,13 @@ pub fn decode_ordered_page(value: &[u8], hash_algorithm: HashAlgorithm) -> Forma
   if u16_at(body, 6)? != role.key_codec() {
     return Err(closure_error("ordered-page key codec disagrees with its role"));
   }
-  if role != OrderedIndexRoleV1::Posting && (u64_at(body, 8)? != 0 || u64_at(body, 16)? != 0) {
-    return Err(reserve_error("non-posting page coordinate fields are nonzero"));
+  let previous_page_id = u64_at(body, 8)?;
+  let next_page_id = u64_at(body, 16)?;
+  if role != OrderedIndexRoleV1::Posting && (previous_page_id != 0 || next_page_id != 0) {
+    return Err(reserve_error("non-posting page links are nonzero"));
+  }
+  if role == OrderedIndexRoleV1::Posting && (previous_page_id == page_id || next_page_id == page_id) {
+    return Err(closure_error("posting page links form a self-cycle"));
   }
   validate_key_length(lower_length)?;
   validate_key_length(upper_length)?;
@@ -605,6 +1069,8 @@ pub fn decode_ordered_page(value: &[u8], hash_algorithm: HashAlgorithm) -> Forma
     owner_id,
     generation: artifact.generation,
     page_id,
+    previous_page_id,
+    next_page_id,
     lower_fence,
     upper_fence,
     live_count,
@@ -709,7 +1175,7 @@ fn decode_record<'a>(
   cursor: &mut usize,
 ) -> FormatResult<OrderedRecordV1<'a>> {
   match role {
-    OrderedIndexRoleV1::Posting => decode_posting_record(bytes, cursor),
+    OrderedIndexRoleV1::Posting => decode_posting_record_for_page(bytes, cursor),
     OrderedIndexRoleV1::Value => decode_value_record(hash_algorithm, bytes, cursor),
     OrderedIndexRoleV1::ScopeOrdinal => decode_scope_ordinal_record(hash_algorithm, bytes, cursor),
     OrderedIndexRoleV1::ScopeReverse => decode_scope_reverse_record(hash_algorithm, bytes, cursor),
@@ -720,29 +1186,72 @@ fn decode_record<'a>(
   }
 }
 
-fn decode_posting_record<'a>(bytes: &'a [u8], cursor: &mut usize) -> FormatResult<OrderedRecordV1<'a>> {
-  let start = *cursor;
-  let tombstone = decode_record_flags(bytes, start)?;
-  let key_length = usize::try_from(u32_at(bytes, start + 4)?).map_err(|_| length_error("posting key length conversion"))?;
+pub fn decode_posting_record(value: &[u8]) -> FormatResult<PostingRecordV1<'_>> {
+  let (record, consumed) = decode_posting_record_prefix(value)?;
+  if consumed != value.len() {
+    return Err(truncated_error("posting record contains trailing bytes"));
+  }
+  Ok(record)
+}
+
+pub fn encode_posting_record(record: &PostingRecordV1<'_>) -> FormatResult<Vec<u8>> {
+  validate_key_length(record.posting_key.len())?;
+  if record.document_ordinal == 0 {
+    return Err(identity_error("posting document ordinal is zero"));
+  }
+  let length = 32usize.checked_add(record.posting_key.len()).ok_or_else(|| length_error("posting record length overflow"))?;
+  let mut encoded = allocate_zeroed(length, "posting record")?;
+  encoded[0] = u8::from(record.tombstone);
+  write_u32(&mut encoded, 4, checked_u32(record.posting_key.len(), "posting key length")?)?;
+  write_u64(&mut encoded, 8, record.coordinate)?;
+  write_u64(&mut encoded, 16, record.document_ordinal)?;
+  write_u32(&mut encoded, 24, record.source_value_ordinal)?;
+  write_u32(&mut encoded, 28, record.expansion_ordinal)?;
+  write_bytes(&mut encoded, 32, record.posting_key, "posting key")?;
+  decode_posting_record(&encoded)?;
+  Ok(encoded)
+}
+
+fn decode_posting_record_prefix(bytes: &[u8]) -> FormatResult<(PostingRecordV1<'_>, usize)> {
+  let tombstone = decode_record_flags(bytes, 0)?;
+  let key_length = checked_usize_from_u32(u32_at(bytes, 4)?, "posting key length")?;
   validate_key_length(key_length)?;
-  let end =
-    start.checked_add(32).and_then(|value| value.checked_add(key_length)).ok_or_else(|| length_error("posting record length overflow"))?;
+  let end = 32usize.checked_add(key_length).ok_or_else(|| length_error("posting record length overflow"))?;
   if end > bytes.len() {
     return Err(truncated_error("posting record is truncated"));
   }
-  let coordinate = u64_at(bytes, start + 8)?;
-  let document_ordinal = u64_at(bytes, start + 16)?;
+  let document_ordinal = u64_at(bytes, 16)?;
+  if document_ordinal == 0 {
+    return Err(identity_error("posting document ordinal is zero"));
+  }
+  Ok((
+    PostingRecordV1 {
+      tombstone,
+      coordinate: u64_at(bytes, 8)?,
+      document_ordinal,
+      source_value_ordinal: u32_at(bytes, 24)?,
+      expansion_ordinal: u32_at(bytes, 28)?,
+      posting_key: &bytes[32..end],
+    },
+    end,
+  ))
+}
+
+fn decode_posting_record_for_page<'a>(bytes: &'a [u8], cursor: &mut usize) -> FormatResult<OrderedRecordV1<'a>> {
+  let start = *cursor;
+  let (record, consumed) = decode_posting_record_prefix(&bytes[start..])?;
+  let end = start.checked_add(consumed).ok_or_else(|| length_error("posting record end overflow"))?;
   let suffix = &bytes[start + 24..start + 32];
-  let key = &bytes[start + 32..end];
+  let key = record.posting_key;
   let encoded = &bytes[start..end];
   *cursor = end;
   Ok(OrderedRecordV1 {
     encoded,
-    tombstone,
-    coordinate,
-    document_ordinal,
+    tombstone: record.tombstone,
+    coordinate: record.coordinate,
+    document_ordinal: record.document_ordinal,
     file_key: None,
-    sort_key: RecordSortKeyV1::Posting { coordinate, key, document_ordinal, suffix },
+    sort_key: RecordSortKeyV1::Posting { coordinate: record.coordinate, key, document_ordinal: record.document_ordinal, suffix },
   })
 }
 
@@ -856,7 +1365,7 @@ pub fn validate_scope_catalog_pair(ordinal: &[u8], reverse: &[u8], hash_algorith
     if record.tombstone {
       continue;
     }
-    let file_key = record.file_key.expect("validated ordinal record has a FileKey");
+    let file_key = record.file_key.ok_or_else(|| closure_error("validated ordinal record has no FileKey"))?;
     if ordinal_live.insert(file_key, record.document_ordinal).is_some() {
       return Err(order_error("scope ordinal page repeats a live FileKey"));
     }
@@ -864,7 +1373,7 @@ pub fn validate_scope_catalog_pair(ordinal: &[u8], reverse: &[u8], hash_algorith
   let mut reverse_live = BTreeMap::new();
   for record in reverse.records.iter() {
     let record = record?;
-    let file_key = record.file_key.expect("validated reverse record has a FileKey");
+    let file_key = record.file_key.ok_or_else(|| closure_error("validated reverse record has no FileKey"))?;
     if reverse_live.insert(file_key, record.document_ordinal).is_some() {
       return Err(order_error("scope reverse page repeats a FileKey"));
     }
@@ -884,10 +1393,7 @@ pub fn compare_order_keys(hash_algorithm: HashAlgorithm, role: OrderedIndexRoleV
     | OrderedIndexRoleV1::IndexDocumentState
     | OrderedIndexRoleV1::NvtTile => u64_at(left, 0)?.cmp(&u64_at(right, 0)?),
     OrderedIndexRoleV1::ScopeReverse => left.cmp(right),
-    OrderedIndexRoleV1::Value => u64_at(left, 0)?.cmp(&u64_at(right, 0)?).then_with(|| {
-      u32::from_le_bytes(left[8..12].try_into().expect("validated value key"))
-        .cmp(&u32::from_le_bytes(right[8..12].try_into().expect("validated value key")))
-    }),
+    OrderedIndexRoleV1::Value => u64_at(left, 0)?.cmp(&u64_at(right, 0)?).then(u32_at(left, 8)?.cmp(&u32_at(right, 8)?)),
     OrderedIndexRoleV1::Posting => compare_posting_positions(left, right)?,
   })
 }
@@ -937,17 +1443,9 @@ fn compare_posting_positions(left: &[u8], right: &[u8]) -> FormatResult<Ordering
     u64_at(left, 0)?
       .cmp(&u64_at(right, 0)?)
       .then_with(|| left[8..left_key_end].cmp(&right[8..right_key_end]))
-      .then_with(|| {
-        u64_at(left, left_key_end).expect("validated posting key").cmp(&u64_at(right, right_key_end).expect("validated posting key"))
-      })
-      .then_with(|| {
-        u32::from_le_bytes(left[left_key_end + 8..left_key_end + 12].try_into().expect("validated posting key"))
-          .cmp(&u32::from_le_bytes(right[right_key_end + 8..right_key_end + 12].try_into().expect("validated posting key")))
-      })
-      .then_with(|| {
-        u32::from_le_bytes(left[left_key_end + 12..].try_into().expect("validated posting key"))
-          .cmp(&u32::from_le_bytes(right[right_key_end + 12..].try_into().expect("validated posting key")))
-      }),
+      .then(u64_at(left, left_key_end)?.cmp(&u64_at(right, right_key_end)?))
+      .then(u32_at(left, left_key_end + 8)?.cmp(&u32_at(right, right_key_end + 8)?))
+      .then(u32_at(left, left_key_end + 12)?.cmp(&u32_at(right, right_key_end + 12)?)),
   )
 }
 
@@ -983,6 +1481,69 @@ fn validate_key_length(length: usize) -> FormatResult<()> {
 
 fn checked_sum(mut values: impl Iterator<Item = u64>, context: &'static str) -> FormatResult<u64> {
   values.try_fold(0u64, |total, value| total.checked_add(value).ok_or_else(|| length_error(context)))
+}
+
+fn validate_owner(value: &[u8], hash_algorithm: HashAlgorithm, context: &'static str) -> FormatResult<()> {
+  validate_hash(value, hash_algorithm, context)
+}
+
+fn validate_hash(value: &[u8], hash_algorithm: HashAlgorithm, context: &'static str) -> FormatResult<()> {
+  if value.len() != hash_algorithm.hash_length() || value.iter().all(|byte| *byte == 0) {
+    return Err(identity_error(format!("{context} has the wrong width or is all zero")));
+  }
+  Ok(())
+}
+
+fn allocate_zeroed(length: usize, label: &'static str) -> FormatResult<Vec<u8>> {
+  let mut value = Vec::new();
+  value
+    .try_reserve_exact(length)
+    .map_err(|source| amplification_error(format!("{label} allocation of {length} bytes failed: {source}")))?;
+  value.resize(length, 0);
+  Ok(value)
+}
+
+fn copy_fallible(source: &[u8], label: &'static str) -> FormatResult<Vec<u8>> {
+  let mut value = allocate_zeroed(source.len(), label)?;
+  value.copy_from_slice(source);
+  Ok(value)
+}
+
+fn checked_u32(value: usize, context: &'static str) -> FormatResult<u32> {
+  u32::try_from(value).map_err(|source| length_error(format!("{context} does not fit u32: {source}")))
+}
+
+fn checked_usize_from_u32(value: u32, context: &'static str) -> FormatResult<usize> {
+  match usize::try_from(value) {
+    Ok(value) => Ok(value),
+    Err(source) => Err(length_error(format!("{context} does not fit usize: {source}"))),
+  }
+}
+
+fn checked_usize_from_u64(value: u64, context: &'static str) -> FormatResult<usize> {
+  match usize::try_from(value) {
+    Ok(value) => Ok(value),
+    Err(source) => Err(length_error(format!("{context} does not fit usize: {source}"))),
+  }
+}
+
+fn write_bytes(destination: &mut [u8], offset: usize, value: &[u8], context: &'static str) -> FormatResult<()> {
+  let end = offset.checked_add(value.len()).ok_or_else(|| length_error("byte write end overflow"))?;
+  let target = destination.get_mut(offset..end).ok_or_else(|| truncated_error(format!("{context} exceeds its destination")))?;
+  target.copy_from_slice(value);
+  Ok(())
+}
+
+fn write_u16(destination: &mut [u8], offset: usize, value: u16) -> FormatResult<()> {
+  write_bytes(destination, offset, &value.to_le_bytes(), "u16 write")
+}
+
+fn write_u32(destination: &mut [u8], offset: usize, value: u32) -> FormatResult<()> {
+  write_bytes(destination, offset, &value.to_le_bytes(), "u32 write")
+}
+
+fn write_u64(destination: &mut [u8], offset: usize, value: u64) -> FormatResult<()> {
+  write_bytes(destination, offset, &value.to_le_bytes(), "u64 write")
 }
 
 fn kind_error(context: impl Into<String>) -> FormatError {

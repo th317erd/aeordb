@@ -829,7 +829,13 @@
         - [x] Validate exact coverage, owner/definition, root-presence, count/high-water, and correctness-reference closure without following pages or activating pointers.
         - [x] Prove malformed, overflow, zero/reused identity, tombstone, source-order, stage/reason, and cross-scope rejection paths.
         - [x] Run narrow, affected, broad, static, architecture, native-platform, and shadow real-world codec gates; record evidence and land the unit.
-      - [ ] P5-4: implement artifact directories and ordered page readers/writers.
+      - [x] P5-4: implement artifact directories and ordered page readers/writers.
+        - [x] Freeze typed directory/page writer ownership and exact both-width fixture parity before implementation.
+        - [x] Implement bounded ArtifactDirectory leaf/internal writers that derive fences and aggregate metadata from validated descriptors.
+        - [x] Implement bounded ordered-page writers that validate role-specific records, ordering, identities, counts, coordinates, and page-link fields.
+        - [x] Expose posting-page links and add streaming-safe adjacent-link validation without loading a complete index.
+        - [x] Prove malformed, overflow, owner/role/page-ID, fence/order, aggregate, physical-hint, and link rejection paths.
+        - [x] Run narrow, affected, broad, static, architecture, native-platform, and shadow real-world codec gates; record evidence and land the unit.
       - [ ] P5-5: implement bounded COW insert/delete/split/merge/compaction.
       - [ ] P5-6: implement sparse fixed-point NVT tiles, fallback, and best-effort healing.
       - [ ] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.

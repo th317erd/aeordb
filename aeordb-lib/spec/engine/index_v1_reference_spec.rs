@@ -14,9 +14,14 @@ use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_f
 use aeordb::engine::v4::index_converter::{ConverterRuntimeV1, IndexSemanticErrorClassV1};
 use aeordb::engine::v4::index_definition_runtime::{IndexDefinitionErrorClassV1, IndexDefinitionRuntimeV1};
 use aeordb::engine::v4::index_artifact::{
-  IndexManifestBodyV1, IndexManifestWriteV1, decode_index_manifest, encode_index_manifest, validate_correctness_manifest_chain,
+  ImmutableIndexArtifactKindV1, IndexManifestBodyV1, IndexManifestWriteV1, decode_index_manifest, encode_index_manifest,
+  validate_correctness_manifest_chain,
 };
-use aeordb::engine::v4::index_page::{OrderedIndexRoleV1, decode_ordered_page};
+use aeordb::engine::v4::index_page::{
+  ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PostingRecordV1,
+  decode_artifact_directory, decode_ordered_page, decode_posting_record, encode_artifact_directory, encode_ordered_page,
+  encode_posting_record, validate_posting_page_link,
+};
 use aeordb::engine::v4::index_record::{
   DocumentStateOwnerV1, DocumentStateRecordV1, decode_canonical_value_record, decode_document_state_record, decode_scope_document_record,
   decode_scope_reverse_record, encode_canonical_value_record, encode_document_state_record, encode_scope_document_record,
@@ -1226,6 +1231,7 @@ fn typed_scope_value_and_state_records_round_trip_both_width_page_fixtures() {
       ("scope-reverse", OrderedIndexRoleV1::ScopeReverse),
       ("value", OrderedIndexRoleV1::Value),
       ("value-document-state", OrderedIndexRoleV1::ValueDocumentState),
+      ("posting", OrderedIndexRoleV1::Posting),
       ("index-document-state", OrderedIndexRoleV1::IndexDocumentState),
     ] {
       let name = format!("aidx-{profile}-{fixture_kind}-page-valid.bin");
@@ -1256,12 +1262,507 @@ fn typed_scope_value_and_state_records_round_trip_both_width_page_fixtures() {
             let decoded = decode_document_state_record(record.encoded, owner, hash_algorithm).unwrap();
             encode_document_state_record(&decoded, owner, hash_algorithm).unwrap()
           }
-          OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::NvtTile => unreachable!("fixture role is fixed above"),
+          OrderedIndexRoleV1::Posting => encode_posting_record(&decode_posting_record(record.encoded).unwrap()).unwrap(),
+          OrderedIndexRoleV1::NvtTile => unreachable!("fixture role is fixed above"),
         };
         assert_eq!(encoded, record.encoded, "{name}");
       }
     }
   }
+}
+
+#[test]
+fn typed_page_and_directory_writers_match_every_independent_fixture() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    for role_name in ["scope-ordinal", "scope-reverse", "value", "value-document-state", "posting", "index-document-state"] {
+      let page_name = format!("aidx-{profile}-{role_name}-page-valid.bin");
+      let expected_page = index_artifact_fixture(&page_name);
+      let page = decode_ordered_page(&expected_page, hash_algorithm).unwrap();
+      let records = page.records.iter().map(|record| record.unwrap().encoded).collect::<Vec<_>>();
+      let encoded_page = encode_ordered_page(&OrderedPageWriteV1 {
+        hash_algorithm,
+        role: page.role,
+        owner_id: page.owner_id,
+        generation: page.generation,
+        page_id: page.page_id,
+        previous_page_id: page.previous_page_id,
+        next_page_id: page.next_page_id,
+        records: &records,
+      })
+      .unwrap();
+      assert_eq!(encoded_page.value, expected_page, "{page_name}");
+      assert_eq!(encoded_page.key, page.key, "{page_name}");
+
+      let directory_name = format!("aidx-{profile}-{role_name}-directory-leaf-valid.bin");
+      let expected_directory = index_artifact_fixture(&directory_name);
+      assert_directory_writer_matches(&expected_directory, hash_algorithm, &directory_name);
+    }
+
+    let internal_name = format!("aidx-{profile}-posting-directory-internal-valid.bin");
+    let expected_internal = index_artifact_fixture(&internal_name);
+    assert_directory_writer_matches(&expected_internal, hash_algorithm, &internal_name);
+
+    let nvt_name = format!("aidx-{profile}-nvt-tile-directory-leaf-valid.bin");
+    let expected_nvt = index_artifact_fixture(&nvt_name);
+    assert_directory_writer_matches(&expected_nvt, hash_algorithm, &nvt_name);
+  }
+}
+
+#[test]
+fn ordered_index_roles_close_owner_child_codec_and_page_id_contract() {
+  let expected = [
+    (OrderedIndexRoleV1::ScopeOrdinal, 1, ImmutableIndexArtifactKindV1::ScopeCatalogPage, 1, false),
+    (OrderedIndexRoleV1::ScopeReverse, 1, ImmutableIndexArtifactKindV1::ScopeCatalogPage, 2, false),
+    (OrderedIndexRoleV1::Value, 2, ImmutableIndexArtifactKindV1::ValuePage, 3, true),
+    (OrderedIndexRoleV1::ValueDocumentState, 2, ImmutableIndexArtifactKindV1::DocumentStatePage, 1, true),
+    (OrderedIndexRoleV1::Posting, 3, ImmutableIndexArtifactKindV1::PostingPage, 4, true),
+    (OrderedIndexRoleV1::IndexDocumentState, 3, ImmutableIndexArtifactKindV1::DocumentStatePage, 1, true),
+    (OrderedIndexRoleV1::NvtTile, 3, ImmutableIndexArtifactKindV1::NvtTile, 5, false),
+  ];
+  for (role, owner_class, child_kind, key_codec, uses_page_id) in expected {
+    assert_eq!(role.owner_class(), owner_class, "{role:?}");
+    assert_eq!(role.child_kind(), child_kind, "{role:?}");
+    assert_eq!(role.key_codec(), key_codec, "{role:?}");
+    assert_eq!(role.uses_page_id(), uses_page_id, "{role:?}");
+  }
+}
+
+fn assert_directory_writer_matches(expected: &[u8], hash_algorithm: HashAlgorithm, name: &str) {
+  let directory = decode_artifact_directory(expected, hash_algorithm).unwrap();
+  let entries = directory
+    .entries
+    .iter()
+    .map(|entry| ArtifactDirectoryEntryWriteV1 {
+      lower_fence: entry.lower_fence,
+      upper_fence: entry.upper_fence,
+      child_hash: entry.child_hash,
+      child_generation: entry.child_generation,
+      live_count: entry.live_count,
+      tombstone_count: entry.tombstone_count,
+      page_count: entry.page_count,
+      logical_bytes: entry.logical_bytes,
+      minimum_page_id: entry.minimum_page_id,
+      maximum_page_id: entry.maximum_page_id,
+      physical_hint: entry.physical_hint,
+    })
+    .collect::<Vec<_>>();
+  let encoded = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+    hash_algorithm,
+    role: directory.role,
+    owner_id: directory.owner_id,
+    generation: directory.generation,
+    level: directory.level,
+    entries: &entries,
+  })
+  .unwrap();
+  assert_eq!(encoded.value, expected, "{name}");
+  assert_eq!(encoded.key, directory.key, "{name}");
+}
+
+#[test]
+fn posting_page_writer_exposes_and_validates_adjacent_links_without_collecting_a_chain() {
+  let fixture = index_artifact_fixture("aidx-blake3-256-posting-page-valid.bin");
+  let page = decode_ordered_page(&fixture, HashAlgorithm::Blake3_256).unwrap();
+  let records = page.records.iter().map(|record| record.unwrap().encoded).collect::<Vec<_>>();
+  assert_eq!(records.len(), 2);
+
+  let left_bytes = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: OrderedIndexRoleV1::Posting,
+    owner_id: page.owner_id,
+    generation: page.generation,
+    page_id: page.page_id,
+    previous_page_id: 0,
+    next_page_id: page.page_id + 1,
+    records: &records[..1],
+  })
+  .unwrap();
+  let right_bytes = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: OrderedIndexRoleV1::Posting,
+    owner_id: page.owner_id,
+    generation: page.generation + 1,
+    page_id: page.page_id + 1,
+    previous_page_id: page.page_id,
+    next_page_id: 0,
+    records: &records[1..],
+  })
+  .unwrap();
+  let left = decode_ordered_page(&left_bytes.value, HashAlgorithm::Blake3_256).unwrap();
+  let right = decode_ordered_page(&right_bytes.value, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!((left.previous_page_id, left.next_page_id), (0, right.page_id));
+  assert_eq!((right.previous_page_id, right.next_page_id), (left.page_id, 0));
+  validate_posting_page_link(&left, &right, HashAlgorithm::Blake3_256).unwrap();
+
+  let detached_bytes = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: OrderedIndexRoleV1::Posting,
+    owner_id: page.owner_id,
+    generation: page.generation + 1,
+    page_id: page.page_id + 1,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &records[1..],
+  })
+  .unwrap();
+  let detached = decode_ordered_page(&detached_bytes.value, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_posting_page_link(&left, &detached, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let overlap_bytes = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: OrderedIndexRoleV1::Posting,
+    owner_id: page.owner_id,
+    generation: page.generation + 1,
+    page_id: page.page_id + 1,
+    previous_page_id: page.page_id,
+    next_page_id: 0,
+    records: &records[..1],
+  })
+  .unwrap();
+  let overlap = decode_ordered_page(&overlap_bytes.value, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_posting_page_link(&left, &overlap, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let value_fixture = index_artifact_fixture("aidx-blake3-256-value-page-valid.bin");
+  let value_page = decode_ordered_page(&value_fixture, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(
+    validate_posting_page_link(&value_page, &right, HashAlgorithm::Blake3_256).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
+fn typed_page_and_directory_writers_reject_noncanonical_inputs_before_publication() {
+  let fixture = index_artifact_fixture("aidx-blake3-256-posting-page-valid.bin");
+  let page = decode_ordered_page(&fixture, HashAlgorithm::Blake3_256).unwrap();
+  let records = page.records.iter().map(|record| record.unwrap().encoded).collect::<Vec<_>>();
+  let valid_page = OrderedPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: page.role,
+    owner_id: page.owner_id,
+    generation: page.generation,
+    page_id: page.page_id,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &records,
+  };
+
+  let zero_owner = vec![0u8; 32];
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { owner_id: &zero_owner, ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { generation: 0, ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { page_id: 0, ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { role: OrderedIndexRoleV1::NvtTile, page_id: 0, ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::UnknownTypeKindOrEnum
+  );
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { previous_page_id: page.page_id, ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { records: &[], ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let reversed = [records[1], records[0]];
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { records: &reversed, ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+  let mut trailing_record = records[0].to_vec();
+  trailing_record.push(0);
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { records: &[&trailing_record], ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::TruncationOrTrailingBytes
+  );
+
+  let non_posting_links = OrderedPageWriteV1 { role: OrderedIndexRoleV1::Value, previous_page_id: 1, ..valid_page };
+  assert_eq!(encode_ordered_page(&non_posting_links).unwrap_err().class(), MalformedInputClass::NonzeroReservedOrPadding);
+
+  let duplicate_records = OrderedPageWriteV1 { role: OrderedIndexRoleV1::Posting, records: &[records[0], records[0]], ..valid_page };
+  assert_eq!(encode_ordered_page(&duplicate_records).unwrap_err().class(), MalformedInputClass::NoncanonicalOrderOrDuplicate);
+
+  let scope_fixture = index_artifact_fixture("aidx-blake3-256-scope-ordinal-page-valid.bin");
+  let scope_page = decode_ordered_page(&scope_fixture, HashAlgorithm::Blake3_256).unwrap();
+  let scope_records = scope_page.records.iter().map(|record| record.unwrap().encoded).collect::<Vec<_>>();
+  let invalid_scope_page = OrderedPageWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: scope_page.role,
+    owner_id: scope_page.owner_id,
+    generation: scope_page.generation,
+    page_id: 1,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &scope_records,
+  };
+  assert_eq!(encode_ordered_page(&invalid_scope_page).unwrap_err().class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+
+  let huge_key_a = vec![0x41; 1_024 * 1_024];
+  let huge_key_b = vec![0x42; 1_024 * 1_024];
+  let huge_record_a = encode_posting_record(&PostingRecordV1 {
+    tombstone: false,
+    coordinate: 1,
+    document_ordinal: 1,
+    source_value_ordinal: 0,
+    expansion_ordinal: 0,
+    posting_key: &huge_key_a,
+  })
+  .unwrap();
+  let huge_record_b = encode_posting_record(&PostingRecordV1 {
+    tombstone: false,
+    coordinate: 2,
+    document_ordinal: 2,
+    source_value_ordinal: 0,
+    expansion_ordinal: 0,
+    posting_key: &huge_key_b,
+  })
+  .unwrap();
+  assert_eq!(
+    encode_ordered_page(&OrderedPageWriteV1 { records: &[&huge_record_a, &huge_record_b], ..valid_page }).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let directory_fixture = index_artifact_fixture("aidx-blake3-256-posting-directory-leaf-valid.bin");
+  let directory = decode_artifact_directory(&directory_fixture, HashAlgorithm::Blake3_256).unwrap();
+  let child = &directory.entries[0];
+  let valid_child = ArtifactDirectoryEntryWriteV1 {
+    lower_fence: child.lower_fence,
+    upper_fence: child.upper_fence,
+    child_hash: child.child_hash,
+    child_generation: child.child_generation,
+    live_count: child.live_count,
+    tombstone_count: child.tombstone_count,
+    page_count: child.page_count,
+    logical_bytes: child.logical_bytes,
+    minimum_page_id: child.minimum_page_id,
+    maximum_page_id: child.maximum_page_id,
+    physical_hint: child.physical_hint,
+  };
+  let valid_directory = ArtifactDirectoryWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    role: directory.role,
+    owner_id: directory.owner_id,
+    generation: directory.generation,
+    level: directory.level,
+    entries: &[valid_child],
+  };
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { owner_id: &zero_owner, ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { generation: 0, ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { level: 16, ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { entries: &[], ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { child_generation: directory.generation + 1, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { live_count: 0, tombstone_count: 0, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { logical_bytes: 0, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { page_count: 2, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { minimum_page_id: 0, maximum_page_id: 0, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      level: 1,
+      entries: &[ArtifactDirectoryEntryWriteV1 { page_count: 0, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { entries: &[valid_child, valid_child], ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalOrderOrDuplicate
+  );
+
+  let zero_hash = vec![0u8; 32];
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { child_hash: &zero_hash, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::IdentityKeyOrGenerationMismatch
+  );
+
+  let too_many_entries = vec![valid_child; 65_537];
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { entries: &too_many_entries, ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut overflow_fence = child.upper_fence.to_vec();
+  overflow_fence[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+  let overflow_entries = [
+    ArtifactDirectoryEntryWriteV1 { live_count: u64::MAX, ..valid_child },
+    ArtifactDirectoryEntryWriteV1 { lower_fence: &overflow_fence, upper_fence: &overflow_fence, live_count: 1, ..valid_child },
+  ];
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { entries: &overflow_entries, ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::LengthCountOrArithmeticOverflow
+  );
+
+  let scope_directory_fixture = index_artifact_fixture("aidx-blake3-256-scope-ordinal-directory-leaf-valid.bin");
+  let scope_directory = decode_artifact_directory(&scope_directory_fixture, HashAlgorithm::Blake3_256).unwrap();
+  let scope_child = &scope_directory.entries[0];
+  let invalid_scope_child = ArtifactDirectoryEntryWriteV1 {
+    lower_fence: scope_child.lower_fence,
+    upper_fence: scope_child.upper_fence,
+    child_hash: scope_child.child_hash,
+    child_generation: scope_child.child_generation,
+    live_count: scope_child.live_count,
+    tombstone_count: scope_child.tombstone_count,
+    page_count: scope_child.page_count,
+    logical_bytes: scope_child.logical_bytes,
+    minimum_page_id: 1,
+    maximum_page_id: 1,
+    physical_hint: scope_child.physical_hint,
+  };
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      hash_algorithm: HashAlgorithm::Blake3_256,
+      role: scope_directory.role,
+      owner_id: scope_directory.owner_id,
+      generation: scope_directory.generation,
+      level: scope_directory.level,
+      entries: &[invalid_scope_child],
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
+  let oversized_fence = vec![0u8; 1_024 * 1_024 + 1];
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { lower_fence: &oversized_fence, upper_fence: &oversized_fence, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let mut first_fence = vec![0u8; 25];
+  first_fence[8] = 1;
+  let mut middle_oversized_fence = vec![0u8; 1_024 * 1_024 + 1];
+  middle_oversized_fence[..8].copy_from_slice(&1u64.to_le_bytes());
+  middle_oversized_fence[8] = 1;
+  let mut last_fence = vec![0u8; 25];
+  last_fence[..8].copy_from_slice(&2u64.to_le_bytes());
+  last_fence[8] = 1;
+  let middle_oversized_entries = [
+    ArtifactDirectoryEntryWriteV1 { lower_fence: &first_fence, upper_fence: &first_fence, ..valid_child },
+    ArtifactDirectoryEntryWriteV1 { lower_fence: &middle_oversized_fence, upper_fence: &middle_oversized_fence, ..valid_child },
+    ArtifactDirectoryEntryWriteV1 { lower_fence: &last_fence, upper_fence: &last_fence, ..valid_child },
+  ];
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 { entries: &middle_oversized_entries, ..valid_directory }).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+
+  let maximum_fence = vec![0u8; 1_024 * 1_024];
+  assert_eq!(
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      entries: &[ArtifactDirectoryEntryWriteV1 { lower_fence: &maximum_fence, upper_fence: &maximum_fence, ..valid_child }],
+      ..valid_directory
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::AllocationAmplification
+  );
+}
+
+#[test]
+fn typed_posting_record_codec_rejects_identity_framing_and_size_errors() {
+  let fixture = index_artifact_fixture("aidx-blake3-256-posting-page-valid.bin");
+  let page = decode_ordered_page(&fixture, HashAlgorithm::Blake3_256).unwrap();
+  let encoded = page.records.iter().next().unwrap().unwrap().encoded;
+  let decoded = decode_posting_record(encoded).unwrap();
+
+  let zero_ordinal = PostingRecordV1 { document_ordinal: 0, ..decoded.clone() };
+  assert_eq!(encode_posting_record(&zero_ordinal).unwrap_err().class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+
+  let empty_key = PostingRecordV1 { posting_key: &[], ..decoded.clone() };
+  assert_eq!(encode_posting_record(&empty_key).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+
+  let mut trailing = encoded.to_vec();
+  trailing.push(0);
+  assert_eq!(decode_posting_record(&trailing).unwrap_err().class(), MalformedInputClass::TruncationOrTrailingBytes);
+
+  let mut reserved = encoded.to_vec();
+  reserved[1] = 1;
+  assert_eq!(decode_posting_record(&reserved).unwrap_err().class(), MalformedInputClass::NonzeroReservedOrPadding);
+
+  let mut zero_ordinal_bytes = encoded.to_vec();
+  zero_ordinal_bytes[16..24].copy_from_slice(&0u64.to_le_bytes());
+  assert_eq!(decode_posting_record(&zero_ordinal_bytes).unwrap_err().class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+
+  let oversized_key = vec![0u8; 1_024 * 1_024 + 1];
+  let oversized = PostingRecordV1 { posting_key: &oversized_key, ..decoded };
+  assert_eq!(encode_posting_record(&oversized).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
 }
 
 #[test]
