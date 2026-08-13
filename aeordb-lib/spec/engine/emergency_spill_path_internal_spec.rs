@@ -3,6 +3,16 @@ use std::path::PathBuf;
 
 use super::*;
 
+#[cfg(unix)]
+fn native_absolute_database_path() -> PathBuf {
+  "/var/lib/aeordb/example.aeordb".into()
+}
+
+#[cfg(windows)]
+fn native_absolute_database_path() -> PathBuf {
+  r"C:\var\lib\aeordb\example.aeordb".into()
+}
+
 #[test]
 fn relative_spill_path_resolution_propagates_current_directory_failure() {
   let error = absolute_path_with_current_dir(Path::new("relative.aeordb"), || {
@@ -16,7 +26,7 @@ fn relative_spill_path_resolution_propagates_current_directory_failure() {
 
 #[test]
 fn absolute_spill_path_resolution_does_not_require_current_directory() {
-  let path = PathBuf::from("/var/lib/aeordb/example.aeordb");
+  let path = native_absolute_database_path();
   let resolved =
     absolute_path_with_current_dir(&path, || Err(io::Error::new(io::ErrorKind::NotFound, "must not be called for absolute paths")))
       .unwrap();

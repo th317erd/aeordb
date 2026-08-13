@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, TryLockError};
 use std::time::Duration;
 
@@ -9,6 +10,16 @@ use crate::engine::config_resolver::{
 use crate::engine::v4::configuration_controls::{ConfigurationControlCapability, ConfigurationControlFamilyStatus};
 
 use super::{ConfigurationAuthority, ConfigurationConvergenceResult};
+
+#[cfg(unix)]
+fn native_absolute_paths() -> (PathBuf, PathBuf, PathBuf) {
+  ("/test.aeordb".into(), "/gc".into(), "/spill".into())
+}
+
+#[cfg(windows)]
+fn native_absolute_paths() -> (PathBuf, PathBuf, PathBuf) {
+  (r"C:\test.aeordb".into(), r"C:\gc".into(), r"C:\spill".into())
+}
 
 fn status() -> ConfigurationControlFamilyStatus {
   ConfigurationControlFamilyStatus {
@@ -23,14 +34,15 @@ fn status() -> ConfigurationControlFamilyStatus {
 }
 
 fn authority() -> Arc<ConfigurationAuthority> {
+  let (database_path, default_gc_workspace_root, default_emergency_spill_dir) = native_absolute_paths();
   let context = ConfigResolutionContext {
     physical_memory_bytes: 16 * 1024 * 1024 * 1024,
     logical_cpu_count: 8,
     filesystem_capacity_bytes: 4 * 1024 * 1024 * 1024 * 1024,
     chunk_size_bytes: 256 * 1024,
-    database_path: "/test.aeordb".into(),
-    default_gc_workspace_root: Some("/gc".into()),
-    default_emergency_spill_dir: Some("/spill".into()),
+    database_path,
+    default_gc_workspace_root: Some(default_gc_workspace_root),
+    default_emergency_spill_dir: Some(default_emergency_spill_dir),
   };
   let inputs = ConfigResolutionInputs::default();
   let resolution = ConfigResolver::new(context.clone()).resolve(inputs.clone());
