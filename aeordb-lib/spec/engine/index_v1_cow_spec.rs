@@ -1,7 +1,8 @@
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::index_copy_on_write::{
-  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, OrderedPageMutationKindV1, OrderedPageMutationRequestV1,
-  default_index_directory_layout_v1, default_index_page_layout_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
+  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, OrderedPageCompactionWindowRequestV1, OrderedPageMutationKindV1,
+  OrderedPageMutationRequestV1, TombstoneDropProofV1, compact_ordered_page_window_v1, default_index_directory_layout_v1,
+  default_index_page_layout_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
 };
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
@@ -441,7 +442,7 @@ fn directory_cow_rewrites_two_leaf_paths_deduplicates_the_root_and_clears_hints(
   let rewritten_root = decode_artifact_directory(&plan.artifacts[2].value, hash_algorithm).unwrap();
   assert_eq!((first_leaf.level, second_leaf.level, rewritten_root.level), (0, 0, 1));
   assert_eq!(rewritten_root.entries.len(), 2);
-  assert_eq!(plan.root_key, rewritten_root.key);
+  assert_eq!(plan.root_key, Some(rewritten_root.key.clone()));
   assert_eq!(rewritten_root.generation, 8);
   assert!([first_leaf, second_leaf, rewritten_root].into_iter().flat_map(|directory| directory.entries).all(|entry| !entry
     .physical_hint
@@ -486,7 +487,7 @@ fn directory_cow_rewrites_a_single_leaf_at_both_hash_widths() {
     .unwrap();
     assert_eq!(plan.artifacts.len(), 1);
     let root = decode_artifact_directory(&plan.artifacts[0].value, hash_algorithm).unwrap();
-    assert_eq!(plan.root_key, root.key);
+    assert_eq!(plan.root_key, Some(root.key));
     assert_eq!(root.owner_id, owner_id);
     assert_eq!(root.entries.len(), 1);
     assert!(!root.entries[0].physical_hint.is_complete());
@@ -631,7 +632,7 @@ fn directory_cow_recursively_splits_a_leaf_and_parent_then_grows_a_new_root() {
     plan.artifacts.iter().map(|artifact| decode_artifact_directory(&artifact.value, hash_algorithm).unwrap().level).collect::<Vec<_>>();
   assert_eq!(levels, vec![0, 0, 1, 1, 2]);
   assert_eq!(plan.root_level, 2);
-  assert_eq!(plan.root_key, plan.artifacts.last().unwrap().key);
+  assert_eq!(plan.root_key, Some(plan.artifacts.last().unwrap().key.clone()));
   assert!(plan.artifacts.iter().all(|artifact| artifact.value.len() <= default_index_directory_layout_v1().target_bytes));
 }
 
@@ -900,5 +901,539 @@ fn cow_mutation_rejects_output_amplification_within_the_operation_workspace() {
   })
   .unwrap_err();
   assert_eq!(error.code(), "index_cow_output_exceeds_workspace");
+  assert_eq!(error.class(), MalformedInputClass::AllocationAmplification);
+}
+
+#[test]
+fn cow_merge_retains_the_lower_right_page_id_and_relinks_only_the_previous_neighbor() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let previous_page = posting_page(hash_algorithm, &owner_id, 7, 5, 0, 30, &[posting_record(1, 1, 16, false)]);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 30, 5, 10, &[posting_record(2, 2, 16, false)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 10, 30, 40, &[posting_record(3, 3, 16, false)]);
+  let next_page = posting_page(hash_algorithm, &owner_id, 7, 40, 10, 0, &[posting_record(4, 4, 16, false)]);
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+
+  let request = OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: Some(&previous_page),
+    next_posting_page: Some(&next_page),
+    generation: 8,
+    next_page_id: 50,
+    tombstone_drop_proof: None,
+    layout: default_index_page_layout_v1(),
+  };
+  let plan = compact_ordered_page_window_v1(&request).unwrap();
+  assert_eq!(compact_ordered_page_window_v1(&request).unwrap(), plan);
+
+  assert_eq!(plan.next_page_id, 50);
+  assert!(plan.allocated_page_ids.is_empty());
+  assert_eq!(plan.retired_page_ids, vec![30]);
+  assert_eq!(plan.replacements.len(), 3);
+  let retained = plan.replacements.iter().find(|replacement| replacement.source_page_id == 10).unwrap();
+  let retired = plan.replacements.iter().find(|replacement| replacement.source_page_id == 30).unwrap();
+  let rewritten_previous = plan.replacements.iter().find(|replacement| replacement.source_page_id == 5).unwrap();
+  assert!(retired.artifacts.is_empty());
+  assert_eq!(decoded_coordinates(&retained.artifacts[0].value, hash_algorithm), vec![(2, false), (3, false)]);
+  let retained_page = decode_ordered_page(&retained.artifacts[0].value, hash_algorithm).unwrap();
+  assert_eq!((retained_page.page_id, retained_page.previous_page_id, retained_page.next_page_id), (10, 5, 40));
+  let previous = decode_ordered_page(&rewritten_previous.artifacts[0].value, hash_algorithm).unwrap();
+  assert_eq!((previous.previous_page_id, previous.next_page_id), (0, 10));
+  assert!(!plan.replacements.iter().any(|replacement| replacement.source_page_id == 40));
+}
+
+#[test]
+fn cow_merge_retains_the_lower_left_page_id_and_relinks_only_the_next_neighbor() {
+  let hash_algorithm = HashAlgorithm::Sha512;
+  let owner_id = owner(hash_algorithm);
+  let previous_page = posting_page(hash_algorithm, &owner_id, 7, 5, 0, 10, &[posting_record(1, 1, 16, false)]);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 10, 5, 30, &[posting_record(2, 2, 16, false)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 40, &[posting_record(3, 3, 16, false)]);
+  let next_page = posting_page(hash_algorithm, &owner_id, 7, 40, 30, 0, &[posting_record(4, 4, 16, false)]);
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+
+  let plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: Some(&previous_page),
+    next_posting_page: Some(&next_page),
+    generation: 8,
+    next_page_id: 50,
+    tombstone_drop_proof: None,
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+
+  assert_eq!(plan.retired_page_ids, vec![30]);
+  let retained = plan.replacements.iter().find(|replacement| replacement.source_page_id == 10).unwrap();
+  let rewritten_next = plan.replacements.iter().find(|replacement| replacement.source_page_id == 40).unwrap();
+  let retained_page = decode_ordered_page(&retained.artifacts[0].value, hash_algorithm).unwrap();
+  assert_eq!((retained_page.page_id, retained_page.previous_page_id, retained_page.next_page_id), (10, 5, 40));
+  let next = decode_ordered_page(&rewritten_next.artifacts[0].value, hash_algorithm).unwrap();
+  assert_eq!((next.previous_page_id, next.next_page_id), (10, 0));
+  assert!(!plan.replacements.iter().any(|replacement| replacement.source_page_id == 5));
+}
+
+#[test]
+fn cow_compaction_preserves_tombstones_without_proof_and_drops_only_an_exact_proven_set() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 30, &[posting_record(1, 1, 16, true), posting_record(2, 2, 16, false)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 0, &[posting_record(3, 3, 16, false)]);
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+  let retained_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: None,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    tombstone_drop_proof: None,
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  let retained_page = retained_plan.replacements.iter().find(|replacement| !replacement.artifacts.is_empty()).unwrap();
+  assert_eq!(decoded_coordinates(&retained_page.artifacts[0].value, hash_algorithm), vec![(1, true), (2, false), (3, false)]);
+
+  let left = decode_ordered_page(&left_page, hash_algorithm).unwrap();
+  let right = decode_ordered_page(&right_page, hash_algorithm).unwrap();
+  let proof_page_keys = [left.key.as_slice(), right.key.as_slice()];
+  let proof = TombstoneDropProofV1 {
+    owner_id: &owner_id,
+    source_page_keys: &proof_page_keys,
+    coverage_epoch_id: 9,
+    covered_through_sequence: 100,
+    journal_contiguous_through_sequence: 100,
+    pin_safe_through_generation: 7,
+  };
+  let compacted_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    tombstone_drop_proof: Some(&proof),
+    ..OrderedPageCompactionWindowRequestV1 {
+      hash_algorithm,
+      source_pages: &source_pages,
+      previous_posting_page: None,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      tombstone_drop_proof: None,
+      layout: default_index_page_layout_v1(),
+    }
+  })
+  .unwrap();
+  let compacted_page = compacted_plan.replacements.iter().find(|replacement| !replacement.artifacts.is_empty()).unwrap();
+  assert_eq!(decoded_coordinates(&compacted_page.artifacts[0].value, hash_algorithm), vec![(2, false), (3, false)]);
+}
+
+#[test]
+fn cow_compaction_rejects_detached_or_incomplete_tombstone_proof_before_output() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 30, &[posting_record(1, 1, 16, true)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 0, &[posting_record(2, 2, 16, false)]);
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+  let left = decode_ordered_page(&left_page, hash_algorithm).unwrap();
+  let right = decode_ordered_page(&right_page, hash_algorithm).unwrap();
+  let reversed_page_keys = [right.key.as_slice(), left.key.as_slice()];
+  let detached = TombstoneDropProofV1 {
+    owner_id: &owner_id,
+    source_page_keys: &reversed_page_keys,
+    coverage_epoch_id: 9,
+    covered_through_sequence: 100,
+    journal_contiguous_through_sequence: 99,
+    pin_safe_through_generation: 6,
+  };
+
+  let error = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: None,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    tombstone_drop_proof: Some(&detached),
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap_err();
+  assert_eq!(error.code(), "index_cow_tombstone_proof_pages");
+  assert_eq!(error.class(), MalformedInputClass::CrossRecordClosureMismatch);
+
+  let exact_page_keys = [left.key.as_slice(), right.key.as_slice()];
+  let other_owner = vec![0xabu8; hash_algorithm.hash_length()];
+  let proofs = [
+    (
+      TombstoneDropProofV1 {
+        owner_id: &other_owner,
+        source_page_keys: &exact_page_keys,
+        coverage_epoch_id: 9,
+        covered_through_sequence: 100,
+        journal_contiguous_through_sequence: 100,
+        pin_safe_through_generation: 7,
+      },
+      "index_cow_tombstone_proof_owner",
+    ),
+    (
+      TombstoneDropProofV1 {
+        owner_id: &owner_id,
+        source_page_keys: &exact_page_keys,
+        coverage_epoch_id: 0,
+        covered_through_sequence: 100,
+        journal_contiguous_through_sequence: 100,
+        pin_safe_through_generation: 7,
+      },
+      "index_cow_tombstone_proof_coverage",
+    ),
+    (
+      TombstoneDropProofV1 {
+        owner_id: &owner_id,
+        source_page_keys: &exact_page_keys,
+        coverage_epoch_id: 9,
+        covered_through_sequence: 100,
+        journal_contiguous_through_sequence: 99,
+        pin_safe_through_generation: 7,
+      },
+      "index_cow_tombstone_proof_coverage",
+    ),
+    (
+      TombstoneDropProofV1 {
+        owner_id: &owner_id,
+        source_page_keys: &exact_page_keys,
+        coverage_epoch_id: 9,
+        covered_through_sequence: 100,
+        journal_contiguous_through_sequence: 100,
+        pin_safe_through_generation: 6,
+      },
+      "index_cow_tombstone_proof_pins",
+    ),
+    (
+      TombstoneDropProofV1 {
+        owner_id: &owner_id,
+        source_page_keys: &exact_page_keys,
+        coverage_epoch_id: 9,
+        covered_through_sequence: 100,
+        journal_contiguous_through_sequence: 100,
+        pin_safe_through_generation: 8,
+      },
+      "index_cow_tombstone_proof_pins",
+    ),
+  ];
+  for (proof, expected_code) in proofs {
+    let error = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+      hash_algorithm,
+      source_pages: &source_pages,
+      previous_posting_page: None,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      tombstone_drop_proof: Some(&proof),
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), expected_code);
+  }
+}
+
+#[test]
+fn cow_compaction_can_retire_a_fully_proven_tombstone_window_and_its_directory_root() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let source_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 0, &[posting_record(1, 1, 16, true)]);
+  let source = decode_ordered_page(&source_page, hash_algorithm).unwrap();
+  let proof_page_keys = [source.key.as_slice()];
+  let source_pages = [source_page.as_slice()];
+  let proof = TombstoneDropProofV1 {
+    owner_id: &owner_id,
+    source_page_keys: &proof_page_keys,
+    coverage_epoch_id: 9,
+    covered_through_sequence: 100,
+    journal_contiguous_through_sequence: 100,
+    pin_safe_through_generation: 7,
+  };
+  let page_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: None,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    tombstone_drop_proof: Some(&proof),
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(page_plan.retired_page_ids, vec![10]);
+  assert!(page_plan.replacements[0].artifacts.is_empty());
+
+  let source_root =
+    leaf_directory(hash_algorithm, &owner_id, 7, &[&source_page], PhysicalHintV1 { wal_offset: 5, total_length: 6, write_sequence: 7 });
+  let path_nodes = [&source_root[..]];
+  let paths = [ArtifactDirectoryPathV1 { source_page_key: &source.key, directories: &path_nodes }];
+  let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    page_plan: &page_plan,
+    paths: &paths,
+    layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(directory_plan.root_key, None);
+  assert_eq!((directory_plan.live_count, directory_plan.tombstone_count, directory_plan.page_count), (0, 0, 0));
+  assert!(directory_plan.artifacts.is_empty());
+}
+
+#[test]
+fn cow_compaction_returns_a_noop_for_a_pair_outside_the_local_merge_window() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 30, &[posting_record(1, 1, 20_000, false)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 0, &[posting_record(2, 2, 20_000, false)]);
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+  let plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: None,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    tombstone_drop_proof: None,
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  assert!(plan.is_unchanged());
+}
+
+#[test]
+fn cow_compaction_rejects_malformed_windows_and_missing_required_neighbors() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let previous_page = posting_page(hash_algorithm, &owner_id, 7, 5, 0, 30, &[posting_record(1, 1, 16, false)]);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 30, 5, 10, &[posting_record(2, 2, 16, false)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 10, 30, 0, &[posting_record(3, 3, 16, false)]);
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+
+  let missing_previous = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: None,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 40,
+    tombstone_drop_proof: None,
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap_err();
+  assert_eq!(missing_previous.code(), "index_cow_compaction_previous_missing");
+
+  let left_low_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 30, &[posting_record(2, 2, 16, false)]);
+  let right_high_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 40, &[posting_record(3, 3, 16, false)]);
+  let low_high_sources = [left_low_page.as_slice(), right_high_page.as_slice()];
+  let missing_next = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &low_high_sources,
+    previous_posting_page: None,
+    next_posting_page: None,
+    generation: 8,
+    next_page_id: 50,
+    tombstone_drop_proof: None,
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap_err();
+  assert_eq!(missing_next.code(), "index_cow_compaction_next_missing");
+
+  let no_pages: [&[u8]; 0] = [];
+  let empty = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    source_pages: &no_pages,
+    ..OrderedPageCompactionWindowRequestV1 {
+      hash_algorithm,
+      source_pages: &source_pages,
+      previous_posting_page: Some(&previous_page),
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      tombstone_drop_proof: None,
+      layout: default_index_page_layout_v1(),
+    }
+  })
+  .unwrap_err();
+  assert_eq!(empty.code(), "index_cow_compaction_window");
+
+  let three_pages = [previous_page.as_slice(), left_page.as_slice(), right_page.as_slice()];
+  let oversized = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    source_pages: &three_pages,
+    ..OrderedPageCompactionWindowRequestV1 {
+      hash_algorithm,
+      source_pages: &source_pages,
+      previous_posting_page: Some(&previous_page),
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      tombstone_drop_proof: None,
+      layout: default_index_page_layout_v1(),
+    }
+  })
+  .unwrap_err();
+  assert_eq!(oversized.code(), "index_cow_compaction_window");
+
+  let stale_generation = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    generation: 7,
+    previous_posting_page: Some(&previous_page),
+    ..OrderedPageCompactionWindowRequestV1 {
+      hash_algorithm,
+      source_pages: &source_pages,
+      previous_posting_page: None,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      tombstone_drop_proof: None,
+      layout: default_index_page_layout_v1(),
+    }
+  })
+  .unwrap_err();
+  assert_eq!(stale_generation.code(), "index_cow_compaction_generation");
+
+  let stale_high_water = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    next_page_id: 30,
+    previous_posting_page: Some(&previous_page),
+    ..OrderedPageCompactionWindowRequestV1 {
+      hash_algorithm,
+      source_pages: &source_pages,
+      previous_posting_page: None,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      tombstone_drop_proof: None,
+      layout: default_index_page_layout_v1(),
+    }
+  })
+  .unwrap_err();
+  assert_eq!(stale_high_water.code(), "index_cow_compaction_page_id_high_water");
+
+  let mut corrupt_left_page = left_page.clone();
+  *corrupt_left_page.last_mut().unwrap() ^= 0x80;
+  let corrupt_sources = [corrupt_left_page.as_slice(), right_page.as_slice()];
+  let corrupt = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    source_pages: &corrupt_sources,
+    previous_posting_page: Some(&previous_page),
+    ..OrderedPageCompactionWindowRequestV1 {
+      hash_algorithm,
+      source_pages: &source_pages,
+      previous_posting_page: None,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      tombstone_drop_proof: None,
+      layout: default_index_page_layout_v1(),
+    }
+  })
+  .unwrap_err();
+  assert_eq!(corrupt.class(), MalformedInputClass::ChecksumOrIntegrityMismatch);
+}
+
+#[test]
+fn cow_compaction_retires_an_empty_middle_window_relinks_both_neighbors_and_rewrites_four_directory_paths() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let previous_page = posting_page(hash_algorithm, &owner_id, 7, 5, 0, 10, &[posting_record(1, 1, 16, false)]);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 10, 5, 30, &[posting_record(2, 2, 16, true)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 40, &[posting_record(3, 3, 16, true)]);
+  let next_page = posting_page(hash_algorithm, &owner_id, 7, 40, 30, 0, &[posting_record(4, 4, 16, false)]);
+  let left = decode_ordered_page(&left_page, hash_algorithm).unwrap();
+  let right = decode_ordered_page(&right_page, hash_algorithm).unwrap();
+  let proof_page_keys = [left.key.as_slice(), right.key.as_slice()];
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+  let proof = TombstoneDropProofV1 {
+    owner_id: &owner_id,
+    source_page_keys: &proof_page_keys,
+    coverage_epoch_id: 9,
+    covered_through_sequence: 100,
+    journal_contiguous_through_sequence: 100,
+    pin_safe_through_generation: 7,
+  };
+  let page_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: Some(&previous_page),
+    next_posting_page: Some(&next_page),
+    generation: 8,
+    next_page_id: 50,
+    tombstone_drop_proof: Some(&proof),
+    layout: default_index_page_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!(page_plan.retired_page_ids, vec![10, 30]);
+  assert_eq!(page_plan.replacements.len(), 4);
+  let rewritten_previous = page_plan.replacements.iter().find(|replacement| replacement.source_page_id == 5).unwrap();
+  let rewritten_next = page_plan.replacements.iter().find(|replacement| replacement.source_page_id == 40).unwrap();
+  let previous = decode_ordered_page(&rewritten_previous.artifacts[0].value, hash_algorithm).unwrap();
+  let next = decode_ordered_page(&rewritten_next.artifacts[0].value, hash_algorithm).unwrap();
+  assert_eq!((previous.previous_page_id, previous.next_page_id), (0, 40));
+  assert_eq!((next.previous_page_id, next.next_page_id), (5, 0));
+
+  let source_root = leaf_directory(
+    hash_algorithm,
+    &owner_id,
+    7,
+    &[&previous_page, &left_page, &right_page, &next_page],
+    PhysicalHintV1 { wal_offset: 5, total_length: 6, write_sequence: 7 },
+  );
+  let previous = decode_ordered_page(&previous_page, hash_algorithm).unwrap();
+  let next = decode_ordered_page(&next_page, hash_algorithm).unwrap();
+  let path_nodes = [&source_root[..]];
+  let paths = [
+    ArtifactDirectoryPathV1 { source_page_key: &left.key, directories: &path_nodes },
+    ArtifactDirectoryPathV1 { source_page_key: &right.key, directories: &path_nodes },
+    ArtifactDirectoryPathV1 { source_page_key: &previous.key, directories: &path_nodes },
+    ArtifactDirectoryPathV1 { source_page_key: &next.key, directories: &path_nodes },
+  ];
+  let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm,
+    generation: 8,
+    page_plan: &page_plan,
+    paths: &paths,
+    layout: default_index_directory_layout_v1(),
+  })
+  .unwrap();
+  assert_eq!((directory_plan.live_count, directory_plan.tombstone_count, directory_plan.page_count), (2, 0, 2));
+  let root = decode_artifact_directory(directory_plan.artifacts.last().unwrap().value.as_slice(), hash_algorithm).unwrap();
+  assert_eq!(directory_plan.root_key, Some(root.key.clone()));
+  assert_eq!(root.entries.len(), 2);
+}
+
+#[test]
+fn cow_compaction_counts_retained_source_summaries_in_its_peak_workspace() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let previous_page = posting_page(hash_algorithm, &owner_id, 7, 5, 0, 10, &[posting_record(1, 1, 900_000, false)]);
+  let left_page = posting_page(hash_algorithm, &owner_id, 7, 10, 5, 30, &[posting_record(2, 2, 16, true)]);
+  let right_page = posting_page(hash_algorithm, &owner_id, 7, 30, 10, 40, &[posting_record(3, 3, 16, true)]);
+  let next_page = posting_page(hash_algorithm, &owner_id, 7, 40, 30, 0, &[posting_record(4, 4, 900_000, false)]);
+  let left = decode_ordered_page(&left_page, hash_algorithm).unwrap();
+  let right = decode_ordered_page(&right_page, hash_algorithm).unwrap();
+  let proof_page_keys = [left.key.as_slice(), right.key.as_slice()];
+  let source_pages = [left_page.as_slice(), right_page.as_slice()];
+  let proof = TombstoneDropProofV1 {
+    owner_id: &owner_id,
+    source_page_keys: &proof_page_keys,
+    coverage_epoch_id: 9,
+    covered_through_sequence: 100,
+    journal_contiguous_through_sequence: 100,
+    pin_safe_through_generation: 7,
+  };
+  let layout = aeordb::engine::v4::index_copy_on_write::IndexPageLayoutV1 {
+    maximum_workspace_bytes: 8 * 1_024 * 1_024,
+    ..default_index_page_layout_v1()
+  };
+
+  let error = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm,
+    source_pages: &source_pages,
+    previous_posting_page: Some(&previous_page),
+    next_posting_page: Some(&next_page),
+    generation: 8,
+    next_page_id: 50,
+    tombstone_drop_proof: Some(&proof),
+    layout,
+  })
+  .unwrap_err();
+  assert_eq!(error.code(), "index_cow_compaction_workspace_exceeded");
   assert_eq!(error.class(), MalformedInputClass::AllocationAmplification);
 }

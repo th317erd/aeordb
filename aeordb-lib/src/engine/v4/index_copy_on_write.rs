@@ -22,7 +22,7 @@ pub const INDEX_ARTIFACT_HARD_CAP_BYTES_V1: usize = 4 * 1_024 * 1_024;
 pub const INDEX_COPY_ON_WRITE_WORKSPACE_BYTES_V1: usize = 32 * 1_024 * 1_024;
 pub const INDEX_DIRECTORY_TARGET_BYTES_V1: usize = 64 * 1_024;
 pub const INDEX_DIRECTORY_COPY_ON_WRITE_WORKSPACE_BYTES_V1: usize = 64 * 1_024 * 1_024;
-pub const INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1: usize = 3;
+pub const INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexPageLayoutV1 {
@@ -87,6 +87,28 @@ pub struct OrderedPageMutationRequestV1<'a> {
   pub layout: IndexPageLayoutV1,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TombstoneDropProofV1<'a> {
+  pub owner_id: &'a [u8],
+  pub source_page_keys: &'a [&'a [u8]],
+  pub coverage_epoch_id: u64,
+  pub covered_through_sequence: u64,
+  pub journal_contiguous_through_sequence: u64,
+  pub pin_safe_through_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OrderedPageCompactionWindowRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub source_pages: &'a [&'a [u8]],
+  pub previous_posting_page: Option<&'a [u8]>,
+  pub next_posting_page: Option<&'a [u8]>,
+  pub generation: u64,
+  pub next_page_id: u64,
+  pub tombstone_drop_proof: Option<&'a TombstoneDropProofV1<'a>>,
+  pub layout: IndexPageLayoutV1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderedPageReplacementV1 {
   pub source_key: Vec<u8>,
@@ -100,6 +122,7 @@ pub struct OrderedPageReplacementV1 {
   source_live_count: u64,
   source_tombstone_count: u64,
   source_logical_bytes: u64,
+  source_retired: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +157,7 @@ pub struct ArtifactDirectoryMutationRequestV1<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactDirectoryMutationPlanV1 {
   pub source_root_key: Vec<u8>,
-  pub root_key: Vec<u8>,
+  pub root_key: Option<Vec<u8>>,
   pub root_level: u16,
   pub live_count: u64,
   pub tombstone_count: u64,
@@ -149,6 +172,7 @@ pub struct ArtifactDirectoryMutationPlanV1 {
 struct OwnedOrderedRecordV1 {
   encoded: Vec<u8>,
   order_key: Vec<u8>,
+  tombstone: bool,
 }
 
 pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> FormatResult<OrderedPageMutationPlanV1> {
@@ -198,7 +222,11 @@ pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> For
     mutation_order_key.len(),
     request.layout.maximum_workspace_bytes,
   )?;
-  let replacement = OwnedOrderedRecordV1 { encoded: request.mutation.encoded_record().to_vec(), order_key: mutation_order_key };
+  let replacement = OwnedOrderedRecordV1 {
+    encoded: request.mutation.encoded_record().to_vec(),
+    order_key: mutation_order_key,
+    tombstone: mutation_record.tombstone,
+  };
   if let Some(index) = matching_index {
     records[index] = replacement;
   } else {
@@ -289,9 +317,186 @@ pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> For
   })
 }
 
+pub fn compact_ordered_page_window_v1(request: &OrderedPageCompactionWindowRequestV1<'_>) -> FormatResult<OrderedPageMutationPlanV1> {
+  validate_layout(request.layout)?;
+  if request.source_pages.is_empty() || request.source_pages.len() > 2 {
+    return Err(amplification_error(
+      "index_cow_compaction_window",
+      format!("compaction source-page count {} is outside 1..=2", request.source_pages.len()),
+    ));
+  }
+
+  let mut sources = Vec::new();
+  if let Err(error) = sources.try_reserve_exact(request.source_pages.len()) {
+    return Err(amplification_error("index_cow_compaction_sources", format!("source-page reservation failed: {error}")));
+  }
+  for source_page in request.source_pages {
+    sources.push(decode_ordered_page(source_page, request.hash_algorithm)?);
+  }
+  let previous = request.previous_posting_page.map(|page| decode_ordered_page(page, request.hash_algorithm)).transpose()?;
+  let next = request.next_posting_page.map(|page| decode_ordered_page(page, request.hash_algorithm)).transpose()?;
+  validate_compaction_window(request, &sources, previous.as_ref(), next.as_ref())?;
+
+  let drop_tombstones = if let Some(proof) = request.tombstone_drop_proof {
+    validate_tombstone_drop_proof(request, &sources, proof)?;
+    true
+  } else {
+    false
+  };
+  let mut records = collect_compaction_records(&sources, request.layout.maximum_workspace_bytes)?;
+  let original_record_count = records.len();
+  if drop_tombstones {
+    records.retain(|record| !record.tombstone);
+  }
+  let dropped_tombstones = records.len() != original_record_count;
+
+  if sources.len() == 1 && !dropped_tombstones {
+    return Ok(unchanged_page_plan(request.next_page_id));
+  }
+  if sources.len() == 2 && !dropped_tombstones && request.source_pages.iter().all(|page| page.len() >= request.layout.merge_below_bytes) {
+    return Ok(unchanged_page_plan(request.next_page_id));
+  }
+
+  let role = sources[0].role;
+  let retained_source_index = if role.uses_page_id() && sources.len() == 2 && sources[1].page_id < sources[0].page_id { 1 } else { 0 };
+  let retained_page_id = sources[retained_source_index].page_id;
+  let previous_page_id = if role == OrderedIndexRoleV1::Posting { sources[0].previous_page_id } else { 0 };
+  let next_page_id = if role == OrderedIndexRoleV1::Posting { sources[sources.len() - 1].next_page_id } else { 0 };
+
+  if sources.len() == 2 && !records.is_empty() {
+    let merged_length = checked_page_range_representable_length(request.hash_algorithm, role, &records)?;
+    if merged_length > request.layout.target_bytes {
+      return Ok(unchanged_page_plan(request.next_page_id));
+    }
+  }
+  let rewrite_previous =
+    role == OrderedIndexRoleV1::Posting && previous_page_id != 0 && (records.is_empty() || retained_page_id != sources[0].page_id);
+  let rewrite_next = role == OrderedIndexRoleV1::Posting
+    && next_page_id != 0
+    && (records.is_empty() || retained_page_id != sources[sources.len() - 1].page_id);
+  if rewrite_previous && previous.is_none() {
+    return Err(closure_error(
+      "index_cow_compaction_previous_missing",
+      "compaction requires the previous posting page before constructing output",
+    ));
+  }
+  if rewrite_next && next.is_none() {
+    return Err(closure_error("index_cow_compaction_next_missing", "compaction requires the next posting page before constructing output"));
+  }
+  let record_workspace_bytes = validate_workspace(&records, request.layout.maximum_workspace_bytes)?;
+  preflight_compaction_workspace(
+    request,
+    &sources,
+    &records,
+    record_workspace_bytes,
+    rewrite_previous.then_some(previous.as_ref()).flatten(),
+    rewrite_next.then_some(next.as_ref()).flatten(),
+  )?;
+
+  let output = if records.is_empty() {
+    None
+  } else {
+    let record_slices = record_slices(&records);
+    Some(encode_ordered_page(&OrderedPageWriteV1 {
+      hash_algorithm: request.hash_algorithm,
+      role,
+      owner_id: sources[0].owner_id,
+      generation: request.generation,
+      page_id: retained_page_id,
+      previous_page_id,
+      next_page_id,
+      records: &record_slices,
+    })?)
+  };
+
+  let mut replacements = Vec::new();
+  if let Err(error) = replacements.try_reserve_exact(sources.len() + usize::from(rewrite_previous) + usize::from(rewrite_next)) {
+    return Err(amplification_error("index_cow_compaction_replacements", format!("replacement reservation failed: {error}")));
+  }
+  let mut output = output;
+  let mut retired_page_ids = Vec::new();
+  for (source_index, source) in sources.iter().enumerate() {
+    let retains_output = output.is_some() && source_index == retained_source_index;
+    let artifacts = if retains_output {
+      vec![output.take().ok_or_else(|| closure_error("index_cow_compaction_output", "retained compaction output disappeared"))?]
+    } else {
+      Vec::new()
+    };
+    let source_retired = !retains_output;
+    if source_retired && role.uses_page_id() {
+      retired_page_ids.push(source.page_id);
+    }
+    replacements.push(ordered_page_replacement_with_retirement(source, artifacts, source_retired)?);
+  }
+
+  if rewrite_previous {
+    let previous = previous.as_ref().ok_or_else(|| {
+      closure_error("index_cow_compaction_previous_missing", "compaction requires the previous posting page for relinking")
+    })?;
+    let rewritten = rewrite_posting_page_links(
+      request,
+      previous,
+      previous.previous_page_id,
+      next_page_id_for_previous(&records, retained_page_id, next_page_id),
+    )?;
+    replacements.push(ordered_page_replacement(previous, vec![rewritten])?);
+  }
+  if rewrite_next {
+    let next = next
+      .as_ref()
+      .ok_or_else(|| closure_error("index_cow_compaction_next_missing", "compaction requires the next posting page for relinking"))?;
+    let previous_page_id = if records.is_empty() { previous_page_id } else { retained_page_id };
+    let rewritten = rewrite_posting_page_links(request, next, previous_page_id, next.next_page_id)?;
+    replacements.push(ordered_page_replacement(next, vec![rewritten])?);
+  }
+  retired_page_ids.sort_unstable();
+
+  Ok(OrderedPageMutationPlanV1 { replacements, allocated_page_ids: Vec::new(), retired_page_ids, next_page_id: request.next_page_id })
+}
+
+fn unchanged_page_plan(next_page_id: u64) -> OrderedPageMutationPlanV1 {
+  OrderedPageMutationPlanV1 { replacements: Vec::new(), allocated_page_ids: Vec::new(), retired_page_ids: Vec::new(), next_page_id }
+}
+
+fn next_page_id_for_previous(records: &[OwnedOrderedRecordV1], retained_page_id: u64, outward_next_page_id: u64) -> u64 {
+  if records.is_empty() {
+    outward_next_page_id
+  } else {
+    retained_page_id
+  }
+}
+
+fn rewrite_posting_page_links(
+  request: &OrderedPageCompactionWindowRequestV1<'_>,
+  source: &OrderedPageV1<'_>,
+  previous_page_id: u64,
+  next_page_id: u64,
+) -> FormatResult<EncodedImmutableIndexArtifactV1> {
+  let records = source.records.iter().collect::<FormatResult<Vec<_>>>()?;
+  let record_slices = records.iter().map(|record| record.encoded).collect::<Vec<_>>();
+  encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: request.hash_algorithm,
+    role: source.role,
+    owner_id: source.owner_id,
+    generation: request.generation,
+    page_id: source.page_id,
+    previous_page_id,
+    next_page_id,
+    records: &record_slices,
+  })
+}
+
 fn ordered_page_replacement(
   source: &OrderedPageV1<'_>,
   artifacts: Vec<EncodedImmutableIndexArtifactV1>,
+) -> FormatResult<OrderedPageReplacementV1> {
+  ordered_page_replacement_with_retirement(source, artifacts, false)
+}
+
+fn ordered_page_replacement_with_retirement(
+  source: &OrderedPageV1<'_>,
+  artifacts: Vec<EncodedImmutableIndexArtifactV1>,
+  source_retired: bool,
 ) -> FormatResult<OrderedPageReplacementV1> {
   Ok(OrderedPageReplacementV1 {
     source_key: source.key.clone(),
@@ -305,6 +510,7 @@ fn ordered_page_replacement(
     source_live_count: u64::from(source.live_count),
     source_tombstone_count: u64::from(source.tombstone_count),
     source_logical_bytes: source.logical_live_bytes,
+    source_retired,
   })
 }
 
@@ -496,12 +702,26 @@ pub fn rewrite_artifact_directory_paths_v1(
       &mut retained_artifact_bytes,
     )?;
   }
+  if root_entries.is_empty() {
+    return Ok(ArtifactDirectoryMutationPlanV1 {
+      source_root_key: graph.source_root_key,
+      root_key: None,
+      root_level: 0,
+      live_count: 0,
+      tombstone_count: 0,
+      page_count: 0,
+      logical_bytes: 0,
+      minimum_page_id: 0,
+      maximum_page_id: 0,
+      artifacts,
+    });
+  }
   let root = root_entries
     .pop()
     .ok_or_else(|| closure_error("index_cow_directory_root_empty", "directory copy-on-write produced no root summary"))?;
   Ok(ArtifactDirectoryMutationPlanV1 {
     source_root_key: graph.source_root_key,
-    root_key: root.child_hash,
+    root_key: Some(root.child_hash),
     root_level,
     live_count: root.live_count,
     tombstone_count: root.tombstone_count,
@@ -521,10 +741,25 @@ fn validate_page_replacement_outputs(
     if replacement.source_key.len() != request.hash_algorithm.hash_length() || replacement.source_key.iter().all(|byte| *byte == 0) {
       return Err(identity_error("index_cow_directory_source_key", "page replacement source key has the wrong width or is all zero"));
     }
-    if replacement.source_generation >= request.generation || replacement.artifacts.is_empty() {
+    if replacement.source_generation >= request.generation {
       return Err(identity_error(
         "index_cow_directory_source_generation",
-        "page replacement is empty or its source generation is not older than the directory generation",
+        "page replacement source generation is not older than the directory generation",
+      ));
+    }
+    if replacement.source_retired != replacement.artifacts.is_empty() {
+      return Err(closure_error(
+        "index_cow_directory_retirement_output",
+        "a retired source page must have no output and a retained source page must have output",
+      ));
+    }
+    if replacement.source_role.uses_page_id()
+      && replacement.source_retired
+      && !request.page_plan.retired_page_ids.contains(&replacement.source_page_id)
+    {
+      return Err(closure_error(
+        "index_cow_directory_retirement_id",
+        "a retired source page ID is absent from the page plan retirement set",
       ));
     }
     let mut entries: Vec<OwnedDirectoryEntryV1> = Vec::new();
@@ -767,6 +1002,9 @@ fn encode_directory_entry_groups(
   artifacts: &mut Vec<EncodedImmutableIndexArtifactV1>,
   retained_artifact_bytes: &mut usize,
 ) -> FormatResult<Vec<OwnedDirectoryEntryV1>> {
+  if entries.is_empty() {
+    return Ok(Vec::new());
+  }
   let groups = partition_directory_entries(request.hash_algorithm, level, entries, request.layout.target_bytes)?;
   let mut summaries = Vec::new();
   if let Err(error) = summaries.try_reserve_exact(groups.len()) {
@@ -939,6 +1177,221 @@ fn validate_layout(layout: IndexPageLayoutV1) -> FormatResult<()> {
   Ok(())
 }
 
+fn validate_compaction_window(
+  request: &OrderedPageCompactionWindowRequestV1<'_>,
+  sources: &[OrderedPageV1<'_>],
+  previous: Option<&OrderedPageV1<'_>>,
+  next: Option<&OrderedPageV1<'_>>,
+) -> FormatResult<()> {
+  let first = sources.first().ok_or_else(|| closure_error("index_cow_compaction_window", "compaction window is empty"))?;
+  for source in sources {
+    if source.role != first.role || source.owner_id != first.owner_id {
+      return Err(closure_error("index_cow_compaction_identity", "compaction source pages disagree on ordered role or owner identity"));
+    }
+    if request.generation <= source.generation {
+      return Err(identity_error(
+        "index_cow_compaction_generation",
+        "compaction generation must be strictly newer than every source page birth generation",
+      ));
+    }
+  }
+  if sources.len() == 2 {
+    if first.role.uses_page_id() && sources[0].page_id == sources[1].page_id {
+      return Err(closure_error("index_cow_compaction_duplicate_page_id", "two compaction source pages reuse one stable page ID"));
+    }
+    if compare_order_keys(request.hash_algorithm, first.role, sources[0].upper_fence, sources[1].lower_fence)? != Ordering::Less {
+      return Err(closure_error("index_cow_compaction_order", "compaction source pages overlap or are not strictly ordered"));
+    }
+    if first.role == OrderedIndexRoleV1::Posting {
+      validate_posting_page_link(&sources[0], &sources[1], request.hash_algorithm)?;
+    }
+  }
+
+  if first.role != OrderedIndexRoleV1::Posting && (previous.is_some() || next.is_some()) {
+    return Err(closure_error("index_cow_compaction_nonposting_neighbor", "non-posting compaction cannot carry posting neighbors"));
+  }
+  if let Some(previous) = previous {
+    validate_posting_page_link(previous, first, request.hash_algorithm)?;
+    validate_compaction_neighbor_identity(request, first, previous)?;
+  }
+  if let Some(next) = next {
+    let last = sources.last().ok_or_else(|| closure_error("index_cow_compaction_window", "compaction window has no last page"))?;
+    validate_posting_page_link(last, next, request.hash_algorithm)?;
+    validate_compaction_neighbor_identity(request, first, next)?;
+  }
+
+  if first.role.uses_page_id() {
+    let mut observed_maximum_page_id = 0u64;
+    for page in sources.iter().chain(previous).chain(next) {
+      observed_maximum_page_id = observed_maximum_page_id.max(page.page_id).max(page.previous_page_id).max(page.next_page_id);
+    }
+    if request.next_page_id == 0 || request.next_page_id <= observed_maximum_page_id {
+      return Err(identity_error(
+        "index_cow_compaction_page_id_high_water",
+        "next page ID must exceed every source, neighbor, and outward linked page ID",
+      ));
+    }
+  } else if request.next_page_id != 0 {
+    return Err(identity_error("index_cow_compaction_scope_page_id", "scope-page compaction must not carry a page ID high-water mark"));
+  }
+  Ok(())
+}
+
+fn validate_compaction_neighbor_identity(
+  request: &OrderedPageCompactionWindowRequestV1<'_>,
+  source: &OrderedPageV1<'_>,
+  neighbor: &OrderedPageV1<'_>,
+) -> FormatResult<()> {
+  if neighbor.owner_id != source.owner_id || neighbor.role != source.role || request.generation <= neighbor.generation {
+    return Err(identity_error(
+      "index_cow_compaction_neighbor_identity",
+      "compaction neighbor owner, role, or birth generation is inconsistent",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_tombstone_drop_proof(
+  request: &OrderedPageCompactionWindowRequestV1<'_>,
+  sources: &[OrderedPageV1<'_>],
+  proof: &TombstoneDropProofV1<'_>,
+) -> FormatResult<()> {
+  let first = sources.first().ok_or_else(|| closure_error("index_cow_tombstone_proof_pages", "proof has no source page"))?;
+  if proof.owner_id != first.owner_id {
+    return Err(identity_error("index_cow_tombstone_proof_owner", "tombstone-drop proof owner disagrees with the compaction window"));
+  }
+  if proof.source_page_keys.len() != sources.len()
+    || proof.source_page_keys.iter().zip(sources).any(|(proof_key, source)| *proof_key != source.key)
+  {
+    return Err(closure_error(
+      "index_cow_tombstone_proof_pages",
+      "tombstone-drop proof does not bind the exact ordered immutable source-page set",
+    ));
+  }
+  if proof.coverage_epoch_id == 0
+    || proof.covered_through_sequence == 0
+    || proof.journal_contiguous_through_sequence < proof.covered_through_sequence
+  {
+    return Err(closure_error(
+      "index_cow_tombstone_proof_coverage",
+      "tombstone-drop proof lacks a nonzero epoch or contiguous journal coverage",
+    ));
+  }
+  let newest_source_generation = sources
+    .iter()
+    .map(|source| source.generation)
+    .max()
+    .ok_or_else(|| closure_error("index_cow_tombstone_proof_pages", "proof has no source-page generation"))?;
+  if proof.pin_safe_through_generation < newest_source_generation || proof.pin_safe_through_generation >= request.generation {
+    return Err(closure_error(
+      "index_cow_tombstone_proof_pins",
+      "tombstone-drop proof does not cover the source generations below the new generation",
+    ));
+  }
+  Ok(())
+}
+
+fn collect_compaction_records(sources: &[OrderedPageV1<'_>], maximum_workspace_bytes: usize) -> FormatResult<Vec<OwnedOrderedRecordV1>> {
+  let record_count = sources.iter().try_fold(0usize, |count, source| {
+    count.checked_add(source.records.len()).ok_or_else(|| arithmetic_error("index_cow_compaction_record_count", "record count overflowed"))
+  })?;
+  let mut records = Vec::new();
+  if let Err(error) = records.try_reserve_exact(record_count) {
+    return Err(amplification_error("index_cow_compaction_records", format!("record reservation failed: {error}")));
+  }
+  let mut accounted_bytes = records
+    .capacity()
+    .checked_mul(size_of::<OwnedOrderedRecordV1>())
+    .ok_or_else(|| arithmetic_error("index_cow_workspace_overflow", "compaction record metadata bytes overflowed"))?;
+  for source in sources {
+    for record in source.records.iter() {
+      let record = record?;
+      let order_key = ordered_record_order_key(&record)?;
+      accounted_bytes = accounted_bytes
+        .checked_add(record.encoded.len())
+        .and_then(|total| total.checked_add(order_key.len()))
+        .ok_or_else(|| arithmetic_error("index_cow_workspace_overflow", "compaction record bytes overflowed"))?;
+      if accounted_bytes > maximum_workspace_bytes {
+        return Err(amplification_error(
+          "index_cow_workspace_exceeded",
+          format!("record workspace exceeds the {maximum_workspace_bytes}-byte operation cap"),
+        ));
+      }
+      records.push(OwnedOrderedRecordV1 {
+        encoded: copy_fallible_bytes(record.encoded, "compaction record")?,
+        order_key,
+        tombstone: record.tombstone,
+      });
+    }
+  }
+  Ok(records)
+}
+
+fn preflight_compaction_workspace(
+  request: &OrderedPageCompactionWindowRequestV1<'_>,
+  sources: &[OrderedPageV1<'_>],
+  records: &[OwnedOrderedRecordV1],
+  record_workspace_bytes: usize,
+  rewritten_previous: Option<&OrderedPageV1<'_>>,
+  rewritten_next: Option<&OrderedPageV1<'_>>,
+) -> FormatResult<()> {
+  let mut output_bytes = if records.is_empty() { 0 } else { checked_page_range_length(request.hash_algorithm, sources[0].role, records)? };
+  for (neighbor, encoded) in [(rewritten_previous, request.previous_posting_page), (rewritten_next, request.next_posting_page)] {
+    let Some(neighbor) = neighbor else {
+      continue;
+    };
+    let encoded = encoded.ok_or_else(|| closure_error("index_cow_compaction_neighbor_missing", "validated neighbor bytes disappeared"))?;
+    output_bytes = output_bytes
+      .checked_add(encoded.len())
+      .and_then(|bytes| {
+        neighbor
+          .records
+          .len()
+          .checked_mul(size_of::<super::index_page::OrderedRecordV1<'_>>() + size_of::<&[u8]>())
+          .and_then(|metadata| bytes.checked_add(metadata))
+      })
+      .ok_or_else(|| arithmetic_error("index_cow_compaction_output", "compaction neighbor output bytes overflowed"))?;
+  }
+  let replacement_count = sources.len() + usize::from(rewritten_previous.is_some()) + usize::from(rewritten_next.is_some());
+  let artifact_count = usize::from(!records.is_empty()) + usize::from(rewritten_previous.is_some()) + usize::from(rewritten_next.is_some());
+  let retained_key_bytes = artifact_count
+    .checked_mul(request.hash_algorithm.hash_length())
+    .ok_or_else(|| arithmetic_error("index_cow_compaction_output", "compaction retained artifact-key bytes overflowed"))?;
+  output_bytes = output_bytes
+    .checked_add(retained_key_bytes)
+    .and_then(|bytes| bytes.checked_add(artifact_count.checked_mul(size_of::<EncodedImmutableIndexArtifactV1>())?))
+    .ok_or_else(|| arithmetic_error("index_cow_compaction_output", "compaction output bytes overflowed"))?;
+  let retained_summary_bytes = sources.iter().chain(rewritten_previous).chain(rewritten_next).try_fold(0usize, |bytes, page| {
+    bytes
+      .checked_add(page.key.len())
+      .and_then(|bytes| bytes.checked_add(page.owner_id.len()))
+      .and_then(|bytes| bytes.checked_add(page.lower_fence.len()))
+      .and_then(|bytes| bytes.checked_add(page.upper_fence.len()))
+      .ok_or_else(|| arithmetic_error("index_cow_compaction_output", "compaction retained source-summary bytes overflowed"))
+  })?;
+  output_bytes = output_bytes
+    .checked_add(retained_summary_bytes)
+    .ok_or_else(|| arithmetic_error("index_cow_compaction_output", "compaction retained output bytes overflowed"))?;
+  let planning_bytes = sources
+    .len()
+    .checked_mul(size_of::<OrderedPageV1<'_>>())
+    .and_then(|bytes| bytes.checked_add(replacement_count.checked_mul(size_of::<OrderedPageReplacementV1>())?))
+    .and_then(|bytes| bytes.checked_add(sources.len().checked_mul(size_of::<u64>())?))
+    .and_then(|bytes| bytes.checked_add(records.len().checked_mul(size_of::<&[u8]>())?))
+    .ok_or_else(|| arithmetic_error("index_cow_compaction_output", "compaction planning bytes overflowed"))?;
+  let peak_bytes = record_workspace_bytes
+    .checked_add(output_bytes)
+    .and_then(|bytes| bytes.checked_add(planning_bytes))
+    .ok_or_else(|| arithmetic_error("index_cow_compaction_output", "compaction peak bytes overflowed"))?;
+  if output_bytes > request.layout.maximum_workspace_bytes || peak_bytes > request.layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_compaction_workspace_exceeded",
+      format!("{peak_bytes} peak bytes exceed the {}-byte operation cap", request.layout.maximum_workspace_bytes),
+    ));
+  }
+  Ok(())
+}
+
 fn validate_mutation_identity(request: &OrderedPageMutationRequestV1<'_>, source: &OrderedPageV1<'_>) -> FormatResult<()> {
   if request.generation <= source.generation {
     return Err(identity_error(
@@ -981,7 +1434,7 @@ fn collect_owned_records(source: &OrderedPageV1<'_>, maximum_workspace_bytes: us
         format!("record workspace exceeds the {maximum_workspace_bytes}-byte operation cap"),
       ));
     }
-    records.push(OwnedOrderedRecordV1 { encoded: record.encoded.to_vec(), order_key });
+    records.push(OwnedOrderedRecordV1 { encoded: record.encoded.to_vec(), order_key, tombstone: record.tombstone });
   }
   Ok(records)
 }
