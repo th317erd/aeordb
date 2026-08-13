@@ -750,26 +750,15 @@ fn write_physical_hint(body: &mut [u8], offset: usize, hint: PhysicalHintV1) -> 
 }
 
 pub fn encode_ordered_page(request: &OrderedPageWriteV1<'_>) -> FormatResult<EncodedImmutableIndexArtifactV1> {
-  validate_owner(request.owner_id, request.hash_algorithm, "ordered-page owner")?;
-  if request.generation == 0 {
-    return Err(identity_error("ordered-page generation is zero"));
-  }
-  validate_page_identity_and_links(request)?;
-  let scan = scan_record_slices(request.hash_algorithm, request.role, request.records)?;
-  let lower_fence = record_order_key(&scan.first)?;
-  let upper_fence = record_order_key(&scan.last)?;
-  validate_descriptor_fences(request.hash_algorithm, request.role, &lower_fence, &upper_fence)?;
+  let prepared = prepare_ordered_page(request)?;
+  let scan = &prepared.scan;
+  let lower_fence = &prepared.lower_fence;
+  let upper_fence = &prepared.upper_fence;
+  let kind = prepared.kind;
+  let identity_length = prepared.identity_length;
+  let body_length = prepared.body_length;
 
-  let kind = page_kind(request.role)?;
-  let identity_length = page_identity_length(request.role, request.hash_algorithm.hash_length(), lower_fence.len())?;
-  let body_length = 96usize
-    .checked_add(lower_fence.len())
-    .and_then(|length| length.checked_add(upper_fence.len()))
-    .and_then(|length| length.checked_add(scan.records_length))
-    .ok_or_else(|| length_error("ordered-page body length overflow"))?;
-  checked_immutable_index_artifact_encoded_length(kind, identity_length, body_length)?;
-
-  let identity = encode_page_identity(request, &lower_fence, identity_length)?;
+  let identity = encode_page_identity(request, lower_fence, identity_length)?;
   let mut body = allocate_zeroed(body_length, "ordered-page body")?;
   write_u16(&mut body, 4, 1)?;
   write_u16(&mut body, 6, request.role.key_codec())?;
@@ -791,9 +780,9 @@ pub fn encode_ordered_page(request: &OrderedPageWriteV1<'_>) -> FormatResult<Enc
     write_u64(&mut body, 72, scan.last.coordinate)?;
   }
   let mut cursor = 96usize;
-  write_bytes(&mut body, cursor, &lower_fence, "ordered-page lower fence")?;
+  write_bytes(&mut body, cursor, lower_fence, "ordered-page lower fence")?;
   cursor += lower_fence.len();
-  write_bytes(&mut body, cursor, &upper_fence, "ordered-page upper fence")?;
+  write_bytes(&mut body, cursor, upper_fence, "ordered-page upper fence")?;
   cursor += upper_fence.len();
   for record in request.records {
     write_bytes(&mut body, cursor, record, "ordered-page record")?;
@@ -812,6 +801,34 @@ pub fn encode_ordered_page(request: &OrderedPageWriteV1<'_>) -> FormatResult<Enc
   })?;
   decode_ordered_page(&encoded.value, request.hash_algorithm)?;
   Ok(encoded)
+}
+
+/// Return the exact encoded page length after running the same validation and
+/// sizing path as [`encode_ordered_page`], without allocating an artifact.
+pub fn checked_ordered_page_encoded_length(request: &OrderedPageWriteV1<'_>) -> FormatResult<usize> {
+  Ok(prepare_ordered_page(request)?.encoded_length)
+}
+
+fn prepare_ordered_page<'a>(request: &OrderedPageWriteV1<'a>) -> FormatResult<PreparedOrderedPageV1<'a>> {
+  validate_owner(request.owner_id, request.hash_algorithm, "ordered-page owner")?;
+  if request.generation == 0 {
+    return Err(identity_error("ordered-page generation is zero"));
+  }
+  validate_page_identity_and_links(request)?;
+  let scan = scan_record_slices(request.hash_algorithm, request.role, request.records)?;
+  let lower_fence = record_order_key(&scan.first)?;
+  let upper_fence = record_order_key(&scan.last)?;
+  validate_descriptor_fences(request.hash_algorithm, request.role, &lower_fence, &upper_fence)?;
+
+  let kind = page_kind(request.role)?;
+  let identity_length = page_identity_length(request.role, request.hash_algorithm.hash_length(), lower_fence.len())?;
+  let body_length = 96usize
+    .checked_add(lower_fence.len())
+    .and_then(|length| length.checked_add(upper_fence.len()))
+    .and_then(|length| length.checked_add(scan.records_length))
+    .ok_or_else(|| length_error("ordered-page body length overflow"))?;
+  let encoded_length = checked_immutable_index_artifact_encoded_length(kind, identity_length, body_length)?;
+  Ok(PreparedOrderedPageV1 { scan, lower_fence, upper_fence, kind, identity_length, body_length, encoded_length })
 }
 
 fn validate_page_identity_and_links(request: &OrderedPageWriteV1<'_>) -> FormatResult<()> {
@@ -892,6 +909,16 @@ struct RecordSliceScanV1<'a> {
   logical_live_bytes: u64,
 }
 
+struct PreparedOrderedPageV1<'a> {
+  scan: RecordSliceScanV1<'a>,
+  lower_fence: Vec<u8>,
+  upper_fence: Vec<u8>,
+  kind: ImmutableIndexArtifactKindV1,
+  identity_length: usize,
+  body_length: usize,
+  encoded_length: usize,
+}
+
 fn scan_record_slices<'a>(
   hash_algorithm: HashAlgorithm,
   role: OrderedIndexRoleV1,
@@ -954,6 +981,21 @@ fn record_order_key(record: &OrderedRecordV1<'_>) -> FormatResult<Vec<u8>> {
       Ok(encoded)
     }
   }
+}
+
+/// Decode exactly one role-specific ordered record.
+pub fn decode_ordered_record(value: &[u8], hash_algorithm: HashAlgorithm, role: OrderedIndexRoleV1) -> FormatResult<OrderedRecordV1<'_>> {
+  let mut cursor = 0usize;
+  let record = decode_record(hash_algorithm, role, value, &mut cursor)?;
+  if cursor != value.len() {
+    return Err(truncated_error("ordered record contains trailing bytes"));
+  }
+  Ok(record)
+}
+
+/// Materialize the canonical order key owned by a decoded ordered record.
+pub fn ordered_record_order_key(record: &OrderedRecordV1<'_>) -> FormatResult<Vec<u8>> {
+  record_order_key(record)
 }
 
 pub fn validate_posting_page_link(left: &OrderedPageV1<'_>, right: &OrderedPageV1<'_>, hash_algorithm: HashAlgorithm) -> FormatResult<()> {

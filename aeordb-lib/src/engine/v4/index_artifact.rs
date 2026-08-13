@@ -95,6 +95,19 @@ pub fn checked_immutable_index_artifact_encoded_length(
   identity_length: usize,
   body_length: usize,
 ) -> FormatResult<usize> {
+  let total_length = checked_immutable_index_artifact_representable_length(identity_length, body_length)?;
+  let maximum_length = kind.maximum_encoded_length();
+  if total_length > maximum_length {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "index_artifact_exceeds_cap",
+      format!("{total_length} bytes exceeds {maximum_length}"),
+    ));
+  }
+  Ok(total_length)
+}
+
+pub(crate) fn checked_immutable_index_artifact_representable_length(identity_length: usize, body_length: usize) -> FormatResult<usize> {
   if identity_length == 0 {
     return Err(identity_error("immutable artifact identity is empty"));
   }
@@ -113,14 +126,6 @@ pub fn checked_immutable_index_artifact_encoded_length(
     .and_then(|length| length.checked_add(4))
     .ok_or_else(|| length_error("artifact length formula overflow"))?;
   let _total_length = checked_index_u32(total_length, "artifact total length exceeds u32")?;
-  let maximum_length = kind.maximum_encoded_length();
-  if total_length > maximum_length {
-    return Err(error(
-      MalformedInputClass::AllocationAmplification,
-      "index_artifact_exceeds_cap",
-      format!("{total_length} bytes exceeds {maximum_length}"),
-    ));
-  }
   Ok(total_length)
 }
 
