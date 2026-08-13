@@ -3,7 +3,7 @@
 - **Status:** active
 - **Current landing unit:** P5-2
 - **Entry commit:** `3b4ad09`
-- **Last green commit:** `3b4ad09`
+- **Last green commit:** `90d8b31`
 - **Owner:** Codex, converter/strategy/source/definition runtime semantics
 - **Start gate:** satisfied; Child 01 registries and Child 03 immutable shadow roots are green
 - **Plan:** [Child 05](../children/05-index-definitions-pages-and-nvt.md)
@@ -22,5 +22,5 @@
 - **P5-2a focused and affected proof:** `index_v1_reference_spec` passes 26 tests covering registry closure, independent scalar boundaries/coordinates/comparators, malformed keys, exact collision recheck, coercion, hash-width selection, JSON traversal/regex/limits/cancellation, plugin outcomes, public-constructor corruption, definition identity, and aggregate limits. The 13-target affected matrix passes with zero failures; the only warning is the historical unused `require_wasm_parser` macro. Final focused and affected logs have SHA-256 `0883584cb4c886802b65f4c6aa2092cfb11b5f3cf4e33ca64111797c6f54d5e5` and `19092648fc11d2d8a39805cf382ef4bcfdb61ca3b0d2a65cb1d63f209c31930b`.
 - **P5-2a broad/static proof:** the complete workspace/all-target suite passes 5,945 tests across 253 result groups with zero failures against the exact final source; retained log SHA-256 is `860308a10ade67869508a7620610dca179e19dee0d3d5a090d8f5cefaf21cfed`. Workspace/all-target checking passes. The 436-fixture/95-route/38-document contract gate passes. All 28 error-squelch architecture tests pass and the exact reviewed suppression ceiling shrank from 1,477 to 1,476 after removing a legacy `unreachable!`. Strict library Clippy remains byte-identical to the P5-1 baseline at exactly 110 historical diagnostics, with no changed-file finding; log SHA-256 remains `b10b6d2188637c384bc84f10d35b7d65f2500131e4225dfbc138ac116cdaf41b`. Formatting, diff hygiene, and the shadow-only/legacy-isolation architecture grep pass.
 - **P5-2a real-world boundary:** this landing unit is a disconnected pure shadow runtime with no CLI, API, storage writer, query path, or active-pointer consumer, so a server exercise cannot execute it without violating the activation boundary. The complete P5-2 real-world/native proof remains open until the ratified token/migration semantics and shadow harness exist; no live-test completion is claimed for P5-2.
-- **P5-2a landing:** exact-source verification is complete; this ledger travels with the corrected v1 semantic-runtime landing commit.
+- **P5-2a landing:** committed as `90d8b31`; exact-source verification and the recorded focused, affected, broad, static, architecture, suppression, and Clippy-baseline gates are green.
 - **Next action:** ratify the three missing persistent semantic values, update the conformance bundles/vectors first, then implement the token and isolated migration-v0 runtimes under failing reference tests before completing P5-2 cross-platform and shadow-only real-world qualification.
