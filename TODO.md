@@ -802,24 +802,25 @@
         - [x] Add the red `index_v1_reference_spec` ownership and byte-identity contract.
         - [x] Implement explicit legacy, KV, and v0 field-index compatibility owners while retaining the public migration facade.
         - [x] Run narrow, adjacent, broad, static, architecture, and real-world gates; record evidence and land the unit.
-      - [ ] P5-2: implement converter, strategy, source, and definition registries with an independent reference model.
-        - [ ] Freeze the runtime contract against the existing ACNV/AFIX, source-selector, ValueStore, semantic-bundle, and canonical-value fixtures.
+      - [x] P5-2: implement converter, strategy, source, and definition registries with an independent reference model.
+        - [x] Freeze the runtime contract against the existing ACNV/AFIX, source-selector, ValueStore, semantic-bundle, and canonical-value fixtures.
           - [x] Freeze and implement the unambiguous corrected scalar, metadata, JSON-path, plugin-mapper, and definition-closure semantics without changing fixture bytes.
-          - [ ] Ratify and freeze corrected phonetic posting class bytes.
-          - [ ] Ratify and freeze the corrected token-coordinate domain separator.
-          - [ ] Ratify and freeze the exact migration-v0 `f64` scalar to fixed-`u64` coordinate conversion.
+          - [x] Freeze the ratified corrected posting classes: trigram word `0x01`, trigram substring `0x02`, Soundex `0x03`, Double Metaphone primary `0x04`, and Double Metaphone alternate `0x05`.
+          - [x] Freeze the ratified corrected token-coordinate domain `aeordb.index.token-coordinate.v1\0`.
+          - [x] Freeze the ratified migration-v0 scalar mapping: endpoints clamp to `0`/`u64::MAX`; finite interior values use exact `floor(scalar * 2^64)` via IEEE decomposition.
         - [x] Add closed corrected/v0 converter and strategy registries with exact capability and operation lookup.
-        - [ ] Implement definition-owned canonicalization, typed comparison, fixed `u64` coordinates, bounded expansion, and query-literal compilation without using legacy `f64` scalar authority.
+        - [x] Implement definition-owned canonicalization, typed comparison, fixed `u64` coordinates, bounded expansion, and query-literal compilation without using legacy `f64` scalar authority.
           - [x] Implement corrected scalar canonicalization, comparison, coordinates, exact recheck, limits, and identical source/query compilation.
-          - [ ] Implement corrected token expansion and the isolated migration-v0 adapter after the three remaining semantics are frozen.
+          - [x] Implement corrected token expansion and the isolated migration-v0 adapter against the ratified semantic corpus.
+          - [x] Freeze `AeorTextFoldV1` to an explicit Unicode 17 data table so corrected token bytes cannot drift with the Rust standard library.
         - [x] Implement bounded metadata/JSON-path source extraction and explicit plugin-mapper operational outcomes from decoded `SourceSelectorV1` definitions.
         - [x] Bind decoded ValueStore/FieldIndex definitions, source/dependency identity, and semantic limits into one validated runtime definition closure.
-        - [ ] Prove independent-vector agreement, malformed/limit/collision/comparator/coordinate/selector behavior, v0 isolation, shuffled determinism, and cross-platform stability.
+        - [x] Prove independent-vector agreement, malformed/limit/collision/comparator/coordinate/selector behavior, v0 isolation, shuffled determinism, and cross-platform stability.
           - [x] Prove the unambiguous scalar/source/definition runtime with 26 focused independent-reference tests and the complete affected matrix.
-          - [ ] Complete token/migration vectors, shuffled determinism, and native cross-platform proof after ratification.
-        - [ ] Run narrow, affected, broad, static, architecture, and real-world shadow-only gates; record evidence and land the unit.
+          - [x] Complete token/migration vectors, shuffled determinism, and native cross-platform proof after ratification.
+        - [x] Run narrow, affected, broad, static, architecture, and real-world shadow-only gates; record evidence and land the unit.
           - [x] Run and record P5-2a narrow, affected, Linux broad, static, architecture, suppression, and Clippy-baseline gates.
-          - [ ] Run the complete P5-2 shadow-only real-world and native-platform gates after the remaining runtime is implemented.
+          - [x] Run the complete P5-2 shadow-only real-world and native-platform gates after the remaining runtime is implemented.
       - [ ] P5-3: implement scope catalog, value/state stores, document identity, and immutable manifest codecs.
       - [ ] P5-4: implement artifact directories and ordered page readers/writers.
       - [ ] P5-5: implement bounded COW insert/delete/split/merge/compaction.
