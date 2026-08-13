@@ -833,6 +833,10 @@ name = "gc_v4_observability_spec"
 path = "spec/engine/gc_v4_observability_spec.rs"
 
 [[test]]
+name = "gc_v4_qualification_harness_spec"
+path = "spec/engine/gc_v4_qualification_harness_spec.rs"
+
+[[test]]
 name = "gc_v4_entry_path_spec"
 path = "spec/engine/gc_v4_entry_path_spec.rs"
 

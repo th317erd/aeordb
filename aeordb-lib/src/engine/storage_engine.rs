@@ -69,6 +69,14 @@ pub struct ChunkReadLocation {
   pub total_length: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KvObservabilityMetrics {
+  pub block_size_bytes: u64,
+  pub fill_ratio: f64,
+  pub file_revisions: u64,
+  pub directory_revisions: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineStartupProgress {
   pub phase: String,
@@ -4600,25 +4608,32 @@ impl StorageEngine {
     })
   }
 
-  /// O(1) metrics for the in-file KV block.
+  /// O(1) layout and revision metrics for the in-file KV block.
   ///
-  /// Returns `(kv_block_size_bytes, kv_fill_ratio)`. The ratio is based on the
-  /// current snapshot's live KV entries against the current bucket-page
-  /// capacity, so it avoids the old full stats scan while still reflecting
-  /// resize pressure.
-  pub fn kv_layout_metrics(&self) -> EngineResult<(u64, f64)> {
+  /// The writer header is sampled before the immutable KV view. Online layout
+  /// expansion holds the writer while draining old snapshot leases, so every
+  /// untracked observer must preserve this order to avoid blocking both sides.
+  pub fn kv_observability_metrics(&self) -> EngineResult<KvObservabilityMetrics> {
     let kv_size_bytes = self
       .writer
       .read()
-      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned in kv_layout_metrics(): {error}"))))?
+      .map_err(|error| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned in kv_observability_metrics(): {error}"))))?
       .file_header()
       .kv_block_length;
 
     let snapshot = self.kv_snapshot.load();
     let capacity = snapshot.bucket_count().saturating_mul(crate::engine::kv_pages::MAX_ENTRIES_PER_PAGE);
     let fill_ratio = if capacity > 0 { snapshot.len() as f64 / capacity as f64 } else { 0.0 };
+    let file_revisions = snapshot.count_by_type(KV_TYPE_FILE_RECORD)? as u64;
+    let directory_revisions = snapshot.count_by_type(KV_TYPE_DIRECTORY)? as u64;
 
-    Ok((kv_size_bytes, fill_ratio))
+    Ok(KvObservabilityMetrics { block_size_bytes: kv_size_bytes, fill_ratio, file_revisions, directory_revisions })
+  }
+
+  /// Compatibility projection for callers that only need layout metrics.
+  pub fn kv_layout_metrics(&self) -> EngineResult<(u64, f64)> {
+    let metrics = self.kv_observability_metrics()?;
+    Ok((metrics.block_size_bytes, metrics.fill_ratio))
   }
 
   /// Perform online KV block expansion. Called after a KV flush detects

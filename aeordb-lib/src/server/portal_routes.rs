@@ -418,8 +418,8 @@ fn get_stats_inner(
   })?;
 
   // In-file KV block metrics: O(1) writer header read + snapshot counts.
-  let (kv_file, kv_fill_ratio) = state.engine.kv_layout_metrics().map_err(|error| {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to read KV layout metrics: {error}") })))
+  let kv_metrics = state.engine.kv_observability_metrics().map_err(|error| {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to read KV observability metrics: {error}") })))
   })?;
 
   // Dedup savings
@@ -466,19 +466,6 @@ fn get_stats_inner(
   // The full path leaks server filesystem layout to authenticated users.
   let db_filename = std::path::Path::new(db_path).file_name().and_then(|f| f.to_str()).unwrap_or("unknown").to_string();
 
-  let (file_revisions, directory_revisions) = {
-    let snapshot = state.engine.kv_snapshot.load();
-    let file_revisions = snapshot.count_by_type(crate::engine::kv_store::KV_TYPE_FILE_RECORD).map_err(|error| {
-      tracing::error!(%error, "Failed to read KV file revision count");
-      (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
-    })? as u64;
-    let directory_revisions = snapshot.count_by_type(crate::engine::kv_store::KV_TYPE_DIRECTORY).map_err(|error| {
-      tracing::error!(%error, "Failed to read KV directory revision count");
-      (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
-    })? as u64;
-    (file_revisions, directory_revisions)
-  };
-
   let stats = EnhancedStats {
     identity: StatsIdentity {
       version: env!("CARGO_PKG_VERSION").to_string(),
@@ -495,12 +482,12 @@ fn get_stats_inner(
       chunks: counters.chunks,
       snapshots: counters.snapshots,
       forks: counters.forks,
-      file_revisions,
-      directory_revisions,
+      file_revisions: kv_metrics.file_revisions,
+      directory_revisions: kv_metrics.directory_revisions,
     },
     sizes: StatsSizes {
       disk_total,
-      kv_file,
+      kv_file: kv_metrics.block_size_bytes,
       logical_data: counters.logical_data_size,
       chunk_data: counters.chunk_data_size,
       void_space: counters.void_space,
@@ -509,7 +496,7 @@ fn get_stats_inner(
     throughput,
     health: StatsHealth {
       disk_usage_percent: disk_health.usage_percent,
-      kv_fill_ratio,
+      kv_fill_ratio: kv_metrics.fill_ratio,
       dedup_hit_rate,
       write_buffer_depth: counters.write_buffer_depth,
       gc,

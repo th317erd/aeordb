@@ -477,14 +477,17 @@ pub async fn run(config: StartConfig<'_>) -> Result<(), String> {
   };
 
   if let Some(runtime) = runtime {
-    runtime.engine.begin_shutdown();
-
-    // Wait for background tasks to finish (with a timeout).
+    // Cancellation has already stopped HTTP admission and told every
+    // background worker to settle. Keep storage write authority open until
+    // checkpointed maintenance has durably completed or returned to pending;
+    // closing it first makes graceful task recovery fail with ShuttingDown.
     tracing::info!("Waiting for background tasks to finish...");
     if let Err(error) = wait_for_background_tasks(runtime.handles, std::time::Duration::from_secs(10)).await {
       tracing::error!(%error, "Background tasks did not terminate cleanly");
       shutdown_errors.push(error);
     }
+
+    runtime.engine.begin_shutdown();
 
     // Flush engine buffers and sync to disk.
     if let Err(error) = runtime.engine.shutdown() {

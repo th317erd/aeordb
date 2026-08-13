@@ -790,6 +790,11 @@
           - [x] P4-8d2: project the same root-only status through task inspection, authenticated stats health, Prometheus gauges, immediate `gc_status` SSE, and periodic metrics SSE while preserving the minimal public health response and omitting status from non-root stats.
           - [x] P4-8d3: render live/terminal GC state on the Dashboard, update operations/API/events/task/CLI documentation, and close focused, architecture, broad, real-server, browser, and contract gates.
         - [ ] P4-8e: complete bounded non-destructive resource, corruption, cancellation, concurrent-load, real-world, soak, and native-platform qualification.
+          - [x] P4-8e1: freeze a repeatable qualification harness contract, including four-job Cargo builds, caller-owned scratch, hard timeout, 8 GiB memory, zero swap, and non-destructive GC enforcement.
+          - [x] P4-8e2: exercise concurrent file writes/reads/search, blob upload/commit, reindex maintenance, dry-run GC, request cancellation, and health latency through a real server.
+          - [x] P4-8e3: run the complete corruption, scratch-pressure, cancellation, mutation-convergence, restart, and retained-or-leaked deterministic matrix without crossing P4-9.
+          - [ ] P4-8e4: qualify the portable GC matrix natively on Linux, macOS arm64, and Windows x86_64 MSVC from the exact landed source and lockfile.
+          - [ ] P4-8e5: reopen and verify the real database, retain bounded resource/latency/result evidence, run broad/static gates, and land the qualification unit.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
     - [ ] P5: implement immutable index definitions, ordered pages, catalogs, sparse fixed-point NVT, compaction, and corruption fallback; eliminate v0 whole-index publication amplification when the active set exceeds the clean-cache cap.
     - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.

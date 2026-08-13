@@ -6,7 +6,6 @@ use crate::engine::engine_counters::EngineCounters;
 use crate::engine::engine_event::{EngineEvent, EVENT_METRICS};
 use crate::engine::event_bus::EventBus;
 use crate::engine::configuration_observability::ConfigurationVisibility;
-use crate::engine::kv_store::{KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD};
 use crate::engine::rate_tracker::RateTrackerSet;
 use crate::engine::storage_engine::StorageEngine;
 
@@ -42,18 +41,10 @@ pub fn spawn_metrics_pulse(
 
       let snapshot = counters.snapshot();
       let rates = rate_trackers.snapshot();
-      let kv = engine.kv_snapshot.load();
-      let (file_revisions, directory_revisions) = match (kv.count_by_type(KV_TYPE_FILE_RECORD), kv.count_by_type(KV_TYPE_DIRECTORY)) {
-        (Ok(files), Ok(directories)) => (files as u64, directories as u64),
-        (files, directories) => {
-          tracing::error!(file_error = ?files.err(), directory_error = ?directories.err(), "Metrics pulse could not read KV type counts");
-          continue;
-        }
-      };
-      let (kv_file, kv_fill_ratio) = match engine.kv_layout_metrics() {
+      let kv_metrics = match engine.kv_observability_metrics() {
         Ok(metrics) => metrics,
         Err(error) => {
-          tracing::error!(%error, "Metrics pulse could not read KV layout metrics");
+          tracing::error!(%error, "Metrics pulse could not read KV observability metrics");
           continue;
         }
       };
@@ -93,8 +84,8 @@ pub fn spawn_metrics_pulse(
               "chunks": snapshot.chunks,
               "snapshots": snapshot.snapshots,
               "forks": snapshot.forks,
-              "file_revisions": file_revisions,
-              "directory_revisions": directory_revisions,
+              "file_revisions": kv_metrics.file_revisions,
+              "directory_revisions": kv_metrics.directory_revisions,
           },
           "sizes": {
               "logical_data": snapshot.logical_data_size,
@@ -102,7 +93,7 @@ pub fn spawn_metrics_pulse(
               "void_space": snapshot.void_space,
               "dedup_savings": dedup_savings,
               "disk_total": disk_total,
-              "kv_file": kv_file,
+              "kv_file": kv_metrics.block_size_bytes,
           },
           "throughput": {
               "writes_per_sec": {
@@ -133,7 +124,7 @@ pub fn spawn_metrics_pulse(
           "health": {
               "write_buffer_depth": snapshot.write_buffer_depth,
               "dedup_hit_rate": dedup_hit_rate,
-              "kv_fill_ratio": kv_fill_ratio,
+              "kv_fill_ratio": kv_metrics.fill_ratio,
               "disk_usage_percent": disk_health.usage_percent,
               "gc": runtime.gc,
           },

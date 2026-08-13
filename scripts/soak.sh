@@ -20,6 +20,8 @@
 #   AEORDB_SOAK_S2_KILL_MAX_SECS (optional)
 #   AEORDB_SOAK_S3_KILL_MIN_SECS (default: 5)  only used by s3; seconds between SIGKILLs
 #   AEORDB_SOAK_S3_KILL_MAX_SECS (default: 30)
+#   AEORDB_SOAK_SCRATCH    (default: ~/.cache/codex/aeordb-tests/soak-scratch)
+#   CARGO_BUILD_JOBS       (default: 4)
 #
 # Outputs land beside the DB file: <db>.checkpoint.tsv, <db>.metrics.tsv.
 
@@ -44,6 +46,9 @@ S2_KILL_MIN_SECS="${AEORDB_SOAK_S2_KILL_MIN_SECS:-}"
 S2_KILL_MAX_SECS="${AEORDB_SOAK_S2_KILL_MAX_SECS:-}"
 S3_KILL_MIN_SECS="${AEORDB_SOAK_S3_KILL_MIN_SECS:-5}"
 S3_KILL_MAX_SECS="${AEORDB_SOAK_S3_KILL_MAX_SECS:-30}"
+CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+SCRATCH_ROOT="${AEORDB_SOAK_SCRATCH:-${XDG_CACHE_HOME:-$HOME/.cache}/codex/aeordb-tests/soak-scratch}"
+mkdir -p "$SCRATCH_ROOT"
 
 cd "$(dirname "$0")/.."
 
@@ -51,11 +56,11 @@ if [ "$MODE" != "summarize" ]; then
   case "$MODE" in
     s1|s2)
       echo "Building release soak worker and CLI..."
-      cargo build --release --bin soak-worker --bin aeordb >/dev/null || { echo "build failed"; exit 1; }
+      cargo build -j "$CARGO_BUILD_JOBS" --release --bin soak-worker --bin aeordb >/dev/null || { echo "build failed"; exit 1; }
       ;;
     s3)
       echo "Building release crash worker and CLI..."
-      cargo build --release --bin crash-soak-worker --bin aeordb >/dev/null || { echo "build failed"; exit 1; }
+      cargo build -j "$CARGO_BUILD_JOBS" --release --bin crash-soak-worker --bin aeordb >/dev/null || { echo "build failed"; exit 1; }
       ;;
   esac
 fi
@@ -223,7 +228,7 @@ case "$MODE" in
       #   - missing_children > 0   (directory tree forgot a child)
       #   - unlisted_files > 0     (file exists but parent doesn't list it)
       #   - broken_snapshots > 0   (snapshot root unreachable)
-      verify_log="$(mktemp)"
+      verify_log="$(mktemp -p "$SCRATCH_ROOT" verify.XXXXXX)"
       ./target/release/aeordb verify -D "$DB" > "$verify_log" 2>&1
       # Parse the report. `awk` prints the numeric value in each line.
       get_field() { awk -v label="$1" '$0 ~ "^  " label ":" { print $NF; exit }' "$verify_log"; }
@@ -305,7 +310,7 @@ invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
       kill "$pmap_pid" 2>/dev/null
       wait "$pmap_pid" 2>/dev/null
 
-      diag_dir="$(mktemp -d)"
+      diag_dir="$(mktemp -d -p "$SCRATCH_ROOT" diagnostics.XXXXXX)"
       verify_db="$diag_dir/verify.aeordb"
       probe_db="$diag_dir/probe.aeordb"
       checkpoint_copy="$diag_dir/checkpoint.tsv"

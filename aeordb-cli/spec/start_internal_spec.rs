@@ -6,6 +6,19 @@ use tokio_util::sync::CancellationToken;
 
 use super::supervise_server_and_initialization;
 
+#[test]
+fn shutdown_drains_background_tasks_before_closing_storage_write_authority() {
+  let source = include_str!("../src/commands/start.rs");
+  let cancel = source.find("cancel.cancel();").expect("shutdown must cancel server and worker admission");
+  let drain = source.find("wait_for_background_tasks(runtime.handles").expect("shutdown must join background workers");
+  let close = source.find("runtime.engine.begin_shutdown();").expect("shutdown must eventually close storage write authority");
+  let flush = source.find("runtime.engine.shutdown()").expect("shutdown must durably flush the engine");
+
+  assert!(cancel < drain, "worker cancellation must happen before worker drain");
+  assert!(drain < close, "checkpointed tasks need storage write authority until every background worker has settled");
+  assert!(close < flush, "storage write authority must close before the final engine flush");
+}
+
 #[tokio::test]
 async fn initialization_task_panic_cancels_and_joins_the_listener() {
   let cancellation = CancellationToken::new();
