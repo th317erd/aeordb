@@ -2,6 +2,7 @@ use crate::engine::HashAlgorithm;
 
 use super::dependency::{DependencyRecordV1, DependencyTableV1, InvocationPolicyKind, decode_dependency_table};
 use super::hash::digest_parts;
+use super::index_semantic_registry::metadata_source_registry_entry;
 use super::parser_plan::{ParserCandidateKind, ParserPlanKind, ParserResolutionPlanV1, decode_parser_resolution_plan};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use super::source_selector::{SourceSelectorKind, SourceSelectorV1, decode_source_selector};
@@ -244,9 +245,12 @@ fn validate_field_selector_and_limits(
   match selector.kind {
     SourceSelectorKind::Metadata => {
       let metadata_id = selector.metadata_id.ok_or_else(|| closure_error("metadata selector omits metadata ID"))?;
+      let metadata_field_name = metadata_source_registry_entry(metadata_id)
+        .map(|entry| entry.field_name)
+        .ok_or_else(|| closure_error("metadata selector names an unknown metadata ID"))?;
       if metadata_source_semantics != family.id()
         || parser.kind != ParserPlanKind::None
-        || field_name != metadata_field_name(metadata_id)
+        || field_name != metadata_field_name
         || max_document_input != 0
         || max_selector_work != 0
         || max_selector_examined != 0
@@ -422,20 +426,6 @@ fn require_wasm_role(
     return Err(closure_error(format!("dependency {} is not the required WASM role", dependency.dependency_id)));
   }
   Ok(())
-}
-
-fn metadata_field_name(metadata_id: u16) -> &'static str {
-  match metadata_id {
-    1 => "@path",
-    2 => "@filename",
-    3 => "@extension",
-    4 => "@content_type",
-    5 => "@size",
-    6 => "@created_at",
-    7 => "@updated_at",
-    8 => "@hash",
-    _ => unreachable!("source selector rejects unknown metadata IDs"),
-  }
 }
 
 fn validate_child_length(length: usize, minimum: usize, maximum: usize, name: &'static str) -> FormatResult<()> {

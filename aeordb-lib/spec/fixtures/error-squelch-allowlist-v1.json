@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1477,
+  "maximum_occurrences": 1476,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -8746,7 +8746,7 @@
     {
       "id": "esq-v1-5028d6bd4583b8e2def9-00",
       "file": "aeordb-lib/src/engine/v4/field_definition.rs",
-      "line": 93,
+      "line": 63,
       "column": 26,
       "enclosing_item": "decode_converter_definition",
       "kind": "error_conversion",
@@ -8756,7 +8756,7 @@
     {
       "id": "esq-v1-3f1c8288a9594d330674-00",
       "file": "aeordb-lib/src/engine/v4/field_definition.rs",
-      "line": 125,
+      "line": 95,
       "column": 49,
       "enclosing_item": "decode_converter_definition",
       "kind": "result_to_option",
@@ -8766,7 +8766,7 @@
     {
       "id": "esq-v1-725164e775ac6b57e12b-00",
       "file": "aeordb-lib/src/engine/v4/field_definition.rs",
-      "line": 208,
+      "line": 178,
       "column": 5,
       "enclosing_item": "decode_field_index_definition",
       "kind": "error_conversion",
@@ -8776,7 +8776,7 @@
     {
       "id": "esq-v1-4096146bd66e2be884ce-00",
       "file": "aeordb-lib/src/engine/v4/field_definition.rs",
-      "line": 391,
+      "line": 324,
       "column": 6,
       "enclosing_item": "validate_definition_envelope",
       "kind": "error_conversion",
@@ -8786,7 +8786,7 @@
     {
       "id": "esq-v1-7850a94332590794cd61-00",
       "file": "aeordb-lib/src/engine/v4/field_definition.rs",
-      "line": 406,
+      "line": 339,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -8796,7 +8796,7 @@
     {
       "id": "esq-v1-ef4d06b2bd63fdf86005-00",
       "file": "aeordb-lib/src/engine/v4/field_definition.rs",
-      "line": 411,
+      "line": 344,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -8806,7 +8806,7 @@
     {
       "id": "esq-v1-fba2ae3f2dd93ec30a6f-00",
       "file": "aeordb-lib/src/engine/v4/field_definition.rs",
-      "line": 416,
+      "line": 349,
       "column": 25,
       "enclosing_item": "u64_at",
       "kind": "panic_method",
@@ -10856,7 +10856,7 @@
     {
       "id": "esq-v1-fdd7cc027a8211c452a7-00",
       "file": "aeordb-lib/src/engine/v4/source_selector.rs",
-      "line": 248,
+      "line": 249,
       "column": 58,
       "enclosing_item": "decode_segment",
       "kind": "panic_method",
@@ -10866,7 +10866,7 @@
     {
       "id": "esq-v1-f98c1a36b799dd9dac1a-00",
       "file": "aeordb-lib/src/engine/v4/source_selector.rs",
-      "line": 295,
+      "line": 296,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -10876,7 +10876,7 @@
     {
       "id": "esq-v1-f5297f2539e0221aa356-00",
       "file": "aeordb-lib/src/engine/v4/source_selector.rs",
-      "line": 302,
+      "line": 303,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -11594,19 +11594,9 @@
       "review": "validated-local-invariant"
     },
     {
-      "id": "esq-v1-4f183b35ce1f8d8f5412-00",
-      "file": "aeordb-lib/src/engine/v4/value_store.rs",
-      "line": 437,
-      "column": 10,
-      "enclosing_item": "metadata_field_name",
-      "kind": "panic_macro",
-      "pattern": "unreachable ! (\"source selector rejects unknown metadata IDs\")",
-      "review": "validated-local-invariant"
-    },
-    {
       "id": "esq-v1-82a18cd379e717f80ea9-00",
       "file": "aeordb-lib/src/engine/v4/value_store.rs",
-      "line": 475,
+      "line": 465,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -11616,7 +11606,7 @@
     {
       "id": "esq-v1-67810455ddf92d237a24-00",
       "file": "aeordb-lib/src/engine/v4/value_store.rs",
-      "line": 482,
+      "line": 472,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -11626,7 +11616,7 @@
     {
       "id": "esq-v1-3ca7b02971ea329fb319-00",
       "file": "aeordb-lib/src/engine/v4/value_store.rs",
-      "line": 489,
+      "line": 479,
       "column": 25,
       "enclosing_item": "u64_at",
       "kind": "panic_method",

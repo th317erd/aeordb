@@ -1,5 +1,6 @@
 use super::config_value::{CanonicalValueBounds, validate_canonical_value};
 use super::dependency::{InvocationPolicyKind, InvocationPolicyV1, decode_invocation_policy};
+use super::index_semantic_registry::metadata_source_registry_entry;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
 const SELECTOR_HEADER_LENGTH: usize = 32;
@@ -134,7 +135,7 @@ fn decode_metadata<'a>(
     return Err(error(MalformedInputClass::NonzeroReservedOrPadding, "selector_metadata_reserved", "metadata reserve is nonzero"));
   }
   let metadata_id = u16_at(value, 32)?;
-  if !(1..=8).contains(&metadata_id) {
+  if metadata_source_registry_entry(metadata_id).is_none() {
     return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "selector_metadata_id", format!("unknown metadata ID {metadata_id}")));
   }
   selector.metadata_id = Some(metadata_id);
