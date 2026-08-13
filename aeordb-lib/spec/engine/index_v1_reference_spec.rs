@@ -13,6 +13,16 @@ use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBou
 use aeordb::engine::v4::field_definition::{decode_converter_definition, decode_field_index_definition};
 use aeordb::engine::v4::index_converter::{ConverterRuntimeV1, IndexSemanticErrorClassV1};
 use aeordb::engine::v4::index_definition_runtime::{IndexDefinitionErrorClassV1, IndexDefinitionRuntimeV1};
+use aeordb::engine::v4::index_artifact::{
+  IndexManifestBodyV1, IndexManifestWriteV1, decode_index_manifest, encode_index_manifest, validate_correctness_manifest_chain,
+};
+use aeordb::engine::v4::index_page::{OrderedIndexRoleV1, decode_ordered_page};
+use aeordb::engine::v4::index_record::{
+  DocumentStateOwnerV1, DocumentStateRecordV1, decode_canonical_value_record, decode_document_state_record, decode_scope_document_record,
+  decode_scope_reverse_record, encode_canonical_value_record, encode_document_state_record, encode_scope_document_record,
+  encode_scope_reverse_record,
+};
+use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::v4::index_semantic_registry::{
   SOURCE_TYPE_BYTES, SOURCE_TYPE_I64, SOURCE_TYPE_NULL, SOURCE_TYPE_U64, SOURCE_TYPE_UTF8, converter_registry, metadata_source_registry,
   source_selector_registry, strategy_registry,
@@ -23,6 +33,10 @@ use aeordb::engine::v4::index_source::{
 };
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 use aeordb::engine::HashAlgorithm;
+
+fn index_artifact_fixture(name: &str) -> Vec<u8> {
+  std::fs::read(format!("{}/spec/fixtures/v4/index-artifact-v1/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
 
 fn legacy_hash_nvt_fixture(bucket_count: u32, buckets: &[(u64, u32)]) -> Vec<u8> {
   assert_eq!(buckets.len(), bucket_count as usize);
@@ -1180,4 +1194,286 @@ fn executable_index_definition_rechecks_value_store_count_before_allocating_call
   let error = runtime.compile_source_values(&values).unwrap_err();
   assert_eq!(error.class(), IndexDefinitionErrorClassV1::ResourceLimit);
   assert_eq!(error.code(), "index_source_value_count_limit");
+}
+
+#[test]
+fn typed_manifest_codecs_round_trip_every_independent_manifest_fixture() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    for kind in ["scope-catalog", "value-store", "field-index", "field-nvt"] {
+      for population in ["empty", "populated"] {
+        let name = format!("aidx-{profile}-{kind}-manifest-{population}.bin");
+        let expected = index_artifact_fixture(&name);
+        let decoded = decode_index_manifest(&expected, hash_algorithm).unwrap();
+        let encoded = encode_index_manifest(&IndexManifestWriteV1 {
+          hash_algorithm,
+          generation: decoded.generation,
+          owner_id: decoded.owner_id,
+          body: decoded.details.clone(),
+        })
+        .unwrap();
+        assert_eq!(encoded.value, expected, "{name}");
+        assert_eq!(encoded.key, decoded.key, "{name}");
+      }
+    }
+  }
+}
+
+#[test]
+fn typed_scope_value_and_state_records_round_trip_both_width_page_fixtures() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    for (fixture_kind, expected_role) in [
+      ("scope-ordinal", OrderedIndexRoleV1::ScopeOrdinal),
+      ("scope-reverse", OrderedIndexRoleV1::ScopeReverse),
+      ("value", OrderedIndexRoleV1::Value),
+      ("value-document-state", OrderedIndexRoleV1::ValueDocumentState),
+      ("index-document-state", OrderedIndexRoleV1::IndexDocumentState),
+    ] {
+      let name = format!("aidx-{profile}-{fixture_kind}-page-valid.bin");
+      let fixture = index_artifact_fixture(&name);
+      let page = decode_ordered_page(&fixture, hash_algorithm).unwrap();
+      assert_eq!(page.role, expected_role, "{name}");
+      for record in page.records.iter() {
+        let record = record.unwrap();
+        let encoded = match expected_role {
+          OrderedIndexRoleV1::ScopeOrdinal => {
+            let decoded = decode_scope_document_record(record.encoded, hash_algorithm).unwrap();
+            encode_scope_document_record(&decoded, hash_algorithm).unwrap()
+          }
+          OrderedIndexRoleV1::ScopeReverse => {
+            let decoded = decode_scope_reverse_record(record.encoded, hash_algorithm).unwrap();
+            encode_scope_reverse_record(&decoded, hash_algorithm).unwrap()
+          }
+          OrderedIndexRoleV1::Value => {
+            let decoded = decode_canonical_value_record(record.encoded, hash_algorithm).unwrap();
+            encode_canonical_value_record(&decoded, hash_algorithm).unwrap()
+          }
+          OrderedIndexRoleV1::ValueDocumentState | OrderedIndexRoleV1::IndexDocumentState => {
+            let owner = if expected_role == OrderedIndexRoleV1::ValueDocumentState {
+              DocumentStateOwnerV1::ValueStore
+            } else {
+              DocumentStateOwnerV1::FieldIndex
+            };
+            let decoded = decode_document_state_record(record.encoded, owner, hash_algorithm).unwrap();
+            encode_document_state_record(&decoded, owner, hash_algorithm).unwrap()
+          }
+          OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::NvtTile => unreachable!("fixture role is fixed above"),
+        };
+        assert_eq!(encoded, record.encoded, "{name}");
+      }
+    }
+  }
+}
+
+#[test]
+fn typed_manifest_chain_requires_exact_references_coverage_and_semantic_owners() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    let scope_empty_bytes = index_artifact_fixture(&format!("aidx-{profile}-scope-catalog-manifest-empty.bin"));
+    let scope_populated_bytes = index_artifact_fixture(&format!("aidx-{profile}-scope-catalog-manifest-populated.bin"));
+    let value_empty_bytes = index_artifact_fixture(&format!("aidx-{profile}-value-store-manifest-empty.bin"));
+    let value_populated_bytes = index_artifact_fixture(&format!("aidx-{profile}-value-store-manifest-populated.bin"));
+    let field_empty_bytes = index_artifact_fixture(&format!("aidx-{profile}-field-index-manifest-empty.bin"));
+    let field_populated_bytes = index_artifact_fixture(&format!("aidx-{profile}-field-index-manifest-populated.bin"));
+    let scope_empty = decode_index_manifest(&scope_empty_bytes, hash_algorithm).unwrap();
+    let scope_populated = decode_index_manifest(&scope_populated_bytes, hash_algorithm).unwrap();
+    let value_empty = decode_index_manifest(&value_empty_bytes, hash_algorithm).unwrap();
+    let value_populated = decode_index_manifest(&value_populated_bytes, hash_algorithm).unwrap();
+    let field_empty = decode_index_manifest(&field_empty_bytes, hash_algorithm).unwrap();
+    let field_populated = decode_index_manifest(&field_populated_bytes, hash_algorithm).unwrap();
+
+    validate_correctness_manifest_chain(&scope_empty, &value_empty, &field_empty, hash_algorithm).unwrap();
+    validate_correctness_manifest_chain(&scope_populated, &value_populated, &field_populated, hash_algorithm).unwrap();
+    assert_eq!(
+      validate_correctness_manifest_chain(&scope_populated, &value_empty, &field_empty, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+    assert_eq!(
+      validate_correctness_manifest_chain(&scope_populated, &value_populated, &field_empty, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+
+    let mut changed_details = field_populated.details.clone();
+    let IndexManifestBodyV1::FieldIndex(changed_field) = &mut changed_details else {
+      panic!("fixture is a field manifest");
+    };
+    changed_field.coverage.runtime_sequence = changed_field.coverage.runtime_sequence.checked_add(1).unwrap();
+    let changed = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: field_populated.generation,
+      owner_id: field_populated.owner_id,
+      body: changed_details,
+    })
+    .unwrap();
+    let changed = decode_index_manifest(&changed.value, hash_algorithm).unwrap();
+    assert_eq!(
+      validate_correctness_manifest_chain(&scope_populated, &value_populated, &changed, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+  }
+}
+
+#[test]
+fn typed_record_codecs_reject_reserved_ordinals_owner_confusion_and_unbounded_evidence() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    let scope_bytes = index_artifact_fixture(&format!("aidx-{profile}-scope-ordinal-page-valid.bin"));
+    let scope_page = decode_ordered_page(&scope_bytes, hash_algorithm).unwrap();
+    let mut scope_record = scope_page.records.iter().next().unwrap().unwrap().encoded.to_vec();
+    scope_record[8..16].copy_from_slice(&0u64.to_le_bytes());
+    assert_eq!(
+      decode_scope_document_record(&scope_record, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::IdentityKeyOrGenerationMismatch
+    );
+
+    let reverse_bytes = index_artifact_fixture(&format!("aidx-{profile}-scope-reverse-page-valid.bin"));
+    let reverse_page = decode_ordered_page(&reverse_bytes, hash_algorithm).unwrap();
+    let mut reverse_record = reverse_page.records.iter().next().unwrap().unwrap().encoded.to_vec();
+    reverse_record[0] = 1;
+    assert_eq!(
+      decode_scope_reverse_record(&reverse_record, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+
+    let value_bytes = index_artifact_fixture(&format!("aidx-{profile}-value-page-valid.bin"));
+    let value_page = decode_ordered_page(&value_bytes, hash_algorithm).unwrap();
+    let mut value_record = value_page.records.iter().next().unwrap().unwrap().encoded.to_vec();
+    value_record.push(0);
+    assert_eq!(
+      decode_canonical_value_record(&value_record, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::TruncationOrTrailingBytes
+    );
+    let decoded_value = decode_canonical_value_record(&value_page.records.iter().next().unwrap().unwrap().encoded, hash_algorithm).unwrap();
+    let ambiguous_tombstone = aeordb::engine::v4::index_record::CanonicalValueRecordV1 {
+      tombstone: true,
+      document_ordinal: decoded_value.document_ordinal,
+      source_value_ordinal: decoded_value.source_value_ordinal,
+      record_revision_hash: decoded_value.record_revision_hash,
+      canonical_value: Some(&[]),
+    };
+    assert_eq!(
+      encode_canonical_value_record(&ambiguous_tombstone, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+
+    let state_bytes = index_artifact_fixture(&format!("aidx-{profile}-value-document-state-page-valid.bin"));
+    let state_page = decode_ordered_page(&state_bytes, hash_algorithm).unwrap();
+    let state_record = state_page.records.iter().next().unwrap().unwrap();
+    assert_eq!(
+      decode_document_state_record(state_record.encoded, DocumentStateOwnerV1::FieldIndex, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+    let decoded = decode_document_state_record(state_record.encoded, DocumentStateOwnerV1::ValueStore, hash_algorithm).unwrap();
+    let oversized_evidence = vec![0u8; 4 * 1_024 + 1];
+    let oversized = DocumentStateRecordV1 {
+      tombstone: decoded.tombstone,
+      stage: decoded.stage,
+      reason: decoded.reason,
+      document_ordinal: decoded.document_ordinal,
+      record_revision_hash: decoded.record_revision_hash,
+      observed_value_count: decoded.observed_value_count,
+      observed_canonical_bytes: decoded.observed_canonical_bytes,
+      observed_work_units: decoded.observed_work_units,
+      dependency_ordinal: decoded.dependency_ordinal,
+      evidence: &oversized_evidence,
+    };
+    assert_eq!(
+      encode_document_state_record(&oversized, DocumentStateOwnerV1::ValueStore, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::AllocationAmplification
+    );
+  }
+}
+
+#[test]
+fn typed_manifest_writers_reject_identity_capability_and_root_count_corruption() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    let scope_bytes = index_artifact_fixture(&format!("aidx-{profile}-scope-catalog-manifest-populated.bin"));
+    let scope = decode_index_manifest(&scope_bytes, hash_algorithm).unwrap();
+
+    let zero_generation = IndexManifestWriteV1 { hash_algorithm, generation: 0, owner_id: scope.owner_id, body: scope.details.clone() };
+    assert_eq!(encode_index_manifest(&zero_generation).unwrap_err().class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+
+    let wrong_width_owner = IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: scope.generation,
+      owner_id: &scope.owner_id[..scope.owner_id.len() - 1],
+      body: scope.details.clone(),
+    };
+    assert_eq!(encode_index_manifest(&wrong_width_owner).unwrap_err().class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+
+    let mut unknown_capability = scope.details.clone();
+    let IndexManifestBodyV1::ScopeCatalog(body) = &mut unknown_capability else {
+      panic!("fixture is a scope manifest");
+    };
+    body.required_reader_capabilities[3] = 1;
+    assert_eq!(
+      encode_index_manifest(&IndexManifestWriteV1 {
+        hash_algorithm,
+        generation: scope.generation,
+        owner_id: scope.owner_id,
+        body: unknown_capability,
+      })
+      .unwrap_err()
+      .class(),
+      MalformedInputClass::UnknownRequiredCapability
+    );
+
+    let mut broken_scope_counts = scope.details.clone();
+    let IndexManifestBodyV1::ScopeCatalog(body) = &mut broken_scope_counts else {
+      panic!("fixture is a scope manifest");
+    };
+    body.ordinal_page_count = 0;
+    assert_eq!(
+      encode_index_manifest(&IndexManifestWriteV1 {
+        hash_algorithm,
+        generation: scope.generation,
+        owner_id: scope.owner_id,
+        body: broken_scope_counts,
+      })
+      .unwrap_err()
+      .class(),
+      MalformedInputClass::CrossRecordClosureMismatch
+    );
+
+    let value_bytes = index_artifact_fixture(&format!("aidx-{profile}-value-store-manifest-populated.bin"));
+    let value = decode_index_manifest(&value_bytes, hash_algorithm).unwrap();
+    let mut zero_next_page = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut zero_next_page else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.next_page_id = 0;
+    assert_eq!(
+      encode_index_manifest(&IndexManifestWriteV1 {
+        hash_algorithm,
+        generation: value.generation,
+        owner_id: value.owner_id,
+        body: zero_next_page,
+      })
+      .unwrap_err()
+      .class(),
+      MalformedInputClass::IdentityKeyOrGenerationMismatch
+    );
+  }
+}
+
+#[test]
+fn typed_record_writers_reject_wrong_hash_width_and_file_key_mismatch() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    let scope_bytes = index_artifact_fixture(&format!("aidx-{profile}-scope-ordinal-page-valid.bin"));
+    let scope_page = decode_ordered_page(&scope_bytes, hash_algorithm).unwrap();
+    let encoded_record = scope_page.records.iter().next().unwrap().unwrap().encoded;
+    let mut record = decode_scope_document_record(encoded_record, hash_algorithm).unwrap();
+
+    let wrong_width_revision = vec![0x44; hash_algorithm.hash_length() - 1];
+    record.record_revision_hash = &wrong_width_revision;
+    assert_eq!(
+      encode_scope_document_record(&record, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::IdentityKeyOrGenerationMismatch
+    );
+
+    record = decode_scope_document_record(encoded_record, hash_algorithm).unwrap();
+    let mismatched_file_key = vec![0x55; hash_algorithm.hash_length()];
+    record.file_key = &mismatched_file_key;
+    assert_eq!(
+      encode_scope_document_record(&record, hash_algorithm).unwrap_err().class(),
+      MalformedInputClass::IdentityKeyOrGenerationMismatch
+    );
+  }
 }

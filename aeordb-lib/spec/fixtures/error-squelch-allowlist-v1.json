@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1476,
+  "maximum_occurrences": 1474,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -9996,7 +9996,7 @@
     {
       "id": "esq-v1-a28f6e7883c522a78290-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 422,
+      "line": 519,
       "column": 6,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",
@@ -10006,7 +10006,7 @@
     {
       "id": "esq-v1-23c0c5c76c2da038f4d8-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 430,
+      "line": 527,
       "column": 21,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",
@@ -10014,39 +10014,9 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-aa7adde9dcaf21cda84b-00",
-      "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 486,
-      "column": 27,
-      "enclosing_item": "decode_correctness_prefix",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (body , 36) ?) . map_err (| _ | length_error (\"definition length does not fit usize\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-8e4a54bc4d467e2433a1-00",
-      "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 561,
-      "column": 78,
-      "enclosing_item": "decode_value_manifest_body",
-      "kind": "result_to_option",
-      "pattern": "u16_at (body , * offset) . ok ()",
-      "review": "derived-exact-fallback"
-    },
-    {
-      "id": "esq-v1-71bbba1ba332ac1ec437-00",
-      "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 614,
-      "column": 78,
-      "enclosing_item": "decode_field_manifest_body",
-      "kind": "result_to_option",
-      "pattern": "u16_at (body , * offset) . ok ()",
-      "review": "derived-exact-fallback"
-    },
-    {
       "id": "esq-v1-0195be9fa48347affbf6-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 750,
+      "line": 577,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -10056,7 +10026,7 @@
     {
       "id": "esq-v1-a4e65f0b3cb6397e41a1-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 755,
+      "line": 582,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -10066,12 +10036,22 @@
     {
       "id": "esq-v1-8011b0945b21bcbcdcd6-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 760,
+      "line": 587,
       "column": 25,
       "enclosing_item": "u64_at",
       "kind": "panic_method",
       "pattern": "value . try_into () . expect (\"exact slice length\")",
       "review": "validated-local-invariant"
+    },
+    {
+      "id": "esq-v1-15d151593cd091165a43-00",
+      "file": "aeordb-lib/src/engine/v4/index_manifest.rs",
+      "line": 560,
+      "column": 27,
+      "enclosing_item": "decode_correctness_prefix",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (u32_at (body , 36) ?) . map_err (| _ | length_error (\"definition length conversion\"))",
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-68c37ffd4471888c86f5-00",
@@ -10264,39 +10244,9 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-e743e392118b3d51578f-00",
-      "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 753,
-      "column": 22,
-      "enclosing_item": "decode_value_record",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (bytes , start + 4) ?) . map_err (| _ | length_error (\"value length conversion\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-2b3c7fcb7ab501a104d5-00",
-      "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 786,
-      "column": 21,
-      "enclosing_item": "decode_scope_ordinal_record",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (bytes , start + 4) ?) . map_err (| _ | length_error (\"scope path length conversion\"))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-de1355c02ba396c59964-00",
-      "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 850,
-      "column": 25,
-      "enclosing_item": "decode_state_record",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (u32_at (bytes , start + 4) ?) . map_err (| _ | length_error (\"state evidence length conversion\"))",
-      "review": "typed-format-failure"
-    },
-    {
       "id": "esq-v1-97ae9724273b32c85227-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 905,
+      "line": 859,
       "column": 20,
       "enclosing_item": "validate_scope_catalog_pair",
       "kind": "panic_method",
@@ -10306,7 +10256,7 @@
     {
       "id": "esq-v1-32b99998144de1a43afc-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 913,
+      "line": 867,
       "column": 20,
       "enclosing_item": "validate_scope_catalog_pair",
       "kind": "panic_method",
@@ -10316,7 +10266,7 @@
     {
       "id": "esq-v1-b1dd3ee51fb00f868d3e-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 934,
+      "line": 888,
       "column": 26,
       "enclosing_item": "compare_order_keys",
       "kind": "panic_method",
@@ -10326,7 +10276,7 @@
     {
       "id": "esq-v1-e0715f7c6332319c6485-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 935,
+      "line": 889,
       "column": 34,
       "enclosing_item": "compare_order_keys",
       "kind": "panic_method",
@@ -10336,7 +10286,7 @@
     {
       "id": "esq-v1-52a2fe4db7286067fe6b-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 987,
+      "line": 941,
       "column": 9,
       "enclosing_item": "compare_posting_positions",
       "kind": "panic_method",
@@ -10346,7 +10296,7 @@
     {
       "id": "esq-v1-09af0e04b6697b170dec-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 987,
+      "line": 941,
       "column": 73,
       "enclosing_item": "compare_posting_positions",
       "kind": "panic_method",
@@ -10356,7 +10306,7 @@
     {
       "id": "esq-v1-0a9abd828f3b34b04f2c-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 990,
+      "line": 944,
       "column": 28,
       "enclosing_item": "compare_posting_positions",
       "kind": "panic_method",
@@ -10366,7 +10316,7 @@
     {
       "id": "esq-v1-d7779d05dda91c17df9e-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 991,
+      "line": 945,
       "column": 36,
       "enclosing_item": "compare_posting_positions",
       "kind": "panic_method",
@@ -10376,7 +10326,7 @@
     {
       "id": "esq-v1-3ac8e8dca8e6f4cd8708-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 994,
+      "line": 948,
       "column": 28,
       "enclosing_item": "compare_posting_positions",
       "kind": "panic_method",
@@ -10386,12 +10336,42 @@
     {
       "id": "esq-v1-6e08b63e76def4f92792-00",
       "file": "aeordb-lib/src/engine/v4/index_page.rs",
-      "line": 995,
+      "line": 949,
       "column": 36,
       "enclosing_item": "compare_posting_positions",
       "kind": "panic_method",
       "pattern": "right [right_key_end + 12 ..] . try_into () . expect (\"validated posting key\")",
       "review": "validated-local-invariant"
+    },
+    {
+      "id": "esq-v1-4c3ff73c742af31190d6-00",
+      "file": "aeordb-lib/src/engine/v4/index_record.rs",
+      "line": 180,
+      "column": 21,
+      "enclosing_item": "decode_scope_document_record_prefix",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (read_u32 (value , 4) ?) . map_err (| _ | length_error (\"scope document path length conversion\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-570e8441666ea433e6b5-00",
+      "file": "aeordb-lib/src/engine/v4/index_record.rs",
+      "line": 227,
+      "column": 22,
+      "enclosing_item": "decode_canonical_value_record_prefix",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (read_u32 (value , 4) ?) . map_err (| _ | length_error (\"canonical value length conversion\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-b8a6938f319d9e960d16-00",
+      "file": "aeordb-lib/src/engine/v4/index_record.rs",
+      "line": 263,
+      "column": 25,
+      "enclosing_item": "decode_document_state_record_prefix",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (read_u32 (value , 4) ?) . map_err (| _ | length_error (\"document state evidence length conversion\"))",
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-ea562dd0ac48dd8cce1a-00",

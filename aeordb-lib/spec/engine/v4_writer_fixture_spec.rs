@@ -386,6 +386,7 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
   assert!(!reference_sources.contains("encode_database_header_slot"));
   assert!(!reference_sources.contains("encode_whole_entity"));
   assert!(!reference_sources.contains("encode_immutable_index_artifact"));
+  assert!(!reference_sources.contains("encode_index_manifest"));
   assert!(!reference_sources.contains("encode_immutable_gc_artifact"));
 
   let admission = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/admission.rs")).unwrap();
@@ -397,10 +398,14 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
   assert!(!storage_engine.contains("encode_database_header_slot"));
   assert!(!storage_engine.contains("encode_whole_entity"));
   assert!(!storage_engine.contains("encode_immutable_index_artifact"));
+  assert!(!storage_engine.contains("encode_index_manifest"));
   assert!(!storage_engine.contains("encode_immutable_gc_artifact"));
 
   let production_sources = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
-  assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 1);
+  let index_artifact = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/index_artifact.rs")).unwrap();
+  assert_eq!(index_artifact.matches("encode_immutable_index_artifact(").count(), 2);
+  assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 2);
+  assert_eq!(production_sources.matches("pub fn encode_index_manifest(").count(), 1);
   let expected_gc_writer_surface = [
     ("gc.rs", 1),
     ("gc_audit.rs", 1),

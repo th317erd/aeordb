@@ -821,7 +821,14 @@
         - [x] Run narrow, affected, broad, static, architecture, and real-world shadow-only gates; record evidence and land the unit.
           - [x] Run and record P5-2a narrow, affected, Linux broad, static, architecture, suppression, and Clippy-baseline gates.
           - [x] Run the complete P5-2 shadow-only real-world and native-platform gates after the remaining runtime is implemented.
-      - [ ] P5-3: implement scope catalog, value/state stores, document identity, and immutable manifest codecs.
+      - [x] P5-3: implement scope catalog, value/state stores, document identity, and immutable manifest codecs.
+        - [x] Freeze typed scope-ordinal, FileKey-reverse, canonical-value, and deterministic document-state record ownership against both-width fixtures.
+        - [x] Add bounded fallible record encoders/decoders and make the generic ordered-page reader delegate to the same validation path.
+        - [x] Expose typed ScopeCatalog, ValueStore, FieldIndex, and FieldNvt manifest bodies instead of requiring consumers to parse raw offsets.
+        - [x] Add bounded typed manifest writers that byte-match every independent empty/populated fixture at both hash widths.
+        - [x] Validate exact coverage, owner/definition, root-presence, count/high-water, and correctness-reference closure without following pages or activating pointers.
+        - [x] Prove malformed, overflow, zero/reused identity, tombstone, source-order, stage/reason, and cross-scope rejection paths.
+        - [x] Run narrow, affected, broad, static, architecture, native-platform, and shadow real-world codec gates; record evidence and land the unit.
       - [ ] P5-4: implement artifact directories and ordered page readers/writers.
       - [ ] P5-5: implement bounded COW insert/delete/split/merge/compaction.
       - [ ] P5-6: implement sparse fixed-point NVT tiles, fallback, and best-effort healing.

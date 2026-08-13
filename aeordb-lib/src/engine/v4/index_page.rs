@@ -3,11 +3,12 @@ use std::collections::BTreeMap;
 
 use crate::engine::HashAlgorithm;
 
-use super::config_value::{CanonicalValueBounds, validate_canonical_value};
-use super::hash::digest_parts;
 use super::index_artifact::{decode_immutable_index_artifact, u16_at, u32_at, u64_at};
+use super::index_record::{
+  DocumentStateOwnerV1, decode_canonical_value_record_prefix, decode_document_state_record_prefix, decode_scope_document_record_prefix,
+  decode_scope_reverse_record_prefix,
+};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
-use super::scope::validate_canonical_absolute_path;
 
 const DIRECTORY_KIND: u16 = 0x0020;
 const POSTING_PAGE_KIND: u16 = 0x0030;
@@ -16,7 +17,6 @@ const SCOPE_PAGE_KIND: u16 = 0x0033;
 const STATE_PAGE_KIND: u16 = 0x0034;
 const MAX_ARTIFACT_LENGTH: usize = 4 * 1_024 * 1_024;
 const MAX_KEY_LENGTH: usize = 1_024 * 1_024;
-const MAX_EVIDENCE_LENGTH: usize = 4 * 1_024;
 const MAX_DIRECTORY_ENTRIES: u32 = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -747,32 +747,20 @@ fn decode_posting_record<'a>(bytes: &'a [u8], cursor: &mut usize) -> FormatResul
 }
 
 fn decode_value_record<'a>(hash_algorithm: HashAlgorithm, bytes: &'a [u8], cursor: &mut usize) -> FormatResult<OrderedRecordV1<'a>> {
-  let hash_width = hash_algorithm.hash_length();
   let start = *cursor;
-  let tombstone = decode_record_flags(bytes, start)?;
-  let value_length = usize::try_from(u32_at(bytes, start + 4)?).map_err(|_| length_error("value length conversion"))?;
-  let end = start
-    .checked_add(24 + hash_width)
-    .and_then(|value| value.checked_add(value_length))
-    .ok_or_else(|| length_error("value record length overflow"))?;
-  if end > bytes.len() {
-    return Err(truncated_error("value record is truncated"));
-  }
-  if bytes[start + 20..start + 24].iter().any(|byte| *byte != 0) {
-    return Err(reserve_error("value record reserve is nonzero"));
-  }
-  let revision = &bytes[start + 24..start + 24 + hash_width];
-  if revision.iter().all(|byte| *byte == 0) || tombstone != (value_length == 0) {
-    return Err(closure_error("value record revision or tombstone/value presence is invalid"));
-  }
-  if !tombstone {
-    validate_canonical_value(&bytes[start + 24 + hash_width..end], CanonicalValueBounds::SOURCE_VALUE)?;
-  }
-  let document_ordinal = u64_at(bytes, start + 8)?;
+  let (record, consumed) = decode_canonical_value_record_prefix(&bytes[start..], hash_algorithm)?;
+  let end = start.checked_add(consumed).ok_or_else(|| length_error("value record end overflow"))?;
   let encoded = &bytes[start..end];
   let sort_key = RecordSortKeyV1::Contiguous(&bytes[start + 8..start + 20]);
   *cursor = end;
-  Ok(OrderedRecordV1 { encoded, tombstone, coordinate: 0, document_ordinal, file_key: None, sort_key })
+  Ok(OrderedRecordV1 {
+    encoded,
+    tombstone: record.tombstone,
+    coordinate: 0,
+    document_ordinal: record.document_ordinal,
+    file_key: None,
+    sort_key,
+  })
 }
 
 fn decode_scope_ordinal_record<'a>(
@@ -780,33 +768,20 @@ fn decode_scope_ordinal_record<'a>(
   bytes: &'a [u8],
   cursor: &mut usize,
 ) -> FormatResult<OrderedRecordV1<'a>> {
-  let hash_width = hash_algorithm.hash_length();
   let start = *cursor;
-  let tombstone = decode_record_flags(bytes, start)?;
-  let path_length = usize::try_from(u32_at(bytes, start + 4)?).map_err(|_| length_error("scope path length conversion"))?;
-  validate_key_length(path_length)?;
-  let end = start
-    .checked_add(16 + 2 * hash_width)
-    .and_then(|value| value.checked_add(path_length))
-    .ok_or_else(|| length_error("scope ordinal record length overflow"))?;
-  if end > bytes.len() {
-    return Err(truncated_error("scope ordinal record is truncated"));
-  }
-  let file_key = &bytes[start + 16..start + 16 + hash_width];
-  let revision = &bytes[start + 16 + hash_width..start + 16 + 2 * hash_width];
-  let path_bytes = &bytes[start + 16 + 2 * hash_width..end];
-  let path = std::str::from_utf8(path_bytes)
-    .map_err(|source| error(MalformedInputClass::InvalidUtf8PathGlobOrNativePath, "scope_ordinal_path_utf8", source.to_string()))?;
-  validate_canonical_absolute_path(path)?;
-  let expected_file_key = digest_parts(hash_algorithm, &[b"file:", path.as_bytes()]);
-  if expected_file_key != file_key || revision.iter().all(|byte| *byte == 0) {
-    return Err(identity_error("scope ordinal FileKey or revision identity is invalid"));
-  }
-  let document_ordinal = u64_at(bytes, start + 8)?;
+  let (record, consumed) = decode_scope_document_record_prefix(&bytes[start..], hash_algorithm)?;
+  let end = start.checked_add(consumed).ok_or_else(|| length_error("scope ordinal record end overflow"))?;
   let encoded = &bytes[start..end];
   let sort_key = RecordSortKeyV1::Contiguous(&bytes[start + 8..start + 16]);
   *cursor = end;
-  Ok(OrderedRecordV1 { encoded, tombstone, coordinate: 0, document_ordinal, file_key: Some(file_key), sort_key })
+  Ok(OrderedRecordV1 {
+    encoded,
+    tombstone: record.tombstone,
+    coordinate: 0,
+    document_ordinal: record.document_ordinal,
+    file_key: Some(record.file_key),
+    sort_key,
+  })
 }
 
 fn decode_scope_reverse_record<'a>(
@@ -814,22 +789,20 @@ fn decode_scope_reverse_record<'a>(
   bytes: &'a [u8],
   cursor: &mut usize,
 ) -> FormatResult<OrderedRecordV1<'a>> {
-  let hash_width = hash_algorithm.hash_length();
   let start = *cursor;
-  let tombstone = decode_record_flags(bytes, start)?;
-  let end = start.checked_add(12 + hash_width).ok_or_else(|| length_error("scope reverse record length overflow"))?;
-  if end > bytes.len() {
-    return Err(truncated_error("scope reverse record is truncated"));
-  }
-  let file_key = &bytes[start + 12..end];
-  if tombstone || file_key.iter().all(|byte| *byte == 0) {
-    return Err(closure_error("scope reverse records cannot be tombstones or use a zero FileKey"));
-  }
-  let document_ordinal = u64_at(bytes, start + 4)?;
+  let (record, consumed) = decode_scope_reverse_record_prefix(&bytes[start..], hash_algorithm)?;
+  let end = start.checked_add(consumed).ok_or_else(|| length_error("scope reverse record end overflow"))?;
   let encoded = &bytes[start..end];
-  let sort_key = RecordSortKeyV1::Contiguous(file_key);
+  let sort_key = RecordSortKeyV1::Contiguous(record.file_key);
   *cursor = end;
-  Ok(OrderedRecordV1 { encoded, tombstone: false, coordinate: 0, document_ordinal, file_key: Some(file_key), sort_key })
+  Ok(OrderedRecordV1 {
+    encoded,
+    tombstone: false,
+    coordinate: 0,
+    document_ordinal: record.document_ordinal,
+    file_key: Some(record.file_key),
+    sort_key,
+  })
 }
 
 fn decode_state_record<'a>(
@@ -838,44 +811,25 @@ fn decode_state_record<'a>(
   bytes: &'a [u8],
   cursor: &mut usize,
 ) -> FormatResult<OrderedRecordV1<'a>> {
-  let hash_width = hash_algorithm.hash_length();
   let start = *cursor;
-  let flags = *bytes.get(start).ok_or_else(|| truncated_error("state record flags are truncated"))?;
-  if flags & !1 != 0 {
-    return Err(reserve_error("state record flags contain unknown bits"));
-  }
-  let tombstone = flags & 1 != 0;
-  let stage = *bytes.get(start + 1).ok_or_else(|| truncated_error("state record stage is truncated"))?;
-  let reason = u16_at(bytes, start + 2)?;
-  let evidence_length = usize::try_from(u32_at(bytes, start + 4)?).map_err(|_| length_error("state evidence length conversion"))?;
-  if evidence_length > MAX_EVIDENCE_LENGTH {
-    return Err(amplification_error("state evidence exceeds 4 KiB"));
-  }
-  let end = start
-    .checked_add(48 + hash_width)
-    .and_then(|value| value.checked_add(evidence_length))
-    .ok_or_else(|| length_error("state record length overflow"))?;
-  if end > bytes.len() {
-    return Err(truncated_error("state record is truncated"));
-  }
-  if bytes[start + 16..start + 16 + hash_width].iter().all(|byte| *byte == 0) {
-    return Err(identity_error("state record revision identity is all zero"));
-  }
-  if u32_at(bytes, start + 44 + hash_width)? != 0 {
-    return Err(reserve_error("state record reserve is nonzero"));
-  }
-  if !valid_state_reason(role, stage, reason) {
-    return Err(closure_error("state stage and reason are not a legal pair for this role"));
-  }
-  if evidence_length == 0 {
-    return Err(closure_error("state evidence is empty"));
-  }
-  validate_canonical_value(&bytes[start + 48 + hash_width..end], CanonicalValueBounds::CONFIG)?;
-  let document_ordinal = u64_at(bytes, start + 8)?;
+  let owner = match role {
+    OrderedIndexRoleV1::ValueDocumentState => DocumentStateOwnerV1::ValueStore,
+    OrderedIndexRoleV1::IndexDocumentState => DocumentStateOwnerV1::FieldIndex,
+    _ => return Err(closure_error("non-state role reached document-state decoder")),
+  };
+  let (record, consumed) = decode_document_state_record_prefix(&bytes[start..], owner, hash_algorithm)?;
+  let end = start.checked_add(consumed).ok_or_else(|| length_error("state record end overflow"))?;
   let encoded = &bytes[start..end];
   let sort_key = RecordSortKeyV1::Contiguous(&bytes[start + 8..start + 16]);
   *cursor = end;
-  Ok(OrderedRecordV1 { encoded, tombstone, coordinate: 0, document_ordinal, file_key: None, sort_key })
+  Ok(OrderedRecordV1 {
+    encoded,
+    tombstone: record.tombstone,
+    coordinate: 0,
+    document_ordinal: record.document_ordinal,
+    file_key: None,
+    sort_key,
+  })
 }
 
 fn decode_record_flags(bytes: &[u8], offset: usize) -> FormatResult<bool> {
@@ -1018,18 +972,6 @@ fn validate_order_key(hash_algorithm: HashAlgorithm, role: OrderedIndexRoleV1, k
     return Err(closure_error("ordered key length disagrees with its role codec"));
   }
   Ok(())
-}
-
-fn valid_state_reason(role: OrderedIndexRoleV1, stage: u8, reason: u16) -> bool {
-  match role {
-    OrderedIndexRoleV1::ValueDocumentState => {
-      matches!((stage, reason), (1, 0x0001..=0x0003) | (2, 0x0005..=0x0008) | (3, 0x0002 | 0x0004 | 0x0007 | 0x0008) | (4, 0x0007..=0x000b))
-    }
-    OrderedIndexRoleV1::IndexDocumentState => {
-      matches!((stage, reason), (5, 0x0009..=0x000c | 0x000e | 0x000f) | (6, 0x0002 | 0x000d..=0x000f))
-    }
-    _ => false,
-  }
 }
 
 fn validate_key_length(length: usize) -> FormatResult<()> {
