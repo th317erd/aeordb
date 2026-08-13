@@ -839,7 +839,7 @@
       - [ ] P5-5: implement bounded COW insert/delete/split/merge/compaction.
         - [x] P5-5a: freeze a storage-neutral COW planner contract, bounded mutation inputs/outputs, PageId allocator, and independent one-page reference model.
         - [x] P5-5b: implement exact-key insert/replace/tombstone mutation with one-page split, stable left ID, fresh nonwrapping right ID, posting-neighbor rewrites, and dependency-ordered immutable outputs.
-        - [ ] P5-5c: implement bounded leaf-to-root directory path rewriting and recursive directory split/root growth without loading unrelated siblings or a complete index.
+        - [x] P5-5c: implement bounded leaf-to-root directory path rewriting and recursive directory split/root growth without loading unrelated siblings or a complete index.
         - [ ] P5-5d: implement local merge and compaction windows, retain the lower PageId, retire the upper PageId without reuse, and require explicit proof authority before dropping tombstones.
         - [ ] P5-5e: validate the resulting path/link/count/generation closure, enforce page/directory/resource bounds, and prove deterministic randomized mutations against the independent model.
         - [ ] P5-5f: run narrow, affected, broad, static, architecture, native-platform, and shadow real-world COW gates; record evidence and land the unit.

@@ -759,7 +759,7 @@ fn decode_leaf_descriptor(
     || child_generation == 0
     || child_generation > parent_generation
     || live.checked_add(tombstones).is_none_or(|count| count == 0)
-    || logical_bytes == 0
+    || (logical_bytes == 0) != (live == 0)
   {
     return Err("artifact_directory_leaf_semantics");
   }
@@ -810,7 +810,7 @@ fn decode_internal_descriptor(
     || child_generation > parent_generation
     || live.checked_add(tombstones).is_none_or(|count| count == 0)
     || pages == 0
-    || logical_bytes == 0
+    || (logical_bytes == 0) != (live == 0)
     || minimum_page_id > maximum_page_id
     || (role.uses_page_id() && minimum_page_id == 0)
     || (!role.uses_page_id() && (minimum_page_id != 0 || maximum_page_id != 0))
@@ -1321,6 +1321,36 @@ mod tests {
           assert_eq!(internal.pages, leaf.pages);
         }
       }
+    }
+  }
+
+  #[test]
+  fn tombstone_only_page_and_directory_have_zero_logical_live_bytes() {
+    for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
+      let mut posting = sample_pages(profile).into_iter().find(|page| page.role == DirectoryRole::Posting).unwrap();
+      let body = 32 + profile.width() + 8;
+      let record_count = read_u32(&posting.bytes, body + 32).unwrap();
+      let lower_length = read_u32(&posting.bytes, body + 24).unwrap() as usize;
+      let upper_length = read_u32(&posting.bytes, body + 28).unwrap() as usize;
+      let mut cursor = body + 96 + lower_length + upper_length;
+      for _ in 0..record_count {
+        posting.bytes[cursor] |= 1;
+        cursor += 32 + read_u32(&posting.bytes, cursor + 4).unwrap() as usize;
+      }
+      put_u32(&mut posting.bytes, body + 36, 0);
+      put_u32(&mut posting.bytes, body + 40, record_count);
+      put_u64(&mut posting.bytes, body + 56, 0);
+      write_trailing_crc(&mut posting.bytes);
+      posting.live = 0;
+      posting.tombstones = u64::from(record_count);
+      posting.logical_bytes = 0;
+
+      assert!(decode_page(profile, &posting.bytes).is_ok());
+      let directory = build_leaf_directory(profile, &posting);
+      let decoded = decode_directory(profile, &directory).unwrap();
+      let artifact = decode_immutable_value(profile, &directory, MAX_ARTIFACT_LENGTH).unwrap();
+      assert_eq!(decoded.live, 0);
+      assert_eq!(read_u64(artifact.body, 48).unwrap(), 0);
     }
   }
 

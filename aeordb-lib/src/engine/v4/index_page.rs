@@ -476,7 +476,7 @@ fn decode_leaf_descriptor<'a>(
     || child_generation == 0
     || child_generation > parent_generation
     || live_count.checked_add(tombstone_count).is_none_or(|count| count == 0)
-    || logical_bytes == 0
+    || (logical_bytes == 0) != (live_count == 0)
   {
     return Err(closure_error("leaf descriptor child identity, generation, counts, or size is invalid"));
   }
@@ -543,7 +543,7 @@ fn decode_internal_descriptor<'a>(
     || child_generation > parent_generation
     || live_count.checked_add(tombstone_count).is_none_or(|count| count == 0)
     || page_count == 0
-    || logical_bytes == 0
+    || (logical_bytes == 0) != (live_count == 0)
     || minimum_page_id > maximum_page_id
     || (role.uses_page_id() && minimum_page_id == 0)
     || (!role.uses_page_id() && (minimum_page_id != 0 || maximum_page_id != 0))
@@ -683,7 +683,9 @@ fn validate_directory_write_entry(request: &ArtifactDirectoryWriteV1<'_>, entry:
   if entry.child_generation == 0 || entry.child_generation > request.generation {
     return Err(closure_error("directory child generation is zero or newer than its parent"));
   }
-  if entry.live_count.checked_add(entry.tombstone_count).is_none_or(|count| count == 0) || entry.logical_bytes == 0 {
+  if entry.live_count.checked_add(entry.tombstone_count).is_none_or(|count| count == 0)
+    || (entry.logical_bytes == 0) != (entry.live_count == 0)
+  {
     return Err(closure_error("directory child counts or logical size are invalid"));
   }
   if request.level == 0 {

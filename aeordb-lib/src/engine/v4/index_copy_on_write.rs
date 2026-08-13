@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::mem::size_of;
+use std::ops::Range;
 
 use crate::engine::HashAlgorithm;
 
@@ -7,8 +9,9 @@ use super::index_artifact::{
   EncodedImmutableIndexArtifactV1, checked_immutable_index_artifact_encoded_length, checked_immutable_index_artifact_representable_length,
 };
 use super::index_page::{
-  OrderedIndexRoleV1, OrderedPageV1, OrderedPageWriteV1, compare_order_keys, decode_ordered_page, decode_ordered_record,
-  encode_ordered_page, ordered_record_order_key, validate_posting_page_link,
+  ArtifactDirectoryEntryV1, ArtifactDirectoryEntryWriteV1, ArtifactDirectoryNodeV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1,
+  OrderedPageV1, OrderedPageWriteV1, PhysicalHintV1, compare_order_keys, decode_artifact_directory, decode_ordered_page,
+  decode_ordered_record, encode_artifact_directory, encode_ordered_page, ordered_record_order_key, validate_posting_page_link,
 };
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
@@ -17,6 +20,9 @@ pub const INDEX_PAGE_SPLIT_ABOVE_BYTES_V1: usize = 96 * 1_024;
 pub const INDEX_PAGE_MERGE_BELOW_BYTES_V1: usize = 16 * 1_024;
 pub const INDEX_ARTIFACT_HARD_CAP_BYTES_V1: usize = 4 * 1_024 * 1_024;
 pub const INDEX_COPY_ON_WRITE_WORKSPACE_BYTES_V1: usize = 32 * 1_024 * 1_024;
+pub const INDEX_DIRECTORY_TARGET_BYTES_V1: usize = 64 * 1_024;
+pub const INDEX_DIRECTORY_COPY_ON_WRITE_WORKSPACE_BYTES_V1: usize = 64 * 1_024 * 1_024;
+pub const INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexPageLayoutV1 {
@@ -34,6 +40,21 @@ pub const fn default_index_page_layout_v1() -> IndexPageLayoutV1 {
     merge_below_bytes: INDEX_PAGE_MERGE_BELOW_BYTES_V1,
     hard_artifact_bytes: INDEX_ARTIFACT_HARD_CAP_BYTES_V1,
     maximum_workspace_bytes: INDEX_COPY_ON_WRITE_WORKSPACE_BYTES_V1,
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexDirectoryLayoutV1 {
+  pub target_bytes: usize,
+  pub hard_artifact_bytes: usize,
+  pub maximum_workspace_bytes: usize,
+}
+
+pub const fn default_index_directory_layout_v1() -> IndexDirectoryLayoutV1 {
+  IndexDirectoryLayoutV1 {
+    target_bytes: INDEX_DIRECTORY_TARGET_BYTES_V1,
+    hard_artifact_bytes: INDEX_ARTIFACT_HARD_CAP_BYTES_V1,
+    maximum_workspace_bytes: INDEX_DIRECTORY_COPY_ON_WRITE_WORKSPACE_BYTES_V1,
   }
 }
 
@@ -71,6 +92,14 @@ pub struct OrderedPageReplacementV1 {
   pub source_key: Vec<u8>,
   pub source_page_id: u64,
   pub artifacts: Vec<EncodedImmutableIndexArtifactV1>,
+  source_role: OrderedIndexRoleV1,
+  source_owner_id: Vec<u8>,
+  source_generation: u64,
+  source_lower_fence: Vec<u8>,
+  source_upper_fence: Vec<u8>,
+  source_live_count: u64,
+  source_tombstone_count: u64,
+  source_logical_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +114,35 @@ impl OrderedPageMutationPlanV1 {
   pub fn is_unchanged(&self) -> bool {
     self.replacements.is_empty()
   }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactDirectoryPathV1<'a> {
+  pub source_page_key: &'a [u8],
+  pub directories: &'a [&'a [u8]],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArtifactDirectoryMutationRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub generation: u64,
+  pub page_plan: &'a OrderedPageMutationPlanV1,
+  pub paths: &'a [ArtifactDirectoryPathV1<'a>],
+  pub layout: IndexDirectoryLayoutV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactDirectoryMutationPlanV1 {
+  pub source_root_key: Vec<u8>,
+  pub root_key: Vec<u8>,
+  pub root_level: u16,
+  pub live_count: u64,
+  pub tombstone_count: u64,
+  pub page_count: u64,
+  pub logical_bytes: u64,
+  pub minimum_page_id: u64,
+  pub maximum_page_id: u64,
+  pub artifacts: Vec<EncodedImmutableIndexArtifactV1>,
 }
 
 #[derive(Debug)]
@@ -204,7 +262,7 @@ pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> For
     })?);
   }
 
-  let mut replacements = vec![OrderedPageReplacementV1 { source_key: source.key.clone(), source_page_id: source.page_id, artifacts }];
+  let mut replacements = vec![ordered_page_replacement(&source, artifacts)?];
   if let Some(next) = relinked_next {
     let next_records = next.records.iter().collect::<FormatResult<Vec<_>>>()?;
     let next_record_slices = next_records.iter().map(|record| record.encoded).collect::<Vec<_>>();
@@ -220,11 +278,7 @@ pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> For
       next_page_id: next.next_page_id,
       records: &next_record_slices,
     })?;
-    replacements.push(OrderedPageReplacementV1 {
-      source_key: next.key.clone(),
-      source_page_id: next.page_id,
-      artifacts: vec![rewritten_next],
-    });
+    replacements.push(ordered_page_replacement(&next, vec![rewritten_next])?);
   }
 
   Ok(OrderedPageMutationPlanV1 {
@@ -233,6 +287,618 @@ pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> For
     retired_page_ids: Vec::new(),
     next_page_id: page_id_allocator.next_page_id,
   })
+}
+
+fn ordered_page_replacement(
+  source: &OrderedPageV1<'_>,
+  artifacts: Vec<EncodedImmutableIndexArtifactV1>,
+) -> FormatResult<OrderedPageReplacementV1> {
+  Ok(OrderedPageReplacementV1 {
+    source_key: source.key.clone(),
+    source_page_id: source.page_id,
+    artifacts,
+    source_role: source.role,
+    source_owner_id: copy_fallible_bytes(source.owner_id, "source page owner")?,
+    source_generation: source.generation,
+    source_lower_fence: copy_fallible_bytes(source.lower_fence, "source page lower fence")?,
+    source_upper_fence: copy_fallible_bytes(source.upper_fence, "source page upper fence")?,
+    source_live_count: u64::from(source.live_count),
+    source_tombstone_count: u64::from(source.tombstone_count),
+    source_logical_bytes: source.logical_live_bytes,
+  })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedDirectoryEntryV1 {
+  lower_fence: Vec<u8>,
+  upper_fence: Vec<u8>,
+  child_hash: Vec<u8>,
+  child_generation: u64,
+  live_count: u64,
+  tombstone_count: u64,
+  page_count: u64,
+  logical_bytes: u64,
+  minimum_page_id: u64,
+  maximum_page_id: u64,
+}
+
+impl OwnedDirectoryEntryV1 {
+  fn from_page(page: &OrderedPageV1<'_>) -> FormatResult<Self> {
+    Ok(Self {
+      lower_fence: copy_fallible_bytes(page.lower_fence, "page summary lower fence")?,
+      upper_fence: copy_fallible_bytes(page.upper_fence, "page summary upper fence")?,
+      child_hash: page.key.clone(),
+      child_generation: page.generation,
+      live_count: u64::from(page.live_count),
+      tombstone_count: u64::from(page.tombstone_count),
+      page_count: 1,
+      logical_bytes: page.logical_live_bytes,
+      minimum_page_id: page.page_id,
+      maximum_page_id: page.page_id,
+    })
+  }
+
+  fn from_directory(directory: &ArtifactDirectoryNodeV1<'_>) -> FormatResult<Self> {
+    Ok(Self {
+      lower_fence: copy_fallible_bytes(directory.lower_fence, "directory summary lower fence")?,
+      upper_fence: copy_fallible_bytes(directory.upper_fence, "directory summary upper fence")?,
+      child_hash: directory.key.clone(),
+      child_generation: directory.generation,
+      live_count: directory.live_count,
+      tombstone_count: directory.tombstone_count,
+      page_count: directory.page_count,
+      logical_bytes: directory.logical_bytes,
+      minimum_page_id: directory.minimum_page_id,
+      maximum_page_id: directory.maximum_page_id,
+    })
+  }
+
+  fn from_existing(entry: &ArtifactDirectoryEntryV1<'_>) -> FormatResult<Self> {
+    Ok(Self {
+      lower_fence: copy_fallible_bytes(entry.lower_fence, "existing directory-entry lower fence")?,
+      upper_fence: copy_fallible_bytes(entry.upper_fence, "existing directory-entry upper fence")?,
+      child_hash: copy_fallible_bytes(entry.child_hash, "existing directory-entry child hash")?,
+      child_generation: entry.child_generation,
+      live_count: entry.live_count,
+      tombstone_count: entry.tombstone_count,
+      page_count: entry.page_count,
+      logical_bytes: entry.logical_bytes,
+      minimum_page_id: entry.minimum_page_id,
+      maximum_page_id: entry.maximum_page_id,
+    })
+  }
+
+  fn as_write(&self) -> ArtifactDirectoryEntryWriteV1<'_> {
+    ArtifactDirectoryEntryWriteV1 {
+      lower_fence: &self.lower_fence,
+      upper_fence: &self.upper_fence,
+      child_hash: &self.child_hash,
+      child_generation: self.child_generation,
+      live_count: self.live_count,
+      tombstone_count: self.tombstone_count,
+      page_count: self.page_count,
+      logical_bytes: self.logical_bytes,
+      minimum_page_id: self.minimum_page_id,
+      maximum_page_id: self.maximum_page_id,
+      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectoryNodeLocationV1 {
+  path_index: usize,
+  directory_index: usize,
+}
+
+#[derive(Debug)]
+struct DirectoryPathGraphV1 {
+  source_root_key: Vec<u8>,
+  root_level: u16,
+  role: OrderedIndexRoleV1,
+  owner_id: Vec<u8>,
+  nodes: BTreeMap<Vec<u8>, DirectoryNodeLocationV1>,
+  parent_by_child: BTreeMap<Vec<u8>, Vec<u8>>,
+  leaf_by_page: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+type ChildReplacementMapV1 = BTreeMap<Vec<u8>, Vec<OwnedDirectoryEntryV1>>;
+type PendingDirectoryMapV1 = BTreeMap<Vec<u8>, ChildReplacementMapV1>;
+
+pub fn rewrite_artifact_directory_paths_v1(
+  request: &ArtifactDirectoryMutationRequestV1<'_>,
+) -> FormatResult<ArtifactDirectoryMutationPlanV1> {
+  validate_directory_layout(request.layout)?;
+  if request.generation == 0 {
+    return Err(identity_error("index_cow_directory_generation", "directory copy-on-write generation is zero"));
+  }
+  if request.page_plan.replacements.is_empty() {
+    return Err(closure_error("index_cow_directory_no_replacements", "directory copy-on-write requires at least one page replacement"));
+  }
+  if request.paths.len() != request.page_plan.replacements.len()
+    || request.paths.is_empty()
+    || request.paths.len() > INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1
+  {
+    return Err(amplification_error(
+      "index_cow_directory_path_count",
+      format!(
+        "{} paths do not match {} replacements or exceed the {}-path operation cap",
+        request.paths.len(),
+        request.page_plan.replacements.len(),
+        INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1
+      ),
+    ));
+  }
+
+  let replacement_entries = validate_page_replacement_outputs(request)?;
+  let graph = validate_directory_path_graph(request, &replacement_entries)?;
+  let mut pending = PendingDirectoryMapV1::new();
+  for (source_page_key, entries) in replacement_entries {
+    let leaf_key = graph
+      .leaf_by_page
+      .get(source_page_key.as_slice())
+      .ok_or_else(|| closure_error("index_cow_directory_path_missing", "validated replacement has no leaf path"))?
+      .clone();
+    let replaced_children = pending.entry(leaf_key).or_default();
+    if replaced_children.insert(source_page_key, entries).is_some() {
+      return Err(closure_error("index_cow_directory_duplicate_replacement", "one source page was replaced more than once"));
+    }
+  }
+
+  let mut artifacts = Vec::new();
+  let mut retained_artifact_bytes = 0usize;
+  let mut root_entries = None;
+  while !pending.is_empty() {
+    let current = std::mem::take(&mut pending);
+    for (source_node_key, child_replacements) in current {
+      let location = graph
+        .nodes
+        .get(source_node_key.as_slice())
+        .ok_or_else(|| closure_error("index_cow_directory_node_missing", "affected directory node is absent from the validated paths"))?;
+      let source_bytes = request.paths[location.path_index].directories[location.directory_index];
+      let source = decode_artifact_directory(source_bytes, request.hash_algorithm)?;
+      let rewritten_entries = rewrite_directory_entries(&source, child_replacements, request.layout.maximum_workspace_bytes)?;
+      let summaries = encode_directory_entry_groups(
+        request,
+        source.level,
+        &graph.owner_id,
+        graph.role,
+        &rewritten_entries,
+        &mut artifacts,
+        &mut retained_artifact_bytes,
+      )?;
+      if let Some(parent_key) = graph.parent_by_child.get(source_node_key.as_slice()) {
+        let parent_replacements = pending.entry(parent_key.clone()).or_default();
+        if parent_replacements.insert(source_node_key, summaries).is_some() {
+          return Err(closure_error("index_cow_directory_duplicate_child", "one directory child was rewritten more than once"));
+        }
+      } else if root_entries.replace(summaries).is_some() {
+        return Err(closure_error("index_cow_directory_multiple_roots", "affected paths produced more than one source root"));
+      }
+    }
+  }
+
+  let mut root_entries =
+    root_entries.ok_or_else(|| closure_error("index_cow_directory_root_missing", "affected paths produced no root"))?;
+  let mut root_level = graph.root_level;
+  while root_entries.len() > 1 {
+    root_level = root_level
+      .checked_add(1)
+      .filter(|level| *level <= 15)
+      .ok_or_else(|| amplification_error("index_cow_directory_depth", "recursive directory split would exceed level 15"))?;
+    root_entries = encode_directory_entry_groups(
+      request,
+      root_level,
+      &graph.owner_id,
+      graph.role,
+      &root_entries,
+      &mut artifacts,
+      &mut retained_artifact_bytes,
+    )?;
+  }
+  let root = root_entries
+    .pop()
+    .ok_or_else(|| closure_error("index_cow_directory_root_empty", "directory copy-on-write produced no root summary"))?;
+  Ok(ArtifactDirectoryMutationPlanV1 {
+    source_root_key: graph.source_root_key,
+    root_key: root.child_hash,
+    root_level,
+    live_count: root.live_count,
+    tombstone_count: root.tombstone_count,
+    page_count: root.page_count,
+    logical_bytes: root.logical_bytes,
+    minimum_page_id: root.minimum_page_id,
+    maximum_page_id: root.maximum_page_id,
+    artifacts,
+  })
+}
+
+fn validate_page_replacement_outputs(
+  request: &ArtifactDirectoryMutationRequestV1<'_>,
+) -> FormatResult<BTreeMap<Vec<u8>, Vec<OwnedDirectoryEntryV1>>> {
+  let mut replacements = BTreeMap::new();
+  for replacement in &request.page_plan.replacements {
+    if replacement.source_key.len() != request.hash_algorithm.hash_length() || replacement.source_key.iter().all(|byte| *byte == 0) {
+      return Err(identity_error("index_cow_directory_source_key", "page replacement source key has the wrong width or is all zero"));
+    }
+    if replacement.source_generation >= request.generation || replacement.artifacts.is_empty() {
+      return Err(identity_error(
+        "index_cow_directory_source_generation",
+        "page replacement is empty or its source generation is not older than the directory generation",
+      ));
+    }
+    let mut entries: Vec<OwnedDirectoryEntryV1> = Vec::new();
+    if let Err(error) = entries.try_reserve_exact(replacement.artifacts.len()) {
+      return Err(amplification_error("index_cow_directory_page_summaries", format!("page-summary reservation failed: {error}")));
+    }
+    for artifact in &replacement.artifacts {
+      let page = decode_ordered_page(&artifact.value, request.hash_algorithm)?;
+      if page.key != artifact.key
+        || page.role != replacement.source_role
+        || page.owner_id != replacement.source_owner_id
+        || page.generation != request.generation
+      {
+        return Err(closure_error(
+          "index_cow_directory_page_output",
+          "replacement page key, owner, role, or generation disagrees with its source",
+        ));
+      }
+      if let Some(previous) = entries.last() {
+        if compare_order_keys(request.hash_algorithm, page.role, &previous.upper_fence, page.lower_fence)? != Ordering::Less {
+          return Err(closure_error("index_cow_directory_page_order", "replacement pages overlap or are not strictly ordered"));
+        }
+      }
+      entries.push(OwnedDirectoryEntryV1::from_page(&page)?);
+    }
+    if replacements.insert(replacement.source_key.clone(), entries).is_some() {
+      return Err(closure_error("index_cow_directory_duplicate_source", "page plan contains a duplicate source key"));
+    }
+  }
+  Ok(replacements)
+}
+
+fn validate_directory_path_graph(
+  request: &ArtifactDirectoryMutationRequestV1<'_>,
+  replacement_entries: &BTreeMap<Vec<u8>, Vec<OwnedDirectoryEntryV1>>,
+) -> FormatResult<DirectoryPathGraphV1> {
+  let first_replacement = request
+    .page_plan
+    .replacements
+    .first()
+    .ok_or_else(|| closure_error("index_cow_directory_no_replacements", "page plan has no replacement"))?;
+  let mut graph = DirectoryPathGraphV1 {
+    source_root_key: Vec::new(),
+    root_level: 0,
+    role: first_replacement.source_role,
+    owner_id: first_replacement.source_owner_id.clone(),
+    nodes: BTreeMap::new(),
+    parent_by_child: BTreeMap::new(),
+    leaf_by_page: BTreeMap::new(),
+  };
+  let replacements_by_key =
+    request.page_plan.replacements.iter().map(|replacement| (replacement.source_key.as_slice(), replacement)).collect::<BTreeMap<_, _>>();
+  let mut seen_paths = BTreeMap::new();
+
+  for (path_index, path) in request.paths.iter().enumerate() {
+    let replacement = replacements_by_key
+      .get(path.source_page_key)
+      .ok_or_else(|| closure_error("index_cow_directory_unknown_path", "directory path names a page outside the replacement plan"))?;
+    if seen_paths.insert(path.source_page_key.to_vec(), ()).is_some() {
+      return Err(closure_error("index_cow_directory_duplicate_path", "one source page has more than one directory path"));
+    }
+    if path.directories.is_empty() || path.directories.len() > 16 {
+      return Err(amplification_error(
+        "index_cow_directory_path_depth",
+        format!("directory path depth {} is outside 1..=16", path.directories.len()),
+      ));
+    }
+
+    for (directory_index, bytes) in path.directories.iter().enumerate() {
+      let directory = decode_artifact_directory(bytes, request.hash_algorithm)?;
+      let expected_level = u16::try_from(path.directories.len() - directory_index - 1)
+        .map_err(|source| amplification_error("index_cow_directory_path_depth", format!("path depth does not fit u16: {source}")))?;
+      if directory.level != expected_level
+        || directory.role != replacement.source_role
+        || directory.owner_id != replacement.source_owner_id
+        || directory.generation >= request.generation
+      {
+        return Err(closure_error("index_cow_directory_path_identity", "directory path level, owner, role, or generation is inconsistent"));
+      }
+      if directory_index == 0 {
+        if graph.source_root_key.is_empty() {
+          graph.source_root_key = directory.key.clone();
+          graph.root_level = directory.level;
+        } else if graph.source_root_key != directory.key || graph.root_level != directory.level {
+          return Err(closure_error("index_cow_directory_root_mismatch", "affected paths do not share one exact source root"));
+        }
+      }
+      if let Some(existing) = graph.nodes.get(directory.key.as_slice()) {
+        let existing_bytes = request.paths[existing.path_index].directories[existing.directory_index];
+        if existing_bytes != *bytes {
+          return Err(closure_error("index_cow_directory_hash_collision", "one directory key names different encoded bytes"));
+        }
+      } else {
+        graph.nodes.insert(directory.key.clone(), DirectoryNodeLocationV1 { path_index, directory_index });
+      }
+    }
+
+    for directory_index in 0..path.directories.len() - 1 {
+      let parent = decode_artifact_directory(path.directories[directory_index], request.hash_algorithm)?;
+      let child = decode_artifact_directory(path.directories[directory_index + 1], request.hash_algorithm)?;
+      let matching = find_unique_directory_entry(&parent, &child.key)?;
+      if !directory_entry_matches_directory(matching, &child) {
+        return Err(closure_error(
+          "index_cow_directory_parent_child",
+          "parent descriptor does not exactly summarize the named child directory",
+        ));
+      }
+      if let Some(existing_parent) = graph.parent_by_child.insert(child.key.clone(), parent.key.clone()) {
+        if existing_parent != parent.key {
+          return Err(closure_error("index_cow_directory_multiple_parents", "one affected directory has multiple parents"));
+        }
+      }
+    }
+
+    let leaf = decode_artifact_directory(path.directories[path.directories.len() - 1], request.hash_algorithm)?;
+    let matching = find_unique_directory_entry(&leaf, &replacement.source_key)?;
+    if !directory_entry_matches_page_source(matching, replacement) {
+      return Err(closure_error("index_cow_directory_leaf_page", "leaf descriptor does not exactly summarize the replaced source page"));
+    }
+    if !replacement_entries.contains_key(path.source_page_key) {
+      return Err(closure_error("index_cow_directory_output_missing", "validated path has no replacement output"));
+    }
+    graph.leaf_by_page.insert(replacement.source_key.clone(), leaf.key.clone());
+  }
+
+  if seen_paths.len() != request.page_plan.replacements.len() {
+    return Err(closure_error("index_cow_directory_path_missing", "not every page replacement has one directory path"));
+  }
+  Ok(graph)
+}
+
+fn find_unique_directory_entry<'node, 'data>(
+  directory: &'node ArtifactDirectoryNodeV1<'data>,
+  child_hash: &[u8],
+) -> FormatResult<&'node ArtifactDirectoryEntryV1<'data>> {
+  let mut matching = None;
+  for entry in &directory.entries {
+    if entry.child_hash != child_hash {
+      continue;
+    }
+    if matching.replace(entry).is_some() {
+      return Err(closure_error(
+        "index_cow_directory_duplicate_child_hash",
+        "directory contains more than one descriptor for an affected child hash",
+      ));
+    }
+  }
+  matching.ok_or_else(|| closure_error("index_cow_directory_child_hash_missing", "directory does not contain the affected child hash"))
+}
+
+fn directory_entry_matches_directory(entry: &ArtifactDirectoryEntryV1<'_>, child: &ArtifactDirectoryNodeV1<'_>) -> bool {
+  entry.lower_fence == child.lower_fence
+    && entry.upper_fence == child.upper_fence
+    && entry.child_generation == child.generation
+    && entry.live_count == child.live_count
+    && entry.tombstone_count == child.tombstone_count
+    && entry.page_count == child.page_count
+    && entry.logical_bytes == child.logical_bytes
+    && entry.minimum_page_id == child.minimum_page_id
+    && entry.maximum_page_id == child.maximum_page_id
+}
+
+fn directory_entry_matches_page_source(entry: &ArtifactDirectoryEntryV1<'_>, source: &OrderedPageReplacementV1) -> bool {
+  entry.lower_fence == source.source_lower_fence
+    && entry.upper_fence == source.source_upper_fence
+    && entry.child_generation == source.source_generation
+    && entry.live_count == source.source_live_count
+    && entry.tombstone_count == source.source_tombstone_count
+    && entry.page_count == 1
+    && entry.logical_bytes == source.source_logical_bytes
+    && entry.minimum_page_id == source.source_page_id
+    && entry.maximum_page_id == source.source_page_id
+}
+
+fn rewrite_directory_entries(
+  source: &ArtifactDirectoryNodeV1<'_>,
+  mut replacements: ChildReplacementMapV1,
+  maximum_workspace_bytes: usize,
+) -> FormatResult<Vec<OwnedDirectoryEntryV1>> {
+  let additional_entries = replacements.values().try_fold(0usize, |total, entries| {
+    total
+      .checked_add(entries.len().saturating_sub(1))
+      .ok_or_else(|| arithmetic_error("index_cow_directory_entry_count", "replacement entry count overflowed"))
+  })?;
+  let capacity = source
+    .entries
+    .len()
+    .checked_add(additional_entries)
+    .ok_or_else(|| arithmetic_error("index_cow_directory_entry_count", "rewritten entry count overflowed"))?;
+  let mut rewritten = Vec::new();
+  if let Err(error) = rewritten.try_reserve_exact(capacity) {
+    return Err(amplification_error(
+      "index_cow_directory_entry_workspace",
+      format!("rewritten directory-entry reservation failed: {error}"),
+    ));
+  }
+  let mut workspace_bytes = rewritten
+    .capacity()
+    .checked_mul(size_of::<OwnedDirectoryEntryV1>())
+    .ok_or_else(|| arithmetic_error("index_cow_directory_workspace", "directory-entry metadata bytes overflowed"))?;
+  for entry in &source.entries {
+    if let Some(replacement_entries) = replacements.remove(entry.child_hash) {
+      for replacement in replacement_entries {
+        workspace_bytes = checked_add_owned_entry_workspace(workspace_bytes, &replacement)?;
+        rewritten.push(replacement);
+      }
+    } else {
+      let retained = OwnedDirectoryEntryV1::from_existing(entry)?;
+      workspace_bytes = checked_add_owned_entry_workspace(workspace_bytes, &retained)?;
+      rewritten.push(retained);
+    }
+    if workspace_bytes > maximum_workspace_bytes {
+      return Err(amplification_error(
+        "index_cow_directory_workspace_exceeded",
+        format!("directory workspace exceeds the {maximum_workspace_bytes}-byte operation cap"),
+      ));
+    }
+  }
+  if !replacements.is_empty() {
+    return Err(closure_error("index_cow_directory_child_missing", "directory does not contain every child selected for replacement"));
+  }
+  Ok(rewritten)
+}
+
+fn checked_add_owned_entry_workspace(total: usize, entry: &OwnedDirectoryEntryV1) -> FormatResult<usize> {
+  total
+    .checked_add(entry.lower_fence.len())
+    .and_then(|bytes| bytes.checked_add(entry.upper_fence.len()))
+    .and_then(|bytes| bytes.checked_add(entry.child_hash.len()))
+    .ok_or_else(|| arithmetic_error("index_cow_directory_workspace", "directory-entry workspace bytes overflowed"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_directory_entry_groups(
+  request: &ArtifactDirectoryMutationRequestV1<'_>,
+  level: u16,
+  owner_id: &[u8],
+  role: OrderedIndexRoleV1,
+  entries: &[OwnedDirectoryEntryV1],
+  artifacts: &mut Vec<EncodedImmutableIndexArtifactV1>,
+  retained_artifact_bytes: &mut usize,
+) -> FormatResult<Vec<OwnedDirectoryEntryV1>> {
+  let groups = partition_directory_entries(request.hash_algorithm, level, entries, request.layout.target_bytes)?;
+  let mut summaries = Vec::new();
+  if let Err(error) = summaries.try_reserve_exact(groups.len()) {
+    return Err(amplification_error("index_cow_directory_summary_workspace", format!("directory-summary reservation failed: {error}")));
+  }
+  for group in groups {
+    let group_entries = &entries[group];
+    let mut write_entries = Vec::new();
+    if let Err(error) = write_entries.try_reserve_exact(group_entries.len()) {
+      return Err(amplification_error("index_cow_directory_write_workspace", format!("directory write-entry reservation failed: {error}")));
+    }
+    write_entries.extend(group_entries.iter().map(OwnedDirectoryEntryV1::as_write));
+    let artifact = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      hash_algorithm: request.hash_algorithm,
+      role,
+      owner_id,
+      generation: request.generation,
+      level,
+      entries: &write_entries,
+    })?;
+    let directory = decode_artifact_directory(&artifact.value, request.hash_algorithm)?;
+    let summary = OwnedDirectoryEntryV1::from_directory(&directory)?;
+    append_directory_artifact(artifact, artifacts, retained_artifact_bytes, request.layout.maximum_workspace_bytes)?;
+    summaries.push(summary);
+  }
+  Ok(summaries)
+}
+
+fn partition_directory_entries(
+  hash_algorithm: HashAlgorithm,
+  level: u16,
+  entries: &[OwnedDirectoryEntryV1],
+  target_bytes: usize,
+) -> FormatResult<Vec<Range<usize>>> {
+  if entries.is_empty() {
+    return Err(closure_error("index_cow_directory_empty", "rewritten directory has no entries"));
+  }
+  let unsplit_length = checked_directory_range_representable_length(hash_algorithm, level, entries)?;
+  if unsplit_length <= target_bytes || entries.len() == 1 {
+    return Ok(vec![0..entries.len()]);
+  }
+  let mut ranges = Vec::new();
+  let mut start = 0usize;
+  while start < entries.len() {
+    let mut end = start + 1;
+    while end < entries.len() {
+      let candidate_end = end + 1;
+      let candidate_length = checked_directory_range_representable_length(hash_algorithm, level, &entries[start..candidate_end])?;
+      if candidate_length > target_bytes {
+        break;
+      }
+      end = candidate_end;
+    }
+    ranges.push(start..end);
+    start = end;
+  }
+  Ok(ranges)
+}
+
+fn checked_directory_range_representable_length(
+  hash_algorithm: HashAlgorithm,
+  level: u16,
+  entries: &[OwnedDirectoryEntryV1],
+) -> FormatResult<usize> {
+  let first = entries.first().ok_or_else(|| closure_error("index_cow_directory_empty", "directory partition is empty"))?;
+  let last = entries.last().ok_or_else(|| closure_error("index_cow_directory_empty", "directory partition is empty"))?;
+  let fixed = (if level == 0 { 72usize } else { 88usize })
+    .checked_add(hash_algorithm.hash_length())
+    .ok_or_else(|| arithmetic_error("index_cow_directory_length", "directory descriptor fixed length overflowed"))?;
+  let entries_length = entries.iter().try_fold(0usize, |total, entry| {
+    total
+      .checked_add(fixed)
+      .and_then(|length| length.checked_add(entry.lower_fence.len()))
+      .and_then(|length| length.checked_add(entry.upper_fence.len()))
+      .ok_or_else(|| arithmetic_error("index_cow_directory_length", "directory descriptor bytes overflowed"))
+  })?;
+  let body_length = 80usize
+    .checked_add(first.lower_fence.len())
+    .and_then(|length| length.checked_add(last.upper_fence.len()))
+    .and_then(|length| length.checked_add(entries_length))
+    .ok_or_else(|| arithmetic_error("index_cow_directory_length", "directory body length overflowed"))?;
+  let identity_length = hash_algorithm
+    .hash_length()
+    .checked_add(2)
+    .ok_or_else(|| arithmetic_error("index_cow_directory_length", "directory identity length overflowed"))?;
+  checked_immutable_index_artifact_representable_length(identity_length, body_length)
+}
+
+fn append_directory_artifact(
+  artifact: EncodedImmutableIndexArtifactV1,
+  artifacts: &mut Vec<EncodedImmutableIndexArtifactV1>,
+  retained_artifact_bytes: &mut usize,
+  maximum_workspace_bytes: usize,
+) -> FormatResult<()> {
+  let artifact_bytes = artifact
+    .key
+    .len()
+    .checked_add(artifact.value.len())
+    .and_then(|bytes| bytes.checked_add(size_of::<EncodedImmutableIndexArtifactV1>()))
+    .ok_or_else(|| arithmetic_error("index_cow_directory_output", "retained directory artifact bytes overflowed"))?;
+  let next = retained_artifact_bytes
+    .checked_add(artifact_bytes)
+    .ok_or_else(|| arithmetic_error("index_cow_directory_output", "retained directory artifact bytes overflowed"))?;
+  let maximum_retained_output_bytes = maximum_workspace_bytes / 2;
+  if next > maximum_retained_output_bytes {
+    return Err(amplification_error(
+      "index_cow_directory_output_exceeded",
+      format!("{next} retained directory bytes exceed the {maximum_retained_output_bytes}-byte output half of the operation cap"),
+    ));
+  }
+  if artifacts.len() == artifacts.capacity() {
+    if let Err(error) = artifacts.try_reserve(1) {
+      return Err(amplification_error(
+        "index_cow_directory_artifact_workspace",
+        format!("directory artifact-list reservation failed: {error}"),
+      ));
+    }
+  }
+  *retained_artifact_bytes = next;
+  artifacts.push(artifact);
+  Ok(())
+}
+
+fn validate_directory_layout(layout: IndexDirectoryLayoutV1) -> FormatResult<()> {
+  if layout.target_bytes <= 128
+    || layout.target_bytes > layout.hard_artifact_bytes
+    || layout.hard_artifact_bytes != INDEX_ARTIFACT_HARD_CAP_BYTES_V1
+    || layout.maximum_workspace_bytes < INDEX_DIRECTORY_COPY_ON_WRITE_WORKSPACE_BYTES_V1
+  {
+    return Err(amplification_error("index_cow_directory_layout", "directory target, hard cap, or workspace bound is invalid"));
+  }
+  Ok(())
 }
 
 #[derive(Debug)]
@@ -542,6 +1208,15 @@ fn validate_relinked_next(
 
 fn record_slices(records: &[OwnedOrderedRecordV1]) -> Vec<&[u8]> {
   records.iter().map(|record| record.encoded.as_slice()).collect()
+}
+
+fn copy_fallible_bytes(value: &[u8], label: &'static str) -> FormatResult<Vec<u8>> {
+  let mut copied = Vec::new();
+  if let Err(error) = copied.try_reserve_exact(value.len()) {
+    return Err(amplification_error("index_cow_copy", format!("{label} reservation failed: {error}")));
+  }
+  copied.extend_from_slice(value);
+  Ok(copied)
 }
 
 fn identity_error(code: &'static str, context: impl Into<String>) -> FormatError {

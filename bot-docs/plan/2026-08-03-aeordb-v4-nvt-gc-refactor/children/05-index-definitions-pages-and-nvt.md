@@ -144,6 +144,10 @@ Initial normal target is 64 KiB, split above 96 KiB, merge below 16 KiB when
 the combined page fits 64 KiB, and hard cap 4 MiB for a dedicated legal large
 record. P0 benchmarking may tune manifest values without changing format.
 
+Directory `logical_bytes` is the exact sum of live record bytes. A nonempty
+tombstone-only page or subtree therefore has zero logical bytes; directory
+descriptors require `logical_bytes == 0` exactly when `live_count == 0`.
+
 ## 8. Sparse NVT
 
 NVT is a sparse tiled map from normalized coordinate cells to nearby posting
