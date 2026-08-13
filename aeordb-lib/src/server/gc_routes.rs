@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
@@ -8,7 +6,7 @@ use serde::Deserialize;
 
 use crate::auth::TokenClaims;
 use crate::engine::gc::{execute_gc_run, GcExecutionRequestV1};
-use crate::engine::v4::gc_run::{GcRunInvocationV1, NoopGcRunProgressSinkV1};
+use crate::engine::v4::gc_run::GcRunInvocationV1;
 use crate::engine::RequestContext;
 use crate::server::responses::{engine_error_response, require_root, ErrorResponse};
 use crate::server::state::AppState;
@@ -51,12 +49,8 @@ pub async fn run_gc_endpoint(
 
   let engine = state.engine.clone();
   let result = tokio::task::spawn_blocking(move || {
-    execute_gc_run(
-      &engine,
-      &ctx,
-      GcExecutionRequestV1::new(GcRunInvocationV1::Http, dry_run, cancellation, Arc::new(NoopGcRunProgressSinkV1)),
-    )
-    .map(|execution| execution.result)
+    execute_gc_run(&engine, &ctx, GcExecutionRequestV1::new(GcRunInvocationV1::Http, dry_run, cancellation))
+      .map(|execution| execution.result)
   })
   .await;
   request_cancellation.completed = true;

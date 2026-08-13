@@ -47,6 +47,26 @@ fn require_task_queue(state: &AppState) -> Result<&std::sync::Arc<crate::engine:
   })
 }
 
+fn task_response_value(
+  state: &AppState,
+  queue: &crate::engine::TaskQueue,
+  task: &crate::engine::TaskRecord,
+) -> Result<serde_json::Value, serde_json::Error> {
+  let mut value = serde_json::to_value(task)?;
+  if let Some(progress) = queue.get_progress(&task.id) {
+    value["progress"] = serde_json::json!(progress.progress);
+    value["eta_ms"] = serde_json::json!(progress.eta_ms);
+  }
+  if task.task_type == "gc" {
+    if let Some(gc) = state.engine.gc_run_status_for_task(&task.id) {
+      value["progress"] = serde_json::json!(gc.status.overall_progress);
+      value["eta_ms"] = serde_json::json!(gc.status.eta_ms);
+      value["gc"] = serde_json::to_value(gc)?;
+    }
+  }
+  Ok(value)
+}
+
 // ---------------------------------------------------------------------------
 // Task endpoints
 // ---------------------------------------------------------------------------
@@ -65,17 +85,7 @@ pub async fn list_tasks(State(state): State<AppState>, Extension(claims): Extens
 
   match queue.list_tasks() {
     Ok(tasks) => {
-      let response = tasks
-        .iter()
-        .map(|task| -> Result<serde_json::Value, serde_json::Error> {
-          let mut json = serde_json::to_value(task)?;
-          if let Some(progress) = queue.get_progress(&task.id) {
-            json["progress"] = serde_json::json!(progress.progress);
-            json["eta_ms"] = serde_json::json!(progress.eta_ms);
-          }
-          Ok(json)
-        })
-        .collect::<Result<Vec<_>, _>>();
+      let response = tasks.iter().map(|task| task_response_value(&state, queue, task)).collect::<Result<Vec<_>, _>>();
       match response {
         Ok(response) => (StatusCode::OK, Json(serde_json::json!({"items": response}))).into_response(),
         Err(error) => {
@@ -203,14 +213,8 @@ pub async fn get_task(State(state): State<AppState>, Extension(claims): Extensio
   };
 
   match queue.get_task(&id) {
-    Ok(Some(task)) => match serde_json::to_value(&task) {
-      Ok(mut json) => {
-        if let Some(progress) = queue.get_progress(&task.id) {
-          json["progress"] = serde_json::json!(progress.progress);
-          json["eta_ms"] = serde_json::json!(progress.eta_ms);
-        }
-        (StatusCode::OK, Json(json)).into_response()
-      }
+    Ok(Some(task)) => match task_response_value(&state, queue, &task) {
+      Ok(json) => (StatusCode::OK, Json(json)).into_response(),
       Err(e) => {
         ErrorResponse::new(format!("Failed to serialize task: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
       }

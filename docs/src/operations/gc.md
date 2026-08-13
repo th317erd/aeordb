@@ -119,6 +119,35 @@ curl -X POST http://localhost:6830/system/tasks/gc \
 
 This enqueues a GC task that the background task worker will pick up. Track its progress via the [task system](tasks.md).
 
+## Run Status and Live Monitoring
+
+Every CLI, synchronous HTTP, task, scheduled, repair-follow-up, and embedded
+run enters the same GC executor and updates one bounded in-memory latest-run
+status. The projection contains `run_id`, optional `task_id`, `invocation`,
+`mode`, `state`, phase and overall progress, ETA, completed/total units,
+memory/scratch use, mutation-journal/checkpoint lag, timestamps, and bounded
+terminal `code`/`message` fields.
+
+States are `running`, `complete`, `incomplete`, `cancelled`, `failed`, and
+`refused`. Phases are `prepare`, `inventory`, `mark`,
+`mutation_convergence`, and `finalize`. The terminal status remains available
+until the next run replaces it or the process restarts. AeorDB retains no run
+history in this projection and does not persist it as GC authority.
+
+Root operators can inspect the same status through:
+
+- `GET /system/stats` at `health.gc`;
+- matching GC task records at `gc`;
+- immediate root-only `gc_status` SSE transitions;
+- periodic root-only `metrics` SSE at `health.gc`;
+- the Browser Dashboard and `aeordb status --json`; and
+- bounded Prometheus `aeordb_gc_run_*` gauges.
+
+Non-root stats omit `health.gc`, non-root SSE streams cannot receive
+`gc_status`, and public `GET /system/health` remains a minimal liveness
+response. Prometheus uses only bounded enum labels; run IDs, task IDs, codes,
+messages, and paths are never labels.
+
 ## When to Run GC
 
 - **After bulk deletes**: If you delete a large number of files, their content chunks become garbage.

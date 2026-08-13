@@ -57,7 +57,7 @@ fn create_engine(name: &str) -> (StorageEngine, tempfile::TempDir) {
 fn legacy_v3_dry_run_uses_the_shared_phase_executor_and_exact_invocation() {
   let (engine, _temporary) = create_engine("shared-gc-dry-run");
   let sink = Arc::new(RecordingSink::default());
-  let request = GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, true, CancellationToken::new(), sink.clone());
+  let request = GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, true, CancellationToken::new()).with_progress_observer(sink.clone());
 
   let execution = execute_gc_run(&engine, &RequestContext::system(), request).unwrap();
 
@@ -81,7 +81,7 @@ fn sealed_legacy_v3_compatibility_preserves_reclamation_without_opening_the_v4_g
   let (engine, _temporary) = create_engine("shared-gc-destructive");
   DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/live.txt", b"live", Some("text/plain")).unwrap();
   let sink = Arc::new(RecordingSink::default());
-  let request = GcExecutionRequestV1::new(GcRunInvocationV1::Http, false, CancellationToken::new(), sink.clone());
+  let request = GcExecutionRequestV1::new(GcRunInvocationV1::Http, false, CancellationToken::new()).with_progress_observer(sink.clone());
 
   let execution = execute_gc_run(&engine, &RequestContext::system(), request).unwrap();
 
@@ -102,7 +102,7 @@ fn shared_cancellation_returns_the_existing_engine_error_before_gc_side_effects(
   let cancellation = CancellationToken::new();
   cancellation.cancel();
   let sink = Arc::new(RecordingSink::default());
-  let request = GcExecutionRequestV1::new(GcRunInvocationV1::Task, false, cancellation, sink.clone());
+  let request = GcExecutionRequestV1::new(GcRunInvocationV1::Task, false, cancellation).with_progress_observer(sink.clone());
   let head_before = engine.head_hash().unwrap();
 
   let error = execute_gc_run(&engine, &RequestContext::system(), request).unwrap_err();
@@ -119,7 +119,7 @@ fn shared_cancellation_stops_every_legacy_phase_and_releases_recheck_state() {
     DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/live.txt", b"live", Some("text/plain")).unwrap();
     let cancellation = CancellationToken::new();
     let sink = Arc::new(PhaseCancellingSink::new(target, cancellation.clone()));
-    let request = GcExecutionRequestV1::new(GcRunInvocationV1::Scheduled, false, cancellation, sink.clone());
+    let request = GcExecutionRequestV1::new(GcRunInvocationV1::Scheduled, false, cancellation).with_progress_observer(sink.clone());
 
     let error = execute_gc_run(&engine, &RequestContext::system(), request).unwrap_err();
 
@@ -138,8 +138,8 @@ fn shared_cancellation_stops_every_legacy_phase_and_releases_recheck_state() {
 
     engine.begin_gc_recheck().expect("cancelled run must release legacy recheck ownership");
     engine.end_gc_recheck().unwrap();
-    let follow_up =
-      GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, true, CancellationToken::new(), Arc::new(RecordingSink::default()));
+    let follow_up = GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, true, CancellationToken::new())
+      .with_progress_observer(Arc::new(RecordingSink::default()));
     assert_eq!(execute_gc_run(&engine, &RequestContext::system(), follow_up).unwrap().status.state, GcRunStateV1::Complete);
   }
 }

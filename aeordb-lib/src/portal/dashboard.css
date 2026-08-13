@@ -41,19 +41,32 @@
 
 .dashboard-state-value[data-state="normal"],
 .dashboard-state-value[data-state="writable"],
-.dashboard-state-value[data-state="valid"] {
+.dashboard-state-value[data-state="valid"],
+.dashboard-state-value[data-state="complete"] {
   color: var(--success);
 }
 
 .dashboard-state-value[data-state="soft"],
-.dashboard-state-value[data-state="degraded"] {
+.dashboard-state-value[data-state="degraded"],
+.dashboard-state-value[data-state="incomplete"],
+.dashboard-state-value[data-state="cancelled"],
+.dashboard-state-value[data-state="refused"] {
   color: var(--warning);
 }
 
 .dashboard-state-value[data-state="hard"],
 .dashboard-state-value[data-state="read-only"],
-.dashboard-state-value[data-state="invalid"] {
+.dashboard-state-value[data-state="invalid"],
+.dashboard-state-value[data-state="failed"] {
   color: var(--danger);
+}
+
+.dashboard-state-value[data-state="running"] {
+  color: var(--accent);
+}
+
+.dashboard-state-value[data-state="idle"] {
+  color: var(--text-muted);
 }
 
 .dashboard-observability-table {

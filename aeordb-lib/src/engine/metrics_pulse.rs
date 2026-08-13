@@ -135,6 +135,7 @@ pub fn spawn_metrics_pulse(
               "dedup_hit_rate": dedup_hit_rate,
               "kv_fill_ratio": kv_fill_ratio,
               "disk_usage_percent": disk_health.usage_percent,
+              "gc": runtime.gc,
           },
           "memory": runtime.memory,
           "durability": runtime.durability,

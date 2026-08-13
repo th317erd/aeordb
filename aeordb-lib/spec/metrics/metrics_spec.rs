@@ -9,6 +9,7 @@ use tower::ServiceExt;
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::auth::magic_link::MagicLinkRecord;
 use aeordb::auth::refresh::RefreshTokenRecord;
+use aeordb::engine::gc::run_gc;
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine, system_store};
 use aeordb::metrics::initialize_metrics;
 use aeordb::server::{create_app_with_jwt_and_metrics, create_temp_engine_for_tests};
@@ -173,8 +174,10 @@ async fn test_metrics_endpoint_returns_empty_when_no_activity() {
 #[tokio::test]
 #[serial]
 async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
-  let (app, jwt_manager, _, _, _temp_dir) = test_app_global();
+  let (app, jwt_manager, _, engine, _temp_dir) = test_app_global();
   let auth = bearer_token(&jwt_manager);
+  run_gc(&engine, &RequestContext::system(), true).unwrap();
+  let run_id = engine.gc_run_status().unwrap().status.run_id.to_string();
 
   let request = Request::builder().uri("/system/metrics").header("authorization", &auth).body(Body::empty()).unwrap();
 
@@ -210,8 +213,31 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
     "aeordb_index_cache_max_bytes",
     "aeordb_index_mutation_buffer_max_bytes",
     "aeordb_index_publication_batch_max_bytes",
+    "aeordb_gc_run_active",
+    "aeordb_gc_run_progress_ratio",
+    "aeordb_gc_run_state",
+    "aeordb_gc_run_phase",
   ] {
     assert!(output.contains(metric), "metrics should contain {metric}, got:\n{output}");
+  }
+  assert!(output.contains("aeordb_gc_run_state{state=\"complete\"} 1"));
+  assert!(!output.contains(&run_id), "Prometheus output must not use run IDs as high-cardinality labels");
+}
+
+#[tokio::test]
+#[serial]
+async fn gc_metrics_are_idle_and_unknown_before_any_run() {
+  let (app, jwt_manager, _, _, _temp_dir) = test_app_global();
+  let auth = bearer_token(&jwt_manager);
+  let request = Request::builder().uri("/system/metrics").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let output = body_string(response.into_body()).await;
+
+  assert!(output.contains("aeordb_gc_run_active 0"));
+  assert!(output.contains("aeordb_gc_run_progress_ratio NaN"));
+  for state in ["running", "complete", "incomplete", "cancelled", "failed", "refused"] {
+    assert!(output.contains(&format!("aeordb_gc_run_state{{state=\"{state}\"}} 0")));
   }
 }
 

@@ -133,7 +133,7 @@ class DashboardMetricsStore {
   }
 
   _connectSSE() {
-    let url = '/system/events?events=metrics';
+    let url = '/system/events?events=metrics,gc_status';
     if (window.AUTH && window.AUTH.token)
       url += '&token=' + encodeURIComponent(window.AUTH.token);
 
@@ -145,6 +145,20 @@ class DashboardMetricsStore {
           this._applyStats(normalizeStatsEnvelope(JSON.parse(event.data)));
         } catch (error) {
           this._error = new Error(`Malformed metrics SSE event: ${error.message}`);
+          this._notify();
+          this._startPollingFallback();
+        }
+      });
+
+      this._eventSource.addEventListener('gc_status', (event) => {
+        try {
+          const status = normalizeStatsEnvelope(JSON.parse(event.data));
+          if (!status || typeof status !== 'object' || typeof status.state !== 'string' || typeof status.run_id !== 'string')
+            throw new Error('payload must contain string state and run_id fields');
+
+          this._applyGcStatus(status);
+        } catch (error) {
+          this._error = new Error(`Malformed gc_status SSE event: ${error.message}`);
           this._notify();
           this._startPollingFallback();
         }
@@ -186,6 +200,20 @@ class DashboardMetricsStore {
     if (this._activityHistory.length > MAX_ACTIVITY_POINTS)
       this._activityHistory.shift();
 
+    this._error = null;
+    this._loading = false;
+    this._notify();
+  }
+
+  _applyGcStatus(status) {
+    const stats = this._stats || {};
+    this._stats = {
+      ...stats,
+      health: {
+        ...(stats.health || {}),
+        gc: status,
+      },
+    };
     this._error = null;
     this._loading = false;
     this._notify();

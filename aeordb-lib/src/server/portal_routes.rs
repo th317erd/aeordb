@@ -359,6 +359,8 @@ pub struct StatsHealth {
   pub kv_fill_ratio: f64,
   pub dedup_hit_rate: f64,
   pub write_buffer_depth: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub gc: Option<crate::engine::GcRunStatusSnapshotV1>,
 }
 
 /// Return bounded database and runtime statistics without a storage scan.
@@ -454,6 +456,7 @@ fn get_stats_inner(
     tracing::error!(%error, "Failed to collect runtime observability snapshot");
     (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
   })?;
+  let gc = runtime.gc.clone();
 
   // Dedup hit rate: chunks_deduped / (chunks + chunks_deduped)
   let total_chunk_operations = counters.chunks + counters.chunks_deduped_total;
@@ -509,6 +512,7 @@ fn get_stats_inner(
       kv_fill_ratio,
       dedup_hit_rate,
       write_buffer_depth: counters.write_buffer_depth,
+      gc,
     },
     memory: runtime.memory,
     durability: runtime.durability,

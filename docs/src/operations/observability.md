@@ -7,11 +7,26 @@ AeorDB exposes one bounded runtime snapshot through several operator surfaces:
 | `GET /system/health` | Public load balancers and startup probes | Minimal health/startup state |
 | `GET /system/stats` | Authenticated clients | Structured JSON; root-only paths are redacted for non-root users |
 | `GET /system/metrics` | Root monitoring systems | Prometheus text |
-| `GET /system/events?events=metrics` | Root live dashboards | SSE every 15 seconds |
+| `GET /system/events?events=metrics,gc_status` | Root live dashboards | Periodic snapshots plus immediate GC transitions |
 | `aeordb status` | Root operators | Concise text or exact JSON |
 | Browser Dashboard | Logged-in operators | Continuously collected visual state |
 
 Stats, Prometheus, administrative SSE, CLI status, and the Dashboard use the same runtime-observability producer. Collection is bounded by fixed owner/property registries and bounded diagnostic arrays. It does not scan WAL entries, KV pages, file bodies, or index files, and it does not evict caches.
+
+## Garbage Collection
+
+`health.gc` is absent until the process observes its first GC run. After that,
+it retains exactly one current/latest bounded status until a newer run starts
+or the process restarts. Root stats, task inspection, Prometheus, metrics SSE,
+immediate `gc_status` SSE, CLI JSON, and the Dashboard all consume this same
+engine-owned projection. It is operational state, not persisted GC authority
+or an execution history.
+
+The public health endpoint never includes GC detail. Non-root stats omit
+`health.gc`, and non-root SSE streams filter both `metrics` and `gc_status`.
+Prometheus exports progress/resource gauges plus one-hot bounded state, phase,
+invocation, and mode labels. It never places run IDs, task IDs, paths, status
+codes, or diagnostic messages in labels.
 
 ## Memory
 
@@ -57,7 +72,7 @@ Registered root-only paths are represented as `{"redacted":true}` for non-root s
 
 ## Dashboard
 
-Metrics collection begins after login, before the Dashboard tab is opened. Root sessions use the administrative metrics SSE stream after an initial stats fetch. Non-root sessions poll `/system/stats` every 15 seconds because metrics SSE is root-only. A malformed or failed root SSE stream is closed, surfaced as an error, and replaced with polling.
+Metrics collection begins after login, before the Dashboard tab is opened. Root sessions use the administrative `metrics,gc_status` SSE stream after an initial stats fetch. Non-root sessions poll `/system/stats` every 15 seconds because both events are root-only. A malformed or failed root SSE stream is closed, surfaced as an error, and replaced with polling.
 
 The Prometheus counter
 `aeordb_namespace_mutation_acknowledgements_total{mutation_kind="..."}`
@@ -81,6 +96,7 @@ The Dashboard shows:
 - durability writability, frontier, waiters, and last barrier;
 - recovery/spill/repair state;
 - runtime/lifecycle validity and pending activation counts;
+- current/latest GC state, phase, progress, ETA, and bounded resource evidence;
 - per-owner memory observations and reservations; and
 - effective configuration values, exact sources, and activation state.
 

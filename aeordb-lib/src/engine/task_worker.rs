@@ -22,7 +22,7 @@ use crate::engine::request_context::RequestContext;
 use crate::engine::run_configuration::MaintenanceRunConfiguration;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::task_queue::{ProgressInfo, TaskOriginV1, TaskQueue, TaskRecord, TaskStatus};
-use crate::engine::v4::gc_run::{GcRunInvocationV1, NoopGcRunProgressSinkV1};
+use crate::engine::v4::gc_run::GcRunInvocationV1;
 use crate::plugins::PluginManager;
 
 /// Maximum completed tasks to keep after pruning.
@@ -491,7 +491,7 @@ where
   // Execute based on task type.
   let result = match task.task_type.as_str() {
     "reindex" => execute_reindex(queue, &task, engine, plugin_manager, task_cancellation.token()),
-    "gc" => execute_gc(queue, &task, engine, task_cancellation.token()),
+    "gc" => execute_gc(queue, &task, engine, event_bus, task_cancellation.token()),
     "backup" => execute_backup(&task, engine, task_cancellation.token()),
     "cleanup" => execute_cleanup(&task, engine, event_bus, task_cancellation.token()),
     unknown => Err(EngineError::InvalidInput(format!("unknown task type: {unknown}"))),
@@ -1319,6 +1319,7 @@ fn execute_gc(
   _queue: &TaskQueue,
   task: &TaskRecord,
   engine: &StorageEngine,
+  event_bus: &EventBus,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> EngineResult<String> {
   let dry_run = optional_task_bool(&task.args, "dry_run", false)?;
@@ -1328,9 +1329,9 @@ fn execute_gc(
     TaskOriginV1::RepairFollowUp => GcRunInvocationV1::RepairFollowUp,
   };
 
-  let ctx = RequestContext::system();
-  let result =
-    execute_gc_run(engine, &ctx, GcExecutionRequestV1::new(invocation, dry_run, cancel.clone(), Arc::new(NoopGcRunProgressSinkV1)))?.result;
+  let ctx = RequestContext::with_bus(Arc::new(event_bus.clone()));
+  let request = GcExecutionRequestV1::new(invocation, dry_run, cancel.clone()).with_task_id(task.id.clone())?;
+  let result = execute_gc_run(engine, &ctx, request)?.result;
 
   let mut message = format!(
     "gc completed: {} garbage entries, {} bytes reclaimed, dry_run={}",

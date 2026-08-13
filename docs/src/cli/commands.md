@@ -192,7 +192,7 @@ AEORDB_ROOT_KEY="$ROOT_KEY" aeordb status --target https://files.example.org
 aeordb status --target https://files.example.org --token "$TOKEN" --json
 ```
 
-The human view reports process/coordinator memory, pressure, durability writability/frontier/waiters, repair state, and runtime/lifecycle validity. Use `--json` for per-owner memory, exact configuration sources, spill evidence, and the last completed durability barrier.
+The human view reports process/coordinator memory, pressure, durability writability/frontier/waiters, repair state, and runtime/lifecycle validity. Use `--json` for per-owner memory, exact configuration sources, spill evidence, the last completed durability barrier, and root-only `health.gc` current/latest GC status when a run has been observed.
 
 ---
 

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use aeordb::auth::refresh::RefreshTokenRecord;
 use aeordb::engine::engine_event::{
-  EVENT_ENTRIES_DELETED, EVENT_TASKS_CANCELLED, EVENT_TASKS_COMPLETED, EVENT_TASKS_DEFERRED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED,
+  EVENT_ENTRIES_DELETED, EVENT_GC_COMPLETED, EVENT_GC_STARTED, EVENT_GC_STATUS, EVENT_TASKS_CANCELLED, EVENT_TASKS_COMPLETED,
+  EVENT_TASKS_DEFERRED, EVENT_TASKS_FAILED, EVENT_TASKS_STARTED,
 };
 use aeordb::engine::event_bus::EventBus;
 use aeordb::engine::config_resolver::ConfigurationFamily;
@@ -33,8 +34,22 @@ fn every_gc_task_origin_completes_through_the_worker_entry_point() {
     assert_eq!(completed.origin, origin);
     assert_eq!(completed.status, TaskStatus::Completed);
     assert_eq!(events.try_recv().unwrap().event_type, EVENT_TASKS_STARTED);
-    let completed_event = events.try_recv().unwrap();
-    assert_eq!(completed_event.event_type, EVENT_TASKS_COMPLETED);
+    let mut projected = Vec::new();
+    while let Ok(event) = events.try_recv() {
+      projected.push(event);
+    }
+    assert!(projected.iter().any(|event| event.event_type == EVENT_GC_STATUS));
+    assert!(projected.iter().any(|event| event.event_type == EVENT_GC_STARTED));
+    assert!(projected.iter().any(|event| event.event_type == EVENT_GC_COMPLETED));
+    assert!(
+      projected.iter().all(|event| {
+        matches!(event.event_type.as_str(), EVENT_GC_STATUS | EVENT_GC_STARTED | EVENT_GC_COMPLETED | EVENT_TASKS_COMPLETED)
+      }),
+      "queued GC must emit only GC and task-completion events after task start: {:?}",
+      projected.iter().map(|event| event.event_type.as_str()).collect::<Vec<_>>()
+    );
+    let completed_event =
+      projected.iter().find(|event| event.event_type == EVENT_TASKS_COMPLETED).expect("queued GC must emit a task completion event");
     assert!(completed_event.payload["summary"].as_str().is_some_and(|summary| summary.contains("dry_run=true")));
   }
 }

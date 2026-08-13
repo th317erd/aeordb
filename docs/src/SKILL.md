@@ -46,7 +46,7 @@ If auth is disabled for a development instance, authenticated routes may work wi
 | Invoke plugin | `POST /plugins/{name}/invoke` |
 | Events | `GET /system/events` |
 
-`GET /system/stats` is available to authenticated users, but filesystem paths in administrative configuration/recovery fields are redacted for non-root callers. The Prometheus endpoint and `metrics` SSE event are root-only. Bots with root credentials should prefer `aeordb status --json` for one bounded operational snapshot.
+`GET /system/stats` is available to authenticated users, but filesystem paths in administrative configuration/recovery fields are redacted for non-root callers. Root responses include one current/latest GC status at `health.gc` after a run begins; non-root responses omit it. The Prometheus endpoint and `metrics`/`gc_status` SSE events are root-only. Bots with root credentials should prefer `aeordb status --json` for one bounded operational snapshot and subscribe to `gc_status` only when immediate GC transitions matter.
 
 ## Search Examples
 

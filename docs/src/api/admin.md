@@ -246,6 +246,10 @@ List all tasks with their current progress.
 Each task includes `progress` (0.0-1.0) and `eta_ms` when available. A
 pressure-deferred task remains `pending`, preserves its `checkpoint`, records
 the earliest next claim time in `retry_at`, and increments `deferral_count`.
+For a GC task whose ID matches the retained latest GC run, the response also
+includes `gc`; `progress` and `eta_ms` are copied from that exact object. The
+field is omitted for non-GC tasks and for GC tasks that do not match the one
+retained run.
 
 **Example:**
 
@@ -828,7 +832,27 @@ Authentication is required. Share-link tokens are rejected. Root callers receive
     "disk_usage_percent": 48.5,
     "kv_fill_ratio": 0.72,
     "dedup_hit_rate": 0.33,
-    "write_buffer_depth": 42
+    "write_buffer_depth": 42,
+    "gc": {
+      "run_id": "0f3dc157-c40e-4bb5-8148-eb2dc83e48ce",
+      "invocation": "task",
+      "mode": "non_destructive_mark",
+      "state": "running",
+      "phase": "mark",
+      "phase_progress": 0.5,
+      "overall_progress": 0.5,
+      "completed_units": 500,
+      "total_units": 1000,
+      "eta_ms": 12000,
+      "memory_reserved_bytes": 67108864,
+      "scratch_used_bytes": 8388608,
+      "mutation_journal_lag": 0,
+      "checkpoint_age_ms": 2000,
+      "started_at_ms": 1786583300000,
+      "observed_at_ms": 1786583310000,
+      "completed_at_ms": null,
+      "task_id": "f737f210-a727-42c8-b6ac-38cfc083fa40"
+    }
   },
   "memory": {
     "process": {
@@ -940,12 +964,17 @@ without double-counting `--auth self`.
 | `counts` | Current totals for files, directories, symlinks, chunks, snapshots, and forks |
 | `sizes` | Byte-level storage breakdown: disk total, KV file size, logical data, chunk data, void space, dedup savings |
 | `throughput` | Rolling read/write rates (1m, 5m, 15m averages) and peak rates |
-| `health` | Operational health signals: disk usage, KV fill ratio, dedup hit rate, and write buffer depth |
+| `health` | Operational health signals plus root-only current/latest GC status when a run has been observed |
 | `memory` | Process probes, memory policy/pressure, per-owner observations and reservations, and bounded cache diagnostics |
 | `durability` | Hard frontier, waiter depth, last completed barrier, grouping policy, read-only latch, spill evidence, and repair state |
 | `configuration` | Complete runtime/lifecycle envelopes: active and desired values, exact sources, validity, degradation, and pending activation |
 
 The response is bounded by fixed owner/property registries and bounded diagnostic arrays. Collection does not evict caches or otherwise mutate storage policy. Poll at a monitoring cadence rather than treating it as a hot data-plane endpoint.
+
+`health.gc` is omitted before the first run, for all non-root callers, and
+after process restart until another run begins. The root projection retains
+one current/latest run only; it is volatile operational evidence, not GC
+history or persisted authority. Public `/system/health` never includes it.
 
 `sizes.logical_data` is the sum of live file sizes reachable from the current HEAD tree. `sizes.chunk_data` is the stored payload size of unique chunk entries in the KV index, initialized from entry metadata without reading chunk bodies. `sizes.void_space` is tracked reusable space inside the append log; it is not filesystem free space.
 
@@ -1064,6 +1093,16 @@ Memory gauges are updated when `/system/metrics` is rendered and by the periodic
 | `aeordb_durability_*` | Frontier, waiters, last barrier, group policy, latch, spill, and repair gauges |
 | `aeordb_configuration_family_*{family}` | Runtime/lifecycle validity, degradation, and pending-state gauges |
 | `aeordb_configuration_property_active{family,path,source}` | Fixed-registry one-hot active source for each configuration property |
+| `aeordb_gc_run_active` | `1` only while the retained GC run is running |
+| `aeordb_gc_run_progress_ratio` / `aeordb_gc_run_phase_progress_ratio` | Overall and current-phase completion ratios, or `NaN` before any run |
+| `aeordb_gc_run_memory_reserved_bytes` / `aeordb_gc_run_scratch_used_bytes` | Current/latest bounded GC resource evidence |
+| `aeordb_gc_run_mutation_journal_lag` / `aeordb_gc_run_checkpoint_age_ms` / `aeordb_gc_run_eta_ms` | Current/latest convergence and time evidence; optional values are `NaN` |
+| `aeordb_gc_run_state{state}` | One-hot bounded run state |
+| `aeordb_gc_run_phase{phase}` | One-hot bounded phase |
+| `aeordb_gc_run_invocation{invocation}` / `aeordb_gc_run_mode{mode}` | One-hot bounded doorway and mode |
+
+GC metric labels are closed enum values. Run IDs, task IDs, paths, codes, and
+messages are deliberately excluded to prevent unbounded Prometheus cardinality.
 
 **Example:**
 

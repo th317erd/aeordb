@@ -6,7 +6,8 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
-use aeordb::engine::StorageEngine;
+use aeordb::engine::gc::run_gc;
+use aeordb::engine::{RequestContext, StorageEngine};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests, docs_routes};
 
 /// Create a fresh in-memory app with engine support.
@@ -82,6 +83,37 @@ fn remove_dynamic_configuration_fields(value: &mut serde_json::Value) {
   }
 }
 
+#[tokio::test]
+async fn gc_status_is_root_only_in_stats_and_never_expands_public_health() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  run_gc(&engine, &RequestContext::system(), true).unwrap();
+  let expected = serde_json::to_value(engine.gc_run_status().unwrap()).unwrap();
+
+  let root_request = Request::builder()
+    .method("GET")
+    .uri("/system/stats")
+    .header("authorization", root_bearer_token(&jwt_manager))
+    .body(Body::empty())
+    .unwrap();
+  let root_response = app.clone().oneshot(root_request).await.unwrap();
+  assert_eq!(root_response.status(), StatusCode::OK);
+  let root = body_json(root_response.into_body()).await;
+  assert_eq!(root["health"]["gc"], expected);
+
+  let non_root_request =
+    Request::builder().method("GET").uri("/system/stats").header("authorization", bearer_token(&jwt_manager)).body(Body::empty()).unwrap();
+  let non_root_response = app.clone().oneshot(non_root_request).await.unwrap();
+  assert_eq!(non_root_response.status(), StatusCode::OK);
+  let non_root = body_json(non_root_response.into_body()).await;
+  assert!(non_root["health"].get("gc").is_none(), "non-root stats must omit GC status instead of serializing null");
+
+  let health_response = app.oneshot(Request::builder().method("GET").uri("/system/health").body(Body::empty()).unwrap()).await.unwrap();
+  assert_eq!(health_response.status(), StatusCode::OK);
+  let health = body_json(health_response.into_body()).await;
+  let health_keys = health.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+  assert_eq!(health_keys, std::collections::BTreeSet::from(["status", "version"]));
+}
+
 // ---------------------------------------------------------------------------
 // Portal asset tests (public, no auth needed)
 // ---------------------------------------------------------------------------
@@ -145,6 +177,9 @@ async fn test_portal_metrics_mjs_returns_javascript() {
   let body = String::from_utf8(body_bytes(response.into_body()).await).unwrap();
   assert!(body.contains("currentUserId"), "non-root metrics clients must choose polling instead of administrative SSE");
   assert!(body.contains("Malformed metrics SSE event"), "malformed metrics events must be surfaced");
+  assert!(body.contains("events=metrics,gc_status"), "root metrics stream must request immediate GC status transitions");
+  assert!(body.contains("Malformed gc_status SSE event"), "malformed GC status events must be surfaced");
+  assert!(body.contains("_applyGcStatus"), "GC transitions must merge into the shared metrics store");
   assert!(body.contains("_closeEventSource"), "polling fallback must close a failed or malformed SSE stream");
   assert!(body.contains("console.error"), "subscriber rendering failures must not be silently squelched");
 }
@@ -161,11 +196,20 @@ async fn test_portal_dashboard_mjs_returns_javascript() {
   let content_type = response.headers().get("content-type").expect("content-type header present").to_str().unwrap();
   assert_eq!(content_type, "application/javascript; charset=utf-8");
   let body = String::from_utf8(body_bytes(response.into_body()).await).unwrap();
-  for contract in
-    ["memory-owner-rows", "configuration-rows", "durability-frontier", "memory-pressure", "updateRuntimeObservability", "replaceChildren"]
-  {
+  for contract in [
+    "memory-owner-rows",
+    "configuration-rows",
+    "durability-frontier",
+    "memory-pressure",
+    "gc-state",
+    "gc-detail",
+    "updateRuntimeObservability",
+    "replaceChildren",
+  ] {
     assert!(body.contains(contract), "Dashboard asset is missing {contract}");
   }
+  let gc_card = body.split("Garbage collection").nth(1).unwrap().split("</div>").take(5).collect::<String>();
+  assert!(!gc_card.contains("style="), "the new GC Dashboard card must use shared classes instead of inline styles");
 }
 
 #[tokio::test]
@@ -382,6 +426,7 @@ async fn test_stats_has_enhanced_structure() {
   assert!(health.get("kv_fill_ratio").is_some(), "health.kv_fill_ratio missing");
   assert!(health.get("dedup_hit_rate").is_some(), "health.dedup_hit_rate missing");
   assert!(health.get("write_buffer_depth").is_some(), "health.write_buffer_depth missing");
+  assert!(health.get("gc").is_none(), "fresh databases must omit absent GC status instead of fabricating a run");
 
   let memory = &json["memory"];
   for section in &["process", "index_cache", "directory_cache", "caches"] {

@@ -23,8 +23,8 @@ use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRu
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
 use crate::engine::engine_event::{
-  EngineEvent, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED, EVENT_ENTRIES_UPDATED, EVENT_HEARTBEAT, EVENT_INDEXES_UPDATED,
-  EVENT_PERMISSIONS_CHANGED, EVENT_SERVER_READY, EVENT_STREAM_GAP,
+  EngineEvent, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_DELETED, EVENT_ENTRIES_UPDATED, EVENT_GC_STATUS, EVENT_HEARTBEAT,
+  EVENT_INDEXES_UPDATED, EVENT_PERMISSIONS_CHANGED, EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::{StorageEngine, SystemFamilyPolicyResolver};
@@ -53,6 +53,7 @@ enum NonRootEventVisibility {
 fn non_root_event_visibility(event_type: &str) -> NonRootEventVisibility {
   match event_type {
     EVENT_SERVER_READY | EVENT_HEARTBEAT => NonRootEventVisibility::Public,
+    EVENT_GC_STATUS => NonRootEventVisibility::RootOnly,
     EVENT_ENTRIES_CREATED | EVENT_ENTRIES_UPDATED | EVENT_ENTRIES_DELETED | EVENT_PERMISSIONS_CHANGED | EVENT_INDEXES_UPDATED => {
       NonRootEventVisibility::PathRequired
     }

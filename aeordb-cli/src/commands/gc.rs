@@ -1,7 +1,5 @@
-use std::sync::Arc;
-
 use aeordb::engine::gc::{execute_gc_run, GcExecutionRequestV1};
-use aeordb::engine::v4::gc_run::{GcRunInvocationV1, NoopGcRunProgressSinkV1};
+use aeordb::engine::v4::gc_run::GcRunInvocationV1;
 use aeordb::engine::{RequestContext, StorageEngine};
 use tokio_util::sync::CancellationToken;
 
@@ -21,12 +19,8 @@ pub async fn run(database: &str, dry_run: bool) -> Result<(), String> {
   let execution_cancellation = cancellation.clone();
   let mut execution = tokio::task::spawn_blocking(move || {
     let engine = StorageEngine::open(&database).map_err(|error| format!("Error opening database: {error}"))?;
-    execute_gc_run(
-      &engine,
-      &RequestContext::system(),
-      GcExecutionRequestV1::new(GcRunInvocationV1::Cli, dry_run, execution_cancellation, Arc::new(NoopGcRunProgressSinkV1)),
-    )
-    .map_err(|error| format!("GC failed: {error}"))
+    execute_gc_run(&engine, &RequestContext::system(), GcExecutionRequestV1::new(GcRunInvocationV1::Cli, dry_run, execution_cancellation))
+      .map_err(|error| format!("GC failed: {error}"))
   });
 
   let execution = tokio::select! {

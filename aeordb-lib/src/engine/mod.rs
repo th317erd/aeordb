@@ -40,6 +40,7 @@ pub mod file_header;
 pub mod file_record;
 pub mod fuzzy;
 pub mod gc;
+pub mod gc_run_status;
 pub mod grants_index;
 pub mod group;
 pub mod hash_algorithm;
@@ -200,6 +201,7 @@ pub use range_extract::{
   DEFAULT_RANGE_MAX_BYTES,
 };
 pub use gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, GcLiveSet, GcResult};
+pub use gc_run_status::GcRunStatusSnapshotV1;
 pub use health::{
   HealthStatus, HealthReport, HealthChecks, EngineHealth, DiskHealth, SyncHealth, AuthHealth, check_engine, check_disk, check_sync,
   check_auth, compute_overall_status, full_health_check,
@@ -235,9 +237,9 @@ pub use engine_event::{
   EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED, EVENT_USERS_CREATED,
   EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED, EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS,
   EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED, EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT,
-  EVENT_FILES_SHARED, EVENT_GC_STARTED, EVENT_GC_COMPLETED, EVENT_METRICS, GcEventData, EVENT_TASKS_CREATED, EVENT_TASKS_STARTED,
-  EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_CANCELLED, EVENT_TASKS_DEFERRED, EVENT_SYNCS_COMPLETED, EVENT_SYNCS_FAILED,
-  EVENT_SERVER_READY, EVENT_STREAM_GAP,
+  EVENT_FILES_SHARED, EVENT_GC_STARTED, EVENT_GC_COMPLETED, EVENT_GC_STATUS, EVENT_METRICS, GcEventData, EVENT_TASKS_CREATED,
+  EVENT_TASKS_STARTED, EVENT_TASKS_COMPLETED, EVENT_TASKS_FAILED, EVENT_TASKS_CANCELLED, EVENT_TASKS_DEFERRED, EVENT_SYNCS_COMPLETED,
+  EVENT_SYNCS_FAILED, EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 pub use event_bus::EventBus;
 pub use heartbeat::spawn_heartbeat;

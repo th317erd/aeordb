@@ -117,6 +117,7 @@ Each event is a JSON object with:
 | `tasks_completed` | A background task completed | `{"task_id": "...", "task_type": "...", "summary": "..."}` |
 | `tasks_failed` | A background task failed terminally | `{"task_id": "...", "task_type": "...", "error": "..."}` |
 | `tasks_cancelled` | A running task cancellation was observed | `{"task_id": "...", "task_type": "..."}` |
+| `gc_status` | Root-only immediate GC phase/terminal status | Bounded GC status object, with optional `task_id` |
 | `heartbeat` | Clock synchronization pulse (every 15s) | `{"intent_time", "construct_time", "node_id"}` |
 | `metrics` | Root-only administrative runtime snapshot (every 15s) | `{"counts", "sizes", "throughput", "health", "memory", "durability", "configuration"}` |
 
@@ -213,6 +214,25 @@ The delta between `intent_time` and `construct_time` is used by peers to measure
 
 ---
 
+### GC Status Event
+
+`gc_status` is emitted immediately whenever the shared GC executor accepts a
+new phase or terminal projection. It is root-only, even when a non-root client
+explicitly requests `events=gc_status`. The payload is the exact object shown
+at `GET /system/stats` under `health.gc`; task-originated runs include
+`task_id`.
+
+```bash
+curl -N "http://localhost:6830/system/events?events=gc_status" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+The stream is transition delivery, not durable history. Reconnect and refresh
+`GET /system/stats` after a connection error or `stream_gap`; the engine
+retains only one current/latest status until another run or process restart.
+
+---
+
 ### Metrics Event
 
 The `metrics` event delivers a bounded administrative snapshot every 15 seconds, independent of the heartbeat interval. Only the root user receives this event; non-root streams filter it even when `events=metrics` is requested. Non-root dashboards use authenticated `/system/stats` polling, where root-only paths are explicitly redacted.
@@ -222,7 +242,7 @@ The producer reads counters, fixed memory-owner/configuration registries, in-mem
 **Subscribe to metrics:**
 
 ```bash
-curl -N "http://localhost:6830/system/events?events=metrics" \
+curl -N "http://localhost:6830/system/events?events=metrics,gc_status" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -256,7 +276,8 @@ curl -N "http://localhost:6830/system/events?events=metrics" \
     "disk_usage_percent": 48.5,
     "kv_fill_ratio": 0.72,
     "dedup_hit_rate": 0.33,
-    "write_buffer_depth": 42
+    "write_buffer_depth": 42,
+    "gc": {"run_id": "...", "state": "running", "phase": "mark", "overall_progress": 0.5}
   },
   "memory": {
     "process": {
@@ -359,7 +380,7 @@ API-key cache and is not yet included in this object.
 | `counts` | Current totals for files, directories, symlinks, chunks, snapshots, and forks |
 | `sizes` | Byte-level storage breakdown: disk total, KV file, logical data, chunk data, void space, dedup savings |
 | `throughput` | Rolling rates (1m, 5m, 15m averages and peak) for read/write operations and bytes |
-| `health` | Operational health signals: disk usage, KV fill ratio, dedup efficiency, write buffer depth |
+| `health` | Operational health signals plus the root-only current/latest GC projection when present |
 | `memory` | Process, policy, pressure, fixed owner, reservation, and cache diagnostics |
 | `durability` | Hard frontier, waiters, last barrier, grouping, read-only latch, spill, and repair state |
 | `configuration` | Complete runtime/lifecycle values, sources, validity, degradation, and pending activation |

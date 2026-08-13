@@ -8,6 +8,8 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::gc::{execute_gc_run, GcExecutionRequestV1};
+use aeordb::engine::v4::gc_run::GcRunInvocationV1;
 use aeordb::engine::{EntryType, RequestContext, StorageEngine, TaskQueue};
 use aeordb::metrics::initialize_metrics;
 use aeordb::server::{create_app_with_jwt_engine_and_task_queue, create_temp_engine_for_tests};
@@ -238,6 +240,41 @@ async fn test_get_task_by_id() {
   assert_eq!(json["task_type"], "reindex");
   assert_eq!(json["status"], "pending");
   assert_eq!(json["args"]["path"], "/docs/");
+  assert!(json.get("gc").is_none(), "non-GC tasks must not receive an unrelated retained GC status");
+}
+
+#[tokio::test]
+async fn gc_task_inspection_uses_the_engine_projection_for_progress_and_eta() {
+  let (app, jwt_manager, engine, task_queue, _temp_dir) = test_app();
+  let auth = root_bearer_token(&jwt_manager);
+  let task = task_queue.enqueue("gc", serde_json::json!({"dry_run": true})).unwrap();
+  let execution = execute_gc_run(
+    &engine,
+    &RequestContext::system(),
+    GcExecutionRequestV1::new(GcRunInvocationV1::Task, true, tokio_util::sync::CancellationToken::new())
+      .with_task_id(task.id.clone())
+      .unwrap(),
+  )
+  .unwrap();
+  let expected = serde_json::to_value(engine.gc_run_status_for_task(&task.id).unwrap()).unwrap();
+
+  let get_request =
+    Request::builder().method("GET").uri(format!("/system/tasks/{}", task.id)).header("authorization", &auth).body(Body::empty()).unwrap();
+  let get_response = app.clone().oneshot(get_request).await.unwrap();
+  assert_eq!(get_response.status(), StatusCode::OK);
+  let inspected = body_json(get_response.into_body()).await;
+  assert_eq!(inspected["gc"], expected);
+  assert_eq!(inspected["progress"], execution.status.overall_progress);
+  assert_eq!(inspected["eta_ms"], serde_json::json!(execution.status.eta_ms));
+
+  let list_request = Request::builder().method("GET").uri("/system/tasks").header("authorization", &auth).body(Body::empty()).unwrap();
+  let list_response = app.oneshot(list_request).await.unwrap();
+  assert_eq!(list_response.status(), StatusCode::OK);
+  let listed = body_json(list_response.into_body()).await;
+  let listed_task = listed["items"].as_array().unwrap().iter().find(|item| item["id"] == task.id).unwrap();
+  assert_eq!(listed_task["gc"], expected);
+  assert_eq!(listed_task["progress"], execution.status.overall_progress);
+  assert_eq!(listed_task["eta_ms"], serde_json::json!(execution.status.eta_ms));
 }
 
 // ===========================================================================

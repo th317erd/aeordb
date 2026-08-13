@@ -748,6 +748,7 @@ pub struct StorageEngine {
   /// written after the mark snapshot was captured. `None` means GC is not
   /// active and writes don't bother recording. See bot-docs/plan/gc-mark-sweep.md.
   gc_recheck: Mutex<Option<GcRecheckState>>,
+  gc_run_status: Arc<crate::engine::gc_run_status::GcRunStatusRegistryV1>,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
 }
@@ -1176,6 +1177,23 @@ impl StorageEngine {
     visibility: crate::engine::configuration_observability::ConfigurationVisibility,
   ) -> EngineResult<crate::engine::runtime_observability::RuntimeObservabilitySnapshot> {
     crate::engine::runtime_observability::collect_runtime_observability(self, visibility)
+  }
+
+  pub fn gc_run_status(&self) -> Option<crate::engine::gc_run_status::GcRunStatusSnapshotV1> {
+    self.gc_run_status.latest()
+  }
+
+  pub fn gc_run_status_for_task(&self, task_id: &str) -> Option<crate::engine::gc_run_status::GcRunStatusSnapshotV1> {
+    self.gc_run_status.for_task(task_id)
+  }
+
+  pub(crate) fn gc_run_progress_sink(
+    &self,
+    task_id: Option<String>,
+    event_bus: Option<Arc<crate::engine::event_bus::EventBus>>,
+    observer: Option<Arc<dyn crate::engine::v4::gc_run::GcRunProgressSinkV1>>,
+  ) -> EngineResult<Arc<dyn crate::engine::v4::gc_run::GcRunProgressSinkV1>> {
+    self.gc_run_status.projection_sink(task_id, event_bus, observer)
   }
 
   /// Return the process memory coordinator when startup has reached memory
@@ -2710,6 +2728,7 @@ impl StorageEngine {
       index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
       index_flush_guard: Mutex::new(()),
       gc_recheck: Mutex::new(None),
+      gc_run_status: Arc::new(crate::engine::gc_run_status::GcRunStatusRegistryV1::default()),
       _file_lock: lock_file,
     };
     engine.initialize_bootstrap_memory_coordinator(inherited_memory, bootstrap.memory_policy_values)?;
@@ -2946,6 +2965,7 @@ impl StorageEngine {
       index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
       index_flush_guard: Mutex::new(()),
       gc_recheck: Mutex::new(None),
+      gc_run_status: Arc::new(crate::engine::gc_run_status::GcRunStatusRegistryV1::default()),
       _file_lock: lock_file,
     };
     engine.initialize_bootstrap_memory_coordinator(inherited_memory, bootstrap.memory_policy_values)?;

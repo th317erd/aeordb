@@ -129,6 +129,21 @@ pub const DURABILITY_SPILL_COUNT: &str = "aeordb_durability_spill_count";
 pub const DURABILITY_SPILL_BYTES: &str = "aeordb_durability_spill_bytes";
 pub const DURABILITY_REPAIR_REQUIRED: &str = "aeordb_durability_repair_required";
 
+// Garbage collection. Enumerated labels are bounded protocol values; run and
+// task identities are deliberately excluded from Prometheus labels.
+pub const GC_RUN_ACTIVE: &str = "aeordb_gc_run_active";
+pub const GC_RUN_PROGRESS_RATIO: &str = "aeordb_gc_run_progress_ratio";
+pub const GC_RUN_PHASE_PROGRESS_RATIO: &str = "aeordb_gc_run_phase_progress_ratio";
+pub const GC_RUN_MEMORY_RESERVED_BYTES: &str = "aeordb_gc_run_memory_reserved_bytes";
+pub const GC_RUN_SCRATCH_USED_BYTES: &str = "aeordb_gc_run_scratch_used_bytes";
+pub const GC_RUN_MUTATION_JOURNAL_LAG: &str = "aeordb_gc_run_mutation_journal_lag";
+pub const GC_RUN_ETA_MS: &str = "aeordb_gc_run_eta_ms";
+pub const GC_RUN_CHECKPOINT_AGE_MS: &str = "aeordb_gc_run_checkpoint_age_ms";
+pub const GC_RUN_STATE: &str = "aeordb_gc_run_state";
+pub const GC_RUN_PHASE: &str = "aeordb_gc_run_phase";
+pub const GC_RUN_INVOCATION: &str = "aeordb_gc_run_invocation";
+pub const GC_RUN_MODE: &str = "aeordb_gc_run_mode";
+
 // Configuration
 pub const CONFIGURATION_FAMILY_VALID: &str = "aeordb_configuration_family_valid";
 pub const CONFIGURATION_FAMILY_DEGRADED: &str = "aeordb_configuration_family_degraded";

@@ -66,17 +66,24 @@ pub struct GcExecutionRequestV1 {
   invocation: GcRunInvocationV1,
   dry_run: bool,
   cancellation: CancellationToken,
-  progress_sink: Arc<dyn GcRunProgressSinkV1>,
+  progress_observer: Option<Arc<dyn GcRunProgressSinkV1>>,
+  task_id: Option<String>,
 }
 
 impl GcExecutionRequestV1 {
-  pub fn new(
-    invocation: GcRunInvocationV1,
-    dry_run: bool,
-    cancellation: CancellationToken,
-    progress_sink: Arc<dyn GcRunProgressSinkV1>,
-  ) -> Self {
-    Self { invocation, dry_run, cancellation, progress_sink }
+  pub fn new(invocation: GcRunInvocationV1, dry_run: bool, cancellation: CancellationToken) -> Self {
+    Self { invocation, dry_run, cancellation, progress_observer: None, task_id: None }
+  }
+
+  pub fn with_progress_observer(mut self, progress_observer: Arc<dyn GcRunProgressSinkV1>) -> Self {
+    self.progress_observer = Some(progress_observer);
+    self
+  }
+
+  pub fn with_task_id(mut self, task_id: String) -> EngineResult<Self> {
+    uuid::Uuid::parse_str(&task_id).map_err(|error| EngineError::InvalidInput(format!("GC task identity must be a UUID: {error}")))?;
+    self.task_id = Some(task_id);
+    Ok(self)
   }
 }
 
@@ -983,17 +990,8 @@ fn gc_sweep_internal(
 ///
 /// GC should not be run concurrently with writes -- see [`gc_sweep`] for details.
 pub fn run_gc(engine: &StorageEngine, ctx: &RequestContext, dry_run: bool) -> EngineResult<GcResult> {
-  execute_gc_run(
-    engine,
-    ctx,
-    GcExecutionRequestV1::new(
-      GcRunInvocationV1::Embedded,
-      dry_run,
-      CancellationToken::new(),
-      Arc::new(crate::engine::v4::gc_run::NoopGcRunProgressSinkV1),
-    ),
-  )
-  .map(|execution| execution.result)
+  execute_gc_run(engine, ctx, GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, dry_run, CancellationToken::new()))
+    .map(|execution| execution.result)
 }
 
 /// Run a complete GC cycle while honoring cooperative cancellation before
@@ -1004,17 +1002,8 @@ pub fn run_gc_with_cancellation(
   dry_run: bool,
   cancellation: &CancellationToken,
 ) -> EngineResult<GcResult> {
-  execute_gc_run(
-    engine,
-    ctx,
-    GcExecutionRequestV1::new(
-      GcRunInvocationV1::Embedded,
-      dry_run,
-      cancellation.clone(),
-      Arc::new(crate::engine::v4::gc_run::NoopGcRunProgressSinkV1),
-    ),
-  )
-  .map(|execution| execution.result)
+  execute_gc_run(engine, ctx, GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, dry_run, cancellation.clone()))
+    .map(|execution| execution.result)
 }
 
 /// Deterministic phase-boundary hook used to prove pressure changes that occur
@@ -1032,12 +1021,7 @@ where
   execute_gc_run_with_hooks(
     engine,
     ctx,
-    GcExecutionRequestV1::new(
-      GcRunInvocationV1::Embedded,
-      dry_run,
-      CancellationToken::new(),
-      Arc::new(crate::engine::v4::gc_run::NoopGcRunProgressSinkV1),
-    ),
+    GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, dry_run, CancellationToken::new()),
     post_start_hook,
     || {},
   )
@@ -1331,6 +1315,7 @@ where
   )
   .map_err(gc_run_contract_error)?;
   let mode = if request.dry_run { GcRunModeV1::NonDestructiveMark } else { GcRunModeV1::Destructive };
+  let progress_sink = engine.gc_run_progress_sink(request.task_id.clone(), ctx.event_bus().cloned(), request.progress_observer)?;
   let context = GcRunContextV1::new(
     GcRunIDV1::new(uuid::Uuid::new_v4().into_bytes()).map_err(gc_run_contract_error)?,
     request.invocation,
@@ -1338,7 +1323,7 @@ where
     chrono::Utc::now().timestamp_millis(),
     budgets,
     request.cancellation.clone(),
-    request.progress_sink,
+    progress_sink,
   )
   .map_err(gc_run_contract_error)?;
   let mut operation = LegacyV3GcOperation {
@@ -1514,12 +1499,7 @@ mod recheck_teardown_tests {
     let result = execute_gc_run_with_hooks(
       &engine,
       &context,
-      GcExecutionRequestV1::new(
-        GcRunInvocationV1::Embedded,
-        false,
-        CancellationToken::new(),
-        Arc::new(crate::engine::v4::gc_run::NoopGcRunProgressSinkV1),
-      ),
+      GcExecutionRequestV1::new(GcRunInvocationV1::Embedded, false, CancellationToken::new()),
       || {},
       || engine.poison_gc_recheck_for_test(),
     )

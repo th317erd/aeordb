@@ -15,8 +15,8 @@ use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::api_key_rules::KeyRule;
 use aeordb::engine::{
-  DirectoryOps, EngineEvent, EventBus, PermissionStore, RequestContext, StorageEngine, User, EVENT_METRICS, EVENT_SERVER_READY,
-  EVENT_STREAM_GAP,
+  DirectoryOps, EngineEvent, EventBus, PermissionStore, RequestContext, StorageEngine, User, EVENT_GC_STATUS, EVENT_METRICS,
+  EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
@@ -1144,6 +1144,38 @@ async fn test_sse_non_root_subscriber_cannot_observe_task_path_arguments() {
     tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
     "non-root SSE stream leaked root-only task arguments"
   );
+}
+
+#[tokio::test]
+async fn test_sse_gc_status_is_root_only() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_non_root_gc_observer");
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request =
+    Request::builder().method("GET").uri("/system/events?events=gc_status").header("authorization", &auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(EVENT_GC_STATUS, "system", serde_json::json!({"state": "running", "overall_progress": 0.5})));
+  assert!(tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(), "non-root SSE stream leaked root-only GC status");
+
+  let (root_app, root_jwt_manager, _, root_event_bus, _root_temp) = test_app();
+  let root_auth = root_bearer_token(&root_jwt_manager);
+  let root_payload = serde_json::json!({"state": "complete", "overall_progress": 1.0});
+  let root_request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=gc_status")
+    .header("authorization", &root_auth)
+    .body(Body::empty())
+    .unwrap();
+  let root_response = root_app.oneshot(root_request).await.unwrap();
+  assert_eq!(root_response.status(), StatusCode::OK);
+  let mut root_body = root_response.into_body();
+  root_event_bus.emit(EngineEvent::new(EVENT_GC_STATUS, "system", root_payload));
+  let root_frame = read_next_sse_frame(&mut root_body).await;
+  assert!(root_frame.contains("event: gc_status"), "root SSE stream did not receive GC status: {root_frame}");
+  assert!(root_frame.contains("\"state\":\"complete\""), "root SSE stream changed the GC status payload: {root_frame}");
 }
 
 #[tokio::test]

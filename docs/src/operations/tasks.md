@@ -196,6 +196,14 @@ Running tasks expose in-memory progress information:
 
 Progress is computed using a rolling average of the last 10 batch execution times for ETA calculation.
 
+GC tasks use the engine's shared GC status instead of a second task-local
+progress state. `GET /system/tasks` and `GET /system/tasks/{id}` add a `gc`
+object only when the retained latest run has the matching `task_id`.
+`progress` and `eta_ms` are then projected from that same object. Terminal GC
+status remains visible after the task's generic in-memory progress entry is
+cleared, until another GC run replaces it or the server restarts. Non-GC tasks
+never receive an unrelated `gc` object.
+
 During an active reindex, query responses include `meta.reindexing: true` so clients know results may be incomplete.
 
 ## Cron Scheduling
@@ -325,6 +333,7 @@ arguments, summaries, and failures can contain paths or operational details.
 | `tasks_cancelled` | A running task cancellation was observed by the worker |
 | `gc_started` | GC has begun execution |
 | `gc_completed` | GC-specific completion event with statistics |
+| `gc_status` | Root-only bounded GC phase/terminal status; emitted immediately for every accepted transition |
 
 ## See Also
 

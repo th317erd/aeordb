@@ -5,6 +5,8 @@ use aeordb::engine::event_bus::EventBus;
 use aeordb::engine::metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::engine::configuration_observability::ConfigurationVisibility;
+use aeordb::engine::gc::run_gc;
+use aeordb::engine::RequestContext;
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +51,8 @@ async fn test_metrics_pulse_payload_structure() {
   let mut rx = bus.subscribe();
   let counters = Arc::new(EngineCounters::new());
   let rate_trackers = Arc::new(RateTrackerSet::new());
+  run_gc(&engine, &RequestContext::system(), true).unwrap();
+  let expected_gc = serde_json::to_value(engine.gc_run_status().unwrap()).unwrap();
 
   let cancel = CancellationToken::new();
   let handle = spawn_metrics_pulse(bus.clone(), engine.clone(), counters.clone(), rate_trackers.clone(), db_path_str, cancel.clone());
@@ -90,6 +94,7 @@ async fn test_metrics_pulse_payload_structure() {
   assert!(health["write_buffer_depth"].is_number());
   assert!(health["dedup_hit_rate"].is_number());
   assert!(health["kv_fill_ratio"].is_number());
+  assert_eq!(health["gc"], expected_gc);
 
   let memory = &payload["memory"];
   assert!(memory["coordinator"]["owners"].is_array());

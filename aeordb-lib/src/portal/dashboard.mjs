@@ -256,6 +256,11 @@ class AeorDashboard extends HTMLElement {
           <div class="dashboard-state-value" id="configuration-state">&mdash;</div>
           <div class="dashboard-state-detail" id="configuration-detail"></div>
         </div>
+        <div class="dashboard-state-card">
+          <div class="dashboard-state-label">Garbage collection</div>
+          <div class="dashboard-state-value" id="gc-state">Idle</div>
+          <div class="dashboard-state-detail" id="gc-detail">No GC run recorded</div>
+        </div>
       </div>
       <div style="font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Memory</div>
       <div class="stats-grid" id="stats-memory">
@@ -554,6 +559,7 @@ class AeorDashboard extends HTMLElement {
     const repair       = durability.repair || {};
     const spill        = durability.spill || {};
     const configuration = data.configuration || {};
+    const gc            = data.health?.gc || null;
 
     const pressure = coordinator.pressure || 'unconfigured';
     this.setRuntimeState('memory-pressure', pressure.replaceAll('_', ' '), pressure);
@@ -588,8 +594,34 @@ class AeorDashboard extends HTMLElement {
     const configurationState = this.configurationState(configuration);
     this.setRuntimeState('configuration-state', configurationState.label, configurationState.state);
     this.setRuntimeDetail('configuration-detail', configurationState.detail);
+    this.updateGarbageCollectionState(gc);
     this.updateMemoryOwners(coordinator.owners || []);
     this.updateConfigurationRows(configuration);
+  }
+
+  updateGarbageCollectionState(gc) {
+    if (!gc) {
+      this.setRuntimeState('gc-state', 'Idle', 'idle');
+      this.setRuntimeDetail('gc-detail', 'No GC run recorded');
+      return;
+    }
+
+    const state = gc.state || 'unknown';
+    this.setRuntimeState('gc-state', state.replaceAll('_', ' '), state);
+    const details = [];
+    if (gc.phase)
+      details.push(gc.phase.replaceAll('_', ' '));
+    if (gc.overall_progress != null)
+      details.push(`${formatPercent(gc.overall_progress * 100)} complete`);
+    if (gc.eta_ms != null)
+      details.push(`ETA ${formatUptime(gc.eta_ms / 1000)}`);
+    details.push(`${formatBytes(gc.memory_reserved_bytes || 0)} memory`);
+    details.push(`${formatBytes(gc.scratch_used_bytes || 0)} scratch`);
+    if (gc.code)
+      details.push(gc.code);
+    if (gc.message)
+      details.push(gc.message);
+    this.setRuntimeDetail('gc-detail', details.join(', '));
   }
 
   setRuntimeState(id, value, state) {

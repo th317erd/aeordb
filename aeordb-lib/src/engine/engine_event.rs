@@ -173,6 +173,7 @@ pub const EVENT_FILES_SHARED: &str = "files_shared";
 pub const EVENT_METRICS: &str = "metrics";
 pub const EVENT_GC_STARTED: &str = "gc_started";
 pub const EVENT_GC_COMPLETED: &str = "gc_completed";
+pub const EVENT_GC_STATUS: &str = "gc_status";
 pub const EVENT_TASKS_CREATED: &str = "tasks_created";
 pub const EVENT_TASKS_STARTED: &str = "tasks_started";
 pub const EVENT_TASKS_COMPLETED: &str = "tasks_completed";

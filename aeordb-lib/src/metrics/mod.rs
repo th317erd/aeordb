@@ -7,6 +7,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::engine::storage_engine::EngineMemoryStats;
 use crate::engine::runtime_observability::RuntimeObservabilitySnapshot;
+use crate::engine::v4::gc_run::{GcRunInvocationV1, GcRunModeV1, GcRunPhaseV1, GcRunStateV1};
 
 static GLOBAL_HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -137,8 +138,68 @@ pub fn record_runtime_metrics(runtime: &RuntimeObservabilitySnapshot) {
   metrics::gauge!(definitions::DURABILITY_SPILL_COUNT).set(durability.spill.count as f64);
   metrics::gauge!(definitions::DURABILITY_SPILL_BYTES).set(durability.spill.total_bytes as f64);
   metrics::gauge!(definitions::DURABILITY_REPAIR_REQUIRED).set(bool_gauge(durability.repair.required));
+  record_gc_metrics(runtime.gc.as_ref());
   record_configuration_family("runtime", &runtime.configuration.runtime);
   record_configuration_family("lifecycle", &runtime.configuration.lifecycle);
+}
+
+fn record_gc_metrics(gc: Option<&crate::engine::GcRunStatusSnapshotV1>) {
+  let status = gc.map(|snapshot| &snapshot.status);
+  metrics::gauge!(definitions::GC_RUN_ACTIVE).set(bool_gauge(status.is_some_and(|status| status.state == GcRunStateV1::Running)));
+  metrics::gauge!(definitions::GC_RUN_PROGRESS_RATIO).set(status.map_or(f64::NAN, |status| status.overall_progress));
+  metrics::gauge!(definitions::GC_RUN_PHASE_PROGRESS_RATIO).set(status.map_or(f64::NAN, |status| status.phase_progress));
+  metrics::gauge!(definitions::GC_RUN_MEMORY_RESERVED_BYTES).set(status.map_or(f64::NAN, |status| status.memory_reserved_bytes as f64));
+  metrics::gauge!(definitions::GC_RUN_SCRATCH_USED_BYTES).set(status.map_or(f64::NAN, |status| status.scratch_used_bytes as f64));
+  metrics::gauge!(definitions::GC_RUN_MUTATION_JOURNAL_LAG).set(status.map_or(f64::NAN, |status| status.mutation_journal_lag as f64));
+  metrics::gauge!(definitions::GC_RUN_ETA_MS).set(status.and_then(|status| status.eta_ms).map_or(f64::NAN, |value| value as f64));
+  metrics::gauge!(definitions::GC_RUN_CHECKPOINT_AGE_MS)
+    .set(status.and_then(|status| status.checkpoint_age_ms).map_or(f64::NAN, |value| value as f64));
+
+  let current_state = status.map(|status| gc_state_name(status.state));
+  for state in ["running", "complete", "incomplete", "cancelled", "failed", "refused"] {
+    metrics::gauge!(definitions::GC_RUN_STATE, "state" => state).set(bool_gauge(current_state == Some(state)));
+  }
+  let current_phase = status.and_then(|status| status.phase).map(GcRunPhaseV1::name);
+  for phase in ["prepare", "inventory", "mark", "mutation_convergence", "finalize"] {
+    metrics::gauge!(definitions::GC_RUN_PHASE, "phase" => phase).set(bool_gauge(current_phase == Some(phase)));
+  }
+  let current_invocation = status.map(|status| gc_invocation_name(status.invocation));
+  for invocation in ["cli", "http", "task", "scheduled", "repair_follow_up", "embedded"] {
+    metrics::gauge!(definitions::GC_RUN_INVOCATION, "invocation" => invocation).set(bool_gauge(current_invocation == Some(invocation)));
+  }
+  let current_mode = status.map(|status| gc_mode_name(status.mode));
+  for mode in ["non_destructive_mark", "destructive"] {
+    metrics::gauge!(definitions::GC_RUN_MODE, "mode" => mode).set(bool_gauge(current_mode == Some(mode)));
+  }
+}
+
+fn gc_state_name(state: GcRunStateV1) -> &'static str {
+  match state {
+    GcRunStateV1::Running => "running",
+    GcRunStateV1::Complete => "complete",
+    GcRunStateV1::Incomplete => "incomplete",
+    GcRunStateV1::Cancelled => "cancelled",
+    GcRunStateV1::Failed => "failed",
+    GcRunStateV1::Refused => "refused",
+  }
+}
+
+fn gc_invocation_name(invocation: GcRunInvocationV1) -> &'static str {
+  match invocation {
+    GcRunInvocationV1::Cli => "cli",
+    GcRunInvocationV1::Http => "http",
+    GcRunInvocationV1::Task => "task",
+    GcRunInvocationV1::Scheduled => "scheduled",
+    GcRunInvocationV1::RepairFollowUp => "repair_follow_up",
+    GcRunInvocationV1::Embedded => "embedded",
+  }
+}
+
+fn gc_mode_name(mode: GcRunModeV1) -> &'static str {
+  match mode {
+    GcRunModeV1::NonDestructiveMark => "non_destructive_mark",
+    GcRunModeV1::Destructive => "destructive",
+  }
 }
 
 fn record_optional_gauge(name: &'static str, value: Option<u64>) {

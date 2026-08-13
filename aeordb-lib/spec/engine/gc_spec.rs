@@ -13,9 +13,25 @@ use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, Memor
 use aeordb::engine::storage_engine::WriteBatch;
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::version_manager::SnapshotInfo;
+use aeordb::engine::engine_event::{EngineEvent, EVENT_GC_COMPLETED, EVENT_GC_STARTED, EVENT_GC_STATUS};
 use aeordb::engine::{EngineError, EventBus};
 use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
+
+fn drain_events(receiver: &mut tokio::sync::broadcast::Receiver<EngineEvent>) -> Vec<EngineEvent> {
+  let mut events = Vec::new();
+  while let Ok(event) = receiver.try_recv() {
+    events.push(event);
+  }
+  events
+}
+
+fn assert_status_without_legacy_start(receiver: &mut tokio::sync::broadcast::Receiver<EngineEvent>, message: &str) {
+  let events = drain_events(receiver);
+  assert!(events.iter().any(|event| event.event_type == EVENT_GC_STATUS), "{message}: missing canonical GC status");
+  assert!(events.iter().all(|event| event.event_type != EVENT_GC_STARTED), "{message}: unexpectedly emitted gc_started");
+  assert!(events.iter().all(|event| event.event_type != EVENT_GC_COMPLETED), "{message}: unexpectedly emitted gc_completed");
+}
 
 // ─── In-place write infrastructure ──────────────────────────────────────────
 
@@ -33,7 +49,7 @@ fn test_gc_soft_pressure_defers_before_event_or_work() {
 
   let error = run_gc(&engine, &ctx, true).expect_err("soft pressure must defer GC before mark");
   assert!(matches!(error, EngineError::ResourceExhausted(_)));
-  assert!(events.try_recv().is_err(), "deferred GC must not emit a started event");
+  assert_status_without_legacy_start(&mut events, "deferred GC must stop before admission");
 
   let snapshot = coordinator.snapshot().unwrap();
   let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
@@ -56,7 +72,7 @@ fn test_gc_hard_pressure_rejects_before_event_or_work() {
 
   let error = run_gc(&engine, &ctx, true).expect_err("hard pressure must reject GC before mark");
   assert!(matches!(error, EngineError::ResourceExhausted(_)));
-  assert!(events.try_recv().is_err(), "rejected GC must not emit a started event");
+  assert_status_without_legacy_start(&mut events, "rejected GC must stop before admission");
 
   let snapshot = coordinator.snapshot().unwrap();
   let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
@@ -76,7 +92,7 @@ fn test_gc_pre_cancelled_run_stops_before_event_or_work() {
 
   let error = run_gc_with_cancellation(&engine, &ctx, true, &cancel).expect_err("cancelled GC must not begin mark work");
   assert!(matches!(error, EngineError::Cancelled(operation) if operation == "garbage collection"));
-  assert!(events.try_recv().is_err(), "cancelled GC must not emit a started event");
+  assert_status_without_legacy_start(&mut events, "pre-cancelled GC must stop before admission");
 
   let snapshot = engine.memory_coordinator().snapshot().unwrap();
   let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
@@ -104,7 +120,7 @@ fn test_gc_preflights_retained_workspace_from_kv_population() {
 
   let error = run_gc(&engine, &ctx, true).expect_err("GC must reserve its KV-scaled retained workspace before mark");
   assert!(matches!(error, EngineError::ResourceExhausted(_)));
-  assert!(events.try_recv().is_err(), "workspace refusal must happen before the GC started event");
+  assert_status_without_legacy_start(&mut events, "workspace refusal must happen before admission");
 
   let snapshot = coordinator.snapshot().unwrap();
   let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
@@ -127,8 +143,12 @@ fn test_gc_cancels_cooperatively_after_started_event_during_mark() {
   let watcher_cancel = cancel.clone();
   let watcher = std::thread::spawn(move || {
     let mut events = events;
-    let started = events.blocking_recv().expect("GC must emit its started event");
-    assert_eq!(started.event_type, aeordb::engine::engine_event::EVENT_GC_STARTED);
+    loop {
+      let event = events.blocking_recv().expect("GC must emit its started event");
+      if event.event_type == EVENT_GC_STARTED {
+        break;
+      }
+    }
     watcher_cancel.cancel();
     events
   });
@@ -136,7 +156,10 @@ fn test_gc_cancels_cooperatively_after_started_event_during_mark() {
   let error = run_gc_with_cancellation(&engine, &ctx, true, &cancel).expect_err("GC must stop at a bounded mark cancellation point");
   assert!(matches!(error, EngineError::Cancelled(operation) if operation == "garbage collection"));
   let mut events = watcher.join().unwrap();
-  assert!(events.try_recv().is_err(), "cancelled dry-run GC must not emit a completed event");
+  assert!(
+    drain_events(&mut events).iter().all(|event| event.event_type != EVENT_GC_COMPLETED),
+    "cancelled dry-run GC must not emit a completed event"
+  );
 
   let snapshot = engine.memory_coordinator().snapshot().unwrap();
   let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
@@ -161,9 +184,9 @@ fn test_gc_new_host_pressure_after_start_defers_at_the_next_safe_point() {
   .expect_err("GC must pause when host pressure rises after initial admission");
   assert!(matches!(error, EngineError::ResourceExhausted(_)));
 
-  let started = events.try_recv().expect("GC crossed admission and must report that it started");
-  assert_eq!(started.event_type, aeordb::engine::engine_event::EVENT_GC_STARTED);
-  assert!(events.try_recv().is_err(), "deferred GC must not report completion");
+  let events = drain_events(&mut events);
+  assert!(events.iter().any(|event| event.event_type == EVENT_GC_STARTED), "GC crossed admission and must report that it started");
+  assert!(events.iter().all(|event| event.event_type != EVENT_GC_COMPLETED), "deferred GC must not report completion");
   let snapshot = engine.memory_coordinator().snapshot().unwrap();
   let owner = snapshot.owner(MemoryOwner::GarbageCollection).unwrap();
   assert!(owner.deferrals >= 1);
@@ -190,8 +213,8 @@ fn test_gc_run_keeps_the_policy_generation_captured_before_start() {
   })
   .unwrap();
 
-  let started = events.try_recv().expect("GC must emit a started event");
-  assert_eq!(started.event_type, aeordb::engine::engine_event::EVENT_GC_STARTED);
+  let events = drain_events(&mut events);
+  let started = events.iter().find(|event| event.event_type == EVENT_GC_STARTED).expect("GC must emit a started event");
   assert_eq!(started.payload["configuration_generation"], captured_generation);
   assert!(engine.configuration_snapshot().generation > captured_generation);
 }

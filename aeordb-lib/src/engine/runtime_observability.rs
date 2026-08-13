@@ -13,6 +13,8 @@ pub struct RuntimeObservabilitySnapshot {
   pub memory: EngineMemoryStats,
   pub durability: DurabilityObservabilitySnapshot,
   pub configuration: ConfigurationObservabilitySnapshot,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub gc: Option<crate::engine::gc_run_status::GcRunStatusSnapshotV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +97,7 @@ pub fn collect_runtime_observability(
       runtime: configuration_envelope(&configuration, ConfigurationFamily::Runtime, visibility),
       lifecycle: configuration_envelope(&configuration, ConfigurationFamily::Lifecycle, visibility),
     },
+    gc: (visibility == ConfigurationVisibility::Root).then(|| engine.gc_run_status()).flatten(),
   })
 }
 

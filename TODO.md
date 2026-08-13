@@ -785,7 +785,10 @@
           - [x] P4-8c1: place the legacy-v3 collector behind the shared five-phase executor through a sealed compatibility admission while preserving the public v4 destructive refusal.
           - [x] P4-8c2: carry explicit invocation provenance from CLI, synchronous HTTP, queued tasks, scheduled cadence, repair follow-up, and embedded callers into one run request/context.
           - [x] P4-8c3: prove shared cancellation, error classification, response compatibility, legacy task decoding, and architecture closure with no direct production traversal bypass.
-        - [ ] P4-8d: project one run status into tasks, health, metrics, SSE, Dashboard, and operations/API documentation with root-only disclosure.
+        - [x] P4-8d: project one run status into tasks, health, metrics, SSE, Dashboard, and operations/API documentation with root-only disclosure.
+          - [x] P4-8d1: add one bounded engine-owned GC status registry and mandatory projection sink for every shared-executor doorway, with task binding, deterministic concurrent-run ordering, terminal retention, and structured transition logs.
+          - [x] P4-8d2: project the same root-only status through task inspection, authenticated stats health, Prometheus gauges, immediate `gc_status` SSE, and periodic metrics SSE while preserving the minimal public health response and omitting status from non-root stats.
+          - [x] P4-8d3: render live/terminal GC state on the Dashboard, update operations/API/events/task/CLI documentation, and close focused, architecture, broad, real-server, browser, and contract gates.
         - [ ] P4-8e: complete bounded non-destructive resource, corruption, cancellation, concurrent-load, real-world, soak, and native-platform qualification.
       - [ ] P4-9: retain the destructive activation gate until an explicitly approved rehearsal and operator decision.
     - [ ] P5: implement immutable index definitions, ordered pages, catalogs, sparse fixed-point NVT, compaction, and corruption fallback; eliminate v0 whole-index publication amplification when the active set exceeds the clean-cache cap.
