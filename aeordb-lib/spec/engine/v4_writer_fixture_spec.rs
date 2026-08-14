@@ -409,7 +409,10 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
   assert_eq!(index_page.matches("pub fn encode_artifact_directory(").count(), 1);
   assert_eq!(index_page.matches("pub fn encode_ordered_page(").count(), 1);
   assert_eq!(index_page.matches("pub fn encode_posting_record(").count(), 1);
-  assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 4);
+  let index_nvt = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/index_nvt.rs")).unwrap();
+  assert_eq!(index_nvt.matches("encode_immutable_index_artifact(").count(), 1);
+  assert_eq!(index_nvt.matches("pub fn encode_nvt_tile(").count(), 1);
+  assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 5);
   assert_eq!(production_sources.matches("pub fn encode_index_manifest(").count(), 1);
   let expected_gc_writer_surface = [
     ("gc.rs", 1),
