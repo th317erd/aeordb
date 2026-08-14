@@ -1057,6 +1057,10 @@ name = "index_semantic_source_spec"
 path = "spec/engine/index_semantic_source_spec.rs"
 
 [[test]]
+name = "index_scope_ordinal_authority_spec"
+path = "spec/engine/index_scope_ordinal_authority_spec.rs"
+
+[[test]]
 name = "index_producer_worker_spec"
 path = "spec/engine/index_producer_worker_spec.rs"
 

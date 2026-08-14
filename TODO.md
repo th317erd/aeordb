@@ -890,6 +890,8 @@
               - [x] Share one exact direct-child/glob scope-membership implementation between semantic resolution and collection.
               - [x] Traverse immutable semantic catalogs in bounded passes and retain only the applicable scope, value-store, and field-index definitions.
               - [ ] Resolve every applicable scope through one typed, retry-stable, non-reusing scope-ordinal claim authority.
+                - [x] Freeze and prove the exact durable selected-state CAS contract, transition fingerprint, conflict retry, and failure taxonomy.
+                - [ ] Bind that contract to selector-last checkpoint persistence and selected scope-manifest/reverse-directory reads.
               - [x] Prove malformed closure, count/depth/prefix disagreement, cancellation, memory pressure, ordinal retry/move/delete/recreate, and aggregate-limit behavior.
             - [ ] Activate the worker behind one recovered runtime owner, retaining legacy query-visible indexing until immutable shadow cutover.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
