@@ -853,7 +853,7 @@
         - [x] P5-5f: run narrow, affected, broad, static, architecture, native-platform, and shadow real-world COW gates; record evidence and land the unit.
       - [ ] P5-6: implement sparse fixed-point NVT tiles, fallback, and best-effort healing.
         - [x] P5-6a: add one bounded typed NVT tile writer and deterministic sparse builder from validated Posting-page summaries at fixed-point coordinates.
-        - [ ] P5-6b: validate FieldNvt-to-FieldIndex basis closure, scan exact/predecessor cells across sparse prior tiles, validate hinted PageIds through pinned Posting directories, and fall back to exact directory predecessor search.
+        - [x] P5-6b: validate FieldNvt-to-FieldIndex basis closure, scan exact/predecessor cells across sparse prior tiles, validate hinted PageIds through pinned Posting directories, and fall back to exact directory predecessor search.
         - [ ] P5-6c: emit bounded best-effort healing proposals from exact fallback results without blocking, publishing, or changing the current lookup decision.
         - [ ] P5-6d: prove absent/stale/corrupt/resized/gapped NVT equivalence, malformed directory/page failure direction, resource bounds, deterministic randomized lookup/build behavior, native platforms, and shadow real-world use.
       - [ ] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.
