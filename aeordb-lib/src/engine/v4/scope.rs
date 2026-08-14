@@ -1,4 +1,5 @@
 use crate::engine::HashAlgorithm;
+use crate::engine::path_utils::{glob_matches, parent_path};
 
 use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
@@ -100,6 +101,24 @@ pub fn decode_scope_definition(value: &[u8], hash_algorithm: HashAlgorithm) -> F
 
   let scope_id = digest_parts(hash_algorithm, &[b"aeordb.index.scope-definition.v1\0", value]);
   Ok(ScopeDefinitionV1 { scope_id, mode, owner_path, glob })
+}
+
+pub fn scope_matches_path(scope: &ScopeDefinitionV1<'_>, path: &str) -> FormatResult<bool> {
+  validate_canonical_absolute_path(path)?;
+  match scope.mode {
+    ScopeMatchingMode::DirectChildren => Ok(parent_path(path).as_deref() == Some(scope.owner_path)),
+    ScopeMatchingMode::RelativePathGlob => {
+      let glob = scope.glob.ok_or_else(|| {
+        error(MalformedInputClass::CrossRecordClosureMismatch, "scope_glob_missing", "relative-glob scope has no decoded glob")
+      })?;
+      let relative = if scope.owner_path == "/" {
+        path.strip_prefix('/')
+      } else {
+        path.strip_prefix(scope.owner_path).and_then(|suffix| suffix.strip_prefix('/'))
+      };
+      Ok(relative.is_some_and(|relative| glob_matches(glob, relative)))
+    }
+  }
 }
 
 pub(crate) fn validate_canonical_absolute_path(path: &str) -> FormatResult<()> {

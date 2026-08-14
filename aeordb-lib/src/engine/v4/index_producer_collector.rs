@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::engine::HashAlgorithm;
 use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
-use crate::engine::path_utils::{glob_matches, normalize_path, parent_path};
+use crate::engine::path_utils::normalize_path;
 
 use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value, encode_canonical_value};
 use super::contract_generated::stable_reason_v1;
@@ -27,7 +27,7 @@ use super::index_source::{
   ValueStoreRuntimeV1,
 };
 use super::parser_plan::{ParserPlanKind, ParserResolutionPlanV1};
-use super::scope::{ScopeDefinitionV1, ScopeMatchingMode, decode_scope_definition};
+use super::scope::{ScopeDefinitionV1, decode_scope_definition, scope_matches_path};
 use super::source_selector::SourceSelectorKind;
 use super::value_store::{ValueStoreDefinitionV1, decode_value_store_definition};
 
@@ -1129,19 +1129,9 @@ fn checked_encoded_length(base: usize, variable: usize, label: &'static str) -> 
 }
 
 fn scope_matches(scope: &ScopeDefinitionV1<'_>, path: &str) -> Result<bool, IndexProducerCollectorErrorV1> {
-  match scope.mode {
-    ScopeMatchingMode::DirectChildren => Ok(parent_path(path).as_deref() == Some(scope.owner_path)),
-    ScopeMatchingMode::RelativePathGlob => {
-      let glob =
-        scope.glob.ok_or_else(|| IndexProducerCollectorErrorV1::InvalidRequest("relative scope has no decoded glob".to_string()))?;
-      let relative = if scope.owner_path == "/" {
-        path.strip_prefix('/')
-      } else {
-        path.strip_prefix(scope.owner_path).and_then(|suffix| suffix.strip_prefix('/'))
-      };
-      Ok(relative.is_some_and(|relative| glob_matches(glob, relative)))
-    }
-  }
+  scope_matches_path(scope, path).map_err(|error| {
+    IndexProducerCollectorErrorV1::InvalidRequest(format!("scope membership failed ({}): {}", error.code(), error.context()))
+  })
 }
 
 fn source_disposition(

@@ -887,7 +887,7 @@
               - [x] Expose borrowed typed definition and catalog-node views over the frozen SemanticObjectV1 bytes without materializing a second record/child vector.
               - [x] Retain one Task memory reservation across semantic catalog traversal, definition loading, ordinal resolution, and worker consumption.
               - [x] Bind semantic scope reads to the exact producer operation ID and cooperative cancellation callback.
-              - [ ] Share one exact direct-child/glob scope-membership implementation between semantic resolution and collection.
+              - [x] Share one exact direct-child/glob scope-membership implementation between semantic resolution and collection.
               - [ ] Traverse immutable semantic catalogs in bounded passes and load only the applicable scope, value-store, and field-index definitions.
               - [ ] Resolve every applicable scope through one typed, retry-stable, non-reusing scope-ordinal claim authority.
               - [ ] Prove malformed closure, count/depth/prefix disagreement, cancellation, memory pressure, ordinal retry/move/delete/recreate, and aggregate-limit behavior.

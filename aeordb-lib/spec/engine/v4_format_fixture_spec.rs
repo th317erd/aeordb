@@ -39,7 +39,7 @@ use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, d
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
 use aeordb::engine::v4::position::{PositionContextV1, PositionRouteV1, decode_logical_position, validate_position_context};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
-use aeordb::engine::v4::scope::{ScopeMatchingMode, decode_scope_definition};
+use aeordb::engine::v4::scope::{ScopeDefinitionV1, ScopeMatchingMode, decode_scope_definition, scope_matches_path};
 use aeordb::engine::v4::source_selector::{SourceSelectorKind, decode_source_selector};
 use aeordb::engine::v4::system_control::{
   SystemControlKindV1, SystemControlSlotV1, decode_system_control, select_cutover_journal, select_system_control_pair,
@@ -257,6 +257,31 @@ fn every_scope_definition_fixture_matches_the_independent_oracle() {
     assert_eq!(observed, row.expected, "fixture {}", row.id);
     assert_eq!(hex::encode(scope.scope_id), row.canonical_key.unwrap(), "fixture {}", row.id);
   }
+}
+
+#[test]
+fn scope_membership_is_exact_for_direct_children_relative_globs_and_owner_boundaries() {
+  let direct = ScopeDefinitionV1 { scope_id: vec![1; 32], mode: ScopeMatchingMode::DirectChildren, owner_path: "/docs", glob: None };
+  assert!(scope_matches_path(&direct, "/docs/readme.md").unwrap());
+  assert!(!scope_matches_path(&direct, "/docs/api/readme.md").unwrap());
+  assert!(!scope_matches_path(&direct, "/docs2/readme.md").unwrap());
+  assert!(!scope_matches_path(&direct, "/docs").unwrap());
+
+  let root = ScopeDefinitionV1 { scope_id: vec![2; 32], mode: ScopeMatchingMode::DirectChildren, owner_path: "/", glob: None };
+  assert!(scope_matches_path(&root, "/readme.md").unwrap());
+  assert!(!scope_matches_path(&root, "/docs/readme.md").unwrap());
+
+  let glob =
+    ScopeDefinitionV1 { scope_id: vec![3; 32], mode: ScopeMatchingMode::RelativePathGlob, owner_path: "/docs", glob: Some("**/*.md") };
+  assert!(scope_matches_path(&glob, "/docs/readme.md").unwrap());
+  assert!(scope_matches_path(&glob, "/docs/api/readme.md").unwrap());
+  assert!(!scope_matches_path(&glob, "/docs/api/schema.json").unwrap());
+  assert!(!scope_matches_path(&glob, "/docs2/readme.md").unwrap());
+  assert_eq!(scope_matches_path(&glob, "/docs//readme.md").unwrap_err().code(), "scope_owner_noncanonical");
+
+  let malformed = ScopeDefinitionV1 { scope_id: vec![4; 32], mode: ScopeMatchingMode::RelativePathGlob, owner_path: "/", glob: None };
+  let error = scope_matches_path(&malformed, "/readme.md").unwrap_err();
+  assert_eq!(error.code(), "scope_glob_missing");
 }
 
 #[test]
