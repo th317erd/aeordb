@@ -879,6 +879,11 @@
           - [x] P6-2b-c: implement bounded restart replay with explicit missing, corrupt, discontinuous, cancellation, and store-failure outcomes.
           - [x] P6-2b-d: qualify crash boundaries, idempotence, stale selection, resource pressure, activation isolation, and broad regressions.
         - [ ] P6-2c: route parser/mapper/converter and every legacy/v1 index mutation through one coordinator task path with bounded retry, spill, and per-index degraded outcomes.
+          - [x] P6-2c-a: freeze a body-free, exact-root/journal-referenced producer task contract with bounded shared-memory admission, canonical leases, cancellation, retry, and spill.
+          - [x] P6-2c-b: freeze typed per-owner ready, deterministic-unindexable, retryable, and degraded outcomes (including independent field-index degradation) and feed every emitted ordered record through `IndexCoordinatorV1`.
+          - [ ] P6-2c-c: refactor parser/mapper/config resolution into a collector executed only by the coordinator task owner; remove synchronous pipeline work from directory post-commit fanout.
+          - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
+          - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.

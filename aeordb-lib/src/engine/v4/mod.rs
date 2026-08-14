@@ -55,6 +55,7 @@ pub mod index_definition_runtime;
 pub mod index_manifest;
 pub mod index_nvt;
 pub mod index_page;
+pub mod index_producer_coordinator;
 pub mod index_record;
 pub mod index_semantic_registry;
 pub mod index_source;

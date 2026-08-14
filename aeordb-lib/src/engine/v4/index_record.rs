@@ -293,7 +293,7 @@ pub(crate) fn decode_document_state_record_prefix(
 }
 
 fn validate_state(owner: DocumentStateOwnerV1, stage: u8, reason: u16, evidence: &[u8]) -> FormatResult<()> {
-  if !valid_state_reason(owner, stage, reason) {
+  if !is_valid_document_state_class(owner, stage, reason) {
     return Err(closure_error("document state stage and reason are not a legal pair for its owner"));
   }
   if evidence.is_empty() {
@@ -308,7 +308,7 @@ fn validate_state(owner: DocumentStateOwnerV1, stage: u8, reason: u16, evidence:
   validate_canonical_value(evidence, CanonicalValueBounds::CONFIG).map(|_| ())
 }
 
-fn valid_state_reason(owner: DocumentStateOwnerV1, stage: u8, reason: u16) -> bool {
+pub(crate) fn is_valid_document_state_class(owner: DocumentStateOwnerV1, stage: u8, reason: u16) -> bool {
   match owner {
     DocumentStateOwnerV1::ValueStore => {
       matches!((stage, reason), (1, 0x0001..=0x0003) | (2, 0x0005..=0x0008) | (3, 0x0002 | 0x0004 | 0x0007 | 0x0008) | (4, 0x0007..=0x000b))
