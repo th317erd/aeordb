@@ -1796,7 +1796,7 @@ fn typed_manifest_chain_requires_exact_references_coverage_and_semantic_owners()
     let IndexManifestBodyV1::FieldIndex(changed_field) = &mut changed_details else {
       panic!("fixture is a field manifest");
     };
-    changed_field.coverage.runtime_sequence = changed_field.coverage.runtime_sequence.checked_add(1).unwrap();
+    changed_field.coverage.coverage_publication_sequence = changed_field.coverage.coverage_publication_sequence.checked_add(1).unwrap();
     let changed = encode_index_manifest(&IndexManifestWriteV1 {
       hash_algorithm,
       generation: field_populated.generation,

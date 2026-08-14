@@ -419,7 +419,7 @@ fn persist_fixture_generation(hash_algorithm: HashAlgorithm) -> StoredShadowGene
   let IndexManifestBodyV1::FieldIndex(field_fixture_body) = field_fixture.details else {
     panic!("populated FieldIndex fixture decoded as another manifest kind");
   };
-  let field_source_head = field_fixture_body.coverage.source_head_hash.to_vec();
+  let field_source_head = field_fixture_body.coverage.source_namespace_root.to_vec();
   assert_eq!(field_fixture.owner_id, posting_root.owner_id);
   let field = encode_index_manifest(&IndexManifestWriteV1 {
     hash_algorithm,

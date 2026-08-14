@@ -13,9 +13,9 @@ const FIELD_INDEX_DEFINITION_CAP: usize = 256 * 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageVersionV1<'a> {
-  pub source_head_hash: &'a [u8],
-  pub runtime_boot_id: &'a [u8],
-  pub runtime_sequence: u64,
+  pub source_namespace_root: &'a [u8],
+  pub coverage_epoch_id: &'a [u8],
+  pub coverage_publication_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,14 +563,14 @@ fn decode_correctness_prefix<'a>(
   if definition_end != body.len() {
     return Err(truncated_error("embedded definition does not consume the manifest body"));
   }
-  let source_head_hash = &body[40..40 + hash_width];
-  let runtime_boot_id = &body[40 + hash_width..56 + hash_width];
-  if source_head_hash.iter().all(|byte| *byte == 0) || runtime_boot_id.iter().all(|byte| *byte == 0) {
-    return Err(identity_error("manifest coverage root or runtime boot ID is zero"));
+  let source_namespace_root = &body[40..40 + hash_width];
+  let coverage_epoch_id = &body[40 + hash_width..56 + hash_width];
+  if source_namespace_root.iter().all(|byte| *byte == 0) || coverage_epoch_id.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("manifest coverage namespace root or epoch ID is zero"));
   }
   Ok((
     required_reader_capabilities,
-    CoverageVersionV1 { source_head_hash, runtime_boot_id, runtime_sequence: u64_at(body, 56 + hash_width)? },
+    CoverageVersionV1 { source_namespace_root, coverage_epoch_id, coverage_publication_sequence: u64_at(body, 56 + hash_width)? },
     &body[definition_start..definition_end],
   ))
 }
@@ -583,16 +583,16 @@ fn encode_correctness_prefix(
   hash_algorithm: HashAlgorithm,
 ) -> FormatResult<()> {
   validate_capabilities(capabilities)?;
-  validate_hash(coverage.source_head_hash, hash_algorithm, "manifest source root")?;
-  if coverage.runtime_boot_id.len() != 16 || coverage.runtime_boot_id.iter().all(|byte| *byte == 0) {
-    return Err(identity_error("manifest runtime boot ID has the wrong width or is zero"));
+  validate_hash(coverage.source_namespace_root, hash_algorithm, "manifest source namespace root")?;
+  if coverage.coverage_epoch_id.len() != 16 || coverage.coverage_epoch_id.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("manifest coverage epoch ID has the wrong width or is zero"));
   }
   encoded[4..36].copy_from_slice(capabilities);
   write_u32(encoded, 36, checked_u32(definition.len(), "manifest definition length")?)?;
   let hash_width = hash_algorithm.hash_length();
-  encoded[40..40 + hash_width].copy_from_slice(coverage.source_head_hash);
-  encoded[40 + hash_width..56 + hash_width].copy_from_slice(coverage.runtime_boot_id);
-  write_u64(encoded, 56 + hash_width, coverage.runtime_sequence)
+  encoded[40..40 + hash_width].copy_from_slice(coverage.source_namespace_root);
+  encoded[40 + hash_width..56 + hash_width].copy_from_slice(coverage.coverage_epoch_id);
+  write_u64(encoded, 56 + hash_width, coverage.coverage_publication_sequence)
 }
 
 fn decode_capabilities(value: &[u8]) -> FormatResult<[u8; CAPABILITY_WIDTH]> {

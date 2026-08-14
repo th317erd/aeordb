@@ -526,7 +526,7 @@ pub fn pin_field_index_v1(value: &[u8], hash_algorithm: HashAlgorithm) -> Format
     manifest_key: manifest.key,
     owner_id: manifest.owner_id,
     generation: manifest.generation,
-    source_head_hash: body.coverage.source_head_hash,
+    source_head_hash: body.coverage.source_namespace_root,
     posting_directory_root: body.posting_directory_root,
     first_page_id: body.first_page_id,
     last_page_id: body.last_page_id,

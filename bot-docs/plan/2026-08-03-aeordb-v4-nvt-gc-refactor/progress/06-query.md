@@ -1,17 +1,20 @@
 # Child 06 Progress: Query
 
-- **Status:** blocked by start gate
+- **Status:** active; P6-1a green, P6-1b next
 - **Current landing unit:** P6-1
-- **Entry commit:** pending Children 03 and 05
-- **Last green commit:** not established
-- **Owner:** unassigned
-- **Start gate:** P6 requires Children 03/05; P7 also requires Child 04 root state
+- **Entry commit:** `a337b08` (`test: qualify v1 shadow index generation`)
+- **Last green commit:** `a337b08`
+- **Owner:** current Codex thread; serialized ownership of namespace fanout, v4 coverage runtime, and shared test manifest
+- **Start gate:** satisfied: Children 03 and 05 are complete; Child 04 root-state APIs are complete for the later P7 gate
 - **Plan:** [Child 06](../children/06-async-coverage-query-pagination-and-locators.md)
-- **Owned files:** assign before start
-- **Forbidden/hotspot files:** assign before start
-- **Hotspot handoff commit:** none
-- **Narrow gate:** `timeout 15m cargo test -j 6 -p aeordb --test coverage_runtime_spec`
-- **Broad gate:** not run
-- **Drift/risks:** coordinated API/client cutover required
-- **Evidence:** none
-- **Next action:** wait for start gate and assign runtime/query owners
+- **Owned files:** `aeordb-lib/src/engine/v4/coverage_runtime.rs` (new), `aeordb-lib/src/engine/v4/mod.rs`, `aeordb-lib/src/engine/namespace_mutation.rs`, `aeordb-lib/src/engine/storage_engine.rs`, `aeordb-lib/spec/engine/coverage_runtime_spec.rs` (new), `aeordb-lib/Cargo.toml`, this progress ledger, and the P6/P7 section of `TODO.md`
+- **Forbidden/hotspot files:** v4 persistent format bytes, namespace/root authority semantics, live v3 index replacement, query/API/UI/SSE cutover before its P7 landing unit, deployment, production databases, unrelated user files
+- **Hotspot handoff commit:** `a337b08` from Child 05
+- **Narrow gate:** `timeout 15m cargo test -j 4 -p aeordb --test coverage_runtime_spec -- --test-threads=4`
+- **Broad gate:** `cargo test -j4 --workspace --all-targets -- --test-threads=4` passed at the P6-1a boundary
+- **Drift/risks:** post-commit callbacks can arrive out of publication order; route-specific fanouts currently coexist with no-op constructors; acknowledgements may carry large batches; any blocking clone, lock, sync, parser, or index work would violate the acknowledgement contract; queue loss must become an explicit reconciliation requirement; coordinated API/client cutover remains deferred to P7
+- **Ratification:** on 2026-08-13 the operator ratified the remaining campaign decisions and the documented recommendations; implementation remains authorized, while deployment and destructive production activation remain unauthorized
+- **Territory:** the completed Child 03 `NamespaceMutationCoordinator` is the sole hard-authority commit owner. Directory and version producers attach caller-specific post-commit effect fanouts; import attaches an event fanout; task queue, backup locator/import apply, server promote, CLI promote, and root wrappers use the no-op fanout. The engine currently has no engine-owned recoverable-soft subscriber. Synchronous legacy indexing still exists after selected file writes and before their caller returns; its replacement belongs to P6-2/P6-4. P5 provides disconnected typed mutation/checkpoint/artifact codecs but no runtime owner.
+- **P6-1 proof shape:** add the required target compile-red first; compare a storage-neutral production state machine to an independent ordered-map model; cover in-order, duplicate, reordered, missing, overflow, restart, identity mismatch, whole-root, cancellation, and malformed boundary behavior before connecting the engine seam
+- **Evidence:** the P6 entry baseline passed 104 namespace/tree/index tests. The new `coverage_runtime_spec` first failed to compile because the runtime module and ratified coverage names did not exist. The storage-neutral tracker now requires exact namespace/control authority continuity, accepts unrelated global publication-sequence gaps, treats exact duplicate delivery as idempotent, and latches every loss, reorder, stale, conflicting-duplicate, or authority-discontinuity case for reconciliation. Manifest coverage fields now use portable epoch/publication terminology without changing bytes. The focused target passed 7 tests; the affected v4 format/index matrix passed 174 tests; `cargo check -j4 --workspace --all-targets`, formatting, `git diff --check`, and the complete all-target workspace test gauntlet all passed. One initial affected-matrix command named the nonexistent `index_v1_manifest_spec` target and was corrected before tests ran.
+- **Next action:** implement P6-1b test-first: add one engine-owned bounded, non-blocking post-commit handoff at `NamespaceMutationCoordinator`, preserve every caller-specific fanout, and prove queue pressure/oversize/contention can only latch reconciliation rather than delay or fail hard acknowledgement.
