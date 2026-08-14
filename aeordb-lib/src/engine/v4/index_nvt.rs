@@ -19,6 +19,8 @@ const ENTRY_LENGTH: usize = 40;
 const MAX_INDEX_PATH_ARTIFACT_LENGTH: usize = 4 * 1_024 * 1_024;
 const MAX_NVT_LOOKUP_TILE_CANDIDATES: usize = 16;
 const MAX_NVT_LOOKUP_INPUT_BYTES: usize = 64 * 1_024 * 1_024;
+const MAX_NVT_HEALING_PROPOSAL_BYTES: usize = 4 * 1_024;
+const NVT_HEALING_PROPOSAL_FIXED_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NvtEntryWriteV1 {
@@ -119,6 +121,7 @@ pub struct PinnedFieldNvtV1<'a> {
   pub resolution: u64,
   pub tile_cells: u32,
   pub basis_posting_generation: u64,
+  pub basis_source_head_hash: &'a [u8],
   pub tile_directory_root: Option<&'a [u8]>,
   pub tile_count: u64,
   pub populated_cell_count: u64,
@@ -132,6 +135,7 @@ pub enum NvtFallbackReasonV1 {
   IncompatibleOwner,
   StalePostingGeneration,
   StaleSourceHead,
+  StalePageHint,
   MissingPredecessor,
   ResourceLimit,
 }
@@ -166,6 +170,74 @@ pub struct PostingPageAnchorV1 {
   pub page_id: u64,
   pub generation: u64,
   pub page_artifact_hash: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NvtHealingLimitsV1 {
+  pub maximum_proposal_bytes: usize,
+}
+
+pub const fn default_nvt_healing_limits_v1() -> NvtHealingLimitsV1 {
+  NvtHealingLimitsV1 { maximum_proposal_bytes: 512 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NvtHealingDiagnosticV1 {
+  pub class: MalformedInputClass,
+  pub code: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NvtHealingProposalV1 {
+  pub field_index_manifest_key: Vec<u8>,
+  pub observed_nvt_manifest_key: Option<Vec<u8>>,
+  pub owner_id: Vec<u8>,
+  pub posting_generation: u64,
+  pub source_head_hash: Vec<u8>,
+  pub target_coordinate: u64,
+  pub exact_page_id: u64,
+  pub exact_page_generation: u64,
+  pub exact_page_artifact_hash: Vec<u8>,
+  pub reason: NvtFallbackReasonV1,
+  pub diagnostic: Option<NvtHealingDiagnosticV1>,
+  pub retained_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NvtHealingDispositionV1 {
+  NotNeeded,
+  Proposed(NvtHealingProposalV1),
+  Skipped(FormatError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NvtLookupSourceV1 {
+  Hint,
+  ExactFallback,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum NvtLookupAttemptV1<'a> {
+  Hint { basis: &'a PinnedFieldNvtV1<'a>, hint: NvtPageHintV1, posting_path: Option<&'a ImmutableIndexPathV1<'a>> },
+  Fallback { basis: Option<&'a PinnedFieldNvtV1<'a>>, cause: &'a NvtFallbackV1 },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NvtLookupRequestV1<'a> {
+  pub field: &'a PinnedFieldIndexV1<'a>,
+  pub target_coordinate: u64,
+  pub target_posting_position: &'a [u8],
+  pub attempt: NvtLookupAttemptV1<'a>,
+  pub exact_posting_path: Option<&'a ImmutableIndexPathV1<'a>>,
+  pub lookup_limits: SparseNvtLookupLimitsV1,
+  pub healing_limits: NvtHealingLimitsV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NvtLookupResolutionV1 {
+  pub anchor: Option<PostingPageAnchorV1>,
+  pub source: NvtLookupSourceV1,
+  pub healing: NvtHealingDispositionV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +569,7 @@ pub fn validate_field_nvt_basis_v1<'a>(field: &PinnedFieldIndexV1<'_>, value: Op
     resolution: body.resolution,
     tile_cells: body.tile_cells,
     basis_posting_generation: body.basis_posting_generation,
+    basis_source_head_hash: body.basis_source_head_hash,
     tile_directory_root: body.tile_directory_root,
     tile_count: body.tile_count,
     populated_cell_count: body.populated_cell_count,
@@ -612,6 +685,139 @@ pub fn exact_posting_predecessor_v1(
   let page = decode_ordered_page(path.leaf, field.hash_algorithm)?;
   validate_posting_page_closure(field, &descriptor, &page)?;
   Ok(Some(PostingPageAnchorV1 { page_id: page.page_id, generation: page.generation, page_artifact_hash: page.key }))
+}
+
+pub fn resolve_nvt_lookup_v1(request: &NvtLookupRequestV1<'_>) -> FormatResult<NvtLookupResolutionV1> {
+  match request.attempt {
+    NvtLookupAttemptV1::Hint { basis, hint, posting_path } => {
+      if let Some(cause) = incompatible_pinned_basis(request.field, basis) {
+        return resolve_exact_nvt_fallback(request, Some(basis), &cause);
+      }
+      if nvt_hint_matches_target(basis, request.target_coordinate, hint) {
+        if let Some(anchor) =
+          validate_nvt_page_hint_v1(request.field, request.target_posting_position, hint.page_id, posting_path, request.lookup_limits)?
+        {
+          return Ok(NvtLookupResolutionV1 {
+            anchor: Some(anchor),
+            source: NvtLookupSourceV1::Hint,
+            healing: NvtHealingDispositionV1::NotNeeded,
+          });
+        }
+      }
+      let cause = NvtFallbackV1 { reason: NvtFallbackReasonV1::StalePageHint, diagnostic: None };
+      resolve_exact_nvt_fallback(request, Some(basis), &cause)
+    }
+    NvtLookupAttemptV1::Fallback { basis, cause } => resolve_exact_nvt_fallback(request, basis, cause),
+  }
+}
+
+fn resolve_exact_nvt_fallback(
+  request: &NvtLookupRequestV1<'_>,
+  basis: Option<&PinnedFieldNvtV1<'_>>,
+  cause: &NvtFallbackV1,
+) -> FormatResult<NvtLookupResolutionV1> {
+  let anchor =
+    exact_posting_predecessor_v1(request.field, request.target_posting_position, request.exact_posting_path, request.lookup_limits)?;
+  let compatible_basis = basis.filter(|basis| incompatible_pinned_basis(request.field, basis).is_none());
+  let healing = if anchor.is_none() {
+    NvtHealingDispositionV1::NotNeeded
+  } else if cause.reason == NvtFallbackReasonV1::ResourceLimit {
+    NvtHealingDispositionV1::Skipped(lookup_amplification_error("resource-limited NVT evidence is not a repair signal"))
+  } else if let Some(anchor) = anchor.as_ref() {
+    match build_nvt_healing_proposal(request, compatible_basis, cause, anchor) {
+      Ok(proposal) => NvtHealingDispositionV1::Proposed(proposal),
+      Err(error) => NvtHealingDispositionV1::Skipped(error),
+    }
+  } else {
+    NvtHealingDispositionV1::NotNeeded
+  };
+  Ok(NvtLookupResolutionV1 { anchor, source: NvtLookupSourceV1::ExactFallback, healing })
+}
+
+fn incompatible_pinned_basis(field: &PinnedFieldIndexV1<'_>, basis: &PinnedFieldNvtV1<'_>) -> Option<NvtFallbackV1> {
+  let reason = if basis.hash_algorithm != field.hash_algorithm || basis.owner_id != field.owner_id {
+    NvtFallbackReasonV1::IncompatibleOwner
+  } else if basis.basis_posting_generation != field.generation {
+    NvtFallbackReasonV1::StalePostingGeneration
+  } else if basis.basis_source_head_hash != field.source_head_hash {
+    NvtFallbackReasonV1::StaleSourceHead
+  } else {
+    return None;
+  };
+  Some(NvtFallbackV1 { reason, diagnostic: None })
+}
+
+fn nvt_hint_matches_target(basis: &PinnedFieldNvtV1<'_>, target_coordinate: u64, hint: NvtPageHintV1) -> bool {
+  let Some(target_cell) = coordinate_cell(target_coordinate, basis.resolution) else {
+    return false;
+  };
+  let Some(sample_cell) = coordinate_cell(hint.sample_coordinate, basis.resolution) else {
+    return false;
+  };
+  let tile_cells = u64::from(basis.tile_cells);
+  let Some(tile_end) = hint.tile_start_cell.checked_add(tile_cells) else {
+    return false;
+  };
+  hint.page_id != 0
+    && tile_cells != 0
+    && hint.tile_start_cell.is_multiple_of(tile_cells)
+    && sample_cell >= hint.tile_start_cell
+    && sample_cell < tile_end
+    && sample_cell <= target_cell
+    && hint.tile_start_cell <= target_cell / tile_cells * tile_cells
+}
+
+fn build_nvt_healing_proposal(
+  request: &NvtLookupRequestV1<'_>,
+  basis: Option<&PinnedFieldNvtV1<'_>>,
+  cause: &NvtFallbackV1,
+  anchor: &PostingPageAnchorV1,
+) -> FormatResult<NvtHealingProposalV1> {
+  if request.healing_limits.maximum_proposal_bytes == 0 || request.healing_limits.maximum_proposal_bytes > MAX_NVT_HEALING_PROPOSAL_BYTES {
+    return Err(lookup_amplification_error("NVT healing proposal budget is outside the admitted range"));
+  }
+  let observed_nvt_manifest_key = basis.map(|basis| basis.manifest_key.as_slice());
+  let retained_bytes = [
+    request.field.manifest_key.len(),
+    observed_nvt_manifest_key.map_or(0, <[u8]>::len),
+    request.field.owner_id.len(),
+    request.field.source_head_hash.len(),
+    anchor.page_artifact_hash.len(),
+    NVT_HEALING_PROPOSAL_FIXED_BYTES,
+  ]
+  .into_iter()
+  .try_fold(0usize, |total, bytes| {
+    total.checked_add(bytes).ok_or_else(|| lookup_length_error("NVT healing proposal byte count overflow"))
+  })?;
+  if retained_bytes > request.healing_limits.maximum_proposal_bytes {
+    return Err(lookup_amplification_error("NVT healing proposal exceeds the caller byte budget"));
+  }
+  Ok(NvtHealingProposalV1 {
+    field_index_manifest_key: try_copy_healing_bytes(&request.field.manifest_key)?,
+    observed_nvt_manifest_key: match observed_nvt_manifest_key {
+      Some(value) => Some(try_copy_healing_bytes(value)?),
+      None => None,
+    },
+    owner_id: try_copy_healing_bytes(request.field.owner_id)?,
+    posting_generation: request.field.generation,
+    source_head_hash: try_copy_healing_bytes(request.field.source_head_hash)?,
+    target_coordinate: request.target_coordinate,
+    exact_page_id: anchor.page_id,
+    exact_page_generation: anchor.generation,
+    exact_page_artifact_hash: try_copy_healing_bytes(&anchor.page_artifact_hash)?,
+    reason: cause.reason,
+    diagnostic: cause.diagnostic.as_ref().map(|error| NvtHealingDiagnosticV1 { class: error.class(), code: error.code() }),
+    retained_bytes,
+  })
+}
+
+fn try_copy_healing_bytes(value: &[u8]) -> FormatResult<Vec<u8>> {
+  let mut copy = Vec::new();
+  copy
+    .try_reserve_exact(value.len())
+    .map_err(|error| lookup_amplification_error(format!("NVT healing proposal allocation failed: {error}")))?;
+  copy.extend_from_slice(value);
+  Ok(copy)
 }
 
 #[derive(Debug, Clone, Copy)]

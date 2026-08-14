@@ -10056,7 +10056,7 @@
     {
       "id": "esq-v1-68c37ffd4471888c86f5-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 226,
+      "line": 298,
       "column": 8,
       "enclosing_item": "impl NvtEntryIteratorV1 < '_ >::next",
       "kind": "result_status_probe",
@@ -10066,7 +10066,7 @@
     {
       "id": "esq-v1-bf03be8045fb9c55d0b9-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 262,
+      "line": 334,
       "column": 19,
       "enclosing_item": "impl NvtTileV1 < '_ >::predecessor_entry",
       "kind": "result_to_option",
@@ -10076,7 +10076,7 @@
     {
       "id": "esq-v1-be21d1fc9a1154d20660-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 272,
+      "line": 344,
       "column": 7,
       "enclosing_item": "impl NvtTileV1 < '_ >::predecessor_entry",
       "kind": "result_to_option",
@@ -10086,7 +10086,7 @@
     {
       "id": "esq-v1-c476df57771b2c1dfe80-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 1063,
+      "line": 1269,
       "column": 24,
       "enclosing_item": "decode_nvt_tile",
       "kind": "error_conversion",
@@ -10096,7 +10096,7 @@
     {
       "id": "esq-v1-58f5393d0910702778ec-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 1091,
+      "line": 1297,
       "column": 33,
       "enclosing_item": "decode_nvt_tile",
       "kind": "result_to_option",
@@ -10106,7 +10106,7 @@
     {
       "id": "esq-v1-512cc8712dc642bce9d4-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 1179,
+      "line": 1385,
       "column": 60,
       "enclosing_item": "verified_page_hint",
       "kind": "result_status_probe",
@@ -10116,7 +10116,7 @@
     {
       "id": "esq-v1-7a0e962326d13ca12cac-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 1190,
+      "line": 1396,
       "column": 3,
       "enclosing_item": "verified_predecessor_or_fallback",
       "kind": "default_on_error",

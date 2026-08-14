@@ -5,10 +5,11 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::index_artifact::{IndexManifestWriteV1, decode_index_manifest, encode_index_manifest};
 use aeordb::engine::v4::index_manifest::{FieldIndexManifestBodyV1, FieldNvtManifestBodyV1, IndexManifestBodyV1};
 use aeordb::engine::v4::index_nvt::{
-  ImmutableIndexPathV1, NvtBasisStatusV1, NvtEntryWriteV1, NvtFallbackReasonV1, NvtPostingPageSampleV1, NvtTileWriteV1,
-  SparseNvtBuildLimitsV1, SparseNvtBuildRequestV1, SparseNvtLookupLimitsV1, build_sparse_nvt_tiles_v1, coordinate_cell, decode_nvt_tile,
-  default_sparse_nvt_lookup_limits_v1, encode_nvt_tile, exact_posting_predecessor_v1, pin_field_index_v1, select_nvt_predecessor_hint_v1,
-  validate_field_nvt_basis_v1, validate_nvt_page_hint_v1,
+  ImmutableIndexPathV1, NvtBasisStatusV1, NvtEntryWriteV1, NvtFallbackReasonV1, NvtFallbackV1, NvtHealingDispositionV1, NvtHealingLimitsV1,
+  NvtLookupAttemptV1, NvtLookupRequestV1, NvtLookupSourceV1, NvtPostingPageSampleV1, NvtTileWriteV1, SparseNvtBuildLimitsV1,
+  SparseNvtBuildRequestV1, SparseNvtLookupLimitsV1, build_sparse_nvt_tiles_v1, coordinate_cell, decode_nvt_tile,
+  default_nvt_healing_limits_v1, default_sparse_nvt_lookup_limits_v1, encode_nvt_tile, exact_posting_predecessor_v1, pin_field_index_v1,
+  resolve_nvt_lookup_v1, select_nvt_predecessor_hint_v1, validate_field_nvt_basis_v1, validate_nvt_page_hint_v1,
 };
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
@@ -816,11 +817,27 @@ fn absent_stale_and_corrupt_nvt_evidence_degrades_to_the_exact_posting_directory
     panic!("corrupt FieldNvt must be unavailable");
   };
   assert_eq!(corrupt.reason, NvtFallbackReasonV1::Corrupt);
-  assert_eq!(corrupt.diagnostic.unwrap().class(), MalformedInputClass::ChecksumOrIntegrityMismatch);
+  assert_eq!(corrupt.diagnostic.as_ref().unwrap().class(), MalformedInputClass::ChecksumOrIntegrityMismatch);
 
   let posting_directories = [graph.posting_directory.as_slice()];
   let exact_path = ImmutableIndexPathV1 { directories: &posting_directories, leaf: &graph.posting_pages[0] };
   assert_eq!(exact_posting_predecessor_v1(&field, &graph.target_key, Some(&exact_path), lookup_limits()).unwrap().unwrap().page_id, 11);
+  let resolved = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &field,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Fallback { basis: None, cause: &corrupt },
+    exact_posting_path: Some(&exact_path),
+    lookup_limits: lookup_limits(),
+    healing_limits: default_nvt_healing_limits_v1(),
+  })
+  .unwrap();
+  let NvtHealingDispositionV1::Proposed(proposal) = resolved.healing else {
+    panic!("corrupt NVT evidence should produce a bounded rebuild proposal after exact fallback");
+  };
+  let diagnostic = proposal.diagnostic.unwrap();
+  assert_eq!(diagnostic.class, MalformedInputClass::ChecksumOrIntegrityMismatch);
+  assert_eq!(diagnostic.code, corrupt.diagnostic.as_ref().unwrap().code());
 }
 
 #[test]
@@ -944,6 +961,19 @@ fn missing_and_mismatched_hints_empty_indexes_and_lookup_limits_have_explicit_re
   let empty_manifest = fixture_bytes(&format!("aidx-{profile}-field-index-manifest-empty.bin"));
   let empty = pin_field_index_v1(&empty_manifest, graph.hash_algorithm).unwrap();
   assert!(exact_posting_predecessor_v1(&empty, &graph.target_key, None, lookup_limits()).unwrap().is_none());
+  let absent = NvtFallbackV1 { reason: NvtFallbackReasonV1::Absent, diagnostic: None };
+  let empty_resolution = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &empty,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Fallback { basis: None, cause: &absent },
+    exact_posting_path: None,
+    lookup_limits: lookup_limits(),
+    healing_limits: default_nvt_healing_limits_v1(),
+  })
+  .unwrap();
+  assert!(empty_resolution.anchor.is_none());
+  assert_eq!(empty_resolution.healing, NvtHealingDispositionV1::NotNeeded);
 
   let candidates = [
     ImmutableIndexPathV1 { directories: &tile_directories, leaf: &graph.tiles[1] },
@@ -973,5 +1003,172 @@ fn missing_and_mismatched_hints_empty_indexes_and_lookup_limits_have_explicit_re
   assert_eq!(
     select_nvt_predecessor_hint_v1(&basis, graph.target_coordinate, &[], unbounded_bytes).unwrap_err().class(),
     MalformedInputClass::AllocationAmplification
+  );
+}
+
+#[test]
+fn completed_lookup_uses_valid_hints_and_proposes_bounded_healing_only_after_exact_fallback() {
+  let graph = build_lookup_graph(HashAlgorithm::Blake3_256);
+  let field = pin_field_index_v1(&graph.field_manifest, graph.hash_algorithm).unwrap();
+  let NvtBasisStatusV1::Usable(basis) = validate_field_nvt_basis_v1(&field, Some(&graph.nvt_manifest)) else {
+    panic!("matching NVT must be usable");
+  };
+  let tile_directories = [graph.tile_directory.as_slice()];
+  let candidates = [
+    ImmutableIndexPathV1 { directories: &tile_directories, leaf: &graph.tiles[1] },
+    ImmutableIndexPathV1 { directories: &tile_directories, leaf: &graph.tiles[0] },
+  ];
+  let hint = select_nvt_predecessor_hint_v1(&basis, graph.target_coordinate, &candidates, lookup_limits()).unwrap().hint.unwrap();
+  let posting_directories = [graph.posting_directory.as_slice()];
+  let posting_path = ImmutableIndexPathV1 { directories: &posting_directories, leaf: &graph.posting_pages[0] };
+  let hinted = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &field,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Hint { basis: &basis, hint, posting_path: Some(&posting_path) },
+    exact_posting_path: Some(&posting_path),
+    lookup_limits: lookup_limits(),
+    healing_limits: default_nvt_healing_limits_v1(),
+  })
+  .unwrap();
+  assert_eq!(hinted.source, NvtLookupSourceV1::Hint);
+  assert_eq!(hinted.anchor.as_ref().unwrap().page_id, 11);
+  assert_eq!(hinted.healing, NvtHealingDispositionV1::NotNeeded);
+
+  let fallback = NvtFallbackV1 { reason: NvtFallbackReasonV1::MissingPredecessor, diagnostic: None };
+  let exact = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &field,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Fallback { basis: Some(&basis), cause: &fallback },
+    exact_posting_path: Some(&posting_path),
+    lookup_limits: lookup_limits(),
+    healing_limits: default_nvt_healing_limits_v1(),
+  })
+  .unwrap();
+  assert_eq!(exact.source, NvtLookupSourceV1::ExactFallback);
+  let anchor = exact.anchor.as_ref().unwrap();
+  assert_eq!(anchor.page_id, 11);
+  let NvtHealingDispositionV1::Proposed(proposal) = exact.healing else {
+    panic!("successful exact fallback must produce one bounded healing proposal");
+  };
+  assert_eq!(proposal.field_index_manifest_key, field.manifest_key);
+  assert_eq!(proposal.observed_nvt_manifest_key, Some(basis.manifest_key));
+  assert_eq!(proposal.owner_id, field.owner_id);
+  assert_eq!(proposal.posting_generation, field.generation);
+  assert_eq!(proposal.source_head_hash, field.source_head_hash);
+  assert_eq!(proposal.target_coordinate, graph.target_coordinate);
+  assert_eq!(proposal.exact_page_id, anchor.page_id);
+  assert_eq!(proposal.exact_page_generation, anchor.generation);
+  assert_eq!(proposal.exact_page_artifact_hash, anchor.page_artifact_hash);
+  assert_eq!(proposal.reason, NvtFallbackReasonV1::MissingPredecessor);
+  assert!(proposal.diagnostic.is_none());
+  assert!(proposal.retained_bytes <= default_nvt_healing_limits_v1().maximum_proposal_bytes);
+}
+
+#[test]
+fn healing_resource_pressure_never_changes_the_exact_lookup_decision() {
+  let graph = build_lookup_graph(HashAlgorithm::Sha512);
+  let field = pin_field_index_v1(&graph.field_manifest, graph.hash_algorithm).unwrap();
+  let posting_directories = [graph.posting_directory.as_slice()];
+  let posting_path = ImmutableIndexPathV1 { directories: &posting_directories, leaf: &graph.posting_pages[0] };
+  let fallback = NvtFallbackV1 { reason: NvtFallbackReasonV1::Absent, diagnostic: None };
+  let unrestricted = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &field,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Fallback { basis: None, cause: &fallback },
+    exact_posting_path: Some(&posting_path),
+    lookup_limits: lookup_limits(),
+    healing_limits: default_nvt_healing_limits_v1(),
+  })
+  .unwrap();
+  let bounded = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &field,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Fallback { basis: None, cause: &fallback },
+    exact_posting_path: Some(&posting_path),
+    lookup_limits: lookup_limits(),
+    healing_limits: NvtHealingLimitsV1 { maximum_proposal_bytes: 1 },
+  })
+  .unwrap();
+  assert_eq!(bounded.anchor, unrestricted.anchor);
+  assert_eq!(bounded.source, NvtLookupSourceV1::ExactFallback);
+  let NvtHealingDispositionV1::Skipped(error) = bounded.healing else {
+    panic!("healing pressure must be reported without replacing the exact result");
+  };
+  assert_eq!(error.class(), MalformedInputClass::AllocationAmplification);
+}
+
+#[test]
+fn invalid_hints_and_nonrepairable_pressure_fall_back_without_weakening_authoritative_errors() {
+  let graph = build_lookup_graph(HashAlgorithm::Blake3_256);
+  let field = pin_field_index_v1(&graph.field_manifest, graph.hash_algorithm).unwrap();
+  let NvtBasisStatusV1::Usable(basis) = validate_field_nvt_basis_v1(&field, Some(&graph.nvt_manifest)) else {
+    panic!("matching NVT must be usable");
+  };
+  let posting_directories = [graph.posting_directory.as_slice()];
+  let posting_path = ImmutableIndexPathV1 { directories: &posting_directories, leaf: &graph.posting_pages[0] };
+  let invalid_hint = aeordb::engine::v4::index_nvt::NvtPageHintV1 { page_id: 11, tile_start_cell: u64::MAX, sample_coordinate: u64::MAX };
+  let resolved = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &field,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Hint { basis: &basis, hint: invalid_hint, posting_path: Some(&posting_path) },
+    exact_posting_path: Some(&posting_path),
+    lookup_limits: lookup_limits(),
+    healing_limits: default_nvt_healing_limits_v1(),
+  })
+  .unwrap();
+  assert_eq!(resolved.source, NvtLookupSourceV1::ExactFallback);
+  let NvtHealingDispositionV1::Proposed(proposal) = resolved.healing else {
+    panic!("invalid hint must propose repair after the exact result is known");
+  };
+  assert_eq!(proposal.reason, NvtFallbackReasonV1::StalePageHint);
+
+  let pressure = NvtFallbackV1 {
+    reason: NvtFallbackReasonV1::ResourceLimit,
+    diagnostic: Some(aeordb::engine::v4::reader::FormatError::new(
+      MalformedInputClass::AllocationAmplification,
+      "test_nvt_pressure",
+      "candidate limit",
+    )),
+  };
+  let resolved = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+    field: &field,
+    target_coordinate: graph.target_coordinate,
+    target_posting_position: &graph.target_key,
+    attempt: NvtLookupAttemptV1::Fallback { basis: Some(&basis), cause: &pressure },
+    exact_posting_path: Some(&posting_path),
+    lookup_limits: lookup_limits(),
+    healing_limits: default_nvt_healing_limits_v1(),
+  })
+  .unwrap();
+  assert_eq!(resolved.anchor.unwrap().page_id, 11);
+  let NvtHealingDispositionV1::Skipped(error) = resolved.healing else {
+    panic!("query-local resource pressure is not a repair signal");
+  };
+  assert_eq!(error.class(), MalformedInputClass::AllocationAmplification);
+
+  let mut corrupt_directory = graph.posting_directory.clone();
+  let corrupt_offset = corrupt_directory.len() / 2;
+  corrupt_directory[corrupt_offset] ^= 0x08;
+  let corrupt_directories = [corrupt_directory.as_slice()];
+  let corrupt_path = ImmutableIndexPathV1 { directories: &corrupt_directories, leaf: &graph.posting_pages[0] };
+  let fallback = NvtFallbackV1 { reason: NvtFallbackReasonV1::Absent, diagnostic: None };
+  assert_eq!(
+    resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+      field: &field,
+      target_coordinate: graph.target_coordinate,
+      target_posting_position: &graph.target_key,
+      attempt: NvtLookupAttemptV1::Fallback { basis: None, cause: &fallback },
+      exact_posting_path: Some(&corrupt_path),
+      lookup_limits: lookup_limits(),
+      healing_limits: default_nvt_healing_limits_v1(),
+    })
+    .unwrap_err()
+    .class(),
+    MalformedInputClass::ChecksumOrIntegrityMismatch
   );
 }
