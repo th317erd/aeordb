@@ -100,6 +100,7 @@ impl IndexScopeOrdinalClaimErrorV1 {
 #[derive(Clone, Copy)]
 pub struct IndexScopeOrdinalClaimRequestV1<'request> {
   pub operation_id: [u8; 16],
+  pub source_publication_sequence: u64,
   pub semantic_state_root: &'request [u8],
   pub scope_id: &'request [u8],
   pub transition: &'request ResolvedIndexDocumentTransitionV1,
@@ -417,6 +418,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
         .ordinals
         .claim_scope_ordinal(IndexScopeOrdinalClaimRequestV1 {
           operation_id: request.operation_id,
+          source_publication_sequence: request.source_publication_sequence,
           semantic_state_root: request.semantic_state_root,
           scope_id: &scope.scope.scope_id,
           transition: request.transition,

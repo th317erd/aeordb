@@ -312,6 +312,7 @@ pub trait IndexSemanticScopeSourceV1: Send + Sync {
 #[derive(Clone, Copy)]
 pub struct IndexSemanticScopeReadRequestV1<'request> {
   pub operation_id: [u8; 16],
+  pub source_publication_sequence: u64,
   pub semantic_state_root: &'request [u8],
   pub transition: &'request ResolvedIndexDocumentTransitionV1,
   pub limits: IndexSemanticScopeLimitsV1,
@@ -361,6 +362,7 @@ pub enum IndexProducerSourceErrorV1 {
 pub fn resolve_semantic_scope_work(
   hash_algorithm: HashAlgorithm,
   operation_id: [u8; 16],
+  source_publication_sequence: u64,
   semantic_state_root: &[u8],
   transition: &ResolvedIndexDocumentTransitionV1,
   source: &dyn IndexSemanticScopeSourceV1,
@@ -380,14 +382,23 @@ pub fn resolve_semantic_scope_work(
       "semantic-state root is zero or does not match the database hash width".to_string(),
     ));
   }
-  let resolution =
-    match source.resolve_scopes(IndexSemanticScopeReadRequestV1 { operation_id, semantic_state_root, transition, limits, is_cancelled }) {
-      Ok(resolution) => resolution,
-      Err(error) if error.class() == IndexSemanticScopeReadErrorClassV1::Cancelled => {
-        return Err(IndexProducerSourceErrorV1::Cancelled);
-      }
-      Err(error) => return Err(IndexProducerSourceErrorV1::SemanticRead(error)),
-    };
+  if source_publication_sequence == 0 {
+    return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution("source publication sequence is zero".to_string()));
+  }
+  let resolution = match source.resolve_scopes(IndexSemanticScopeReadRequestV1 {
+    operation_id,
+    source_publication_sequence,
+    semantic_state_root,
+    transition,
+    limits,
+    is_cancelled,
+  }) {
+    Ok(resolution) => resolution,
+    Err(error) if error.class() == IndexSemanticScopeReadErrorClassV1::Cancelled => {
+      return Err(IndexProducerSourceErrorV1::Cancelled);
+    }
+    Err(error) => return Err(IndexProducerSourceErrorV1::SemanticRead(error)),
+  };
   if is_cancelled() {
     return Err(IndexProducerSourceErrorV1::Cancelled);
   }

@@ -331,6 +331,7 @@ fn ordinal_request<'request>(
 ) -> IndexScopeOrdinalClaimRequestV1<'request> {
   IndexScopeOrdinalClaimRequestV1 {
     operation_id: [0x41; 16],
+    source_publication_sequence: 7,
     semantic_state_root: &SEMANTIC_ROOT,
     scope_id: &SCOPE_ID,
     transition,
@@ -507,6 +508,7 @@ struct MappedOrdinals {
 
 impl IndexScopeOrdinalAuthorityV1 for MappedOrdinals {
   fn claim_scope_ordinal(&self, request: IndexScopeOrdinalClaimRequestV1<'_>) -> Result<u64, IndexScopeOrdinalClaimErrorV1> {
+    assert_eq!(request.source_publication_sequence, 7);
     self.calls.lock().unwrap().push(request.scope_id.to_vec());
     self
       .ordinals
@@ -519,6 +521,7 @@ impl IndexScopeOrdinalAuthorityV1 for MappedOrdinals {
 impl IndexScopeOrdinalAuthorityV1 for RecordingOrdinals {
   fn claim_scope_ordinal(&self, request: IndexScopeOrdinalClaimRequestV1<'_>) -> Result<u64, IndexScopeOrdinalClaimErrorV1> {
     assert!(!(request.is_cancelled)());
+    assert_eq!(request.source_publication_sequence, 7);
     self.calls.lock().unwrap().push((request.operation_id, request.scope_id.to_vec(), request.before_in_scope, request.after_in_scope));
     Ok(self.ordinal)
   }
@@ -539,6 +542,7 @@ fn content_only_state_is_resolved_without_catalog_or_ordinal_access() {
   let read = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [9; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &state.object_id,
       transition: &transition,
       limits: limits(),
@@ -557,6 +561,7 @@ fn missing_semantic_state_is_corruption_not_empty_or_content_only_success() {
   let error = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [9; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &[7; 32],
       transition: &transition,
       limits: limits(),
@@ -577,6 +582,7 @@ fn complete_catalog_resolves_exact_definition_closure_and_scope_local_ordinal() 
   let read = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x44; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: limits(),
@@ -615,6 +621,7 @@ fn concrete_scope_resolution_forwards_exact_before_and_after_membership() {
     source
       .resolve_scopes(IndexSemanticScopeReadRequestV1 {
         operation_id: [0x45; 16],
+        source_publication_sequence: 7,
         semantic_state_root: &graph.state_root,
         transition: &transition,
         limits: limits(),
@@ -637,6 +644,7 @@ fn out_of_scope_complete_catalog_is_an_explicit_empty_complete_result() {
   let read = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x45; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: limits(),
@@ -660,6 +668,7 @@ fn semantic_memory_admission_precedes_the_first_object_read_and_releases_on_refu
   let error = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x46; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: limits(),
@@ -684,6 +693,7 @@ fn cancellation_during_catalog_resolution_releases_task_memory() {
   let error = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x47; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: limits(),
@@ -708,6 +718,7 @@ fn successful_semantic_read_retains_and_then_releases_its_task_reservation() {
   let read = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x48; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: limits(),
@@ -743,6 +754,7 @@ fn semantic_state_catalog_count_mismatches_fail_closed() {
     let error = source
       .resolve_scopes(IndexSemanticScopeReadRequestV1 {
         operation_id: [0x49; 16],
+        source_publication_sequence: 7,
         semantic_state_root: &graph.state_root,
         transition: &transition,
         limits: limits(),
@@ -774,6 +786,7 @@ fn missing_and_ambiguous_catalog_roots_are_corruption() {
     let error = source
       .resolve_scopes(IndexSemanticScopeReadRequestV1 {
         operation_id: [0x4a; 16],
+        source_publication_sequence: 7,
         semantic_state_root: &graph.state_root,
         transition: &transition,
         limits: limits(),
@@ -807,6 +820,7 @@ fn missing_or_substituted_definition_objects_fail_closed() {
     let error = source
       .resolve_scopes(IndexSemanticScopeReadRequestV1 {
         operation_id: [0x4b; 16],
+        source_publication_sequence: 7,
         semantic_state_root: &graph.state_root,
         transition: &transition,
         limits: limits(),
@@ -829,6 +843,7 @@ fn definition_byte_limit_accepts_exact_fit_and_rejects_one_byte_less() {
     let transition = transition();
     let result = source.resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x4c; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: configured_limits,
@@ -855,6 +870,7 @@ fn overlapping_scopes_resolve_independent_ordinals_and_exact_aggregate_limits() 
   let read = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x4c; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: IndexSemanticScopeLimitsV1::new(2, 2, 2, graph.definition_bytes).unwrap(),
@@ -895,6 +911,7 @@ fn concrete_catalog_enforces_scope_value_store_and_field_index_limits_independen
     let error = source
       .resolve_scopes(IndexSemanticScopeReadRequestV1 {
         operation_id: [0x4d; 16],
+        source_publication_sequence: 7,
         semantic_state_root: &graph.state_root,
         transition: &transition,
         limits: IndexSemanticScopeLimitsV1::new(max_scopes, max_value_stores, max_field_indexes, graph.definition_bytes).unwrap(),
@@ -926,6 +943,7 @@ fn ordinal_failures_preserve_their_typed_error_class_and_zero_is_corruption() {
     let error = source
       .resolve_scopes(IndexSemanticScopeReadRequestV1 {
         operation_id: [0x4d; 16],
+        source_publication_sequence: 7,
         semantic_state_root: &graph.state_root,
         transition: &transition,
         limits: limits(),
@@ -944,6 +962,7 @@ fn ordinal_failures_preserve_their_typed_error_class_and_zero_is_corruption() {
   let error = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x4e; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: limits(),
@@ -972,6 +991,7 @@ fn file_backed_semantic_store_resolves_the_complete_catalog_through_the_producti
   let read = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
       operation_id: [0x4f; 16],
+      source_publication_sequence: 7,
       semantic_state_root: &graph.state_root,
       transition: &transition,
       limits: limits(),

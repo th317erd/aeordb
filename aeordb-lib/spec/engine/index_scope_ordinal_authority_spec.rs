@@ -53,6 +53,7 @@ fn request<'a>(
 ) -> IndexScopeOrdinalClaimRequestV1<'a> {
   IndexScopeOrdinalClaimRequestV1 {
     operation_id,
+    source_publication_sequence: 101,
     semantic_state_root: &SEMANTIC_ROOT,
     scope_id: &SCOPE_ID,
     transition,
@@ -181,9 +182,14 @@ impl IndexScopeOrdinalStateStoreV1 for RecordingStore {
       state.conflicts_remaining -= 1;
       let alien_ordinal = state.next_document_ordinal;
       state.next_document_ordinal += 1;
-      state
-        .claims
-        .insert([0xfe; 16], IndexScopeOrdinalDurableClaimV1 { request_fingerprint: vec![0xfd; 32], document_ordinal: alien_ordinal });
+      state.claims.insert(
+        [0xfe; 16],
+        IndexScopeOrdinalDurableClaimV1 {
+          request_fingerprint: vec![0xfd; 32],
+          document_ordinal: alien_ordinal,
+          source_publication_sequence: 100,
+        },
+      );
       state.checkpoint_sequence += 1;
       state.checkpoint_key = vec![state.checkpoint_sequence as u8; 32];
       return Ok(IndexScopeOrdinalPublishOutcomeV1::SelectionChanged);
@@ -202,6 +208,7 @@ impl IndexScopeOrdinalStateStoreV1 for RecordingStore {
       IndexScopeOrdinalDurableClaimV1 {
         request_fingerprint: request.request_fingerprint.to_vec(),
         document_ordinal: request.document_ordinal,
+        source_publication_sequence: request.source_publication_sequence,
       },
     );
     if state.commit_unknown_remaining != 0 {
@@ -229,6 +236,7 @@ fn allocation_is_not_returned_until_claim_and_high_water_are_durably_selected() 
   let state = store.state.lock().unwrap();
   assert_eq!(state.next_document_ordinal, 18);
   assert_eq!(state.claims.get(&[1; 16]).unwrap().document_ordinal, 17);
+  assert_eq!(state.claims.get(&[1; 16]).unwrap().source_publication_sequence, 101);
   assert_eq!(state.publish_count, 1);
 }
 
@@ -291,6 +299,20 @@ fn operation_identity_reuse_for_a_different_transition_is_corruption() {
 
   assert_eq!(error.class(), IndexScopeOrdinalClaimErrorClassV1::Corrupt);
   assert_eq!(error.code(), "scope_ordinal_operation_conflict");
+}
+
+#[test]
+fn operation_identity_reuse_at_a_different_source_sequence_is_corruption() {
+  let store = RecordingStore::default();
+  let transition = create("/docs/a.json");
+  authority(&store, 4).claim_scope_ordinal(request([1; 16], &transition, false, true, &|| false)).unwrap();
+
+  let mut conflicting = request([1; 16], &transition, false, true, &|| false);
+  conflicting.source_publication_sequence = 102;
+  let error = authority(&store, 4).claim_scope_ordinal(conflicting).unwrap_err();
+
+  assert_eq!(error.class(), IndexScopeOrdinalClaimErrorClassV1::Corrupt);
+  assert_eq!(error.code(), "scope_ordinal_operation_sequence_conflict");
 }
 
 #[test]
@@ -430,6 +452,9 @@ fn malformed_requests_and_zero_retry_limit_are_rejected_before_store_access() {
   let transition = create("/docs/a.json");
   let zero_operation = authority(&store, 4).claim_scope_ordinal(request([0; 16], &transition, false, true, &|| false)).unwrap_err();
   assert_eq!(zero_operation.code(), "scope_ordinal_request_identity");
+  let mut zero_sequence = request([7; 16], &transition, false, true, &|| false);
+  zero_sequence.source_publication_sequence = 0;
+  assert_eq!(authority(&store, 4).claim_scope_ordinal(zero_sequence).unwrap_err().code(), "scope_ordinal_request_identity");
   let missing_side = authority(&store, 4).claim_scope_ordinal(request([6; 16], &transition, true, false, &|| false)).unwrap_err();
   assert_eq!(missing_side.code(), "scope_ordinal_request_transition");
   assert_eq!(store.state.lock().unwrap().publish_count, 0);

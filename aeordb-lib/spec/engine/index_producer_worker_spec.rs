@@ -134,6 +134,7 @@ struct RetainedSemanticSource {
 
 struct OperationCheckingSemanticSource {
   expected_operation_id: [u8; 16],
+  expected_publication_sequence: u64,
   semantic_state_root: Vec<u8>,
   observed: AtomicBool,
 }
@@ -144,6 +145,7 @@ impl IndexSemanticScopeSourceV1 for OperationCheckingSemanticSource {
     request: IndexSemanticScopeReadRequestV1<'_>,
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
     assert_eq!(request.operation_id, self.expected_operation_id);
+    assert_eq!(request.source_publication_sequence, self.expected_publication_sequence);
     assert_eq!(request.semantic_state_root, self.semantic_state_root);
     assert!(!(request.is_cancelled)());
     self.observed.store(true, Ordering::SeqCst);
@@ -366,13 +368,14 @@ fn one_worker_composes_exact_sources_scopes_and_leased_execution() {
 }
 
 #[test]
-fn worker_forwards_the_exact_lease_operation_id_to_semantic_resolution() {
+fn worker_forwards_the_exact_lease_operation_and_publication_sequence_to_semantic_resolution() {
   let encoded = encoded_journal("/doc.json");
   let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
   let revisions = revision_source(&encoded);
   let (mut producer, lease) = admitted(&encoded);
   let semantics = OperationCheckingSemanticSource {
     expected_operation_id: lease.operation_id(),
+    expected_publication_sequence: lease.publication_sequence(),
     semantic_state_root: journal.semantic_state_root.to_vec(),
     observed: AtomicBool::new(false),
   };

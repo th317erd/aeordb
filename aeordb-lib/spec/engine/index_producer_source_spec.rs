@@ -16,7 +16,8 @@ use aeordb::engine::v4::index_producer_source::{
   IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1,
   IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1,
   OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1, ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1,
-  ResolvedIndexScopeWorkV1, resolve_leased_mutation_record, resolve_mutation_document_transition, resolve_semantic_scope_work,
+  ResolvedIndexScopeWorkV1, resolve_leased_mutation_record, resolve_mutation_document_transition,
+  resolve_semantic_scope_work as resolve_semantic_scope_work_with_sequence,
 };
 use aeordb::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
@@ -30,7 +31,7 @@ fn hash(label: &[u8]) -> Vec<u8> {
 }
 
 struct RecordingSemanticSource {
-  observed: Mutex<Option<([u8; 16], Vec<u8>, String, IndexSemanticScopeLimitsV1)>>,
+  observed: Mutex<Option<([u8; 16], u64, Vec<u8>, String, IndexSemanticScopeLimitsV1)>>,
 }
 
 impl IndexSemanticScopeSourceV1 for RecordingSemanticSource {
@@ -48,7 +49,8 @@ impl IndexSemanticScopeSourceV1 for RecordingSemanticSource {
       .file_record
       .path
       .clone();
-    *self.observed.lock().unwrap() = Some((request.operation_id, request.semantic_state_root.to_vec(), path, request.limits));
+    *self.observed.lock().unwrap() =
+      Some((request.operation_id, request.source_publication_sequence, request.semantic_state_root.to_vec(), path, request.limits));
     let resolution = IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: request.semantic_state_root.to_vec() };
     let memory = MemoryCoordinator::new(MemoryPolicy::new(6_000, 8_000, 1, 1_000).unwrap());
     let reservation = memory
@@ -195,6 +197,18 @@ fn semantic_limits() -> IndexSemanticScopeLimitsV1 {
   IndexSemanticScopeLimitsV1::new(8, 16, 32, 2 * 1_024 * 1_024).unwrap()
 }
 
+fn resolve_semantic_scope_work(
+  hash_algorithm: HashAlgorithm,
+  operation_id: [u8; 16],
+  semantic_state_root: &[u8],
+  transition: &ResolvedIndexDocumentTransitionV1,
+  source: &dyn IndexSemanticScopeSourceV1,
+  limits: IndexSemanticScopeLimitsV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<IndexSemanticScopeReadV1, IndexProducerSourceErrorV1> {
+  resolve_semantic_scope_work_with_sequence(hash_algorithm, operation_id, 7, semantic_state_root, transition, source, limits, is_cancelled)
+}
+
 #[test]
 fn semantic_scope_source_receives_exact_operation_transition_limits_and_cancellation() {
   let operation_id = [0x5a; 16];
@@ -211,7 +225,7 @@ fn semantic_scope_source_receives_exact_operation_transition_limits_and_cancella
     resolve_semantic_scope_work(ALGORITHM, operation_id, &root, &resolved_transition(), &source, limits, &is_cancelled).unwrap();
 
   assert!(matches!(resolved.resolution(), IndexSemanticScopeResolutionV1::ContentOnly { .. }));
-  assert_eq!(source.observed.lock().unwrap().as_ref(), Some(&(operation_id, root, "/workspace/docs/doc.json".to_string(), limits)));
+  assert_eq!(source.observed.lock().unwrap().as_ref(), Some(&(operation_id, 7, root, "/workspace/docs/doc.json".to_string(), limits)));
   assert!(cancellation_calls.load(Ordering::SeqCst) >= 3);
 }
 
@@ -553,6 +567,19 @@ fn semantic_resolution_rejects_invalid_inputs_and_cancels_during_validation() {
   assert!(matches!(
     resolve_semantic_scope_work(ALGORITHM, [1; 16], &[0; 32], &resolved_transition(), &source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(_))
+  ));
+  assert!(matches!(
+    resolve_semantic_scope_work_with_sequence(
+      ALGORITHM,
+      [1; 16],
+      0,
+      &root,
+      &resolved_transition(),
+      &source,
+      semantic_limits(),
+      &|| false
+    ),
+    Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(message)) if message.contains("publication sequence")
   ));
   assert!(matches!(
     resolve_semantic_scope_work(

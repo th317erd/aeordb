@@ -892,6 +892,9 @@
               - [ ] Resolve every applicable scope through one typed, retry-stable, non-reusing scope-ordinal claim authority.
                 - [x] Freeze and prove the exact durable selected-state CAS contract, transition fingerprint, conflict retry, and failure taxonomy.
                 - [ ] Bind that contract to selector-last checkpoint persistence and selected scope-manifest/reverse-directory reads.
+                  - [x] Carry the source publication sequence through semantic resolution and freeze a bounded pending-claim resume payload.
+                  - [ ] Persist/recover that payload with the scope high-water through one selected IndexTaskCheckpoint.
+                  - [ ] Resolve live FileKey mappings from the exact attached ScopeCatalog manifest/reverse directory.
               - [x] Prove malformed closure, count/depth/prefix disagreement, cancellation, memory pressure, ordinal retry/move/delete/recreate, and aggregate-limit behavior.
             - [ ] Activate the worker behind one recovered runtime owner, retaining legacy query-visible indexing until immutable shadow cutover.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.

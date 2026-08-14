@@ -100,6 +100,7 @@ impl IndexProducerMutationWorkerV1 {
     let scope_read = match resolve_semantic_scope_work(
       self.hash_algorithm,
       request.lease.operation_id(),
+      request.lease.publication_sequence(),
       request.journal.semantic_state_root,
       &transition,
       request.semantic_source,

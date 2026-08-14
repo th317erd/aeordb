@@ -63,6 +63,7 @@ pub mod index_producer_source;
 pub mod index_producer_worker;
 pub mod index_record;
 pub mod index_scope_ordinal_authority;
+pub mod index_scope_ordinal_checkpoint;
 pub mod index_semantic_registry;
 pub mod index_semantic_source;
 pub mod index_source;

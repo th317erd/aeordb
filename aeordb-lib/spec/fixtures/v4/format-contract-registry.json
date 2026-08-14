@@ -2231,6 +2231,32 @@
         "maximum_resume_key_bytes": 1048576,
         "maximum_attachments": 4096,
         "maximum_external_descriptor_bytes": 65536,
+        "scope_ordinal_resume_v1": {
+          "magic_ascii": "SORC",
+          "schema_version": 1,
+          "header_length": 32,
+          "body_formula": "32 + claim_count*(32 + H)",
+          "maximum_pending_claims": 8192,
+          "layout": [
+            { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII SORC" },
+            { "offset": 4, "length": 2, "field": "schema_version", "rule": "exactly 1" },
+            { "offset": 6, "length": 2, "field": "header_length", "rule": "exactly 32" },
+            { "offset": 8, "length": 4, "field": "total_length", "rule": "exactly 32 + claim_count*row_length" },
+            { "offset": 12, "length": 4, "field": "claim_count", "rule": "0..8192" },
+            { "offset": 16, "length": 8, "field": "applied_through_publication_sequence", "rule": "highest source publication sequence reflected by the attached ScopeCatalog generation; zero allowed before first application" },
+            { "offset": 24, "length": 2, "field": "claim_row_length", "rule": "exactly 32 + database hash width H" },
+            { "offset": 26, "length": 6, "field": "flags_and_reserved", "rule": "zero" },
+            { "offset": 32, "length_formula": "claim_count*(32 + H)", "field": "pending_claim_rows", "rule": "strict operation_id order; each row is operation_id[16] || request_fingerprint[H] || document_ordinal u64 LE || source_publication_sequence u64 LE" }
+          ],
+          "claim_rule": "operation ID, fingerprint, ordinal, and source sequence are nonzero; source sequence is greater than the applied-through watermark; exact retries require all fields to agree",
+          "checksum": "no nested checksum; enclosing immutable IndexTaskCheckpoint AIDX key and CRC protect the complete resume payload",
+          "canonical_order": "strict unsigned byte order by operation_id; duplicates rejected",
+          "malformed_behavior": "reject before ordinal observation on unknown magic/version, wrong hash-profile row width, length/count overflow, nonzero reserve, zero identity, applied pending claim, duplicate/reversed operation, trailing bytes, or allocation refusal",
+          "fixtures": [
+            "scope-ordinal-resume-v1/sorc-blake3-256-valid.hex",
+            "scope-ordinal-resume-v1/sorc-sha512-valid.hex"
+          ]
+        },
         "task_phase_registry": {
           "1_scope_build": ["capture-source", "scan-scope", "build-ordinal", "build-reverse", "validate", "publish"],
           "2_value_build": ["capture-source", "scan-documents", "parse-select", "build-values", "validate", "publish"],

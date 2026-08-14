@@ -55,6 +55,7 @@ impl IndexScopeOrdinalStateStoreErrorV1 {
 pub struct IndexScopeOrdinalDurableClaimV1 {
   pub request_fingerprint: Vec<u8>,
   pub document_ordinal: u64,
+  pub source_publication_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,7 @@ pub struct IndexScopeOrdinalPublishRequestV1<'request> {
   pub request_fingerprint: &'request [u8],
   pub document_ordinal: u64,
   pub next_document_ordinal: u64,
+  pub source_publication_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +228,7 @@ where
           request_fingerprint: &request_fingerprint,
           document_ordinal,
           next_document_ordinal,
+          source_publication_sequence: request.source_publication_sequence,
         })
         .map_err(map_store_error)?
       {
@@ -260,12 +263,13 @@ fn validate_claim_request(
 ) -> Result<ValidatedTransitionV1, IndexScopeOrdinalClaimErrorV1> {
   let hash_width = hash_algorithm.hash_length();
   if request.operation_id.iter().all(|byte| *byte == 0)
+    || request.source_publication_sequence == 0
     || !valid_hash(request.semantic_state_root, hash_width)
     || !valid_hash(request.scope_id, hash_width)
   {
     return Err(IndexScopeOrdinalClaimErrorV1::corrupt(
       "scope_ordinal_request_identity",
-      "operation, semantic-state, or scope identity is zero or has the wrong width",
+      "operation, source publication sequence, semantic-state, or scope identity is zero or has the wrong width",
     ));
   }
   if request.before_in_scope && request.transition.before.is_none() || request.after_in_scope && request.transition.after.is_none() {
@@ -312,7 +316,7 @@ fn fingerprint_claim_request(
     .map_or(0usize, |document| document.file_record.path.len())
     .checked_add(request.transition.after.as_ref().map_or(0usize, |document| document.file_record.path.len()))
     .ok_or_else(|| IndexScopeOrdinalClaimErrorV1::corrupt("scope_ordinal_request_fingerprint", "transition path bytes overflow"))?;
-  let capacity = 5usize
+  let capacity = 13usize
     .checked_add(2 * hash_width)
     .and_then(|value| value.checked_add(2 * (1 + 2 * hash_width + 4)))
     .and_then(|value| value.checked_add(path_bytes))
@@ -321,6 +325,7 @@ fn fingerprint_claim_request(
     IndexScopeOrdinalClaimErrorV1::retryable("scope_ordinal_fingerprint_allocation", format!("fingerprint allocation failed: {error}"))
   })?;
   bytes.extend_from_slice(b"SOC1");
+  bytes.extend_from_slice(&request.source_publication_sequence.to_le_bytes());
   bytes.extend_from_slice(request.semantic_state_root);
   bytes.extend_from_slice(request.scope_id);
   bytes.push(u8::from(request.before_in_scope) | (u8::from(request.after_in_scope) << 1));
@@ -377,10 +382,17 @@ fn validate_selected(
     if !valid_hash(&claim.request_fingerprint, hash_width)
       || claim.document_ordinal == 0
       || claim.document_ordinal >= selected.next_document_ordinal
+      || claim.source_publication_sequence == 0
     {
       return Err(IndexScopeOrdinalClaimErrorV1::corrupt(
         "scope_ordinal_selected_claim",
-        "selected operation claim has a malformed fingerprint or ordinal",
+        "selected operation claim has a malformed fingerprint, ordinal, or source publication sequence",
+      ));
+    }
+    if claim.source_publication_sequence != request.source_publication_sequence {
+      return Err(IndexScopeOrdinalClaimErrorV1::corrupt(
+        "scope_ordinal_operation_sequence_conflict",
+        "operation identity was already claimed at a different source publication sequence",
       ));
     }
     if claim.request_fingerprint != request_fingerprint {
