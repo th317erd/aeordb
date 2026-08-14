@@ -873,7 +873,11 @@
         - [x] P6-1d: prove restart, dropped/duplicate/out-of-order delivery, queue pressure, whole-root transitions, cancellation, memory bounds, and unchanged acknowledgement durability/latency.
       - [ ] P6-2: implement the single bounded IndexCoordinator, task admission, memtable, spill, checkpoint, cache, cancellation, and graceful shutdown runtime.
         - [x] P6-2a: implement the storage-neutral coordinator state machine, active/frozen memtables, exact shared-memory reservations, deterministic dedupe/replacement, flush triggers, cancellation, and drain contract.
-        - [ ] P6-2b: persist/replay the soft journal and typed task checkpoint, root unpublished attachments, and fail closed to reconciliation on missing/corrupt/discontinuous recovery state.
+        - [x] P6-2b: persist/replay the soft journal and typed task checkpoint, root unpublished attachments, and fail closed to reconciliation on missing/corrupt/discontinuous recovery state.
+          - [x] P6-2b-a: freeze the durable store, selected-checkpoint, publication receipt, recovery outcome, and bounded-memory contracts in a compile-red target.
+          - [x] P6-2b-b: implement dependency-first/checkpoint-last persistence with complete attachment and journal readback before selected-root publication.
+          - [x] P6-2b-c: implement bounded restart replay with explicit missing, corrupt, discontinuous, cancellation, and store-failure outcomes.
+          - [x] P6-2b-d: qualify crash boundaries, idempotence, stale selection, resource pressure, activation isolation, and broad regressions.
         - [ ] P6-2c: route parser/mapper/converter and every legacy/v1 index mutation through one coordinator task path with bounded retry, spill, and per-index degraded outcomes.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.

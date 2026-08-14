@@ -49,6 +49,7 @@ pub mod index_artifact;
 pub mod index_converter;
 pub mod index_converter_v0;
 pub mod index_coordinator;
+pub mod index_coordinator_recovery;
 pub mod index_copy_on_write;
 pub mod index_definition_runtime;
 pub mod index_manifest;
