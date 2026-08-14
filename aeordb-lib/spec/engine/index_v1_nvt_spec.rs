@@ -312,6 +312,254 @@ fn wrap_posting_directory(graph: &LookupGraph) -> (Vec<u8>, Vec<u8>) {
   (manifest.value, root.value)
 }
 
+fn next_deterministic_u64(state: &mut u64) -> u64 {
+  *state ^= *state << 13;
+  *state ^= *state >> 7;
+  *state ^= *state << 17;
+  *state
+}
+
+fn prove_randomized_lookup_model(hash_algorithm: HashAlgorithm, resolution: u64, tile_cell_count: u32) {
+  let profile = match hash_algorithm {
+    HashAlgorithm::Blake3_256 => "blake3-256",
+    HashAlgorithm::Sha512 => "sha512",
+    _ => panic!("randomized lookup model uses a frozen v4 hash profile"),
+  };
+  let seed = fixture_bytes(&format!("aidx-{profile}-field-index-manifest-populated.bin"));
+  let seed = decode_index_manifest(&seed, hash_algorithm).unwrap();
+  let IndexManifestBodyV1::FieldIndex(seed_body) = &seed.details else {
+    panic!("randomized lookup seed is not a FieldIndex manifest");
+  };
+  let page_count = 64usize;
+  let mut random_state = 0x4e56_542d_7631_2026 ^ resolution ^ u64::from(tile_cell_count);
+  let mut cells = Vec::with_capacity(page_count);
+  let mut cell = 17u64;
+  for _ in 0..page_count {
+    cell += 3 + next_deterministic_u64(&mut random_state) % (resolution / 96);
+    assert!(cell < resolution);
+    cells.push(cell);
+  }
+  let page_ids = (0..page_count).map(|index| u64::try_from((index * 37) % page_count + 1).unwrap()).collect::<Vec<_>>();
+  let records = cells
+    .iter()
+    .enumerate()
+    .map(|(index, cell)| posting_record(coordinate_for_cell(*cell, resolution), u64::try_from(index + 1).unwrap()))
+    .collect::<Vec<_>>();
+  let posting_pages = records
+    .iter()
+    .enumerate()
+    .map(|(index, record)| {
+      let records = [record.as_slice()];
+      encode_ordered_page(&OrderedPageWriteV1 {
+        hash_algorithm,
+        role: OrderedIndexRoleV1::Posting,
+        owner_id: seed.owner_id,
+        generation: seed.generation,
+        page_id: page_ids[index],
+        previous_page_id: if index == 0 { 0 } else { page_ids[index - 1] },
+        next_page_id: if index + 1 == page_count { 0 } else { page_ids[index + 1] },
+        records: &records,
+      })
+      .unwrap()
+    })
+    .collect::<Vec<_>>();
+  let decoded_pages = posting_pages.iter().map(|page| decode_ordered_page(&page.value, hash_algorithm).unwrap()).collect::<Vec<_>>();
+  let posting_entries = decoded_pages
+    .iter()
+    .enumerate()
+    .map(|(index, page)| ArtifactDirectoryEntryWriteV1 {
+      lower_fence: page.lower_fence,
+      upper_fence: page.upper_fence,
+      child_hash: &posting_pages[index].key,
+      child_generation: page.generation,
+      live_count: u64::from(page.live_count),
+      tombstone_count: u64::from(page.tombstone_count),
+      page_count: 1,
+      logical_bytes: page.logical_live_bytes,
+      minimum_page_id: page.page_id,
+      maximum_page_id: page.page_id,
+      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    })
+    .collect::<Vec<_>>();
+  let posting_directory = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+    hash_algorithm,
+    role: OrderedIndexRoleV1::Posting,
+    owner_id: seed.owner_id,
+    generation: seed.generation,
+    level: 0,
+    entries: &posting_entries,
+  })
+  .unwrap();
+  let posting_directory_decoded = decode_artifact_directory(&posting_directory.value, hash_algorithm).unwrap();
+  let field_manifest = encode_index_manifest(&IndexManifestWriteV1 {
+    hash_algorithm,
+    generation: seed.generation,
+    owner_id: seed.owner_id,
+    body: IndexManifestBodyV1::FieldIndex(FieldIndexManifestBodyV1 {
+      required_reader_capabilities: seed_body.required_reader_capabilities,
+      coverage: seed_body.coverage.clone(),
+      value_store_manifest: seed_body.value_store_manifest,
+      posting_directory_root: Some(&posting_directory.key),
+      document_state_directory_root: None,
+      first_page_id: page_ids[0],
+      last_page_id: page_ids[page_count - 1],
+      next_page_id: u64::try_from(page_count + 1).unwrap(),
+      posting_page_count: posting_directory_decoded.page_count,
+      state_page_count: 0,
+      live_posting_count: posting_directory_decoded.live_count,
+      posting_tombstone_count: posting_directory_decoded.tombstone_count,
+      posting_document_count: u64::try_from(page_count).unwrap(),
+      unindexable_document_count: 0,
+      state_tombstone_count: 0,
+      live_canonical_posting_bytes: posting_directory_decoded.logical_bytes,
+      field_index_definition: seed_body.field_index_definition,
+    }),
+  })
+  .unwrap();
+  let samples = decoded_pages
+    .iter()
+    .map(|page| NvtPostingPageSampleV1 {
+      page_id: page.page_id,
+      minimum_coordinate: page.minimum_coordinate,
+      maximum_coordinate: page.maximum_coordinate,
+      live_postings: u64::from(page.live_count),
+    })
+    .collect::<Vec<_>>();
+  let build_request = SparseNvtBuildRequestV1 {
+    hash_algorithm,
+    owner_id: seed.owner_id,
+    generation: seed.generation + 1,
+    resolution,
+    tile_cell_count,
+    basis_posting_generation: seed.generation,
+    pages: &samples,
+    limits: build_limits(),
+  };
+  let plan = build_sparse_nvt_tiles_v1(&build_request).unwrap();
+  assert_eq!(plan, build_sparse_nvt_tiles_v1(&build_request).unwrap());
+  let decoded_tiles = plan.tiles.iter().map(|tile| decode_nvt_tile(&tile.value, hash_algorithm).unwrap()).collect::<Vec<_>>();
+  let tile_fences = decoded_tiles.iter().map(|tile| tile.tile_start_cell.to_le_bytes()).collect::<Vec<_>>();
+  let tile_entries = decoded_tiles
+    .iter()
+    .enumerate()
+    .map(|(index, tile)| ArtifactDirectoryEntryWriteV1 {
+      lower_fence: &tile_fences[index],
+      upper_fence: &tile_fences[index],
+      child_hash: &plan.tiles[index].key,
+      child_generation: tile.generation,
+      live_count: u64::try_from(tile.entries.len()).unwrap(),
+      tombstone_count: 0,
+      page_count: 1,
+      logical_bytes: u64::try_from(plan.tiles[index].value.len()).unwrap(),
+      minimum_page_id: 0,
+      maximum_page_id: 0,
+      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    })
+    .collect::<Vec<_>>();
+  let tile_directory = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+    hash_algorithm,
+    role: OrderedIndexRoleV1::NvtTile,
+    owner_id: seed.owner_id,
+    generation: seed.generation + 1,
+    level: 0,
+    entries: &tile_entries,
+  })
+  .unwrap();
+  let tile_directory_decoded = decode_artifact_directory(&tile_directory.value, hash_algorithm).unwrap();
+  let nvt_manifest = encode_index_manifest(&IndexManifestWriteV1 {
+    hash_algorithm,
+    generation: seed.generation + 1,
+    owner_id: seed.owner_id,
+    body: IndexManifestBodyV1::FieldNvt(FieldNvtManifestBodyV1 {
+      required_reader_capabilities: [0; 32],
+      tile_cells: tile_cell_count,
+      resolution,
+      basis_posting_generation: seed.generation,
+      basis_source_head_hash: seed_body.coverage.source_head_hash,
+      tile_directory_root: Some(&tile_directory.key),
+      tile_count: tile_directory_decoded.page_count,
+      populated_cell_count: tile_directory_decoded.live_count,
+      approximate_live_posting_count: plan.approximate_live_posting_count,
+    }),
+  })
+  .unwrap();
+  let field = pin_field_index_v1(&field_manifest.value, hash_algorithm).unwrap();
+  let NvtBasisStatusV1::Usable(basis) = validate_field_nvt_basis_v1(&field, Some(&nvt_manifest.value)) else {
+    panic!("randomized NVT basis must close to its FieldIndex");
+  };
+  let posting_directories = [posting_directory.value.as_slice()];
+  let tile_directories = [tile_directory.value.as_slice()];
+  let mut hint_count = 0usize;
+  let mut fallback_count = 0usize;
+  for query_index in 0..256usize {
+    let target_cell = match query_index {
+      0 => 0,
+      1 => cells[0],
+      _ => next_deterministic_u64(&mut random_state) % resolution,
+    };
+    let target_coordinate = coordinate_for_cell(target_cell, resolution);
+    let target_record = posting_record(target_coordinate, u64::MAX);
+    let target_key = posting_order_key(hash_algorithm, &target_record);
+    let predecessor_count = cells.partition_point(|cell| *cell <= target_cell);
+    let exact_index = predecessor_count.saturating_sub(1);
+    let exact_path = ImmutableIndexPathV1 { directories: &posting_directories, leaf: &posting_pages[exact_index].value };
+    let exact = exact_posting_predecessor_v1(&field, &target_key, Some(&exact_path), lookup_limits()).unwrap().unwrap();
+    assert_eq!(exact.page_id, page_ids[exact_index]);
+
+    let target_tile_start = target_cell / u64::from(tile_cell_count) * u64::from(tile_cell_count);
+    let tile_end = decoded_tiles.partition_point(|tile| tile.tile_start_cell <= target_tile_start);
+    let mut candidates = Vec::new();
+    if tile_end != 0 {
+      let current = tile_end - 1;
+      candidates.push(ImmutableIndexPathV1 { directories: &tile_directories, leaf: &plan.tiles[current].value });
+      if current != 0 {
+        candidates.push(ImmutableIndexPathV1 { directories: &tile_directories, leaf: &plan.tiles[current - 1].value });
+      }
+    }
+    let selection = select_nvt_predecessor_hint_v1(&basis, target_coordinate, &candidates, lookup_limits()).unwrap();
+    let resolved = if let Some(hint) = selection.hint {
+      hint_count += 1;
+      let hint_index = page_ids.iter().position(|page_id| *page_id == hint.page_id).unwrap();
+      let hint_path = ImmutableIndexPathV1 { directories: &posting_directories, leaf: &posting_pages[hint_index].value };
+      let resolved = resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+        field: &field,
+        target_coordinate,
+        target_posting_position: &target_key,
+        attempt: NvtLookupAttemptV1::Hint { basis: &basis, hint, posting_path: Some(&hint_path) },
+        exact_posting_path: Some(&exact_path),
+        lookup_limits: lookup_limits(),
+        healing_limits: default_nvt_healing_limits_v1(),
+      })
+      .unwrap();
+      assert_eq!(resolved.source, NvtLookupSourceV1::Hint);
+      assert!(hint_index <= exact_index);
+      for page_index in hint_index..=exact_index {
+        let page = &decoded_pages[page_index];
+        let expected_next = if page_index + 1 == page_count { 0 } else { page_ids[page_index + 1] };
+        assert_eq!(page.next_page_id, expected_next);
+      }
+      resolved
+    } else {
+      fallback_count += 1;
+      let cause = selection.fallback.as_ref().unwrap();
+      resolve_nvt_lookup_v1(&NvtLookupRequestV1 {
+        field: &field,
+        target_coordinate,
+        target_posting_position: &target_key,
+        attempt: NvtLookupAttemptV1::Fallback { basis: Some(&basis), cause },
+        exact_posting_path: Some(&exact_path),
+        lookup_limits: lookup_limits(),
+        healing_limits: default_nvt_healing_limits_v1(),
+      })
+      .unwrap()
+    };
+    let resolved_index = page_ids.iter().position(|page_id| *page_id == resolved.anchor.as_ref().unwrap().page_id).unwrap();
+    assert!(resolved_index <= exact_index);
+  }
+  assert!(hint_count > 0);
+  assert!(fallback_count > 0);
+}
+
 #[test]
 fn nvt_tile_writer_matches_both_independent_fixtures_exactly() {
   for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
@@ -1171,4 +1419,15 @@ fn invalid_hints_and_nonrepairable_pressure_fall_back_without_weakening_authorit
     .class(),
     MalformedInputClass::ChecksumOrIntegrityMismatch
   );
+}
+
+#[test]
+fn deterministic_randomized_sparse_lookup_never_starts_after_the_independent_exact_predecessor() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    for resolution in [65_536, 131_072] {
+      for tile_cell_count in [256, 1_024, 4_096] {
+        prove_randomized_lookup_model(hash_algorithm, resolution, tile_cell_count);
+      }
+    }
+  }
 }
