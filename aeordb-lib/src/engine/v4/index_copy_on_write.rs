@@ -998,7 +998,7 @@ fn validate_page_plan_closure<'a>(request: &'a IndexCopyOnWriteClosureRequestV1<
       previous_output = output_pages.last();
     }
     if role.uses_page_id() {
-      let retirement_set_contains_source = request.page_plan.retired_page_ids.iter().any(|page_id| *page_id == source.page_id);
+      let retirement_set_contains_source = request.page_plan.retired_page_ids.contains(&source.page_id);
       if replacement.source_retired != retirement_set_contains_source || replacement.source_retired == retains_source_page_id {
         return Err(closure_error(
           "index_cow_closure_source_retirement",
@@ -1691,7 +1691,7 @@ fn partition_directory_entries(
   }
   let unsplit_length = checked_directory_range_representable_length(hash_algorithm, level, entries)?;
   if unsplit_length <= target_bytes || entries.len() == 1 {
-    return Ok(vec![0..entries.len()]);
+    return Ok(std::iter::once(0..entries.len()).collect());
   }
   let mut ranges = Vec::new();
   let mut start = 0usize;
@@ -2214,7 +2214,7 @@ fn partition_records(
 ) -> FormatResult<Vec<std::ops::Range<usize>>> {
   let unsplit_length = checked_page_range_representable_length(request.hash_algorithm, source.role, records)?;
   if unsplit_length <= request.layout.split_above_bytes || records.len() == 1 {
-    return Ok(vec![0..records.len()]);
+    return Ok(std::iter::once(0..records.len()).collect());
   }
 
   let mut ranges = Vec::new();
