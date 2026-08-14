@@ -8346,7 +8346,7 @@
     {
       "id": "esq-v1-2102659b21bf909e46c5-00",
       "file": "aeordb-lib/src/engine/v4/coverage_runtime.rs",
-      "line": 434,
+      "line": 475,
       "column": 17,
       "enclosing_item": "impl SoftMutationHubV1::snapshot",
       "kind": "error_conversion",
@@ -8356,7 +8356,7 @@
     {
       "id": "esq-v1-8d41ede7f49cd8e7e24c-00",
       "file": "aeordb-lib/src/engine/v4/coverage_runtime.rs",
-      "line": 459,
+      "line": 553,
       "column": 21,
       "enclosing_item": "impl SoftMutationHubV1::try_drain",
       "kind": "error_conversion",

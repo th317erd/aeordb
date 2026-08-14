@@ -9,6 +9,7 @@ pub mod admission;
 pub mod config_value;
 pub mod configuration_controls;
 pub mod control_store;
+pub mod coverage_journal;
 pub mod coverage_runtime;
 pub mod database_header;
 pub mod dependency;

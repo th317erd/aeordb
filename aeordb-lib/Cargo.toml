@@ -1021,6 +1021,10 @@ name = "coverage_runtime_spec"
 path = "spec/engine/coverage_runtime_spec.rs"
 
 [[test]]
+name = "coverage_journal_spec"
+path = "spec/engine/coverage_journal_spec.rs"
+
+[[test]]
 name = "error_squelch_architecture_spec"
 path = "spec/engine/error_squelch_architecture_spec.rs"
 

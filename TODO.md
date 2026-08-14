@@ -865,7 +865,11 @@
       - [ ] P6-1: implement the post-authority soft mutation stream, sequence/gap model, and authoritative reconciliation boundary.
         - [x] P6-1a: freeze the typed coverage epoch/cursor, mutation envelope, admission outcomes, and gap/rebuild state machine in `coverage_runtime_spec` with an independent model.
         - [x] P6-1b: route every namespace mutation producer through one engine-owned, bounded, non-blocking post-commit fanout while preserving caller-specific effects.
-        - [ ] P6-1c: implement bounded journal ordering/replay and exact NamespaceRoot/SystemFamily identity reconciliation; absence or ambiguity must request diff/rebuild, never imply an empty delta.
+        - [x] P6-1c: implement bounded journal ordering/replay and exact NamespaceRoot/SystemFamily identity reconciliation; absence or ambiguity must request diff/rebuild, never imply an empty delta.
+          - [x] P6-1c-a: derive coverage authority only from verified NamespaceRoot, SemanticState, and selected SystemFamily identities.
+          - [x] P6-1c-b: reorder acknowledged mutations within explicit record/byte bounds and encode frozen journal segments without blocking the hard writer.
+          - [x] P6-1c-c: replay validated journal chains and reconcile missing, ambiguous, corrupt, or disconnected authority to bounded diff/rebuild.
+          - [x] P6-1c-d: clear current loss only with a generation-checked authoritative reconciliation and prove restart, cancellation, corruption, and concurrent-loss races.
         - [ ] P6-1d: prove restart, dropped/duplicate/out-of-order delivery, queue pressure, whole-root transitions, cancellation, memory bounds, and unchanged acknowledgement durability/latency.
       - [ ] P6-2: implement the single bounded IndexCoordinator, task admission, memtable, spill, checkpoint, cache, cancellation, and graceful shutdown runtime.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.

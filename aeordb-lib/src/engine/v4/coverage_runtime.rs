@@ -134,6 +134,22 @@ pub struct CoverageTrackerV1 {
   lost_through_sequence: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoverageReconciliationProofV1 {
+  coverage_epoch_id: [u8; 16],
+  boundary: CoverageBoundaryV1,
+}
+
+impl CoverageReconciliationProofV1 {
+  pub fn coverage_epoch_id(&self) -> [u8; 16] {
+    self.coverage_epoch_id
+  }
+
+  pub fn boundary(&self) -> &CoverageBoundaryV1 {
+    &self.boundary
+  }
+}
+
 impl CoverageTrackerV1 {
   pub fn new(coverage_epoch_id: [u8; 16], covered: CoverageBoundaryV1) -> Result<Self, CoverageRuntimeErrorV1> {
     if coverage_epoch_id.iter().all(|byte| *byte == 0) {
@@ -202,18 +218,18 @@ impl CoverageTrackerV1 {
     Ok(CoverageReconciliationV1::BoundedDiffRequired { from: self.covered.clone(), to: selected_authority.clone(), authority_sequence })
   }
 
-  pub fn accept_reconciled(&mut self, boundary: CoverageBoundaryV1) -> Result<(), CoverageRuntimeErrorV1> {
+  pub fn accept_reconciled(&mut self, boundary: CoverageBoundaryV1) -> Result<CoverageReconciliationProofV1, CoverageRuntimeErrorV1> {
     if boundary.publication_sequence < self.covered.publication_sequence {
       return Err(CoverageRuntimeErrorV1::AuthoritySequenceRegressed {
         covered: self.covered.publication_sequence,
         authority: boundary.publication_sequence,
       });
     }
-    self.covered = boundary;
+    self.covered = boundary.clone();
     self.last_mutation = None;
     self.reconciliation_reason = None;
     self.lost_through_sequence = None;
-    Ok(())
+    Ok(CoverageReconciliationProofV1 { coverage_epoch_id: self.coverage_epoch_id, boundary })
   }
 
   fn latch(&mut self, reason: CoverageGapReasonV1, observed_sequence: u64) -> CoverageObservationV1 {
@@ -314,6 +330,7 @@ pub struct SoftMutationNoticeV1 {
   pub operation_id: [u8; 16],
   pub kind: NamespaceMutationKind,
   pub publication_sequence: u64,
+  pub committed_at_ms: u64,
   pub previous_namespace_root: Vec<u8>,
   pub namespace_root: Vec<u8>,
   pub source_identities: Vec<NamespaceMutationSourceIdentity>,
@@ -344,6 +361,24 @@ pub struct SoftMutationHubSnapshotV1 {
   pub lost_through_sequence: Option<u64>,
   pub loss_reasons: Vec<SoftMutationLossReasonV1>,
   pub dropped_notices: u64,
+  pub loss_epoch: u64,
+  pub reconciled_loss_epoch: u64,
+  pub losses_in_flight: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoftMutationReconciliationTokenV1 {
+  loss_epoch: u64,
+  lost_through_sequence: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoftMutationReconciliationClearV1 {
+  Cleared,
+  AlreadyExact,
+  Stale,
+  BoundaryBehind,
+  QueueUnavailable,
 }
 
 #[derive(Debug)]
@@ -359,6 +394,9 @@ pub struct SoftMutationHubV1 {
   lost_through_sequence: AtomicU64,
   loss_reason_bits: AtomicU8,
   dropped_notices: AtomicU64,
+  loss_epoch: AtomicU64,
+  reconciled_loss_epoch: AtomicU64,
+  losses_in_flight: AtomicU64,
 }
 
 impl SoftMutationHubV1 {
@@ -372,12 +410,15 @@ impl SoftMutationHubV1 {
       lost_through_sequence: AtomicU64::new(0),
       loss_reason_bits: AtomicU8::new(0),
       dropped_notices: AtomicU64::new(0),
+      loss_epoch: AtomicU64::new(0),
+      reconciled_loss_epoch: AtomicU64::new(0),
+      losses_in_flight: AtomicU64::new(0),
     })
   }
 
   pub fn offer_acknowledgement(&self, acknowledgement: &NamespaceMutationAcknowledgement) -> SoftMutationAdmissionV1 {
-    if self.loss_reason_bits.load(Ordering::Acquire) != 0 {
-      self.record_dropped(acknowledgement.publication_sequence);
+    if self.reconciliation_required() {
+      self.record_loss(acknowledgement.publication_sequence, None);
       return SoftMutationAdmissionV1::ReconciliationAlreadyRequired;
     }
     if acknowledgement.publication_sequence == 0 {
@@ -434,6 +475,9 @@ impl SoftMutationHubV1 {
     let queue = self.queue.lock().map_err(|_| SoftMutationHubErrorV1::QueueUnavailable)?;
     let lost = self.lost_through_sequence.load(Ordering::Acquire);
     let reason_bits = self.loss_reason_bits.load(Ordering::Acquire);
+    let loss_epoch = self.loss_epoch.load(Ordering::Acquire);
+    let reconciled_loss_epoch = self.reconciled_loss_epoch.load(Ordering::Acquire);
+    let losses_in_flight = self.losses_in_flight.load(Ordering::Acquire);
     Ok(SoftMutationHubSnapshotV1 {
       queued_notices: queue.notices.len(),
       retained_bytes: queue.retained_bytes,
@@ -441,11 +485,61 @@ impl SoftMutationHubV1 {
       maximum_retained_bytes: self.options.maximum_retained_bytes,
       maximum_notice_bytes: self.options.maximum_notice_bytes,
       latest_queued_publication_sequence: queue.notices.back().map(|notice| notice.publication_sequence),
-      reconciliation_required: reason_bits != 0,
+      reconciliation_required: losses_in_flight != 0 || loss_epoch != reconciled_loss_epoch,
       lost_through_sequence: (lost != 0).then_some(lost),
       loss_reasons: SoftMutationLossReasonV1::ALL.into_iter().filter(|reason| reason_bits & reason.bit() != 0).collect(),
       dropped_notices: self.dropped_notices.load(Ordering::Relaxed),
+      loss_epoch,
+      reconciled_loss_epoch,
+      losses_in_flight,
     })
+  }
+
+  pub fn reconciliation_token(&self) -> SoftMutationReconciliationTokenV1 {
+    let loss_epoch = self.loss_epoch.load(Ordering::Acquire);
+    let lost = self.lost_through_sequence.load(Ordering::Acquire);
+    SoftMutationReconciliationTokenV1 { loss_epoch, lost_through_sequence: (lost != 0).then_some(lost) }
+  }
+
+  pub fn try_clear_reconciliation(
+    &self,
+    token: SoftMutationReconciliationTokenV1,
+    proof: &CoverageReconciliationProofV1,
+  ) -> SoftMutationReconciliationClearV1 {
+    let reconciled_through_sequence = proof.boundary.publication_sequence;
+    let current_epoch = self.loss_epoch.load(Ordering::Acquire);
+    let reconciled_epoch = self.reconciled_loss_epoch.load(Ordering::Acquire);
+    if current_epoch == reconciled_epoch {
+      return SoftMutationReconciliationClearV1::AlreadyExact;
+    }
+    if self.losses_in_flight.load(Ordering::Acquire) != 0 || token.loss_epoch == u64::MAX || token.loss_epoch != current_epoch {
+      return SoftMutationReconciliationClearV1::Stale;
+    }
+    if token.lost_through_sequence.is_some_and(|lost| lost > reconciled_through_sequence) {
+      return SoftMutationReconciliationClearV1::BoundaryBehind;
+    }
+
+    let mut queue = match self.queue.lock() {
+      Ok(queue) => queue,
+      Err(error) => {
+        tracing::error!(?error, "Soft mutation queue was poisoned while clearing reconciled loss");
+        return SoftMutationReconciliationClearV1::QueueUnavailable;
+      }
+    };
+    if queue.notices.iter().any(|notice| notice.publication_sequence > reconciled_through_sequence) {
+      return SoftMutationReconciliationClearV1::BoundaryBehind;
+    }
+    if self.losses_in_flight.load(Ordering::Acquire) != 0 || self.loss_epoch.load(Ordering::Acquire) != token.loss_epoch {
+      return SoftMutationReconciliationClearV1::Stale;
+    }
+    queue.notices.clear();
+    queue.retained_bytes = 0;
+    self.reconciled_loss_epoch.store(token.loss_epoch, Ordering::Release);
+    if self.losses_in_flight.load(Ordering::Acquire) == 0 && self.loss_epoch.load(Ordering::Acquire) == token.loss_epoch {
+      SoftMutationReconciliationClearV1::Cleared
+    } else {
+      SoftMutationReconciliationClearV1::Stale
+    }
   }
 
   pub fn try_drain(&self, maximum_notices: usize, maximum_bytes: usize) -> Result<SoftMutationDrainV1, SoftMutationHubErrorV1> {
@@ -486,13 +580,21 @@ impl SoftMutationHubV1 {
   }
 
   fn latch_loss(&self, publication_sequence: u64, reason: SoftMutationLossReasonV1) -> SoftMutationAdmissionV1 {
-    self.loss_reason_bits.fetch_or(reason.bit(), Ordering::AcqRel);
-    self.record_dropped(publication_sequence);
+    self.record_loss(publication_sequence, Some(reason));
     SoftMutationAdmissionV1::ReconciliationRequired(reason)
   }
 
-  fn record_dropped(&self, publication_sequence: u64) {
+  fn reconciliation_required(&self) -> bool {
+    self.losses_in_flight.load(Ordering::Acquire) != 0
+      || self.loss_epoch.load(Ordering::Acquire) != self.reconciled_loss_epoch.load(Ordering::Acquire)
+  }
+
+  fn record_loss(&self, publication_sequence: u64, reason: Option<SoftMutationLossReasonV1>) {
+    self.losses_in_flight.fetch_add(1, Ordering::AcqRel);
     self.lost_through_sequence.fetch_max(publication_sequence, Ordering::AcqRel);
+    if let Some(reason) = reason {
+      self.loss_reason_bits.fetch_or(reason.bit(), Ordering::AcqRel);
+    }
     let mut current = self.dropped_notices.load(Ordering::Acquire);
     loop {
       match self.dropped_notices.compare_exchange_weak(current, current.saturating_add(1), Ordering::AcqRel, Ordering::Acquire) {
@@ -500,6 +602,14 @@ impl SoftMutationHubV1 {
         Err(observed) => current = observed,
       }
     }
+    let mut epoch = self.loss_epoch.load(Ordering::Acquire);
+    while epoch != u64::MAX {
+      match self.loss_epoch.compare_exchange_weak(epoch, epoch + 1, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => break,
+        Err(observed) => epoch = observed,
+      }
+    }
+    self.losses_in_flight.fetch_sub(1, Ordering::AcqRel);
   }
 
   #[cfg(test)]
@@ -547,6 +657,7 @@ fn clone_notice(
     operation_id: *acknowledgement.operation_id.as_bytes(),
     kind: acknowledgement.kind,
     publication_sequence: acknowledgement.publication_sequence,
+    committed_at_ms: chrono::Utc::now().timestamp_millis().max(1) as u64,
     previous_namespace_root: clone_bytes(&acknowledgement.previous_root_hash)?,
     namespace_root: clone_bytes(&acknowledgement.root_hash)?,
     source_identities,
