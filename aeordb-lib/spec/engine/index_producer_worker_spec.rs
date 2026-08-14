@@ -19,9 +19,9 @@ use aeordb::engine::v4::index_producer_coordinator::{
 use aeordb::engine::v4::index_producer_executor::IndexProducerExecutorV1;
 use aeordb::engine::v4::index_producer_source::{
   IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
-  IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1,
-  LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1,
-  ResolvedIndexDocumentTransitionV1, ResolvedIndexScopeWorkV1,
+  IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1,
+  IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1,
+  OwnedIndexValueStoreDefinitionV1, ResolvedIndexScopeWorkV1,
 };
 use aeordb::engine::v4::index_producer_worker::{
   IndexProducerMutationWorkRequestV1, IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1, IndexProducerWorkerOutcomeV1,
@@ -116,9 +116,7 @@ struct SemanticSource {
 impl IndexSemanticScopeSourceV1 for SemanticSource {
   fn resolve_scopes(
     &self,
-    _semantic_state_root: &[u8],
-    _transition: &ResolvedIndexDocumentTransitionV1,
-    _limits: IndexSemanticScopeLimitsV1,
+    _request: IndexSemanticScopeReadRequestV1<'_>,
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
     let resolution = self.result.clone()?;
     let reservation = memory(8 * 1_024 * 1_024)
@@ -134,12 +132,35 @@ struct RetainedSemanticSource {
   reserved_bytes: u64,
 }
 
+struct OperationCheckingSemanticSource {
+  expected_operation_id: [u8; 16],
+  semantic_state_root: Vec<u8>,
+  observed: AtomicBool,
+}
+
+impl IndexSemanticScopeSourceV1 for OperationCheckingSemanticSource {
+  fn resolve_scopes(
+    &self,
+    request: IndexSemanticScopeReadRequestV1<'_>,
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    assert_eq!(request.operation_id, self.expected_operation_id);
+    assert_eq!(request.semantic_state_root, self.semantic_state_root);
+    assert!(!(request.is_cancelled)());
+    self.observed.store(true, Ordering::SeqCst);
+    let reservation = memory(8 * 1_024 * 1_024)
+      .reserve(MemoryOwner::Task, self.semantic_state_root.len() as u64, AdmissionClass::Workload)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexSemanticScopeReadV1::new(
+      IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: self.semantic_state_root.clone() },
+      reservation,
+    )
+  }
+}
+
 impl IndexSemanticScopeSourceV1 for RetainedSemanticSource {
   fn resolve_scopes(
     &self,
-    _semantic_state_root: &[u8],
-    _transition: &ResolvedIndexDocumentTransitionV1,
-    _limits: IndexSemanticScopeLimitsV1,
+    _request: IndexSemanticScopeReadRequestV1<'_>,
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
     let reservation = self
       .memory
@@ -342,6 +363,41 @@ fn one_worker_composes_exact_sources_scopes_and_leased_execution() {
   assert_eq!(producer.snapshot().pending_tasks, 0);
   assert_eq!(producer.snapshot().leased_tasks, 0);
   assert_eq!(mutations.snapshot().active_records, 4);
+}
+
+#[test]
+fn worker_forwards_the_exact_lease_operation_id_to_semantic_resolution() {
+  let encoded = encoded_journal("/doc.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  let revisions = revision_source(&encoded);
+  let (mut producer, lease) = admitted(&encoded);
+  let semantics = OperationCheckingSemanticSource {
+    expected_operation_id: lease.operation_id(),
+    semantic_state_root: journal.semantic_state_root.to_vec(),
+    observed: AtomicBool::new(false),
+  };
+  let mut mutations = mutations(2 * 1_024 * 1_024);
+
+  let outcome = worker()
+    .execute(
+      &mut producer,
+      &mut mutations,
+      IndexProducerMutationWorkRequestV1 {
+        lease: &lease,
+        journal: &journal,
+        revision_source: &revisions,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 101,
+        is_cancelled: &|| false,
+      },
+      &mut SpillStore,
+    )
+    .unwrap();
+
+  assert!(matches!(outcome, IndexProducerWorkerOutcomeV1::ContentOnly { .. }));
+  assert!(semantics.observed.load(Ordering::SeqCst));
 }
 
 #[test]

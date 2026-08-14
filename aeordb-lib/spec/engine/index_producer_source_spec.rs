@@ -1,5 +1,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::file_record::FileRecord;
@@ -11,10 +13,10 @@ use aeordb::engine::v4::index_producer_coordinator::{
 };
 use aeordb::engine::v4::index_producer_source::{
   IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
-  IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1,
-  IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1,
-  OwnedIndexValueStoreDefinitionV1, ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1, ResolvedIndexScopeWorkV1,
-  resolve_leased_mutation_record, resolve_mutation_document_transition, resolve_semantic_scope_work,
+  IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1,
+  IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1,
+  OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1, ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1,
+  ResolvedIndexScopeWorkV1, resolve_leased_mutation_record, resolve_mutation_document_transition, resolve_semantic_scope_work,
 };
 use aeordb::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
@@ -25,6 +27,35 @@ const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
 fn hash(label: &[u8]) -> Vec<u8> {
   aeordb::engine::v4::hash::digest_parts(ALGORITHM, &[b"producer-source:", label])
+}
+
+struct RecordingSemanticSource {
+  observed: Mutex<Option<([u8; 16], Vec<u8>, String, IndexSemanticScopeLimitsV1)>>,
+}
+
+impl IndexSemanticScopeSourceV1 for RecordingSemanticSource {
+  fn resolve_scopes(
+    &self,
+    request: IndexSemanticScopeReadRequestV1<'_>,
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    assert!(!(request.is_cancelled)());
+    let path = request
+      .transition
+      .after
+      .as_ref()
+      .or(request.transition.before.as_ref())
+      .expect("validated semantic transition")
+      .file_record
+      .path
+      .clone();
+    *self.observed.lock().unwrap() = Some((request.operation_id, request.semantic_state_root.to_vec(), path, request.limits));
+    let resolution = IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: request.semantic_state_root.to_vec() };
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(6_000, 8_000, 1, 1_000).unwrap());
+    let reservation = memory
+      .reserve(MemoryOwner::Task, request.semantic_state_root.len() as u64, AdmissionClass::Workload)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexSemanticScopeReadV1::new(resolution, reservation)
+  }
 }
 
 fn fixture(folder: &str, name: &str) -> Vec<u8> {
@@ -114,9 +145,7 @@ struct SemanticSource {
 impl IndexSemanticScopeSourceV1 for SemanticSource {
   fn resolve_scopes(
     &self,
-    _semantic_state_root: &[u8],
-    _transition: &aeordb::engine::v4::index_producer_source::ResolvedIndexDocumentTransitionV1,
-    _limits: IndexSemanticScopeLimitsV1,
+    _request: IndexSemanticScopeReadRequestV1<'_>,
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
     let resolution = self.result.clone()?;
     let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap());
@@ -164,6 +193,26 @@ fn resolved_transition() -> ResolvedIndexDocumentTransitionV1 {
 
 fn semantic_limits() -> IndexSemanticScopeLimitsV1 {
   IndexSemanticScopeLimitsV1::new(8, 16, 32, 2 * 1_024 * 1_024).unwrap()
+}
+
+#[test]
+fn semantic_scope_source_receives_exact_operation_transition_limits_and_cancellation() {
+  let operation_id = [0x5a; 16];
+  let root = hash(b"semantic-request");
+  let limits = semantic_limits();
+  let source = RecordingSemanticSource { observed: Mutex::new(None) };
+  let cancellation_calls = AtomicUsize::new(0);
+  let is_cancelled = || {
+    cancellation_calls.fetch_add(1, Ordering::SeqCst);
+    false
+  };
+
+  let resolved =
+    resolve_semantic_scope_work(ALGORITHM, operation_id, &root, &resolved_transition(), &source, limits, &is_cancelled).unwrap();
+
+  assert!(matches!(resolved.resolution(), IndexSemanticScopeResolutionV1::ContentOnly { .. }));
+  assert_eq!(source.observed.lock().unwrap().as_ref(), Some(&(operation_id, root, "/workspace/docs/doc.json".to_string(), limits)));
+  assert!(cancellation_calls.load(Ordering::SeqCst) >= 3);
 }
 
 #[test]
@@ -320,7 +369,8 @@ fn complete_semantic_resolution_preserves_all_scope_local_ordinals() {
     }),
   };
 
-  let resolved = resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap();
+  let resolved =
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap();
   let (resolved, _reservation) = resolved.into_parts();
   let IndexSemanticScopeResolutionV1::Complete { semantic_state_root, scope_work } = resolved else {
     panic!("complete semantic source became content-only");
@@ -344,7 +394,9 @@ fn content_only_semantics_remain_explicit_instead_of_becoming_empty_complete_cov
   let source = SemanticSource { result: Ok(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root.clone() }) };
 
   assert_eq!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap().resolution(),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, semantic_limits(), &|| false)
+      .unwrap()
+      .resolution(),
     &IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root }
   );
 }
@@ -360,7 +412,7 @@ fn semantic_resolution_rejects_wrong_roots_duplicate_owners_and_zero_ordinals() 
     }),
   };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &wrong_root_source, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &wrong_root_source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::SemanticRootMismatch { .. })
   ));
 
@@ -370,7 +422,7 @@ fn semantic_resolution_rejects_wrong_roots_duplicate_owners_and_zero_ordinals() 
     result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![wrong_nested_root] }),
   };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &wrong_nested_root_source, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &wrong_nested_root_source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::SemanticRootMismatch { .. })
   ));
 
@@ -382,7 +434,7 @@ fn semantic_resolution_rejects_wrong_roots_duplicate_owners_and_zero_ordinals() 
     }),
   };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &duplicate_source, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &duplicate_source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::DuplicateSemanticOwner { .. })
   ));
 
@@ -393,7 +445,7 @@ fn semantic_resolution_rejects_wrong_roots_duplicate_owners_and_zero_ordinals() 
     }),
   };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &zero_source, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &zero_source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::InvalidDocumentOrdinal { .. })
   ));
 }
@@ -412,7 +464,7 @@ fn semantic_resolution_enforces_aggregate_limits_before_collection() {
   };
   let one_scope = IndexSemanticScopeLimitsV1::new(1, 16, 32, 2 * 1_024 * 1_024).unwrap();
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &two_scopes, one_scope, &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &two_scopes, one_scope, &|| false),
     Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "scopes", .. })
   ));
 
@@ -425,9 +477,9 @@ fn semantic_resolution_enforces_aggregate_limits_before_collection() {
   let source = SemanticSource {
     result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![one.clone()] }),
   };
-  resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, exact, &|| false).unwrap();
+  resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, exact, &|| false).unwrap();
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, too_small, &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, too_small, &|| false),
     Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "definition bytes", .. })
   ));
 
@@ -438,7 +490,7 @@ fn semantic_resolution_enforces_aggregate_limits_before_collection() {
   };
   let one_value_store = IndexSemanticScopeLimitsV1::new(1, 1, 32, 2 * 1_024 * 1_024).unwrap();
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, one_value_store, &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, one_value_store, &|| false),
     Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "value stores", .. })
   ));
 
@@ -450,7 +502,7 @@ fn semantic_resolution_enforces_aggregate_limits_before_collection() {
   };
   let one_field = IndexSemanticScopeLimitsV1::new(1, 1, 1, 2 * 1_024 * 1_024).unwrap();
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, one_field, &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, one_field, &|| false),
     Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "field indexes", .. })
   ));
 }
@@ -464,29 +516,29 @@ fn malformed_semantic_definitions_and_source_failures_remain_typed() {
     result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![malformed] }),
   };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::Format(_))
   ));
 
   let retryable =
     SemanticSource { result: Err(IndexSemanticScopeReadErrorV1::retryable("semantic_busy", "injected semantic catalog outage")) };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &retryable, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &retryable, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::SemanticRead(error)) if error.code() == "semantic_busy"
   ));
   let cancelled = SemanticSource { result: Err(IndexSemanticScopeReadErrorV1::cancelled("shutdown", "worker stopping")) };
   assert_eq!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &cancelled, semantic_limits(), &|| false).unwrap_err(),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &cancelled, semantic_limits(), &|| false).unwrap_err(),
     IndexProducerSourceErrorV1::Cancelled
   );
   assert_eq!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &retryable, semantic_limits(), &|| true).unwrap_err(),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &retryable, semantic_limits(), &|| true).unwrap_err(),
     IndexProducerSourceErrorV1::Cancelled
   );
 
   let corrupt = SemanticSource { result: Err(IndexSemanticScopeReadErrorV1::corrupt("catalog_corrupt", "bad catalog edge")) };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &corrupt, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &corrupt, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::SemanticRead(error))
       if error.class() == IndexSemanticScopeReadErrorClassV1::Corrupt && error.code() == "catalog_corrupt"
   ));
@@ -499,12 +551,13 @@ fn semantic_resolution_rejects_invalid_inputs_and_cancels_during_validation() {
   let root = hash(b"semantic");
   let source = SemanticSource { result: Ok(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root.clone() }) };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &[0; 32], &resolved_transition(), &source, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &[0; 32], &resolved_transition(), &source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(_))
   ));
   assert!(matches!(
     resolve_semantic_scope_work(
       ALGORITHM,
+      [1; 16],
       &root,
       &ResolvedIndexDocumentTransitionV1 { before: None, after: None },
       &source,
@@ -527,7 +580,7 @@ fn semantic_resolution_rejects_invalid_inputs_and_cancels_during_validation() {
     call >= 3
   };
   assert_eq!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &cancellation).unwrap_err(),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, semantic_limits(), &cancellation).unwrap_err(),
     IndexProducerSourceErrorV1::Cancelled
   );
 }
@@ -540,7 +593,7 @@ fn semantic_definition_closure_mismatch_fails_before_collection() {
   let source =
     SemanticSource { result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![work] }) };
   assert!(matches!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false),
+    resolve_semantic_scope_work(ALGORITHM, [1; 16], &root, &resolved_transition(), &source, semantic_limits(), &|| false),
     Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(message)) if message.contains("ValueStoreDefinition closure mismatch")
   ));
 }
