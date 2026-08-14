@@ -97,7 +97,7 @@ impl IndexProducerMutationWorkerV1 {
       Ok(transition) => transition,
       Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
     };
-    let scopes = match resolve_semantic_scope_work(
+    let scope_read = match resolve_semantic_scope_work(
       self.hash_algorithm,
       request.journal.semantic_state_root,
       &transition,
@@ -108,6 +108,7 @@ impl IndexProducerMutationWorkerV1 {
       Ok(scopes) => scopes,
       Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
     };
+    let (scopes, _scope_reservation) = scope_read.into_parts();
 
     match scopes {
       IndexSemanticScopeResolutionV1::Complete { semantic_state_root, scope_work } => {

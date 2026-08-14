@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::engine::HashAlgorithm;
 use crate::engine::file_record::FileRecord;
+use crate::engine::memory_coordinator::{MemoryOwner, MemoryReservation};
 
 use super::hash::digest_parts;
 use super::index_producer_admission::{IndexProducerJournalAdmissionErrorV1, derive_mutation_operation_id};
@@ -256,13 +257,60 @@ impl IndexSemanticScopeResolutionV1 {
   }
 }
 
+pub struct IndexSemanticScopeReadV1 {
+  resolution: IndexSemanticScopeResolutionV1,
+  reservation: MemoryReservation,
+}
+
+impl std::fmt::Debug for IndexSemanticScopeReadV1 {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("IndexSemanticScopeReadV1")
+      .field("resolution", &self.resolution)
+      .field("reservation_owner", &self.reservation.owner())
+      .field("reserved_bytes", &self.reservation.bytes())
+      .finish()
+  }
+}
+
+impl IndexSemanticScopeReadV1 {
+  pub fn new(resolution: IndexSemanticScopeResolutionV1, reservation: MemoryReservation) -> Result<Self, IndexSemanticScopeReadErrorV1> {
+    if reservation.owner() != MemoryOwner::Task {
+      return Err(IndexSemanticScopeReadErrorV1::corrupt(
+        "semantic_memory_owner",
+        format!("semantic scope resolution is owned by {:?}, expected Task", reservation.owner()),
+      ));
+    }
+    let required_bytes = semantic_resolution_retained_bytes(&resolution)?;
+    if reservation.bytes() < required_bytes {
+      return Err(IndexSemanticScopeReadErrorV1::corrupt(
+        "semantic_memory_reservation",
+        format!("semantic scope resolution retains at least {required_bytes} bytes but reserves {}", reservation.bytes()),
+      ));
+    }
+    Ok(Self { resolution, reservation })
+  }
+
+  pub fn resolution(&self) -> &IndexSemanticScopeResolutionV1 {
+    &self.resolution
+  }
+
+  pub const fn reserved_bytes(&self) -> u64 {
+    self.reservation.bytes()
+  }
+
+  pub fn into_parts(self) -> (IndexSemanticScopeResolutionV1, MemoryReservation) {
+    (self.resolution, self.reservation)
+  }
+}
+
 pub trait IndexSemanticScopeSourceV1: Send + Sync {
   fn resolve_scopes(
     &self,
     semantic_state_root: &[u8],
     transition: &ResolvedIndexDocumentTransitionV1,
     limits: IndexSemanticScopeLimitsV1,
-  ) -> Result<IndexSemanticScopeResolutionV1, IndexSemanticScopeReadErrorV1>;
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1>;
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -312,7 +360,7 @@ pub fn resolve_semantic_scope_work(
   source: &dyn IndexSemanticScopeSourceV1,
   limits: IndexSemanticScopeLimitsV1,
   is_cancelled: &dyn Fn() -> bool,
-) -> Result<IndexSemanticScopeResolutionV1, IndexProducerSourceErrorV1> {
+) -> Result<IndexSemanticScopeReadV1, IndexProducerSourceErrorV1> {
   if is_cancelled() {
     return Err(IndexProducerSourceErrorV1::Cancelled);
   }
@@ -336,12 +384,48 @@ pub fn resolve_semantic_scope_work(
   if is_cancelled() {
     return Err(IndexProducerSourceErrorV1::Cancelled);
   }
-  validate_semantic_root(semantic_state_root, resolution.semantic_state_root())?;
-  let IndexSemanticScopeResolutionV1::Complete { scope_work, .. } = &resolution else {
+  validate_semantic_root(semantic_state_root, resolution.resolution().semantic_state_root())?;
+  let IndexSemanticScopeResolutionV1::Complete { scope_work, .. } = resolution.resolution() else {
     return Ok(resolution);
   };
   validate_scope_work(hash_algorithm, semantic_state_root, scope_work, limits, is_cancelled)?;
   Ok(resolution)
+}
+
+fn semantic_resolution_retained_bytes(resolution: &IndexSemanticScopeResolutionV1) -> Result<u64, IndexSemanticScopeReadErrorV1> {
+  let mut retained = usize_to_semantic_bytes(resolution.semantic_state_root().len(), "semantic-state root")?;
+  let IndexSemanticScopeResolutionV1::Complete { scope_work, .. } = resolution else {
+    return Ok(retained);
+  };
+  for work in scope_work {
+    retained = add_semantic_retained_bytes(retained, work.semantic_state_root.len(), "scope semantic-state root")?;
+    retained = add_semantic_retained_bytes(retained, work.scope.scope_id.len(), "ScopeId")?;
+    retained = add_semantic_retained_bytes(retained, work.scope.encoded_definition.len(), "ScopeDefinition")?;
+    for value_store in &work.scope.value_stores {
+      retained = add_semantic_retained_bytes(retained, value_store.value_store_id.len(), "ValueStoreId")?;
+      retained = add_semantic_retained_bytes(retained, value_store.encoded_definition.len(), "ValueStoreDefinition")?;
+      for field in &value_store.field_indexes {
+        retained = add_semantic_retained_bytes(retained, field.index_id.len(), "IndexId")?;
+        retained = add_semantic_retained_bytes(retained, field.encoded_definition.len(), "FieldIndexDefinition")?;
+      }
+    }
+  }
+  Ok(retained)
+}
+
+fn add_semantic_retained_bytes(retained: u64, bytes: usize, resource: &'static str) -> Result<u64, IndexSemanticScopeReadErrorV1> {
+  retained.checked_add(usize_to_semantic_bytes(bytes, resource)?).ok_or_else(|| {
+    IndexSemanticScopeReadErrorV1::corrupt("semantic_memory_overflow", format!("retained {resource} byte accounting overflowed"))
+  })
+}
+
+fn usize_to_semantic_bytes(bytes: usize, resource: &'static str) -> Result<u64, IndexSemanticScopeReadErrorV1> {
+  u64::try_from(bytes).map_err(|source| {
+    IndexSemanticScopeReadErrorV1::corrupt(
+      "semantic_memory_overflow",
+      format!("retained {resource} byte length does not fit u64: {source}"),
+    )
+  })
 }
 
 fn validate_semantic_root(expected: &[u8], actual: &[u8]) -> Result<(), IndexProducerSourceErrorV1> {

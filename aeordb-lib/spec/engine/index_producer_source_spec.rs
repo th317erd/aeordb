@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::file_record::FileRecord;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::index_producer_admission::{admit_mutation_journal_tasks, derive_mutation_operation_id};
 use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1,
@@ -11,10 +11,10 @@ use aeordb::engine::v4::index_producer_coordinator::{
 };
 use aeordb::engine::v4::index_producer_source::{
   IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
-  IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeReadErrorV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1,
-  LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1,
-  ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1, ResolvedIndexScopeWorkV1, resolve_leased_mutation_record,
-  resolve_mutation_document_transition, resolve_semantic_scope_work,
+  IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1,
+  IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1,
+  OwnedIndexValueStoreDefinitionV1, ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1, ResolvedIndexScopeWorkV1,
+  resolve_leased_mutation_record, resolve_mutation_document_transition, resolve_semantic_scope_work,
 };
 use aeordb::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
@@ -117,8 +117,13 @@ impl IndexSemanticScopeSourceV1 for SemanticSource {
     _semantic_state_root: &[u8],
     _transition: &aeordb::engine::v4::index_producer_source::ResolvedIndexDocumentTransitionV1,
     _limits: IndexSemanticScopeLimitsV1,
-  ) -> Result<IndexSemanticScopeResolutionV1, IndexSemanticScopeReadErrorV1> {
-    self.result.clone()
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    let resolution = self.result.clone()?;
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap());
+    let reservation = memory
+      .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexSemanticScopeReadV1::new(resolution, reservation)
   }
 }
 
@@ -159,6 +164,28 @@ fn resolved_transition() -> ResolvedIndexDocumentTransitionV1 {
 
 fn semantic_limits() -> IndexSemanticScopeLimitsV1 {
   IndexSemanticScopeLimitsV1::new(8, 16, 32, 2 * 1_024 * 1_024).unwrap()
+}
+
+#[test]
+fn semantic_scope_reads_require_task_owned_memory_for_their_complete_lifetime() {
+  let root = hash(b"semantic");
+  let coordinator = MemoryCoordinator::new(MemoryPolicy::new(6_000, 8_000, 1, 1_000).unwrap());
+  let wrong_owner = coordinator.reserve(MemoryOwner::Query, root.len() as u64, AdmissionClass::Workload).unwrap();
+  assert!(
+    IndexSemanticScopeReadV1::new(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root.clone() }, wrong_owner).is_err()
+  );
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let under_reserved = coordinator.reserve(MemoryOwner::Task, (root.len() - 1) as u64, AdmissionClass::Workload).unwrap();
+  assert!(IndexSemanticScopeReadV1::new(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root.clone() }, under_reserved)
+    .is_err());
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
+
+  let reservation = coordinator.reserve(MemoryOwner::Task, root.len() as u64, AdmissionClass::Workload).unwrap();
+  let read = IndexSemanticScopeReadV1::new(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root }, reservation).unwrap();
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 32);
+  drop(read);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
 }
 
 impl IndexFileRevisionSourceV1 for RevisionSource {
@@ -294,6 +321,7 @@ fn complete_semantic_resolution_preserves_all_scope_local_ordinals() {
   };
 
   let resolved = resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap();
+  let (resolved, _reservation) = resolved.into_parts();
   let IndexSemanticScopeResolutionV1::Complete { semantic_state_root, scope_work } = resolved else {
     panic!("complete semantic source became content-only");
   };
@@ -316,8 +344,8 @@ fn content_only_semantics_remain_explicit_instead_of_becoming_empty_complete_cov
   let source = SemanticSource { result: Ok(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root.clone() }) };
 
   assert_eq!(
-    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap(),
-    IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root }
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap().resolution(),
+    &IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root }
   );
 }
 

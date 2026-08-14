@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::file_record::FileRecord;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
+use aeordb::engine::v4::config_value::CanonicalConfigValueV1;
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoordinatorV1};
 use aeordb::engine::v4::index_producer_admission::admit_mutation_journal_tasks;
@@ -17,9 +19,9 @@ use aeordb::engine::v4::index_producer_coordinator::{
 use aeordb::engine::v4::index_producer_executor::IndexProducerExecutorV1;
 use aeordb::engine::v4::index_producer_source::{
   IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
-  IndexSemanticScopeReadErrorV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1,
-  OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1, ResolvedIndexDocumentTransitionV1,
-  ResolvedIndexScopeWorkV1,
+  IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1,
+  LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1,
+  ResolvedIndexDocumentTransitionV1, ResolvedIndexScopeWorkV1,
 };
 use aeordb::engine::v4::index_producer_worker::{
   IndexProducerMutationWorkRequestV1, IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1, IndexProducerWorkerOutcomeV1,
@@ -117,15 +119,44 @@ impl IndexSemanticScopeSourceV1 for SemanticSource {
     _semantic_state_root: &[u8],
     _transition: &ResolvedIndexDocumentTransitionV1,
     _limits: IndexSemanticScopeLimitsV1,
-  ) -> Result<IndexSemanticScopeResolutionV1, IndexSemanticScopeReadErrorV1> {
-    self.result.clone()
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    let resolution = self.result.clone()?;
+    let reservation = memory(8 * 1_024 * 1_024)
+      .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexSemanticScopeReadV1::new(resolution, reservation)
+  }
+}
+
+struct RetainedSemanticSource {
+  resolution: IndexSemanticScopeResolutionV1,
+  memory: MemoryCoordinator,
+  reserved_bytes: u64,
+}
+
+impl IndexSemanticScopeSourceV1 for RetainedSemanticSource {
+  fn resolve_scopes(
+    &self,
+    _semantic_state_root: &[u8],
+    _transition: &ResolvedIndexDocumentTransitionV1,
+    _limits: IndexSemanticScopeLimitsV1,
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    let reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, self.reserved_bytes, AdmissionClass::Workload)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexSemanticScopeReadV1::new(self.resolution.clone(), reservation)
   }
 }
 
 fn scope_work(semantic_state_root: &[u8], ordinal: u64) -> ResolvedIndexScopeWorkV1 {
+  scope_work_with_value(semantic_state_root, ordinal, "avst-blake3-256-metadata-hash-corrected-valid.bin")
+}
+
+fn scope_work_with_value(semantic_state_root: &[u8], ordinal: u64, value_fixture: &str) -> ResolvedIndexScopeWorkV1 {
   let scope = fixture("scope-definition-v1", "ascp-blake3-256-root-direct-valid.bin");
   let scope_id = decode_scope_definition(&scope, ALGORITHM).unwrap().scope_id;
-  let mut value = fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid.bin");
+  let mut value = fixture("value-store-definition-v1", value_fixture);
   value[32..64].copy_from_slice(&scope_id);
   let value_id = decode_value_store_definition(&value, ALGORITHM).unwrap().value_store_id;
   let mut field = fixture("field-index-definition-v1", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
@@ -151,6 +182,37 @@ struct UnexpectedParser;
 impl IndexParserExecutorV1 for UnexpectedParser {
   fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
     Err(IndexParserExecutionErrorV1::host_failure("unexpected_parser", "metadata-only definition invoked the parser"))
+  }
+}
+
+struct ReservationObservingParser {
+  memory: MemoryCoordinator,
+  minimum_reserved_bytes: u64,
+  observed: AtomicBool,
+}
+
+impl IndexParserExecutorV1 for ReservationObservingParser {
+  fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
+    let reserved_bytes = self
+      .memory
+      .snapshot()
+      .map_err(|error| IndexParserExecutionErrorV1::host_failure("memory_snapshot", error.to_string()))?
+      .owner(MemoryOwner::Task)
+      .map_or(0, |owner| owner.reserved_bytes);
+    if reserved_bytes < self.minimum_reserved_bytes {
+      return Err(IndexParserExecutionErrorV1::host_failure(
+        "semantic_reservation_released",
+        format!("parser observed {reserved_bytes} task bytes, expected at least {}", self.minimum_reserved_bytes),
+      ));
+    }
+    self.observed.store(true, Ordering::SeqCst);
+    Ok(IndexParserOutcomeV1::Parsed(CanonicalConfigValueV1::Map(BTreeMap::from([(
+      "messages".to_string(),
+      CanonicalConfigValueV1::Array(vec![CanonicalConfigValueV1::Map(BTreeMap::from([(
+        "user".to_string(),
+        CanonicalConfigValueV1::String("retained".to_string()),
+      )]))]),
+    )]))))
   }
 }
 
@@ -205,7 +267,7 @@ fn mutations(max_bytes: u64) -> IndexCoordinatorV1 {
 fn worker_with_retry(source_retry_after_ms: u64) -> Result<IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1> {
   let collector = IndexProducerCollectorV1::new(
     ALGORITHM,
-    memory(8 * 1_024 * 1_024),
+    memory(32 * 1_024 * 1_024),
     IndexProducerCollectorOptionsV1::new(8, 16, 32, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap(),
   )
   .unwrap();
@@ -280,6 +342,53 @@ fn one_worker_composes_exact_sources_scopes_and_leased_execution() {
   assert_eq!(producer.snapshot().pending_tasks, 0);
   assert_eq!(producer.snapshot().leased_tasks, 0);
   assert_eq!(mutations.snapshot().active_records, 4);
+}
+
+#[test]
+fn semantic_task_memory_remains_reserved_through_parser_execution_and_releases_after_completion() {
+  const SEMANTIC_BYTES: u64 = 2 * 1_024 * 1_024;
+  let encoded = encoded_journal("/doc.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  let revisions = revision_source(&encoded);
+  let semantic_root = journal.semantic_state_root.to_vec();
+  let semantic_memory = memory(8 * 1_024 * 1_024);
+  let semantics = RetainedSemanticSource {
+    resolution: IndexSemanticScopeResolutionV1::Complete {
+      semantic_state_root: semantic_root.clone(),
+      scope_work: vec![scope_work_with_value(&semantic_root, 3, "avst-blake3-256-json-corrected-valid.bin")],
+    },
+    memory: semantic_memory.clone(),
+    reserved_bytes: SEMANTIC_BYTES,
+  };
+  let parser = ReservationObservingParser {
+    memory: semantic_memory.clone(),
+    minimum_reserved_bytes: SEMANTIC_BYTES,
+    observed: AtomicBool::new(false),
+  };
+  let (mut producer, lease) = admitted(&encoded);
+  let mut mutations = mutations(2 * 1_024 * 1_024);
+
+  let outcome = worker()
+    .execute(
+      &mut producer,
+      &mut mutations,
+      IndexProducerMutationWorkRequestV1 {
+        lease: &lease,
+        journal: &journal,
+        revision_source: &revisions,
+        semantic_source: &semantics,
+        parser: &parser,
+        mapper: None,
+        now_ms: 101,
+        is_cancelled: &|| false,
+      },
+      &mut SpillStore,
+    )
+    .unwrap();
+
+  assert!(matches!(outcome, IndexProducerWorkerOutcomeV1::Completed(IndexProducerCompletionV1::Completed { .. })));
+  assert!(parser.observed.load(Ordering::SeqCst));
+  assert_eq!(semantic_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
 }
 
 #[test]
