@@ -10356,7 +10356,7 @@
     {
       "id": "esq-v1-003fe08e80210547321e-00",
       "file": "aeordb-lib/src/engine/v4/namespace.rs",
-      "line": 409,
+      "line": 581,
       "column": 41,
       "enclosing_item": "decode_namespace_root",
       "kind": "panic_method",
@@ -10366,7 +10366,7 @@
     {
       "id": "esq-v1-1a045f297018c8f21bbf-00",
       "file": "aeordb-lib/src/engine/v4/namespace.rs",
-      "line": 546,
+      "line": 824,
       "column": 32,
       "enclosing_item": "decode_semantic_state",
       "kind": "panic_method",
@@ -10376,7 +10376,7 @@
     {
       "id": "esq-v1-1d7df8674a71fa7c9fd5-00",
       "file": "aeordb-lib/src/engine/v4/namespace.rs",
-      "line": 905,
+      "line": 1183,
       "column": 22,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -10386,7 +10386,7 @@
     {
       "id": "esq-v1-f3a3e3e228d0c403d2f8-00",
       "file": "aeordb-lib/src/engine/v4/namespace.rs",
-      "line": 909,
+      "line": 1187,
       "column": 22,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -10396,7 +10396,7 @@
     {
       "id": "esq-v1-0c329eb97ca16bf2ba9d-00",
       "file": "aeordb-lib/src/engine/v4/namespace.rs",
-      "line": 913,
+      "line": 1191,
       "column": 22,
       "enclosing_item": "u64_at",
       "kind": "panic_method",

@@ -131,6 +131,178 @@ pub struct SemanticObjectV1 {
   pub semantic_state: Option<SemanticStateV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticDefinitionRecordV1<'a> {
+  pub object_id: Vec<u8>,
+  pub class: u16,
+  pub semantic_id: &'a [u8],
+  pub definition: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticCatalogRecordV1<'a> {
+  pub record_kind: u16,
+  pub semantic_id: &'a [u8],
+  pub definition_object_id: &'a [u8],
+  pub owner_key: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticCatalogChildV1<'a> {
+  pub edge: u8,
+  pub record_count: u64,
+  pub object_id: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticCatalogLeafV1<'a> {
+  object_id: Vec<u8>,
+  lookup_digest: &'a [u8],
+  records: &'a [u8],
+  record_count: u32,
+  hash_width: usize,
+}
+
+impl<'a> SemanticCatalogLeafV1<'a> {
+  pub fn object_id(&self) -> &[u8] {
+    &self.object_id
+  }
+
+  pub fn lookup_digest(&self) -> &[u8] {
+    self.lookup_digest
+  }
+
+  pub const fn record_count(&self) -> u32 {
+    self.record_count
+  }
+
+  pub fn records(&self) -> SemanticCatalogRecordIteratorV1<'a> {
+    SemanticCatalogRecordIteratorV1 {
+      bytes: self.records,
+      hash_width: self.hash_width,
+      remaining: self.record_count,
+      cursor: 0,
+      failed: false,
+    }
+  }
+}
+
+pub struct SemanticCatalogRecordIteratorV1<'a> {
+  bytes: &'a [u8],
+  hash_width: usize,
+  remaining: u32,
+  cursor: usize,
+  failed: bool,
+}
+
+impl<'a> Iterator for SemanticCatalogRecordIteratorV1<'a> {
+  type Item = FormatResult<SemanticCatalogRecordV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.failed || self.remaining == 0 {
+      return None;
+    }
+    match decode_catalog_record_view(self.bytes, self.cursor, self.hash_width) {
+      Ok((record, next_cursor)) => {
+        self.cursor = next_cursor;
+        self.remaining -= 1;
+        Some(Ok(record))
+      }
+      Err(error) => {
+        self.failed = true;
+        Some(Err(error))
+      }
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticCatalogInternalV1<'a> {
+  object_id: Vec<u8>,
+  depth: u16,
+  prefix: &'a [u8],
+  children: &'a [u8],
+  child_count: u16,
+  subtree_record_count: u64,
+  hash_width: usize,
+}
+
+impl<'a> SemanticCatalogInternalV1<'a> {
+  pub fn object_id(&self) -> &[u8] {
+    &self.object_id
+  }
+
+  pub const fn depth(&self) -> u16 {
+    self.depth
+  }
+
+  pub const fn prefix(&self) -> &[u8] {
+    self.prefix
+  }
+
+  pub const fn child_count(&self) -> u16 {
+    self.child_count
+  }
+
+  pub const fn subtree_record_count(&self) -> u64 {
+    self.subtree_record_count
+  }
+
+  pub fn children(&self) -> SemanticCatalogChildIteratorV1<'a> {
+    SemanticCatalogChildIteratorV1 {
+      bytes: self.children,
+      hash_width: self.hash_width,
+      remaining: self.child_count,
+      cursor: 0,
+      failed: false,
+    }
+  }
+}
+
+pub struct SemanticCatalogChildIteratorV1<'a> {
+  bytes: &'a [u8],
+  hash_width: usize,
+  remaining: u16,
+  cursor: usize,
+  failed: bool,
+}
+
+impl<'a> Iterator for SemanticCatalogChildIteratorV1<'a> {
+  type Item = FormatResult<SemanticCatalogChildV1<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.failed || self.remaining == 0 {
+      return None;
+    }
+    match decode_catalog_child_view(self.bytes, self.cursor, self.hash_width) {
+      Ok((child, next_cursor)) => {
+        self.cursor = next_cursor;
+        self.remaining -= 1;
+        Some(Ok(child))
+      }
+      Err(error) => {
+        self.failed = true;
+        Some(Err(error))
+      }
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticCatalogNodeV1<'a> {
+  Leaf(SemanticCatalogLeafV1<'a>),
+  Internal(SemanticCatalogInternalV1<'a>),
+}
+
+impl SemanticCatalogNodeV1<'_> {
+  pub fn object_id(&self) -> &[u8] {
+    match self {
+      Self::Leaf(node) => node.object_id(),
+      Self::Internal(node) => node.object_id(),
+    }
+  }
+}
+
 pub fn encode_namespace_root(request: &NamespaceRootWriteV1, hash_algorithm: HashAlgorithm) -> FormatResult<EncodedNamespaceRootV1> {
   validate_capabilities(&request.required_capabilities, "namespace root")?;
   let hash_width = hash_algorithm.hash_length();
@@ -523,6 +695,112 @@ pub fn decode_semantic_object(value: &[u8], hash_algorithm: HashAlgorithm) -> Fo
     availability,
   });
   Ok(SemanticObjectV1 { object_id, kind_id, kind, graph_edges, semantic_state })
+}
+
+pub fn decode_semantic_definition_record(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<SemanticDefinitionRecordV1<'_>> {
+  let object = decode_semantic_object(value, hash_algorithm)?;
+  let SemanticObjectKind::Definition { class } = object.kind else {
+    return Err(error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "semantic_definition_expected",
+      "semantic object is not a definition record",
+    ));
+  };
+  let body = semantic_object_body(value)?;
+  let hash_width = hash_algorithm.hash_length();
+  let definition_start = checked_add(16, hash_width, "semantic definition payload start")?;
+  Ok(SemanticDefinitionRecordV1 {
+    object_id: object.object_id,
+    class,
+    semantic_id: &body[8..8 + hash_width],
+    definition: &body[definition_start..],
+  })
+}
+
+pub fn decode_semantic_catalog_node(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<SemanticCatalogNodeV1<'_>> {
+  let object = decode_semantic_object(value, hash_algorithm)?;
+  let body = semantic_object_body(value)?;
+  let hash_width = hash_algorithm.hash_length();
+  match object.kind {
+    SemanticObjectKind::CatalogLeaf { record_count } => {
+      let prefix_length = checked_add(16, hash_width, "catalog leaf view prefix")?;
+      Ok(SemanticCatalogNodeV1::Leaf(SemanticCatalogLeafV1 {
+        object_id: object.object_id,
+        lookup_digest: &body[8..8 + hash_width],
+        records: &body[prefix_length..],
+        record_count,
+        hash_width,
+      }))
+    }
+    SemanticObjectKind::CatalogInternal { child_count } => {
+      let depth = u16_at(body, 4);
+      let prefix_length = usize::from(u16_at(body, 6));
+      let children_start = checked_add(20, prefix_length, "catalog internal view children")?;
+      Ok(SemanticCatalogNodeV1::Internal(SemanticCatalogInternalV1 {
+        object_id: object.object_id,
+        depth,
+        prefix: &body[20..children_start],
+        children: &body[children_start..],
+        child_count,
+        subtree_record_count: u64_at(body, 12),
+        hash_width,
+      }))
+    }
+    _ => Err(error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "semantic_catalog_expected",
+      "semantic object is not a catalog leaf or internal node",
+    )),
+  }
+}
+
+fn semantic_object_body(value: &[u8]) -> FormatResult<&[u8]> {
+  let body_end = value.len().checked_sub(4).ok_or_else(|| length_error("semantic object body end underflow"))?;
+  if body_end < SEMANTIC_HEADER_LENGTH {
+    return Err(error(
+      MalformedInputClass::TruncationOrTrailingBytes,
+      "semantic_object_body_truncated",
+      "semantic object has no complete body",
+    ));
+  }
+  Ok(&value[SEMANTIC_HEADER_LENGTH..body_end])
+}
+
+fn decode_catalog_record_view(bytes: &[u8], cursor: usize, hash_width: usize) -> FormatResult<(SemanticCatalogRecordV1<'_>, usize)> {
+  let hash_bytes = checked_mul(2, hash_width, "catalog record view hashes")?;
+  let prefix_length = checked_add(8, hash_bytes, "catalog record view prefix")?;
+  let available = bytes.len().checked_sub(cursor).ok_or_else(|| length_error("catalog record view cursor"))?;
+  if available < prefix_length {
+    return Err(error(MalformedInputClass::TruncationOrTrailingBytes, "catalog_record_view_truncated", "catalog record view is truncated"));
+  }
+  let owner_length = u32_at(bytes, cursor + 4) as usize;
+  let record_length = prefix_length.checked_add(owner_length).ok_or_else(|| length_error("catalog record view length"))?;
+  let end = cursor.checked_add(record_length).ok_or_else(|| length_error("catalog record view end"))?;
+  if end > bytes.len() {
+    return Err(error(
+      MalformedInputClass::TruncationOrTrailingBytes,
+      "catalog_record_view_truncated",
+      "catalog record owner key is truncated",
+    ));
+  }
+  Ok((
+    SemanticCatalogRecordV1 {
+      record_kind: u16_at(bytes, cursor),
+      semantic_id: &bytes[cursor + 8..cursor + 8 + hash_width],
+      definition_object_id: &bytes[cursor + 8 + hash_width..cursor + prefix_length],
+      owner_key: &bytes[cursor + prefix_length..end],
+    },
+    end,
+  ))
+}
+
+fn decode_catalog_child_view(bytes: &[u8], cursor: usize, hash_width: usize) -> FormatResult<(SemanticCatalogChildV1<'_>, usize)> {
+  let child_length = checked_add(12, hash_width, "catalog child view length")?;
+  let end = cursor.checked_add(child_length).ok_or_else(|| length_error("catalog child view end"))?;
+  if end > bytes.len() {
+    return Err(error(MalformedInputClass::TruncationOrTrailingBytes, "catalog_child_view_truncated", "catalog child view is truncated"));
+  }
+  Ok((SemanticCatalogChildV1 { edge: bytes[cursor], record_count: u64_at(bytes, cursor + 4), object_id: &bytes[cursor + 12..end] }, end))
 }
 
 fn decode_semantic_state(

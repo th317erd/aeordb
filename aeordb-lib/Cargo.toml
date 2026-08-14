@@ -1057,6 +1057,10 @@ name = "index_producer_worker_spec"
 path = "spec/engine/index_producer_worker_spec.rs"
 
 [[test]]
+name = "semantic_catalog_reader_spec"
+path = "spec/engine/semantic_catalog_reader_spec.rs"
+
+[[test]]
 name = "error_squelch_architecture_spec"
 path = "spec/engine/error_squelch_architecture_spec.rs"
 

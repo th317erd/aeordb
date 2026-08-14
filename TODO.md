@@ -884,6 +884,8 @@
           - [ ] P6-2c-c: refactor parser/mapper/config resolution into a collector executed only by the coordinator task owner; remove synchronous pipeline work from directory post-commit fanout.
             - [x] Compose exact journal record, FileRecord revision, semantic scope, content-only, retry, and leased executor handling under one storage-neutral mutation worker.
             - [ ] Resolve concrete semantic-catalog definitions and scope-local ordinals under retained shared-memory admission.
+              - [x] Expose borrowed typed definition and catalog-node views over the frozen SemanticObjectV1 bytes without materializing a second record/child vector.
+              - [ ] Retain one Task memory reservation across semantic catalog traversal, definition loading, ordinal resolution, and worker consumption.
             - [ ] Activate the worker behind one recovered runtime owner, retaining legacy query-visible indexing until immutable shadow cutover.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
