@@ -53,7 +53,7 @@ fn failure_after_dependency_append_emits_no_acknowledgement_and_latches_partial_
   let coordinator = NamespaceMutationCoordinator::with_test_faults(
     &engine,
     fanout.clone(),
-    NamespaceMutationTestFaults { fail_after_dependency_writes: Some(1), fail_hard_before_commit: false },
+    NamespaceMutationTestFaults { fail_after_dependency_writes: Some(1), fail_hard_before_commit: false, panic_soft_handoff: false },
   );
   let (batch, dependency_key, locator_key) = dependency_and_locator_batch(&engine);
 
@@ -74,7 +74,7 @@ fn hard_failure_after_locator_mutation_emits_no_acknowledgement_and_latches_read
   let coordinator = NamespaceMutationCoordinator::with_test_faults(
     &engine,
     fanout.clone(),
-    NamespaceMutationTestFaults { fail_after_dependency_writes: None, fail_hard_before_commit: true },
+    NamespaceMutationTestFaults { fail_after_dependency_writes: None, fail_hard_before_commit: true, panic_soft_handoff: false },
   );
   let (batch, _dependency_key, locator_key) = dependency_and_locator_batch(&engine);
   let frontier_before = engine.durability_snapshot().unwrap().hard_frontier;
@@ -88,4 +88,58 @@ fn hard_failure_after_locator_mutation_emits_no_acknowledgement_and_latches_read
   assert_eq!(engine.durability_snapshot().unwrap().pending_hard, 0);
   assert!(engine.durability_failure().is_some());
   assert!(matches!(engine.ensure_writable(), Err(EngineError::DurabilityFailure(_))));
+}
+
+#[test]
+fn engine_soft_handoff_is_not_emitted_for_failed_hard_publication() {
+  let (engine, _temporary) = test_engine("hard-failure-soft-handoff");
+  let coordinator = NamespaceMutationCoordinator::with_test_faults(
+    &engine,
+    Arc::new(RecordingFanout::default()),
+    NamespaceMutationTestFaults { fail_after_dependency_writes: None, fail_hard_before_commit: true, panic_soft_handoff: false },
+  );
+  let (batch, _dependency_key, _locator_key) = dependency_and_locator_batch(&engine);
+  let before = engine.soft_mutation_runtime_snapshot().unwrap();
+
+  assert!(coordinator.execute(batch).is_err());
+
+  let after = engine.soft_mutation_runtime_snapshot().unwrap();
+  assert_eq!(after.queued_notices, before.queued_notices);
+  assert_eq!(after.dropped_notices, before.dropped_notices);
+}
+
+#[test]
+fn contended_engine_soft_handoff_latches_reconciliation_without_failing_commit() {
+  let (engine, _temporary) = test_engine("contended-soft-handoff");
+  let guard = engine.lock_soft_mutation_queue_for_test().unwrap();
+  let (batch, _dependency_key, stable_key) = dependency_and_locator_batch(&engine);
+
+  let acknowledgement =
+    NamespaceMutationCoordinator::new(&engine).execute(batch).expect("recoverable-soft contention must not fail hard publication");
+  drop(guard);
+
+  assert!(engine.get_kv_entry(&stable_key).unwrap().is_some());
+  let snapshot = engine.soft_mutation_runtime_snapshot().unwrap();
+  assert_eq!(snapshot.queued_notices, 0);
+  assert_eq!(snapshot.lost_through_sequence, Some(acknowledgement.publication_sequence));
+  assert!(snapshot.loss_reasons.contains(&crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1::QueueContended));
+}
+
+#[test]
+fn panicked_engine_soft_handoff_latches_reconciliation_without_failing_commit() {
+  let (engine, _temporary) = test_engine("panicked-soft-handoff");
+  let coordinator = NamespaceMutationCoordinator::with_test_faults(
+    &engine,
+    Arc::new(RecordingFanout::default()),
+    NamespaceMutationTestFaults { fail_after_dependency_writes: None, fail_hard_before_commit: false, panic_soft_handoff: true },
+  );
+  let (batch, _dependency_key, stable_key) = dependency_and_locator_batch(&engine);
+
+  let acknowledgement = coordinator.execute(batch).expect("recoverable-soft panic must not fail hard publication");
+
+  assert!(engine.get_kv_entry(&stable_key).unwrap().is_some());
+  let snapshot = engine.soft_mutation_runtime_snapshot().unwrap();
+  assert_eq!(snapshot.queued_notices, 0);
+  assert_eq!(snapshot.lost_through_sequence, Some(acknowledgement.publication_sequence));
+  assert!(snapshot.loss_reasons.contains(&crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1::QueueUnavailable));
 }

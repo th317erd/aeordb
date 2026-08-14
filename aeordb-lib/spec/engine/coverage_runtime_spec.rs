@@ -1,9 +1,12 @@
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::coverage_runtime::{
   CoverageAuthorityV1, CoverageBoundaryV1, CoverageControlIdentityV1, CoverageGapReasonV1, CoverageMutationV1, CoverageObservationV1,
-  CoverageReconciliationV1, CoverageRuntimeErrorV1, CoverageTrackerV1,
+  CoverageReconciliationV1, CoverageRuntimeErrorV1, CoverageTrackerV1, SoftMutationAdmissionV1, SoftMutationHubOptionsV1,
+  SoftMutationHubV1, SoftMutationLossReasonV1,
 };
 use aeordb::engine::v4::index_manifest::CoverageVersionV1;
+use aeordb::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
+use uuid::Uuid;
 
 fn hash(byte: u8) -> Vec<u8> {
   vec![byte; HashAlgorithm::Blake3_256.hash_length()]
@@ -20,6 +23,23 @@ fn authority(root: u8, controls: &[(u16, u8)]) -> CoverageAuthorityV1 {
 
 fn mutation(id: u8, sequence: u64, before: CoverageAuthorityV1, after: CoverageAuthorityV1) -> CoverageMutationV1 {
   CoverageMutationV1::new([id; 16], sequence, before, after).unwrap()
+}
+
+fn acknowledgement(sequence: u64, path: &str) -> NamespaceMutationAcknowledgement {
+  NamespaceMutationAcknowledgement {
+    operation_id: Uuid::from_bytes([sequence as u8; 16]),
+    kind: NamespaceMutationKind::FileWrite,
+    publication_sequence: sequence,
+    previous_root_hash: hash(sequence as u8),
+    root_hash: hash(sequence.saturating_add(1) as u8),
+    source_identities: vec![NamespaceMutationSourceIdentity {
+      path: path.to_string(),
+      entry_type: Some(1),
+      previous_identity: Some(hash(sequence as u8)),
+      new_identity: Some(hash(sequence.saturating_add(1) as u8)),
+    }],
+    locator_replacements: Vec::new(),
+  }
 }
 
 #[test]
@@ -169,4 +189,78 @@ fn malformed_or_ambiguous_boundaries_fail_before_becoming_coverage_authority() {
     CoverageMutationV1::new([0; 16], 2, authority(1, &[]), authority(2, &[])).unwrap_err(),
     CoverageRuntimeErrorV1::ZeroMutationId
   );
+}
+
+#[test]
+fn bounded_soft_hub_preserves_exact_notice_data_and_drain_accounting() {
+  let hub = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(4, 8_192, 4_096).unwrap()).unwrap();
+  let first = acknowledgement(11, "/docs/first.txt");
+  let second = acknowledgement(14, "/docs/second.txt");
+
+  assert_eq!(hub.offer_acknowledgement(&first), SoftMutationAdmissionV1::Accepted);
+  assert_eq!(hub.offer_acknowledgement(&second), SoftMutationAdmissionV1::Accepted);
+  let before = hub.snapshot().unwrap();
+  assert_eq!(before.queued_notices, 2);
+  assert!(before.retained_bytes > 0);
+  assert!(!before.reconciliation_required);
+
+  let drained = hub.try_drain(4, 8_192).unwrap();
+  assert_eq!(drained.notices.len(), 2);
+  assert_eq!(drained.notices[0].operation_id, *first.operation_id.as_bytes());
+  assert_eq!(drained.notices[0].source_identities, first.source_identities);
+  assert_eq!(drained.notices[1].publication_sequence, second.publication_sequence);
+  assert_eq!(drained.retained_bytes, before.retained_bytes);
+  assert_eq!(hub.snapshot().unwrap().queued_notices, 0);
+}
+
+#[test]
+fn queue_capacity_and_oversized_notices_latch_reconciliation_without_partial_admission() {
+  let full = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(1, 8_192, 4_096).unwrap()).unwrap();
+  assert_eq!(full.offer_acknowledgement(&acknowledgement(20, "/a")), SoftMutationAdmissionV1::Accepted);
+  assert_eq!(
+    full.offer_acknowledgement(&acknowledgement(21, "/b")),
+    SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::QueueFull)
+  );
+  let full_snapshot = full.snapshot().unwrap();
+  assert_eq!(full_snapshot.queued_notices, 1);
+  assert_eq!(full_snapshot.lost_through_sequence, Some(21));
+  assert_eq!(full_snapshot.dropped_notices, 1);
+
+  let tiny = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(2, 256, 128).unwrap()).unwrap();
+  assert_eq!(
+    tiny.offer_acknowledgement(&acknowledgement(31, &format!("/{}", "x".repeat(256)))),
+    SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::NoticeTooLarge)
+  );
+  let tiny_snapshot = tiny.snapshot().unwrap();
+  assert_eq!(tiny_snapshot.queued_notices, 0);
+  assert_eq!(tiny_snapshot.lost_through_sequence, Some(31));
+  assert!(tiny_snapshot.loss_reasons.contains(&SoftMutationLossReasonV1::NoticeTooLarge));
+
+  assert_eq!(tiny.offer_acknowledgement(&acknowledgement(35, "/later")), SoftMutationAdmissionV1::ReconciliationAlreadyRequired);
+  assert_eq!(tiny.snapshot().unwrap().lost_through_sequence, Some(35));
+}
+
+#[test]
+fn soft_hub_options_and_drain_limits_reject_ambiguous_or_unbounded_requests() {
+  assert!(SoftMutationHubOptionsV1::new(0, 1, 1).is_err());
+  assert!(SoftMutationHubOptionsV1::new(1, 0, 1).is_err());
+  assert!(SoftMutationHubOptionsV1::new(1, 8, 9).is_err());
+
+  let hub = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(2, 8_192, 4_096).unwrap()).unwrap();
+  assert!(hub.try_drain(0, 8_192).is_err());
+  assert!(hub.try_drain(1, 0).is_err());
+
+  assert_eq!(
+    hub.offer_acknowledgement(&acknowledgement(0, "/invalid-sequence")),
+    SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::InvalidNotice)
+  );
+  let malformed = hub.snapshot().unwrap();
+  assert!(malformed.reconciliation_required);
+  assert_eq!(malformed.lost_through_sequence, None);
+  assert!(malformed.loss_reasons.contains(&SoftMutationLossReasonV1::InvalidNotice));
+
+  let drain_hub = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(2, 8_192, 4_096).unwrap()).unwrap();
+  assert_eq!(drain_hub.offer_acknowledgement(&acknowledgement(41, "/drain-limit")), SoftMutationAdmissionV1::Accepted);
+  assert!(drain_hub.try_drain(1, 1).is_err());
+  assert_eq!(drain_hub.snapshot().unwrap().queued_notices, 1);
 }

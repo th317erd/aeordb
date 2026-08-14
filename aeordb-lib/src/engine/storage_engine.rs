@@ -703,6 +703,7 @@ pub struct StorageEngine {
   configuration_authority: OnceLock<Arc<crate::engine::configuration_authority::ConfigurationAuthority>>,
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
   query_runtime: OnceLock<Arc<QueryRuntime>>,
+  soft_mutation_hub: crate::engine::v4::coverage_runtime::SoftMutationHubV1,
   operation_tracker: EngineOperationTracker,
   shutdown_started: Arc<AtomicBool>,
   shutdown_flush_started: AtomicBool,
@@ -1080,6 +1081,47 @@ impl StorageEngine {
 
   pub fn query_runtime_snapshot(&self) -> EngineResult<QueryRuntimeSnapshot> {
     self.query_runtime.get().ok_or_else(|| EngineError::InvalidInput("query runtime is not initialized".to_string()))?.snapshot()
+  }
+
+  pub fn soft_mutation_runtime_snapshot(
+    &self,
+  ) -> Result<crate::engine::v4::coverage_runtime::SoftMutationHubSnapshotV1, crate::engine::v4::coverage_runtime::SoftMutationHubErrorV1>
+  {
+    self.soft_mutation_hub.snapshot()
+  }
+
+  pub(crate) fn offer_soft_namespace_mutation(
+    &self,
+    acknowledgement: &crate::engine::namespace_mutation::NamespaceMutationAcknowledgement,
+  ) -> crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1 {
+    self.soft_mutation_hub.offer_acknowledgement(acknowledgement)
+  }
+
+  pub(crate) fn force_soft_mutation_reconciliation(
+    &self,
+    publication_sequence: u64,
+    reason: crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1,
+  ) -> crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1 {
+    self.soft_mutation_hub.force_reconciliation_required(publication_sequence, reason)
+  }
+
+  #[allow(dead_code)]
+  pub(crate) fn drain_soft_namespace_mutations(
+    &self,
+    maximum_notices: usize,
+    maximum_bytes: usize,
+  ) -> Result<crate::engine::v4::coverage_runtime::SoftMutationDrainV1, crate::engine::v4::coverage_runtime::SoftMutationHubErrorV1> {
+    self.soft_mutation_hub.try_drain(maximum_notices, maximum_bytes)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn lock_soft_mutation_queue_for_test(
+    &self,
+  ) -> Result<
+    crate::engine::v4::coverage_runtime::SoftMutationQueueTestGuardV1<'_>,
+    crate::engine::v4::coverage_runtime::SoftMutationHubErrorV1,
+  > {
+    self.soft_mutation_hub.lock_queue_for_test()
   }
 
   fn activate_bounded_kv_pages(&self) -> EngineResult<()> {
@@ -2705,6 +2747,10 @@ impl StorageEngine {
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       query_runtime: OnceLock::new(),
+      soft_mutation_hub: crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
+        crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
+      )
+      .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
@@ -2942,6 +2988,10 @@ impl StorageEngine {
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       query_runtime: OnceLock::new(),
+      soft_mutation_hub: crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
+        crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
+      )
+      .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),

@@ -422,6 +422,7 @@ fn persistent_format_file(file: &str) -> bool {
 fn authority_file(file: &str) -> bool {
   [
     "/configuration_authority.rs",
+    "/coverage_runtime.rs",
     "/disk_kv_store.rs",
     "/durability_coordinator.rs",
     "/memory_coordinator.rs",

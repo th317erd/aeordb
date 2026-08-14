@@ -531,6 +531,7 @@ pub struct NamespaceMutationCoordinator<'a> {
 struct NamespaceMutationTestFaults {
   fail_after_dependency_writes: Option<usize>,
   fail_hard_before_commit: bool,
+  panic_soft_handoff: bool,
 }
 
 impl<'a> NamespaceMutationCoordinator<'a> {
@@ -688,7 +689,7 @@ impl<'a> NamespaceMutationCoordinator<'a> {
     let receipt = transaction.commit_top_level_after(namespace)?;
     acknowledgement.publication_sequence = receipt.sequence;
 
-    if catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic_payload) = catch_unwind(AssertUnwindSafe(|| {
       metrics::counter!(
         "aeordb_namespace_mutation_acknowledgements_total",
         "mutation_kind" => acknowledgement.kind.as_str()
@@ -704,15 +705,54 @@ impl<'a> NamespaceMutationCoordinator<'a> {
       } else {
         self.engine.invalidate_caches_for_paths(acknowledgement.source_identities.iter().map(|identity| &identity.path));
       }
-      self.fanout.publish(&acknowledgement);
-    }))
-    .is_err()
-    {
-      tracing::error!(operation_id = %acknowledgement.operation_id, "Post-commit namespace mutation fanout panicked");
+    })) {
+      drop(panic_payload);
+      tracing::error!(operation_id = %acknowledgement.operation_id, "Post-commit namespace mutation cache/counter fanout panicked");
+    }
+
+    match catch_unwind(AssertUnwindSafe(|| {
+      #[cfg(test)]
+      if self.test_faults.panic_soft_handoff {
+        trigger_soft_handoff_panic_for_test();
+      }
+      self.engine.offer_soft_namespace_mutation(&acknowledgement)
+    })) {
+      Ok(crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1::Accepted) => {}
+      Ok(crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1::ReconciliationRequired(reason)) => {
+        tracing::warn!(
+          operation_id = %acknowledgement.operation_id,
+          publication_sequence = acknowledgement.publication_sequence,
+          ?reason,
+          "Recoverable-soft namespace mutation handoff was lost; index reconciliation is required"
+        );
+      }
+      Ok(crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1::ReconciliationAlreadyRequired) => {}
+      Err(panic_payload) => {
+        drop(panic_payload);
+        self.engine.force_soft_mutation_reconciliation(
+          acknowledgement.publication_sequence,
+          crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1::QueueUnavailable,
+        );
+        tracing::error!(
+          operation_id = %acknowledgement.operation_id,
+          publication_sequence = acknowledgement.publication_sequence,
+          "Recoverable-soft namespace mutation handoff panicked; reconciliation was forced from hard authority"
+        );
+      }
+    }
+
+    if let Err(panic_payload) = catch_unwind(AssertUnwindSafe(|| self.fanout.publish(&acknowledgement))) {
+      drop(panic_payload);
+      tracing::error!(operation_id = %acknowledgement.operation_id, "Caller-specific post-commit namespace mutation fanout panicked");
     }
 
     Ok(acknowledgement)
   }
+}
+
+#[cfg(test)]
+fn trigger_soft_handoff_panic_for_test() -> ! {
+  panic!("injected engine soft-handoff panic");
 }
 
 /// Publish a validated whole-namespace root through the shared hard authority.

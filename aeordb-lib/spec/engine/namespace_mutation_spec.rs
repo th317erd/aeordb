@@ -158,7 +158,8 @@ fn custom_whole_root_fanout_cannot_bypass_engine_owned_authority_cache_invalidat
   engine.api_key_cache.get(&uuid::Uuid::new_v4().to_string(), &engine).unwrap();
   let fanout = Arc::new(RecordingFanout::default());
 
-  publish_namespace_root_with_fanout(&engine, &selected_root, NamespaceMutationKind::Import, fanout.clone())
+  let soft_before = engine.soft_mutation_runtime_snapshot().unwrap();
+  let acknowledgement = publish_namespace_root_with_fanout(&engine, &selected_root, NamespaceMutationKind::Import, fanout.clone())
     .unwrap()
     .expect("root should change");
 
@@ -173,6 +174,9 @@ fn custom_whole_root_fanout_cannot_bypass_engine_owned_authority_cache_invalidat
   assert_eq!(published_counts.directories, selected_counts.directories);
   assert_eq!(published_counts.symlinks, selected_counts.symlinks);
   assert_eq!(published_counts.logical_data_size, selected_counts.logical_data_size);
+  let soft_after = engine.soft_mutation_runtime_snapshot().unwrap();
+  assert_eq!(soft_after.queued_notices, soft_before.queued_notices + 1);
+  assert_eq!(soft_after.latest_queued_publication_sequence, Some(acknowledgement.publication_sequence));
 }
 
 #[test]
@@ -320,6 +324,7 @@ fn successful_mutation_reuses_the_hard_publication_sequence_and_fans_out_once_af
   let fanout =
     Arc::new(AuthorityCheckingFanout { engine: Arc::clone(&engine), stable_key: stable_key.clone(), calls: Mutex::new(Vec::new()) });
   let coordinator = NamespaceMutationCoordinator::with_fanout(&engine, fanout.clone());
+  let soft_before = engine.soft_mutation_runtime_snapshot().unwrap();
 
   let acknowledgement = coordinator.execute(replacement_batch(&stable_key, b"first locator value")).unwrap();
 
@@ -335,11 +340,15 @@ fn successful_mutation_reuses_the_hard_publication_sequence_and_fans_out_once_af
   let published = engine.get_kv_entry(&stable_key).unwrap().unwrap();
   assert_eq!(incarnation.type_flags, published.type_flags);
   assert_eq!(incarnation.total_length, published.total_length);
+  let soft_after = engine.soft_mutation_runtime_snapshot().unwrap();
+  assert_eq!(soft_after.queued_notices, soft_before.queued_notices + 1);
+  assert_eq!(soft_after.latest_queued_publication_sequence, Some(acknowledgement.publication_sequence));
 }
 
 #[test]
 fn concurrent_mutations_receive_unique_operation_ids_and_hard_publication_sequences() {
   let (engine, _temporary) = create_temp_engine_for_tests();
+  let soft_before = engine.soft_mutation_runtime_snapshot().unwrap();
   let acknowledgements = std::thread::scope(|scope| {
     let handles: Vec<_> = (0u8..16)
       .map(|index| {
@@ -358,6 +367,11 @@ fn concurrent_mutations_receive_unique_operation_ids_and_hard_publication_sequen
   assert_eq!(operation_ids.len(), acknowledgements.len());
   assert_eq!(sequences.len(), acknowledgements.len());
   assert!(sequences.iter().all(|sequence| *sequence > 0));
+  let soft = engine.soft_mutation_runtime_snapshot().unwrap();
+  let admitted = soft.queued_notices - soft_before.queued_notices;
+  let dropped = soft.dropped_notices - soft_before.dropped_notices;
+  assert_eq!(admitted as u64 + dropped, acknowledgements.len() as u64);
+  assert_eq!(soft.reconciliation_required, soft_before.reconciliation_required || dropped != 0);
 }
 
 #[test]
@@ -624,6 +638,7 @@ fn no_op_batches_and_dependency_locator_aliases_are_rejected_before_admission() 
   let coordinator = NamespaceMutationCoordinator::with_fanout(&engine, fanout.clone());
   let stable_key = vec![0xC2; engine.hash_algo().hash_length()];
   let initial_sequence = engine.durability_snapshot().unwrap().next_sequence;
+  let soft_before = engine.soft_mutation_runtime_snapshot().unwrap();
 
   assert!(coordinator.execute(NamespaceMutationBatch::new(NamespaceMutationKind::FileWrite)).is_err());
 
@@ -645,6 +660,7 @@ fn no_op_batches_and_dependency_locator_aliases_are_rejected_before_admission() 
   assert_eq!(engine.durability_snapshot().unwrap().next_sequence, initial_sequence);
   assert!(engine.get_kv_entry(&stable_key).unwrap().is_none());
   assert!(fanout.acknowledgements().is_empty());
+  assert_eq!(engine.soft_mutation_runtime_snapshot().unwrap(), soft_before);
 }
 
 #[test]
@@ -773,10 +789,42 @@ fn soft_fanout_panic_cannot_turn_durably_committed_success_into_failure() {
   let stable_key = vec![0xE1; engine.hash_algo().hash_length()];
   let coordinator = NamespaceMutationCoordinator::with_fanout(&engine, Arc::new(PanickingFanout));
 
+  let soft_before = engine.soft_mutation_runtime_snapshot().unwrap();
   let result = coordinator.execute(replacement_batch(&stable_key, b"committed despite soft panic"));
 
   assert!(result.is_ok());
   assert!(engine.get_kv_entry(&stable_key).unwrap().is_some());
+  let soft_after = engine.soft_mutation_runtime_snapshot().unwrap();
+  assert_eq!(soft_after.queued_notices, soft_before.queued_notices + 1);
+  assert_eq!(soft_after.latest_queued_publication_sequence, Some(result.unwrap().publication_sequence));
+}
+
+#[test]
+fn oversized_engine_soft_notice_latches_reconciliation_without_failing_hard_commit_or_caller_fanout() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let stable_key = vec![0xE2; engine.hash_algo().hash_length()];
+  let path = format!("/{}", "x".repeat(300 * 1_024));
+  let mut batch = NamespaceMutationBatch::new(NamespaceMutationKind::BatchWrite);
+  batch.replace_locator(EntryType::FileRecord, stable_key.clone(), b"durable oversized notice".to_vec(), 0).unwrap();
+  batch
+    .add_source_identity(NamespaceMutationSourceIdentity {
+      path,
+      entry_type: Some(EntryType::FileRecord.to_u8()),
+      previous_identity: None,
+      new_identity: Some(stable_key.clone()),
+    })
+    .unwrap();
+  let fanout = Arc::new(RecordingFanout::default());
+  let before = engine.soft_mutation_runtime_snapshot().unwrap();
+
+  let acknowledgement = NamespaceMutationCoordinator::with_fanout(&engine, fanout.clone()).execute(batch).unwrap();
+
+  assert!(engine.get_kv_entry(&stable_key).unwrap().is_some());
+  assert_eq!(fanout.acknowledgements(), vec![acknowledgement.clone()]);
+  let after = engine.soft_mutation_runtime_snapshot().unwrap();
+  assert_eq!(after.queued_notices, before.queued_notices);
+  assert_eq!(after.lost_through_sequence, Some(acknowledgement.publication_sequence));
+  assert!(after.loss_reasons.contains(&aeordb::engine::v4::coverage_runtime::SoftMutationLossReasonV1::NoticeTooLarge));
 }
 
 #[test]
@@ -807,6 +855,11 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
   assert!(facade.contains("pub struct NamespaceMutationCoordinator"));
   assert!(facade.contains("pub struct LocatorReplacementCoordinator"));
   assert!(facade.contains("commit_top_level_after"));
+  assert_eq!(
+    facade.matches("offer_soft_namespace_mutation(&acknowledgement)").count(),
+    1,
+    "every producer must share one engine-owned post-authority soft handoff"
+  );
 
   let mut violations = Vec::new();
   visit(&package.join("src"), &mut violations);
@@ -820,6 +873,23 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
   assert!(backup.contains("NamespaceMutationCoordinator"), "the characterized Wave 3 backup producer must use the shared facade");
   let task_queue = std::fs::read_to_string(package.join("src/engine/task_queue.rs")).unwrap();
   assert!(task_queue.contains("NamespaceMutationCoordinator"), "the characterized Wave 4 task producer must use the shared facade");
+
+  let storage_engine = std::fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
+  assert_eq!(storage_engine.matches("offer_acknowledgement(acknowledgement)").count(), 1);
+  let mut duplicate_soft_producers = Vec::new();
+  for entry in std::fs::read_dir(package.join("src/engine")).unwrap() {
+    let path = entry.unwrap().path();
+    if path.extension().and_then(|value| value.to_str()) != Some("rs")
+      || matches!(path.file_name().and_then(|value| value.to_str()), Some("namespace_mutation.rs" | "storage_engine.rs"))
+    {
+      continue;
+    }
+    let source = std::fs::read_to_string(&path).unwrap();
+    if source.contains("offer_soft_namespace_mutation") || source.contains("offer_acknowledgement(acknowledgement)") {
+      duplicate_soft_producers.push(path.display().to_string());
+    }
+  }
+  assert!(duplicate_soft_producers.is_empty(), "soft mutation handoff bypasses exist: {duplicate_soft_producers:?}");
 }
 
 #[test]
