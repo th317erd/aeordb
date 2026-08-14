@@ -872,6 +872,10 @@
           - [x] P6-1c-d: clear current loss only with a generation-checked authoritative reconciliation and prove restart, cancellation, corruption, and concurrent-loss races.
         - [x] P6-1d: prove restart, dropped/duplicate/out-of-order delivery, queue pressure, whole-root transitions, cancellation, memory bounds, and unchanged acknowledgement durability/latency.
       - [ ] P6-2: implement the single bounded IndexCoordinator, task admission, memtable, spill, checkpoint, cache, cancellation, and graceful shutdown runtime.
+        - [x] P6-2a: implement the storage-neutral coordinator state machine, active/frozen memtables, exact shared-memory reservations, deterministic dedupe/replacement, flush triggers, cancellation, and drain contract.
+        - [ ] P6-2b: persist/replay the soft journal and typed task checkpoint, root unpublished attachments, and fail closed to reconciliation on missing/corrupt/discontinuous recovery state.
+        - [ ] P6-2c: route parser/mapper/converter and every legacy/v1 index mutation through one coordinator task path with bounded retry, spill, and per-index degraded outcomes.
+        - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.

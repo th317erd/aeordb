@@ -8,8 +8,8 @@ use aeordb::engine::v4::index_copy_on_write::{
 };
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
-  decode_artifact_directory, decode_ordered_page, decode_ordered_record, decode_posting_record, encode_artifact_directory,
-  encode_ordered_page, encode_posting_record, ordered_record_order_key, validate_posting_page_link,
+  checked_ordered_record_order_key_length, decode_artifact_directory, decode_ordered_page, decode_ordered_record, decode_posting_record,
+  encode_artifact_directory, encode_ordered_page, encode_posting_record, ordered_record_order_key, validate_posting_page_link,
 };
 use aeordb::engine::v4::index_record::{ScopeDocumentRecordV1, encode_scope_document_record};
 use aeordb::engine::v4::reader::MalformedInputClass;
@@ -99,6 +99,18 @@ fn posting_fence(hash_algorithm: HashAlgorithm, coordinate: u64) -> Vec<u8> {
   let record = posting_record(coordinate, coordinate, 16, false);
   let decoded = decode_ordered_record(&record, hash_algorithm, OrderedIndexRoleV1::Posting).unwrap();
   ordered_record_order_key(&decoded).unwrap()
+}
+
+#[test]
+fn nonallocating_order_key_lengths_match_contiguous_and_posting_materialization() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  for (role, encoded) in [
+    (OrderedIndexRoleV1::ScopeOrdinal, scope_document_record(hash_algorithm, 7, "/docs/readme.md")),
+    (OrderedIndexRoleV1::Posting, posting_record(17, 7, 64, false)),
+  ] {
+    let decoded = decode_ordered_record(&encoded, hash_algorithm, role).unwrap();
+    assert_eq!(checked_ordered_record_order_key_length(&decoded).unwrap(), ordered_record_order_key(&decoded).unwrap().len());
+  }
 }
 
 fn leaf_directory(

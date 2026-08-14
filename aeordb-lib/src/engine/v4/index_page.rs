@@ -985,6 +985,18 @@ fn record_order_key(record: &OrderedRecordV1<'_>) -> FormatResult<Vec<u8>> {
   }
 }
 
+/// Return the canonical order-key length without allocating the key.
+pub fn checked_ordered_record_order_key_length(record: &OrderedRecordV1<'_>) -> FormatResult<usize> {
+  match &record.sort_key {
+    RecordSortKeyV1::Contiguous(key) => Ok(key.len()),
+    RecordSortKeyV1::Posting { key, .. } => {
+      let length = 24usize.checked_add(key.len()).ok_or_else(|| length_error("posting order-key length overflow"))?;
+      validate_key_length(length)?;
+      Ok(length)
+    }
+  }
+}
+
 /// Decode exactly one role-specific ordered record.
 pub fn decode_ordered_record(value: &[u8], hash_algorithm: HashAlgorithm, role: OrderedIndexRoleV1) -> FormatResult<OrderedRecordV1<'_>> {
   let mut cursor = 0usize;
