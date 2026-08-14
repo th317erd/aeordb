@@ -857,7 +857,10 @@
         - [x] P5-6c: emit bounded best-effort healing proposals from exact fallback results without blocking, publishing, or changing the current lookup decision.
         - [x] P5-6d: prove absent/stale/corrupt/resized/gapped NVT equivalence, malformed directory/page failure direction, resource bounds, deterministic randomized lookup/build behavior, native platforms, and shadow real-world use.
       - [x] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.
-      - [ ] P5-8: qualify shadow build, restart, corruption fallback, memory bounds, and full validation.
+      - [x] P5-8: qualify shadow build, restart, corruption fallback, memory bounds, and full validation.
+        - [x] P5-8a: add a dedicated shadow-generation integration target that composes every P5 artifact family and validates exact graph closure after file-backed restart.
+        - [x] P5-8b: prove large synthetic build/update/compaction and NVT fallback equivalence under explicit memory, artifact, and corruption bounds while preserving cancellation ownership for the P6 task authority.
+        - [x] P5-8c: run the complete P5 matrix, broad/static/native-platform, external real-world, cleanup, and Child 05 closure gates.
     - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

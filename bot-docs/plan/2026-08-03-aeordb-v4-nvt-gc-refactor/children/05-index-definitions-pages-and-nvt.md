@@ -2,7 +2,7 @@
 
 **Parent:** [AeorDB V4, NVT, GC, and Migration Campaign](../../2026-08-03-aeordb-v4-nvt-gc-refactor.md)
 **Landing unit:** P5
-**Status:** Starts after Child 01 freezes registries and Child 03 provides immutable shadow roots
+**Status:** Complete; all v1 index artifacts remain shadow-only and Child 06 owns runtime activation
 **Primary owner:** field-index storage/semantics owner
 **Activation:** shadow derived artifacts only; Child 06 owns runtime activation
 
@@ -286,14 +286,14 @@ untouched. Keep v0 readers; never route old v0 mutation code into v1 pages.
 
 ## 16. Definition of Done
 
-- [ ] Legacy KV/v0 NVT bytes and behavior are unchanged.
-- [ ] Converter/query literals share exact canonical semantics.
-- [ ] Digest/coordinate collisions cannot create false matches.
-- [ ] Scope ordinals never cross scope identity or reuse.
-- [ ] Every page/directory operation is bounded and COW.
-- [ ] No index operation loads or serializes a complete index.
-- [ ] NVT is sparse, approximate, disposable, and independently rebuildable.
-- [ ] Empty/stale/corrupt NVT returns the exact reference result.
-- [ ] Virtual field profiles match ratified strategy policy.
-- [ ] Shadow build/restart/compaction reproduces fixtures and reference output.
-- [ ] Memory and physical read amplification evidence meet parent gates.
+- [x] Legacy KV/v0 NVT bytes and behavior are unchanged.
+- [x] Converter/query literals share exact canonical semantics.
+- [x] Digest/coordinate collisions cannot create false matches.
+- [x] Scope ordinals never cross scope identity or reuse.
+- [x] Every page/directory operation is bounded and COW.
+- [x] No index operation loads or serializes a complete index.
+- [x] NVT is sparse, approximate, disposable, and independently rebuildable.
+- [x] Empty/stale/corrupt NVT returns the exact reference result.
+- [x] Virtual field profiles match ratified strategy policy.
+- [x] Shadow build/restart/compaction reproduces fixtures and reference output.
+- [x] Memory and physical read amplification evidence meet parent gates.
