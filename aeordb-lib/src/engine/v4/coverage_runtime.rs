@@ -689,3 +689,52 @@ pub enum SoftMutationHubErrorV1 {
   #[error("soft mutation drain byte limit {maximum} is smaller than the first queued notice ({required} bytes)")]
   DrainLimitTooSmall { required: usize, maximum: usize },
 }
+
+#[cfg(test)]
+mod tests {
+  use std::sync::{Arc, mpsc};
+  use std::time::Duration;
+
+  use uuid::Uuid;
+
+  use super::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
+  use crate::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
+
+  fn acknowledgement() -> NamespaceMutationAcknowledgement {
+    NamespaceMutationAcknowledgement {
+      operation_id: Uuid::from_bytes([1; 16]),
+      kind: NamespaceMutationKind::FileWrite,
+      publication_sequence: 1,
+      previous_root_hash: vec![1; 32],
+      root_hash: vec![2; 32],
+      source_identities: vec![NamespaceMutationSourceIdentity {
+        path: "/docs/contended.txt".to_string(),
+        entry_type: Some(1),
+        previous_identity: Some(vec![1; 32]),
+        new_identity: Some(vec![2; 32]),
+      }],
+      locator_replacements: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn a_contended_soft_consumer_cannot_wait_on_the_hard_acknowledgement_path() {
+    let hub = Arc::new(SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(4, 8_192, 4_096).unwrap()).unwrap());
+    let queue_guard = hub.lock_queue_for_test().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let offered_hub = Arc::clone(&hub);
+    let worker = std::thread::spawn(move || {
+      let result = offered_hub.offer_acknowledgement(&acknowledgement());
+      sender.send(result).unwrap();
+    });
+
+    let received = receiver.recv_timeout(Duration::from_secs(1));
+    drop(queue_guard);
+    worker.join().unwrap();
+
+    assert_eq!(
+      received.expect("soft admission blocked behind its consumer lock"),
+      SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::QueueContended)
+    );
+  }
+}

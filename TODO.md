@@ -862,7 +862,7 @@
         - [x] P5-8b: prove large synthetic build/update/compaction and NVT fallback equivalence under explicit memory, artifact, and corruption bounds while preserving cancellation ownership for the P6 task authority.
         - [x] P5-8c: run the complete P5 matrix, broad/static/native-platform, external real-world, cleanup, and Child 05 closure gates.
     - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
-      - [ ] P6-1: implement the post-authority soft mutation stream, sequence/gap model, and authoritative reconciliation boundary.
+      - [x] P6-1: implement the post-authority soft mutation stream, sequence/gap model, and authoritative reconciliation boundary.
         - [x] P6-1a: freeze the typed coverage epoch/cursor, mutation envelope, admission outcomes, and gap/rebuild state machine in `coverage_runtime_spec` with an independent model.
         - [x] P6-1b: route every namespace mutation producer through one engine-owned, bounded, non-blocking post-commit fanout while preserving caller-specific effects.
         - [x] P6-1c: implement bounded journal ordering/replay and exact NamespaceRoot/SystemFamily identity reconciliation; absence or ambiguity must request diff/rebuild, never imply an empty delta.
@@ -870,7 +870,7 @@
           - [x] P6-1c-b: reorder acknowledged mutations within explicit record/byte bounds and encode frozen journal segments without blocking the hard writer.
           - [x] P6-1c-c: replay validated journal chains and reconcile missing, ambiguous, corrupt, or disconnected authority to bounded diff/rebuild.
           - [x] P6-1c-d: clear current loss only with a generation-checked authoritative reconciliation and prove restart, cancellation, corruption, and concurrent-loss races.
-        - [ ] P6-1d: prove restart, dropped/duplicate/out-of-order delivery, queue pressure, whole-root transitions, cancellation, memory bounds, and unchanged acknowledgement durability/latency.
+        - [x] P6-1d: prove restart, dropped/duplicate/out-of-order delivery, queue pressure, whole-root transitions, cancellation, memory bounds, and unchanged acknowledgement durability/latency.
       - [ ] P6-2: implement the single bounded IndexCoordinator, task admission, memtable, spill, checkpoint, cache, cancellation, and graceful shutdown runtime.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.

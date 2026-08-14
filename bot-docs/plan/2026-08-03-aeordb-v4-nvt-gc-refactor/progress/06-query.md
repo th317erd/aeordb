@@ -1,9 +1,9 @@
 # Child 06 Progress: Query
 
-- **Status:** active; P6-1a through P6-1c green, P6-1d next
-- **Current landing unit:** P6-1
+- **Status:** active; P6-1 complete, P6-2 next
+- **Current landing unit:** P6-2
 - **Entry commit:** `a337b08` (`test: qualify v1 shadow index generation`)
-- **Last green commit:** `b65116b` (`feat: capture namespace mutations for async indexing`)
+- **Last green commit:** `d8b42f5` (`feat: add recoverable index mutation journals`)
 - **Owner:** current Codex thread; serialized ownership of namespace fanout, v4 coverage runtime, and shared test manifest
 - **Start gate:** satisfied: Children 03 and 05 are complete; Child 04 root-state APIs are complete for the later P7 gate
 - **Plan:** [Child 06](../children/06-async-coverage-query-pagination-and-locators.md)
@@ -37,4 +37,10 @@
 - **Failure direction:** there is still no persistent sink, worker, v4 activation, parser/index work, or journal sync in the hard writer. P6-2 owns the single memory-coordinated drain/persist worker and coverage-epoch binding. A replay summary validates a chain but deliberately does not activate or apply it before that owner exists.
 - **TDD and focused evidence:** the new target first failed to compile before the contracts existed. The semantic-control regression then failed by returning `Exact` and passed after the fail-closed guard. The final focused targets pass 12 coverage-journal, 10 coverage-runtime, and 28 error-squelch architecture tests. The exact suppression inventory remains 1,457 reviewed occurrences; formatting and `git diff --check` pass.
 - **Broad evidence:** the first complete all-target gauntlet passed 6,057 tests with 7 ignored before the final semantic-control guard. The phase-boundary rerun after that guard passed 259 targets, 6,058 tests, and 7 ignored with zero failures. Its log is `/home/wyatt/.cache/codex/aeordb-tests/p6-1c-final-full.log`.
-- **Next action:** complete P6-1d restart/pressure/acknowledgement-latency qualification, then hand the soft stream to the single bounded P6-2 IndexCoordinator without activating v4 query replacement.
+
+## P6-1d Qualification
+
+- **Restart/failure matrix:** the coverage tracker, soft hub, journal, and namespace coordinator suites prove restart comparison, dropped/duplicate/out-of-order delivery, queue count/byte pressure, oversized acknowledgement, allocation/poison/panic failure direction, whole-root reconciliation, cancellation, malformed/corrupt authority and journal input, and concurrent loss-generation races.
+- **Acknowledgement isolation:** one deterministic unit test retains the consumer queue lock while another thread offers the postcommit acknowledgement. The offer completes while the lock remains held and returns `QueueContended`, proving the producer uses nonblocking admission rather than waiting for downstream work. Existing namespace tests prove soft panic and oversize loss cannot change the already-durable hard success or suppress caller fanout. Source architecture gates retain exactly one engine-owned post-authority offer and no parser/index/journal sync in that path.
+- **Bounds:** the hub preallocates fixed notice capacity, checks retained bytes before cloning, uses fallible allocations, and converts every inability to retain soft state into explicit reconciliation evidence. Journal ordering/replay is count/byte bounded and cancellation-aware. P6-2 now owns transferring these fixed bounds into the process-wide memory budget and persistent worker lifecycle.
+- **Next action:** add the compile-red P6-2 coordinator target after mapping all legacy buffer, parser, task, timer, spill, checkpoint, cache, startup, and shutdown owners. The new owner must replace or adapt those paths rather than coexist as another independent index runtime.
