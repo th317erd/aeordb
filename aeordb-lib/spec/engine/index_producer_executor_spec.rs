@@ -3,16 +3,19 @@ use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoordinatorV1};
+use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_producer_collector::{
-  IndexCollectorDocumentTransitionV1, IndexCollectorDocumentV1, IndexCollectorFieldDefinitionV1, IndexCollectorScopeDefinitionV1,
-  IndexCollectorValueStoreDefinitionV1, IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1,
-  IndexParserOutcomeV1, IndexProducerCollectorOptionsV1, IndexProducerCollectorV1,
+  IndexCollectorDocumentRevisionTransitionV1, IndexCollectorDocumentV1, IndexCollectorFieldDefinitionV1, IndexCollectorScopeDefinitionV1,
+  IndexCollectorScopeWorkV1, IndexCollectorValueStoreDefinitionV1, IndexParserExecutionErrorV1, IndexParserExecutionRequestV1,
+  IndexParserExecutorV1, IndexParserOutcomeV1, IndexProducerCollectorOptionsV1, IndexProducerCollectorV1,
 };
 use aeordb::engine::v4::index_producer_coordinator::{
-  IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1,
-  IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
+  IndexProducerCompletionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerSpillErrorV1,
+  IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1,
+  IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_producer_executor::{IndexProducerExecutionErrorV1, IndexProducerExecutionInputV1, IndexProducerExecutorV1};
+use aeordb::engine::v4::index_record::decode_scope_document_record;
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 
@@ -78,6 +81,10 @@ fn scope_bundle(definitions: &Definitions) -> IndexCollectorScopeDefinitionV1<'_
       }],
     }],
   }
+}
+
+fn scope_work(definitions: &Definitions, document_ordinal: u64) -> IndexCollectorScopeWorkV1<'_> {
+  IndexCollectorScopeWorkV1 { document_ordinal, scope_bundle: scope_bundle(definitions) }
 }
 
 fn hash(label: &[u8]) -> Vec<u8> {
@@ -182,9 +189,8 @@ fn exact_leased_transition_collects_and_completes_while_memory_remains_accounted
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundles: vec![scope_bundle(&definitions)],
-        transition: IndexCollectorDocumentTransitionV1 {
-          document_ordinal: 3,
+        scope_work: vec![scope_work(&definitions, 3)],
+        transition: IndexCollectorDocumentRevisionTransitionV1 {
           before: None,
           after: Some(IndexCollectorDocumentV1 { namespace_root: &after_root, record_revision_hash: &revision, file_record: &record }),
         },
@@ -197,7 +203,7 @@ fn exact_leased_transition_collects_and_completes_while_memory_remains_accounted
     )
     .unwrap();
 
-  assert!(matches!(completion, aeordb::engine::v4::index_producer_coordinator::IndexProducerCompletionV1::Completed { .. }));
+  assert!(matches!(completion, IndexProducerCompletionV1::Completed { .. }));
   assert_eq!(producer.snapshot().pending_tasks, 0);
   assert_eq!(producer.snapshot().leased_tasks, 0);
   assert_eq!(mutations.snapshot().active_records, 4);
@@ -240,9 +246,8 @@ fn mismatched_roots_and_scope_fail_before_collection_and_release_the_lease_for_r
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundles: vec![scope_bundle(&definitions)],
-        transition: IndexCollectorDocumentTransitionV1 {
-          document_ordinal: 3,
+        scope_work: vec![scope_work(&definitions, 3)],
+        transition: IndexCollectorDocumentRevisionTransitionV1 {
           before: None,
           after: Some(IndexCollectorDocumentV1 { namespace_root: &wrong_root, record_revision_hash: &revision, file_record: &record }),
         },
@@ -267,9 +272,8 @@ fn mismatched_roots_and_scope_fail_before_collection_and_release_the_lease_for_r
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &wrong_root,
-        scope_bundles: vec![scope_bundle(&definitions)],
-        transition: IndexCollectorDocumentTransitionV1 {
-          document_ordinal: 3,
+        scope_work: vec![scope_work(&definitions, 3)],
+        transition: IndexCollectorDocumentRevisionTransitionV1 {
           before: None,
           after: Some(IndexCollectorDocumentV1 { namespace_root: &root, record_revision_hash: &revision, file_record: &record }),
         },
@@ -292,9 +296,8 @@ fn mismatched_roots_and_scope_fail_before_collection_and_release_the_lease_for_r
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundles: vec![scope_bundle(&definitions)],
-        transition: IndexCollectorDocumentTransitionV1 {
-          document_ordinal: 3,
+        scope_work: vec![scope_work(&definitions, 3)],
+        transition: IndexCollectorDocumentRevisionTransitionV1 {
           before: None,
           after: Some(IndexCollectorDocumentV1 { namespace_root: &root, record_revision_hash: &revision, file_record: &record }),
         },
@@ -332,9 +335,8 @@ fn cancellation_and_mutation_pressure_release_the_lease_without_consuming_the_ta
     &lease,
     IndexProducerExecutionInputV1 {
       semantic_state_root: &semantic,
-      scope_bundles: vec![scope_bundle(&definitions)],
-      transition: IndexCollectorDocumentTransitionV1 {
-        document_ordinal: 3,
+      scope_work: vec![scope_work(&definitions, 3)],
+      transition: IndexCollectorDocumentRevisionTransitionV1 {
         before: None,
         after: Some(IndexCollectorDocumentV1 { namespace_root: &after_root, record_revision_hash: &revision, file_record: &record }),
       },
@@ -356,9 +358,8 @@ fn cancellation_and_mutation_pressure_release_the_lease_without_consuming_the_ta
     &lease,
     IndexProducerExecutionInputV1 {
       semantic_state_root: &semantic,
-      scope_bundles: vec![scope_bundle(&definitions)],
-      transition: IndexCollectorDocumentTransitionV1 {
-        document_ordinal: 3,
+      scope_work: vec![scope_work(&definitions, 3)],
+      transition: IndexCollectorDocumentRevisionTransitionV1 {
         before: None,
         after: Some(IndexCollectorDocumentV1 { namespace_root: &after_root, record_revision_hash: &revision, file_record: &record }),
       },
@@ -398,9 +399,8 @@ fn collector_memory_refusal_releases_the_lease_and_every_task_reservation() {
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundles: vec![scope_bundle(&definitions)],
-        transition: IndexCollectorDocumentTransitionV1 {
-          document_ordinal: 3,
+        scope_work: vec![scope_work(&definitions, 3)],
+        transition: IndexCollectorDocumentRevisionTransitionV1 {
           before: None,
           after: Some(IndexCollectorDocumentV1 { namespace_root: &after_root, record_revision_hash: &revision, file_record: &record }),
         },
@@ -443,9 +443,8 @@ fn one_lease_collects_every_applicable_scope_before_consuming_the_task() {
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundles: vec![scope_bundle(&root_scope), scope_bundle(&glob_scope)],
-        transition: IndexCollectorDocumentTransitionV1 {
-          document_ordinal: 3,
+        scope_work: vec![scope_work(&root_scope, 3), scope_work(&glob_scope, 9)],
+        transition: IndexCollectorDocumentRevisionTransitionV1 {
           before: None,
           after: Some(IndexCollectorDocumentV1 { namespace_root: &after_root, record_revision_hash: &revision, file_record: &record }),
         },
@@ -458,7 +457,17 @@ fn one_lease_collects_every_applicable_scope_before_consuming_the_task() {
     )
     .unwrap();
 
-  assert!(matches!(completion, aeordb::engine::v4::index_producer_coordinator::IndexProducerCompletionV1::Completed { .. }));
+  let IndexProducerCompletionV1::Completed { outcomes } = completion else {
+    panic!("expected completed multi-scope producer task");
+  };
+  let mut ordinals = outcomes
+    .iter()
+    .flat_map(|outcome| &outcome.mutations)
+    .filter(|mutation| mutation.role == OrderedIndexRoleV1::ScopeOrdinal)
+    .map(|mutation| decode_scope_document_record(&mutation.encoded_record, ALGORITHM).unwrap().document_ordinal)
+    .collect::<Vec<_>>();
+  ordinals.sort_unstable();
+  assert_eq!(ordinals, vec![3, 9]);
   assert_eq!(producer.snapshot().pending_tasks, 0);
   assert_eq!(mutations.snapshot().active_records, 8);
   assert_eq!(task_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);

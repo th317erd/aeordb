@@ -106,6 +106,18 @@ pub struct IndexCollectorDocumentTransitionV1<'a> {
   pub after: Option<IndexCollectorDocumentV1<'a>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct IndexCollectorDocumentRevisionTransitionV1<'a> {
+  pub before: Option<IndexCollectorDocumentV1<'a>>,
+  pub after: Option<IndexCollectorDocumentV1<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexCollectorScopeWorkV1<'a> {
+  pub document_ordinal: u64,
+  pub scope_bundle: IndexCollectorScopeDefinitionV1<'a>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexParserDeterministicFailureV1 {
   reason: u16,
@@ -275,13 +287,19 @@ impl IndexProducerCollectorV1 {
     mapper: Option<&dyn PluginMapperExecutorV1>,
     is_cancelled: &dyn Fn() -> bool,
   ) -> Result<CollectedIndexProducerReportV1, IndexProducerCollectorErrorV1> {
-    self.collect_scopes(std::iter::once(scope_bundle), transition, parser, mapper, is_cancelled)
+    self.collect_scopes(
+      std::iter::once(IndexCollectorScopeWorkV1 { document_ordinal: transition.document_ordinal, scope_bundle }),
+      IndexCollectorDocumentRevisionTransitionV1 { before: transition.before, after: transition.after },
+      parser,
+      mapper,
+      is_cancelled,
+    )
   }
 
   pub fn collect_scopes<'a>(
     &self,
-    scope_bundles: impl IntoIterator<Item = IndexCollectorScopeDefinitionV1<'a>>,
-    transition: IndexCollectorDocumentTransitionV1<'a>,
+    scope_work: impl IntoIterator<Item = IndexCollectorScopeWorkV1<'a>>,
+    transition: IndexCollectorDocumentRevisionTransitionV1<'a>,
     parser: &dyn IndexParserExecutorV1,
     mapper: Option<&dyn PluginMapperExecutorV1>,
     is_cancelled: &dyn Fn() -> bool,
@@ -291,7 +309,7 @@ impl IndexProducerCollectorV1 {
     }
     let mut report = ReportBuilderV1::new(self.memory.clone(), self.options)?;
     let mut scope_count = 0u32;
-    for scope_bundle in scope_bundles {
+    for scope in scope_work {
       if is_cancelled() {
         return Err(IndexProducerCollectorErrorV1::Cancelled);
       }
@@ -299,7 +317,14 @@ impl IndexProducerCollectorV1 {
       if scope_count > self.options.max_scopes {
         return Err(IndexProducerCollectorErrorV1::InvalidRequest("scope definition count exceeds the collector bound".to_string()));
       }
-      self.collect_scope(&mut report, &scope_bundle, transition, parser, mapper, is_cancelled)?;
+      self.collect_scope(
+        &mut report,
+        &scope.scope_bundle,
+        IndexCollectorDocumentTransitionV1 { document_ordinal: scope.document_ordinal, before: transition.before, after: transition.after },
+        parser,
+        mapper,
+        is_cancelled,
+      )?;
     }
     report.finish()
   }

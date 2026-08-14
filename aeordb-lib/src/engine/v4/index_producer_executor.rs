@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use super::index_coordinator::IndexCoordinatorV1;
 use super::index_producer_collector::{
-  IndexCollectorDocumentTransitionV1, IndexCollectorScopeDefinitionV1, IndexParserExecutorV1, IndexProducerCollectorErrorV1,
+  IndexCollectorDocumentRevisionTransitionV1, IndexCollectorScopeWorkV1, IndexParserExecutorV1, IndexProducerCollectorErrorV1,
   IndexProducerCollectorV1,
 };
 use super::index_producer_coordinator::{
@@ -12,8 +12,8 @@ use super::index_source::PluginMapperExecutorV1;
 
 pub struct IndexProducerExecutionInputV1<'a> {
   pub semantic_state_root: &'a [u8],
-  pub scope_bundles: Vec<IndexCollectorScopeDefinitionV1<'a>>,
-  pub transition: IndexCollectorDocumentTransitionV1<'a>,
+  pub scope_work: Vec<IndexCollectorScopeWorkV1<'a>>,
+  pub transition: IndexCollectorDocumentRevisionTransitionV1<'a>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -65,7 +65,7 @@ impl IndexProducerExecutorV1 {
       return Err(error);
     }
 
-    let collected = match self.collector.collect_scopes(input.scope_bundles, input.transition, parser, mapper, is_cancelled) {
+    let collected = match self.collector.collect_scopes(input.scope_work, input.transition, parser, mapper, is_cancelled) {
       Ok(collected) => collected,
       Err(IndexProducerCollectorErrorV1::Cancelled) => {
         release_lease(producer, lease, "collection cancellation")?;

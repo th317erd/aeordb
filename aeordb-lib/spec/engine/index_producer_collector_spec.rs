@@ -9,10 +9,10 @@ use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBou
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::index_page::{OrderedIndexRoleV1, decode_posting_record};
 use aeordb::engine::v4::index_producer_collector::{
-  CollectedIndexProducerReportV1, IndexCollectorDocumentTransitionV1, IndexCollectorDocumentV1, IndexCollectorFieldDefinitionV1,
-  IndexCollectorScopeDefinitionV1, IndexCollectorValueStoreDefinitionV1, IndexParserDeterministicFailureV1, IndexParserExecutionErrorV1,
-  IndexParserExecutionRequestV1, IndexParserExecutorV1, IndexParserOutcomeV1, IndexProducerCollectorErrorV1,
-  IndexProducerCollectorOptionsV1, IndexProducerCollectorV1,
+  CollectedIndexProducerReportV1, IndexCollectorDocumentRevisionTransitionV1, IndexCollectorDocumentTransitionV1, IndexCollectorDocumentV1,
+  IndexCollectorFieldDefinitionV1, IndexCollectorScopeDefinitionV1, IndexCollectorScopeWorkV1, IndexCollectorValueStoreDefinitionV1,
+  IndexParserDeterministicFailureV1, IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1,
+  IndexParserOutcomeV1, IndexProducerCollectorErrorV1, IndexProducerCollectorOptionsV1, IndexProducerCollectorV1,
 };
 use aeordb::engine::v4::index_producer_coordinator::{IndexProducerOwnerDispositionV1, IndexProducerOwnerOutcomeV1};
 use aeordb::engine::v4::index_record::{
@@ -503,13 +503,31 @@ fn invalid_transition_identity_and_duplicate_owners_fail_before_parser_work() {
   let transition =
     IndexCollectorDocumentTransitionV1 { document_ordinal: 1, before: None, after: Some(document(&root, &revision, &record)) };
   assert!(matches!(
-    collector.collect_scopes(vec![scope_bundle(&definitions), scope_bundle(&definitions)], transition, &parser, None, &|| false,),
+    collector.collect_scopes(
+      vec![
+        IndexCollectorScopeWorkV1 { document_ordinal: 1, scope_bundle: scope_bundle(&definitions) },
+        IndexCollectorScopeWorkV1 { document_ordinal: 2, scope_bundle: scope_bundle(&definitions) },
+      ],
+      IndexCollectorDocumentRevisionTransitionV1 { before: transition.before, after: transition.after },
+      &parser,
+      None,
+      &|| false,
+    ),
     Err(IndexProducerCollectorErrorV1::InvalidRequest(_))
   ));
   let one_scope_options = IndexProducerCollectorOptionsV1::new(1, 16, 16, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap();
   let one_scope_collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), one_scope_options).unwrap();
   assert!(matches!(
-    one_scope_collector.collect_scopes(vec![scope_bundle(&definitions), scope_bundle(&definitions)], transition, &parser, None, &|| false,),
+    one_scope_collector.collect_scopes(
+      vec![
+        IndexCollectorScopeWorkV1 { document_ordinal: 1, scope_bundle: scope_bundle(&definitions) },
+        IndexCollectorScopeWorkV1 { document_ordinal: 2, scope_bundle: scope_bundle(&definitions) },
+      ],
+      IndexCollectorDocumentRevisionTransitionV1 { before: transition.before, after: transition.after },
+      &parser,
+      None,
+      &|| false,
+    ),
     Err(IndexProducerCollectorErrorV1::InvalidRequest(_))
   ));
   assert_eq!(parser.calls.load(Ordering::SeqCst), 0);
