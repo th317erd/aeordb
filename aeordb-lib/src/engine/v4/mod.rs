@@ -63,6 +63,7 @@ pub mod index_producer_source;
 pub mod index_producer_worker;
 pub mod index_record;
 pub mod index_semantic_registry;
+pub mod index_semantic_source;
 pub mod index_source;
 pub mod index_task;
 pub mod namespace;

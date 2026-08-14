@@ -7,6 +7,7 @@ use super::database_header::validate_capabilities;
 use super::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, decode_whole_entity};
 use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
+use super::scope::validate_canonical_absolute_path;
 
 const DIRECTORY_HEADER_LENGTH: usize = 32;
 const DIRECTORY_KIND_NAMESPACE_ROOT: u16 = 0x0003;
@@ -992,6 +993,7 @@ fn decode_catalog_leaf(body: &[u8], item_count: u64, hash_algorithm: HashAlgorit
       return Err(error(MalformedInputClass::InvalidGraphEdgeOrCycle, "catalog_leaf_zero_hash", "record identity or edge is zero"));
     }
     let owner_key = &body[cursor + record_prefix..record_end];
+    validate_catalog_owner_key(kind, owner_key, hash_width)?;
     let kind_bytes = kind.to_le_bytes();
     let expected_lookup = digest_parts(hash_algorithm, &[b"aeordb.semantic-catalog-key.v1\0", &kind_bytes, owner_key]);
     if expected_lookup != lookup_digest {
@@ -1012,6 +1014,58 @@ fn decode_catalog_leaf(body: &[u8], item_count: u64, hash_algorithm: HashAlgorit
     return Err(error(MalformedInputClass::TruncationOrTrailingBytes, "catalog_leaf_trailing", "unconsumed catalog leaf bytes"));
   }
   Ok((SemanticObjectKind::CatalogLeaf { record_count }, graph_edges))
+}
+
+fn validate_catalog_owner_key(kind: u16, owner_key: &[u8], hash_width: usize) -> FormatResult<()> {
+  match kind {
+    1 | 2 => {
+      if owner_key.len() < 3 || owner_key.len() > 65_537 {
+        return Err(error(
+          MalformedInputClass::IdentityKeyOrGenerationMismatch,
+          "catalog_leaf_owner_key",
+          "control projection owner key has an invalid length",
+        ));
+      }
+      let control_kind = u16::from_le_bytes([owner_key[0], owner_key[1]]);
+      let path = std::str::from_utf8(&owner_key[2..]).map_err(|error| {
+        FormatError::new(
+          MalformedInputClass::IdentityKeyOrGenerationMismatch,
+          "catalog_leaf_owner_key",
+          format!("control projection owner path is not UTF-8: {error}"),
+        )
+      })?;
+      if control_kind == 0 {
+        return Err(error(
+          MalformedInputClass::IdentityKeyOrGenerationMismatch,
+          "catalog_leaf_owner_key",
+          "control projection owner requires a nonzero kind",
+        ));
+      }
+      validate_canonical_absolute_path(path).map_err(|source| {
+        FormatError::new(
+          MalformedInputClass::IdentityKeyOrGenerationMismatch,
+          "catalog_leaf_owner_key",
+          format!("control projection owner path is not canonical: {source}"),
+        )
+      })?;
+    }
+    3..=7 if owner_key.len() == hash_width => {}
+    3..=7 => {
+      return Err(error(
+        MalformedInputClass::IdentityKeyOrGenerationMismatch,
+        "catalog_leaf_owner_key",
+        format!("semantic definition owner has {} bytes, expected {hash_width}", owner_key.len()),
+      ));
+    }
+    _ => {
+      return Err(error(
+        MalformedInputClass::UnknownTypeKindOrEnum,
+        "catalog_leaf_owner_key",
+        format!("semantic catalog class {kind} is not registered"),
+      ));
+    }
+  }
+  Ok(())
 }
 
 fn decode_catalog_internal(

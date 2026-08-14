@@ -1,8 +1,40 @@
 use aeordb::engine::HashAlgorithm;
+use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticCatalogNodeV1, decode_semantic_catalog_node, decode_semantic_definition_record};
 
 fn fixture(name: &str) -> Vec<u8> {
   std::fs::read(format!("{}/spec/fixtures/v4/semantic-object-v1/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+fn catalog_leaf_with_owner(algorithm: HashAlgorithm, kind: u16, owner_key: &[u8]) -> Vec<u8> {
+  let hash_width = algorithm.hash_length();
+  let record_length = 8 + 2 * hash_width + owner_key.len();
+  let mut body = vec![0; 16 + hash_width + record_length];
+  body[4..8].copy_from_slice(&1u32.to_le_bytes());
+  let lookup_digest = digest_parts(algorithm, &[b"aeordb.semantic-catalog-key.v1\0", &kind.to_le_bytes(), owner_key]);
+  body[8..8 + hash_width].copy_from_slice(&lookup_digest);
+  body[8 + hash_width..12 + hash_width].copy_from_slice(&u32::try_from(record_length).unwrap().to_le_bytes());
+  let record_offset = 16 + hash_width;
+  body[record_offset..record_offset + 2].copy_from_slice(&kind.to_le_bytes());
+  body[record_offset + 4..record_offset + 8].copy_from_slice(&u32::try_from(owner_key.len()).unwrap().to_le_bytes());
+  body[record_offset + 8..record_offset + 8 + hash_width].fill(0x11);
+  body[record_offset + 8 + hash_width..record_offset + 8 + 2 * hash_width].fill(0x22);
+  body[record_offset + 8 + 2 * hash_width..].copy_from_slice(owner_key);
+
+  let mut bytes = vec![0; 32 + body.len() + 4];
+  let total_length = u32::try_from(bytes.len()).unwrap();
+  bytes[..4].copy_from_slice(b"ASEM");
+  bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+  bytes[6..8].copy_from_slice(&2u16.to_le_bytes());
+  bytes[8..10].copy_from_slice(&32u16.to_le_bytes());
+  bytes[12..16].copy_from_slice(&total_length.to_le_bytes());
+  bytes[16..20].copy_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+  bytes[20..28].copy_from_slice(&1u64.to_le_bytes());
+  bytes[32..32 + body.len()].copy_from_slice(&body);
+  let checksum_offset = bytes.len() - 4;
+  let checksum = crc32fast::hash(&bytes[..checksum_offset]);
+  bytes[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+  bytes
 }
 
 #[test]
@@ -87,4 +119,49 @@ fn typed_readers_reject_corrupt_and_truncated_semantic_objects_before_exposing_v
   definition.truncate(definition.len() - 1);
   let truncated = decode_semantic_definition_record(&definition, HashAlgorithm::Sha512).unwrap_err();
   assert_eq!(truncated.code(), "semantic_total_length");
+}
+
+#[test]
+fn catalog_leaf_reader_rejects_a_checksum_valid_class_specific_owner_shape_mismatch() {
+  let mut leaf = fixture("asem-blake3-256-catalog-leaf-valid.bin");
+  let hash_width = HashAlgorithm::Blake3_256.hash_length();
+  let body_offset = 32;
+  let record_offset = body_offset + 16 + hash_width;
+  let record_prefix = 8 + 2 * hash_width;
+  let owner_length = u32::from_le_bytes(leaf[record_offset + 4..record_offset + 8].try_into().unwrap()) as usize;
+  let owner = leaf[record_offset + record_prefix..record_offset + record_prefix + owner_length].to_vec();
+  let kind = 3u16;
+  leaf[record_offset..record_offset + 2].copy_from_slice(&kind.to_le_bytes());
+  let lookup_digest = digest_parts(HashAlgorithm::Blake3_256, &[b"aeordb.semantic-catalog-key.v1\0", &kind.to_le_bytes(), &owner]);
+  leaf[body_offset + 8..body_offset + 8 + hash_width].copy_from_slice(&lookup_digest);
+  let checksum_offset = leaf.len() - 4;
+  let checksum = crc32fast::hash(&leaf[..checksum_offset]);
+  leaf[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+
+  let error = decode_semantic_catalog_node(&leaf, HashAlgorithm::Blake3_256).unwrap_err();
+
+  assert_eq!(error.code(), "catalog_leaf_owner_key");
+}
+
+#[test]
+fn catalog_leaf_owner_contract_covers_control_paths_and_semantic_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let hash_width = algorithm.hash_length();
+    let valid_control = [b"\x02\x00".as_slice(), b"/control.json".as_slice()].concat();
+    assert!(decode_semantic_catalog_node(&catalog_leaf_with_owner(algorithm, 2, &valid_control), algorithm).is_ok());
+    assert!(decode_semantic_catalog_node(&catalog_leaf_with_owner(algorithm, 3, &vec![0x33; hash_width]), algorithm).is_ok());
+
+    let invalid_owners = [
+      (2, vec![2, 0]),
+      (2, [b"\x00\x00".as_slice(), b"/control.json".as_slice()].concat()),
+      (2, vec![2, 0, b'/', 0xff]),
+      (2, [b"\x02\x00".as_slice(), b"/a/../control.json".as_slice()].concat()),
+      (2, [vec![2, 0, b'/'], vec![b'a'; 65_535]].concat()),
+      (3, vec![0x33; hash_width - 1]),
+    ];
+    for (kind, owner) in invalid_owners {
+      let error = decode_semantic_catalog_node(&catalog_leaf_with_owner(algorithm, kind, &owner), algorithm).unwrap_err();
+      assert_eq!(error.code(), "catalog_leaf_owner_key", "kind={kind} owner_length={}", owner.len());
+    }
+  }
 }

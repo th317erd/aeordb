@@ -264,14 +264,22 @@ fn semantic_store_memory_refusal_cannot_publish_a_path_or_root() {
 }
 
 #[test]
-fn semantic_store_has_no_service_or_string_path_publication_caller() {
+fn semantic_store_has_only_the_bounded_read_source_and_no_service_or_string_path_publication_caller() {
   let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
   let semantic_store = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/semantic_store.rs")).unwrap();
   for forbidden in ["server::", "update_head", "admit_v4_header", "V4ControlStore", "publish_namespace_root"] {
     assert!(!semantic_store.contains(forbidden), "semantic store unexpectedly contains {forbidden}");
   }
   let production = read_rust_sources(&root.join("aeordb-lib/src"));
-  assert_eq!(production.matches("V4SemanticObjectStore::new").count(), 0, "semantic store gained a production caller before activation");
+  assert_eq!(
+    production.matches("V4SemanticObjectStore::new").count(),
+    1,
+    "semantic store gained a production caller beyond the disconnected bounded read source"
+  );
+  let semantic_source = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/index_semantic_source.rs")).unwrap();
+  assert!(semantic_source.contains("V4SemanticObjectStore::new(self.engine)"));
+  assert!(semantic_source.contains(".load(kind_id, object_id)"));
+  assert!(!semantic_source.contains(".publish("), "the disconnected semantic source must remain read-only");
   assert_eq!(production.matches("store_semantic_file_record_v1").count(), 2, "semantic publication must have one owner and one adapter");
 }
 
