@@ -216,6 +216,10 @@ name = "index_v1_nvt_spec"
 path = "spec/engine/index_v1_nvt_spec.rs"
 
 [[test]]
+name = "index_v1_task_spec"
+path = "spec/engine/index_v1_task_spec.rs"
+
+[[test]]
 name = "kv_store_spec"
 path = "spec/engine/kv_store_spec.rs"
 

@@ -10166,7 +10166,7 @@
     {
       "id": "esq-v1-ea562dd0ac48dd8cce1a-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 307,
+      "line": 491,
       "column": 8,
       "enclosing_item": "impl IndexTaskAttachmentIteratorV1 < 'a >::next",
       "kind": "result_status_probe",
@@ -10176,7 +10176,7 @@
     {
       "id": "esq-v1-85795af240cb3db8b8fa-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 376,
+      "line": 925,
       "column": 28,
       "enclosing_item": "decode_mutation_journal",
       "kind": "panic_method",
@@ -10186,7 +10186,7 @@
     {
       "id": "esq-v1-76d242b85e16722366fd-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 399,
+      "line": 948,
       "column": 24,
       "enclosing_item": "decode_mutation_journal",
       "kind": "error_conversion",
@@ -10196,7 +10196,7 @@
     {
       "id": "esq-v1-6bc1a2d57b734a9611a7-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 410,
+      "line": 959,
       "column": 35,
       "enclosing_item": "decode_mutation_journal",
       "kind": "panic_method",
@@ -10206,7 +10206,7 @@
     {
       "id": "esq-v1-33c9e514f213a6091fd3-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 528,
+      "line": 1077,
       "column": 23,
       "enclosing_item": "decode_mutation_record",
       "kind": "error_conversion",
@@ -10216,7 +10216,7 @@
     {
       "id": "esq-v1-602436c8447752db0612-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 546,
+      "line": 1095,
       "column": 23,
       "enclosing_item": "decode_mutation_record",
       "kind": "error_conversion",
@@ -10226,7 +10226,7 @@
     {
       "id": "esq-v1-653783d2a8741fc4ca5e-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 547,
+      "line": 1096,
       "column": 22,
       "enclosing_item": "decode_mutation_record",
       "kind": "error_conversion",
@@ -10236,7 +10236,7 @@
     {
       "id": "esq-v1-caab827231845d2979af-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 644,
+      "line": 1193,
       "column": 27,
       "enclosing_item": "decode_index_task_checkpoint",
       "kind": "panic_method",
@@ -10246,7 +10246,7 @@
     {
       "id": "esq-v1-5fd0b48c132a6be5c39e-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 688,
+      "line": 1237,
       "column": 23,
       "enclosing_item": "decode_index_task_checkpoint",
       "kind": "error_conversion",
@@ -10256,7 +10256,7 @@
     {
       "id": "esq-v1-92116fc14c9c7fcf826c-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 690,
+      "line": 1239,
       "column": 26,
       "enclosing_item": "decode_index_task_checkpoint",
       "kind": "error_conversion",
@@ -10266,7 +10266,7 @@
     {
       "id": "esq-v1-27005a6be42e63af2082-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 691,
+      "line": 1240,
       "column": 25,
       "enclosing_item": "decode_index_task_checkpoint",
       "kind": "error_conversion",
@@ -10276,7 +10276,7 @@
     {
       "id": "esq-v1-856e2101ed888081d7ab-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 704,
+      "line": 1253,
       "column": 35,
       "enclosing_item": "decode_index_task_checkpoint",
       "kind": "result_to_option",
@@ -10286,7 +10286,7 @@
     {
       "id": "esq-v1-b77cf94bc22a50c783b6-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 792,
+      "line": 1339,
       "column": 32,
       "enclosing_item": "decode_external_descriptor",
       "kind": "panic_method",
@@ -10296,7 +10296,7 @@
     {
       "id": "esq-v1-88af874d7c64e95efd4d-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 793,
+      "line": 1340,
       "column": 21,
       "enclosing_item": "decode_external_descriptor",
       "kind": "error_conversion",
@@ -10306,7 +10306,7 @@
     {
       "id": "esq-v1-95949e8e78f80d957317-00",
       "file": "aeordb-lib/src/engine/v4/index_task.rs",
-      "line": 794,
+      "line": 1341,
       "column": 35,
       "enclosing_item": "decode_external_descriptor",
       "kind": "panic_method",

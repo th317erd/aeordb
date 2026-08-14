@@ -3,7 +3,12 @@ use std::cmp::Ordering;
 use crate::engine::HashAlgorithm;
 
 use super::hash::digest_parts;
-use super::index_artifact::{decode_immutable_index_artifact, u16_at, u32_at, u64_at};
+use super::index_artifact::{
+  EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1, IndexManifestKindV1,
+  checked_immutable_index_artifact_encoded_length, decode_immutable_index_artifact, decode_index_manifest, encode_immutable_index_artifact,
+  u16_at, u32_at, u64_at,
+};
+use super::index_page::{OrderedIndexRoleV1, decode_artifact_directory};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use super::scope::validate_canonical_absolute_path;
 
@@ -38,6 +43,13 @@ impl JournalOwnerKindV1 {
       _ => None,
     }
   }
+
+  fn id(self) -> u16 {
+    match self {
+      Self::Task => 1,
+      Self::System => 2,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +76,52 @@ impl MutationKindV1 {
       _ => None,
     }
   }
+
+  fn id(self) -> u16 {
+    match self {
+      Self::Create => 1,
+      Self::Update => 2,
+      Self::Delete => 3,
+      Self::Move => 4,
+      Self::Copy => 5,
+      Self::Restore => 6,
+      Self::Transition => 7,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutationSideWriteV1<'a> {
+  pub path: &'a str,
+  pub revision: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutationRecordWriteV1<'a> {
+  pub kind: MutationKindV1,
+  pub sequence: u64,
+  pub mutation_id: &'a [u8],
+  pub batch_ordinal: u32,
+  pub batch_count: u32,
+  pub root_before: &'a [u8],
+  pub root_after: &'a [u8],
+  pub before: Option<MutationSideWriteV1<'a>>,
+  pub after: Option<MutationSideWriteV1<'a>>,
+  pub committed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationJournalWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub owner_id: [u8; 16],
+  pub owner_kind: JournalOwnerKindV1,
+  pub generation: u64,
+  pub segment_ordinal: u64,
+  pub chain_reset: bool,
+  pub previous_segment: &'a [u8],
+  pub semantic_state_root: &'a [u8],
+  pub runtime_boot_id: [u8; 16],
+  pub records: &'a [MutationRecordWriteV1<'a>],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +271,19 @@ impl IndexTaskKindV1 {
       _ => None,
     }
   }
+
+  fn id(self) -> u16 {
+    match self {
+      Self::ScopeBuild => 1,
+      Self::ValueBuild => 2,
+      Self::FieldBuild => 3,
+      Self::NvtBuild => 4,
+      Self::Reconcile => 5,
+      Self::V0Migration => 6,
+      Self::Compaction => 7,
+      Self::IndexRepair => 8,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,11 +322,124 @@ impl IndexTaskStateV1 {
       _ => None,
     }
   }
+
+  fn id(self) -> u16 {
+    match self {
+      Self::Running => 1,
+      Self::CancelRequested => 2,
+      Self::Canceled => 3,
+      Self::FailedRetryable => 4,
+      Self::FailedTerminal => 5,
+      Self::CompleteUnpublished => 6,
+      Self::Published => 7,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IndexTaskAttachmentRoleV1 {
+  ScopeOrdinalDirectoryRoot,
+  ScopeReverseDirectoryRoot,
+  ValueDirectoryRoot,
+  ValueStateDirectoryRoot,
+  PostingDirectoryRoot,
+  IndexStateDirectoryRoot,
+  NvtTileDirectoryRoot,
+  CandidateScopeManifest,
+  CandidateValueManifest,
+  CandidateFieldManifest,
+  CandidateNvtManifest,
+  MutationJournalHead,
+}
+
+impl IndexTaskAttachmentRoleV1 {
+  pub fn id(self) -> u16 {
+    match self {
+      Self::ScopeOrdinalDirectoryRoot => 1,
+      Self::ScopeReverseDirectoryRoot => 2,
+      Self::ValueDirectoryRoot => 3,
+      Self::ValueStateDirectoryRoot => 4,
+      Self::PostingDirectoryRoot => 5,
+      Self::IndexStateDirectoryRoot => 6,
+      Self::NvtTileDirectoryRoot => 7,
+      Self::CandidateScopeManifest => 8,
+      Self::CandidateValueManifest => 9,
+      Self::CandidateFieldManifest => 10,
+      Self::CandidateNvtManifest => 11,
+      Self::MutationJournalHead => 12,
+    }
+  }
+
+  pub fn name(self) -> &'static str {
+    match self {
+      Self::ScopeOrdinalDirectoryRoot => "scope-ordinal-directory-root",
+      Self::ScopeReverseDirectoryRoot => "scope-reverse-directory-root",
+      Self::ValueDirectoryRoot => "value-directory-root",
+      Self::ValueStateDirectoryRoot => "value-state-directory-root",
+      Self::PostingDirectoryRoot => "posting-directory-root",
+      Self::IndexStateDirectoryRoot => "index-state-directory-root",
+      Self::NvtTileDirectoryRoot => "nvt-tile-directory-root",
+      Self::CandidateScopeManifest => "candidate-scope-manifest",
+      Self::CandidateValueManifest => "candidate-value-manifest",
+      Self::CandidateFieldManifest => "candidate-field-manifest",
+      Self::CandidateNvtManifest => "candidate-nvt-manifest",
+      Self::MutationJournalHead => "mutation-journal-head",
+    }
+  }
+
+  fn from_id(id: u16) -> Option<Self> {
+    match id {
+      1 => Some(Self::ScopeOrdinalDirectoryRoot),
+      2 => Some(Self::ScopeReverseDirectoryRoot),
+      3 => Some(Self::ValueDirectoryRoot),
+      4 => Some(Self::ValueStateDirectoryRoot),
+      5 => Some(Self::PostingDirectoryRoot),
+      6 => Some(Self::IndexStateDirectoryRoot),
+      7 => Some(Self::NvtTileDirectoryRoot),
+      8 => Some(Self::CandidateScopeManifest),
+      9 => Some(Self::CandidateValueManifest),
+      10 => Some(Self::CandidateFieldManifest),
+      11 => Some(Self::CandidateNvtManifest),
+      12 => Some(Self::MutationJournalHead),
+      _ => None,
+    }
+  }
+
+  fn directory_role(self) -> Option<OrderedIndexRoleV1> {
+    match self {
+      Self::ScopeOrdinalDirectoryRoot => Some(OrderedIndexRoleV1::ScopeOrdinal),
+      Self::ScopeReverseDirectoryRoot => Some(OrderedIndexRoleV1::ScopeReverse),
+      Self::ValueDirectoryRoot => Some(OrderedIndexRoleV1::Value),
+      Self::ValueStateDirectoryRoot => Some(OrderedIndexRoleV1::ValueDocumentState),
+      Self::PostingDirectoryRoot => Some(OrderedIndexRoleV1::Posting),
+      Self::IndexStateDirectoryRoot => Some(OrderedIndexRoleV1::IndexDocumentState),
+      Self::NvtTileDirectoryRoot => Some(OrderedIndexRoleV1::NvtTile),
+      _ => None,
+    }
+  }
+
+  fn manifest_kind(self) -> Option<IndexManifestKindV1> {
+    match self {
+      Self::CandidateScopeManifest => Some(IndexManifestKindV1::ScopeCatalog),
+      Self::CandidateValueManifest => Some(IndexManifestKindV1::ValueStore),
+      Self::CandidateFieldManifest => Some(IndexManifestKindV1::FieldIndex),
+      Self::CandidateNvtManifest => Some(IndexManifestKindV1::FieldNvt),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexTaskAttachmentWriteV1<'a> {
+  pub role: IndexTaskAttachmentRoleV1,
+  pub owner_id: &'a [u8],
+  pub artifact_hash: &'a [u8],
+  pub birth_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexTaskAttachmentV1<'a> {
-  pub role: u16,
+  pub role: IndexTaskAttachmentRoleV1,
   pub owner_id: &'a [u8],
   pub artifact_hash: &'a [u8],
   pub birth_generation: u64,
@@ -320,6 +504,41 @@ pub struct ExternalWorkspaceDescriptorV1<'a> {
   pub path: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalWorkspaceDescriptorWriteV1<'a> {
+  pub workspace_id: [u8; 16],
+  pub manifest_digest: [u8; 32],
+  pub durable_sequence: u64,
+  pub durable_bytes: u64,
+  pub path: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexTaskCheckpointWriteV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub task_id: [u8; 16],
+  pub checkpoint_sequence: u64,
+  pub generation: u64,
+  pub task_kind: IndexTaskKindV1,
+  pub state: IndexTaskStateV1,
+  pub phase: u16,
+  pub required_capabilities: &'a [u8; 32],
+  pub started_at_ms: u64,
+  pub updated_at_ms: u64,
+  pub source_root: &'a [u8],
+  pub target_root: Option<&'a [u8]>,
+  pub primary_id: Option<&'a [u8]>,
+  pub journal_head: Option<&'a [u8]>,
+  pub journal_floor_sequence: u64,
+  pub journal_audited_through: u64,
+  pub next_document_ordinal: u64,
+  pub completed_work: u64,
+  pub total_work_hint: u64,
+  pub resume_key: &'a [u8],
+  pub attachments: &'a [IndexTaskAttachmentWriteV1<'a>],
+  pub external: Option<ExternalWorkspaceDescriptorWriteV1<'a>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexTaskCheckpointV1<'a> {
   pub task_id: [u8; 16],
@@ -351,6 +570,336 @@ pub struct IndexTaskCheckpointV1<'a> {
 pub enum IndexTaskArtifactV1<'a> {
   Journal(MutationJournalV1<'a>),
   Checkpoint(IndexTaskCheckpointV1<'a>),
+}
+
+pub fn encode_mutation_journal(request: &MutationJournalWriteV1<'_>) -> FormatResult<EncodedImmutableIndexArtifactV1> {
+  validate_journal_write_header(request)?;
+  if request.records.is_empty() || request.records.len() > MAX_JOURNAL_RECORDS as usize {
+    return Err(amplification_error("journal record count is outside 1..=10000"));
+  }
+
+  let records_length = request.records.iter().try_fold(0usize, |length, record| {
+    let record_length = checked_mutation_record_length(request.hash_algorithm, record)?;
+    length.checked_add(record_length).ok_or_else(|| length_error("journal record byte length overflow"))
+  })?;
+  let records_length_u32 = checked_task_u32(records_length, "journal records exceed u32")?;
+  let hash_width = request.hash_algorithm.hash_length();
+  let fixed = 56usize.checked_add(4 * hash_width).ok_or_else(|| length_error("journal fixed length overflow"))?;
+  let body_length = fixed.checked_add(records_length).ok_or_else(|| length_error("journal body length overflow"))?;
+  checked_immutable_index_artifact_encoded_length(ImmutableIndexArtifactKindV1::MutationJournalSegment, 24, body_length)?;
+  let mut body = vec![0u8; body_length];
+  let first = request.records.first().ok_or_else(|| closure_error("journal has no first record"))?;
+  let last = request.records.last().ok_or_else(|| closure_error("journal has no last record"))?;
+  body[..4].copy_from_slice(&u32::from(request.chain_reset).to_le_bytes());
+  body[4..6].copy_from_slice(&1u16.to_le_bytes());
+  body[6..8].copy_from_slice(&request.owner_kind.id().to_le_bytes());
+  body[8..16].copy_from_slice(&request.segment_ordinal.to_le_bytes());
+  body[16..24].copy_from_slice(&first.sequence.to_le_bytes());
+  body[24..32].copy_from_slice(&last.sequence.to_le_bytes());
+  body[32..36].copy_from_slice(&(request.records.len() as u32).to_le_bytes());
+  body[36..40].copy_from_slice(&records_length_u32.to_le_bytes());
+  body[40..40 + hash_width].copy_from_slice(request.previous_segment);
+  body[40 + hash_width..40 + 2 * hash_width].copy_from_slice(first.root_before);
+  body[40 + 2 * hash_width..40 + 3 * hash_width].copy_from_slice(last.root_after);
+  body[40 + 3 * hash_width..40 + 4 * hash_width].copy_from_slice(request.semantic_state_root);
+  body[40 + 4 * hash_width..fixed].copy_from_slice(&request.runtime_boot_id);
+  let mut offset = fixed;
+  for record in request.records {
+    let encoded = encode_mutation_record(request.hash_algorithm, record)?;
+    let end = offset.checked_add(encoded.len()).ok_or_else(|| length_error("journal record offset overflow"))?;
+    body[offset..end].copy_from_slice(&encoded);
+    offset = end;
+  }
+
+  let mut identity = Vec::with_capacity(24);
+  identity.extend_from_slice(&request.owner_id);
+  identity.extend_from_slice(&request.segment_ordinal.to_le_bytes());
+  let encoded = encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+    kind: ImmutableIndexArtifactKindV1::MutationJournalSegment,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  decode_mutation_journal(&encoded.value, request.hash_algorithm)?;
+  Ok(encoded)
+}
+
+fn validate_journal_write_header(request: &MutationJournalWriteV1<'_>) -> FormatResult<()> {
+  let hash_width = request.hash_algorithm.hash_length();
+  validate_hash(request.previous_segment, hash_width, true, "journal previous segment")?;
+  validate_hash(request.semantic_state_root, hash_width, false, "journal semantic-state root")?;
+  if request.generation == 0 || request.runtime_boot_id.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("journal generation or runtime boot ID is zero"));
+  }
+  if request.chain_reset != request.previous_segment.iter().all(|byte| *byte == 0) {
+    return Err(closure_error("journal reset flag disagrees with previous-segment presence"));
+  }
+  match request.owner_kind {
+    JournalOwnerKindV1::Task if request.owner_id.iter().all(|byte| *byte == 0) || request.owner_id == SYSTEM_INDEX_JOURNAL_ID => {
+      Err(identity_error("task journal owner is zero or uses the reserved system owner"))
+    }
+    JournalOwnerKindV1::System if request.owner_id != SYSTEM_INDEX_JOURNAL_ID => {
+      Err(identity_error("system journal does not use its reserved owner ID"))
+    }
+    _ => Ok(()),
+  }
+}
+
+fn encode_mutation_record(hash_algorithm: HashAlgorithm, request: &MutationRecordWriteV1<'_>) -> FormatResult<Vec<u8>> {
+  let record_length = checked_mutation_record_length(hash_algorithm, request)?;
+  let hash_width = hash_algorithm.hash_length();
+  let before_path = request.before.map_or(&[][..], |side| side.path.as_bytes());
+  let after_path = request.after.map_or(&[][..], |side| side.path.as_bytes());
+  let fixed = 40usize.checked_add(7 * hash_width).ok_or_else(|| length_error("mutation record fixed length overflow"))?;
+  let record_length_u32 = checked_task_u32(record_length, "mutation record length exceeds u32")?;
+  let before_length = checked_task_u32(before_path.len(), "before path length exceeds u32")?;
+  let after_length = checked_task_u32(after_path.len(), "after path length exceeds u32")?;
+  let mut record = vec![0u8; record_length];
+  record[..4].copy_from_slice(&record_length_u32.to_le_bytes());
+  record[4..6].copy_from_slice(&request.kind.id().to_le_bytes());
+  let presence = u16::from(request.before.is_some()) | (u16::from(request.after.is_some()) << 1);
+  record[6..8].copy_from_slice(&presence.to_le_bytes());
+  record[8..16].copy_from_slice(&request.sequence.to_le_bytes());
+  record[16..20].copy_from_slice(&request.batch_ordinal.to_le_bytes());
+  record[20..24].copy_from_slice(&request.batch_count.to_le_bytes());
+  record[24..24 + hash_width].copy_from_slice(request.mutation_id);
+  record[24 + hash_width..24 + 2 * hash_width].copy_from_slice(request.root_before);
+  record[24 + 2 * hash_width..24 + 3 * hash_width].copy_from_slice(request.root_after);
+  encode_mutation_side(hash_algorithm, &mut record, 24 + 3 * hash_width, request.before)?;
+  encode_mutation_side(hash_algorithm, &mut record, 24 + 5 * hash_width, request.after)?;
+  record[24 + 7 * hash_width..28 + 7 * hash_width].copy_from_slice(&before_length.to_le_bytes());
+  record[28 + 7 * hash_width..32 + 7 * hash_width].copy_from_slice(&after_length.to_le_bytes());
+  record[32 + 7 * hash_width..40 + 7 * hash_width].copy_from_slice(&request.committed_at_ms.to_le_bytes());
+  record[fixed..fixed + before_path.len()].copy_from_slice(before_path);
+  record[fixed + before_path.len()..].copy_from_slice(after_path);
+  Ok(record)
+}
+
+fn checked_mutation_record_length(hash_algorithm: HashAlgorithm, request: &MutationRecordWriteV1<'_>) -> FormatResult<usize> {
+  let hash_width = hash_algorithm.hash_length();
+  validate_hash(request.mutation_id, hash_width, false, "mutation ID")?;
+  validate_hash(request.root_before, hash_width, false, "mutation root before")?;
+  validate_hash(request.root_after, hash_width, false, "mutation root after")?;
+  if request.sequence == 0 || request.batch_count == 0 || request.batch_ordinal >= request.batch_count {
+    return Err(closure_error("mutation sequence or batch coordinates are invalid"));
+  }
+  validate_mutation_presence(request)?;
+  validate_mutation_side_write(hash_width, request.before)?;
+  validate_mutation_side_write(hash_width, request.after)?;
+  let before_length = request.before.map_or(0, |side| side.path.len());
+  let after_length = request.after.map_or(0, |side| side.path.len());
+  let _before_length_u32 = checked_task_u32(before_length, "before path length exceeds u32")?;
+  let _after_length_u32 = checked_task_u32(after_length, "after path length exceeds u32")?;
+  40usize
+    .checked_add(7 * hash_width)
+    .and_then(|length| length.checked_add(before_length))
+    .and_then(|length| length.checked_add(after_length))
+    .ok_or_else(|| length_error("mutation record length overflow"))
+}
+
+fn validate_mutation_presence(request: &MutationRecordWriteV1<'_>) -> FormatResult<()> {
+  let valid = match request.kind {
+    MutationKindV1::Create | MutationKindV1::Copy | MutationKindV1::Restore => request.before.is_none() && request.after.is_some(),
+    MutationKindV1::Update => request.before.is_some() && request.after.is_some(),
+    MutationKindV1::Delete => request.before.is_some() && request.after.is_none(),
+    MutationKindV1::Move => {
+      request.before.is_some() && request.after.is_some() && request.before.map(|side| side.path) != request.after.map(|side| side.path)
+    }
+    MutationKindV1::Transition => request.before.is_some() || request.after.is_some(),
+  };
+  if valid {
+    Ok(())
+  } else {
+    Err(closure_error("mutation kind and before/after presence are inconsistent"))
+  }
+}
+
+fn validate_mutation_side_write(hash_width: usize, side: Option<MutationSideWriteV1<'_>>) -> FormatResult<()> {
+  let Some(side) = side else {
+    return Ok(());
+  };
+  validate_canonical_absolute_path(side.path)?;
+  validate_hash(side.revision, hash_width, false, "mutation revision")
+}
+
+fn encode_mutation_side(
+  hash_algorithm: HashAlgorithm,
+  output: &mut [u8],
+  offset: usize,
+  side: Option<MutationSideWriteV1<'_>>,
+) -> FormatResult<()> {
+  let Some(side) = side else {
+    return Ok(());
+  };
+  let hash_width = hash_algorithm.hash_length();
+  let file_key = digest_parts(hash_algorithm, &[b"file:", side.path.as_bytes()]);
+  output[offset..offset + hash_width].copy_from_slice(&file_key);
+  output[offset + hash_width..offset + 2 * hash_width].copy_from_slice(side.revision);
+  Ok(())
+}
+
+pub fn encode_index_task_checkpoint(request: &IndexTaskCheckpointWriteV1<'_>) -> FormatResult<EncodedImmutableIndexArtifactV1> {
+  validate_checkpoint_write(request)?;
+  let hash_width = request.hash_algorithm.hash_length();
+  let attachment_length = 12usize.checked_add(2 * hash_width).ok_or_else(|| length_error("attachment fixed length overflow"))?;
+  let attachment_bytes =
+    request.attachments.len().checked_mul(attachment_length).ok_or_else(|| length_error("checkpoint attachment length overflow"))?;
+  let external = match request.external {
+    Some(external) => encode_external_descriptor(external)?,
+    None => Vec::new(),
+  };
+  let fixed = 120usize.checked_add(4 * hash_width).ok_or_else(|| length_error("checkpoint fixed length overflow"))?;
+  let body_length = fixed
+    .checked_add(request.resume_key.len())
+    .and_then(|length| length.checked_add(attachment_bytes))
+    .and_then(|length| length.checked_add(external.len()))
+    .ok_or_else(|| length_error("checkpoint body length overflow"))?;
+  let resume_length_u32 = checked_task_u32(request.resume_key.len(), "checkpoint resume key exceeds u32")?;
+  let attachment_count_u32 = checked_task_u32(request.attachments.len(), "checkpoint attachment count exceeds u32")?;
+  let attachment_bytes_u32 = checked_task_u32(attachment_bytes, "checkpoint attachment bytes exceed u32")?;
+  let external_length_u32 = checked_task_u32(external.len(), "checkpoint external descriptor exceeds u32")?;
+  let mut body = vec![0u8; body_length];
+  body[4..6].copy_from_slice(&1u16.to_le_bytes());
+  body[6..8].copy_from_slice(&request.task_kind.id().to_le_bytes());
+  body[8..10].copy_from_slice(&request.state.id().to_le_bytes());
+  body[10..12].copy_from_slice(&request.phase.to_le_bytes());
+  body[12..44].copy_from_slice(request.required_capabilities);
+  body[44..52].copy_from_slice(&request.started_at_ms.to_le_bytes());
+  body[52..60].copy_from_slice(&request.updated_at_ms.to_le_bytes());
+  body[60..60 + hash_width].copy_from_slice(request.source_root);
+  write_optional_hash(&mut body[60 + hash_width..60 + 2 * hash_width], request.target_root);
+  write_optional_hash(&mut body[60 + 2 * hash_width..60 + 3 * hash_width], request.primary_id);
+  write_optional_hash(&mut body[60 + 3 * hash_width..60 + 4 * hash_width], request.journal_head);
+  body[60 + 4 * hash_width..68 + 4 * hash_width].copy_from_slice(&request.journal_floor_sequence.to_le_bytes());
+  body[68 + 4 * hash_width..76 + 4 * hash_width].copy_from_slice(&request.journal_audited_through.to_le_bytes());
+  body[76 + 4 * hash_width..84 + 4 * hash_width].copy_from_slice(&request.next_document_ordinal.to_le_bytes());
+  body[84 + 4 * hash_width..92 + 4 * hash_width].copy_from_slice(&request.completed_work.to_le_bytes());
+  body[92 + 4 * hash_width..100 + 4 * hash_width].copy_from_slice(&request.total_work_hint.to_le_bytes());
+  body[100 + 4 * hash_width..104 + 4 * hash_width].copy_from_slice(&resume_length_u32.to_le_bytes());
+  body[104 + 4 * hash_width..108 + 4 * hash_width].copy_from_slice(&attachment_count_u32.to_le_bytes());
+  body[108 + 4 * hash_width..112 + 4 * hash_width].copy_from_slice(&attachment_bytes_u32.to_le_bytes());
+  body[112 + 4 * hash_width..116 + 4 * hash_width].copy_from_slice(&external_length_u32.to_le_bytes());
+  body[fixed..fixed + request.resume_key.len()].copy_from_slice(request.resume_key);
+  let mut offset = fixed + request.resume_key.len();
+  for attachment in request.attachments {
+    body[offset..offset + 2].copy_from_slice(&attachment.role.id().to_le_bytes());
+    body[offset + 4..offset + 4 + hash_width].copy_from_slice(attachment.owner_id);
+    body[offset + 4 + hash_width..offset + 4 + 2 * hash_width].copy_from_slice(attachment.artifact_hash);
+    body[offset + 4 + 2 * hash_width..offset + 12 + 2 * hash_width].copy_from_slice(&attachment.birth_generation.to_le_bytes());
+    offset += attachment_length;
+  }
+  body[offset..].copy_from_slice(&external);
+
+  let mut identity = Vec::with_capacity(24);
+  identity.extend_from_slice(&request.task_id);
+  identity.extend_from_slice(&request.checkpoint_sequence.to_le_bytes());
+  let encoded = encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+    kind: ImmutableIndexArtifactKindV1::IndexTaskCheckpoint,
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    identity: &identity,
+    body: &body,
+  })?;
+  decode_index_task_checkpoint(&encoded.value, request.hash_algorithm)?;
+  Ok(encoded)
+}
+
+fn validate_checkpoint_write(request: &IndexTaskCheckpointWriteV1<'_>) -> FormatResult<()> {
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.task_id.iter().all(|byte| *byte == 0) || request.checkpoint_sequence == 0 || request.generation == 0 {
+    return Err(identity_error("checkpoint TaskId, sequence, or generation is zero"));
+  }
+  if request.task_kind.phase_name(request.phase).is_none() {
+    return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "index_checkpoint_phase", "checkpoint phase is unknown for task kind"));
+  }
+  if request.required_capabilities[3..].iter().any(|byte| *byte != 0) {
+    return Err(error(
+      MalformedInputClass::UnknownRequiredCapability,
+      "index_checkpoint_capabilities",
+      "checkpoint requires an unknown capability bit",
+    ));
+  }
+  validate_hash(request.source_root, hash_width, false, "checkpoint source root")?;
+  validate_optional_hash(request.target_root, hash_width, "checkpoint target root")?;
+  validate_optional_hash(request.primary_id, hash_width, "checkpoint primary ID")?;
+  validate_optional_hash(request.journal_head, hash_width, "checkpoint journal head")?;
+  if request.updated_at_ms < request.started_at_ms
+    || (request.journal_head.is_none() && (request.journal_floor_sequence != 0 || request.journal_audited_through != 0))
+    || (request.journal_head.is_some()
+      && (request.journal_audited_through == 0 || request.journal_floor_sequence > request.journal_audited_through))
+    || (request.total_work_hint != 0 && request.completed_work > request.total_work_hint)
+  {
+    return Err(closure_error("checkpoint time, journal, or progress semantics are invalid"));
+  }
+  if request.resume_key.len() > MAX_RESUME_KEY_LENGTH || request.attachments.len() > MAX_ATTACHMENTS as usize {
+    return Err(amplification_error("checkpoint component exceeds its hard cap"));
+  }
+  let mut previous = None;
+  for attachment in request.attachments {
+    validate_hash(attachment.owner_id, hash_width, false, "checkpoint attachment owner")?;
+    validate_hash(attachment.artifact_hash, hash_width, false, "checkpoint attachment hash")?;
+    if attachment.birth_generation == 0 {
+      return Err(identity_error("checkpoint attachment generation is zero"));
+    }
+    let key = (attachment.role, attachment.owner_id, attachment.artifact_hash);
+    if previous.is_some_and(|previous| previous >= key) {
+      return Err(order_error("checkpoint attachments are not strictly ordered"));
+    }
+    previous = Some(key);
+  }
+  if let Some(external) = request.external {
+    let _encoded = encode_external_descriptor(external)?;
+  }
+  Ok(())
+}
+
+fn encode_external_descriptor(request: ExternalWorkspaceDescriptorWriteV1<'_>) -> FormatResult<Vec<u8>> {
+  validate_canonical_absolute_path(request.path)?;
+  if request.workspace_id.iter().all(|byte| *byte == 0) || request.manifest_digest.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("external workspace identity or manifest digest is zero"));
+  }
+  let path = request.path.as_bytes();
+  let length = 68usize.checked_add(path.len()).ok_or_else(|| length_error("external descriptor length overflow"))?;
+  if path.is_empty() || length > MAX_EXTERNAL_DESCRIPTOR_LENGTH {
+    return Err(amplification_error("external workspace descriptor exceeds its hard cap"));
+  }
+  let path_length = checked_task_u32(path.len(), "external path exceeds u32")?;
+  let mut encoded = vec![0u8; length];
+  encoded[..16].copy_from_slice(&request.workspace_id);
+  encoded[16..20].copy_from_slice(&path_length.to_le_bytes());
+  encoded[20..52].copy_from_slice(&request.manifest_digest);
+  encoded[52..60].copy_from_slice(&request.durable_sequence.to_le_bytes());
+  encoded[60..68].copy_from_slice(&request.durable_bytes.to_le_bytes());
+  encoded[68..].copy_from_slice(path);
+  Ok(encoded)
+}
+
+fn validate_hash(bytes: &[u8], hash_width: usize, allow_zero: bool, context: &'static str) -> FormatResult<()> {
+  if bytes.len() != hash_width || (!allow_zero && bytes.iter().all(|byte| *byte == 0)) {
+    return Err(identity_error(format!("{context} has the wrong width or is all zero")));
+  }
+  Ok(())
+}
+
+fn validate_optional_hash(bytes: Option<&[u8]>, hash_width: usize, context: &'static str) -> FormatResult<()> {
+  match bytes {
+    Some(bytes) => validate_hash(bytes, hash_width, false, context),
+    None => Ok(()),
+  }
+}
+
+fn write_optional_hash(output: &mut [u8], value: Option<&[u8]>) {
+  if let Some(value) = value {
+    output.copy_from_slice(value);
+  }
+}
+
+fn checked_task_u32(value: usize, context: &'static str) -> FormatResult<u32> {
+  if value > u32::MAX as usize {
+    return Err(length_error(context));
+  }
+  Ok(value as u32)
 }
 
 pub fn decode_index_task_artifact(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<IndexTaskArtifactV1<'_>> {
@@ -769,10 +1318,8 @@ fn decode_attachment(hash_width: usize, bytes: &[u8], index: usize) -> FormatRes
   let length = 12usize.checked_add(2 * hash_width).ok_or_else(|| length_error("attachment length overflow"))?;
   let start = index.checked_mul(length).ok_or_else(|| length_error("attachment offset overflow"))?;
   let record = bytes.get(start..start + length).ok_or_else(|| truncated_error("checkpoint attachment is truncated"))?;
-  let role = u16_at(record, 0)?;
-  if !(1..=12).contains(&role) {
-    return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "index_checkpoint_attachment_role", "attachment role is unknown"));
-  }
+  let role = IndexTaskAttachmentRoleV1::from_id(u16_at(record, 0)?)
+    .ok_or_else(|| error(MalformedInputClass::UnknownTypeKindOrEnum, "index_checkpoint_attachment_role", "attachment role is unknown"))?;
   if u16_at(record, 2)? != 0 {
     return Err(reserve_error("checkpoint attachment flags are nonzero"));
   }
@@ -809,6 +1356,115 @@ fn decode_external_descriptor(bytes: &[u8]) -> FormatResult<ExternalWorkspaceDes
     durable_bytes: u64_at(bytes, 60)?,
     path,
   })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexTaskAttachmentClosureV1 {
+  checkpoint_hash: Vec<u8>,
+  rooted_artifact_count: u32,
+  journal_head_validated: bool,
+}
+
+impl IndexTaskAttachmentClosureV1 {
+  pub fn checkpoint_hash(&self) -> &[u8] {
+    &self.checkpoint_hash
+  }
+
+  pub fn rooted_artifact_count(&self) -> u32 {
+    self.rooted_artifact_count
+  }
+
+  pub fn journal_head_validated(&self) -> bool {
+    self.journal_head_validated
+  }
+}
+
+#[derive(Debug)]
+pub struct IndexTaskAttachmentClosureBuilderV1<'checkpoint, 'artifact> {
+  checkpoint: &'checkpoint IndexTaskCheckpointV1<'artifact>,
+  hash_algorithm: HashAlgorithm,
+  next_attachment: usize,
+  journal_head_validated: bool,
+  failed: bool,
+}
+
+impl<'checkpoint, 'artifact> IndexTaskAttachmentClosureBuilderV1<'checkpoint, 'artifact> {
+  pub fn new(checkpoint: &'checkpoint IndexTaskCheckpointV1<'artifact>, hash_algorithm: HashAlgorithm) -> FormatResult<Self> {
+    let hash_width = hash_algorithm.hash_length();
+    if checkpoint.key.len() != hash_width || checkpoint.source_root.len() != hash_width || checkpoint.attachments.hash_width != hash_width {
+      return Err(identity_error("checkpoint attachment closure uses a different hash profile"));
+    }
+    Ok(Self { checkpoint, hash_algorithm, next_attachment: 0, journal_head_validated: false, failed: false })
+  }
+
+  pub fn observe_encoded(&mut self, value: &[u8]) -> FormatResult<()> {
+    if self.failed {
+      return Err(closure_error("checkpoint attachment closure is already failed"));
+    }
+    match self.observe_encoded_inner(value) {
+      Ok(()) => Ok(()),
+      Err(error) => {
+        self.failed = true;
+        Err(error)
+      }
+    }
+  }
+
+  pub fn finish(self) -> FormatResult<IndexTaskAttachmentClosureV1> {
+    let expects_journal = self.checkpoint.journal_head.iter().any(|byte| *byte != 0);
+    if self.failed || self.next_attachment != self.checkpoint.attachments.len() || expects_journal != self.journal_head_validated {
+      return Err(closure_error("checkpoint attachment closure is incomplete or failed"));
+    }
+    Ok(IndexTaskAttachmentClosureV1 {
+      checkpoint_hash: self.checkpoint.key.clone(),
+      rooted_artifact_count: self.next_attachment as u32,
+      journal_head_validated: self.journal_head_validated,
+    })
+  }
+
+  fn observe_encoded_inner(&mut self, value: &[u8]) -> FormatResult<()> {
+    if self.next_attachment >= self.checkpoint.attachments.len() {
+      return Err(closure_error("checkpoint attachment closure received more artifacts than the checkpoint declares"));
+    }
+    let attachment = self.checkpoint.attachments.entry_at(self.next_attachment)?;
+    match attachment.role {
+      IndexTaskAttachmentRoleV1::MutationJournalHead => {
+        let journal = decode_mutation_journal(value, self.hash_algorithm)?;
+        validate_attachment_identity(&attachment, &journal.key, journal.generation)?;
+        if self.checkpoint.journal_head != journal.key {
+          return Err(closure_error("journal attachment does not name the checkpoint journal head"));
+        }
+        if journal.owner_kind == JournalOwnerKindV1::Task && journal.owner_id != self.checkpoint.task_id {
+          return Err(closure_error("task-owned journal attachment belongs to another task"));
+        }
+        self.journal_head_validated = true;
+      }
+      role if role.directory_role().is_some() => {
+        let directory = decode_artifact_directory(value, self.hash_algorithm)?;
+        validate_attachment_identity(&attachment, &directory.key, directory.generation)?;
+        if directory.owner_id != attachment.owner_id || Some(directory.role) != role.directory_role() {
+          return Err(closure_error("directory attachment owner or role disagrees with its artifact"));
+        }
+      }
+      role if role.manifest_kind().is_some() => {
+        let manifest = decode_index_manifest(value, self.hash_algorithm)?;
+        validate_attachment_identity(&attachment, &manifest.key, manifest.generation)?;
+        if manifest.owner_id != attachment.owner_id || Some(manifest.kind) != role.manifest_kind() {
+          return Err(closure_error("manifest attachment owner or kind disagrees with its artifact"));
+        }
+      }
+      _ => return Err(closure_error("checkpoint attachment role has no registered immutable artifact decoder")),
+    }
+    self.next_attachment += 1;
+    Ok(())
+  }
+}
+
+fn validate_attachment_identity(attachment: &IndexTaskAttachmentV1<'_>, artifact_hash: &[u8], generation: u64) -> FormatResult<()> {
+  if attachment.artifact_hash != artifact_hash || attachment.birth_generation != generation {
+    return Err(closure_error("checkpoint attachment hash or birth generation disagrees with its artifact"));
+  }
+  Ok(())
 }
 
 fn truncated_error(context: impl Into<String>) -> FormatError {

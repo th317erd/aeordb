@@ -856,7 +856,7 @@
         - [x] P5-6b: validate FieldNvt-to-FieldIndex basis closure, scan exact/predecessor cells across sparse prior tiles, validate hinted PageIds through pinned Posting directories, and fall back to exact directory predecessor search.
         - [x] P5-6c: emit bounded best-effort healing proposals from exact fallback results without blocking, publishing, or changing the current lookup decision.
         - [x] P5-6d: prove absent/stale/corrupt/resized/gapped NVT equivalence, malformed directory/page failure direction, resource bounds, deterministic randomized lookup/build behavior, native platforms, and shadow real-world use.
-      - [ ] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.
+      - [x] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.
       - [ ] P5-8: qualify shadow build, restart, corruption fallback, memory bounds, and full validation.
     - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.

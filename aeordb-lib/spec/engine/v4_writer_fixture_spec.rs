@@ -412,7 +412,11 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
   let index_nvt = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/index_nvt.rs")).unwrap();
   assert_eq!(index_nvt.matches("encode_immutable_index_artifact(").count(), 1);
   assert_eq!(index_nvt.matches("pub fn encode_nvt_tile(").count(), 1);
-  assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 5);
+  let index_task = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/index_task.rs")).unwrap();
+  assert_eq!(index_task.matches("encode_immutable_index_artifact(").count(), 2);
+  assert_eq!(index_task.matches("pub fn encode_mutation_journal(").count(), 1);
+  assert_eq!(index_task.matches("pub fn encode_index_task_checkpoint(").count(), 1);
+  assert_eq!(production_sources.matches("encode_immutable_index_artifact(").count(), 7);
   assert_eq!(production_sources.matches("pub fn encode_index_manifest(").count(), 1);
   let expected_gc_writer_surface = [
     ("gc.rs", 1),
