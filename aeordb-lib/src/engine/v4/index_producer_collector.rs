@@ -39,6 +39,7 @@ const STATE_STAGE_CONVERTER: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexProducerCollectorOptionsV1 {
+  pub max_scopes: u32,
   pub max_value_stores: u32,
   pub max_field_indexes: u32,
   pub max_definition_bytes: u64,
@@ -49,6 +50,7 @@ pub struct IndexProducerCollectorOptionsV1 {
 
 impl IndexProducerCollectorOptionsV1 {
   pub fn new(
+    max_scopes: u32,
     max_value_stores: u32,
     max_field_indexes: u32,
     max_definition_bytes: u64,
@@ -56,7 +58,8 @@ impl IndexProducerCollectorOptionsV1 {
     max_report_bytes: u64,
     retry_after_ms: u64,
   ) -> Result<Self, IndexProducerCollectorErrorV1> {
-    if max_value_stores == 0
+    if max_scopes == 0
+      || max_value_stores == 0
       || max_field_indexes == 0
       || max_definition_bytes == 0
       || max_mutations == 0
@@ -65,7 +68,7 @@ impl IndexProducerCollectorOptionsV1 {
     {
       return Err(IndexProducerCollectorErrorV1::InvalidOptions("all collector limits and retry delay must be nonzero".to_string()));
     }
-    Ok(Self { max_value_stores, max_field_indexes, max_definition_bytes, max_mutations, max_report_bytes, retry_after_ms })
+    Ok(Self { max_scopes, max_value_stores, max_field_indexes, max_definition_bytes, max_mutations, max_report_bytes, retry_after_ms })
   }
 }
 
@@ -272,36 +275,58 @@ impl IndexProducerCollectorV1 {
     mapper: Option<&dyn PluginMapperExecutorV1>,
     is_cancelled: &dyn Fn() -> bool,
   ) -> Result<CollectedIndexProducerReportV1, IndexProducerCollectorErrorV1> {
+    self.collect_scopes(std::iter::once(scope_bundle), transition, parser, mapper, is_cancelled)
+  }
+
+  pub fn collect_scopes<'a>(
+    &self,
+    scope_bundles: impl IntoIterator<Item = IndexCollectorScopeDefinitionV1<'a>>,
+    transition: IndexCollectorDocumentTransitionV1<'a>,
+    parser: &dyn IndexParserExecutorV1,
+    mapper: Option<&dyn PluginMapperExecutorV1>,
+    is_cancelled: &dyn Fn() -> bool,
+  ) -> Result<CollectedIndexProducerReportV1, IndexProducerCollectorErrorV1> {
     if is_cancelled() {
       return Err(IndexProducerCollectorErrorV1::Cancelled);
     }
-    let definition_bytes = self.validate_request(&scope_bundle, transition)?;
+    let mut report = ReportBuilderV1::new(self.memory.clone(), self.options)?;
+    let mut scope_count = 0u32;
+    for scope_bundle in scope_bundles {
+      if is_cancelled() {
+        return Err(IndexProducerCollectorErrorV1::Cancelled);
+      }
+      scope_count = scope_count.checked_add(1).ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("scope definition count"))?;
+      if scope_count > self.options.max_scopes {
+        return Err(IndexProducerCollectorErrorV1::InvalidRequest("scope definition count exceeds the collector bound".to_string()));
+      }
+      self.collect_scope(&mut report, &scope_bundle, transition, parser, mapper, is_cancelled)?;
+    }
+    report.finish()
+  }
+
+  fn collect_scope(
+    &self,
+    report: &mut ReportBuilderV1,
+    scope_bundle: &IndexCollectorScopeDefinitionV1<'_>,
+    transition: IndexCollectorDocumentTransitionV1<'_>,
+    parser: &dyn IndexParserExecutorV1,
+    mapper: Option<&dyn PluginMapperExecutorV1>,
+    is_cancelled: &dyn Fn() -> bool,
+  ) -> Result<(), IndexProducerCollectorErrorV1> {
+    let definition_bytes = self.validate_request(scope_bundle, transition)?;
     let _definition_memory = self.reserve_transient(
       definition_bytes.checked_mul(2).ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("definition decode bytes"))?,
     )?;
-    let mut report = ReportBuilderV1::new(self.memory.clone(), self.options)?;
     let scope = match decode_scope_definition(scope_bundle.encoded_definition, self.hash_algorithm) {
       Ok(scope) if scope.scope_id == scope_bundle.expected_scope_id => scope,
       Ok(_) => {
-        report.push_degraded(scope_bundle.expected_scope_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-        for value in &scope_bundle.value_stores {
-          report.push_degraded(value.expected_value_store_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-          for field in &value.field_indexes {
-            report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-          }
-        }
-        return report.finish();
+        degrade_scope_bundle(report, scope_bundle)?;
+        return Ok(());
       }
       Err(error) => {
         tracing::warn!(code = error.code(), context = %error.context(), "Index scope configuration is malformed");
-        report.push_degraded(scope_bundle.expected_scope_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-        for value in &scope_bundle.value_stores {
-          report.push_degraded(value.expected_value_store_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-          for field in &value.field_indexes {
-            report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-          }
-        }
-        return report.finish();
+        degrade_scope_bundle(report, scope_bundle)?;
+        return Ok(());
       }
     };
 
@@ -321,20 +346,20 @@ impl IndexProducerCollectorV1 {
       None => false,
     };
     if !before_in_scope && !after_in_scope {
-      return report.finish();
+      return Ok(());
     }
 
     let mut scope_outcome = report.outcome(scope_bundle.expected_scope_id, IndexProducerOwnerDispositionV1::Ready)?;
-    self.collect_scope_mutations(&mut report, &mut scope_outcome, transition, before_in_scope, after_in_scope)?;
+    self.collect_scope_mutations(report, &mut scope_outcome, transition, before_in_scope, after_in_scope)?;
     report.push_outcome(scope_outcome)?;
 
     for value in &scope_bundle.value_stores {
       if is_cancelled() {
         return Err(IndexProducerCollectorErrorV1::Cancelled);
       }
-      self.collect_value_store(&mut report, &scope, value, transition, before_in_scope, after_in_scope, parser, mapper, is_cancelled)?;
+      self.collect_value_store(report, &scope, value, transition, before_in_scope, after_in_scope, parser, mapper, is_cancelled)?;
     }
-    report.finish()
+    Ok(())
   }
 
   fn validate_request(
@@ -1046,6 +1071,20 @@ impl ReportBuilderV1 {
     }
     Ok(CollectedIndexProducerReportV1 { report: self.report, _reservation: self.reservation })
   }
+}
+
+fn degrade_scope_bundle(
+  report: &mut ReportBuilderV1,
+  scope: &IndexCollectorScopeDefinitionV1<'_>,
+) -> Result<(), IndexProducerCollectorErrorV1> {
+  report.push_degraded(scope.expected_scope_id, stable_reason_v1::INVALID_CONFIGURATION)?;
+  for value in &scope.value_stores {
+    report.push_degraded(value.expected_value_store_id, stable_reason_v1::INVALID_CONFIGURATION)?;
+    for field in &value.field_indexes {
+      report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
+    }
+  }
+  Ok(())
 }
 
 fn validate_owner(owner: &[u8], hash_width: usize, label: &str) -> Result<(), IndexProducerCollectorErrorV1> {

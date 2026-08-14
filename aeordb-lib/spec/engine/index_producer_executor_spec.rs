@@ -36,8 +36,7 @@ struct Definitions {
   field_id: Vec<u8>,
 }
 
-fn definitions() -> Definitions {
-  let scope = fixture("scope-definition-v1", "ascp-blake3-256-root-direct-valid.bin");
+fn definitions_from_scope(scope: Vec<u8>) -> Definitions {
   let scope_id = decode_scope_definition(&scope, ALGORITHM).unwrap().scope_id;
   let mut value = fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid.bin");
   value[32..64].copy_from_slice(&scope_id);
@@ -46,6 +45,24 @@ fn definitions() -> Definitions {
   field[32..64].copy_from_slice(&value_id);
   let field_id = decode_field_index_definition(&field, ALGORITHM).unwrap().index_id;
   Definitions { scope, scope_id, value, value_id, field, field_id }
+}
+
+fn definitions_for_scope(fixture_name: &str) -> Definitions {
+  definitions_from_scope(fixture("scope-definition-v1", fixture_name))
+}
+
+fn definitions() -> Definitions {
+  definitions_for_scope("ascp-blake3-256-root-direct-valid.bin")
+}
+
+fn direct_scope(owner_path: &str) -> Vec<u8> {
+  let fixture = fixture("scope-definition-v1", "ascp-blake3-256-root-direct-valid.bin");
+  let mut encoded = fixture[..64].to_vec();
+  encoded.extend_from_slice(owner_path.as_bytes());
+  let encoded_length = encoded.len() as u32;
+  encoded[8..12].copy_from_slice(&encoded_length.to_le_bytes());
+  encoded[32..36].copy_from_slice(&(owner_path.len() as u32).to_le_bytes());
+  encoded
 }
 
 fn scope_bundle(definitions: &Definitions) -> IndexCollectorScopeDefinitionV1<'_> {
@@ -119,7 +136,7 @@ fn collector(memory: MemoryCoordinator) -> IndexProducerCollectorV1 {
   IndexProducerCollectorV1::new(
     ALGORITHM,
     memory,
-    IndexProducerCollectorOptionsV1::new(16, 16, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap(),
+    IndexProducerCollectorOptionsV1::new(16, 16, 16, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap(),
   )
   .unwrap()
 }
@@ -165,7 +182,7 @@ fn exact_leased_transition_collects_and_completes_while_memory_remains_accounted
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundle: scope_bundle(&definitions),
+        scope_bundles: vec![scope_bundle(&definitions)],
         transition: IndexCollectorDocumentTransitionV1 {
           document_ordinal: 3,
           before: None,
@@ -223,7 +240,7 @@ fn mismatched_roots_and_scope_fail_before_collection_and_release_the_lease_for_r
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundle: scope_bundle(&definitions),
+        scope_bundles: vec![scope_bundle(&definitions)],
         transition: IndexCollectorDocumentTransitionV1 {
           document_ordinal: 3,
           before: None,
@@ -250,7 +267,7 @@ fn mismatched_roots_and_scope_fail_before_collection_and_release_the_lease_for_r
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &wrong_root,
-        scope_bundle: scope_bundle(&definitions),
+        scope_bundles: vec![scope_bundle(&definitions)],
         transition: IndexCollectorDocumentTransitionV1 {
           document_ordinal: 3,
           before: None,
@@ -275,7 +292,7 @@ fn mismatched_roots_and_scope_fail_before_collection_and_release_the_lease_for_r
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundle: scope_bundle(&definitions),
+        scope_bundles: vec![scope_bundle(&definitions)],
         transition: IndexCollectorDocumentTransitionV1 {
           document_ordinal: 3,
           before: None,
@@ -315,7 +332,7 @@ fn cancellation_and_mutation_pressure_release_the_lease_without_consuming_the_ta
     &lease,
     IndexProducerExecutionInputV1 {
       semantic_state_root: &semantic,
-      scope_bundle: scope_bundle(&definitions),
+      scope_bundles: vec![scope_bundle(&definitions)],
       transition: IndexCollectorDocumentTransitionV1 {
         document_ordinal: 3,
         before: None,
@@ -339,7 +356,7 @@ fn cancellation_and_mutation_pressure_release_the_lease_without_consuming_the_ta
     &lease,
     IndexProducerExecutionInputV1 {
       semantic_state_root: &semantic,
-      scope_bundle: scope_bundle(&definitions),
+      scope_bundles: vec![scope_bundle(&definitions)],
       transition: IndexCollectorDocumentTransitionV1 {
         document_ordinal: 3,
         before: None,
@@ -381,7 +398,7 @@ fn collector_memory_refusal_releases_the_lease_and_every_task_reservation() {
       &lease,
       IndexProducerExecutionInputV1 {
         semantic_state_root: &semantic,
-        scope_bundle: scope_bundle(&definitions),
+        scope_bundles: vec![scope_bundle(&definitions)],
         transition: IndexCollectorDocumentTransitionV1 {
           document_ordinal: 3,
           before: None,
@@ -401,4 +418,48 @@ fn collector_memory_refusal_releases_the_lease_and_every_task_reservation() {
   assert_eq!(producer.snapshot().leased_tasks, 0);
   assert_eq!(collector_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
   assert!(producer_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes > 0);
+}
+
+#[test]
+fn one_lease_collects_every_applicable_scope_before_consuming_the_task() {
+  let root_scope = definitions_from_scope(direct_scope("/workspace/docs/guides/sub"));
+  let glob_scope = definitions_for_scope("ascp-blake3-256-normalized-glob-valid.bin");
+  let before_root = hash(b"before");
+  let after_root = hash(b"after");
+  let semantic = hash(b"semantic");
+  let revision = hash(b"revision");
+  let record = file("/workspace/docs/guides/sub/topic.md");
+  let task_memory = memory(8 * 1_024 * 1_024);
+  let mut producer = producer(task_memory.clone());
+  let mut mutations = mutations(memory(8 * 1_024 * 1_024), 2 * 1_024 * 1_024);
+  admit_mutation_task(&mut producer, &before_root, &after_root, &semantic);
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  let executor = IndexProducerExecutorV1::new(collector(task_memory.clone()));
+
+  let completion = executor
+    .execute_transition(
+      &mut producer,
+      &mut mutations,
+      &lease,
+      IndexProducerExecutionInputV1 {
+        semantic_state_root: &semantic,
+        scope_bundles: vec![scope_bundle(&root_scope), scope_bundle(&glob_scope)],
+        transition: IndexCollectorDocumentTransitionV1 {
+          document_ordinal: 3,
+          before: None,
+          after: Some(IndexCollectorDocumentV1 { namespace_root: &after_root, record_revision_hash: &revision, file_record: &record }),
+        },
+      },
+      &UnexpectedParser,
+      None,
+      101,
+      &|| false,
+      &mut SpillStore,
+    )
+    .unwrap();
+
+  assert!(matches!(completion, aeordb::engine::v4::index_producer_coordinator::IndexProducerCompletionV1::Completed { .. }));
+  assert_eq!(producer.snapshot().pending_tasks, 0);
+  assert_eq!(mutations.snapshot().active_records, 8);
+  assert_eq!(task_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
 }

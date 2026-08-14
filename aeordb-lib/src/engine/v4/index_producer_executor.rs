@@ -12,7 +12,7 @@ use super::index_source::PluginMapperExecutorV1;
 
 pub struct IndexProducerExecutionInputV1<'a> {
   pub semantic_state_root: &'a [u8],
-  pub scope_bundle: IndexCollectorScopeDefinitionV1<'a>,
+  pub scope_bundles: Vec<IndexCollectorScopeDefinitionV1<'a>>,
   pub transition: IndexCollectorDocumentTransitionV1<'a>,
 }
 
@@ -65,7 +65,7 @@ impl IndexProducerExecutorV1 {
       return Err(error);
     }
 
-    let collected = match self.collector.collect(input.scope_bundle, input.transition, parser, mapper, is_cancelled) {
+    let collected = match self.collector.collect_scopes(input.scope_bundles, input.transition, parser, mapper, is_cancelled) {
       Ok(collected) => collected,
       Err(IndexProducerCollectorErrorV1::Cancelled) => {
         release_lease(producer, lease, "collection cancellation")?;

@@ -29,7 +29,7 @@ fn memory(hard_limit_bytes: u64) -> MemoryCoordinator {
 }
 
 fn options() -> IndexProducerCollectorOptionsV1 {
-  IndexProducerCollectorOptionsV1::new(16, 16, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap()
+  IndexProducerCollectorOptionsV1::new(16, 16, 16, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap()
 }
 
 fn fixture(folder: &str, name: &str) -> Vec<u8> {
@@ -450,7 +450,7 @@ fn malformed_parser_evidence_fails_closed_without_retaining_memory() {
 
 #[test]
 fn invalid_transition_identity_and_duplicate_owners_fail_before_parser_work() {
-  assert!(IndexProducerCollectorOptionsV1::new(0, 1, 1, 1, 1, 1).is_err());
+  assert!(IndexProducerCollectorOptionsV1::new(0, 1, 1, 1, 1, 1, 1).is_err());
   let definitions = definitions("avst-blake3-256-metadata-hash-corrected-valid.bin", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
   let root = hash(b"root");
   let revision = hash(b"revision");
@@ -497,6 +497,19 @@ fn invalid_transition_identity_and_duplicate_owners_fail_before_parser_work() {
       None,
       &|| false,
     ),
+    Err(IndexProducerCollectorErrorV1::InvalidRequest(_))
+  ));
+
+  let transition =
+    IndexCollectorDocumentTransitionV1 { document_ordinal: 1, before: None, after: Some(document(&root, &revision, &record)) };
+  assert!(matches!(
+    collector.collect_scopes(vec![scope_bundle(&definitions), scope_bundle(&definitions)], transition, &parser, None, &|| false,),
+    Err(IndexProducerCollectorErrorV1::InvalidRequest(_))
+  ));
+  let one_scope_options = IndexProducerCollectorOptionsV1::new(1, 16, 16, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap();
+  let one_scope_collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), one_scope_options).unwrap();
+  assert!(matches!(
+    one_scope_collector.collect_scopes(vec![scope_bundle(&definitions), scope_bundle(&definitions)], transition, &parser, None, &|| false,),
     Err(IndexProducerCollectorErrorV1::InvalidRequest(_))
   ));
   assert_eq!(parser.calls.load(Ordering::SeqCst), 0);
