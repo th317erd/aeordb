@@ -292,6 +292,77 @@ fn retry_exhaustion_spills_and_spill_failure_retains_recoverable_work() {
 }
 
 #[test]
+fn task_level_retry_uses_the_same_backoff_and_exhaustion_path() {
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  producer.admit(task([0x51; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/")), 100).unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  let mut spills = SpillStore::default();
+
+  assert!(matches!(producer.retry_task(&lease, 0, 101, false, &mut spills), Err(IndexProducerCoordinatorErrorV1::InvalidTask(_))));
+  assert_eq!(producer.snapshot().leased_tasks, 1, "invalid caller input cannot silently release a lease");
+  let completion = producer.retry_task(&lease, 25, 101, false, &mut spills).unwrap();
+  assert!(
+    matches!(completion, IndexProducerCompletionV1::RetryScheduled { attempt: 1, next_retry_at_ms: 126, ref outcomes } if outcomes.is_empty())
+  );
+  assert!(producer.lease_next(125, false).unwrap().is_none());
+
+  let lease = producer.lease_next(126, false).unwrap().unwrap();
+  let completion = producer.retry_task(&lease, 25, 126, false, &mut spills).unwrap();
+  assert!(matches!(completion, IndexProducerCompletionV1::RetryScheduled { attempt: 2, next_retry_at_ms: 151, .. }));
+  let lease = producer.lease_next(151, false).unwrap().unwrap();
+  let completion = producer.retry_task(&lease, 25, 151, false, &mut spills).unwrap();
+  assert!(matches!(completion, IndexProducerCompletionV1::Spilled { ref outcomes, .. } if outcomes.is_empty()));
+  assert_eq!(spills.calls, vec![([0x51; 16], IndexProducerSpillReasonV1::RetryExhausted)]);
+  assert_eq!(producer.snapshot().pending_tasks, 0);
+  assert_eq!(producer.snapshot().scheduled_retries, 2);
+}
+
+#[test]
+fn task_level_retry_cancellation_and_spill_refusal_retain_recoverable_work() {
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 1)).unwrap();
+  producer.admit(task([0x52; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/")), 100).unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  assert!(matches!(
+    producer.retry_task(&lease, 25, 101, true, &mut SpillStore::default()),
+    Err(IndexProducerCoordinatorErrorV1::Cancelled)
+  ));
+  assert_eq!(producer.snapshot().pending_tasks, 1);
+  assert_eq!(producer.snapshot().leased_tasks, 0);
+
+  let lease = producer.lease_next(101, false).unwrap().unwrap();
+  let mut spills = SpillStore { fail: true, ..SpillStore::default() };
+  assert!(matches!(
+    producer.retry_task(&lease, 25, 102, false, &mut spills),
+    Err(IndexProducerCoordinatorErrorV1::SpillFailed { code: "spill_refused", .. })
+  ));
+  assert_eq!(producer.snapshot().pending_tasks, 1);
+  assert_eq!(producer.snapshot().leased_tasks, 0);
+  assert!(producer.lease_next(1_102, false).unwrap().is_some());
+}
+
+#[test]
+fn retry_deadline_overflow_releases_the_lease_and_retains_recoverable_work() {
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  producer.admit(task([0x53; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/")), u64::MAX).unwrap();
+  let lease = producer.lease_next(u64::MAX, false).unwrap().unwrap();
+
+  assert!(matches!(
+    producer.retry_task(&lease, 25, u64::MAX, false, &mut SpillStore::default()),
+    Err(IndexProducerCoordinatorErrorV1::AccountingOverflow("retry deadline"))
+  ));
+  assert_eq!(producer.snapshot().pending_tasks, 1);
+  assert_eq!(producer.snapshot().leased_tasks, 0);
+  assert_eq!(producer.snapshot().scheduled_retries, 1);
+  assert!(producer.lease_next(u64::MAX, false).unwrap().is_some());
+}
+
+#[test]
 fn pressure_can_spill_before_cloning_and_cancellation_never_consumes_a_task() {
   let root = hash(b"root");
   let semantic = hash(b"semantic");

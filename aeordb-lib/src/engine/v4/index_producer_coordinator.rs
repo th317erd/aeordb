@@ -603,34 +603,7 @@ impl IndexProducerCoordinatorV1 {
     });
     let requested_retry_ms = retry_after_ms.max();
     if let Some(requested_retry_ms) = requested_retry_ms {
-      let task_index = self.task_index(lease.operation_id)?;
-      let attempt = self.tasks[task_index].attempts.saturating_add(1).min(self.options.max_attempts);
-      if attempt >= self.options.max_attempts {
-        let receipt = match spill_store.spill(self.tasks[task_index].view(), IndexProducerSpillReasonV1::RetryExhausted) {
-          Ok(receipt) => receipt,
-          Err(error) => {
-            self.retain_after_spill_failure(task_index, attempt, now_ms);
-            return Err(spill_error(error));
-          }
-        };
-        if let Err(error) = self.validate_spill_receipt(&receipt) {
-          self.retain_after_spill_failure(task_index, attempt, now_ms);
-          return Err(error);
-        }
-        self.remove_task(task_index)?;
-        self.active_lease = None;
-        self.spilled_tasks = self.spilled_tasks.saturating_add(1);
-        return Ok(IndexProducerCompletionV1::Spilled { receipt, outcomes: report.outcomes });
-      }
-
-      let exponential = retry_delay(self.options.base_retry_ms, self.options.max_retry_ms, attempt);
-      let delay = requested_retry_ms.max(exponential).min(self.options.max_retry_ms);
-      let next_retry_at_ms = now_ms.checked_add(delay).ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("retry deadline"))?;
-      self.tasks[task_index].attempts = attempt;
-      self.tasks[task_index].next_attempt_at_ms = next_retry_at_ms;
-      self.active_lease = None;
-      self.scheduled_retries = self.scheduled_retries.saturating_add(1);
-      return Ok(IndexProducerCompletionV1::RetryScheduled { attempt, next_retry_at_ms, outcomes: report.outcomes });
+      return self.schedule_retry(lease, requested_retry_ms, report.outcomes, now_ms, spill_store);
     }
 
     let task_index = self.task_index(lease.operation_id)?;
@@ -638,6 +611,67 @@ impl IndexProducerCoordinatorV1 {
     self.active_lease = None;
     self.completed_tasks = self.completed_tasks.saturating_add(1);
     Ok(IndexProducerCompletionV1::Completed { outcomes: report.outcomes })
+  }
+
+  pub fn retry_task(
+    &mut self,
+    lease: &IndexProducerLeaseV1,
+    requested_retry_ms: u64,
+    now_ms: u64,
+    cancelled: bool,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    if cancelled {
+      self.active_lease = None;
+      return Err(IndexProducerCoordinatorErrorV1::Cancelled);
+    }
+    if requested_retry_ms == 0 {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask("task retry delay must be nonzero".to_string()));
+    }
+    self.observe_time(now_ms)?;
+    self.schedule_retry(lease, requested_retry_ms, Vec::new(), now_ms, spill_store)
+  }
+
+  fn schedule_retry(
+    &mut self,
+    lease: &IndexProducerLeaseV1,
+    requested_retry_ms: u64,
+    outcomes: Vec<IndexProducerOwnerOutcomeV1>,
+    now_ms: u64,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1> {
+    let task_index = self.task_index(lease.operation_id)?;
+    let attempt = self.tasks[task_index].attempts.saturating_add(1).min(self.options.max_attempts);
+    if attempt >= self.options.max_attempts {
+      let receipt = match spill_store.spill(self.tasks[task_index].view(), IndexProducerSpillReasonV1::RetryExhausted) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+          self.retain_after_spill_failure(task_index, attempt, now_ms);
+          return Err(spill_error(error));
+        }
+      };
+      if let Err(error) = self.validate_spill_receipt(&receipt) {
+        self.retain_after_spill_failure(task_index, attempt, now_ms);
+        return Err(error);
+      }
+      self.remove_task(task_index)?;
+      self.active_lease = None;
+      self.spilled_tasks = self.spilled_tasks.saturating_add(1);
+      return Ok(IndexProducerCompletionV1::Spilled { receipt, outcomes });
+    }
+
+    let exponential = retry_delay(self.options.base_retry_ms, self.options.max_retry_ms, attempt);
+    let delay = requested_retry_ms.max(exponential).min(self.options.max_retry_ms);
+    let Some(next_retry_at_ms) = now_ms.checked_add(delay) else {
+      self.retain_after_spill_failure(task_index, attempt, now_ms);
+      return Err(IndexProducerCoordinatorErrorV1::AccountingOverflow("retry deadline"));
+    };
+    self.tasks[task_index].attempts = attempt;
+    self.tasks[task_index].next_attempt_at_ms = next_retry_at_ms;
+    self.active_lease = None;
+    self.scheduled_retries = self.scheduled_retries.saturating_add(1);
+    Ok(IndexProducerCompletionV1::RetryScheduled { attempt, next_retry_at_ms, outcomes })
   }
 
   fn validate_task(&self, request: &IndexProducerTaskRequestV1<'_>) -> Result<(), IndexProducerCoordinatorErrorV1> {
