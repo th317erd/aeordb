@@ -1049,6 +1049,10 @@ name = "index_producer_admission_spec"
 path = "spec/engine/index_producer_admission_spec.rs"
 
 [[test]]
+name = "index_producer_source_spec"
+path = "spec/engine/index_producer_source_spec.rs"
+
+[[test]]
 name = "error_squelch_architecture_spec"
 path = "spec/engine/error_squelch_architecture_spec.rs"
 
