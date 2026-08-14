@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use thiserror::Error;
 
 use crate::engine::HashAlgorithm;
@@ -5,12 +7,18 @@ use crate::engine::file_record::FileRecord;
 
 use super::hash::digest_parts;
 use super::index_producer_admission::{IndexProducerJournalAdmissionErrorV1, derive_mutation_operation_id};
-use super::index_producer_collector::{IndexCollectorDocumentRevisionTransitionV1, IndexCollectorDocumentV1};
+use super::field_definition::decode_field_index_definition;
+use super::index_producer_collector::{
+  IndexCollectorDocumentRevisionTransitionV1, IndexCollectorDocumentV1, IndexCollectorFieldDefinitionV1, IndexCollectorScopeDefinitionV1,
+  IndexCollectorScopeWorkV1, IndexCollectorValueStoreDefinitionV1,
+};
 use super::index_producer_coordinator::{
   IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerLeaseV1, IndexProducerTaskKindV1,
 };
 use super::index_task::{MutationJournalV1, MutationRecordV1};
 use super::reader::FormatError;
+use super::scope::decode_scope_definition;
+use super::value_store::decode_value_store_definition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexFileRevisionReadErrorClassV1 {
@@ -97,6 +105,166 @@ impl ResolvedIndexDocumentTransitionV1 {
   }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexSemanticScopeLimitsV1 {
+  max_scopes: u32,
+  max_value_stores: u32,
+  max_field_indexes: u32,
+  max_definition_bytes: u64,
+}
+
+impl IndexSemanticScopeLimitsV1 {
+  pub fn new(
+    max_scopes: u32,
+    max_value_stores: u32,
+    max_field_indexes: u32,
+    max_definition_bytes: u64,
+  ) -> Result<Self, IndexProducerSourceErrorV1> {
+    if max_scopes == 0 || max_value_stores == 0 || max_field_indexes == 0 || max_definition_bytes == 0 {
+      return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(
+        "all semantic scope resolution limits must be nonzero".to_string(),
+      ));
+    }
+    Ok(Self { max_scopes, max_value_stores, max_field_indexes, max_definition_bytes })
+  }
+
+  pub const fn max_scopes(self) -> u32 {
+    self.max_scopes
+  }
+
+  pub const fn max_value_stores(self) -> u32 {
+    self.max_value_stores
+  }
+
+  pub const fn max_field_indexes(self) -> u32 {
+    self.max_field_indexes
+  }
+
+  pub const fn max_definition_bytes(self) -> u64 {
+    self.max_definition_bytes
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexSemanticScopeReadErrorClassV1 {
+  Cancelled,
+  Retryable,
+  Corrupt,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[error("index semantic scope read failed ({code}): {context}")]
+pub struct IndexSemanticScopeReadErrorV1 {
+  class: IndexSemanticScopeReadErrorClassV1,
+  code: &'static str,
+  context: String,
+}
+
+impl IndexSemanticScopeReadErrorV1 {
+  pub fn cancelled(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: IndexSemanticScopeReadErrorClassV1::Cancelled, code, context: context.into() }
+  }
+
+  pub fn retryable(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: IndexSemanticScopeReadErrorClassV1::Retryable, code, context: context.into() }
+  }
+
+  pub fn corrupt(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: IndexSemanticScopeReadErrorClassV1::Corrupt, code, context: context.into() }
+  }
+
+  pub const fn class(&self) -> IndexSemanticScopeReadErrorClassV1 {
+    self.class
+  }
+
+  pub const fn code(&self) -> &'static str {
+    self.code
+  }
+
+  pub fn context(&self) -> &str {
+    &self.context
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedIndexFieldDefinitionV1 {
+  pub index_id: Vec<u8>,
+  pub encoded_definition: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedIndexValueStoreDefinitionV1 {
+  pub value_store_id: Vec<u8>,
+  pub encoded_definition: Vec<u8>,
+  pub field_indexes: Vec<OwnedIndexFieldDefinitionV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedIndexScopeDefinitionV1 {
+  pub scope_id: Vec<u8>,
+  pub encoded_definition: Vec<u8>,
+  pub value_stores: Vec<OwnedIndexValueStoreDefinitionV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedIndexScopeWorkV1 {
+  pub semantic_state_root: Vec<u8>,
+  pub document_ordinal: u64,
+  pub scope: OwnedIndexScopeDefinitionV1,
+}
+
+impl ResolvedIndexScopeWorkV1 {
+  pub fn as_collector_scope_work(&self) -> IndexCollectorScopeWorkV1<'_> {
+    IndexCollectorScopeWorkV1 {
+      document_ordinal: self.document_ordinal,
+      scope_bundle: IndexCollectorScopeDefinitionV1 {
+        expected_scope_id: &self.scope.scope_id,
+        encoded_definition: &self.scope.encoded_definition,
+        value_stores: self
+          .scope
+          .value_stores
+          .iter()
+          .map(|value_store| IndexCollectorValueStoreDefinitionV1 {
+            expected_value_store_id: &value_store.value_store_id,
+            encoded_definition: &value_store.encoded_definition,
+            field_indexes: value_store
+              .field_indexes
+              .iter()
+              .map(|field| IndexCollectorFieldDefinitionV1 {
+                expected_index_id: &field.index_id,
+                encoded_definition: &field.encoded_definition,
+              })
+              .collect(),
+          })
+          .collect(),
+      },
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexSemanticScopeResolutionV1 {
+  Complete { semantic_state_root: Vec<u8>, scope_work: Vec<ResolvedIndexScopeWorkV1> },
+  ContentOnly { semantic_state_root: Vec<u8> },
+}
+
+impl IndexSemanticScopeResolutionV1 {
+  fn semantic_state_root(&self) -> &[u8] {
+    match self {
+      Self::Complete { semantic_state_root, .. } | Self::ContentOnly { semantic_state_root } => semantic_state_root,
+    }
+  }
+}
+
+pub trait IndexSemanticScopeSourceV1: Send + Sync {
+  fn resolve_scopes(
+    &self,
+    semantic_state_root: &[u8],
+    transition: &ResolvedIndexDocumentTransitionV1,
+    limits: IndexSemanticScopeLimitsV1,
+  ) -> Result<IndexSemanticScopeResolutionV1, IndexSemanticScopeReadErrorV1>;
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IndexProducerSourceErrorV1 {
   #[error("index producer source resolution was cancelled")]
@@ -123,6 +291,160 @@ pub enum IndexProducerSourceErrorV1 {
   PathMismatch { expected: String, actual: String },
   #[error("index producer source FileKey mismatch at {path}")]
   FileKeyMismatch { path: String },
+  #[error("index producer semantic source read failed: {0}")]
+  SemanticRead(#[from] IndexSemanticScopeReadErrorV1),
+  #[error("index producer semantic root mismatch: expected {expected}, received {actual}")]
+  SemanticRootMismatch { expected: String, actual: String },
+  #[error("index producer semantic source repeated owner {owner}")]
+  DuplicateSemanticOwner { owner: String },
+  #[error("index producer semantic scope {scope} has invalid document ordinal {ordinal}")]
+  InvalidDocumentOrdinal { scope: String, ordinal: u64 },
+  #[error("index producer semantic {resource} exceeds limit {limit}: {actual}")]
+  SemanticLimitExceeded { resource: &'static str, limit: u64, actual: u64 },
+  #[error("index producer semantic source is invalid: {0}")]
+  InvalidSemanticResolution(String),
+}
+
+pub fn resolve_semantic_scope_work(
+  hash_algorithm: HashAlgorithm,
+  semantic_state_root: &[u8],
+  transition: &ResolvedIndexDocumentTransitionV1,
+  source: &dyn IndexSemanticScopeSourceV1,
+  limits: IndexSemanticScopeLimitsV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<IndexSemanticScopeResolutionV1, IndexProducerSourceErrorV1> {
+  if is_cancelled() {
+    return Err(IndexProducerSourceErrorV1::Cancelled);
+  }
+  if transition.before.is_none() && transition.after.is_none() {
+    return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(
+      "document transition has neither a before nor after revision".to_string(),
+    ));
+  }
+  if semantic_state_root.len() != hash_algorithm.hash_length() || semantic_state_root.iter().all(|byte| *byte == 0) {
+    return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(
+      "semantic-state root is zero or does not match the database hash width".to_string(),
+    ));
+  }
+  let resolution = match source.resolve_scopes(semantic_state_root, transition, limits) {
+    Ok(resolution) => resolution,
+    Err(error) if error.class() == IndexSemanticScopeReadErrorClassV1::Cancelled => {
+      return Err(IndexProducerSourceErrorV1::Cancelled);
+    }
+    Err(error) => return Err(IndexProducerSourceErrorV1::SemanticRead(error)),
+  };
+  if is_cancelled() {
+    return Err(IndexProducerSourceErrorV1::Cancelled);
+  }
+  validate_semantic_root(semantic_state_root, resolution.semantic_state_root())?;
+  let IndexSemanticScopeResolutionV1::Complete { scope_work, .. } = &resolution else {
+    return Ok(resolution);
+  };
+  validate_scope_work(hash_algorithm, semantic_state_root, scope_work, limits, is_cancelled)?;
+  Ok(resolution)
+}
+
+fn validate_semantic_root(expected: &[u8], actual: &[u8]) -> Result<(), IndexProducerSourceErrorV1> {
+  if expected != actual {
+    return Err(IndexProducerSourceErrorV1::SemanticRootMismatch { expected: hex::encode(expected), actual: hex::encode(actual) });
+  }
+  Ok(())
+}
+
+fn validate_scope_work(
+  hash_algorithm: HashAlgorithm,
+  semantic_state_root: &[u8],
+  scope_work: &[ResolvedIndexScopeWorkV1],
+  limits: IndexSemanticScopeLimitsV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), IndexProducerSourceErrorV1> {
+  enforce_semantic_limit("scopes", limits.max_scopes as u64, scope_work.len() as u64)?;
+  let mut value_store_count = 0u64;
+  let mut field_index_count = 0u64;
+  let mut definition_bytes = 0u64;
+  let mut owners = BTreeSet::new();
+
+  for work in scope_work {
+    if is_cancelled() {
+      return Err(IndexProducerSourceErrorV1::Cancelled);
+    }
+    validate_semantic_root(semantic_state_root, &work.semantic_state_root)?;
+    if work.document_ordinal == 0 {
+      return Err(IndexProducerSourceErrorV1::InvalidDocumentOrdinal {
+        scope: hex::encode(&work.scope.scope_id),
+        ordinal: work.document_ordinal,
+      });
+    }
+
+    definition_bytes = add_definition_bytes(definition_bytes, work.scope.encoded_definition.len())?;
+    enforce_semantic_limit("definition bytes", limits.max_definition_bytes, definition_bytes)?;
+    let scope = decode_scope_definition(&work.scope.encoded_definition, hash_algorithm)?;
+    if scope.scope_id != work.scope.scope_id {
+      return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(format!(
+        "ScopeDefinition identity mismatch for {}",
+        hex::encode(&work.scope.scope_id)
+      )));
+    }
+    insert_semantic_owner(&mut owners, &work.scope.scope_id)?;
+
+    for value_store in &work.scope.value_stores {
+      value_store_count = value_store_count
+        .checked_add(1)
+        .ok_or_else(|| IndexProducerSourceErrorV1::InvalidSemanticResolution("ValueStore count overflow".to_string()))?;
+      enforce_semantic_limit("value stores", limits.max_value_stores as u64, value_store_count)?;
+      definition_bytes = add_definition_bytes(definition_bytes, value_store.encoded_definition.len())?;
+      enforce_semantic_limit("definition bytes", limits.max_definition_bytes, definition_bytes)?;
+      let definition = decode_value_store_definition(&value_store.encoded_definition, hash_algorithm)?;
+      if definition.value_store_id != value_store.value_store_id || definition.scope_id != work.scope.scope_id {
+        return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(format!(
+          "ValueStoreDefinition closure mismatch for {}",
+          hex::encode(&value_store.value_store_id)
+        )));
+      }
+      insert_semantic_owner(&mut owners, &value_store.value_store_id)?;
+
+      for field in &value_store.field_indexes {
+        field_index_count = field_index_count
+          .checked_add(1)
+          .ok_or_else(|| IndexProducerSourceErrorV1::InvalidSemanticResolution("FieldIndex count overflow".to_string()))?;
+        enforce_semantic_limit("field indexes", limits.max_field_indexes as u64, field_index_count)?;
+        definition_bytes = add_definition_bytes(definition_bytes, field.encoded_definition.len())?;
+        enforce_semantic_limit("definition bytes", limits.max_definition_bytes, definition_bytes)?;
+        let definition = decode_field_index_definition(&field.encoded_definition, hash_algorithm)?;
+        if definition.index_id != field.index_id || definition.value_store_id != value_store.value_store_id {
+          return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(format!(
+            "FieldIndexDefinition closure mismatch for {}",
+            hex::encode(&field.index_id)
+          )));
+        }
+        insert_semantic_owner(&mut owners, &field.index_id)?;
+      }
+    }
+  }
+  Ok(())
+}
+
+fn add_definition_bytes(total: u64, bytes: usize) -> Result<u64, IndexProducerSourceErrorV1> {
+  let bytes = u64::try_from(bytes).map_err(|source| {
+    IndexProducerSourceErrorV1::InvalidSemanticResolution(format!("definition byte length does not fit u64: {source}"))
+  })?;
+  total
+    .checked_add(bytes)
+    .ok_or_else(|| IndexProducerSourceErrorV1::InvalidSemanticResolution("definition byte count overflow".to_string()))
+}
+
+fn enforce_semantic_limit(resource: &'static str, limit: u64, actual: u64) -> Result<(), IndexProducerSourceErrorV1> {
+  if actual > limit {
+    return Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource, limit, actual });
+  }
+  Ok(())
+}
+
+fn insert_semantic_owner(owners: &mut BTreeSet<Vec<u8>>, owner: &[u8]) -> Result<(), IndexProducerSourceErrorV1> {
+  if !owners.insert(owner.to_vec()) {
+    return Err(IndexProducerSourceErrorV1::DuplicateSemanticOwner { owner: hex::encode(owner) });
+  }
+  Ok(())
 }
 
 pub fn resolve_leased_mutation_record<'a>(

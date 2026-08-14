@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use aeordb::engine::HashAlgorithm;
@@ -9,8 +10,11 @@ use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_producer_source::{
-  IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, LoadedIndexFileRevisionV1,
-  resolve_leased_mutation_record, resolve_mutation_document_transition,
+  IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
+  IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeReadErrorV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1,
+  LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1,
+  ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1, ResolvedIndexScopeWorkV1, resolve_leased_mutation_record,
+  resolve_mutation_document_transition, resolve_semantic_scope_work,
 };
 use aeordb::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
@@ -21,6 +25,10 @@ const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
 fn hash(label: &[u8]) -> Vec<u8> {
   aeordb::engine::v4::hash::digest_parts(ALGORITHM, &[b"producer-source:", label])
+}
+
+fn fixture(folder: &str, name: &str) -> Vec<u8> {
+  std::fs::read(format!("{}/spec/fixtures/v4/{folder}/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
 fn file(path: &str, content: u8) -> FileRecord {
@@ -96,6 +104,61 @@ impl IndexProducerSpillStoreV1 for Spill {
 struct RevisionSource {
   records: BTreeMap<(Vec<u8>, String), LoadedIndexFileRevisionV1>,
   failure: Option<IndexFileRevisionReadErrorV1>,
+}
+
+#[derive(Clone)]
+struct SemanticSource {
+  result: Result<IndexSemanticScopeResolutionV1, IndexSemanticScopeReadErrorV1>,
+}
+
+impl IndexSemanticScopeSourceV1 for SemanticSource {
+  fn resolve_scopes(
+    &self,
+    _semantic_state_root: &[u8],
+    _transition: &aeordb::engine::v4::index_producer_source::ResolvedIndexDocumentTransitionV1,
+    _limits: IndexSemanticScopeLimitsV1,
+  ) -> Result<IndexSemanticScopeResolutionV1, IndexSemanticScopeReadErrorV1> {
+    self.result.clone()
+  }
+}
+
+fn scope_work(semantic_state_root: &[u8], ordinal: u64, scope_fixture: &str) -> ResolvedIndexScopeWorkV1 {
+  let scope = fixture("scope-definition-v1", scope_fixture);
+  let scope_id = aeordb::engine::v4::scope::decode_scope_definition(&scope, ALGORITHM).unwrap().scope_id;
+  let mut value = fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid.bin");
+  value[32..64].copy_from_slice(&scope_id);
+  let value_id = aeordb::engine::v4::value_store::decode_value_store_definition(&value, ALGORITHM).unwrap().value_store_id;
+  let mut field = fixture("field-index-definition-v1", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
+  field[32..64].copy_from_slice(&value_id);
+  let field_id = aeordb::engine::v4::field_definition::decode_field_index_definition(&field, ALGORITHM).unwrap().index_id;
+  ResolvedIndexScopeWorkV1 {
+    semantic_state_root: semantic_state_root.to_vec(),
+    document_ordinal: ordinal,
+    scope: OwnedIndexScopeDefinitionV1 {
+      scope_id,
+      encoded_definition: scope,
+      value_stores: vec![OwnedIndexValueStoreDefinitionV1 {
+        value_store_id: value_id,
+        encoded_definition: value,
+        field_indexes: vec![OwnedIndexFieldDefinitionV1 { index_id: field_id, encoded_definition: field }],
+      }],
+    },
+  }
+}
+
+fn resolved_transition() -> ResolvedIndexDocumentTransitionV1 {
+  ResolvedIndexDocumentTransitionV1 {
+    before: None,
+    after: Some(ResolvedIndexDocumentV1 {
+      namespace_root: hash(b"after-root"),
+      revision_hash: hash(b"after-revision"),
+      file_record: file("/workspace/docs/doc.json", 0x42),
+    }),
+  }
+}
+
+fn semantic_limits() -> IndexSemanticScopeLimitsV1 {
+  IndexSemanticScopeLimitsV1::new(8, 16, 32, 2 * 1_024 * 1_024).unwrap()
 }
 
 impl IndexFileRevisionSourceV1 for RevisionSource {
@@ -215,4 +278,241 @@ fn cancellation_and_reader_failures_remain_typed() {
     resolve_mutation_document_transition(ALGORITHM, &record, &source, &|| false).unwrap_err(),
     IndexProducerSourceErrorV1::Cancelled
   );
+}
+
+#[test]
+fn complete_semantic_resolution_preserves_all_scope_local_ordinals() {
+  let root = hash(b"semantic");
+  let source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete {
+      semantic_state_root: root.clone(),
+      scope_work: vec![
+        scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin"),
+        scope_work(&root, 9, "ascp-blake3-256-normalized-glob-valid.bin"),
+      ],
+    }),
+  };
+
+  let resolved = resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap();
+  let IndexSemanticScopeResolutionV1::Complete { semantic_state_root, scope_work } = resolved else {
+    panic!("complete semantic source became content-only");
+  };
+  assert_eq!(semantic_state_root, root);
+  assert_eq!(scope_work.iter().map(|scope| scope.document_ordinal).collect::<Vec<_>>(), vec![3, 9]);
+  assert_ne!(scope_work[0].scope.scope_id, scope_work[1].scope.scope_id);
+  for work in &scope_work {
+    assert_eq!(work.semantic_state_root, semantic_state_root);
+    let borrowed = work.as_collector_scope_work();
+    assert_eq!(borrowed.document_ordinal, work.document_ordinal);
+    assert_eq!(borrowed.scope_bundle.expected_scope_id, work.scope.scope_id);
+    assert_eq!(borrowed.scope_bundle.value_stores.len(), 1);
+    assert_eq!(borrowed.scope_bundle.value_stores[0].field_indexes.len(), 1);
+  }
+}
+
+#[test]
+fn content_only_semantics_remain_explicit_instead_of_becoming_empty_complete_coverage() {
+  let root = hash(b"semantic");
+  let source = SemanticSource { result: Ok(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root.clone() }) };
+
+  assert_eq!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false).unwrap(),
+    IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root }
+  );
+}
+
+#[test]
+fn semantic_resolution_rejects_wrong_roots_duplicate_owners_and_zero_ordinals() {
+  let root = hash(b"semantic");
+  let wrong_root = hash(b"wrong-semantic");
+  let wrong_root_source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete {
+      semantic_state_root: wrong_root.clone(),
+      scope_work: vec![scope_work(&wrong_root, 3, "ascp-blake3-256-root-direct-valid.bin")],
+    }),
+  };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &wrong_root_source, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticRootMismatch { .. })
+  ));
+
+  let mut wrong_nested_root = scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin");
+  wrong_nested_root.semantic_state_root = wrong_root;
+  let wrong_nested_root_source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![wrong_nested_root] }),
+  };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &wrong_nested_root_source, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticRootMismatch { .. })
+  ));
+
+  let duplicate = scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin");
+  let duplicate_source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete {
+      semantic_state_root: root.clone(),
+      scope_work: vec![duplicate.clone(), duplicate],
+    }),
+  };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &duplicate_source, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::DuplicateSemanticOwner { .. })
+  ));
+
+  let zero_source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete {
+      semantic_state_root: root.clone(),
+      scope_work: vec![scope_work(&root, 0, "ascp-blake3-256-root-direct-valid.bin")],
+    }),
+  };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &zero_source, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::InvalidDocumentOrdinal { .. })
+  ));
+}
+
+#[test]
+fn semantic_resolution_enforces_aggregate_limits_before_collection() {
+  let root = hash(b"semantic");
+  let two_scopes = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete {
+      semantic_state_root: root.clone(),
+      scope_work: vec![
+        scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin"),
+        scope_work(&root, 9, "ascp-blake3-256-normalized-glob-valid.bin"),
+      ],
+    }),
+  };
+  let one_scope = IndexSemanticScopeLimitsV1::new(1, 16, 32, 2 * 1_024 * 1_024).unwrap();
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &two_scopes, one_scope, &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "scopes", .. })
+  ));
+
+  let one = scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin");
+  let encoded_bytes = one.scope.encoded_definition.len()
+    + one.scope.value_stores[0].encoded_definition.len()
+    + one.scope.value_stores[0].field_indexes[0].encoded_definition.len();
+  let exact = IndexSemanticScopeLimitsV1::new(1, 1, 1, encoded_bytes as u64).unwrap();
+  let too_small = IndexSemanticScopeLimitsV1::new(1, 1, 1, encoded_bytes as u64 - 1).unwrap();
+  let source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![one.clone()] }),
+  };
+  resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, exact, &|| false).unwrap();
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, too_small, &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "definition bytes", .. })
+  ));
+
+  let mut excess_values = scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin");
+  excess_values.scope.value_stores.push(excess_values.scope.value_stores[0].clone());
+  let source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![excess_values] }),
+  };
+  let one_value_store = IndexSemanticScopeLimitsV1::new(1, 1, 32, 2 * 1_024 * 1_024).unwrap();
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, one_value_store, &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "value stores", .. })
+  ));
+
+  let mut excess_fields = scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin");
+  let duplicate_field = excess_fields.scope.value_stores[0].field_indexes[0].clone();
+  excess_fields.scope.value_stores[0].field_indexes.push(duplicate_field);
+  let source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![excess_fields] }),
+  };
+  let one_field = IndexSemanticScopeLimitsV1::new(1, 1, 1, 2 * 1_024 * 1_024).unwrap();
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, one_field, &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticLimitExceeded { resource: "field indexes", .. })
+  ));
+}
+
+#[test]
+fn malformed_semantic_definitions_and_source_failures_remain_typed() {
+  let root = hash(b"semantic");
+  let mut malformed = scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin");
+  malformed.scope.encoded_definition[0] ^= 0xff;
+  let source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![malformed] }),
+  };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::Format(_))
+  ));
+
+  let retryable =
+    SemanticSource { result: Err(IndexSemanticScopeReadErrorV1::retryable("semantic_busy", "injected semantic catalog outage")) };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &retryable, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticRead(error)) if error.code() == "semantic_busy"
+  ));
+  let cancelled = SemanticSource { result: Err(IndexSemanticScopeReadErrorV1::cancelled("shutdown", "worker stopping")) };
+  assert_eq!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &cancelled, semantic_limits(), &|| false).unwrap_err(),
+    IndexProducerSourceErrorV1::Cancelled
+  );
+  assert_eq!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &retryable, semantic_limits(), &|| true).unwrap_err(),
+    IndexProducerSourceErrorV1::Cancelled
+  );
+
+  let corrupt = SemanticSource { result: Err(IndexSemanticScopeReadErrorV1::corrupt("catalog_corrupt", "bad catalog edge")) };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &corrupt, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::SemanticRead(error))
+      if error.class() == IndexSemanticScopeReadErrorClassV1::Corrupt && error.code() == "catalog_corrupt"
+  ));
+}
+
+#[test]
+fn semantic_resolution_rejects_invalid_inputs_and_cancels_during_validation() {
+  assert!(matches!(IndexSemanticScopeLimitsV1::new(0, 1, 1, 1), Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(_))));
+
+  let root = hash(b"semantic");
+  let source = SemanticSource { result: Ok(IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: root.clone() }) };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &[0; 32], &resolved_transition(), &source, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(_))
+  ));
+  assert!(matches!(
+    resolve_semantic_scope_work(
+      ALGORITHM,
+      &root,
+      &ResolvedIndexDocumentTransitionV1 { before: None, after: None },
+      &source,
+      semantic_limits(),
+      &|| false
+    ),
+    Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(_))
+  ));
+
+  let source = SemanticSource {
+    result: Ok(IndexSemanticScopeResolutionV1::Complete {
+      semantic_state_root: root.clone(),
+      scope_work: vec![scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin")],
+    }),
+  };
+  let calls = Cell::new(0u8);
+  let cancellation = || {
+    let call = calls.get().saturating_add(1);
+    calls.set(call);
+    call >= 3
+  };
+  assert_eq!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &cancellation).unwrap_err(),
+    IndexProducerSourceErrorV1::Cancelled
+  );
+}
+
+#[test]
+fn semantic_definition_closure_mismatch_fails_before_collection() {
+  let root = hash(b"semantic");
+  let mut work = scope_work(&root, 3, "ascp-blake3-256-root-direct-valid.bin");
+  work.scope.value_stores[0].value_store_id = hash(b"wrong-value-owner");
+  let source =
+    SemanticSource { result: Ok(IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root.clone(), scope_work: vec![work] }) };
+  assert!(matches!(
+    resolve_semantic_scope_work(ALGORITHM, &root, &resolved_transition(), &source, semantic_limits(), &|| false),
+    Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(message)) if message.contains("ValueStoreDefinition closure mismatch")
+  ));
 }
