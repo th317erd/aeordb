@@ -297,7 +297,12 @@ impl<'a> ValueStoreRuntimeV1<'a> {
             if next_count > self.definition.max_source_values_per_document as usize
               || total_value_bytes > self.definition.max_canonical_source_bytes_per_document
             {
-              return Ok(deterministic_unindexable("source_value_limit", "terminal source values exceed this ValueStore definition"));
+              let code = if values.len() >= self.definition.max_source_values_per_document as usize {
+                "source_value_count_limit"
+              } else {
+                "source_value_bytes_limit"
+              };
+              return Ok(deterministic_unindexable(code, "terminal source values exceed this ValueStore definition"));
             }
             values.try_reserve(1).map_err(|source| {
               operational_error(
@@ -474,7 +479,7 @@ impl<'a> ValueStoreRuntimeV1<'a> {
       return deterministic_unindexable("plugin_mapper_empty_values", "corrected mapper values must be nonempty or explicitly missing");
     }
     if values.len() > self.definition.max_source_values_per_document as usize {
-      return deterministic_unindexable("source_value_limit", "mapper source-value count exceeds this ValueStore definition");
+      return deterministic_unindexable("source_value_count_limit", "mapper source-value count exceeds this ValueStore definition");
     }
     let mut total = 0u64;
     for value in &values {
@@ -486,7 +491,7 @@ impl<'a> ValueStoreRuntimeV1<'a> {
         None => return deterministic_unindexable("source_value_bytes_overflow", "mapper source bytes overflow"),
       };
       if total > self.definition.max_canonical_source_bytes_per_document {
-        return deterministic_unindexable("source_value_limit", "mapper source bytes exceed this ValueStore definition");
+        return deterministic_unindexable("source_value_bytes_limit", "mapper source bytes exceed this ValueStore definition");
       }
     }
     SourceExtractionV1::Values(values)
@@ -504,10 +509,11 @@ impl<'a> ValueStoreRuntimeV1<'a> {
         Some(total) => total,
         None => return deterministic_unindexable("source_value_bytes_overflow", "metadata source bytes overflow"),
       };
-      if encoded.len() + 1 > self.definition.max_source_values_per_document as usize
-        || total > self.definition.max_canonical_source_bytes_per_document
-      {
-        return deterministic_unindexable("source_value_limit", "metadata source value exceeds this ValueStore definition");
+      if encoded.len() + 1 > self.definition.max_source_values_per_document as usize {
+        return deterministic_unindexable("source_value_count_limit", "metadata source-value count exceeds this ValueStore definition");
+      }
+      if total > self.definition.max_canonical_source_bytes_per_document {
+        return deterministic_unindexable("source_value_bytes_limit", "metadata source value exceeds this ValueStore definition");
       }
       encoded.push(value);
     }

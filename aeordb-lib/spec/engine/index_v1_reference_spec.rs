@@ -967,7 +967,14 @@ fn corrected_json_selector_limits_fail_the_whole_document_without_partial_values
   let count_limited = Box::leak(count_limited.into_boxed_slice());
   let runtime = ValueStoreRuntimeV1::from_encoded(count_limited, HashAlgorithm::Blake3_256).unwrap();
   let outcome = runtime.extract(SourceDocumentV1 { file_record: &record, parsed_value: Some(&parsed) }, None, &|| false).unwrap();
-  assert!(matches!(outcome, SourceExtractionV1::DeterministicUnindexable { code: "source_value_limit", .. }));
+  assert!(matches!(outcome, SourceExtractionV1::DeterministicUnindexable { code: "source_value_count_limit", .. }));
+
+  let mut bytes_limited = value_store_fixture("avst-blake3-256-json-corrected-valid");
+  bytes_limited[112..120].copy_from_slice(&1u64.to_le_bytes());
+  let bytes_limited = Box::leak(bytes_limited.into_boxed_slice());
+  let runtime = ValueStoreRuntimeV1::from_encoded(bytes_limited, HashAlgorithm::Blake3_256).unwrap();
+  let outcome = runtime.extract(SourceDocumentV1 { file_record: &record, parsed_value: Some(&parsed) }, None, &|| false).unwrap();
+  assert!(matches!(outcome, SourceExtractionV1::DeterministicUnindexable { code: "source_value_bytes_limit", .. }));
 
   let mut examined_limited = value_store_fixture("avst-blake3-256-json-corrected-valid");
   examined_limited[136..144].copy_from_slice(&3u64.to_le_bytes());

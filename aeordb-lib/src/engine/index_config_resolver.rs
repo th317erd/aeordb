@@ -13,73 +13,7 @@ use crate::engine::storage_engine::StorageEngine;
 ///   - `?`  matches a single character within a segment
 ///
 /// Both `pattern` and `path` are split by `/` and matched segment by segment.
-pub fn glob_matches(pattern: &str, path: &str) -> bool {
-  let pat_segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
-  let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-  glob_match_segments(&pat_segments, &path_segments)
-}
-
-fn glob_match_segments(pattern: &[&str], path: &[&str]) -> bool {
-  if pattern.is_empty() {
-    return path.is_empty();
-  }
-
-  if pattern[0] == "**" {
-    for skip in 0..=path.len() {
-      if glob_match_segments(&pattern[1..], &path[skip..]) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  if path.is_empty() {
-    return false;
-  }
-
-  if segment_matches(pattern[0], path[0]) {
-    glob_match_segments(&pattern[1..], &path[1..])
-  } else {
-    false
-  }
-}
-
-fn segment_matches(pattern: &str, segment: &str) -> bool {
-  if pattern == "*" {
-    return true;
-  }
-  char_glob_match(pattern.as_bytes(), segment.as_bytes())
-}
-
-fn char_glob_match(pat: &[u8], seg: &[u8]) -> bool {
-  let mut pi = 0;
-  let mut si = 0;
-  let mut star_pi: Option<usize> = None;
-  let mut star_si: usize = 0;
-
-  while si < seg.len() {
-    if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == seg[si]) {
-      pi += 1;
-      si += 1;
-    } else if pi < pat.len() && pat[pi] == b'*' {
-      star_pi = Some(pi);
-      star_si = si;
-      pi += 1;
-    } else if let Some(sp) = star_pi {
-      pi = sp + 1;
-      star_si += 1;
-      si = star_si;
-    } else {
-      return false;
-    }
-  }
-
-  while pi < pat.len() && pat[pi] == b'*' {
-    pi += 1;
-  }
-
-  pi == pat.len()
-}
+pub use crate::engine::path_utils::glob_matches;
 
 /// Resolves `.aeordb-config/indexes.json` ownership and derived policies.
 pub struct IndexConfigResolver<'a> {

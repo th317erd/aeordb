@@ -75,3 +75,54 @@ pub fn path_segments(path: &str) -> Vec<String> {
   }
   segments
 }
+
+/// Match canonical path segments using the index-scope wildcard contract.
+///
+/// `*` matches within one segment, `**` matches zero or more complete
+/// segments, and `?` matches one byte within a segment.
+pub fn glob_matches(pattern: &str, path: &str) -> bool {
+  let pattern = pattern.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+  let path = path.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+  glob_match_segments(&pattern, &path)
+}
+
+fn glob_match_segments(pattern: &[&str], path: &[&str]) -> bool {
+  let Some((head, tail)) = pattern.split_first() else {
+    return path.is_empty();
+  };
+  if *head == "**" {
+    return (0..=path.len()).any(|skip| glob_match_segments(tail, &path[skip..]));
+  }
+  let Some((path_head, path_tail)) = path.split_first() else {
+    return false;
+  };
+  segment_matches(head.as_bytes(), path_head.as_bytes()) && glob_match_segments(tail, path_tail)
+}
+
+fn segment_matches(pattern: &[u8], segment: &[u8]) -> bool {
+  let mut pattern_index = 0usize;
+  let mut segment_index = 0usize;
+  let mut star_pattern_index = None;
+  let mut star_segment_index = 0usize;
+
+  while segment_index < segment.len() {
+    if pattern_index < pattern.len() && (pattern[pattern_index] == b'?' || pattern[pattern_index] == segment[segment_index]) {
+      pattern_index += 1;
+      segment_index += 1;
+    } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+      star_pattern_index = Some(pattern_index);
+      star_segment_index = segment_index;
+      pattern_index += 1;
+    } else if let Some(star) = star_pattern_index {
+      pattern_index = star + 1;
+      star_segment_index += 1;
+      segment_index = star_segment_index;
+    } else {
+      return false;
+    }
+  }
+  while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+    pattern_index += 1;
+  }
+  pattern_index == pattern.len()
+}
