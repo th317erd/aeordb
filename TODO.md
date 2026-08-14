@@ -836,7 +836,7 @@
         - [x] Expose posting-page links and add streaming-safe adjacent-link validation without loading a complete index.
         - [x] Prove malformed, overflow, owner/role/page-ID, fence/order, aggregate, physical-hint, and link rejection paths.
         - [x] Run narrow, affected, broad, static, architecture, native-platform, and shadow real-world codec gates; record evidence and land the unit.
-      - [ ] P5-5: implement bounded COW insert/delete/split/merge/compaction.
+      - [x] P5-5: implement bounded COW insert/delete/split/merge/compaction.
         - [x] P5-5a: freeze a storage-neutral COW planner contract, bounded mutation inputs/outputs, PageId allocator, and independent one-page reference model.
         - [x] P5-5b: implement exact-key insert/replace/tombstone mutation with one-page split, stable left ID, fresh nonwrapping right ID, posting-neighbor rewrites, and dependency-ordered immutable outputs.
         - [x] P5-5c: implement bounded leaf-to-root directory path rewriting and recursive directory split/root growth without loading unrelated siblings or a complete index.
@@ -850,7 +850,7 @@
           - [x] Validate exact source/replacement, allocation/retirement, page-link, directory dependency, root aggregate, generation, and PageId closure.
           - [x] Reject mutated plans, duplicate/detached artifacts, inconsistent counters, broken dependency order, and resource amplification before publication can consume them.
           - [x] Run deterministic randomized insert/replace/tombstone/split/compact/merge sequences against an independent logical model at both hash widths.
-        - [ ] P5-5f: run narrow, affected, broad, static, architecture, native-platform, and shadow real-world COW gates; record evidence and land the unit.
+        - [x] P5-5f: run narrow, affected, broad, static, architecture, native-platform, and shadow real-world COW gates; record evidence and land the unit.
       - [ ] P5-6: implement sparse fixed-point NVT tiles, fallback, and best-effort healing.
       - [ ] P5-7: implement mutation/checkpoint codecs and unpublished attachment rooting.
       - [ ] P5-8: qualify shadow build, restart, corruption fallback, memory bounds, and full validation.
