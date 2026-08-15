@@ -27,6 +27,7 @@ use super::header_publication::{
   observe_database_header_v4,
 };
 use super::hash::digest_parts;
+use super::index_artifact::{EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, decode_immutable_index_artifact};
 use super::gc::{
   EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlV1, GcArtifactKindV1, decode_gc_active_control,
   decode_gc_artifact_envelope, gc_active_control_key, immutable_gc_artifact_key, select_gc_active_control,
@@ -106,6 +107,8 @@ const FIRST_AUTHORITY_ENTITY_COUNT: usize = 8;
 const FIRST_AUTHORITY_NAMESPACE_TREE_CAP: usize = 48 * 1024 * 1024;
 const FIRST_AUTHORITY_CONTROL_BODY_CAP: usize = 16 * 1024;
 const FIRST_AUTHORITY_CONTROL_ENTITY_CAP: usize = 64 * 1024;
+const INDEX_ARTIFACT_BATCH_COUNT_CAP: usize = 4_097;
+const INDEX_ARTIFACT_BATCH_BYTES_CAP: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedNamespaceTreeV0 {
@@ -131,6 +134,27 @@ pub struct FirstAuthorityPublicationReceiptV1 {
   pub prepare_control: Vec<u8>,
   pub admission_control: Vec<u8>,
   pub publication_sequence: u64,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IndexArtifactBatchPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub artifacts: &'a [&'a EncodedImmutableIndexArtifactV1],
+  pub publication_timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexArtifactPublicationReceiptV1 {
+  pub artifact_key: Vec<u8>,
+  pub write_sequence: u64,
+  pub idempotent: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexArtifactBatchPublicationReceiptV1 {
+  pub artifacts: Vec<IndexArtifactPublicationReceiptV1>,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
 }
@@ -1888,6 +1912,264 @@ impl V4FirstAuthorityPublisher {
   pub fn locator(&self, key: &[u8]) -> Result<Option<KVEntry>, FirstAuthorityPublicationErrorV1> {
     let kv = self.lock_kv()?;
     kv.get(key).map_err(Into::into)
+  }
+
+  pub fn load_index_artifact(&self, key: &[u8], expected_value_length: u64) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    validate_index_artifact_key(header.hash_algorithm, key)?;
+    let expected_value_length = usize::try_from(expected_value_length).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_expected_length",
+        format!("expected IndexArtifact length exceeds usize: {error}"),
+      )
+    })?;
+    if expected_value_length == 0 || expected_value_length > ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length() {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_expected_length",
+        format!("expected IndexArtifact length {expected_value_length} is outside the frozen bounds"),
+      ));
+    }
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    load_index_artifact_entity(&self.file, &kv, header, key)
+      .map(|loaded| loaded.and_then(|loaded| (loaded.value.len() == expected_value_length).then_some(loaded.value)))
+  }
+
+  pub fn index_artifact_length(&self, key: &[u8]) -> Result<Option<u64>, FirstAuthorityPublicationErrorV1> {
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    validated_index_artifact_locator(&self.file, &kv, header, key)?
+      .map(|located| {
+        u64::try_from(located.value_length).map_err(|error| {
+          FirstAuthorityPublicationErrorV1::invalid(
+            "immutable_index_locator_length",
+            format!("IndexArtifact value length exceeds u64: {error}"),
+          )
+        })
+      })
+      .transpose()
+  }
+
+  pub fn publish_index_artifacts(
+    &self,
+    request: IndexArtifactBatchPublicationRequestV1<'_>,
+  ) -> Result<IndexArtifactBatchPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_index_artifacts_with_observer(request, &mut observer)
+  }
+
+  fn publish_index_artifacts_with_observer(
+    &self,
+    request: IndexArtifactBatchPublicationRequestV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<IndexArtifactBatchPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_missing_authority",
+        "immutable IndexArtifact publication requires selected non-degraded first authority",
+      ));
+    }
+    if &header.database_id != request.database_id {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_database_mismatch",
+        "immutable IndexArtifact batch belongs to another logical database",
+      ));
+    }
+    if request.artifacts.is_empty() || request.artifacts.len() > INDEX_ARTIFACT_BATCH_COUNT_CAP {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_batch_count",
+        format!("immutable IndexArtifact batch count {} is outside 1..={INDEX_ARTIFACT_BATCH_COUNT_CAP}", request.artifacts.len()),
+      ));
+    }
+
+    let mut unique = HashSet::new();
+    unique.try_reserve(request.artifacts.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_batch_allocation", format!("artifact identity allocation failed: {error}"))
+    })?;
+    let mut total_value_bytes = 0usize;
+    for artifact in request.artifacts {
+      let decoded = decode_immutable_index_artifact(
+        &artifact.value,
+        header.hash_algorithm,
+        ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length(),
+      )?;
+      if decoded.key != artifact.key {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "immutable_index_prepared_mismatch",
+          "immutable IndexArtifact key disagrees with its encoded value",
+        ));
+      }
+      if !unique.insert(artifact.key.as_slice()) {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "immutable_index_duplicate",
+          "immutable IndexArtifact batch contains a duplicate key",
+        ));
+      }
+      total_value_bytes = total_value_bytes.checked_add(artifact.value.len()).ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid("immutable_index_batch_bytes", "immutable IndexArtifact batch bytes overflowed")
+      })?;
+      if total_value_bytes > INDEX_ARTIFACT_BATCH_BYTES_CAP {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "immutable_index_batch_bytes",
+          format!("immutable IndexArtifact batch exceeds {INDEX_ARTIFACT_BATCH_BYTES_CAP} bytes"),
+        ));
+      }
+    }
+
+    let mut kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    kv.flush()?;
+    validate_kv_header_alignment(&kv, header)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_baseline_not_flushed",
+        "immutable IndexArtifact publication requires an empty KV write and hot-buffer baseline",
+      ));
+    }
+
+    let mut receipts = Vec::new();
+    receipts.try_reserve_exact(request.artifacts.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_receipt_allocation", format!("receipt allocation failed: {error}"))
+    })?;
+    let mut entities = Vec::new();
+    entities.try_reserve_exact(request.artifacts.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_entity_allocation", format!("entity allocation failed: {error}"))
+    })?;
+    let mut next_write_sequence = header.write_sequence_high_water;
+    for artifact in request.artifacts {
+      if let Some(existing) = load_index_artifact_entity(&self.file, &kv, header, &artifact.key)? {
+        if existing.value != artifact.value {
+          return Err(FirstAuthorityPublicationErrorV1::invalid(
+            "immutable_index_identity_collision",
+            "existing immutable IndexArtifact differs from its exact canonical bytes",
+          ));
+        }
+        receipts.push(IndexArtifactPublicationReceiptV1 {
+          artifact_key: artifact.key.clone(),
+          write_sequence: existing.write_sequence,
+          idempotent: true,
+        });
+        continue;
+      }
+      next_write_sequence = next_write_sequence.checked_add(1).ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid("immutable_index_write_sequence_exhausted", "v4 write sequence is exhausted")
+      })?;
+      let entity_bytes = encode_entity(
+        EntryTypeV4::IndexArtifact,
+        WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        header.hash_algorithm,
+        header.updated_at_ms.max(request.publication_timestamp_ms),
+        next_write_sequence,
+        &artifact.key,
+        &artifact.value,
+      )?;
+      entities.push(PreparedWholeEntityV1 { key: artifact.key.clone(), kv_type: kv_tag::INDEX_ARTIFACT, bytes: entity_bytes });
+      receipts.push(IndexArtifactPublicationReceiptV1 {
+        artifact_key: artifact.key.clone(),
+        write_sequence: next_write_sequence,
+        idempotent: false,
+      });
+    }
+    if entities.is_empty() {
+      return Ok(IndexArtifactBatchPublicationReceiptV1 { artifacts: receipts, observation, idempotent: true });
+    }
+
+    let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
+    if append_start < header.hot_tail_offset {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_file_truncated",
+        "database length precedes the selected v4 hot-tail offset",
+      ));
+    }
+    let expected_hot_tail_offset = entities.iter().try_fold(append_start, |offset, entity| {
+      offset.checked_add(entity.bytes.len() as u64).ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid("immutable_index_wal_overflow", "immutable IndexArtifact WAL offset overflowed")
+      })
+    })?;
+    let orphan_prefix_bytes = append_start.checked_sub(header.hot_tail_offset).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_wal_prefix",
+        "immutable IndexArtifact append precedes the selected hot tail",
+      )
+    })?;
+    let dependency_bytes = entity_dependency_bytes(&entities, header.hash_algorithm.hash_length())?
+      .checked_add(orphan_prefix_bytes)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_dependency_bytes", "dependency byte count overflowed"))?;
+    let entry_increment = u64::try_from(entities.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_entry_count", format!("entity count exceeds u64: {error}"))
+    })?;
+    let mut candidate = header.clone();
+    candidate.updated_at_ms = header.updated_at_ms.max(request.publication_timestamp_ms);
+    candidate.write_sequence_high_water = next_write_sequence;
+    candidate.hot_tail_offset = expected_hot_tail_offset;
+    candidate.entry_count = header
+      .entry_count
+      .checked_add(entry_increment)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_entry_count", "v4 entry count overflowed"))?;
+    let admitted =
+      self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)?;
+    let authority_sequence = admitted.sequence();
+    let batch = kv.begin_atomic_visibility_batch(entities.len(), authority_sequence)?;
+    let (publication_result, append_completed) = {
+      let mut dependency = FirstAuthorityDependencyV1 {
+        file: &self.file,
+        kv: &mut kv,
+        batch,
+        expected_publication_sequence: authority_sequence,
+        entities: &entities,
+        start_offset: append_start,
+        expected_hot_tail_offset,
+        expected_existing: None,
+        prewritten: false,
+        append_completed: false,
+        observer,
+      };
+      let publication_result = admitted.commit_with_dependency(&mut dependency);
+      (publication_result, dependency.append_completed)
+    };
+    let publication = match publication_result {
+      Ok(publication) => publication,
+      Err(error) => {
+        kv.abort_atomic_visibility_batch(batch)?;
+        return Err(error.into());
+      }
+    };
+    if !append_completed {
+      kv.abort_atomic_visibility_batch(batch)?;
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_dependency_missing",
+        "header publication completed without the exact immutable IndexArtifact dependency append",
+      ));
+    }
+    kv.complete_hot_tail_dependency();
+    kv.publish_atomic_visibility_after_authority(batch, &publication.durability)?;
+    observer.authority_committed(&kv, &entities)?;
+
+    for artifact in request.artifacts {
+      let stored =
+        load_index_artifact_entity(&self.file, &kv, &publication.observation.selected.header, &artifact.key)?.ok_or_else(|| {
+          FirstAuthorityPublicationErrorV1::invalid(
+            "immutable_index_readback_missing",
+            "published immutable IndexArtifact locator is absent",
+          )
+        })?;
+      if stored.value != artifact.value {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "immutable_index_readback_mismatch",
+          "published immutable IndexArtifact differs from its exact prepared bytes",
+        ));
+      }
+    }
+    Ok(IndexArtifactBatchPublicationReceiptV1 { artifacts: receipts, observation: publication.observation, idempotent: false })
   }
 
   pub fn admission_locator(&self, root_hash: &[u8]) -> Result<Option<KVEntry>, FirstAuthorityPublicationErrorV1> {
@@ -8259,6 +8541,123 @@ fn read_entity_bounded(
     ));
   }
   Ok(Some(bytes))
+}
+
+struct LoadedIndexArtifactEntityV1 {
+  value: Vec<u8>,
+  write_sequence: u64,
+}
+
+struct ValidatedIndexArtifactLocatorV1 {
+  locator: KVEntry,
+  total_length: usize,
+  value_length: usize,
+}
+
+fn validate_index_artifact_key(hash_algorithm: HashAlgorithm, key: &[u8]) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if key.len() != hash_algorithm.hash_length() {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_index_key",
+      format!("immutable IndexArtifact key length {} does not match the database hash width {}", key.len(), hash_algorithm.hash_length()),
+    ));
+  }
+  Ok(())
+}
+
+fn validated_index_artifact_locator(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+) -> Result<Option<ValidatedIndexArtifactLocatorV1>, FirstAuthorityPublicationErrorV1> {
+  validate_index_artifact_key(header.hash_algorithm, key)?;
+  let Some(locator) = kv.get(key)? else {
+    return Ok(None);
+  };
+  if locator.type_flags != kv_tag::INDEX_ARTIFACT {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_index_identity_collision",
+      "immutable IndexArtifact key resolves to another KV role",
+    ));
+  }
+  let total_length = usize::try_from(locator.total_length).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_index_locator_length",
+      format!("IndexArtifact locator length exceeds usize: {error}"),
+    )
+  })?;
+  let base_length = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, key.len(), 0)?;
+  let maximum_value_length = ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length();
+  let maximum_entity_length = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, key.len(), maximum_value_length)?;
+  if total_length <= base_length || total_length > maximum_entity_length {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_index_locator_length",
+      format!("IndexArtifact locator length {total_length} is outside the frozen entity bounds"),
+    ));
+  }
+  let entity_end = locator
+    .offset
+    .checked_add(u64::from(locator.total_length))
+    .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_locator_range", "IndexArtifact locator range overflowed"))?;
+  let file_length = file.metadata().map_err(EngineError::IoError)?.len();
+  if entity_end > header.hot_tail_offset || entity_end > file_length {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_index_locator_range",
+      format!(
+        "IndexArtifact locator end {entity_end} exceeds the durable hot tail {} or file length {file_length}",
+        header.hot_tail_offset
+      ),
+    ));
+  }
+  Ok(Some(ValidatedIndexArtifactLocatorV1 { locator, total_length, value_length: total_length - base_length }))
+}
+
+fn load_index_artifact_entity(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+) -> Result<Option<LoadedIndexArtifactEntityV1>, FirstAuthorityPublicationErrorV1> {
+  let Some(located) = validated_index_artifact_locator(file, kv, header, key)? else {
+    return Ok(None);
+  };
+  let maximum_value_length = ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length();
+  let mut bytes = Vec::new();
+  bytes.try_reserve_exact(located.total_length).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_index_read_allocation",
+      format!("IndexArtifact read allocation failed for {} bytes: {error}", located.total_length),
+    )
+  })?;
+  bytes.resize(located.total_length, 0);
+  read_file_at_native(file, located.locator.offset, &mut bytes)
+    .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("first_authority_readback_io", error.to_string()))?;
+  let write_sequence = {
+    let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    if entity.entry_type != EntryTypeV4::IndexArtifact
+      || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || entity.compression_algorithm != CompressionAlgorithm::None
+      || entity.key != key
+      || entity.stored_value.len() != located.value_length
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_representation",
+        "immutable IndexArtifact WholeEntity representation is noncanonical",
+      ));
+    }
+    let artifact = decode_immutable_index_artifact(entity.stored_value, header.hash_algorithm, maximum_value_length)?;
+    if artifact.key != key {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_prepared_mismatch",
+        "immutable IndexArtifact envelope key disagrees with its WholeEntity identity",
+      ));
+    }
+    entity.write_sequence
+  };
+  let value_start = bytes.len() - located.value_length;
+  bytes.copy_within(value_start.., 0);
+  bytes.truncate(located.value_length);
+  Ok(Some(LoadedIndexArtifactEntityV1 { value: bytes, write_sequence }))
 }
 
 fn load_system_file(

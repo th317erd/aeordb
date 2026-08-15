@@ -82,6 +82,9 @@ use crate::engine::v4::gc_mark_workspace::{
   DurableMarkWorkspaceClosureV1, DurableMarkWorkspaceV1, MarkWorkspaceBasisV1, MarkWorkspaceIdentityV1, MarkWorkspaceOptionsV1,
 };
 use crate::engine::v4::header_publication::HeaderPublicationIo;
+use crate::engine::v4::index_artifact::{
+  EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1, encode_immutable_index_artifact,
+};
 use crate::engine::v4::gc_state::{
   GcDirectoryRoleV1, GcPhysicalHintV1, GcStateArtifactV1, GcStateDirectoryEntryWriteV1, GcStateDirectoryWriteV1, GcStatePageWriteV1,
   RootExpiryStateV1, decode_gc_state_artifact, decode_physical_inventory_manifest_v1, decode_root_expiry_record_v1,
@@ -4004,6 +4007,269 @@ fn request_for_database(database_id: [u8; 16]) -> FirstAuthorityPublicationReque
     typed_closure_digest: digest_parts(algorithm, &[b"typed test closure"]),
     authority_identity: b"HEAD".to_vec(),
   }
+}
+
+fn index_artifact(fill: u8, generation: u64) -> EncodedImmutableIndexArtifactV1 {
+  encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+    kind: ImmutableIndexArtifactKindV1::ArtifactDirectoryNode,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    generation,
+    identity: &[fill; 16],
+    body: &[fill.wrapping_add(1); 32],
+  })
+  .unwrap()
+}
+
+#[test]
+fn immutable_index_artifact_batch_is_native_idempotent_and_reopenable() {
+  let (_directory, path, _coordinator, publisher) = create_environment("index-artifact-batch", None);
+  publisher.publish(&request()).unwrap();
+  let first = index_artifact(0x91, 1);
+  let second = index_artifact(0x92, 2);
+  let artifacts = [&first, &second];
+
+  let before = publisher.observe().unwrap();
+  let receipt = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &artifacts,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap();
+  assert!(!receipt.idempotent);
+  assert_eq!(receipt.artifacts.len(), 2);
+  assert_eq!(receipt.observation.selected.header.entry_count, before.selected.header.entry_count + 2);
+  for artifact in artifacts {
+    let locator = publisher.locator(&artifact.key).unwrap().unwrap();
+    assert_eq!(locator.type_flags, kv_tag::INDEX_ARTIFACT);
+    assert_eq!(publisher.load_index_artifact(&artifact.key, artifact.value.len() as u64).unwrap(), Some(artifact.value.clone()));
+  }
+
+  let selected_before_retry = publisher.observe().unwrap();
+  let retry = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &artifacts,
+      publication_timestamp_ms: 1_700_000_000_201,
+    })
+    .unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.observation, selected_before_retry);
+
+  drop(publisher);
+  let (_coordinator, reopened) = reopen(&path);
+  for artifact in artifacts {
+    assert_eq!(reopened.load_index_artifact(&artifact.key, artifact.value.len() as u64).unwrap(), Some(artifact.value.clone()));
+  }
+}
+
+#[test]
+fn immutable_index_artifact_batch_rejects_fabricated_identity_before_publication() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-invalid", None);
+  publisher.publish(&request()).unwrap();
+  let mut artifact = index_artifact(0xa1, 1);
+  artifact.key[0] ^= 0xff;
+  let artifacts = [&artifact];
+  let before = publisher.observe().unwrap();
+
+  let error = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &artifacts,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+  assert_eq!(error.code(), "immutable_index_prepared_mismatch");
+  assert_eq!(publisher.observe().unwrap(), before);
+  assert!(publisher.locator(&artifact.key).unwrap().is_none());
+}
+
+#[test]
+fn immutable_index_artifact_publication_refuses_authority_database_and_count_boundaries() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-boundaries", None);
+  let artifact = index_artifact(0xa6, 1);
+  let artifacts = [&artifact];
+  let missing_authority = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &artifacts,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+  assert_eq!(missing_authority.code(), "immutable_index_missing_authority");
+
+  publisher.publish(&request()).unwrap();
+  let before = publisher.observe().unwrap();
+  let wrong_database = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x32; 16],
+      artifacts: &artifacts,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+  assert_eq!(wrong_database.code(), "immutable_index_database_mismatch");
+
+  let oversized = vec![&artifact; INDEX_ARTIFACT_BATCH_COUNT_CAP + 1];
+  let wrong_count = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &oversized,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+  assert_eq!(wrong_count.code(), "immutable_index_batch_count");
+  assert_eq!(publisher.observe().unwrap(), before);
+  assert!(publisher.locator(&artifact.key).unwrap().is_none());
+}
+
+#[test]
+fn immutable_index_artifact_length_and_load_are_bounded_by_exact_identity() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-length", None);
+  publisher.publish(&request()).unwrap();
+  let artifact = index_artifact(0xa2, 1);
+  let artifacts = [&artifact];
+  publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &artifacts,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap();
+
+  assert_eq!(publisher.index_artifact_length(&artifact.key).unwrap(), Some(artifact.value.len() as u64));
+  assert_eq!(publisher.load_index_artifact(&artifact.key, artifact.value.len() as u64 + 1).unwrap(), None);
+  assert_eq!(publisher.load_index_artifact(&artifact.key, 0).unwrap_err().code(), "immutable_index_expected_length");
+  assert_eq!(
+    publisher
+      .load_index_artifact(&artifact.key, ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length() as u64 + 1,)
+      .unwrap_err()
+      .code(),
+    "immutable_index_expected_length"
+  );
+  for invalid_key in [Vec::new(), vec![0x11; 31], vec![0x11; 33]] {
+    assert_eq!(publisher.index_artifact_length(&invalid_key).unwrap_err().code(), "immutable_index_key");
+    assert_eq!(publisher.load_index_artifact(&invalid_key, 1).unwrap_err().code(), "immutable_index_key");
+  }
+}
+
+#[test]
+fn immutable_index_artifact_mixed_retry_advances_only_missing_entities() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-mixed", None);
+  publisher.publish(&request()).unwrap();
+  let existing = index_artifact(0xa3, 1);
+  let missing = index_artifact(0xa4, 2);
+  let first = [&existing];
+  let first_receipt = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &first,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap();
+  let existing_sequence = first_receipt.artifacts[0].write_sequence;
+  let before = publisher.observe().unwrap();
+  let mixed = [&existing, &missing];
+
+  let receipt = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &mixed,
+      publication_timestamp_ms: 1_700_000_000_201,
+    })
+    .unwrap();
+
+  assert!(!receipt.idempotent);
+  assert_eq!(receipt.observation.selected.header.entry_count, before.selected.header.entry_count + 1);
+  assert_eq!(receipt.observation.selected.header.write_sequence_high_water, before.selected.header.write_sequence_high_water + 1);
+  assert_eq!(receipt.artifacts[0].write_sequence, existing_sequence);
+  assert!(receipt.artifacts[0].idempotent);
+  assert_eq!(receipt.artifacts[1].write_sequence, before.selected.header.write_sequence_high_water + 1);
+  assert!(!receipt.artifacts[1].idempotent);
+}
+
+#[test]
+fn immutable_index_artifact_dependency_failures_reopen_old_and_retry_across_orphans() {
+  for phase in [DependencyFailurePhase::BeforeEntity, DependencyFailurePhase::EntityWritten, DependencyFailurePhase::EntityStaged] {
+    for entity_index in 0..2 {
+      let name = format!("index-artifact-fault-{phase:?}-{entity_index}");
+      let (_directory, path, _coordinator, publisher) = create_environment(&name, None);
+      publisher.publish(&request()).unwrap();
+      let first = index_artifact(0xb1, 1);
+      let second = index_artifact(0xb2, 2);
+      let artifacts = [&first, &second];
+      let before = publisher.observe().unwrap();
+      let mut observer = FailingDependencyObserver { phase, entity_index };
+
+      publisher
+        .publish_index_artifacts_with_observer(
+          IndexArtifactBatchPublicationRequestV1 {
+            database_id: &[0x31; 16],
+            artifacts: &artifacts,
+            publication_timestamp_ms: 1_700_000_000_200,
+          },
+          &mut observer,
+        )
+        .unwrap_err();
+      drop(publisher);
+
+      let (_coordinator, reopened) = reopen(&path);
+      assert_eq!(reopened.observe().unwrap(), before);
+      for artifact in artifacts {
+        assert!(reopened.locator(&artifact.key).unwrap().is_none());
+      }
+      let retried = reopened
+        .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          artifacts: &artifacts,
+          publication_timestamp_ms: 1_700_000_000_201,
+        })
+        .unwrap();
+      assert!(!retried.idempotent);
+      assert_eq!(retried.observation.selected.header.entry_count, before.selected.header.entry_count + 2);
+      for artifact in artifacts {
+        assert_eq!(reopened.load_index_artifact(&artifact.key, artifact.value.len() as u64).unwrap(), Some(artifact.value.clone()));
+      }
+    }
+  }
+}
+
+#[test]
+fn immutable_index_artifact_batch_rejects_empty_duplicate_and_wrong_role() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-batch-errors", None);
+  publisher.publish(&request()).unwrap();
+  let artifact = index_artifact(0xa5, 1);
+  let before = publisher.observe().unwrap();
+
+  let empty_error = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &[],
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+  assert_eq!(empty_error.code(), "immutable_index_batch_count");
+
+  let duplicate = [&artifact, &artifact];
+  let duplicate_error = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &duplicate,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+  assert_eq!(duplicate_error.code(), "immutable_index_duplicate");
+  assert_eq!(publisher.observe().unwrap(), before);
+
+  let collision = {
+    let mut kv = publisher.kv.lock().unwrap();
+    kv.insert(KVEntry { type_flags: KV_TYPE_CHUNK, hash: artifact.key.clone(), offset: 0, total_length: 1 }).unwrap();
+    let Err(error) = validated_index_artifact_locator(&publisher.file, &kv, &before.selected.header, &artifact.key) else {
+      panic!("wrong-role IndexArtifact locator was accepted");
+    };
+    error
+  };
+  assert_eq!(collision.code(), "immutable_index_identity_collision");
+  assert_eq!(publisher.observe().unwrap(), before);
 }
 
 fn captured_retirement_segment(database_id: [u8; 16]) -> CapturedRetirementSegmentV1 {
