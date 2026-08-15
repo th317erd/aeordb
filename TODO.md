@@ -905,6 +905,12 @@
                 - [x] Bind selected checkpoint roots to typed IndexOperationControl A/B publication with retirement lineage.
                 - [x] Compose the concrete recovery store and bounded evictable per-scope registry under shared memory admission.
               - [ ] Install the recovered owner in `StorageEngine` and route the existing timer, pressure, metrics, spill, startup, and shutdown seams through it while legacy queries remain authoritative.
+                - [ ] P6-2d-c3a: converge `StorageEngine` and `IndexRuntimeOwnerV1` on one shared soft-mutation hub and publish lock-free cached lifecycle/queue/mutation observability.
+                - [ ] P6-2d-c3b: construct exactly one runtime owner during create/open, resolve content-only or selected-checkpoint recovery before admission, and surface typed degraded startup without changing v3 query authority.
+                - [ ] P6-2d-c3c: add the concrete selector-last runtime batch publisher and durable producer spill boundary required by live worker/flush activation.
+                - [ ] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
+                - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.
+                - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.

@@ -6,8 +6,9 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::mem::size_of;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use thiserror::Error;
 
 use crate::engine::HashAlgorithm;
@@ -16,6 +17,7 @@ use crate::engine::namespace_mutation::NamespaceMutationAcknowledgement;
 
 use super::coverage_runtime::{
   SoftMutationAdmissionV1, SoftMutationHubErrorV1, SoftMutationHubOptionsV1, SoftMutationHubSnapshotV1, SoftMutationHubV1,
+  SoftMutationLossReasonV1,
 };
 use super::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorLifecycleV1, IndexCoordinatorOptionsV1, IndexCoordinatorSnapshotV1, IndexCoordinatorV1,
@@ -224,9 +226,10 @@ struct IndexRuntimeStateV1 {
 
 pub struct IndexRuntimeOwnerV1 {
   hash_algorithm: HashAlgorithm,
-  soft_hub: SoftMutationHubV1,
+  soft_hub: Arc<SoftMutationHubV1>,
   _soft_capacity: MemoryReservation,
   state: Mutex<IndexRuntimeStateV1>,
+  observability: ArcSwap<IndexRuntimeSnapshotV1>,
   source_retry_after_ms: u64,
   publication_retry_after_ms: u64,
 }
@@ -239,14 +242,32 @@ impl IndexRuntimeOwnerV1 {
     options: IndexRuntimeOwnerOptionsV1,
     now_ms: u64,
   ) -> Result<Self, IndexRuntimeErrorV1> {
+    let soft_hub = Arc::new(SoftMutationHubV1::new(options.soft_hub).map_err(soft_error)?);
+    Self::new_with_soft_hub(coordinator_id, hash_algorithm, memory, options, now_ms, soft_hub)
+  }
+
+  pub fn new_with_soft_hub(
+    coordinator_id: [u8; 16],
+    hash_algorithm: HashAlgorithm,
+    memory: MemoryCoordinator,
+    options: IndexRuntimeOwnerOptionsV1,
+    now_ms: u64,
+    soft_hub: Arc<SoftMutationHubV1>,
+  ) -> Result<Self, IndexRuntimeErrorV1> {
     if options.source_retry_after_ms == 0 || options.publication_retry_after_ms == 0 {
       return Err(IndexRuntimeErrorV1::Invalid("runtime retry delays must be nonzero".to_string()));
+    }
+    let soft_snapshot = soft_hub.snapshot().map_err(soft_error)?;
+    if soft_snapshot.maximum_notices != options.soft_hub.maximum_notices
+      || soft_snapshot.maximum_retained_bytes != options.soft_hub.maximum_retained_bytes
+      || soft_snapshot.maximum_notice_bytes != options.soft_hub.maximum_notice_bytes
+    {
+      return Err(IndexRuntimeErrorV1::Invalid("shared soft hub capacity does not match the runtime owner options".to_string()));
     }
     let soft_capacity = modeled_soft_capacity(options.soft_hub)?;
     let soft_capacity = memory
       .reserve(MemoryOwner::IndexDirtyBuffers, soft_capacity, AdmissionClass::Workload)
       .map_err(|error| IndexRuntimeErrorV1::Memory(error.to_string()))?;
-    let soft_hub = SoftMutationHubV1::new(options.soft_hub).map_err(soft_error)?;
     let producer = IndexProducerCoordinatorV1::new(hash_algorithm, memory.clone(), options.producer)
       .map_err(|error| producer_error(error.to_string()))?;
     let mutations = IndexCoordinatorV1::new(coordinator_id, hash_algorithm, memory.clone(), options.mutations, now_ms)
@@ -260,44 +281,70 @@ impl IndexRuntimeOwnerV1 {
       options.source_retry_after_ms,
     )
     .map_err(|error| IndexRuntimeErrorV1::Invalid(error.to_string()))?;
+    let state = IndexRuntimeStateV1 {
+      lifecycle: IndexRuntimeLifecycleV1::Recovering,
+      recovered_scopes: 0,
+      highest_checkpoint_sequence: 0,
+      degraded: None,
+      producer,
+      mutations,
+      worker,
+      service_retry_not_before_ms: 0,
+      publication_retry_not_before_ms: 0,
+      publication_in_flight: None,
+    };
+    let observability = ArcSwap::from_pointee(runtime_snapshot(&state, soft_snapshot));
     Ok(Self {
       hash_algorithm,
       soft_hub,
       _soft_capacity: soft_capacity,
-      state: Mutex::new(IndexRuntimeStateV1 {
-        lifecycle: IndexRuntimeLifecycleV1::Recovering,
-        recovered_scopes: 0,
-        highest_checkpoint_sequence: 0,
-        degraded: None,
-        producer,
-        mutations,
-        worker,
-        service_retry_not_before_ms: 0,
-        publication_retry_not_before_ms: 0,
-        publication_in_flight: None,
-      }),
+      state: Mutex::new(state),
+      observability,
       source_retry_after_ms: options.source_retry_after_ms,
       publication_retry_after_ms: options.publication_retry_after_ms,
     })
   }
 
   pub fn offer_acknowledgement(&self, acknowledgement: &NamespaceMutationAcknowledgement) -> SoftMutationAdmissionV1 {
-    self.soft_hub.offer_acknowledgement(acknowledgement)
+    let admission = self.soft_hub.offer_acknowledgement(acknowledgement);
+    match self.soft_hub.snapshot() {
+      Ok(soft_hub) => {
+        self.observability.rcu(|current| {
+          let mut next = (**current).clone();
+          next.soft_hub = soft_hub.clone();
+          Arc::new(next)
+        });
+      }
+      Err(error) => {
+        tracing::error!(%error, "Index runtime soft-hub observability failed; projecting reconciliation-required state");
+        self.observability.rcu(|current| {
+          let mut next = (**current).clone();
+          next.soft_hub.reconciliation_required = true;
+          next.soft_hub.lost_through_sequence = Some(match next.soft_hub.lost_through_sequence {
+            Some(sequence) => sequence.max(acknowledgement.publication_sequence),
+            None => acknowledgement.publication_sequence,
+          });
+          if !next.soft_hub.loss_reasons.contains(&SoftMutationLossReasonV1::QueueUnavailable) {
+            next.soft_hub.loss_reasons.push(SoftMutationLossReasonV1::QueueUnavailable);
+          }
+          next.soft_hub.dropped_notices = next.soft_hub.dropped_notices.saturating_add(1);
+          next.soft_hub.loss_epoch = next.soft_hub.loss_epoch.saturating_add(1);
+          Arc::new(next)
+        });
+        return SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::QueueUnavailable);
+      }
+    }
+    admission
   }
 
   pub fn snapshot(&self) -> Result<IndexRuntimeSnapshotV1, IndexRuntimeErrorV1> {
     let soft_hub = self.soft_hub.snapshot().map_err(soft_error)?;
     let state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    Ok(IndexRuntimeSnapshotV1 {
-      lifecycle: state.lifecycle,
-      recovered_scopes: state.recovered_scopes,
-      highest_checkpoint_sequence: state.highest_checkpoint_sequence,
-      degraded: state.degraded.clone(),
-      publication_in_flight: state.publication_in_flight.is_some(),
-      soft_hub,
-      producer: state.producer.snapshot(),
-      mutations: state.mutations.snapshot(),
-    })
+    Ok(runtime_snapshot(&state, soft_hub))
+  }
+
+  pub fn cached_snapshot(&self) -> Arc<IndexRuntimeSnapshotV1> {
+    self.observability.load_full()
   }
 
   pub fn complete_recovery(&self, decision: IndexRuntimeRecoveryDecisionV1) -> Result<(), IndexRuntimeErrorV1> {
@@ -332,6 +379,15 @@ impl IndexRuntimeOwnerV1 {
       }
       IndexRuntimeRecoveryDecisionV1::Canceled => return Err(IndexRuntimeErrorV1::Canceled),
     }
+    let snapshot = runtime_snapshot(&state, soft);
+    drop(state);
+    self.observability.store(Arc::new(snapshot));
+    Ok(())
+  }
+
+  fn refresh_cached_snapshot(&self) -> Result<(), IndexRuntimeErrorV1> {
+    let snapshot = self.snapshot()?;
+    self.observability.store(Arc::new(snapshot));
     Ok(())
   }
 
@@ -341,11 +397,14 @@ impl IndexRuntimeOwnerV1 {
     now_ms: u64,
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexProducerAdmissionV1, IndexRuntimeErrorV1> {
-    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    observe_soft_loss(&mut state, &soft);
-    require_running(&state)?;
-    state.producer.admit_or_spill(request, now_ms, spill_store).map_err(|error| producer_error(error.to_string()))
+    let result = (|| {
+      let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      observe_soft_loss(&mut state, &soft);
+      require_running(&state)?;
+      state.producer.admit_or_spill(request, now_ms, spill_store).map_err(|error| producer_error(error.to_string()))
+    })();
+    self.finish_observed(result)
   }
 
   pub fn admit_mutation_journal(
@@ -355,15 +414,18 @@ impl IndexRuntimeOwnerV1 {
     is_cancelled: &dyn Fn() -> bool,
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexRuntimeErrorV1> {
-    if is_cancelled() {
-      return Err(IndexRuntimeErrorV1::Canceled);
-    }
-    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    observe_soft_loss(&mut state, &soft);
-    require_running(&state)?;
-    admit_mutation_journal_tasks(self.hash_algorithm, &mut state.producer, journal, now_ms, is_cancelled, spill_store)
-      .map_err(journal_error)
+    let result = (|| {
+      if is_cancelled() {
+        return Err(IndexRuntimeErrorV1::Canceled);
+      }
+      let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      observe_soft_loss(&mut state, &soft);
+      require_running(&state)?;
+      admit_mutation_journal_tasks(self.hash_algorithm, &mut state.producer, journal, now_ms, is_cancelled, spill_store)
+        .map_err(journal_error)
+    })();
+    self.finish_observed(result)
   }
 
   pub fn execute_next_mutation(
@@ -371,73 +433,76 @@ impl IndexRuntimeOwnerV1 {
     request: IndexRuntimeMutationWorkRequestV1<'_, '_>,
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
-    if (request.is_cancelled)() {
-      return Err(IndexRuntimeErrorV1::Canceled);
-    }
-    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    observe_soft_loss(&mut state, &soft);
-    require_serviceable(&state)?;
-    if request.now_ms < state.service_retry_not_before_ms {
-      return Ok(IndexRuntimeWorkOutcomeV1::Deferred { retry_at_ms: state.service_retry_not_before_ms });
-    }
-    let Some(lease) =
-      state.producer.lease_next(request.now_ms, (request.is_cancelled)()).map_err(|error| producer_error(error.to_string()))?
-    else {
-      return Ok(IndexRuntimeWorkOutcomeV1::Idle);
-    };
-    let execution = {
-      let IndexRuntimeStateV1 { producer, mutations, worker, .. } = &mut *state;
-      catch_unwind(AssertUnwindSafe(|| {
-        worker.execute(
-          producer,
-          mutations,
-          IndexProducerMutationWorkRequestV1 {
-            lease: &lease,
-            journal: request.journal,
-            revision_source: request.revision_source,
-            semantic_source: request.semantic_source,
-            parser: request.parser,
-            mapper: request.mapper,
-            now_ms: request.now_ms,
-            is_cancelled: request.is_cancelled,
-          },
-          spill_store,
-        )
-      }))
-    };
-    match execution {
-      Ok(Ok(outcome)) => {
-        state.service_retry_not_before_ms = 0;
-        Ok(IndexRuntimeWorkOutcomeV1::Completed(outcome))
+    let result = (|| {
+      if (request.is_cancelled)() {
+        return Err(IndexRuntimeErrorV1::Canceled);
       }
-      Ok(Err(IndexProducerWorkerErrorV1::Cancelled)) => Err(IndexRuntimeErrorV1::Canceled),
-      Ok(Err(error)) if retryable_worker_error(&error) => {
-        let Some(retry_at_ms) = request.now_ms.checked_add(self.source_retry_after_ms) else {
-          let context = "worker retry deadline overflowed after releasing the exact task lease".to_string();
-          latch_degraded(&mut state, "worker_retry_deadline", context.clone());
-          return Err(IndexRuntimeErrorV1::Work(context));
-        };
-        state.service_retry_not_before_ms = retry_at_ms;
-        Err(IndexRuntimeErrorV1::Work(error.to_string()))
+      let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      observe_soft_loss(&mut state, &soft);
+      require_serviceable(&state)?;
+      if request.now_ms < state.service_retry_not_before_ms {
+        return Ok(IndexRuntimeWorkOutcomeV1::Deferred { retry_at_ms: state.service_retry_not_before_ms });
       }
-      Ok(Err(error)) => {
-        latch_degraded(&mut state, "worker_terminal", error.to_string());
-        Err(IndexRuntimeErrorV1::Work(error.to_string()))
+      let Some(lease) =
+        state.producer.lease_next(request.now_ms, (request.is_cancelled)()).map_err(|error| producer_error(error.to_string()))?
+      else {
+        return Ok(IndexRuntimeWorkOutcomeV1::Idle);
+      };
+      let execution = {
+        let IndexRuntimeStateV1 { producer, mutations, worker, .. } = &mut *state;
+        catch_unwind(AssertUnwindSafe(|| {
+          worker.execute(
+            producer,
+            mutations,
+            IndexProducerMutationWorkRequestV1 {
+              lease: &lease,
+              journal: request.journal,
+              revision_source: request.revision_source,
+              semantic_source: request.semantic_source,
+              parser: request.parser,
+              mapper: request.mapper,
+              now_ms: request.now_ms,
+              is_cancelled: request.is_cancelled,
+            },
+            spill_store,
+          )
+        }))
+      };
+      match execution {
+        Ok(Ok(outcome)) => {
+          state.service_retry_not_before_ms = 0;
+          Ok(IndexRuntimeWorkOutcomeV1::Completed(outcome))
+        }
+        Ok(Err(IndexProducerWorkerErrorV1::Cancelled)) => Err(IndexRuntimeErrorV1::Canceled),
+        Ok(Err(error)) if retryable_worker_error(&error) => {
+          let Some(retry_at_ms) = request.now_ms.checked_add(self.source_retry_after_ms) else {
+            let context = "worker retry deadline overflowed after releasing the exact task lease".to_string();
+            latch_degraded(&mut state, "worker_retry_deadline", context.clone());
+            return Err(IndexRuntimeErrorV1::Work(context));
+          };
+          state.service_retry_not_before_ms = retry_at_ms;
+          Err(IndexRuntimeErrorV1::Work(error.to_string()))
+        }
+        Ok(Err(error)) => {
+          latch_degraded(&mut state, "worker_terminal", error.to_string());
+          Err(IndexRuntimeErrorV1::Work(error.to_string()))
+        }
+        Err(_) => {
+          let context = if state.producer.snapshot().leased_tasks != 0 {
+            match state.producer.cancel(&lease) {
+              Ok(()) => "index producer worker panicked".to_string(),
+              Err(error) => format!("index producer worker panicked and its lease could not be released: {error}"),
+            }
+          } else {
+            "index producer worker panicked after releasing its lease".to_string()
+          };
+          latch_degraded(&mut state, "worker_panic", context.clone());
+          Err(IndexRuntimeErrorV1::Work(context))
+        }
       }
-      Err(_) => {
-        let context = if state.producer.snapshot().leased_tasks != 0 {
-          match state.producer.cancel(&lease) {
-            Ok(()) => "index producer worker panicked".to_string(),
-            Err(error) => format!("index producer worker panicked and its lease could not be released: {error}"),
-          }
-        } else {
-          "index producer worker panicked after releasing its lease".to_string()
-        };
-        latch_degraded(&mut state, "worker_panic", context.clone());
-        Err(IndexRuntimeErrorV1::Work(context))
-      }
-    }
+    })();
+    self.finish_observed(result)
   }
 
   pub fn flush(
@@ -447,166 +512,205 @@ impl IndexRuntimeOwnerV1 {
     cancelled: bool,
     publisher: &mut dyn IndexRuntimeBatchPublisherV1,
   ) -> Result<IndexRuntimeFlushOutcomeV1, IndexRuntimeErrorV1> {
-    if cancelled {
-      return Err(IndexRuntimeErrorV1::Canceled);
-    }
-    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    observe_soft_loss(&mut state, &soft);
-    require_serviceable(&state)?;
-    if let Some(attempt) = state.publication_in_flight {
-      return Err(IndexRuntimeErrorV1::PublicationInProgress { batch_id: attempt.batch_id, attempt_id: attempt.attempt_id });
-    }
-    if now_ms < state.publication_retry_not_before_ms {
-      return Ok(IndexRuntimeFlushOutcomeV1::Deferred { retry_at_ms: state.publication_retry_not_before_ms });
-    }
-    prepare_mutation_drain(&mut state)?;
-    let snapshot = state.mutations.snapshot();
-    let batch = if snapshot.frozen_records != 0 {
-      state.mutations.retry_frozen(cancelled).map_err(|error| IndexRuntimeErrorV1::Mutations(error.to_string()))?
-    } else {
-      let reason = if state.lifecycle == IndexRuntimeLifecycleV1::Draining { Some(IndexFlushReasonV1::Shutdown) } else { requested_reason };
-      let Some(batch) =
-        state.mutations.begin_flush(now_ms, reason, cancelled).map_err(|error| IndexRuntimeErrorV1::Mutations(error.to_string()))?
-      else {
-        return Ok(IndexRuntimeFlushOutcomeV1::Idle);
-      };
-      batch
-    };
-    let attempt = IndexRuntimePublicationAttemptV1 { batch_id: batch.batch_id(), attempt_id: batch.attempt_id() };
-    state.publication_in_flight = Some(attempt);
-    drop(state);
-
-    let publication = catch_unwind(AssertUnwindSafe(|| publisher.publish(&batch)));
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    match state.publication_in_flight.take() {
-      Some(current) if current == attempt => {}
-      Some(current) => {
-        state.publication_in_flight = Some(current);
-        latch_degraded(
-          &mut state,
-          "publication_attempt_mismatch",
-          "runtime publication attempt identity changed while storage I/O was active".to_string(),
-        );
-        return Err(IndexRuntimeErrorV1::Publication("publication attempt identity changed while I/O was active".to_string()));
+    let result = (|| {
+      if cancelled {
+        return Err(IndexRuntimeErrorV1::Canceled);
       }
-      None => {
-        latch_degraded(
-          &mut state,
-          "publication_attempt_missing",
-          "runtime publication attempt identity disappeared while storage I/O was active".to_string(),
-        );
-        return Err(IndexRuntimeErrorV1::Publication("publication attempt identity disappeared while I/O was active".to_string()));
+      let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      observe_soft_loss(&mut state, &soft);
+      require_serviceable(&state)?;
+      if let Some(attempt) = state.publication_in_flight {
+        return Err(IndexRuntimeErrorV1::PublicationInProgress { batch_id: attempt.batch_id, attempt_id: attempt.attempt_id });
       }
-    }
-    match publication {
-      Err(_) => {
-        latch_degraded(&mut state, "publication_panic", "index batch publisher panicked with an exact frozen batch retained".to_string());
-        Err(IndexRuntimeErrorV1::Publication("index batch publisher panicked".to_string()))
+      if now_ms < state.publication_retry_not_before_ms {
+        return Ok(IndexRuntimeFlushOutcomeV1::Deferred { retry_at_ms: state.publication_retry_not_before_ms });
       }
-      Ok(Err(error)) if !valid_publication_error(&error) => {
-        latch_degraded(
-          &mut state,
-          "publication_error_malformed",
-          "publisher returned malformed or amplified failure evidence with an exact frozen batch retained".to_string(),
-        );
-        Err(IndexRuntimeErrorV1::Publication("publisher returned malformed failure evidence".to_string()))
-      }
-      Ok(Ok(receipt)) => {
-        if !receipt_matches(&receipt, &batch, state.highest_checkpoint_sequence) {
-          latch_degraded(&mut state, "publication_receipt_mismatch", "publisher returned a receipt for different batch bytes".to_string());
-          return Err(IndexRuntimeErrorV1::Publication("publisher returned a dishonest or malformed receipt".to_string()));
-        }
-        if let Err(error) = state.mutations.complete_success(&batch) {
-          let context = format!("selected checkpoint advanced but local batch finalization failed: {error}");
-          latch_degraded(&mut state, "publication_local_finalize", context.clone());
-          return Err(IndexRuntimeErrorV1::Mutations(context));
-        }
-        state.publication_retry_not_before_ms = 0;
-        state.highest_checkpoint_sequence = state.highest_checkpoint_sequence.max(receipt.checkpoint_sequence);
-        Ok(IndexRuntimeFlushOutcomeV1::Published {
-          records: receipt.published_records,
-          publication_bytes: receipt.publication_bytes,
-          checkpoint_sequence: receipt.checkpoint_sequence,
-        })
-      }
-      Ok(Err(error)) if error.class() == IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection => {
-        if let Err(restore) = state.mutations.complete_failure(&batch, now_ms) {
-          let context = format!("{error}; batch restoration failed: {restore}");
-          latch_degraded(&mut state, "publication_restore_failed", context.clone());
-          return Err(IndexRuntimeErrorV1::Mutations(context));
-        }
-        let Some(retry_at_ms) = now_ms.checked_add(self.publication_retry_after_ms) else {
-          let context = "publication retry deadline overflowed after restoring the exact batch".to_string();
-          latch_degraded(&mut state, "publication_retry_deadline", context.clone());
-          return Err(IndexRuntimeErrorV1::Publication(context));
+      prepare_mutation_drain(&mut state)?;
+      let snapshot = state.mutations.snapshot();
+      let batch = if snapshot.frozen_records != 0 {
+        state.mutations.retry_frozen(cancelled).map_err(|error| IndexRuntimeErrorV1::Mutations(error.to_string()))?
+      } else {
+        let reason =
+          if state.lifecycle == IndexRuntimeLifecycleV1::Draining { Some(IndexFlushReasonV1::Shutdown) } else { requested_reason };
+        let Some(batch) =
+          state.mutations.begin_flush(now_ms, reason, cancelled).map_err(|error| IndexRuntimeErrorV1::Mutations(error.to_string()))?
+        else {
+          return Ok(IndexRuntimeFlushOutcomeV1::Idle);
         };
-        state.publication_retry_not_before_ms = retry_at_ms;
-        Err(IndexRuntimeErrorV1::Publication(error.to_string()))
-      }
-      Ok(Err(error)) if error.class() == IndexRuntimePublicationErrorClassV1::CancelledBeforeSelection => {
-        if let Err(restore) = state.mutations.complete_failure(&batch, now_ms) {
-          let context = format!("{error}; canceled batch restoration failed: {restore}");
-          latch_degraded(&mut state, "publication_cancel_restore_failed", context.clone());
-          return Err(IndexRuntimeErrorV1::Mutations(context));
+        batch
+      };
+      let attempt = IndexRuntimePublicationAttemptV1 { batch_id: batch.batch_id(), attempt_id: batch.attempt_id() };
+      state.publication_in_flight = Some(attempt);
+      self.observability.store(Arc::new(runtime_snapshot(&state, soft)));
+      drop(state);
+
+      let publication = catch_unwind(AssertUnwindSafe(|| publisher.publish(&batch)));
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      match state.publication_in_flight.take() {
+        Some(current) if current == attempt => {}
+        Some(current) => {
+          state.publication_in_flight = Some(current);
+          latch_degraded(
+            &mut state,
+            "publication_attempt_mismatch",
+            "runtime publication attempt identity changed while storage I/O was active".to_string(),
+          );
+          return Err(IndexRuntimeErrorV1::Publication("publication attempt identity changed while I/O was active".to_string()));
         }
-        Err(IndexRuntimeErrorV1::Canceled)
+        None => {
+          latch_degraded(
+            &mut state,
+            "publication_attempt_missing",
+            "runtime publication attempt identity disappeared while storage I/O was active".to_string(),
+          );
+          return Err(IndexRuntimeErrorV1::Publication("publication attempt identity disappeared while I/O was active".to_string()));
+        }
       }
-      Ok(Err(error)) => {
-        latch_degraded(&mut state, "publication_uncertain", error.to_string());
-        Err(IndexRuntimeErrorV1::Publication(error.to_string()))
+      match publication {
+        Err(_) => {
+          latch_degraded(&mut state, "publication_panic", "index batch publisher panicked with an exact frozen batch retained".to_string());
+          Err(IndexRuntimeErrorV1::Publication("index batch publisher panicked".to_string()))
+        }
+        Ok(Err(error)) if !valid_publication_error(&error) => {
+          latch_degraded(
+            &mut state,
+            "publication_error_malformed",
+            "publisher returned malformed or amplified failure evidence with an exact frozen batch retained".to_string(),
+          );
+          Err(IndexRuntimeErrorV1::Publication("publisher returned malformed failure evidence".to_string()))
+        }
+        Ok(Ok(receipt)) => {
+          if !receipt_matches(&receipt, &batch, state.highest_checkpoint_sequence) {
+            latch_degraded(
+              &mut state,
+              "publication_receipt_mismatch",
+              "publisher returned a receipt for different batch bytes".to_string(),
+            );
+            return Err(IndexRuntimeErrorV1::Publication("publisher returned a dishonest or malformed receipt".to_string()));
+          }
+          if let Err(error) = state.mutations.complete_success(&batch) {
+            let context = format!("selected checkpoint advanced but local batch finalization failed: {error}");
+            latch_degraded(&mut state, "publication_local_finalize", context.clone());
+            return Err(IndexRuntimeErrorV1::Mutations(context));
+          }
+          state.publication_retry_not_before_ms = 0;
+          state.highest_checkpoint_sequence = state.highest_checkpoint_sequence.max(receipt.checkpoint_sequence);
+          Ok(IndexRuntimeFlushOutcomeV1::Published {
+            records: receipt.published_records,
+            publication_bytes: receipt.publication_bytes,
+            checkpoint_sequence: receipt.checkpoint_sequence,
+          })
+        }
+        Ok(Err(error)) if error.class() == IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection => {
+          if let Err(restore) = state.mutations.complete_failure(&batch, now_ms) {
+            let context = format!("{error}; batch restoration failed: {restore}");
+            latch_degraded(&mut state, "publication_restore_failed", context.clone());
+            return Err(IndexRuntimeErrorV1::Mutations(context));
+          }
+          let Some(retry_at_ms) = now_ms.checked_add(self.publication_retry_after_ms) else {
+            let context = "publication retry deadline overflowed after restoring the exact batch".to_string();
+            latch_degraded(&mut state, "publication_retry_deadline", context.clone());
+            return Err(IndexRuntimeErrorV1::Publication(context));
+          };
+          state.publication_retry_not_before_ms = retry_at_ms;
+          Err(IndexRuntimeErrorV1::Publication(error.to_string()))
+        }
+        Ok(Err(error)) if error.class() == IndexRuntimePublicationErrorClassV1::CancelledBeforeSelection => {
+          if let Err(restore) = state.mutations.complete_failure(&batch, now_ms) {
+            let context = format!("{error}; canceled batch restoration failed: {restore}");
+            latch_degraded(&mut state, "publication_cancel_restore_failed", context.clone());
+            return Err(IndexRuntimeErrorV1::Mutations(context));
+          }
+          Err(IndexRuntimeErrorV1::Canceled)
+        }
+        Ok(Err(error)) => {
+          latch_degraded(&mut state, "publication_uncertain", error.to_string());
+          Err(IndexRuntimeErrorV1::Publication(error.to_string()))
+        }
       }
-    }
+    })();
+    self.finish_observed(result)
   }
 
   pub fn begin_draining(&self) -> Result<(), IndexRuntimeErrorV1> {
-    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    observe_soft_loss(&mut state, &soft);
-    require_running(&state)?;
-    if let Err(error) = self.soft_hub.close_admission() {
-      let context = format!("soft mutation admission could not close before drain: {error}");
-      latch_degraded(&mut state, "soft_mutation_close_failed", context.clone());
-      return Err(IndexRuntimeErrorV1::SoftHub(context));
-    }
-    state.lifecycle = IndexRuntimeLifecycleV1::Draining;
-    Ok(())
+    let result = (|| {
+      let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      observe_soft_loss(&mut state, &soft);
+      require_running(&state)?;
+      if let Err(error) = self.soft_hub.close_admission() {
+        let context = format!("soft mutation admission could not close before drain: {error}");
+        latch_degraded(&mut state, "soft_mutation_close_failed", context.clone());
+        return Err(IndexRuntimeErrorV1::SoftHub(context));
+      }
+      state.lifecycle = IndexRuntimeLifecycleV1::Draining;
+      Ok(())
+    })();
+    self.finish_observed(result)
   }
 
   pub fn finish_draining(&self) -> Result<(), IndexRuntimeErrorV1> {
-    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    observe_soft_loss(&mut state, &soft);
-    if state.lifecycle != IndexRuntimeLifecycleV1::Draining {
-      return Err(IndexRuntimeErrorV1::NotRunning { lifecycle: state.lifecycle });
-    }
-    let producer = state.producer.snapshot();
-    if soft.queued_notices != 0 || soft.reconciliation_required || producer.pending_tasks != 0 || producer.leased_tasks != 0 {
+    let result = (|| {
+      let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      observe_soft_loss(&mut state, &soft);
+      if state.lifecycle != IndexRuntimeLifecycleV1::Draining {
+        return Err(IndexRuntimeErrorV1::NotRunning { lifecycle: state.lifecycle });
+      }
+      let producer = state.producer.snapshot();
+      if soft.queued_notices != 0 || soft.reconciliation_required || producer.pending_tasks != 0 || producer.leased_tasks != 0 {
+        let mutations = state.mutations.snapshot();
+        return Err(IndexRuntimeErrorV1::DrainIncomplete {
+          pending_soft_notices: soft.queued_notices,
+          soft_reconciliation_required: soft.reconciliation_required,
+          pending_tasks: producer.pending_tasks,
+          leased_tasks: producer.leased_tasks,
+          active_records: mutations.active_records,
+          frozen_records: mutations.frozen_records,
+        });
+      }
+      prepare_mutation_drain(&mut state)?;
       let mutations = state.mutations.snapshot();
-      return Err(IndexRuntimeErrorV1::DrainIncomplete {
-        pending_soft_notices: soft.queued_notices,
-        soft_reconciliation_required: soft.reconciliation_required,
-        pending_tasks: producer.pending_tasks,
-        leased_tasks: producer.leased_tasks,
-        active_records: mutations.active_records,
-        frozen_records: mutations.frozen_records,
-      });
+      if mutations.active_records != 0 || mutations.frozen_records != 0 {
+        return Err(IndexRuntimeErrorV1::DrainIncomplete {
+          pending_soft_notices: soft.queued_notices,
+          soft_reconciliation_required: soft.reconciliation_required,
+          pending_tasks: 0,
+          leased_tasks: 0,
+          active_records: mutations.active_records,
+          frozen_records: mutations.frozen_records,
+        });
+      }
+      state.mutations.finish_draining().map_err(|error| IndexRuntimeErrorV1::Mutations(error.to_string()))?;
+      state.lifecycle = IndexRuntimeLifecycleV1::Stopped;
+      Ok(())
+    })();
+    self.finish_observed(result)
+  }
+
+  fn finish_observed<T>(&self, result: Result<T, IndexRuntimeErrorV1>) -> Result<T, IndexRuntimeErrorV1> {
+    let observation = self.refresh_cached_snapshot();
+    match result {
+      Err(error) => Err(error),
+      Ok(value) => {
+        observation?;
+        Ok(value)
+      }
     }
-    prepare_mutation_drain(&mut state)?;
-    let mutations = state.mutations.snapshot();
-    if mutations.active_records != 0 || mutations.frozen_records != 0 {
-      return Err(IndexRuntimeErrorV1::DrainIncomplete {
-        pending_soft_notices: soft.queued_notices,
-        soft_reconciliation_required: soft.reconciliation_required,
-        pending_tasks: 0,
-        leased_tasks: 0,
-        active_records: mutations.active_records,
-        frozen_records: mutations.frozen_records,
-      });
-    }
-    state.mutations.finish_draining().map_err(|error| IndexRuntimeErrorV1::Mutations(error.to_string()))?;
-    state.lifecycle = IndexRuntimeLifecycleV1::Stopped;
-    Ok(())
+  }
+}
+
+fn runtime_snapshot(state: &IndexRuntimeStateV1, soft_hub: SoftMutationHubSnapshotV1) -> IndexRuntimeSnapshotV1 {
+  IndexRuntimeSnapshotV1 {
+    lifecycle: state.lifecycle,
+    recovered_scopes: state.recovered_scopes,
+    highest_checkpoint_sequence: state.highest_checkpoint_sequence,
+    degraded: state.degraded.clone(),
+    publication_in_flight: state.publication_in_flight.is_some(),
+    soft_hub,
+    producer: state.producer.snapshot(),
+    mutations: state.mutations.snapshot(),
   }
 }
 

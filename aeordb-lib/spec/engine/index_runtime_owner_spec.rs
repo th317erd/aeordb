@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
-use aeordb::engine::v4::coverage_runtime::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationLossReasonV1};
+use aeordb::engine::v4::coverage_runtime::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
 use aeordb::engine::v4::index_coordinator::{FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexFlushReasonV1};
 use aeordb::engine::v4::index_producer_collector::{
   IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1, IndexParserOutcomeV1, IndexProducerCollectorOptionsV1,
@@ -55,6 +55,36 @@ fn options() -> IndexRuntimeOwnerOptionsV1 {
 
 fn owner() -> IndexRuntimeOwnerV1 {
   IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, memory(), options(), 1).unwrap()
+}
+
+#[test]
+fn runtime_owner_and_storage_boundary_share_exactly_one_soft_hub() {
+  let shared_hub = Arc::new(SoftMutationHubV1::new(options().soft_hub).unwrap());
+  let owner = IndexRuntimeOwnerV1::new_with_soft_hub([0x44; 16], ALGORITHM, memory(), options(), 1, Arc::clone(&shared_hub)).unwrap();
+
+  assert_eq!(shared_hub.offer_acknowledgement(&acknowledgement("/from-engine.json".to_string(), 7)), SoftMutationAdmissionV1::Accepted);
+  assert_eq!(owner.snapshot().unwrap().soft_hub.queued_notices, 1);
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  let recovered = owner.cached_snapshot();
+  assert_eq!(recovered.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(recovered.soft_hub.queued_notices, 1);
+
+  assert_eq!(owner.offer_acknowledgement(&acknowledgement("/from-owner.json".to_string(), 8)), SoftMutationAdmissionV1::Accepted);
+  assert_eq!(owner.cached_snapshot().soft_hub.queued_notices, 2);
+  let snapshot = shared_hub.snapshot().unwrap();
+  assert_eq!(snapshot.queued_notices, 2);
+  assert_eq!(snapshot.latest_queued_publication_sequence, Some(8));
+}
+
+#[test]
+fn shared_soft_hub_capacity_mismatch_is_rejected_without_memory_reservation() {
+  let coordinator = memory();
+  let mismatched = Arc::new(SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(31, 256 * 1_024, 64 * 1_024).unwrap()).unwrap());
+  assert!(matches!(
+    IndexRuntimeOwnerV1::new_with_soft_hub([0x44; 16], ALGORITHM, coordinator.clone(), options(), 1, mismatched),
+    Err(IndexRuntimeErrorV1::Invalid(_))
+  ));
+  assert_eq!(reserved(&coordinator, MemoryOwner::IndexDirtyBuffers), 0);
 }
 
 fn reserved(memory: &MemoryCoordinator, owner: MemoryOwner) -> u64 {
@@ -357,6 +387,7 @@ fn recovery_is_a_fail_closed_gate_for_task_admission() {
 
   owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 2, highest_checkpoint_sequence: 9 }).unwrap();
   owner.admit_task(task(&root_before, &root_after, &semantic, &journal), 3, &mut Spill).unwrap();
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
   let snapshot = owner.snapshot().unwrap();
   assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
   assert_eq!(snapshot.producer.pending_tasks, 1);
@@ -545,6 +576,10 @@ fn publication_io_does_not_hold_runtime_state_or_allow_a_second_publisher() {
     publishing_owner.flush(102, Some(IndexFlushReasonV1::Explicit), false, &mut publisher)
   });
   entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+  let cached_during = owner.cached_snapshot();
+  assert!(cached_during.publication_in_flight);
+  assert_eq!(cached_during.mutations.active_records, 0);
+  assert_eq!(cached_during.mutations.frozen_records, 4);
 
   let (snapshot_tx, snapshot_rx) = mpsc::channel();
   let snapshot_owner = Arc::clone(&owner);
@@ -562,6 +597,9 @@ fn publication_io_does_not_hold_runtime_state_or_allow_a_second_publisher() {
 
   release_tx.send(()).unwrap();
   assert!(matches!(publisher_thread.join().unwrap().unwrap(), IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }));
+  let cached_after = owner.cached_snapshot();
+  assert!(!cached_after.publication_in_flight);
+  assert_eq!(cached_after.mutations.frozen_records, 0);
   snapshot_thread.join().unwrap();
 }
 
@@ -587,7 +625,9 @@ fn content_only_recovery_can_start_and_stop_without_fabricating_a_checkpoint() {
   assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
   assert_eq!(snapshot.highest_checkpoint_sequence, 0);
   content_only.begin_draining().unwrap();
+  assert_eq!(content_only.cached_snapshot().lifecycle, IndexRuntimeLifecycleV1::Draining);
   content_only.finish_draining().unwrap();
+  assert_eq!(content_only.cached_snapshot().lifecycle, IndexRuntimeLifecycleV1::Stopped);
   assert_eq!(content_only.snapshot().unwrap().lifecycle, IndexRuntimeLifecycleV1::Stopped);
 
   let invalid = owner();
@@ -652,6 +692,22 @@ struct FailingSemanticSource {
 
 struct PanickingSemanticSource;
 
+struct BlockingSemanticSource {
+  entered: mpsc::Sender<()>,
+  release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl IndexSemanticScopeSourceV1 for BlockingSemanticSource {
+  fn resolve_scopes(
+    &self,
+    _request: IndexSemanticScopeReadRequestV1<'_>,
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    self.entered.send(()).unwrap();
+    self.release.lock().unwrap().recv().unwrap();
+    Err(IndexSemanticScopeReadErrorV1::retryable("store_busy", "injected blocked semantic read"))
+  }
+}
+
 impl IndexSemanticScopeSourceV1 for PanickingSemanticSource {
   fn resolve_scopes(
     &self,
@@ -659,6 +715,48 @@ impl IndexSemanticScopeSourceV1 for PanickingSemanticSource {
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
     panic!("injected semantic source panic")
   }
+}
+
+#[test]
+fn cached_observability_does_not_wait_for_worker_owned_runtime_state() {
+  let owner = Arc::new(owner());
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let encoded = encoded_journal("/doc.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  owner.admit_mutation_journal(&journal, 100, &|| false, &mut Spill).unwrap();
+  let (entered_tx, entered_rx) = mpsc::channel();
+  let (release_tx, release_rx) = mpsc::channel();
+  let semantics = Arc::new(BlockingSemanticSource { entered: entered_tx, release: Mutex::new(release_rx) });
+  let worker_owner = Arc::clone(&owner);
+  let worker_semantics = Arc::clone(&semantics);
+  let worker = std::thread::spawn(move || {
+    let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+    let revisions = revision_source(&encoded);
+    worker_owner.execute_next_mutation(
+      IndexRuntimeMutationWorkRequestV1 {
+        journal: &journal,
+        revision_source: &revisions,
+        semantic_source: worker_semantics.as_ref(),
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 101,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+  });
+  entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+  let (snapshot_tx, snapshot_rx) = mpsc::channel();
+  let snapshot_owner = Arc::clone(&owner);
+  let snapshot = std::thread::spawn(move || snapshot_tx.send(snapshot_owner.cached_snapshot()).unwrap());
+  let cached = snapshot_rx.recv_timeout(Duration::from_secs(1)).expect("cached runtime observability blocked behind worker state");
+  assert_eq!(cached.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(cached.producer.pending_tasks, 1);
+
+  release_tx.send(()).unwrap();
+  assert!(worker.join().unwrap().is_ok());
+  snapshot.join().unwrap();
 }
 
 impl IndexSemanticScopeSourceV1 for FailingSemanticSource {
