@@ -16,10 +16,11 @@ use super::first_authority::{
 use super::gc_retirement::{RetirementJournalOwnerErrorV1, RetirementJournalOwnerV1};
 use super::header_publication::DatabaseHeaderObservationV4;
 use super::migration_control::{
-  MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED, MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
-  MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1, MigrationLeaseControlV1, MigrationLeaseStateV1, MigrationPhaseV1,
-  MigrationProgressBodyV1, MigrationProgressControlV1, MigrationProgressStateV1, decode_migration_lease_control,
-  decode_migration_progress_control, encode_migration_lease_control, encode_migration_progress_control,
+  MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED, MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE,
+  MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1,
+  MigrationLeaseControlV1, MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressBodyV1, MigrationProgressControlV1,
+  MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control, encode_migration_lease_control,
+  encode_migration_progress_control,
 };
 use super::migration_preflight::MigrationPreflightPermitV1;
 use super::reader::FormatError;
@@ -74,15 +75,30 @@ pub struct MigrationProgressTransitionRequestV1 {
   pub flags: u32,
   pub destination_header_sequence: u64,
   pub copied_through_write_sequence: u64,
-  pub captured_through_publication_sequence: u64,
   pub reconciled_through_publication_sequence: u64,
   pub namespace_count: u64,
   pub entity_count: u64,
   pub copied_bytes: u64,
   pub updated_at_ms: i64,
-  pub checkpoint_artifact: Vec<u8>,
   pub legacy_root_map_control_payload_hash: Vec<u8>,
   pub last_error_evidence: Vec<u8>,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationCaptureCheckpointPublicationRequestV1 {
+  pub captured_through_publication_sequence: u64,
+  pub checkpoint_artifact: Vec<u8>,
+  pub updated_at_ms: i64,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationFullReconciliationLatchRequestV1 {
+  pub last_error_evidence: Vec<u8>,
+  pub updated_at_ms: i64,
   pub publication_timestamp_ms: u64,
   pub monotonic_now_ms: u64,
 }
@@ -373,15 +389,8 @@ impl MigrationStateOwnerV1 {
     request: MigrationProgressTransitionRequestV1,
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
-    if request.updated_at_ms < 0 {
-      return Err(MigrationStateOwnerErrorV1::invalid("migration_progress_time", "migration progress update time must be nonnegative"));
-    }
-    let publication_time_ms = validate_publication_clock(request.publication_timestamp_ms, request.monotonic_now_ms, i64::MAX as u64)?;
-    validate_transition_publication_time(publication_time_ms, request.updated_at_ms)?;
-    validate_destination_authority(&self.publisher, &self.permit)?;
-    let (loaded_lease, lease) = require_lease(&self.publisher, &self.permit)?;
-    let (loaded_progress, progress) = require_progress(&self.publisher, &self.permit)?;
-    validate_owned_held_controls(self, &lease, &progress, publication_time_ms)?;
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
 
     let body = MigrationProgressBodyV1 {
       database_id: progress.body.database_id,
@@ -395,14 +404,14 @@ impl MigrationStateOwnerV1 {
       source_header_sequence: progress.body.source_header_sequence,
       destination_header_sequence: request.destination_header_sequence,
       copied_through_write_sequence: request.copied_through_write_sequence,
-      captured_through_publication_sequence: request.captured_through_publication_sequence,
+      captured_through_publication_sequence: progress.body.captured_through_publication_sequence,
       reconciled_through_publication_sequence: request.reconciled_through_publication_sequence,
       namespace_count: request.namespace_count,
       entity_count: request.entity_count,
       copied_bytes: request.copied_bytes,
       updated_at_ms: request.updated_at_ms,
       source_capture_head: progress.body.source_capture_head.clone(),
-      checkpoint_artifact: request.checkpoint_artifact,
+      checkpoint_artifact: progress.body.checkpoint_artifact.clone(),
       legacy_root_map_control_payload_hash: request.legacy_root_map_control_payload_hash,
       effective_config_fingerprint: progress.body.effective_config_fingerprint.clone(),
       system_family_registry_fingerprint: progress.body.system_family_registry_fingerprint.clone(),
@@ -417,18 +426,61 @@ impl MigrationStateOwnerV1 {
         idempotent: true,
       });
     }
-    self.publish_progress_body(
-      MigrationProgressPublicationContextV1 {
-        loaded_lease,
-        loaded_progress,
-        publication_timestamp_ms: request.publication_timestamp_ms,
-        monotonic_now_ms: request.monotonic_now_ms,
-      },
-      &progress,
-      body,
-      0,
-      retirement_owner,
-    )
+    self.publish_progress_body(context, &progress, body, 0, false, retirement_owner)
+  }
+
+  pub fn publish_capture_checkpoint(
+    &self,
+    request: MigrationCaptureCheckpointPublicationRequestV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    let hash_width = self.permit.hash_algorithm().hash_length();
+    if request.checkpoint_artifact.len() != hash_width || all_zero(&request.checkpoint_artifact) {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_capture_checkpoint_identity",
+        "selected capture checkpoint identity must be a nonzero database-profile hash",
+      ));
+    }
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if progress.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE != 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_capture_already_inexact",
+        "optional capture checkpoints cannot advance after full reconciliation became mandatory",
+      ));
+    }
+    let mut body = progress.body.clone();
+    body.captured_through_publication_sequence = request.captured_through_publication_sequence;
+    body.checkpoint_artifact = request.checkpoint_artifact;
+    body.updated_at_ms = request.updated_at_ms;
+    if body == progress.body {
+      return Ok(progress_receipt(&progress, true));
+    }
+    self.publish_progress_body(context, &progress, body, 0, true, retirement_owner)
+  }
+
+  pub fn latch_needs_full_reconciliation(
+    &self,
+    request: MigrationFullReconciliationLatchRequestV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    let hash_width = self.permit.hash_algorithm().hash_length();
+    if request.last_error_evidence.len() != hash_width || all_zero(&request.last_error_evidence) {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_capture_failure_evidence",
+        "full-reconciliation latching requires a nonzero database-profile evidence hash",
+      ));
+    }
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if progress.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE != 0 {
+      return Ok(progress_receipt(&progress, true));
+    }
+    let mut body = progress.body.clone();
+    body.flags |= MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE;
+    body.last_error_evidence = request.last_error_evidence;
+    body.updated_at_ms = request.updated_at_ms;
+    self.publish_progress_body(context, &progress, body, MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, true, retirement_owner)
   }
 
   pub(crate) fn claim_source_gc_suspension(
@@ -465,6 +517,7 @@ impl MigrationStateOwnerV1 {
       &progress,
       body,
       MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+      false,
       retirement_owner,
     )
   }
@@ -484,15 +537,7 @@ impl MigrationStateOwnerV1 {
     publication_timestamp_ms: u64,
     monotonic_now_ms: u64,
   ) -> Result<(LoadedMutableSystemControlV1, LoadedMutableSystemControlV1, MigrationProgressControlV1), MigrationStateOwnerErrorV1> {
-    if suspended_at_ms < 0 {
-      return Err(MigrationStateOwnerErrorV1::invalid("migration_source_gc_time", "source GC suspension time must be nonnegative"));
-    }
-    let publication_time_ms = validate_publication_clock(publication_timestamp_ms, monotonic_now_ms, i64::MAX as u64)?;
-    validate_transition_publication_time(publication_time_ms, suspended_at_ms)?;
-    validate_destination_authority(&self.publisher, &self.permit)?;
-    let (loaded_lease, lease) = require_lease(&self.publisher, &self.permit)?;
-    let (loaded_progress, progress) = require_progress(&self.publisher, &self.permit)?;
-    validate_owned_held_controls(self, &lease, &progress, publication_time_ms)?;
+    let (context, progress) = self.prepare_progress_publication(suspended_at_ms, publication_timestamp_ms, monotonic_now_ms)?;
     if progress.body.flags & MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED == 0
       && (progress.body.phase != MigrationPhaseV1::Preflight
         || !matches!(progress.body.state, MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running))
@@ -502,7 +547,25 @@ impl MigrationStateOwnerV1 {
         "source GC suspension must be established during active preflight before copy begins",
       ));
     }
-    Ok((loaded_lease, loaded_progress, progress))
+    Ok((context.loaded_lease, context.loaded_progress, progress))
+  }
+
+  fn prepare_progress_publication(
+    &self,
+    updated_at_ms: i64,
+    publication_timestamp_ms: u64,
+    monotonic_now_ms: u64,
+  ) -> Result<(MigrationProgressPublicationContextV1, MigrationProgressControlV1), MigrationStateOwnerErrorV1> {
+    if updated_at_ms < 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid("migration_progress_time", "migration progress update time must be nonnegative"));
+    }
+    let publication_time_ms = validate_publication_clock(publication_timestamp_ms, monotonic_now_ms, i64::MAX as u64)?;
+    validate_transition_publication_time(publication_time_ms, updated_at_ms)?;
+    validate_destination_authority(&self.publisher, &self.permit)?;
+    let (loaded_lease, lease) = require_lease(&self.publisher, &self.permit)?;
+    let (loaded_progress, progress) = require_progress(&self.publisher, &self.permit)?;
+    validate_owned_held_controls(self, &lease, &progress, publication_time_ms)?;
+    Ok((MigrationProgressPublicationContextV1 { loaded_lease, loaded_progress, publication_timestamp_ms, monotonic_now_ms }, progress))
   }
 
   fn publish_progress_body(
@@ -511,9 +574,10 @@ impl MigrationStateOwnerV1 {
     progress: &MigrationProgressControlV1,
     body: MigrationProgressBodyV1,
     authorized_new_flags: u32,
+    allow_same_state_metadata_update: bool,
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
-    validate_progress_transition(&progress.body, &body, authorized_new_flags)?;
+    validate_progress_transition(&progress.body, &body, authorized_new_flags, allow_same_state_metadata_update)?;
     let sequence = progress.sequence.checked_add(1).ok_or_else(|| {
       MigrationStateOwnerErrorV1::invalid("migration_progress_sequence_exhausted", "migration progress sequence is exhausted")
     })?;
@@ -1307,6 +1371,7 @@ fn validate_progress_transition(
   current: &MigrationProgressBodyV1,
   target: &MigrationProgressBodyV1,
   authorized_new_flags: u32,
+  allow_same_state_metadata_update: bool,
 ) -> Result<(), MigrationStateOwnerErrorV1> {
   let current_phase = current.phase as u16;
   let target_phase = target.phase as u16;
@@ -1317,7 +1382,9 @@ fn validate_progress_transition(
     ));
   }
   if target_phase == current_phase {
-    validate_same_phase_state_transition(current.state, target.state)?;
+    if !(allow_same_state_metadata_update && target.state == current.state) {
+      validate_same_phase_state_transition(current.state, target.state)?;
+    }
   } else if current.state != MigrationProgressStateV1::Complete || target.state != MigrationProgressStateV1::Pending {
     return Err(MigrationStateOwnerErrorV1::invalid(
       "migration_progress_phase_boundary",
@@ -1390,6 +1457,16 @@ fn validate_progress_transition(
     ));
   }
   Ok(())
+}
+
+fn progress_receipt(progress: &MigrationProgressControlV1, idempotent: bool) -> MigrationProgressTransitionReceiptV1 {
+  MigrationProgressTransitionReceiptV1 {
+    control_sequence: progress.sequence,
+    fencing_token: progress.body.fencing_token,
+    phase: progress.body.phase,
+    state: progress.body.state,
+    idempotent,
+  }
 }
 
 fn validate_same_phase_state_transition(

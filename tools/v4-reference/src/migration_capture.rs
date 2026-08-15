@@ -36,23 +36,31 @@ pub struct MigrationCaptureFixtureCase {
 pub fn fixture_cases() -> Vec<MigrationCaptureFixtureCase> {
   [HashProfile::Blake3_256, HashProfile::Sha512]
     .into_iter()
-    .map(|profile| {
-      let bytes = build_manifest(profile);
-      let mut identity_preimage = Vec::with_capacity(IDENTITY_DOMAIN.len() + bytes.len());
-      identity_preimage.extend_from_slice(IDENTITY_DOMAIN);
-      identity_preimage.extend_from_slice(&bytes);
-      MigrationCaptureFixtureCase {
-        id: match profile {
-          HashProfile::Blake3_256 => "amcm-blake3-256-capturing-valid",
-          HashProfile::Sha512 => "amcm-sha512-capturing-valid",
-        },
-        format: MigrationCaptureFormat::ManifestV1,
-        profile,
-        expected: "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
-        relation: Some("selects:external-migration-capture-segment-chain"),
-        canonical_key: Some(hex::encode(profile.digest(&identity_preimage))),
-        bytes,
-      }
+    .flat_map(|profile| {
+      [false, true].map(|initial| {
+        let bytes = build_manifest(profile, initial);
+        let mut identity_preimage = Vec::with_capacity(IDENTITY_DOMAIN.len() + bytes.len());
+        identity_preimage.extend_from_slice(IDENTITY_DOMAIN);
+        identity_preimage.extend_from_slice(&bytes);
+        MigrationCaptureFixtureCase {
+          id: match (profile, initial) {
+            (HashProfile::Blake3_256, false) => "amcm-blake3-256-capturing-valid",
+            (HashProfile::Sha512, false) => "amcm-sha512-capturing-valid",
+            (HashProfile::Blake3_256, true) => "amcm-blake3-256-initial-empty-valid",
+            (HashProfile::Sha512, true) => "amcm-sha512-initial-empty-valid",
+          },
+          format: MigrationCaptureFormat::ManifestV1,
+          profile,
+          expected: if initial {
+            "migration:capture:state=capturing:checkpoint=1:segments=0:captured=0:observed=0"
+          } else {
+            "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110"
+          },
+          relation: Some("selects:external-migration-capture-segment-chain"),
+          canonical_key: Some(hex::encode(profile.digest(&identity_preimage))),
+          bytes,
+        }
+      })
     })
     .collect()
 }
@@ -77,7 +85,7 @@ pub fn annotation_lines(profile: HashProfile, bytes: &[u8]) -> Vec<String> {
   ]
 }
 
-fn build_manifest(profile: HashProfile) -> Vec<u8> {
+fn build_manifest(profile: HashProfile, initial: bool) -> Vec<u8> {
   let expected = manifest_length(profile);
   let mut bytes = Vec::with_capacity(expected);
   bytes.extend_from_slice(b"AMCM");
@@ -92,17 +100,25 @@ fn build_manifest(profile: HashProfile) -> Vec<u8> {
   append_sequence(&mut bytes, 0x20, 16);
   append_sequence(&mut bytes, 0x30, 16);
   append_sequence(&mut bytes, 0x40, 16);
-  for value in [9, 2, 3] {
+  for value in [9, 2, if initial { 1 } else { 3 }] {
     put_u64_vec(&mut bytes, value);
   }
   put_i64_vec(&mut bytes, 1_700_000_000_000);
   put_i64_vec(&mut bytes, 1_700_000_001_000);
-  for value in [110, 110, 4, 5, 2, 2_048] {
+  let closure = if initial { [0, 0, 0, 0, 0, 0] } else { [110, 110, 4, 5, 2, 2_048] };
+  for value in closure {
     put_u64_vec(&mut bytes, value);
   }
-  for first in [0x50, 0x60, 0x70, 0x80, 0x90, 0xa0] {
-    append_sequence(&mut bytes, first, profile.width());
+  append_sequence(&mut bytes, 0x50, profile.width());
+  append_sequence(&mut bytes, if initial { 0x50 } else { 0x60 }, profile.width());
+  if initial {
+    bytes.resize(bytes.len() + 2 * profile.width(), 0);
+  } else {
+    append_sequence(&mut bytes, 0x70, profile.width());
+    append_sequence(&mut bytes, 0x80, profile.width());
   }
+  append_sequence(&mut bytes, 0x90, profile.width());
+  append_sequence(&mut bytes, 0xa0, profile.width());
   bytes.resize(bytes.len() + profile.width(), 0);
   append_sequence(&mut bytes, 0xb0, SOURCE_AUTHORITY_DIGEST_LENGTH);
   bytes.resize(expected - CRC_LENGTH, 0);
@@ -141,26 +157,56 @@ fn decode_manifest(profile: HashProfile, bytes: &[u8]) -> Result<String, &'stati
   if read_i64(bytes, 112)? < 0 || read_i64(bytes, 120)? < read_i64(bytes, 112)? {
     return Err("time");
   }
+  let checkpoint = read_u64(bytes, 104)?;
   let captured = read_u64(bytes, 128)?;
   let observed = read_u64(bytes, 136)?;
   let first = read_u64(bytes, 144)?;
   let last = read_u64(bytes, 152)?;
   let count = read_u64(bytes, 160)?;
-  if captured == 0 || captured != observed || first == 0 || last.checked_sub(first).and_then(|span| span.checked_add(1)) != Some(count) {
+  let stored_bytes = read_u64(bytes, 168)?;
+  let source_root_before = &bytes[FIXED_PREFIX_LENGTH..FIXED_PREFIX_LENGTH + profile.width()];
+  let source_root_after = &bytes[FIXED_PREFIX_LENGTH + profile.width()..FIXED_PREFIX_LENGTH + 2 * profile.width()];
+  let segment_head = &bytes[FIXED_PREFIX_LENGTH + 2 * profile.width()..FIXED_PREFIX_LENGTH + 3 * profile.width()];
+  let previous_manifest = &bytes[FIXED_PREFIX_LENGTH + 3 * profile.width()..FIXED_PREFIX_LENGTH + 4 * profile.width()];
+  let config = &bytes[FIXED_PREFIX_LENGTH + 4 * profile.width()..FIXED_PREFIX_LENGTH + 5 * profile.width()];
+  let registry = &bytes[FIXED_PREFIX_LENGTH + 5 * profile.width()..FIXED_PREFIX_LENGTH + 6 * profile.width()];
+  let failure = &bytes[FIXED_PREFIX_LENGTH + 6 * profile.width()..FIXED_PREFIX_LENGTH + 7 * profile.width()];
+  let empty_segments = count == 0
+    && captured == 0
+    && observed == 0
+    && first == 0
+    && last == 0
+    && stored_bytes == 0
+    && all_zero(segment_head)
+    && source_root_before == source_root_after;
+  let populated_segments = count != 0
+    && captured != 0
+    && captured == observed
+    && first != 0
+    && last.checked_sub(first).and_then(|span| span.checked_add(1)) == Some(count)
+    && stored_bytes >= count
+    && !all_zero(segment_head);
+  if !(empty_segments || populated_segments)
+    || (checkpoint == 1) != all_zero(previous_manifest)
+    || all_zero(source_root_before)
+    || all_zero(source_root_after)
+    || all_zero(config)
+    || all_zero(registry)
+    || !all_zero(failure)
+  {
     return Err("sequence_or_segment_closure");
   }
   let hashes_end = FIXED_PREFIX_LENGTH + HASH_COUNT * profile.width();
-  if bytes[FIXED_PREFIX_LENGTH..hashes_end - profile.width()].chunks_exact(profile.width()).any(|hash| hash.iter().all(|byte| *byte == 0))
-    || bytes[hashes_end - profile.width()..hashes_end].iter().any(|byte| *byte != 0)
-    || bytes[hashes_end..hashes_end + SOURCE_AUTHORITY_DIGEST_LENGTH].iter().all(|byte| *byte == 0)
+  if bytes[hashes_end..hashes_end + SOURCE_AUTHORITY_DIGEST_LENGTH].iter().all(|byte| *byte == 0)
     || bytes[hashes_end + SOURCE_AUTHORITY_DIGEST_LENGTH..expected - CRC_LENGTH].iter().any(|byte| *byte != 0)
   {
     return Err("hash_or_reserve_closure");
   }
-  Ok(format!(
-    "migration:capture:state=capturing:checkpoint={}:segments={count}:captured={captured}:observed={observed}",
-    read_u64(bytes, 104)?
-  ))
+  Ok(format!("migration:capture:state=capturing:checkpoint={}:segments={count}:captured={captured}:observed={observed}", checkpoint))
+}
+
+fn all_zero(bytes: &[u8]) -> bool {
+  bytes.iter().all(|byte| *byte == 0)
 }
 
 fn manifest_length(profile: HashProfile) -> usize {

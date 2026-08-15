@@ -167,7 +167,7 @@ impl MigrationCaptureWorkspaceBasisV1 {
     system_family_registry_fingerprint: Vec<u8>,
     source_authority_digest: [u8; 32],
   ) -> Result<Self, MigrationCaptureWorkspaceErrorV1> {
-    if created_at_ms < 0 || starting_publication_sequence == 0 || all_zero(&source_authority_digest) {
+    if created_at_ms < 0 || all_zero(&source_authority_digest) {
       return Err(MigrationCaptureWorkspaceErrorV1::Identity("capture basis time, sequence, or source authority is invalid"));
     }
     Ok(Self {

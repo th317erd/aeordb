@@ -1046,7 +1046,7 @@ fn validate_migration_progress(profile: HashProfile, body: &[u8]) -> Result<Vec<
     || read_u16(body, 74)? != 4
     || !(1..=8).contains(&read_u16(body, 76)?)
     || !(1..=6).contains(&read_u16(body, 78)?)
-    || read_u32(body, 80)? & !0x0007 != 0
+    || read_u32(body, 80)? & !0x000f != 0
     || read_i64(body, 148)? < 0
     || any_zero_hash(body, 156 + 3 * h, h)
     || any_zero_hash(body, 156 + 4 * h, h)
@@ -1575,6 +1575,19 @@ mod tests {
         assert!(path.ends_with(if case.relation == Some("slot:immutable-i") { "/i.ctrl" } else { "/a.ctrl" }));
       }
     }
+  }
+
+  #[test]
+  fn migration_progress_accepts_the_full_reconcile_latch_and_keeps_higher_bits_reserved() {
+    let profile = HashProfile::Blake3_256;
+    let mut body = build_migration_progress(profile);
+    body[80..84].copy_from_slice(&0x000fu32.to_le_bytes());
+    let accepted = build_control(ControlKind::MigrationProgress, 7, &body);
+    assert!(decode_control(profile, &accepted).is_ok());
+
+    body[80..84].copy_from_slice(&0x0010u32.to_le_bytes());
+    let rejected = build_control(ControlKind::MigrationProgress, 7, &body);
+    assert_eq!(decode_control(profile, &rejected).err(), Some("migration_progress_fields"));
   }
 
   #[test]

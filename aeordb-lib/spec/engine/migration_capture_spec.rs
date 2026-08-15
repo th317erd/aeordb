@@ -73,6 +73,26 @@ fn manifest_codec_covers_the_widest_hash_profile_without_a_growing_descriptor_ta
 }
 
 #[test]
+fn empty_initial_checkpoint_accepts_the_boot_local_zero_publication_sentinel() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let mut request = manifest(algorithm);
+  request.checkpoint_sequence = 1;
+  request.captured_through_publication_sequence = 0;
+  request.observed_through_publication_sequence = 0;
+  request.first_segment_ordinal = 0;
+  request.last_segment_ordinal = 0;
+  request.segment_count = 0;
+  request.segment_stored_bytes = 0;
+  request.source_root_after.clone_from(&request.source_root_before);
+  request.segment_head.fill(0);
+  request.previous_manifest.fill(0);
+
+  let expected = fixture("amcm-blake3-256-initial-empty-valid.bin");
+  assert_eq!(encode_migration_capture_manifest(&request, algorithm).unwrap(), expected);
+  assert_eq!(decode_migration_capture_manifest(&expected, algorithm).unwrap(), request);
+}
+
+#[test]
 fn manifest_requires_exact_identity_time_sequence_segment_and_hash_closure() {
   let algorithm = HashAlgorithm::Blake3_256;
   let mut request = manifest(algorithm);

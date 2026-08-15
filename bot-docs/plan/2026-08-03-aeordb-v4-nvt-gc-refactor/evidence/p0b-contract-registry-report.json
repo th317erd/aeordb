@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p3c-2b1-pre-activation-format-extension",
+  "stage": "p3c-2b2a-pre-activation-capture-authority-extension",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "6bf823a9f91f440187f18811479a3dede28d28b5994cb41f14e48276f9c8c774",
-  "fixture_manifest_sha256": "d80baefc9bbeeadb809febd84ab73788fe99102b6bc34f93797869922d1b5545",
+  "source_sha256": "ad76c02bf0442331cff19c7885b9fa1813912457f0f096b40bcf41ec6da28a28",
+  "fixture_manifest_sha256": "c6aa63271c1725823cc00b7873c6f07b396d31f7df5fabc93748e5a174f75d49",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 22,
-    "fixtures": 438,
+    "fixtures": 440,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,
@@ -55,7 +55,7 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 148,
+    "tests_passed": 149,
     "reviewer_status": "pending-owner-review-before-production-writer"
   }
 }

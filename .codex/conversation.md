@@ -15806,3 +15806,29 @@ assign explicit file ownership, and update the progress ledgers.
 No Cargo tests or release builds were run during formalization because no
 production code changed and the named campaign test targets are intentionally
 future red/green obligations. No database was opened or modified.
+
+---
+
+# 2026-08-13 Ratified Migration-Capture Clarification
+
+The owner ratified the remaining implementation recommendations and policy
+decisions. This authorizes the disconnected implementation campaign, not
+deployment, production-database mutation, cutover, or first-v4-write
+acceptance.
+
+Before a v4 writer exists, P3c-2b2 corrects two persistent capture details:
+
+1. `MigrationProgress.flags` bit 3 is `needs_full_reconcile`. Bits 4 through 31
+   remain reserved and fail closed. Only the fenced migration capture owner may
+   add bit 3; ordinary progress transitions cannot forge or clear it.
+2. An initial empty `MigrationCaptureManifestV1` may use publication sequence
+   zero as the exact boot-local sentinel meaning that no post-registration
+   source publication has yet been captured. Any nonempty segment chain still
+   begins at sequence one or later and remains strictly contiguous.
+
+The selected AMPR remains the small durable authority for the capture
+watermark and checkpoint identity. External AMCM/AINX workspace state is bulk
+evidence only. Optional capture failure never changes an acknowledged source
+write; it latches full reconciliation, stops optional capture, and requires an
+exact final source-authority/SystemFamily diff before the shadow may claim
+completeness.

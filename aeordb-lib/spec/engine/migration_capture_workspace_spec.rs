@@ -200,6 +200,40 @@ fn populated_writer(algorithm: HashAlgorithm, root: &Path) -> (PathBuf, MemoryCo
 }
 
 #[test]
+fn workspace_can_select_an_empty_initial_checkpoint_at_publication_sequence_zero() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory_coordinator();
+  let basis = MigrationCaptureWorkspaceBasisV1::new(
+    1_700_000_000_000,
+    0,
+    hash(algorithm, 0x61),
+    hash(algorithm, 0x90),
+    hash(algorithm, 0xa0),
+    sequence::<32>(0xb0),
+  )
+  .unwrap();
+  let mut writer = DurableMigrationCaptureWorkspaceV1::create(
+    &database,
+    identity(algorithm),
+    basis,
+    options(&scratch, 1024 * 1024),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  let request = manifest(&writer, algorithm, 1, vec![0; algorithm.hash_length()]);
+
+  let checkpoint = writer.publish_checkpoint(&request).unwrap();
+  assert_eq!(checkpoint.checkpoint_sequence(), 1);
+  assert_eq!(checkpoint.segment_count(), 0);
+  assert_eq!(writer.summary().captured_through_publication_sequence(), 0);
+}
+
+#[test]
 fn real_workspace_checkpoints_and_reopens_a_constant_memory_chain_at_both_hash_widths() {
   for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
     let directory = tempdir().unwrap();

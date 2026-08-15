@@ -10,7 +10,7 @@
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 438,
+  "fixture_count": 440,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -5128,6 +5128,21 @@
       "relation": "selects:external-migration-capture-segment-chain"
     },
     {
+      "id": "amcm-blake3-256-initial-empty-valid",
+      "format_id": "migration-capture-v1",
+      "family": "MigrationCaptureManifestV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "migration-capture-v1/amcm-blake3-256-initial-empty-valid.bin",
+      "annotated_hex": "migration-capture-v1/amcm-blake3-256-initial-empty-valid.hex",
+      "byte_length": 500,
+      "sha256": "cd16f0a2672f66d2d20c36026e6b41e6efbe17079ceda4c1846554f036046336",
+      "blake3": "d2d0dee8bd3be105c2a53b005bfbe5cae9de3f2c5470f87ab7a3fd2d92f5a376",
+      "canonical_key": "e9177fc949dc6093eda4f055f01122cbf21ca40dc86977c4d6b4d44b0fa2f096",
+      "expected": "migration:capture:state=capturing:checkpoint=1:segments=0:captured=0:observed=0",
+      "relation": "selects:external-migration-capture-segment-chain"
+    },
+    {
       "id": "amcm-sha512-capturing-valid",
       "format_id": "migration-capture-v1",
       "family": "MigrationCaptureManifestV1",
@@ -5140,6 +5155,21 @@
       "blake3": "cf37c590249862e3df096501a7b9f0aa2d0df5e8a030c4cfe5fe57d93be415e8",
       "canonical_key": "0090cc3aba7a6931539e82d3d22b009374c78933f16680189f36b5039443eaae476672a6b8e0dbd08d4327c9f8031ec76b9d968d81c8b33405a10886dee166f1",
       "expected": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
+      "relation": "selects:external-migration-capture-segment-chain"
+    },
+    {
+      "id": "amcm-sha512-initial-empty-valid",
+      "format_id": "migration-capture-v1",
+      "family": "MigrationCaptureManifestV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "migration-capture-v1/amcm-sha512-initial-empty-valid.bin",
+      "annotated_hex": "migration-capture-v1/amcm-sha512-initial-empty-valid.hex",
+      "byte_length": 724,
+      "sha256": "9659595e7aef6d8d5aef0b7d46b36ef22cba18a3ad8448df456066351706d1c5",
+      "blake3": "0bb967722cbc51a5117b324104afbd9b86620492807ee5be78706dc275f52b77",
+      "canonical_key": "4c378e5a23f5192261a27f100a52b66616bf6a5d337ab17e5baff9a2e473fe85bd54d90f608f6f1d2f0e6c5ce91e029ba294958bec911daca621826aa6345079",
+      "expected": "migration:capture:state=capturing:checkpoint=1:segments=0:captured=0:observed=0",
       "relation": "selects:external-migration-capture-segment-chain"
     },
     {

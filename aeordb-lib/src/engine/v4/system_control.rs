@@ -1117,7 +1117,7 @@ fn validate_migration_progress(body: &[u8], algorithm: HashAlgorithm) -> FormatR
   if u16_at(body, 72)? != 3 || u16_at(body, 74)? != 4 || !(1..=8).contains(&u16_at(body, 76)?) || !(1..=6).contains(&u16_at(body, 78)?) {
     return Err(kind_error("migration_progress_state", "migration formats, phase, or state are invalid"));
   }
-  if u32_at(body, 80)? & !0x0007 != 0 {
+  if u32_at(body, 80)? & !0x000f != 0 {
     return Err(reserved_error("migration_progress_flags", "migration progress contains unknown flag bits"));
   }
   if i64_at(body, 148)? < 0 {

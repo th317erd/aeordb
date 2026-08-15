@@ -229,9 +229,7 @@ fn validate_manifest(request: &MigrationCaptureManifestWriteV1, algorithm: HashA
   if request.created_at_ms < 0 || request.updated_at_ms < request.created_at_ms {
     return Err(error(MalformedInputClass::CrossRecordClosureMismatch, "migration_capture_time", "capture timestamps are invalid"));
   }
-  if request.captured_through_publication_sequence == 0
-    || request.observed_through_publication_sequence < request.captured_through_publication_sequence
-  {
+  if request.observed_through_publication_sequence < request.captured_through_publication_sequence {
     return Err(error(
       MalformedInputClass::CrossRecordClosureMismatch,
       "migration_capture_sequence",
@@ -334,6 +332,9 @@ fn validate_segment_closure(request: &MigrationCaptureManifestWriteV1) -> Format
       return Err(segment_closure_error());
     }
     return Ok(());
+  }
+  if request.captured_through_publication_sequence == 0 {
+    return Err(segment_closure_error());
   }
   let expected_count = request
     .last_segment_ordinal

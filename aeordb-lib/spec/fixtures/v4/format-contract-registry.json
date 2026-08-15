@@ -3425,7 +3425,7 @@
         { "offset": 20, "length": 4, "field": "reserved", "rule": "zero" },
         { "offset": 24, "length": 64, "field": "database_migration_source_destination_ids", "rule": "four nonzero 16-byte IDs; source and destination differ" },
         { "offset": 88, "length": 24, "field": "fence_generation_checkpoint", "rule": "three nonzero u64 values" },
-        { "offset": 112, "length": 32, "field": "timestamps_and_publication_watermarks", "rule": "created/updated i64 and nonzero monotonic captured/observed u64" },
+        { "offset": 112, "length": 32, "field": "timestamps_and_publication_watermarks", "rule": "created/updated i64 and monotonic captured/observed u64; zero is allowed only for an empty initial checkpoint" },
         { "offset": 144, "length": 32, "field": "segment_summary", "rule": "first/last ordinal, count, and stored bytes close exactly" },
         { "offset": 176, "length": "7H", "field": "root_head_predecessor_policy_and_failure_hashes", "rule": "selected-width hashes with state-specific zero/nonzero closure" },
         { "offset": "176 + 7H", "length": 32, "field": "source_authority_digest", "rule": "nonzero BLAKE3 authority-inventory digest" },
@@ -3451,8 +3451,8 @@
         { "field": "failure_evidence", "role": "non-traversed terminal evidence" },
         { "field": "source_authority_digest", "role": "fixed BLAKE3 source-inventory closure" }
       ],
-      "fixture_ids_32": ["amcm-blake3-256-capturing-valid"],
-      "fixture_ids_64": ["amcm-sha512-capturing-valid"]
+      "fixture_ids_32": ["amcm-blake3-256-capturing-valid", "amcm-blake3-256-initial-empty-valid"],
+      "fixture_ids_64": ["amcm-sha512-capturing-valid", "amcm-sha512-initial-empty-valid"]
     },
     {
       "id": "logical-position-v1",
@@ -3626,9 +3626,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 22,
-    "fixture_count": 438,
+    "fixture_count": 440,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, and the complete 46-family SystemFamilyRegistryV1",
-    "remaining_p0b_2_scope": "none; P0b is frozen and the ratified P3c-2b1 AMCM extension is registered before runtime activation"
+    "remaining_p0b_2_scope": "none; P0b is frozen and the ratified P3c-2b2a AMCM/AMPR capture-authority extension is registered before runtime activation"
   }
 }

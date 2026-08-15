@@ -1,9 +1,9 @@
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::migration_control::{
-  MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED, MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
-  MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1, MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressBodyV1,
-  MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control, encode_migration_lease_control,
-  encode_migration_progress_control,
+  MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED, MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE,
+  MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1,
+  MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressBodyV1, MigrationProgressStateV1, decode_migration_lease_control,
+  decode_migration_progress_control, encode_migration_lease_control, encode_migration_progress_control,
 };
 
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
@@ -136,7 +136,8 @@ fn migration_enums_and_known_progress_flags_round_trip_exhaustively() {
     body.state = states[index % states.len()];
     body.flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED
       | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD
-      | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
+      | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED
+      | MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE;
     let encoded = encode_migration_progress_control(index as u64 + 1, &body, ALGORITHM).unwrap();
     assert_eq!(decode_migration_progress_control(&encoded, ALGORITHM).unwrap().body, body);
   }
@@ -164,7 +165,7 @@ fn migration_progress_encoder_rejects_invalid_identity_flags_time_and_hashes() {
   assert_eq!(encode_migration_progress_control(1, &body, ALGORITHM).unwrap_err().code(), "migration_progress_identity");
 
   let mut body = progress();
-  body.flags = 1 << 3;
+  body.flags = 1 << 4;
   assert_eq!(encode_migration_progress_control(1, &body, ALGORITHM).unwrap_err().code(), "migration_progress_flags");
 
   let mut body = progress();

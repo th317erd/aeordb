@@ -2050,9 +2050,21 @@
       "result": "pass"
     },
     {
+      "fixture_id": "amcm-blake3-256-initial-empty-valid",
+      "expected": "migration:capture:state=capturing:checkpoint=1:segments=0:captured=0:observed=0",
+      "observed": "migration:capture:state=capturing:checkpoint=1:segments=0:captured=0:observed=0",
+      "result": "pass"
+    },
+    {
       "fixture_id": "amcm-sha512-capturing-valid",
       "expected": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
       "observed": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "amcm-sha512-initial-empty-valid",
+      "expected": "migration:capture:state=capturing:checkpoint=1:segments=0:captured=0:observed=0",
+      "observed": "migration:capture:state=capturing:checkpoint=1:segments=0:captured=0:observed=0",
       "result": "pass"
     },
     {

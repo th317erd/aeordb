@@ -20,13 +20,15 @@ use aeordb::engine::v4::first_authority::{
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::migration_control::{
-  MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1,
-  MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressBodyV1, MigrationProgressStateV1, decode_migration_lease_control,
-  decode_migration_progress_control, encode_migration_lease_control, encode_migration_progress_control,
+  MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+  MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1, MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressBodyV1,
+  MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control, encode_migration_lease_control,
+  encode_migration_progress_control,
 };
 use aeordb::engine::v4::migration_owner::{
-  MigrationAcquisitionRequestV1, MigrationLeaseReleaseRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1,
-  MigrationStateOwnerV1, MigrationTakeoverRequestV1,
+  MigrationAcquisitionRequestV1, MigrationCaptureCheckpointPublicationRequestV1, MigrationFullReconciliationLatchRequestV1,
+  MigrationLeaseReleaseRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
+  MigrationTakeoverRequestV1,
 };
 use aeordb::engine::v4::migration_source_gc::{MigrationSourceGcSuspensionOwnerV1, MigrationSourceGcSuspensionRequestV1};
 use aeordb::engine::v4::migration_preflight::{
@@ -394,13 +396,11 @@ fn progress_transition(
     flags,
     destination_header_sequence: 7,
     copied_through_write_sequence: 11,
-    captured_through_publication_sequence: 13,
     reconciled_through_publication_sequence: 0,
     namespace_count: 17,
     entity_count: 19,
     copied_bytes: 23,
     updated_at_ms,
-    checkpoint_artifact: digest_parts(algorithm, &[b"migration checkpoint"]),
     legacy_root_map_control_payload_hash: vec![0; algorithm.hash_length()],
     last_error_evidence: vec![0; algorithm.hash_length()],
     publication_timestamp_ms: updated_at_ms as u64 + 100,
@@ -856,7 +856,7 @@ fn renewal_extends_the_exact_held_lease_and_retries_idempotently_after_reopen() 
   let cancellation = CancellationToken::new();
   let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
   let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
-  let (owner, _) = MigrationStateOwnerV1::acquire(publisher, permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
   let request = renewal_request(ACQUIRED_AT_MS + 10_000);
 
   let receipt = owner.renew(request, &mut retirement).unwrap();
@@ -927,7 +927,7 @@ fn progress_transitions_are_sequential_monotonic_and_file_backed() {
   assert_eq!(progress.body.phase, MigrationPhaseV1::Copy);
   assert_eq!(progress.body.state, MigrationProgressStateV1::Pending);
   assert_eq!(progress.body.copied_through_write_sequence, 11);
-  assert_eq!(progress.body.checkpoint_artifact, digest_parts(algorithm, &[b"migration checkpoint"]));
+  assert!(progress.body.checkpoint_artifact.iter().all(|byte| *byte == 0));
 }
 
 #[test]
@@ -963,6 +963,17 @@ fn renewal_and_progress_refuse_regression_expiry_and_unowned_flag_claims_without
     ACQUIRED_AT_MS + 1_000,
   );
   assert_eq!(owner.transition_progress(unauthorized_flag, &mut retirement).unwrap_err().code(), "migration_progress_flag_authority");
+  let unauthorized_reconcile_latch = progress_transition(
+    algorithm,
+    MigrationPhaseV1::Preflight,
+    MigrationProgressStateV1::Running,
+    MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE,
+    ACQUIRED_AT_MS + 1_000,
+  );
+  assert_eq!(
+    owner.transition_progress(unauthorized_reconcile_latch, &mut retirement).unwrap_err().code(),
+    "migration_progress_flag_authority"
+  );
   let skipped_phase =
     progress_transition(algorithm, MigrationPhaseV1::Reconcile, MigrationProgressStateV1::Pending, 0, ACQUIRED_AT_MS + 1_000);
   assert_eq!(owner.transition_progress(skipped_phase, &mut retirement).unwrap_err().code(), "migration_progress_phase_sequence");
@@ -992,6 +1003,85 @@ fn renewal_and_progress_refuse_regression_expiry_and_unowned_flag_claims_without
   assert_eq!(progress.control_sequence, 1);
   let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
   assert_eq!(lease.control_sequence, 1);
+}
+
+#[test]
+fn capture_checkpoint_and_full_reconciliation_latch_have_one_specialized_monotonic_authority() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let checkpoint_hash = digest_parts(algorithm, &[b"selected capture checkpoint"]);
+  let checkpoint = MigrationCaptureCheckpointPublicationRequestV1 {
+    captured_through_publication_sequence: 7,
+    checkpoint_artifact: checkpoint_hash.clone(),
+    updated_at_ms: ACQUIRED_AT_MS + 1_000,
+    publication_timestamp_ms: (ACQUIRED_AT_MS + 1_100) as u64,
+    monotonic_now_ms: 31_000,
+  };
+  let checkpoint_receipt = owner.publish_capture_checkpoint(checkpoint.clone(), &mut retirement).unwrap();
+  assert_eq!(checkpoint_receipt.control_sequence, 2);
+  assert!(owner.publish_capture_checkpoint(checkpoint.clone(), &mut retirement).unwrap().idempotent);
+  let regressed_checkpoint = MigrationCaptureCheckpointPublicationRequestV1 {
+    captured_through_publication_sequence: 6,
+    checkpoint_artifact: digest_parts(algorithm, &[b"regressed capture checkpoint"]),
+    updated_at_ms: checkpoint.updated_at_ms + 1,
+    publication_timestamp_ms: checkpoint.publication_timestamp_ms + 1,
+    monotonic_now_ms: checkpoint.monotonic_now_ms + 1,
+  };
+  assert_eq!(
+    owner.publish_capture_checkpoint(regressed_checkpoint, &mut retirement).unwrap_err().code(),
+    "migration_progress_scalar_regression"
+  );
+
+  let failure_evidence = digest_parts(algorithm, &[b"capture queue exhausted"]);
+  let invalid_latch = MigrationFullReconciliationLatchRequestV1 {
+    last_error_evidence: vec![0; algorithm.hash_length()],
+    updated_at_ms: ACQUIRED_AT_MS + 2_000,
+    publication_timestamp_ms: (ACQUIRED_AT_MS + 2_100) as u64,
+    monotonic_now_ms: 32_000,
+  };
+  assert_eq!(
+    owner.latch_needs_full_reconciliation(invalid_latch, &mut retirement).unwrap_err().code(),
+    "migration_capture_failure_evidence"
+  );
+  let latch = MigrationFullReconciliationLatchRequestV1 {
+    last_error_evidence: failure_evidence.clone(),
+    updated_at_ms: ACQUIRED_AT_MS + 2_000,
+    publication_timestamp_ms: (ACQUIRED_AT_MS + 2_100) as u64,
+    monotonic_now_ms: 32_000,
+  };
+  let latch_receipt = owner.latch_needs_full_reconciliation(latch.clone(), &mut retirement).unwrap();
+  assert_eq!(latch_receipt.control_sequence, 3);
+  assert!(owner.latch_needs_full_reconciliation(latch, &mut retirement).unwrap().idempotent);
+  let checkpoint_after_latch = MigrationCaptureCheckpointPublicationRequestV1 {
+    captured_through_publication_sequence: 8,
+    checkpoint_artifact: digest_parts(algorithm, &[b"checkpoint after capture loss"]),
+    updated_at_ms: ACQUIRED_AT_MS + 3_000,
+    publication_timestamp_ms: (ACQUIRED_AT_MS + 3_100) as u64,
+    monotonic_now_ms: 33_000,
+  };
+  assert_eq!(
+    owner.publish_capture_checkpoint(checkpoint_after_latch, &mut retirement).unwrap_err().code(),
+    "migration_capture_already_inexact"
+  );
+  let clear_latch =
+    progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Pending, 0, ACQUIRED_AT_MS + 3_000);
+  assert_eq!(owner.transition_progress(clear_latch, &mut retirement).unwrap_err().code(), "migration_progress_flag_regression");
+  drop(owner);
+
+  let reopened = reopen(&path);
+  let progress =
+    reopened.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let progress = decode_migration_progress_control(&progress.bytes, algorithm).unwrap();
+  assert_eq!(progress.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE);
+  assert_eq!(progress.body.captured_through_publication_sequence, 7);
+  assert_eq!(progress.body.checkpoint_artifact, checkpoint_hash);
+  assert_eq!(progress.body.last_error_evidence, failure_evidence);
 }
 
 #[test]
@@ -1030,7 +1120,6 @@ fn progress_state_machine_refuses_every_regression_and_unproven_phase_boundary()
   for scalar_regression in [
     MigrationProgressTransitionRequestV1 { destination_header_sequence: 6, ..running.clone() },
     MigrationProgressTransitionRequestV1 { copied_through_write_sequence: 10, ..running.clone() },
-    MigrationProgressTransitionRequestV1 { captured_through_publication_sequence: 12, ..running.clone() },
     MigrationProgressTransitionRequestV1 { namespace_count: 16, ..running.clone() },
     MigrationProgressTransitionRequestV1 { entity_count: 18, ..running.clone() },
     MigrationProgressTransitionRequestV1 { copied_bytes: 22, ..running.clone() },
@@ -1103,22 +1192,32 @@ fn terminal_progress_and_established_evidence_cannot_be_reopened_or_cleared() {
   let cancellation = CancellationToken::new();
   let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
   let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
-  let (owner, _) = MigrationStateOwnerV1::acquire(publisher, permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
 
+  let checkpoint_hash = digest_parts(algorithm, &[b"retained capture checkpoint"]);
+  owner
+    .publish_capture_checkpoint(
+      MigrationCaptureCheckpointPublicationRequestV1 {
+        captured_through_publication_sequence: 1,
+        checkpoint_artifact: checkpoint_hash.clone(),
+        updated_at_ms: ACQUIRED_AT_MS + 500,
+        publication_timestamp_ms: (ACQUIRED_AT_MS + 600) as u64,
+        monotonic_now_ms: 30_500,
+      },
+      &mut retirement,
+    )
+    .unwrap();
   let running = progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, ACQUIRED_AT_MS + 1_000);
   owner.transition_progress(running, &mut retirement).unwrap();
-  let mut cleared =
-    progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, ACQUIRED_AT_MS + 2_000);
-  cleared.checkpoint_artifact.fill(0);
-  assert_eq!(owner.transition_progress(cleared, &mut retirement).unwrap_err().code(), "migration_progress_evidence_regression");
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(decode_migration_progress_control(&selected.bytes, algorithm).unwrap().body.checkpoint_artifact, checkpoint_hash);
 
   let mut failed = progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Failed, 0, ACQUIRED_AT_MS + 3_000);
   failed.last_error_evidence = digest_parts(algorithm, &[b"migration failure"]);
   owner.transition_progress(failed, &mut retirement).unwrap();
-  let mut reopened =
-    progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, ACQUIRED_AT_MS + 4_000);
+  let reopened = progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, ACQUIRED_AT_MS + 4_000);
   assert_eq!(owner.transition_progress(reopened.clone(), &mut retirement).unwrap_err().code(), "migration_progress_terminal");
-  reopened.checkpoint_artifact.fill(0);
   assert_eq!(owner.transition_progress(reopened, &mut retirement).unwrap_err().code(), "migration_progress_terminal");
 }
 
