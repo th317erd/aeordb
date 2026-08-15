@@ -614,7 +614,11 @@
           - [x] Record retained activation boundaries and close P3b-3 only after every required proof is green.
     - [ ] P3c: implement the shadow clone, bounded capture, root map, migration lease/progress, reconciliation, and cutover-journal substrate without service activation.
       - [x] P3c-1a: add typed MigrationLease and MigrationProgress codecs over the frozen SystemControlV1 bytes and independent fixtures.
-      - [ ] P3c-1b: implement fail-closed source/destination preflight evidence, physical identity, capacity, capability, configuration, and strict-verification admission.
+      - [x] P3c-1b: implement fail-closed source/destination preflight evidence, physical identity, capacity, capability, configuration, and strict-verification admission.
+        - [x] Freeze one bounded observation contract over source/header identity, strict verification, recovery closure, protected-family inventory, native qualification, resources, configuration, and binary identity.
+        - [x] Aggregate destination/workspace/backup/capture reservations by physical volume and reject arithmetic overflow, inconsistent volume reports, or a breached remaining-space floor.
+        - [x] Issue a non-constructible permit only when every observation names the same exact source frontier and all capability, registry, memory, and identity gates close.
+        - [x] Prove every refusal class, deterministic evidence identity, request-order independence, and disconnected architecture before landing.
       - [ ] P3c-1c: implement one fenced durable migration lease/progress owner with explicit acquire, renew, transition, release, expiry-recovery, and restart semantics.
       - [ ] P3c-1d: suspend every source mutating-GC and retention-cleanup entry point for the exact selected lease while preserving read-only diagnostics.
       - [ ] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.

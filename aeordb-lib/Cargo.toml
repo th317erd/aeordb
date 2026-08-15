@@ -1081,6 +1081,10 @@ name = "migration_control_spec"
 path = "spec/engine/migration_control_spec.rs"
 
 [[test]]
+name = "migration_preflight_spec"
+path = "spec/engine/migration_preflight_spec.rs"
+
+[[test]]
 name = "index_operation_control_spec"
 path = "spec/engine/index_operation_control_spec.rs"
 

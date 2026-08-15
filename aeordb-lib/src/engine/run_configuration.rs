@@ -27,10 +27,10 @@ pub(crate) struct MaintenanceRunConfiguration {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// P7 activates the v4 migration owner. Keeping its frozen capture type here
-// prevents that owner from falling back to live configuration reads mid-run.
-#[allow(dead_code)]
-pub(crate) struct MigrationRunConfiguration {
+// P3c migration preflight captures these values once so later migration
+// phases cannot fall back to live configuration reads mid-run.
+// The type is public for the disconnected P3c evidence adapter.
+pub struct MigrationRunConfiguration {
   pub generation: u64,
   pub capture_max_bytes: u64,
   pub capture_free_reserve_bytes: u64,
@@ -70,7 +70,7 @@ impl StorageEngine {
     Ok(MaintenanceRunConfiguration { generation: snapshot.generation, max_concurrent_tasks })
   }
 
-  #[allow(dead_code)] // Called when the P7 v4 migration state machine is activated.
+  #[allow(dead_code)] // Called when the P3c migration state owner is activated.
   pub(crate) fn capture_migration_run_configuration(&self) -> EngineResult<MigrationRunConfiguration> {
     let snapshot = self.configuration_snapshot();
     Ok(MigrationRunConfiguration {

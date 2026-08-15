@@ -1094,7 +1094,7 @@ fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
 }
 
 #[test]
-fn wave_five_exit_allows_the_reviewed_p3c_codec_but_keeps_migration_runtime_unactivated() {
+fn wave_five_exit_allows_reviewed_p3c_contracts_but_keeps_migration_runtime_unactivated() {
   fn visit_rust_sources(directory: &std::path::Path, sources: &mut Vec<(std::path::PathBuf, String)>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -1122,7 +1122,7 @@ fn wave_five_exit_allows_the_reviewed_p3c_codec_but_keeps_migration_runtime_unac
     .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("run_configuration.rs"))
     .map(|(_, source)| source)
     .unwrap();
-  assert!(run_configuration.contains("Called when the P7 v4 migration state machine is activated"));
+  assert!(run_configuration.contains("Called when the P3c migration state owner is activated"));
   assert!(run_configuration.contains("#[allow(dead_code)]"));
 
   let migration_control_sources = sources
@@ -1155,6 +1155,7 @@ fn wave_five_exit_allows_the_reviewed_p3c_codec_but_keeps_migration_runtime_unac
 
   let v4_module = std::fs::read_to_string(package.join("src/engine/v4/mod.rs")).unwrap();
   assert!(v4_module.contains("pub mod migration_control;"), "ratified P3c migration codec is not exported");
+  assert!(v4_module.contains("pub mod migration_preflight;"), "ratified P3c preflight contract is not exported");
   for forbidden in ["pub mod migration;", "pub mod migration_runtime;", "pub mod migration_capture;"] {
     assert!(!v4_module.contains(forbidden), "migration runtime module was activated before its owning phase: {forbidden}");
   }
