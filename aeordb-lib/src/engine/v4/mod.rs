@@ -62,6 +62,7 @@ pub mod index_producer_executor;
 pub mod index_producer_source;
 pub mod index_producer_worker;
 pub mod index_record;
+pub mod index_runtime_owner;
 pub mod index_scope_ordinal_authority;
 pub mod index_scope_ordinal_checkpoint;
 pub mod index_scope_ordinal_checkpoint_store;

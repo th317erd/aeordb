@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use crate::engine::HashAlgorithm;
 use crate::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
@@ -351,6 +351,7 @@ pub struct SoftMutationDrainV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SoftMutationHubSnapshotV1 {
+  pub admission_closed: bool,
   pub queued_notices: usize,
   pub retained_bytes: usize,
   pub maximum_notices: usize,
@@ -391,6 +392,7 @@ struct SoftMutationQueueV1 {
 pub struct SoftMutationHubV1 {
   options: SoftMutationHubOptionsV1,
   queue: Mutex<SoftMutationQueueV1>,
+  admission_closed: AtomicBool,
   lost_through_sequence: AtomicU64,
   loss_reason_bits: AtomicU8,
   dropped_notices: AtomicU64,
@@ -407,6 +409,7 @@ impl SoftMutationHubV1 {
     Ok(Self {
       options,
       queue: Mutex::new(SoftMutationQueueV1 { notices, retained_bytes: 0 }),
+      admission_closed: AtomicBool::new(false),
       lost_through_sequence: AtomicU64::new(0),
       loss_reason_bits: AtomicU8::new(0),
       dropped_notices: AtomicU64::new(0),
@@ -417,6 +420,9 @@ impl SoftMutationHubV1 {
   }
 
   pub fn offer_acknowledgement(&self, acknowledgement: &NamespaceMutationAcknowledgement) -> SoftMutationAdmissionV1 {
+    if self.admission_closed.load(Ordering::Acquire) {
+      return self.latch_loss(acknowledgement.publication_sequence, SoftMutationLossReasonV1::QueueUnavailable);
+    }
     if self.reconciliation_required() {
       self.record_loss(acknowledgement.publication_sequence, None);
       return SoftMutationAdmissionV1::ReconciliationAlreadyRequired;
@@ -438,6 +444,9 @@ impl SoftMutationHubV1 {
         return self.latch_loss(acknowledgement.publication_sequence, SoftMutationLossReasonV1::QueueUnavailable);
       }
     };
+    if self.admission_closed.load(Ordering::Acquire) {
+      return self.latch_loss(acknowledgement.publication_sequence, SoftMutationLossReasonV1::QueueUnavailable);
+    }
     let next_bytes = match queue.retained_bytes.checked_add(retained_bytes) {
       Some(bytes) => bytes,
       None => return self.latch_loss(acknowledgement.publication_sequence, SoftMutationLossReasonV1::QueueFull),
@@ -479,6 +488,7 @@ impl SoftMutationHubV1 {
     let reconciled_loss_epoch = self.reconciled_loss_epoch.load(Ordering::Acquire);
     let losses_in_flight = self.losses_in_flight.load(Ordering::Acquire);
     Ok(SoftMutationHubSnapshotV1 {
+      admission_closed: self.admission_closed.load(Ordering::Acquire),
       queued_notices: queue.notices.len(),
       retained_bytes: queue.retained_bytes,
       maximum_notices: self.options.maximum_notices,
@@ -493,6 +503,17 @@ impl SoftMutationHubV1 {
       reconciled_loss_epoch,
       losses_in_flight,
     })
+  }
+
+  /// Permanently close this handoff before its owner begins final drain.
+  ///
+  /// Offers remain non-blocking. An offer already inside the queue lock is
+  /// visible to the closer; every later offer records a coverage loss instead
+  /// of becoming stranded behind a stopped consumer.
+  pub(crate) fn close_admission(&self) -> Result<(), SoftMutationHubErrorV1> {
+    self.admission_closed.store(true, Ordering::Release);
+    let _queue = self.queue.lock().map_err(|_| SoftMutationHubErrorV1::QueueUnavailable)?;
+    Ok(())
   }
 
   pub fn reconciliation_token(&self) -> SoftMutationReconciliationTokenV1 {

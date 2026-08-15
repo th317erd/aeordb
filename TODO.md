@@ -899,6 +899,9 @@
                     - [x] Prove bounded leaf and multi-level reverse-directory lookup plus malformed child closure and memory refusal.
               - [x] Prove malformed closure, count/depth/prefix disagreement, cancellation, memory pressure, ordinal retry/move/delete/recreate, and aggregate-limit behavior.
             - [ ] Activate the worker behind one recovered runtime owner, retaining legacy query-visible indexing until immutable shadow cutover.
+              - [x] Freeze one fail-closed runtime-owner lifecycle that exclusively composes the soft hub, producer queue, mutation memtable, worker, publication retry, degraded latch, and drain state.
+              - [ ] Bind the owner to one concrete recovery store and bounded per-scope selected-checkpoint adapter registry without adding another selector or in-memory persistent cursor map.
+              - [ ] Install the recovered owner in `StorageEngine` and route the existing timer, pressure, metrics, spill, startup, and shutdown seams through it while legacy queries remain authoritative.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.

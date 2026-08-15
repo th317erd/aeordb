@@ -1069,6 +1069,10 @@ name = "index_scope_ordinal_checkpoint_store_spec"
 path = "spec/engine/index_scope_ordinal_checkpoint_store_spec.rs"
 
 [[test]]
+name = "index_runtime_owner_spec"
+path = "spec/engine/index_runtime_owner_spec.rs"
+
+[[test]]
 name = "index_producer_worker_spec"
 path = "spec/engine/index_producer_worker_spec.rs"
 

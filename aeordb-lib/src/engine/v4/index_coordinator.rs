@@ -213,6 +213,10 @@ impl FrozenIndexBatchV1 {
     self.batch_id
   }
 
+  pub const fn attempt_id(&self) -> u64 {
+    self.attempt_id
+  }
+
   pub const fn reason(&self) -> IndexFlushReasonV1 {
     self.reason
   }
