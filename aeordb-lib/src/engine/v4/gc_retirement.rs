@@ -638,7 +638,7 @@ impl PreparedRetirementJournalReplacementV1 {
   ///
   /// Any intervening owner mutation latches the owner instead of guessing
   /// which retirement evidence is safe to remove.
-  pub fn discard_buffered(mut self, owner: &mut RetirementJournalOwnerV1<'_>) -> Result<(), RetirementJournalBufferedDiscardErrorV1> {
+  pub fn discard_buffered(mut self, owner: &mut RetirementJournalOwnerV1) -> Result<(), RetirementJournalBufferedDiscardErrorV1> {
     let Some(rollback) = self.buffered_rollback.as_ref() else {
       return Err(RetirementJournalBufferedDiscardErrorV1::new(RetirementJournalOwnerErrorV1::BufferedRollbackState, self));
     };
@@ -810,16 +810,13 @@ impl<E> From<RetirementJournalReplacementAdmissionErrorV1> for RetirementJournal
 /// owner before the activation callback can run. The current v3 mutation
 /// acknowledgement cannot construct this input because it lacks the v4
 /// integrity digest and entity write sequence.
-pub struct RetirementJournalReplacementCoordinatorV1<'coordinator, 'owner> {
-  owner: &'coordinator mut RetirementJournalOwnerV1<'owner>,
+pub struct RetirementJournalReplacementCoordinatorV1<'coordinator> {
+  owner: &'coordinator mut RetirementJournalOwnerV1,
   sink: &'coordinator mut dyn RetirementJournalDurableSinkV1,
 }
 
-impl<'coordinator, 'owner> RetirementJournalReplacementCoordinatorV1<'coordinator, 'owner> {
-  pub fn new(
-    owner: &'coordinator mut RetirementJournalOwnerV1<'owner>,
-    sink: &'coordinator mut dyn RetirementJournalDurableSinkV1,
-  ) -> Self {
+impl<'coordinator> RetirementJournalReplacementCoordinatorV1<'coordinator> {
+  pub fn new(owner: &'coordinator mut RetirementJournalOwnerV1, sink: &'coordinator mut dyn RetirementJournalDurableSinkV1) -> Self {
     Self { owner, sink }
   }
 
@@ -1089,14 +1086,14 @@ fn physical_extents_overlap(left: &PhysicalIncarnationV1<'_>, right: &PhysicalIn
   left.wal_offset < right_end && right.wal_offset < left_end
 }
 
-pub struct RetirementJournalOwnerV1<'a> {
+pub struct RetirementJournalOwnerV1 {
   owner_instance_id: u64,
   algorithm: HashAlgorithm,
   database_id: [u8; 16],
   next_segment_ordinal: u64,
   next_generation: u64,
   options: RetirementJournalBufferOptionsV1,
-  cancellation: &'a CancellationToken,
+  cancellation: CancellationToken,
   _memory: MemoryReservation,
   records: Vec<u8>,
   pending_records: u32,
@@ -1126,7 +1123,7 @@ struct RetirementJournalChainStateV1 {
   last_durable_segment_ordinal: u64,
 }
 
-impl<'a> RetirementJournalOwnerV1<'a> {
+impl RetirementJournalOwnerV1 {
   pub const fn hash_algorithm(&self) -> HashAlgorithm {
     self.algorithm
   }
@@ -1141,7 +1138,7 @@ impl<'a> RetirementJournalOwnerV1<'a> {
     first_segment_ordinal: u64,
     first_generation: u64,
     options: RetirementJournalBufferOptionsV1,
-    cancellation: &'a CancellationToken,
+    cancellation: &CancellationToken,
     memory: &MemoryCoordinator,
   ) -> Result<Self, RetirementJournalOwnerErrorV1> {
     if database_id.iter().all(|byte| *byte == 0)
@@ -1176,7 +1173,7 @@ impl<'a> RetirementJournalOwnerV1<'a> {
     database_id: [u8; 16],
     summary: &RetirementJournalModelSummaryV1,
     options: RetirementJournalBufferOptionsV1,
-    cancellation: &'a CancellationToken,
+    cancellation: &CancellationToken,
     memory: &MemoryCoordinator,
   ) -> Result<Self, RetirementJournalOwnerErrorV1> {
     if database_id.iter().all(|byte| *byte == 0)
@@ -1221,7 +1218,7 @@ impl<'a> RetirementJournalOwnerV1<'a> {
     database_id: [u8; 16],
     state: RetirementJournalChainStateV1,
     options: RetirementJournalBufferOptionsV1,
-    cancellation: &'a CancellationToken,
+    cancellation: &CancellationToken,
     memory: &MemoryCoordinator,
   ) -> Result<Self, RetirementJournalOwnerErrorV1> {
     validate_options(algorithm, options)?;
@@ -1251,7 +1248,7 @@ impl<'a> RetirementJournalOwnerV1<'a> {
       next_segment_ordinal: state.next_segment_ordinal,
       next_generation: state.next_generation,
       options,
-      cancellation,
+      cancellation: cancellation.clone(),
       _memory: reservation,
       records: Vec::with_capacity(record_capacity),
       pending_records: 0,

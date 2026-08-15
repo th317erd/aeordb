@@ -28,7 +28,7 @@ use super::header_publication::{
 };
 use super::hash::digest_parts;
 use super::index_artifact::{EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, decode_immutable_index_artifact};
-use super::index_operation_control::{IndexOperationControlV1, decode_index_operation_control};
+use super::index_operation_control::{IndexOperationControlV1, IndexOperationStateV1, decode_index_operation_control};
 use super::gc::{
   EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlV1, GcArtifactKindV1, decode_gc_active_control,
   decode_gc_artifact_envelope, gc_active_control_key, immutable_gc_artifact_key, select_gc_active_control,
@@ -2153,7 +2153,7 @@ impl V4FirstAuthorityPublisher {
   pub fn publish_index_operation_control(
     &self,
     request: IndexOperationControlPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<IndexOperationControlPublicationReceiptV1, IndexOperationControlPublicationErrorV1> {
     let mut observer = NoopFirstAuthorityDependencyObserverV1;
     self.publish_index_operation_control_with_observer(request, retirement_owner, &mut observer)
@@ -2162,7 +2162,7 @@ impl V4FirstAuthorityPublisher {
   fn publish_index_operation_control_with_observer(
     &self,
     request: IndexOperationControlPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<IndexOperationControlPublicationReceiptV1, IndexOperationControlPublicationErrorV1> {
     // No prior buffered replacement may be hidden behind the publication this
@@ -2240,6 +2240,10 @@ impl V4FirstAuthorityPublisher {
         "index_operation_sequence",
         format!("expected control sequence {expected_sequence}, received {}", incoming.control_sequence),
       ));
+    }
+    if let Some(current) = pair.selected.as_ref() {
+      let current_control = decode_index_operation_control(&current.bytes, header.hash_algorithm)?;
+      validate_index_operation_transition(&current_control, &incoming)?;
     }
     let target_slot = match pair.selected.as_ref().map(|selected| selected.selected_slot) {
       Some(SystemControlSlotV1::A) => SystemControlSlotV1::B,
@@ -2976,7 +2980,7 @@ impl V4FirstAuthorityPublisher {
   pub fn publish_mark_run_checkpoint(
     &mut self,
     request: MarkRunCheckpointPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MarkRunCheckpointPublicationReceiptV1, MarkRunCheckpointPublicationErrorV1> {
     let mut observer = NoopFirstAuthorityDependencyObserverV1;
     self.publish_mark_run_checkpoint_with_control_observer(request, retirement_owner, &mut observer)
@@ -2985,7 +2989,7 @@ impl V4FirstAuthorityPublisher {
   fn publish_mark_run_checkpoint_with_control_observer(
     &mut self,
     request: MarkRunCheckpointPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<MarkRunCheckpointPublicationReceiptV1, MarkRunCheckpointPublicationErrorV1> {
     let (checkpoint, _) = validate_mark_run_checkpoint_publication(&request)?;
@@ -3089,7 +3093,7 @@ impl V4FirstAuthorityPublisher {
   fn publish_gc_active_control(
     &self,
     request: GcControlPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<GcControlPublicationOutcomeV1, GcControlPublicationErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
@@ -3102,7 +3106,7 @@ impl V4FirstAuthorityPublisher {
   fn publish_gc_active_control_locked(
     &self,
     request: GcControlPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<GcControlPublicationOutcomeV1, GcControlPublicationErrorV1> {
     let expected_control_kind = request.expected_control_kind;
@@ -3468,7 +3472,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: PhysicalQuarantinePublicationRequestV1<'_>,
     authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<PhysicalQuarantinePublicationReceiptV1, PhysicalQuarantinePublicationErrorV1> {
     self.publish_physical_quarantine_with_control_observer(
       request,
@@ -3482,7 +3486,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: PhysicalQuarantinePublicationRequestV1<'_>,
     authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<PhysicalQuarantinePublicationReceiptV1, PhysicalQuarantinePublicationErrorV1> {
     let validated = validate_physical_quarantine_publication(&request)?;
@@ -3677,7 +3681,7 @@ impl V4FirstAuthorityPublisher {
     request: &PhysicalQuarantinePublicationRequestV1<'_>,
     validated: &ValidatedPhysicalQuarantinePublicationV1<'_>,
     authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<PhysicalQuarantineLockedPublicationV1, PhysicalQuarantinePublicationErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
@@ -3779,7 +3783,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: RootRetirementPublicationRequestV1<'_>,
     authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<RootRetirementPublicationReceiptV1, RootRetirementPublicationErrorV1> {
     self.publish_root_retirement_with_control_observer(
       request,
@@ -3793,7 +3797,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: RootRetirementPublicationRequestV1<'_>,
     authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<RootRetirementPublicationReceiptV1, RootRetirementPublicationErrorV1> {
     let validated = validate_root_retirement_publication(&request)?;
@@ -3963,7 +3967,7 @@ impl V4FirstAuthorityPublisher {
     request: &RootRetirementPublicationRequestV1<'_>,
     validated: &ValidatedRootRetirementPublicationV1<'_>,
     authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<RootRetirementLockedPublicationV1, RootRetirementPublicationErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
@@ -4097,7 +4101,7 @@ impl V4FirstAuthorityPublisher {
   pub fn publish_root_reclaim(
     &mut self,
     request: RootReclaimPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<RootReclaimPublicationReceiptV1, RootReclaimPublicationErrorV1> {
     self.publish_root_reclaim_with_control_observer(request, retirement_owner, &mut NoopFirstAuthorityDependencyObserverV1)
   }
@@ -4105,7 +4109,7 @@ impl V4FirstAuthorityPublisher {
   fn publish_root_reclaim_with_control_observer(
     &mut self,
     request: RootReclaimPublicationRequestV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<RootReclaimPublicationReceiptV1, RootReclaimPublicationErrorV1> {
     let validated = validate_root_reclaim_publication(&request)?;
@@ -4272,7 +4276,7 @@ impl V4FirstAuthorityPublisher {
     &self,
     request: &RootReclaimPublicationRequestV1<'_>,
     validated: &ValidatedRootReclaimPublicationV1<'_>,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<RootReclaimLockedPublicationV1, RootReclaimPublicationErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
@@ -5139,7 +5143,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: VoidCatalogPublicationRequestV1<'_>,
     authority: &mut dyn VoidCatalogPublicationAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<VoidCatalogPublicationReceiptV1, VoidCatalogPublicationErrorV1> {
     self.publish_void_catalog_with_control_observer(request, authority, retirement_owner, &mut NoopFirstAuthorityDependencyObserverV1)
   }
@@ -5148,7 +5152,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: VoidCatalogPublicationRequestV1<'_>,
     authority: &mut dyn VoidCatalogPublicationAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<VoidCatalogPublicationReceiptV1, VoidCatalogPublicationErrorV1> {
     if request.cancellation.is_cancelled() {
@@ -5224,7 +5228,7 @@ impl V4FirstAuthorityPublisher {
     &self,
     request: &VoidCatalogPublicationRequestV1<'_>,
     authority: &mut dyn VoidCatalogPublicationAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<VoidCatalogLockedPublicationV1, VoidCatalogPublicationErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
@@ -5505,7 +5509,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: VoidClaimAdmissionRequestV1<'_>,
     authority: &mut dyn VoidClaimAdmissionAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<VoidClaimAdmissionPermitV1, VoidClaimAdmissionErrorV1> {
     self.admit_void_claim_with_control_observer(request, authority, retirement_owner, &mut NoopFirstAuthorityDependencyObserverV1)
   }
@@ -5514,7 +5518,7 @@ impl V4FirstAuthorityPublisher {
     &mut self,
     request: VoidClaimAdmissionRequestV1<'_>,
     authority: &mut dyn VoidClaimAdmissionAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<VoidClaimAdmissionPermitV1, VoidClaimAdmissionErrorV1> {
     if request.cancellation.is_cancelled() {
@@ -5607,7 +5611,7 @@ impl V4FirstAuthorityPublisher {
     &self,
     request: &VoidClaimAdmissionRequestV1<'_>,
     authority: &mut dyn VoidClaimAdmissionAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<VoidClaimLockedAdmissionV1, VoidClaimAdmissionErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
@@ -5839,7 +5843,7 @@ impl V4FirstAuthorityPublisher {
     consumption: &VoidClaimConsumptionPermitV1,
     request: VoidClaimSettlementPublicationRequestV1<'_>,
     authority: &mut dyn VoidClaimSettlementAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<VoidClaimSettlementHardPublicationReceiptV1, VoidClaimSettlementPublicationErrorV1> {
     self.settle_void_claim_with_control_observer(
       consumption,
@@ -5855,7 +5859,7 @@ impl V4FirstAuthorityPublisher {
     consumption: &VoidClaimConsumptionPermitV1,
     request: VoidClaimSettlementPublicationRequestV1<'_>,
     authority: &mut dyn VoidClaimSettlementAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<VoidClaimSettlementHardPublicationReceiptV1, VoidClaimSettlementPublicationErrorV1> {
     if request.cancellation.is_cancelled() {
@@ -5986,7 +5990,7 @@ impl V4FirstAuthorityPublisher {
     consumption: &VoidClaimConsumptionPermitV1,
     request: &VoidClaimSettlementPublicationRequestV1<'_>,
     authority: &mut dyn VoidClaimSettlementAuthorityV1,
-    retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<VoidClaimLockedSettlementV1, VoidClaimSettlementPublicationErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
@@ -9482,6 +9486,73 @@ fn validate_index_operation_control_request(
     ));
   }
   Ok(())
+}
+
+fn validate_index_operation_transition(
+  current: &IndexOperationControlV1<'_>,
+  incoming: &IndexOperationControlV1<'_>,
+) -> Result<(), IndexOperationControlPublicationErrorV1> {
+  if current.operation_kind != incoming.operation_kind
+    || current.requested_namespace_root != incoming.requested_namespace_root
+    || current.definition_id != incoming.definition_id
+    || current.base_manifest != incoming.base_manifest
+  {
+    return Err(IndexOperationControlPublicationErrorV1::invalid(
+      "index_operation_descriptor_changed",
+      "index-operation kind, requested root, definition, and base manifest are immutable within one operation",
+    ));
+  }
+  if let Some(current_target) = current.target_manifest {
+    if incoming.target_manifest != Some(current_target) {
+      return Err(IndexOperationControlPublicationErrorV1::invalid(
+        "index_operation_target_changed",
+        "an established target manifest cannot be cleared or replaced within one operation",
+      ));
+    }
+  }
+  if current.created_at_ms != incoming.created_at_ms {
+    return Err(IndexOperationControlPublicationErrorV1::invalid(
+      "index_operation_created_at_changed",
+      "index-operation creation time is immutable within one operation",
+    ));
+  }
+  if incoming.updated_at_ms < current.updated_at_ms
+    || incoming.captured_runtime_sequence < current.captured_runtime_sequence
+    || incoming.reconciled_through_sequence < current.reconciled_through_sequence
+    || incoming.completed_work < current.completed_work
+  {
+    return Err(IndexOperationControlPublicationErrorV1::invalid(
+      "index_operation_progress_regression",
+      "index-operation update time, watermarks, and completed work must not regress",
+    ));
+  }
+  if is_terminal_index_operation_state(current.state) {
+    return Err(IndexOperationControlPublicationErrorV1::invalid(
+      "index_operation_terminal_state",
+      "a terminal index operation can only be superseded by a new operation identity",
+    ));
+  }
+  if index_operation_state_rank(incoming.state) < index_operation_state_rank(current.state) {
+    return Err(IndexOperationControlPublicationErrorV1::invalid(
+      "index_operation_state_regression",
+      "index-operation state must advance monotonically",
+    ));
+  }
+  Ok(())
+}
+
+const fn index_operation_state_rank(state: IndexOperationStateV1) -> u8 {
+  match state {
+    IndexOperationStateV1::Queued => 1,
+    IndexOperationStateV1::Running => 2,
+    IndexOperationStateV1::Checkpointed => 3,
+    IndexOperationStateV1::Publishing => 4,
+    IndexOperationStateV1::Complete | IndexOperationStateV1::Canceled | IndexOperationStateV1::Failed => 5,
+  }
+}
+
+const fn is_terminal_index_operation_state(state: IndexOperationStateV1) -> bool {
+  matches!(state, IndexOperationStateV1::Complete | IndexOperationStateV1::Canceled | IndexOperationStateV1::Failed)
 }
 
 fn validate_index_operation_expectation(

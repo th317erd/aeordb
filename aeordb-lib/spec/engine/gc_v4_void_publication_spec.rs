@@ -45,7 +45,7 @@ fn publish_void_catalog(
   publisher: &mut V4FirstAuthorityPublisher,
   request: VoidCatalogPublicationRequestV1<'_>,
   authority: &mut dyn VoidCatalogPublicationAuthorityV1,
-  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  retirement_owner: &mut RetirementJournalOwnerV1,
 ) -> Result<VoidCatalogPublicationReceiptV1, VoidCatalogPublicationErrorV1> {
   publisher.publish_void_catalog(request, authority, retirement_owner)
 }
@@ -194,7 +194,7 @@ fn void_catalog_publication_has_one_disconnected_selector_last_owner() {
     &mut V4FirstAuthorityPublisher,
     VoidCatalogPublicationRequestV1<'_>,
     &mut dyn VoidCatalogPublicationAuthorityV1,
-    &mut RetirementJournalOwnerV1<'_>,
+    &mut RetirementJournalOwnerV1,
   ) -> Result<VoidCatalogPublicationReceiptV1, VoidCatalogPublicationErrorV1> = publish_void_catalog;
   assert_eq!(std::mem::size_of_val(&support_pointer), std::mem::size_of::<usize>());
   assert_eq!(std::mem::size_of_val(&selector_pointer), std::mem::size_of::<usize>());

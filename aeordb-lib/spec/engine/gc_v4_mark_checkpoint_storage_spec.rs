@@ -297,7 +297,7 @@ fn read_entity(path: &Path, offset: u64, length: u32) -> Vec<u8> {
 
 fn publish(
   publisher: &mut V4FirstAuthorityPublisher,
-  owner: &mut RetirementJournalOwnerV1<'_>,
+  owner: &mut RetirementJournalOwnerV1,
   algorithm: HashAlgorithm,
   prepared: &PreparedCheckpoint,
   timestamp: u64,

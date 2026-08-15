@@ -120,6 +120,12 @@ pub trait IndexRecoveryStoreV1 {
   fn immutable_length(&mut self, key: &[u8]) -> Result<Option<u64>, IndexRecoveryStoreErrorV1>;
   fn load_immutable(&mut self, key: &[u8], expected_length: u64) -> Result<Option<Vec<u8>>, IndexRecoveryStoreErrorV1>;
   fn put_immutable(&mut self, artifact: &EncodedImmutableIndexArtifactV1) -> Result<(), IndexRecoveryStoreErrorV1>;
+  fn put_immutable_batch(&mut self, artifacts: &[&EncodedImmutableIndexArtifactV1]) -> Result<(), IndexRecoveryStoreErrorV1> {
+    for artifact in artifacts {
+      self.put_immutable(artifact)?;
+    }
+    Ok(())
+  }
   fn sync_immutable(&mut self) -> Result<(), IndexRecoveryStoreErrorV1>;
   fn load_selected(&mut self, owner: &IndexRecoveryOwnerV1) -> Result<Option<IndexCheckpointRootV1>, IndexRecoveryStoreErrorV1>;
   fn publish_selected_synced(
@@ -223,11 +229,19 @@ pub fn publish_index_recovery_checkpoint_v1(
   }
   validate_checkpoint_advance(current.as_ref(), &selected)?;
 
-  for dependency in request.dependencies {
-    check_cancellation(request.cancellation)?;
-    store.put_immutable(dependency)?;
-  }
-  store.put_immutable(request.checkpoint)?;
+  check_cancellation(request.cancellation)?;
+  let mut immutable_batch = Vec::new();
+  let immutable_batch_length = request
+    .dependencies
+    .len()
+    .checked_add(1)
+    .ok_or_else(|| IndexRecoveryErrorV1::Arithmetic("immutable publication batch length overflowed".to_string()))?;
+  immutable_batch
+    .try_reserve_exact(immutable_batch_length)
+    .map_err(|error| IndexRecoveryErrorV1::Arithmetic(format!("immutable publication batch allocation failed: {error}")))?;
+  immutable_batch.extend_from_slice(request.dependencies);
+  immutable_batch.push(request.checkpoint);
+  store.put_immutable_batch(&immutable_batch)?;
   store.sync_immutable()?;
   check_cancellation(request.cancellation)?;
 

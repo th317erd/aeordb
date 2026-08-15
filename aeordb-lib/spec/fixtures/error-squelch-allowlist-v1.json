@@ -8866,7 +8866,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 3400,
+      "line": 3404,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 6732,
+      "line": 6736,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 6735,
+      "line": 6739,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -9654,11 +9654,11 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-99874e4a452f57413152-00",
+      "id": "esq-v1-7a2978b57ffd924f0e55-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 832,
+      "line": 829,
       "column": 29,
-      "enclosing_item": "impl RetirementJournalReplacementCoordinatorV1 < 'coordinator , 'owner >::prepare",
+      "enclosing_item": "impl RetirementJournalReplacementCoordinatorV1 < 'coordinator >::prepare",
       "kind": "error_conversion",
       "pattern": "u32 :: try_from (batch . replacements . len ()) . map_err (| _ | RetirementJournalReplacementAdmissionErrorV1 :: Preflight (\"replacement count exceeds u32\"))",
       "review": "typed-format-failure"
@@ -9666,7 +9666,7 @@
     {
       "id": "esq-v1-3568baeb31a260286058-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1053,
+      "line": 1050,
       "column": 27,
       "enclosing_item": "retirement_journal_replacement_batch_digest_v1",
       "kind": "error_conversion",
@@ -9674,41 +9674,41 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-d1ac4a4e0eccd7d04809-00",
+      "id": "esq-v1-8050d32914d13d0e72b3-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1407,
+      "line": 1404,
       "column": 41,
-      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::preflight_record_batch",
+      "enclosing_item": "impl RetirementJournalOwnerV1::preflight_record_batch",
       "kind": "error_conversion",
       "pattern": "encoded [8 .. 16] . try_into () . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-7fd6acfc452b039de5f9-00",
+      "id": "esq-v1-7a42ec99a1abe9b7ee21-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1455,
+      "line": 1452,
       "column": 39,
-      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::validate_order",
+      "enclosing_item": "impl RetirementJournalOwnerV1::validate_order",
       "kind": "error_conversion",
       "pattern": "encoded [8 .. 16] . try_into () . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-ebca7a6d4001c52e8d58-00",
+      "id": "esq-v1-e8373df0ea00f98b5aa8-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1499,
+      "line": 1496,
       "column": 31,
-      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::flush_pending",
+      "enclosing_item": "impl RetirementJournalOwnerV1::flush_pending",
       "kind": "error_conversion",
       "pattern": "u32 :: try_from (encoded . value . len ()) . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-e20f2faf36fefe6a0111-00",
+      "id": "esq-v1-3cf3a2d1bc68bfe1797f-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1536,
+      "line": 1533,
       "column": 27,
-      "enclosing_item": "impl RetirementJournalOwnerV1 < 'a >::encode_pending_segment",
+      "enclosing_item": "impl RetirementJournalOwnerV1::encode_pending_segment",
       "kind": "error_conversion",
       "pattern": "u32 :: try_from (self . records . len ()) . map_err (| _ | RetirementJournalOwnerErrorV1 :: ArithmeticOverflow)",
       "review": "typed-format-failure"
@@ -9716,7 +9716,7 @@
     {
       "id": "esq-v1-b9ee108cf38bb1b167d3-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1601,
+      "line": 1598,
       "column": 3,
       "enclosing_item": "required_memory_bytes",
       "kind": "error_conversion",
@@ -9726,7 +9726,7 @@
     {
       "id": "esq-v1-04fce5a85a12011c3fd8-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1627,
+      "line": 1624,
       "column": 30,
       "enclosing_item": "encode_record",
       "kind": "error_conversion",

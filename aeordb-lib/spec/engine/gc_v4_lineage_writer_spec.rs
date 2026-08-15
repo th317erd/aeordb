@@ -86,12 +86,12 @@ fn fixture_record<'a>(bytes: &'a [u8], algorithm: HashAlgorithm) -> RetirementJo
   }
 }
 
-fn owner<'a>(
+fn owner(
   algorithm: HashAlgorithm,
-  cancellation: &'a CancellationToken,
+  cancellation: &CancellationToken,
   options: RetirementJournalBufferOptionsV1,
   memory: &MemoryCoordinator,
-) -> RetirementJournalOwnerV1<'a> {
+) -> RetirementJournalOwnerV1 {
   RetirementJournalOwnerV1::new_chain(
     algorithm,
     (0x31u8..=0x40).collect::<Vec<_>>().try_into().unwrap(),
@@ -428,7 +428,7 @@ fn writer_has_no_live_service_or_independent_watermark_control_caller() {
     if path == source_root.join("engine/v4/gc_retirement.rs") || path == source_root.join("engine/v4/gc_lineage_recovery.rs") {
       continue;
     }
-    let source = fs::read_to_string(&path).unwrap_or_default();
+    let source = fs::read_to_string(&path).unwrap();
     if source.contains("RetirementJournalOwnerV1") {
       callers.push(path.strip_prefix(&source_root).unwrap().to_owned());
     }
@@ -436,7 +436,7 @@ fn writer_has_no_live_service_or_independent_watermark_control_caller() {
   callers.sort();
   assert_eq!(
     callers,
-    [PathBuf::from("engine/v4/first_authority.rs")],
-    "retirement owner must remain confined to the disconnected P4 first-authority owner"
+    [PathBuf::from("engine/v4/first_authority.rs"), PathBuf::from("engine/v4/index_recovery_store.rs")],
+    "retirement owner must remain confined to the disconnected first-authority and native recovery owners"
   );
 }

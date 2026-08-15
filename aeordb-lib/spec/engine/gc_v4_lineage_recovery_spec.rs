@@ -151,11 +151,7 @@ impl CorruptGcEvidenceDurableSinkV1 for RecordingRecoverySink {
   }
 }
 
-fn new_owner<'a>(
-  algorithm: HashAlgorithm,
-  cancellation: &'a CancellationToken,
-  memory: &MemoryCoordinator,
-) -> RetirementJournalOwnerV1<'a> {
+fn new_owner(algorithm: HashAlgorithm, cancellation: &CancellationToken, memory: &MemoryCoordinator) -> RetirementJournalOwnerV1 {
   RetirementJournalOwnerV1::new_chain(
     algorithm,
     database_id(),

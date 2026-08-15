@@ -158,7 +158,7 @@ fn first_authority_supports_the_frozen_sha512_identity_width() {
 }
 
 #[test]
-fn first_authority_remains_disconnected_and_exclusively_owns_atomic_root_publication() {
+fn first_authority_allows_only_the_disconnected_recovery_adapter_and_exclusively_owns_atomic_root_publication() {
   fn collect_rust_files(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -172,6 +172,7 @@ fn first_authority_remains_disconnected_and_exclusively_owns_atomic_root_publica
 
   let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let first_authority_path = source_root.join("engine/v4/first_authority.rs");
+  let index_recovery_store_path = source_root.join("engine/v4/index_recovery_store.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
   let mut files = Vec::new();
@@ -182,7 +183,15 @@ fn first_authority_remains_disconnected_and_exclusively_owns_atomic_root_publica
     .filter(|path| *path != &first_authority_path)
     .filter(|path| std::fs::read_to_string(path).unwrap().contains("V4FirstAuthorityPublisher"))
     .collect();
-  assert!(publisher_callers.is_empty(), "first-authority publisher gained a production caller: {publisher_callers:?}");
+  assert_eq!(
+    publisher_callers,
+    vec![&index_recovery_store_path],
+    "first-authority publisher escaped the one disconnected recovery adapter: {publisher_callers:?}"
+  );
+  let recovery_source = std::fs::read_to_string(&index_recovery_store_path).unwrap();
+  for forbidden in ["StorageEngine", "DirectoryOps", "crate::server", "tokio::spawn"] {
+    assert!(!recovery_source.contains(forbidden), "recovery adapter gained live activation token {forbidden}");
+  }
 
   for method in ["begin_atomic_visibility_batch", "publish_atomic_visibility_after_authority", "admit_inactive_slot_with_dependency_bytes"]
   {

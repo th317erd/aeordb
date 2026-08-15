@@ -41,7 +41,7 @@ fn admit_void_claim(
   publisher: &mut V4FirstAuthorityPublisher,
   request: VoidClaimAdmissionRequestV1<'_>,
   authority: &mut dyn VoidClaimAdmissionAuthorityV1,
-  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  retirement_owner: &mut RetirementJournalOwnerV1,
 ) -> Result<VoidClaimAdmissionPermitV1, VoidClaimAdmissionErrorV1> {
   publisher.admit_void_claim(request, authority, retirement_owner)
 }
@@ -536,7 +536,7 @@ fn claim_admission_has_one_disconnected_selector_last_owner_and_private_permit()
     &mut V4FirstAuthorityPublisher,
     VoidClaimAdmissionRequestV1<'_>,
     &mut dyn VoidClaimAdmissionAuthorityV1,
-    &mut RetirementJournalOwnerV1<'_>,
+    &mut RetirementJournalOwnerV1,
   ) -> Result<VoidClaimAdmissionPermitV1, VoidClaimAdmissionErrorV1> = admit_void_claim;
   assert_eq!(std::mem::size_of_val(&admission_pointer), std::mem::size_of::<usize>());
 }

@@ -143,6 +143,7 @@ struct RecordingStore {
   artifacts: BTreeMap<Vec<u8>, Vec<u8>>,
   selected: BTreeMap<(Vec<u8>, [u8; 16]), IndexCheckpointRootV1>,
   events: Vec<String>,
+  immutable_batches: Vec<Vec<Vec<u8>>>,
   fail_event: Option<String>,
   fail_after_publish: bool,
   cancel_on_event: Option<(String, CancellationToken)>,
@@ -214,6 +215,14 @@ impl IndexRecoveryStoreV1 for RecordingStore {
     Ok(())
   }
 
+  fn put_immutable_batch(&mut self, artifacts: &[&EncodedImmutableIndexArtifactV1]) -> Result<(), IndexRecoveryStoreErrorV1> {
+    self.immutable_batches.push(artifacts.iter().map(|artifact| artifact.key.clone()).collect());
+    for artifact in artifacts {
+      self.put_immutable(artifact)?;
+    }
+    Ok(())
+  }
+
   fn sync_immutable(&mut self) -> Result<(), IndexRecoveryStoreErrorV1> {
     self.event("sync".to_string())
   }
@@ -266,6 +275,7 @@ fn dependencies_and_checkpoint_are_synced_before_selector_and_recover_exactly() 
   )
   .unwrap();
   assert!(!receipt.idempotent);
+  assert_eq!(store.immutable_batches, vec![vec![journal.key.clone(), checkpoint_artifact.key.clone()]]);
   let sync = store.events.iter().position(|event| event == "sync").unwrap();
   let publish = store.events.iter().position(|event| event == "publish-selected").unwrap();
   assert!(sync < publish);

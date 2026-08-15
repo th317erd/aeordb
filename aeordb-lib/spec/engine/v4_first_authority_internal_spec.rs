@@ -4280,29 +4280,78 @@ fn index_operation_control(sequence: u64, checkpoint_fill: u8) -> Vec<u8> {
 }
 
 fn index_operation_control_with_checkpoint(sequence: u64, checkpoint_fill: Option<u8>) -> Vec<u8> {
+  index_operation_control_with_transition(
+    sequence,
+    checkpoint_fill,
+    [0xc4; 16],
+    IndexOperationStateV1::Checkpointed,
+    1_700_000_000_100,
+    1_700_000_000_100 + sequence as i64,
+    sequence,
+    0xc3,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn index_operation_control_with_transition(
+  sequence: u64,
+  checkpoint_fill: Option<u8>,
+  operation_id: [u8; 16],
+  state: IndexOperationStateV1,
+  created_at_ms: i64,
+  updated_at_ms: i64,
+  completed_work: u64,
+  definition_fill: u8,
+) -> Vec<u8> {
+  index_operation_control_with_target(
+    sequence,
+    checkpoint_fill,
+    operation_id,
+    state,
+    created_at_ms,
+    updated_at_ms,
+    completed_work,
+    definition_fill,
+    None,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn index_operation_control_with_target(
+  sequence: u64,
+  checkpoint_fill: Option<u8>,
+  operation_id: [u8; 16],
+  state: IndexOperationStateV1,
+  created_at_ms: i64,
+  updated_at_ms: i64,
+  completed_work: u64,
+  definition_fill: u8,
+  target_fill: Option<u8>,
+) -> Vec<u8> {
   let algorithm = HashAlgorithm::Blake3_256;
   let index_id = vec![0xc1; algorithm.hash_length()];
   let requested_namespace_root = vec![0xc2; algorithm.hash_length()];
-  let definition_id = vec![0xc3; algorithm.hash_length()];
+  let definition_id = vec![definition_fill; algorithm.hash_length()];
+  let target_manifest = target_fill.map(|fill| vec![fill; algorithm.hash_length()]);
   let checkpoint_artifact = checkpoint_fill.map(|fill| vec![fill; algorithm.hash_length()]);
   encode_index_operation_control(
     sequence,
     &IndexOperationControlWriteV1 {
       database_id: [0x31; 16],
       index_id: &index_id,
-      operation_id: [0xc4; 16],
+      operation_id,
       operation_kind: IndexOperationKindV1::Build,
-      state: IndexOperationStateV1::Checkpointed,
-      created_at_ms: 1_700_000_000_100,
-      updated_at_ms: 1_700_000_000_100 + sequence as i64,
+      state,
+      created_at_ms,
+      updated_at_ms,
       requested_namespace_root: &requested_namespace_root,
       definition_id: &definition_id,
       base_manifest: None,
-      target_manifest: None,
+      target_manifest: target_manifest.as_deref(),
       checkpoint_artifact: checkpoint_artifact.as_deref(),
       captured_runtime_sequence: 0,
       reconciled_through_sequence: sequence,
-      completed_work: sequence,
+      completed_work,
       total_work_hint: 100,
       stable_reason: StableReasonV1::NoneOrSuccess,
       retry_class: RetryClassV1::None,
@@ -4313,7 +4362,279 @@ fn index_operation_control_with_checkpoint(sequence: u64, checkpoint_fill: Optio
   .unwrap()
 }
 
-fn index_operation_retirement_owner<'a>(cancellation: &'a CancellationToken, memory: &MemoryCoordinator) -> RetirementJournalOwnerV1<'a> {
+#[test]
+fn index_operation_control_enforces_monotonic_operation_transitions_and_terminal_supersession() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-operation-transitions", None);
+  publisher.publish(&request()).unwrap();
+  let index_id = vec![0xc1; HashAlgorithm::Blake3_256.hash_length()];
+  let operation_id = [0xc4; 16];
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut retirement_owner = index_operation_retirement_owner(&cancellation, &memory);
+  let first = index_operation_control(1, 0xd1);
+  publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: None,
+        encoded_control: &first,
+        publication_timestamp_ms: 1_700_000_000_201,
+        monotonic_now_ms: 10_001,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap();
+  let selected = publisher.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().unwrap();
+  let expected = Some(IndexOperationControlExpectationV1 {
+    control_sequence: selected.control_sequence,
+    checkpoint_artifact: &selected.checkpoint_artifact,
+  });
+
+  for (encoded, code) in [
+    (
+      index_operation_control_with_transition(
+        2,
+        Some(0xd2),
+        operation_id,
+        IndexOperationStateV1::Running,
+        1_700_000_000_100,
+        1_700_000_000_102,
+        2,
+        0xc3,
+      ),
+      "index_operation_state_regression",
+    ),
+    (
+      index_operation_control_with_transition(
+        2,
+        Some(0xd2),
+        operation_id,
+        IndexOperationStateV1::Checkpointed,
+        1_700_000_000_100,
+        1_700_000_000_102,
+        2,
+        0xc5,
+      ),
+      "index_operation_descriptor_changed",
+    ),
+    (
+      index_operation_control_with_transition(
+        2,
+        Some(0xd2),
+        operation_id,
+        IndexOperationStateV1::Checkpointed,
+        1_700_000_000_099,
+        1_700_000_000_102,
+        2,
+        0xc3,
+      ),
+      "index_operation_created_at_changed",
+    ),
+    (
+      index_operation_control_with_transition(
+        2,
+        Some(0xd2),
+        operation_id,
+        IndexOperationStateV1::Checkpointed,
+        1_700_000_000_100,
+        1_700_000_000_100,
+        2,
+        0xc3,
+      ),
+      "index_operation_progress_regression",
+    ),
+    (
+      index_operation_control_with_transition(
+        2,
+        Some(0xd2),
+        operation_id,
+        IndexOperationStateV1::Checkpointed,
+        1_700_000_000_100,
+        1_700_000_000_102,
+        0,
+        0xc3,
+      ),
+      "index_operation_progress_regression",
+    ),
+  ] {
+    let error = publisher
+      .publish_index_operation_control(
+        IndexOperationControlPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          index_id: &index_id,
+          operation_id: &operation_id,
+          expected,
+          encoded_control: &encoded,
+          publication_timestamp_ms: 1_700_000_000_202,
+          monotonic_now_ms: 10_002,
+        },
+        &mut retirement_owner,
+      )
+      .unwrap_err();
+    assert_eq!(error.code(), code);
+    assert_eq!(publisher.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().unwrap(), selected);
+  }
+
+  let canceled = index_operation_control_with_transition(
+    2,
+    Some(0xd2),
+    operation_id,
+    IndexOperationStateV1::Canceled,
+    1_700_000_000_100,
+    1_700_000_000_102,
+    2,
+    0xc3,
+  );
+  publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected,
+        encoded_control: &canceled,
+        publication_timestamp_ms: 1_700_000_000_202,
+        monotonic_now_ms: 10_002,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap();
+  let terminal = publisher.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().unwrap();
+  let after_terminal = index_operation_control_with_transition(
+    3,
+    Some(0xd3),
+    operation_id,
+    IndexOperationStateV1::Failed,
+    1_700_000_000_100,
+    1_700_000_000_103,
+    3,
+    0xc3,
+  );
+  let error = publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: Some(IndexOperationControlExpectationV1 {
+          control_sequence: terminal.control_sequence,
+          checkpoint_artifact: &terminal.checkpoint_artifact,
+        }),
+        encoded_control: &after_terminal,
+        publication_timestamp_ms: 1_700_000_000_203,
+        monotonic_now_ms: 10_003,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "index_operation_terminal_state");
+
+  let replacement_operation_id = [0xc5; 16];
+  let replacement = index_operation_control_with_transition(
+    1,
+    Some(0xe1),
+    replacement_operation_id,
+    IndexOperationStateV1::Queued,
+    1_700_000_000_200,
+    1_700_000_000_200,
+    0,
+    0xc3,
+  );
+  publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &replacement_operation_id,
+        expected: None,
+        encoded_control: &replacement,
+        publication_timestamp_ms: 1_700_000_000_204,
+        monotonic_now_ms: 10_004,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap();
+}
+
+#[test]
+fn index_operation_control_target_manifest_can_be_established_once_but_not_replaced_or_cleared() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-operation-target-transition", None);
+  publisher.publish(&request()).unwrap();
+  let index_id = vec![0xc1; HashAlgorithm::Blake3_256.hash_length()];
+  let operation_id = [0xc4; 16];
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut retirement_owner = index_operation_retirement_owner(&cancellation, &memory);
+  let mut expected: Option<(u64, Vec<u8>)> = None;
+  for (sequence, checkpoint_fill, target_fill) in [(1, 0xd1, None), (2, 0xd2, Some(0xe1)), (3, 0xd3, Some(0xe1))] {
+    let control = index_operation_control_with_target(
+      sequence,
+      Some(checkpoint_fill),
+      operation_id,
+      IndexOperationStateV1::Checkpointed,
+      1_700_000_000_100,
+      1_700_000_000_100 + sequence as i64,
+      sequence,
+      0xc3,
+      target_fill,
+    );
+    let receipt = publisher
+      .publish_index_operation_control(
+        IndexOperationControlPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          index_id: &index_id,
+          operation_id: &operation_id,
+          expected: expected.as_ref().map(|(control_sequence, checkpoint_artifact)| IndexOperationControlExpectationV1 {
+            control_sequence: *control_sequence,
+            checkpoint_artifact,
+          }),
+          encoded_control: &control,
+          publication_timestamp_ms: 1_700_000_000_200 + sequence,
+          monotonic_now_ms: 10_000 + sequence,
+        },
+        &mut retirement_owner,
+      )
+      .unwrap();
+    expected = Some((receipt.control_sequence, receipt.checkpoint_artifact));
+  }
+  let before = publisher.observe().unwrap();
+  for target_fill in [None, Some(0xe2)] {
+    let invalid = index_operation_control_with_target(
+      4,
+      Some(0xd4),
+      operation_id,
+      IndexOperationStateV1::Checkpointed,
+      1_700_000_000_100,
+      1_700_000_000_104,
+      4,
+      0xc3,
+      target_fill,
+    );
+    let error = publisher
+      .publish_index_operation_control(
+        IndexOperationControlPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          index_id: &index_id,
+          operation_id: &operation_id,
+          expected: expected.as_ref().map(|(control_sequence, checkpoint_artifact)| IndexOperationControlExpectationV1 {
+            control_sequence: *control_sequence,
+            checkpoint_artifact,
+          }),
+          encoded_control: &invalid,
+          publication_timestamp_ms: 1_700_000_000_204,
+          monotonic_now_ms: 10_004,
+        },
+        &mut retirement_owner,
+      )
+      .unwrap_err();
+    assert_eq!(error.code(), "index_operation_target_changed");
+    assert_eq!(publisher.observe().unwrap(), before);
+  }
+}
+
+fn index_operation_retirement_owner(cancellation: &CancellationToken, memory: &MemoryCoordinator) -> RetirementJournalOwnerV1 {
   RetirementJournalOwnerV1::new_chain(
     HashAlgorithm::Blake3_256,
     [0x31; 16],
@@ -4857,7 +5178,7 @@ impl RootRetirementAuthorityVerifierV1 for FailingRootRetirementAuthorityVerifie
 
 fn publish_empty_lifecycle_authority(
   publisher: &V4FirstAuthorityPublisher,
-  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  retirement_owner: &mut RetirementJournalOwnerV1,
   slot: u8,
   sequence: u64,
   generation: u64,
@@ -4868,7 +5189,7 @@ fn publish_empty_lifecycle_authority(
 
 fn publish_empty_lifecycle_authority_for_database(
   publisher: &V4FirstAuthorityPublisher,
-  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  retirement_owner: &mut RetirementJournalOwnerV1,
   slot: u8,
   sequence: u64,
   generation: u64,
@@ -4939,7 +5260,7 @@ fn publish_empty_lifecycle_authority_for_database(
 
 fn prepare_guarded_root_retirement(
   publisher: &mut V4FirstAuthorityPublisher,
-  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  retirement_owner: &mut RetirementJournalOwnerV1,
   cancellation: &CancellationToken,
   memory: &Arc<MemoryCoordinator>,
   publish_support: bool,
@@ -4949,7 +5270,7 @@ fn prepare_guarded_root_retirement(
 
 fn prepare_guarded_root_retirement_for_database(
   publisher: &mut V4FirstAuthorityPublisher,
-  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  retirement_owner: &mut RetirementJournalOwnerV1,
   cancellation: &CancellationToken,
   memory: &Arc<MemoryCoordinator>,
   publish_support: bool,
@@ -5660,7 +5981,7 @@ fn prepare_mark_checkpoint(
 
 fn publish_mark_checkpoint(
   publisher: &mut V4FirstAuthorityPublisher,
-  owner: &mut RetirementJournalOwnerV1<'_>,
+  owner: &mut RetirementJournalOwnerV1,
   prepared: &PreparedMarkCheckpointV1,
   timestamp_ms: u64,
 ) -> MarkRunCheckpointPublicationReceiptV1 {
@@ -8046,7 +8367,7 @@ impl PreparedGuardedPhysicalQuarantineV1 {
 
 fn prepare_guarded_physical_quarantine(
   publisher: &mut V4FirstAuthorityPublisher,
-  retirement_owner: &mut RetirementJournalOwnerV1<'_>,
+  retirement_owner: &mut RetirementJournalOwnerV1,
   cancellation: &CancellationToken,
   memory: &Arc<MemoryCoordinator>,
 ) -> PreparedGuardedPhysicalQuarantineV1 {

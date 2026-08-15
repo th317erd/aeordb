@@ -20,12 +20,12 @@ fn memory_coordinator() -> MemoryCoordinator {
   MemoryCoordinator::new(MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap())
 }
 
-fn owner<'a>(
+fn owner(
   algorithm: HashAlgorithm,
-  cancellation: &'a CancellationToken,
+  cancellation: &CancellationToken,
   options: RetirementJournalBufferOptionsV1,
   memory: &MemoryCoordinator,
-) -> RetirementJournalOwnerV1<'a> {
+) -> RetirementJournalOwnerV1 {
   RetirementJournalOwnerV1::new_chain(algorithm, [0x31; 16], 1, 1, options, cancellation, memory).unwrap()
 }
 

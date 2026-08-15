@@ -192,7 +192,7 @@ impl<'a> RetirementLineageRecoveryReconcilerV1<'a> {
     &mut self,
     group: RetirementLineageRecoveryGroupV1<'_>,
     monotonic_now_ms: u64,
-    owner: &mut RetirementJournalOwnerV1<'_>,
+    owner: &mut RetirementJournalOwnerV1,
     sink: &mut S,
   ) -> Result<RetirementLineageRecoveryOutcomeV1, RetirementLineageRecoveryErrorV1> {
     if self.failed {
