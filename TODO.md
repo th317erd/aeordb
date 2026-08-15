@@ -620,6 +620,11 @@
         - [x] Issue a non-constructible permit only when every observation names the same exact source frontier and all capability, registry, memory, and identity gates close.
         - [x] Prove every refusal class, deterministic evidence identity, request-order independence, and disconnected architecture before landing.
       - [ ] P3c-1c: implement one fenced durable migration lease/progress owner with explicit acquire, renew, transition, release, expiry-recovery, and restart semantics.
+        - [x] Add one compare-and-swap mutable SystemControl publisher to the physical v4 first authority, including A/B selection, read-back, replacement lineage, restart, and commit-unknown classification.
+        - [ ] Bind acquisition to the exact preflight permit, destination header/database/physical identity, holder boot identity, and a non-reusable fencing token.
+        - [ ] Enforce one monotonic progress state machine, nondecreasing watermarks/counters/flags, lease re-read before every transition, and conservative terminal release rules.
+        - [ ] Recover crash-partial acquisition, renewal, release, and expired-holder takeover explicitly; never clear, steal, or resume a lease by inference.
+        - [ ] Prove real file-backed A/B/A publication and reopen, concurrent CAS, every malformed/foreign/stale/terminal path, and disconnected service architecture.
       - [ ] P3c-1d: suspend every source mutating-GC and retention-cleanup entry point for the exact selected lease while preserving read-only diagnostics.
       - [ ] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.
       - [ ] P3c-2b: implement bounded capture, pressure/exhaustion latching, durable checkpoints, resume, and final full-reconciliation authority.

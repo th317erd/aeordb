@@ -102,11 +102,10 @@ use super::root_authority::{
   encode_root_publication_prepare_control,
 };
 use super::semantic_store::{SEMANTIC_OBJECT_CONTENT_TYPE, semantic_object_path};
-use super::system_control::{SystemControlKindV1, SystemControlSlotV1, system_control_path};
+use super::system_control::{SystemControlKindV1, SystemControlSlotV1, decode_system_control, system_control_path};
 
 const FIRST_AUTHORITY_ENTITY_COUNT: usize = 8;
 const FIRST_AUTHORITY_NAMESPACE_TREE_CAP: usize = 48 * 1024 * 1024;
-const FIRST_AUTHORITY_CONTROL_BODY_CAP: usize = 16 * 1024;
 const FIRST_AUTHORITY_CONTROL_ENTITY_CAP: usize = 64 * 1024;
 const INDEX_ARTIFACT_BATCH_COUNT_CAP: usize = 4_097;
 const INDEX_ARTIFACT_BATCH_BYTES_CAP: usize = 64 * 1024 * 1024;
@@ -137,6 +136,147 @@ pub struct FirstAuthorityPublicationReceiptV1 {
   pub publication_sequence: u64,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MutableSystemControlExpectationV1 {
+  pub selected_slot: SystemControlSlotV1,
+  pub control_sequence: u64,
+  pub control_digest: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MutableSystemControlPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub kind: SystemControlKindV1,
+  pub identity: &'a [u8],
+  pub expected: Option<MutableSystemControlExpectationV1>,
+  pub encoded_control: &'a [u8],
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedMutableSystemControlV1 {
+  pub selected_slot: SystemControlSlotV1,
+  pub control_sequence: u64,
+  pub control_digest: Vec<u8>,
+  pub redundancy_degraded: bool,
+  pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MutableSystemControlPublicationReceiptV1 {
+  pub selected_slot: SystemControlSlotV1,
+  pub control_sequence: u64,
+  pub control_digest: Vec<u8>,
+  pub replaced_slot: bool,
+  pub retirement_hard_publication_sequence: Option<u64>,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+#[derive(Debug)]
+pub enum MutableSystemControlPublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Committed { code: &'static str, message: String, receipt: Box<MutableSystemControlPublicationReceiptV1> },
+  Format(FormatError),
+  Authority(FirstAuthorityPublicationErrorV1),
+  RetirementAdmission(RetirementJournalReplacementAdmissionErrorV1),
+  RetirementOwner(RetirementJournalOwnerErrorV1),
+}
+
+impl MutableSystemControlPublicationErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
+      Self::Format(source) => source.code(),
+      Self::Authority(source) => source.code(),
+      Self::RetirementAdmission(source) => source.code(),
+      Self::RetirementOwner(source) => source.code(),
+    }
+  }
+
+  pub fn committed_receipt(&self) -> Option<&MutableSystemControlPublicationReceiptV1> {
+    match self {
+      Self::Committed { receipt, .. } => Some(receipt),
+      Self::Invalid { .. } | Self::Format(_) | Self::Authority(_) | Self::RetirementAdmission(_) | Self::RetirementOwner(_) => None,
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+
+  fn committed(code: &'static str, message: impl Into<String>, receipt: MutableSystemControlPublicationReceiptV1) -> Self {
+    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
+  }
+}
+
+impl Display for MutableSystemControlPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    let code = self.code();
+    match self {
+      Self::Invalid { message, .. } => write!(formatter, "{code}: {message}"),
+      Self::Committed { message, receipt, .. } => write!(
+        formatter,
+        "{code}: mutable system control {} committed, but post-commit handling failed: {message}",
+        receipt.control_sequence
+      ),
+      Self::Format(source) => write!(formatter, "{code}: mutable system control format error: {source}"),
+      Self::Authority(source) => write!(formatter, "{code}: mutable system control authority error: {source}"),
+      Self::RetirementAdmission(source) => write!(formatter, "{code}: mutable system control retirement admission error: {source}"),
+      Self::RetirementOwner(source) => write!(formatter, "{code}: mutable system control retirement owner error: {source}"),
+    }
+  }
+}
+
+impl Error for MutableSystemControlPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Format(source) => Some(source),
+      Self::Authority(source) => Some(source),
+      Self::RetirementAdmission(source) => Some(source),
+      Self::RetirementOwner(source) => Some(source),
+      Self::Invalid { .. } | Self::Committed { .. } => None,
+    }
+  }
+}
+
+impl From<FormatError> for MutableSystemControlPublicationErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for MutableSystemControlPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<EngineError> for MutableSystemControlPublicationErrorV1 {
+  fn from(source: EngineError) -> Self {
+    Self::Authority(source.into())
+  }
+}
+
+impl From<DatabaseHeaderPublicationErrorV4> for MutableSystemControlPublicationErrorV1 {
+  fn from(source: DatabaseHeaderPublicationErrorV4) -> Self {
+    Self::Authority(source.into())
+  }
+}
+
+impl From<RetirementJournalReplacementAdmissionErrorV1> for MutableSystemControlPublicationErrorV1 {
+  fn from(source: RetirementJournalReplacementAdmissionErrorV1) -> Self {
+    Self::RetirementAdmission(source)
+  }
+}
+
+impl From<RetirementJournalOwnerErrorV1> for MutableSystemControlPublicationErrorV1 {
+  fn from(source: RetirementJournalOwnerErrorV1) -> Self {
+    Self::RetirementOwner(source)
+  }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -227,10 +367,6 @@ impl IndexOperationControlPublicationErrorV1 {
 
   fn invalid(code: &'static str, message: impl Into<String>) -> Self {
     Self::Invalid { code, message: message.into() }
-  }
-
-  fn committed(code: &'static str, message: impl Into<String>, receipt: IndexOperationControlPublicationReceiptV1) -> Self {
-    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
   }
 }
 
@@ -1607,8 +1743,12 @@ struct LoadedSystemFileV1 {
   integrity_hash: Vec<u8>,
 }
 
-struct LoadedIndexOperationControlPairV1 {
+struct LoadedMutableSystemControlPairV1 {
   slots: [Option<LoadedSystemFileV1>; 2],
+  selected: Option<LoadedMutableSystemControlV1>,
+}
+
+struct LoadedIndexOperationControlPairV1 {
   selected: Option<LoadedIndexOperationControlV1>,
 }
 
@@ -2132,42 +2272,39 @@ impl V4FirstAuthorityPublisher {
       .transpose()
   }
 
-  pub fn load_index_operation_control(
+  pub fn load_mutable_system_control(
     &self,
+    kind: SystemControlKindV1,
     database_id: &[u8; 16],
-    index_id: &[u8],
-    operation_id: &[u8; 16],
-  ) -> Result<Option<LoadedIndexOperationControlV1>, FirstAuthorityPublicationErrorV1> {
+    identity: &[u8],
+  ) -> Result<Option<LoadedMutableSystemControlV1>, FirstAuthorityPublicationErrorV1> {
     let _authority = self.root_state.lock().map_err(|poisoned| {
       drop(poisoned);
       FirstAuthorityPublicationErrorV1::StateLockPoisoned
     })?;
     let observation = self.observe()?;
     let header = &observation.selected.header;
-    validate_index_operation_identity(header, database_id, index_id, operation_id)?;
+    validate_mutable_system_control_identity(header, kind, database_id, identity)?;
     let kv = self.lock_kv()?;
     validate_kv_header_alignment(&kv, header)?;
-    Ok(load_index_operation_control_pair(&self.file, &kv, header, index_id, operation_id)?.selected)
+    Ok(load_mutable_system_control_pair(&self.file, &kv, header, kind, identity)?.selected)
   }
 
-  pub fn publish_index_operation_control(
+  pub fn publish_mutable_system_control(
     &self,
-    request: IndexOperationControlPublicationRequestV1<'_>,
+    request: MutableSystemControlPublicationRequestV1<'_>,
     retirement_owner: &mut RetirementJournalOwnerV1,
-  ) -> Result<IndexOperationControlPublicationReceiptV1, IndexOperationControlPublicationErrorV1> {
+  ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
     let mut observer = NoopFirstAuthorityDependencyObserverV1;
-    self.publish_index_operation_control_with_observer(request, retirement_owner, &mut observer)
+    self.publish_mutable_system_control_with_observer(request, retirement_owner, &mut observer)
   }
 
-  fn publish_index_operation_control_with_observer(
+  fn publish_mutable_system_control_with_observer(
     &self,
-    request: IndexOperationControlPublicationRequestV1<'_>,
+    request: MutableSystemControlPublicationRequestV1<'_>,
     retirement_owner: &mut RetirementJournalOwnerV1,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
-  ) -> Result<IndexOperationControlPublicationReceiptV1, IndexOperationControlPublicationErrorV1> {
-    // No prior buffered replacement may be hidden behind the publication this
-    // call is about to make. The sink reacquires first authority, so flush
-    // before taking the root-state lock.
+  ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
     retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self })?;
     let prior_hard_publication_sequence = retirement_owner.status().last_hard_publication_sequence;
     let authority = self.root_state.lock().map_err(|poisoned| {
@@ -2177,50 +2314,49 @@ impl V4FirstAuthorityPublisher {
     let observation = self.observe()?;
     let header = &observation.selected.header;
     if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
-      return Err(IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_missing_authority",
-        "index-operation control publication requires selected non-degraded first authority",
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_missing_authority",
+        "mutable system-control publication requires selected non-degraded first authority",
       ));
     }
-    validate_index_operation_identity(header, request.database_id, request.index_id, request.operation_id)?;
+    validate_mutable_system_control_identity(header, request.kind, request.database_id, request.identity)?;
     if retirement_owner.hash_algorithm() != header.hash_algorithm || retirement_owner.database_id() != header.database_id {
-      return Err(IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_retirement_authority",
-        "index-operation control and retirement owner belong to different database authority",
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_retirement_authority",
+        "mutable system control and retirement owner belong to different database authority",
       ));
     }
     if request.publication_timestamp_ms == 0 || request.monotonic_now_ms == 0 {
-      return Err(IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_publication_time",
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_publication_time",
         "publication and monotonic timestamps must be nonzero",
       ));
     }
-    let incoming = decode_index_operation_control(request.encoded_control, header.hash_algorithm)?;
-    validate_index_operation_control_request(&incoming, &request)?;
-    let incoming_checkpoint = incoming.checkpoint_artifact.ok_or_else(|| {
-      IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_checkpoint_missing",
-        "selected recovery control must identify an immutable checkpoint artifact",
-      )
-    })?;
+    let incoming = decode_system_control(request.encoded_control, header.hash_algorithm)?;
+    if incoming.kind != request.kind || incoming.database_id != request.database_id || incoming.identity != request.identity {
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_prepared_mismatch",
+        "encoded control does not match the requested kind, database, and identity",
+      ));
+    }
 
     let mut kv = self.lock_kv()?;
     validate_kv_header_alignment(&kv, header)?;
     kv.flush()?;
     validate_kv_header_alignment(&kv, header)?;
     if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
-      return Err(IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_baseline_not_flushed",
-        "index-operation control publication requires an empty KV write and hot-buffer baseline",
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_baseline_not_flushed",
+        "mutable system-control publication requires an empty KV write and hot-buffer baseline",
       ));
     }
-    let pair = load_index_operation_control_pair(&self.file, &kv, header, request.index_id, request.operation_id)?;
+    let pair = load_mutable_system_control_pair(&self.file, &kv, header, request.kind, request.identity)?;
     if let Some(current) = pair.selected.as_ref() {
       if current.bytes == request.encoded_control {
-        return Ok(IndexOperationControlPublicationReceiptV1 {
+        return Ok(MutableSystemControlPublicationReceiptV1 {
           selected_slot: current.selected_slot,
           control_sequence: current.control_sequence,
-          checkpoint_artifact: current.checkpoint_artifact.clone(),
+          control_digest: current.control_digest.clone(),
           replaced_slot: false,
           retirement_hard_publication_sequence: None,
           observation,
@@ -2228,37 +2364,32 @@ impl V4FirstAuthorityPublisher {
         });
       }
     }
-    validate_index_operation_expectation(pair.selected.as_ref(), request.expected, header.hash_algorithm)?;
+    validate_mutable_system_control_expectation(pair.selected.as_ref(), request.expected.as_ref(), header.hash_algorithm)?;
     let expected_sequence = match pair.selected.as_ref() {
       Some(current) => current.control_sequence.checked_add(1).ok_or_else(|| {
-        IndexOperationControlPublicationErrorV1::invalid("index_operation_sequence_exhausted", "control sequence is exhausted")
+        MutableSystemControlPublicationErrorV1::invalid("mutable_control_sequence_exhausted", "control sequence is exhausted")
       })?,
       None => 1,
     };
-    if incoming.control_sequence != expected_sequence {
-      return Err(IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_sequence",
-        format!("expected control sequence {expected_sequence}, received {}", incoming.control_sequence),
+    if incoming.sequence != expected_sequence {
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_sequence",
+        format!("expected control sequence {expected_sequence}, received {}", incoming.sequence),
       ));
-    }
-    if let Some(current) = pair.selected.as_ref() {
-      let current_control = decode_index_operation_control(&current.bytes, header.hash_algorithm)?;
-      validate_index_operation_transition(&current_control, &incoming)?;
     }
     let target_slot = match pair.selected.as_ref().map(|selected| selected.selected_slot) {
       Some(SystemControlSlotV1::A) => SystemControlSlotV1::B,
       Some(SystemControlSlotV1::B) | None => SystemControlSlotV1::A,
       Some(SystemControlSlotV1::Immutable) => {
-        return Err(IndexOperationControlPublicationErrorV1::invalid(
-          "index_operation_selected_slot",
-          "mutable index-operation control selected the immutable slot",
+        return Err(MutableSystemControlPublicationErrorV1::invalid(
+          "mutable_control_selected_slot",
+          "mutable system control selected the immutable slot",
         ));
       }
     };
     let target_index = usize::from(target_slot == SystemControlSlotV1::B);
     let target = pair.slots[target_index].as_ref();
-    let identity = index_operation_control_identity(header.hash_algorithm, request.index_id, request.operation_id)?;
-    let path = system_control_path(SystemControlKindV1::IndexOperation, &identity, target_slot)?;
+    let path = system_control_path(request.kind, request.identity, target_slot)?;
     let path_key = first_authority_file_path_hash(&path, header.hash_algorithm);
     let chunk_key = first_authority_system_chunk_hash(request.encoded_control, header.hash_algorithm);
     let stored_chunk = load_system_chunk(&self.file, &kv, header, &chunk_key, request.encoded_control)?;
@@ -2266,11 +2397,11 @@ impl V4FirstAuthorityPublisher {
     let mut next_write_sequence = header.write_sequence_high_water;
     if stored_chunk.is_none() {
       next_write_sequence = next_write_sequence.checked_add(1).ok_or_else(|| {
-        IndexOperationControlPublicationErrorV1::invalid("index_operation_write_sequence_exhausted", "v4 write sequence is exhausted")
+        MutableSystemControlPublicationErrorV1::invalid("mutable_control_write_sequence_exhausted", "v4 write sequence is exhausted")
       })?;
     }
     next_write_sequence = next_write_sequence.checked_add(1).ok_or_else(|| {
-      IndexOperationControlPublicationErrorV1::invalid("index_operation_write_sequence_exhausted", "v4 write sequence is exhausted")
+      MutableSystemControlPublicationErrorV1::invalid("mutable_control_write_sequence_exhausted", "v4 write sequence is exhausted")
     })?;
     let file_record_write_sequence = next_write_sequence;
     let mut reservation_candidate = header.clone();
@@ -2282,19 +2413,19 @@ impl V4FirstAuthorityPublisher {
     validate_kv_header_alignment(&kv, header)?;
 
     let timestamp = i64::try_from(request.publication_timestamp_ms).map_err(|error| {
-      IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_timestamp_range",
+      MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_timestamp_range",
         format!("publication timestamp exceeds FileRecord range: {error}"),
       )
     })?;
     let mut entities = Vec::new();
     entities.try_reserve_exact(2).map_err(|error| {
-      IndexOperationControlPublicationErrorV1::invalid("index_operation_entity_allocation", format!("entity allocation failed: {error}"))
+      MutableSystemControlPublicationErrorV1::invalid("mutable_control_entity_allocation", format!("entity allocation failed: {error}"))
     })?;
     let mut expected_existing = Vec::new();
     expected_existing.try_reserve_exact(2).map_err(|error| {
-      IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_expectation_allocation",
+      MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_expectation_allocation",
         format!("dependency expectation allocation failed: {error}"),
       )
     })?;
@@ -2314,16 +2445,16 @@ impl V4FirstAuthorityPublisher {
     }
     let mut content_type = String::new();
     content_type.try_reserve_exact(SYSTEM_CONTROL_CONTENT_TYPE.len()).map_err(|error| {
-      IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_file_record_allocation",
+      MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_file_record_allocation",
         format!("content-type allocation failed: {error}"),
       )
     })?;
     content_type.push_str(SYSTEM_CONTROL_CONTENT_TYPE);
     let mut chunk_hashes = Vec::new();
     chunk_hashes.try_reserve_exact(1).map_err(|error| {
-      IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_file_record_allocation",
+      MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_file_record_allocation",
         format!("chunk identity allocation failed: {error}"),
       )
     })?;
@@ -2356,20 +2487,20 @@ impl V4FirstAuthorityPublisher {
 
     let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
     if append_start < header.hot_tail_offset {
-      return Err(IndexOperationControlPublicationErrorV1::invalid(
-        "index_operation_file_truncated",
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_file_truncated",
         "database length precedes the selected v4 hot-tail offset",
       ));
     }
     let mut write_offset = append_start;
     for entity in &entities {
       write_file_at_native(&self.file, write_offset, &entity.bytes)
-        .map_err(|source| IndexOperationControlPublicationErrorV1::invalid("index_operation_control_write", source.to_string()))?;
+        .map_err(|source| MutableSystemControlPublicationErrorV1::invalid("mutable_control_write", source.to_string()))?;
       verify_file_bytes_native(&self.file, write_offset, &entity.bytes)
-        .map_err(|source| IndexOperationControlPublicationErrorV1::invalid("index_operation_control_readback", source.to_string()))?;
+        .map_err(|source| MutableSystemControlPublicationErrorV1::invalid("mutable_control_readback", source.to_string()))?;
       write_offset = write_offset
         .checked_add(entity.bytes.len() as u64)
-        .ok_or_else(|| IndexOperationControlPublicationErrorV1::invalid("index_operation_wal_overflow", "control WAL offset overflowed"))?;
+        .ok_or_else(|| MutableSystemControlPublicationErrorV1::invalid("mutable_control_wal_overflow", "control WAL offset overflowed"))?;
     }
     let expected_hot_tail_offset = write_offset;
     let record_entity_offset = expected_hot_tail_offset - record_entity_length as u64;
@@ -2382,7 +2513,7 @@ impl V4FirstAuthorityPublisher {
       record_entity_length,
       EntryTypeV4::FileRecord,
     )
-    .map_err(index_operation_from_gc_control_error)?;
+    .map_err(mutable_system_control_from_gc_error)?;
     let old_incarnation = target
       .map(|target| {
         encode_v4_physical_incarnation(
@@ -2394,16 +2525,16 @@ impl V4FirstAuthorityPublisher {
           target.entity_bytes.len(),
           EntryTypeV4::FileRecord,
         )
-        .map_err(index_operation_from_gc_control_error)
+        .map_err(mutable_system_control_from_gc_error)
       })
       .transpose()?;
 
     let orphan_prefix_bytes = append_start.checked_sub(header.hot_tail_offset).ok_or_else(|| {
-      IndexOperationControlPublicationErrorV1::invalid("index_operation_wal_prefix", "control append precedes the selected hot tail")
+      MutableSystemControlPublicationErrorV1::invalid("mutable_control_wal_prefix", "control append precedes the selected hot tail")
     })?;
     let dependency_bytes = entity_dependency_bytes(&entities, header.hash_algorithm.hash_length())?
       .checked_add(orphan_prefix_bytes)
-      .ok_or_else(|| IndexOperationControlPublicationErrorV1::invalid("index_operation_dependency_size", "dependency bytes overflowed"))?;
+      .ok_or_else(|| MutableSystemControlPublicationErrorV1::invalid("mutable_control_dependency_size", "dependency bytes overflowed"))?;
     let new_locators = u64::from(stored_chunk.is_none()) + u64::from(target.is_none());
     let mut candidate = header.clone();
     candidate.updated_at_ms = header.updated_at_ms.max(request.publication_timestamp_ms);
@@ -2412,7 +2543,7 @@ impl V4FirstAuthorityPublisher {
     candidate.entry_count = header
       .entry_count
       .checked_add(new_locators)
-      .ok_or_else(|| IndexOperationControlPublicationErrorV1::invalid("index_operation_entry_count", "v4 entry count overflowed"))?;
+      .ok_or_else(|| MutableSystemControlPublicationErrorV1::invalid("mutable_control_entry_count", "v4 entry count overflowed"))?;
     let admitted =
       self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, &reserved_observation, candidate, dependency_bytes)?;
     let authority_sequence = admitted.sequence();
@@ -2459,8 +2590,8 @@ impl V4FirstAuthorityPublisher {
         Ok(outcome) => outcome.output,
         Err(source) => {
           let Some((source, prepared)) = source.into_activation_failure() else {
-            return Err(IndexOperationControlPublicationErrorV1::invalid(
-              "index_operation_retirement_activation",
+            return Err(MutableSystemControlPublicationErrorV1::invalid(
+              "mutable_control_retirement_activation",
               "prepared retirement activation returned an admission error",
             ));
           };
@@ -2492,27 +2623,28 @@ impl V4FirstAuthorityPublisher {
       }
     };
     let selected =
-      load_index_operation_control_pair(&self.file, &kv, &publication_observation.selected.header, request.index_id, request.operation_id)?
-        .selected;
+      load_mutable_system_control_pair(&self.file, &kv, &publication_observation.selected.header, request.kind, request.identity)?.selected;
+    let incoming_digest = mutable_system_control_digest(header.hash_algorithm, request.encoded_control);
     let readback_failure = match selected {
       Some(ref selected)
         if selected.selected_slot == target_slot
-          && selected.control_sequence == incoming.control_sequence
+          && selected.control_sequence == incoming.sequence
+          && selected.control_digest == incoming_digest
           && selected.bytes == request.encoded_control =>
       {
         None
       }
-      Some(_) => Some("published index-operation control was not selected exactly".to_string()),
-      None => Some("published index-operation control is absent".to_string()),
+      Some(_) => Some("published mutable system control was not selected exactly".to_string()),
+      None => Some("published mutable system control is absent".to_string()),
     };
     drop(kv);
     drop(authority);
 
     let replaced_slot = target.is_some();
-    let mut receipt = IndexOperationControlPublicationReceiptV1 {
+    let mut receipt = MutableSystemControlPublicationReceiptV1 {
       selected_slot: target_slot,
-      control_sequence: incoming.control_sequence,
-      checkpoint_artifact: incoming_checkpoint.to_vec(),
+      control_sequence: incoming.sequence,
+      control_digest: incoming_digest,
       replaced_slot,
       retirement_hard_publication_sequence: None,
       observation: publication_observation,
@@ -2520,12 +2652,12 @@ impl V4FirstAuthorityPublisher {
     };
     if replaced_slot {
       if let Err(source) = retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self }) {
-        return Err(IndexOperationControlPublicationErrorV1::committed("index_operation_retirement_flush", source.to_string(), receipt));
+        return Err(MutableSystemControlPublicationErrorV1::committed("mutable_control_retirement_flush", source.to_string(), receipt));
       }
       let hard_sequence = retirement_owner.status().last_hard_publication_sequence;
       if hard_sequence <= prior_hard_publication_sequence {
-        return Err(IndexOperationControlPublicationErrorV1::committed(
-          "index_operation_retirement_missing",
+        return Err(MutableSystemControlPublicationErrorV1::committed(
+          "mutable_control_retirement_missing",
           "control replacement committed without a new hard retirement publication",
           receipt,
         ));
@@ -2534,14 +2666,106 @@ impl V4FirstAuthorityPublisher {
       receipt.observation = self.observe()?;
     }
     if let Some((failure, message)) = committed_failure {
-      return Err(IndexOperationControlPublicationErrorV1::committed(index_operation_committed_failure_code(failure), message, receipt));
+      return Err(MutableSystemControlPublicationErrorV1::committed(
+        mutable_system_control_committed_failure_code(failure),
+        message,
+        receipt,
+      ));
     }
     if let Some(message) = readback_failure {
-      return Err(IndexOperationControlPublicationErrorV1::committed("index_operation_committed_readback", message, receipt));
+      return Err(MutableSystemControlPublicationErrorV1::committed("mutable_control_committed_readback", message, receipt));
     }
     Ok(receipt)
   }
 
+  pub fn load_index_operation_control(
+    &self,
+    database_id: &[u8; 16],
+    index_id: &[u8],
+    operation_id: &[u8; 16],
+  ) -> Result<Option<LoadedIndexOperationControlV1>, FirstAuthorityPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    validate_index_operation_identity(header, database_id, index_id, operation_id)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    Ok(load_index_operation_control_pair(&self.file, &kv, header, index_id, operation_id)?.selected)
+  }
+
+  pub fn publish_index_operation_control(
+    &self,
+    request: IndexOperationControlPublicationRequestV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<IndexOperationControlPublicationReceiptV1, IndexOperationControlPublicationErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_index_operation_control_with_observer(request, retirement_owner, &mut observer)
+  }
+
+  fn publish_index_operation_control_with_observer(
+    &self,
+    request: IndexOperationControlPublicationRequestV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<IndexOperationControlPublicationReceiptV1, IndexOperationControlPublicationErrorV1> {
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    validate_index_operation_identity(header, request.database_id, request.index_id, request.operation_id)?;
+    let incoming = decode_index_operation_control(request.encoded_control, header.hash_algorithm)?;
+    validate_index_operation_control_request(&incoming, &request)?;
+    let incoming_checkpoint = incoming.checkpoint_artifact.ok_or_else(|| {
+      IndexOperationControlPublicationErrorV1::invalid(
+        "index_operation_checkpoint_missing",
+        "selected recovery control must identify an immutable checkpoint artifact",
+      )
+    })?;
+    let identity = index_operation_control_identity(header.hash_algorithm, request.index_id, request.operation_id)?;
+    let current = self.load_index_operation_control(request.database_id, request.index_id, request.operation_id)?;
+    let is_exact_retry = current.as_ref().is_some_and(|current| current.bytes == request.encoded_control);
+    if !is_exact_retry {
+      validate_index_operation_expectation(current.as_ref(), request.expected, header.hash_algorithm)?;
+      let expected_sequence = match current.as_ref() {
+        Some(current) => current.control_sequence.checked_add(1).ok_or_else(|| {
+          IndexOperationControlPublicationErrorV1::invalid("index_operation_sequence_exhausted", "control sequence is exhausted")
+        })?,
+        None => 1,
+      };
+      if incoming.control_sequence != expected_sequence {
+        return Err(IndexOperationControlPublicationErrorV1::invalid(
+          "index_operation_sequence",
+          format!("expected control sequence {expected_sequence}, received {}", incoming.control_sequence),
+        ));
+      }
+      if let Some(current) = current.as_ref() {
+        let current_control = decode_index_operation_control(&current.bytes, header.hash_algorithm)?;
+        validate_index_operation_transition(&current_control, &incoming)?;
+      }
+    }
+    let expected = current.as_ref().map(|current| MutableSystemControlExpectationV1 {
+      selected_slot: current.selected_slot,
+      control_sequence: current.control_sequence,
+      control_digest: mutable_system_control_digest(header.hash_algorithm, &current.bytes),
+    });
+    let publication = self
+      .publish_mutable_system_control_with_observer(
+        MutableSystemControlPublicationRequestV1 {
+          database_id: request.database_id,
+          kind: SystemControlKindV1::IndexOperation,
+          identity: &identity,
+          expected,
+          encoded_control: request.encoded_control,
+          publication_timestamp_ms: request.publication_timestamp_ms,
+          monotonic_now_ms: request.monotonic_now_ms,
+        },
+        retirement_owner,
+        observer,
+      )
+      .map_err(|error| index_operation_from_mutable_system_control_error(error, incoming_checkpoint))?;
+    Ok(index_operation_receipt_from_mutable(publication, incoming_checkpoint))
+  }
   pub fn publish_index_artifacts(
     &self,
     request: IndexArtifactBatchPublicationRequestV1<'_>,
@@ -9321,7 +9545,7 @@ fn load_system_file_slot(
       format!("{path} FileRecord metadata is not canonical"),
     ));
   }
-  if record.chunk_hashes.len() != 1 || record.total_size > FIRST_AUTHORITY_CONTROL_BODY_CAP as u64 {
+  if record.chunk_hashes.len() != 1 || record.total_size > kind.encoded_cap() as u64 {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "first_authority_control_file_record",
       format!("{path} must contain one bounded canonical control chunk"),
@@ -9340,10 +9564,10 @@ fn load_system_file_slot(
       format!("{path} chunk identity resolves to another KV role"),
     ));
   }
-  let chunk_bytes = read_entity_bounded(file, kv, chunk_key, FIRST_AUTHORITY_CONTROL_ENTITY_CAP, header.write_sequence_high_water)?
-    .ok_or_else(|| {
-      FirstAuthorityPublicationErrorV1::invalid("first_authority_control_chunk_missing", format!("missing chunk for {path}"))
-    })?;
+  let chunk_entity_cap = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, chunk_key.len(), kind.encoded_cap())?;
+  let chunk_bytes = read_entity_bounded(file, kv, chunk_key, chunk_entity_cap, header.write_sequence_high_water)?.ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid("first_authority_control_chunk_missing", format!("missing chunk for {path}"))
+  })?;
   let chunk = decode_whole_entity(&chunk_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
   if chunk.entry_type != EntryTypeV4::Chunk
     || chunk.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
@@ -9376,6 +9600,187 @@ fn load_system_file_slot(
     ));
   }
   Ok(Some(LoadedSystemFileV1 { locator, entity_bytes: record_bytes, record, body, write_sequence, integrity_hash }))
+}
+
+fn validate_mutable_system_control_identity(
+  header: &DatabaseHeaderV4,
+  kind: SystemControlKindV1,
+  database_id: &[u8; 16],
+  identity: &[u8],
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if kind.is_immutable() {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "mutable_control_kind",
+      "mutable system-control authority cannot publish an immutable control kind",
+    ));
+  }
+  if database_id != &header.database_id {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "mutable_control_database_mismatch",
+      "mutable system control belongs to another logical database",
+    ));
+  }
+  system_control_path(kind, identity, SystemControlSlotV1::A)?;
+  system_control_path(kind, identity, SystemControlSlotV1::B)?;
+  Ok(())
+}
+
+fn load_mutable_system_control_pair(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  kind: SystemControlKindV1,
+  identity: &[u8],
+) -> Result<LoadedMutableSystemControlPairV1, FirstAuthorityPublicationErrorV1> {
+  let a = load_system_file_slot(file, kv, header, kind, identity, SystemControlSlotV1::A)?;
+  let b = load_system_file_slot(file, kv, header, kind, identity, SystemControlSlotV1::B)?;
+  let selected = discover_mutable_control(
+    header.hash_algorithm,
+    kind,
+    identity,
+    a.as_ref().map(|loaded| loaded.body.clone()),
+    b.as_ref().map(|loaded| loaded.body.clone()),
+  )?
+  .map(|selected| {
+    if selected.database_id != header.database_id {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "mutable_control_database_mismatch",
+        "selected mutable system control belongs to another logical database",
+      ));
+    }
+    Ok(LoadedMutableSystemControlV1 {
+      selected_slot: selected.selected_slot,
+      control_sequence: selected.sequence,
+      control_digest: mutable_system_control_digest(header.hash_algorithm, &selected.bytes),
+      redundancy_degraded: selected.redundancy_degraded,
+      bytes: selected.bytes,
+    })
+  })
+  .transpose()?;
+  Ok(LoadedMutableSystemControlPairV1 { slots: [a, b], selected })
+}
+
+fn mutable_system_control_digest(algorithm: HashAlgorithm, bytes: &[u8]) -> Vec<u8> {
+  digest_parts(algorithm, &[b"aeordb.mutable-system-control-cas.v1\0", bytes])
+}
+
+fn validate_mutable_system_control_expectation(
+  current: Option<&LoadedMutableSystemControlV1>,
+  expected: Option<&MutableSystemControlExpectationV1>,
+  algorithm: HashAlgorithm,
+) -> Result<(), MutableSystemControlPublicationErrorV1> {
+  if let Some(expected) = expected {
+    if expected.selected_slot == SystemControlSlotV1::Immutable
+      || expected.control_sequence == 0
+      || expected.control_digest.len() != algorithm.hash_length()
+      || expected.control_digest.iter().all(|byte| *byte == 0)
+    {
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_expectation",
+        "expected slot, sequence, and control digest are noncanonical",
+      ));
+    }
+  }
+  match (current, expected) {
+    (None, None) => Ok(()),
+    (Some(current), Some(expected))
+      if current.selected_slot == expected.selected_slot
+        && current.control_sequence == expected.control_sequence
+        && current.control_digest == expected.control_digest =>
+    {
+      Ok(())
+    }
+    _ => Err(MutableSystemControlPublicationErrorV1::invalid(
+      "mutable_control_selector_conflict",
+      "selected mutable system control differs from the caller's compare-and-swap expectation",
+    )),
+  }
+}
+
+fn mutable_system_control_from_gc_error(source: GcControlPublicationErrorV1) -> MutableSystemControlPublicationErrorV1 {
+  MutableSystemControlPublicationErrorV1::invalid("mutable_control_physical_incarnation", source.to_string())
+}
+
+const fn mutable_system_control_committed_failure_code(failure: StableEntityDependencyFailureV1) -> &'static str {
+  match failure {
+    StableEntityDependencyFailureV1::DependencyMissing => "mutable_control_committed_dependency_missing",
+    StableEntityDependencyFailureV1::AuthorityUncertain => "mutable_control_committed_authority_uncertain",
+    StableEntityDependencyFailureV1::VisibilityFailure => "mutable_control_committed_visibility_failure",
+    StableEntityDependencyFailureV1::PostconditionFailure => "mutable_control_committed_postcondition_failure",
+  }
+}
+
+fn index_operation_receipt_from_mutable(
+  receipt: MutableSystemControlPublicationReceiptV1,
+  checkpoint_artifact: &[u8],
+) -> IndexOperationControlPublicationReceiptV1 {
+  IndexOperationControlPublicationReceiptV1 {
+    selected_slot: receipt.selected_slot,
+    control_sequence: receipt.control_sequence,
+    checkpoint_artifact: checkpoint_artifact.to_vec(),
+    replaced_slot: receipt.replaced_slot,
+    retirement_hard_publication_sequence: receipt.retirement_hard_publication_sequence,
+    observation: receipt.observation,
+    idempotent: receipt.idempotent,
+  }
+}
+
+fn index_operation_from_mutable_system_control_error(
+  source: MutableSystemControlPublicationErrorV1,
+  checkpoint_artifact: &[u8],
+) -> IndexOperationControlPublicationErrorV1 {
+  match source {
+    MutableSystemControlPublicationErrorV1::Invalid { code, message } => {
+      IndexOperationControlPublicationErrorV1::Invalid { code: index_operation_mutable_error_code(code), message }
+    }
+    MutableSystemControlPublicationErrorV1::Committed { code, message, receipt } => IndexOperationControlPublicationErrorV1::Committed {
+      code: index_operation_mutable_error_code(code),
+      message,
+      receipt: Box::new(index_operation_receipt_from_mutable(*receipt, checkpoint_artifact)),
+    },
+    MutableSystemControlPublicationErrorV1::Format(source) => IndexOperationControlPublicationErrorV1::Format(source),
+    MutableSystemControlPublicationErrorV1::Authority(source) => IndexOperationControlPublicationErrorV1::Authority(source),
+    MutableSystemControlPublicationErrorV1::RetirementAdmission(source) => {
+      IndexOperationControlPublicationErrorV1::RetirementAdmission(source)
+    }
+    MutableSystemControlPublicationErrorV1::RetirementOwner(source) => IndexOperationControlPublicationErrorV1::RetirementOwner(source),
+  }
+}
+
+fn index_operation_mutable_error_code(code: &'static str) -> &'static str {
+  match code {
+    "mutable_control_missing_authority" => "index_operation_missing_authority",
+    "mutable_control_retirement_authority" => "index_operation_retirement_authority",
+    "mutable_control_publication_time" => "index_operation_publication_time",
+    "mutable_control_prepared_mismatch" => "index_operation_prepared_mismatch",
+    "mutable_control_baseline_not_flushed" => "index_operation_baseline_not_flushed",
+    "mutable_control_selector_conflict" => "index_operation_selector_conflict",
+    "mutable_control_sequence_exhausted" => "index_operation_sequence_exhausted",
+    "mutable_control_sequence" => "index_operation_sequence",
+    "mutable_control_selected_slot" => "index_operation_selected_slot",
+    "mutable_control_write_sequence_exhausted" => "index_operation_write_sequence_exhausted",
+    "mutable_control_timestamp_range" => "index_operation_timestamp_range",
+    "mutable_control_entity_allocation" => "index_operation_entity_allocation",
+    "mutable_control_expectation_allocation" => "index_operation_expectation_allocation",
+    "mutable_control_file_record_allocation" => "index_operation_file_record_allocation",
+    "mutable_control_file_truncated" => "index_operation_file_truncated",
+    "mutable_control_write" => "index_operation_control_write",
+    "mutable_control_readback" => "index_operation_control_readback",
+    "mutable_control_wal_overflow" => "index_operation_wal_overflow",
+    "mutable_control_physical_incarnation" => "index_operation_physical_incarnation",
+    "mutable_control_wal_prefix" => "index_operation_wal_prefix",
+    "mutable_control_dependency_size" => "index_operation_dependency_size",
+    "mutable_control_entry_count" => "index_operation_entry_count",
+    "mutable_control_retirement_activation" => "index_operation_retirement_activation",
+    "mutable_control_retirement_flush" => "index_operation_retirement_flush",
+    "mutable_control_retirement_missing" => "index_operation_retirement_missing",
+    "mutable_control_committed_dependency_missing" => "index_operation_committed_dependency_missing",
+    "mutable_control_committed_authority_uncertain" => "index_operation_committed_authority_uncertain",
+    "mutable_control_committed_visibility_failure" => "index_operation_committed_visibility_failure",
+    "mutable_control_committed_postcondition_failure" => "index_operation_committed_postcondition_failure",
+    "mutable_control_committed_readback" => "index_operation_committed_readback",
+    _ => code,
+  }
 }
 
 fn validate_index_operation_identity(
@@ -9472,7 +9877,7 @@ fn load_index_operation_control_pair(
     })
   })
   .transpose()?;
-  Ok(LoadedIndexOperationControlPairV1 { slots: [a, b], selected })
+  Ok(LoadedIndexOperationControlPairV1 { selected })
 }
 
 fn validate_index_operation_control_request(
@@ -9619,19 +10024,6 @@ fn load_system_chunk(
     ));
   }
   Ok(Some(locator))
-}
-
-fn index_operation_from_gc_control_error(source: GcControlPublicationErrorV1) -> IndexOperationControlPublicationErrorV1 {
-  IndexOperationControlPublicationErrorV1::invalid("index_operation_physical_incarnation", source.to_string())
-}
-
-const fn index_operation_committed_failure_code(failure: StableEntityDependencyFailureV1) -> &'static str {
-  match failure {
-    StableEntityDependencyFailureV1::DependencyMissing => "index_operation_committed_dependency_missing",
-    StableEntityDependencyFailureV1::AuthorityUncertain => "index_operation_committed_authority_uncertain",
-    StableEntityDependencyFailureV1::VisibilityFailure => "index_operation_committed_visibility_failure",
-    StableEntityDependencyFailureV1::PostconditionFailure => "index_operation_committed_postcondition_failure",
-  }
 }
 
 const fn stable_dependency_to_gc_failure(failure: StableEntityDependencyFailureV1) -> GcControlPublicationFailureV1 {
