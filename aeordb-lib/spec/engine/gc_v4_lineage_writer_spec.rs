@@ -436,7 +436,11 @@ fn writer_has_no_live_service_or_independent_watermark_control_caller() {
   callers.sort();
   assert_eq!(
     callers,
-    [PathBuf::from("engine/v4/first_authority.rs"), PathBuf::from("engine/v4/index_recovery_store.rs")],
-    "retirement owner must remain confined to the disconnected first-authority and native recovery owners"
+    [
+      PathBuf::from("engine/v4/first_authority.rs"),
+      PathBuf::from("engine/v4/index_recovery_store.rs"),
+      PathBuf::from("engine/v4/migration_owner.rs"),
+    ],
+    "retirement owner must remain confined to the reviewed disconnected physical-authority owners"
   );
 }

@@ -381,17 +381,17 @@ impl MigrationMemoryEvidenceV1 {
   }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationConfigurationEvidenceV1 {
   pub generation: u64,
   pub capture_max_bytes: u64,
   pub capture_free_reserve_bytes: u64,
   pub checkpoint_after_seconds: u64,
-  pub effective_configuration_fingerprint: [u8; 32],
+  pub effective_configuration_fingerprint: Vec<u8>,
 }
 
 impl MigrationConfigurationEvidenceV1 {
-  pub fn from_run_configuration(configuration: MigrationRunConfiguration, effective_configuration_fingerprint: [u8; 32]) -> Self {
+  pub fn from_run_configuration(configuration: MigrationRunConfiguration, effective_configuration_fingerprint: Vec<u8>) -> Self {
     Self {
       generation: configuration.generation,
       capture_max_bytes: configuration.capture_max_bytes,
@@ -504,8 +504,12 @@ pub struct MigrationPreflightPermitV1 {
   migration_id: [u8; 16],
   source_physical_instance_id: [u8; 16],
   destination_physical_instance_id: [u8; 16],
+  hash_algorithm: HashAlgorithm,
   source_header_sequence: u64,
+  source_capture_head: Vec<u8>,
   configuration_generation: u64,
+  effective_configuration_fingerprint: Vec<u8>,
+  system_family_registry_fingerprint: Vec<u8>,
   evidence_fingerprint: [u8; 32],
 }
 
@@ -526,12 +530,28 @@ impl MigrationPreflightPermitV1 {
     self.destination_physical_instance_id
   }
 
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
   pub const fn source_header_sequence(&self) -> u64 {
     self.source_header_sequence
   }
 
+  pub fn source_capture_head(&self) -> &[u8] {
+    &self.source_capture_head
+  }
+
   pub const fn configuration_generation(&self) -> u64 {
     self.configuration_generation
+  }
+
+  pub fn effective_configuration_fingerprint(&self) -> &[u8] {
+    &self.effective_configuration_fingerprint
+  }
+
+  pub fn system_family_registry_fingerprint(&self) -> &[u8] {
+    &self.system_family_registry_fingerprint
   }
 
   pub const fn evidence_fingerprint(&self) -> [u8; 32] {
@@ -607,8 +627,12 @@ pub fn admit_migration_preflight_v1(
     migration_id: request.identity.migration_id,
     source_physical_instance_id: request.identity.source_physical_instance_id,
     destination_physical_instance_id: request.identity.destination_physical_instance_id,
+    hash_algorithm: request.source.hash_algorithm,
     source_header_sequence: request.source.selected_header_sequence,
+    source_capture_head: request.source.head_hash.clone(),
     configuration_generation: request.configuration.generation,
+    effective_configuration_fingerprint: request.configuration.effective_configuration_fingerprint.clone(),
+    system_family_registry_fingerprint: request.inventory.system_family_registry_fingerprint.clone(),
     evidence_fingerprint: report.evidence_fingerprint,
   };
   Ok((report, permit))
@@ -729,11 +753,12 @@ fn validate_binary(request: &MigrationPreflightRequestV1, report: &mut Migration
 }
 
 fn validate_configuration(request: &MigrationPreflightRequestV1, report: &mut MigrationPreflightReportV1) {
-  let configuration = request.configuration;
+  let configuration = &request.configuration;
   if configuration.generation == 0
     || !(GIB..=MAX_CAPTURE_BYTES).contains(&configuration.capture_max_bytes)
     || configuration.capture_free_reserve_bytes < GIB
     || !(30..=3_600).contains(&configuration.checkpoint_after_seconds)
+    || configuration.effective_configuration_fingerprint.len() != request.source.hash_algorithm.hash_length()
     || all_zero(&configuration.effective_configuration_fingerprint)
   {
     report.push(MigrationPreflightFindingCodeV1::ConfigurationInvalid);
@@ -950,7 +975,7 @@ fn evidence_fingerprint(request: &MigrationPreflightRequestV1) -> [u8; 32] {
   ] {
     hash_u64(&mut hasher, value);
   }
-  hasher.update(&request.configuration.effective_configuration_fingerprint);
+  hash_len_bytes(&mut hasher, &request.configuration.effective_configuration_fingerprint);
 
   hasher.update(&request.binary.source_commit);
   hasher.update(&request.binary.executable_sha256);

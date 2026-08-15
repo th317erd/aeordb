@@ -157,7 +157,7 @@ fn valid_request() -> MigrationPreflightRequestV1 {
       capture_max_bytes: 64 * GIB,
       capture_free_reserve_bytes: 16 * GIB,
       checkpoint_after_seconds: 300,
-      effective_configuration_fingerprint: digest(0x17),
+      effective_configuration_fingerprint: digest(0x17).to_vec(),
     },
     binary: MigrationBinaryEvidenceV1 {
       source_commit: std::array::from_fn(|offset| 0x21 + offset as u8),
@@ -185,8 +185,14 @@ fn clean_preflight_issues_one_identity_bound_nonconstructible_permit() {
   assert!(report.findings().is_empty());
   assert_eq!(permit.database_id(), request.identity.database_id);
   assert_eq!(permit.migration_id(), request.identity.migration_id);
+  assert_eq!(permit.source_physical_instance_id(), request.identity.source_physical_instance_id);
+  assert_eq!(permit.destination_physical_instance_id(), request.identity.destination_physical_instance_id);
+  assert_eq!(permit.hash_algorithm(), request.source.hash_algorithm);
   assert_eq!(permit.source_header_sequence(), 41);
+  assert_eq!(permit.source_capture_head(), request.source.head_hash);
   assert_eq!(permit.configuration_generation(), 7);
+  assert_eq!(permit.effective_configuration_fingerprint(), request.configuration.effective_configuration_fingerprint);
+  assert_eq!(permit.system_family_registry_fingerprint(), request.inventory.system_family_registry_fingerprint);
   assert_eq!(permit.evidence_fingerprint(), report.evidence_fingerprint());
   assert_ne!(permit.evidence_fingerprint(), [0; 32]);
 }
@@ -233,6 +239,12 @@ fn inventory_native_binary_registry_and_configuration_fail_closed() {
   assert_refused(|request| request.binary.contract_registry_sha256[0] ^= 1, MigrationPreflightFindingCodeV1::RegistryMismatch);
   assert_refused(|request| request.inventory.system_family_registry_fingerprint[0] ^= 1, MigrationPreflightFindingCodeV1::RegistryMismatch);
   assert_refused(|request| request.configuration.checkpoint_after_seconds = 29, MigrationPreflightFindingCodeV1::ConfigurationInvalid);
+  assert_refused(
+    |request| {
+      request.configuration.effective_configuration_fingerprint.pop();
+    },
+    MigrationPreflightFindingCodeV1::ConfigurationInvalid,
+  );
   assert_refused(
     |request| request.capacity[3].required_bytes = request.configuration.capture_max_bytes - 1,
     MigrationPreflightFindingCodeV1::ConfigurationInvalid,

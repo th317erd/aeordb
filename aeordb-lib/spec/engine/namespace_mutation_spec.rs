@@ -1135,11 +1135,19 @@ fn wave_five_exit_allows_reviewed_p3c_contracts_but_keeps_migration_runtime_unac
     .collect::<Vec<_>>();
   assert_eq!(
     migration_control_sources.len(),
-    1,
-    "migration controls escaped their one reviewed typed codec: {migration_control_sources:?}"
+    2,
+    "migration controls escaped their reviewed codec and state owner: {migration_control_sources:?}"
   );
-  assert_eq!(migration_control_sources[0].0.file_name().and_then(|value| value.to_str()), Some("migration_control.rs"));
-  let codec = migration_control_sources[0].1;
+  let codec = migration_control_sources
+    .iter()
+    .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("migration_control.rs"))
+    .map(|(_, source)| *source)
+    .expect("reviewed migration codec");
+  let owner = migration_control_sources
+    .iter()
+    .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("migration_owner.rs"))
+    .map(|(_, source)| *source)
+    .expect("reviewed migration state owner");
   for forbidden in [
     "StorageEngine",
     "DirectoryOps",
@@ -1152,9 +1160,26 @@ fn wave_five_exit_allows_reviewed_p3c_contracts_but_keeps_migration_runtime_unac
   ] {
     assert!(!codec.contains(forbidden), "disconnected migration codec acquired premature runtime dependency {forbidden}");
   }
+  assert!(owner.contains("V4FirstAuthorityPublisher"));
+  assert!(owner.contains("MigrationPreflightPermitV1"));
+  for forbidden in [
+    "StorageEngine",
+    "DirectoryOps",
+    "V4ControlStore",
+    "V3TransitionControlStore",
+    "std::fs",
+    "server::",
+    "axum",
+    "task_worker",
+    "GarbageCollector",
+    "capture_migration_run_configuration",
+  ] {
+    assert!(!owner.contains(forbidden), "disconnected migration owner acquired premature runtime dependency {forbidden}");
+  }
 
   let v4_module = std::fs::read_to_string(package.join("src/engine/v4/mod.rs")).unwrap();
   assert!(v4_module.contains("pub mod migration_control;"), "ratified P3c migration codec is not exported");
+  assert!(v4_module.contains("pub mod migration_owner;"), "ratified P3c migration state owner is not exported");
   assert!(v4_module.contains("pub mod migration_preflight;"), "ratified P3c preflight contract is not exported");
   for forbidden in ["pub mod migration;", "pub mod migration_runtime;", "pub mod migration_capture;"] {
     assert!(!v4_module.contains(forbidden), "migration runtime module was activated before its owning phase: {forbidden}");
