@@ -85,6 +85,9 @@ use crate::engine::v4::header_publication::HeaderPublicationIo;
 use crate::engine::v4::index_artifact::{
   EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1, encode_immutable_index_artifact,
 };
+use crate::engine::v4::index_operation_control::{
+  IndexOperationControlWriteV1, IndexOperationKindV1, IndexOperationStateV1, RetryClassV1, StableReasonV1, encode_index_operation_control,
+};
 use crate::engine::v4::gc_state::{
   GcDirectoryRoleV1, GcPhysicalHintV1, GcStateArtifactV1, GcStateDirectoryEntryWriteV1, GcStateDirectoryWriteV1, GcStatePageWriteV1,
   RootExpiryStateV1, decode_gc_state_artifact, decode_physical_inventory_manifest_v1, decode_root_expiry_record_v1,
@@ -4270,6 +4273,422 @@ fn immutable_index_artifact_batch_rejects_empty_duplicate_and_wrong_role() {
   };
   assert_eq!(collision.code(), "immutable_index_identity_collision");
   assert_eq!(publisher.observe().unwrap(), before);
+}
+
+fn index_operation_control(sequence: u64, checkpoint_fill: u8) -> Vec<u8> {
+  index_operation_control_with_checkpoint(sequence, Some(checkpoint_fill))
+}
+
+fn index_operation_control_with_checkpoint(sequence: u64, checkpoint_fill: Option<u8>) -> Vec<u8> {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let index_id = vec![0xc1; algorithm.hash_length()];
+  let requested_namespace_root = vec![0xc2; algorithm.hash_length()];
+  let definition_id = vec![0xc3; algorithm.hash_length()];
+  let checkpoint_artifact = checkpoint_fill.map(|fill| vec![fill; algorithm.hash_length()]);
+  encode_index_operation_control(
+    sequence,
+    &IndexOperationControlWriteV1 {
+      database_id: [0x31; 16],
+      index_id: &index_id,
+      operation_id: [0xc4; 16],
+      operation_kind: IndexOperationKindV1::Build,
+      state: IndexOperationStateV1::Checkpointed,
+      created_at_ms: 1_700_000_000_100,
+      updated_at_ms: 1_700_000_000_100 + sequence as i64,
+      requested_namespace_root: &requested_namespace_root,
+      definition_id: &definition_id,
+      base_manifest: None,
+      target_manifest: None,
+      checkpoint_artifact: checkpoint_artifact.as_deref(),
+      captured_runtime_sequence: 0,
+      reconciled_through_sequence: sequence,
+      completed_work: sequence,
+      total_work_hint: 100,
+      stable_reason: StableReasonV1::NoneOrSuccess,
+      retry_class: RetryClassV1::None,
+      error_evidence_hash: None,
+    },
+    algorithm,
+  )
+  .unwrap()
+}
+
+fn index_operation_retirement_owner<'a>(cancellation: &'a CancellationToken, memory: &MemoryCoordinator) -> RetirementJournalOwnerV1<'a> {
+  RetirementJournalOwnerV1::new_chain(
+    HashAlgorithm::Blake3_256,
+    [0x31; 16],
+    1,
+    901,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    cancellation,
+    memory,
+  )
+  .unwrap()
+}
+
+#[test]
+fn index_operation_control_selects_a_b_a_with_hard_lineage_and_restart() {
+  let (_directory, path, _coordinator, publisher) = create_environment("index-operation-control", None);
+  publisher.publish(&request()).unwrap();
+  let index_id = vec![0xc1; HashAlgorithm::Blake3_256.hash_length()];
+  let operation_id = [0xc4; 16];
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut retirement_owner = index_operation_retirement_owner(&cancellation, &memory);
+  assert!(publisher.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().is_none());
+
+  let mut expected_root: Option<(u64, Vec<u8>)> = None;
+  for (sequence, fill, slot, replaced) in
+    [(1, 0xd1, SystemControlSlotV1::A, false), (2, 0xd2, SystemControlSlotV1::B, false), (3, 0xd3, SystemControlSlotV1::A, true)]
+  {
+    let encoded = index_operation_control(sequence, fill);
+    let expected = expected_root.as_ref().map(|(control_sequence, checkpoint_artifact)| IndexOperationControlExpectationV1 {
+      control_sequence: *control_sequence,
+      checkpoint_artifact,
+    });
+    let receipt = publisher
+      .publish_index_operation_control(
+        IndexOperationControlPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          index_id: &index_id,
+          operation_id: &operation_id,
+          expected,
+          encoded_control: &encoded,
+          publication_timestamp_ms: 1_700_000_000_200 + sequence,
+          monotonic_now_ms: 10_000 + sequence,
+        },
+        &mut retirement_owner,
+      )
+      .unwrap();
+    assert_eq!(receipt.selected_slot, slot);
+    assert_eq!(receipt.control_sequence, sequence);
+    assert_eq!(receipt.checkpoint_artifact, vec![fill; HashAlgorithm::Blake3_256.hash_length()]);
+    assert_eq!(receipt.replaced_slot, replaced);
+    assert!(!receipt.idempotent);
+    if replaced {
+      assert!(receipt.retirement_hard_publication_sequence.is_some());
+    } else {
+      assert!(receipt.retirement_hard_publication_sequence.is_none());
+    }
+    expected_root = Some((sequence, receipt.checkpoint_artifact.clone()));
+  }
+
+  let before_retry = publisher.observe().unwrap();
+  let selected = publisher.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().unwrap();
+  let retry = publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: Some(IndexOperationControlExpectationV1 {
+          control_sequence: selected.control_sequence,
+          checkpoint_artifact: &selected.checkpoint_artifact,
+        }),
+        encoded_control: &selected.bytes,
+        publication_timestamp_ms: 1_700_000_000_300,
+        monotonic_now_ms: 10_100,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.observation, before_retry);
+
+  drop(publisher);
+  let (_coordinator, reopened) = reopen(&path);
+  let selected = reopened.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().unwrap();
+  assert_eq!(selected.selected_slot, SystemControlSlotV1::A);
+  assert_eq!(selected.control_sequence, 3);
+  assert_eq!(selected.checkpoint_artifact, vec![0xd3; HashAlgorithm::Blake3_256.hash_length()]);
+}
+
+#[test]
+fn index_operation_control_rejects_malformed_identity_checkpoint_and_stale_expectation_without_mutation() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-operation-control-errors", None);
+  publisher.publish(&request()).unwrap();
+  let index_id = vec![0xc1; HashAlgorithm::Blake3_256.hash_length()];
+  let operation_id = [0xc4; 16];
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut retirement_owner = index_operation_retirement_owner(&cancellation, &memory);
+  let initial = publisher.observe().unwrap();
+
+  let malformed = publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: None,
+        encoded_control: b"not-an-index-operation-control",
+        publication_timestamp_ms: 1_700_000_000_201,
+        monotonic_now_ms: 10_001,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap_err();
+  assert_eq!(malformed.code(), "system_control_length");
+
+  let wrong_database = publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x32; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: None,
+        encoded_control: &index_operation_control(1, 0xd1),
+        publication_timestamp_ms: 1_700_000_000_201,
+        monotonic_now_ms: 10_002,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap_err();
+  assert_eq!(wrong_database.code(), "index_operation_database_mismatch");
+
+  let missing_checkpoint_bytes = index_operation_control_with_checkpoint(1, None);
+  let missing_checkpoint = publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: None,
+        encoded_control: &missing_checkpoint_bytes,
+        publication_timestamp_ms: 1_700_000_000_201,
+        monotonic_now_ms: 10_003,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap_err();
+  assert_eq!(missing_checkpoint.code(), "index_operation_checkpoint_missing");
+  assert_eq!(publisher.observe().unwrap(), initial);
+
+  let first = index_operation_control(1, 0xd1);
+  publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: None,
+        encoded_control: &first,
+        publication_timestamp_ms: 1_700_000_000_201,
+        monotonic_now_ms: 10_004,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap();
+  let after_first = publisher.observe().unwrap();
+  let second = index_operation_control(2, 0xd2);
+  let stale = publisher
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: Some(IndexOperationControlExpectationV1 {
+          control_sequence: 1,
+          checkpoint_artifact: &vec![0xee; HashAlgorithm::Blake3_256.hash_length()],
+        }),
+        encoded_control: &second,
+        publication_timestamp_ms: 1_700_000_000_202,
+        monotonic_now_ms: 10_005,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap_err();
+  assert_eq!(stale.code(), "index_operation_selector_conflict");
+  assert_eq!(publisher.observe().unwrap(), after_first);
+}
+
+#[test]
+fn index_operation_control_dependency_failures_leave_no_selected_control_and_retry_after_restart() {
+  for phase in [DependencyFailurePhase::BeforeEntity, DependencyFailurePhase::EntityWritten, DependencyFailurePhase::EntityStaged] {
+    for entity_index in 0..2 {
+      let (_directory, path, _coordinator, publisher) =
+        create_environment(&format!("index-operation-prefix-{phase:?}-{entity_index}"), None);
+      publisher.publish(&request()).unwrap();
+      let index_id = vec![0xc1; HashAlgorithm::Blake3_256.hash_length()];
+      let operation_id = [0xc4; 16];
+      let encoded = index_operation_control(1, 0xd1);
+      let cancellation = CancellationToken::new();
+      let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+      let mut retirement_owner = index_operation_retirement_owner(&cancellation, &memory);
+      let error = publisher
+        .publish_index_operation_control_with_observer(
+          IndexOperationControlPublicationRequestV1 {
+            database_id: &[0x31; 16],
+            index_id: &index_id,
+            operation_id: &operation_id,
+            expected: None,
+            encoded_control: &encoded,
+            publication_timestamp_ms: 1_700_000_000_201,
+            monotonic_now_ms: 10_001,
+          },
+          &mut retirement_owner,
+          &mut FailingDependencyObserver { phase, entity_index },
+        )
+        .unwrap_err();
+      assert!(error.committed_receipt().is_none());
+      drop(publisher);
+
+      let (_coordinator, reopened) = reopen(&path);
+      assert!(reopened.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().is_none());
+      let retry_cancellation = CancellationToken::new();
+      let retry_memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+      let mut retry_owner = index_operation_retirement_owner(&retry_cancellation, &retry_memory);
+      let retry = reopened
+        .publish_index_operation_control(
+          IndexOperationControlPublicationRequestV1 {
+            database_id: &[0x31; 16],
+            index_id: &index_id,
+            operation_id: &operation_id,
+            expected: None,
+            encoded_control: &encoded,
+            publication_timestamp_ms: 1_700_000_000_202,
+            monotonic_now_ms: 10_002,
+          },
+          &mut retry_owner,
+        )
+        .unwrap();
+      assert_eq!(retry.selected_slot, SystemControlSlotV1::A);
+      assert_eq!(retry.control_sequence, 1);
+      assert!(!retry.idempotent);
+    }
+  }
+}
+
+#[test]
+fn index_operation_control_post_commit_failure_reopens_as_exact_idempotent_retry() {
+  let (_directory, path, _coordinator, publisher) = create_environment("index-operation-post-commit", None);
+  publisher.publish(&request()).unwrap();
+  let index_id = vec![0xc1; HashAlgorithm::Blake3_256.hash_length()];
+  let operation_id = [0xc4; 16];
+  let encoded = index_operation_control(1, 0xd1);
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut retirement_owner = index_operation_retirement_owner(&cancellation, &memory);
+  let error = publisher
+    .publish_index_operation_control_with_observer(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: None,
+        encoded_control: &encoded,
+        publication_timestamp_ms: 1_700_000_000_201,
+        monotonic_now_ms: 10_001,
+      },
+      &mut retirement_owner,
+      &mut FailingPostCommitObserver,
+    )
+    .unwrap_err();
+  let committed = error.committed_receipt().unwrap();
+  assert_eq!(committed.selected_slot, SystemControlSlotV1::A);
+  assert_eq!(committed.control_sequence, 1);
+  drop(publisher);
+
+  let (_coordinator, reopened) = reopen(&path);
+  let before_retry = reopened.observe().unwrap();
+  let retry_cancellation = CancellationToken::new();
+  let retry_memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut retry_owner = index_operation_retirement_owner(&retry_cancellation, &retry_memory);
+  let retry = reopened
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: None,
+        encoded_control: &encoded,
+        publication_timestamp_ms: 1_700_000_000_202,
+        monotonic_now_ms: 10_002,
+      },
+      &mut retry_owner,
+    )
+    .unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.observation, before_retry);
+}
+
+#[test]
+fn index_operation_control_failed_slot_replacement_discards_soft_lineage_and_retries_with_same_owner() {
+  let (_directory, path, _coordinator, publisher) = create_environment("index-operation-replacement-rollback", None);
+  publisher.publish(&request()).unwrap();
+  let index_id = vec![0xc1; HashAlgorithm::Blake3_256.hash_length()];
+  let operation_id = [0xc4; 16];
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap());
+  let mut retirement_owner = index_operation_retirement_owner(&cancellation, &memory);
+  let mut expected: Option<(u64, Vec<u8>)> = None;
+  for (sequence, fill) in [(1, 0xd1), (2, 0xd2)] {
+    let encoded = index_operation_control(sequence, fill);
+    let expectation = expected.as_ref().map(|(control_sequence, checkpoint_artifact)| IndexOperationControlExpectationV1 {
+      control_sequence: *control_sequence,
+      checkpoint_artifact,
+    });
+    let receipt = publisher
+      .publish_index_operation_control(
+        IndexOperationControlPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          index_id: &index_id,
+          operation_id: &operation_id,
+          expected: expectation,
+          encoded_control: &encoded,
+          publication_timestamp_ms: 1_700_000_000_200 + sequence,
+          monotonic_now_ms: 10_000 + sequence,
+        },
+        &mut retirement_owner,
+      )
+      .unwrap();
+    expected = Some((sequence, receipt.checkpoint_artifact));
+  }
+
+  let encoded = index_operation_control(3, 0xd3);
+  let before = publisher.observe().unwrap();
+  let error = publisher
+    .publish_index_operation_control_with_observer(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: Some(IndexOperationControlExpectationV1 { control_sequence: 2, checkpoint_artifact: &expected.as_ref().unwrap().1 }),
+        encoded_control: &encoded,
+        publication_timestamp_ms: 1_700_000_000_203,
+        monotonic_now_ms: 10_003,
+      },
+      &mut retirement_owner,
+      &mut FailingDependencyObserver { phase: DependencyFailurePhase::BeforeEntity, entity_index: 0 },
+    )
+    .unwrap_err();
+  assert!(error.committed_receipt().is_none());
+  assert_eq!(retirement_owner.status().pending_records, 0);
+  let selected = publisher.load_index_operation_control(&[0x31; 16], &index_id, &operation_id).unwrap().unwrap();
+  assert_eq!(selected.control_sequence, 2);
+  assert_eq!(selected.selected_slot, SystemControlSlotV1::B);
+  assert!(publisher.observe().unwrap().selected.header.write_sequence_high_water > before.selected.header.write_sequence_high_water);
+  drop(publisher);
+  let (_coordinator, reopened) = reopen(&path);
+
+  let retry = reopened
+    .publish_index_operation_control(
+      IndexOperationControlPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        index_id: &index_id,
+        operation_id: &operation_id,
+        expected: Some(IndexOperationControlExpectationV1 { control_sequence: 2, checkpoint_artifact: &selected.checkpoint_artifact }),
+        encoded_control: &encoded,
+        publication_timestamp_ms: 1_700_000_000_204,
+        monotonic_now_ms: 10_004,
+      },
+      &mut retirement_owner,
+    )
+    .unwrap();
+  assert_eq!(retry.selected_slot, SystemControlSlotV1::A);
+  assert_eq!(retry.control_sequence, 3);
+  assert!(retry.replaced_slot);
+  assert!(retry.retirement_hard_publication_sequence.is_some());
 }
 
 fn captured_retirement_segment(database_id: [u8; 16]) -> CapturedRetirementSegmentV1 {

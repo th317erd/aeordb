@@ -902,7 +902,7 @@
               - [x] Freeze one fail-closed runtime-owner lifecycle that exclusively composes the soft hub, producer queue, mutation memtable, worker, publication retry, degraded latch, and drain state.
               - [ ] Bind the owner to one concrete recovery store and bounded per-scope selected-checkpoint adapter registry without adding another selector or in-memory persistent cursor map.
                 - [x] Bind bounded immutable IndexArtifact length/read and idempotent batch publication to the native v4 WholeEntity/KV/header authority.
-                - [ ] Bind selected checkpoint roots to typed IndexOperationControl A/B publication with retirement lineage.
+                - [x] Bind selected checkpoint roots to typed IndexOperationControl A/B publication with retirement lineage.
                 - [ ] Compose the concrete recovery store and bounded evictable per-scope registry under shared memory admission.
               - [ ] Install the recovered owner in `StorageEngine` and route the existing timer, pressure, metrics, spill, startup, and shutdown seams through it while legacy queries remain authoritative.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
