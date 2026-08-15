@@ -3,7 +3,7 @@
 - **Status:** active; Child 03 start gate and P3c-1 lease/progress/source-GC ownership are complete; P3c-2a clone planning and destination initialization are complete; bounded capture is next
 - **Current landing unit:** P3c-2b bounded capture, checkpoints, resume, and reconciliation
 - **Entry commit:** `956ab36` (`feat: suspend source gc during migration`)
-- **Last green commit:** `8877a35` (`feat: plan bounded v4 migration clones`); the destination-initializer landing is green and pending its commit at this ledger update
+- **Last green commit:** `1d65fd5` (`feat: initialize v4 migration destinations`)
 - **Owner:** current Codex thread after the shared-owner handoff; migration/control hotspots remain serialized
 - **Start gate:** satisfied for P3c because Child 03 is complete; P8 still requires Children 04 and 06
 - **Plan:** [Child 07](../children/07-side-by-side-migration-cutover-and-rollout.md)
