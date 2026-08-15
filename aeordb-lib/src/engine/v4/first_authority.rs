@@ -145,12 +145,20 @@ pub struct MutableSystemControlExpectationV1 {
   pub control_digest: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MutableSystemControlGuardV1<'a> {
+  pub kind: SystemControlKindV1,
+  pub identity: &'a [u8],
+  pub expected: MutableSystemControlExpectationV1,
+}
+
 #[derive(Clone, Debug)]
 pub struct MutableSystemControlPublicationRequestV1<'a> {
   pub database_id: &'a [u8; 16],
   pub kind: SystemControlKindV1,
   pub identity: &'a [u8],
   pub expected: Option<MutableSystemControlExpectationV1>,
+  pub guards: &'a [MutableSystemControlGuardV1<'a>],
   pub encoded_control: &'a [u8],
   pub publication_timestamp_ms: u64,
   pub monotonic_now_ms: u64,
@@ -2305,6 +2313,18 @@ impl V4FirstAuthorityPublisher {
     retirement_owner: &mut RetirementJournalOwnerV1,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
+    if request.publication_timestamp_ms == 0 || request.monotonic_now_ms == 0 {
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_publication_time",
+        "publication and monotonic timestamps must be nonzero",
+      ));
+    }
+    let timestamp = i64::try_from(request.publication_timestamp_ms).map_err(|error| {
+      MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_timestamp_range",
+        format!("publication timestamp exceeds FileRecord range: {error}"),
+      )
+    })?;
     retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self })?;
     let prior_hard_publication_sequence = retirement_owner.status().last_hard_publication_sequence;
     let authority = self.root_state.lock().map_err(|poisoned| {
@@ -2324,12 +2344,6 @@ impl V4FirstAuthorityPublisher {
       return Err(MutableSystemControlPublicationErrorV1::invalid(
         "mutable_control_retirement_authority",
         "mutable system control and retirement owner belong to different database authority",
-      ));
-    }
-    if request.publication_timestamp_ms == 0 || request.monotonic_now_ms == 0 {
-      return Err(MutableSystemControlPublicationErrorV1::invalid(
-        "mutable_control_publication_time",
-        "publication and monotonic timestamps must be nonzero",
       ));
     }
     let incoming = decode_system_control(request.encoded_control, header.hash_algorithm)?;
@@ -2364,6 +2378,7 @@ impl V4FirstAuthorityPublisher {
         });
       }
     }
+    validate_mutable_system_control_guards(&self.file, &kv, header, &request)?;
     validate_mutable_system_control_expectation(pair.selected.as_ref(), request.expected.as_ref(), header.hash_algorithm)?;
     let expected_sequence = match pair.selected.as_ref() {
       Some(current) => current.control_sequence.checked_add(1).ok_or_else(|| {
@@ -2412,12 +2427,6 @@ impl V4FirstAuthorityPublisher {
     let header = &reserved_observation.selected.header;
     validate_kv_header_alignment(&kv, header)?;
 
-    let timestamp = i64::try_from(request.publication_timestamp_ms).map_err(|error| {
-      MutableSystemControlPublicationErrorV1::invalid(
-        "mutable_control_timestamp_range",
-        format!("publication timestamp exceeds FileRecord range: {error}"),
-      )
-    })?;
     let mut entities = Vec::new();
     entities.try_reserve_exact(2).map_err(|error| {
       MutableSystemControlPublicationErrorV1::invalid("mutable_control_entity_allocation", format!("entity allocation failed: {error}"))
@@ -2756,6 +2765,7 @@ impl V4FirstAuthorityPublisher {
           kind: SystemControlKindV1::IndexOperation,
           identity: &identity,
           expected,
+          guards: &[],
           encoded_control: request.encoded_control,
           publication_timestamp_ms: request.publication_timestamp_ms,
           monotonic_now_ms: request.monotonic_now_ms,
@@ -9662,6 +9672,40 @@ fn load_mutable_system_control_pair(
 
 fn mutable_system_control_digest(algorithm: HashAlgorithm, bytes: &[u8]) -> Vec<u8> {
   digest_parts(algorithm, &[b"aeordb.mutable-system-control-cas.v1\0", bytes])
+}
+
+fn validate_mutable_system_control_guards(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  request: &MutableSystemControlPublicationRequestV1<'_>,
+) -> Result<(), MutableSystemControlPublicationErrorV1> {
+  const MAX_GUARDS: usize = 8;
+  if request.guards.len() > MAX_GUARDS {
+    return Err(MutableSystemControlPublicationErrorV1::invalid(
+      "mutable_control_guard_count",
+      format!("mutable system-control publication has {} guards, maximum is {MAX_GUARDS}", request.guards.len()),
+    ));
+  }
+  for (index, guard) in request.guards.iter().enumerate() {
+    validate_mutable_system_control_identity(header, guard.kind, request.database_id, guard.identity)?;
+    if request.guards[..index].iter().any(|prior| prior.kind == guard.kind && prior.identity == guard.identity) {
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_guard_duplicate",
+        "mutable system-control guards must identify distinct controls",
+      ));
+    }
+    let selected = load_mutable_system_control_pair(file, kv, header, guard.kind, guard.identity)?.selected;
+    if let Err(source) = validate_mutable_system_control_expectation(selected.as_ref(), Some(&guard.expected), header.hash_algorithm) {
+      let code =
+        if source.code() == "mutable_control_expectation" { "mutable_control_guard_expectation" } else { "mutable_control_guard_conflict" };
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        code,
+        format!("guarded mutable system control no longer matches its selected expectation: {source}"),
+      ));
+    }
+  }
+  Ok(())
 }
 
 fn validate_mutable_system_control_expectation(

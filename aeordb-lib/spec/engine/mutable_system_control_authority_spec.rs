@@ -10,8 +10,8 @@ use aeordb::engine::kv_stages::initial_block_size;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
 use aeordb::engine::v4::first_authority::{
-  FirstAuthorityPublicationRequestV1, MutableSystemControlExpectationV1, MutableSystemControlPublicationRequestV1, PreparedNamespaceTreeV0,
-  V4FirstAuthorityPublisher,
+  FirstAuthorityPublicationRequestV1, MutableSystemControlExpectationV1, MutableSystemControlGuardV1,
+  MutableSystemControlPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher,
 };
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::hash::digest_parts;
@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 const DATABASE_ID: [u8; 16] = [0x31; 16];
 const MIGRATION_ID: [u8; 16] = [0x71; 16];
+const OTHER_MIGRATION_ID: [u8; 16] = [0x72; 16];
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
 fn initial_header_for(algorithm: HashAlgorithm, kv_block_length: u64) -> DatabaseHeaderV4 {
@@ -155,11 +156,15 @@ fn lease_control(sequence: u64, renewed_at_ms: i64) -> Vec<u8> {
 }
 
 fn lease_control_for(algorithm: HashAlgorithm, sequence: u64, renewed_at_ms: i64) -> Vec<u8> {
+  lease_control_for_identity(algorithm, MIGRATION_ID, sequence, renewed_at_ms)
+}
+
+fn lease_control_for_identity(algorithm: HashAlgorithm, migration_id: [u8; 16], sequence: u64, renewed_at_ms: i64) -> Vec<u8> {
   encode_migration_lease_control(
     sequence,
     &MigrationLeaseBodyV1 {
       database_id: DATABASE_ID,
-      migration_id: MIGRATION_ID,
+      migration_id,
       source_physical_instance_id: [0x41; 16],
       destination_physical_instance_id: [0x51; 16],
       holder_boot_id: [0x61; 16],
@@ -193,12 +198,28 @@ fn publish_lease(
   aeordb::engine::v4::first_authority::MutableSystemControlPublicationReceiptV1,
   aeordb::engine::v4::first_authority::MutableSystemControlPublicationErrorV1,
 > {
+  publish_lease_guarded(publisher, retirement, &MIGRATION_ID, expected, &[], bytes, timestamp)
+}
+
+fn publish_lease_guarded(
+  publisher: &V4FirstAuthorityPublisher,
+  retirement: &mut RetirementJournalOwnerV1,
+  identity: &[u8],
+  expected: Option<MutableSystemControlExpectationV1>,
+  guards: &[MutableSystemControlGuardV1<'_>],
+  bytes: &[u8],
+  timestamp: u64,
+) -> Result<
+  aeordb::engine::v4::first_authority::MutableSystemControlPublicationReceiptV1,
+  aeordb::engine::v4::first_authority::MutableSystemControlPublicationErrorV1,
+> {
   publisher.publish_mutable_system_control(
     MutableSystemControlPublicationRequestV1 {
       database_id: &DATABASE_ID,
       kind: SystemControlKindV1::MigrationLease,
-      identity: &MIGRATION_ID,
+      identity,
       expected,
+      guards,
       encoded_control: bytes,
       publication_timestamp_ms: timestamp,
       monotonic_now_ms: timestamp,
@@ -224,6 +245,7 @@ fn mutable_control_authority_selects_a_b_a_with_lineage_and_reopens_exactly() {
           kind: SystemControlKindV1::MigrationLease,
           identity: &MIGRATION_ID,
           expected,
+          guards: &[],
           encoded_control: &bytes,
           publication_timestamp_ms: 1_700_000_000_300 + sequence,
           monotonic_now_ms: 10_000 + sequence,
@@ -268,6 +290,7 @@ fn mutable_control_authority_preserves_the_widest_hash_profile() {
         kind: SystemControlKindV1::MigrationLease,
         identity: &MIGRATION_ID,
         expected: None,
+        guards: &[],
         encoded_control: &first,
         publication_timestamp_ms: 1_700_000_000_301,
         monotonic_now_ms: 1,
@@ -288,6 +311,7 @@ fn mutable_control_authority_preserves_the_widest_hash_profile() {
           control_sequence: first_receipt.control_sequence,
           control_digest: first_receipt.control_digest,
         }),
+        guards: &[],
         encoded_control: &second,
         publication_timestamp_ms: 1_700_000_000_302,
         monotonic_now_ms: 2,
@@ -378,6 +402,7 @@ fn mutable_control_authority_rejects_foreign_kind_database_identity_and_sequence
         kind: SystemControlKindV1::MigrationLease,
         identity: &MIGRATION_ID,
         expected: None,
+        guards: &[],
         encoded_control: &bytes,
         publication_timestamp_ms: 1_700_000_000_301,
         monotonic_now_ms: 1,
@@ -394,6 +419,7 @@ fn mutable_control_authority_rejects_foreign_kind_database_identity_and_sequence
         kind: SystemControlKindV1::LegacyRootMapPage,
         identity: &MIGRATION_ID,
         expected: None,
+        guards: &[],
         encoded_control: &bytes,
         publication_timestamp_ms: 1_700_000_000_301,
         monotonic_now_ms: 1,
@@ -410,6 +436,7 @@ fn mutable_control_authority_rejects_foreign_kind_database_identity_and_sequence
         kind: SystemControlKindV1::MigrationLease,
         identity: &[0x72; 16],
         expected: None,
+        guards: &[],
         encoded_control: &bytes,
         publication_timestamp_ms: 1_700_000_000_301,
         monotonic_now_ms: 1,
@@ -422,6 +449,179 @@ fn mutable_control_authority_rejects_foreign_kind_database_identity_and_sequence
   let skipped = publish_lease(&publisher, &mut retirement, None, &lease_control(2, 1_700_000_000_202), 1_700_000_000_302).unwrap_err();
   assert_eq!(skipped.code(), "mutable_control_sequence");
   assert!(publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().is_none());
+}
+
+#[test]
+fn mutable_control_authority_rejects_out_of_range_time_before_any_durable_mutation() {
+  let (_directory, path, publisher) = create_publisher();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(&cancellation, &memory);
+  let before = std::fs::read(&path).unwrap();
+
+  let error = publish_lease(&publisher, &mut retirement, None, &lease_control(1, 1_700_000_000_201), i64::MAX as u64 + 1).unwrap_err();
+
+  assert_eq!(error.code(), "mutable_control_timestamp_range");
+  assert_eq!(std::fs::read(&path).unwrap(), before, "invalid input must not reserve a header sequence or append WAL bytes");
+  assert!(publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().is_none());
+}
+
+#[test]
+fn mutable_control_authority_rejects_a_stale_cross_control_guard_without_target_publication() {
+  let (_directory, _path, publisher) = create_publisher();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(&cancellation, &memory);
+  let first = lease_control(1, 1_700_000_000_201);
+  publish_lease(&publisher, &mut retirement, None, &first, 1_700_000_000_301).unwrap();
+  let guarded = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let stale_guard =
+    MutableSystemControlGuardV1 { kind: SystemControlKindV1::MigrationLease, identity: &MIGRATION_ID, expected: expectation(&guarded) };
+
+  let other_first = lease_control_for_identity(ALGORITHM, OTHER_MIGRATION_ID, 1, 1_700_000_000_201);
+  publisher
+    .publish_mutable_system_control(
+      MutableSystemControlPublicationRequestV1 {
+        database_id: &DATABASE_ID,
+        kind: SystemControlKindV1::MigrationLease,
+        identity: &OTHER_MIGRATION_ID,
+        expected: None,
+        guards: &[],
+        encoded_control: &other_first,
+        publication_timestamp_ms: 1_700_000_000_302,
+        monotonic_now_ms: 2,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  let other_selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &OTHER_MIGRATION_ID).unwrap().unwrap();
+
+  let second = lease_control(2, 1_700_000_000_202);
+  publish_lease(&publisher, &mut retirement, Some(expectation(&guarded)), &second, 1_700_000_000_303).unwrap();
+  let other_second = lease_control_for_identity(ALGORITHM, OTHER_MIGRATION_ID, 2, 1_700_000_000_202);
+  let error = publisher
+    .publish_mutable_system_control(
+      MutableSystemControlPublicationRequestV1 {
+        database_id: &DATABASE_ID,
+        kind: SystemControlKindV1::MigrationLease,
+        identity: &OTHER_MIGRATION_ID,
+        expected: Some(expectation(&other_selected)),
+        guards: &[stale_guard],
+        encoded_control: &other_second,
+        publication_timestamp_ms: 1_700_000_000_304,
+        monotonic_now_ms: 4,
+      },
+      &mut retirement,
+    )
+    .unwrap_err();
+
+  assert_eq!(error.code(), "mutable_control_guard_conflict");
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &OTHER_MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(selected.control_sequence, 1);
+  assert_eq!(selected.bytes, other_first);
+}
+
+#[test]
+fn mutable_control_authority_bounds_and_validates_cross_control_guards() {
+  let (_directory, _path, publisher) = create_publisher();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(&cancellation, &memory);
+  let first = lease_control(1, 1_700_000_000_201);
+  publish_lease(&publisher, &mut retirement, None, &first, 1_700_000_000_301).unwrap();
+  let guarded = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let valid_guard =
+    MutableSystemControlGuardV1 { kind: SystemControlKindV1::MigrationLease, identity: &MIGRATION_ID, expected: expectation(&guarded) };
+
+  let other_first = lease_control_for_identity(ALGORITHM, OTHER_MIGRATION_ID, 1, 1_700_000_000_201);
+  publish_lease_guarded(&publisher, &mut retirement, &OTHER_MIGRATION_ID, None, &[], &other_first, 1_700_000_000_302).unwrap();
+  let target =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &OTHER_MIGRATION_ID).unwrap().unwrap();
+  let other_second = lease_control_for_identity(ALGORITHM, OTHER_MIGRATION_ID, 2, 1_700_000_000_202);
+
+  let malformed = MutableSystemControlGuardV1 {
+    expected: MutableSystemControlExpectationV1 {
+      selected_slot: guarded.selected_slot,
+      control_sequence: guarded.control_sequence,
+      control_digest: vec![0; ALGORITHM.hash_length()],
+    },
+    ..valid_guard.clone()
+  };
+  let error = publish_lease_guarded(
+    &publisher,
+    &mut retirement,
+    &OTHER_MIGRATION_ID,
+    Some(expectation(&target)),
+    &[malformed],
+    &other_second,
+    1_700_000_000_303,
+  )
+  .unwrap_err();
+  assert_eq!(error.code(), "mutable_control_guard_expectation");
+
+  let duplicate = [valid_guard.clone(), valid_guard.clone()];
+  let error = publish_lease_guarded(
+    &publisher,
+    &mut retirement,
+    &OTHER_MIGRATION_ID,
+    Some(expectation(&target)),
+    &duplicate,
+    &other_second,
+    1_700_000_000_304,
+  )
+  .unwrap_err();
+  assert_eq!(error.code(), "mutable_control_guard_duplicate");
+
+  let excessive = vec![valid_guard.clone(); 9];
+  let error = publish_lease_guarded(
+    &publisher,
+    &mut retirement,
+    &OTHER_MIGRATION_ID,
+    Some(expectation(&target)),
+    &excessive,
+    &other_second,
+    1_700_000_000_305,
+  )
+  .unwrap_err();
+  assert_eq!(error.code(), "mutable_control_guard_count");
+
+  let immutable = MutableSystemControlGuardV1 { kind: SystemControlKindV1::LegacyRootMapPage, ..valid_guard.clone() };
+  let error = publish_lease_guarded(
+    &publisher,
+    &mut retirement,
+    &OTHER_MIGRATION_ID,
+    Some(expectation(&target)),
+    &[immutable],
+    &other_second,
+    1_700_000_000_306,
+  )
+  .unwrap_err();
+  assert_eq!(error.code(), "mutable_control_kind");
+
+  let retry = publish_lease_guarded(
+    &publisher,
+    &mut retirement,
+    &OTHER_MIGRATION_ID,
+    None,
+    &[MutableSystemControlGuardV1 {
+      expected: MutableSystemControlExpectationV1 {
+        selected_slot: SystemControlSlotV1::Immutable,
+        control_sequence: 0,
+        control_digest: Vec::new(),
+      },
+      ..valid_guard
+    }],
+    &other_first,
+    1_700_000_000_307,
+  )
+  .unwrap();
+  assert!(retry.idempotent, "an already-selected target must remain an exact retry even if a guard subsequently changed");
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &OTHER_MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(selected.control_sequence, 1);
+  assert_eq!(selected.bytes, other_first);
 }
 
 #[test]
