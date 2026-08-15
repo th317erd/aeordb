@@ -1,8 +1,10 @@
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
+use std::time::Duration;
 
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
 use aeordb::engine::hot_tail::read_hot_tail_checked;
@@ -26,6 +28,7 @@ use aeordb::engine::v4::migration_owner::{
   MigrationAcquisitionRequestV1, MigrationLeaseReleaseRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1,
   MigrationStateOwnerV1, MigrationTakeoverRequestV1,
 };
+use aeordb::engine::v4::migration_source_gc::{MigrationSourceGcSuspensionOwnerV1, MigrationSourceGcSuspensionRequestV1};
 use aeordb::engine::v4::migration_preflight::{
   AuthorityInventoryCountsV1, CapacityRoleV1, MigrationBinaryEvidenceV1, MigrationCapacityObservationV1, MigrationConfigurationEvidenceV1,
   MigrationIdentityEvidenceV1, MigrationMemoryEvidenceV1, MigrationNativeEvidenceV1, MigrationPreflightPermitV1,
@@ -35,8 +38,14 @@ use aeordb::engine::v4::migration_preflight::{
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use aeordb::engine::v4::system_control::{SystemControlKindV1, SystemControlSlotV1};
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
-use aeordb::engine::{DiskKVStore, HashAlgorithm};
-use aeordb::engine::native_durability::PlatformFileIdentityDescriptorV1;
+use aeordb::engine::gc::{GcExecutionRequestV1, execute_gc_run, gc_mark, gc_sweep, run_gc, run_gc_with_post_start_hook};
+use aeordb::engine::lifecycle_config::{prune_expired_snapshots, prune_expired_snapshots_with_post_capture_hook};
+use aeordb::engine::native_durability::{PlatformFileIdentityDescriptorV1, platform_file_identity};
+use aeordb::engine::request_context::RequestContext;
+use aeordb::engine::v4::gc_run::GcRunInvocationV1;
+use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::{DirectoryOps, DiskKVStore, EngineError, HashAlgorithm};
+use aeordb::server::create_temp_engine_for_tests;
 use tokio_util::sync::CancellationToken;
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -93,6 +102,14 @@ fn capacity(role: CapacityRoleV1, volume: u8, required_bytes: u64, minimum_remai
 }
 
 fn preflight_request(algorithm: HashAlgorithm, destination_physical_instance_id: [u8; 16]) -> MigrationPreflightRequestV1 {
+  preflight_request_with_source_identity(algorithm, destination_physical_instance_id, identity(0x50, 0x10))
+}
+
+fn preflight_request_with_source_identity(
+  algorithm: HashAlgorithm,
+  destination_physical_instance_id: [u8; 16],
+  source_file_identity: PlatformFileIdentityDescriptorV1,
+) -> MigrationPreflightRequestV1 {
   let baseline = CapabilitySetV1::v4_baseline();
   let registry = embedded_system_family_registry(algorithm).unwrap();
   let source_checksum = digest(0x70);
@@ -104,7 +121,7 @@ fn preflight_request(algorithm: HashAlgorithm, destination_physical_instance_id:
       destination_physical_instance_id,
       source_path_digest: digest(0x10),
       destination_path_digest: digest(0x30),
-      source_file_identity: identity(0x50, 0x10),
+      source_file_identity,
       destination_parent_identity: identity(0x81, 0x31),
     },
     source: MigrationSourceEvidenceV1 {
@@ -1490,4 +1507,520 @@ fn takeover_rejects_invalid_active_and_inconsistent_state_before_publication() {
   );
   let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
   assert_eq!(lease.control_sequence, 2);
+}
+
+#[test]
+fn selected_migration_suspends_every_source_gc_mutation_but_not_diagnostics() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (source, source_directory) = create_temp_engine_for_tests();
+  let source_path = source_directory.path().join("test.aeordb");
+  let source_identity = platform_file_identity(&source_path).unwrap();
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) =
+    admit_migration_preflight_v1(&preflight_request_with_source_identity(algorithm, DESTINATION_PHYSICAL_ID, source_identity)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+
+  let (suspension, receipt) = MigrationSourceGcSuspensionOwnerV1::suspend(
+    &source,
+    &owner,
+    MigrationSourceGcSuspensionRequestV1 {
+      suspended_at_ms: ACQUIRED_AT_MS + 500,
+      publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 600,
+      monotonic_now_ms: 10_500,
+    },
+    &mut retirement,
+  )
+  .unwrap();
+  assert_eq!(receipt.fencing_token, 1);
+  let selected_progress =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_ne!(
+    decode_migration_progress_control(&selected_progress.bytes, algorithm).unwrap().body.flags
+      & MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+    0
+  );
+
+  let context = RequestContext::system();
+  let directory = DirectoryOps::new(&source);
+  directory.store_file_buffered(&context, "/still-writable.txt", b"normal writes continue", Some("text/plain")).unwrap();
+  assert_eq!(directory.read_file_buffered("/still-writable.txt").unwrap(), b"normal writes continue");
+  for invocation in [
+    GcRunInvocationV1::Cli,
+    GcRunInvocationV1::Http,
+    GcRunInvocationV1::Task,
+    GcRunInvocationV1::Scheduled,
+    GcRunInvocationV1::RepairFollowUp,
+    GcRunInvocationV1::Embedded,
+  ] {
+    let error = execute_gc_run(&source, &context, GcExecutionRequestV1::new(invocation, false, CancellationToken::new())).unwrap_err();
+    assert!(matches!(error, EngineError::MigrationGcSuspended { fencing_token: 1, .. }), "unexpected {invocation:?} error: {error}");
+  }
+
+  let live = gc_mark(&source).unwrap();
+  let source_bytes_before_diagnostics = fs::read(&source_path).unwrap();
+  let snapshots_before_diagnostics: Vec<_> = VersionManager::new(&source)
+    .list_snapshots()
+    .unwrap()
+    .into_iter()
+    .map(|snapshot| (snapshot.name, snapshot.root_hash, snapshot.created_at, snapshot.metadata))
+    .collect();
+  assert!(matches!(gc_sweep(&source, &live, false).unwrap_err(), EngineError::MigrationGcSuspended { fencing_token: 1, .. }));
+  assert!(matches!(prune_expired_snapshots(&source, &context).unwrap_err(), EngineError::MigrationGcSuspended { fencing_token: 1, .. }));
+  let retention_hook_called = AtomicBool::new(false);
+  assert!(matches!(
+    prune_expired_snapshots_with_post_capture_hook(&source, &context, || {
+      retention_hook_called.store(true, Ordering::Release);
+    })
+    .unwrap_err(),
+    EngineError::MigrationGcSuspended { fencing_token: 1, .. }
+  ));
+  assert!(!retention_hook_called.load(Ordering::Acquire), "retention work began before source-GC admission");
+  assert!(run_gc(&source, &context, true).unwrap().dry_run);
+  assert!(gc_sweep(&source, &live, true).is_ok());
+  assert_eq!(fs::read(&source_path).unwrap(), source_bytes_before_diagnostics, "diagnostic GC mutated source bytes");
+  let snapshots_after_diagnostics: Vec<_> = VersionManager::new(&source)
+    .list_snapshots()
+    .unwrap()
+    .into_iter()
+    .map(|snapshot| (snapshot.name, snapshot.root_hash, snapshot.created_at, snapshot.metadata))
+    .collect();
+  assert_eq!(snapshots_after_diagnostics, snapshots_before_diagnostics, "diagnostic GC mutated snapshot state");
+
+  owner
+    .transition_progress(
+      progress_transition(
+        algorithm,
+        MigrationPhaseV1::Preflight,
+        MigrationProgressStateV1::Canceled,
+        MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+        ACQUIRED_AT_MS + 1_000,
+      ),
+      &mut retirement,
+    )
+    .unwrap();
+  let (foreign_release_source, _foreign_release_directory) = create_temp_engine_for_tests();
+  let lease_before_wrong_source =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(
+    suspension
+      .release_after_early_terminal(&foreign_release_source, &owner, release_request(ACQUIRED_AT_MS as u64 + 2_000), &mut retirement,)
+      .unwrap_err()
+      .code(),
+    "migration_source_gc_file_identity"
+  );
+  let lease_after_wrong_source =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(lease_after_wrong_source.bytes, lease_before_wrong_source.bytes);
+  assert!(matches!(run_gc(&source, &context, false).unwrap_err(), EngineError::MigrationGcSuspended { fencing_token: 1, .. }));
+  assert!(!run_gc(&foreign_release_source, &context, false).unwrap().dry_run);
+  let release =
+    suspension.release_after_early_terminal(&source, &owner, release_request(ACQUIRED_AT_MS as u64 + 2_000), &mut retirement).unwrap();
+  assert_eq!(release.fencing_token, 1);
+  let release_retry =
+    suspension.release_after_early_terminal(&source, &owner, release_request(ACQUIRED_AT_MS as u64 + 2_000), &mut retirement).unwrap();
+  assert!(release_retry.lease_idempotent);
+  assert!(release_retry.interlock_idempotent);
+  assert!(!run_gc(&source, &context, false).unwrap().dry_run);
+}
+
+#[test]
+fn source_gc_suspension_drains_an_admitted_mutation_and_closes_new_admission() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (source, source_directory) = create_temp_engine_for_tests();
+  let source_identity = platform_file_identity(source_directory.path().join("test.aeordb")).unwrap();
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) =
+    admit_migration_preflight_v1(&preflight_request_with_source_identity(algorithm, DESTINATION_PHYSICAL_ID, source_identity)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(
+    publisher,
+    permit,
+    acquisition_request(HOLDER_BOOT_ID),
+    &mut retirement_owner(algorithm, &cancellation, &memory),
+  )
+  .unwrap();
+
+  let gc_source = source.clone();
+  let (gc_entered_tx, gc_entered_rx) = mpsc::channel();
+  let (finish_gc_tx, finish_gc_rx) = mpsc::channel();
+  let gc_thread = thread::spawn(move || {
+    run_gc_with_post_start_hook(&gc_source, &RequestContext::system(), false, || {
+      gc_entered_tx.send(()).unwrap();
+      finish_gc_rx.recv().unwrap();
+    })
+  });
+  gc_entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+  let suspension_source = source.clone();
+  let (suspended_tx, suspended_rx) = mpsc::channel();
+  let suspension_thread = thread::spawn(move || {
+    let mut retirement = retirement;
+    let result = MigrationSourceGcSuspensionOwnerV1::suspend(
+      &suspension_source,
+      &owner,
+      MigrationSourceGcSuspensionRequestV1 {
+        suspended_at_ms: ACQUIRED_AT_MS + 500,
+        publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 600,
+        monotonic_now_ms: 10_500,
+      },
+      &mut retirement,
+    );
+    suspended_tx.send(result).unwrap();
+  });
+
+  assert!(suspended_rx.recv_timeout(Duration::from_millis(50)).is_err(), "suspension bypassed an admitted destructive GC run");
+  assert!(matches!(
+    run_gc(&source, &RequestContext::system(), false).unwrap_err(),
+    EngineError::MigrationGcSuspended { fencing_token: 1, .. }
+  ));
+  finish_gc_tx.send(()).unwrap();
+  assert!(gc_thread.join().unwrap().is_ok());
+  let (_suspension, receipt) = suspended_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+  assert_eq!(receipt.fencing_token, 1);
+  suspension_thread.join().unwrap();
+}
+
+#[test]
+fn source_gc_suspension_race_failure_stays_latched_but_is_fenced_and_recoverable() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (source, source_directory) = create_temp_engine_for_tests();
+  let source_identity = platform_file_identity(source_directory.path().join("test.aeordb")).unwrap();
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) =
+    admit_migration_preflight_v1(&preflight_request_with_source_identity(algorithm, DESTINATION_PHYSICAL_ID, source_identity)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let owner = Arc::new(
+    MigrationStateOwnerV1::acquire(
+      publisher,
+      permit,
+      acquisition_request(HOLDER_BOOT_ID),
+      &mut retirement_owner(algorithm, &cancellation, &memory),
+    )
+    .unwrap()
+    .0,
+  );
+
+  let gc_source = source.clone();
+  let (gc_entered_tx, gc_entered_rx) = mpsc::channel();
+  let (finish_gc_tx, finish_gc_rx) = mpsc::channel();
+  let gc_thread = thread::spawn(move || {
+    run_gc_with_post_start_hook(&gc_source, &RequestContext::system(), false, || {
+      gc_entered_tx.send(()).unwrap();
+      finish_gc_rx.recv().unwrap();
+    })
+  });
+  gc_entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+  let suspension_source = source.clone();
+  let suspension_owner = owner.clone();
+  let suspension_cancellation = CancellationToken::new();
+  let suspension_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let (suspended_tx, suspended_rx) = mpsc::channel();
+  let suspension_thread = thread::spawn(move || {
+    let mut retirement = retirement_owner(algorithm, &suspension_cancellation, &suspension_memory);
+    suspended_tx
+      .send(MigrationSourceGcSuspensionOwnerV1::suspend(
+        &suspension_source,
+        &suspension_owner,
+        MigrationSourceGcSuspensionRequestV1 {
+          suspended_at_ms: ACQUIRED_AT_MS + 500,
+          publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 600,
+          monotonic_now_ms: 10_500,
+        },
+        &mut retirement,
+      ))
+      .unwrap();
+  });
+  assert!(suspended_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+  owner
+    .transition_progress(
+      progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Canceled, 0, ACQUIRED_AT_MS + 1_000),
+      &mut retirement_owner(algorithm, &cancellation, &memory),
+    )
+    .unwrap();
+  finish_gc_tx.send(()).unwrap();
+  assert!(gc_thread.join().unwrap().is_ok());
+  assert_eq!(suspended_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap_err().code(), "migration_source_gc_phase");
+  suspension_thread.join().unwrap();
+
+  assert!(matches!(
+    run_gc(&source, &RequestContext::system(), false).unwrap_err(),
+    EngineError::MigrationGcSuspended { fencing_token: 1, .. }
+  ));
+  let recovered = MigrationSourceGcSuspensionOwnerV1::recover_latched(&source, &owner).unwrap();
+  recovered
+    .release_after_early_terminal(
+      &source,
+      &owner,
+      release_request(ACQUIRED_AT_MS as u64 + 2_000),
+      &mut retirement_owner(algorithm, &cancellation, &memory),
+    )
+    .unwrap();
+  assert!(!run_gc(&source, &RequestContext::system(), false).unwrap().dry_run);
+}
+
+#[test]
+fn source_gc_suspension_retries_rebinds_on_takeover_and_fences_the_old_holder() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (source, source_directory) = create_temp_engine_for_tests();
+  let source_identity = platform_file_identity(source_directory.path().join("test.aeordb")).unwrap();
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) =
+    admit_migration_preflight_v1(&preflight_request_with_source_identity(algorithm, DESTINATION_PHYSICAL_ID, source_identity)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (old_owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let suspension_request = MigrationSourceGcSuspensionRequestV1 {
+    suspended_at_ms: ACQUIRED_AT_MS + 500,
+    publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 600,
+    monotonic_now_ms: 10_500,
+  };
+  let (old_suspension, first) =
+    MigrationSourceGcSuspensionOwnerV1::suspend(&source, &old_owner, suspension_request, &mut retirement).unwrap();
+  let (_, retry) = MigrationSourceGcSuspensionOwnerV1::suspend(&source, &old_owner, suspension_request, &mut retirement).unwrap();
+  assert!(retry.interlock_idempotent);
+  assert!(retry.progress_idempotent);
+  assert_eq!(retry.progress_control_sequence, first.progress_control_sequence);
+
+  assert!(matches!(
+    run_gc(&source, &RequestContext::system(), false).unwrap_err(),
+    EngineError::MigrationGcSuspended { fencing_token: 1, .. }
+  ));
+  let takeover_at_ms = ACQUIRED_AT_MS + LEASE_DURATION_MS;
+  let new_holder = [0x72; 16];
+  let (new_owner, _) =
+    MigrationStateOwnerV1::takeover(publisher, permit, takeover_request(new_holder, 1, takeover_at_ms), &mut retirement).unwrap();
+  let (new_suspension, rebound) = MigrationSourceGcSuspensionOwnerV1::suspend(
+    &source,
+    &new_owner,
+    MigrationSourceGcSuspensionRequestV1 {
+      suspended_at_ms: takeover_at_ms + 200,
+      publication_timestamp_ms: takeover_at_ms as u64 + 300,
+      monotonic_now_ms: 120_000,
+    },
+    &mut retirement,
+  )
+  .unwrap();
+  assert_eq!(rebound.fencing_token, 2);
+  assert!(!rebound.interlock_idempotent);
+  assert!(matches!(
+    run_gc(&source, &RequestContext::system(), false).unwrap_err(),
+    EngineError::MigrationGcSuspended { fencing_token: 2, .. }
+  ));
+  assert_eq!(
+    old_suspension
+      .release_after_early_terminal(&source, &old_owner, release_request(takeover_at_ms as u64 + 500), &mut retirement,)
+      .unwrap_err()
+      .code(),
+    "migration_owner_fenced"
+  );
+
+  let mut canceled = progress_transition(
+    algorithm,
+    MigrationPhaseV1::Preflight,
+    MigrationProgressStateV1::Canceled,
+    MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+    takeover_at_ms + 1_000,
+  );
+  canceled.monotonic_now_ms = 130_000;
+  new_owner.transition_progress(canceled, &mut retirement).unwrap();
+  new_suspension
+    .release_after_early_terminal(
+      &source,
+      &new_owner,
+      MigrationLeaseReleaseRequestV1 { publication_timestamp_ms: takeover_at_ms as u64 + 2_000, monotonic_now_ms: 140_000 },
+      &mut retirement,
+    )
+    .unwrap();
+  assert!(!run_gc(&source, &RequestContext::system(), false).unwrap().dry_run);
+}
+
+#[test]
+fn source_gc_suspension_rejects_wrong_source_and_invalid_clocks_before_latching() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (selected_source, selected_directory) = create_temp_engine_for_tests();
+  let (foreign_source, _foreign_directory) = create_temp_engine_for_tests();
+  let source_identity = platform_file_identity(selected_directory.path().join("test.aeordb")).unwrap();
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let (_, permit) =
+    admit_migration_preflight_v1(&preflight_request_with_source_identity(algorithm, DESTINATION_PHYSICAL_ID, source_identity)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) =
+    MigrationStateOwnerV1::acquire(Arc::new(publisher), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let request = MigrationSourceGcSuspensionRequestV1 {
+    suspended_at_ms: ACQUIRED_AT_MS + 500,
+    publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 600,
+    monotonic_now_ms: 10_500,
+  };
+  assert_eq!(
+    MigrationSourceGcSuspensionOwnerV1::recover_latched(&selected_source, &owner).unwrap_err().code(),
+    "migration_source_gc_not_latched"
+  );
+  assert_eq!(
+    MigrationSourceGcSuspensionOwnerV1::suspend(&foreign_source, &owner, request, &mut retirement).unwrap_err().code(),
+    "migration_source_gc_file_identity"
+  );
+  assert_eq!(
+    MigrationSourceGcSuspensionOwnerV1::suspend(
+      &selected_source,
+      &owner,
+      MigrationSourceGcSuspensionRequestV1 { publication_timestamp_ms: 0, ..request },
+      &mut retirement,
+    )
+    .unwrap_err()
+    .code(),
+    "migration_source_gc_times"
+  );
+  assert_eq!(
+    MigrationSourceGcSuspensionOwnerV1::suspend(
+      &selected_source,
+      &owner,
+      MigrationSourceGcSuspensionRequestV1 { publication_timestamp_ms: i64::MAX as u64 + 1, ..request },
+      &mut retirement,
+    )
+    .unwrap_err()
+    .code(),
+    "migration_source_gc_time_range"
+  );
+  assert_eq!(
+    MigrationSourceGcSuspensionOwnerV1::suspend(
+      &selected_source,
+      &owner,
+      MigrationSourceGcSuspensionRequestV1 { publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 400, ..request },
+      &mut retirement,
+    )
+    .unwrap_err()
+    .code(),
+    "migration_source_gc_publication_before_suspension"
+  );
+  assert!(!run_gc(&foreign_source, &RequestContext::system(), false).unwrap().dry_run);
+  assert!(!run_gc(&selected_source, &RequestContext::system(), false).unwrap().dry_run);
+}
+
+#[test]
+fn migration_restart_reopens_the_source_with_gc_suspended_before_exposure() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (source, source_directory) = create_temp_engine_for_tests();
+  let source_path = source_directory.path().join("test.aeordb");
+  let source_identity = platform_file_identity(&source_path).unwrap();
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let (_, permit) =
+    admit_migration_preflight_v1(&preflight_request_with_source_identity(algorithm, DESTINATION_PHYSICAL_ID, source_identity)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) =
+    MigrationStateOwnerV1::acquire(Arc::new(publisher), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let request = MigrationSourceGcSuspensionRequestV1 {
+    suspended_at_ms: ACQUIRED_AT_MS + 500,
+    publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 600,
+    monotonic_now_ms: 10_500,
+  };
+  MigrationSourceGcSuspensionOwnerV1::suspend(&source, &owner, request, &mut retirement).unwrap();
+  owner
+    .transition_progress(
+      progress_transition(
+        algorithm,
+        MigrationPhaseV1::Preflight,
+        MigrationProgressStateV1::Running,
+        MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+        ACQUIRED_AT_MS + 1_000,
+      ),
+      &mut retirement,
+    )
+    .unwrap();
+  owner
+    .transition_progress(
+      progress_transition(
+        algorithm,
+        MigrationPhaseV1::Preflight,
+        MigrationProgressStateV1::Complete,
+        MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+        ACQUIRED_AT_MS + 2_000,
+      ),
+      &mut retirement,
+    )
+    .unwrap();
+  owner
+    .transition_progress(
+      progress_transition(
+        algorithm,
+        MigrationPhaseV1::Copy,
+        MigrationProgressStateV1::Pending,
+        MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+        ACQUIRED_AT_MS + 3_000,
+      ),
+      &mut retirement,
+    )
+    .unwrap();
+  source.shutdown().unwrap();
+  drop(source);
+
+  let reopen_request =
+    MigrationSourceGcSuspensionRequestV1 { publication_timestamp_ms: ACQUIRED_AT_MS as u64 + 3_500, monotonic_now_ms: 13_500, ..request };
+  let (reopened, suspension, receipt) =
+    MigrationSourceGcSuspensionOwnerV1::reopen_source_suspended(source_path.to_str().unwrap(), &owner, reopen_request, &mut retirement)
+      .unwrap();
+  assert!(!receipt.interlock_idempotent, "the reopened engine must install a new in-process interlock");
+  assert!(receipt.progress_idempotent, "restart must retain the already durable later-phase AMPR claim");
+  assert!(matches!(
+    run_gc(&reopened, &RequestContext::system(), false).unwrap_err(),
+    EngineError::MigrationGcSuspended { fencing_token: 1, .. }
+  ));
+
+  owner
+    .transition_progress(
+      progress_transition(
+        algorithm,
+        MigrationPhaseV1::Copy,
+        MigrationProgressStateV1::Canceled,
+        MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+        ACQUIRED_AT_MS + 4_000,
+      ),
+      &mut retirement,
+    )
+    .unwrap();
+  suspension.release_after_early_terminal(&reopened, &owner, release_request(ACQUIRED_AT_MS as u64 + 5_000), &mut retirement).unwrap();
+  reopened.shutdown().unwrap();
+}
+
+#[test]
+fn source_gc_suspension_has_one_interlock_and_no_wall_clock_auto_release() {
+  let gc = include_str!("../../src/engine/gc.rs");
+  let lifecycle = include_str!("../../src/engine/lifecycle_config.rs");
+  let interlock = include_str!("../../src/engine/v4/migration_source_gc.rs");
+  assert_eq!(
+    gc.matches("admit_migration_sensitive_gc_mutation()?").count(),
+    2,
+    "the shared executor and direct sweep must be the only destructive-GC admissions"
+  );
+  assert_eq!(
+    lifecycle.matches("admit_migration_sensitive_gc_mutation()?").count(),
+    1,
+    "public retention pruning must use the same engine-owned interlock"
+  );
+  for doorway in ["pub fn run_gc(", "pub fn run_gc_with_cancellation(", "pub fn execute_gc_run("] {
+    let start = gc.find(doorway).unwrap_or_else(|| panic!("missing GC doorway {doorway}"));
+    assert!(gc[start..].contains("execute_gc_run"), "GC doorway {doorway} bypasses the shared executor");
+  }
+  assert!(gc.contains("prune_expired_snapshots_admitted"), "destructive GC reacquires or bypasses retention admission");
+  assert!(!interlock.contains("SystemTime"));
+  assert!(!interlock.contains("Utc::now"));
+  assert!(!interlock.contains("Instant::now"));
+  assert!(interlock.contains("release_after_early_terminal"), "suspension lacks an explicit fenced release path");
 }

@@ -757,6 +757,7 @@ pub struct StorageEngine {
   /// written after the mark snapshot was captured. `None` means GC is not
   /// active and writes don't bother recording. See bot-docs/plan/gc-mark-sweep.md.
   gc_recheck: Mutex<Option<GcRecheckState>>,
+  migration_source_gc: crate::engine::v4::migration_source_gc::SourceGcMutationInterlockV1,
   gc_run_status: Arc<crate::engine::gc_run_status::GcRunStatusRegistryV1>,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
@@ -1255,6 +1256,42 @@ impl StorageEngine {
 
   pub(crate) fn database_path(&self) -> &Path {
     &self.database_path
+  }
+
+  pub(crate) fn admit_migration_sensitive_gc_mutation(
+    &self,
+  ) -> EngineResult<crate::engine::v4::migration_source_gc::SourceGcMutationPermitV1<'_>> {
+    self.migration_source_gc.admit_mutation()
+  }
+
+  pub(crate) fn activate_migration_source_gc_suspension(
+    &self,
+    binding: crate::engine::v4::migration_source_gc::SourceGcSuspensionBindingV1,
+  ) -> Result<
+    crate::engine::v4::migration_source_gc::SourceGcInterlockReceiptV1,
+    crate::engine::v4::migration_source_gc::MigrationSourceGcSuspensionErrorV1,
+  > {
+    self.migration_source_gc.suspend(binding)
+  }
+
+  pub(crate) fn release_migration_source_gc_suspension(
+    &self,
+    binding: crate::engine::v4::migration_source_gc::SourceGcSuspensionBindingV1,
+  ) -> Result<
+    crate::engine::v4::migration_source_gc::SourceGcInterlockReceiptV1,
+    crate::engine::v4::migration_source_gc::MigrationSourceGcSuspensionErrorV1,
+  > {
+    self.migration_source_gc.release(binding)
+  }
+
+  pub(crate) fn recover_migration_source_gc_suspension(
+    &self,
+    binding: crate::engine::v4::migration_source_gc::SourceGcSuspensionBindingV1,
+  ) -> Result<
+    crate::engine::v4::migration_source_gc::SourceGcInterlockReceiptV1,
+    crate::engine::v4::migration_source_gc::MigrationSourceGcSuspensionErrorV1,
+  > {
+    self.migration_source_gc.recover_latched(binding)
   }
 
   pub fn kv_page_provider_stats(&self) -> EngineResult<Option<crate::engine::kv_page_provider::KvPageProviderStats>> {
@@ -2782,6 +2819,7 @@ impl StorageEngine {
       index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
       index_flush_guard: Mutex::new(()),
       gc_recheck: Mutex::new(None),
+      migration_source_gc: crate::engine::v4::migration_source_gc::SourceGcMutationInterlockV1::default(),
       gc_run_status: Arc::new(crate::engine::gc_run_status::GcRunStatusRegistryV1::default()),
       _file_lock: lock_file,
     };
@@ -3023,6 +3061,7 @@ impl StorageEngine {
       index_write_buffer: Mutex::new(SharedIndexWriteBuffer::default()),
       index_flush_guard: Mutex::new(()),
       gc_recheck: Mutex::new(None),
+      migration_source_gc: crate::engine::v4::migration_source_gc::SourceGcMutationInterlockV1::default(),
       gc_run_status: Arc::new(crate::engine::gc_run_status::GcRunStatusRegistryV1::default()),
       _file_lock: lock_file,
     };

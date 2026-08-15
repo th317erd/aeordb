@@ -414,12 +414,16 @@ fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn writer_has_no_live_service_or_independent_watermark_control_caller() {
+fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_control() {
   let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let writer_source = fs::read_to_string(source_root.join("engine/v4/gc_retirement.rs")).unwrap();
   assert!(!writer_source.contains("V4ControlStore"));
   assert!(!writer_source.contains("PhysicalInventoryActiveControl"));
   assert!(!writer_source.contains("publish_mutable"));
+  let migration_source_gc = fs::read_to_string(source_root.join("engine/v4/migration_source_gc.rs")).unwrap();
+  assert!(migration_source_gc.contains("MigrationStateOwnerV1"));
+  assert!(!migration_source_gc.contains("V4FirstAuthorityPublisher"));
+  assert!(!migration_source_gc.contains("retirement_owner."));
 
   let mut callers = Vec::new();
   let mut sources = Vec::new();
@@ -440,7 +444,8 @@ fn writer_has_no_live_service_or_independent_watermark_control_caller() {
       PathBuf::from("engine/v4/first_authority.rs"),
       PathBuf::from("engine/v4/index_recovery_store.rs"),
       PathBuf::from("engine/v4/migration_owner.rs"),
+      PathBuf::from("engine/v4/migration_source_gc.rs"),
     ],
-    "retirement owner must remain confined to the reviewed disconnected physical-authority owners"
+    "retirement owner must remain confined to reviewed physical-authority and fenced migration owners"
   );
 }

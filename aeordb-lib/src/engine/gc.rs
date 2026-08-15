@@ -27,6 +27,7 @@ use crate::engine::v4::gc_run::{
   execute_legacy_v3_gc_run_v1, GcRunBudgetsV1, GcRunContextV1, GcRunErrorV1, GcRunIDV1, GcRunInvocationV1, GcRunModeV1, GcRunOperationV1,
   GcRunPhaseOutcomeV1, GcRunPhaseReporterV1, GcRunPhaseV1, GcRunProgressSinkV1, GcRunStatusV1,
 };
+use crate::engine::v4::migration_source_gc::SourceGcMutationPermitV1;
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -846,6 +847,7 @@ fn mark_task_entries(engine: &StorageEngine, live: &mut HashSet<Vec<u8>>, cancel
 /// data is lost — only the sweep progress is discarded and garbage entries
 /// that were not yet overwritten will persist until the next GC run.
 pub fn gc_sweep(engine: &StorageEngine, live: &GcLiveSet, dry_run: bool) -> EngineResult<(usize, u64)> {
+  let _mutation_permit = if dry_run { None } else { Some(engine.admit_migration_sensitive_gc_mutation()?) };
   gc_sweep_internal(engine, &live.hashes, dry_run, None)
 }
 
@@ -1049,6 +1051,7 @@ where
   pre_teardown_hook: Option<G>,
   started_at: Option<std::time::Instant>,
   gc_admission: Option<MemoryReservation>,
+  mutation_permit: Option<SourceGcMutationPermitV1<'a>>,
   namespace_guard: Option<NamespaceWriteGuard<'a>>,
   recheck_guard: Option<GcRecheckGuard<'a>>,
   teardown_armed: bool,
@@ -1118,7 +1121,11 @@ where
 
       let prune_start = std::time::Instant::now();
       let gc_timing = std::env::var_os("AEORDB_GC_TIMING").is_some();
-      match crate::engine::lifecycle_config::prune_expired_snapshots(self.engine, self.request_context) {
+      let mutation_permit = self
+        .mutation_permit
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidInput("destructive legacy v3 GC inventory is missing its source mutation permit".to_string()))?;
+      match crate::engine::lifecycle_config::prune_expired_snapshots_admitted(self.engine, self.request_context, mutation_permit) {
         Ok(result) if result.pruned_count > 0 => {
           tracing::info!(
             pruned = result.pruned_count,
@@ -1305,6 +1312,7 @@ where
   F: FnOnce(),
   G: FnOnce(),
 {
+  let mutation_permit = if request.dry_run { None } else { Some(engine.admit_migration_sensitive_gc_mutation()?) };
   let run_configuration = engine.capture_gc_run_configuration()?;
   let scratch_maximum_bytes = run_configuration.mark_scratch_max_bytes.map_or(u64::MAX, std::convert::identity);
   let budgets = GcRunBudgetsV1::new(
@@ -1336,6 +1344,7 @@ where
     pre_teardown_hook: Some(pre_teardown_hook),
     started_at: None,
     gc_admission: None,
+    mutation_permit,
     namespace_guard: None,
     recheck_guard: None,
     teardown_armed: false,

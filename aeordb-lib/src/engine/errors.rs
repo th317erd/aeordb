@@ -31,6 +31,10 @@ pub enum EngineError {
   },
   InvalidInput(String),
   ResourceExhausted(String),
+  MigrationGcSuspended {
+    migration_id: [u8; 16],
+    fencing_token: u64,
+  },
   SnapshotWritesDisabled,
   DurabilityFailure(String),
   /// A storage mutation began before failure, so the caller must latch write
@@ -75,6 +79,9 @@ impl fmt::Display for EngineError {
       EngineError::SystemFamilyPolicy { code, reason } => write!(formatter, "System family policy failure ({code}): {reason}"),
       EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
       EngineError::ResourceExhausted(msg) => write!(formatter, "Resource exhausted: {}", msg),
+      EngineError::MigrationGcSuspended { fencing_token, .. } => {
+        write!(formatter, "Mutating garbage collection is suspended by migration fencing token {fencing_token}")
+      }
       EngineError::SnapshotWritesDisabled => write!(formatter, "Snapshot writes are disabled by lifecycle configuration"),
       EngineError::DurabilityFailure(msg) => write!(formatter, "Durability failure: {}", msg),
       EngineError::PostMutationDurabilityFailure(msg) => write!(formatter, "Post-mutation durability failure: {}", msg),

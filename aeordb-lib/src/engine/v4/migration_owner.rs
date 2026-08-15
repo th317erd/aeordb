@@ -121,6 +121,13 @@ pub struct MigrationProgressTransitionReceiptV1 {
   pub idempotent: bool,
 }
 
+struct MigrationProgressPublicationContextV1 {
+  loaded_lease: LoadedMutableSystemControlV1,
+  loaded_progress: LoadedMutableSystemControlV1,
+  publication_timestamp_ms: u64,
+  monotonic_now_ms: u64,
+}
+
 pub struct MigrationStateOwnerV1 {
   publisher: Arc<V4FirstAuthorityPublisher>,
   permit: MigrationPreflightPermitV1,
@@ -410,7 +417,103 @@ impl MigrationStateOwnerV1 {
         idempotent: true,
       });
     }
-    validate_progress_transition(&progress.body, &body)?;
+    self.publish_progress_body(
+      MigrationProgressPublicationContextV1 {
+        loaded_lease,
+        loaded_progress,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      &progress,
+      body,
+      0,
+      retirement_owner,
+    )
+  }
+
+  pub(crate) fn claim_source_gc_suspension(
+    &self,
+    suspended_at_ms: i64,
+    publication_timestamp_ms: u64,
+    monotonic_now_ms: u64,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    let (loaded_lease, loaded_progress, progress) =
+      self.prepare_source_gc_suspension_claim(suspended_at_ms, publication_timestamp_ms, monotonic_now_ms)?;
+    if progress.body.flags & MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED != 0 {
+      return Ok(MigrationProgressTransitionReceiptV1 {
+        control_sequence: progress.sequence,
+        fencing_token: progress.body.fencing_token,
+        phase: progress.body.phase,
+        state: progress.body.state,
+        idempotent: true,
+      });
+    }
+    if progress.body.phase != MigrationPhaseV1::Preflight
+      || !matches!(progress.body.state, MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running)
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_source_gc_phase",
+        "source GC suspension must be established during active preflight before copy begins",
+      ));
+    }
+    let mut body = progress.body.clone();
+    body.flags |= MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED;
+    body.updated_at_ms = body.updated_at_ms.max(suspended_at_ms);
+    self.publish_progress_body(
+      MigrationProgressPublicationContextV1 { loaded_lease, loaded_progress, publication_timestamp_ms, monotonic_now_ms },
+      &progress,
+      body,
+      MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+      retirement_owner,
+    )
+  }
+
+  pub(crate) fn validate_source_gc_suspension_claim(
+    &self,
+    suspended_at_ms: i64,
+    publication_timestamp_ms: u64,
+    monotonic_now_ms: u64,
+  ) -> Result<(), MigrationStateOwnerErrorV1> {
+    self.prepare_source_gc_suspension_claim(suspended_at_ms, publication_timestamp_ms, monotonic_now_ms).map(|_| ())
+  }
+
+  fn prepare_source_gc_suspension_claim(
+    &self,
+    suspended_at_ms: i64,
+    publication_timestamp_ms: u64,
+    monotonic_now_ms: u64,
+  ) -> Result<(LoadedMutableSystemControlV1, LoadedMutableSystemControlV1, MigrationProgressControlV1), MigrationStateOwnerErrorV1> {
+    if suspended_at_ms < 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid("migration_source_gc_time", "source GC suspension time must be nonnegative"));
+    }
+    let publication_time_ms = validate_publication_clock(publication_timestamp_ms, monotonic_now_ms, i64::MAX as u64)?;
+    validate_transition_publication_time(publication_time_ms, suspended_at_ms)?;
+    validate_destination_authority(&self.publisher, &self.permit)?;
+    let (loaded_lease, lease) = require_lease(&self.publisher, &self.permit)?;
+    let (loaded_progress, progress) = require_progress(&self.publisher, &self.permit)?;
+    validate_owned_held_controls(self, &lease, &progress, publication_time_ms)?;
+    if progress.body.flags & MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED == 0
+      && (progress.body.phase != MigrationPhaseV1::Preflight
+        || !matches!(progress.body.state, MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running))
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_source_gc_phase",
+        "source GC suspension must be established during active preflight before copy begins",
+      ));
+    }
+    Ok((loaded_lease, loaded_progress, progress))
+  }
+
+  fn publish_progress_body(
+    &self,
+    context: MigrationProgressPublicationContextV1,
+    progress: &MigrationProgressControlV1,
+    body: MigrationProgressBodyV1,
+    authorized_new_flags: u32,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    validate_progress_transition(&progress.body, &body, authorized_new_flags)?;
     let sequence = progress.sequence.checked_add(1).ok_or_else(|| {
       MigrationStateOwnerErrorV1::invalid("migration_progress_sequence_exhausted", "migration progress sequence is exhausted")
     })?;
@@ -419,17 +522,17 @@ impl MigrationStateOwnerV1 {
     let guards = [MutableSystemControlGuardV1 {
       kind: SystemControlKindV1::MigrationLease,
       identity: &guard_identity,
-      expected: control_expectation(&loaded_lease),
+      expected: control_expectation(&context.loaded_lease),
     }];
     let receipt = publish_owned_control(
       &self.publisher,
       &self.permit,
       SystemControlKindV1::MigrationProgress,
-      Some(control_expectation(&loaded_progress)),
+      Some(control_expectation(&context.loaded_progress)),
       &guards,
       &encoded,
-      request.publication_timestamp_ms,
-      request.monotonic_now_ms,
+      context.publication_timestamp_ms,
+      context.monotonic_now_ms,
       retirement_owner,
       MigrationCommittedControlV1::Progress,
     )?;
@@ -760,6 +863,18 @@ impl MigrationStateOwnerV1 {
 
   pub const fn database_id(&self) -> [u8; 16] {
     self.permit.database_id()
+  }
+
+  pub const fn source_physical_instance_id(&self) -> [u8; 16] {
+    self.permit.source_physical_instance_id()
+  }
+
+  pub const fn source_file_identity(&self) -> crate::engine::native_durability::PlatformFileIdentityDescriptorV1 {
+    self.permit.source_file_identity()
+  }
+
+  pub const fn hash_algorithm(&self) -> crate::engine::HashAlgorithm {
+    self.permit.hash_algorithm()
   }
 
   pub const fn migration_id(&self) -> [u8; 16] {
@@ -1191,6 +1306,7 @@ fn validate_transition_publication_time(publication_time_ms: i64, transition_tim
 fn validate_progress_transition(
   current: &MigrationProgressBodyV1,
   target: &MigrationProgressBodyV1,
+  authorized_new_flags: u32,
 ) -> Result<(), MigrationStateOwnerErrorV1> {
   let current_phase = current.phase as u16;
   let target_phase = target.phase as u16;
@@ -1211,7 +1327,8 @@ fn validate_progress_transition(
   if target.flags & current.flags != current.flags {
     return Err(MigrationStateOwnerErrorV1::invalid("migration_progress_flag_regression", "migration progress flags cannot be cleared"));
   }
-  if target.flags != current.flags {
+  let new_flags = target.flags & !current.flags;
+  if new_flags & !authorized_new_flags != 0 {
     return Err(MigrationStateOwnerErrorV1::invalid(
       "migration_progress_flag_authority",
       "this transition owner cannot claim a new external migration condition",

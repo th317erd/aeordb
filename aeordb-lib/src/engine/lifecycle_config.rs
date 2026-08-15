@@ -11,6 +11,7 @@ use crate::engine::config_resolver::ConfigurationFamily;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::v4::migration_source_gc::SourceGcMutationPermitV1;
 use crate::engine::version_manager::{VersionManager, SnapshotInfo};
 
 pub const LIFECYCLE_CONFIG_PATH: &str = "/.aeordb-config/lifecycle.json";
@@ -145,6 +146,27 @@ pub fn prune_expired_snapshots(engine: &StorageEngine, ctx: &RequestContext) -> 
 pub fn prune_expired_snapshots_with_post_capture_hook<F>(
   engine: &StorageEngine,
   ctx: &RequestContext,
+  post_capture_hook: F,
+) -> EngineResult<PruneResult>
+where
+  F: FnOnce(),
+{
+  let mutation_permit = engine.admit_migration_sensitive_gc_mutation()?;
+  prune_expired_snapshots_admitted_with_post_capture_hook(engine, ctx, &mutation_permit, post_capture_hook)
+}
+
+pub(crate) fn prune_expired_snapshots_admitted(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  mutation_permit: &SourceGcMutationPermitV1<'_>,
+) -> EngineResult<PruneResult> {
+  prune_expired_snapshots_admitted_with_post_capture_hook(engine, ctx, mutation_permit, || {})
+}
+
+fn prune_expired_snapshots_admitted_with_post_capture_hook<F>(
+  engine: &StorageEngine,
+  ctx: &RequestContext,
+  _mutation_permit: &SourceGcMutationPermitV1<'_>,
   post_capture_hook: F,
 ) -> EngineResult<PruneResult>
 where

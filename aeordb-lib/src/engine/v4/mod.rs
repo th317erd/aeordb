@@ -76,6 +76,7 @@ pub mod index_task;
 pub mod migration_control;
 pub mod migration_owner;
 pub mod migration_preflight;
+pub mod migration_source_gc;
 pub mod namespace;
 pub mod parser_plan;
 pub mod position;
