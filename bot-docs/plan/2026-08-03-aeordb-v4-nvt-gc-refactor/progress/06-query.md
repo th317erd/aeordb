@@ -3,7 +3,7 @@
 - **Status:** active; P6-1, P6-2a, P6-2b, and durable scope-ordinal authority complete; P6-2c/P6-2d runtime convergence in progress
 - **Current landing unit:** P6-2d-c2 concrete recovery store and bounded per-scope registry in progress
 - **Entry commit:** `a337b08` (`test: qualify v1 shadow index generation`)
-- **Last green commit:** `f857549` (`feat: bind scope ordinals to selected checkpoints`)
+- **Last green commit:** `c99e16d` (`feat: own v4 index runtime lifecycle`)
 - **Owner:** current Codex thread; serialized ownership of namespace fanout, v4 coverage runtime, and shared test manifest
 - **Start gate:** satisfied: Children 03 and 05 are complete; Child 04 root-state APIs are complete for the later P7 gate
 - **Plan:** [Child 06](../children/06-async-coverage-query-pagination-and-locators.md)
@@ -151,3 +151,9 @@
 - **Static and architecture proof:** workspace all-target checking, formatting, and `git diff --check` pass; the only check warning is the historical unused `require_wasm_parser` test macro. The reviewed error-suppression inventory contains 1,469 occurrences, with all new runtime-owner authority catches classified `authority-state-failure`; its 28 architecture tests pass.
 - **Broad proof:** `TMPDIR=/home/wyatt/.cache/codex/aeordb-tests/tmp timeout 2400s cargo test -j 4 --workspace --all-targets -- --test-threads=4` passes 273 result groups, 6,222 tests, and seven intentional ignores with zero failures. Retained log `/home/wyatt/.cache/codex/aeordb-tests/p6-2d-runtime-owner-final-hardened-full.log`, SHA-256 `f52265819691935bd0c90db7ba1072514abe090f8e9fc62a2aa1f1d56e654fd6`.
 - **Activation boundary and next action:** the owner is disconnected and owns a private hub only for focused composition proof. P6-2d-c2 binds one concrete v4 recovery backend and bounded per-scope adapter registry. P6-2d-c3 must converge that owner with the existing `StorageEngine` hub rather than activate two hubs, and must expose cached/atomic health state so semantic/parser work under the current owner mutex cannot starve health or metrics. No live v3 writer, query, API, service, deployment, or persistent-format activation changed in c1.
+
+## P6-2d-c2 Concrete Recovery Store Entry
+
+- **Typed AIOP prerequisite:** the frozen IndexOperationControl body now has one typed, zero-copy reader/writer rather than offset parsing in each recovery caller. Operation kind/state and the shared `StableReasonV1`/`RetryClassV1` registries are closed enums; writer validation rejects wrong-width or zero required identities, noncanonical optional hashes, inverted time/counter closure, and allocation failure before common system-control framing. The common codec remains the sole header/CRC/body-identity owner.
+- **Proof:** the target first failed to compile because the typed module was absent. Five focused tests round-trip every supported hash profile, exactly re-encode both independent-width golden fixtures, prove canonical optional hashes, reject wrong widths/times/counters, and reject another control family. The 153-test control/format/writer/platform/error matrix passes; the reviewed suppression inventory is exact at 1,473 entries. Workspace all-target checking passes with only the historical unused `require_wasm_parser` test macro warning.
+- **Next action:** bind immutable IndexArtifact reads and batch publication to the real v4 physical authority, then use typed AIOP A/B selection for `IndexRecoveryStoreV1`. The store remains disconnected from live v3 and must not represent IndexArtifacts as namespace files or sidecars.

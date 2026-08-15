@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1469,
+  "maximum_occurrences": 1473,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -10172,6 +10172,46 @@
       "kind": "default_on_error",
       "pattern": "tile . and_then (| tile | tile . predecessor_entry (relative_cell)) . and_then (| entry | verified_page_hint (entry . predecessor_page_id , known_minimum , known_maximum , present_page_ids)) . unwrap_or (directory_fallback)",
       "review": "bounded-authority-default"
+    },
+    {
+      "id": "esq-v1-3fdb6a8fdd56b744798f-00",
+      "file": "aeordb-lib/src/engine/v4/index_operation_control.rs",
+      "line": 307,
+      "column": 3,
+      "enclosing_item": "array_16",
+      "kind": "error_conversion",
+      "pattern": "bytes . try_into () . map_err (| _ | length_error (format ! (\"{name} does not contain 16 bytes\")))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-73d6b224dc0aeb99abb5-00",
+      "file": "aeordb-lib/src/engine/v4/index_operation_control.rs",
+      "line": 313,
+      "column": 25,
+      "enclosing_item": "read_u16",
+      "kind": "error_conversion",
+      "pattern": "slice . try_into () . map_err (| _ | length_error (\"invalid u16 width\"))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-a0723896c98978468f74-00",
+      "file": "aeordb-lib/src/engine/v4/index_operation_control.rs",
+      "line": 319,
+      "column": 25,
+      "enclosing_item": "read_u64",
+      "kind": "error_conversion",
+      "pattern": "slice . try_into () . map_err (| _ | length_error (\"invalid u64 width\"))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-780195599eb31a1f0c1c-00",
+      "file": "aeordb-lib/src/engine/v4/index_operation_control.rs",
+      "line": 325,
+      "column": 25,
+      "enclosing_item": "read_i64",
+      "kind": "error_conversion",
+      "pattern": "slice . try_into () . map_err (| _ | length_error (\"invalid i64 width\"))",
+      "review": "boundary-validation-failure"
     },
     {
       "id": "esq-v1-866a3f2104cc30d7c401-00",

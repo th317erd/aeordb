@@ -1073,6 +1073,10 @@ name = "index_runtime_owner_spec"
 path = "spec/engine/index_runtime_owner_spec.rs"
 
 [[test]]
+name = "index_operation_control_spec"
+path = "spec/engine/index_operation_control_spec.rs"
+
+[[test]]
 name = "index_producer_worker_spec"
 path = "spec/engine/index_producer_worker_spec.rs"
 
