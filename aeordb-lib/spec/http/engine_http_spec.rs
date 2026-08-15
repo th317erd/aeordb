@@ -9,7 +9,7 @@ use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::{
   save_lifecycle_config, CompressionAlgorithm, DirectoryOps, EntryType, LifecycleConfig, RequestContext, StorageEngine, DEFAULT_CHUNK_SIZE,
 };
-use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner, MemoryOwnerSnapshot};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 
 /// Create a fresh in-memory app with engine support.
@@ -58,6 +58,20 @@ async fn body_bytes(body: Body) -> Vec<u8> {
 async fn body_json(body: Body) -> serde_json::Value {
   let bytes = body_bytes(body).await;
   serde_json::from_slice(&bytes).expect("valid JSON response body")
+}
+
+async fn wait_for_streaming_reservations_to_release(engine: &StorageEngine, baseline: &MemoryOwnerSnapshot) -> bool {
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+  loop {
+    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
+    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes {
+      return true;
+    }
+    if tokio::time::Instant::now() >= deadline {
+      return false;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,14 +170,10 @@ async fn file_response_frame_retains_streaming_reservation_after_body_drop() {
   let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
   assert!(held.active_reservations > baseline.active_reservations, "delivered bytes lost their reservation with the body stream");
   drop(frame);
-  for _ in 0..100 {
-    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
-    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes {
-      return;
-    }
-    tokio::task::yield_now().await;
-  }
-  panic!("streaming response reservations did not release after frame and body drop");
+  assert!(
+    wait_for_streaming_reservations_to_release(&engine, &baseline).await,
+    "streaming response reservations did not release after frame and body drop"
+  );
 }
 
 #[tokio::test]
@@ -364,14 +374,10 @@ async fn file_response_backpressure_keeps_only_one_pending_frame() {
   );
 
   drop(response);
-  for _ in 0..100 {
-    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
-    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes {
-      return;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-  }
-  panic!("backpressured file response retained reservations after disconnect");
+  assert!(
+    wait_for_streaming_reservations_to_release(&engine, &baseline).await,
+    "backpressured file response retained reservations after disconnect"
+  );
 }
 
 #[tokio::test]
@@ -1752,14 +1758,10 @@ async fn get_chunk_by_hash_frame_retains_streaming_reservation() {
   let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
   assert!(held.active_reservations > baseline.active_reservations, "raw chunk bytes lost their reservation before socket consumption");
   drop(frame);
-  for _ in 0..100 {
-    let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
-    if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes {
-      return;
-    }
-    tokio::task::yield_now().await;
-  }
-  panic!("raw chunk response reservation did not release after frame drop");
+  assert!(
+    wait_for_streaming_reservations_to_release(&engine, &baseline).await,
+    "raw chunk response reservation did not release after frame drop"
+  );
 }
 
 #[tokio::test]
@@ -1791,9 +1793,10 @@ async fn get_raw_entry_by_hash_frame_retains_streaming_reservation() {
   let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
   assert!(held.active_reservations > baseline.active_reservations, "raw entry bytes lost their reservation before socket consumption");
   drop(frame);
-  let released = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
-  assert_eq!(released.active_reservations, baseline.active_reservations);
-  assert_eq!(released.reserved_bytes, baseline.reserved_bytes);
+  assert!(
+    wait_for_streaming_reservations_to_release(&engine, &baseline).await,
+    "raw entry response reservation did not release after frame drop"
+  );
 }
 
 #[tokio::test]

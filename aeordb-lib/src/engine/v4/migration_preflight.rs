@@ -505,6 +505,8 @@ pub struct MigrationPreflightPermitV1 {
   source_physical_instance_id: [u8; 16],
   destination_physical_instance_id: [u8; 16],
   source_file_identity: PlatformFileIdentityDescriptorV1,
+  destination_path_digest: [u8; 32],
+  destination_parent_identity: PlatformFileIdentityDescriptorV1,
   hash_algorithm: HashAlgorithm,
   source_header_sequence: u64,
   source_capture_head: Vec<u8>,
@@ -537,6 +539,14 @@ impl MigrationPreflightPermitV1 {
 
   pub const fn source_file_identity(&self) -> PlatformFileIdentityDescriptorV1 {
     self.source_file_identity
+  }
+
+  pub const fn destination_path_digest(&self) -> [u8; 32] {
+    self.destination_path_digest
+  }
+
+  pub const fn destination_parent_identity(&self) -> PlatformFileIdentityDescriptorV1 {
+    self.destination_parent_identity
   }
 
   pub const fn hash_algorithm(&self) -> HashAlgorithm {
@@ -653,6 +663,8 @@ pub fn admit_migration_preflight_v1(
     source_physical_instance_id: request.identity.source_physical_instance_id,
     destination_physical_instance_id: request.identity.destination_physical_instance_id,
     source_file_identity: request.identity.source_file_identity,
+    destination_path_digest: request.identity.destination_path_digest,
+    destination_parent_identity: request.identity.destination_parent_identity,
     hash_algorithm: request.source.hash_algorithm,
     source_header_sequence: request.source.selected_header_sequence,
     source_capture_head: request.source.head_hash.clone(),

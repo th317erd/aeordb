@@ -626,7 +626,7 @@
         - [x] Recover crash-partial acquisition, renewal, release, and expired-holder takeover explicitly; never clear, steal, or resume a lease by inference.
         - [x] Prove real file-backed A/B/A publication and reopen, concurrent CAS, every malformed/foreign/stale/terminal path, and disconnected service architecture.
       - [x] P3c-1d: suspend every source mutating-GC and retention-cleanup entry point for the exact selected lease while preserving read-only diagnostics.
-      - [ ] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.
+      - [x] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.
       - [ ] P3c-2b: implement bounded capture, pressure/exhaustion latching, durable checkpoints, resume, and final full-reconciliation authority.
       - [ ] P3c-3a: implement immutable paged legacy-root mapping, selected control publication, and typed reset/unavailable outcomes.
       - [ ] P3c-3b: prove cancel/resume, crash boundaries, complete shadow verification, GC reset policy, and byte-for-byte source invariance.

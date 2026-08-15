@@ -1089,6 +1089,10 @@ name = "migration_clone_spec"
 path = "spec/engine/migration_clone_spec.rs"
 
 [[test]]
+name = "migration_destination_spec"
+path = "spec/engine/migration_destination_spec.rs"
+
+[[test]]
 name = "mutable_system_control_authority_spec"
 path = "spec/engine/mutable_system_control_authority_spec.rs"
 

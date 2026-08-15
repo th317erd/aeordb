@@ -369,6 +369,12 @@ pub fn platform_file_identity(path: impl AsRef<Path>) -> NativeDurabilityResult<
   platform_file_identity_impl(path.as_ref())
 }
 
+/// Returns the stable platform identity for the physical file referenced by an
+/// already-open handle, independent of later pathname replacement.
+pub fn platform_file_identity_from_file(file: &File) -> NativeDurabilityResult<PlatformFileIdentityDescriptorV1> {
+  platform_file_identity_from_file_impl(file)
+}
+
 pub fn probe_native_durability(root: impl AsRef<Path>) -> NativeDurabilityResult<NativeDurabilityProbeReport> {
   let root = root.as_ref();
   let root_metadata =
@@ -775,7 +781,12 @@ fn platform_file_identity_impl(path: &Path) -> NativeDurabilityResult<PlatformFi
     .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
     .open(path)
     .map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::FileIdentity, error))?;
-  unix_file_identity(&file)
+  platform_file_identity_from_file_impl(&file)
+}
+
+#[cfg(unix)]
+fn platform_file_identity_from_file_impl(file: &File) -> NativeDurabilityResult<PlatformFileIdentityDescriptorV1> {
+  unix_file_identity(file)
 }
 
 #[cfg(target_os = "linux")]
@@ -817,12 +828,9 @@ fn unix_file_identity(file: &File) -> NativeDurabilityResult<PlatformFileIdentit
 
 #[cfg(windows)]
 fn platform_file_identity_impl(path: &Path) -> NativeDurabilityResult<PlatformFileIdentityDescriptorV1> {
-  use std::mem::size_of;
   use std::os::windows::fs::OpenOptionsExt;
-  use std::os::windows::io::AsRawHandle;
   use windows_sys::Win32::Storage::FileSystem::{
-    FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
   };
 
   let file = OpenOptions::new()
@@ -831,6 +839,15 @@ fn platform_file_identity_impl(path: &Path) -> NativeDurabilityResult<PlatformFi
     .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
     .open(path)
     .map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::FileIdentity, error))?;
+  platform_file_identity_from_file_impl(&file)
+}
+
+#[cfg(windows)]
+fn platform_file_identity_from_file_impl(file: &File) -> NativeDurabilityResult<PlatformFileIdentityDescriptorV1> {
+  use std::mem::size_of;
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::Storage::FileSystem::{FILE_BASIC_INFO, FILE_ID_INFO, FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx};
+
   let handle = file.as_raw_handle();
   let mut id = FILE_ID_INFO::default();
   if unsafe { GetFileInformationByHandleEx(handle, FileIdInfo, &mut id as *mut _ as *mut _, size_of::<FILE_ID_INFO>() as u32) } == 0 {

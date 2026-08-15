@@ -661,21 +661,27 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
 
   let production_sources = read_rust_sources(&root.join("aeordb-lib/src"));
   let first_authority = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/first_authority.rs")).unwrap();
-  for (encoder, expected_production_occurrences, expected_first_authority_occurrences) in [
-    ("encode_namespace_root", 3, 2),
-    ("encode_semantic_state_object", 1, 0),
-    ("encode_root_publication_prepare_control", 3, 2),
-    ("encode_root_admission_commit_control", 3, 2),
+  let migration_destination = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_destination.rs")).unwrap();
+  for (encoder, expected_production_occurrences, expected_first_authority_occurrences, expected_migration_destination_occurrences) in [
+    ("encode_namespace_root", 3, 2, 0),
+    ("encode_semantic_state_object", 3, 0, 2),
+    ("encode_root_publication_prepare_control", 3, 2, 0),
+    ("encode_root_admission_commit_control", 3, 2, 0),
   ] {
     assert_eq!(
       production_sources.matches(encoder).count(),
       expected_production_occurrences,
-      "P3b root encoder {encoder} escaped its codec and first-authority owners"
+      "P3b root encoder {encoder} escaped its reviewed codec, first-authority, and migration-destination owners"
     );
     assert_eq!(
       first_authority.matches(encoder).count(),
       expected_first_authority_occurrences,
       "P3b root encoder {encoder} has an unexpected first-authority call shape"
+    );
+    assert_eq!(
+      migration_destination.matches(encoder).count(),
+      expected_migration_destination_occurrences,
+      "P3b root encoder {encoder} has an unexpected migration-destination call shape"
     );
   }
 

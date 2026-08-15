@@ -187,6 +187,9 @@ fn clean_preflight_issues_one_identity_bound_nonconstructible_permit() {
   assert_eq!(permit.migration_id(), request.identity.migration_id);
   assert_eq!(permit.source_physical_instance_id(), request.identity.source_physical_instance_id);
   assert_eq!(permit.destination_physical_instance_id(), request.identity.destination_physical_instance_id);
+  assert_eq!(permit.source_file_identity(), request.identity.source_file_identity);
+  assert_eq!(permit.destination_path_digest(), request.identity.destination_path_digest);
+  assert_eq!(permit.destination_parent_identity(), request.identity.destination_parent_identity);
   assert_eq!(permit.hash_algorithm(), request.source.hash_algorithm);
   assert_eq!(permit.source_header_sequence(), 41);
   assert_eq!(permit.source_capture_head(), request.source.head_hash);

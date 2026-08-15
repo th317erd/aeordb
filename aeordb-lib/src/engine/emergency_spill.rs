@@ -1048,8 +1048,16 @@ pub(crate) fn open_regular_file_no_follow(path: &Path) -> EngineResult<fs::File>
 }
 
 pub(crate) fn create_new_regular_file_no_follow(path: &Path) -> EngineResult<fs::File> {
+  create_new_regular_file_no_follow_with_access(path, false)
+}
+
+pub(crate) fn create_new_regular_file_read_write_no_follow(path: &Path) -> EngineResult<fs::File> {
+  create_new_regular_file_no_follow_with_access(path, true)
+}
+
+fn create_new_regular_file_no_follow_with_access(path: &Path, read: bool) -> EngineResult<fs::File> {
   let mut options = OpenOptions::new();
-  options.write(true).create_new(true);
+  options.read(read).write(true).create_new(true);
   #[cfg(unix)]
   {
     use std::os::unix::fs::OpenOptionsExt;

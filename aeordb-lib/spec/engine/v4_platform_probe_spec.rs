@@ -8,8 +8,9 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::durability::{rename_durable, sync_parent_dir};
 use aeordb::engine::native_durability::{
   NativeDurabilityError, NativeDurabilityErrorClass, NativeDurabilityMechanism, NativeDurabilityOperation, NativeOperationSupport,
-  PlatformFileIdentityDescriptorV1, durable_install_new_native, durable_replace_native, platform_file_identity, preallocate_file,
-  probe_native_durability, sync_directory_native, sync_file_all_native, sync_file_data_native,
+  PlatformFileIdentityDescriptorV1, durable_install_new_native, durable_replace_native, platform_file_identity,
+  platform_file_identity_from_file, preallocate_file, probe_native_durability, sync_directory_native, sync_file_all_native,
+  sync_file_data_native,
 };
 use aeordb::engine::v4::control_store::{ControlStoreReadV1, ControlStoreSlotsV1, select_control_store_read};
 use aeordb::engine::v4::config_value::{
@@ -285,6 +286,26 @@ fn platform_file_identity_compares_stable_native_identity_separately_from_birth_
   let unix_identity = PlatformFileIdentityDescriptorV1 { platform: 1, ..windows_identity };
   let unix_reused_inode = PlatformFileIdentityDescriptorV1 { platform: 1, ..windows_after_replace };
   assert!(!unix_identity.represents_same_physical_file_as(unix_reused_inode));
+}
+
+#[test]
+fn platform_file_identity_from_open_file_is_bound_to_the_open_physical_file() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("identity.bin");
+  let moved = temp.path().join("identity-moved.bin");
+  let file = OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
+  let open_identity = platform_file_identity_from_file(&file).unwrap();
+
+  assert_eq!(open_identity, platform_file_identity(&path).unwrap());
+
+  #[cfg(unix)]
+  {
+    fs::rename(&path, &moved).unwrap();
+    fs::write(&path, b"replacement").unwrap();
+    assert_eq!(open_identity, platform_file_identity_from_file(&file).unwrap());
+    assert_eq!(open_identity, platform_file_identity(&moved).unwrap());
+    assert!(!open_identity.represents_same_physical_file_as(platform_file_identity(&path).unwrap()));
+  }
 }
 
 #[test]
