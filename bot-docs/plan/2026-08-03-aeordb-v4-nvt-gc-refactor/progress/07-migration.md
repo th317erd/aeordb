@@ -1,9 +1,9 @@
 # Child 07 Progress: Migration
 
-- **Status:** active; Child 03 start gate and P3c-1 lease/progress/source-GC ownership are complete; P3c-2a destination initialization and P3c-2b1 capture-format/workspace ownership are complete; producer capture is next
+- **Status:** active; Child 03 start gate, P3c-1 lease/progress/source-GC ownership, P3c-2a destination initialization, P3c-2b1 capture format/workspace, and P3c-2b2a durable incomplete-capture authority are complete; producer subscription is next
 - **Current landing unit:** P3c-2b2b independent optional source-publication subscription
 - **Entry commit:** `956ab36` (`feat: suspend source gc during migration`)
-- **Last green commit:** `ccc7cdb` (`feat: add bounded migration capture workspace`)
+- **Last green commit:** `98635a5` (`feat: fence incomplete migration capture`)
 - **Owner:** current Codex thread after the shared-owner handoff; migration/control hotspots remain serialized
 - **Start gate:** satisfied for P3c because Child 03 is complete; P8 still requires Children 04 and 06
 - **Plan:** [Child 07](../children/07-side-by-side-migration-cutover-and-rollout.md)
