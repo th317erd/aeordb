@@ -23,7 +23,8 @@ use aeordb::engine::v4::migration_control::{
   decode_migration_progress_control, encode_migration_lease_control, encode_migration_progress_control,
 };
 use aeordb::engine::v4::migration_owner::{
-  MigrationAcquisitionRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
+  MigrationAcquisitionRequestV1, MigrationLeaseReleaseRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1,
+  MigrationStateOwnerV1, MigrationTakeoverRequestV1,
 };
 use aeordb::engine::v4::migration_preflight::{
   AuthorityInventoryCountsV1, CapacityRoleV1, MigrationBinaryEvidenceV1, MigrationCapacityObservationV1, MigrationConfigurationEvidenceV1,
@@ -345,6 +346,21 @@ fn renewal_request(renewed_at_ms: i64) -> MigrationLeaseRenewalRequestV1 {
     lease_duration_ms: LEASE_DURATION_MS,
     publication_timestamp_ms: renewed_at_ms as u64 + 100,
     monotonic_now_ms: renewed_at_ms as u64 - ACQUIRED_AT_MS as u64 + 20_000,
+  }
+}
+
+fn release_request(publication_timestamp_ms: u64) -> MigrationLeaseReleaseRequestV1 {
+  MigrationLeaseReleaseRequestV1 { publication_timestamp_ms, monotonic_now_ms: publication_timestamp_ms - ACQUIRED_AT_MS as u64 + 40_000 }
+}
+
+fn takeover_request(new_holder_boot_id: [u8; 16], expected_fencing_token: u64, takeover_at_ms: i64) -> MigrationTakeoverRequestV1 {
+  MigrationTakeoverRequestV1 {
+    new_holder_boot_id,
+    expected_fencing_token,
+    takeover_at_ms,
+    lease_duration_ms: LEASE_DURATION_MS,
+    publication_timestamp_ms: takeover_at_ms as u64 + 100,
+    monotonic_now_ms: takeover_at_ms as u64 - ACQUIRED_AT_MS as u64 + 50_000,
   }
 }
 
@@ -699,12 +715,13 @@ fn concurrent_foreign_holders_select_exactly_one_fenced_owner() {
 fn acquisition_preserves_the_widest_database_hash_profile() {
   let algorithm = HashAlgorithm::Sha512;
   let (_directory, path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
   let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
   let cancellation = CancellationToken::new();
   let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
   let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
   let (owner, receipt) =
-    MigrationStateOwnerV1::acquire(Arc::new(publisher), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
   assert_eq!(receipt.fencing_token, 1);
   owner.renew(renewal_request(ACQUIRED_AT_MS + 1_000), &mut retirement).unwrap();
   owner
@@ -714,13 +731,23 @@ fn acquisition_preserves_the_widest_database_hash_profile() {
     )
     .unwrap();
   drop(owner);
+  let (owner, takeover) = MigrationStateOwnerV1::takeover(
+    publisher,
+    permit,
+    takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + 1_000 + LEASE_DURATION_MS),
+    &mut retirement,
+  )
+  .unwrap();
+  assert_eq!(takeover.fencing_token, 2);
+  drop(owner);
 
   let reopened = reopen(&path);
   let progress =
     reopened.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
   let progress = decode_migration_progress_control(&progress.bytes, algorithm).unwrap();
-  assert_eq!(progress.sequence, 2);
+  assert_eq!(progress.sequence, 3);
   assert_eq!(progress.body.state, MigrationProgressStateV1::Running);
+  assert_eq!(progress.body.fencing_token, 2);
   assert_eq!(progress.body.effective_config_fingerprint.len(), algorithm.hash_length());
   assert_eq!(progress.body.system_family_registry_fingerprint.len(), algorithm.hash_length());
 }
@@ -781,6 +808,26 @@ fn acquisition_has_no_fallible_post_publication_readback_window() {
     1,
     "progress acquisition must load once before publication and nowhere after a durable success"
   );
+}
+
+#[test]
+fn release_and_takeover_prepare_fallible_state_before_their_first_publication() {
+  let source = std::fs::read_to_string(format!("{}/src/engine/v4/migration_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let release = source
+    .split_once("pub fn release(")
+    .and_then(|(_, remainder)| remainder.split_once("pub fn takeover(").map(|(release, _)| release))
+    .expect("migration release method boundary");
+  assert_eq!(release.matches("require_lease(").count(), 1);
+  assert_eq!(release.matches("require_progress(").count(), 1);
+  assert!(release.rfind("encode_migration_lease_control").unwrap() < release.find("publish_control(").unwrap());
+
+  let takeover = source
+    .split_once("pub fn takeover(")
+    .and_then(|(_, remainder)| remainder.split_once("pub const fn fencing_token(").map(|(takeover, _)| takeover))
+    .expect("migration takeover method boundary");
+  assert_eq!(takeover.matches("require_lease(").count(), 1);
+  assert_eq!(takeover.matches("require_progress(").count(), 1);
+  assert!(takeover.rfind("encode_migration_progress_control").unwrap() < takeover.find("publish_control(").unwrap());
 }
 
 #[test]
@@ -1056,4 +1103,391 @@ fn terminal_progress_and_established_evidence_cannot_be_reopened_or_cleared() {
   assert_eq!(owner.transition_progress(reopened.clone(), &mut retirement).unwrap_err().code(), "migration_progress_terminal");
   reopened.checkpoint_artifact.fill(0);
   assert_eq!(owner.transition_progress(reopened, &mut retirement).unwrap_err().code(), "migration_progress_terminal");
+}
+
+#[test]
+fn early_terminal_release_is_two_step_idempotent_and_file_backed() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher, permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let mut failed = progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Failed, 0, ACQUIRED_AT_MS + 1_000);
+  failed.last_error_evidence = digest_parts(algorithm, &[b"release failure evidence"]);
+  owner.transition_progress(failed, &mut retirement).unwrap();
+  let request = release_request((ACQUIRED_AT_MS + 2_000) as u64);
+
+  let receipt = owner.release(request, &mut retirement).unwrap();
+  assert_eq!(receipt.control_sequence, 3);
+  assert_eq!(receipt.fencing_token, 1);
+  assert!(!receipt.resumed_releasing);
+  assert!(!receipt.idempotent);
+  let retry = owner.release(request, &mut retirement).unwrap();
+  assert_eq!(retry.control_sequence, 3);
+  assert!(retry.idempotent);
+  drop(owner);
+
+  let reopened = reopen(&path);
+  let lease = reopened.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let lease = decode_migration_lease_control(&lease.bytes, algorithm).unwrap();
+  assert_eq!(lease.sequence, 3);
+  assert_eq!(lease.body.state, MigrationLeaseStateV1::Released);
+  assert_eq!(lease.body.fencing_token, 1);
+}
+
+#[test]
+fn release_resumes_a_releasing_crash_prefix_even_after_expiry() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let canceled = progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Canceled, 0, ACQUIRED_AT_MS + 1_000);
+  owner.transition_progress(canceled, &mut retirement).unwrap();
+  replace_lease(&publisher, algorithm, &mut retirement, ACQUIRED_AT_MS + 2_000, |lease| {
+    lease.state = MigrationLeaseStateV1::Releasing;
+  });
+
+  let receipt = owner.release(release_request((ACQUIRED_AT_MS + LEASE_DURATION_MS + 3_000) as u64), &mut retirement).unwrap();
+  assert_eq!(receipt.control_sequence, 3);
+  assert!(receipt.resumed_releasing);
+  assert!(!receipt.idempotent);
+  let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(decode_migration_lease_control(&lease.bytes, algorithm).unwrap().body.state, MigrationLeaseStateV1::Released);
+}
+
+#[test]
+fn release_rejects_active_late_and_foreign_state_without_publication() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let request = release_request((ACQUIRED_AT_MS + 2_000) as u64);
+
+  for (invalid, code) in [
+    (MigrationLeaseReleaseRequestV1 { publication_timestamp_ms: 0, ..request }, "migration_publication_times"),
+    (MigrationLeaseReleaseRequestV1 { monotonic_now_ms: 0, ..request }, "migration_publication_times"),
+    (MigrationLeaseReleaseRequestV1 { publication_timestamp_ms: i64::MAX as u64, ..request }, "migration_publication_time_range"),
+    (MigrationLeaseReleaseRequestV1 { monotonic_now_ms: u64::MAX, ..request }, "migration_release_time_overflow"),
+  ] {
+    assert_eq!(owner.release(invalid, &mut retirement).unwrap_err().code(), code);
+  }
+  assert_eq!(owner.release(request, &mut retirement).unwrap_err().code(), "migration_release_progress_not_terminal");
+  replace_progress(&publisher, algorithm, &mut retirement, |progress| {
+    progress.phase = MigrationPhaseV1::FinalFreeze;
+    progress.state = MigrationProgressStateV1::Canceled;
+    progress.flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED;
+    progress.updated_at_ms = ACQUIRED_AT_MS + 1_000;
+  });
+  assert_eq!(owner.release(request, &mut retirement).unwrap_err().code(), "migration_release_after_final_freeze");
+  replace_progress(&publisher, algorithm, &mut retirement, |progress| {
+    progress.phase = MigrationPhaseV1::Preflight;
+    progress.updated_at_ms = ACQUIRED_AT_MS + 2_000;
+  });
+  replace_lease(&publisher, algorithm, &mut retirement, ACQUIRED_AT_MS + 13_000, |lease| {
+    lease.holder_boot_id = [0x62; 16];
+  });
+  assert_eq!(owner.release(request, &mut retirement).unwrap_err().code(), "migration_owner_fenced");
+  replace_lease(&publisher, algorithm, &mut retirement, ACQUIRED_AT_MS + 24_000, |lease| {
+    lease.holder_boot_id = HOLDER_BOOT_ID;
+    lease.state = MigrationLeaseStateV1::Expired;
+  });
+  assert_eq!(
+    owner.release(release_request((ACQUIRED_AT_MS + 25_000) as u64), &mut retirement).unwrap_err().code(),
+    "migration_lease_expired_state"
+  );
+  let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(lease.control_sequence, 3);
+}
+
+#[test]
+fn expired_takeover_advances_the_token_rebinds_progress_and_retries_exactly() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (old_owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let request = takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + LEASE_DURATION_MS);
+
+  let (new_owner, receipt) = MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), request, &mut retirement).unwrap();
+  assert_eq!(new_owner.fencing_token(), 2);
+  assert_eq!(new_owner.holder_boot_id(), request.new_holder_boot_id);
+  assert_eq!(receipt.lease_control_sequence, 2);
+  assert_eq!(receipt.progress_control_sequence, 2);
+  assert_eq!(receipt.fencing_token, 2);
+  assert!(!receipt.resumed_rebind);
+  assert!(!receipt.idempotent);
+  assert_eq!(
+    old_owner.renew(renewal_request(ACQUIRED_AT_MS + LEASE_DURATION_MS + 1_000), &mut retirement).unwrap_err().code(),
+    "migration_owner_fenced"
+  );
+
+  let (_, retry) = MigrationStateOwnerV1::takeover(publisher, permit, request, &mut retirement).unwrap();
+  assert!(retry.idempotent);
+  drop(new_owner);
+  drop(old_owner);
+
+  let reopened = reopen(&path);
+  let lease = reopened.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let progress =
+    reopened.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let lease = decode_migration_lease_control(&lease.bytes, algorithm).unwrap();
+  let progress = decode_migration_progress_control(&progress.bytes, algorithm).unwrap();
+  assert_eq!(lease.body.fencing_token, 2);
+  assert_eq!(lease.body.holder_boot_id, request.new_holder_boot_id);
+  assert_eq!(progress.body.fencing_token, 2);
+}
+
+#[test]
+fn takeover_accepts_a_durably_expired_lease_prefix() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  drop(owner);
+  replace_lease(&publisher, algorithm, &mut retirement, ACQUIRED_AT_MS + 1_000, |lease| {
+    lease.state = MigrationLeaseStateV1::Expired;
+  });
+  let request = takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + LEASE_DURATION_MS + 1_000);
+
+  let (owner, receipt) = MigrationStateOwnerV1::takeover(publisher.clone(), permit, request, &mut retirement).unwrap();
+  assert_eq!(owner.fencing_token(), 2);
+  assert_eq!(receipt.lease_control_sequence, 3);
+  assert_eq!(receipt.progress_control_sequence, 2);
+  let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(decode_migration_lease_control(&lease.bytes, algorithm).unwrap().body.state, MigrationLeaseStateV1::Held);
+}
+
+#[test]
+fn takeover_resumes_or_supersedes_abandoned_lease_only_crash_prefixes() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (old_owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let first_takeover_at = ACQUIRED_AT_MS + LEASE_DURATION_MS;
+  let first_request = takeover_request([0x72; 16], 1, first_takeover_at);
+  replace_lease(&publisher, algorithm, &mut retirement, first_takeover_at, |lease| {
+    lease.holder_boot_id = first_request.new_holder_boot_id;
+    lease.fencing_token = 2;
+    lease.acquired_at_ms = first_takeover_at;
+    lease.state = MigrationLeaseStateV1::Held;
+  });
+  assert_eq!(
+    old_owner.renew(renewal_request(first_takeover_at + 1_000), &mut retirement).unwrap_err().code(),
+    "migration_progress_rebind_required"
+  );
+  assert_eq!(
+    old_owner.release(release_request((first_takeover_at + 1_000) as u64), &mut retirement).unwrap_err().code(),
+    "migration_progress_rebind_required"
+  );
+  let reacquire = MigrationAcquisitionRequestV1 {
+    holder_boot_id: first_request.new_holder_boot_id,
+    acquired_at_ms: first_takeover_at,
+    lease_duration_ms: LEASE_DURATION_MS,
+    publication_timestamp_ms: first_request.publication_timestamp_ms,
+    monotonic_now_ms: first_request.monotonic_now_ms,
+  };
+  assert_eq!(
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), reacquire, &mut retirement).unwrap_err().code(),
+    "migration_progress_rebind_required"
+  );
+  drop(old_owner);
+
+  let (resumed_owner, resumed) =
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), first_request, &mut retirement).unwrap();
+  assert_eq!(resumed_owner.fencing_token(), 2);
+  assert_eq!(resumed.lease_control_sequence, 2);
+  assert_eq!(resumed.progress_control_sequence, 2);
+  assert!(resumed.resumed_rebind);
+  assert!(!resumed.idempotent);
+  drop(resumed_owner);
+
+  let (_second_directory, _second_path, second_publisher) = create_publisher(algorithm);
+  let second_publisher = Arc::new(second_publisher);
+  let (_, second_permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let mut second_retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (second_old_owner, _) = MigrationStateOwnerV1::acquire(
+    second_publisher.clone(),
+    second_permit.clone(),
+    acquisition_request(HOLDER_BOOT_ID),
+    &mut second_retirement,
+  )
+  .unwrap();
+  drop(second_old_owner);
+  replace_lease(&second_publisher, algorithm, &mut second_retirement, first_takeover_at, |lease| {
+    lease.holder_boot_id = first_request.new_holder_boot_id;
+    lease.fencing_token = 2;
+    lease.acquired_at_ms = first_takeover_at;
+    lease.state = MigrationLeaseStateV1::Held;
+  });
+  let second_takeover_at = first_takeover_at + LEASE_DURATION_MS;
+  replace_lease(&second_publisher, algorithm, &mut second_retirement, second_takeover_at, |lease| {
+    lease.holder_boot_id = [0x73; 16];
+    lease.fencing_token = 3;
+    lease.acquired_at_ms = second_takeover_at;
+    lease.state = MigrationLeaseStateV1::Held;
+  });
+  let third_takeover_at = second_takeover_at + LEASE_DURATION_MS;
+  let third_request = takeover_request([0x74; 16], 3, third_takeover_at);
+  let (owner, receipt) =
+    MigrationStateOwnerV1::takeover(second_publisher.clone(), second_permit, third_request, &mut second_retirement).unwrap();
+  assert_eq!(owner.fencing_token(), 4);
+  assert_eq!(receipt.fencing_token, 4);
+  assert!(!receipt.resumed_rebind);
+  let progress =
+    second_publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(decode_migration_progress_control(&progress.bytes, algorithm).unwrap().body.fencing_token, 4);
+}
+
+#[test]
+fn concurrent_expired_takeovers_select_exactly_one_new_holder() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  drop(owner);
+
+  let barrier = Arc::new(Barrier::new(3));
+  let mut contenders = Vec::new();
+  for holder in [[0x72; 16], [0x73; 16]] {
+    let contender_publisher = publisher.clone();
+    let contender_permit = permit.clone();
+    let contender_barrier = barrier.clone();
+    contenders.push(thread::spawn(move || {
+      let cancellation = CancellationToken::new();
+      let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+      let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+      contender_barrier.wait();
+      MigrationStateOwnerV1::takeover(
+        contender_publisher,
+        contender_permit,
+        takeover_request(holder, 1, ACQUIRED_AT_MS + LEASE_DURATION_MS),
+        &mut retirement,
+      )
+      .map(|(owner, receipt)| (owner.holder_boot_id(), receipt.fencing_token))
+      .map_err(|error| error.code())
+    }));
+  }
+  barrier.wait();
+  let outcomes: Vec<_> = contenders.into_iter().map(|contender| contender.join().unwrap()).collect();
+  assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1, "unexpected takeover outcomes: {outcomes:?}");
+  assert_eq!(
+    outcomes.iter().filter(|outcome| outcome.as_ref().err().copied() == Some("migration_takeover_fenced")).count(),
+    1,
+    "unexpected takeover outcomes: {outcomes:?}"
+  );
+
+  let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let progress =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let lease = decode_migration_lease_control(&lease.bytes, algorithm).unwrap();
+  let progress = decode_migration_progress_control(&progress.bytes, algorithm).unwrap();
+  assert_eq!(lease.body.fencing_token, 2);
+  assert_eq!(progress.body.fencing_token, 2);
+  assert_eq!(lease.body.holder_boot_id, outcomes.iter().find_map(|outcome| outcome.as_ref().ok().map(|(holder, _)| *holder)).unwrap());
+}
+
+#[test]
+fn takeover_rejects_invalid_active_and_inconsistent_state_before_publication() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  drop(owner);
+
+  let active = takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + 1_000);
+  for (invalid, code) in [
+    (MigrationTakeoverRequestV1 { new_holder_boot_id: [0; 16], ..active }, "migration_holder_boot_identity"),
+    (MigrationTakeoverRequestV1 { expected_fencing_token: u64::MAX, ..active }, "migration_takeover_fencing_exhausted"),
+    (MigrationTakeoverRequestV1 { takeover_at_ms: -1, ..active }, "migration_takeover_times"),
+    (MigrationTakeoverRequestV1 { lease_duration_ms: 0, ..active }, "migration_takeover_times"),
+    (MigrationTakeoverRequestV1 { takeover_at_ms: i64::MAX, lease_duration_ms: 1, ..active }, "migration_lease_time_overflow"),
+    (MigrationTakeoverRequestV1 { publication_timestamp_ms: 0, ..active }, "migration_publication_times"),
+    (MigrationTakeoverRequestV1 { monotonic_now_ms: 0, ..active }, "migration_publication_times"),
+    (MigrationTakeoverRequestV1 { publication_timestamp_ms: i64::MAX as u64, ..active }, "migration_publication_time_range"),
+    (MigrationTakeoverRequestV1 { monotonic_now_ms: u64::MAX, ..active }, "migration_takeover_time_overflow"),
+  ] {
+    assert_eq!(MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), invalid, &mut retirement).unwrap_err().code(), code);
+  }
+  assert_eq!(
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), active, &mut retirement).unwrap_err().code(),
+    "migration_takeover_lease_active"
+  );
+  let zero_token = MigrationTakeoverRequestV1 { expected_fencing_token: 0, ..active };
+  assert_eq!(
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), zero_token, &mut retirement).unwrap_err().code(),
+    "migration_takeover_fencing"
+  );
+  let before_transition = MigrationTakeoverRequestV1 {
+    publication_timestamp_ms: (ACQUIRED_AT_MS + LEASE_DURATION_MS - 1) as u64,
+    ..takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + LEASE_DURATION_MS)
+  };
+  assert_eq!(
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), before_transition, &mut retirement).unwrap_err().code(),
+    "migration_publication_before_transition"
+  );
+  let dead_target =
+    MigrationTakeoverRequestV1 { lease_duration_ms: 1, ..takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + LEASE_DURATION_MS) };
+  assert_eq!(
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), dead_target, &mut retirement).unwrap_err().code(),
+    "migration_takeover_expired_target"
+  );
+  let stale_token = takeover_request([0x72; 16], 2, ACQUIRED_AT_MS + LEASE_DURATION_MS);
+  assert_eq!(
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), stale_token, &mut retirement).unwrap_err().code(),
+    "migration_takeover_fenced"
+  );
+
+  replace_progress(&publisher, algorithm, &mut retirement, |progress| {
+    progress.fencing_token = 2;
+  });
+  let inconsistent = takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + LEASE_DURATION_MS);
+  assert_eq!(
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit, inconsistent, &mut retirement).unwrap_err().code(),
+    "migration_progress_token_ahead"
+  );
+  replace_lease(&publisher, algorithm, &mut retirement, ACQUIRED_AT_MS + 1_000, |lease| {
+    lease.state = MigrationLeaseStateV1::Releasing;
+  });
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  assert_eq!(
+    MigrationStateOwnerV1::takeover(publisher.clone(), permit, inconsistent, &mut retirement).unwrap_err().code(),
+    "migration_takeover_lease_state"
+  );
+  let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  assert_eq!(lease.control_sequence, 2);
 }
