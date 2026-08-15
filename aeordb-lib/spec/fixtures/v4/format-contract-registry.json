@@ -3408,6 +3408,53 @@
       "fixture_ids_64": ["cutover-sha512-external-journal-valid"]
     },
     {
+      "id": "migration-capture-v1",
+      "family": "external-migration-capture-checkpoint",
+      "magic_ascii": "AMCM",
+      "version": 1,
+      "identity": "database_id[16], migration_id[16], source and destination physical_instance_id[16], fencing_token u64, capture_generation u64, and checkpoint_sequence u64",
+      "generation": "nonzero capture_generation at byte 96",
+      "layout": [
+        { "offset": 0, "length": 4, "field": "magic", "rule": "ASCII AMCM" },
+        { "offset": 4, "length": 2, "field": "schema_version", "rule": "exactly 1" },
+        { "offset": 6, "length": 2, "field": "hash_algorithm", "rule": "must equal the selected database profile" },
+        { "offset": 8, "length": 2, "field": "capture_state", "rule": "frozen CaptureStateV1 enum" },
+        { "offset": 10, "length": 2, "field": "reserved", "rule": "zero" },
+        { "offset": 12, "length": 4, "field": "flags", "rule": "only needs_full_reconcile and optional_capture_stopped bits" },
+        { "offset": 16, "length": 4, "field": "complete_length", "rule": "exactly 276 + 7H" },
+        { "offset": 20, "length": 4, "field": "reserved", "rule": "zero" },
+        { "offset": 24, "length": 64, "field": "database_migration_source_destination_ids", "rule": "four nonzero 16-byte IDs; source and destination differ" },
+        { "offset": 88, "length": 24, "field": "fence_generation_checkpoint", "rule": "three nonzero u64 values" },
+        { "offset": 112, "length": 32, "field": "timestamps_and_publication_watermarks", "rule": "created/updated i64 and nonzero monotonic captured/observed u64" },
+        { "offset": 144, "length": 32, "field": "segment_summary", "rule": "first/last ordinal, count, and stored bytes close exactly" },
+        { "offset": 176, "length": "7H", "field": "root_head_predecessor_policy_and_failure_hashes", "rule": "selected-width hashes with state-specific zero/nonzero closure" },
+        { "offset": "176 + 7H", "length": 32, "field": "source_authority_digest", "rule": "nonzero BLAKE3 authority-inventory digest" },
+        { "offset": "208 + 7H", "length": 64, "field": "reserved", "rule": "zero" },
+        { "offset": "272 + 7H", "length": 4, "field": "crc32", "rule": "CRC-32/ISO-HDLC over all prior bytes" }
+      ],
+      "fixed_length_formula": "276 + 7H; 500 bytes at H=32 and 724 bytes at H=64",
+      "body_formula": "176-byte fixed prefix + seven selected-width hashes + 32-byte source authority digest + 64 zero reserve + 4-byte CRC",
+      "hard_cap": 724,
+      "checksum": "CRC-32/ISO-HDLC over all prior bytes",
+      "canonical_order": "one fixed field order; segment ordinals and publication watermarks are monotonic and the previous-manifest hash forms the checkpoint chain",
+      "reserve_zero_ranges": ["10..11", "20..23", "208 + 7H through 271 + 7H"],
+      "malformed_behavior": "reject wrong magic/version/hash algorithm/state, unknown flags, identity/fence/generation/time/watermark/segment/predecessor/policy/failure closure, complete-length mismatch, reserve, CRC, or trailing bytes; incomplete capture never becomes complete",
+      "trailing_behavior": "exactly 276 + 7H bytes; no trailing data",
+      "bounded_decode": "derive and require the exact <=724-byte length from the selected hash profile before CRC or field allocation; each hash copy is bounded to H",
+      "producer_owner": "Child 07 migration capture workspace through the independently checked P3c codec",
+      "consumer_owners": ["Child 01 fixture/reader hardening", "Child 07 capture resume/replay/final reconciliation", "verify/repair/diagnostics"],
+      "capability": "SideBySideMigrationV1 bit 21",
+      "typed_hash_roles": [
+        { "field": "source_root_before and source_root_after", "role": "authoritative namespace-root graph edges" },
+        { "field": "segment_head and previous_manifest", "role": "external immutable artifact integrity edges" },
+        { "field": "effective_config and SystemFamily registry fingerprints", "role": "policy closure fingerprints" },
+        { "field": "failure_evidence", "role": "non-traversed terminal evidence" },
+        { "field": "source_authority_digest", "role": "fixed BLAKE3 source-inventory closure" }
+      ],
+      "fixture_ids_32": ["amcm-blake3-256-capturing-valid"],
+      "fixture_ids_64": ["amcm-sha512-capturing-valid"]
+    },
+    {
       "id": "logical-position-v1",
       "family": "public-wire-position",
       "magic_ascii": "APOS",
@@ -3578,10 +3625,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 21,
-    "fixture_count": 436,
+    "fixture_family_count": 22,
+    "fixture_count": 438,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, and the complete 46-family SystemFamilyRegistryV1",
-    "remaining_p0b_2_scope": "none; P0b is frozen and P0c generation/staleness work is next"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, and the complete 46-family SystemFamilyRegistryV1",
+    "remaining_p0b_2_scope": "none; P0b is frozen and the ratified P3c-2b1 AMCM extension is registered before runtime activation"
   }
 }

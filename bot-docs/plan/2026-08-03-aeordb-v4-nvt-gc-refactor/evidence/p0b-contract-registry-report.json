@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p0b-complete-independent-contract-freeze",
+  "stage": "p3c-2b1-pre-activation-format-extension",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "b1ea5bc615bf6b840cfbf73302946f620801c3653a5654f800c071e833faa5fc",
-  "fixture_manifest_sha256": "a9efbcdc1de33347d5e62fc34938c0e8ac359b9fc4b04f13792771141795f5c5",
+  "source_sha256": "6bf823a9f91f440187f18811479a3dede28d28b5994cb41f14e48276f9c8c774",
+  "fixture_manifest_sha256": "d80baefc9bbeeadb809febd84ab73788fe99102b6bc34f93797869922d1b5545",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
-    "formats": 21,
-    "fixtures": 436,
+    "formats": 22,
+    "fixtures": 438,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,
@@ -55,7 +55,7 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 147,
+    "tests_passed": 148,
     "reviewer_status": "pending-owner-review-before-production-writer"
   }
 }

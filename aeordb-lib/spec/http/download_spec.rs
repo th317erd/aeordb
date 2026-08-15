@@ -559,7 +559,8 @@ async fn batch_fetch_frame_retains_reservation_and_disconnect_removes_artifact()
   assert!(held.active_reservations > baseline.active_reservations);
   drop(frame);
 
-  for _ in 0..100 {
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+  loop {
     let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
     let has_artifact = std::fs::read_dir(temp.path())
       .unwrap()
@@ -568,9 +569,11 @@ async fn batch_fetch_frame_retains_reservation_and_disconnect_removes_artifact()
     if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes && !has_artifact {
       return;
     }
-    tokio::task::yield_now().await;
+    if tokio::time::Instant::now() >= deadline {
+      panic!("batch fetch response retained memory or its temporary artifact after disconnect");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
   }
-  panic!("batch fetch response retained memory or its temporary artifact after disconnect");
 }
 
 #[tokio::test]

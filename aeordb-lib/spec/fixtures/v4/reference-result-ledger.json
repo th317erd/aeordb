@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p0b2-system-family-v1-root-derived-paths",
+  "tool_revision": "p3c2b1-migration-capture-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -2041,6 +2041,18 @@
       "fixture_id": "agca-sha512-audit-pin",
       "expected": "gc:pin:audit:reason=2:artifacts=2",
       "observed": "gc:pin:audit:reason=2:artifacts=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "amcm-blake3-256-capturing-valid",
+      "expected": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
+      "observed": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "amcm-sha512-capturing-valid",
+      "expected": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
+      "observed": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
       "result": "pass"
     },
     {

@@ -1181,15 +1181,27 @@ fn wave_five_exit_allows_reviewed_p3c_contracts_but_keeps_migration_runtime_unac
   assert!(v4_module.contains("pub mod migration_control;"), "ratified P3c migration codec is not exported");
   assert!(v4_module.contains("pub mod migration_owner;"), "ratified P3c migration state owner is not exported");
   assert!(v4_module.contains("pub mod migration_preflight;"), "ratified P3c preflight contract is not exported");
-  for forbidden in ["pub mod migration;", "pub mod migration_runtime;", "pub mod migration_capture;"] {
+  assert!(v4_module.contains("pub mod migration_capture;"), "ratified P3c capture checkpoint format is not exported");
+  assert!(v4_module.contains("pub mod migration_capture_workspace;"), "ratified P3c capture workspace is not exported");
+  for forbidden in ["pub mod migration;", "pub mod migration_runtime;"] {
     assert!(!v4_module.contains(forbidden), "migration runtime module was activated before its owning phase: {forbidden}");
   }
   assert!(
-    !sources.iter().any(|(path, _)| {
-      matches!(path.file_name().and_then(|value| value.to_str()), Some("migration.rs" | "migration_runtime.rs" | "migration_capture.rs"))
-    }),
+    !sources
+      .iter()
+      .any(|(path, _)| { matches!(path.file_name().and_then(|value| value.to_str()), Some("migration.rs" | "migration_runtime.rs")) }),
     "migration runtime source exists without its authority review"
   );
+
+  let capture_workspace_callers = sources
+    .iter()
+    .filter(|(path, source)| {
+      path.file_name().and_then(|value| value.to_str()) != Some("migration_capture_workspace.rs")
+        && source.contains("DurableMigrationCaptureWorkspaceV1")
+    })
+    .map(|(path, _)| path)
+    .collect::<Vec<_>>();
+  assert!(capture_workspace_callers.is_empty(), "capture workspace acquired premature runtime callers: {capture_workspace_callers:?}");
 }
 
 #[test]

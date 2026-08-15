@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1474,
+  "maximum_occurrences": 1495,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -9446,7 +9446,7 @@
     {
       "id": "esq-v1-4a39c7561587839ea769-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 446,
+      "line": 464,
       "column": 16,
       "enclosing_item": "impl DurableMarkWorkspaceV1::create",
       "kind": "default_on_error",
@@ -9456,7 +9456,7 @@
     {
       "id": "esq-v1-758511023d97ccd9817e-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 513,
+      "line": 531,
       "column": 7,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_object",
       "kind": "error_conversion",
@@ -9466,7 +9466,7 @@
     {
       "id": "esq-v1-e9c4b4517378b346feab-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 527,
+      "line": 545,
       "column": 28,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_object",
       "kind": "error_conversion",
@@ -9476,7 +9476,7 @@
     {
       "id": "esq-v1-58acc17e5ecfc8f0b185-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 565,
+      "line": 583,
       "column": 24,
       "enclosing_item": "impl DurableMarkWorkspaceV1::complete",
       "kind": "error_conversion",
@@ -9486,7 +9486,7 @@
     {
       "id": "esq-v1-d473a2a68f592425dc08-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 569,
+      "line": 587,
       "column": 7,
       "enclosing_item": "impl DurableMarkWorkspaceV1::complete",
       "kind": "error_conversion",
@@ -9496,7 +9496,7 @@
     {
       "id": "esq-v1-1159eebfa1c3062842d1-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 680,
+      "line": 698,
       "column": 7,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_object_file",
       "kind": "error_conversion",
@@ -9506,7 +9506,7 @@
     {
       "id": "esq-v1-4c34e5ba13b5442df3bc-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 712,
+      "line": 730,
       "column": 18,
       "enclosing_item": "impl DurableMarkWorkspaceV1::write_manifest_file",
       "kind": "error_conversion",
@@ -9514,89 +9514,9 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-db637663dfd5068928f8-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 983,
-      "column": 14,
-      "enclosing_item": "create_platform_private_directory",
-      "kind": "error_conversion",
-      "pattern": "u32 :: try_from (size_of :: < SECURITY_ATTRIBUTES > ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows security attributes exceed u32\" . to_string ()))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-abd46733e8ff04e604f9-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1145,
-      "column": 32,
-      "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (required_bytes) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows security descriptor exceeds usize\" . to_string ()))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-b33af3e5bdd077f78c2d-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1156,
-      "column": 25,
-      "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
-      "kind": "result_to_option",
-      "pattern": "u32 :: try_from (bytes) . ok ()",
-      "review": "checked-arithmetic-composition"
-    },
-    {
-      "id": "esq-v1-d386edc621c70c7766f3-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1200,
-      "column": 24,
-      "enclosing_item": "windows_security_descriptor_sddl",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (length) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows normalized security descriptor length exceeds usize\" . to_string ()))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-d228ce7342486996a6f3-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1209,
-      "column": 14,
-      "enclosing_item": "windows_security_descriptor_sddl",
-      "kind": "error_conversion",
-      "pattern": "String :: from_utf16 (unsafe { std :: slice :: from_raw_parts (raw_sddl , string_length) }) . map_err (| _ | MarkWorkspaceErrorV1 :: Path (\"Windows normalized security descriptor is not valid UTF-16\" . to_string ()))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-7e4345f002d6d75481b1-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1239,
-      "column": 5,
-      "enclosing_item": "windows_current_user_sid",
-      "kind": "error_conversion",
-      "pattern": "u32 :: try_from (size_of :: < TOKEN_USER > ()) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows token header exceeds u32\" . to_string ()))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-fb5ce579809e1a977f01-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1244,
-      "column": 5,
-      "enclosing_item": "windows_current_user_sid",
-      "kind": "error_conversion",
-      "pattern": "usize :: try_from (required_bytes) . map_err (| _ | MarkWorkspaceErrorV1 :: Capacity (\"Windows token size exceeds usize\" . to_string ()))",
-      "review": "typed-format-failure"
-    },
-    {
-      "id": "esq-v1-f2bf1c46543ddad46544-00",
-      "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1274,
-      "column": 13,
-      "enclosing_item": "windows_current_user_sid",
-      "kind": "error_conversion",
-      "pattern": "String :: from_utf16 (unsafe { std :: slice :: from_raw_parts (raw_sid_string , length) }) . map_err (| _ | MarkWorkspaceErrorV1 :: Path (\"Windows workspace owner SID is not valid UTF-16\" . to_string ()))",
-      "review": "typed-format-failure"
-    },
-    {
       "id": "esq-v1-c1311e7deaf52331056a-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1331,
+      "line": 904,
       "column": 18,
       "enclosing_item": "enforce_run_cap",
       "kind": "error_conversion",
@@ -9606,7 +9526,7 @@
     {
       "id": "esq-v1-97de5df1eaec303d26cd-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1352,
+      "line": 925,
       "column": 18,
       "enclosing_item": "manifest_length",
       "kind": "default_on_error",
@@ -9616,7 +9536,7 @@
     {
       "id": "esq-v1-d22b83e35504b81f2c51-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1378,
+      "line": 951,
       "column": 26,
       "enclosing_item": "encode_manifest",
       "kind": "error_conversion",
@@ -9626,7 +9546,7 @@
     {
       "id": "esq-v1-a99797767be0827ec260-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1389,
+      "line": 962,
       "column": 5,
       "enclosing_item": "encode_manifest",
       "kind": "error_conversion",
@@ -9636,7 +9556,7 @@
     {
       "id": "esq-v1-032b73a364bece4eafde-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1405,
+      "line": 978,
       "column": 7,
       "enclosing_item": "encode_manifest",
       "kind": "error_conversion",
@@ -9646,7 +9566,7 @@
     {
       "id": "esq-v1-f5e552ef433f1ae77c0e-00",
       "file": "aeordb-lib/src/engine/v4/gc_mark_workspace.rs",
-      "line": 1451,
+      "line": 1024,
       "column": 20,
       "enclosing_item": "stream_file_digest",
       "kind": "error_conversion",
@@ -10181,7 +10101,7 @@
       "enclosing_item": "array_16",
       "kind": "error_conversion",
       "pattern": "bytes . try_into () . map_err (| _ | length_error (format ! (\"{name} does not contain 16 bytes\")))",
-      "review": "boundary-validation-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-73d6b224dc0aeb99abb5-00",
@@ -10191,7 +10111,7 @@
       "enclosing_item": "read_u16",
       "kind": "error_conversion",
       "pattern": "slice . try_into () . map_err (| _ | length_error (\"invalid u16 width\"))",
-      "review": "boundary-validation-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-a0723896c98978468f74-00",
@@ -10201,7 +10121,7 @@
       "enclosing_item": "read_u64",
       "kind": "error_conversion",
       "pattern": "slice . try_into () . map_err (| _ | length_error (\"invalid u64 width\"))",
-      "review": "boundary-validation-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-780195599eb31a1f0c1c-00",
@@ -10211,7 +10131,7 @@
       "enclosing_item": "read_i64",
       "kind": "error_conversion",
       "pattern": "slice . try_into () . map_err (| _ | length_error (\"invalid i64 width\"))",
-      "review": "boundary-validation-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-866a3f2104cc30d7c401-00",
@@ -10261,7 +10181,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::snapshot",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-e4b8eb49aca411feeede-00",
@@ -10271,7 +10191,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::complete_recovery",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-424727f08a667cedd0b0-00",
@@ -10281,7 +10201,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::admit_task",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-1d60b5155247bdfad43f-00",
@@ -10291,7 +10211,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::admit_mutation_journal",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-b9d24051e4a476f5b21f-00",
@@ -10301,7 +10221,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-fb05ddd50d3bd48a1ecb-00",
@@ -10311,7 +10231,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation",
       "kind": "broad_err_pattern",
       "pattern": "Err (_)",
-      "review": "authority-state-failure"
+      "review": "candidate-format-probe"
     },
     {
       "id": "esq-v1-4ae2de5a6869b8c02a6f-00",
@@ -10321,7 +10241,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::flush",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-4ae2de5a6869b8c02a6f-01",
@@ -10331,7 +10251,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::flush",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-dbac20a6bdaf0b05a966-00",
@@ -10341,7 +10261,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::flush",
       "kind": "broad_err_pattern",
       "pattern": "Err (_)",
-      "review": "authority-state-failure"
+      "review": "candidate-format-probe"
     },
     {
       "id": "esq-v1-618bfb10c7501e1bb9dd-00",
@@ -10351,7 +10271,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::begin_draining",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-c089d1a70228fa16ffdc-00",
@@ -10361,7 +10281,7 @@
       "enclosing_item": "impl IndexRuntimeOwnerV1::finish_draining",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
-      "review": "authority-state-failure"
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-ea562dd0ac48dd8cce1a-00",
@@ -10514,6 +10434,216 @@
       "review": "validated-local-invariant"
     },
     {
+      "id": "esq-v1-b2f725e7716dd2bb8798-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture.rs",
+      "line": 82,
+      "column": 22,
+      "enclosing_item": "encode_migration_capture_manifest",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (expected) . map_err (| _ | length_error (\"manifest length does not fit u32\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-bc8ae2e65030fafd87b3-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture.rs",
+      "line": 141,
+      "column": 41,
+      "enclosing_item": "decode_migration_capture_manifest",
+      "kind": "error_conversion",
+      "pattern": "encoded_crc . try_into () . map_err (| _ | length_error (\"manifest CRC is truncated\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-7313c8d678badae5ce35-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture.rs",
+      "line": 165,
+      "column": 6,
+      "enclosing_item": "decode_migration_capture_manifest",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (reader . read_u32 () ?) . map_err (| _ | length_error (\"declared manifest length does not fit usize\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-dbe26e9db9421d1740ea-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture.rs",
+      "line": 196,
+      "column": 30,
+      "enclosing_item": "decode_migration_capture_manifest",
+      "kind": "error_conversion",
+      "pattern": "reader . read_exact (SOURCE_AUTHORITY_DIGEST_LENGTH) ? . try_into () . map_err (| _ | length_error (\"source authority digest is truncated\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-b8c67b48a415dd6c8f53-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture.rs",
+      "line": 364,
+      "column": 3,
+      "enclosing_item": "read_id",
+      "kind": "error_conversion",
+      "pattern": "reader . read_exact (16) ? . try_into () . map_err (| _ | length_error (\"capture identity is truncated\"))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-1182479cbcf5e2c6e53e-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 422,
+      "column": 25,
+      "enclosing_item": "impl DurableMigrationCaptureWorkspaceV1::append_segment",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bytes . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"capture segment length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-cc8976b300b2ecd06194-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 470,
+      "column": 25,
+      "enclosing_item": "impl DurableMigrationCaptureWorkspaceV1::publish_checkpoint",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bytes . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"capture manifest length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-5307ce3086185cc85374-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 652,
+      "column": 11,
+      "enclosing_item": "impl ReopenedMigrationCaptureWorkspaceV1::validate_segment_closure",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bytes . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"reopened capture segment length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-519447d2f512b436c3bb-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 779,
+      "column": 37,
+      "enclosing_item": "validate_checkpoint_predecessor_chain",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (selected_stored_bytes) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"selected manifest length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-f534ac4ef66251ae8bbf-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 804,
+      "column": 9,
+      "enclosing_item": "validate_checkpoint_predecessor_chain",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bytes . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"predecessor manifest length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-f6b96bd946e2e07db7a2-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 905,
+      "column": 16,
+      "enclosing_item": "write_immutable_file",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (bytes . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"capture artifact length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-c301aee77cb46dd17e0f-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 925,
+      "column": 25,
+      "enclosing_item": "verify_file_exact",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (expected . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"capture readback length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-cc269608b6038d70e60c-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 963,
+      "column": 5,
+      "enclosing_item": "read_charged_file",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (metadata . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (format ! (\"{role} length exceeds usize\")))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-d7bd0b1c9356e96e9055-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 968,
+      "column": 5,
+      "enclosing_item": "read_charged_file",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (length) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (format ! (\"{role} reservation length exceeds u64\")))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-13839a7a3d4bb19a218c-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1058,
+      "column": 16,
+      "enclosing_item": "inventory_segment_files",
+      "kind": "error_conversion",
+      "pattern": "entry . file_name () . into_string () . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Path (\"capture segment filename is not UTF-8\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-f50729c7678f596828b7-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1084,
+      "column": 16,
+      "enclosing_item": "inventory_checkpoint_files",
+      "kind": "error_conversion",
+      "pattern": "entry . file_name () . into_string () . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Path (\"capture checkpoint directory name is not UTF-8\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-63bdc48bc5e6e0c7d43d-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1101,
+      "column": 24,
+      "enclosing_item": "inventory_checkpoint_files",
+      "kind": "error_conversion",
+      "pattern": "child . file_name () . into_string () . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Path (\"capture checkpoint filename is not UTF-8\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-009d44d211bba67ac354-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1125,
+      "column": 30,
+      "enclosing_item": "account_private_file",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (per_file_maximum) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"per-file workspace cap exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-913b3224be686b90b99c-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1162,
+      "column": 20,
+      "enclosing_item": "state_accounting_bytes",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (path . as_os_str () . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"workspace path length exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-11d1936e167bd5ae7eb8-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1165,
+      "column": 5,
+      "enclosing_item": "state_accounting_bytes",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (hash_width) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"workspace hash width exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-e57d62b7285f15988d9e-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1169,
+      "column": 23,
+      "enclosing_item": "state_accounting_bytes",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (size_of :: < MigrationCaptureWorkspaceSummaryV1 > ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"workspace summary accounting exceeds u64\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
       "id": "esq-v1-ff56f48e8217ba467e39-00",
       "file": "aeordb-lib/src/engine/v4/migration_source_gc.rs",
       "line": 377,
@@ -10662,6 +10792,86 @@
       "kind": "panic_method",
       "pattern": "raw . try_into () . expect (\"checked position u32 width\")",
       "review": "validated-local-invariant"
+    },
+    {
+      "id": "esq-v1-c5b88f8b202e46d7f394-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 127,
+      "column": 14,
+      "enclosing_item": "create_platform_private_directory",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (size_of :: < SECURITY_ATTRIBUTES > ()) . map_err (| _ | PrivateWorkspaceErrorV1 :: Capacity (\"Windows security attributes exceed u32\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-a0530b4116e361ad3211-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 293,
+      "column": 32,
+      "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (required_bytes) . map_err (| _ | PrivateWorkspaceErrorV1 :: Capacity (\"Windows security descriptor exceeds usize\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-445946dba0f6ed3bdfaf-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 305,
+      "column": 27,
+      "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (allocated_bytes) . map_err (| _ | PrivateWorkspaceErrorV1 :: Capacity (\"Windows security descriptor allocation exceeds u32\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-6b45de7ab935cbed79d5-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 352,
+      "column": 24,
+      "enclosing_item": "windows_security_descriptor_sddl",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (length) . map_err (| _ | PrivateWorkspaceErrorV1 :: Capacity (\"Windows normalized security descriptor length exceeds usize\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-7ea1f5df7810154f80a9-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 361,
+      "column": 14,
+      "enclosing_item": "windows_security_descriptor_sddl",
+      "kind": "error_conversion",
+      "pattern": "String :: from_utf16 (unsafe { std :: slice :: from_raw_parts (raw_sddl , string_length) }) . map_err (| _ | PrivateWorkspaceErrorV1 :: Path (\"Windows normalized security descriptor is not valid UTF-16\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-b13cda4b1379ecd882d1-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 390,
+      "column": 29,
+      "enclosing_item": "windows_current_user_sid",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (size_of :: < TOKEN_USER > ()) . map_err (| _ | PrivateWorkspaceErrorV1 :: Capacity (\"Windows token header exceeds u32\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-4257c9a923d8b34a4448-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 396,
+      "column": 5,
+      "enclosing_item": "windows_current_user_sid",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (required_bytes) . map_err (| _ | PrivateWorkspaceErrorV1 :: Capacity (\"Windows token size exceeds usize\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-e07c5a0ee4b92331b1cc-00",
+      "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
+      "line": 426,
+      "column": 13,
+      "enclosing_item": "windows_current_user_sid",
+      "kind": "error_conversion",
+      "pattern": "String :: from_utf16 (unsafe { std :: slice :: from_raw_parts (raw_sid_string , length) }) . map_err (| _ | PrivateWorkspaceErrorV1 :: Path (\"Windows workspace owner SID is not valid UTF-16\" . to_string ()))",
+      "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-80be8890bb381ba75842-00",

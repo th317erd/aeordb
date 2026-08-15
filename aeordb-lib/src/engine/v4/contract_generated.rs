@@ -2,8 +2,8 @@
 // Regenerate with `aeordb-v4-reference generate-contracts`.
 #![allow(dead_code)]
 
-pub const CONTRACT_REGISTRY_SHA256: &str = "b1ea5bc615bf6b840cfbf73302946f620801c3653a5654f800c071e833faa5fc";
-pub const CONTRACT_REGISTRY_BLAKE3: &str = "bf1fc6c15af95f4821067e7ddff954be0976a96d9a5647e6d0d8581bfef40484";
+pub const CONTRACT_REGISTRY_SHA256: &str = "6bf823a9f91f440187f18811479a3dede28d28b5994cb41f14e48276f9c8c774";
+pub const CONTRACT_REGISTRY_BLAKE3: &str = "a00a92449dfaecf2b23f7e29294ac05e38512731a15b6e40a05a9634d405c54d";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
 pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";
@@ -516,6 +516,7 @@ pub const FORMAT_LIMITS: &[FormatLimit] = &[
   FormatLimit { id: "gc-mark-workspace-object-v1", hard_cap: 67108864 },
   FormatLimit { id: "system-control-v1", hard_cap: 67108900 },
   FormatLimit { id: "cutover-journal-v1", hard_cap: 2048 },
+  FormatLimit { id: "migration-capture-v1", hard_cap: 724 },
   FormatLimit { id: "logical-position-v1", hard_cap: 1048576 },
   FormatLimit { id: "system-family-registry-v1", hard_cap: 1048576 },
 ];
@@ -540,6 +541,7 @@ pub mod format_hard_cap {
   pub const GC_MARK_WORKSPACE_OBJECT_V1: u64 = 67108864;
   pub const SYSTEM_CONTROL_V1: u64 = 67108900;
   pub const CUTOVER_JOURNAL_V1: u64 = 2048;
+  pub const MIGRATION_CAPTURE_V1: u64 = 724;
   pub const LOGICAL_POSITION_V1: u64 = 1048576;
   pub const SYSTEM_FAMILY_REGISTRY_V1: u64 = 1048576;
 }

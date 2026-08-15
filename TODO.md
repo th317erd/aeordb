@@ -628,6 +628,9 @@
       - [x] P3c-1d: suspend every source mutating-GC and retention-cleanup entry point for the exact selected lease while preserving read-only diagnostics.
       - [x] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.
       - [ ] P3c-2b: implement bounded capture, pressure/exhaustion latching, durable checkpoints, resume, and final full-reconciliation authority.
+        - [x] P3c-2b1: freeze the external capture segment/checkpoint formats and private bounded workspace with independent fixtures and reopen validation.
+        - [ ] P3c-2b2: add one optional source-publication capture owner that preserves acknowledged writes, latches exhaustion/pressure durably, checkpoints, and resumes exactly.
+        - [ ] P3c-2b3: stream the base clone into the initialized destination, replay retained capture, and require an exact final-freeze authority/SystemFamily diff whenever capture is incomplete.
       - [ ] P3c-3a: implement immutable paged legacy-root mapping, selected control publication, and typed reset/unavailable outcomes.
       - [ ] P3c-3b: prove cancel/resume, crash boundaries, complete shadow verification, GC reset policy, and byte-for-byte source invariance.
     - [ ] P4: implement bounded physical inventory, logical/physical lifecycle, quarantine, sweep, and receipt-backed Void authority without destructive activation.

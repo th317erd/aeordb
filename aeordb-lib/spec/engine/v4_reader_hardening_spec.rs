@@ -23,6 +23,7 @@ use aeordb::engine::v4::index_artifact::decode_index_control_or_manifest;
 use aeordb::engine::v4::index_nvt::decode_nvt_tile;
 use aeordb::engine::v4::index_page::decode_ordered_index_artifact;
 use aeordb::engine::v4::index_task::decode_index_task_artifact;
+use aeordb::engine::v4::migration_capture::decode_migration_capture_manifest;
 use aeordb::engine::v4::namespace::{decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::decode_parser_resolution_plan;
 use aeordb::engine::v4::position::decode_logical_position;
@@ -128,7 +129,7 @@ fn manifest() -> FixtureManifest {
 fn every_manifest_row_has_one_production_decoder() {
   let root = fixture_root();
   let rows = manifest().fixtures;
-  assert_eq!(rows.len(), 436);
+  assert_eq!(rows.len(), 438);
   for row in rows {
     let bytes = fs::read(root.join(&row.binary)).unwrap();
     let decoded = decode_fixture_row(&row, &bytes).unwrap_or_else(|error| panic!("fixture {}: {error}", row.id));
@@ -321,6 +322,7 @@ fn decode_fixture_row(row: &FixtureRow, bytes: &[u8]) -> Result<Result<(), Forma
       decode_index_task_artifact(bytes, algorithm).map(|_| ())
     }
     "logical-position-v1" => decode_logical_position(bytes, algorithm).map(|_| ()),
+    "migration-capture-v1" => decode_migration_capture_manifest(bytes, algorithm).map(|_| ()),
     "gc-artifact-v1" if row.expected.starts_with("gc:control:") => decode_gc_active_control(bytes, algorithm).map(|_| ()),
     "gc-artifact-v1" if is_gc_state_fixture(row) => decode_gc_state_artifact(bytes, algorithm).map(|_| ()),
     "gc-artifact-v1" if is_gc_mark_fixture(row) => decode_gc_mark_artifact(bytes, algorithm).map(|_| ()),

@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p0b-2-system-family",
+  "stage": "p3c-2b1-migration-capture",
   "reference_tool": {
     "name": "aeordb-v4-reference",
-    "revision": "p0b2-system-family-v1-root-derived-paths",
+    "revision": "p3c2b1-migration-capture-v1",
     "production_dependencies": [],
     "provenance": "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency",
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 436,
+  "fixture_count": 438,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -5111,6 +5111,36 @@
       "canonical_key": "2afd7a9be2ed012c83a387e510254756bf8e261ccf179e14949227456a43f968ee71846c5c5249c89aff15c41a127cf51922d111eb4a20ef294360ea207183da",
       "expected": "gc:pin:audit:reason=2:artifacts=2",
       "relation": "roots:corrupt-evidence-and-run-summary"
+    },
+    {
+      "id": "amcm-blake3-256-capturing-valid",
+      "format_id": "migration-capture-v1",
+      "family": "MigrationCaptureManifestV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "migration-capture-v1/amcm-blake3-256-capturing-valid.bin",
+      "annotated_hex": "migration-capture-v1/amcm-blake3-256-capturing-valid.hex",
+      "byte_length": 500,
+      "sha256": "1712234f6bb1c148faa5469c3e7cc24bf5f5f42aeeb08c576948a4d2b1076328",
+      "blake3": "89cac29a77cdebb39c40d2121f6bbb55e7e5148fc3360257fb01fb0f05f90ddc",
+      "canonical_key": "ea8e29ddfbfa642d4511b5957b6cfa50a38a764d11bdff709fe2937f25473238",
+      "expected": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
+      "relation": "selects:external-migration-capture-segment-chain"
+    },
+    {
+      "id": "amcm-sha512-capturing-valid",
+      "format_id": "migration-capture-v1",
+      "family": "MigrationCaptureManifestV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "migration-capture-v1/amcm-sha512-capturing-valid.bin",
+      "annotated_hex": "migration-capture-v1/amcm-sha512-capturing-valid.hex",
+      "byte_length": 724,
+      "sha256": "ab895516cea8a18753487e889df8241d413266f745c023c725c76bf4152ee447",
+      "blake3": "cf37c590249862e3df096501a7b9f0aa2d0df5e8a030c4cfe5fe57d93be415e8",
+      "canonical_key": "0090cc3aba7a6931539e82d3d22b009374c78933f16680189f36b5039443eaae476672a6b8e0dbd08d4327c9f8031ec76b9d968d81c8b33405a10886dee166f1",
+      "expected": "migration:capture:state=capturing:checkpoint=3:segments=2:captured=110:observed=110",
+      "relation": "selects:external-migration-capture-segment-chain"
     },
     {
       "id": "aivp-blake3-256-native-valid",

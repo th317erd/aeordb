@@ -257,7 +257,7 @@ jq -e --arg source_sha "$(sha256_canonical_text_file "$contract_registry")" \
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .source_sha256 == $source_sha and .fixture_manifest_sha256 == $fixture_sha and
   .counts == {
-    "formats":21,"fixtures":436,"capability_bits":24,"entry_types":10,"kv_tags":12,
+    "formats":22,"fixtures":438,"capability_bits":24,"entry_types":10,"kv_tags":12,
     "shared_enum_scopes":13,"shared_enum_values":134,"system_families":46,
     "system_family_descriptors":63,"malformed_input_classes":16
   } and
@@ -287,7 +287,7 @@ jq -e \
   .proof.production_tests_passed >= 3 and
   .proof.strict_reference_clippy == "pass" and
   .proof.rustfmt_check == "pass" and
-  .proof.fixture_cases_verified == 436 and
+  .proof.fixture_cases_verified == 438 and
   .proof.route_registrations_inventoried == 93 and
   .proof.documentation_pages_inventoried == 36 and
   .proof.v4_writers_activated == false and
@@ -297,7 +297,7 @@ jq -e \
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p0b-2-system-family" and
+  .stage == "p3c-2b1-migration-capture" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and
@@ -673,6 +673,23 @@ for result_prefix in "${required_p0b2_system_control_results[@]}"; do
   ' "$fixture_manifest" >/dev/null \
     || fail "P0b-2 system control/cutover artifact lacks both hash-width fixtures: $result_prefix"
 done
+
+jq -e '
+  .formats[] | select(.id == "migration-capture-v1") |
+  .magic_ascii == "AMCM" and .version == 1 and
+  .fixed_length_formula == "276 + 7H; 500 bytes at H=32 and 724 bytes at H=64" and
+  .hard_cap == 724 and
+  .capability == "SideBySideMigrationV1 bit 21" and
+  (.layout | length) == 16 and
+  (.reserve_zero_ranges | length) == 3 and
+  (.typed_hash_roles | length) == 5
+' "$contract_registry" >/dev/null \
+  || fail "P3c-2b1 migration capture contract registry is incomplete"
+jq -e '
+  any(.fixtures[]; .format_id == "migration-capture-v1" and .hash_width == 32 and (.expected | startswith("migration:capture:"))) and
+  any(.fixtures[]; .format_id == "migration-capture-v1" and .hash_width == 64 and (.expected | startswith("migration:capture:")))
+' "$fixture_manifest" >/dev/null \
+  || fail "P3c-2b1 migration capture format lacks both hash-width fixtures"
 
 system_family_binary="$repo_root/aeordb-lib/spec/fixtures/system-family-registry-v1.bin"
 system_family_manifest="$repo_root/aeordb-lib/spec/fixtures/system-family-registry-v1.manifest.json"
