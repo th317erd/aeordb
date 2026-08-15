@@ -1094,7 +1094,7 @@ fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
 }
 
 #[test]
-fn wave_five_exit_keeps_v4_migration_source_capture_unactivated_until_p7() {
+fn wave_five_exit_allows_the_reviewed_p3c_codec_but_keeps_migration_runtime_unactivated() {
   fn visit_rust_sources(directory: &std::path::Path, sources: &mut Vec<(std::path::PathBuf, String)>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -1114,7 +1114,7 @@ fn wave_five_exit_keeps_v4_migration_source_capture_unactivated_until_p7() {
     .iter()
     .flat_map(|(path, source)| source.match_indices("capture_migration_run_configuration(").map(move |_| path))
     .collect::<Vec<_>>();
-  assert_eq!(capture_callers.len(), 1, "P7 migration configuration capture acquired a premature runtime caller: {capture_callers:?}");
+  assert_eq!(capture_callers.len(), 1, "migration configuration capture acquired a premature runtime caller: {capture_callers:?}");
   assert_eq!(capture_callers[0].file_name().and_then(|value| value.to_str()), Some("run_configuration.rs"));
 
   let run_configuration = sources
@@ -1125,27 +1125,44 @@ fn wave_five_exit_keeps_v4_migration_source_capture_unactivated_until_p7() {
   assert!(run_configuration.contains("Called when the P7 v4 migration state machine is activated"));
   assert!(run_configuration.contains("#[allow(dead_code)]"));
 
-  let premature_control_writers = sources
+  let migration_control_sources = sources
     .iter()
     .filter(|(path, source)| {
       path.file_name().and_then(|value| value.to_str()) != Some("system_control.rs")
         && (source.contains("SystemControlKindV1::MigrationLease") || source.contains("SystemControlKindV1::MigrationProgress"))
     })
-    .map(|(path, _)| path.display().to_string())
+    .map(|(path, source)| (path, source))
     .collect::<Vec<_>>();
-  assert!(
-    premature_control_writers.is_empty(),
-    "P7 migration lease/progress controls acquired a premature runtime writer: {}",
-    premature_control_writers.join(", ")
+  assert_eq!(
+    migration_control_sources.len(),
+    1,
+    "migration controls escaped their one reviewed typed codec: {migration_control_sources:?}"
   );
+  assert_eq!(migration_control_sources[0].0.file_name().and_then(|value| value.to_str()), Some("migration_control.rs"));
+  let codec = migration_control_sources[0].1;
+  for forbidden in [
+    "StorageEngine",
+    "DirectoryOps",
+    "V4ControlStore",
+    "V3TransitionControlStore",
+    "FirstAuthority",
+    "std::fs",
+    "publish_mutable",
+    "capture_migration_run_configuration",
+  ] {
+    assert!(!codec.contains(forbidden), "disconnected migration codec acquired premature runtime dependency {forbidden}");
+  }
 
   let v4_module = std::fs::read_to_string(package.join("src/engine/v4/mod.rs")).unwrap();
-  assert!(!v4_module.contains("mod migration"), "P7 migration runtime module was activated before its owning phase");
+  assert!(v4_module.contains("pub mod migration_control;"), "ratified P3c migration codec is not exported");
+  for forbidden in ["pub mod migration;", "pub mod migration_runtime;", "pub mod migration_capture;"] {
+    assert!(!v4_module.contains(forbidden), "migration runtime module was activated before its owning phase: {forbidden}");
+  }
   assert!(
     !sources.iter().any(|(path, _)| {
       matches!(path.file_name().and_then(|value| value.to_str()), Some("migration.rs" | "migration_runtime.rs" | "migration_capture.rs"))
     }),
-    "P7 migration runtime source exists without Wave 5/P7 authority review"
+    "migration runtime source exists without its authority review"
   );
 }
 

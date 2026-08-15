@@ -1077,6 +1077,10 @@ name = "index_recovery_store_spec"
 path = "spec/engine/index_recovery_store_spec.rs"
 
 [[test]]
+name = "migration_control_spec"
+path = "spec/engine/migration_control_spec.rs"
+
+[[test]]
 name = "index_operation_control_spec"
 path = "spec/engine/index_operation_control_spec.rs"
 

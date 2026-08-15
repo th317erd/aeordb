@@ -1,19 +1,21 @@
 # Child 07 Progress: Migration
 
 - **Status:** active; Child 03 start gate is complete and P3c is restored as the required P6 activation prerequisite
-- **Current landing unit:** P3c-1
-- **Entry commit:** pending the P6-2d-c3 shared-owner preparation landing
-- **Last green commit:** not established
+- **Current landing unit:** P3c-1b
+- **Entry commit:** `74e5498` (`feat: prepare shared v4 index runtime`)
+- **Last green commit:** `74e5498` (`feat: prepare shared v4 index runtime`)
 - **Owner:** current Codex thread after the shared-owner handoff; migration/control hotspots remain serialized
 - **Start gate:** satisfied for P3c because Child 03 is complete; P8 still requires Children 04 and 06
 - **Plan:** [Child 07](../children/07-side-by-side-migration-cutover-and-rollout.md)
-- **Owned files:** assign before start
-- **Forbidden/hotspot files:** assign before start
+- **Owned files:** `engine/v4/migration_control.rs`, subsequent migration runtime modules, their dedicated specs, `engine/v4/mod.rs`, explicit test manifests, and this progress ledger
+- **Forbidden/hotspot files:** v3 source mutation, live `StorageEngine`/server/CLI activation, production databases, deployment, cutover, first-v4-write admission, and shared first-authority/control-store hotspots without a separately green handoff
 - **Hotspot handoff commit:** none
 - **Narrow gate:** `timeout 30m cargo test -j 6 -p aeordb-cli --test cutover_fault_spec`
 - **Broad gate:** not run
 - **Drift/risks:** no production mutation without explicit P8 operator gate
 - **Ratification:** on 2026-08-13 the operator ratified the remaining recommendations and policy decisions. This authorizes the disconnected P3c substrate and later planned implementation gates, but not deployment, destructive migration, production cutover, or first-v4-write acceptance.
-- **Evidence:** none
+- **Evidence:** P3c-1a first demonstrated the absent typed module through an unresolved-import compile failure. `migration_control.rs` now provides the one typed AMLE/AMPR v1 body authority over the existing `SystemControlV1` envelope, including exact fixed layouts, every frozen enum/flag, nonzero identity/fencing/policy validation, time and hash-width bounds, fallible allocation, and encode/decode identity round trips at 32-byte and 64-byte hash widths. Four independent checked-in binary fixtures remain the byte oracle. Seven focused tests cover exact bytes, widest-hash round trip, every enum, all known flags, wrong-kind/truncation, invalid identities/fencing/times/flags/hash widths, and zero required policy hashes. The neighboring format/writer/control-store/platform/error-squelch matrix passes 155 tests. Workspace all-target checking passes with only the historical unused `require_wasm_parser` test macro. The complete workspace/all-target gate passes 6,262 tests across 276 result groups with zero failures and seven intentional ignores; retained log `/home/wyatt/.cache/codex/aeordb-tests/p3c-1a-migration-control-full.log` has SHA-256 `1f0fbf3c3cd7448352d796136fb23e1a0afd7e92c34777378b6acba3fdbd3680`. The first broad run correctly exposed an obsolete Wave-5 architecture guard that treated any typed writer as runtime activation. Its replacement permits exactly `migration_control.rs` and recursively rejects storage engine, directory, control-store, first-authority, filesystem, publication, and capture dependencies; source migration configuration capture remains callerless and migration runtime modules remain absent.
 - **Dependency correction:** the parent graph requires P3c's separate v4 shadow authority before P6 can install its native recovery store into lifecycle. A live v3 `StorageEngine` cannot safely stand in for that authority. No source file, production database, deployment, or cutover is authorized by this correction.
-- **Next action:** land the shared-owner preparation, assign P3c-1 owned files, refresh the preflight/identity/control territory, and add the smallest failing migration-state test before production code.
+- **Territory refresh:** the complete control registry already freezes MigrationLease `0x0030/AMLE`, MigrationProgress `0x0031/AMPR`, LegacyRootMap control/page `0x0032/0x0033`, and SideBySideCutover `0x0052/ACUT`. Fail-closed envelope/body readers, A/B/I selection, the v4 control wrapper, v4 first-authority publication, exact 56-byte native file identity, filesystem capacity, migration configuration, and platform durability probes exist. Typed migration body codecs, a lease/progress owner, source-GC suspension, preflight aggregation, capture/clone/reconciliation, and a generic physical-v4 migration control publication path do not exist. `StorageEngine` remains v3 and cannot be substituted for the destination.
+- **Landing decomposition:** P3c-1a freezes typed lease/progress codecs against independent 32/64-byte-hash fixtures. P3c-1b adds preflight evidence. P3c-1c adds the durable fenced state owner. P3c-1d connects the exact lease to every mutating GC/retention entry point while leaving diagnostics available. P3c-2 owns bounded clone/capture/reconciliation; P3c-3 owns root mapping and source-invariance exit proof.
+- **Next action:** map every existing native durability/configuration/capacity/capability/verifier producer into one fail-closed P3c-1b source/destination preflight evidence contract, then demonstrate that missing contract before production code.

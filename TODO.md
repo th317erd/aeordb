@@ -613,6 +613,14 @@
           - [x] Qualify the exact pushed commit on macOS arm64 and Windows x86_64 MSVC using the frozen lockfile and bounded native commands.
           - [x] Record retained activation boundaries and close P3b-3 only after every required proof is green.
     - [ ] P3c: implement the shadow clone, bounded capture, root map, migration lease/progress, reconciliation, and cutover-journal substrate without service activation.
+      - [x] P3c-1a: add typed MigrationLease and MigrationProgress codecs over the frozen SystemControlV1 bytes and independent fixtures.
+      - [ ] P3c-1b: implement fail-closed source/destination preflight evidence, physical identity, capacity, capability, configuration, and strict-verification admission.
+      - [ ] P3c-1c: implement one fenced durable migration lease/progress owner with explicit acquire, renew, transition, release, expiry-recovery, and restart semantics.
+      - [ ] P3c-1d: suspend every source mutating-GC and retention-cleanup entry point for the exact selected lease while preserving read-only diagnostics.
+      - [ ] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.
+      - [ ] P3c-2b: implement bounded capture, pressure/exhaustion latching, durable checkpoints, resume, and final full-reconciliation authority.
+      - [ ] P3c-3a: implement immutable paged legacy-root mapping, selected control publication, and typed reset/unavailable outcomes.
+      - [ ] P3c-3b: prove cancel/resume, crash boundaries, complete shadow verification, GC reset policy, and byte-for-byte source invariance.
     - [ ] P4: implement bounded physical inventory, logical/physical lifecycle, quarantine, sweep, and receipt-backed Void authority without destructive activation.
       - [x] P4-1: expose typed physical-inventory readers and build a disconnected streaming inventory/reference model.
         - [x] Add the `gc_v4_model_spec` campaign target and demonstrate the missing typed inventory API.
