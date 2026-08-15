@@ -510,7 +510,11 @@ pub struct MigrationPreflightPermitV1 {
   source_capture_head: Vec<u8>,
   configuration_generation: u64,
   effective_configuration_fingerprint: Vec<u8>,
+  source_authority_digest: [u8; 32],
+  source_authority_counts: AuthorityInventoryCountsV1,
   system_family_registry_fingerprint: Vec<u8>,
+  required_reader_capabilities: CapabilitySetV1,
+  required_writer_capabilities: CapabilitySetV1,
   evidence_fingerprint: [u8; 32],
 }
 
@@ -555,8 +559,24 @@ impl MigrationPreflightPermitV1 {
     &self.effective_configuration_fingerprint
   }
 
+  pub const fn source_authority_digest(&self) -> [u8; 32] {
+    self.source_authority_digest
+  }
+
+  pub const fn source_authority_counts(&self) -> AuthorityInventoryCountsV1 {
+    self.source_authority_counts
+  }
+
   pub fn system_family_registry_fingerprint(&self) -> &[u8] {
     &self.system_family_registry_fingerprint
+  }
+
+  pub const fn required_reader_capabilities(&self) -> CapabilitySetV1 {
+    self.required_reader_capabilities
+  }
+
+  pub const fn required_writer_capabilities(&self) -> CapabilitySetV1 {
+    self.required_writer_capabilities
   }
 
   pub const fn evidence_fingerprint(&self) -> [u8; 32] {
@@ -638,7 +658,11 @@ pub fn admit_migration_preflight_v1(
     source_capture_head: request.source.head_hash.clone(),
     configuration_generation: request.configuration.generation,
     effective_configuration_fingerprint: request.configuration.effective_configuration_fingerprint.clone(),
+    source_authority_digest: request.inventory.authority_digest,
+    source_authority_counts: request.inventory.counts,
     system_family_registry_fingerprint: request.inventory.system_family_registry_fingerprint.clone(),
+    required_reader_capabilities: request.binary.required_reader_capabilities,
+    required_writer_capabilities: request.binary.required_writer_capabilities,
     evidence_fingerprint: report.evidence_fingerprint,
   };
   Ok((report, permit))

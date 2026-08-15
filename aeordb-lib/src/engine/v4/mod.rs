@@ -73,6 +73,7 @@ pub mod index_semantic_registry;
 pub mod index_semantic_source;
 pub mod index_source;
 pub mod index_task;
+pub mod migration_clone;
 pub mod migration_control;
 pub mod migration_owner;
 pub mod migration_preflight;

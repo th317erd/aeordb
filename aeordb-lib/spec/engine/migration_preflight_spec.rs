@@ -192,7 +192,11 @@ fn clean_preflight_issues_one_identity_bound_nonconstructible_permit() {
   assert_eq!(permit.source_capture_head(), request.source.head_hash);
   assert_eq!(permit.configuration_generation(), 7);
   assert_eq!(permit.effective_configuration_fingerprint(), request.configuration.effective_configuration_fingerprint);
+  assert_eq!(permit.source_authority_digest(), request.inventory.authority_digest);
+  assert_eq!(permit.source_authority_counts(), request.inventory.counts);
   assert_eq!(permit.system_family_registry_fingerprint(), request.inventory.system_family_registry_fingerprint);
+  assert_eq!(permit.required_reader_capabilities(), request.binary.required_reader_capabilities);
+  assert_eq!(permit.required_writer_capabilities(), request.binary.required_writer_capabilities);
   assert_eq!(permit.evidence_fingerprint(), report.evidence_fingerprint());
   assert_ne!(permit.evidence_fingerprint(), [0; 32]);
 }
