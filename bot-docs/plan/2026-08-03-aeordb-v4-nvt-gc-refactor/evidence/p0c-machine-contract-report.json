@@ -4,7 +4,7 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
-  "generated_rust_sha256": "58e868dd425223c6a548e696cd03dd77f82506b3f8fa02a95893a0e54cd6fbfd",
+  "generated_rust_sha256": "5e5a5e23efe8e9b1454f8556e13688d2a434cd1194af98ddfd7e71a35c1046c7",
   "generated_rust_bytes": 61519,
   "counts": {
     "route_classes": 7,
