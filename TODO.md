@@ -629,10 +629,10 @@
       - [x] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.
       - [ ] P3c-2b: implement bounded capture, pressure/exhaustion latching, durable checkpoints, resume, and final full-reconciliation authority.
         - [x] P3c-2b1: freeze the external capture segment/checkpoint formats and private bounded workspace with independent fixtures and reopen validation.
-        - [ ] P3c-2b2: add one optional source-publication capture owner that preserves acknowledged writes, latches exhaustion/pressure durably, checkpoints, and resumes exactly.
+        - [x] P3c-2b2: add one optional source-publication capture owner that preserves acknowledged writes, latches exhaustion/pressure durably, checkpoints, and resumes exactly.
           - [x] P3c-2b2a: reserve the durable AMPR `needs_full_reconcile` authority bit, add its specialized monotonic owner, and permit an exact zero-publication initial checkpoint.
-          - [ ] P3c-2b2b: install one independently bounded optional `StorageEngine` capture subscription at an exact source-root/publication boundary without sharing the index drain.
-          - [ ] P3c-2b2c: encode post-commit notices into bounded AINX segments, checkpoint every 300 seconds, hard-latch every loss/failure, and reopen conservatively across process boots.
+          - [x] P3c-2b2b: install one independently bounded optional `StorageEngine` capture subscription at an exact source-root/publication boundary without sharing the index drain.
+          - [x] P3c-2b2c: encode post-commit notices into bounded AINX segments, checkpoint every 300 seconds, hard-latch every loss/failure, and reopen conservatively across process boots.
         - [ ] P3c-2b3: stream the base clone into the initialized destination, replay retained capture, and require an exact final-freeze authority/SystemFamily diff whenever capture is incomplete.
       - [ ] P3c-3a: implement immutable paged legacy-root mapping, selected control publication, and typed reset/unavailable outcomes.
       - [ ] P3c-3b: prove cancel/resume, crash boundaries, complete shadow verification, GC reset policy, and byte-for-byte source invariance.
