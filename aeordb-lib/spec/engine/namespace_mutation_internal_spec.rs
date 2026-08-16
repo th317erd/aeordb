@@ -109,6 +109,34 @@ fn engine_soft_handoff_is_not_emitted_for_failed_hard_publication() {
 }
 
 #[test]
+fn migration_capture_is_not_emitted_for_failed_hard_publication() {
+  let (engine, _temporary) = test_engine("hard-failure-migration-capture");
+  let identity =
+    crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionIdentityV1::new([0x71; 16], [0x72; 16], 7, [0x73; 16])
+      .unwrap();
+  let hub = Arc::new(
+    crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
+      crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::new(2, 64 * 1_024, 16 * 1_024).unwrap(),
+    )
+    .unwrap(),
+  );
+  let subscription = engine.register_migration_capture_subscription(identity, hub).unwrap();
+  let coordinator = NamespaceMutationCoordinator::with_test_faults(
+    &engine,
+    Arc::new(RecordingFanout::default()),
+    NamespaceMutationTestFaults { fail_after_dependency_writes: None, fail_hard_before_commit: true, panic_soft_handoff: false },
+  );
+  let (batch, _dependency_key, _locator_key) = dependency_and_locator_batch(&engine);
+
+  assert!(coordinator.execute(batch).is_err());
+
+  let migration = subscription.snapshot().unwrap();
+  assert_eq!(migration.queued_notices, 0);
+  assert_eq!(migration.dropped_notices, 0);
+  assert!(!migration.reconciliation_required);
+}
+
+#[test]
 fn contended_engine_soft_handoff_latches_reconciliation_without_failing_commit() {
   let (engine, _temporary) = test_engine("contended-soft-handoff");
   let guard = engine.lock_soft_mutation_queue_for_test().unwrap();
@@ -128,6 +156,16 @@ fn contended_engine_soft_handoff_latches_reconciliation_without_failing_commit()
 #[test]
 fn panicked_engine_soft_handoff_latches_reconciliation_without_failing_commit() {
   let (engine, _temporary) = test_engine("panicked-soft-handoff");
+  let identity =
+    crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionIdentityV1::new([0x81; 16], [0x82; 16], 8, [0x83; 16])
+      .unwrap();
+  let migration_hub = Arc::new(
+    crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
+      crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::new(2, 64 * 1_024, 16 * 1_024).unwrap(),
+    )
+    .unwrap(),
+  );
+  let migration = engine.register_migration_capture_subscription(identity, migration_hub).unwrap();
   let coordinator = NamespaceMutationCoordinator::with_test_faults(
     &engine,
     Arc::new(RecordingFanout::default()),
@@ -142,4 +180,8 @@ fn panicked_engine_soft_handoff_latches_reconciliation_without_failing_commit() 
   assert_eq!(snapshot.queued_notices, 0);
   assert_eq!(snapshot.lost_through_sequence, Some(acknowledgement.publication_sequence));
   assert!(snapshot.loss_reasons.contains(&crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1::QueueUnavailable));
+  let migration_snapshot = migration.snapshot().unwrap();
+  assert_eq!(migration_snapshot.queued_notices, 0);
+  assert_eq!(migration_snapshot.lost_through_sequence, Some(acknowledgement.publication_sequence));
+  assert!(migration_snapshot.loss_reasons.contains(&crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1::QueueUnavailable));
 }

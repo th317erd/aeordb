@@ -74,6 +74,7 @@ pub mod index_semantic_source;
 pub mod index_source;
 pub mod index_task;
 pub mod migration_capture;
+pub mod migration_capture_subscription;
 pub mod migration_capture_workspace;
 pub mod migration_clone;
 pub mod migration_control;

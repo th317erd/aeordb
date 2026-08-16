@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use fs2::FileExt;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 
 use crate::engine::append_writer::{read_span_at, AppendWriter};
 use crate::engine::cache::{Cache, CleanCache};
@@ -704,6 +704,7 @@ pub struct StorageEngine {
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
   query_runtime: OnceLock<Arc<QueryRuntime>>,
   soft_mutation_hub: crate::engine::v4::coverage_runtime::SoftMutationHubV1,
+  migration_capture_subscription: ArcSwapOption<crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionV1>,
   operation_tracker: EngineOperationTracker,
   shutdown_started: Arc<AtomicBool>,
   shutdown_flush_started: AtomicBool,
@@ -1095,7 +1096,94 @@ impl StorageEngine {
     &self,
     acknowledgement: &crate::engine::namespace_mutation::NamespaceMutationAcknowledgement,
   ) -> crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1 {
-    self.soft_mutation_hub.offer_acknowledgement(acknowledgement)
+    let primary = self.soft_mutation_hub.offer_acknowledgement(acknowledgement);
+    if let Some(subscription) = self.migration_capture_subscription.load_full() {
+      match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subscription.offer_acknowledgement(acknowledgement))) {
+        Ok(crate::engine::v4::migration_capture_subscription::MigrationCaptureOfferV1::IgnoredAtOrBeforeBoundary)
+        | Ok(crate::engine::v4::migration_capture_subscription::MigrationCaptureOfferV1::Offered(
+          crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1::Accepted,
+        ))
+        | Ok(crate::engine::v4::migration_capture_subscription::MigrationCaptureOfferV1::Offered(
+          crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1::ReconciliationAlreadyRequired,
+        )) => {}
+        Ok(crate::engine::v4::migration_capture_subscription::MigrationCaptureOfferV1::Offered(
+          crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1::ReconciliationRequired(reason),
+        )) => {
+          tracing::warn!(
+            operation_id = %acknowledgement.operation_id,
+            publication_sequence = acknowledgement.publication_sequence,
+            ?reason,
+            "Optional migration capture lost a source publication; full reconciliation is required"
+          );
+        }
+        Err(panic_payload) => {
+          drop(panic_payload);
+          subscription.force_reconciliation_required(acknowledgement.publication_sequence);
+          tracing::error!(
+            operation_id = %acknowledgement.operation_id,
+            publication_sequence = acknowledgement.publication_sequence,
+            "Optional migration capture panicked; source success was preserved and full reconciliation is required"
+          );
+        }
+      }
+    }
+    primary
+  }
+
+  pub(crate) fn register_migration_capture_subscription(
+    &self,
+    identity: crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionIdentityV1,
+    hub: Arc<crate::engine::v4::coverage_runtime::SoftMutationHubV1>,
+  ) -> Result<
+    Arc<crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionV1>,
+    crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1,
+  > {
+    identity.validate()?;
+    let _authority = self
+      .direct_hard_authority_guard()
+      .map_err(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1::Engine)?;
+    if self.migration_capture_subscription.load_full().is_some() {
+      return Err(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1::AlreadyRegistered);
+    }
+    let boundary = crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionBoundaryV1 {
+      source_namespace_root: self
+        .head_hash()
+        .map_err(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1::Engine)?,
+      publication_sequence: self
+        .durability_snapshot()
+        .map_err(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1::Engine)?
+        .hard_frontier,
+    };
+    let subscription =
+      Arc::new(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionV1::new(identity, boundary, hub)?);
+    self.migration_capture_subscription.store(Some(Arc::clone(&subscription)));
+    Ok(subscription)
+  }
+
+  pub(crate) fn unregister_migration_capture_subscription(
+    &self,
+    identity: crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionIdentityV1,
+  ) -> Result<
+    crate::engine::v4::migration_capture_subscription::RetiredMigrationCaptureSubscriptionV1,
+    crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1,
+  > {
+    identity.validate()?;
+    let _authority = self
+      .direct_hard_authority_guard()
+      .map_err(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1::Engine)?;
+    let subscription = self
+      .migration_capture_subscription
+      .load_full()
+      .ok_or(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1::NotRegistered)?;
+    if subscription.identity() != identity {
+      return Err(crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionErrorV1::OwnerFenced);
+    }
+    self.migration_capture_subscription.store(None);
+    let close_error = subscription.close_admission().err();
+    if close_error.is_some() {
+      subscription.force_reconciliation_required(subscription.boundary().publication_sequence);
+    }
+    Ok(crate::engine::v4::migration_capture_subscription::RetiredMigrationCaptureSubscriptionV1 { subscription, close_error })
   }
 
   pub(crate) fn force_soft_mutation_reconciliation(
@@ -1103,7 +1191,11 @@ impl StorageEngine {
     publication_sequence: u64,
     reason: crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1,
   ) -> crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1 {
-    self.soft_mutation_hub.force_reconciliation_required(publication_sequence, reason)
+    let primary = self.soft_mutation_hub.force_reconciliation_required(publication_sequence, reason);
+    if let Some(subscription) = self.migration_capture_subscription.load_full() {
+      subscription.force_reconciliation_required(publication_sequence);
+    }
+    primary
   }
 
   #[allow(dead_code)]
@@ -2788,6 +2880,7 @@ impl StorageEngine {
         crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
       )
       .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
+      migration_capture_subscription: ArcSwapOption::empty(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
@@ -3030,6 +3123,7 @@ impl StorageEngine {
         crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
       )
       .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
+      migration_capture_subscription: ArcSwapOption::empty(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
       shutdown_flush_started: AtomicBool::new(false),
@@ -7451,3 +7545,7 @@ mod storage_engine_transaction_admission_internal_spec;
 #[cfg(test)]
 #[path = "../../spec/engine/void_gap_recovery_internal_spec.rs"]
 mod void_gap_recovery_internal_spec;
+
+#[cfg(test)]
+#[path = "../../spec/engine/migration_capture_subscription_internal_spec.rs"]
+mod migration_capture_subscription_internal_spec;

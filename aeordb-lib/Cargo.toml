@@ -1101,6 +1101,10 @@ name = "migration_capture_workspace_spec"
 path = "spec/engine/migration_capture_workspace_spec.rs"
 
 [[test]]
+name = "migration_capture_subscription_spec"
+path = "spec/engine/migration_capture_subscription_spec.rs"
+
+[[test]]
 name = "mutable_system_control_authority_spec"
 path = "spec/engine/mutable_system_control_authority_spec.rs"
 

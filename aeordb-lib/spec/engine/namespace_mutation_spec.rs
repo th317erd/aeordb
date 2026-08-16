@@ -875,7 +875,11 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
   assert!(task_queue.contains("NamespaceMutationCoordinator"), "the characterized Wave 4 task producer must use the shared facade");
 
   let storage_engine = std::fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
-  assert_eq!(storage_engine.matches("offer_acknowledgement(acknowledgement)").count(), 1);
+  assert_eq!(storage_engine.matches("self.soft_mutation_hub.offer_acknowledgement(acknowledgement)").count(), 1);
+  assert_eq!(storage_engine.matches("subscription.offer_acknowledgement(acknowledgement)").count(), 1);
+  assert_eq!(storage_engine.matches("migration_capture_subscription: ArcSwapOption<").count(), 1);
+  assert!(storage_engine.contains("fn register_migration_capture_subscription"));
+  assert!(storage_engine.contains("fn unregister_migration_capture_subscription"));
   let mut duplicate_soft_producers = Vec::new();
   for entry in std::fs::read_dir(package.join("src/engine")).unwrap() {
     let path = entry.unwrap().path();
