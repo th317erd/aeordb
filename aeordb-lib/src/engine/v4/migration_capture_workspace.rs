@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::index_task::{JournalOwnerKindV1, MutationJournalV1, decode_mutation_journal};
 use super::migration_capture::{
-  MigrationCaptureManifestWriteV1, decode_migration_capture_manifest, encode_migration_capture_manifest,
+  MigrationCaptureManifestStateV1, MigrationCaptureManifestWriteV1, decode_migration_capture_manifest, encode_migration_capture_manifest,
   migration_capture_manifest_identity,
 };
 use super::private_workspace::{
@@ -28,10 +28,11 @@ use crate::engine::emergency_spill::{create_new_regular_file_no_follow, open_reg
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::native_durability::{NativeDurabilityError, durable_install_new_native, preallocate_file, sync_file_all_native};
 
-const SEGMENT_MAX_BYTES: usize = 16 * 1_024 * 1_024;
+pub const MIGRATION_CAPTURE_SEGMENT_MAX_BYTES_V1: usize = 16 * 1_024 * 1_024;
 const MANIFEST_MAX_BYTES: usize = 1_024;
 const IO_CHUNK_BYTES: usize = 64 * 1_024;
 const STATE_ACCOUNTING_BASE_BYTES: u64 = 1_024;
+const MAX_CAPTURE_WORKSPACE_ENTRY_SCAN: u64 = 1_000_000;
 
 #[derive(Debug, Error)]
 pub enum MigrationCaptureWorkspaceErrorV1 {
@@ -146,6 +147,38 @@ impl MigrationCaptureWorkspaceIdentityV1 {
       algorithm,
     })
   }
+
+  pub const fn database_id(self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub const fn migration_id(self) -> [u8; 16] {
+    self.migration_id
+  }
+
+  pub const fn source_physical_instance_id(self) -> [u8; 16] {
+    self.source_physical_instance_id
+  }
+
+  pub const fn destination_physical_instance_id(self) -> [u8; 16] {
+    self.destination_physical_instance_id
+  }
+
+  pub const fn runtime_boot_id(self) -> [u8; 16] {
+    self.runtime_boot_id
+  }
+
+  pub const fn fencing_token(self) -> u64 {
+    self.fencing_token
+  }
+
+  pub const fn capture_generation(self) -> u64 {
+    self.capture_generation
+  }
+
+  pub const fn hash_algorithm(self) -> HashAlgorithm {
+    self.algorithm
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +222,30 @@ impl MigrationCaptureWorkspaceBasisV1 {
     }
     Ok(())
   }
+
+  pub const fn created_at_ms(&self) -> i64 {
+    self.created_at_ms
+  }
+
+  pub const fn starting_publication_sequence(&self) -> u64 {
+    self.starting_publication_sequence
+  }
+
+  pub fn starting_source_root(&self) -> &[u8] {
+    &self.starting_source_root
+  }
+
+  pub fn effective_config_fingerprint(&self) -> &[u8] {
+    &self.effective_config_fingerprint
+  }
+
+  pub fn system_family_registry_fingerprint(&self) -> &[u8] {
+    &self.system_family_registry_fingerprint
+  }
+
+  pub const fn source_authority_digest(&self) -> [u8; 32] {
+    self.source_authority_digest
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +268,10 @@ impl MigrationCaptureWorkspaceOptionsV1 {
       return Err(MigrationCaptureWorkspaceErrorV1::Path("configured capture root must be absolute".to_string()));
     }
     Ok(Self { scratch_root, maximum_stored_bytes, minimum_free_bytes })
+  }
+
+  pub const fn maximum_stored_bytes(&self) -> u64 {
+    self.maximum_stored_bytes
   }
 }
 
@@ -408,11 +469,52 @@ impl DurableMigrationCaptureWorkspaceV1 {
     self.segments_path.join(segment_name(ordinal))
   }
 
+  pub fn prepare_capturing_checkpoint(
+    &self,
+    updated_at_ms: i64,
+  ) -> Result<MigrationCaptureManifestWriteV1, MigrationCaptureWorkspaceErrorV1> {
+    self.preflight_open()?;
+    if updated_at_ms < self.basis.created_at_ms {
+      return Err(MigrationCaptureWorkspaceErrorV1::Checkpoint("capture checkpoint time precedes workspace creation".to_string()));
+    }
+    let checkpoint_sequence = self
+      .last_checkpoint_sequence
+      .checked_add(1)
+      .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Checkpoint("capture checkpoint sequence is exhausted".to_string()))?;
+    Ok(MigrationCaptureManifestWriteV1 {
+      database_id: self.identity.database_id,
+      migration_id: self.identity.migration_id,
+      source_physical_instance_id: self.identity.source_physical_instance_id,
+      destination_physical_instance_id: self.identity.destination_physical_instance_id,
+      fencing_token: self.identity.fencing_token,
+      capture_generation: self.identity.capture_generation,
+      checkpoint_sequence,
+      state: MigrationCaptureManifestStateV1::Capturing,
+      flags: 0,
+      created_at_ms: self.basis.created_at_ms,
+      updated_at_ms,
+      captured_through_publication_sequence: self.summary.captured_through_publication_sequence,
+      observed_through_publication_sequence: self.summary.captured_through_publication_sequence,
+      first_segment_ordinal: self.summary.first_segment_ordinal,
+      last_segment_ordinal: self.summary.last_segment_ordinal,
+      segment_count: self.summary.segment_count,
+      segment_stored_bytes: self.summary.segment_stored_bytes,
+      source_root_before: self.summary.source_root_before.clone(),
+      source_root_after: self.summary.source_root_after.clone(),
+      segment_head: self.summary.segment_head.clone(),
+      previous_manifest: self.last_manifest_identity.clone(),
+      effective_config_fingerprint: self.basis.effective_config_fingerprint.clone(),
+      system_family_registry_fingerprint: self.basis.system_family_registry_fingerprint.clone(),
+      failure_evidence: vec![0; self.identity.algorithm.hash_length()],
+      source_authority_digest: self.basis.source_authority_digest,
+    })
+  }
+
   pub fn append_segment(&mut self, bytes: &[u8]) -> Result<(), MigrationCaptureWorkspaceErrorV1> {
     self.preflight_open()?;
-    if bytes.len() > SEGMENT_MAX_BYTES {
+    if bytes.len() > MIGRATION_CAPTURE_SEGMENT_MAX_BYTES_V1 {
       return Err(MigrationCaptureWorkspaceErrorV1::Capacity(format!(
-        "capture segment has {} bytes, exceeding {SEGMENT_MAX_BYTES}",
+        "capture segment has {} bytes, exceeding {MIGRATION_CAPTURE_SEGMENT_MAX_BYTES_V1}",
         bytes.len()
       )));
     }
@@ -525,6 +627,7 @@ pub struct ReopenedMigrationCaptureWorkspaceV1 {
   cancellation: CancellationToken,
   memory: MemoryCoordinator,
   _manifest_memory: MemoryReservation,
+  has_unselected_tail: bool,
 }
 
 impl fmt::Debug for ReopenedMigrationCaptureWorkspaceV1 {
@@ -539,6 +642,30 @@ impl fmt::Debug for ReopenedMigrationCaptureWorkspaceV1 {
 }
 
 impl ReopenedMigrationCaptureWorkspaceV1 {
+  #[allow(clippy::too_many_arguments)]
+  pub fn open_selected(
+    workspace_path: &Path,
+    expected_manifest_identity: &[u8],
+    identity: MigrationCaptureWorkspaceIdentityV1,
+    basis: MigrationCaptureWorkspaceBasisV1,
+    options: MigrationCaptureWorkspaceReopenOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, MigrationCaptureWorkspaceErrorV1> {
+    if cancellation.is_cancelled() {
+      return Err(MigrationCaptureWorkspaceErrorV1::Canceled);
+    }
+    if expected_manifest_identity.len() != identity.algorithm.hash_length() || all_zero(expected_manifest_identity) {
+      return Err(MigrationCaptureWorkspaceErrorV1::Identity("selected manifest identity is invalid"));
+    }
+    validate_private_directory_readonly(workspace_path, "migration capture workspace")?;
+    let checkpoints_path = workspace_path.join("checkpoints");
+    validate_private_directory_readonly(&checkpoints_path, "migration capture checkpoint collection")?;
+    let checkpoint_sequence =
+      locate_selected_checkpoint_sequence(&checkpoints_path, expected_manifest_identity, identity.algorithm, &cancellation, memory)?;
+    Self::open(workspace_path, checkpoint_sequence, expected_manifest_identity, identity, basis, options, cancellation, memory)
+  }
+
   #[allow(clippy::too_many_arguments)]
   pub fn open(
     workspace_path: &Path,
@@ -581,7 +708,8 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
     let checkpoint_stored_bytes =
       validate_checkpoint_predecessor_chain(&checkpoints_path, &manifest, manifest_bytes.len(), identity, &basis, &cancellation, memory)?;
     enforce_capture_cap(manifest.segment_stored_bytes, checkpoint_stored_bytes, options.maximum_stored_bytes)?;
-    enforce_physical_workspace_cap(workspace_path, &cancellation, options.maximum_stored_bytes)?;
+    let physical_inventory = enforce_physical_workspace_cap(workspace_path, &cancellation, options.maximum_stored_bytes)?;
+    let has_unselected_tail = physical_inventory.has_unselected_tail(&manifest);
     let reopened = Self {
       workspace_path: workspace_path.to_path_buf(),
       segments_path,
@@ -592,6 +720,7 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
       cancellation,
       memory: memory.clone(),
       _manifest_memory: manifest_memory,
+      has_unselected_tail,
     };
     reopened.validate_segment_closure(|_| Ok(()))?;
     Ok(reopened)
@@ -603,6 +732,10 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
 
   pub const fn captured_through_publication_sequence(&self) -> u64 {
     self.manifest.captured_through_publication_sequence
+  }
+
+  pub const fn has_unselected_tail(&self) -> bool {
+    self.has_unselected_tail
   }
 
   pub fn for_each_segment<F>(&self, visit: F) -> Result<(), MigrationCaptureWorkspaceErrorV1>
@@ -636,7 +769,7 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
     for ordinal in self.manifest.first_segment_ordinal..=self.manifest.last_segment_ordinal {
       let path = self.segments_path.join(segment_name(ordinal));
       let (bytes, _reservation) =
-        read_charged_file(&path, SEGMENT_MAX_BYTES, 1, "migration capture segment", &self.cancellation, &self.memory)?;
+        read_charged_file(&path, MIGRATION_CAPTURE_SEGMENT_MAX_BYTES_V1, 1, "migration capture segment", &self.cancellation, &self.memory)?;
       let journal = decode_mutation_journal(&bytes, self.identity.algorithm)
         .map_err(|error| MigrationCaptureWorkspaceErrorV1::Format(error.to_string()))?;
       validate_journal_for_summary(&journal, self.identity, &summary)?;
@@ -997,6 +1130,51 @@ fn read_charged_file(
   Ok((bytes, reservation))
 }
 
+fn locate_selected_checkpoint_sequence(
+  checkpoints_path: &Path,
+  expected_manifest_identity: &[u8],
+  algorithm: HashAlgorithm,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<u64, MigrationCaptureWorkspaceErrorV1> {
+  let mut scan_budget = PhysicalCaptureWorkspaceScanBudgetV1::new();
+  let mut selected = None;
+  for entry in fs::read_dir(checkpoints_path)
+    .map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "selected capture checkpoint scan", source })?
+  {
+    if cancellation.is_cancelled() {
+      return Err(MigrationCaptureWorkspaceErrorV1::Canceled);
+    }
+    scan_budget.observe("selected capture checkpoint")?;
+    let entry =
+      entry.map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "selected capture checkpoint scan entry", source })?;
+    let name = entry
+      .file_name()
+      .into_string()
+      .map_err(|_| MigrationCaptureWorkspaceErrorV1::Path("capture checkpoint directory name is not UTF-8".to_string()))?;
+    let sequence = parse_checkpoint_name(&name)
+      .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Path(format!("capture checkpoint collection contains unknown entry {name}")))?;
+    let path = entry.path();
+    validate_private_directory_readonly(&path, "scanned migration capture checkpoint")?;
+    let manifest_path = path.join("manifest.amcm");
+    match fs::symlink_metadata(&manifest_path) {
+      Ok(_) => {}
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+      Err(source) => {
+        return Err(MigrationCaptureWorkspaceErrorV1::Io { operation: "selected capture checkpoint metadata", source });
+      }
+    }
+    let (bytes, _reservation) =
+      read_charged_file(&manifest_path, MANIFEST_MAX_BYTES, 2, "selected capture checkpoint scan", cancellation, memory)?;
+    if migration_capture_manifest_identity(&bytes, algorithm) == expected_manifest_identity && selected.replace(sequence).is_some() {
+      return Err(MigrationCaptureWorkspaceErrorV1::Checkpoint(
+        "selected capture manifest identity appears in multiple checkpoint directories".to_string(),
+      ));
+    }
+  }
+  selected.ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Checkpoint("AMPR-selected capture manifest is absent".to_string()))
+}
+
 fn enforce_capture_cap(segment_bytes: u64, checkpoint_bytes: u64, maximum_bytes: u64) -> Result<(), MigrationCaptureWorkspaceErrorV1> {
   let total = segment_bytes
     .checked_add(checkpoint_bytes)
@@ -1007,20 +1185,71 @@ fn enforce_capture_cap(segment_bytes: u64, checkpoint_bytes: u64, maximum_bytes:
   Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PhysicalCaptureWorkspaceInventoryV1 {
+  segment_files: u64,
+  maximum_segment_ordinal: u64,
+  checkpoint_directories: u64,
+  checkpoint_manifests: u64,
+  maximum_checkpoint_sequence: u64,
+  has_pending_file: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PhysicalCaptureWorkspaceScanBudgetV1 {
+  remaining: u64,
+  limit: u64,
+}
+
+impl PhysicalCaptureWorkspaceScanBudgetV1 {
+  const fn new() -> Self {
+    Self::with_limit(MAX_CAPTURE_WORKSPACE_ENTRY_SCAN)
+  }
+
+  const fn with_limit(limit: u64) -> Self {
+    Self { remaining: limit, limit }
+  }
+
+  fn observe(&mut self, role: &str) -> Result<(), MigrationCaptureWorkspaceErrorV1> {
+    if self.remaining == 0 {
+      return Err(MigrationCaptureWorkspaceErrorV1::Capacity(format!(
+        "{role} scan exceeds the bounded {}-entry workspace inventory",
+        self.limit
+      )));
+    }
+    self.remaining -= 1;
+    Ok(())
+  }
+}
+
+impl PhysicalCaptureWorkspaceInventoryV1 {
+  fn has_unselected_tail(self, manifest: &MigrationCaptureManifestWriteV1) -> bool {
+    self.has_pending_file
+      || self.segment_files != manifest.segment_count
+      || self.maximum_segment_ordinal > manifest.last_segment_ordinal
+      || self.checkpoint_directories > manifest.checkpoint_sequence
+      || self.checkpoint_manifests > manifest.checkpoint_sequence
+      || self.maximum_checkpoint_sequence > manifest.checkpoint_sequence
+  }
+}
+
 fn enforce_physical_workspace_cap(
   workspace_path: &Path,
   cancellation: &CancellationToken,
   maximum_bytes: u64,
-) -> Result<(), MigrationCaptureWorkspaceErrorV1> {
+) -> Result<PhysicalCaptureWorkspaceInventoryV1, MigrationCaptureWorkspaceErrorV1> {
   let segments_path = workspace_path.join("segments");
   let checkpoints_path = workspace_path.join("checkpoints");
   let mut total = 0u64;
+  let mut inventory = PhysicalCaptureWorkspaceInventoryV1::default();
+  let mut scan_budget = PhysicalCaptureWorkspaceScanBudgetV1::new();
   for entry in fs::read_dir(workspace_path)
     .map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture workspace inventory", source })?
   {
     if cancellation.is_cancelled() {
       return Err(MigrationCaptureWorkspaceErrorV1::Canceled);
     }
+    scan_budget.observe("capture workspace")?;
     let entry = entry.map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture workspace inventory entry", source })?;
     let path = entry.path();
     if path != segments_path && path != checkpoints_path {
@@ -1031,14 +1260,14 @@ fn enforce_physical_workspace_cap(
     }
     validate_private_directory_readonly(&path, "capture workspace collection")?;
   }
-  total = inventory_segment_files(&segments_path, cancellation, maximum_bytes, total)?;
-  total = inventory_checkpoint_files(&checkpoints_path, cancellation, maximum_bytes, total)?;
+  total = inventory_segment_files(&segments_path, cancellation, maximum_bytes, total, &mut inventory, &mut scan_budget)?;
+  total = inventory_checkpoint_files(&checkpoints_path, cancellation, maximum_bytes, total, &mut inventory, &mut scan_budget)?;
   if total > maximum_bytes {
     return Err(MigrationCaptureWorkspaceErrorV1::Capacity(format!(
       "physical capture workspace uses {total} bytes, exceeding cap {maximum_bytes}"
     )));
   }
-  Ok(())
+  Ok(inventory)
 }
 
 fn inventory_segment_files(
@@ -1046,6 +1275,8 @@ fn inventory_segment_files(
   cancellation: &CancellationToken,
   maximum_bytes: u64,
   mut total: u64,
+  inventory: &mut PhysicalCaptureWorkspaceInventoryV1,
+  scan_budget: &mut PhysicalCaptureWorkspaceScanBudgetV1,
 ) -> Result<u64, MigrationCaptureWorkspaceErrorV1> {
   for entry in
     fs::read_dir(segments_path).map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture segment inventory", source })?
@@ -1053,16 +1284,25 @@ fn inventory_segment_files(
     if cancellation.is_cancelled() {
       return Err(MigrationCaptureWorkspaceErrorV1::Canceled);
     }
+    scan_budget.observe("capture segment inventory")?;
     let entry = entry.map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture segment inventory entry", source })?;
     let path = entry.path();
     let name = entry
       .file_name()
       .into_string()
       .map_err(|_| MigrationCaptureWorkspaceErrorV1::Path("capture segment filename is not UTF-8".to_string()))?;
-    if !canonical_segment_name(&name) && !canonical_pending_name(&name) {
+    if let Some(ordinal) = parse_segment_name(&name) {
+      inventory.segment_files = inventory
+        .segment_files
+        .checked_add(1)
+        .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Capacity("capture segment inventory count overflow".to_string()))?;
+      inventory.maximum_segment_ordinal = inventory.maximum_segment_ordinal.max(ordinal);
+    } else if canonical_pending_name(&name) {
+      inventory.has_pending_file = true;
+    } else {
       return Err(MigrationCaptureWorkspaceErrorV1::Path(format!("capture segment collection contains unknown entry {name}")));
     }
-    total = account_private_file(&path, "capture segment inventory file", SEGMENT_MAX_BYTES, total, maximum_bytes)?;
+    total = account_private_file(&path, "capture segment inventory file", MIGRATION_CAPTURE_SEGMENT_MAX_BYTES_V1, total, maximum_bytes)?;
   }
   Ok(total)
 }
@@ -1072,6 +1312,8 @@ fn inventory_checkpoint_files(
   cancellation: &CancellationToken,
   maximum_bytes: u64,
   mut total: u64,
+  inventory: &mut PhysicalCaptureWorkspaceInventoryV1,
+  scan_budget: &mut PhysicalCaptureWorkspaceScanBudgetV1,
 ) -> Result<u64, MigrationCaptureWorkspaceErrorV1> {
   for entry in fs::read_dir(checkpoints_path)
     .map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture checkpoint inventory", source })?
@@ -1079,15 +1321,20 @@ fn inventory_checkpoint_files(
     if cancellation.is_cancelled() {
       return Err(MigrationCaptureWorkspaceErrorV1::Canceled);
     }
+    scan_budget.observe("capture checkpoint inventory")?;
     let entry = entry.map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture checkpoint inventory entry", source })?;
     let path = entry.path();
     let name = entry
       .file_name()
       .into_string()
       .map_err(|_| MigrationCaptureWorkspaceErrorV1::Path("capture checkpoint directory name is not UTF-8".to_string()))?;
-    if !canonical_checkpoint_name(&name) {
-      return Err(MigrationCaptureWorkspaceErrorV1::Path(format!("capture checkpoint collection contains unknown entry {name}")));
-    }
+    let sequence = parse_checkpoint_name(&name)
+      .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Path(format!("capture checkpoint collection contains unknown entry {name}")))?;
+    inventory.checkpoint_directories = inventory
+      .checkpoint_directories
+      .checked_add(1)
+      .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Capacity("capture checkpoint directory count overflow".to_string()))?;
+    inventory.maximum_checkpoint_sequence = inventory.maximum_checkpoint_sequence.max(sequence);
     validate_private_directory_readonly(&path, "capture checkpoint inventory directory")?;
     for child in fs::read_dir(&path)
       .map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture checkpoint file inventory", source })?
@@ -1095,6 +1342,7 @@ fn inventory_checkpoint_files(
       if cancellation.is_cancelled() {
         return Err(MigrationCaptureWorkspaceErrorV1::Canceled);
       }
+      scan_budget.observe("capture checkpoint file inventory")?;
       let child =
         child.map_err(|source| MigrationCaptureWorkspaceErrorV1::Io { operation: "capture checkpoint file inventory entry", source })?;
       let child_path = child.path();
@@ -1102,7 +1350,14 @@ fn inventory_checkpoint_files(
         .file_name()
         .into_string()
         .map_err(|_| MigrationCaptureWorkspaceErrorV1::Path("capture checkpoint filename is not UTF-8".to_string()))?;
-      if child_name != "manifest.amcm" && !canonical_pending_name(&child_name) {
+      if child_name == "manifest.amcm" {
+        inventory.checkpoint_manifests = inventory
+          .checkpoint_manifests
+          .checked_add(1)
+          .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Capacity("capture checkpoint manifest count overflow".to_string()))?;
+      } else if canonical_pending_name(&child_name) {
+        inventory.has_pending_file = true;
+      } else {
         return Err(MigrationCaptureWorkspaceErrorV1::Path(format!("capture checkpoint contains unknown entry {child_name}")));
       }
       total = account_private_file(&child_path, "capture checkpoint inventory file", MANIFEST_MAX_BYTES, total, maximum_bytes)?;
@@ -1140,15 +1395,22 @@ fn account_private_file(
   Ok(projected)
 }
 
-fn canonical_segment_name(name: &str) -> bool {
-  let Some(ordinal) = name.strip_prefix("segment-").and_then(|value| value.strip_suffix(".ainx")) else {
-    return false;
-  };
-  ordinal.len() == 16 && ordinal.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) && ordinal != "0000000000000000"
+fn parse_segment_name(name: &str) -> Option<u64> {
+  let ordinal = name.strip_prefix("segment-").and_then(|value| value.strip_suffix(".ainx"))?;
+  if ordinal.len() != 16
+    || !ordinal.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    || ordinal == "0000000000000000"
+  {
+    return None;
+  }
+  u64::from_str_radix(ordinal, 16).ok()
 }
 
-fn canonical_checkpoint_name(name: &str) -> bool {
-  name.len() == 16 && name.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) && name != "0000000000000000"
+fn parse_checkpoint_name(name: &str) -> Option<u64> {
+  if name.len() != 16 || !name.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) || name == "0000000000000000" {
+    return None;
+  }
+  u64::from_str_radix(name, 16).ok()
 }
 
 fn canonical_pending_name(name: &str) -> bool {

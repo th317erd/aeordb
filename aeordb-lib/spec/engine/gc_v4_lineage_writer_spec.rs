@@ -424,6 +424,10 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
   assert!(migration_source_gc.contains("MigrationStateOwnerV1"));
   assert!(!migration_source_gc.contains("V4FirstAuthorityPublisher"));
   assert!(!migration_source_gc.contains("retirement_owner."));
+  let migration_capture_runtime = fs::read_to_string(source_root.join("engine/v4/migration_capture_runtime.rs")).unwrap();
+  assert!(migration_capture_runtime.contains("MigrationStateOwnerV1"));
+  assert!(!migration_capture_runtime.contains("V4FirstAuthorityPublisher"));
+  assert!(!migration_capture_runtime.contains("retirement_owner."));
 
   let mut callers = Vec::new();
   let mut sources = Vec::new();
@@ -443,6 +447,7 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
     [
       PathBuf::from("engine/v4/first_authority.rs"),
       PathBuf::from("engine/v4/index_recovery_store.rs"),
+      PathBuf::from("engine/v4/migration_capture_runtime.rs"),
       PathBuf::from("engine/v4/migration_owner.rs"),
       PathBuf::from("engine/v4/migration_source_gc.rs"),
     ],

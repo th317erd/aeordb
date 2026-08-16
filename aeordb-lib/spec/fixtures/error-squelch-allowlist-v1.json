@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1496,
+  "maximum_occurrences": 1508,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 3638,
+      "line": 3662,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 6970,
+      "line": 6994,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 6973,
+      "line": 6997,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -10494,9 +10494,99 @@
       "review": "typed-format-failure"
     },
     {
+      "id": "esq-v1-7851c879f5ccbea4c9eb-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 317,
+      "column": 5,
+      "enclosing_item": "impl MigrationCaptureRuntimeOptionsV1::new",
+      "kind": "error_conversion",
+      "pattern": "SoftMutationHubOptionsV1 :: new (hub . maximum_notices , hub . maximum_retained_bytes , hub . maximum_notice_bytes) . map_err (| _ | MigrationCaptureRuntimeErrorV1 :: InvalidOptions (\"soft mutation hub limits are invalid\"))",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-9dab84dd31855351fd65-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 851,
+      "column": 7,
+      "enclosing_item": "impl MigrationCaptureRuntimeV1::fail_capture",
+      "kind": "logged_error_continues",
+      "pattern": "Err (error) => { tracing :: error ! (code = error . code () , % error , failure_code , \"Failed to persist the optional migration capture reconciliation latch\") ; match self . owner . observe_capture_state (clock . updated_at_ms , clock ....",
+      "review": "authority-state-failure"
+    },
+    {
+      "id": "esq-v1-6199bf93f1c89ef58fbd-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 855,
+      "column": 11,
+      "enclosing_item": "impl MigrationCaptureRuntimeV1::fail_capture",
+      "kind": "logged_error_continues",
+      "pattern": "Err (observe_error) => { tracing :: error ! (code = observe_error . code () , % observe_error , failure_code , \"Failed to observe migration progress after reconciliation latch failure\") ; false }",
+      "review": "authority-state-failure"
+    },
+    {
+      "id": "esq-v1-3b466b5bdf9a0f800ce7-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 891,
+      "column": 13,
+      "enclosing_item": "impl MigrationCaptureRuntimeV1::deactivate_after_failure",
+      "kind": "logged_error_continues",
+      "pattern": "if let Err (close_error) = subscription . close_admission () { tracing :: error ! (% close_error , \"Failed to close stopped optional migration capture admission\") ; }",
+      "review": "unwind-cleanup-evidence"
+    },
+    {
+      "id": "esq-v1-39c0e3b85675e5bab4d8-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 906,
+      "column": 7,
+      "enclosing_item": "impl MigrationCaptureRuntimeV1::release_queue_memory",
+      "kind": "logged_error_continues",
+      "pattern": "if let Err (error) = reservation . release () { tracing :: error ! (% error , \"Failed to release migration capture queue reservation\") ; }",
+      "review": "unwind-cleanup-evidence"
+    },
+    {
+      "id": "esq-v1-dcf8d3c0f87130069957-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 933,
+      "column": 13,
+      "enclosing_item": "impl MigrationCaptureRuntimeV1::drop",
+      "kind": "logged_error_continues",
+      "pattern": "if let Err (close_error) = subscription . close_admission () { tracing :: error ! (% close_error , \"Migration capture drop could not close source admission\") ; }",
+      "review": "unwind-cleanup-evidence"
+    },
+    {
+      "id": "esq-v1-592d5e629ffdc0ae9989-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 970,
+      "column": 3,
+      "enclosing_item": "modeled_runtime_memory_bytes",
+      "kind": "error_conversion",
+      "pattern": "u64 :: try_from (total) . map_err (| _ | MigrationCaptureRuntimeErrorV1 :: AccountingOverflow)",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-6ce726fa3f93b575ceae-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 1010,
+      "column": 5,
+      "enclosing_item": "latch_recovery_failure",
+      "kind": "logged_error_continues",
+      "pattern": "Err (error) => { tracing :: error ! (code = error . code () , % error , failure_code , \"Failed to persist the recovered migration capture reconciliation latch\") ; match owner . observe_capture_state (clock . updated_at_ms , clock . publi...",
+      "review": "authority-state-failure"
+    },
+    {
+      "id": "esq-v1-09597755ced5aea5c35b-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_runtime.rs",
+      "line": 1014,
+      "column": 9,
+      "enclosing_item": "latch_recovery_failure",
+      "kind": "logged_error_continues",
+      "pattern": "Err (observe_error) => { tracing :: error ! (code = observe_error . code () , % observe_error , failure_code , \"Failed to observe migration progress after recovered reconciliation latch failure\") ; false }",
+      "review": "authority-state-failure"
+    },
+    {
       "id": "esq-v1-1182479cbcf5e2c6e53e-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 422,
+      "line": 524,
       "column": 25,
       "enclosing_item": "impl DurableMigrationCaptureWorkspaceV1::append_segment",
       "kind": "error_conversion",
@@ -10506,7 +10596,7 @@
     {
       "id": "esq-v1-cc8976b300b2ecd06194-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 470,
+      "line": 572,
       "column": 25,
       "enclosing_item": "impl DurableMigrationCaptureWorkspaceV1::publish_checkpoint",
       "kind": "error_conversion",
@@ -10516,7 +10606,7 @@
     {
       "id": "esq-v1-5307ce3086185cc85374-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 652,
+      "line": 785,
       "column": 11,
       "enclosing_item": "impl ReopenedMigrationCaptureWorkspaceV1::validate_segment_closure",
       "kind": "error_conversion",
@@ -10526,7 +10616,7 @@
     {
       "id": "esq-v1-519447d2f512b436c3bb-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 779,
+      "line": 912,
       "column": 37,
       "enclosing_item": "validate_checkpoint_predecessor_chain",
       "kind": "error_conversion",
@@ -10536,7 +10626,7 @@
     {
       "id": "esq-v1-f534ac4ef66251ae8bbf-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 804,
+      "line": 937,
       "column": 9,
       "enclosing_item": "validate_checkpoint_predecessor_chain",
       "kind": "error_conversion",
@@ -10546,7 +10636,7 @@
     {
       "id": "esq-v1-f6b96bd946e2e07db7a2-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 905,
+      "line": 1038,
       "column": 16,
       "enclosing_item": "write_immutable_file",
       "kind": "error_conversion",
@@ -10556,7 +10646,7 @@
     {
       "id": "esq-v1-c301aee77cb46dd17e0f-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 925,
+      "line": 1058,
       "column": 25,
       "enclosing_item": "verify_file_exact",
       "kind": "error_conversion",
@@ -10566,7 +10656,7 @@
     {
       "id": "esq-v1-cc269608b6038d70e60c-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 963,
+      "line": 1096,
       "column": 5,
       "enclosing_item": "read_charged_file",
       "kind": "error_conversion",
@@ -10576,7 +10666,7 @@
     {
       "id": "esq-v1-d7bd0b1c9356e96e9055-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 968,
+      "line": 1101,
       "column": 5,
       "enclosing_item": "read_charged_file",
       "kind": "error_conversion",
@@ -10584,9 +10674,19 @@
       "review": "typed-format-failure"
     },
     {
+      "id": "esq-v1-3c8607289a1c8bdc9fca-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1151,
+      "column": 16,
+      "enclosing_item": "locate_selected_checkpoint_sequence",
+      "kind": "error_conversion",
+      "pattern": "entry . file_name () . into_string () . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Path (\"capture checkpoint directory name is not UTF-8\" . to_string ()))",
+      "review": "typed-format-failure"
+    },
+    {
       "id": "esq-v1-13839a7a3d4bb19a218c-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1058,
+      "line": 1290,
       "column": 16,
       "enclosing_item": "inventory_segment_files",
       "kind": "error_conversion",
@@ -10596,7 +10696,7 @@
     {
       "id": "esq-v1-f50729c7678f596828b7-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1084,
+      "line": 1327,
       "column": 16,
       "enclosing_item": "inventory_checkpoint_files",
       "kind": "error_conversion",
@@ -10606,7 +10706,7 @@
     {
       "id": "esq-v1-63bdc48bc5e6e0c7d43d-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1101,
+      "line": 1349,
       "column": 24,
       "enclosing_item": "inventory_checkpoint_files",
       "kind": "error_conversion",
@@ -10616,7 +10716,7 @@
     {
       "id": "esq-v1-009d44d211bba67ac354-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1125,
+      "line": 1380,
       "column": 30,
       "enclosing_item": "account_private_file",
       "kind": "error_conversion",
@@ -10624,9 +10724,29 @@
       "review": "typed-format-failure"
     },
     {
+      "id": "esq-v1-d867c46595a1e343dced-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1406,
+      "column": 3,
+      "enclosing_item": "parse_segment_name",
+      "kind": "result_to_option",
+      "pattern": "u64 :: from_str_radix (ordinal , 16) . ok ()",
+      "review": "boundary-validation-failure"
+    },
+    {
+      "id": "esq-v1-715dbeebc61b82ddfd9c-00",
+      "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
+      "line": 1413,
+      "column": 3,
+      "enclosing_item": "parse_checkpoint_name",
+      "kind": "result_to_option",
+      "pattern": "u64 :: from_str_radix (name , 16) . ok ()",
+      "review": "boundary-validation-failure"
+    },
+    {
       "id": "esq-v1-913b3224be686b90b99c-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1162,
+      "line": 1424,
       "column": 20,
       "enclosing_item": "state_accounting_bytes",
       "kind": "error_conversion",
@@ -10636,7 +10756,7 @@
     {
       "id": "esq-v1-11d1936e167bd5ae7eb8-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1165,
+      "line": 1427,
       "column": 5,
       "enclosing_item": "state_accounting_bytes",
       "kind": "error_conversion",
@@ -10646,7 +10766,7 @@
     {
       "id": "esq-v1-e57d62b7285f15988d9e-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1169,
+      "line": 1431,
       "column": 23,
       "enclosing_item": "state_accounting_bytes",
       "kind": "error_conversion",

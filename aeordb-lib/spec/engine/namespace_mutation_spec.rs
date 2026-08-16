@@ -1098,7 +1098,7 @@ fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
 }
 
 #[test]
-fn wave_five_exit_allows_reviewed_p3c_contracts_but_keeps_migration_runtime_unactivated() {
+fn wave_five_exit_allows_reviewed_p3c_capture_runtime_but_keeps_migration_orchestration_unactivated() {
   fn visit_rust_sources(directory: &std::path::Path, sources: &mut Vec<(std::path::PathBuf, String)>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -1187,6 +1187,7 @@ fn wave_five_exit_allows_reviewed_p3c_contracts_but_keeps_migration_runtime_unac
   assert!(v4_module.contains("pub mod migration_preflight;"), "ratified P3c preflight contract is not exported");
   assert!(v4_module.contains("pub mod migration_capture;"), "ratified P3c capture checkpoint format is not exported");
   assert!(v4_module.contains("pub mod migration_capture_workspace;"), "ratified P3c capture workspace is not exported");
+  assert!(v4_module.contains("pub mod migration_capture_runtime;"), "ratified P3c capture runtime is not exported");
   for forbidden in ["pub mod migration;", "pub mod migration_runtime;"] {
     assert!(!v4_module.contains(forbidden), "migration runtime module was activated before its owning phase: {forbidden}");
   }
@@ -1205,7 +1206,18 @@ fn wave_five_exit_allows_reviewed_p3c_contracts_but_keeps_migration_runtime_unac
     })
     .map(|(path, _)| path)
     .collect::<Vec<_>>();
-  assert!(capture_workspace_callers.is_empty(), "capture workspace acquired premature runtime callers: {capture_workspace_callers:?}");
+  assert_eq!(capture_workspace_callers.len(), 1, "capture workspace escaped its reviewed runtime owner: {capture_workspace_callers:?}");
+  assert_eq!(capture_workspace_callers[0].file_name().and_then(|value| value.to_str()), Some("migration_capture_runtime.rs"));
+
+  let capture_runtime_callers = sources
+    .iter()
+    .filter(|(path, source)| {
+      path.file_name().and_then(|value| value.to_str()) != Some("migration_capture_runtime.rs")
+        && source.contains("MigrationCaptureRuntimeV1")
+    })
+    .map(|(path, _)| path)
+    .collect::<Vec<_>>();
+  assert!(capture_runtime_callers.is_empty(), "capture runtime was activated before migration orchestration: {capture_runtime_callers:?}");
 }
 
 #[test]

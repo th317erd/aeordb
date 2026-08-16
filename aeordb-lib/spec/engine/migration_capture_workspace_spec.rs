@@ -285,6 +285,66 @@ fn real_workspace_checkpoints_and_reopens_a_constant_memory_chain_at_both_hash_w
 }
 
 #[test]
+fn selected_checkpoint_lookup_never_promotes_a_later_segment_or_checkpoint() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let directory = tempdir().unwrap();
+  let (_database, memory, mut writer) = populated_writer(algorithm, directory.path());
+  let first_request = manifest(&writer, algorithm, 1, vec![0; algorithm.hash_length()]);
+  let first = writer.publish_checkpoint(&first_request).unwrap();
+  let selected_identity = first.manifest_identity().to_vec();
+
+  let root_before = writer.summary().source_root_after().to_vec();
+  let root_after = hash(algorithm, 0x64);
+  let previous_segment = writer.summary().segment_head().to_vec();
+  let third = segment(algorithm, 3, 102, &root_before, &root_after, &previous_segment);
+  writer.append_segment(&third.value).unwrap();
+  let second_request = manifest(&writer, algorithm, 2, selected_identity.clone());
+  writer.publish_checkpoint(&second_request).unwrap();
+  let workspace_path = writer.workspace_path().to_path_buf();
+  drop(writer);
+
+  let reopened = ReopenedMigrationCaptureWorkspaceV1::open_selected(
+    &workspace_path,
+    &selected_identity,
+    identity(algorithm),
+    basis(algorithm),
+    MigrationCaptureWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  assert_eq!(reopened.segment_count(), 2);
+  assert_eq!(reopened.captured_through_publication_sequence(), 101);
+  assert!(reopened.has_unselected_tail());
+}
+
+#[test]
+fn selected_checkpoint_lookup_rejects_an_absent_manifest_identity() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let directory = tempdir().unwrap();
+  let (_database, memory, mut writer) = populated_writer(algorithm, directory.path());
+  let request = manifest(&writer, algorithm, 1, vec![0; algorithm.hash_length()]);
+  let closure = writer.publish_checkpoint(&request).unwrap();
+  let workspace_path = closure.workspace_path().to_path_buf();
+  drop(writer);
+
+  assert_eq!(
+    ReopenedMigrationCaptureWorkspaceV1::open_selected(
+      &workspace_path,
+      &hash(algorithm, 0xf0),
+      identity(algorithm),
+      basis(algorithm),
+      MigrationCaptureWorkspaceReopenOptionsV1::new(64 * 1024 * 1024).unwrap(),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap_err()
+    .code(),
+    "migration_capture_workspace_checkpoint"
+  );
+}
+
+#[test]
 fn empty_capture_checkpoint_preserves_the_exact_starting_frontier() {
   let algorithm = HashAlgorithm::Blake3_256;
   let directory = tempdir().unwrap();
@@ -753,6 +813,20 @@ fn reopen_accounts_for_private_crash_prefixes_and_rejects_unknown_entries() {
     .code(),
     "migration_capture_workspace_path"
   );
+}
+
+#[test]
+fn every_physical_workspace_directory_walk_consumes_a_fixed_scan_budget() {
+  let package = Path::new(env!("CARGO_MANIFEST_DIR"));
+  let source = fs::read_to_string(package.join("src/engine/v4/migration_capture_workspace.rs")).unwrap();
+
+  assert!(source.contains("const MAX_CAPTURE_WORKSPACE_ENTRY_SCAN: u64 = 1_000_000;"));
+  assert_eq!(source.matches("fs::read_dir").count(), 5, "every physical workspace directory walk must remain inventoried");
+  assert_eq!(source.matches("scan_budget.observe(").count(), 5, "every directory walk must consume its scan budget");
+  assert!(source.contains("if self.remaining == 0"));
+  assert!(source.contains("self.remaining -= 1;"));
+  assert_eq!(source.matches("let mut scan_budget = PhysicalCaptureWorkspaceScanBudgetV1::new();").count(), 2);
+  assert_eq!(source.matches("scan_budget: &mut PhysicalCaptureWorkspaceScanBudgetV1").count(), 2);
 }
 
 #[test]

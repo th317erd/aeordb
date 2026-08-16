@@ -5,8 +5,10 @@ use aeordb::engine::namespace_mutation::{NamespaceMutationAcknowledgement, Names
 use aeordb::engine::v4::coverage_runtime::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationHubV1};
 use aeordb::engine::v4::index_task::{JournalOwnerKindV1, decode_mutation_journal};
 use aeordb::engine::v4::migration_capture_runtime::{
-  MigrationCaptureDrainOutcomeV1, MigrationCaptureDrainPlanV1, MigrationCaptureInexactReasonV1, prepare_migration_capture_drain,
+  MigrationCaptureDrainOutcomeV1, MigrationCaptureDrainPlanV1, MigrationCaptureInexactReasonV1, MigrationCaptureRuntimeClockV1,
+  MigrationCaptureRuntimeOptionsV1, prepare_migration_capture_drain,
 };
+use aeordb::engine::v4::migration_capture_workspace::MigrationCaptureWorkspaceOptionsV1;
 
 fn acknowledgement(operation_id: [u8; 16], sequence: u64, previous_root: u8, root: u8, path: &str) -> NamespaceMutationAcknowledgement {
   acknowledgement_with_width(operation_id, sequence, previous_root, root, path, 32)
@@ -170,4 +172,31 @@ fn malformed_plan_notice_authority_and_window_fail_closed() {
     prepare_migration_capture_drain(limited_hub.try_drain(16, 64 * 1_024).unwrap(), &limited_plan).unwrap(),
     MigrationCaptureDrainOutcomeV1::FullReconciliationRequired(MigrationCaptureInexactReasonV1::WindowLimitExceeded)
   );
+}
+
+#[test]
+fn runtime_clock_and_resource_limits_reject_every_unbounded_or_zero_shape() {
+  for (updated_at_ms, publication_timestamp_ms, monotonic_now_ms) in [(-1, 1, 1), (0, 0, 1), (0, u64::MAX, 1), (0, 1, 0), (0, 1, u64::MAX)]
+  {
+    assert_eq!(
+      MigrationCaptureRuntimeClockV1::new(updated_at_ms, publication_timestamp_ms, monotonic_now_ms).unwrap_err().code(),
+      "migration_capture_runtime_clock"
+    );
+  }
+  let scratch = tempfile::tempdir().unwrap();
+  let workspace = || MigrationCaptureWorkspaceOptionsV1::new(Some(scratch.path().to_path_buf()), 1 << 20, 0).unwrap();
+  let hub = SoftMutationHubOptionsV1::new(8, 64 * 1_024, 16 * 1_024).unwrap();
+  for result in [
+    MigrationCaptureRuntimeOptionsV1::new(0, [1; 16], hub, 8, 64 * 1_024, 1, workspace()),
+    MigrationCaptureRuntimeOptionsV1::new(1, [0; 16], hub, 8, 64 * 1_024, 1, workspace()),
+    MigrationCaptureRuntimeOptionsV1::new(1, [1; 16], hub, 0, 64 * 1_024, 1, workspace()),
+    MigrationCaptureRuntimeOptionsV1::new(1, [1; 16], hub, 9, 64 * 1_024, 1, workspace()),
+    MigrationCaptureRuntimeOptionsV1::new(1, [1; 16], hub, 8, 0, 1, workspace()),
+    MigrationCaptureRuntimeOptionsV1::new(1, [1; 16], hub, 8, 64 * 1_024 + 1, 1, workspace()),
+    MigrationCaptureRuntimeOptionsV1::new(1, [1; 16], hub, 8, 64 * 1_024, 0, workspace()),
+    MigrationCaptureRuntimeOptionsV1::new(1, [1; 16], hub, 8, 64 * 1_024, 300_001, workspace()),
+  ] {
+    assert_eq!(result.unwrap_err().code(), "migration_capture_runtime_options");
+  }
+  MigrationCaptureRuntimeOptionsV1::new(1, [1; 16], hub, 8, 64 * 1_024, 300_000, workspace()).unwrap();
 }

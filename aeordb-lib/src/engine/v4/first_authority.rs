@@ -2298,6 +2298,30 @@ impl V4FirstAuthorityPublisher {
     Ok(load_mutable_system_control_pair(&self.file, &kv, header, kind, identity)?.selected)
   }
 
+  #[allow(clippy::too_many_arguments)]
+  pub fn load_mutable_system_control_selected_pair(
+    &self,
+    first_kind: SystemControlKindV1,
+    first_identity: &[u8],
+    second_kind: SystemControlKindV1,
+    second_identity: &[u8],
+    database_id: &[u8; 16],
+  ) -> Result<(Option<LoadedMutableSystemControlV1>, Option<LoadedMutableSystemControlV1>), FirstAuthorityPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    validate_mutable_system_control_identity(header, first_kind, database_id, first_identity)?;
+    validate_mutable_system_control_identity(header, second_kind, database_id, second_identity)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let first = load_mutable_system_control_pair(&self.file, &kv, header, first_kind, first_identity)?.selected;
+    let second = load_mutable_system_control_pair(&self.file, &kv, header, second_kind, second_identity)?.selected;
+    Ok((first, second))
+  }
+
   pub fn publish_mutable_system_control(
     &self,
     request: MutableSystemControlPublicationRequestV1<'_>,

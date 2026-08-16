@@ -9,9 +9,10 @@ use std::time::Duration;
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
 use aeordb::engine::hot_tail::read_hot_tail_checked;
 use aeordb::engine::kv_stages::initial_block_size;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy, MemoryPressure};
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy, MemoryPressure};
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::contract_generated::CONTRACT_REGISTRY_SHA256;
+use aeordb::engine::v4::coverage_runtime::SoftMutationHubOptionsV1;
 use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
 use aeordb::engine::v4::first_authority::{
   FirstAuthorityPublicationRequestV1, MutableSystemControlExpectationV1, MutableSystemControlPublicationRequestV1, PreparedNamespaceTreeV0,
@@ -25,6 +26,10 @@ use aeordb::engine::v4::migration_control::{
   MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control, encode_migration_lease_control,
   encode_migration_progress_control,
 };
+use aeordb::engine::v4::migration_capture_runtime::{
+  MigrationCaptureRuntimeClockV1, MigrationCaptureRuntimeOptionsV1, MigrationCaptureRuntimeStateV1, MigrationCaptureRuntimeV1,
+};
+use aeordb::engine::v4::migration_capture_workspace::MigrationCaptureWorkspaceOptionsV1;
 use aeordb::engine::v4::migration_owner::{
   MigrationAcquisitionRequestV1, MigrationCaptureCheckpointPublicationRequestV1, MigrationFullReconciliationLatchRequestV1,
   MigrationLeaseReleaseRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
@@ -316,6 +321,28 @@ fn retirement_owner(algorithm: HashAlgorithm, cancellation: &CancellationToken, 
     RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
     cancellation,
     memory,
+  )
+  .unwrap()
+}
+
+fn capture_runtime_options(scratch_root: &Path, maximum_notices: usize, maximum_stored_bytes: u64) -> MigrationCaptureRuntimeOptionsV1 {
+  MigrationCaptureRuntimeOptionsV1::new(
+    1,
+    [0x81; 16],
+    SoftMutationHubOptionsV1::new(maximum_notices, 64 * 1024, 32 * 1024).unwrap(),
+    maximum_notices,
+    64 * 1024,
+    10,
+    MigrationCaptureWorkspaceOptionsV1::new(Some(scratch_root.to_path_buf()), maximum_stored_bytes, 0).unwrap(),
+  )
+  .unwrap()
+}
+
+fn capture_clock(elapsed_ms: u64) -> MigrationCaptureRuntimeClockV1 {
+  MigrationCaptureRuntimeClockV1::new(
+    ACQUIRED_AT_MS + i64::try_from(elapsed_ms).unwrap(),
+    u64::try_from(ACQUIRED_AT_MS).unwrap() + elapsed_ms + 100,
+    20_000 + elapsed_ms,
   )
   .unwrap()
 }
@@ -804,8 +831,18 @@ fn migration_owner_remains_disconnected_from_live_service_authority() {
   assert!(source.contains("MigrationPreflightPermitV1"));
   assert!(source.contains("SystemControlKindV1::MigrationLease"));
   assert!(source.contains("SystemControlKindV1::MigrationProgress"));
+  assert!(source.contains("load_mutable_system_control_selected_pair"));
   assert!(source.contains("flags: 0"), "initial acquisition must not claim source GC suspension");
   assert_ne!(SystemControlSlotV1::A, SystemControlSlotV1::B);
+
+  let first_authority = std::fs::read_to_string(format!("{}/src/engine/v4/first_authority.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let pair_read = first_authority
+    .split_once("pub fn load_mutable_system_control_selected_pair(")
+    .and_then(|(_, remainder)| remainder.split_once("pub fn publish_mutable_system_control(").map(|(pair_read, _)| pair_read))
+    .expect("atomic mutable-control pair reader");
+  assert_eq!(pair_read.matches("self.root_state.lock()").count(), 1);
+  assert_eq!(pair_read.matches("load_mutable_system_control_pair(").count(), 2);
+  assert!(pair_read.find("self.root_state.lock()").unwrap() < pair_read.find("load_mutable_system_control_pair(").unwrap());
 }
 
 #[test]
@@ -815,16 +852,8 @@ fn acquisition_has_no_fallible_post_publication_readback_window() {
     .split_once("pub fn acquire(")
     .and_then(|(_, remainder)| remainder.split_once("pub fn renew(").map(|(acquisition, _)| acquisition))
     .expect("migration acquisition method boundary");
-  assert_eq!(
-    acquisition.matches("load_lease(").count(),
-    1,
-    "lease acquisition must load once before publication and nowhere after a durable success"
-  );
-  assert_eq!(
-    acquisition.matches("load_progress(").count(),
-    1,
-    "progress acquisition must load once before publication and nowhere after a durable success"
-  );
+  assert_eq!(acquisition.matches("load_migration_controls(").count(), 1);
+  assert!(!acquisition.contains("load_mutable_system_control("));
 }
 
 #[test]
@@ -834,16 +863,14 @@ fn release_and_takeover_prepare_fallible_state_before_their_first_publication() 
     .split_once("pub fn release(")
     .and_then(|(_, remainder)| remainder.split_once("pub fn takeover(").map(|(release, _)| release))
     .expect("migration release method boundary");
-  assert_eq!(release.matches("require_lease(").count(), 1);
-  assert_eq!(release.matches("require_progress(").count(), 1);
+  assert_eq!(release.matches("require_migration_controls(").count(), 1);
   assert!(release.rfind("encode_migration_lease_control").unwrap() < release.find("publish_control(").unwrap());
 
   let takeover = source
     .split_once("pub fn takeover(")
     .and_then(|(_, remainder)| remainder.split_once("pub const fn fencing_token(").map(|(takeover, _)| takeover))
     .expect("migration takeover method boundary");
-  assert_eq!(takeover.matches("require_lease(").count(), 1);
-  assert_eq!(takeover.matches("require_progress(").count(), 1);
+  assert_eq!(takeover.matches("require_migration_controls(").count(), 1);
   assert!(takeover.rfind("encode_migration_progress_control").unwrap() < takeover.find("publish_control(").unwrap());
 }
 
@@ -1481,55 +1508,61 @@ fn takeover_resumes_or_supersedes_abandoned_lease_only_crash_prefixes() {
 
 #[test]
 fn concurrent_expired_takeovers_select_exactly_one_new_holder() {
-  let algorithm = HashAlgorithm::Blake3_256;
-  let (_directory, _path, publisher) = create_publisher(algorithm);
-  let publisher = Arc::new(publisher);
-  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
-  let cancellation = CancellationToken::new();
-  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
-  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
-  let (owner, _) =
-    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
-  drop(owner);
+  for iteration in 0..16 {
+    let algorithm = HashAlgorithm::Blake3_256;
+    let (_directory, _path, publisher) = create_publisher(algorithm);
+    let publisher = Arc::new(publisher);
+    let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+    let cancellation = CancellationToken::new();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+    let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+    let (owner, _) =
+      MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+    drop(owner);
 
-  let barrier = Arc::new(Barrier::new(3));
-  let mut contenders = Vec::new();
-  for holder in [[0x72; 16], [0x73; 16]] {
-    let contender_publisher = publisher.clone();
-    let contender_permit = permit.clone();
-    let contender_barrier = barrier.clone();
-    contenders.push(thread::spawn(move || {
-      let cancellation = CancellationToken::new();
-      let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
-      let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
-      contender_barrier.wait();
-      MigrationStateOwnerV1::takeover(
-        contender_publisher,
-        contender_permit,
-        takeover_request(holder, 1, ACQUIRED_AT_MS + LEASE_DURATION_MS),
-        &mut retirement,
-      )
-      .map(|(owner, receipt)| (owner.holder_boot_id(), receipt.fencing_token))
-      .map_err(|error| error.code())
-    }));
+    let barrier = Arc::new(Barrier::new(3));
+    let mut contenders = Vec::new();
+    for holder in [[0x72; 16], [0x73; 16]] {
+      let contender_publisher = publisher.clone();
+      let contender_permit = permit.clone();
+      let contender_barrier = barrier.clone();
+      contenders.push(thread::spawn(move || {
+        let cancellation = CancellationToken::new();
+        let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+        let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+        contender_barrier.wait();
+        MigrationStateOwnerV1::takeover(
+          contender_publisher,
+          contender_permit,
+          takeover_request(holder, 1, ACQUIRED_AT_MS + LEASE_DURATION_MS),
+          &mut retirement,
+        )
+        .map(|(owner, receipt)| (owner.holder_boot_id(), receipt.fencing_token))
+        .map_err(|error| error.code())
+      }));
+    }
+    barrier.wait();
+    let outcomes: Vec<_> = contenders.into_iter().map(|contender| contender.join().unwrap()).collect();
+    assert_eq!(
+      outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+      1,
+      "iteration {iteration} produced unexpected takeover outcomes: {outcomes:?}"
+    );
+    assert_eq!(
+      outcomes.iter().filter(|outcome| outcome.as_ref().err().copied() == Some("migration_takeover_fenced")).count(),
+      1,
+      "iteration {iteration} produced unexpected takeover outcomes: {outcomes:?}"
+    );
+
+    let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+    let progress =
+      publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+    let lease = decode_migration_lease_control(&lease.bytes, algorithm).unwrap();
+    let progress = decode_migration_progress_control(&progress.bytes, algorithm).unwrap();
+    assert_eq!(lease.body.fencing_token, 2);
+    assert_eq!(progress.body.fencing_token, 2);
+    assert_eq!(lease.body.holder_boot_id, outcomes.iter().find_map(|outcome| outcome.as_ref().ok().map(|(holder, _)| *holder)).unwrap());
   }
-  barrier.wait();
-  let outcomes: Vec<_> = contenders.into_iter().map(|contender| contender.join().unwrap()).collect();
-  assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1, "unexpected takeover outcomes: {outcomes:?}");
-  assert_eq!(
-    outcomes.iter().filter(|outcome| outcome.as_ref().err().copied() == Some("migration_takeover_fenced")).count(),
-    1,
-    "unexpected takeover outcomes: {outcomes:?}"
-  );
-
-  let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
-  let progress =
-    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
-  let lease = decode_migration_lease_control(&lease.bytes, algorithm).unwrap();
-  let progress = decode_migration_progress_control(&progress.bytes, algorithm).unwrap();
-  assert_eq!(lease.body.fencing_token, 2);
-  assert_eq!(progress.body.fencing_token, 2);
-  assert_eq!(lease.body.holder_boot_id, outcomes.iter().find_map(|outcome| outcome.as_ref().ok().map(|(holder, _)| *holder)).unwrap());
 }
 
 #[test]
@@ -2122,4 +2155,368 @@ fn source_gc_suspension_has_one_interlock_and_no_wall_clock_auto_release() {
   assert!(!interlock.contains("Utc::now"));
   assert!(!interlock.contains("Instant::now"));
   assert!(interlock.contains("release_after_early_terminal"), "suspension lacks an explicit fenced release path");
+}
+
+#[test]
+fn bounded_capture_runtime_checkpoints_real_source_writes_and_releases_queue_memory_after_final_drain() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let owner = Arc::new(owner);
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let source_memory = source.memory_coordinator();
+  let baseline = source_memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+
+  let mut runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::clone(&owner),
+    capture_runtime_options(workspace_directory.path(), 8, 8 << 20),
+    cancellation.clone(),
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+  assert_eq!(runtime.status().state, MigrationCaptureRuntimeStateV1::Capturing);
+  assert_eq!(runtime.status().checkpoint_sequence, 1);
+  assert!(runtime.status().queue_reservation_bytes > 0);
+  let active = source_memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+  assert!(active.active_reservations >= baseline.active_reservations + 2, "queue and workspace memory must both be retained");
+
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&RequestContext::system(), "/capture-a.txt", b"a", Some("text/plain")).unwrap();
+  operations.store_file_buffered(&RequestContext::system(), "/capture-b.txt", b"b", Some("text/plain")).unwrap();
+  runtime.poll(capture_clock(1_005), &mut retirement).unwrap();
+  assert_eq!(runtime.status().checkpoint_sequence, 1, "a pre-deadline drain must not publish an early checkpoint");
+  assert!(runtime.status().captured_through_publication_sequence > runtime.status().starting_publication_sequence);
+  runtime.poll(capture_clock(1_010), &mut retirement).unwrap();
+  assert_eq!(runtime.status().checkpoint_sequence, 2);
+
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let selected = decode_migration_progress_control(&selected.bytes, algorithm).unwrap();
+  assert_eq!(selected.body.captured_through_publication_sequence, runtime.status().captured_through_publication_sequence);
+  assert_eq!(selected.body.checkpoint_artifact, runtime.status().selected_checkpoint_artifact);
+
+  operations.store_file_buffered(&RequestContext::system(), "/capture-final.txt", b"final", Some("text/plain")).unwrap();
+  runtime.stop(capture_clock(1_015), &mut retirement).unwrap();
+  assert_eq!(runtime.status().state, MigrationCaptureRuntimeStateV1::Stopped);
+  assert_eq!(operations.read_file_buffered("/capture-final.txt").unwrap(), b"final");
+  let stopped = source_memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+  assert_eq!(
+    stopped.active_reservations,
+    baseline.active_reservations + 1,
+    "workspace state remains, but the queue budget must be released"
+  );
+  drop(runtime);
+  let dropped = source_memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+  assert_eq!(dropped.active_reservations, baseline.active_reservations);
+  source.shutdown().unwrap();
+}
+
+#[test]
+fn capture_queue_exhaustion_never_rolls_back_source_and_durably_requires_full_reconciliation() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let owner = Arc::new(owner);
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let mut runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::clone(&owner),
+    capture_runtime_options(workspace_directory.path(), 1, 8 << 20),
+    cancellation,
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&RequestContext::system(), "/kept-one.json", br#"{"one":1}"#, Some("application/json")).unwrap();
+  operations.store_file_buffered(&RequestContext::system(), "/kept-two.json", br#"{"two":2}"#, Some("application/json")).unwrap();
+  runtime.poll(capture_clock(1_005), &mut retirement).unwrap();
+
+  assert_eq!(runtime.status().state, MigrationCaptureRuntimeStateV1::NeedsFullReconcile);
+  assert!(runtime.status().durable_reconciliation_latched);
+  assert_eq!(operations.read_file_buffered("/kept-one.json").unwrap(), br#"{"one":1}"#);
+  assert_eq!(operations.read_file_buffered("/kept-two.json").unwrap(), br#"{"two":2}"#);
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let selected = decode_migration_progress_control(&selected.bytes, algorithm).unwrap();
+  assert_ne!(selected.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, 0);
+  assert!(selected.body.last_error_evidence.iter().any(|byte| *byte != 0));
+  source.shutdown().unwrap();
+}
+
+#[test]
+fn capture_workspace_capacity_failure_stops_only_optional_capture_and_preserves_source_success() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let owner = Arc::new(owner);
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let mut runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::clone(&owner),
+    capture_runtime_options(workspace_directory.path(), 8, 500),
+    cancellation,
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+  assert_eq!(runtime.status().state, MigrationCaptureRuntimeStateV1::Capturing);
+
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&RequestContext::system(), "/capacity-survives.txt", b"source wins", Some("text/plain")).unwrap();
+  runtime.poll(capture_clock(1_005), &mut retirement).unwrap();
+
+  assert_eq!(runtime.status().state, MigrationCaptureRuntimeStateV1::NeedsFullReconcile);
+  assert_eq!(runtime.status().failure_code, Some("migration_capture_workspace_capacity"));
+  assert!(runtime.status().durable_reconciliation_latched);
+  assert_eq!(operations.read_file_buffered("/capacity-survives.txt").unwrap(), b"source wins");
+  source.shutdown().unwrap();
+}
+
+#[test]
+fn capture_clock_regression_stops_before_drain_and_retains_only_an_in_memory_latch_when_ampr_refuses_time_travel() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher, permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let mut runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::new(owner),
+    capture_runtime_options(workspace_directory.path(), 8, 8 << 20),
+    cancellation,
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+
+  DirectoryOps::new(&source)
+    .store_file_buffered(&RequestContext::system(), "/clock-source.txt", b"still committed", Some("text/plain"))
+    .unwrap();
+  runtime.poll(capture_clock(999), &mut retirement).unwrap();
+
+  assert_eq!(runtime.status().state, MigrationCaptureRuntimeStateV1::NeedsFullReconcile);
+  assert_eq!(runtime.status().failure_code, Some("migration_capture_runtime_clock_regression"));
+  assert!(!runtime.status().durable_reconciliation_latched);
+  assert_eq!(DirectoryOps::new(&source).read_file_buffered("/clock-source.txt").unwrap(), b"still committed");
+  source.shutdown().unwrap();
+}
+
+#[test]
+fn restart_reopens_only_the_ampr_selected_checkpoint_and_latches_an_unselected_crash_tail() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher, permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let owner = Arc::new(owner);
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let mut runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::clone(&owner),
+    capture_runtime_options(workspace_directory.path(), 8, 8 << 20),
+    cancellation.clone(),
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+  DirectoryOps::new(&source).store_file_buffered(&RequestContext::system(), "/unselected-tail.txt", b"tail", Some("text/plain")).unwrap();
+  runtime.poll(capture_clock(1_005), &mut retirement).unwrap();
+  assert_eq!(runtime.status().checkpoint_sequence, 1);
+  let recovery_request = runtime.recovery_request().unwrap();
+  drop(runtime);
+
+  let recovered = MigrationCaptureRuntimeV1::recover_selected(
+    owner,
+    recovery_request,
+    cancellation,
+    capture_clock(1_006),
+    &source.memory_coordinator(),
+    &mut retirement,
+  )
+  .unwrap();
+  assert!(recovered.needs_full_reconciliation());
+  assert!(recovered.durable_reconciliation_latched());
+  assert_eq!(recovered.failure_code(), Some("migration_capture_recovery_unselected_tail"));
+  let selected_workspace = recovered.workspace().expect("the AMPR-selected checkpoint remains replayable");
+  assert_eq!(selected_workspace.segment_count(), 0, "the unselected segment must not be promoted during restart");
+  assert!(selected_workspace.has_unselected_tail());
+  assert_eq!(DirectoryOps::new(&source).read_file_buffered("/unselected-tail.txt").unwrap(), b"tail");
+  source.shutdown().unwrap();
+}
+
+#[test]
+fn restart_rejects_a_damaged_ampr_selected_checkpoint_and_durably_requires_reconciliation() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let owner = Arc::new(owner);
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&RequestContext::system(), "/selected-source.txt", b"source survives", Some("text/plain")).unwrap();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::clone(&owner),
+    capture_runtime_options(workspace_directory.path(), 8, 8 << 20),
+    cancellation.clone(),
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+  let selected_sequence = runtime.status().checkpoint_sequence;
+  let recovery_request = runtime.recovery_request().unwrap();
+  let manifest_path = recovery_request.workspace_path().join("checkpoints").join(format!("{selected_sequence:016x}")).join("manifest.amcm");
+  drop(runtime);
+
+  let mut damaged = fs::read(&manifest_path).unwrap();
+  let damaged_offset = damaged.len() / 2;
+  damaged[damaged_offset] ^= 1;
+  fs::write(&manifest_path, damaged).unwrap();
+  let recovered = MigrationCaptureRuntimeV1::recover_selected(
+    Arc::clone(&owner),
+    recovery_request,
+    cancellation,
+    capture_clock(1_001),
+    &source.memory_coordinator(),
+    &mut retirement,
+  )
+  .unwrap();
+
+  assert!(recovered.workspace().is_none());
+  assert!(recovered.needs_full_reconciliation());
+  assert!(recovered.durable_reconciliation_latched());
+  assert_eq!(recovered.failure_code(), Some("migration_capture_workspace_checkpoint"));
+  assert_eq!(operations.read_file_buffered("/selected-source.txt").unwrap(), b"source survives");
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let selected = decode_migration_progress_control(&selected.bytes, algorithm).unwrap();
+  assert_ne!(selected.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, 0);
+  source.shutdown().unwrap();
+}
+
+#[test]
+fn holder_boot_change_keeps_the_selected_capture_replayable_but_makes_exact_reconciliation_mandatory() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::new(owner),
+    capture_runtime_options(workspace_directory.path(), 8, 8 << 20),
+    cancellation.clone(),
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+  let recovery_request = runtime.recovery_request().unwrap();
+  drop(runtime);
+
+  let takeover_at_ms = ACQUIRED_AT_MS + LEASE_DURATION_MS;
+  let (new_owner, _) =
+    MigrationStateOwnerV1::takeover(publisher, permit, takeover_request([0xa1; 16], 1, takeover_at_ms), &mut retirement).unwrap();
+  let recovery_clock = MigrationCaptureRuntimeClockV1::new(
+    takeover_at_ms + 1_000,
+    u64::try_from(takeover_at_ms).unwrap() + 1_100,
+    u64::try_from(takeover_at_ms - ACQUIRED_AT_MS).unwrap() + 60_000,
+  )
+  .unwrap();
+  let recovered = MigrationCaptureRuntimeV1::recover_selected(
+    Arc::new(new_owner),
+    recovery_request,
+    cancellation,
+    recovery_clock,
+    &source.memory_coordinator(),
+    &mut retirement,
+  )
+  .unwrap();
+  assert!(recovered.needs_full_reconciliation());
+  assert!(recovered.durable_reconciliation_latched());
+  assert_eq!(recovered.failure_code(), Some("migration_capture_recovery_boot_changed"));
+  assert!(recovered.workspace().is_some(), "the previously selected capture remains available to replay");
+  source.shutdown().unwrap();
+}
+
+#[test]
+fn fenced_checkpoint_and_latch_failures_remain_an_in_memory_reconciliation_stop_without_harming_source() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_destination_directory, _destination_path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let retirement_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &retirement_memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let owner = Arc::new(owner);
+  let (source, _source_directory) = create_temp_engine_for_tests();
+  let workspace_directory = tempfile::tempdir().unwrap();
+  let mut runtime = MigrationCaptureRuntimeV1::start(
+    Arc::clone(&source),
+    Arc::clone(&owner),
+    capture_runtime_options(workspace_directory.path(), 8, 8 << 20),
+    cancellation,
+    capture_clock(1_000),
+    &mut retirement,
+  )
+  .unwrap();
+
+  replace_lease(&publisher, algorithm, &mut retirement, ACQUIRED_AT_MS + 1_001, |lease| {
+    lease.holder_boot_id = [0x99; 16];
+  });
+  let operations = DirectoryOps::new(&source);
+  operations.store_file_buffered(&RequestContext::system(), "/survives-fencing.txt", b"durable", Some("text/plain")).unwrap();
+  runtime.poll(capture_clock(1_010), &mut retirement).unwrap();
+
+  assert_eq!(runtime.status().state, MigrationCaptureRuntimeStateV1::NeedsFullReconcile);
+  assert!(!runtime.status().durable_reconciliation_latched);
+  assert!(runtime.status().failure_evidence.iter().any(|byte| *byte != 0));
+  assert_eq!(operations.read_file_buffered("/survives-fencing.txt").unwrap(), b"durable");
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let selected = decode_migration_progress_control(&selected.bytes, algorithm).unwrap();
+  assert_eq!(selected.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, 0);
+  source.shutdown().unwrap();
 }

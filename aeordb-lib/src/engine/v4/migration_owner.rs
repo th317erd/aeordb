@@ -137,6 +137,15 @@ pub struct MigrationProgressTransitionReceiptV1 {
   pub idempotent: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationCaptureStateObservationV1 {
+  pub control_sequence: u64,
+  pub captured_through_publication_sequence: u64,
+  pub checkpoint_artifact: Vec<u8>,
+  pub needs_full_reconciliation: bool,
+  pub last_error_evidence: Vec<u8>,
+}
+
 struct MigrationProgressPublicationContextV1 {
   loaded_lease: LoadedMutableSystemControlV1,
   loaded_progress: LoadedMutableSystemControlV1,
@@ -173,8 +182,7 @@ impl MigrationStateOwnerV1 {
     validate_acquisition_request(request)?;
     validate_destination_authority(&publisher, &permit)?;
 
-    let initial_lease = load_lease(&publisher, &permit)?;
-    let initial_progress = load_progress(&publisher, &permit)?;
+    let (initial_lease, initial_progress) = load_migration_controls(&publisher, &permit)?;
     if initial_lease.is_none() && initial_progress.is_some() {
       return Err(MigrationStateOwnerErrorV1::invalid(
         "migration_progress_without_lease",
@@ -326,8 +334,7 @@ impl MigrationStateOwnerV1 {
     let publication_time_ms = validate_publication_clock(request.publication_timestamp_ms, request.monotonic_now_ms, i64::MAX as u64)?;
     validate_transition_publication_time(publication_time_ms, request.renewed_at_ms)?;
     validate_destination_authority(&self.publisher, &self.permit)?;
-    let (loaded_lease, lease) = require_lease(&self.publisher, &self.permit)?;
-    let (loaded_progress, progress) = require_progress(&self.publisher, &self.permit)?;
+    let ((loaded_lease, lease), (loaded_progress, progress)) = require_migration_controls(&self.publisher, &self.permit)?;
     validate_owned_held_controls(self, &lease, &progress, publication_time_ms)?;
     if request.renewed_at_ms < lease.body.renewed_at_ms {
       return Err(MigrationStateOwnerErrorV1::invalid(
@@ -483,6 +490,22 @@ impl MigrationStateOwnerV1 {
     self.publish_progress_body(context, &progress, body, MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, true, retirement_owner)
   }
 
+  pub fn observe_capture_state(
+    &self,
+    updated_at_ms: i64,
+    publication_timestamp_ms: u64,
+    monotonic_now_ms: u64,
+  ) -> Result<MigrationCaptureStateObservationV1, MigrationStateOwnerErrorV1> {
+    let (_, progress) = self.prepare_progress_publication(updated_at_ms, publication_timestamp_ms, monotonic_now_ms)?;
+    Ok(MigrationCaptureStateObservationV1 {
+      control_sequence: progress.sequence,
+      captured_through_publication_sequence: progress.body.captured_through_publication_sequence,
+      checkpoint_artifact: progress.body.checkpoint_artifact,
+      needs_full_reconciliation: progress.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE != 0,
+      last_error_evidence: progress.body.last_error_evidence,
+    })
+  }
+
   pub(crate) fn claim_source_gc_suspension(
     &self,
     suspended_at_ms: i64,
@@ -562,8 +585,7 @@ impl MigrationStateOwnerV1 {
     let publication_time_ms = validate_publication_clock(publication_timestamp_ms, monotonic_now_ms, i64::MAX as u64)?;
     validate_transition_publication_time(publication_time_ms, updated_at_ms)?;
     validate_destination_authority(&self.publisher, &self.permit)?;
-    let (loaded_lease, lease) = require_lease(&self.publisher, &self.permit)?;
-    let (loaded_progress, progress) = require_progress(&self.publisher, &self.permit)?;
+    let ((loaded_lease, lease), (loaded_progress, progress)) = require_migration_controls(&self.publisher, &self.permit)?;
     validate_owned_held_controls(self, &lease, &progress, publication_time_ms)?;
     Ok((MigrationProgressPublicationContextV1 { loaded_lease, loaded_progress, publication_timestamp_ms, monotonic_now_ms }, progress))
   }
@@ -624,8 +646,7 @@ impl MigrationStateOwnerV1 {
     })?;
     validate_publication_clock(next_publication_timestamp_ms, next_monotonic_now_ms, i64::MAX as u64)?;
     validate_destination_authority(&self.publisher, &self.permit)?;
-    let (loaded_lease, lease) = require_lease(&self.publisher, &self.permit)?;
-    let (loaded_progress, progress) = require_progress(&self.publisher, &self.permit)?;
+    let ((loaded_lease, lease), (loaded_progress, progress)) = require_migration_controls(&self.publisher, &self.permit)?;
     validate_lease_binding(&lease, &self.permit)?;
     validate_bound_progress(&progress, &lease, &self.permit)?;
     validate_owner_fence(self, &lease)?;
@@ -745,8 +766,7 @@ impl MigrationStateOwnerV1 {
   ) -> Result<(Self, MigrationTakeoverReceiptV1), MigrationStateOwnerErrorV1> {
     let clocks = validate_takeover_request(request)?;
     validate_destination_authority(&publisher, &permit)?;
-    let (loaded_lease, lease) = require_lease(&publisher, &permit)?;
-    let (loaded_progress, progress) = require_progress(&publisher, &permit)?;
+    let ((loaded_lease, lease), (loaded_progress, progress)) = require_migration_controls(&publisher, &permit)?;
     validate_lease_binding(&lease, &permit)?;
     validate_progress_policy_binding(&progress, &permit)?;
     if !matches!(lease.body.state, MigrationLeaseStateV1::Held | MigrationLeaseStateV1::Expired) {
@@ -933,6 +953,10 @@ impl MigrationStateOwnerV1 {
     self.permit.source_physical_instance_id()
   }
 
+  pub const fn destination_physical_instance_id(&self) -> [u8; 16] {
+    self.permit.destination_physical_instance_id()
+  }
+
   pub const fn source_file_identity(&self) -> crate::engine::native_durability::PlatformFileIdentityDescriptorV1 {
     self.permit.source_file_identity()
   }
@@ -947,6 +971,18 @@ impl MigrationStateOwnerV1 {
 
   pub const fn preflight_evidence_fingerprint(&self) -> [u8; 32] {
     self.permit.evidence_fingerprint()
+  }
+
+  pub fn effective_configuration_fingerprint(&self) -> &[u8] {
+    self.permit.effective_configuration_fingerprint()
+  }
+
+  pub fn system_family_registry_fingerprint(&self) -> &[u8] {
+    self.permit.system_family_registry_fingerprint()
+  }
+
+  pub const fn source_authority_digest(&self) -> [u8; 32] {
+    self.permit.source_authority_digest()
   }
 
   pub fn destination_observation(&self) -> Result<DatabaseHeaderObservationV4, MigrationStateOwnerErrorV1> {
@@ -1520,48 +1556,50 @@ fn mutable_control_was_fenced(error: &MutableSystemControlPublicationErrorV1) ->
   matches!(error.code(), "mutable_control_selector_conflict" | "mutable_control_guard_conflict")
 }
 
-fn load_lease(
+type LoadedMigrationLeaseV1 = (LoadedMutableSystemControlV1, MigrationLeaseControlV1);
+type LoadedMigrationProgressV1 = (LoadedMutableSystemControlV1, MigrationProgressControlV1);
+
+fn load_migration_controls(
   publisher: &V4FirstAuthorityPublisher,
   permit: &MigrationPreflightPermitV1,
-) -> Result<Option<(LoadedMutableSystemControlV1, MigrationLeaseControlV1)>, MigrationStateOwnerErrorV1> {
-  publisher
-    .load_mutable_system_control(SystemControlKindV1::MigrationLease, &permit.database_id(), &permit.migration_id())?
-    .map(|loaded| {
+) -> Result<(Option<LoadedMigrationLeaseV1>, Option<LoadedMigrationProgressV1>), MigrationStateOwnerErrorV1> {
+  let identity = permit.migration_id();
+  let (lease, progress) = publisher.load_mutable_system_control_selected_pair(
+    SystemControlKindV1::MigrationLease,
+    &identity,
+    SystemControlKindV1::MigrationProgress,
+    &identity,
+    &permit.database_id(),
+  )?;
+  let lease = match lease {
+    Some(loaded) => {
       let decoded = decode_migration_lease_control(&loaded.bytes, permit.hash_algorithm())?;
-      Ok((loaded, decoded))
-    })
-    .transpose()
-}
-
-fn load_progress(
-  publisher: &V4FirstAuthorityPublisher,
-  permit: &MigrationPreflightPermitV1,
-) -> Result<Option<(LoadedMutableSystemControlV1, MigrationProgressControlV1)>, MigrationStateOwnerErrorV1> {
-  publisher
-    .load_mutable_system_control(SystemControlKindV1::MigrationProgress, &permit.database_id(), &permit.migration_id())?
-    .map(|loaded| {
+      Some((loaded, decoded))
+    }
+    None => None,
+  };
+  let progress = match progress {
+    Some(loaded) => {
       let decoded = decode_migration_progress_control(&loaded.bytes, permit.hash_algorithm())?;
-      Ok((loaded, decoded))
-    })
-    .transpose()
+      Some((loaded, decoded))
+    }
+    None => None,
+  };
+  Ok((lease, progress))
 }
 
-fn require_lease(
+fn require_migration_controls(
   publisher: &V4FirstAuthorityPublisher,
   permit: &MigrationPreflightPermitV1,
-) -> Result<(LoadedMutableSystemControlV1, MigrationLeaseControlV1), MigrationStateOwnerErrorV1> {
-  load_lease(publisher, permit)?.ok_or_else(|| {
+) -> Result<(LoadedMigrationLeaseV1, LoadedMigrationProgressV1), MigrationStateOwnerErrorV1> {
+  let (lease, progress) = load_migration_controls(publisher, permit)?;
+  let lease = lease.ok_or_else(|| {
     MigrationStateOwnerErrorV1::invalid("migration_lease_missing", "selected migration lease is required for this operation")
-  })
-}
-
-fn require_progress(
-  publisher: &V4FirstAuthorityPublisher,
-  permit: &MigrationPreflightPermitV1,
-) -> Result<(LoadedMutableSystemControlV1, MigrationProgressControlV1), MigrationStateOwnerErrorV1> {
-  load_progress(publisher, permit)?.ok_or_else(|| {
+  })?;
+  let progress = progress.ok_or_else(|| {
     MigrationStateOwnerErrorV1::invalid("migration_progress_missing", "selected migration progress is required for this operation")
-  })
+  })?;
+  Ok((lease, progress))
 }
 
 fn control_expectation(loaded: &LoadedMutableSystemControlV1) -> MutableSystemControlExpectationV1 {
