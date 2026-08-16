@@ -3386,7 +3386,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     Self::visit_bounded_flat_children(&value, hash_length, header.entry_version, |child| {
-      visitor(&child)?;
+      visitor(child)?;
       Ok(true)
     })?;
     Ok((Vec::new(), recovered_stale_path_key))
@@ -3396,31 +3396,13 @@ impl<'a> DirectoryOps<'a> {
   where
     F: FnMut(&ChildEntry) -> EngineResult<bool>,
   {
-    let mut offset = 0usize;
-    let mut count = 0usize;
-    while offset < data.len() {
-      if count >= crate::engine::btree::BTREE_CONVERSION_THRESHOLD {
-        return Err(EngineError::CorruptEntry {
-          offset: 0,
-          reason: format!(
-            "flat directory exceeds the bounded {}-entry compatibility limit",
-            crate::engine::btree::BTREE_CONVERSION_THRESHOLD
-          ),
-        });
-      }
-      let (child, consumed) = ChildEntry::deserialize(&data[offset..], hash_length, version)?;
-      if consumed == 0 {
-        return Err(EngineError::CorruptEntry { offset: 0, reason: "flat directory child consumed zero bytes".to_string() });
-      }
-      offset = offset
-        .checked_add(consumed)
-        .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "flat directory offset overflow".to_string() })?;
-      count = count.saturating_add(1);
-      if !visitor(&child)? {
-        return Ok(false);
-      }
-    }
-    Ok(true)
+    crate::engine::directory_entry::visit_bounded_child_entries(
+      data,
+      hash_length,
+      version,
+      crate::engine::btree::BTREE_CONVERSION_THRESHOLD,
+      |child| visitor(&child),
+    )
   }
 
   fn list_directory_window_inner(

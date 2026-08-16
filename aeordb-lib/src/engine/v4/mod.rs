@@ -73,6 +73,8 @@ pub mod index_semantic_registry;
 pub mod index_semantic_source;
 pub mod index_source;
 pub mod index_task;
+pub mod migration_base_clone_execution;
+mod migration_base_clone_source;
 pub mod migration_capture;
 pub mod migration_capture_runtime;
 pub mod migration_capture_subscription;

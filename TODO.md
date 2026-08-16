@@ -636,7 +636,13 @@
         - [ ] P3c-2b3: stream the base clone into the initialized destination, replay retained capture, and require an exact final-freeze authority/SystemFamily diff whenever capture is incomplete.
           - [x] P3c-2b3p: correct `WholeEntityV1` to preserve the ratified per-type EntityVersion across v4 physical framing, including migrated v0 directory/chunk entities, before any migration writer can publish them.
           - [x] P3c-2b3a: expose one bounded immutable-entity and successor-root publication boundary by reusing the existing physical v4 dependency, header, KV, durability, and root-witness authority.
-          - [ ] P3c-2b3b: stream the exact preflight-pinned v3 authority and retained-root/SystemFamily closure into the initialized destination without retaining a whole-tree inventory or mutating the source.
+          - [x] P3c-2b3b: stream the exact preflight-pinned v3 authority and retained-root/SystemFamily closure into the initialized destination without retaining a whole-tree inventory or mutating the source.
+            - [x] Refresh the source-reader, retained-root, directory/B-tree, compression, SystemFamily, destination-publication, and memory/cancellation territory.
+            - [x] Add the compile-red `migration_base_clone_execution_spec` contract for one disconnected bounded execution owner.
+            - [x] Stream caller-supplied retained roots and detached protected seeds through short-lived exact historical reads.
+            - [x] Traverse flat and B-tree directories with ancestry/frontier bounds, decode compressed chunks, and publish one bounded idempotent destination batch at a time.
+            - [x] Reject caller-supplied decoded-chunk bounds above the destination publication ceiling before source reads or destination mutation.
+            - [x] Prove strict corruption/policy refusal, cancellation/resource pressure, duplicate/restart behavior, both hash widths, and byte-for-byte source invariance on disposable real files.
           - [ ] P3c-2b3c: replay only the AMPR-selected capture chain as idempotent namespace deltas, preserving exact source publication/root order and refusing every missing or divergent dependency.
           - [ ] P3c-2b3d: acquire the explicit final write freeze and require an exact authority, retained-root, and SystemFamily reconciliation before allowing destination verification; incomplete capture can only increase this requirement.
           - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.

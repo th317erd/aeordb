@@ -110,6 +110,50 @@ pub fn deserialize_child_entries(data: &[u8], hash_length: usize, version: u8) -
   }
 }
 
+/// Visit a flat directory without retaining its complete child collection.
+///
+/// The caller supplies the structural count bound appropriate to its owner.
+/// This is shared by verification and migration so malformed legacy flat
+/// directories cannot bypass the same zero-progress and count checks.
+pub(crate) fn visit_bounded_child_entries<F>(
+  data: &[u8],
+  hash_length: usize,
+  version: u8,
+  maximum_entries: usize,
+  mut visitor: F,
+) -> EngineResult<bool>
+where
+  F: FnMut(ChildEntry) -> EngineResult<bool>,
+{
+  if maximum_entries == 0 {
+    return Err(EngineError::InvalidInput("flat directory entry bound must be nonzero".to_string()));
+  }
+  let mut offset = 0usize;
+  let mut count = 0usize;
+  while offset < data.len() {
+    if count >= maximum_entries {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("flat directory exceeds the bounded {maximum_entries}-entry compatibility limit"),
+      });
+    }
+    let (child, consumed) = ChildEntry::deserialize(&data[offset..], hash_length, version)?;
+    if consumed == 0 {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "flat directory child consumed zero bytes".to_string() });
+    }
+    offset = offset
+      .checked_add(consumed)
+      .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "flat directory offset overflow".to_string() })?;
+    count = count
+      .checked_add(1)
+      .ok_or_else(|| EngineError::CorruptEntry { offset: 0, reason: "flat directory entry count overflow".to_string() })?;
+    if !visitor(child)? {
+      return Ok(false);
+    }
+  }
+  Ok(true)
+}
+
 fn deserialize_child_entries_v0(data: &[u8], hash_length: usize) -> EngineResult<Vec<ChildEntry>> {
   let mut entries = Vec::new();
   let mut offset = 0;
