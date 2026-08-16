@@ -4,6 +4,11 @@ use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
 pub const WHOLE_ENTITY_V1_MAGIC: u32 = 0x0ae0_12db;
+/// Highest per-type entity version supported by the v1 physical framing.
+///
+/// Byte 4 is the version of the complete typed entity, not a second framing
+/// version. The selected v4 database layout and this record's magic/header
+/// geometry identify the physical framing.
 pub const WHOLE_ENTITY_V1_VERSION: u8 = 1;
 pub const WHOLE_ENTITY_V1_MAX_HEADER_LENGTH: usize = 4_096;
 pub const WHOLE_ENTITY_V1_KEY_CAP: usize = 1_073_741_824;
@@ -49,6 +54,7 @@ impl EntryTypeV4 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WholeEntityV1<'a> {
+  pub entity_version: u8,
   pub entry_type: EntryTypeV4,
   pub flags: u8,
   pub hash_algorithm: HashAlgorithm,
@@ -62,6 +68,7 @@ pub struct WholeEntityV1<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WholeEntityWriteV1<'a> {
+  pub entity_version: u8,
   pub entry_type: EntryTypeV4,
   pub flags: u8,
   pub hash_algorithm: HashAlgorithm,
@@ -102,6 +109,8 @@ pub fn checked_whole_entity_encoded_length(
 
 /// Encode one complete v1 entity without publishing it to a database.
 pub fn encode_whole_entity(request: &WholeEntityWriteV1<'_>) -> FormatResult<Vec<u8>> {
+  validate_entity_version(request.entity_version)?;
+  validate_entry_type_entity_version(request.entry_type, request.entity_version)?;
   if request.flags & !WHOLE_ENTITY_V1_FLAG_SYSTEM != 0 {
     return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "unknown_entity_flags", format!("flags {:#04x}", request.flags)));
   }
@@ -124,7 +133,7 @@ pub fn encode_whole_entity(request: &WholeEntityWriteV1<'_>) -> FormatResult<Vec
 
   let mut entity = vec![0u8; total_length];
   put_u32(&mut entity, 0, WHOLE_ENTITY_V1_MAGIC);
-  entity[4] = WHOLE_ENTITY_V1_VERSION;
+  entity[4] = request.entity_version;
   entity[5] = request.entry_type.to_u8();
   put_u16(&mut entity, 6, header_length as u16);
   put_u32(&mut entity, 8, total_length_u32);
@@ -160,11 +169,14 @@ pub fn decode_whole_entity<'a>(
   if entity.len() < 12 {
     return Err(error(MalformedInputClass::TruncationOrTrailingBytes, "truncated_entity_prefix", "need 12-byte entity prefix"));
   }
-  if u32_at(entity, 0) != WHOLE_ENTITY_V1_MAGIC || entity[4] != WHOLE_ENTITY_V1_VERSION {
-    return Err(error(MalformedInputClass::UnknownMagicOrVersion, "entity_magic_or_version", "expected whole entity v1"));
+  if u32_at(entity, 0) != WHOLE_ENTITY_V1_MAGIC {
+    return Err(error(MalformedInputClass::UnknownMagicOrVersion, "entity_magic_or_version", "expected whole entity v1 magic"));
   }
+  let entity_version = entity[4];
+  validate_entity_version(entity_version)?;
 
   let entry_type = EntryTypeV4::from_u8(entity[5])?;
+  validate_entry_type_entity_version(entry_type, entity_version)?;
   let hash_width = expected_hash_algorithm.hash_length();
   let expected_header_length = 77usize.checked_add(hash_width).ok_or_else(|| {
     error(MalformedInputClass::LengthCountOrArithmeticOverflow, "header_length_overflow", "whole entity header length overflow")
@@ -279,6 +291,7 @@ pub fn decode_whole_entity<'a>(
   }
 
   Ok(WholeEntityV1 {
+    entity_version,
     entry_type,
     flags,
     hash_algorithm: stored_hash_algorithm,
@@ -289,6 +302,38 @@ pub fn decode_whole_entity<'a>(
     key,
     stored_value,
   })
+}
+
+fn validate_entity_version(entity_version: u8) -> FormatResult<()> {
+  if entity_version > WHOLE_ENTITY_V1_VERSION {
+    return Err(error(
+      MalformedInputClass::UnknownMagicOrVersion,
+      "unsupported_entity_version",
+      format!("whole entity version {entity_version} exceeds supported version {WHOLE_ENTITY_V1_VERSION}"),
+    ));
+  }
+  Ok(())
+}
+
+fn validate_entry_type_entity_version(entry_type: EntryTypeV4, entity_version: u8) -> FormatResult<()> {
+  let supported = match entry_type {
+    EntryTypeV4::Chunk
+    | EntryTypeV4::DeletionRecord
+    | EntryTypeV4::Snapshot
+    | EntryTypeV4::Void
+    | EntryTypeV4::Fork
+    | EntryTypeV4::Symlink => entity_version == 0,
+    EntryTypeV4::FileRecord | EntryTypeV4::DirectoryIndex => matches!(entity_version, 0 | 1),
+    EntryTypeV4::IndexArtifact | EntryTypeV4::GcArtifact => entity_version == 1,
+  };
+  if !supported {
+    return Err(error(
+      MalformedInputClass::UnknownMagicOrVersion,
+      "unsupported_entry_type_entity_version",
+      format!("{entry_type:?} entity version {entity_version} is not a registered codec"),
+    ));
+  }
+  Ok(())
 }
 
 fn u16_at(bytes: &[u8], offset: usize) -> u16 {

@@ -8,6 +8,7 @@ use std::sync::{Barrier, mpsc};
 use std::time::Duration;
 
 use crate::engine::hot_tail::{HotTailPayload, read_hot_tail_checked};
+use crate::engine::directory_entry::{ChildEntry, serialize_child_entries};
 use crate::engine::kv_stages::initial_block_size;
 use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use crate::engine::native_durability::{sync_file_all_native, sync_file_data_native};
@@ -3711,6 +3712,24 @@ impl FirstAuthorityDependencyObserverV1 for FailingPostCommitObserver {
   }
 }
 
+struct TruncatingPostCommitObserver {
+  file: fs::File,
+}
+
+impl FirstAuthorityDependencyObserverV1 for TruncatingPostCommitObserver {
+  fn staged(&mut self, _kv: &DiskKVStore, _entities: &[PreparedWholeEntityV1]) -> Result<(), NativeDurabilityError> {
+    Ok(())
+  }
+
+  fn authority_committed(&mut self, kv: &DiskKVStore, entities: &[PreparedWholeEntityV1]) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    let locator = kv.get(&entities[0].key)?.expect("committed entity must be visible");
+    self.file.set_len(locator.offset).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("injected_post_commit_truncation", format!("failed to truncate committed entity: {error}"))
+    })?;
+    Ok(())
+  }
+}
+
 struct CancelRetirementAfterCommitObserver {
   cancellation: CancellationToken,
 }
@@ -3952,6 +3971,7 @@ fn seed_namespace_tree_collision(publisher: &V4FirstAuthorityPublisher, request:
   let mut observation = publisher.observe().unwrap();
   let sequence = observation.selected.header.write_sequence_high_water + 1;
   let entity = encode_entity(
+    0,
     EntryTypeV4::DirectoryIndex,
     0,
     observation.selected.header.hash_algorithm,
@@ -4008,6 +4028,44 @@ fn request_for_database(database_id: [u8; 16]) -> FirstAuthorityPublicationReque
     .unwrap(),
     required_capabilities: [0; 32],
     typed_closure_digest: digest_parts(algorithm, &[b"typed test closure"]),
+    authority_identity: b"HEAD".to_vec(),
+  }
+}
+
+fn successor_request(
+  publisher: &V4FirstAuthorityPublisher,
+  transaction_byte: u8,
+  child_name: &str,
+) -> SuccessorAuthorityPublicationRequestV1 {
+  let observation = publisher.observe().unwrap();
+  let header = &observation.selected.header;
+  let root_value = serialize_child_entries(
+    &[ChildEntry {
+      entry_type: EntryTypeV4::FileRecord.to_u8(),
+      hash: digest_parts(header.hash_algorithm, &[b"filec:", child_name.as_bytes()]),
+      total_size: 1,
+      created_at: (header.updated_at_ms + 1) as i64,
+      updated_at: (header.updated_at_ms + 1) as i64,
+      name: child_name.to_string(),
+      content_type: Some("text/plain".to_string()),
+      virtual_time: 1,
+      node_id: 1,
+    }],
+    header.hash_algorithm.hash_length(),
+  )
+  .unwrap();
+  SuccessorAuthorityPublicationRequestV1 {
+    database_id: header.database_id,
+    transaction_id: [transaction_byte; 16],
+    created_at_ms: header.updated_at_ms + 1,
+    expected_head_hash: header.head_hash.clone(),
+    namespace_tree: PreparedNamespaceTreeV0 {
+      root_hash: digest_parts(header.hash_algorithm, &[b"dirc:", &root_value]),
+      stored_value: root_value,
+    },
+    semantic_state: request().semantic_state,
+    required_capabilities: [0; 32],
+    typed_closure_digest: digest_parts(header.hash_algorithm, &[b"successor fault closure", child_name.as_bytes()]),
     authority_identity: b"HEAD".to_vec(),
   }
 }
@@ -6060,6 +6118,151 @@ fn post_commit_failure_returns_the_exact_committed_receipt_and_retry_is_idempote
   assert_eq!(retry.publication_sequence, committed_sequence);
   assert_eq!(retry.namespace_root.root_hash, committed_root);
   assert_eq!(coordinator.snapshot().unwrap().next_sequence, committed_sequence + 1);
+}
+
+#[test]
+fn immutable_entity_batch_dependency_failures_reopen_on_the_old_authority() {
+  let phases = [DependencyFailurePhase::BeforeEntity, DependencyFailurePhase::EntityWritten, DependencyFailurePhase::EntityStaged];
+  for phase in phases {
+    for entity_index in 0..2 {
+      let (_directory, path, coordinator, publisher) = create_environment(&format!("immutable-migration-{phase:?}-{entity_index}"), None);
+      publish_first_authority(&publisher);
+      let before = publisher.observe().unwrap();
+      let first_value = b"first migration entity";
+      let second_value = b"second migration entity";
+      let first_key = digest_parts(HashAlgorithm::Blake3_256, &[b"chunk:", first_value]);
+      let second_key = digest_parts(HashAlgorithm::Blake3_256, &[b"chunk:", second_value]);
+      let entities = [
+        ImmutableEntityWriteV1 { entity_version: 0, entry_type: EntryTypeV4::Chunk, flags: 0, key: &first_key, stored_value: first_value },
+        ImmutableEntityWriteV1 {
+          entity_version: 0,
+          entry_type: EntryTypeV4::Chunk,
+          flags: 0,
+          key: &second_key,
+          stored_value: second_value,
+        },
+      ];
+      let request = ImmutableEntityBatchPublicationRequestV1 {
+        database_id: &before.selected.header.database_id,
+        entities: &entities,
+        publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+      };
+      let mut observer = FailingDependencyObserver { phase, entity_index };
+
+      let error = publisher.publish_immutable_entity_batch_with_observer(request, &mut observer).unwrap_err();
+
+      assert_eq!(error.code(), "durability_failure", "phase {phase:?}, entity {entity_index}");
+      assert!(error.committed_receipt().is_none(), "phase {phase:?}, entity {entity_index}");
+      assert_eq!(publisher.observe().unwrap(), before, "phase {phase:?}, entity {entity_index}");
+      assert!(publisher.locator(&first_key).unwrap().is_none());
+      assert!(publisher.locator(&second_key).unwrap().is_none());
+      assert!(coordinator.hard_failure().unwrap().is_some());
+      drop(publisher);
+
+      let (_restart_coordinator, reopened) = reopen(&path);
+      assert_eq!(reopened.observe().unwrap(), before);
+      assert!(reopened.locator(&first_key).unwrap().is_none());
+      assert!(reopened.locator(&second_key).unwrap().is_none());
+      assert!(!reopened.publish_immutable_entity_batch(request).unwrap().idempotent);
+    }
+  }
+}
+
+#[test]
+fn immutable_entity_batch_post_commit_failure_returns_a_retryable_committed_receipt() {
+  let (_directory, _coordinator, publisher) = environment("immutable-migration-postcommit");
+  publish_first_authority(&publisher);
+  let before = publisher.observe().unwrap();
+  let value = b"committed migration entity";
+  let key = digest_parts(HashAlgorithm::Blake3_256, &[b"chunk:", value]);
+  let entities = [ImmutableEntityWriteV1 { entity_version: 0, entry_type: EntryTypeV4::Chunk, flags: 0, key: &key, stored_value: value }];
+  let request = ImmutableEntityBatchPublicationRequestV1 {
+    database_id: &before.selected.header.database_id,
+    entities: &entities,
+    publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+  };
+  let mut observer = FailingPostCommitObserver;
+
+  let error = publisher.publish_immutable_entity_batch_with_observer(request, &mut observer).unwrap_err();
+
+  assert_eq!(error.code(), "immutable_entity_committed_postcondition_failure");
+  let committed = error.committed_receipt().unwrap();
+  assert!(!committed.idempotent);
+  assert!(publisher.locator(&key).unwrap().is_some());
+  let retry = publisher.publish_immutable_entity_batch(request).unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.observation, committed.observation);
+}
+
+#[test]
+fn immutable_entity_batch_readback_failure_after_authority_returns_the_committed_receipt() {
+  let (_directory, path, _coordinator, publisher) = create_environment("immutable-migration-readback", None);
+  publish_first_authority(&publisher);
+  let before = publisher.observe().unwrap();
+  let value = b"committed entity truncated before readback";
+  let key = digest_parts(HashAlgorithm::Blake3_256, &[b"chunk:", value]);
+  let entities = [ImmutableEntityWriteV1 { entity_version: 0, entry_type: EntryTypeV4::Chunk, flags: 0, key: &key, stored_value: value }];
+  let request = ImmutableEntityBatchPublicationRequestV1 {
+    database_id: &before.selected.header.database_id,
+    entities: &entities,
+    publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+  };
+  let mut observer = TruncatingPostCommitObserver { file: fs::OpenOptions::new().write(true).open(path).unwrap() };
+
+  let error = publisher.publish_immutable_entity_batch_with_observer(request, &mut observer).unwrap_err();
+
+  assert_eq!(error.code(), "immutable_entity_committed_readback_failure");
+  let committed = error.committed_receipt().expect("selected authority must retain the exact receipt");
+  assert!(!committed.idempotent);
+  assert_eq!(publisher.observe().unwrap(), committed.observation);
+}
+
+#[test]
+fn successor_dependency_failures_reopen_on_the_predecessor_root() {
+  let phases = [DependencyFailurePhase::BeforeEntity, DependencyFailurePhase::EntityWritten, DependencyFailurePhase::EntityStaged];
+  for phase in phases {
+    for entity_index in 0..6 {
+      let (_directory, path, coordinator, publisher) = create_environment(&format!("successor-{phase:?}-{entity_index}"), None);
+      publish_first_authority(&publisher);
+      let request = successor_request(&publisher, 0x81, &format!("child-{phase:?}-{entity_index}"));
+      let before = publisher.observe().unwrap();
+      let mut observer = FailingDependencyObserver { phase, entity_index };
+
+      let error = publisher.publish_successor_authority_with_observer(&request, &mut observer).unwrap_err();
+
+      assert_eq!(error.code(), "durability_failure", "phase {phase:?}, entity {entity_index}");
+      assert!(error.committed_receipt().is_none(), "phase {phase:?}, entity {entity_index}");
+      assert_eq!(publisher.observe().unwrap(), before, "phase {phase:?}, entity {entity_index}");
+      assert!(publisher.locator(&request.namespace_tree.root_hash).unwrap().is_none());
+      assert!(coordinator.hard_failure().unwrap().is_some());
+      drop(publisher);
+
+      let (_restart_coordinator, reopened) = reopen(&path);
+      assert_eq!(reopened.observe().unwrap(), before);
+      assert!(reopened.locator(&request.namespace_tree.root_hash).unwrap().is_none());
+      assert!(!reopened.publish_successor_authority(&request).unwrap().idempotent);
+    }
+  }
+}
+
+#[test]
+fn successor_post_commit_failure_returns_the_selected_root_and_retry_is_idempotent() {
+  let (_directory, _coordinator, publisher) = environment("successor-postcommit");
+  publish_first_authority(&publisher);
+  let request = successor_request(&publisher, 0x82, "postcommit.txt");
+  let mut observer = FailingPostCommitObserver;
+
+  let error = publisher.publish_successor_authority_with_observer(&request, &mut observer).unwrap_err();
+
+  assert_eq!(error.code(), "successor_authority_committed_postcondition_failure");
+  let committed = error.committed_receipt().unwrap();
+  assert!(!committed.idempotent);
+  assert_eq!(publisher.observe().unwrap(), committed.observation);
+  let retry = publisher.publish_successor_authority(&request).unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.namespace_root, committed.namespace_root);
+  assert_eq!(retry.publication_sequence, committed.publication_sequence);
+  assert_eq!(retry.observation, committed.observation);
 }
 
 #[test]

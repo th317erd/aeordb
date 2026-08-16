@@ -1,0 +1,37 @@
+# fixture: entity-sha512-directory-tree-v0-empty-valid
+# contract: WholeEntityV1
+# hash: sha512 (64 bytes)
+# expected: entity:version=0:entry-type=0x03
+# canonical key: e021b0ffcaaf01587e72c3b7453e44b53380598c0c7d9a8200c66c5ebbcc030c60aa8903b2da537fbf5ecd6d4fe163b523d467d39ad7f35a8ac54fb5c0f41d3d
+# relation: migrated:directory-tree-v0
+# hex offsets are absolute within this fixture
+# field +0x000 len 4: magic
+# field +0x004 len 1: entity_version
+# field +0x005 len 1: entry_type
+# field +0x006 len 2: allocated_header_length
+# field +0x008 len 4: total_length
+# field +0x00c len 1: flags
+# field +0x00d len 2: hash_algorithm
+# field +0x00f len 1: compression_algorithm
+# field +0x010 len 1: encryption_algorithm
+# field +0x011 len 4: key_length
+# field +0x015 len 4: value_length
+# field +0x019 len 8: timestamp_ms
+# field +0x021 len 8: write_sequence
+# field +0x029 len 64: integrity_hash
+# field +0x069 len 32: reserved
+# field +0x089 len 4: header_crc32
+# field +0x08d: key then stored_value
+00000000: db12e00a00038d00cd00000000030000
+00000010: 0040000000000000000068e5cf8b0100
+00000020: 000a0000000000000092266fd725f15e
+00000030: 50518031e65d59e7b8d9642b96d4bc59
+00000040: 150d3a0caa56e0aab31fba377926088e
+00000050: 8611f7a064f9bc50af4433049066d583
+00000060: 1e13b20ef71e9cccea00000000000000
+00000070: 00000000000000000000000000000000
+00000080: 000000000000000000de548a3be021b0
+00000090: ffcaaf01587e72c3b7453e44b5338059
+000000a0: 8c0c7d9a8200c66c5ebbcc030c60aa89
+000000b0: 03b2da537fbf5ecd6d4fe163b523d467
+000000c0: d39ad7f35a8ac54fb5c0f41d3d

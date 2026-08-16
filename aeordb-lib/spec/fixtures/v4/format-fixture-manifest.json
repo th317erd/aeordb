@@ -4,13 +4,13 @@
   "stage": "p3c-2b1-migration-capture",
   "reference_tool": {
     "name": "aeordb-v4-reference",
-    "revision": "p3c2b1-migration-capture-v1",
+    "revision": "p3c2b3-entity-version-v1",
     "production_dependencies": [],
     "provenance": "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency",
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 440,
+  "fixture_count": 442,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -354,8 +354,23 @@
       "sha256": "bdabf99e94e2fb6fee552d359407d0d22b2332277f198ad2aec16d67a8fe6c57",
       "blake3": "fd3fdad809b13de410e0399254283b746a50cb6159de0e9c392a803bc7675389",
       "canonical_key": "4415359575280e81de596a9c54aeb13aa1a6e6cbef1361cb0d9e1487c6de5dfe",
-      "expected": "entity:entry-type=0x03",
+      "expected": "entity:version=1:entry-type=0x03",
       "relation": "wraps:namespace-root-valid"
+    },
+    {
+      "id": "entity-blake3-256-directory-tree-v0-empty-valid",
+      "format_id": "whole-entity-v1",
+      "family": "WholeEntityV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "whole-entity-v1/entity-blake3-256-directory-tree-v0-empty-valid.bin",
+      "annotated_hex": "whole-entity-v1/entity-blake3-256-directory-tree-v0-empty-valid.hex",
+      "byte_length": 141,
+      "sha256": "823520095e6b62b9d6e85b8ad66a08014b977b4249daa8b12b782aeea3f71b55",
+      "blake3": "01abe8939398d4162fd0f4d25cd683c3a364dcabb96931834cb439c9361dc467",
+      "canonical_key": "19238e25e6ee3d8a59b2dcab4295717c3623c444bfdf6bfc666714e0e6612174",
+      "expected": "entity:version=0:entry-type=0x03",
+      "relation": "migrated:directory-tree-v0"
     },
     {
       "id": "adir-blake3-256-namespace-root-valid",
@@ -459,8 +474,23 @@
       "sha256": "809491926c0f599b04276f4c21a15627215946a99e5fe8bb16da443f5ffd7c65",
       "blake3": "12dff8da2f84e80fb5ec7a50ee79c9d5133ae466719d0f99e9b9393467d197c8",
       "canonical_key": "f12fc3618e1cff9d5c4fbf4c1b480ca65ac3e1bb83ad844d7ddc1b9dee8dab289794e782c296339973b1f426b6c856e89527f65149e29fed69a619eb24ce4b42",
-      "expected": "entity:entry-type=0x03",
+      "expected": "entity:version=1:entry-type=0x03",
       "relation": "wraps:namespace-root-valid"
+    },
+    {
+      "id": "entity-sha512-directory-tree-v0-empty-valid",
+      "format_id": "whole-entity-v1",
+      "family": "WholeEntityV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "whole-entity-v1/entity-sha512-directory-tree-v0-empty-valid.bin",
+      "annotated_hex": "whole-entity-v1/entity-sha512-directory-tree-v0-empty-valid.hex",
+      "byte_length": 205,
+      "sha256": "99987791e9f7ff99b44381b4a0e111888c49d2e3f61fc06c7d573350d2733087",
+      "blake3": "5f944bf841d5775f6d057cd9ebcbdc08578ad85a24622d66e301ecf3363c6579",
+      "canonical_key": "e021b0ffcaaf01587e72c3b7453e44b53380598c0c7d9a8200c66c5ebbcc030c60aa8903b2da537fbf5ecd6d4fe163b523d467d39ad7f35a8ac54fb5c0f41d3d",
+      "expected": "entity:version=0:entry-type=0x03",
+      "relation": "migrated:directory-tree-v0"
     },
     {
       "id": "adir-sha512-namespace-root-valid",

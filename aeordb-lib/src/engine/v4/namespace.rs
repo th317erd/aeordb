@@ -433,11 +433,11 @@ pub fn decode_namespace_root_entity(
   write_sequence_high_water: u64,
 ) -> FormatResult<NamespaceRootV1> {
   let entity = decode_whole_entity(entity_bytes, hash_algorithm, write_sequence_high_water)?;
-  if entity.entry_type != EntryTypeV4::DirectoryIndex {
+  if entity.entry_type != EntryTypeV4::DirectoryIndex || entity.entity_version != 1 {
     return Err(error(
       MalformedInputClass::UnknownTypeKindOrEnum,
       "namespace_root_entity_type",
-      format!("expected DirectoryIndex, got {:?}", entity.entry_type),
+      format!("expected DirectoryIndex entity version 1, got {:?} version {}", entity.entry_type, entity.entity_version),
     ));
   }
   if entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM || entity.compression_algorithm != CompressionAlgorithm::None {
@@ -472,11 +472,11 @@ pub fn decode_namespace_tree_root_v0(
     ));
   }
   let entity = decode_whole_entity(entity_bytes, hash_algorithm, write_sequence_high_water)?;
-  if entity.entry_type != EntryTypeV4::DirectoryIndex {
+  if entity.entry_type != EntryTypeV4::DirectoryIndex || entity.entity_version != 0 {
     return Err(error(
       MalformedInputClass::UnknownTypeKindOrEnum,
       "namespace_tree_entity_type",
-      format!("expected DirectoryIndex, got {:?}", entity.entry_type),
+      format!("expected DirectoryIndex entity version 0, got {:?} version {}", entity.entry_type, entity.entity_version),
     ));
   }
   if entity.flags != 0 || entity.compression_algorithm != CompressionAlgorithm::None {

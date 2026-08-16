@@ -51,7 +51,7 @@ use system_family::SystemFamilyFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p3c2b1-migration-capture-v1";
+const TOOL_REVISION: &str = "p3c2b3-entity-version-v1";
 const FIXTURE_STAGE: &str = "p3c-2b1-migration-capture";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;

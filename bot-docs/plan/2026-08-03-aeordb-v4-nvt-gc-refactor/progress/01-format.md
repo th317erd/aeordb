@@ -260,8 +260,8 @@
 - **Frozen global registries:** all ten EntryType values including approved IndexArtifact/GcArtifact assignments; all twelve occupied KV tags including HEAD/VERSION and the two approved artifact tags; all 24 capability bits; and all 134 permanent values across the thirteen Round 15 shared enum scopes.
 - **Bounds closure:** every one of the 21 format rows has a nonzero hard cap, checked bounded-decoder rule, exact checksum, reserve-zero policy, canonical order, malformed/trailing behavior, ownership, typed hash roles, and both-width fixtures. Nested maxima remain owned by each exact body/formula contract rather than a conflicting global table.
 - **Malformed closure:** the registry freezes sixteen malformed-input classes and nine required mutation dimensions. The independent modules cover all-byte integrity where applicable plus repaired-checksum semantic corruption, count/length amplification, unknown enums, ordering/duplicates, identity/closure mismatch, and strict trailing behavior.
-- **Collision report:** `evidence/p0b-contract-registry-report.json` binds the exact registry, fixture manifest, and ASFR SHA-256 digests; records 21 formats, 436 fixtures, 46/61 SystemFamily rows/descriptors, and zero collisions in every scoped permanent registry.
-- **Green command:** `timeout 2m ./scripts/plan/check-v4-contracts.sh` independently reverified all 436 fixtures and passed the complete P0 contract gate with 93 routes and 36 docs.
+- **Collision report:** `evidence/p0b-contract-registry-report.json` binds the exact registry, fixture manifest, and ASFR SHA-256 digests; records 22 formats, 442 fixtures, 46/63 SystemFamily rows/descriptors, and zero collisions in every scoped permanent registry.
+- **Green command:** `timeout 2m ./scripts/plan/check-v4-contracts.sh` independently reverified all 442 fixtures and passed the complete P0 contract gate with 95 routes and 38 docs.
 - **Boundary:** P0b remains reference/spec/evidence only and emits no production reader, writer, capability, or database byte. P0c may now generate constants from this frozen source but may not reinterpret it.
 
 ## P0c Machine Contract Registry

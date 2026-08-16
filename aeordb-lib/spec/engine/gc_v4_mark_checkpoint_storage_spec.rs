@@ -628,6 +628,7 @@ fn corrupt_control_falls_back_but_equal_sequence_disagreement_remains_ambiguous(
   })
   .unwrap();
   let replacement = encode_whole_entity(&WholeEntityWriteV1 {
+    entity_version: 1,
     entry_type: EntryTypeV4::GcArtifact,
     flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
     hash_algorithm: algorithm,
@@ -730,6 +731,7 @@ fn control_with_a_missing_checkpoint_does_not_hide_its_complete_peer() {
   })
   .unwrap();
   let replacement = encode_whole_entity(&WholeEntityWriteV1 {
+    entity_version: 1,
     entry_type: EntryTypeV4::GcArtifact,
     flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
     hash_algorithm: algorithm,

@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p3c-2b2a-pre-activation-capture-authority-extension",
+  "stage": "p3c-2b3-entity-version-prerequisite",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "ad76c02bf0442331cff19c7885b9fa1813912457f0f096b40bcf41ec6da28a28",
-  "fixture_manifest_sha256": "c6aa63271c1725823cc00b7873c6f07b396d31f7df5fabc93748e5a174f75d49",
+  "source_sha256": "ae6ab1691efe8bd0073ce26151d58ab68f3b4e7422156e8d9522bd347312fa26",
+  "fixture_manifest_sha256": "c554468f0b5ece6cb0519b3cb52807a07af2e2deda92ddf5bb0ee483c815c0c0",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 22,
-    "fixtures": 440,
+    "fixtures": 442,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,

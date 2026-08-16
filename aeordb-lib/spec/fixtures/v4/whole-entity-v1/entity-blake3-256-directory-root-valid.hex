@@ -1,7 +1,7 @@
 # fixture: entity-blake3-256-directory-root-valid
 # contract: WholeEntityV1
 # hash: blake3-256 (32 bytes)
-# expected: entity:entry-type=0x03
+# expected: entity:version=1:entry-type=0x03
 # canonical key: 4415359575280e81de596a9c54aeb13aa1a6e6cbef1361cb0d9e1487c6de5dfe
 # relation: wraps:namespace-root-valid
 # hex offsets are absolute within this fixture

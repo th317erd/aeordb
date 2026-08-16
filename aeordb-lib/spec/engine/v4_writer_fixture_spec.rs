@@ -45,11 +45,14 @@ fn database_header_writer_matches_both_independent_hash_width_fixtures() {
 fn whole_entity_writer_matches_both_independent_hash_width_fixtures() {
   for (name, algorithm) in [
     ("entity-blake3-256-directory-root-valid.bin", HashAlgorithm::Blake3_256),
+    ("entity-blake3-256-directory-tree-v0-empty-valid.bin", HashAlgorithm::Blake3_256),
     ("entity-sha512-directory-root-valid.bin", HashAlgorithm::Sha512),
+    ("entity-sha512-directory-tree-v0-empty-valid.bin", HashAlgorithm::Sha512),
   ] {
     let expected = entity_fixture(name);
     let decoded = decode_whole_entity(&expected, algorithm, u64::MAX).expect("valid independent whole-entity fixture");
     let request = WholeEntityWriteV1 {
+      entity_version: decoded.entity_version,
       entry_type: decoded.entry_type,
       flags: decoded.flags,
       hash_algorithm: decoded.hash_algorithm,
@@ -330,6 +333,7 @@ fn database_header_reader_rejects_crc_valid_unchecked_stage_state() {
 #[test]
 fn whole_entity_writer_rejects_invalid_flags_and_unreserved_sequence() {
   let request = WholeEntityWriteV1 {
+    entity_version: 1,
     entry_type: aeordb::engine::v4::entity::EntryTypeV4::FileRecord,
     flags: 0,
     hash_algorithm: HashAlgorithm::Blake3_256,
@@ -356,6 +360,50 @@ fn whole_entity_writer_rejects_invalid_flags_and_unreserved_sequence() {
   let decoded = decode_whole_entity(&encoded, request.hash_algorithm, request.write_sequence).unwrap();
   assert_eq!(decoded.key, request.key);
   assert_eq!(decoded.stored_value, request.stored_value);
+}
+
+#[test]
+fn whole_entity_preserves_per_type_v0_and_v1_versions_and_rejects_unknown_versions() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let key = vec![0x5a; algorithm.hash_length()];
+    let base = WholeEntityWriteV1 {
+      entity_version: 0,
+      entry_type: aeordb::engine::v4::entity::EntryTypeV4::DirectoryIndex,
+      flags: 0,
+      hash_algorithm: algorithm,
+      compression_algorithm: CompressionAlgorithm::None,
+      timestamp_ms: 1_700_000_000_000,
+      write_sequence: 7,
+      key: &key,
+      stored_value: b"legacy directory bytes",
+    };
+
+    let encoded_v0 = encode_whole_entity(&base).expect("v4 framing must preserve a v0 per-type entity");
+    let decoded_v0 = decode_whole_entity(&encoded_v0, algorithm, base.write_sequence).unwrap();
+    assert_eq!(decoded_v0.entity_version, 0);
+    assert_eq!(encoded_v0[4], 0);
+
+    let mut v1 = base.clone();
+    v1.entity_version = 1;
+    let encoded_v1 = encode_whole_entity(&v1).unwrap();
+    let decoded_v1 = decode_whole_entity(&encoded_v1, algorithm, v1.write_sequence).unwrap();
+    assert_eq!(decoded_v1.entity_version, 1);
+    assert_eq!(encoded_v1[4], 1);
+    assert_ne!(decoded_v0.integrity_hash, decoded_v1.integrity_hash);
+
+    let mut unknown = base.clone();
+    unknown.entity_version = 2;
+    let error = encode_whole_entity(&unknown).unwrap_err();
+    assert_eq!(error.class(), MalformedInputClass::UnknownMagicOrVersion);
+    assert_eq!(error.code(), "unsupported_entity_version");
+
+    let mut unsupported_pair = base.clone();
+    unsupported_pair.entity_version = 1;
+    unsupported_pair.entry_type = aeordb::engine::v4::entity::EntryTypeV4::Chunk;
+    let error = encode_whole_entity(&unsupported_pair).unwrap_err();
+    assert_eq!(error.class(), MalformedInputClass::UnknownMagicOrVersion);
+    assert_eq!(error.code(), "unsupported_entry_type_entity_version");
+  }
 }
 
 #[test]

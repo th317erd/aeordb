@@ -665,6 +665,19 @@
       "family": "core-entity-framing",
       "magic_u32_le": "0x0ae012db",
       "version": 1,
+      "version_semantics": "byte 4 is the complete per-type EntityVersion inside v4 physical framing; supported codecs are dispatched by (entry_type, entity_version)",
+      "entity_version_registry": {
+        "0x01": [0],
+        "0x02": [0, 1],
+        "0x03": [0, 1],
+        "0x04": [0],
+        "0x05": [0],
+        "0x06": [0],
+        "0x07": [0],
+        "0x08": [0],
+        "0x09": [1],
+        "0x0a": [1]
+      },
       "entry_type_registry": {
         "0x01": "Chunk",
         "0x02": "FileRecord",
@@ -688,7 +701,7 @@
           "offset": 4,
           "length": 1,
           "field": "entity_version",
-          "rule": "exactly 1"
+          "rule": "registered per-type EntityVersion 0 or 1; dispatch by (entry_type, entity_version)"
         },
         {
           "offset": 5,
@@ -828,10 +841,12 @@
         }
       ],
       "fixture_ids_32": [
-        "entity-blake3-256-directory-root-valid"
+        "entity-blake3-256-directory-root-valid",
+        "entity-blake3-256-directory-tree-v0-empty-valid"
       ],
       "fixture_ids_64": [
-        "entity-sha512-directory-root-valid"
+        "entity-sha512-directory-root-valid",
+        "entity-sha512-directory-tree-v0-empty-valid"
       ]
     },
     {
@@ -3626,9 +3641,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 22,
-    "fixture_count": 440,
+    "fixture_count": 442,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, and the complete 46-family SystemFamilyRegistryV1",
-    "remaining_p0b_2_scope": "none; P0b is frozen and the ratified P3c-2b2a AMCM/AMPR capture-authority extension is registered before runtime activation"
+    "remaining_p0b_2_scope": "none; P0b is frozen, the ratified P3c-2b2a AMCM/AMPR capture-authority extension is registered, and P3c-2b3 preserves per-type EntityVersion before runtime activation"
   }
 }

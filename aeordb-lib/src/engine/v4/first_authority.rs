@@ -21,7 +21,10 @@ use tokio_util::sync::CancellationToken;
 use super::control_store::{SYSTEM_CONTROL_CONTENT_TYPE, discover_mutable_control};
 use super::contract_generated::kv_tag;
 use super::database_header::DatabaseHeaderV4;
-use super::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, WholeEntityWriteV1, decode_whole_entity, encode_whole_entity};
+use super::entity::{
+  EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, WholeEntityWriteV1, checked_whole_entity_encoded_length, decode_whole_entity,
+  encode_whole_entity,
+};
 use super::header_publication::{
   DatabaseHeaderObservationV4, DatabaseHeaderPublicationErrorV4, DatabaseHeaderPublisherV4, HeaderPublicationDependencyV4,
   observe_database_header_v4,
@@ -107,6 +110,8 @@ use super::system_control::{SystemControlKindV1, SystemControlSlotV1, decode_sys
 const FIRST_AUTHORITY_ENTITY_COUNT: usize = 8;
 const FIRST_AUTHORITY_NAMESPACE_TREE_CAP: usize = 48 * 1024 * 1024;
 const FIRST_AUTHORITY_CONTROL_ENTITY_CAP: usize = 64 * 1024;
+const IMMUTABLE_ENTITY_BATCH_COUNT_CAP: usize = DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES;
+const IMMUTABLE_ENTITY_BATCH_BYTES_CAP: usize = 64 * 1024 * 1024;
 const INDEX_ARTIFACT_BATCH_COUNT_CAP: usize = 4_097;
 const INDEX_ARTIFACT_BATCH_BYTES_CAP: usize = 64 * 1024 * 1024;
 
@@ -121,6 +126,19 @@ pub struct FirstAuthorityPublicationRequestV1 {
   pub database_id: [u8; 16],
   pub transaction_id: [u8; 16],
   pub created_at_ms: u64,
+  pub namespace_tree: PreparedNamespaceTreeV0,
+  pub semantic_state: EncodedSemanticObjectV1,
+  pub required_capabilities: [u8; 32],
+  pub typed_closure_digest: Vec<u8>,
+  pub authority_identity: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccessorAuthorityPublicationRequestV1 {
+  pub database_id: [u8; 16],
+  pub transaction_id: [u8; 16],
+  pub created_at_ms: u64,
+  pub expected_head_hash: Vec<u8>,
   pub namespace_tree: PreparedNamespaceTreeV0,
   pub semantic_state: EncodedSemanticObjectV1,
   pub required_capabilities: [u8; 32],
@@ -284,6 +302,92 @@ impl From<RetirementJournalReplacementAdmissionErrorV1> for MutableSystemControl
 impl From<RetirementJournalOwnerErrorV1> for MutableSystemControlPublicationErrorV1 {
   fn from(source: RetirementJournalOwnerErrorV1) -> Self {
     Self::RetirementOwner(source)
+  }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ImmutableEntityWriteV1<'a> {
+  pub entity_version: u8,
+  pub entry_type: EntryTypeV4,
+  pub flags: u8,
+  pub key: &'a [u8],
+  pub stored_value: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ImmutableEntityBatchPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub entities: &'a [ImmutableEntityWriteV1<'a>],
+  pub publication_timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImmutableEntityPublicationReceiptV1 {
+  pub key: Vec<u8>,
+  pub write_sequence: u64,
+  pub idempotent: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImmutableEntityBatchPublicationReceiptV1 {
+  pub entities: Vec<ImmutableEntityPublicationReceiptV1>,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+#[derive(Debug)]
+pub enum ImmutableEntityBatchPublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Committed { code: &'static str, message: String, receipt: Box<ImmutableEntityBatchPublicationReceiptV1> },
+  Authority(FirstAuthorityPublicationErrorV1),
+}
+
+impl ImmutableEntityBatchPublicationErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
+      Self::Authority(source) => source.code(),
+    }
+  }
+
+  pub fn committed_receipt(&self) -> Option<&ImmutableEntityBatchPublicationReceiptV1> {
+    match self {
+      Self::Committed { receipt, .. } => Some(receipt),
+      Self::Invalid { .. } | Self::Authority(_) => None,
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+
+  fn committed(code: &'static str, message: impl Into<String>, receipt: ImmutableEntityBatchPublicationReceiptV1) -> Self {
+    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
+  }
+}
+
+impl Display for ImmutableEntityBatchPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Committed { code, message, .. } => write!(formatter, "{code}: immutable entity batch committed: {message}"),
+      Self::Authority(source) => Display::fmt(source, formatter),
+    }
+  }
+}
+
+impl Error for ImmutableEntityBatchPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Authority(source) => Some(source),
+      Self::Invalid { .. } | Self::Committed { .. } => None,
+    }
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for ImmutableEntityBatchPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
   }
 }
 
@@ -2465,6 +2569,7 @@ impl V4FirstAuthorityPublisher {
     if stored_chunk.is_none() {
       let chunk_sequence = file_record_write_sequence - 1;
       let chunk = encode_entity(
+        0,
         EntryTypeV4::Chunk,
         WHOLE_ENTITY_V1_FLAG_SYSTEM,
         header.hash_algorithm,
@@ -2504,6 +2609,7 @@ impl V4FirstAuthorityPublisher {
     };
     let record_value = record.serialize(header.hash_algorithm.hash_length())?;
     let record_entity = encode_entity(
+      1,
       EntryTypeV4::FileRecord,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
@@ -2800,6 +2906,262 @@ impl V4FirstAuthorityPublisher {
       .map_err(|error| index_operation_from_mutable_system_control_error(error, incoming_checkpoint))?;
     Ok(index_operation_receipt_from_mutable(publication, incoming_checkpoint))
   }
+  pub fn publish_immutable_entity_batch(
+    &self,
+    request: ImmutableEntityBatchPublicationRequestV1<'_>,
+  ) -> Result<ImmutableEntityBatchPublicationReceiptV1, ImmutableEntityBatchPublicationErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_immutable_entity_batch_with_observer(request, &mut observer)
+  }
+
+  fn publish_immutable_entity_batch_with_observer(
+    &self,
+    request: ImmutableEntityBatchPublicationRequestV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<ImmutableEntityBatchPublicationReceiptV1, ImmutableEntityBatchPublicationErrorV1> {
+    if request.publication_timestamp_ms == 0 || request.publication_timestamp_ms > i64::MAX as u64 {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_publication_time",
+        "immutable entity publication time must fit the signed persistent timestamp range",
+      ));
+    }
+    if request.entities.is_empty() || request.entities.len() > IMMUTABLE_ENTITY_BATCH_COUNT_CAP {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_batch_count",
+        format!("immutable entity batch count {} is outside 1..={IMMUTABLE_ENTITY_BATCH_COUNT_CAP}", request.entities.len()),
+      ));
+    }
+
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      ImmutableEntityBatchPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_missing_authority",
+        "immutable entity publication requires selected non-degraded first authority",
+      ));
+    }
+    if &header.database_id != request.database_id {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_database_mismatch",
+        "immutable entity batch belongs to another logical database",
+      ));
+    }
+
+    let mut unique = HashSet::new();
+    unique.try_reserve(request.entities.len()).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_batch_allocation", format!("identity allocation failed: {error}"))
+    })?;
+    let mut total_encoded_bytes = 0usize;
+    for entity in request.entities {
+      immutable_entity_kv_tag(entity.entry_type)?;
+      if entity.key.len() != header.hash_algorithm.hash_length() {
+        return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+          "immutable_entity_key_width",
+          format!(
+            "immutable {:?} key length {} does not match the database hash width {}",
+            entity.entry_type,
+            entity.key.len(),
+            header.hash_algorithm.hash_length()
+          ),
+        ));
+      }
+      if !unique.insert(entity.key) {
+        return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+          "immutable_entity_duplicate",
+          "immutable entity batch contains a duplicate key",
+        ));
+      }
+      let encoded_length = checked_whole_entity_encoded_length(header.hash_algorithm, entity.key.len(), entity.stored_value.len())
+        .map_err(FirstAuthorityPublicationErrorV1::from)?;
+      total_encoded_bytes = total_encoded_bytes.checked_add(encoded_length).ok_or_else(|| {
+        ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_batch_bytes", "immutable entity batch bytes overflowed")
+      })?;
+      if total_encoded_bytes > IMMUTABLE_ENTITY_BATCH_BYTES_CAP {
+        return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+          "immutable_entity_batch_bytes",
+          format!("immutable entity batch exceeds {IMMUTABLE_ENTITY_BATCH_BYTES_CAP} encoded bytes"),
+        ));
+      }
+    }
+    for entity in request.entities {
+      validate_immutable_entity_content_identity(header.hash_algorithm, *entity)?;
+    }
+
+    let mut kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    kv.flush().map_err(FirstAuthorityPublicationErrorV1::from)?;
+    validate_kv_header_alignment(&kv, header)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_baseline_not_flushed",
+        "immutable entity publication requires an empty KV write and hot-buffer baseline",
+      ));
+    }
+
+    let mut receipts = Vec::new();
+    receipts.try_reserve_exact(request.entities.len()).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_receipt_allocation", format!("receipt allocation failed: {error}"))
+    })?;
+    let mut entities = Vec::new();
+    entities.try_reserve_exact(request.entities.len()).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_allocation", format!("entity allocation failed: {error}"))
+    })?;
+    let mut next_write_sequence = header.write_sequence_high_water;
+    for incoming in request.entities {
+      let kv_type = immutable_entity_kv_tag(incoming.entry_type)?;
+      if let Some(write_sequence) = load_exact_immutable_entity(&self.file, &kv, header, *incoming, kv_type)? {
+        receipts.push(ImmutableEntityPublicationReceiptV1 { key: incoming.key.to_vec(), write_sequence, idempotent: true });
+        continue;
+      }
+      next_write_sequence = next_write_sequence.checked_add(1).ok_or_else(|| {
+        ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_write_sequence_exhausted", "v4 write sequence is exhausted")
+      })?;
+      let bytes = encode_entity(
+        incoming.entity_version,
+        incoming.entry_type,
+        incoming.flags,
+        header.hash_algorithm,
+        request.publication_timestamp_ms,
+        next_write_sequence,
+        incoming.key,
+        incoming.stored_value,
+      )?;
+      entities.push(PreparedWholeEntityV1 { key: incoming.key.to_vec(), kv_type, bytes });
+      receipts.push(ImmutableEntityPublicationReceiptV1 {
+        key: incoming.key.to_vec(),
+        write_sequence: next_write_sequence,
+        idempotent: false,
+      });
+    }
+    if entities.is_empty() {
+      return Ok(ImmutableEntityBatchPublicationReceiptV1 { entities: receipts, observation, idempotent: true });
+    }
+
+    let append_start = self.file.metadata().map_err(EngineError::IoError).map_err(FirstAuthorityPublicationErrorV1::from)?.len();
+    if append_start < header.hot_tail_offset {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_file_truncated",
+        "database length precedes the selected v4 hot-tail offset",
+      ));
+    }
+    let expected_hot_tail_offset = entities.iter().try_fold(append_start, |offset, entity| {
+      offset.checked_add(entity.bytes.len() as u64).ok_or_else(|| {
+        ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_wal_overflow", "immutable entity WAL offset overflowed")
+      })
+    })?;
+    let orphan_prefix_bytes = append_start.checked_sub(header.hot_tail_offset).ok_or_else(|| {
+      ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_wal_prefix",
+        "immutable entity append precedes the selected hot tail",
+      )
+    })?;
+    let dependency_bytes =
+      entity_dependency_bytes(&entities, header.hash_algorithm.hash_length())?.checked_add(orphan_prefix_bytes).ok_or_else(|| {
+        ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_dependency_bytes", "dependency byte count overflowed")
+      })?;
+    let entry_increment = u64::try_from(entities.len()).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_entry_count", format!("entity count exceeds u64: {error}"))
+    })?;
+    let mut candidate = header.clone();
+    candidate.updated_at_ms = header.updated_at_ms.max(request.publication_timestamp_ms);
+    candidate.write_sequence_high_water = next_write_sequence;
+    candidate.hot_tail_offset = expected_hot_tail_offset;
+    candidate.entry_count = header
+      .entry_count
+      .checked_add(entry_increment)
+      .ok_or_else(|| ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_entry_count", "v4 entry count overflowed"))?;
+    let admitted = self
+      .header_publisher
+      .admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)
+      .map_err(FirstAuthorityPublicationErrorV1::from)?;
+    let authority_sequence = admitted.sequence();
+    let batch = kv.begin_atomic_visibility_batch(entities.len(), authority_sequence).map_err(FirstAuthorityPublicationErrorV1::from)?;
+
+    let mut write_offset = append_start;
+    for entity in &entities {
+      if let Err(error) = write_file_at_native(&self.file, write_offset, &entity.bytes)
+        .and_then(|_| verify_file_bytes_native(&self.file, write_offset, &entity.bytes))
+      {
+        kv.abort_atomic_visibility_batch(batch).map_err(FirstAuthorityPublicationErrorV1::from)?;
+        return Err(ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_write", error.to_string()));
+      }
+      write_offset = match write_offset.checked_add(entity.bytes.len() as u64) {
+        Some(offset) => offset,
+        None => {
+          kv.abort_atomic_visibility_batch(batch).map_err(FirstAuthorityPublicationErrorV1::from)?;
+          return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+            "immutable_entity_wal_overflow",
+            "immutable entity WAL offset overflowed",
+          ));
+        }
+      };
+    }
+    if write_offset != expected_hot_tail_offset {
+      kv.abort_atomic_visibility_batch(batch).map_err(FirstAuthorityPublicationErrorV1::from)?;
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_append_length",
+        "immutable entity append ended at an unexpected offset",
+      ));
+    }
+    let mut expected_existing = Vec::new();
+    expected_existing.try_reserve_exact(entities.len()).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_expectation_allocation",
+        format!("dependency expectation allocation failed: {error}"),
+      )
+    })?;
+    expected_existing.resize(entities.len(), None);
+    let publication = commit_stable_entity_dependency(
+      &self.file,
+      &mut kv,
+      admitted,
+      batch,
+      authority_sequence,
+      &entities,
+      append_start,
+      expected_hot_tail_offset,
+      &expected_existing,
+      observer,
+    )?;
+    let (published_observation, committed_failure) = match publication {
+      StableEntityDependencyOutcomeV1::Complete(publication) => (publication.observation, None),
+      StableEntityDependencyOutcomeV1::CommittedFailure { publication, failure, message } => {
+        (publication.observation, Some((failure, message)))
+      }
+    };
+    let receipt = ImmutableEntityBatchPublicationReceiptV1 { entities: receipts, observation: published_observation, idempotent: false };
+    let selected_header = &receipt.observation.selected.header;
+    for incoming in request.entities {
+      let readback =
+        load_exact_immutable_entity(&self.file, &kv, selected_header, *incoming, immutable_entity_kv_tag(incoming.entry_type)?);
+      match readback {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+          return Err(ImmutableEntityBatchPublicationErrorV1::committed(
+            "immutable_entity_committed_readback_failure",
+            format!("published immutable entity {} is absent", hex::encode(incoming.key)),
+            receipt,
+          ));
+        }
+        Err(error) => {
+          return Err(ImmutableEntityBatchPublicationErrorV1::committed(
+            "immutable_entity_committed_readback_failure",
+            error.to_string(),
+            receipt,
+          ));
+        }
+      }
+    }
+    if let Some((failure, message)) = committed_failure {
+      return Err(ImmutableEntityBatchPublicationErrorV1::committed(immutable_entity_committed_failure_code(failure), message, receipt));
+    }
+    Ok(receipt)
+  }
+
   pub fn publish_index_artifacts(
     &self,
     request: IndexArtifactBatchPublicationRequestV1<'_>,
@@ -2911,6 +3273,7 @@ impl V4FirstAuthorityPublisher {
         FirstAuthorityPublicationErrorV1::invalid("immutable_index_write_sequence_exhausted", "v4 write sequence is exhausted")
       })?;
       let entity_bytes = encode_entity(
+        1,
         EntryTypeV4::IndexArtifact,
         WHOLE_ENTITY_V1_FLAG_SYSTEM,
         header.hash_algorithm,
@@ -3455,6 +3818,7 @@ impl V4FirstAuthorityPublisher {
     let header = &reserved_observation.selected.header;
     validate_kv_header_alignment(&kv, header)?;
     let entity_bytes = encode_entity(
+      1,
       EntryTypeV4::GcArtifact,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
@@ -6653,6 +7017,7 @@ impl V4FirstAuthorityPublisher {
       .checked_add(1)
       .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_gc_entry_count_overflow", "v4 entry count overflowed"))?;
     let entity_bytes = encode_entity(
+      1,
       EntryTypeV4::GcArtifact,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
@@ -6746,6 +7111,205 @@ impl V4FirstAuthorityPublisher {
       ));
     }
     Ok(write_sequence)
+  }
+
+  pub fn publish_successor_authority(
+    &self,
+    request: &SuccessorAuthorityPublicationRequestV1,
+  ) -> Result<FirstAuthorityPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_successor_authority_with_observer(request, &mut observer)
+  }
+
+  fn publish_successor_authority_with_observer(
+    &self,
+    request: &SuccessorAuthorityPublicationRequestV1,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<FirstAuthorityPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    if request.created_at_ms == 0 || request.created_at_ms > i64::MAX as u64 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_timestamp_range",
+        "successor authority timestamp must fit the signed persistent range",
+      ));
+    }
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    if observation.selected.redundancy_degraded {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_degraded_header",
+        "successor authority requires two valid v4 header slots",
+      ));
+    }
+    let header = &observation.selected.header;
+    if header.database_id != request.database_id {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_database_mismatch",
+        "successor authority belongs to another logical database",
+      ));
+    }
+    if request.expected_head_hash.len() != header.hash_algorithm.hash_length() || request.expected_head_hash.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_expected_head",
+        "successor authority requires one nonzero database-width predecessor root",
+      ));
+    }
+    let namespace_root = prepare_successor_namespace_root(request, header.hash_algorithm, header.write_sequence_high_water)?;
+    if header.head_hash == namespace_root.root_hash {
+      return self.load_successor_idempotent(request, namespace_root, observation);
+    }
+    if header.head_hash != request.expected_head_hash {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_stale_head",
+        "selected HEAD differs from the exact successor predecessor",
+      ));
+    }
+
+    let mut kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    kv.flush()?;
+    validate_kv_header_alignment(&kv, header)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_baseline_not_flushed",
+        "successor authority requires an empty KV write and hot-buffer baseline",
+      ));
+    }
+    verify_selected_semantic_state(&self.file, &kv, header, &request.semantic_state)?;
+    let namespace_tree_already_stored = immutable_entity_exists_for_authority(
+      &self.file,
+      &kv,
+      header,
+      ImmutableEntityWriteV1 {
+        entity_version: 0,
+        entry_type: EntryTypeV4::DirectoryIndex,
+        flags: 0,
+        key: &request.namespace_tree.root_hash,
+        stored_value: &request.namespace_tree.stored_value,
+      },
+      KV_TYPE_DIRECTORY,
+    )?;
+    let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
+    if append_start < header.hot_tail_offset {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_file_truncated",
+        "database length precedes the selected v4 hot-tail offset",
+      ));
+    }
+    let selected_header_slot_sequence = header.slot_sequence.checked_add(1).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("successor_authority_header_sequence_exhausted", "header sequence exhausted")
+    })?;
+    let mut package_source_header = header.clone();
+    package_source_header.hot_tail_offset = append_start;
+    let sizing_package = build_successor_package(
+      request,
+      namespace_root.clone(),
+      &package_source_header,
+      selected_header_slot_sequence,
+      1,
+      !namespace_tree_already_stored,
+    )?;
+    refuse_existing_entities(&kv, &sizing_package.entities)?;
+    let new_entity_count = u64::try_from(sizing_package.entities.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("successor_authority_entry_count", format!("entity count exceeds u64: {error}"))
+    })?;
+    let expected_hot_tail_offset = sizing_package.hot_tail_offset;
+    let expected_write_sequence_high_water = sizing_package.write_sequence_high_water;
+    let orphan_prefix_bytes = append_start.checked_sub(header.hot_tail_offset).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("successor_authority_wal_prefix", "successor append precedes the selected hot tail")
+    })?;
+    let dependency_bytes = package_dependency_bytes(&sizing_package, header.hash_algorithm.hash_length())?
+      .checked_add(orphan_prefix_bytes)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("successor_authority_dependency_bytes", "dependency bytes overflowed"))?;
+    drop(sizing_package);
+    let mut candidate = header.clone();
+    candidate.updated_at_ms = header.updated_at_ms.max(request.created_at_ms);
+    candidate.write_sequence_high_water = expected_write_sequence_high_water;
+    candidate.hot_tail_offset = expected_hot_tail_offset;
+    candidate.entry_count = header
+      .entry_count
+      .checked_add(new_entity_count)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("successor_authority_entry_count", "v4 entry count overflowed"))?;
+    candidate.head_hash = namespace_root.root_hash.clone();
+    let admitted =
+      self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)?;
+    let publication_sequence = admitted.sequence();
+    let package = build_successor_package(
+      request,
+      namespace_root,
+      &package_source_header,
+      selected_header_slot_sequence,
+      publication_sequence,
+      !namespace_tree_already_stored,
+    )?;
+    if package.hot_tail_offset != expected_hot_tail_offset || package.write_sequence_high_water != expected_write_sequence_high_water {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_sizing_changed",
+        "publication sequence changed the pre-admitted successor layout",
+      ));
+    }
+    let batch = kv.begin_atomic_visibility_batch(package.entities.len(), publication_sequence)?;
+    let mut write_offset = append_start;
+    for entity in &package.entities {
+      if let Err(error) = write_file_at_native(&self.file, write_offset, &entity.bytes)
+        .and_then(|_| verify_file_bytes_native(&self.file, write_offset, &entity.bytes))
+      {
+        kv.abort_atomic_visibility_batch(batch)?;
+        return Err(FirstAuthorityPublicationErrorV1::invalid("successor_authority_write", error.to_string()));
+      }
+      write_offset = match write_offset.checked_add(entity.bytes.len() as u64) {
+        Some(offset) => offset,
+        None => {
+          kv.abort_atomic_visibility_batch(batch)?;
+          return Err(FirstAuthorityPublicationErrorV1::invalid("successor_authority_wal_overflow", "WAL offset overflowed"));
+        }
+      };
+    }
+    let mut expected_existing = Vec::new();
+    expected_existing.try_reserve_exact(package.entities.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_expectation_allocation",
+        format!("dependency expectation allocation failed: {error}"),
+      )
+    })?;
+    expected_existing.resize(package.entities.len(), None);
+    let publication = commit_stable_entity_dependency(
+      &self.file,
+      &mut kv,
+      admitted,
+      batch,
+      publication_sequence,
+      &package.entities,
+      append_start,
+      expected_hot_tail_offset,
+      &expected_existing,
+      observer,
+    )?;
+    let (published_observation, committed_failure) = match publication {
+      StableEntityDependencyOutcomeV1::Complete(publication) => (publication.observation, None),
+      StableEntityDependencyOutcomeV1::CommittedFailure { publication, failure: _, message } => (publication.observation, Some(message)),
+    };
+    let receipt = FirstAuthorityPublicationReceiptV1 {
+      namespace_root: package.namespace_root.clone(),
+      prepare_control: package.prepare_control.clone(),
+      admission_control: package.admission_control.clone(),
+      publication_sequence,
+      observation: published_observation,
+      idempotent: false,
+    };
+    if let Err(error) = verify_package_locators(&self.file, &kv, &package, &receipt.observation.selected.header) {
+      return Err(FirstAuthorityPublicationErrorV1::committed(
+        "successor_authority_committed_readback_failure",
+        error.to_string(),
+        receipt,
+      ));
+    }
+    if let Some(message) = committed_failure {
+      return Err(FirstAuthorityPublicationErrorV1::committed("successor_authority_committed_postcondition_failure", message, receipt));
+    }
+    Ok(receipt)
   }
 
   pub fn publish(
@@ -6942,6 +7506,74 @@ impl V4FirstAuthorityPublisher {
     })
   }
 
+  fn load_successor_idempotent(
+    &self,
+    request: &SuccessorAuthorityPublicationRequestV1,
+    namespace_root: EncodedNamespaceRootV1,
+    observation: DatabaseHeaderObservationV4,
+  ) -> Result<FirstAuthorityPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    let header = &observation.selected.header;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    verify_selected_semantic_state(&self.file, &kv, header, &request.semantic_state)?;
+    let admission_control = load_system_file(&self.file, &kv, header, SystemControlKindV1::RootAdmissionCommit, &namespace_root.root_hash)?;
+    let admission = decode_root_admission_commit(&admission_control, header.hash_algorithm)?;
+    if admission.selected_header_slot_sequence != header.slot_sequence
+      || admission.namespace_root != namespace_root.root_hash
+      || admission.database_id != request.database_id
+      || admission.transaction_id != request.transaction_id
+      || admission.authority_kind != RootAuthorityKindV1::Head
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_witness_mismatch",
+        "selected HEAD and successor admission witness do not describe the exact request",
+      ));
+    }
+    let prepare_control = load_system_file(&self.file, &kv, header, SystemControlKindV1::RootPublicationPrepare, &request.transaction_id)?;
+    let (expected_prepare_control, expected_admission_control) =
+      encode_successor_witnesses(request, &namespace_root, header.hash_algorithm, header.slot_sequence, admission.publication_sequence)?;
+    if prepare_control != expected_prepare_control || admission_control != expected_admission_control {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_retry_collision",
+        "selected successor witnesses differ from the exact retry request",
+      ));
+    }
+    verify_exact_immutable_entity_for_authority(
+      &self.file,
+      &kv,
+      header,
+      ImmutableEntityWriteV1 {
+        entity_version: 0,
+        entry_type: EntryTypeV4::DirectoryIndex,
+        flags: 0,
+        key: &request.namespace_tree.root_hash,
+        stored_value: &request.namespace_tree.stored_value,
+      },
+      KV_TYPE_DIRECTORY,
+    )?;
+    verify_exact_immutable_entity_for_authority(
+      &self.file,
+      &kv,
+      header,
+      ImmutableEntityWriteV1 {
+        entity_version: 1,
+        entry_type: EntryTypeV4::DirectoryIndex,
+        flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        key: &namespace_root.root_hash,
+        stored_value: &namespace_root.value,
+      },
+      KV_TYPE_DIRECTORY,
+    )?;
+    Ok(FirstAuthorityPublicationReceiptV1 {
+      namespace_root,
+      prepare_control,
+      admission_control,
+      publication_sequence: admission.publication_sequence,
+      observation,
+      idempotent: true,
+    })
+  }
+
   fn lock_kv(&self) -> Result<MutexGuard<'_, DiskKVStore>, FirstAuthorityPublicationErrorV1> {
     match self.kv.lock() {
       Ok(kv) => Ok(kv),
@@ -7022,24 +7654,57 @@ fn prepare_namespace_root(
   algorithm: HashAlgorithm,
   write_sequence_high_water: u64,
 ) -> Result<EncodedNamespaceRootV1, FirstAuthorityPublicationErrorV1> {
-  if request.namespace_tree.stored_value.len() > FIRST_AUTHORITY_NAMESPACE_TREE_CAP {
+  prepare_namespace_root_parts(
+    &request.namespace_tree,
+    &request.semantic_state,
+    request.required_capabilities,
+    request.created_at_ms,
+    algorithm,
+    write_sequence_high_water,
+  )
+}
+
+fn prepare_successor_namespace_root(
+  request: &SuccessorAuthorityPublicationRequestV1,
+  algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+) -> Result<EncodedNamespaceRootV1, FirstAuthorityPublicationErrorV1> {
+  prepare_namespace_root_parts(
+    &request.namespace_tree,
+    &request.semantic_state,
+    request.required_capabilities,
+    request.created_at_ms,
+    algorithm,
+    write_sequence_high_water,
+  )
+}
+
+fn prepare_namespace_root_parts(
+  namespace_tree: &PreparedNamespaceTreeV0,
+  semantic_state: &EncodedSemanticObjectV1,
+  required_capabilities: [u8; 32],
+  created_at_ms: u64,
+  algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+) -> Result<EncodedNamespaceRootV1, FirstAuthorityPublicationErrorV1> {
+  if namespace_tree.stored_value.len() > FIRST_AUTHORITY_NAMESPACE_TREE_CAP {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "first_authority_namespace_tree_exceeds_cap",
       format!(
         "namespace tree is {} bytes, exceeding the {FIRST_AUTHORITY_NAMESPACE_TREE_CAP}-byte first-authority cap",
-        request.namespace_tree.stored_value.len()
+        namespace_tree.stored_value.len()
       ),
     ));
   }
-  let semantic = decode_semantic_object(&request.semantic_state.value, algorithm)?;
+  let semantic = decode_semantic_object(&semantic_state.value, algorithm)?;
   let semantic_cap = super::semantic_store::semantic_object_cap(semantic.kind_id)?;
-  if request.semantic_state.value.len() > semantic_cap {
+  if semantic_state.value.len() > semantic_cap {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "first_authority_semantic_state_exceeds_cap",
-      format!("semantic state is {} bytes, exceeding its {semantic_cap}-byte kind cap", request.semantic_state.value.len()),
+      format!("semantic state is {} bytes, exceeding its {semantic_cap}-byte kind cap", semantic_state.value.len()),
     ));
   }
-  if semantic.object_id != request.semantic_state.object_id || !matches!(semantic.kind, SemanticObjectKind::State { .. }) {
+  if semantic.object_id != semantic_state.object_id || !matches!(semantic.kind, SemanticObjectKind::State { .. }) {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "first_authority_semantic_state_mismatch",
       "semantic-state bytes do not match their state identity",
@@ -7049,20 +7714,21 @@ fn prepare_namespace_root(
     .checked_add(1)
     .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_write_sequence_exhausted", "write sequence exhausted"))?;
   let tree_entity = encode_entity(
+    0,
     EntryTypeV4::DirectoryIndex,
     0,
     algorithm,
-    request.created_at_ms,
+    created_at_ms,
     tree_sequence,
-    &request.namespace_tree.root_hash,
-    &request.namespace_tree.stored_value,
+    &namespace_tree.root_hash,
+    &namespace_tree.stored_value,
   )?;
-  decode_namespace_tree_root_v0(&tree_entity, &request.namespace_tree.root_hash, algorithm, tree_sequence)?;
+  decode_namespace_tree_root_v0(&tree_entity, &namespace_tree.root_hash, algorithm, tree_sequence)?;
   encode_namespace_root(
     &NamespaceRootWriteV1 {
-      required_capabilities: request.required_capabilities,
-      namespace_tree_root: request.namespace_tree.root_hash.clone(),
-      semantic_state_root: request.semantic_state.object_id.clone(),
+      required_capabilities,
+      namespace_tree_root: namespace_tree.root_hash.clone(),
+      semantic_state_root: semantic_state.object_id.clone(),
     },
     algorithm,
   )
@@ -7270,6 +7936,7 @@ fn build_package(
   let mut entities = Vec::with_capacity(FIRST_AUTHORITY_ENTITY_COUNT);
   next_sequence = append_entity(
     &mut entities,
+    0,
     EntryTypeV4::DirectoryIndex,
     0,
     KV_TYPE_DIRECTORY,
@@ -7290,6 +7957,7 @@ fn build_package(
   )?;
   next_sequence = append_entity(
     &mut entities,
+    1,
     EntryTypeV4::DirectoryIndex,
     WHOLE_ENTITY_V1_FLAG_SYSTEM,
     KV_TYPE_DIRECTORY,
@@ -7349,9 +8017,144 @@ fn build_package(
   })
 }
 
+fn build_successor_package(
+  request: &SuccessorAuthorityPublicationRequestV1,
+  namespace_root: EncodedNamespaceRootV1,
+  source_header: &DatabaseHeaderV4,
+  selected_header_slot_sequence: u64,
+  publication_sequence: u64,
+  include_namespace_tree: bool,
+) -> Result<FirstAuthorityPackageV1, FirstAuthorityPublicationErrorV1> {
+  let algorithm = source_header.hash_algorithm;
+  let (prepare_control, admission_control) =
+    encode_successor_witnesses(request, &namespace_root, algorithm, selected_header_slot_sequence, publication_sequence)?;
+
+  let mut next_sequence = source_header.write_sequence_high_water;
+  let expected_entity_count = if include_namespace_tree { 6 } else { 5 };
+  let mut entities = Vec::with_capacity(expected_entity_count);
+  if include_namespace_tree {
+    next_sequence = append_entity(
+      &mut entities,
+      0,
+      EntryTypeV4::DirectoryIndex,
+      0,
+      KV_TYPE_DIRECTORY,
+      algorithm,
+      request.created_at_ms,
+      next_sequence,
+      &request.namespace_tree.root_hash,
+      &request.namespace_tree.stored_value,
+    )?;
+  }
+  next_sequence = append_entity(
+    &mut entities,
+    1,
+    EntryTypeV4::DirectoryIndex,
+    WHOLE_ENTITY_V1_FLAG_SYSTEM,
+    KV_TYPE_DIRECTORY,
+    algorithm,
+    request.created_at_ms,
+    next_sequence,
+    &namespace_root.root_hash,
+    &namespace_root.value,
+  )?;
+  let prepare_path =
+    system_control_path(SystemControlKindV1::RootPublicationPrepare, &request.transaction_id, SystemControlSlotV1::Immutable)?;
+  next_sequence = append_system_file(
+    &mut entities,
+    prepare_path,
+    SYSTEM_CONTROL_CONTENT_TYPE,
+    &prepare_control,
+    algorithm,
+    request.created_at_ms,
+    next_sequence,
+  )?;
+  let admission_path =
+    system_control_path(SystemControlKindV1::RootAdmissionCommit, &namespace_root.root_hash, SystemControlSlotV1::Immutable)?;
+  next_sequence = append_system_file(
+    &mut entities,
+    admission_path,
+    SYSTEM_CONTROL_CONTENT_TYPE,
+    &admission_control,
+    algorithm,
+    request.created_at_ms,
+    next_sequence,
+  )?;
+  if entities.len() != expected_entity_count {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "successor_authority_entity_count",
+      format!("constructed {} entities, expected {expected_entity_count}", entities.len()),
+    ));
+  }
+  let mut identities = HashSet::with_capacity(entities.len());
+  if entities.iter().any(|entity| !identities.insert(entity.key.clone())) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "successor_authority_duplicate_identity",
+      "successor-authority entities contain a duplicate KV identity",
+    ));
+  }
+  let hot_tail_offset = entities.iter().try_fold(source_header.hot_tail_offset, |offset, entity| {
+    offset.checked_add(entity.bytes.len() as u64).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("successor_authority_wal_overflow", "successor-authority WAL offset overflow")
+    })
+  })?;
+  Ok(FirstAuthorityPackageV1 {
+    namespace_root,
+    prepare_control,
+    admission_control,
+    entities,
+    hot_tail_offset,
+    write_sequence_high_water: next_sequence,
+  })
+}
+
+fn encode_successor_witnesses(
+  request: &SuccessorAuthorityPublicationRequestV1,
+  namespace_root: &EncodedNamespaceRootV1,
+  algorithm: HashAlgorithm,
+  selected_header_slot_sequence: u64,
+  publication_sequence: u64,
+) -> Result<(Vec<u8>, Vec<u8>), FirstAuthorityPublicationErrorV1> {
+  let timestamp_i64 = i64::try_from(request.created_at_ms).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("successor_authority_timestamp_range", format!("timestamp exceeds signed range: {error}"))
+  })?;
+  let authority_identity_digest = digest_parts(algorithm, &[&request.authority_identity]);
+  let prepare = RootPublicationPrepareV1 {
+    database_id: request.database_id,
+    transaction_id: request.transaction_id,
+    created_at_ms: timestamp_i64,
+    target_namespace_root: namespace_root.root_hash.clone(),
+    target_semantic_state: request.semantic_state.object_id.clone(),
+    typed_closure_digest: request.typed_closure_digest.clone(),
+    authority_kind: RootAuthorityKindV1::Head,
+    authority_identity: request.authority_identity.clone(),
+    expected_authority_before: request.expected_head_hash.clone(),
+    expected_authority_after: namespace_root.root_hash.clone(),
+    intended_header_slot_sequence: selected_header_slot_sequence,
+    intended_publication_sequence: publication_sequence,
+  };
+  let prepare_control = encode_root_publication_prepare_control(&prepare, algorithm)?;
+  let admission = RootAdmissionCommitV1 {
+    database_id: request.database_id,
+    namespace_root: namespace_root.root_hash.clone(),
+    transaction_id: request.transaction_id,
+    publication_started_at_ms: timestamp_i64,
+    authority_kind: RootAuthorityKindV1::Head,
+    recovered_from_selected_authority: false,
+    authority_identity_digest,
+    authority_after: namespace_root.root_hash.clone(),
+    selected_header_slot_sequence,
+    publication_sequence,
+    prepare_payload_hash: digest_parts(algorithm, &[&prepare_control]),
+  };
+  let admission_control = encode_root_admission_commit_control(&admission, algorithm)?;
+  Ok((prepare_control, admission_control))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_entity(
   entities: &mut Vec<PreparedWholeEntityV1>,
+  entity_version: u8,
   entry_type: EntryTypeV4,
   flags: u8,
   kv_type: u8,
@@ -7364,7 +8167,7 @@ fn append_entity(
   let write_sequence = previous_sequence
     .checked_add(1)
     .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_write_sequence_exhausted", "write sequence exhausted"))?;
-  let bytes = encode_entity(entry_type, flags, algorithm, timestamp_ms, write_sequence, key, stored_value)?;
+  let bytes = encode_entity(entity_version, entry_type, flags, algorithm, timestamp_ms, write_sequence, key, stored_value)?;
   entities.push(PreparedWholeEntityV1 { key: key.to_vec(), kv_type, bytes });
   Ok(write_sequence)
 }
@@ -7382,6 +8185,7 @@ fn append_system_file(
   let chunk_key = first_authority_system_chunk_hash(body, algorithm);
   let sequence = append_entity(
     entities,
+    0,
     EntryTypeV4::Chunk,
     WHOLE_ENTITY_V1_FLAG_SYSTEM,
     KV_TYPE_CHUNK,
@@ -7414,6 +8218,7 @@ fn append_system_file(
   let path_key = first_authority_file_path_hash(&path, algorithm);
   append_entity(
     entities,
+    1,
     EntryTypeV4::FileRecord,
     WHOLE_ENTITY_V1_FLAG_SYSTEM,
     KV_TYPE_FILE_RECORD,
@@ -7426,6 +8231,7 @@ fn append_system_file(
 }
 
 fn encode_entity(
+  entity_version: u8,
   entry_type: EntryTypeV4,
   flags: u8,
   algorithm: HashAlgorithm,
@@ -7435,6 +8241,7 @@ fn encode_entity(
   stored_value: &[u8],
 ) -> Result<Vec<u8>, FirstAuthorityPublicationErrorV1> {
   encode_whole_entity(&WholeEntityWriteV1 {
+    entity_version,
     entry_type,
     flags,
     hash_algorithm: algorithm,
@@ -9370,6 +10177,145 @@ fn verify_package_locators(
   Ok(())
 }
 
+fn immutable_entity_kv_tag(entry_type: EntryTypeV4) -> Result<u8, ImmutableEntityBatchPublicationErrorV1> {
+  match entry_type {
+    EntryTypeV4::Chunk => Ok(kv_tag::CHUNK),
+    EntryTypeV4::FileRecord => Ok(kv_tag::FILE_RECORD),
+    EntryTypeV4::DirectoryIndex => Ok(kv_tag::DIRECTORY),
+    EntryTypeV4::Symlink => Ok(kv_tag::SYMLINK),
+    EntryTypeV4::DeletionRecord
+    | EntryTypeV4::Snapshot
+    | EntryTypeV4::Void
+    | EntryTypeV4::Fork
+    | EntryTypeV4::IndexArtifact
+    | EntryTypeV4::GcArtifact => Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_specialized_type",
+      format!("{:?} requires its specialized publication owner", entry_type),
+    )),
+  }
+}
+
+fn validate_immutable_entity_content_identity(
+  algorithm: HashAlgorithm,
+  entity: ImmutableEntityWriteV1<'_>,
+) -> Result<(), ImmutableEntityBatchPublicationErrorV1> {
+  if entity.flags & !WHOLE_ENTITY_V1_FLAG_SYSTEM != 0 {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid("unknown_entity_flags", format!("flags {:#04x}", entity.flags)));
+  }
+  if entity.flags != 0 {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_representation",
+      "generic migration publication accepts only ordinary unflagged content entities",
+    ));
+  }
+  let (versions, domain): (&[u8], &[u8]) = match entity.entry_type {
+    EntryTypeV4::Chunk => (&[0], b"chunk:"),
+    EntryTypeV4::FileRecord => (&[0, 1], b"filec:"),
+    EntryTypeV4::DirectoryIndex if crate::engine::btree::is_btree_format(entity.stored_value) => (&[0], b"btree:"),
+    EntryTypeV4::DirectoryIndex => (&[0], b"dirc:"),
+    EntryTypeV4::Symlink => (&[0], b"symlinkc:"),
+    _ => {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_entity_specialized_type",
+        format!("{:?} requires its specialized publication owner", entity.entry_type),
+      ));
+    }
+  };
+  if !versions.contains(&entity.entity_version) {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_version",
+      format!("{:?} entity version {} is not admitted by generic migration publication", entity.entry_type, entity.entity_version),
+    ));
+  }
+  let expected_key = digest_parts(algorithm, &[domain, entity.stored_value]);
+  if entity.key != expected_key {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_content_identity",
+      format!("{:?} key does not match its canonical content identity", entity.entry_type),
+    ));
+  }
+  Ok(())
+}
+
+fn load_exact_immutable_entity(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  expected: ImmutableEntityWriteV1<'_>,
+  expected_kv_type: u8,
+) -> Result<Option<u64>, ImmutableEntityBatchPublicationErrorV1> {
+  let Some(locator) = kv.get(expected.key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+    return Ok(None);
+  };
+  if locator.type_flags != expected_kv_type {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_identity_collision",
+      format!("existing identity {} has KV type {}, expected {expected_kv_type}", hex::encode(expected.key), locator.type_flags),
+    ));
+  }
+  let expected_length = checked_whole_entity_encoded_length(header.hash_algorithm, expected.key.len(), expected.stored_value.len())
+    .map_err(FirstAuthorityPublicationErrorV1::from)?;
+  let locator_length = usize::try_from(locator.total_length).map_err(|error| {
+    ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_locator_length",
+      format!("existing identity {} length exceeds usize: {error}", hex::encode(expected.key)),
+    )
+  })?;
+  if locator_length != expected_length {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_identity_collision",
+      format!("existing identity {} has another encoded length", hex::encode(expected.key)),
+    ));
+  }
+  let bytes = read_entity_bounded(file, kv, expected.key, expected_length, header.write_sequence_high_water)?
+    .ok_or_else(|| ImmutableEntityBatchPublicationErrorV1::invalid("immutable_entity_locator_missing", "selected locator disappeared"))?;
+  let entity =
+    decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water).map_err(FirstAuthorityPublicationErrorV1::from)?;
+  if entity.entry_type != expected.entry_type
+    || entity.entity_version != expected.entity_version
+    || entity.flags != expected.flags
+    || entity.compression_algorithm != CompressionAlgorithm::None
+    || entity.key != expected.key
+    || entity.stored_value != expected.stored_value
+  {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_identity_collision",
+      format!("existing identity {} differs from the exact immutable entity", hex::encode(expected.key)),
+    ));
+  }
+  Ok(Some(entity.write_sequence))
+}
+
+fn verify_exact_immutable_entity_for_authority(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  expected: ImmutableEntityWriteV1<'_>,
+  expected_kv_type: u8,
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  match load_exact_immutable_entity(file, kv, header, expected, expected_kv_type) {
+    Ok(Some(_)) => Ok(()),
+    Ok(None) => Err(FirstAuthorityPublicationErrorV1::invalid(
+      "successor_authority_dependency_missing",
+      format!("successor dependency {} is absent", hex::encode(expected.key)),
+    )),
+    Err(error) => Err(FirstAuthorityPublicationErrorV1::invalid(error.code(), error.to_string())),
+  }
+}
+
+fn immutable_entity_exists_for_authority(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  expected: ImmutableEntityWriteV1<'_>,
+  expected_kv_type: u8,
+) -> Result<bool, FirstAuthorityPublicationErrorV1> {
+  match load_exact_immutable_entity(file, kv, header, expected, expected_kv_type) {
+    Ok(existing) => Ok(existing.is_some()),
+    Err(error) => Err(FirstAuthorityPublicationErrorV1::invalid(error.code(), error.to_string())),
+  }
+}
+
 fn read_entity_bounded(
   file: &File,
   kv: &DiskKVStore,
@@ -9395,7 +10341,11 @@ fn read_entity_bounded(
       format!("locator length {length} exceeds its {maximum_total_length}-byte role cap"),
     ));
   }
-  let mut bytes = vec![0; length];
+  let mut bytes = Vec::new();
+  bytes.try_reserve_exact(length).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("first_authority_readback_allocation", format!("entity read allocation failed: {error}"))
+  })?;
+  bytes.resize(length, 0);
   read_file_at_native(file, locator.offset, &mut bytes)
     .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("first_authority_readback_io", error.to_string()))?;
   let entity = decode_whole_entity(&bytes, kv.hash_algo(), write_sequence_high_water)?;
@@ -9547,60 +10497,75 @@ fn load_system_file_slot(
   slot: SystemControlSlotV1,
 ) -> Result<Option<LoadedSystemFileV1>, FirstAuthorityPublicationErrorV1> {
   let path = system_control_path(kind, identity, slot)?;
+  load_canonical_system_file_at_path(file, kv, header, &path, SYSTEM_CONTROL_CONTENT_TYPE, kind.encoded_cap())
+}
+
+fn load_canonical_system_file_at_path(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  path: &str,
+  content_type: &str,
+  maximum_body_length: usize,
+) -> Result<Option<LoadedSystemFileV1>, FirstAuthorityPublicationErrorV1> {
   let path_key = first_authority_file_path_hash(&path, header.hash_algorithm);
   let Some(locator) = kv.get(&path_key)? else {
     return Ok(None);
   };
   if locator.type_flags != KV_TYPE_FILE_RECORD {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_identity_collision",
+      "first_authority_system_file_identity_collision",
       format!("{path} path identity resolves to another KV role"),
     ));
   }
   let record_bytes = read_entity_bounded(file, kv, &path_key, FIRST_AUTHORITY_CONTROL_ENTITY_CAP, header.write_sequence_high_water)?
-    .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_control_missing", format!("missing {path}")))?;
+    .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_system_file_missing", format!("missing {path}")))?;
   let entity = decode_whole_entity(&record_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
   if entity.entry_type != EntryTypeV4::FileRecord
+    || entity.entity_version != 1
     || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
     || entity.compression_algorithm != CompressionAlgorithm::None
     || entity.key != path_key
   {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_representation",
+      "first_authority_system_file_representation",
       format!("{path} is not a canonical system FileRecord"),
     ));
   }
   let write_sequence = entity.write_sequence;
   let integrity_hash = entity.integrity_hash.to_vec();
   let record = FileRecord::deserialize(entity.stored_value, header.hash_algorithm.hash_length(), 1)?;
-  if record.path != path || record.content_type.as_deref() != Some(SYSTEM_CONTROL_CONTENT_TYPE) || !record.metadata.is_empty() {
+  if record.path != path || record.content_type.as_deref() != Some(content_type) || !record.metadata.is_empty() {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_file_record",
+      "first_authority_system_file_record",
       format!("{path} FileRecord metadata is not canonical"),
     ));
   }
-  if record.chunk_hashes.len() != 1 || record.total_size > kind.encoded_cap() as u64 {
+  if record.chunk_hashes.len() != 1 || record.total_size > maximum_body_length as u64 {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_file_record",
-      format!("{path} must contain one bounded canonical control chunk"),
+      "first_authority_system_file_record",
+      format!("{path} must contain one bounded canonical system chunk"),
     ));
   }
   let body_length = usize::try_from(record.total_size).map_err(|error| {
-    FirstAuthorityPublicationErrorV1::invalid("first_authority_control_size", format!("{path} body length exceeds usize: {error}"))
+    FirstAuthorityPublicationErrorV1::invalid("first_authority_system_file_size", format!("{path} body length exceeds usize: {error}"))
   })?;
   let chunk_key = &record.chunk_hashes[0];
   let Some(chunk_locator) = kv.get(chunk_key)? else {
-    return Err(FirstAuthorityPublicationErrorV1::invalid("first_authority_control_chunk_missing", format!("missing chunk for {path}")));
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "first_authority_system_file_chunk_missing",
+      format!("missing chunk for {path}"),
+    ));
   };
   if chunk_locator.type_flags != KV_TYPE_CHUNK {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_chunk_identity_collision",
+      "first_authority_system_file_chunk_identity_collision",
       format!("{path} chunk identity resolves to another KV role"),
     ));
   }
-  let chunk_entity_cap = super::entity::checked_whole_entity_encoded_length(header.hash_algorithm, chunk_key.len(), kind.encoded_cap())?;
+  let chunk_entity_cap = checked_whole_entity_encoded_length(header.hash_algorithm, chunk_key.len(), maximum_body_length)?;
   let chunk_bytes = read_entity_bounded(file, kv, chunk_key, chunk_entity_cap, header.write_sequence_high_water)?.ok_or_else(|| {
-    FirstAuthorityPublicationErrorV1::invalid("first_authority_control_chunk_missing", format!("missing chunk for {path}"))
+    FirstAuthorityPublicationErrorV1::invalid("first_authority_system_file_chunk_missing", format!("missing chunk for {path}"))
   })?;
   let chunk = decode_whole_entity(&chunk_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
   if chunk.entry_type != EntryTypeV4::Chunk
@@ -9609,31 +10574,62 @@ fn load_system_file_slot(
     || chunk.key != chunk_key.as_slice()
   {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_chunk_representation",
+      "first_authority_system_file_chunk_representation",
       format!("{path} references a noncanonical system chunk"),
     ));
   }
   let mut body = Vec::new();
   body.try_reserve_exact(body_length).map_err(|error| {
     FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_allocation",
+      "first_authority_system_file_allocation",
       format!("{path} body allocation failed for {body_length} bytes: {error}"),
     )
   })?;
   body.extend_from_slice(chunk.stored_value);
   if body.len() as u64 != record.total_size || first_authority_content_hash(&body, header.hash_algorithm) != record.content_hash {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_content",
+      "first_authority_system_file_content",
       format!("{path} content does not match its FileRecord"),
     ));
   }
   if first_authority_system_chunk_hash(&body, header.hash_algorithm) != *chunk_key {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
-      "first_authority_control_chunk_identity",
+      "first_authority_system_file_chunk_identity",
       format!("{path} chunk key does not match its canonical system payload identity"),
     ));
   }
   Ok(Some(LoadedSystemFileV1 { locator, entity_bytes: record_bytes, record, body, write_sequence, integrity_hash }))
+}
+
+fn verify_selected_semantic_state(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  expected: &EncodedSemanticObjectV1,
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  let semantic = decode_semantic_object(&expected.value, header.hash_algorithm)?;
+  if semantic.object_id != expected.object_id || !matches!(semantic.kind, SemanticObjectKind::State { .. }) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "successor_authority_semantic_state_mismatch",
+      "successor semantic-state bytes do not match their state identity",
+    ));
+  }
+  let maximum_body_length = super::semantic_store::semantic_object_cap(semantic.kind_id)?;
+  let path = semantic_object_path(header.hash_algorithm, semantic.kind_id, &expected.object_id)?;
+  let loaded =
+    load_canonical_system_file_at_path(file, kv, header, &path, SEMANTIC_OBJECT_CONTENT_TYPE, maximum_body_length)?.ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_semantic_state_missing",
+        "successor authority references a semantic state that is not stored",
+      )
+    })?;
+  if loaded.body != expected.value {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "successor_authority_semantic_state_collision",
+      "stored semantic state differs from the exact successor request",
+    ));
+  }
+  Ok(())
 }
 
 fn validate_mutable_system_control_identity(
@@ -9775,6 +10771,15 @@ const fn mutable_system_control_committed_failure_code(failure: StableEntityDepe
     StableEntityDependencyFailureV1::AuthorityUncertain => "mutable_control_committed_authority_uncertain",
     StableEntityDependencyFailureV1::VisibilityFailure => "mutable_control_committed_visibility_failure",
     StableEntityDependencyFailureV1::PostconditionFailure => "mutable_control_committed_postcondition_failure",
+  }
+}
+
+const fn immutable_entity_committed_failure_code(failure: StableEntityDependencyFailureV1) -> &'static str {
+  match failure {
+    StableEntityDependencyFailureV1::DependencyMissing => "immutable_entity_committed_dependency_missing",
+    StableEntityDependencyFailureV1::AuthorityUncertain => "immutable_entity_committed_authority_uncertain",
+    StableEntityDependencyFailureV1::VisibilityFailure => "immutable_entity_committed_visibility_failure",
+    StableEntityDependencyFailureV1::PostconditionFailure => "immutable_entity_committed_postcondition_failure",
   }
 }
 

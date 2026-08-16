@@ -163,13 +163,18 @@ fn adopted_header_fixture_models_a_fail_closed_two_slot_transition() {
 fn every_whole_entity_fixture_matches_the_independent_oracle() {
   let root = fixture_root();
   let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "whole-entity-v1").collect();
-  assert_eq!(rows.len(), 2);
+  assert_eq!(rows.len(), 4);
 
   for row in rows {
     let bytes = fs::read(root.join(row.binary)).unwrap();
     let algorithm = hash_algorithm(&row.hash_algorithm);
     let entity = decode_whole_entity(&bytes, algorithm, u64::MAX).unwrap();
-    assert_eq!(format!("entity:entry-type=0x{:02x}", entity.entry_type.to_u8()), row.expected, "fixture {}", row.id);
+    assert_eq!(
+      format!("entity:version={}:entry-type=0x{:02x}", entity.entity_version, entity.entry_type.to_u8()),
+      row.expected,
+      "fixture {}",
+      row.id
+    );
     assert_eq!(hex::encode(entity.key), row.canonical_key.unwrap(), "fixture {}", row.id);
   }
 }

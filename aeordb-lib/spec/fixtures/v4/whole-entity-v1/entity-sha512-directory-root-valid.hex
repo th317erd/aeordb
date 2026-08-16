@@ -1,7 +1,7 @@
 # fixture: entity-sha512-directory-root-valid
 # contract: WholeEntityV1
 # hash: sha512 (64 bytes)
-# expected: entity:entry-type=0x03
+# expected: entity:version=1:entry-type=0x03
 # canonical key: f12fc3618e1cff9d5c4fbf4c1b480ca65ac3e1bb83ad844d7ddc1b9dee8dab289794e782c296339973b1f426b6c856e89527f65149e29fed69a619eb24ce4b42
 # relation: wraps:namespace-root-valid
 # hex offsets are absolute within this fixture

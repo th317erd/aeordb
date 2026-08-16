@@ -257,7 +257,7 @@ jq -e --arg source_sha "$(sha256_canonical_text_file "$contract_registry")" \
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .source_sha256 == $source_sha and .fixture_manifest_sha256 == $fixture_sha and
   .counts == {
-    "formats":22,"fixtures":440,"capability_bits":24,"entry_types":10,"kv_tags":12,
+    "formats":22,"fixtures":442,"capability_bits":24,"entry_types":10,"kv_tags":12,
     "shared_enum_scopes":13,"shared_enum_values":134,"system_families":46,
     "system_family_descriptors":63,"malformed_input_classes":16
   } and
@@ -287,7 +287,7 @@ jq -e \
   .proof.production_tests_passed >= 3 and
   .proof.strict_reference_clippy == "pass" and
   .proof.rustfmt_check == "pass" and
-  .proof.fixture_cases_verified == 440 and
+  .proof.fixture_cases_verified == 442 and
   .proof.route_registrations_inventoried == 93 and
   .proof.documentation_pages_inventoried == 36 and
   .proof.v4_writers_activated == false and

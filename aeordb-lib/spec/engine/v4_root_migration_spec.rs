@@ -35,6 +35,7 @@ struct AuthorityBundle {
 #[derive(Clone, Copy)]
 struct IndependentEntityWrite<'a> {
   algorithm: HashAlgorithm,
+  entity_version: u8,
   entry_type: EntryTypeV4,
   flags: u8,
   compression_algorithm: CompressionAlgorithm,
@@ -419,6 +420,20 @@ fn namespace_tree_reader_enforces_outer_entity_identity_and_hash_width() {
     assert_eq!(error.code(), expected_code);
   }
 
+  let wrong_version = independent_whole_entity(&IndependentEntityWrite {
+    algorithm,
+    entity_version: 1,
+    entry_type: EntryTypeV4::DirectoryIndex,
+    flags: 0,
+    compression_algorithm: CompressionAlgorithm::None,
+    timestamp_ms: 1,
+    write_sequence: 1,
+    key: &root_hash,
+    stored_value: &value,
+  });
+  let error = decode_namespace_tree_root_v0(&wrong_version, &root_hash, algorithm, u64::MAX).unwrap_err();
+  assert_eq!(error.code(), "namespace_tree_entity_type");
+
   let entity = wrap_tree_entity(algorithm, &value, &root_hash, EntryTypeV4::DirectoryIndex, 0, CompressionAlgorithm::None);
   let short_hash = &root_hash[..root_hash.len() - 1];
   let error = decode_namespace_tree_root_v0(&entity, short_hash, algorithm, u64::MAX).unwrap_err();
@@ -507,6 +522,23 @@ fn immutable_authority_enforces_namespace_root_outer_entity_contract() {
     assert_eq!(error.identity(), bundle.root_hash);
   }
 
+  let wrong_version = independent_whole_entity(&IndependentEntityWrite {
+    algorithm: bundle.algorithm,
+    entity_version: 0,
+    entry_type: EntryTypeV4::DirectoryIndex,
+    flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+    compression_algorithm: CompressionAlgorithm::None,
+    timestamp_ms: 2,
+    write_sequence: 2,
+    key: &bundle.root_hash,
+    stored_value: &bundle.root_value,
+  });
+  let mut input = authority_input(&bundle);
+  input.root_entity = Some(&wrong_version);
+  let error = decode_immutable_namespace_authority(input, bundle.algorithm, u64::MAX).unwrap_err();
+  assert_eq!(error.role(), RootAuthorityReferenceRoleV1::NamespaceRoot);
+  assert_eq!(error.code(), "namespace_root_entity_type");
+
   let short_root_hash = &bundle.root_hash[..bundle.root_hash.len() - 1];
   let mut input = authority_input(&bundle);
   input.expected_root_hash = short_root_hash;
@@ -522,6 +554,7 @@ fn immutable_authority_rejects_malformed_tree_wrong_semantic_kind_and_database()
   let malformed_tree_value = [0x01, 0x02, 0x03];
   let malformed_tree = independent_whole_entity(&IndependentEntityWrite {
     algorithm: bundle.algorithm,
+    entity_version: 0,
     entry_type: EntryTypeV4::DirectoryIndex,
     flags: 0,
     compression_algorithm: CompressionAlgorithm::None,
@@ -665,8 +698,8 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
   for (encoder, expected_production_occurrences, expected_first_authority_occurrences, expected_migration_destination_occurrences) in [
     ("encode_namespace_root", 3, 2, 0),
     ("encode_semantic_state_object", 3, 0, 2),
-    ("encode_root_publication_prepare_control", 3, 2, 0),
-    ("encode_root_admission_commit_control", 3, 2, 0),
+    ("encode_root_publication_prepare_control", 4, 3, 0),
+    ("encode_root_admission_commit_control", 4, 3, 0),
   ] {
     assert_eq!(
       production_sources.matches(encoder).count(),
@@ -734,6 +767,7 @@ fn authority_bundle_with_semantic(algorithm: HashAlgorithm, semantic_name: &str)
   let namespace_tree_hash = independent_digest(algorithm, &[b"dirc:", &namespace_tree_value]);
   let namespace_tree_entity = independent_whole_entity(&IndependentEntityWrite {
     algorithm,
+    entity_version: 0,
     entry_type: EntryTypeV4::DirectoryIndex,
     flags: 0,
     compression_algorithm: CompressionAlgorithm::None,
@@ -750,6 +784,7 @@ fn authority_bundle_with_semantic(algorithm: HashAlgorithm, semantic_name: &str)
   let root_hash = independent_digest(algorithm, &[b"aeordb.directory-index.immutable.v1\0", &3u16.to_le_bytes(), &root_value]);
   let root_entity = independent_whole_entity(&IndependentEntityWrite {
     algorithm,
+    entity_version: 1,
     entry_type: EntryTypeV4::DirectoryIndex,
     flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
     compression_algorithm: CompressionAlgorithm::None,
@@ -795,6 +830,7 @@ fn wrap_root_entity(
 ) -> Vec<u8> {
   independent_whole_entity(&IndependentEntityWrite {
     algorithm: bundle.algorithm,
+    entity_version: 1,
     entry_type,
     flags,
     compression_algorithm,
@@ -825,6 +861,7 @@ fn wrap_tree_entity(
 ) -> Vec<u8> {
   independent_whole_entity(&IndependentEntityWrite {
     algorithm,
+    entity_version: 0,
     entry_type,
     flags,
     compression_algorithm,
@@ -895,7 +932,7 @@ fn independent_whole_entity(fields: &IndependentEntityWrite<'_>) -> Vec<u8> {
   let total_length = header_length + key.len() + stored_value.len();
   let mut entity = vec![0u8; total_length];
   put_u32(&mut entity, 0, 0x0ae0_12db);
-  entity[4] = 1;
+  entity[4] = fields.entity_version;
   entity[5] = fields.entry_type as u8;
   put_u16(&mut entity, 6, header_length as u16);
   put_u32(&mut entity, 8, total_length as u32);

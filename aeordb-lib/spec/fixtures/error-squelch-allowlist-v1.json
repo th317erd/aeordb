@@ -3226,7 +3226,7 @@
     {
       "id": "esq-v1-4ea949551ec2d158fd84-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1576,
+      "line": 1579,
       "column": 25,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3236,7 +3236,7 @@
     {
       "id": "esq-v1-b5990e6dab44f241035e-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1601,
+      "line": 1604,
       "column": 22,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3246,7 +3246,7 @@
     {
       "id": "esq-v1-a4eede644110adffe720-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1694,
+      "line": 1697,
       "column": 5,
       "enclosing_item": "impl DiskKVStore::pending_hot_tail_bytes",
       "kind": "error_conversion",
@@ -3256,7 +3256,7 @@
     {
       "id": "esq-v1-07cbf56174ceb4b24285-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1707,
+      "line": 1710,
       "column": 9,
       "enclosing_item": "impl DiskKVStore::prepare_hot_tail_dependency",
       "kind": "error_conversion",
@@ -3266,7 +3266,7 @@
     {
       "id": "esq-v1-85907f46c110382617a0-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1744,
+      "line": 1747,
       "column": 7,
       "enclosing_item": "impl DiskKVStore::drop",
       "kind": "logged_error_continues",
@@ -8746,7 +8746,7 @@
     {
       "id": "esq-v1-e372d44e774d37ebf813-00",
       "file": "aeordb-lib/src/engine/v4/entity.rs",
-      "line": 192,
+      "line": 204,
       "column": 22,
       "enclosing_item": "decode_whole_entity",
       "kind": "error_conversion",
@@ -8756,7 +8756,7 @@
     {
       "id": "esq-v1-5de20568f42fbc4a3cb2-00",
       "file": "aeordb-lib/src/engine/v4/entity.rs",
-      "line": 228,
+      "line": 240,
       "column": 20,
       "enclosing_item": "decode_whole_entity",
       "kind": "error_conversion",
@@ -8766,7 +8766,7 @@
     {
       "id": "esq-v1-0b1eb177234dd3757bd9-00",
       "file": "aeordb-lib/src/engine/v4/entity.rs",
-      "line": 230,
+      "line": 242,
       "column": 22,
       "enclosing_item": "decode_whole_entity",
       "kind": "error_conversion",
@@ -8776,7 +8776,7 @@
     {
       "id": "esq-v1-7011814836c6f8a17cd9-00",
       "file": "aeordb-lib/src/engine/v4/entity.rs",
-      "line": 295,
+      "line": 340,
       "column": 22,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -8786,7 +8786,7 @@
     {
       "id": "esq-v1-17ba4004d178fb90a6fa-00",
       "file": "aeordb-lib/src/engine/v4/entity.rs",
-      "line": 299,
+      "line": 344,
       "column": 22,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -8796,7 +8796,7 @@
     {
       "id": "esq-v1-29fb3c6b0c8153cd5ffe-00",
       "file": "aeordb-lib/src/engine/v4/entity.rs",
-      "line": 303,
+      "line": 348,
       "column": 22,
       "enclosing_item": "u64_at",
       "kind": "panic_method",
@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 3662,
+      "line": 4026,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 6994,
+      "line": 7626,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 6997,
+      "line": 7629,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",

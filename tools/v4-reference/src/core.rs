@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha512};
 
 const ENTITY_MAGIC: u32 = 0x0ae0_12db;
-const ENTITY_VERSION: u8 = 1;
+const MAX_ENTITY_VERSION: u8 = 1;
 const DIRECTORY_ENTRY_TYPE: u8 = 0x03;
 const INITIAL_CAPABILITIES: &[u8; 32] = &[
   0x7f, 0x00, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -85,7 +85,7 @@ pub fn fixture_cases() -> Vec<CoreFixtureCase> {
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
     let directory = build_namespace_root(profile);
     let directory_key = directory_key(profile, &directory);
-    let entity = build_entity(profile, DIRECTORY_ENTRY_TYPE, &directory_key, &directory, 11);
+    let entity = build_entity(profile, 1, DIRECTORY_ENTRY_TYPE, &directory_key, &directory, 11);
 
     cases.push(CoreFixtureCase {
       id: match profile {
@@ -94,10 +94,24 @@ pub fn fixture_cases() -> Vec<CoreFixtureCase> {
       },
       format: CoreFormat::WholeEntityV1,
       profile,
-      expected: "entity:entry-type=0x03",
+      expected: "entity:version=1:entry-type=0x03",
       relation: Some("wraps:namespace-root-valid"),
       canonical_key: Some(hex::encode(&directory_key)),
       bytes: entity,
+    });
+    let legacy_directory = Vec::new();
+    let legacy_directory_key = legacy_directory_key(profile, &legacy_directory);
+    cases.push(CoreFixtureCase {
+      id: match profile {
+        HashProfile::Blake3_256 => "entity-blake3-256-directory-tree-v0-empty-valid",
+        HashProfile::Sha512 => "entity-sha512-directory-tree-v0-empty-valid",
+      },
+      format: CoreFormat::WholeEntityV1,
+      profile,
+      expected: "entity:version=0:entry-type=0x03",
+      relation: Some("migrated:directory-tree-v0"),
+      canonical_key: Some(hex::encode(&legacy_directory_key)),
+      bytes: build_entity(profile, 0, DIRECTORY_ENTRY_TYPE, &legacy_directory_key, &legacy_directory, 10),
     });
     cases.push(CoreFixtureCase {
       id: match profile {
@@ -210,12 +224,12 @@ pub fn annotation_lines(format: CoreFormat, profile: HashProfile, bytes: &[u8]) 
   }
 }
 
-fn build_entity(profile: HashProfile, entry_type: u8, key: &[u8], value: &[u8], write_sequence: u64) -> Vec<u8> {
+fn build_entity(profile: HashProfile, entity_version: u8, entry_type: u8, key: &[u8], value: &[u8], write_sequence: u64) -> Vec<u8> {
   let header_length = 77 + profile.width();
   let total_length = header_length + key.len() + value.len();
   let mut entity = vec![0u8; total_length];
   put_u32(&mut entity, 0, ENTITY_MAGIC);
-  entity[4] = ENTITY_VERSION;
+  entity[4] = entity_version;
   entity[5] = entry_type;
   put_u16(&mut entity, 6, header_length as u16);
   put_u32(&mut entity, 8, total_length as u32);
@@ -230,7 +244,7 @@ fn build_entity(profile: HashProfile, entry_type: u8, key: &[u8], value: &[u8], 
 
   let mut integrity_preimage = Vec::with_capacity(22 + key.len() + value.len());
   integrity_preimage.extend_from_slice(b"aeordb-entry-v1\0");
-  integrity_preimage.push(ENTITY_VERSION);
+  integrity_preimage.push(entity_version);
   integrity_preimage.push(entry_type);
   integrity_preimage.push(0);
   integrity_preimage.extend_from_slice(&profile.algorithm_id().to_le_bytes());
@@ -255,8 +269,13 @@ fn decode_entity(profile: HashProfile, entity: &[u8]) -> Result<(String, Option<
   if entity.len() < 12 {
     return Err("truncated_prefix");
   }
-  if read_u32(entity, 0)? != ENTITY_MAGIC || entity[4] != ENTITY_VERSION {
+  if read_u32(entity, 0)? != ENTITY_MAGIC || entity[4] > MAX_ENTITY_VERSION {
     return Err("magic_or_version");
+  }
+  let entity_version = entity[4];
+  let entry_type = entity[5];
+  if entry_type == DIRECTORY_ENTRY_TYPE && !matches!(entity_version, 0 | 1) {
+    return Err("type_version");
   }
   let header_length = read_u16(entity, 6)? as usize;
   if header_length != 77 + profile.width() || header_length > 4_096 || entity.len() < header_length {
@@ -295,13 +314,13 @@ fn decode_entity(profile: HashProfile, entity: &[u8]) -> Result<(String, Option<
   if entity[41..41 + profile.width()] != profile.digest(&integrity_preimage) {
     return Err("integrity_hash_mismatch");
   }
-  if entity[5] == DIRECTORY_ENTRY_TYPE {
-    let expected_key = directory_key(profile, value);
+  if entry_type == DIRECTORY_ENTRY_TYPE {
+    let expected_key = if entity_version == 0 { legacy_directory_key(profile, value) } else { directory_key(profile, value) };
     if key != expected_key {
       return Err("directory_key_mismatch");
     }
   }
-  Ok((format!("entity:entry-type=0x{:02x}", entity[5]), Some(key.to_vec())))
+  Ok((format!("entity:version={entity_version}:entry-type=0x{entry_type:02x}"), Some(key.to_vec())))
 }
 
 fn build_namespace_root(profile: HashProfile) -> Vec<u8> {
@@ -358,6 +377,13 @@ fn directory_key(profile: HashProfile, value: &[u8]) -> Vec<u8> {
   let mut preimage = Vec::with_capacity(42 + value.len());
   preimage.extend_from_slice(b"aeordb.directory-index.immutable.v1\0");
   preimage.extend_from_slice(&0x0003u16.to_le_bytes());
+  preimage.extend_from_slice(value);
+  profile.digest(&preimage)
+}
+
+fn legacy_directory_key(profile: HashProfile, value: &[u8]) -> Vec<u8> {
+  let mut preimage = Vec::with_capacity(5 + value.len());
+  preimage.extend_from_slice(b"dirc:");
   preimage.extend_from_slice(value);
   profile.digest(&preimage)
 }
@@ -802,7 +828,7 @@ mod tests {
     for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
       let value = build_namespace_root(profile);
       let key = directory_key(profile, &value);
-      let entity = build_entity(profile, DIRECTORY_ENTRY_TYPE, &key, &value, 1);
+      let entity = build_entity(profile, 1, DIRECTORY_ENTRY_TYPE, &key, &value, 1);
       assert_eq!(read_u16(&entity, 6).unwrap() as usize, 77 + profile.width());
       assert_eq!(read_u32(&entity, 8).unwrap() as usize, entity.len());
     }

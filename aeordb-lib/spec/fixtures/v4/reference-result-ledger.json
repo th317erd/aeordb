@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p3c2b1-migration-capture-v1",
+  "tool_revision": "p3c2b3-entity-version-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -137,8 +137,14 @@
     },
     {
       "fixture_id": "entity-blake3-256-directory-root-valid",
-      "expected": "entity:entry-type=0x03",
-      "observed": "entity:entry-type=0x03",
+      "expected": "entity:version=1:entry-type=0x03",
+      "observed": "entity:version=1:entry-type=0x03",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "entity-blake3-256-directory-tree-v0-empty-valid",
+      "expected": "entity:version=0:entry-type=0x03",
+      "observed": "entity:version=0:entry-type=0x03",
       "result": "pass"
     },
     {
@@ -179,8 +185,14 @@
     },
     {
       "fixture_id": "entity-sha512-directory-root-valid",
-      "expected": "entity:entry-type=0x03",
-      "observed": "entity:entry-type=0x03",
+      "expected": "entity:version=1:entry-type=0x03",
+      "observed": "entity:version=1:entry-type=0x03",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "entity-sha512-directory-tree-v0-empty-valid",
+      "expected": "entity:version=0:entry-type=0x03",
+      "observed": "entity:version=0:entry-type=0x03",
       "result": "pass"
     },
     {

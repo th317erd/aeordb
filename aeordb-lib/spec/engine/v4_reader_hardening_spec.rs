@@ -129,7 +129,7 @@ fn manifest() -> FixtureManifest {
 fn every_manifest_row_has_one_production_decoder() {
   let root = fixture_root();
   let rows = manifest().fixtures;
-  assert_eq!(rows.len(), 440);
+  assert_eq!(rows.len(), 442);
   for row in rows {
     let bytes = fs::read(root.join(&row.binary)).unwrap();
     let decoded = decode_fixture_row(&row, &bytes).unwrap_or_else(|error| panic!("fixture {}: {error}", row.id));

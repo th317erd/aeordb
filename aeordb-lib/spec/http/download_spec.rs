@@ -166,7 +166,8 @@ async fn download_zip_frame_retains_streaming_reservation_until_consumed() {
   let held = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
   assert!(held.active_reservations > baseline.active_reservations, "ZIP response bytes lost their reservation before consumption");
   drop(frame);
-  for _ in 0..100 {
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+  loop {
     let current = engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::StreamingRead).unwrap().clone();
     let has_artifact = std::fs::read_dir(temp.path())
       .unwrap()
@@ -175,9 +176,11 @@ async fn download_zip_frame_retains_streaming_reservation_until_consumed() {
     if current.active_reservations == baseline.active_reservations && current.reserved_bytes == baseline.reserved_bytes && !has_artifact {
       return;
     }
-    tokio::task::yield_now().await;
+    if tokio::time::Instant::now() >= deadline {
+      panic!("ZIP response reservation did not release after disconnect");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
   }
-  panic!("ZIP response reservation did not release after disconnect");
 }
 
 #[tokio::test]

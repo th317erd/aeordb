@@ -634,6 +634,13 @@
           - [x] P3c-2b2b: install one independently bounded optional `StorageEngine` capture subscription at an exact source-root/publication boundary without sharing the index drain.
           - [x] P3c-2b2c: encode post-commit notices into bounded AINX segments, checkpoint every 300 seconds, hard-latch every loss/failure, and reopen conservatively across process boots.
         - [ ] P3c-2b3: stream the base clone into the initialized destination, replay retained capture, and require an exact final-freeze authority/SystemFamily diff whenever capture is incomplete.
+          - [x] P3c-2b3p: correct `WholeEntityV1` to preserve the ratified per-type EntityVersion across v4 physical framing, including migrated v0 directory/chunk entities, before any migration writer can publish them.
+          - [x] P3c-2b3a: expose one bounded immutable-entity and successor-root publication boundary by reusing the existing physical v4 dependency, header, KV, durability, and root-witness authority.
+          - [ ] P3c-2b3b: stream the exact preflight-pinned v3 authority and retained-root/SystemFamily closure into the initialized destination without retaining a whole-tree inventory or mutating the source.
+          - [ ] P3c-2b3c: replay only the AMPR-selected capture chain as idempotent namespace deltas, preserving exact source publication/root order and refusing every missing or divergent dependency.
+          - [ ] P3c-2b3d: acquire the explicit final write freeze and require an exact authority, retained-root, and SystemFamily reconciliation before allowing destination verification; incomplete capture can only increase this requirement.
+          - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
+          - [ ] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.
       - [ ] P3c-3a: implement immutable paged legacy-root mapping, selected control publication, and typed reset/unavailable outcomes.
       - [ ] P3c-3b: prove cancel/resume, crash boundaries, complete shadow verification, GC reset policy, and byte-for-byte source invariance.
     - [ ] P4: implement bounded physical inventory, logical/physical lifecycle, quarantine, sweep, and receipt-backed Void authority without destructive activation.

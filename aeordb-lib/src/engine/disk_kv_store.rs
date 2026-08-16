@@ -151,6 +151,9 @@ impl DiskKvMemoryStats {
 }
 
 impl DiskKVStore {
+  pub(crate) const MAX_ATOMIC_VISIBILITY_ENTRIES: usize =
+    if WRITE_BUFFER_THRESHOLD < HOT_BUFFER_THRESHOLD { WRITE_BUFFER_THRESHOLD - 1 } else { HOT_BUFFER_THRESHOLD - 1 };
+
   pub(crate) fn memory_stats(&self) -> DiskKvMemoryStats {
     let write_buffer_slots = self
       .write_buffer
@@ -799,10 +802,10 @@ impl DiskKVStore {
         "atomic KV visibility requires an explicitly flushed write and hot-buffer baseline".to_string(),
       ));
     }
-    if maximum_unique_entries == 0 || maximum_unique_entries >= WRITE_BUFFER_THRESHOLD || maximum_unique_entries >= HOT_BUFFER_THRESHOLD {
+    if maximum_unique_entries == 0 || maximum_unique_entries > Self::MAX_ATOMIC_VISIBILITY_ENTRIES {
       return Err(EngineError::InvalidInput(format!(
-        "atomic KV visibility entry bound must be in 1..{}",
-        WRITE_BUFFER_THRESHOLD.min(HOT_BUFFER_THRESHOLD)
+        "atomic KV visibility entry bound must be in 1..={}",
+        Self::MAX_ATOMIC_VISIBILITY_ENTRIES
       )));
     }
     if expected_authority_sequence == 0 {
