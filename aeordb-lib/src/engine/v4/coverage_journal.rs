@@ -204,17 +204,28 @@ pub fn order_soft_mutation_window(
     return CoverageJournalWindowOutcomeV1::BoundedDiffRequired { reason: CoverageRebuildReasonV1::WholeRootTransition };
   }
 
-  for left in 0..notices.len() {
-    for right in 0..left {
-      if notices[left].operation_id == notices[right].operation_id && notices[left] != notices[right] {
-        return CoverageJournalWindowOutcomeV1::BoundedDiffRequired { reason: CoverageRebuildReasonV1::ConflictingMutation };
-      }
+  notices.sort_unstable_by(|left, right| {
+    left.operation_id.cmp(&right.operation_id).then_with(|| left.committed_at_ms.cmp(&right.committed_at_ms))
+  });
+  let mut conflicting_operation = false;
+  notices.dedup_by(|later, earlier| {
+    if later.operation_id != earlier.operation_id {
+      return false;
     }
+    if same_soft_mutation(later, earlier) {
+      earlier.committed_at_ms = earlier.committed_at_ms.min(later.committed_at_ms);
+      true
+    } else {
+      conflicting_operation = true;
+      false
+    }
+  });
+  if conflicting_operation {
+    return CoverageJournalWindowOutcomeV1::BoundedDiffRequired { reason: CoverageRebuildReasonV1::ConflictingMutation };
   }
   notices.sort_unstable_by(|left, right| {
     left.publication_sequence.cmp(&right.publication_sequence).then_with(|| left.operation_id.cmp(&right.operation_id))
   });
-  notices.dedup();
 
   let mut expected_root = covered.authority.source_namespace_root.as_slice();
   let mut previous_sequence = covered.publication_sequence;
@@ -240,6 +251,14 @@ pub fn order_soft_mutation_window(
     root_after: selected.authority.source_namespace_root.clone(),
     selected_authority: selected.authority.clone(),
   })
+}
+
+fn same_soft_mutation(left: &SoftMutationNoticeV1, right: &SoftMutationNoticeV1) -> bool {
+  left.kind == right.kind
+    && left.publication_sequence == right.publication_sequence
+    && left.previous_namespace_root == right.previous_namespace_root
+    && left.namespace_root == right.namespace_root
+    && left.source_identities == right.source_identities
 }
 
 fn valid_notice(notice: &SoftMutationNoticeV1, hash_width: usize) -> bool {
@@ -279,6 +298,34 @@ pub fn encode_soft_mutation_journal_segment(
   if window.notices.is_empty() {
     return Err(CoverageJournalErrorV1::EmptyWindow);
   }
+  let semantic_state_root = window
+    .selected_authority
+    .control_identities
+    .iter()
+    .find(|control| control.domain == CoverageControlDomainV1::SemanticStateRoot as u16)
+    .map(|control| control.identity.as_slice())
+    .ok_or(CoverageJournalErrorV1::AuthorityClosure("selected coverage authority has no semantic-state identity"))?;
+  encode_owned_soft_mutation_journal_segment(
+    hash_algorithm,
+    window,
+    SYSTEM_INDEX_JOURNAL_ID,
+    JournalOwnerKindV1::System,
+    semantic_state_root,
+    options,
+  )
+}
+
+pub fn encode_owned_soft_mutation_journal_segment(
+  hash_algorithm: HashAlgorithm,
+  window: &CoverageJournalWindowV1,
+  owner_id: [u8; 16],
+  owner_kind: JournalOwnerKindV1,
+  semantic_state_root: &[u8],
+  options: CoverageJournalEncodeOptionsV1,
+) -> Result<EncodedImmutableIndexArtifactV1, CoverageJournalErrorV1> {
+  if window.notices.is_empty() {
+    return Err(CoverageJournalErrorV1::EmptyWindow);
+  }
   let record_count = window.notices.iter().try_fold(0usize, |sum, notice| sum.checked_add(notice.source_identities.len()));
   let Some(record_count) = record_count else {
     return Err(CoverageJournalErrorV1::RecordLimitExceeded);
@@ -287,13 +334,6 @@ pub fn encode_soft_mutation_journal_segment(
     return Err(CoverageJournalErrorV1::RecordLimitExceeded);
   }
 
-  let semantic_state_root = window
-    .selected_authority
-    .control_identities
-    .iter()
-    .find(|control| control.domain == CoverageControlDomainV1::SemanticStateRoot as u16)
-    .map(|control| control.identity.as_slice())
-    .ok_or(CoverageJournalErrorV1::AuthorityClosure("selected coverage authority has no semantic-state identity"))?;
   let mut mutation_ids = Vec::new();
   mutation_ids.try_reserve_exact(window.notices.len()).map_err(|error| CoverageJournalErrorV1::Allocation(error.to_string()))?;
   for notice in &window.notices {
@@ -321,8 +361,8 @@ pub fn encode_soft_mutation_journal_segment(
 
   encode_mutation_journal(&MutationJournalWriteV1 {
     hash_algorithm,
-    owner_id: SYSTEM_INDEX_JOURNAL_ID,
-    owner_kind: JournalOwnerKindV1::System,
+    owner_id,
+    owner_kind,
     generation: options.generation,
     segment_ordinal: options.segment_ordinal,
     chain_reset: options.previous_segment.iter().all(|byte| *byte == 0),
