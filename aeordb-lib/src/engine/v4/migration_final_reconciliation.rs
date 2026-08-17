@@ -126,8 +126,7 @@ pub struct MigrationFinalNamespaceReconciliationRequestV1<'request, 'source> {
   pub maximum_directory_depth: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MigrationFinalNamespaceReconciliationReceiptV1 {
+pub struct MigrationFinalNamespaceReconciliationReceiptV1<'freeze, 'source> {
   pub frozen_source_root: Vec<u8>,
   pub frozen_source_publication_sequence: u64,
   pub diff: MigrationMerkleDiffReceiptV1,
@@ -139,6 +138,32 @@ pub struct MigrationFinalNamespaceReconciliationReceiptV1 {
   pub destination_header_sequence: u64,
   pub destination_namespace_root: Vec<u8>,
   pub destination_tree_root: Vec<u8>,
+  freeze: &'freeze MigrationSourceWriteFreezeV1<'source>,
+}
+
+impl fmt::Debug for MigrationFinalNamespaceReconciliationReceiptV1<'_, '_> {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("MigrationFinalNamespaceReconciliationReceiptV1")
+      .field("frozen_source_root", &self.frozen_source_root)
+      .field("frozen_source_publication_sequence", &self.frozen_source_publication_sequence)
+      .field("diff", &self.diff)
+      .field("translated_subtree_count", &self.translated_subtree_count)
+      .field("translated_subtree_work_items", &self.translated_subtree_work_items)
+      .field("reused_destination_entity_count", &self.reused_destination_entity_count)
+      .field("destination_successor_count", &self.destination_successor_count)
+      .field("idempotent", &self.idempotent)
+      .field("destination_header_sequence", &self.destination_header_sequence)
+      .field("destination_namespace_root", &self.destination_namespace_root)
+      .field("destination_tree_root", &self.destination_tree_root)
+      .finish_non_exhaustive()
+  }
+}
+
+impl<'freeze, 'source> MigrationFinalNamespaceReconciliationReceiptV1<'freeze, 'source> {
+  pub(crate) const fn live_freeze(&self) -> &'freeze MigrationSourceWriteFreezeV1<'source> {
+    self.freeze
+  }
 }
 
 impl MigrationSourceWriteFreezeV1<'_> {
@@ -158,7 +183,7 @@ impl MigrationSourceWriteFreezeV1<'_> {
     Ok(())
   }
 
-  fn source(&self) -> &StorageEngine {
+  pub(crate) fn source(&self) -> &StorageEngine {
     self.source
   }
 }
@@ -302,9 +327,9 @@ pub fn acquire_migration_source_write_freeze_v1<'a>(
   })
 }
 
-pub fn execute_final_namespace_reconciliation_v1(
-  request: MigrationFinalNamespaceReconciliationRequestV1<'_, '_>,
-) -> Result<MigrationFinalNamespaceReconciliationReceiptV1, MigrationFinalReconciliationErrorV1> {
+pub fn execute_final_namespace_reconciliation_v1<'request, 'source>(
+  request: MigrationFinalNamespaceReconciliationRequestV1<'request, 'source>,
+) -> Result<MigrationFinalNamespaceReconciliationReceiptV1<'request, 'source>, MigrationFinalReconciliationErrorV1> {
   validate_final_reconciliation_request(&request)?;
   request.freeze.validate_unchanged()?;
   let source = request.freeze.source();
@@ -394,6 +419,7 @@ pub fn execute_final_namespace_reconciliation_v1(
     destination_header_sequence,
     destination_namespace_root,
     destination_tree_root: destination_tree.root_hash,
+    freeze: request.freeze,
   })
 }
 

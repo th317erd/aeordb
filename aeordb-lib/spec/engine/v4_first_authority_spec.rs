@@ -176,6 +176,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
   let migration_base_clone_execution_path = source_root.join("engine/v4/migration_base_clone_execution.rs");
   let migration_capture_replay_path = source_root.join("engine/v4/migration_capture_replay.rs");
   let migration_destination_path = source_root.join("engine/v4/migration_destination.rs");
+  let migration_final_authority_reconciliation_path = source_root.join("engine/v4/migration_final_authority_reconciliation.rs");
   let migration_final_reconciliation_path = source_root.join("engine/v4/migration_final_reconciliation.rs");
   let migration_owner_path = source_root.join("engine/v4/migration_owner.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
@@ -196,6 +197,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
       &migration_base_clone_execution_path,
       &migration_capture_replay_path,
       &migration_destination_path,
+      &migration_final_authority_reconciliation_path,
       &migration_final_reconciliation_path,
       &migration_owner_path,
     ],
@@ -206,6 +208,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
     &migration_base_clone_execution_path,
     &migration_capture_replay_path,
     &migration_destination_path,
+    &migration_final_authority_reconciliation_path,
     &migration_final_reconciliation_path,
     &migration_owner_path,
   ] {

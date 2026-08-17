@@ -9,9 +9,9 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::Arc;
 
 use super::first_authority::{
-  FirstAuthorityPublicationErrorV1, LoadedMutableSystemControlV1, MutableSystemControlExpectationV1, MutableSystemControlGuardV1,
-  MutableSystemControlPublicationErrorV1, MutableSystemControlPublicationRequestV1, MutableSystemControlPublicationReceiptV1,
-  V4FirstAuthorityPublisher,
+  FirstAuthorityPublicationErrorV1, LoadedMutableSystemControlV1, MutableSystemControlAuthorityExpectationV1,
+  MutableSystemControlExpectationV1, MutableSystemControlGuardV1, MutableSystemControlPublicationErrorV1,
+  MutableSystemControlPublicationRequestV1, MutableSystemControlPublicationReceiptV1, V4FirstAuthorityPublisher,
 };
 use super::gc_retirement::{RetirementJournalOwnerErrorV1, RetirementJournalOwnerV1};
 use super::header_publication::DatabaseHeaderObservationV4;
@@ -22,6 +22,7 @@ use super::migration_control::{
   MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control, encode_migration_lease_control,
   encode_migration_progress_control,
 };
+use super::migration_final_authority_reconciliation::MigrationFinalAuthorityReconciliationProofV1;
 use super::migration_preflight::MigrationPreflightPermitV1;
 use super::reader::FormatError;
 use super::system_control::SystemControlKindV1;
@@ -107,6 +108,14 @@ pub struct MigrationFullReconciliationLatchRequestV1 {
 pub struct MigrationReplayCheckpointPublicationRequestV1 {
   pub reconciled_through_publication_sequence: u64,
   pub destination_header_sequence: u64,
+  pub updated_at_ms: i64,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct MigrationFinalFreezeCompletionRequestV1<'proof, 'freeze, 'source> {
+  pub proof: &'proof MigrationFinalAuthorityReconciliationProofV1<'freeze, 'source>,
   pub updated_at_ms: i64,
   pub publication_timestamp_ms: u64,
   pub monotonic_now_ms: u64,
@@ -407,6 +416,14 @@ impl MigrationStateOwnerV1 {
     request: MigrationProgressTransitionRequestV1,
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if request.phase as u16 > MigrationPhaseV1::FinalFreeze as u16
+      || (request.phase == MigrationPhaseV1::FinalFreeze && request.state == MigrationProgressStateV1::Complete)
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_progress_specialized_authority",
+        "final-freeze completion and every later phase require their specialized live-proof authority",
+      ));
+    }
     let (context, progress) =
       self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
 
@@ -539,6 +556,69 @@ impl MigrationStateOwnerV1 {
     self.publish_progress_body(context, &progress, body, 0, true, retirement_owner)
   }
 
+  pub fn complete_final_freeze(
+    &self,
+    request: MigrationFinalFreezeCompletionRequestV1<'_, '_, '_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    request
+      .proof
+      .validate_for_completion(&self.permit, &self.publisher)
+      .map_err(|error| MigrationStateOwnerErrorV1::invalid(error.code(), error.to_string()))?;
+    let closure = request.proof.closure();
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if progress.body.phase != MigrationPhaseV1::FinalFreeze
+      || !matches!(progress.body.state, MigrationProgressStateV1::Running | MigrationProgressStateV1::Complete)
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_final_freeze_phase",
+        "specialized final-freeze completion requires running or already complete FinalFreeze progress",
+      ));
+    }
+    if progress.body.flags & MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED == 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_progress_gc_suspension_required",
+        "final-freeze completion requires durable source GC suspension",
+      ));
+    }
+    if closure.frozen_source_publication_sequence < progress.body.reconciled_through_publication_sequence
+      || closure.destination_header_sequence < progress.body.destination_header_sequence
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_final_freeze_proof_regression",
+        "live final-freeze proof is older than selected migration progress",
+      ));
+    }
+
+    let mut body = progress.body.clone();
+    body.phase = MigrationPhaseV1::FinalFreeze;
+    body.state = MigrationProgressStateV1::Complete;
+    body.flags |= MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD;
+    body.destination_header_sequence = closure.destination_header_sequence;
+    body.reconciled_through_publication_sequence = closure.frozen_source_publication_sequence;
+    body.updated_at_ms = request.updated_at_ms;
+    if body == progress.body {
+      return Ok(progress_receipt(&progress, true));
+    }
+    request
+      .proof
+      .validate_for_completion(&self.permit, &self.publisher)
+      .map_err(|error| MigrationStateOwnerErrorV1::invalid(error.code(), error.to_string()))?;
+    self.publish_progress_body_with_authority_expectation(
+      context,
+      &progress,
+      body,
+      MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD,
+      true,
+      MutableSystemControlAuthorityExpectationV1 {
+        selected_header_sequence: closure.destination_header_sequence,
+        head_hash: &closure.destination_namespace_root,
+      },
+      retirement_owner,
+    )
+  }
+
   pub fn observe_capture_state(
     &self,
     updated_at_ms: i64,
@@ -650,6 +730,50 @@ impl MigrationStateOwnerV1 {
     allow_same_state_metadata_update: bool,
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    self.publish_progress_body_inner(
+      context,
+      progress,
+      body,
+      authorized_new_flags,
+      allow_same_state_metadata_update,
+      None,
+      retirement_owner,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn publish_progress_body_with_authority_expectation(
+    &self,
+    context: MigrationProgressPublicationContextV1,
+    progress: &MigrationProgressControlV1,
+    body: MigrationProgressBodyV1,
+    authorized_new_flags: u32,
+    allow_same_state_metadata_update: bool,
+    authority_expectation: MutableSystemControlAuthorityExpectationV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    self.publish_progress_body_inner(
+      context,
+      progress,
+      body,
+      authorized_new_flags,
+      allow_same_state_metadata_update,
+      Some(authority_expectation),
+      retirement_owner,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn publish_progress_body_inner(
+    &self,
+    context: MigrationProgressPublicationContextV1,
+    progress: &MigrationProgressControlV1,
+    body: MigrationProgressBodyV1,
+    authorized_new_flags: u32,
+    allow_same_state_metadata_update: bool,
+    authority_expectation: Option<MutableSystemControlAuthorityExpectationV1<'_>>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
     validate_progress_transition(&progress.body, &body, authorized_new_flags, allow_same_state_metadata_update)?;
     let sequence = progress.sequence.checked_add(1).ok_or_else(|| {
       MigrationStateOwnerErrorV1::invalid("migration_progress_sequence_exhausted", "migration progress sequence is exhausted")
@@ -661,7 +785,7 @@ impl MigrationStateOwnerV1 {
       identity: &guard_identity,
       expected: control_expectation(&context.loaded_lease),
     }];
-    let receipt = publish_owned_control(
+    let receipt = publish_owned_control_inner(
       &self.publisher,
       &self.permit,
       SystemControlKindV1::MigrationProgress,
@@ -672,6 +796,7 @@ impl MigrationStateOwnerV1 {
       context.monotonic_now_ms,
       retirement_owner,
       MigrationCommittedControlV1::Progress,
+      authority_expectation,
     )?;
     Ok(MigrationProgressTransitionReceiptV1 {
       control_sequence: receipt.control_sequence,
@@ -1687,7 +1812,7 @@ fn publish_owned_control(
   retirement_owner: &mut RetirementJournalOwnerV1,
   committed_control: MigrationCommittedControlV1,
 ) -> Result<MutableSystemControlPublicationReceiptV1, MigrationStateOwnerErrorV1> {
-  match publish_control(
+  publish_owned_control_inner(
     publisher,
     permit,
     kind,
@@ -1697,6 +1822,36 @@ fn publish_owned_control(
     publication_timestamp_ms,
     monotonic_now_ms,
     retirement_owner,
+    committed_control,
+    None,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_owned_control_inner(
+  publisher: &V4FirstAuthorityPublisher,
+  permit: &MigrationPreflightPermitV1,
+  kind: SystemControlKindV1,
+  expected: Option<MutableSystemControlExpectationV1>,
+  guards: &[MutableSystemControlGuardV1<'_>],
+  encoded_control: &[u8],
+  publication_timestamp_ms: u64,
+  monotonic_now_ms: u64,
+  retirement_owner: &mut RetirementJournalOwnerV1,
+  committed_control: MigrationCommittedControlV1,
+  authority_expectation: Option<MutableSystemControlAuthorityExpectationV1<'_>>,
+) -> Result<MutableSystemControlPublicationReceiptV1, MigrationStateOwnerErrorV1> {
+  match publish_control_inner(
+    publisher,
+    permit,
+    kind,
+    expected,
+    guards,
+    encoded_control,
+    publication_timestamp_ms,
+    monotonic_now_ms,
+    retirement_owner,
+    authority_expectation,
   ) {
     Ok(receipt) => Ok(receipt),
     Err(source) if source.committed_receipt().is_some() => match committed_control {
@@ -1718,17 +1873,45 @@ fn publish_control(
   monotonic_now_ms: u64,
   retirement_owner: &mut RetirementJournalOwnerV1,
 ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
-  publisher.publish_mutable_system_control(
-    MutableSystemControlPublicationRequestV1 {
-      database_id: &permit.database_id(),
-      kind,
-      identity: &permit.migration_id(),
-      expected,
-      guards,
-      encoded_control,
-      publication_timestamp_ms,
-      monotonic_now_ms,
-    },
+  publish_control_inner(
+    publisher,
+    permit,
+    kind,
+    expected,
+    guards,
+    encoded_control,
+    publication_timestamp_ms,
+    monotonic_now_ms,
     retirement_owner,
+    None,
   )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_control_inner(
+  publisher: &V4FirstAuthorityPublisher,
+  permit: &MigrationPreflightPermitV1,
+  kind: SystemControlKindV1,
+  expected: Option<MutableSystemControlExpectationV1>,
+  guards: &[MutableSystemControlGuardV1<'_>],
+  encoded_control: &[u8],
+  publication_timestamp_ms: u64,
+  monotonic_now_ms: u64,
+  retirement_owner: &mut RetirementJournalOwnerV1,
+  authority_expectation: Option<MutableSystemControlAuthorityExpectationV1<'_>>,
+) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
+  let request = MutableSystemControlPublicationRequestV1 {
+    database_id: &permit.database_id(),
+    kind,
+    identity: &permit.migration_id(),
+    expected,
+    guards,
+    encoded_control,
+    publication_timestamp_ms,
+    monotonic_now_ms,
+  };
+  match authority_expectation {
+    Some(expectation) => publisher.publish_mutable_system_control_with_authority_expectation(request, expectation, retirement_owner),
+    None => publisher.publish_mutable_system_control(request, retirement_owner),
+  }
 }

@@ -38,7 +38,7 @@ use crate::engine::HashAlgorithm;
 
 const MAX_BATCH_ENTITIES: usize = 511;
 const MAX_BATCH_ENCODED_BYTES: usize = 64 * 1024 * 1024;
-const MAX_DIRECTORY_DEPTH: usize = 1_000;
+pub(super) const MAX_DIRECTORY_DEPTH: usize = 1_000;
 const MAX_BTREE_DEPTH: usize = 128;
 const MAX_SEED_PATH_BYTES: usize = u16::MAX as usize;
 const OWNED_ALLOCATION_OVERHEAD: u64 = 128;

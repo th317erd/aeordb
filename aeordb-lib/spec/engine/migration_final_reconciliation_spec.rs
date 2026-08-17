@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -6,6 +6,7 @@ use std::time::Duration;
 use aeordb::engine::btree::{BTREE_CONVERSION_THRESHOLD, BTreeNode, InternalNode, LeafNode, btree_plan_from_entries};
 use aeordb::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use aeordb::engine::file_header::read_active_header;
+use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy, MemoryPressure};
 use aeordb::engine::native_durability::{PlatformFileIdentityDescriptorV1, platform_file_identity};
 use aeordb::engine::storage_engine::EntryData;
@@ -16,16 +17,32 @@ use aeordb::engine::v4::first_authority::{
   ImmutableEntityBatchPublicationRequestV1, ImmutableEntityWriteV1, SuccessorAuthorityPublicationRequestV1, V4FirstAuthorityPublisher,
 };
 use aeordb::engine::v4::hash::digest_parts;
-use aeordb::engine::v4::migration_base_clone_execution::MigrationBaseCloneEntrySourceV1;
+use aeordb::engine::v4::migration_base_clone_execution::{
+  MigrationBaseCloneEntrySourceV1, MigrationBaseCloneSeedKindV1, MigrationBaseCloneSeedV1,
+};
 use aeordb::engine::v4::migration_capture_replay::MigrationCaptureReplayAuthorityTemplateV1;
 use aeordb::engine::v4::migration_destination::{
   InitializedMigrationDestinationV1, MigrationDestinationInitializationRequestV1, initialize_migration_destination_v1,
   observe_migration_destination_path_v1,
 };
 use aeordb::engine::v4::migration_final_reconciliation::{
-  MigrationFinalNamespaceReconciliationRequestV1, MigrationMerkleChangeKindV1, MigrationMerkleChangeV1, MigrationMerkleDiffRequestV1,
-  MigrationMerkleDiffSinkV1, MigrationSourceWriteFreezeRequestV1, MigrationSourceWriteFreezeV1, acquire_migration_source_write_freeze_v1,
-  execute_final_namespace_reconciliation_v1, stream_strict_migration_merkle_diff_v1,
+  MigrationFinalNamespaceReconciliationReceiptV1, MigrationFinalNamespaceReconciliationRequestV1, MigrationMerkleChangeKindV1,
+  MigrationMerkleChangeV1, MigrationMerkleDiffRequestV1, MigrationMerkleDiffSinkV1, MigrationSourceWriteFreezeRequestV1,
+  MigrationSourceWriteFreezeV1, acquire_migration_source_write_freeze_v1, execute_final_namespace_reconciliation_v1,
+  stream_strict_migration_merkle_diff_v1,
+};
+use aeordb::engine::v4::migration_control::{
+  MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationPhaseV1,
+  MigrationProgressStateV1, decode_migration_progress_control,
+};
+use aeordb::engine::v4::migration_owner::{
+  MigrationAcquisitionRequestV1, MigrationFinalFreezeCompletionRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
+};
+use aeordb::engine::v4::migration_final_authority_reconciliation::{
+  MigrationFinalAuthorityInventoryClosureV1, MigrationFinalAuthorityInventorySourceV1, MigrationFinalAuthorityReconciliationErrorV1,
+  MigrationFinalAuthorityReconciliationRequestV1, MigrationFinalAuthoritySeedCountsV1, MigrationFinalAuthoritySeedV1,
+  MigrationFinalPriorRootMappingLookupV1, MigrationFinalRootMappingClosureV1, MigrationFinalRootMappingSinkV1, MigrationFinalRootMappingV1,
+  execute_final_authority_reconciliation_v1,
 };
 use aeordb::engine::v4::migration_preflight::{
   AuthorityInventoryCountsV1, CapacityRoleV1, MigrationBinaryEvidenceV1, MigrationCapacityObservationV1, MigrationConfigurationEvidenceV1,
@@ -33,11 +50,13 @@ use aeordb::engine::v4::migration_preflight::{
   MigrationPreflightRequestV1, MigrationRecoveryEvidenceV1, MigrationSourceEvidenceV1, NativeCutoverCapabilitiesV1,
   SourceAuthorityInventoryV1, StrictVerificationEvidenceV1, StrictVerificationStateV1, admit_migration_preflight_v1,
 };
+use aeordb::engine::v4::migration_source_gc::{MigrationSourceGcSuspensionOwnerV1, MigrationSourceGcSuspensionRequestV1};
 use aeordb::engine::v4::namespace::{
   NamespaceRootWriteV1, SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_namespace_root,
   encode_semantic_state_object, decode_namespace_root,
 };
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
+use aeordb::engine::v4::system_control::SystemControlKindV1;
 use aeordb::engine::{
   CompressionAlgorithm, EngineError, EngineResult, EntryHeader, EntryType, FileRecord, HashAlgorithm, NamespaceMutationBatch,
   NamespaceMutationCoordinator, NamespaceMutationKind, NamespaceMutationSourceIdentity, StorageEngine,
@@ -1224,5 +1243,1229 @@ fn final_reconciliation_refuses_invalid_or_cancelled_work_without_moving_authori
       .unwrap_err();
   assert!(error.code().starts_with("migration_"), "{}: {error}", error.code());
   assert_eq!(fixture.destination.publisher().observe().unwrap().selected.header, before);
+  freeze.validate_unchanged().unwrap();
+}
+
+struct FinalInventoryStream {
+  seeds: VecDeque<MigrationFinalAuthoritySeedV1>,
+  closure: MigrationFinalAuthorityInventoryClosureV1,
+}
+
+impl MigrationFinalAuthorityInventorySourceV1 for FinalInventoryStream {
+  fn next_seed(&mut self) -> EngineResult<Option<MigrationFinalAuthoritySeedV1>> {
+    Ok(self.seeds.pop_front())
+  }
+
+  fn finish(&mut self) -> EngineResult<MigrationFinalAuthorityInventoryClosureV1> {
+    Ok(self.closure.clone())
+  }
+}
+
+#[derive(Default)]
+struct FinalPriorMappings {
+  rows: HashMap<Vec<u8>, Vec<u8>>,
+  lookups: u64,
+}
+
+impl MigrationFinalPriorRootMappingLookupV1 for FinalPriorMappings {
+  fn lookup_destination_entity(&mut self, seed: &MigrationFinalAuthoritySeedV1) -> EngineResult<Option<Vec<u8>>> {
+    self.lookups += 1;
+    Ok(self.rows.get(&seed.seed.hash).cloned())
+  }
+}
+
+#[derive(Default)]
+struct FinalMappingSink {
+  rows: Vec<MigrationFinalRootMappingV1>,
+  closure: Option<MigrationFinalRootMappingClosureV1>,
+  fail_record: bool,
+  fail_finish: bool,
+}
+
+impl MigrationFinalRootMappingSinkV1 for FinalMappingSink {
+  fn record_root_mapping(&mut self, mapping: &MigrationFinalRootMappingV1) -> EngineResult<()> {
+    if self.fail_record {
+      return Err(EngineError::ResourceExhausted("injected final mapping sink failure".to_string()));
+    }
+    self.rows.push(mapping.clone());
+    Ok(())
+  }
+
+  fn finish_root_mappings(&mut self, closure: &MigrationFinalRootMappingClosureV1) -> EngineResult<()> {
+    if self.fail_finish {
+      return Err(EngineError::ResourceExhausted("injected final mapping closure failure".to_string()));
+    }
+    if let Some(existing) = self.closure.as_ref() {
+      if existing != closure {
+        return Err(EngineError::InvalidInput("final mapping closure changed across retry".to_string()));
+      }
+    } else {
+      self.closure = Some(closure.clone());
+    }
+    Ok(())
+  }
+}
+
+struct FailingFinalInventory {
+  head: Option<MigrationFinalAuthoritySeedV1>,
+  closure: MigrationFinalAuthorityInventoryClosureV1,
+  fail_next: bool,
+  fail_finish: bool,
+}
+
+impl MigrationFinalAuthorityInventorySourceV1 for FailingFinalInventory {
+  fn next_seed(&mut self) -> EngineResult<Option<MigrationFinalAuthoritySeedV1>> {
+    if self.fail_next {
+      return Err(EngineError::ResourceExhausted("injected final inventory read failure".to_string()));
+    }
+    Ok(self.head.take())
+  }
+
+  fn finish(&mut self) -> EngineResult<MigrationFinalAuthorityInventoryClosureV1> {
+    if self.fail_finish {
+      return Err(EngineError::ResourceExhausted("injected final inventory closure failure".to_string()));
+    }
+    Ok(self.closure.clone())
+  }
+}
+
+struct FailingFinalPriorMappings;
+
+impl MigrationFinalPriorRootMappingLookupV1 for FailingFinalPriorMappings {
+  fn lookup_destination_entity(&mut self, _seed: &MigrationFinalAuthoritySeedV1) -> EngineResult<Option<Vec<u8>>> {
+    Err(EngineError::ResourceExhausted("injected final prior-map failure".to_string()))
+  }
+}
+
+struct OneShotFinalPriorMapping {
+  destination: Option<Vec<u8>>,
+}
+
+impl MigrationFinalPriorRootMappingLookupV1 for OneShotFinalPriorMapping {
+  fn lookup_destination_entity(&mut self, _seed: &MigrationFinalAuthoritySeedV1) -> EngineResult<Option<Vec<u8>>> {
+    Ok(self.destination.take())
+  }
+}
+
+struct MovingFinalInventory {
+  seeds: VecDeque<MigrationFinalAuthoritySeedV1>,
+  closure: Option<MigrationFinalAuthorityInventoryClosureV1>,
+}
+
+impl MigrationFinalAuthorityInventorySourceV1 for MovingFinalInventory {
+  fn next_seed(&mut self) -> EngineResult<Option<MigrationFinalAuthoritySeedV1>> {
+    Ok(self.seeds.pop_front())
+  }
+
+  fn finish(&mut self) -> EngineResult<MigrationFinalAuthorityInventoryClosureV1> {
+    self.closure.take().ok_or_else(|| EngineError::InvalidInput("final inventory closure already consumed".to_string()))
+  }
+}
+
+struct MutatingFinalMappingSink {
+  publisher: Arc<V4FirstAuthorityPublisher>,
+  database_id: [u8; 16],
+  rows: Vec<MigrationFinalRootMappingV1>,
+}
+
+impl MigrationFinalRootMappingSinkV1 for MutatingFinalMappingSink {
+  fn record_root_mapping(&mut self, mapping: &MigrationFinalRootMappingV1) -> EngineResult<()> {
+    self.rows.push(mapping.clone());
+    Ok(())
+  }
+
+  fn finish_root_mappings(&mut self, _closure: &MigrationFinalRootMappingClosureV1) -> EngineResult<()> {
+    let value = b"sink authority mutation".to_vec();
+    let key = digest_parts(ALGORITHM, &[b"chunk:", &value]);
+    publish_projection_entities(self.publisher.as_ref(), self.database_id, &[(0, EntryTypeV4::Chunk, key, value)]);
+    Ok(())
+  }
+}
+
+struct CancellingFinalInventory {
+  head: Option<MigrationFinalAuthoritySeedV1>,
+  closure: MigrationFinalAuthorityInventoryClosureV1,
+  cancellation: CancellationToken,
+}
+
+impl MigrationFinalAuthorityInventorySourceV1 for CancellingFinalInventory {
+  fn next_seed(&mut self) -> EngineResult<Option<MigrationFinalAuthoritySeedV1>> {
+    Ok(self.head.take())
+  }
+
+  fn finish(&mut self) -> EngineResult<MigrationFinalAuthorityInventoryClosureV1> {
+    self.cancellation.cancel();
+    Ok(self.closure.clone())
+  }
+}
+
+struct CancellingFinalMappingSink {
+  cancellation: CancellationToken,
+}
+
+impl MigrationFinalRootMappingSinkV1 for CancellingFinalMappingSink {
+  fn record_root_mapping(&mut self, _mapping: &MigrationFinalRootMappingV1) -> EngineResult<()> {
+    Ok(())
+  }
+
+  fn finish_root_mappings(&mut self, _closure: &MigrationFinalRootMappingClosureV1) -> EngineResult<()> {
+    self.cancellation.cancel();
+    Ok(())
+  }
+}
+
+fn final_authority_digest(rows: &[MigrationFinalAuthoritySeedV1], counts: AuthorityInventoryCountsV1) -> [u8; 32] {
+  let mut hasher = blake3::Hasher::new();
+  hasher.update(b"aeordb.migration-final-authority-inventory.v1\0");
+  for row in rows {
+    let kind = match row.seed.kind {
+      MigrationBaseCloneSeedKindV1::CurrentHead => 0,
+      MigrationBaseCloneSeedKindV1::Snapshot => 1,
+      MigrationBaseCloneSeedKindV1::Fork => 2,
+      MigrationBaseCloneSeedKindV1::SyncPin => 3,
+      MigrationBaseCloneSeedKindV1::Maintenance => 4,
+      MigrationBaseCloneSeedKindV1::DetachedProtectedPath => 5,
+    };
+    hasher.update(&[kind]);
+    hasher.update(&(row.authority_identity.len() as u32).to_le_bytes());
+    hasher.update(&row.authority_identity);
+    hasher.update(&row.source_write_sequence.to_le_bytes());
+    match row.system_family_id {
+      Some(family_id) => {
+        hasher.update(&[1]);
+        hasher.update(&family_id.to_le_bytes());
+      }
+      None => {
+        hasher.update(&[0]);
+      }
+    }
+    hasher.update(&row.logical_bytes.to_le_bytes());
+    hasher.update(&(row.seed.path.len() as u32).to_le_bytes());
+    hasher.update(row.seed.path.as_bytes());
+    hasher.update(&[row.seed.entry_type.to_u8()]);
+    hasher.update(&(row.seed.hash.len() as u16).to_le_bytes());
+    hasher.update(&row.seed.hash);
+  }
+  hasher.update(b"authority-counts\0");
+  for value in [
+    counts.protected_families,
+    counts.modules,
+    counts.snapshots,
+    counts.forks,
+    counts.symlinks,
+    counts.history_roots,
+    counts.peers,
+    counts.sync_states,
+    counts.tasks,
+    counts.plugins,
+    counts.roots,
+  ] {
+    hasher.update(&value.to_le_bytes());
+  }
+  *hasher.finalize().as_bytes()
+}
+
+fn final_inventory_closure(
+  fixture: &ProjectionFixture,
+  freeze: &MigrationSourceWriteFreezeV1<'_>,
+  rows: &[MigrationFinalAuthoritySeedV1],
+  seed_counts: MigrationFinalAuthoritySeedCountsV1,
+) -> MigrationFinalAuthorityInventoryClosureV1 {
+  let registry = embedded_system_family_registry(fixture.permit.hash_algorithm()).unwrap();
+  let source_authority_counts = AuthorityInventoryCountsV1 {
+    protected_families: u64::from(registry.family_count),
+    roots: seed_counts.root_count().unwrap(),
+    snapshots: seed_counts.snapshots,
+    forks: seed_counts.forks,
+    ..Default::default()
+  };
+  MigrationFinalAuthorityInventoryClosureV1 {
+    complete: true,
+    database_id: fixture.permit.database_id(),
+    source_physical_instance_id: fixture.permit.source_physical_instance_id(),
+    source_physical_identity: freeze.authority().physical_identity,
+    source_header_sequence: freeze.authority().header_sequence,
+    frozen_source_root: freeze.authority().namespace_root.clone(),
+    frozen_source_publication_sequence: freeze.authority().hard_publication_frontier,
+    unresolved_family_count: 0,
+    source_authority_counts,
+    seed_counts,
+    seed_count: rows.len() as u64,
+    authority_digest: final_authority_digest(rows, source_authority_counts),
+    system_family_registry_fingerprint: registry.operational_fingerprint.clone(),
+  }
+}
+
+fn final_head_rows(freeze: &MigrationSourceWriteFreezeV1<'_>) -> Vec<MigrationFinalAuthoritySeedV1> {
+  vec![MigrationFinalAuthoritySeedV1 {
+    authority_identity: Vec::new(),
+    source_write_sequence: freeze.authority().hard_publication_frontier,
+    system_family_id: None,
+    logical_bytes: 0,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::CurrentHead,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: freeze.authority().namespace_root.clone(),
+    },
+  }]
+}
+
+fn final_authority_request<'request, 'freeze, 'source>(
+  fixture: &'request ProjectionFixture,
+  namespace: &'request MigrationFinalNamespaceReconciliationReceiptV1<'freeze, 'source>,
+  inventory: &'request mut dyn MigrationFinalAuthorityInventorySourceV1,
+  prior_mappings: &'request mut dyn MigrationFinalPriorRootMappingLookupV1,
+  root_sink: &'request mut dyn MigrationFinalRootMappingSinkV1,
+  cancellation: &'request CancellationToken,
+) -> MigrationFinalAuthorityReconciliationRequestV1<'request, 'freeze, 'source> {
+  MigrationFinalAuthorityReconciliationRequestV1 {
+    permit: &fixture.permit,
+    namespace,
+    inventory,
+    prior_mappings,
+    root_sink,
+    destination: fixture.destination.publisher(),
+    authority: &fixture.authority,
+    memory: &fixture.memory,
+    cancellation,
+    publication_timestamp_ms: 1_700_000_003_000,
+    maximum_memory_bytes: 16 << 20,
+    maximum_work_items: 100_000,
+    maximum_subtree_memory_bytes: 16 << 20,
+    maximum_subtree_work_items: 100_000,
+    maximum_total_subtree_work_items: 100_000,
+    maximum_decoded_chunk_bytes: 1 << 20,
+    maximum_destination_entity_bytes: 1 << 20,
+    maximum_directory_depth: 128,
+  }
+}
+
+fn final_authority_error(
+  request: MigrationFinalAuthorityReconciliationRequestV1<'_, '_, '_>,
+) -> MigrationFinalAuthorityReconciliationErrorV1 {
+  match execute_final_authority_reconciliation_v1(request) {
+    Ok(_) => panic!("final authority reconciliation unexpectedly succeeded"),
+    Err(error) => error,
+  }
+}
+
+fn final_retirement_owner(fixture: &ProjectionFixture, cancellation: &CancellationToken) -> RetirementJournalOwnerV1 {
+  RetirementJournalOwnerV1::new_chain(
+    fixture.permit.hash_algorithm(),
+    fixture.permit.database_id(),
+    1,
+    901,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    cancellation,
+    &fixture.memory,
+  )
+  .unwrap()
+}
+
+fn final_progress_transition(
+  fixture: &ProjectionFixture,
+  phase: MigrationPhaseV1,
+  state: MigrationProgressStateV1,
+  step: u64,
+) -> MigrationProgressTransitionRequestV1 {
+  let updated_at_ms = 1_700_000_001_000 + step as i64;
+  MigrationProgressTransitionRequestV1 {
+    phase,
+    state,
+    flags: MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+    destination_header_sequence: 0,
+    copied_through_write_sequence: 0,
+    reconciled_through_publication_sequence: 0,
+    namespace_count: 0,
+    entity_count: 0,
+    copied_bytes: 0,
+    updated_at_ms,
+    legacy_root_map_control_payload_hash: vec![0; fixture.permit.hash_algorithm().hash_length()],
+    last_error_evidence: vec![0; fixture.permit.hash_algorithm().hash_length()],
+    publication_timestamp_ms: updated_at_ms as u64 + 10,
+    monotonic_now_ms: 20_000 + step,
+  }
+}
+
+fn advance_to_final_freeze_running(fixture: &ProjectionFixture, owner: &MigrationStateOwnerV1, retirement: &mut RetirementJournalOwnerV1) {
+  for (phase, state, step) in [
+    (MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 100),
+    (MigrationPhaseV1::Preflight, MigrationProgressStateV1::Complete, 200),
+    (MigrationPhaseV1::Copy, MigrationProgressStateV1::Pending, 300),
+    (MigrationPhaseV1::Copy, MigrationProgressStateV1::Running, 400),
+    (MigrationPhaseV1::Copy, MigrationProgressStateV1::Complete, 500),
+    (MigrationPhaseV1::Reconcile, MigrationProgressStateV1::Pending, 600),
+    (MigrationPhaseV1::Reconcile, MigrationProgressStateV1::Running, 700),
+    (MigrationPhaseV1::Reconcile, MigrationProgressStateV1::Complete, 800),
+    (MigrationPhaseV1::FinalFreeze, MigrationProgressStateV1::Pending, 900),
+    (MigrationPhaseV1::FinalFreeze, MigrationProgressStateV1::Running, 1_000),
+  ] {
+    owner.transition_progress(final_progress_transition(fixture, phase, state, step), retirement).unwrap();
+  }
+}
+
+#[test]
+fn final_authority_closes_the_live_head_mapping_without_source_mutation() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let before = fs::read(&fixture.source_path).unwrap();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let rows = vec![MigrationFinalAuthoritySeedV1 {
+    authority_identity: Vec::new(),
+    source_write_sequence: freeze.authority().hard_publication_frontier,
+    system_family_id: None,
+    logical_bytes: 0,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::CurrentHead,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: freeze.authority().namespace_root.clone(),
+    },
+  }];
+  let seed_counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let mut inventory =
+    FinalInventoryStream { seeds: rows.clone().into(), closure: final_inventory_closure(&fixture, &freeze, &rows, seed_counts) };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let destination_head_before = fixture.destination.publisher().observe().unwrap().selected.header.head_hash;
+
+  let receipt = execute_final_authority_reconciliation_v1(MigrationFinalAuthorityReconciliationRequestV1 {
+    permit: &fixture.permit,
+    namespace: &namespace,
+    inventory: &mut inventory,
+    prior_mappings: &mut prior,
+    root_sink: &mut sink,
+    destination: fixture.destination.publisher(),
+    authority: &fixture.authority,
+    memory: &fixture.memory,
+    cancellation: &cancellation,
+    publication_timestamp_ms: 1_700_000_003_000,
+    maximum_memory_bytes: 16 << 20,
+    maximum_work_items: 100_000,
+    maximum_subtree_memory_bytes: 16 << 20,
+    maximum_subtree_work_items: 100_000,
+    maximum_total_subtree_work_items: 100_000,
+    maximum_decoded_chunk_bytes: 1 << 20,
+    maximum_destination_entity_bytes: 1 << 20,
+    maximum_directory_depth: 128,
+  })
+  .unwrap();
+
+  assert_eq!(receipt.processed_seed_count, 1);
+  assert_eq!(receipt.reused_mapping_count, 0);
+  assert_eq!(receipt.translated_seed_count, 0);
+  assert_eq!(receipt.omitted_seed_count, 0);
+  assert_eq!(prior.lookups, 0, "the live HEAD mapping must come from the d2 receipt");
+  assert_eq!(sink.rows.len(), 1);
+  assert_eq!(sink.rows[0].source_root, freeze.authority().namespace_root);
+  assert_eq!(sink.rows[0].destination_tree_root.as_deref(), Some(namespace.destination_tree_root.as_slice()));
+  assert_eq!(sink.rows[0].destination_namespace_root.as_deref(), Some(namespace.destination_namespace_root.as_slice()));
+  assert!(sink.closure.is_some());
+  receipt.proof().validate_live(fixture.destination.publisher()).unwrap();
+  assert_eq!(fixture.destination.publisher().observe().unwrap().selected.header.head_hash, destination_head_before);
+  assert_eq!(fs::read(&fixture.source_path).unwrap(), before);
+}
+
+#[test]
+fn only_live_final_authority_proof_can_complete_the_ampr_final_freeze() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let mut retirement = final_retirement_owner(&fixture, &cancellation);
+  let (owner, _) = MigrationStateOwnerV1::acquire(
+    fixture.destination.shared_publisher(),
+    fixture.permit.clone(),
+    MigrationAcquisitionRequestV1 {
+      holder_boot_id: id(0x61),
+      acquired_at_ms: 1_700_000_000_200,
+      lease_duration_ms: 60_000,
+      publication_timestamp_ms: 1_700_000_000_300,
+      monotonic_now_ms: 10_000,
+    },
+    &mut retirement,
+  )
+  .unwrap();
+  let (_gc_owner, _) = MigrationSourceGcSuspensionOwnerV1::suspend(
+    &fixture.source,
+    &owner,
+    MigrationSourceGcSuspensionRequestV1 {
+      suspended_at_ms: 1_700_000_001_000,
+      publication_timestamp_ms: 1_700_000_001_010,
+      monotonic_now_ms: 20_000,
+    },
+    &mut retirement,
+  )
+  .unwrap();
+  advance_to_final_freeze_running(&fixture, &owner, &mut retirement);
+
+  let before = fs::read(&fixture.source_path).unwrap();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let rows = vec![MigrationFinalAuthoritySeedV1 {
+    authority_identity: Vec::new(),
+    source_write_sequence: freeze.authority().hard_publication_frontier,
+    system_family_id: None,
+    logical_bytes: 0,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::CurrentHead,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: freeze.authority().namespace_root.clone(),
+    },
+  }];
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let mut inventory =
+    FinalInventoryStream { seeds: rows.clone().into(), closure: final_inventory_closure(&fixture, &freeze, &rows, counts) };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let final_authority = execute_final_authority_reconciliation_v1(MigrationFinalAuthorityReconciliationRequestV1 {
+    permit: &fixture.permit,
+    namespace: &namespace,
+    inventory: &mut inventory,
+    prior_mappings: &mut prior,
+    root_sink: &mut sink,
+    destination: fixture.destination.publisher(),
+    authority: &fixture.authority,
+    memory: &fixture.memory,
+    cancellation: &cancellation,
+    publication_timestamp_ms: 1_700_000_003_000,
+    maximum_memory_bytes: 16 << 20,
+    maximum_work_items: 100_000,
+    maximum_subtree_memory_bytes: 16 << 20,
+    maximum_subtree_work_items: 100_000,
+    maximum_total_subtree_work_items: 100_000,
+    maximum_decoded_chunk_bytes: 1 << 20,
+    maximum_destination_entity_bytes: 1 << 20,
+    maximum_directory_depth: 128,
+  })
+  .unwrap();
+  let proof_destination_sequence = final_authority.mapping_closure.destination_header_sequence;
+
+  let completion = owner
+    .complete_final_freeze(
+      MigrationFinalFreezeCompletionRequestV1 {
+        proof: final_authority.proof(),
+        updated_at_ms: 1_700_000_003_100,
+        publication_timestamp_ms: 1_700_000_003_200,
+        monotonic_now_ms: 40_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert_eq!(completion.phase, MigrationPhaseV1::FinalFreeze);
+  assert_eq!(completion.state, MigrationProgressStateV1::Complete);
+
+  let progress = fixture
+    .destination
+    .publisher()
+    .load_mutable_system_control(SystemControlKindV1::MigrationProgress, &fixture.permit.database_id(), &fixture.permit.migration_id())
+    .unwrap()
+    .unwrap();
+  let progress = decode_migration_progress_control(&progress.bytes, fixture.permit.hash_algorithm()).unwrap();
+  assert_eq!(progress.body.phase, MigrationPhaseV1::FinalFreeze);
+  assert_eq!(progress.body.state, MigrationProgressStateV1::Complete);
+  assert_ne!(progress.body.flags & MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, 0);
+  assert_eq!(progress.body.reconciled_through_publication_sequence, freeze.authority().hard_publication_frontier);
+  assert_eq!(progress.body.destination_header_sequence, proof_destination_sequence);
+  freeze.validate_unchanged().unwrap();
+  assert_eq!(fs::read(&fixture.source_path).unwrap(), before);
+
+  let stale = owner
+    .complete_final_freeze(
+      MigrationFinalFreezeCompletionRequestV1 {
+        proof: final_authority.proof(),
+        updated_at_ms: 1_700_000_003_300,
+        publication_timestamp_ms: 1_700_000_003_400,
+        monotonic_now_ms: 41_000,
+      },
+      &mut retirement,
+    )
+    .unwrap_err();
+  assert_eq!(stale.code(), "migration_final_authority_destination_changed");
+
+  let mut retry_inventory =
+    FinalInventoryStream { seeds: rows.clone().into(), closure: final_inventory_closure(&fixture, &freeze, &rows, counts) };
+  let mut retry_prior = FinalPriorMappings::default();
+  let mut retry_sink = FinalMappingSink::default();
+  let retry_authority = execute_final_authority_reconciliation_v1(final_authority_request(
+    &fixture,
+    &namespace,
+    &mut retry_inventory,
+    &mut retry_prior,
+    &mut retry_sink,
+    &cancellation,
+  ))
+  .unwrap();
+  assert!(retry_authority.mapping_closure.destination_header_sequence > proof_destination_sequence);
+  let retry = owner
+    .complete_final_freeze(
+      MigrationFinalFreezeCompletionRequestV1 {
+        proof: retry_authority.proof(),
+        updated_at_ms: 1_700_000_003_500,
+        publication_timestamp_ms: 1_700_000_003_600,
+        monotonic_now_ms: 42_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert!(!retry.idempotent, "a newly observed destination watermark requires one monotonic AMPR update");
+}
+
+#[test]
+fn final_authority_rejects_noncanonical_seeds_and_inexact_closures() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let head = final_head_rows(&freeze).remove(0);
+  let exact_rows = vec![head.clone()];
+  let exact_counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let exact_closure = final_inventory_closure(&fixture, &freeze, &exact_rows, exact_counts);
+  let before = fixture.destination.publisher().observe().unwrap().selected.header.clone();
+
+  let mut wrong_head = head.clone();
+  wrong_head.seed.path = "/not-head".to_string();
+  let mut invalid_hash = head.clone();
+  invalid_hash.seed.hash = vec![0; fixture.permit.hash_algorithm().hash_length()];
+  let snapshot_without_head = MigrationFinalAuthoritySeedV1 {
+    authority_identity: b"snapshot-1".to_vec(),
+    source_write_sequence: 1,
+    system_family_id: None,
+    logical_bytes: 17,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::Snapshot,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: fixture.basis_root.clone(),
+    },
+  };
+  let invalid_detached = MigrationFinalAuthoritySeedV1 {
+    authority_identity: b"detached-1".to_vec(),
+    source_write_sequence: 1,
+    system_family_id: Some(0x0013),
+    logical_bytes: 17,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::DetachedProtectedPath,
+      path: "/.aeordb-config/indexes.json".to_string(),
+      entry_type: EntryType::FileRecord,
+      hash: fixture.basis_file.clone(),
+    },
+  };
+  for (rows, expected) in [
+    (vec![head.clone(), head.clone()], "migration_final_authority_order"),
+    (vec![wrong_head], "migration_final_authority_head"),
+    (vec![invalid_hash], "migration_final_authority_seed"),
+    (vec![snapshot_without_head], "migration_final_authority_retained_root"),
+    (vec![head.clone(), invalid_detached], "migration_final_authority_family_binding"),
+  ] {
+    let mut inventory = FinalInventoryStream { seeds: rows.into(), closure: exact_closure.clone() };
+    let mut prior = FinalPriorMappings::default();
+    let mut sink = FinalMappingSink::default();
+    let error = final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation));
+    assert_eq!(error.code(), expected);
+    assert!(sink.closure.is_none());
+    assert_eq!(fixture.destination.publisher().observe().unwrap().selected.header, before);
+  }
+
+  for mutation in 0..15 {
+    let mut closure = exact_closure.clone();
+    match mutation {
+      0 => closure.complete = false,
+      1 => closure.unresolved_family_count = 1,
+      2 => closure.database_id[0] ^= 0xff,
+      3 => closure.source_physical_instance_id[0] ^= 0xff,
+      4 => closure.source_header_sequence += 1,
+      5 => closure.frozen_source_root[0] ^= 0xff,
+      6 => closure.frozen_source_publication_sequence += 1,
+      7 => closure.seed_counts.current_heads = 0,
+      8 => closure.seed_count += 1,
+      9 => closure.authority_digest[0] ^= 0xff,
+      10 => closure.system_family_registry_fingerprint[0] ^= 0xff,
+      11 => closure.source_authority_counts.protected_families -= 1,
+      12 => closure.source_authority_counts.roots += 1,
+      13 => closure.source_authority_counts.snapshots += 1,
+      14 => closure.source_authority_counts.modules += 1,
+      _ => unreachable!(),
+    }
+    let mut inventory = FinalInventoryStream { seeds: exact_rows.clone().into(), closure };
+    let mut prior = FinalPriorMappings::default();
+    let mut sink = FinalMappingSink::default();
+    let error = final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation));
+    assert_eq!(error.code(), "migration_final_authority_closure", "closure mutation {mutation}");
+    assert!(sink.closure.is_none());
+    assert_eq!(fixture.destination.publisher().observe().unwrap().selected.header, before);
+  }
+}
+
+#[test]
+fn final_authority_reuses_valid_roots_and_applies_detached_family_policy() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let mut rows = final_head_rows(&freeze);
+  rows.extend([
+    MigrationFinalAuthoritySeedV1 {
+      authority_identity: b"snapshot-1".to_vec(),
+      source_write_sequence: 1,
+      system_family_id: None,
+      logical_bytes: 17,
+      seed: MigrationBaseCloneSeedV1 {
+        kind: MigrationBaseCloneSeedKindV1::Snapshot,
+        path: "/".to_string(),
+        entry_type: EntryType::DirectoryIndex,
+        hash: fixture.basis_root.clone(),
+      },
+    },
+    MigrationFinalAuthoritySeedV1 {
+      authority_identity: b"01-detached-required".to_vec(),
+      source_write_sequence: 1,
+      system_family_id: Some(0x0001),
+      logical_bytes: 17,
+      seed: MigrationBaseCloneSeedV1 {
+        kind: MigrationBaseCloneSeedKindV1::DetachedProtectedPath,
+        path: "/.aeordb-config/indexes.json".to_string(),
+        entry_type: EntryType::FileRecord,
+        hash: fixture.basis_file.clone(),
+      },
+    },
+    MigrationFinalAuthoritySeedV1 {
+      authority_identity: b"02-detached-omit".to_vec(),
+      source_write_sequence: 1,
+      system_family_id: Some(0x0013),
+      logical_bytes: 17,
+      seed: MigrationBaseCloneSeedV1 {
+        kind: MigrationBaseCloneSeedKindV1::DetachedProtectedPath,
+        path: "/.aeordb-system/api-keys/key".to_string(),
+        entry_type: EntryType::FileRecord,
+        hash: fixture.basis_file.clone(),
+      },
+    },
+  ]);
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, snapshots: 1, detached_protected: 2, ..Default::default() };
+  let mut inventory =
+    FinalInventoryStream { seeds: rows.clone().into(), closure: final_inventory_closure(&fixture, &freeze, &rows, counts) };
+  let mut prior = FinalPriorMappings::default();
+  prior.rows.insert(fixture.basis_root.clone(), fixture.basis_root.clone());
+  prior.rows.insert(fixture.basis_file.clone(), fixture.basis_file.clone());
+  let mut sink = FinalMappingSink::default();
+
+  let receipt = execute_final_authority_reconciliation_v1(final_authority_request(
+    &fixture,
+    &namespace,
+    &mut inventory,
+    &mut prior,
+    &mut sink,
+    &cancellation,
+  ))
+  .unwrap();
+
+  assert_eq!(receipt.processed_seed_count, 4);
+  assert_eq!(receipt.reused_mapping_count, 2);
+  assert_eq!(receipt.translated_seed_count, 0);
+  assert_eq!(receipt.omitted_seed_count, 1);
+  assert_eq!(prior.lookups, 2, "HEAD and destination-local families must bypass prior-map lookup");
+  assert_eq!(sink.rows.len(), 4);
+  assert!(sink.rows[1].reused);
+  assert!(sink.rows[1].destination_namespace_root.is_some());
+  assert!(sink.rows[2].reused);
+  assert_eq!(sink.rows[2].destination_entity, Some(fixture.basis_file.clone()));
+  assert_eq!(sink.rows[3].destination_entity, None);
+  assert_eq!(receipt.mapping_closure.omitted_mapping_count, 1);
+  receipt.proof().validate_live(fixture.destination.publisher()).unwrap();
+}
+
+#[test]
+fn final_authority_rejects_invalid_prior_mapping_entities() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let mut rows = final_head_rows(&freeze);
+  rows.push(MigrationFinalAuthoritySeedV1 {
+    authority_identity: b"snapshot-1".to_vec(),
+    source_write_sequence: 1,
+    system_family_id: None,
+    logical_bytes: 17,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::Snapshot,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: fixture.basis_root.clone(),
+    },
+  });
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, snapshots: 1, ..Default::default() };
+  let closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+  let wrong_type = digest_parts(ALGORITHM, &[b"chunk:", b"old"]);
+  for (mapped, expected) in [
+    (vec![0x44; ALGORITHM.hash_length() - 1], "migration_final_authority_prior_mapping_hash"),
+    (digest_parts(ALGORITHM, &[b"missing prior mapping"]), "migration_final_authority_prior_mapping_missing"),
+    (wrong_type, "migration_final_authority_prior_mapping_type"),
+  ] {
+    let mut inventory = FinalInventoryStream { seeds: rows.clone().into(), closure: closure.clone() };
+    let mut prior = FinalPriorMappings::default();
+    prior.rows.insert(fixture.basis_root.clone(), mapped);
+    let mut sink = FinalMappingSink::default();
+    let error = final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation));
+    assert_eq!(error.code(), expected);
+    assert!(sink.closure.is_none());
+  }
+}
+
+#[test]
+fn final_authority_translates_a_new_retained_root_under_the_aggregate_work_bound() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let (snapshot_chunk, snapshot_file, snapshot_file_value) = projection_file(ALGORITHM, b"new retained snapshot", 1_700_000_000_050);
+  let (snapshot_root, snapshot_root_value) = projection_root(ALGORITHM, snapshot_file.clone(), 1_700_000_000_050);
+  for (entry_type, version, key, value) in [
+    (EntryType::Chunk, 0, snapshot_chunk, b"new retained snapshot".to_vec()),
+    (EntryType::FileRecord, 1, snapshot_file, snapshot_file_value),
+    (EntryType::DirectoryIndex, 0, snapshot_root.clone(), snapshot_root_value),
+  ] {
+    fixture.source.store_entry_with_version(entry_type, &key, &value, version).unwrap();
+  }
+  let before_source = fs::read(&fixture.source_path).unwrap();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let mut rows = final_head_rows(&freeze);
+  rows.push(MigrationFinalAuthoritySeedV1 {
+    authority_identity: b"snapshot-new".to_vec(),
+    source_write_sequence: freeze.authority().hard_publication_frontier,
+    system_family_id: None,
+    logical_bytes: 21,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::Snapshot,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: snapshot_root,
+    },
+  });
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, snapshots: 1, ..Default::default() };
+  let closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+
+  let mut bounded_inventory = FinalInventoryStream { seeds: rows.clone().into(), closure: closure.clone() };
+  let mut bounded_prior = FinalPriorMappings::default();
+  let mut bounded_sink = FinalMappingSink::default();
+  let mut bounded =
+    final_authority_request(&fixture, &namespace, &mut bounded_inventory, &mut bounded_prior, &mut bounded_sink, &cancellation);
+  bounded.maximum_subtree_work_items = 1;
+  bounded.maximum_total_subtree_work_items = 1;
+  assert_eq!(final_authority_error(bounded).code(), "migration_clone_work_limit");
+  assert!(bounded_sink.closure.is_none());
+
+  let mut inventory = FinalInventoryStream { seeds: rows.into(), closure };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let receipt = execute_final_authority_reconciliation_v1(final_authority_request(
+    &fixture,
+    &namespace,
+    &mut inventory,
+    &mut prior,
+    &mut sink,
+    &cancellation,
+  ))
+  .unwrap();
+  assert_eq!(receipt.translated_seed_count, 1);
+  assert!(receipt.translated_subtree_work_items >= 3);
+  assert_eq!(receipt.reused_mapping_count, 0);
+  assert_eq!(prior.lookups, 1);
+  let translated = sink.rows[1].destination_entity.as_ref().unwrap();
+  let loaded = fixture.destination.publisher().load_immutable_entity_bounded(translated, 1 << 20).unwrap().unwrap();
+  assert_eq!(loaded.entry_type, EntryTypeV4::DirectoryIndex);
+  assert_eq!(fs::read(&fixture.source_path).unwrap(), before_source);
+  receipt.proof().validate_live(fixture.destination.publisher()).unwrap();
+}
+
+#[test]
+fn final_authority_bounds_cancellation_and_component_failures_never_issue_a_proof() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let rows = final_head_rows(&freeze);
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+  let before = fixture.destination.publisher().observe().unwrap().selected.header.clone();
+
+  let mut inventory = FinalInventoryStream { seeds: rows.clone().into(), closure: closure.clone() };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let mut invalid = final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation);
+  invalid.maximum_memory_bytes = 0;
+  assert_eq!(final_authority_error(invalid).code(), "migration_final_authority_bounds");
+
+  let mut inventory = FinalInventoryStream { seeds: rows.clone().into(), closure: closure.clone() };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let mut invalid = final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation);
+  invalid.maximum_directory_depth = 1_001;
+  assert_eq!(final_authority_error(invalid).code(), "migration_final_authority_bounds");
+
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  let mut inventory = FinalInventoryStream { seeds: rows.clone().into(), closure: closure.clone() };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  assert_eq!(
+    final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &canceled)).code(),
+    "migration_final_authority_cancelled"
+  );
+
+  let mut inventory = FinalInventoryStream { seeds: rows.clone().into(), closure: closure.clone() };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let mut bounded = final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation);
+  bounded.maximum_memory_bytes = 1;
+  assert_eq!(final_authority_error(bounded).code(), "migration_final_authority_memory_limit");
+
+  let mut two_rows = rows.clone();
+  two_rows.push(MigrationFinalAuthoritySeedV1 {
+    authority_identity: b"snapshot-1".to_vec(),
+    source_write_sequence: 1,
+    system_family_id: None,
+    logical_bytes: 17,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::Snapshot,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: fixture.basis_root.clone(),
+    },
+  });
+  let two_counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, snapshots: 1, ..Default::default() };
+  let two_closure = final_inventory_closure(&fixture, &freeze, &two_rows, two_counts);
+  let mut inventory = FinalInventoryStream { seeds: two_rows.clone().into(), closure: two_closure.clone() };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let mut bounded = final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation);
+  bounded.maximum_work_items = 1;
+  assert_eq!(final_authority_error(bounded).code(), "migration_final_authority_work_limit");
+
+  let mut inventory = FailingFinalInventory { head: None, closure: closure.clone(), fail_next: true, fail_finish: false };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  assert_eq!(
+    final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation)).code(),
+    "migration_final_authority_inventory_source"
+  );
+
+  let mut inventory = FailingFinalInventory { head: Some(rows[0].clone()), closure: closure.clone(), fail_next: false, fail_finish: true };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  assert_eq!(
+    final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation)).code(),
+    "migration_final_authority_inventory_source"
+  );
+
+  let mut inventory = FinalInventoryStream { seeds: two_rows.into(), closure: two_closure };
+  let mut prior = FailingFinalPriorMappings;
+  let mut sink = FinalMappingSink::default();
+  assert_eq!(
+    final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation)).code(),
+    "migration_final_authority_prior_mapping"
+  );
+
+  for fail_finish in [false, true] {
+    let mut inventory = FinalInventoryStream { seeds: rows.clone().into(), closure: closure.clone() };
+    let mut prior = FinalPriorMappings::default();
+    let mut sink = FinalMappingSink { fail_record: !fail_finish, fail_finish, ..Default::default() };
+    assert_eq!(
+      final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation)).code(),
+      "migration_final_authority_root_sink"
+    );
+    assert!(sink.closure.is_none());
+  }
+  assert_eq!(fixture.destination.publisher().observe().unwrap().selected.header, before);
+  freeze.validate_unchanged().unwrap();
+}
+
+#[test]
+fn final_authority_memory_bound_charges_excess_owned_seed_capacity() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let mut rows = final_head_rows(&freeze);
+  let mut oversized_identity = Vec::with_capacity(1 << 20);
+  oversized_identity.clear();
+  rows[0].authority_identity = oversized_identity;
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+  let mut inventory = FinalInventoryStream { seeds: rows.into(), closure };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let mut request = final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation);
+  request.maximum_memory_bytes = 4 << 10;
+
+  assert_eq!(final_authority_error(request).code(), "migration_final_authority_memory_limit");
+  assert!(sink.closure.is_none());
+}
+
+#[test]
+fn final_authority_memory_bound_charges_excess_prior_mapping_capacity() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let mut rows = final_head_rows(&freeze);
+  rows.push(MigrationFinalAuthoritySeedV1 {
+    authority_identity: b"snapshot-1".to_vec(),
+    source_write_sequence: 1,
+    system_family_id: None,
+    logical_bytes: 17,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::Snapshot,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: fixture.basis_root.clone(),
+    },
+  });
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, snapshots: 1, ..Default::default() };
+  let closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+  let mut oversized_mapping = Vec::with_capacity(1 << 20);
+  oversized_mapping.extend_from_slice(&fixture.basis_root);
+  let mut inventory = FinalInventoryStream { seeds: rows.into(), closure };
+  let mut prior = OneShotFinalPriorMapping { destination: Some(oversized_mapping) };
+  let mut sink = FinalMappingSink::default();
+  let mut request = final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation);
+  request.maximum_memory_bytes = 4 << 10;
+
+  assert_eq!(final_authority_error(request).code(), "migration_final_authority_memory_limit");
+  assert!(sink.closure.is_none());
+}
+
+#[test]
+fn final_authority_memory_bound_charges_excess_inventory_closure_capacity() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let rows = final_head_rows(&freeze);
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let mut closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+  let fingerprint = closure.system_family_registry_fingerprint.clone();
+  let mut oversized_fingerprint = Vec::with_capacity(1 << 20);
+  oversized_fingerprint.extend_from_slice(&fingerprint);
+  closure.system_family_registry_fingerprint = oversized_fingerprint;
+  let mut inventory = MovingFinalInventory { seeds: rows.into(), closure: Some(closure) };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let mut request = final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation);
+  request.maximum_memory_bytes = 4 << 10;
+
+  assert_eq!(final_authority_error(request).code(), "migration_final_authority_memory_limit");
+  assert!(sink.closure.is_none());
+}
+
+#[test]
+fn final_authority_detects_a_mapping_sink_that_moves_destination_authority() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let before_source = fs::read(&fixture.source_path).unwrap();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let rows = final_head_rows(&freeze);
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+  let before = fixture.destination.publisher().observe().unwrap().selected.header.clone();
+  let mut inventory = FinalInventoryStream { seeds: rows.into(), closure };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = MutatingFinalMappingSink {
+    publisher: fixture.destination.shared_publisher(),
+    database_id: fixture.permit.database_id(),
+    rows: Vec::new(),
+  };
+
+  let error = final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation));
+  assert_eq!(error.code(), "migration_final_authority_sink_mutation");
+  let after = fixture.destination.publisher().observe().unwrap().selected.header.clone();
+  assert!(after.slot_sequence > before.slot_sequence);
+  assert_eq!(after.head_hash, before.head_hash);
+  assert_eq!(fs::read(&fixture.source_path).unwrap(), before_source);
+  freeze.validate_unchanged().unwrap();
+}
+
+#[test]
+fn final_authority_cancellation_at_stream_and_sink_closure_never_issues_a_proof() {
+  let fixture = ProjectionFixture::new();
+  let freeze_cancellation = CancellationToken::new();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &freeze_cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &freeze_cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let rows = final_head_rows(&freeze);
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let closure = final_inventory_closure(&fixture, &freeze, &rows, counts);
+
+  let cancellation = CancellationToken::new();
+  let mut inventory =
+    CancellingFinalInventory { head: Some(rows[0].clone()), closure: closure.clone(), cancellation: cancellation.clone() };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = FinalMappingSink::default();
+  let error = final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation));
+  assert_eq!(error.code(), "migration_final_authority_cancelled");
+  assert!(sink.closure.is_none());
+
+  let cancellation = CancellationToken::new();
+  let mut inventory = FinalInventoryStream { seeds: rows.into(), closure };
+  let mut prior = FinalPriorMappings::default();
+  let mut sink = CancellingFinalMappingSink { cancellation: cancellation.clone() };
+  let error = final_authority_error(final_authority_request(&fixture, &namespace, &mut inventory, &mut prior, &mut sink, &cancellation));
+  assert_eq!(error.code(), "migration_final_authority_cancelled");
   freeze.validate_unchanged().unwrap();
 }

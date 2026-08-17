@@ -846,6 +846,32 @@ fn migration_owner_remains_disconnected_from_live_service_authority() {
 }
 
 #[test]
+fn final_freeze_destination_expectation_is_checked_inside_first_authority_serialization() {
+  let owner = std::fs::read_to_string(format!("{}/src/engine/v4/migration_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let completion = owner
+    .split_once("pub fn complete_final_freeze(")
+    .and_then(|(_, remainder)| remainder.split_once("pub fn observe_capture_state(").map(|(completion, _)| completion))
+    .expect("specialized final-freeze completion method boundary");
+  assert!(completion.contains("validate_for_completion"));
+  assert!(completion.contains("publish_progress_body_with_authority_expectation"));
+  assert!(
+    completion.find("validate_for_completion").unwrap() < completion.rfind("publish_progress_body_with_authority_expectation").unwrap()
+  );
+
+  let first_authority = std::fs::read_to_string(format!("{}/src/engine/v4/first_authority.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let guarded = first_authority
+    .split_once("fn publish_mutable_system_control_with_observer(")
+    .and_then(|(_, remainder)| remainder.split_once("pub fn publish_index_operation_control(").map(|(guarded, _)| guarded))
+    .expect("guarded mutable-control publisher boundary");
+  let retirement = guarded.find("retirement_owner.flush").unwrap();
+  let lock = guarded.find("self.root_state.lock()").unwrap();
+  let observation = guarded.find("self.observe()").unwrap();
+  let expectation = guarded.find("if let Some(expected) = authority_expectation").unwrap();
+  let kv = guarded.find("self.lock_kv()").unwrap();
+  assert!(retirement < lock && lock < observation && observation < expectation && expectation < kv);
+}
+
+#[test]
 fn acquisition_has_no_fallible_post_publication_readback_window() {
   let source = std::fs::read_to_string(format!("{}/src/engine/v4/migration_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
   let acquisition = source
@@ -1230,7 +1256,7 @@ fn progress_state_machine_refuses_every_regression_and_unproven_phase_boundary()
   );
   assert_eq!(
     owner.transition_progress(destination_verify_without_freeze, &mut retirement).unwrap_err().code(),
-    "migration_progress_write_freeze_required"
+    "migration_progress_specialized_authority"
   );
 
   replace_progress(&publisher, algorithm, &mut retirement, |progress| {
@@ -1248,7 +1274,7 @@ fn progress_state_machine_refuses_every_regression_and_unproven_phase_boundary()
   );
   assert_eq!(
     owner.transition_progress(cutover_without_verification, &mut retirement).unwrap_err().code(),
-    "migration_progress_destination_verification_required"
+    "migration_progress_specialized_authority"
   );
 
   replace_progress(&publisher, algorithm, &mut retirement, |progress| {
@@ -1262,7 +1288,41 @@ fn progress_state_machine_refuses_every_regression_and_unproven_phase_boundary()
     MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD,
     ACQUIRED_AT_MS + 10_000,
   );
-  assert_eq!(owner.transition_progress(reopen_canceled, &mut retirement).unwrap_err().code(), "migration_progress_terminal");
+  assert_eq!(owner.transition_progress(reopen_canceled, &mut retirement).unwrap_err().code(), "migration_progress_specialized_authority");
+}
+
+#[test]
+fn generic_progress_cannot_complete_final_freeze_or_enter_a_later_phase() {
+  for target in [
+    (MigrationPhaseV1::FinalFreeze, MigrationProgressStateV1::Complete),
+    (MigrationPhaseV1::DestinationVerify, MigrationProgressStateV1::Pending),
+  ] {
+    let algorithm = HashAlgorithm::Blake3_256;
+    let (_directory, _path, publisher) = create_publisher(algorithm);
+    let publisher = Arc::new(publisher);
+    let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+    let cancellation = CancellationToken::new();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+    let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+    let (owner, _) =
+      MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+    replace_progress(&publisher, algorithm, &mut retirement, |progress| {
+      progress.phase = MigrationPhaseV1::FinalFreeze;
+      progress.state =
+        if target.0 == MigrationPhaseV1::FinalFreeze { MigrationProgressStateV1::Running } else { MigrationProgressStateV1::Complete };
+      progress.flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD;
+      progress.updated_at_ms = ACQUIRED_AT_MS + 5_000;
+    });
+    let request = progress_transition(
+      algorithm,
+      target.0,
+      target.1,
+      MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD,
+      ACQUIRED_AT_MS + 6_000,
+    );
+
+    assert_eq!(owner.transition_progress(request, &mut retirement).unwrap_err().code(), "migration_progress_specialized_authority");
+  }
 }
 
 #[test]

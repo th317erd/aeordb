@@ -170,6 +170,12 @@ pub struct MutableSystemControlGuardV1<'a> {
   pub expected: MutableSystemControlExpectationV1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MutableSystemControlAuthorityExpectationV1<'a> {
+  pub selected_header_sequence: u64,
+  pub head_hash: &'a [u8],
+}
+
 #[derive(Clone, Debug)]
 pub struct MutableSystemControlPublicationRequestV1<'a> {
   pub database_id: &'a [u8; 16],
@@ -2487,12 +2493,23 @@ impl V4FirstAuthorityPublisher {
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
     let mut observer = NoopFirstAuthorityDependencyObserverV1;
-    self.publish_mutable_system_control_with_observer(request, retirement_owner, &mut observer)
+    self.publish_mutable_system_control_with_observer(request, None, retirement_owner, &mut observer)
+  }
+
+  pub(crate) fn publish_mutable_system_control_with_authority_expectation(
+    &self,
+    request: MutableSystemControlPublicationRequestV1<'_>,
+    authority_expectation: MutableSystemControlAuthorityExpectationV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_mutable_system_control_with_observer(request, Some(authority_expectation), retirement_owner, &mut observer)
   }
 
   fn publish_mutable_system_control_with_observer(
     &self,
     request: MutableSystemControlPublicationRequestV1<'_>,
+    authority_expectation: Option<MutableSystemControlAuthorityExpectationV1<'_>>,
     retirement_owner: &mut RetirementJournalOwnerV1,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
@@ -2516,6 +2533,14 @@ impl V4FirstAuthorityPublisher {
     })?;
     let observation = self.observe()?;
     let header = &observation.selected.header;
+    if let Some(expected) = authority_expectation {
+      if header.slot_sequence != expected.selected_header_sequence || header.head_hash != expected.head_hash {
+        return Err(MutableSystemControlPublicationErrorV1::invalid(
+          "mutable_control_authority_expectation",
+          "selected destination header or HEAD changed before guarded mutable-control publication",
+        ));
+      }
+    }
     if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
       return Err(MutableSystemControlPublicationErrorV1::invalid(
         "mutable_control_missing_authority",
@@ -2955,6 +2980,7 @@ impl V4FirstAuthorityPublisher {
           publication_timestamp_ms: request.publication_timestamp_ms,
           monotonic_now_ms: request.monotonic_now_ms,
         },
+        None,
         retirement_owner,
         observer,
       )

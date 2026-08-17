@@ -83,6 +83,7 @@ pub mod migration_capture_workspace;
 pub mod migration_clone;
 pub mod migration_control;
 pub mod migration_destination;
+pub mod migration_final_authority_reconciliation;
 pub mod migration_final_reconciliation;
 pub mod migration_owner;
 pub mod migration_preflight;
