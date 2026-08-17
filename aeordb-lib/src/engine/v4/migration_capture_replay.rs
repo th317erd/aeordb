@@ -214,6 +214,177 @@ impl From<MemoryCoordinatorError> for MigrationCaptureReplayErrorV1 {
   }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MigrationPathProjectionModeV1 {
+  TranslateSubtree,
+  ReuseDestinationEntity,
+}
+
+pub(super) struct MigrationPathProjectionRequestV1<'a> {
+  pub permit: &'a MigrationPreflightPermitV1,
+  pub source: &'a dyn MigrationCaptureReplaySourceV1,
+  pub destination: &'a V4FirstAuthorityPublisher,
+  pub source_root_after: &'a [u8],
+  pub current_tree: &'a PreparedNamespaceTreeV0,
+  pub path: &'a str,
+  pub mode: MigrationPathProjectionModeV1,
+  pub memory: &'a MemoryCoordinator,
+  pub cancellation: &'a CancellationToken,
+  pub timestamp_ms: u64,
+  pub maximum_subtree_memory_bytes: u64,
+  pub maximum_subtree_work_items: u64,
+  pub maximum_decoded_chunk_bytes: usize,
+  pub maximum_directory_depth: usize,
+}
+
+pub(super) struct MigrationSuccessorProjectionRequestV1<'a> {
+  pub permit: &'a MigrationPreflightPermitV1,
+  pub destination: &'a V4FirstAuthorityPublisher,
+  pub authority: &'a MigrationCaptureReplayAuthorityTemplateV1,
+  pub source_sequence: u64,
+  pub source_root: &'a [u8],
+  pub expected_head_hash: &'a [u8],
+  pub tree: PreparedNamespaceTreeV0,
+  pub semantic_timestamp_ms: u64,
+  pub transaction_domain: &'static [u8],
+  pub closure_domain: &'static [u8],
+}
+
+pub(super) struct MigrationPathProjectionReceiptV1 {
+  pub tree: PreparedNamespaceTreeV0,
+  pub translated_subtree_work_items: u64,
+}
+
+pub(super) fn project_migration_authoritative_path_v1(
+  request: MigrationPathProjectionRequestV1<'_>,
+) -> Result<MigrationPathProjectionReceiptV1, MigrationCaptureReplayErrorV1> {
+  let algorithm = request.permit.hash_algorithm();
+  let source_entry = if request.path == "/" && request.source_root_after.iter().all(|byte| *byte == 0) {
+    None
+  } else {
+    resolve_source_path(request.source, algorithm, request.source_root_after, request.path, request.cancellation)?
+  };
+  let source_entry_exists = source_entry.is_some();
+  let mut translated_subtree_work_items = 0;
+  let replacement = match (source_entry, request.mode) {
+    (Some(source_entry), MigrationPathProjectionModeV1::TranslateSubtree) => {
+      let entry_type = EntryType::from_u8(source_entry.entry_type).map_err(MigrationCaptureReplayErrorV1::Source)?;
+      let translated = translate_migration_subtree_v1(MigrationSubtreeCloneRequestV1 {
+        permit: request.permit,
+        source: request.source,
+        destination: request.destination,
+        memory: request.memory,
+        cancellation: request.cancellation,
+        publication_timestamp_ms: request.timestamp_ms,
+        maximum_work_items: request.maximum_subtree_work_items,
+        maximum_memory_bytes: request.maximum_subtree_memory_bytes,
+        maximum_decoded_chunk_bytes: request.maximum_decoded_chunk_bytes,
+        maximum_directory_depth: request.maximum_directory_depth,
+        path: request.path,
+        hash: &source_entry.hash,
+        entry_type,
+        logical_bytes: source_entry.total_size,
+      })?;
+      translated.map(|translated| {
+        translated_subtree_work_items = translated.work_items;
+        apply_translation(source_entry, translated)
+      })
+    }
+    (Some(source_entry), MigrationPathProjectionModeV1::ReuseDestinationEntity) => {
+      let destination_entry =
+        resolve_destination_path(request.destination, algorithm, request.current_tree, request.path, request.cancellation)?.ok_or_else(
+          || {
+            MigrationCaptureReplayErrorV1::invalid(
+              "migration_replay_destination_reuse_missing",
+              format!("destination path {} has no translated entity to reuse", request.path),
+            )
+          },
+        )?;
+      Some(reuse_destination_identity(source_entry, destination_entry)?)
+    }
+    (None, _) => None,
+  };
+  let tree = if request.path == "/" {
+    match replacement {
+      Some(replacement) => {
+        if EntryType::from_u8(replacement.entry_type).map_err(MigrationCaptureReplayErrorV1::Source)? != EntryType::DirectoryIndex {
+          return Err(MigrationCaptureReplayErrorV1::invalid(
+            "migration_replay_root_type",
+            "source root projection did not produce a directory",
+          ));
+        }
+        load_destination_tree(request.destination, &replacement.hash)
+      }
+      None if !source_entry_exists => {
+        publish_directory_values(request.destination, algorithm, request.permit.database_id(), request.timestamp_ms, vec![Vec::new()], None)
+      }
+      None => Ok(request.current_tree.clone()),
+    }?
+  } else if replacement.is_none() && source_entry_exists {
+    request.current_tree.clone()
+  } else {
+    patch_destination_path(
+      DestinationPathPatchContextV1 {
+        destination: request.destination,
+        algorithm,
+        source_root_after: request.source_root_after,
+        source: request.source,
+        timestamp_ms: request.timestamp_ms,
+        database_id: request.permit.database_id(),
+        cancellation: request.cancellation,
+      },
+      request.current_tree,
+      request.path,
+      replacement,
+    )?
+  };
+  Ok(MigrationPathProjectionReceiptV1 { tree, translated_subtree_work_items })
+}
+
+pub(super) fn publish_migration_successor_v1(
+  request: MigrationSuccessorProjectionRequestV1<'_>,
+) -> Result<super::first_authority::FirstAuthorityPublicationReceiptV1, MigrationCaptureReplayErrorV1> {
+  let algorithm = request.permit.hash_algorithm();
+  let timestamp = timestamp_for(request.authority.publication_timestamp_floor_ms, request.semantic_timestamp_ms, request.source_sequence)?;
+  let transaction_id = migration_projection_transaction_id(
+    algorithm,
+    request.transaction_domain,
+    request.permit.migration_id(),
+    request.source_sequence,
+    request.source_root,
+    &request.tree.root_hash,
+  )?;
+  let closure = digest_parts(
+    algorithm,
+    &[
+      request.closure_domain,
+      &request.authority.typed_closure_context,
+      &request.source_sequence.to_le_bytes(),
+      request.source_root,
+      &request.tree.root_hash,
+      &request.authority.semantic_state.object_id,
+    ],
+  );
+  let publication_request = SuccessorAuthorityPublicationRequestV1 {
+    database_id: request.permit.database_id(),
+    transaction_id,
+    created_at_ms: timestamp,
+    expected_head_hash: request.expected_head_hash.to_vec(),
+    namespace_tree: request.tree,
+    semantic_state: request.authority.semantic_state.clone(),
+    required_capabilities: request.authority.required_capabilities,
+    typed_closure_digest: closure,
+    authority_identity: request.authority.authority_identity.clone(),
+  };
+  match request.destination.publish_successor_authority(&publication_request) {
+    Ok(receipt) => Ok(receipt),
+    Err(error) => match error.committed_receipt() {
+      Some(receipt) => Ok(receipt.clone()),
+      None => Err(MigrationCaptureReplayErrorV1::Publication(error)),
+    },
+  }
+}
+
 #[derive(Clone)]
 struct OwnedMutationRecordV1 {
   kind: MutationKindV1,
@@ -511,60 +682,23 @@ impl<'a> ReplayExecutorV1<'a> {
     path: &str,
     committed_at_ms: u64,
   ) -> Result<(), MigrationCaptureReplayErrorV1> {
-    let source_entry = resolve_source_path(self.request.source, self.algorithm, source_root_after, path, self.request.cancellation)?;
-    let source_entry_exists = source_entry.is_some();
-    let replacement = match source_entry {
-      Some(source_entry) => {
-        let entry_type = EntryType::from_u8(source_entry.entry_type).map_err(MigrationCaptureReplayErrorV1::Source)?;
-        let translated = translate_migration_subtree_v1(MigrationSubtreeCloneRequestV1 {
-          permit: self.request.permit,
-          source: self.request.source,
-          destination: self.request.destination,
-          memory: self.request.memory,
-          cancellation: self.request.cancellation,
-          publication_timestamp_ms: timestamp_for(self.request.authority.publication_timestamp_floor_ms, committed_at_ms, 0)?,
-          maximum_work_items: self.request.maximum_subtree_work_items,
-          maximum_memory_bytes: self.request.maximum_subtree_memory_bytes,
-          maximum_decoded_chunk_bytes: self.request.maximum_decoded_chunk_bytes,
-          maximum_directory_depth: self.request.maximum_directory_depth,
-          path,
-          hash: &source_entry.hash,
-          entry_type,
-          logical_bytes: source_entry.total_size,
-        })?;
-        translated.map(|translated| apply_translation(source_entry, translated))
-      }
-      None => None,
-    };
-    if path == "/" {
-      if let Some(replacement) = replacement {
-        if EntryType::from_u8(replacement.entry_type).map_err(MigrationCaptureReplayErrorV1::Source)? != EntryType::DirectoryIndex {
-          return Err(MigrationCaptureReplayErrorV1::invalid(
-            "migration_replay_root_type",
-            "source root replay did not produce a directory",
-          ));
-        }
-        self.current_tree = load_destination_tree(self.request.destination, &replacement.hash)?;
-      }
-      return Ok(());
-    }
-    if replacement.is_none() && source_entry_exists {
-      return Ok(());
-    }
-    self.current_tree = patch_destination_path(
-      DestinationPathPatchContextV1 {
-        destination: self.request.destination,
-        algorithm: self.algorithm,
-        source_root_after,
-        source: self.request.source,
-        timestamp_ms: timestamp_for(self.request.authority.publication_timestamp_floor_ms, committed_at_ms, 0)?,
-        database_id: self.request.permit.database_id(),
-        cancellation: self.request.cancellation,
-      },
-      &self.current_tree,
+    self.current_tree = project_migration_authoritative_path_v1(MigrationPathProjectionRequestV1 {
+      permit: self.request.permit,
+      source: self.request.source,
+      destination: self.request.destination,
+      source_root_after,
+      current_tree: &self.current_tree,
       path,
-      replacement,
-    )?;
+      mode: MigrationPathProjectionModeV1::TranslateSubtree,
+      memory: self.request.memory,
+      cancellation: self.request.cancellation,
+      timestamp_ms: timestamp_for(self.request.authority.publication_timestamp_floor_ms, committed_at_ms, 0)?,
+      maximum_subtree_memory_bytes: self.request.maximum_subtree_memory_bytes,
+      maximum_subtree_work_items: self.request.maximum_subtree_work_items,
+      maximum_decoded_chunk_bytes: self.request.maximum_decoded_chunk_bytes,
+      maximum_directory_depth: self.request.maximum_directory_depth,
+    })?
+    .tree;
     Ok(())
   }
 
@@ -576,38 +710,18 @@ impl<'a> ReplayExecutorV1<'a> {
     tree: PreparedNamespaceTreeV0,
     semantic_timestamp_ms: u64,
   ) -> Result<super::first_authority::FirstAuthorityPublicationReceiptV1, MigrationCaptureReplayErrorV1> {
-    let timestamp = timestamp_for(self.request.authority.publication_timestamp_floor_ms, semantic_timestamp_ms, source_sequence)?;
-    let transaction_id =
-      replay_transaction_id(self.algorithm, self.request.permit.migration_id(), source_sequence, source_root, &tree.root_hash)?;
-    let closure = digest_parts(
-      self.algorithm,
-      &[
-        REPLAY_CLOSURE_DOMAIN,
-        &self.request.authority.typed_closure_context,
-        &source_sequence.to_le_bytes(),
-        source_root,
-        &tree.root_hash,
-        &self.request.authority.semantic_state.object_id,
-      ],
-    );
-    let request = SuccessorAuthorityPublicationRequestV1 {
-      database_id: self.request.permit.database_id(),
-      transaction_id,
-      created_at_ms: timestamp,
-      expected_head_hash: expected_head_hash.to_vec(),
-      namespace_tree: tree,
-      semantic_state: self.request.authority.semantic_state.clone(),
-      required_capabilities: self.request.authority.required_capabilities,
-      typed_closure_digest: closure,
-      authority_identity: self.request.authority.authority_identity.clone(),
-    };
-    match self.request.destination.publish_successor_authority(&request) {
-      Ok(receipt) => Ok(receipt),
-      Err(error) => match error.committed_receipt() {
-        Some(receipt) => Ok(receipt.clone()),
-        None => Err(MigrationCaptureReplayErrorV1::Publication(error)),
-      },
-    }
+    publish_migration_successor_v1(MigrationSuccessorProjectionRequestV1 {
+      permit: self.request.permit,
+      destination: self.request.destination,
+      authority: self.request.authority,
+      source_sequence,
+      source_root,
+      expected_head_hash,
+      tree,
+      semantic_timestamp_ms,
+      transaction_domain: REPLAY_TRANSACTION_DOMAIN,
+      closure_domain: REPLAY_CLOSURE_DOMAIN,
+    })
   }
 
   fn publish_checkpoint(&mut self, sequence: u64, destination_header_sequence: u64) -> Result<(), MigrationCaptureReplayErrorV1> {
@@ -861,6 +975,56 @@ fn resolve_source_path(
     }
     let (header, _, value) = load_source_entity(source, algorithm, &directory_hash, EntryType::DirectoryIndex)?;
     let child = lookup_directory_child(&reader, &directory_hash, &value, header.entry_version, segment, algorithm.hash_length())?;
+    let Some(child) = child else {
+      return Ok(None);
+    };
+    if index + 1 == segments.len() {
+      return Ok(Some(child));
+    }
+    if EntryType::from_u8(child.entry_type).map_err(MigrationCaptureReplayErrorV1::Source)? != EntryType::DirectoryIndex {
+      return Ok(None);
+    }
+    directory_hash = child.hash;
+  }
+  Ok(None)
+}
+
+fn resolve_destination_path(
+  destination: &V4FirstAuthorityPublisher,
+  algorithm: HashAlgorithm,
+  tree: &PreparedNamespaceTreeV0,
+  path: &str,
+  cancellation: &CancellationToken,
+) -> Result<Option<ChildEntry>, MigrationCaptureReplayErrorV1> {
+  if cancellation.is_cancelled() {
+    return Err(MigrationCaptureReplayErrorV1::invalid("migration_replay_cancelled", "namespace projection was canceled"));
+  }
+  if normalize_path(path) != path || !path.starts_with('/') || path_depth(path) > MAX_PATH_DEPTH {
+    return Err(MigrationCaptureReplayErrorV1::invalid("migration_replay_path", format!("destination path {path:?} is invalid")));
+  }
+  if path == "/" {
+    return Ok(Some(ChildEntry {
+      entry_type: EntryType::DirectoryIndex.to_u8(),
+      hash: tree.root_hash.clone(),
+      total_size: tree.stored_value.len() as u64,
+      created_at: 0,
+      updated_at: 0,
+      name: String::new(),
+      content_type: None,
+      virtual_time: 0,
+      node_id: 0,
+    }));
+  }
+  let reader = DestinationBtreeReaderV1 { destination };
+  let mut directory_hash = tree.root_hash.clone();
+  let segments = path.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+  for (index, segment) in segments.iter().enumerate() {
+    if cancellation.is_cancelled() {
+      return Err(MigrationCaptureReplayErrorV1::invalid("migration_replay_cancelled", "namespace projection was canceled"));
+    }
+    let entity = load_destination_directory(destination, &directory_hash)?;
+    let child =
+      lookup_directory_child(&reader, &directory_hash, &entity.stored_value, entity.entity_version, segment, algorithm.hash_length())?;
     let Some(child) = child else {
       return Ok(None);
     };
@@ -1171,7 +1335,7 @@ fn publish_directory_values(
   Ok(PreparedNamespaceTreeV0 { root_hash, stored_value })
 }
 
-fn load_destination_tree(
+pub(super) fn load_destination_tree(
   destination: &V4FirstAuthorityPublisher,
   root_hash: &[u8],
 ) -> Result<PreparedNamespaceTreeV0, MigrationCaptureReplayErrorV1> {
@@ -1215,7 +1379,29 @@ fn apply_translation(mut source_entry: ChildEntry, translated: MigrationTranslat
   source_entry
 }
 
-fn namespace_root_for_tree(
+fn reuse_destination_identity(
+  mut source_entry: ChildEntry,
+  destination_entry: ChildEntry,
+) -> Result<ChildEntry, MigrationCaptureReplayErrorV1> {
+  let source_type = EntryType::from_u8(source_entry.entry_type).map_err(MigrationCaptureReplayErrorV1::Source)?;
+  let destination_type = EntryType::from_u8(destination_entry.entry_type).map_err(MigrationCaptureReplayErrorV1::Source)?;
+  if source_type != destination_type || source_entry.name != destination_entry.name {
+    return Err(MigrationCaptureReplayErrorV1::invalid(
+      "migration_replay_destination_reuse_identity",
+      "metadata-only projection cannot reuse a different destination type or name",
+    ));
+  }
+  source_entry.hash = destination_entry.hash;
+  source_entry.total_size = destination_entry.total_size;
+  if matches!(source_type, EntryType::FileRecord | EntryType::Symlink) {
+    source_entry.content_type = destination_entry.content_type;
+    source_entry.created_at = destination_entry.created_at;
+    source_entry.updated_at = destination_entry.updated_at;
+  }
+  Ok(source_entry)
+}
+
+pub(super) fn namespace_root_for_tree(
   algorithm: HashAlgorithm,
   tree: &PreparedNamespaceTreeV0,
   authority: &MigrationCaptureReplayAuthorityTemplateV1,
@@ -1232,17 +1418,15 @@ fn namespace_root_for_tree(
   .map_err(|error| MigrationCaptureReplayErrorV1::invalid(error.code(), error.to_string()))
 }
 
-fn replay_transaction_id(
+fn migration_projection_transaction_id(
   algorithm: HashAlgorithm,
+  domain: &[u8],
   migration_id: [u8; 16],
   source_sequence: u64,
   source_root: &[u8],
   destination_tree_root: &[u8],
 ) -> Result<[u8; 16], MigrationCaptureReplayErrorV1> {
-  let digest = digest_parts(
-    algorithm,
-    &[REPLAY_TRANSACTION_DOMAIN, &migration_id, &source_sequence.to_le_bytes(), source_root, destination_tree_root],
-  );
+  let digest = digest_parts(algorithm, &[domain, &migration_id, &source_sequence.to_le_bytes(), source_root, destination_tree_root]);
   let mut transaction_id = [0u8; 16];
   transaction_id.copy_from_slice(&digest[..16]);
   if transaction_id == [0; 16] {

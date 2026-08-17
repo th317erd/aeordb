@@ -176,6 +176,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
   let migration_base_clone_execution_path = source_root.join("engine/v4/migration_base_clone_execution.rs");
   let migration_capture_replay_path = source_root.join("engine/v4/migration_capture_replay.rs");
   let migration_destination_path = source_root.join("engine/v4/migration_destination.rs");
+  let migration_final_reconciliation_path = source_root.join("engine/v4/migration_final_reconciliation.rs");
   let migration_owner_path = source_root.join("engine/v4/migration_owner.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
@@ -195,6 +196,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
       &migration_base_clone_execution_path,
       &migration_capture_replay_path,
       &migration_destination_path,
+      &migration_final_reconciliation_path,
       &migration_owner_path,
     ],
     "first-authority publisher escaped the reviewed disconnected owners: {publisher_callers:?}"
@@ -204,11 +206,18 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
     &migration_base_clone_execution_path,
     &migration_capture_replay_path,
     &migration_destination_path,
+    &migration_final_reconciliation_path,
     &migration_owner_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();
-    for forbidden in ["StorageEngine", "DirectoryOps", "crate::server", "tokio::spawn"] {
+    for forbidden in ["DirectoryOps", "crate::server", "tokio::spawn"] {
       assert!(!owner_source.contains(forbidden), "disconnected owner {owner_path:?} gained live activation token {forbidden}");
+    }
+    if owner_path == &migration_final_reconciliation_path {
+      assert!(owner_source.contains("MigrationSourceWriteFreezeV1"));
+      assert!(owner_source.contains("StorageEngine"));
+    } else {
+      assert!(!owner_source.contains("StorageEngine"), "disconnected owner {owner_path:?} gained direct v3 engine ownership");
     }
   }
 

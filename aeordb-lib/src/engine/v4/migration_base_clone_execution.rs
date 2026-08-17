@@ -150,6 +150,7 @@ pub(crate) struct MigrationTranslatedSubtreeV1 {
   pub content_type: Option<String>,
   pub created_at: Option<i64>,
   pub updated_at: Option<i64>,
+  pub work_items: u64,
 }
 
 #[derive(Debug)]
@@ -639,6 +640,7 @@ pub(crate) fn translate_migration_subtree_v1(
     }
   };
   executor.batch.flush(&mut executor.budget)?;
+  let work_items = executor.work_items;
   translated
     .map(|translated| {
       executor.budget.release(translated.memory_charge)?;
@@ -648,6 +650,7 @@ pub(crate) fn translate_migration_subtree_v1(
         content_type: translated.content_type,
         created_at: translated.created_at,
         updated_at: translated.updated_at,
+        work_items,
       })
     })
     .transpose()
