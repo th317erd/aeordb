@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Barrier, mpsc};
 use std::time::Duration;
 
-use crate::engine::hot_tail::{HotTailPayload, read_hot_tail_checked};
+use crate::engine::hot_tail::{HotTailPayload, VoidRecord, read_hot_tail_checked};
 use crate::engine::directory_entry::{ChildEntry, serialize_child_entries};
-use crate::engine::kv_stages::initial_block_size;
+use crate::engine::kv_stages::KV_STAGE_SIZES;
 use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use crate::engine::native_durability::{sync_file_all_native, sync_file_data_native};
 use crate::engine::v4::database_header::{
@@ -3810,6 +3810,50 @@ impl FailingDependencyObserver {
   }
 }
 
+struct FailingStagedWindowObserver {
+  staged_calls: usize,
+  fail_on_call: usize,
+}
+
+impl FirstAuthorityDependencyObserverV1 for FailingStagedWindowObserver {
+  fn staged(&mut self, _kv: &DiskKVStore, _entities: &[PreparedWholeEntityV1]) -> Result<(), NativeDurabilityError> {
+    self.staged_calls += 1;
+    if self.staged_calls == self.fail_on_call {
+      return Err(NativeDurabilityError::invalid(
+        NativeDurabilityOperation::ReadBack,
+        format!("injected failure while staging immutable IndexArtifact window {}", self.staged_calls),
+      ));
+    }
+    Ok(())
+  }
+}
+
+struct FailingCommittedWindowObserver {
+  committed_calls: usize,
+  fail_on_call: usize,
+}
+
+impl FirstAuthorityDependencyObserverV1 for FailingCommittedWindowObserver {
+  fn staged(&mut self, _kv: &DiskKVStore, _entities: &[PreparedWholeEntityV1]) -> Result<(), NativeDurabilityError> {
+    Ok(())
+  }
+
+  fn authority_committed(
+    &mut self,
+    _kv: &DiskKVStore,
+    _entities: &[PreparedWholeEntityV1],
+  ) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    self.committed_calls += 1;
+    if self.committed_calls == self.fail_on_call {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "injected_index_window_commit_unknown",
+        format!("injected failure after immutable IndexArtifact window {} committed", self.committed_calls),
+      ));
+    }
+    Ok(())
+  }
+}
+
 #[derive(Debug)]
 struct CapturedRetirementSegmentV1 {
   segment_ordinal: u64,
@@ -3874,11 +3918,37 @@ fn create_environment_for_database(
   failure: Option<FirstAuthorityFailurePoint>,
   database_id: [u8; 16],
 ) -> (tempfile::TempDir, PathBuf, Arc<DurabilityCoordinator>, V4FirstAuthorityPublisher) {
+  create_environment_for_database_at_kv_stage(name, failure, database_id, 0)
+}
+
+fn create_environment_at_kv_stage(
+  name: &str,
+  stage: usize,
+) -> (tempfile::TempDir, PathBuf, Arc<DurabilityCoordinator>, V4FirstAuthorityPublisher) {
+  create_environment_for_database_at_kv_stage(name, None, [0x31; 16], stage)
+}
+
+fn create_environment_for_database_at_kv_stage(
+  name: &str,
+  failure: Option<FirstAuthorityFailurePoint>,
+  database_id: [u8; 16],
+  stage: usize,
+) -> (tempfile::TempDir, PathBuf, Arc<DurabilityCoordinator>, V4FirstAuthorityPublisher) {
+  create_environment_for_algorithm_at_kv_stage(name, failure, database_id, HashAlgorithm::Blake3_256, stage)
+}
+
+fn create_environment_for_algorithm_at_kv_stage(
+  name: &str,
+  failure: Option<FirstAuthorityFailurePoint>,
+  database_id: [u8; 16],
+  algorithm: HashAlgorithm,
+  stage: usize,
+) -> (tempfile::TempDir, PathBuf, Arc<DurabilityCoordinator>, V4FirstAuthorityPublisher) {
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join(format!("{name}.aeordb"));
   let mut file = std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
-  let algorithm = HashAlgorithm::Blake3_256;
-  let kv_block_length = initial_block_size();
+  let kv_block_length = KV_STAGE_SIZES[stage];
+  let kv_block_stage = u8::try_from(stage).unwrap();
   let header = DatabaseHeaderV4 {
     hash_algorithm: algorithm,
     slot_sequence: 1,
@@ -3890,7 +3960,7 @@ fn create_environment_for_database(
     kv_block_offset: DATABASE_HEADER_V4_DATA_OFFSET,
     kv_block_length,
     kv_block_version: DiskKVStore::CURRENT_KV_BLOCK_VERSION,
-    kv_block_stage: 0,
+    kv_block_stage,
     resize_in_progress: false,
     resize_target_stage: 0,
     nvt_offset: DATABASE_HEADER_V4_DATA_OFFSET + kv_block_length,
@@ -3920,7 +3990,7 @@ fn create_environment_for_database(
     algorithm,
     header.kv_block_offset,
     header.hot_tail_offset,
-    0,
+    stage,
     coordinator.clone(),
   )
   .unwrap();
@@ -4018,7 +4088,10 @@ fn request() -> FirstAuthorityPublicationRequestV1 {
 }
 
 fn request_for_database(database_id: [u8; 16]) -> FirstAuthorityPublicationRequestV1 {
-  let algorithm = HashAlgorithm::Blake3_256;
+  request_for_database_and_algorithm(database_id, HashAlgorithm::Blake3_256)
+}
+
+fn request_for_database_and_algorithm(database_id: [u8; 16], algorithm: HashAlgorithm) -> FirstAuthorityPublicationRequestV1 {
   FirstAuthorityPublicationRequestV1 {
     database_id,
     transaction_id: [0x61; 16],
@@ -4193,12 +4266,35 @@ fn migration_map_authority_refuses_an_existing_admission_without_its_prepare_wit
 }
 
 fn index_artifact(fill: u8, generation: u64) -> EncodedImmutableIndexArtifactV1 {
+  index_artifact_for_algorithm(fill, generation, HashAlgorithm::Blake3_256)
+}
+
+fn index_artifact_for_algorithm(fill: u8, generation: u64, algorithm: HashAlgorithm) -> EncodedImmutableIndexArtifactV1 {
   encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
     kind: ImmutableIndexArtifactKindV1::ArtifactDirectoryNode,
-    hash_algorithm: HashAlgorithm::Blake3_256,
+    hash_algorithm: algorithm,
     generation,
     identity: &[fill; 16],
     body: &[fill.wrapping_add(1); 32],
+  })
+  .unwrap()
+}
+
+fn indexed_artifact(ordinal: u64) -> EncodedImmutableIndexArtifactV1 {
+  let mut identity = [0u8; 16];
+  identity[..8].copy_from_slice(&ordinal.to_le_bytes());
+  identity[8..].copy_from_slice(&ordinal.rotate_left(17).to_le_bytes());
+  let mut body = [0u8; 32];
+  body[..8].copy_from_slice(&ordinal.to_be_bytes());
+  body[8..16].copy_from_slice(&ordinal.wrapping_mul(3).to_le_bytes());
+  body[16..24].copy_from_slice(&ordinal.wrapping_mul(5).to_le_bytes());
+  body[24..].copy_from_slice(&ordinal.wrapping_mul(7).to_le_bytes());
+  encode_immutable_index_artifact(&ImmutableIndexArtifactWriteV1 {
+    kind: ImmutableIndexArtifactKindV1::ArtifactDirectoryNode,
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    generation: ordinal + 1,
+    identity: &identity,
+    body: &body,
   })
   .unwrap()
 }
@@ -4247,6 +4343,230 @@ fn immutable_index_artifact_batch_is_native_idempotent_and_reopenable() {
 }
 
 #[test]
+fn immutable_index_artifact_publication_preserves_sha512_identity_through_reopen_and_retry() {
+  let algorithm = HashAlgorithm::Sha512;
+  let (_directory, path, _coordinator, publisher) =
+    create_environment_for_algorithm_at_kv_stage("index-artifact-sha512", None, [0x31; 16], algorithm, 0);
+  publisher.publish(&request_for_database_and_algorithm([0x31; 16], algorithm)).unwrap();
+  let artifact = index_artifact_for_algorithm(0x93, 1, algorithm);
+
+  let receipt = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &[&artifact],
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap();
+  assert!(!receipt.idempotent);
+  assert_eq!(receipt.artifacts[0].artifact_key.len(), algorithm.hash_length());
+  drop(publisher);
+
+  let (_coordinator, reopened) = reopen(&path);
+  assert_eq!(reopened.load_index_artifact(&artifact.key, artifact.value.len() as u64).unwrap(), Some(artifact.value.clone()));
+  let selected_before_retry = reopened.observe().unwrap();
+  let retry = reopened
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &[&artifact],
+      publication_timestamp_ms: 1_700_000_000_201,
+    })
+    .unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.observation, selected_before_retry);
+}
+
+#[test]
+fn immutable_index_artifact_dependency_includes_pending_void_records() {
+  let (_directory, path, _coordinator, publisher) = create_environment("index-artifact-pending-void", None);
+  publisher.publish(&request()).unwrap();
+  let before = publisher.observe().unwrap();
+  let void = VoidRecord { offset: before.selected.header.kv_block_offset + before.selected.header.kv_block_length, size: 1 };
+  {
+    let mut kv = publisher.lock_kv().unwrap();
+    kv.flush().unwrap();
+    kv.set_pending_voids(vec![void]);
+    assert_eq!(pending_void_hot_tail_bytes(&kv, before.selected.header.hash_algorithm.hash_length()).unwrap(), 13);
+  }
+
+  let artifact = index_artifact(0x90, 1);
+  publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &[&artifact],
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap();
+
+  drop(publisher);
+  let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+  let selected = observe_database_header_v4(&file).unwrap();
+  let hot_tail =
+    read_hot_tail_checked(&mut file, selected.selected.header.hot_tail_offset, selected.selected.header.hash_algorithm.hash_length())
+      .unwrap();
+  assert_eq!(hot_tail.voids, vec![void]);
+}
+
+#[test]
+fn immutable_index_artifact_exact_request_cap_uses_bounded_atomic_windows_and_retries_without_sequence_growth() {
+  let (_directory, _path, _coordinator, publisher) = create_environment_at_kv_stage("index-artifact-exact-cap", 2);
+  publisher.publish(&request()).unwrap();
+  let artifacts: Vec<_> = (0..INDEX_ARTIFACT_BATCH_COUNT_CAP as u64).map(indexed_artifact).collect();
+  let references: Vec<_> = artifacts.iter().collect();
+  let before = publisher.observe().unwrap();
+
+  let receipt = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &references,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap();
+
+  let expected_windows = INDEX_ARTIFACT_BATCH_COUNT_CAP.div_ceil(DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES) as u64;
+  assert!(!receipt.idempotent);
+  assert_eq!(receipt.artifacts.len(), INDEX_ARTIFACT_BATCH_COUNT_CAP);
+  assert_eq!(receipt.observation.selected.header.entry_count, before.selected.header.entry_count + INDEX_ARTIFACT_BATCH_COUNT_CAP as u64);
+  assert_eq!(
+    receipt.observation.selected.header.write_sequence_high_water,
+    before.selected.header.write_sequence_high_water + INDEX_ARTIFACT_BATCH_COUNT_CAP as u64
+  );
+  assert_eq!(receipt.observation.selected.header.slot_sequence, before.selected.header.slot_sequence + expected_windows);
+  assert_eq!(receipt.observation.selected.header.head_hash, before.selected.header.head_hash);
+  for index in [0, 510, 511, 1_021, 1_022, INDEX_ARTIFACT_BATCH_COUNT_CAP - 1] {
+    let artifact = &artifacts[index];
+    assert_eq!(publisher.load_index_artifact(&artifact.key, artifact.value.len() as u64).unwrap(), Some(artifact.value.clone()));
+  }
+
+  let selected_before_retry = publisher.observe().unwrap();
+  let retry = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &references,
+      publication_timestamp_ms: 1_700_000_000_201,
+    })
+    .unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.observation, selected_before_retry);
+  assert!(retry.artifacts.iter().all(|artifact| artifact.idempotent));
+}
+
+#[test]
+fn immutable_index_artifact_exact_request_cap_refuses_insufficient_kv_capacity_before_publication() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-capacity", None);
+  publisher.publish(&request()).unwrap();
+  let artifacts: Vec<_> = (0..INDEX_ARTIFACT_BATCH_COUNT_CAP as u64).map(indexed_artifact).collect();
+  let references: Vec<_> = artifacts.iter().collect();
+  let before = publisher.observe().unwrap();
+
+  let error = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &references,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+
+  assert_eq!(error.code(), "immutable_index_kv_capacity");
+  assert_eq!(publisher.observe().unwrap(), before);
+  assert!(publisher.locator(&artifacts[0].key).unwrap().is_none());
+}
+
+#[test]
+fn immutable_index_artifact_second_window_failure_preserves_prefix_and_whole_request_retry_completes() {
+  let (_directory, path, _coordinator, publisher) = create_environment("index-artifact-window-failure", None);
+  publisher.publish(&request()).unwrap();
+  let artifacts: Vec<_> = (0..(DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES + 1) as u64).map(indexed_artifact).collect();
+  let references: Vec<_> = artifacts.iter().collect();
+  let before = publisher.observe().unwrap();
+  let mut observer = FailingStagedWindowObserver { staged_calls: 0, fail_on_call: 2 };
+
+  publisher
+    .publish_index_artifacts_with_observer(
+      IndexArtifactBatchPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        artifacts: &references,
+        publication_timestamp_ms: 1_700_000_000_200,
+      },
+      &mut observer,
+    )
+    .unwrap_err();
+  assert_eq!(observer.staged_calls, 2);
+  let after_failure = publisher.observe().unwrap();
+  assert_eq!(
+    after_failure.selected.header.entry_count,
+    before.selected.header.entry_count + DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES as u64
+  );
+  assert_eq!(after_failure.selected.header.slot_sequence, before.selected.header.slot_sequence + 1);
+  assert_eq!(after_failure.selected.header.head_hash, before.selected.header.head_hash);
+  assert_eq!(publisher.load_index_artifact(&artifacts[0].key, artifacts[0].value.len() as u64).unwrap(), Some(artifacts[0].value.clone()));
+  assert_eq!(
+    publisher
+      .load_index_artifact(
+        &artifacts[DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES].key,
+        artifacts[DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES].value.len() as u64
+      )
+      .unwrap(),
+    None
+  );
+
+  drop(publisher);
+  let (_coordinator, reopened) = reopen(&path);
+  assert_eq!(reopened.observe().unwrap(), after_failure);
+  let retry = reopened
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &references,
+      publication_timestamp_ms: 1_700_000_000_201,
+    })
+    .unwrap();
+  assert!(!retry.idempotent);
+  assert!(retry.artifacts[..DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES].iter().all(|artifact| artifact.idempotent));
+  assert!(!retry.artifacts[DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES].idempotent);
+  assert_eq!(retry.observation.selected.header.entry_count, before.selected.header.entry_count + references.len() as u64);
+  assert_eq!(retry.observation.selected.header.slot_sequence, before.selected.header.slot_sequence + 2);
+}
+
+#[test]
+fn immutable_index_artifact_second_window_commit_unknown_reopens_and_retries_without_sequence_growth() {
+  let (_directory, path, _coordinator, publisher) = create_environment("index-artifact-window-commit-unknown", None);
+  publisher.publish(&request()).unwrap();
+  let artifacts: Vec<_> = (0..(DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES + 1) as u64).map(indexed_artifact).collect();
+  let references: Vec<_> = artifacts.iter().collect();
+  let before = publisher.observe().unwrap();
+  let mut observer = FailingCommittedWindowObserver { committed_calls: 0, fail_on_call: 2 };
+
+  let error = publisher
+    .publish_index_artifacts_with_observer(
+      IndexArtifactBatchPublicationRequestV1 {
+        database_id: &[0x31; 16],
+        artifacts: &references,
+        publication_timestamp_ms: 1_700_000_000_200,
+      },
+      &mut observer,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "injected_index_window_commit_unknown");
+  assert_eq!(observer.committed_calls, 2);
+  let committed = publisher.observe().unwrap();
+  assert_eq!(committed.selected.header.entry_count, before.selected.header.entry_count + references.len() as u64);
+  assert_eq!(committed.selected.header.slot_sequence, before.selected.header.slot_sequence + 2);
+
+  drop(publisher);
+  let (_coordinator, reopened) = reopen(&path);
+  assert_eq!(reopened.observe().unwrap(), committed);
+  let retry = reopened
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &references,
+      publication_timestamp_ms: 1_700_000_000_201,
+    })
+    .unwrap();
+  assert!(retry.idempotent);
+  assert!(retry.artifacts.iter().all(|artifact| artifact.idempotent));
+  assert_eq!(retry.observation, committed);
+}
+
+#[test]
 fn immutable_index_artifact_batch_rejects_fabricated_identity_before_publication() {
   let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-invalid", None);
   publisher.publish(&request()).unwrap();
@@ -4265,6 +4585,28 @@ fn immutable_index_artifact_batch_rejects_fabricated_identity_before_publication
   assert_eq!(error.code(), "immutable_index_prepared_mismatch");
   assert_eq!(publisher.observe().unwrap(), before);
   assert!(publisher.locator(&artifact.key).unwrap().is_none());
+}
+
+#[test]
+fn immutable_index_artifact_batch_validates_the_last_window_before_publishing_the_first() {
+  let (_directory, _path, _coordinator, publisher) = create_environment("index-artifact-invalid-last-window", None);
+  publisher.publish(&request()).unwrap();
+  let mut artifacts: Vec<_> = (0..(DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES + 1) as u64).map(indexed_artifact).collect();
+  artifacts.last_mut().unwrap().key[0] ^= 0xff;
+  let references: Vec<_> = artifacts.iter().collect();
+  let before = publisher.observe().unwrap();
+
+  let error = publisher
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      artifacts: &references,
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap_err();
+
+  assert_eq!(error.code(), "immutable_index_prepared_mismatch");
+  assert_eq!(publisher.observe().unwrap(), before);
+  assert!(publisher.locator(&artifacts[0].key).unwrap().is_none());
 }
 
 #[test]

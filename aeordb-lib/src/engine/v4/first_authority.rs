@@ -3880,8 +3880,8 @@ impl V4FirstAuthorityPublisher {
       drop(poisoned);
       FirstAuthorityPublicationErrorV1::StateLockPoisoned
     })?;
-    let observation = self.observe()?;
-    let header = &observation.selected.header;
+    let mut observation = self.observe()?;
+    let header = observation.selected.header.clone();
     if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
         "immutable_index_missing_authority",
@@ -3936,9 +3936,9 @@ impl V4FirstAuthorityPublisher {
     }
 
     let mut kv = self.lock_kv()?;
-    validate_kv_header_alignment(&kv, header)?;
+    validate_kv_header_alignment(&kv, &header)?;
     kv.flush()?;
-    validate_kv_header_alignment(&kv, header)?;
+    validate_kv_header_alignment(&kv, &header)?;
     if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
         "immutable_index_baseline_not_flushed",
@@ -3954,9 +3954,13 @@ impl V4FirstAuthorityPublisher {
     entities.try_reserve_exact(request.artifacts.len()).map_err(|error| {
       FirstAuthorityPublicationErrorV1::invalid("immutable_index_entity_allocation", format!("entity allocation failed: {error}"))
     })?;
+    let mut missing_artifacts = Vec::new();
+    missing_artifacts.try_reserve_exact(request.artifacts.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_entity_allocation", format!("missing-artifact allocation failed: {error}"))
+    })?;
     let mut next_write_sequence = header.write_sequence_high_water;
     for artifact in request.artifacts {
-      if let Some(existing) = load_index_artifact_entity(&self.file, &kv, header, &artifact.key)? {
+      if let Some(existing) = load_index_artifact_entity(&self.file, &kv, &header, &artifact.key)? {
         if existing.value != artifact.value {
           return Err(FirstAuthorityPublicationErrorV1::invalid(
             "immutable_index_identity_collision",
@@ -3984,6 +3988,7 @@ impl V4FirstAuthorityPublisher {
         &artifact.value,
       )?;
       entities.push(PreparedWholeEntityV1 { key: artifact.key.clone(), kv_type: kv_tag::INDEX_ARTIFACT, bytes: entity_bytes });
+      missing_artifacts.push(*artifact);
       receipts.push(IndexArtifactPublicationReceiptV1 {
         artifact_key: artifact.key.clone(),
         write_sequence: next_write_sequence,
@@ -3994,6 +3999,109 @@ impl V4FirstAuthorityPublisher {
       return Ok(IndexArtifactBatchPublicationReceiptV1 { artifacts: receipts, observation, idempotent: true });
     }
 
+    let mut missing_keys = Vec::new();
+    missing_keys.try_reserve_exact(entities.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_entity_allocation", format!("capacity-key allocation failed: {error}"))
+    })?;
+    missing_keys.extend(entities.iter().map(|entity| entity.key.as_slice()));
+    if !kv.preflight_new_keys_fit_current_layout(&missing_keys)? {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_kv_capacity",
+        "the current KV layout cannot retain the complete immutable IndexArtifact batch; expand the KV block and retry",
+      ));
+    }
+
+    let missing_count = u64::try_from(entities.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_entry_count", format!("entity count exceeds u64: {error}"))
+    })?;
+    header
+      .entry_count
+      .checked_add(missing_count)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_entry_count", "v4 entry count overflowed"))?;
+    let window_count = entities.len().div_ceil(DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES);
+    let window_count = u64::try_from(window_count).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_window_count", format!("window count exceeds u64: {error}"))
+    })?;
+    header.slot_sequence.checked_add(window_count).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_header_sequence_exhausted",
+        "v4 header sequence cannot represent every batch window",
+      )
+    })?;
+    let initial_append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
+    if initial_append_start < header.hot_tail_offset {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_file_truncated",
+        "database length precedes the selected v4 hot-tail offset",
+      ));
+    }
+    let projected_entity_end = entities.iter().try_fold(initial_append_start, |offset, entity| {
+      offset.checked_add(entity.bytes.len() as u64).ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid("immutable_index_wal_overflow", "immutable IndexArtifact WAL offset overflowed")
+      })
+    })?;
+    let empty_hot_tail_bytes = kv.pending_hot_tail_bytes()?;
+    let inter_window_bytes = empty_hot_tail_bytes.checked_mul(window_count - 1).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_wal_overflow",
+        "immutable IndexArtifact inter-window hot-tail bytes overflowed",
+      )
+    })?;
+    projected_entity_end.checked_add(inter_window_bytes).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_wal_overflow", "immutable IndexArtifact final WAL offset overflowed")
+    })?;
+    let orphan_prefix_bytes = initial_append_start.checked_sub(header.hot_tail_offset).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_wal_prefix",
+        "immutable IndexArtifact append precedes the selected hot tail",
+      )
+    })?;
+    entity_dependency_bytes(&entities, header.hash_algorithm.hash_length())?
+      .checked_add(pending_void_hot_tail_bytes(&kv, header.hash_algorithm.hash_length())?)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_dependency_bytes", "dependency byte count overflowed"))?
+      .checked_add(orphan_prefix_bytes)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_dependency_bytes", "dependency byte count overflowed"))?;
+
+    for (entity_window, artifact_window) in
+      entities.chunks(DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES).zip(missing_artifacts.chunks(DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES))
+    {
+      observation = self.publish_index_artifact_window(
+        &mut kv,
+        &observation,
+        entity_window,
+        artifact_window,
+        request.publication_timestamp_ms,
+        observer,
+      )?;
+    }
+    Ok(IndexArtifactBatchPublicationReceiptV1 { artifacts: receipts, observation, idempotent: false })
+  }
+
+  fn publish_index_artifact_window(
+    &self,
+    kv: &mut DiskKVStore,
+    observation: &DatabaseHeaderObservationV4,
+    entities: &[PreparedWholeEntityV1],
+    artifacts: &[&EncodedImmutableIndexArtifactV1],
+    publication_timestamp_ms: u64,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<DatabaseHeaderObservationV4, FirstAuthorityPublicationErrorV1> {
+    if entities.is_empty() || entities.len() > DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES || entities.len() != artifacts.len() {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_window_count",
+        "immutable IndexArtifact authority window has an invalid entity/artifact count",
+      ));
+    }
+    let header = &observation.selected.header;
+    validate_kv_header_alignment(kv, header)?;
+    kv.flush()?;
+    validate_kv_header_alignment(kv, header)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_window_baseline_not_flushed",
+        "immutable IndexArtifact authority window requires an empty KV write and hot-buffer baseline",
+      ));
+    }
     let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
     if append_start < header.hot_tail_offset {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
@@ -4012,22 +4120,25 @@ impl V4FirstAuthorityPublisher {
         "immutable IndexArtifact append precedes the selected hot tail",
       )
     })?;
-    let dependency_bytes = entity_dependency_bytes(&entities, header.hash_algorithm.hash_length())?
+    let dependency_bytes = entity_dependency_bytes(entities, header.hash_algorithm.hash_length())?
+      .checked_add(pending_void_hot_tail_bytes(kv, header.hash_algorithm.hash_length())?)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_dependency_bytes", "dependency byte count overflowed"))?
       .checked_add(orphan_prefix_bytes)
       .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_dependency_bytes", "dependency byte count overflowed"))?;
     let entry_increment = u64::try_from(entities.len()).map_err(|error| {
       FirstAuthorityPublicationErrorV1::invalid("immutable_index_entry_count", format!("entity count exceeds u64: {error}"))
     })?;
     let mut candidate = header.clone();
-    candidate.updated_at_ms = header.updated_at_ms.max(request.publication_timestamp_ms);
-    candidate.write_sequence_high_water = next_write_sequence;
+    candidate.updated_at_ms = header.updated_at_ms.max(publication_timestamp_ms);
+    candidate.write_sequence_high_water = header.write_sequence_high_water.checked_add(entry_increment).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("immutable_index_write_sequence_exhausted", "v4 write sequence is exhausted")
+    })?;
     candidate.hot_tail_offset = expected_hot_tail_offset;
     candidate.entry_count = header
       .entry_count
       .checked_add(entry_increment)
       .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("immutable_index_entry_count", "v4 entry count overflowed"))?;
-    let admitted =
-      self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)?;
+    let admitted = self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, observation, candidate, dependency_bytes)?;
     let authority_sequence = admitted.sequence();
     let batch = kv.begin_atomic_visibility_batch(entities.len(), authority_sequence)?;
     let mut expected_existing = Vec::new();
@@ -4041,10 +4152,10 @@ impl V4FirstAuthorityPublisher {
     let (publication_result, append_completed) = {
       let mut dependency = FirstAuthorityDependencyV1 {
         file: &self.file,
-        kv: &mut kv,
+        kv,
         batch,
         expected_publication_sequence: authority_sequence,
-        entities: &entities,
+        entities,
         start_offset: append_start,
         expected_hot_tail_offset,
         expected_existing: &expected_existing,
@@ -4071,11 +4182,11 @@ impl V4FirstAuthorityPublisher {
     }
     kv.complete_hot_tail_dependency();
     kv.publish_atomic_visibility_after_authority(batch, &publication.durability)?;
-    observer.authority_committed(&kv, &entities)?;
+    observer.authority_committed(kv, entities)?;
 
-    for artifact in request.artifacts {
+    for artifact in artifacts {
       let stored =
-        load_index_artifact_entity(&self.file, &kv, &publication.observation.selected.header, &artifact.key)?.ok_or_else(|| {
+        load_index_artifact_entity(&self.file, kv, &publication.observation.selected.header, &artifact.key)?.ok_or_else(|| {
           FirstAuthorityPublicationErrorV1::invalid(
             "immutable_index_readback_missing",
             "published immutable IndexArtifact locator is absent",
@@ -4088,7 +4199,7 @@ impl V4FirstAuthorityPublisher {
         ));
       }
     }
-    Ok(IndexArtifactBatchPublicationReceiptV1 { artifacts: receipts, observation: publication.observation, idempotent: false })
+    Ok(publication.observation)
   }
 
   pub fn admission_locator(&self, root_hash: &[u8]) -> Result<Option<KVEntry>, FirstAuthorityPublicationErrorV1> {
@@ -8505,6 +8616,22 @@ fn entity_dependency_bytes(entities: &[PreparedWholeEntityV1], hash_length: usiz
   entity_bytes
     .checked_add(hot_tail_bytes)
     .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_package_size", "dependency byte total overflowed"))
+}
+
+fn pending_void_hot_tail_bytes(kv: &DiskKVStore, hash_length: usize) -> Result<u64, FirstAuthorityPublicationErrorV1> {
+  let empty_without_voids = crate::engine::hot_tail::serialized_size(0, 0, hash_length)?;
+  let empty_without_voids = match u64::try_from(empty_without_voids) {
+    Ok(bytes) => bytes,
+    Err(error) => {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "first_authority_package_size",
+        format!("empty hot-tail length exceeds u64: {error}"),
+      ));
+    }
+  };
+  kv.pending_hot_tail_bytes()?.checked_sub(empty_without_voids).ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid("first_authority_package_size", "pending hot-tail size is below its fixed header")
+  })
 }
 
 fn retirement_journal_receipt(

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -776,6 +776,51 @@ impl DiskKVStore {
     }
 
     Ok(())
+  }
+
+  /// Verify that one already validated set of new keys can be flushed into the
+  /// current fixed KV layout. The caller must hold the writer and provide a
+  /// clean baseline so this read-only result stays valid until publication.
+  pub(crate) fn preflight_new_keys_fit_current_layout(&mut self, keys: &[&[u8]]) -> EngineResult<bool> {
+    self.require_no_atomic_visibility("KV capacity preflight")?;
+    if !self.write_buffer.is_empty() || !self.hot_buffer.is_empty() {
+      return Err(EngineError::ResourceExhausted(
+        "KV capacity preflight requires an explicitly flushed write and hot-buffer baseline".to_string(),
+      ));
+    }
+
+    let hash_length = self.hash_algo.hash_length();
+    let mut unique = HashSet::new();
+    unique
+      .try_reserve(keys.len())
+      .map_err(|error| EngineError::ResourceExhausted(format!("KV capacity preflight identity allocation failed: {error}")))?;
+    let mut keys_by_bucket: BTreeMap<usize, Vec<&[u8]>> = BTreeMap::new();
+    for key in keys {
+      if key.len() != hash_length {
+        return Err(EngineError::InvalidInput(format!(
+          "KV capacity preflight key length {} does not match active hash length {hash_length}",
+          key.len()
+        )));
+      }
+      if !unique.insert(*key) {
+        return Err(EngineError::InvalidInput("KV capacity preflight contains a duplicate key".to_string()));
+      }
+      keys_by_bucket.entry(self.nvt.bucket_for_value(key)).or_default().push(*key);
+    }
+
+    for (bucket, new_keys) in keys_by_bucket {
+      let page = self.current_page(bucket)?;
+      let existing = deserialize_page(&page, hash_length)?;
+      let additional = new_keys.iter().filter(|key| !existing.iter().any(|entry| entry.hash.as_slice() == **key)).count();
+      let projected = existing
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| EngineError::ResourceExhausted("KV capacity preflight entry count overflowed".to_string()))?;
+      if projected > MAX_ENTRIES_PER_PAGE {
+        return Ok(false);
+      }
+    }
+    Ok(true)
   }
 
   /// Begin one bounded batch whose entries remain absent from every published

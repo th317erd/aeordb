@@ -3226,7 +3226,7 @@
     {
       "id": "esq-v1-4ea949551ec2d158fd84-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1579,
+      "line": 1624,
       "column": 25,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3236,7 +3236,7 @@
     {
       "id": "esq-v1-b5990e6dab44f241035e-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1604,
+      "line": 1649,
       "column": 22,
       "enclosing_item": "impl DiskKVStore::finalize_expansion_with_block_length",
       "kind": "error_conversion",
@@ -3246,7 +3246,7 @@
     {
       "id": "esq-v1-a4eede644110adffe720-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1697,
+      "line": 1742,
       "column": 5,
       "enclosing_item": "impl DiskKVStore::pending_hot_tail_bytes",
       "kind": "error_conversion",
@@ -3256,7 +3256,7 @@
     {
       "id": "esq-v1-07cbf56174ceb4b24285-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1710,
+      "line": 1755,
       "column": 9,
       "enclosing_item": "impl DiskKVStore::prepare_hot_tail_dependency",
       "kind": "error_conversion",
@@ -3266,7 +3266,7 @@
     {
       "id": "esq-v1-85907f46c110382617a0-00",
       "file": "aeordb-lib/src/engine/disk_kv_store.rs",
-      "line": 1747,
+      "line": 1792,
       "column": 7,
       "enclosing_item": "impl DiskKVStore::drop",
       "kind": "logged_error_continues",
@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 4727,
+      "line": 4838,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 8352,
+      "line": 8463,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 8355,
+      "line": 8466,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",

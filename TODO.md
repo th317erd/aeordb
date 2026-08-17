@@ -666,6 +666,9 @@
             - [x] Prove the post-hard-commit/pre-capture race, prior admitted raw and namespace writes, blocked new writes, capture gaps, stale roots, malformed flat/B-tree state, missing protected closure, cancellation/timeout/memory pressure, retry/reopen, both hash widths, and byte-for-byte source invariance.
           - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
           - [ ] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.
+            - [x] Reproduce the exact 4,097-item boundary and a second-window failure before changing production publication.
+            - [x] Prevalidate the complete request, then publish only missing immutable artifacts in 511-entry authority windows while keeping selection last.
+            - [ ] Prove exact retry, prefix reuse, no sequence growth for existing artifacts, broad regression safety, and native-platform behavior.
       - [x] P3c-3a: add fixture-matching typed legacy-root-map codecs and one shared immutable-system-control publication/read authority.
       - [ ] P3c-3b: add the bounded private staging/sort workspace, producer sinks, authority-last root-map owner, and selected streaming reader.
       - [ ] P3c-3c: bind the selected root-map control into AMPR destination verification and prove cancel/resume, commit-unknown recovery, bounded resources, shadow-only refusal, and byte-for-byte source invariance.

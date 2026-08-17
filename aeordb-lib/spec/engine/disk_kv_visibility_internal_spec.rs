@@ -21,6 +21,37 @@ fn hard_receipt(sequence: u64) -> DurabilityCommitReceipt {
   DurabilityCommitReceipt { sequence, class: CommitClass::HardAuthority, hard_frontier: sequence }
 }
 
+fn colliding_keys(count: usize) -> Vec<Vec<u8>> {
+  (0..count)
+    .map(|ordinal| {
+      let mut key = vec![0u8; 32];
+      key[24..].copy_from_slice(&(ordinal as u64).to_be_bytes());
+      key
+    })
+    .collect()
+}
+
+#[test]
+fn kv_capacity_preflight_is_exact_read_only_and_requires_a_clean_unique_key_set() {
+  let (mut store, _directory) = test_store("capacity-preflight");
+  assert!(store.preflight_new_keys_fit_current_layout(&[]).unwrap());
+
+  let keys = colliding_keys(MAX_ENTRIES_PER_PAGE + 1);
+  let first_page: Vec<_> = keys[..MAX_ENTRIES_PER_PAGE].iter().map(Vec::as_slice).collect();
+  assert!(store.preflight_new_keys_fit_current_layout(&first_page).unwrap());
+  let overfull: Vec<_> = keys.iter().map(Vec::as_slice).collect();
+  assert!(!store.preflight_new_keys_fit_current_layout(&overfull).unwrap());
+  assert_eq!(store.len(), 0);
+  assert_eq!(store.write_buffer_len(), 0);
+  assert_eq!(store.hot_buffer_len(), 0);
+
+  assert!(store.preflight_new_keys_fit_current_layout(&[keys[0].as_slice(), keys[0].as_slice()]).is_err());
+  assert!(store.preflight_new_keys_fit_current_layout(&[&[0u8; 31]]).is_err());
+
+  store.insert(entry(0x31, 3_100)).unwrap();
+  assert!(store.preflight_new_keys_fit_current_layout(&[keys[0].as_slice()]).is_err());
+}
+
 #[test]
 fn atomic_visibility_batch_keeps_staged_entries_hidden_until_hard_authority() {
   let (mut store, _directory) = test_store("hidden-until-authority");
