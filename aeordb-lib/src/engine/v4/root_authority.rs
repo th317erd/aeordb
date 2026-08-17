@@ -176,6 +176,46 @@ pub fn encode_root_publication_prepare_control(prepare: &RootPublicationPrepareV
   encode_system_control(SystemControlKindV1::RootPublicationPrepare, 1, &body, hash_algorithm)
 }
 
+pub fn decode_root_publication_prepare(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<RootPublicationPrepareV1> {
+  let control = decode_system_control(value, hash_algorithm)?;
+  if control.kind != SystemControlKindV1::RootPublicationPrepare {
+    return Err(format_error(
+      MalformedInputClass::UnknownTypeKindOrEnum,
+      "root_prepare_control_kind",
+      format!("expected RootPublicationPrepare, got {:?}", control.kind),
+    ));
+  }
+  let hash_width = hash_algorithm.hash_length();
+  let body = control.body;
+  let authority_kind_value = u16_at(body, 40 + 3 * hash_width)?;
+  let authority_kind = RootAuthorityKindV1::from_u16(authority_kind_value)
+    .ok_or_else(|| format_error(MalformedInputClass::UnknownTypeKindOrEnum, "root_prepare_kind", format!("kind {authority_kind_value}")))?;
+  let root_format = u16_at(body, 42 + 3 * hash_width)?;
+  if root_format != 1 {
+    return Err(format_error(MalformedInputClass::UnknownMagicOrVersion, "root_prepare_root_format", format!("format {root_format}")));
+  }
+  let authority_identity_length = usize::from(u16_at(body, 44 + 3 * hash_width)?);
+  let authority_identity_offset = 64 + 5 * hash_width;
+  let authority_identity_end = authority_identity_offset.checked_add(authority_identity_length).ok_or_else(|| {
+    format_error(MalformedInputClass::LengthCountOrArithmeticOverflow, "root_prepare_length", "authority identity end overflow")
+  })?;
+  let authority_identity = body.get(authority_identity_offset..authority_identity_end).ok_or_else(root_admission_bounds_error)?.to_vec();
+  Ok(RootPublicationPrepareV1 {
+    database_id: array_16_at(body, 0)?,
+    transaction_id: array_16_at(body, 16)?,
+    created_at_ms: i64_at(body, 32)?,
+    target_namespace_root: body[40..40 + hash_width].to_vec(),
+    target_semantic_state: body[40 + hash_width..40 + 2 * hash_width].to_vec(),
+    typed_closure_digest: body[40 + 2 * hash_width..40 + 3 * hash_width].to_vec(),
+    authority_kind,
+    authority_identity,
+    expected_authority_before: body[48 + 3 * hash_width..48 + 4 * hash_width].to_vec(),
+    expected_authority_after: body[48 + 4 * hash_width..48 + 5 * hash_width].to_vec(),
+    intended_header_slot_sequence: u64_at(body, 48 + 5 * hash_width)?,
+    intended_publication_sequence: u64_at(body, 56 + 5 * hash_width)?,
+  })
+}
+
 pub fn encode_root_admission_commit_control(commit: &RootAdmissionCommitV1, hash_algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
   let hash_width = hash_algorithm.hash_length();
   require_hash(&commit.namespace_root, hash_width, false, "root_commit_identity", "namespace root")?;

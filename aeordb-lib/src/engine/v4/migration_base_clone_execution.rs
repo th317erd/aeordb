@@ -126,6 +126,32 @@ pub struct MigrationBaseCloneExecutionReceiptV1 {
   pub destination_head_tree: Vec<u8>,
 }
 
+pub(crate) struct MigrationSubtreeCloneRequestV1<'a> {
+  pub permit: &'a MigrationPreflightPermitV1,
+  pub source: &'a dyn MigrationBaseCloneEntrySourceV1,
+  pub destination: &'a V4FirstAuthorityPublisher,
+  pub memory: &'a MemoryCoordinator,
+  pub cancellation: &'a CancellationToken,
+  pub publication_timestamp_ms: u64,
+  pub maximum_work_items: u64,
+  pub maximum_memory_bytes: u64,
+  pub maximum_decoded_chunk_bytes: usize,
+  pub maximum_directory_depth: usize,
+  pub path: &'a str,
+  pub hash: &'a [u8],
+  pub entry_type: EntryType,
+  pub logical_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MigrationTranslatedSubtreeV1 {
+  pub hash: Vec<u8>,
+  pub total_size: u64,
+  pub content_type: Option<String>,
+  pub created_at: Option<i64>,
+  pub updated_at: Option<i64>,
+}
+
 #[derive(Debug)]
 pub enum MigrationBaseCloneExecutionErrorV1 {
   Invalid { code: &'static str, message: String },
@@ -519,6 +545,112 @@ pub fn execute_migration_base_clone_v1(
     destination_head_tree: None,
   };
   executor.execute()
+}
+
+/// Reuse the bounded base-clone traversal for one authoritative after-subtree.
+///
+/// Capture replay owns root ordering and ancestor copy-on-write. This adapter
+/// owns only source validation, SystemFamily classification, immutable subtree
+/// translation, and bounded destination publication.
+pub(crate) fn translate_migration_subtree_v1(
+  request: MigrationSubtreeCloneRequestV1<'_>,
+) -> Result<Option<MigrationTranslatedSubtreeV1>, MigrationBaseCloneExecutionErrorV1> {
+  struct EmptySeedSource;
+  impl MigrationBaseCloneSeedSourceV1 for EmptySeedSource {
+    fn next_seed(&mut self) -> EngineResult<Option<MigrationBaseCloneSeedV1>> {
+      Ok(None)
+    }
+
+    fn finish(&mut self) -> EngineResult<MigrationBaseCloneStreamClosureV1> {
+      Err(EngineError::InvalidInput("subtree translator has no seed-stream closure".to_string()))
+    }
+  }
+  struct EmptySeedSink;
+  impl MigrationBaseCloneSeedResultSinkV1 for EmptySeedSink {
+    fn record_seed_result(&mut self, _seed: &MigrationBaseCloneSeedV1, _destination_hash: Option<&[u8]>) -> EngineResult<()> {
+      Err(EngineError::InvalidInput("subtree translator has no seed-result handoff".to_string()))
+    }
+  }
+
+  let mut seeds = EmptySeedSource;
+  let mut seed_results = EmptySeedSink;
+  let base_request = MigrationBaseCloneExecutionRequestV1 {
+    permit: request.permit,
+    source: request.source,
+    seeds: &mut seeds,
+    seed_results: &mut seed_results,
+    destination: request.destination,
+    memory: request.memory,
+    cancellation: request.cancellation,
+    publication_timestamp_ms: request.publication_timestamp_ms,
+    maximum_work_items: request.maximum_work_items,
+    maximum_memory_bytes: request.maximum_memory_bytes,
+    maximum_decoded_chunk_bytes: request.maximum_decoded_chunk_bytes,
+    maximum_directory_depth: request.maximum_directory_depth,
+  };
+  validate_request(&base_request)?;
+  validate_path(request.path)?;
+  if request.hash.len() != request.permit.hash_algorithm().hash_length() || request.hash.iter().all(|byte| *byte == 0) {
+    return Err(MigrationBaseCloneExecutionErrorV1::invalid(
+      "migration_clone_subtree_hash",
+      "subtree identity must be one nonzero database-width hash",
+    ));
+  }
+  let planner = MigrationBaseClonePlannerV1::new(request.permit, request.cancellation, request.maximum_work_items)?;
+  let budget = MigrationMemoryBudgetV1::new(request.memory, request.maximum_memory_bytes)?;
+  let batch = DestinationBatchV1::new(request.destination, request.permit.database_id(), request.publication_timestamp_ms)?;
+  let mut executor = ExecutorV1 {
+    request: base_request,
+    planner: Some(planner),
+    budget,
+    batch,
+    work: Vec::new(),
+    active_directories: Vec::new(),
+    active_btree_nodes: Vec::new(),
+    entry_results: Vec::new(),
+    btree_results: Vec::new(),
+    pending_seed_results: Vec::new(),
+    work_items: 0,
+    processed_seeds: 0,
+    loaded_entities: 0,
+    copied_chunk_bytes: 0,
+    maximum_frontier_items: 0,
+    maximum_directory_depth: 0,
+    maximum_btree_depth: 0,
+    work_since_cancellation: 0,
+    saw_head: true,
+    destination_head_tree: None,
+  };
+  executor.push_work(CloneWorkV1::Entry {
+    path: Arc::from(request.path),
+    hash: request.hash.to_vec(),
+    entry_type: request.entry_type,
+    logical_bytes: request.logical_bytes,
+    directory_depth: request.path.split('/').filter(|segment| !segment.is_empty()).count(),
+  })?;
+  executor.drain_work()?;
+  let translated = match executor.entry_results.pop() {
+    Some(translated) if executor.entry_results.is_empty() && executor.btree_results.is_empty() => translated,
+    _ => {
+      return Err(MigrationBaseCloneExecutionErrorV1::invalid(
+        "migration_clone_result_unbalanced",
+        "subtree traversal did not produce exactly one destination result",
+      ));
+    }
+  };
+  executor.batch.flush(&mut executor.budget)?;
+  translated
+    .map(|translated| {
+      executor.budget.release(translated.memory_charge)?;
+      Ok(MigrationTranslatedSubtreeV1 {
+        hash: translated.hash,
+        total_size: translated.total_size,
+        content_type: translated.content_type,
+        created_at: translated.created_at,
+        updated_at: translated.updated_at,
+      })
+    })
+    .transpose()
 }
 
 impl ExecutorV1<'_> {

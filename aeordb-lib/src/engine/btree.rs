@@ -52,6 +52,22 @@ pub struct BTreeMutationDelta {
   pub removals: Vec<String>,
 }
 
+/// Bounded immutable-node reader used by the storage-neutral mutation planner.
+///
+/// Live v3 operations use the `StorageEngine` implementation below. Shadow v4
+/// migration supplies the same bytes through its selected-authority reader, so
+/// both paths share one B-tree mutation algorithm.
+pub(crate) trait BTreeNodeRead {
+  fn load_btree_node(&self, node_hash: &[u8]) -> EngineResult<(Vec<u8>, u8)>;
+}
+
+impl BTreeNodeRead for StorageEngine {
+  fn load_btree_node(&self, node_hash: &[u8]) -> EngineResult<(Vec<u8>, u8)> {
+    let (header, _key, value) = self.get_entry(node_hash)?.ok_or_else(|| EngineError::NotFound("B-tree node not found".to_string()))?;
+    Ok((value, header.entry_version))
+  }
+}
+
 #[derive(Debug, Default)]
 struct PlannedNodeOverlay {
   writes: Vec<BTreeNodeWrite>,
@@ -725,13 +741,33 @@ pub fn btree_lookup(
   hash_length: usize,
   include_deleted: bool,
 ) -> EngineResult<Option<ChildEntry>> {
+  struct HistoricalStorageReader<'a> {
+    engine: &'a StorageEngine,
+    include_deleted: bool,
+  }
+  impl BTreeNodeRead for HistoricalStorageReader<'_> {
+    fn load_btree_node(&self, node_hash: &[u8]) -> EngineResult<(Vec<u8>, u8)> {
+      let entry =
+        if self.include_deleted { self.engine.get_entry_including_deleted(node_hash)? } else { self.engine.get_entry(node_hash)? }
+          .ok_or_else(|| EngineError::NotFound("B-tree node not found".to_string()))?;
+      Ok((entry.2, entry.0.entry_version))
+    }
+  }
+  btree_lookup_with_reader(&HistoricalStorageReader { engine, include_deleted }, root_hash, name, hash_length)
+}
+
+pub(crate) fn btree_lookup_with_reader(
+  source: &(impl BTreeNodeRead + ?Sized),
+  root_hash: &[u8],
+  name: &str,
+  hash_length: usize,
+) -> EngineResult<Option<ChildEntry>> {
   let mut state = BTreeWalkState::default();
   let mut current_hash = root_hash.to_vec();
   loop {
     state.enter(Some(&current_hash))?;
-    let node_data = if include_deleted { engine.get_entry_including_deleted(&current_hash)? } else { engine.get_entry(&current_hash)? }
-      .ok_or_else(|| EngineError::NotFound("B-tree node not found".to_string()))?;
-    let node = BTreeNode::deserialize(&node_data.2, hash_length, node_data.0.entry_version)?;
+    let (node_data, entry_version) = source.load_btree_node(&current_hash)?;
+    let node = BTreeNode::deserialize(&node_data, hash_length, entry_version)?;
 
     match node {
       BTreeNode::Leaf(leaf) => return Ok(leaf.find(name).cloned()),
@@ -1057,12 +1093,15 @@ fn append_bounded_warnings(target: &mut Vec<BTreeWalkWarning>, mut source: Vec<B
 /// the tree can have near-empty leaf nodes, degrading lookup from O(log N)
 /// toward O(N). For now, this is acceptable -- a full reindex rebuilds the tree.
 /// Future: implement sibling borrowing and node merging on underflow.
-fn load_planned_btree_node(engine: &StorageEngine, overlay: &PlannedNodeOverlay, node_hash: &[u8]) -> EngineResult<(Vec<u8>, u8)> {
+fn load_planned_btree_node(
+  source: &(impl BTreeNodeRead + ?Sized),
+  overlay: &PlannedNodeOverlay,
+  node_hash: &[u8],
+) -> EngineResult<(Vec<u8>, u8)> {
   if let Some(value) = overlay.value(node_hash) {
     return Ok((value.to_vec(), 0));
   }
-  let (header, _key, value) = engine.get_entry(node_hash)?.ok_or_else(|| EngineError::NotFound("B-tree node not found".to_string()))?;
-  Ok((value, header.entry_version))
+  source.load_btree_node(node_hash)
 }
 
 pub fn btree_delete(
@@ -1101,7 +1140,7 @@ pub fn btree_plan_delete(
 }
 
 fn btree_plan_delete_node(
-  engine: &StorageEngine,
+  source: &(impl BTreeNodeRead + ?Sized),
   node_hash: &[u8],
   supplied_node_data: Option<&[u8]>,
   name: &str,
@@ -1111,7 +1150,7 @@ fn btree_plan_delete_node(
 ) -> EngineResult<Option<(Vec<u8>, Vec<u8>)>> {
   let (node_data, entry_version) = match supplied_node_data {
     Some(data) => (data.to_vec(), 0),
-    None => load_planned_btree_node(engine, overlay, node_hash)?,
+    None => load_planned_btree_node(source, overlay, node_hash)?,
   };
   let mut node = BTreeNode::deserialize(&node_data, hash_length, entry_version)?;
 
@@ -1131,7 +1170,7 @@ fn btree_plan_delete_node(
       let child_idx = internal.find_child_index(name);
       let child_hash = internal.children[child_idx].clone();
 
-      match btree_plan_delete_node(engine, &child_hash, None, name, hash_length, algo, overlay)? {
+      match btree_plan_delete_node(source, &child_hash, None, name, hash_length, algo, overlay)? {
         Some((new_child_hash, _new_child_data)) => {
           internal.children[child_idx] = new_child_hash;
           let data = node.serialize(hash_length)?;
@@ -1153,7 +1192,7 @@ fn btree_plan_delete_node(
           } else if internal.children.len() == 1 {
             // Collapse: single child becomes the new root
             let remaining_hash = internal.children[0].clone();
-            let (remaining_data, _entry_version) = load_planned_btree_node(engine, overlay, &remaining_hash)?;
+            let (remaining_data, _entry_version) = load_planned_btree_node(source, overlay, &remaining_hash)?;
             Ok(Some((remaining_hash, remaining_data)))
           } else {
             let data = node.serialize(hash_length)?;
@@ -1203,7 +1242,7 @@ pub fn btree_plan_insert(
 }
 
 fn btree_plan_insert_with_overlay(
-  engine: &StorageEngine,
+  source: &(impl BTreeNodeRead + ?Sized),
   root_data: &[u8],
   entry: ChildEntry,
   hash_length: usize,
@@ -1212,7 +1251,7 @@ fn btree_plan_insert_with_overlay(
 ) -> EngineResult<(Vec<u8>, Vec<u8>)> {
   let root_node = BTreeNode::deserialize(root_data, hash_length, 0)?;
 
-  let result = btree_plan_insert_node(engine, root_node, entry, hash_length, algo, overlay)?;
+  let result = btree_plan_insert_node(source, root_node, entry, hash_length, algo, overlay)?;
 
   let (new_hash, new_data) = match result {
     InsertResult::Done(hash, data) => (hash, data),
@@ -1233,6 +1272,16 @@ fn btree_plan_insert_with_overlay(
 /// final root. `None` means the mutations removed every entry.
 pub fn btree_plan_apply(
   engine: &StorageEngine,
+  root_data: &[u8],
+  delta: BTreeMutationDelta,
+  hash_length: usize,
+  algo: &HashAlgorithm,
+) -> EngineResult<Option<BTreeMutationPlan>> {
+  btree_plan_apply_with_reader(engine, root_data, delta, hash_length, algo)
+}
+
+pub(crate) fn btree_plan_apply_with_reader(
+  source: &(impl BTreeNodeRead + ?Sized),
   root_data: &[u8],
   mut delta: BTreeMutationDelta,
   hash_length: usize,
@@ -1264,7 +1313,7 @@ pub fn btree_plan_apply(
     let Some((root_hash, root_data)) = current.take() else {
       continue;
     };
-    current = btree_plan_delete_node(engine, &root_hash, Some(&root_data), &name, hash_length, algo, &mut overlay)?;
+    current = btree_plan_delete_node(source, &root_hash, Some(&root_data), &name, hash_length, algo, &mut overlay)?;
   }
 
   for entry in delta.upserts {
@@ -1272,7 +1321,7 @@ pub fn btree_plan_apply(
       Some((_root_hash, root_data)) => root_data.clone(),
       None => BTreeNode::Leaf(LeafNode::new()).serialize(hash_length)?,
     };
-    current = Some(btree_plan_insert_with_overlay(engine, &root_data, entry, hash_length, algo, &mut overlay)?);
+    current = Some(btree_plan_insert_with_overlay(source, &root_data, entry, hash_length, algo, &mut overlay)?);
   }
 
   let Some((root_hash, root_data)) = current else {
@@ -1283,7 +1332,7 @@ pub fn btree_plan_apply(
 }
 
 fn btree_plan_insert_node(
-  engine: &StorageEngine,
+  source: &(impl BTreeNodeRead + ?Sized),
   node: BTreeNode,
   entry: ChildEntry,
   hash_length: usize,
@@ -1316,10 +1365,10 @@ fn btree_plan_insert_node(
       let child_hash = internal.children[child_idx].clone();
 
       // Read child node (still needs disk read)
-      let (child_data, entry_version) = load_planned_btree_node(engine, overlay, &child_hash)?;
+      let (child_data, entry_version) = load_planned_btree_node(source, overlay, &child_hash)?;
       let child_node = BTreeNode::deserialize(&child_data, hash_length, entry_version)?;
 
-      let child_result = btree_plan_insert_node(engine, child_node, entry, hash_length, algo, overlay)?;
+      let child_result = btree_plan_insert_node(source, child_node, entry, hash_length, algo, overlay)?;
 
       match child_result {
         InsertResult::Done(new_child_hash, _) => {

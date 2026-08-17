@@ -101,8 +101,8 @@ use super::namespace::{
 use super::reader::FormatError;
 use super::read_view::{RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1};
 use super::root_authority::{
-  RootAdmissionCommitV1, RootAuthorityKindV1, RootPublicationPrepareV1, decode_root_admission_commit, encode_root_admission_commit_control,
-  encode_root_publication_prepare_control,
+  RootAdmissionCommitV1, RootAuthorityKindV1, RootPublicationPrepareV1, decode_root_admission_commit, decode_root_publication_prepare,
+  encode_root_admission_commit_control, encode_root_publication_prepare_control,
 };
 use super::semantic_store::{SEMANTIC_OBJECT_CONTENT_TYPE, semantic_object_path};
 use super::system_control::{SystemControlKindV1, SystemControlSlotV1, decode_system_control, system_control_path};
@@ -333,6 +333,23 @@ pub struct ImmutableEntityBatchPublicationReceiptV1 {
   pub entities: Vec<ImmutableEntityPublicationReceiptV1>,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
+}
+
+/// One owned immutable entity loaded through the selected v4 authority.
+///
+/// The caller supplies the complete encoded-entity cap before any allocation.
+/// Exposing decoded fields instead of physical offsets keeps migration and
+/// repair callers on the same bounded KV/header validation path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedImmutableEntityV1 {
+  pub entity_version: u8,
+  pub entry_type: EntryTypeV4,
+  pub flags: u8,
+  pub compression_algorithm: CompressionAlgorithm,
+  pub timestamp_ms: u64,
+  pub write_sequence: u64,
+  pub key: Vec<u8>,
+  pub stored_value: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -2343,6 +2360,44 @@ impl V4FirstAuthorityPublisher {
   pub fn locator(&self, key: &[u8]) -> Result<Option<KVEntry>, FirstAuthorityPublicationErrorV1> {
     let kv = self.lock_kv()?;
     kv.get(key).map_err(Into::into)
+  }
+
+  pub fn load_immutable_entity_bounded(
+    &self,
+    key: &[u8],
+    maximum_total_length: usize,
+  ) -> Result<Option<LoadedImmutableEntityV1>, FirstAuthorityPublicationErrorV1> {
+    if maximum_total_length == 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid("immutable_entity_read_bound", "immutable entity read bound must be nonzero"));
+    }
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if key.len() != header.hash_algorithm.hash_length() || key.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_entity_read_key",
+        "immutable entity read requires one nonzero database-width key",
+      ));
+    }
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let Some(bytes) = read_entity_bounded(&self.file, &kv, key, maximum_total_length, header.write_sequence_high_water)? else {
+      return Ok(None);
+    };
+    let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    Ok(Some(LoadedImmutableEntityV1 {
+      entity_version: entity.entity_version,
+      entry_type: entity.entry_type,
+      flags: entity.flags,
+      compression_algorithm: entity.compression_algorithm,
+      timestamp_ms: entity.timestamp_ms,
+      write_sequence: entity.write_sequence,
+      key: entity.key.to_vec(),
+      stored_value: entity.stored_value.to_vec(),
+    }))
   }
 
   pub fn load_index_artifact(&self, key: &[u8], expected_value_length: u64) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
@@ -7191,6 +7246,20 @@ impl V4FirstAuthorityPublisher {
       },
       KV_TYPE_DIRECTORY,
     )?;
+    let namespace_root_already_stored = immutable_entity_exists_for_authority(
+      &self.file,
+      &kv,
+      header,
+      ImmutableEntityWriteV1 {
+        entity_version: 1,
+        entry_type: EntryTypeV4::DirectoryIndex,
+        flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        key: &namespace_root.root_hash,
+        stored_value: &namespace_root.value,
+      },
+      KV_TYPE_DIRECTORY,
+    )?;
+    let existing_admission_control = load_reusable_root_admission(&self.file, &kv, header, &namespace_root, namespace_root_already_stored)?;
     let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
     if append_start < header.hot_tail_offset {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
@@ -7203,14 +7272,14 @@ impl V4FirstAuthorityPublisher {
     })?;
     let mut package_source_header = header.clone();
     package_source_header.hot_tail_offset = append_start;
-    let sizing_package = build_successor_package(
-      request,
-      namespace_root.clone(),
-      &package_source_header,
+    let package_options = SuccessorPackageBuildOptionsV1 {
       selected_header_slot_sequence,
-      1,
-      !namespace_tree_already_stored,
-    )?;
+      publication_sequence: 1,
+      include_namespace_tree: !namespace_tree_already_stored,
+      include_namespace_root: !namespace_root_already_stored,
+      existing_admission_control: existing_admission_control.as_deref(),
+    };
+    let sizing_package = build_successor_package(request, namespace_root.clone(), &package_source_header, package_options)?;
     refuse_existing_entities(&kv, &sizing_package.entities)?;
     let new_entity_count = u64::try_from(sizing_package.entities.len()).map_err(|error| {
       FirstAuthorityPublicationErrorV1::invalid("successor_authority_entry_count", format!("entity count exceeds u64: {error}"))
@@ -7240,9 +7309,7 @@ impl V4FirstAuthorityPublisher {
       request,
       namespace_root,
       &package_source_header,
-      selected_header_slot_sequence,
-      publication_sequence,
-      !namespace_tree_already_stored,
+      SuccessorPackageBuildOptionsV1 { publication_sequence, ..package_options },
     )?;
     if package.hot_tail_offset != expected_hot_tail_offset || package.write_sequence_high_water != expected_write_sequence_high_water {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
@@ -7516,28 +7583,6 @@ impl V4FirstAuthorityPublisher {
     let kv = self.lock_kv()?;
     validate_kv_header_alignment(&kv, header)?;
     verify_selected_semantic_state(&self.file, &kv, header, &request.semantic_state)?;
-    let admission_control = load_system_file(&self.file, &kv, header, SystemControlKindV1::RootAdmissionCommit, &namespace_root.root_hash)?;
-    let admission = decode_root_admission_commit(&admission_control, header.hash_algorithm)?;
-    if admission.selected_header_slot_sequence != header.slot_sequence
-      || admission.namespace_root != namespace_root.root_hash
-      || admission.database_id != request.database_id
-      || admission.transaction_id != request.transaction_id
-      || admission.authority_kind != RootAuthorityKindV1::Head
-    {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "successor_authority_witness_mismatch",
-        "selected HEAD and successor admission witness do not describe the exact request",
-      ));
-    }
-    let prepare_control = load_system_file(&self.file, &kv, header, SystemControlKindV1::RootPublicationPrepare, &request.transaction_id)?;
-    let (expected_prepare_control, expected_admission_control) =
-      encode_successor_witnesses(request, &namespace_root, header.hash_algorithm, header.slot_sequence, admission.publication_sequence)?;
-    if prepare_control != expected_prepare_control || admission_control != expected_admission_control {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "successor_authority_retry_collision",
-        "selected successor witnesses differ from the exact retry request",
-      ));
-    }
     verify_exact_immutable_entity_for_authority(
       &self.file,
       &kv,
@@ -7564,11 +7609,46 @@ impl V4FirstAuthorityPublisher {
       },
       KV_TYPE_DIRECTORY,
     )?;
+    let admission_control = load_reusable_root_admission(&self.file, &kv, header, &namespace_root, true)?.ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_admission_missing",
+        "selected HEAD has no immutable first-admission proof",
+      )
+    })?;
+    let prepare_control = load_system_file_slot(
+      &self.file,
+      &kv,
+      header,
+      SystemControlKindV1::RootPublicationPrepare,
+      &request.transaction_id,
+      SystemControlSlotV1::Immutable,
+    )?
+    .map(|loaded| loaded.body)
+    .ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_witness_mismatch",
+        "selected HEAD has no publication prepare for the requested transaction",
+      )
+    })?;
+    let prepare = decode_root_publication_prepare(&prepare_control, header.hash_algorithm)?;
+    let (expected_prepare_control, _) = encode_successor_witnesses(
+      request,
+      &namespace_root,
+      header.hash_algorithm,
+      header.slot_sequence,
+      prepare.intended_publication_sequence,
+    )?;
+    if prepare_control != expected_prepare_control {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_retry_collision",
+        "selected successor prepare differs from the exact retry request",
+      ));
+    }
     Ok(FirstAuthorityPublicationReceiptV1 {
       namespace_root,
       prepare_control,
       admission_control,
-      publication_sequence: admission.publication_sequence,
+      publication_sequence: prepare.intended_publication_sequence,
       observation,
       idempotent: true,
     })
@@ -8017,22 +8097,35 @@ fn build_package(
   })
 }
 
+#[derive(Clone, Copy)]
+struct SuccessorPackageBuildOptionsV1<'a> {
+  selected_header_slot_sequence: u64,
+  publication_sequence: u64,
+  include_namespace_tree: bool,
+  include_namespace_root: bool,
+  existing_admission_control: Option<&'a [u8]>,
+}
+
 fn build_successor_package(
   request: &SuccessorAuthorityPublicationRequestV1,
   namespace_root: EncodedNamespaceRootV1,
   source_header: &DatabaseHeaderV4,
-  selected_header_slot_sequence: u64,
-  publication_sequence: u64,
-  include_namespace_tree: bool,
+  options: SuccessorPackageBuildOptionsV1<'_>,
 ) -> Result<FirstAuthorityPackageV1, FirstAuthorityPublicationErrorV1> {
   let algorithm = source_header.hash_algorithm;
-  let (prepare_control, admission_control) =
-    encode_successor_witnesses(request, &namespace_root, algorithm, selected_header_slot_sequence, publication_sequence)?;
+  let (prepare_control, new_admission_control) =
+    encode_successor_witnesses(request, &namespace_root, algorithm, options.selected_header_slot_sequence, options.publication_sequence)?;
+  let include_admission = options.existing_admission_control.is_none();
+  let admission_control = options.existing_admission_control.map_or(new_admission_control, <[u8]>::to_vec);
 
   let mut next_sequence = source_header.write_sequence_high_water;
-  let expected_entity_count = if include_namespace_tree { 6 } else { 5 };
+  let expected_entity_count = usize::from(options.include_namespace_tree)
+    .checked_add(usize::from(options.include_namespace_root))
+    .and_then(|count| count.checked_add(2))
+    .and_then(|count| count.checked_add(2 * usize::from(include_admission)))
+    .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("successor_authority_entity_count", "entity count overflowed"))?;
   let mut entities = Vec::with_capacity(expected_entity_count);
-  if include_namespace_tree {
+  if options.include_namespace_tree {
     next_sequence = append_entity(
       &mut entities,
       0,
@@ -8046,18 +8139,20 @@ fn build_successor_package(
       &request.namespace_tree.stored_value,
     )?;
   }
-  next_sequence = append_entity(
-    &mut entities,
-    1,
-    EntryTypeV4::DirectoryIndex,
-    WHOLE_ENTITY_V1_FLAG_SYSTEM,
-    KV_TYPE_DIRECTORY,
-    algorithm,
-    request.created_at_ms,
-    next_sequence,
-    &namespace_root.root_hash,
-    &namespace_root.value,
-  )?;
+  if options.include_namespace_root {
+    next_sequence = append_entity(
+      &mut entities,
+      1,
+      EntryTypeV4::DirectoryIndex,
+      WHOLE_ENTITY_V1_FLAG_SYSTEM,
+      KV_TYPE_DIRECTORY,
+      algorithm,
+      request.created_at_ms,
+      next_sequence,
+      &namespace_root.root_hash,
+      &namespace_root.value,
+    )?;
+  }
   let prepare_path =
     system_control_path(SystemControlKindV1::RootPublicationPrepare, &request.transaction_id, SystemControlSlotV1::Immutable)?;
   next_sequence = append_system_file(
@@ -8069,17 +8164,19 @@ fn build_successor_package(
     request.created_at_ms,
     next_sequence,
   )?;
-  let admission_path =
-    system_control_path(SystemControlKindV1::RootAdmissionCommit, &namespace_root.root_hash, SystemControlSlotV1::Immutable)?;
-  next_sequence = append_system_file(
-    &mut entities,
-    admission_path,
-    SYSTEM_CONTROL_CONTENT_TYPE,
-    &admission_control,
-    algorithm,
-    request.created_at_ms,
-    next_sequence,
-  )?;
+  if include_admission {
+    let admission_path =
+      system_control_path(SystemControlKindV1::RootAdmissionCommit, &namespace_root.root_hash, SystemControlSlotV1::Immutable)?;
+    next_sequence = append_system_file(
+      &mut entities,
+      admission_path,
+      SYSTEM_CONTROL_CONTENT_TYPE,
+      &admission_control,
+      algorithm,
+      request.created_at_ms,
+      next_sequence,
+    )?;
+  }
   if entities.len() != expected_entity_count {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "successor_authority_entity_count",
@@ -10486,6 +10583,41 @@ fn load_system_file(
   load_system_file_slot(file, kv, header, kind, identity, SystemControlSlotV1::Immutable)?
     .map(|loaded| loaded.body)
     .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_control_missing", format!("missing {path}")))
+}
+
+fn load_reusable_root_admission(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  namespace_root: &EncodedNamespaceRootV1,
+  namespace_root_already_stored: bool,
+) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
+  let Some(loaded) = load_system_file_slot(
+    file,
+    kv,
+    header,
+    SystemControlKindV1::RootAdmissionCommit,
+    &namespace_root.root_hash,
+    SystemControlSlotV1::Immutable,
+  )?
+  else {
+    return Ok(None);
+  };
+  if !namespace_root_already_stored {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "successor_authority_admission_without_root",
+      "a reusable root admission exists without its exact immutable NamespaceRoot",
+    ));
+  }
+
+  let admission = decode_root_admission_commit(&loaded.body, header.hash_algorithm)?;
+  if admission.database_id != header.database_id || admission.namespace_root != namespace_root.root_hash {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "successor_authority_admission_mismatch",
+      "the reusable root admission does not close over this database and NamespaceRoot",
+    ));
+  }
+  Ok(Some(loaded.body))
 }
 
 fn load_system_file_slot(

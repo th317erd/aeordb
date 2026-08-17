@@ -2036,7 +2036,7 @@
     {
       "id": "esq-v1-3c7f8d43a96981d79267-00",
       "file": "aeordb-lib/src/engine/btree.rs",
-      "line": 377,
+      "line": 393,
       "column": 5,
       "enclosing_item": "impl LeafNode::find",
       "kind": "result_to_option",
@@ -2046,7 +2046,7 @@
     {
       "id": "esq-v1-cb7e50cd8f4d7a2152fd-00",
       "file": "aeordb-lib/src/engine/btree.rs",
-      "line": 610,
+      "line": 626,
       "column": 32,
       "enclosing_item": "btree_from_entries",
       "kind": "error_conversion",
@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 4026,
+      "line": 4081,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 7626,
+      "line": 7706,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 7629,
+      "line": 7709,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -10604,19 +10604,19 @@
       "review": "typed-format-failure"
     },
     {
-      "id": "esq-v1-5307ce3086185cc85374-00",
+      "id": "esq-v1-89f36c6088b1aee64a67-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 785,
+      "line": 820,
       "column": 11,
-      "enclosing_item": "impl ReopenedMigrationCaptureWorkspaceV1::validate_segment_closure",
+      "enclosing_item": "impl ReopenedMigrationCaptureWorkspaceV1::validate_segment_closure_generic",
       "kind": "error_conversion",
-      "pattern": "u64 :: try_from (bytes . len ()) . map_err (| _ | MigrationCaptureWorkspaceErrorV1 :: Capacity (\"reopened capture segment length exceeds u64\" . to_string ()))",
+      "pattern": "u64 :: try_from (bytes . len ()) . map_err (| _ | E :: from (MigrationCaptureWorkspaceErrorV1 :: Capacity (\"reopened capture segment length exceeds u64\" . to_string ())))",
       "review": "typed-format-failure"
     },
     {
       "id": "esq-v1-519447d2f512b436c3bb-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 912,
+      "line": 947,
       "column": 37,
       "enclosing_item": "validate_checkpoint_predecessor_chain",
       "kind": "error_conversion",
@@ -10626,7 +10626,7 @@
     {
       "id": "esq-v1-f534ac4ef66251ae8bbf-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 937,
+      "line": 972,
       "column": 9,
       "enclosing_item": "validate_checkpoint_predecessor_chain",
       "kind": "error_conversion",
@@ -10636,7 +10636,7 @@
     {
       "id": "esq-v1-f6b96bd946e2e07db7a2-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1038,
+      "line": 1073,
       "column": 16,
       "enclosing_item": "write_immutable_file",
       "kind": "error_conversion",
@@ -10646,7 +10646,7 @@
     {
       "id": "esq-v1-c301aee77cb46dd17e0f-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1058,
+      "line": 1093,
       "column": 25,
       "enclosing_item": "verify_file_exact",
       "kind": "error_conversion",
@@ -10656,7 +10656,7 @@
     {
       "id": "esq-v1-cc269608b6038d70e60c-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1096,
+      "line": 1131,
       "column": 5,
       "enclosing_item": "read_charged_file",
       "kind": "error_conversion",
@@ -10666,7 +10666,7 @@
     {
       "id": "esq-v1-d7bd0b1c9356e96e9055-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1101,
+      "line": 1136,
       "column": 5,
       "enclosing_item": "read_charged_file",
       "kind": "error_conversion",
@@ -10676,7 +10676,7 @@
     {
       "id": "esq-v1-3c8607289a1c8bdc9fca-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1151,
+      "line": 1186,
       "column": 16,
       "enclosing_item": "locate_selected_checkpoint_sequence",
       "kind": "error_conversion",
@@ -10686,7 +10686,7 @@
     {
       "id": "esq-v1-13839a7a3d4bb19a218c-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1290,
+      "line": 1325,
       "column": 16,
       "enclosing_item": "inventory_segment_files",
       "kind": "error_conversion",
@@ -10696,7 +10696,7 @@
     {
       "id": "esq-v1-f50729c7678f596828b7-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1327,
+      "line": 1362,
       "column": 16,
       "enclosing_item": "inventory_checkpoint_files",
       "kind": "error_conversion",
@@ -10706,7 +10706,7 @@
     {
       "id": "esq-v1-63bdc48bc5e6e0c7d43d-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1349,
+      "line": 1384,
       "column": 24,
       "enclosing_item": "inventory_checkpoint_files",
       "kind": "error_conversion",
@@ -10716,7 +10716,7 @@
     {
       "id": "esq-v1-009d44d211bba67ac354-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1380,
+      "line": 1415,
       "column": 30,
       "enclosing_item": "account_private_file",
       "kind": "error_conversion",
@@ -10726,7 +10726,7 @@
     {
       "id": "esq-v1-d867c46595a1e343dced-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1406,
+      "line": 1441,
       "column": 3,
       "enclosing_item": "parse_segment_name",
       "kind": "result_to_option",
@@ -10736,7 +10736,7 @@
     {
       "id": "esq-v1-715dbeebc61b82ddfd9c-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1413,
+      "line": 1448,
       "column": 3,
       "enclosing_item": "parse_checkpoint_name",
       "kind": "result_to_option",
@@ -10746,7 +10746,7 @@
     {
       "id": "esq-v1-913b3224be686b90b99c-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1424,
+      "line": 1459,
       "column": 20,
       "enclosing_item": "state_accounting_bytes",
       "kind": "error_conversion",
@@ -10756,7 +10756,7 @@
     {
       "id": "esq-v1-11d1936e167bd5ae7eb8-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1427,
+      "line": 1462,
       "column": 5,
       "enclosing_item": "state_accounting_bytes",
       "kind": "error_conversion",
@@ -10766,7 +10766,7 @@
     {
       "id": "esq-v1-e57d62b7285f15988d9e-00",
       "file": "aeordb-lib/src/engine/v4/migration_capture_workspace.rs",
-      "line": 1431,
+      "line": 1466,
       "column": 23,
       "enclosing_item": "state_accounting_bytes",
       "kind": "error_conversion",

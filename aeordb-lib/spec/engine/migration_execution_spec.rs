@@ -1,5 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use std::sync::{Arc, Barrier};
 
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
@@ -11,11 +12,13 @@ use aeordb::engine::v4::entity::{
   encode_whole_entity,
 };
 use aeordb::engine::v4::first_authority::{
-  FirstAuthorityPublicationRequestV1, ImmutableEntityBatchPublicationRequestV1, ImmutableEntityWriteV1, PreparedNamespaceTreeV0,
-  SuccessorAuthorityPublicationRequestV1, V4FirstAuthorityPublisher,
+  FirstAuthorityPublicationReceiptV1, FirstAuthorityPublicationRequestV1, ImmutableEntityBatchPublicationRequestV1, ImmutableEntityWriteV1,
+  PreparedNamespaceTreeV0, SuccessorAuthorityPublicationRequestV1, V4FirstAuthorityPublisher,
 };
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
+use aeordb::engine::v4::root_authority::decode_root_admission_commit;
+use aeordb::engine::hot_tail::read_hot_tail_checked;
 use aeordb::engine::{CompressionAlgorithm, DiskKVStore, HashAlgorithm};
 
 fn content_only_semantic_state(algorithm: HashAlgorithm) -> aeordb::engine::v4::namespace::EncodedSemanticObjectV1 {
@@ -96,6 +99,27 @@ fn initialized_publisher(algorithm: HashAlgorithm) -> (tempfile::TempDir, Arc<Du
     })
     .unwrap();
   (directory, coordinator, publisher)
+}
+
+fn reopen_publisher(path: &Path) -> V4FirstAuthorityPublisher {
+  let mut file = OpenOptions::new().read(true).write(true).open(path).unwrap();
+  let observation = aeordb::engine::v4::header_publication::observe_database_header_v4(&file).unwrap();
+  let header = &observation.selected.header;
+  let hot_tail = read_hot_tail_checked(&mut file, header.hot_tail_offset, header.hash_algorithm.hash_length()).unwrap();
+  let coordinator = Arc::new(DurabilityCoordinator::new());
+  let kv = DiskKVStore::open_with_coordinator(
+    file.try_clone().unwrap(),
+    header.hash_algorithm,
+    header.kv_block_offset,
+    header.hot_tail_offset,
+    header.kv_block_stage as usize,
+    hot_tail.writes,
+    hot_tail.voids,
+    header.kv_block_version,
+    coordinator.clone(),
+  )
+  .unwrap();
+  V4FirstAuthorityPublisher::new(kv, coordinator).unwrap()
 }
 
 fn read_published_entity(directory: &tempfile::TempDir, publisher: &V4FirstAuthorityPublisher, key: &[u8]) -> Vec<u8> {
@@ -208,6 +232,50 @@ fn bounded_immutable_entity_batch_is_atomic_idempotent_and_preserves_head() {
     assert!(retry.entities.iter().all(|entity| entity.idempotent));
     assert_eq!(retry.observation, receipt.observation);
     assert_eq!(coordinator.snapshot().unwrap().hard_frontier, hard_frontier);
+  }
+}
+
+#[test]
+fn bounded_immutable_entity_reader_enforces_key_and_allocation_limits() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, _coordinator, publisher) = initialized_publisher(algorithm);
+    let observation = publisher.observe().unwrap();
+    let chunk = b"bounded immutable read";
+    let chunk_key = digest_parts(algorithm, &[b"chunk:", chunk]);
+    publisher
+      .publish_immutable_entity_batch(ImmutableEntityBatchPublicationRequestV1 {
+        database_id: &observation.selected.header.database_id,
+        entities: &[ImmutableEntityWriteV1 {
+          entity_version: 0,
+          entry_type: EntryTypeV4::Chunk,
+          flags: 0,
+          key: &chunk_key,
+          stored_value: chunk,
+        }],
+        publication_timestamp_ms: observation.selected.header.updated_at_ms + 1,
+      })
+      .unwrap();
+
+    assert_eq!(publisher.load_immutable_entity_bounded(&chunk_key, 0).unwrap_err().code(), "immutable_entity_read_bound");
+    assert_eq!(
+      publisher.load_immutable_entity_bounded(&chunk_key[..chunk_key.len() - 1], 1024).unwrap_err().code(),
+      "immutable_entity_read_key"
+    );
+    assert_eq!(
+      publisher.load_immutable_entity_bounded(&vec![0; algorithm.hash_length()], 1024).unwrap_err().code(),
+      "immutable_entity_read_key"
+    );
+    let missing = digest_parts(algorithm, &[b"missing immutable entity"]);
+    assert!(publisher.load_immutable_entity_bounded(&missing, 1024).unwrap().is_none());
+    assert_eq!(publisher.load_immutable_entity_bounded(&chunk_key, 1).unwrap_err().code(), "first_authority_locator_exceeds_cap");
+
+    let loaded = publisher.load_immutable_entity_bounded(&chunk_key, 1024).unwrap().unwrap();
+    assert_eq!(loaded.entity_version, 0);
+    assert_eq!(loaded.entry_type, EntryTypeV4::Chunk);
+    assert_eq!(loaded.flags, 0);
+    assert_eq!(loaded.compression_algorithm, CompressionAlgorithm::None);
+    assert_eq!(loaded.key, chunk_key);
+    assert_eq!(loaded.stored_value, chunk);
   }
 }
 
@@ -459,6 +527,53 @@ fn successor_authority_can_atomically_supply_a_missing_target_root() {
   assert_eq!(receipt.observation.selected.header.write_sequence_high_water, before.selected.header.write_sequence_high_water + 6);
   assert_eq!(receipt.observation.selected.header.entry_count, before.selected.header.entry_count + 6);
   assert!(publisher.locator(&request.namespace_tree.root_hash).unwrap().is_some());
+}
+
+#[test]
+fn successor_authority_can_reselect_a_previously_admitted_root_and_retry_after_restart() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (directory, _coordinator, publisher) = initialized_publisher(algorithm);
+    let initial = publisher.observe().unwrap();
+    let initial_root = initial.selected.header.head_hash.clone();
+    let initial_admission_locator = publisher.admission_locator(&initial_root).unwrap().unwrap();
+
+    let away = successor_request(algorithm, &initial.selected.header, 0x73, initial.selected.header.updated_at_ms + 1, "away.txt");
+    let away_receipt = publisher.publish_successor_authority(&away).unwrap();
+    let return_request = SuccessorAuthorityPublicationRequestV1 {
+      database_id: initial.selected.header.database_id,
+      transaction_id: [0x74; 16],
+      created_at_ms: away_receipt.observation.selected.header.updated_at_ms + 1,
+      expected_head_hash: away_receipt.namespace_root.root_hash.clone(),
+      namespace_tree: PreparedNamespaceTreeV0 { root_hash: digest_parts(algorithm, &[b"dirc:"]), stored_value: Vec::new() },
+      semantic_state: content_only_semantic_state(algorithm),
+      required_capabilities: [0; 32],
+      typed_closure_digest: digest_parts(algorithm, &[b"migration execution return closure"]),
+      authority_identity: b"HEAD".to_vec(),
+    };
+    let before_return = publisher.observe().unwrap();
+
+    let returned = publisher.publish_successor_authority(&return_request).unwrap();
+
+    assert!(!returned.idempotent);
+    assert_eq!(returned.namespace_root.root_hash, initial_root);
+    assert_eq!(returned.observation.selected.header.head_hash, initial_root);
+    assert_eq!(returned.observation.selected.header.write_sequence_high_water, before_return.selected.header.write_sequence_high_water + 2);
+    assert_eq!(returned.observation.selected.header.entry_count, before_return.selected.header.entry_count + 2);
+    assert_eq!(publisher.admission_locator(&initial_root).unwrap().unwrap(), initial_admission_locator);
+    let original_admission = decode_root_admission_commit(&returned.admission_control, algorithm).unwrap();
+    assert_eq!(original_admission.transaction_id, [0x61; 16]);
+    assert_ne!(returned.publication_sequence, original_admission.publication_sequence);
+
+    let retry = publisher.publish_successor_authority(&return_request).unwrap();
+    assert!(retry.idempotent);
+    assert_eq!(retry, FirstAuthorityPublicationReceiptV1 { idempotent: true, ..returned.clone() });
+    drop(publisher);
+
+    let reopened = reopen_publisher(&directory.path().join("migration-execution.aeordb"));
+    let reopened_retry = reopened.publish_successor_authority(&return_request).unwrap();
+    assert!(reopened_retry.idempotent);
+    assert_eq!(reopened_retry, retry);
+  }
 }
 
 #[test]

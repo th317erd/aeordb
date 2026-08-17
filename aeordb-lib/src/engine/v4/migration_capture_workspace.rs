@@ -627,6 +627,7 @@ pub struct ReopenedMigrationCaptureWorkspaceV1 {
   cancellation: CancellationToken,
   memory: MemoryCoordinator,
   _manifest_memory: MemoryReservation,
+  selected_manifest_identity: Vec<u8>,
   has_unselected_tail: bool,
 }
 
@@ -720,6 +721,7 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
       cancellation,
       memory: memory.clone(),
       _manifest_memory: manifest_memory,
+      selected_manifest_identity: expected_manifest_identity.to_vec(),
       has_unselected_tail,
     };
     reopened.validate_segment_closure(|_| Ok(()))?;
@@ -738,6 +740,22 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
     self.has_unselected_tail
   }
 
+  pub fn selected_manifest_identity(&self) -> &[u8] {
+    &self.selected_manifest_identity
+  }
+
+  pub const fn starting_publication_sequence(&self) -> u64 {
+    self.basis.starting_publication_sequence
+  }
+
+  pub fn starting_source_root(&self) -> &[u8] {
+    &self.basis.starting_source_root
+  }
+
+  pub fn selected_source_root_after(&self) -> &[u8] {
+    &self.manifest.source_root_after
+  }
+
   pub fn for_each_segment<F>(&self, visit: F) -> Result<(), MigrationCaptureWorkspaceErrorV1>
   where
     F: FnMut(&MutationJournalV1<'_>) -> Result<(), MigrationCaptureWorkspaceErrorV1>,
@@ -745,12 +763,28 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
     self.validate_segment_closure(visit)
   }
 
+  pub fn try_for_each_segment<E, F>(&self, visit: F) -> Result<(), E>
+  where
+    E: From<MigrationCaptureWorkspaceErrorV1>,
+    F: FnMut(&MutationJournalV1<'_>) -> Result<(), E>,
+  {
+    self.validate_segment_closure_generic(visit)
+  }
+
   fn validate_segment_closure<F>(&self, mut visit: F) -> Result<(), MigrationCaptureWorkspaceErrorV1>
   where
     F: FnMut(&MutationJournalV1<'_>) -> Result<(), MigrationCaptureWorkspaceErrorV1>,
   {
+    self.validate_segment_closure_generic(&mut visit)
+  }
+
+  fn validate_segment_closure_generic<E, F>(&self, mut visit: F) -> Result<(), E>
+  where
+    E: From<MigrationCaptureWorkspaceErrorV1>,
+    F: FnMut(&MutationJournalV1<'_>) -> Result<(), E>,
+  {
     if self.cancellation.is_cancelled() {
-      return Err(MigrationCaptureWorkspaceErrorV1::Canceled);
+      return Err(MigrationCaptureWorkspaceErrorV1::Canceled.into());
     }
     let mut summary = MigrationCaptureWorkspaceSummaryV1 {
       first_segment_ordinal: 0,
@@ -763,31 +797,32 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
       segment_head: vec![0; self.identity.algorithm.hash_length()],
     };
     if self.manifest.segment_count == 0 {
-      validate_summary_matches_manifest(&summary, &self.manifest)?;
+      validate_summary_matches_manifest(&summary, &self.manifest).map_err(E::from)?;
       return Ok(());
     }
     for ordinal in self.manifest.first_segment_ordinal..=self.manifest.last_segment_ordinal {
       let path = self.segments_path.join(segment_name(ordinal));
       let (bytes, _reservation) =
-        read_charged_file(&path, MIGRATION_CAPTURE_SEGMENT_MAX_BYTES_V1, 1, "migration capture segment", &self.cancellation, &self.memory)?;
+        read_charged_file(&path, MIGRATION_CAPTURE_SEGMENT_MAX_BYTES_V1, 1, "migration capture segment", &self.cancellation, &self.memory)
+          .map_err(E::from)?;
       let journal = decode_mutation_journal(&bytes, self.identity.algorithm)
-        .map_err(|error| MigrationCaptureWorkspaceErrorV1::Format(error.to_string()))?;
-      validate_journal_for_summary(&journal, self.identity, &summary)?;
+        .map_err(|error| E::from(MigrationCaptureWorkspaceErrorV1::Format(error.to_string())))?;
+      validate_journal_for_summary(&journal, self.identity, &summary).map_err(E::from)?;
       summary.first_segment_ordinal = if summary.segment_count == 0 { journal.segment_ordinal } else { summary.first_segment_ordinal };
       summary.last_segment_ordinal = journal.segment_ordinal;
       summary.segment_count = summary
         .segment_count
         .checked_add(1)
-        .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Capacity("reopened segment count overflow".to_string()))?;
+        .ok_or_else(|| E::from(MigrationCaptureWorkspaceErrorV1::Capacity("reopened segment count overflow".to_string())))?;
       summary.segment_stored_bytes = summary
         .segment_stored_bytes
         .checked_add(
           u64::try_from(bytes.len())
-            .map_err(|_| MigrationCaptureWorkspaceErrorV1::Capacity("reopened capture segment length exceeds u64".to_string()))?,
+            .map_err(|_| E::from(MigrationCaptureWorkspaceErrorV1::Capacity("reopened capture segment length exceeds u64".to_string())))?,
         )
-        .ok_or_else(|| MigrationCaptureWorkspaceErrorV1::Capacity("reopened segment byte total overflow".to_string()))?;
+        .ok_or_else(|| E::from(MigrationCaptureWorkspaceErrorV1::Capacity("reopened segment byte total overflow".to_string())))?;
       if summary.segment_stored_bytes > self.maximum_stored_bytes {
-        return Err(MigrationCaptureWorkspaceErrorV1::Capacity("reopened segment bytes exceed capture cap".to_string()));
+        return Err(MigrationCaptureWorkspaceErrorV1::Capacity("reopened segment bytes exceed capture cap".to_string()).into());
       }
       summary.captured_through_publication_sequence = journal.last_sequence;
       summary.source_root_after.clear();
@@ -796,7 +831,7 @@ impl ReopenedMigrationCaptureWorkspaceV1 {
       summary.segment_head.extend_from_slice(&journal.key);
       visit(&journal)?;
     }
-    validate_summary_matches_manifest(&summary, &self.manifest)
+    validate_summary_matches_manifest(&summary, &self.manifest).map_err(E::from)
   }
 }
 

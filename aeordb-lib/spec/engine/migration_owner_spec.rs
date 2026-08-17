@@ -32,8 +32,8 @@ use aeordb::engine::v4::migration_capture_runtime::{
 use aeordb::engine::v4::migration_capture_workspace::MigrationCaptureWorkspaceOptionsV1;
 use aeordb::engine::v4::migration_owner::{
   MigrationAcquisitionRequestV1, MigrationCaptureCheckpointPublicationRequestV1, MigrationFullReconciliationLatchRequestV1,
-  MigrationLeaseReleaseRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
-  MigrationTakeoverRequestV1,
+  MigrationLeaseReleaseRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1,
+  MigrationReplayCheckpointPublicationRequestV1, MigrationStateOwnerV1, MigrationTakeoverRequestV1,
 };
 use aeordb::engine::v4::migration_source_gc::{MigrationSourceGcSuspensionOwnerV1, MigrationSourceGcSuspensionRequestV1};
 use aeordb::engine::v4::migration_preflight::{
@@ -1109,6 +1109,61 @@ fn capture_checkpoint_and_full_reconciliation_latch_have_one_specialized_monoton
   assert_eq!(progress.body.captured_through_publication_sequence, 7);
   assert_eq!(progress.body.checkpoint_artifact, checkpoint_hash);
   assert_eq!(progress.body.last_error_evidence, failure_evidence);
+}
+
+#[test]
+fn replay_checkpoint_is_monotonic_exactly_idempotent_and_bound_to_capture() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher, permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  owner
+    .publish_capture_checkpoint(
+      MigrationCaptureCheckpointPublicationRequestV1 {
+        captured_through_publication_sequence: 7,
+        checkpoint_artifact: digest_parts(algorithm, &[b"replay checkpoint capture"]),
+        updated_at_ms: ACQUIRED_AT_MS + 1_000,
+        publication_timestamp_ms: (ACQUIRED_AT_MS + 1_100) as u64,
+        monotonic_now_ms: 31_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  let checkpoint = MigrationReplayCheckpointPublicationRequestV1 {
+    reconciled_through_publication_sequence: 5,
+    destination_header_sequence: 17,
+    updated_at_ms: ACQUIRED_AT_MS + 2_000,
+    publication_timestamp_ms: (ACQUIRED_AT_MS + 2_100) as u64,
+    monotonic_now_ms: 32_000,
+  };
+  assert!(!owner.publish_replay_checkpoint(checkpoint, &mut retirement).unwrap().idempotent);
+  assert!(owner.publish_replay_checkpoint(checkpoint, &mut retirement).unwrap().idempotent);
+
+  let conflict = MigrationReplayCheckpointPublicationRequestV1 { destination_header_sequence: 18, ..checkpoint };
+  assert_eq!(owner.publish_replay_checkpoint(conflict, &mut retirement).unwrap_err().code(), "migration_replay_checkpoint_conflict");
+  let regression = MigrationReplayCheckpointPublicationRequestV1 {
+    reconciled_through_publication_sequence: 4,
+    destination_header_sequence: 16,
+    ..checkpoint
+  };
+  assert_eq!(owner.publish_replay_checkpoint(regression, &mut retirement).unwrap_err().code(), "migration_progress_scalar_regression");
+  let beyond_capture = MigrationReplayCheckpointPublicationRequestV1 {
+    reconciled_through_publication_sequence: 8,
+    destination_header_sequence: 19,
+    ..checkpoint
+  };
+  assert_eq!(owner.publish_replay_checkpoint(beyond_capture, &mut retirement).unwrap_err().code(), "migration_replay_beyond_capture");
+  let missing_destination = MigrationReplayCheckpointPublicationRequestV1 { destination_header_sequence: 0, ..checkpoint };
+  assert_eq!(
+    owner.publish_replay_checkpoint(missing_destination, &mut retirement).unwrap_err().code(),
+    "migration_replay_destination_sequence"
+  );
+  let missing_source = MigrationReplayCheckpointPublicationRequestV1 { reconciled_through_publication_sequence: 0, ..checkpoint };
+  assert_eq!(owner.publish_replay_checkpoint(missing_source, &mut retirement).unwrap_err().code(), "migration_replay_destination_sequence");
 }
 
 #[test]

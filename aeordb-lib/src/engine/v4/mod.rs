@@ -76,6 +76,7 @@ pub mod index_task;
 pub mod migration_base_clone_execution;
 mod migration_base_clone_source;
 pub mod migration_capture;
+pub mod migration_capture_replay;
 pub mod migration_capture_runtime;
 pub mod migration_capture_subscription;
 pub mod migration_capture_workspace;

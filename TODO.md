@@ -643,7 +643,17 @@
             - [x] Traverse flat and B-tree directories with ancestry/frontier bounds, decode compressed chunks, and publish one bounded idempotent destination batch at a time.
             - [x] Reject caller-supplied decoded-chunk bounds above the destination publication ceiling before source reads or destination mutation.
             - [x] Prove strict corruption/policy refusal, cancellation/resource pressure, duplicate/restart behavior, both hash widths, and byte-for-byte source invariance on disposable real files.
-          - [ ] P3c-2b3c: replay only the AMPR-selected capture chain as idempotent namespace deltas, preserving exact source publication/root order and refusing every missing or divergent dependency.
+          - [x] P3c-2b3c: replay only the AMPR-selected capture chain as idempotent namespace deltas, preserving exact source publication/root order and refusing every missing or divergent dependency.
+            - [x] Add the compile-red `migration_capture_replay_spec` contract for one disconnected selected-capture replay owner.
+            - [x] Verify each complete atomic batch against exact historical before/after roots and collapse overlapping changed paths to shallowest authoritative paths.
+            - [x] Coalesce every consecutive atomic batch carrying the same publication sequence/root transition into one replay publication and checkpoint.
+            - [x] Enforce mutation-kind-specific historical absence as well as captured revision presence for create/copy/restore/delete/move transitions.
+            - [x] Translate only authoritative after-subtrees and copy-on-write only affected destination ancestors through shared bounded directory/B-tree machinery.
+            - [x] Publish deterministic successor authority and monotonic AMPR reconciliation checkpoints with commit-unknown idempotence.
+            - [x] Charge a conservative replay-owned segment/record allocation bound and reject undersized requests before destination mutation.
+            - [x] Guard shared B-tree plans so the published immutable batch and returned root cannot diverge.
+            - [x] Preserve one immutable admission per distinct root while allowing transaction-specific `A -> B -> A` root reselection and exact retry after restart.
+            - [x] Prove basis divergence, gaps, malformed batches, stale roots, cancellation, memory pressure, restart, both hash widths, and source invariance.
           - [ ] P3c-2b3d: acquire the explicit final write freeze and require an exact authority, retained-root, and SystemFamily reconciliation before allowing destination verification; incomplete capture can only increase this requirement.
           - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
           - [ ] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.

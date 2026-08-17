@@ -103,6 +103,15 @@ pub struct MigrationFullReconciliationLatchRequestV1 {
   pub monotonic_now_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MigrationReplayCheckpointPublicationRequestV1 {
+  pub reconciled_through_publication_sequence: u64,
+  pub destination_header_sequence: u64,
+  pub updated_at_ms: i64,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationLeaseRenewalReceiptV1 {
   pub control_sequence: u64,
@@ -141,6 +150,8 @@ pub struct MigrationProgressTransitionReceiptV1 {
 pub struct MigrationCaptureStateObservationV1 {
   pub control_sequence: u64,
   pub captured_through_publication_sequence: u64,
+  pub reconciled_through_publication_sequence: u64,
+  pub destination_header_sequence: u64,
   pub checkpoint_artifact: Vec<u8>,
   pub needs_full_reconciliation: bool,
   pub last_error_evidence: Vec<u8>,
@@ -490,6 +501,44 @@ impl MigrationStateOwnerV1 {
     self.publish_progress_body(context, &progress, body, MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, true, retirement_owner)
   }
 
+  pub fn publish_replay_checkpoint(
+    &self,
+    request: MigrationReplayCheckpointPublicationRequestV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if request.reconciled_through_publication_sequence == 0 || request.destination_header_sequence == 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_replay_destination_sequence",
+        "capture replay checkpoint requires nonzero source and destination sequences",
+      ));
+    }
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if request.reconciled_through_publication_sequence > progress.body.captured_through_publication_sequence {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_replay_beyond_capture",
+        "capture replay cannot reconcile beyond the selected capture watermark",
+      ));
+    }
+    if request.reconciled_through_publication_sequence == progress.body.reconciled_through_publication_sequence {
+      if request.destination_header_sequence != progress.body.destination_header_sequence {
+        return Err(MigrationStateOwnerErrorV1::invalid(
+          "migration_replay_checkpoint_conflict",
+          "an existing replay watermark is bound to a different destination header sequence",
+        ));
+      }
+      return Ok(progress_receipt(&progress, true));
+    }
+    let mut body = progress.body.clone();
+    body.reconciled_through_publication_sequence = request.reconciled_through_publication_sequence;
+    body.destination_header_sequence = request.destination_header_sequence;
+    body.updated_at_ms = request.updated_at_ms;
+    if body == progress.body {
+      return Ok(progress_receipt(&progress, true));
+    }
+    self.publish_progress_body(context, &progress, body, 0, true, retirement_owner)
+  }
+
   pub fn observe_capture_state(
     &self,
     updated_at_ms: i64,
@@ -500,6 +549,8 @@ impl MigrationStateOwnerV1 {
     Ok(MigrationCaptureStateObservationV1 {
       control_sequence: progress.sequence,
       captured_through_publication_sequence: progress.body.captured_through_publication_sequence,
+      reconciled_through_publication_sequence: progress.body.reconciled_through_publication_sequence,
+      destination_header_sequence: progress.body.destination_header_sequence,
       checkpoint_artifact: progress.body.checkpoint_artifact,
       needs_full_reconciliation: progress.body.flags & MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE != 0,
       last_error_evidence: progress.body.last_error_evidence,

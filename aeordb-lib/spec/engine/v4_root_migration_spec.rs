@@ -9,7 +9,8 @@ use aeordb::engine::v4::namespace::{
 };
 use aeordb::engine::v4::root_authority::{
   ImmutableNamespaceAuthorityInputV1, RootAdmissionCommitV1, RootAuthorityKindV1, RootAuthorityReferenceRoleV1, RootPublicationPrepareV1,
-  decode_immutable_namespace_authority, encode_root_admission_commit_control, encode_root_publication_prepare_control,
+  decode_immutable_namespace_authority, decode_root_publication_prepare, encode_root_admission_commit_control,
+  encode_root_publication_prepare_control,
 };
 use aeordb::engine::{CompressionAlgorithm, EntryType as LegacyEntryType, HashAlgorithm, StorageEngine};
 use sha2::{Digest, Sha512};
@@ -124,6 +125,7 @@ fn root_prepare_and_admission_writers_match_independent_fixtures_at_both_hash_wi
       intended_publication_sequence: fixture_u64(prepare_body, 56 + 5 * hash_width),
     };
     assert_eq!(encode_root_publication_prepare_control(&prepare, algorithm).unwrap(), expected_prepare);
+    assert_eq!(decode_root_publication_prepare(&expected_prepare, algorithm).unwrap(), prepare);
 
     let expected_commit = fixture(&format!("system-control-v1/control-{algorithm_name}-root-admission-commit-valid.bin"));
     let commit_body = &expected_commit[32..expected_commit.len() - 4];
@@ -694,12 +696,19 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
 
   let production_sources = read_rust_sources(&root.join("aeordb-lib/src"));
   let first_authority = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/first_authority.rs")).unwrap();
+  let migration_capture_replay = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_capture_replay.rs")).unwrap();
   let migration_destination = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_destination.rs")).unwrap();
-  for (encoder, expected_production_occurrences, expected_first_authority_occurrences, expected_migration_destination_occurrences) in [
-    ("encode_namespace_root", 3, 2, 0),
-    ("encode_semantic_state_object", 3, 0, 2),
-    ("encode_root_publication_prepare_control", 4, 3, 0),
-    ("encode_root_admission_commit_control", 4, 3, 0),
+  for (
+    encoder,
+    expected_production_occurrences,
+    expected_first_authority_occurrences,
+    expected_migration_capture_replay_occurrences,
+    expected_migration_destination_occurrences,
+  ) in [
+    ("encode_namespace_root", 5, 2, 2, 0),
+    ("encode_semantic_state_object", 3, 0, 0, 2),
+    ("encode_root_publication_prepare_control", 4, 3, 0, 0),
+    ("encode_root_admission_commit_control", 4, 3, 0, 0),
   ] {
     assert_eq!(
       production_sources.matches(encoder).count(),
@@ -710,6 +719,11 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
       first_authority.matches(encoder).count(),
       expected_first_authority_occurrences,
       "P3b root encoder {encoder} has an unexpected first-authority call shape"
+    );
+    assert_eq!(
+      migration_capture_replay.matches(encoder).count(),
+      expected_migration_capture_replay_occurrences,
+      "P3b root encoder {encoder} has an unexpected migration-capture-replay call shape"
     );
     assert_eq!(
       migration_destination.matches(encoder).count(),
