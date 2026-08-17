@@ -16,7 +16,7 @@ fn poison_tracker_state(tracker: &Arc<EngineOperationTracker>) {
 fn poisoned_tracker_fails_closed_without_hiding_active_operations() {
   let tracker = Arc::new(EngineOperationTracker::default());
   let engine_id = Arc::as_ptr(&tracker) as usize;
-  let operation = tracker.begin(engine_id, "held_read").unwrap();
+  let operation = tracker.begin(engine_id, "held_read", EngineOperationAccess::Read).unwrap();
   poison_tracker_state(&tracker);
 
   tracker.begin_shutdown();
@@ -30,14 +30,14 @@ fn poisoned_tracker_fails_closed_without_hiding_active_operations() {
   assert!(drained.shutting_down);
   assert_eq!(drained.active_operations, 0);
   assert!(drained.operations.is_empty());
-  assert!(matches!(tracker.begin(engine_id, "late_read"), Err(EngineError::ShuttingDown)));
+  assert!(matches!(tracker.begin(engine_id, "late_read", EngineOperationAccess::Read), Err(EngineError::ShuttingDown)));
 }
 
 #[test]
 fn poisoned_tracker_still_releases_exclusive_maintenance() {
   let tracker = Arc::new(EngineOperationTracker::default());
   let engine_id = Arc::as_ptr(&tracker) as usize;
-  let operation = tracker.begin(engine_id, "maintenance_owner").unwrap();
+  let operation = tracker.begin(engine_id, "maintenance_owner", EngineOperationAccess::Write).unwrap();
   let maintenance = tracker.begin_maintenance(engine_id, std::time::Duration::ZERO).unwrap();
   poison_tracker_state(&tracker);
 
@@ -62,7 +62,7 @@ fn poisoned_tracker_waits_for_a_live_operation_to_drain() {
   let (release_tx, release_rx) = std::sync::mpsc::channel();
   let tracker_for_worker = Arc::clone(&tracker);
   let worker = std::thread::spawn(move || {
-    let operation = tracker_for_worker.begin(engine_id, "slow_read").unwrap();
+    let operation = tracker_for_worker.begin(engine_id, "slow_read", EngineOperationAccess::Read).unwrap();
     started_tx.send(()).unwrap();
     release_rx.recv().unwrap();
     drop(operation);
@@ -78,4 +78,39 @@ fn poisoned_tracker_waits_for_a_live_operation_to_drain() {
   assert!(drained.shutting_down);
   assert_eq!(drained.active_operations, 0);
   assert!(drained.operations.is_empty());
+}
+
+#[test]
+fn cancellable_maintenance_reopens_admission_after_drain_is_canceled() {
+  let tracker = Arc::new(EngineOperationTracker::default());
+  let engine_id = Arc::as_ptr(&tracker) as usize;
+  let owner = tracker.begin(engine_id, "maintenance_owner", EngineOperationAccess::Read).unwrap();
+  let (started_tx, started_rx) = std::sync::mpsc::channel();
+  let (release_tx, release_rx) = std::sync::mpsc::channel();
+  let worker_tracker = Arc::clone(&tracker);
+  let worker = std::thread::spawn(move || {
+    let operation = worker_tracker.begin(engine_id, "slow_read", EngineOperationAccess::Read).unwrap();
+    started_tx.send(()).unwrap();
+    release_rx.recv().unwrap();
+    drop(operation);
+  });
+  started_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+
+  let cancellation = CancellationToken::new();
+  let cancel = cancellation.clone();
+  let canceler = std::thread::spawn(move || {
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    cancel.cancel();
+  });
+  let started = std::time::Instant::now();
+  let error = tracker.begin_maintenance_cancellable(engine_id, std::time::Duration::from_secs(2), Some(&cancellation)).err().unwrap();
+  assert!(error.to_string().contains("canceled"), "{error}");
+  assert!(started.elapsed() < std::time::Duration::from_millis(500));
+
+  release_tx.send(()).unwrap();
+  worker.join().unwrap();
+  canceler.join().unwrap();
+  let admitted = tracker.begin(engine_id, "after_cancel", EngineOperationAccess::Read).unwrap();
+  drop(admitted);
+  drop(owner);
 }

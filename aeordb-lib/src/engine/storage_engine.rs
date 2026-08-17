@@ -8,6 +8,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
 
 use fs2::FileExt;
+use tokio_util::sync::CancellationToken;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 
@@ -251,6 +252,26 @@ pub struct EngineOperationSnapshot {
   pub operations: Vec<(String, usize)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FrozenSourceAuthoritySnapshot {
+  pub header_sequence: u64,
+  pub namespace_root: Vec<u8>,
+  pub hard_publication_frontier: u64,
+  pub hash_algorithm: HashAlgorithm,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineOperationAccess {
+  Read,
+  Write,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EngineOperationStackEntry {
+  engine_id: usize,
+  write_prohibited: bool,
+}
+
 #[derive(Default)]
 struct EngineOperationTracker {
   state: Mutex<EngineOperationState>,
@@ -278,6 +299,21 @@ struct EngineMaintenanceGuard<'a> {
   tracker: &'a EngineOperationTracker,
 }
 
+pub(crate) struct ExclusiveEngineMaintenanceGuard<'a> {
+  _maintenance: EngineMaintenanceGuard<'a>,
+  _operation: EngineOperationGuard<'a>,
+}
+
+pub(crate) struct ExclusiveReadOnlyEngineMaintenanceGuard<'a> {
+  _maintenance: EngineMaintenanceGuard<'a>,
+  _write_prohibition: EngineOperationWriteProhibitionGuard,
+  _operation: EngineOperationGuard<'a>,
+}
+
+struct EngineOperationWriteProhibitionGuard {
+  engine_id: usize,
+}
+
 impl EngineOperationTracker {
   fn record_poison_once(&self, operation: &'static str) {
     if !self.poison_reported.swap(true, Ordering::AcqRel) {
@@ -302,36 +338,80 @@ impl EngineOperationTracker {
     }
   }
 
-  fn begin(&self, engine_id: usize, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
-    let nested = ENGINE_OPERATION_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
-    ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
+  fn begin(&self, engine_id: usize, operation: &'static str, access: EngineOperationAccess) -> EngineResult<EngineOperationGuard<'_>> {
+    self.begin_cancellable(engine_id, operation, access, None, None)
+  }
+
+  fn begin_cancellable(
+    &self,
+    engine_id: usize,
+    operation: &'static str,
+    access: EngineOperationAccess,
+    timeout: Option<std::time::Duration>,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<EngineOperationGuard<'_>> {
+    let (nested, write_prohibited) = ENGINE_OPERATION_STACK.with(|stack| {
+      let stack = stack.borrow();
+      (stack.iter().any(|held| held.engine_id == engine_id), stack.iter().any(|held| held.engine_id == engine_id && held.write_prohibited))
+    });
+    if access == EngineOperationAccess::Write && write_prohibited {
+      return Err(EngineError::InvalidInput(
+        "source writes are prohibited while exclusive read-only engine maintenance is held".to_string(),
+      ));
+    }
+    ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(EngineOperationStackEntry { engine_id, write_prohibited }));
     if nested {
       return Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: false, _thread_bound: std::marker::PhantomData });
     }
 
     let mut state = self.lock_state_fail_closed("begin");
+    let deadline = timeout.map(|timeout| std::time::Instant::now() + timeout);
     while state.maintenance_in_progress && !state.shutting_down {
-      state = match self.idle.wait(state) {
-        Ok(state) => state,
+      if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        pop_engine_operation_stack(engine_id);
+        return Err(EngineError::InvalidInput("engine operation admission was canceled".to_string()));
+      }
+      if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        pop_engine_operation_stack(engine_id);
+        return Err(EngineError::InvalidInput("timed out waiting for exclusive engine maintenance admission".to_string()));
+      }
+      let wait = match deadline {
+        Some(deadline) => deadline.saturating_duration_since(std::time::Instant::now()),
+        None => std::time::Duration::from_millis(50),
+      }
+      .min(std::time::Duration::from_millis(50));
+      state = match self.idle.wait_timeout(state, wait) {
+        Ok((state, _)) => state,
         Err(poisoned) => {
           self.record_poison_once("begin_wait");
-          let mut state = poisoned.into_inner();
+          let (mut state, _) = poisoned.into_inner();
           state.shutting_down = true;
           state
         }
       };
     }
     if state.shutting_down {
-      ENGINE_OPERATION_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let popped = stack.pop();
-        debug_assert_eq!(popped, Some(engine_id));
-      });
+      pop_engine_operation_stack(engine_id);
       return Err(EngineError::ShuttingDown);
     }
     state.active_operations += 1;
     *state.operations.entry(operation).or_insert(0) += 1;
     Ok(EngineOperationGuard { tracker: self, operation, engine_id, counted: true, _thread_bound: std::marker::PhantomData })
+  }
+
+  fn prohibit_nested_writes(&self, engine_id: usize) -> EngineResult<EngineOperationWriteProhibitionGuard> {
+    ENGINE_OPERATION_STACK.with(|stack| {
+      let mut stack = stack.borrow_mut();
+      let current = stack
+        .last_mut()
+        .filter(|entry| entry.engine_id == engine_id)
+        .ok_or_else(|| EngineError::InvalidInput("exclusive read-only maintenance requires current-thread engine admission".to_string()))?;
+      if current.write_prohibited {
+        return Err(EngineError::InvalidInput("exclusive read-only maintenance write prohibition is already active".to_string()));
+      }
+      current.write_prohibited = true;
+      Ok(EngineOperationWriteProhibitionGuard { engine_id })
+    })
   }
 
   fn begin_shutdown(&self) {
@@ -341,7 +421,16 @@ impl EngineOperationTracker {
   }
 
   fn begin_maintenance(&self, engine_id: usize, timeout: std::time::Duration) -> EngineResult<EngineMaintenanceGuard<'_>> {
-    let admitted = ENGINE_OPERATION_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    self.begin_maintenance_cancellable(engine_id, timeout, None)
+  }
+
+  fn begin_maintenance_cancellable(
+    &self,
+    engine_id: usize,
+    timeout: std::time::Duration,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<EngineMaintenanceGuard<'_>> {
+    let admitted = ENGINE_OPERATION_STACK.with(|stack| stack.borrow().iter().any(|held| held.engine_id == engine_id));
     if !admitted {
       return Err(EngineError::InvalidInput("KV layout maintenance requires an admitted engine operation".to_string()));
     }
@@ -355,6 +444,11 @@ impl EngineOperationTracker {
     }
     state.maintenance_in_progress = true;
     while state.active_operations > 1 {
+      if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        state.maintenance_in_progress = false;
+        self.idle.notify_all();
+        return Err(EngineError::InvalidInput("exclusive engine maintenance was canceled while draining active operations".to_string()));
+      }
       let now = std::time::Instant::now();
       if now >= deadline {
         state.maintenance_in_progress = false;
@@ -362,7 +456,8 @@ impl EngineOperationTracker {
         return Err(EngineError::InvalidInput("timed out waiting for active operations before KV layout maintenance".to_string()));
       }
       let remaining = deadline.saturating_duration_since(now);
-      let (next, result) = match self.idle.wait_timeout(state, remaining) {
+      let wait = remaining.min(std::time::Duration::from_millis(50));
+      let (next, result) = match self.idle.wait_timeout(state, wait) {
         Ok(waited) => waited,
         Err(poisoned) => {
           self.record_poison_once("begin_maintenance_wait");
@@ -377,7 +472,7 @@ impl EngineOperationTracker {
         self.idle.notify_all();
         return Err(EngineError::ShuttingDown);
       }
-      if result.timed_out() && state.active_operations > 1 {
+      if result.timed_out() && wait == remaining && state.active_operations > 1 {
         state.maintenance_in_progress = false;
         self.idle.notify_all();
         return Err(EngineError::InvalidInput("timed out waiting for active operations before KV layout maintenance".to_string()));
@@ -428,11 +523,7 @@ impl EngineOperationTracker {
 
 impl Drop for EngineOperationGuard<'_> {
   fn drop(&mut self) {
-    ENGINE_OPERATION_STACK.with(|stack| {
-      let mut stack = stack.borrow_mut();
-      let popped = stack.pop();
-      debug_assert_eq!(popped, Some(self.engine_id));
-    });
+    pop_engine_operation_stack(self.engine_id);
 
     if !self.counted {
       return;
@@ -457,6 +548,23 @@ impl Drop for EngineMaintenanceGuard<'_> {
     let mut state = self.tracker.lock_state_fail_closed("maintenance_drop");
     state.maintenance_in_progress = false;
     self.tracker.idle.notify_all();
+  }
+}
+
+impl Drop for EngineOperationWriteProhibitionGuard {
+  fn drop(&mut self) {
+    ENGINE_OPERATION_STACK.with(|stack| {
+      let mut stack = stack.borrow_mut();
+      let current_matches = stack.last().is_some_and(|entry| entry.engine_id == self.engine_id && entry.write_prohibited);
+      debug_assert!(current_matches, "exclusive read-only maintenance prohibition stack out of order");
+      if current_matches {
+        if let Some(entry) = stack.last_mut() {
+          entry.write_prohibited = false;
+        }
+      } else if let Some(entry) = stack.iter_mut().rev().find(|entry| entry.engine_id == self.engine_id && entry.write_prohibited) {
+        entry.write_prohibited = false;
+      }
+    });
   }
 }
 
@@ -1596,13 +1704,18 @@ impl StorageEngine {
     Ok(observations.into_iter().collect())
   }
 
-  fn operation_guard(&self, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
+  fn read_operation_guard(&self, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
     let engine_id = self as *const StorageEngine as usize;
-    self.operation_tracker.begin(engine_id, operation)
+    self.operation_tracker.begin(engine_id, operation, EngineOperationAccess::Read)
+  }
+
+  fn write_operation_guard(&self, operation: &'static str) -> EngineResult<EngineOperationGuard<'_>> {
+    let engine_id = self as *const StorageEngine as usize;
+    self.operation_tracker.begin(engine_id, operation, EngineOperationAccess::Write)
   }
 
   pub(crate) fn query_operation_guard(&self) -> EngineResult<EngineOperationGuard<'_>> {
-    self.operation_guard("query")
+    self.read_operation_guard("query")
   }
 
   pub(crate) fn repair_cancellation(&self) -> Arc<AtomicBool> {
@@ -1613,15 +1726,81 @@ impl StorageEngine {
   where
     F: FnOnce() -> EngineResult<T>,
   {
-    let _operation = self.operation_guard(operation)?;
-    let engine_id = self as *const StorageEngine as usize;
-    let _maintenance = self.operation_tracker.begin_maintenance(engine_id, std::time::Duration::from_secs(300))?;
+    let _maintenance = self.acquire_exclusive_engine_maintenance(operation, std::time::Duration::from_secs(300), None)?;
     action()
+  }
+
+  pub(crate) fn acquire_exclusive_engine_maintenance(
+    &self,
+    operation: &'static str,
+    timeout: std::time::Duration,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<ExclusiveEngineMaintenanceGuard<'_>> {
+    if timeout.is_zero() {
+      return Err(EngineError::InvalidInput("exclusive engine maintenance timeout must be positive".to_string()));
+    }
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+      return Err(EngineError::InvalidInput("exclusive engine maintenance was canceled before admission".to_string()));
+    }
+    let started = std::time::Instant::now();
+    let engine_id = self as *const StorageEngine as usize;
+    let operation_guard =
+      self.operation_tracker.begin_cancellable(engine_id, operation, EngineOperationAccess::Write, Some(timeout), cancellation)?;
+    let remaining = timeout.checked_sub(started.elapsed()).filter(|remaining| !remaining.is_zero()).ok_or_else(|| {
+      EngineError::InvalidInput("timed out before exclusive engine maintenance could drain active operations".to_string())
+    })?;
+    let maintenance = self.operation_tracker.begin_maintenance_cancellable(engine_id, remaining, cancellation)?;
+    Ok(ExclusiveEngineMaintenanceGuard { _maintenance: maintenance, _operation: operation_guard })
+  }
+
+  pub(crate) fn acquire_exclusive_read_only_engine_maintenance(
+    &self,
+    operation: &'static str,
+    timeout: std::time::Duration,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<ExclusiveReadOnlyEngineMaintenanceGuard<'_>> {
+    if timeout.is_zero() {
+      return Err(EngineError::InvalidInput("exclusive read-only engine maintenance timeout must be positive".to_string()));
+    }
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+      return Err(EngineError::InvalidInput("exclusive read-only engine maintenance was canceled before admission".to_string()));
+    }
+    let started = std::time::Instant::now();
+    let engine_id = self as *const StorageEngine as usize;
+    let operation_guard =
+      self.operation_tracker.begin_cancellable(engine_id, operation, EngineOperationAccess::Read, Some(timeout), cancellation)?;
+    let remaining = timeout.checked_sub(started.elapsed()).filter(|remaining| !remaining.is_zero()).ok_or_else(|| {
+      EngineError::InvalidInput("timed out before exclusive read-only engine maintenance could drain active operations".to_string())
+    })?;
+    let maintenance = self.operation_tracker.begin_maintenance_cancellable(engine_id, remaining, cancellation)?;
+    let write_prohibition = self.operation_tracker.prohibit_nested_writes(engine_id)?;
+    Ok(ExclusiveReadOnlyEngineMaintenanceGuard {
+      _maintenance: maintenance,
+      _write_prohibition: write_prohibition,
+      _operation: operation_guard,
+    })
+  }
+
+  pub(crate) fn frozen_source_authority_snapshot(&self) -> EngineResult<FrozenSourceAuthoritySnapshot> {
+    let durability = self.durability_snapshot()?;
+    if durability.admitted != 0 || durability.executing != 0 || durability.pending_hard != 0 || durability.driver_active {
+      return Err(EngineError::DurabilityFailure("frozen source authority still has admitted or executing durability work".to_string()));
+    }
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let header = writer.file_header();
+    Ok(FrozenSourceAuthoritySnapshot {
+      header_sequence: header.sequence,
+      namespace_root: header.head_hash.clone(),
+      hard_publication_frontier: durability.hard_frontier,
+      hash_algorithm: header.hash_algo,
+    })
   }
 
   fn internal_operation_scope(&self, operation: &'static str) -> EngineOperationGuard<'_> {
     let engine_id = self as *const StorageEngine as usize;
-    ENGINE_OPERATION_STACK.with(|stack| stack.borrow_mut().push(engine_id));
+    ENGINE_OPERATION_STACK.with(|stack| {
+      stack.borrow_mut().push(EngineOperationStackEntry { engine_id, write_prohibited: false });
+    });
     EngineOperationGuard { tracker: &self.operation_tracker, operation, engine_id, counted: false, _thread_bound: std::marker::PhantomData }
   }
 
@@ -2527,7 +2706,7 @@ impl StorageEngine {
     // current set. Namespace authority must therefore be admitted before the
     // mutex is acquired: a holder can finish nested work, and every waiter is
     // visible to maintenance before it can become a lock dependency.
-    let operation = self.operation_guard("namespace_authority")?;
+    let operation = self.write_operation_guard("namespace_authority")?;
     let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
     if already_held {
       NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
@@ -2606,7 +2785,7 @@ impl StorageEngine {
       return self.namespace_write_guard().map(Some);
     }
 
-    let operation = self.operation_guard("namespace_authority")?;
+    let operation = self.write_operation_guard("namespace_authority")?;
     let guard = match self.namespace_write_lock.try_lock() {
       Ok(guard) => guard,
       Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
@@ -3238,6 +3417,7 @@ impl StorageEngine {
   /// missed the very first void if it lived between kv_block_end and the
   /// first entry.
   pub(crate) fn recover_voids_via_gap_scan(&self) -> EngineResult<()> {
+    let _operation = self.write_operation_guard("recover_voids_via_gap_scan")?;
     // WAL begins immediately after the KV block.
     let (wal_start, wal_end): (u64, u64) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
@@ -3290,6 +3470,7 @@ impl StorageEngine {
   /// reconstructs reusable void state from WAL gaps and publishes a fresh
   /// hot-tail snapshot.
   pub fn recover_after_emergency_spill_replay(&self) -> EngineResult<()> {
+    let _operation = self.write_operation_guard("recover_after_emergency_spill_replay")?;
     self.rebuild_kv()?;
     self.recover_voids_via_gap_scan()?;
     self.sync_voids_to_kv_writer()?;
@@ -3300,6 +3481,7 @@ impl StorageEngine {
   /// new voids so the void state is durable without waiting for the normal
   /// threshold trigger.
   pub(crate) fn force_hot_tail_flush(&self) -> EngineResult<()> {
+    let _operation = self.write_operation_guard("force_hot_tail_flush")?;
     self.ensure_writable()?;
     let _authority = self.direct_hard_authority_guard()?;
     let commit_result = {
@@ -3355,12 +3537,14 @@ impl StorageEngine {
   /// Flush buffered index mutations if their shared write-count/time policy
   /// says they are due.
   pub fn flush_index_buffer_if_due(&self) -> EngineResult<bool> {
+    let _operation = self.write_operation_guard("flush_index_buffer_if_due")?;
     self.ensure_writable()?;
     IndexManager::new(self).flush_buffered_indexes_if_due()
   }
 
   /// Force all buffered index mutations to disk.
   pub fn flush_index_buffer(&self) -> EngineResult<usize> {
+    let _operation = self.write_operation_guard("flush_index_buffer")?;
     self.ensure_writable()?;
     IndexManager::new(self).flush_buffered_indexes()
   }
@@ -3379,6 +3563,7 @@ impl StorageEngine {
   /// startup population). Also refreshes the void_count + void_space
   /// counters so dashboard metrics stay accurate.
   pub(crate) fn sync_voids_to_kv_writer(&self) -> EngineResult<()> {
+    let _operation = self.write_operation_guard("sync_voids_to_kv_writer")?;
     let (voids, count, total_bytes) = self.collect_void_snapshot()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.set_pending_voids(voids);
@@ -3540,7 +3725,7 @@ impl StorageEngine {
     compression_algo: CompressionAlgorithm,
     entry_version: u8,
   ) -> EngineResult<u64> {
-    let _operation = self.operation_guard("store_entry")?;
+    let _operation = self.write_operation_guard("store_entry")?;
     self.ensure_writable()?;
     self.validate_indexed_entry_key(entry_type, key)?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -3821,7 +4006,7 @@ impl StorageEngine {
   ///
   /// Returns `(header, key, value)` if a non-deleted entry exists.
   pub fn get_entry(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
-    let _operation = self.operation_guard("get_entry")?;
+    let _operation = self.read_operation_guard("get_entry")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get(hash)? {
       Some(entry) if !entry.is_deleted() => entry,
@@ -3851,7 +4036,7 @@ impl StorageEngine {
 
   /// Retrieve only an entry header by key without reading the entry value.
   pub fn get_entry_header(&self, hash: &[u8]) -> EngineResult<Option<EntryHeader>> {
-    let _operation = self.operation_guard("get_entry_header")?;
+    let _operation = self.read_operation_guard("get_entry_header")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get(hash)? {
       Some(entry) if !entry.is_deleted() => entry,
@@ -3867,7 +4052,7 @@ impl StorageEngine {
   /// Maintenance readers use the encoded lengths to reserve before loading a
   /// historical value.
   pub fn get_entry_header_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryHeader>> {
-    let _operation = self.operation_guard("get_entry_header_including_deleted")?;
+    let _operation = self.read_operation_guard("get_entry_header_including_deleted")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get_raw(hash)? {
       Some(entry) => entry,
@@ -3883,7 +4068,7 @@ impl StorageEngine {
   /// Used for version history where we need to read files that were
   /// deleted after a snapshot was taken.
   pub fn get_entry_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
-    let _operation = self.operation_guard("get_entry_including_deleted")?;
+    let _operation = self.read_operation_guard("get_entry_including_deleted")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get_raw(hash)? {
       Some(entry) => entry,
@@ -3901,7 +4086,7 @@ impl StorageEngine {
   /// therefore invalidate the first header probe without causing unaccounted
   /// growth.
   pub fn get_entry_including_deleted_bounded(&self, hash: &[u8], maximum_value_length: u32) -> EngineResult<Option<EntryData>> {
-    let _operation = self.operation_guard("get_entry_including_deleted_bounded")?;
+    let _operation = self.read_operation_guard("get_entry_including_deleted_bounded")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get_raw(hash)? {
       Some(entry) => entry,
@@ -3927,7 +4112,7 @@ impl StorageEngine {
     hash: &[u8],
     maximum_value_length: u32,
   ) -> EngineResult<Option<EntryData>> {
-    let _operation = self.operation_guard("get_entry_including_deleted_verified_bounded")?;
+    let _operation = self.read_operation_guard("get_entry_including_deleted_verified_bounded")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get_raw(hash)? {
       Some(entry) => entry,
@@ -3957,7 +4142,7 @@ impl StorageEngine {
   /// caller-owned allocation bound. The header check and value read share one
   /// writer read lock, so a concurrent append cannot invalidate the bound.
   pub fn get_entry_verified_bounded(&self, hash: &[u8], maximum_value_length: u32) -> EngineResult<Option<EntryData>> {
-    let _operation = self.operation_guard("get_entry_verified")?;
+    let _operation = self.read_operation_guard("get_entry_verified")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get(hash)? {
       Some(entry) if !entry.is_deleted() => entry,
@@ -3981,7 +4166,7 @@ impl StorageEngine {
   /// Like `get_entry_verified` but includes entries marked as deleted.
   /// Needed for reading historical chunk data when streaming files from snapshots.
   pub fn get_entry_verified_including_deleted(&self, hash: &[u8]) -> EngineResult<Option<EntryData>> {
-    let _operation = self.operation_guard("get_entry_verified_including_deleted")?;
+    let _operation = self.read_operation_guard("get_entry_verified_including_deleted")?;
     let snapshot = self.kv_snapshot.load();
     let kv_entry = match snapshot.get_raw(hash)? {
       Some(entry) => entry,
@@ -4111,7 +4296,7 @@ impl StorageEngine {
   /// metadata shortcut, this reports an unknown decoded length for compressed
   /// chunks so callers cannot mistake stored bytes for logical file bytes.
   pub(crate) fn get_chunk_stream_metadata(&self, hash: &[u8], include_deleted: bool) -> EngineResult<Option<ChunkEntryMetadata>> {
-    let _operation = self.operation_guard("get_chunk_stream_metadata")?;
+    let _operation = self.read_operation_guard("get_chunk_stream_metadata")?;
     let snapshot = self.kv_snapshot.load();
     let Some(kv_entry) = snapshot.get(hash)? else {
       return Ok(None);
@@ -4151,7 +4336,7 @@ impl StorageEngine {
   }
 
   fn get_chunk_metadata_internal(&self, hash: &[u8], include_deleted: bool) -> EngineResult<Option<ChunkEntryMetadata>> {
-    let _operation = self.operation_guard("get_chunk_metadata")?;
+    let _operation = self.read_operation_guard("get_chunk_metadata")?;
     let snapshot = self.kv_snapshot.load();
     let Some(kv_entry) = snapshot.get(hash)? else {
       return Ok(None);
@@ -4191,7 +4376,7 @@ impl StorageEngine {
   /// revalidates that each chunk is still the live KV entry at the expected
   /// offset, then performs one offset-based read over the covering span.
   pub fn read_chunk_span_verified(&self, locations: &[ChunkReadLocation]) -> EngineResult<Vec<Vec<u8>>> {
-    let _operation = self.operation_guard("read_chunk_span_verified")?;
+    let _operation = self.read_operation_guard("read_chunk_span_verified")?;
     if locations.is_empty() {
       return Ok(Vec::new());
     }
@@ -4322,7 +4507,7 @@ impl StorageEngine {
 
   /// Check if a non-deleted entry exists in the KV store (lock-free).
   pub fn has_entry(&self, hash: &[u8]) -> EngineResult<bool> {
-    let _operation = self.operation_guard("has_entry")?;
+    let _operation = self.read_operation_guard("has_entry")?;
     let snapshot = self.kv_snapshot.load();
     match snapshot.get(hash)? {
       Some(entry) => Ok(!entry.is_deleted()),
@@ -4371,7 +4556,7 @@ impl StorageEngine {
 
   /// Update the HEAD hash in the file header, pointing to a new root directory version.
   pub fn update_head(&self, head_hash: &[u8]) -> EngineResult<()> {
-    let _operation = self.operation_guard("update_head")?;
+    let _operation = self.write_operation_guard("update_head")?;
     self.ensure_writable()?;
     let _namespace = self.direct_hard_authority_guard()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -4396,14 +4581,14 @@ impl StorageEngine {
   /// Read the current HEAD hash from the file header. HEAD points to the
   /// content-addressed root directory and represents the latest version.
   pub fn head_hash(&self) -> EngineResult<Vec<u8>> {
-    let _operation = self.operation_guard("head_hash")?;
+    let _operation = self.read_operation_guard("head_hash")?;
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     Ok(writer.file_header().head_hash.clone())
   }
 
   /// Get the backup metadata from the file header.
   pub fn backup_info(&self) -> EngineResult<(u8, Vec<u8>, Vec<u8>)> {
-    let _operation = self.operation_guard("backup_info")?;
+    let _operation = self.read_operation_guard("backup_info")?;
     let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(format!("writer lock poisoned: {}", e))))?;
     let fh = writer.file_header();
     Ok((fh.backup_type, fh.base_hash.clone(), fh.target_hash.clone()))
@@ -4411,7 +4596,7 @@ impl StorageEngine {
 
   /// Update the backup metadata in the file header.
   pub fn set_backup_info(&self, backup_type: u8, base_hash: &[u8], target_hash: &[u8]) -> EngineResult<()> {
-    let _operation = self.operation_guard("set_backup_info")?;
+    let _operation = self.write_operation_guard("set_backup_info")?;
     self.ensure_writable()?;
     let _namespace = self.direct_hard_authority_guard()?;
     let in_transaction =
@@ -4437,7 +4622,7 @@ impl StorageEngine {
   /// could leave the entry on disk but missing from the index.
   /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn store_entry_typed(&self, entry_type: EntryType, key: &[u8], value: &[u8], kv_type: u8) -> EngineResult<u64> {
-    let _operation = self.operation_guard("store_entry_typed")?;
+    let _operation = self.write_operation_guard("store_entry_typed")?;
     self.ensure_writable()?;
     self.validate_indexed_entry_key(entry_type, key)?;
     // Acquire BOTH locks before any work to close the TOCTOU gap.
@@ -4476,7 +4661,7 @@ impl StorageEngine {
   /// KV inserts could leave entries on disk but missing from the index.
   /// Lock order: writer first, then KV (must be consistent everywhere).
   pub fn flush_batch(&self, batch: WriteBatch) -> EngineResult<Vec<u64>> {
-    let _operation = self.operation_guard("flush_batch")?;
+    let _operation = self.write_operation_guard("flush_batch")?;
     self.ensure_writable()?;
     if batch.is_empty() {
       return Ok(Vec::new());
@@ -4532,7 +4717,7 @@ impl StorageEngine {
   /// Flush a write batch AND update HEAD atomically in a single lock hold.
   /// This avoids separate lock acquisitions for the batch and the head update.
   pub fn flush_batch_and_update_head(&self, batch: WriteBatch, head_hash: &[u8]) -> EngineResult<Vec<u64>> {
-    let _operation = self.operation_guard("flush_batch_and_update_head")?;
+    let _operation = self.write_operation_guard("flush_batch_and_update_head")?;
     self.ensure_writable()?;
     let _namespace = self.direct_hard_authority_guard()?;
     if batch.is_empty() {
@@ -4829,7 +5014,7 @@ impl StorageEngine {
   /// 4. Tells the KV store to finalize: zero pages, rehash, update header
   /// 5. Updates the writer's offset to reflect the new file layout
   pub fn expand_kv_block_online(&self, target_stage: usize) -> EngineResult<()> {
-    let _operation = self.operation_guard("expand_kv_block_online")?;
+    let _operation = self.write_operation_guard("expand_kv_block_online")?;
     self.ensure_writable()?;
     let engine_id = self as *const StorageEngine as usize;
     let _maintenance = self.operation_tracker.begin_maintenance(engine_id, std::time::Duration::from_secs(300))?;
@@ -5001,7 +5186,7 @@ impl StorageEngine {
 
   /// Check if a KV entry is marked as deleted.
   pub fn is_entry_deleted(&self, hash: &[u8]) -> EngineResult<bool> {
-    let _operation = self.operation_guard("is_entry_deleted")?;
+    let _operation = self.read_operation_guard("is_entry_deleted")?;
     let snapshot = self.kv_snapshot.load();
     match snapshot.get_raw(hash)? {
       Some(entry) => Ok(entry.is_deleted()),
@@ -5011,7 +5196,7 @@ impl StorageEngine {
 
   /// Mark a KV entry as deleted by setting the deleted flag.
   pub fn mark_entry_deleted(&self, hash: &[u8]) -> EngineResult<()> {
-    let _operation = self.operation_guard("mark_entry_deleted")?;
+    let _operation = self.write_operation_guard("mark_entry_deleted")?;
     self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let updated = kv.update_flags(hash, KV_FLAG_DELETED)?;
@@ -5024,7 +5209,7 @@ impl StorageEngine {
   /// Read only the entry header at a given file offset.
   /// Used by GC to determine entry size without reading the full payload.
   pub fn read_entry_header_at(&self, offset: u64) -> EngineResult<EntryHeader> {
-    let _operation = self.operation_guard("read_entry_header_at")?;
+    let _operation = self.read_operation_guard("read_entry_header_at")?;
     // Use a READ lock — read_entry_at_shared uses a cloned file handle.
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
@@ -5047,7 +5232,7 @@ impl StorageEngine {
   /// Write a DeletionRecord entry at a specific file offset (in-place).
   /// Returns the total bytes written.
   pub fn write_deletion_at(&self, offset: u64, path: &str) -> EngineResult<u32> {
-    let _operation = self.operation_guard("write_deletion_at")?;
+    let _operation = self.write_operation_guard("write_deletion_at")?;
     self.ensure_writable()?;
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
@@ -5070,7 +5255,7 @@ impl StorageEngine {
 
   /// Write a void entry at a specific file offset (in-place).
   pub fn write_void_at(&self, offset: u64, size: u32) -> EngineResult<()> {
-    let _operation = self.operation_guard("write_void_at")?;
+    let _operation = self.write_operation_guard("write_void_at")?;
     self.ensure_writable()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
@@ -5093,7 +5278,7 @@ impl StorageEngine {
 
   /// Write a DeletionRecord in-place WITHOUT syncing. Used by GC batch sweep.
   pub fn write_deletion_at_nosync(&self, offset: u64, path: &str) -> EngineResult<u32> {
-    let _operation = self.operation_guard("write_deletion_at_nosync")?;
+    let _operation = self.write_operation_guard("write_deletion_at_nosync")?;
     self.ensure_writable()?;
     let deletion = crate::engine::deletion_record::DeletionRecord::new(path.to_string(), Some("gc".to_string()));
     let value = deletion.serialize();
@@ -5116,7 +5301,7 @@ impl StorageEngine {
 
   /// Write a void in-place WITHOUT syncing. Used by GC batch sweep.
   pub fn write_void_at_nosync(&self, offset: u64, size: u32) -> EngineResult<()> {
-    let _operation = self.operation_guard("write_void_at_nosync")?;
+    let _operation = self.write_operation_guard("write_void_at_nosync")?;
     self.ensure_writable()?;
     let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
@@ -5139,7 +5324,7 @@ impl StorageEngine {
 
   /// Sync the append writer to disk. Call after batch nosync operations.
   pub fn sync_writer(&self) -> EngineResult<()> {
-    let _operation = self.operation_guard("sync_writer")?;
+    let _operation = self.write_operation_guard("sync_writer")?;
     self.ensure_writable()?;
     let sync_result = {
       let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -5153,7 +5338,7 @@ impl StorageEngine {
 
   /// Batch remove multiple entries from the KV store. Publishes snapshot once at the end.
   pub fn remove_kv_entries_batch(&self, hashes: &[Vec<u8>]) -> EngineResult<()> {
-    let _operation = self.operation_guard("remove_kv_entries_batch")?;
+    let _operation = self.write_operation_guard("remove_kv_entries_batch")?;
     self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.mark_deleted_batch(hashes)?;
@@ -5162,7 +5347,7 @@ impl StorageEngine {
 
   /// Remove an entry from the KV store (mark deleted). Used by GC sweep.
   pub fn remove_kv_entry(&self, hash: &[u8]) -> EngineResult<()> {
-    let _operation = self.operation_guard("remove_kv_entry")?;
+    let _operation = self.write_operation_guard("remove_kv_entry")?;
     self.ensure_writable()?;
     let mut kv = self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     kv.mark_deleted(hash)?;
@@ -5171,7 +5356,7 @@ impl StorageEngine {
 
   /// Iterate all live KV entries. Used by GC sweep.
   pub fn iter_kv_entries(&self) -> EngineResult<Vec<KVEntry>> {
-    let _operation = self.operation_guard("iter_kv_entries")?;
+    let _operation = self.read_operation_guard("iter_kv_entries")?;
     let snapshot = self.kv_snapshot.load();
     snapshot.iter_all()
   }
@@ -5188,7 +5373,7 @@ impl StorageEngine {
   /// cloning those rows. Maintenance owners use this for pre-allocation
   /// admission before materializing a full scan.
   pub fn kv_entry_count(&self) -> EngineResult<usize> {
-    let _operation = self.operation_guard("kv_entry_count")?;
+    let _operation = self.read_operation_guard("kv_entry_count")?;
     Ok(self.kv_snapshot.load().len())
   }
 
@@ -5196,7 +5381,7 @@ impl StorageEngine {
   where
     F: FnOnce(usize) -> EngineResult<()>,
   {
-    let _operation = self.operation_guard("kv_entries_by_type_admitted")?;
+    let _operation = self.read_operation_guard("kv_entries_by_type_admitted")?;
     let snapshot = self.kv_snapshot.load();
     let count = snapshot.count_by_type(target_type)?;
     admit(count)?;
@@ -5206,7 +5391,7 @@ impl StorageEngine {
   /// Lightweight single-hash lookup in the KV snapshot.
   /// Returns `None` for deleted or missing entries.
   pub fn get_kv_entry(&self, hash: &[u8]) -> EngineResult<Option<KVEntry>> {
-    let _operation = self.operation_guard("get_kv_entry")?;
+    let _operation = self.read_operation_guard("get_kv_entry")?;
     let snapshot = self.kv_snapshot.load();
     snapshot.get(hash)
   }
@@ -5215,7 +5400,7 @@ impl StorageEngine {
   /// Scans KV pages through the active snapshot backend, then reads each
   /// matching entry's value from the WAL.
   pub fn entries_by_type(&self, target_type: u8) -> EngineResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    let _operation = self.operation_guard("entries_by_type")?;
+    let _operation = self.read_operation_guard("entries_by_type")?;
     let entries: Vec<KVEntry> = {
       let snapshot = self.kv_snapshot.load();
       snapshot.iter_by_type(target_type)?
@@ -5246,7 +5431,7 @@ impl StorageEngine {
   /// instead of silently omitting it. Authority and migration callers use this
   /// when an incomplete result would be indistinguishable from success.
   pub(crate) fn entries_by_type_strict(&self, target_type: u8) -> EngineResult<Vec<EntryData>> {
-    let _operation = self.operation_guard("entries_by_type_strict")?;
+    let _operation = self.read_operation_guard("entries_by_type_strict")?;
     let entries = self.kv_snapshot.load().iter_by_type(target_type)?;
     let mut results = Vec::with_capacity(entries.len());
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
@@ -5332,7 +5517,7 @@ impl StorageEngine {
     progress_callback: Option<EngineStartupProgressCallback>,
     scan_boundary: KvRebuildScanBoundary,
   ) -> EngineResult<()> {
-    let _operation = self.operation_guard("rebuild_kv")?;
+    let _operation = self.write_operation_guard("rebuild_kv")?;
     self.ensure_writable()?;
     let engine_id = self as *const StorageEngine as usize;
     let _maintenance = self.operation_tracker.begin_maintenance(engine_id, std::time::Duration::from_secs(300))?;
@@ -6281,14 +6466,14 @@ mod tests {
   fn layout_maintenance_drains_existing_operations_and_blocks_new_admission() {
     let tracker = Arc::new(EngineOperationTracker::default());
     let engine_id = Arc::as_ptr(&tracker) as usize;
-    let owner = tracker.begin(engine_id, "layout_owner").unwrap();
+    let owner = tracker.begin(engine_id, "layout_owner", EngineOperationAccess::Write).unwrap();
 
     std::thread::scope(|scope| {
       let (active_tx, active_rx) = std::sync::mpsc::channel();
       let (release_tx, release_rx) = std::sync::mpsc::channel();
       let worker_tracker = Arc::clone(&tracker);
       scope.spawn(move || {
-        let worker = worker_tracker.begin(engine_id, "existing_reader").unwrap();
+        let worker = worker_tracker.begin(engine_id, "existing_reader", EngineOperationAccess::Read).unwrap();
         active_tx.send(()).unwrap();
         release_rx.recv().unwrap();
         drop(worker);
@@ -6306,7 +6491,7 @@ mod tests {
       let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
       let blocked_tracker = Arc::clone(&tracker);
       scope.spawn(move || {
-        let blocked = blocked_tracker.begin(engine_id, "new_reader").unwrap();
+        let blocked = blocked_tracker.begin(engine_id, "new_reader", EngineOperationAccess::Read).unwrap();
         admitted_tx.send(()).unwrap();
         drop(blocked);
       });
@@ -6321,14 +6506,14 @@ mod tests {
   fn layout_maintenance_timeout_reopens_normal_admission() {
     let tracker = Arc::new(EngineOperationTracker::default());
     let engine_id = Arc::as_ptr(&tracker) as usize;
-    let owner = tracker.begin(engine_id, "layout_owner").unwrap();
+    let owner = tracker.begin(engine_id, "layout_owner", EngineOperationAccess::Write).unwrap();
 
     std::thread::scope(|scope| {
       let (active_tx, active_rx) = std::sync::mpsc::channel();
       let (release_tx, release_rx) = std::sync::mpsc::channel();
       let worker_tracker = Arc::clone(&tracker);
       scope.spawn(move || {
-        let worker = worker_tracker.begin(engine_id, "slow_reader").unwrap();
+        let worker = worker_tracker.begin(engine_id, "slow_reader", EngineOperationAccess::Read).unwrap();
         active_tx.send(()).unwrap();
         release_rx.recv().unwrap();
         drop(worker);
@@ -6338,7 +6523,7 @@ mod tests {
       assert!(tracker.begin_maintenance(engine_id, Duration::from_millis(10)).is_err());
       release_tx.send(()).unwrap();
     });
-    let admitted = tracker.begin(engine_id, "after_timeout").unwrap();
+    let admitted = tracker.begin(engine_id, "after_timeout", EngineOperationAccess::Read).unwrap();
     drop(admitted);
     drop(owner);
   }
@@ -6358,7 +6543,7 @@ mod tests {
       let maintenance_engine = Arc::clone(&engine);
       let (result_tx, result_rx) = std::sync::mpsc::channel();
       scope.spawn(move || {
-        let operation = maintenance_engine.operation_guard("layout_owner").unwrap();
+        let operation = maintenance_engine.write_operation_guard("layout_owner").unwrap();
         let engine_id = Arc::as_ptr(&maintenance_engine) as usize;
         let result = maintenance_engine.operation_tracker.begin_maintenance(engine_id, Duration::from_secs(1));
         result_tx.send(result.map(drop)).unwrap();
@@ -6718,7 +6903,7 @@ mod tests {
     let temp_dir = tempfile::tempdir().unwrap();
     let engine_path = temp_dir.path().join("shutdown-repeat.aeordb");
     let engine = StorageEngine::create(engine_path.to_str().unwrap()).unwrap();
-    let _active_operation = engine.operation_guard("test_active_operation").unwrap();
+    let _active_operation = engine.read_operation_guard("test_active_operation").unwrap();
 
     let first = engine.shutdown_with_drain_timeout(Duration::ZERO);
     assert!(matches!(first, Err(EngineError::ShuttingDown)));
@@ -7361,7 +7546,23 @@ mod tests {
 
 thread_local! {
   static NAMESPACE_WRITE_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-  static ENGINE_OPERATION_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+  static ENGINE_OPERATION_STACK: RefCell<Vec<EngineOperationStackEntry>> = const { RefCell::new(Vec::new()) };
+}
+
+fn pop_engine_operation_stack(engine_id: usize) {
+  ENGINE_OPERATION_STACK.with(|stack| {
+    let mut stack = stack.borrow_mut();
+    let popped = stack.pop();
+    if !popped.is_some_and(|entry| entry.engine_id == engine_id) {
+      debug_assert!(popped.is_some_and(|entry| entry.engine_id == engine_id), "engine operation guard stack out of order");
+      if let Some(other_entry) = popped {
+        stack.push(other_entry);
+      }
+      if let Some(position) = stack.iter().rposition(|held| held.engine_id == engine_id) {
+        stack.remove(position);
+      }
+    }
+  });
 }
 
 pub(crate) struct DurabilityRepairAuthorityGuard<'a> {
@@ -7429,13 +7630,13 @@ pub struct TransactionGuard<'a> {
 
 impl<'a> TransactionGuard<'a> {
   pub fn new(engine: &'a StorageEngine) -> EngineResult<Self> {
-    let operation = engine.operation_guard("namespace_transaction")?;
+    let operation = engine.write_operation_guard("namespace_transaction")?;
     let top_level = engine.begin_transaction(false)?;
     Ok(TransactionGuard { engine, _operation: operation, admitted_ticket: None, top_level, completed: false })
   }
 
   pub(crate) fn new_top_level(engine: &'a StorageEngine, estimated_dependency_bytes: u64) -> EngineResult<Self> {
-    let operation = engine.operation_guard("namespace_mutation_transaction")?;
+    let operation = engine.write_operation_guard("namespace_mutation_transaction")?;
     let top_level = engine.begin_transaction(true)?;
     debug_assert!(top_level);
     let admitted_ticket = match engine.admit_transaction_ticket(estimated_dependency_bytes) {

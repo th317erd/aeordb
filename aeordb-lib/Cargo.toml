@@ -1121,6 +1121,10 @@ name = "migration_capture_replay_spec"
 path = "spec/engine/migration_capture_replay_spec.rs"
 
 [[test]]
+name = "migration_final_reconciliation_spec"
+path = "spec/engine/migration_final_reconciliation_spec.rs"
+
+[[test]]
 name = "mutable_system_control_authority_spec"
 path = "spec/engine/mutable_system_control_authority_spec.rs"
 
