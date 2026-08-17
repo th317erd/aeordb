@@ -218,6 +218,43 @@ impl MigrationFinalAuthorityReconciliationProofV1<'_, '_> {
     self.validate_live(destination)
   }
 
+  pub(crate) fn validate_for_destination_verification(
+    &self,
+    permit: &MigrationPreflightPermitV1,
+    destination: &V4FirstAuthorityPublisher,
+    expected_destination_header_sequence: u64,
+    expected_destination_head: &[u8],
+  ) -> Result<(), MigrationFinalAuthorityReconciliationErrorV1> {
+    if permit.evidence_fingerprint() != self.permit_evidence_fingerprint {
+      return Err(MigrationFinalAuthorityReconciliationErrorV1::invalid(
+        "migration_final_authority_proof_binding",
+        "final authority proof belongs to another permit or destination owner",
+      ));
+    }
+    self.freeze.validate_unchanged()?;
+    if expected_destination_header_sequence < self.closure.destination_header_sequence
+      || expected_destination_head != self.closure.destination_namespace_root
+    {
+      return Err(MigrationFinalAuthorityReconciliationErrorV1::invalid(
+        "migration_final_authority_destination_changed",
+        "selected root-map authority precedes or changes the frozen reconciliation destination",
+      ));
+    }
+    let observation = destination.observe()?;
+    if observation.selected.redundancy_degraded
+      || observation.selected.header.database_id != self.closure.database_id
+      || observation.selected.header.physical_instance_id != self.closure.destination_physical_instance_id
+      || observation.selected.header.slot_sequence != expected_destination_header_sequence
+      || observation.selected.header.head_hash != expected_destination_head
+    {
+      return Err(MigrationFinalAuthorityReconciliationErrorV1::invalid(
+        "migration_final_authority_destination_changed",
+        "destination identity, header sequence, redundancy, or HEAD changed after selected root-map verification",
+      ));
+    }
+    Ok(())
+  }
+
   pub(crate) const fn closure(&self) -> &MigrationFinalRootMappingClosureV1 {
     &self.closure
   }

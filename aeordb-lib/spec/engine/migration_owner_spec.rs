@@ -1326,6 +1326,27 @@ fn generic_progress_cannot_complete_final_freeze_or_enter_a_later_phase() {
 }
 
 #[test]
+fn generic_progress_cannot_establish_the_selected_legacy_root_map_hash() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (owner, _) = MigrationStateOwnerV1::acquire(publisher.clone(), permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let mut request =
+    progress_transition(algorithm, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, ACQUIRED_AT_MS + 1_000);
+  request.legacy_root_map_control_payload_hash = digest_parts(algorithm, &[b"forged selected root map"]);
+
+  assert_eq!(owner.transition_progress(request, &mut retirement).unwrap_err().code(), "migration_progress_specialized_authority");
+  let selected =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let progress = decode_migration_progress_control(&selected.bytes, algorithm).unwrap();
+  assert!(progress.body.legacy_root_map_control_payload_hash.iter().all(|byte| *byte == 0));
+}
+
+#[test]
 fn terminal_progress_and_established_evidence_cannot_be_reopened_or_cleared() {
   let algorithm = HashAlgorithm::Blake3_256;
   let (_directory, _path, publisher) = create_publisher(algorithm);

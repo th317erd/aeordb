@@ -36,7 +36,8 @@ use aeordb::engine::v4::migration_control::{
   MigrationProgressStateV1, decode_migration_progress_control,
 };
 use aeordb::engine::v4::migration_owner::{
-  MigrationAcquisitionRequestV1, MigrationFinalFreezeCompletionRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
+  MigrationAcquisitionRequestV1, MigrationDestinationVerificationRequestV1, MigrationFinalFreezeCompletionRequestV1,
+  MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
 };
 use aeordb::engine::v4::migration_final_authority_reconciliation::{
   MigrationFinalAuthorityInventoryClosureV1, MigrationFinalAuthorityInventorySourceV1, MigrationFinalAuthorityReconciliationErrorV1,
@@ -49,6 +50,10 @@ use aeordb::engine::v4::migration_preflight::{
   MigrationIdentityEvidenceV1, MigrationMemoryEvidenceV1, MigrationNativeEvidenceV1, MigrationPreflightPermitV1,
   MigrationPreflightRequestV1, MigrationRecoveryEvidenceV1, MigrationSourceEvidenceV1, NativeCutoverCapabilitiesV1,
   SourceAuthorityInventoryV1, StrictVerificationEvidenceV1, StrictVerificationStateV1, admit_migration_preflight_v1,
+};
+use aeordb::engine::v4::migration_root_map_owner::{
+  LegacyRootMapOwnerV1, LegacyRootMapProducerSinkV1, LegacyRootMapPublicationRequestV1, LegacyRootMapStagingWorkspaceV1,
+  LegacyRootMapWorkspaceIdentityV1, LegacyRootMapWorkspaceOptionsV1, VerifiedLegacyRootMapReaderV1,
 };
 use aeordb::engine::v4::migration_source_gc::{MigrationSourceGcSuspensionOwnerV1, MigrationSourceGcSuspensionRequestV1};
 use aeordb::engine::v4::namespace::{
@@ -1836,6 +1841,278 @@ fn only_live_final_authority_proof_can_complete_the_ampr_final_freeze() {
     )
     .unwrap();
   assert!(!retry.idempotent, "a newly observed destination watermark requires one monotonic AMPR update");
+}
+
+#[test]
+fn selected_root_map_and_live_frozen_source_begin_destination_verification_idempotently() {
+  let fixture = ProjectionFixture::new();
+  let cancellation = CancellationToken::new();
+  let mut retirement = final_retirement_owner(&fixture, &cancellation);
+  let (owner, _) = MigrationStateOwnerV1::acquire(
+    fixture.destination.shared_publisher(),
+    fixture.permit.clone(),
+    MigrationAcquisitionRequestV1 {
+      holder_boot_id: id(0x61),
+      acquired_at_ms: 1_700_000_000_200,
+      lease_duration_ms: 60_000,
+      publication_timestamp_ms: 1_700_000_000_300,
+      monotonic_now_ms: 10_000,
+    },
+    &mut retirement,
+  )
+  .unwrap();
+  let (_gc_owner, _) = MigrationSourceGcSuspensionOwnerV1::suspend(
+    &fixture.source,
+    &owner,
+    MigrationSourceGcSuspensionRequestV1 {
+      suspended_at_ms: 1_700_000_001_000,
+      publication_timestamp_ms: 1_700_000_001_010,
+      monotonic_now_ms: 20_000,
+    },
+    &mut retirement,
+  )
+  .unwrap();
+  advance_to_final_freeze_running(&fixture, &owner, &mut retirement);
+
+  let source_before = fs::read(&fixture.source_path).unwrap();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit: &fixture.permit,
+    source: &fixture.source,
+    cancellation: &cancellation,
+    acquisition_timeout: Duration::from_secs(2),
+  })
+  .unwrap();
+  let namespace = execute_final_namespace_reconciliation_v1(final_reconciliation_request(
+    &fixture,
+    &freeze,
+    &cancellation,
+    &fixture.basis_root,
+    &fixture.current_destination_tree_root,
+  ))
+  .unwrap();
+  let rows = final_head_rows(&freeze);
+  let counts = MigrationFinalAuthoritySeedCountsV1 { current_heads: 1, ..Default::default() };
+  let mut inventory =
+    FinalInventoryStream { seeds: rows.clone().into(), closure: final_inventory_closure(&fixture, &freeze, &rows, counts) };
+  let mut prior = FinalPriorMappings::default();
+  let scratch = fixture.destination.path().parent().unwrap().join("root-map-destination-verification");
+  fs::create_dir(&scratch).unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+  }
+  let mut workspace = LegacyRootMapStagingWorkspaceV1::create(
+    fixture.destination.path(),
+    LegacyRootMapWorkspaceIdentityV1::new(
+      fixture.permit.database_id(),
+      fixture.permit.migration_id(),
+      fixture.permit.database_id(),
+      fixture.permit.source_physical_instance_id(),
+      fixture.permit.destination_physical_instance_id(),
+      1,
+      fixture.permit.hash_algorithm(),
+    )
+    .unwrap(),
+    1_700_000_003_000,
+    LegacyRootMapWorkspaceOptionsV1::new(Some(scratch), 64 << 20, 100, 0, 1 << 20, 2, 8, 2 << 20).unwrap(),
+    cancellation.clone(),
+    &fixture.memory,
+  )
+  .unwrap();
+  let mut root_sink =
+    LegacyRootMapProducerSinkV1::new(&mut workspace, &fixture.authority, freeze.authority().hard_publication_frontier).unwrap();
+  let final_authority = execute_final_authority_reconciliation_v1(final_authority_request(
+    &fixture,
+    &namespace,
+    &mut inventory,
+    &mut prior,
+    &mut root_sink,
+    &cancellation,
+  ))
+  .unwrap();
+  drop(root_sink);
+  owner
+    .complete_final_freeze(
+      MigrationFinalFreezeCompletionRequestV1 {
+        proof: final_authority.proof(),
+        updated_at_ms: 1_700_000_003_100,
+        publication_timestamp_ms: 1_700_000_003_200,
+        monotonic_now_ms: 40_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  let map_receipt = LegacyRootMapOwnerV1::new(fixture.destination.publisher())
+    .publish(
+      LegacyRootMapPublicationRequestV1 {
+        workspace,
+        retirement_owner: &mut retirement,
+        cancellation: &cancellation,
+        monotonic_now_ms: 41_000,
+      },
+      &fixture.memory,
+    )
+    .unwrap();
+  let reader = VerifiedLegacyRootMapReaderV1::open(
+    fixture.destination.publisher(),
+    fixture.permit.database_id(),
+    fixture.permit.migration_id(),
+    &cancellation,
+    &fixture.memory,
+  )
+  .unwrap();
+  let prepublication_destination_sequence = reader.destination_header_sequence();
+  let first = owner
+    .begin_destination_verification(
+      MigrationDestinationVerificationRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &reader,
+        cancellation: &cancellation,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_003_300,
+        publication_timestamp_ms: 1_700_000_003_400,
+        monotonic_now_ms: 42_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert_eq!((first.phase, first.state, first.idempotent), (MigrationPhaseV1::DestinationVerify, MigrationProgressStateV1::Pending, false));
+
+  let progress = fixture
+    .destination
+    .publisher()
+    .load_mutable_system_control(SystemControlKindV1::MigrationProgress, &fixture.permit.database_id(), &fixture.permit.migration_id())
+    .unwrap()
+    .unwrap();
+  let progress = decode_migration_progress_control(&progress.bytes, fixture.permit.hash_algorithm()).unwrap();
+  assert_eq!(progress.body.destination_header_sequence, prepublication_destination_sequence);
+  assert_eq!(progress.body.legacy_root_map_control_payload_hash, map_receipt.control_payload_hash);
+
+  let reopened_reader = VerifiedLegacyRootMapReaderV1::open(
+    fixture.destination.publisher(),
+    fixture.permit.database_id(),
+    fixture.permit.migration_id(),
+    &cancellation,
+    &fixture.memory,
+  )
+  .unwrap();
+  let retry = owner
+    .begin_destination_verification(
+      MigrationDestinationVerificationRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &reopened_reader,
+        cancellation: &cancellation,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_003_500,
+        publication_timestamp_ms: 1_700_000_003_600,
+        monotonic_now_ms: 43_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert!(retry.idempotent);
+  freeze.validate_unchanged().unwrap();
+  assert_eq!(fs::read(&fixture.source_path).unwrap(), source_before);
+
+  let selected_progress = fixture
+    .destination
+    .publisher()
+    .load_mutable_system_control(SystemControlKindV1::MigrationProgress, &fixture.permit.database_id(), &fixture.permit.migration_id())
+    .unwrap()
+    .unwrap();
+  let error = owner
+    .begin_destination_verification(
+      MigrationDestinationVerificationRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &reopened_reader,
+        cancellation: &cancellation,
+        expected_map_generation: 2,
+        updated_at_ms: 1_700_000_003_700,
+        publication_timestamp_ms: 1_700_000_003_800,
+        monotonic_now_ms: 44_000,
+      },
+      &mut retirement,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "migration_destination_verification_map_binding");
+
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  let error = owner
+    .begin_destination_verification(
+      MigrationDestinationVerificationRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &reopened_reader,
+        cancellation: &canceled,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_003_700,
+        publication_timestamp_ms: 1_700_000_003_800,
+        monotonic_now_ms: 44_000,
+      },
+      &mut retirement,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "migration_root_map_cancelled");
+  assert_eq!(
+    fixture
+      .destination
+      .publisher()
+      .load_mutable_system_control(SystemControlKindV1::MigrationProgress, &fixture.permit.database_id(), &fixture.permit.migration_id())
+      .unwrap()
+      .unwrap(),
+    selected_progress
+  );
+
+  owner
+    .renew(
+      MigrationLeaseRenewalRequestV1 {
+        renewed_at_ms: 1_700_000_004_000,
+        lease_duration_ms: 120_000,
+        publication_timestamp_ms: 1_700_000_004_100,
+        monotonic_now_ms: 45_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  let error = owner
+    .begin_destination_verification(
+      MigrationDestinationVerificationRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &reopened_reader,
+        cancellation: &cancellation,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_004_200,
+        publication_timestamp_ms: 1_700_000_004_300,
+        monotonic_now_ms: 46_000,
+      },
+      &mut retirement,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "migration_root_map_selected_changed");
+  let fresh_reader = VerifiedLegacyRootMapReaderV1::open(
+    fixture.destination.publisher(),
+    fixture.permit.database_id(),
+    fixture.permit.migration_id(),
+    &cancellation,
+    &fixture.memory,
+  )
+  .unwrap();
+  let recovered = owner
+    .begin_destination_verification(
+      MigrationDestinationVerificationRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &fresh_reader,
+        cancellation: &cancellation,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_004_400,
+        publication_timestamp_ms: 1_700_000_004_500,
+        monotonic_now_ms: 47_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert!(recovered.idempotent);
 }
 
 #[test]

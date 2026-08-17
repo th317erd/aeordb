@@ -24,6 +24,7 @@ use super::migration_control::{
 };
 use super::migration_final_authority_reconciliation::MigrationFinalAuthorityReconciliationProofV1;
 use super::migration_preflight::MigrationPreflightPermitV1;
+use super::migration_root_map_owner::{LegacyRootMapOwnerErrorV1, VerifiedLegacyRootMapReaderV1};
 use super::reader::FormatError;
 use super::system_control::SystemControlKindV1;
 
@@ -116,6 +117,17 @@ pub struct MigrationReplayCheckpointPublicationRequestV1 {
 #[derive(Clone, Copy)]
 pub struct MigrationFinalFreezeCompletionRequestV1<'proof, 'freeze, 'source> {
   pub proof: &'proof MigrationFinalAuthorityReconciliationProofV1<'freeze, 'source>,
+  pub updated_at_ms: i64,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct MigrationDestinationVerificationRequestV1<'request, 'freeze, 'source, 'destination> {
+  pub proof: &'request MigrationFinalAuthorityReconciliationProofV1<'freeze, 'source>,
+  pub root_map: &'request VerifiedLegacyRootMapReaderV1<'destination>,
+  pub cancellation: &'request tokio_util::sync::CancellationToken,
+  pub expected_map_generation: u64,
   pub updated_at_ms: i64,
   pub publication_timestamp_ms: u64,
   pub monotonic_now_ms: u64,
@@ -426,6 +438,12 @@ impl MigrationStateOwnerV1 {
     }
     let (context, progress) =
       self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if request.legacy_root_map_control_payload_hash != progress.body.legacy_root_map_control_payload_hash {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_progress_specialized_authority",
+        "the selected legacy root-map hash may change only through destination-verification authority",
+      ));
+    }
 
     let body = MigrationProgressBodyV1 {
       database_id: progress.body.database_id,
@@ -619,6 +637,137 @@ impl MigrationStateOwnerV1 {
     )
   }
 
+  pub fn begin_destination_verification(
+    &self,
+    request: MigrationDestinationVerificationRequestV1<'_, '_, '_, '_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if request.expected_map_generation == 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_generation",
+        "destination verification requires a nonzero expected root-map generation",
+      ));
+    }
+    self.validate_destination_verification_evidence(&request)?;
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    let closure = request.proof.closure();
+    if progress.body.phase == MigrationPhaseV1::DestinationVerify && progress.body.state == MigrationProgressStateV1::Pending {
+      if progress.body.legacy_root_map_control_payload_hash != request.root_map.control_payload_hash()
+        || progress.body.destination_header_sequence < closure.destination_header_sequence
+        || progress.body.destination_header_sequence > request.root_map.destination_header_sequence()
+      {
+        return Err(MigrationStateOwnerErrorV1::invalid(
+          "migration_destination_verification_retry",
+          "selected destination-verification progress is not bound to the exact live root map and reconciliation proof",
+        ));
+      }
+      return Ok(progress_receipt(&progress, true));
+    }
+    if progress.body.phase != MigrationPhaseV1::FinalFreeze || progress.body.state != MigrationProgressStateV1::Complete {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_phase",
+        "destination verification can begin only from completed FinalFreeze progress",
+      ));
+    }
+    let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD;
+    if progress.body.flags & required_flags != required_flags {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_freeze",
+        "destination verification requires durable source GC suspension and the live source write freeze",
+      ));
+    }
+    if !all_zero(&progress.body.legacy_root_map_control_payload_hash) {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_map_conflict",
+        "completed FinalFreeze progress already contains an unexpected root-map binding",
+      ));
+    }
+    if progress.body.destination_header_sequence > request.root_map.destination_header_sequence()
+      || progress.body.reconciled_through_publication_sequence > closure.frozen_source_publication_sequence
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_proof_regression",
+        "selected root-map or frozen-source proof is older than migration progress",
+      ));
+    }
+
+    let mut body = progress.body.clone();
+    body.phase = MigrationPhaseV1::DestinationVerify;
+    body.state = MigrationProgressStateV1::Pending;
+    body.destination_header_sequence = request.root_map.destination_header_sequence();
+    body.legacy_root_map_control_payload_hash = request.root_map.control_payload_hash().to_vec();
+    body.updated_at_ms = request.updated_at_ms;
+    self.validate_destination_verification_evidence(&request)?;
+    let root_map_identity = self.permit.migration_id();
+    let root_map_guard = MutableSystemControlGuardV1 {
+      kind: SystemControlKindV1::LegacyRootMapControl,
+      identity: &root_map_identity,
+      expected: request.root_map.control_expectation(),
+    };
+    if request.cancellation.is_cancelled() {
+      return Err(MigrationStateOwnerErrorV1::RootMap(Box::new(LegacyRootMapOwnerErrorV1::Canceled)));
+    }
+    self.publish_progress_body_inner(
+      context,
+      &progress,
+      body,
+      0,
+      false,
+      Some(root_map_guard),
+      Some(MutableSystemControlAuthorityExpectationV1 {
+        selected_header_sequence: request.root_map.destination_header_sequence(),
+        head_hash: request.root_map.destination_head(),
+      }),
+      retirement_owner,
+    )
+  }
+
+  fn validate_destination_verification_evidence(
+    &self,
+    request: &MigrationDestinationVerificationRequestV1<'_, '_, '_, '_>,
+  ) -> Result<(), MigrationStateOwnerErrorV1> {
+    request.root_map.validate_selected_unchanged()?;
+    let map = request.root_map.control_body();
+    if map.database_id != self.permit.database_id()
+      || map.migration_id != self.permit.migration_id()
+      || map.logical_database_id != self.permit.database_id()
+      || map.source_physical_instance_id != self.permit.source_physical_instance_id()
+      || map.destination_physical_instance_id != self.permit.destination_physical_instance_id()
+      || map.map_generation != request.expected_map_generation
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_map_binding",
+        "selected root map differs from the permit identity, physical incarnations, or expected generation",
+      ));
+    }
+    request
+      .proof
+      .validate_for_destination_verification(
+        &self.permit,
+        &self.publisher,
+        request.root_map.destination_header_sequence(),
+        request.root_map.destination_head(),
+      )
+      .map_err(|error| MigrationStateOwnerErrorV1::invalid(error.code(), error.to_string()))?;
+    let closure = request.proof.closure();
+    let mapped = request.root_map.lookup(&closure.frozen_source_root, request.cancellation)?.ok_or_else(|| {
+      MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_current_root",
+        "selected root map does not contain the frozen source root",
+      )
+    })?;
+    if mapped.namespace_root_v1_hash != closure.destination_namespace_root
+      || mapped.captured_source_write_sequence != closure.frozen_source_publication_sequence
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_current_root",
+        "frozen source root maps to a different destination NamespaceRoot or publication sequence",
+      ));
+    }
+    Ok(())
+  }
+
   pub fn observe_capture_state(
     &self,
     updated_at_ms: i64,
@@ -737,6 +886,7 @@ impl MigrationStateOwnerV1 {
       authorized_new_flags,
       allow_same_state_metadata_update,
       None,
+      None,
       retirement_owner,
     )
   }
@@ -758,6 +908,7 @@ impl MigrationStateOwnerV1 {
       body,
       authorized_new_flags,
       allow_same_state_metadata_update,
+      None,
       Some(authority_expectation),
       retirement_owner,
     )
@@ -771,6 +922,7 @@ impl MigrationStateOwnerV1 {
     body: MigrationProgressBodyV1,
     authorized_new_flags: u32,
     allow_same_state_metadata_update: bool,
+    extra_guard: Option<MutableSystemControlGuardV1<'_>>,
     authority_expectation: Option<MutableSystemControlAuthorityExpectationV1<'_>>,
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
@@ -780,24 +932,49 @@ impl MigrationStateOwnerV1 {
     })?;
     let encoded = encode_migration_progress_control(sequence, &body, self.permit.hash_algorithm())?;
     let guard_identity = self.permit.migration_id();
-    let guards = [MutableSystemControlGuardV1 {
-      kind: SystemControlKindV1::MigrationLease,
-      identity: &guard_identity,
-      expected: control_expectation(&context.loaded_lease),
-    }];
-    let receipt = publish_owned_control_inner(
-      &self.publisher,
-      &self.permit,
-      SystemControlKindV1::MigrationProgress,
-      Some(control_expectation(&context.loaded_progress)),
-      &guards,
-      &encoded,
-      context.publication_timestamp_ms,
-      context.monotonic_now_ms,
-      retirement_owner,
-      MigrationCommittedControlV1::Progress,
-      authority_expectation,
-    )?;
+    let lease_expectation = control_expectation(&context.loaded_lease);
+    let progress_expectation = control_expectation(&context.loaded_progress);
+    let receipt = match extra_guard {
+      Some(extra_guard) => {
+        let guards = [
+          MutableSystemControlGuardV1 { kind: SystemControlKindV1::MigrationLease, identity: &guard_identity, expected: lease_expectation },
+          extra_guard,
+        ];
+        publish_owned_control_inner(
+          &self.publisher,
+          &self.permit,
+          SystemControlKindV1::MigrationProgress,
+          Some(progress_expectation),
+          &guards,
+          &encoded,
+          context.publication_timestamp_ms,
+          context.monotonic_now_ms,
+          retirement_owner,
+          MigrationCommittedControlV1::Progress,
+          authority_expectation,
+        )?
+      }
+      None => {
+        let guards = [MutableSystemControlGuardV1 {
+          kind: SystemControlKindV1::MigrationLease,
+          identity: &guard_identity,
+          expected: lease_expectation,
+        }];
+        publish_owned_control_inner(
+          &self.publisher,
+          &self.permit,
+          SystemControlKindV1::MigrationProgress,
+          Some(progress_expectation),
+          &guards,
+          &encoded,
+          context.publication_timestamp_ms,
+          context.monotonic_now_ms,
+          retirement_owner,
+          MigrationCommittedControlV1::Progress,
+          authority_expectation,
+        )?
+      }
+    };
     Ok(MigrationProgressTransitionReceiptV1 {
       control_sequence: receipt.control_sequence,
       fencing_token: body.fencing_token,
@@ -1180,6 +1357,7 @@ pub enum MigrationStateOwnerErrorV1 {
   TakeoverPartial { lease_control_sequence: u64, fencing_token: u64, source: MutableSystemControlPublicationErrorV1 },
   TakeoverCommitted { lease_control_sequence: u64, fencing_token: u64, source: Box<MutableSystemControlPublicationErrorV1> },
   Format(FormatError),
+  RootMap(Box<LegacyRootMapOwnerErrorV1>),
   Authority(FirstAuthorityPublicationErrorV1),
   Publication(MutableSystemControlPublicationErrorV1),
   RetirementOwner(RetirementJournalOwnerErrorV1),
@@ -1200,6 +1378,7 @@ impl MigrationStateOwnerErrorV1 {
       Self::TakeoverPartial { .. } => "migration_takeover_partial",
       Self::TakeoverCommitted { .. } => "migration_takeover_committed",
       Self::Format(source) => source.code(),
+      Self::RootMap(source) => source.code(),
       Self::Authority(source) => source.code(),
       Self::Publication(source) => source.code(),
       Self::RetirementOwner(source) => source.code(),
@@ -1245,6 +1424,7 @@ impl Display for MigrationStateOwnerErrorV1 {
         write!(formatter, "{code}: migration takeover lease {lease_control_sequence} and progress token {fencing_token} committed but post-commit handling failed: {source}")
       }
       Self::Format(source) => write!(formatter, "{code}: migration control format error: {source}"),
+      Self::RootMap(source) => write!(formatter, "{code}: selected legacy root-map error: {source}"),
       Self::Authority(source) => write!(formatter, "{code}: migration authority error: {source}"),
       Self::Publication(source) => write!(formatter, "{code}: migration control publication error: {source}"),
       Self::RetirementOwner(source) => write!(formatter, "{code}: migration retirement owner error: {source}"),
@@ -1265,6 +1445,7 @@ impl Error for MigrationStateOwnerErrorV1 {
       | Self::TakeoverCommitted { source, .. } => Some(source.as_ref()),
       Self::ReleasePartial { source, .. } | Self::TakeoverPartial { source, .. } => Some(source),
       Self::Format(source) => Some(source),
+      Self::RootMap(source) => Some(source.as_ref()),
       Self::Authority(source) => Some(source),
       Self::Publication(source) => Some(source),
       Self::RetirementOwner(source) => Some(source),
@@ -1276,6 +1457,12 @@ impl Error for MigrationStateOwnerErrorV1 {
 impl From<FormatError> for MigrationStateOwnerErrorV1 {
   fn from(source: FormatError) -> Self {
     Self::Format(source)
+  }
+}
+
+impl From<LegacyRootMapOwnerErrorV1> for MigrationStateOwnerErrorV1 {
+  fn from(source: LegacyRootMapOwnerErrorV1) -> Self {
+    Self::RootMap(Box::new(source))
   }
 }
 

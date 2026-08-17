@@ -3243,6 +3243,24 @@ impl V4FirstAuthorityPublisher {
         "migration-map authority requires a nonzero migration ID and map generation",
       ));
     }
+    let request_memory_bytes = u64::try_from(request.maximum_encoded_batch_bytes)
+      .map_err(|error| {
+        FirstAuthorityPublicationErrorV1::invalid(
+          "migration_map_authority_memory_bound",
+          format!("migration-map batch memory bound exceeds u64: {error}"),
+        )
+      })?
+      .checked_mul(3)
+      .ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid(
+          "migration_map_authority_memory_bound",
+          "migration-map request memory reservation overflowed",
+        )
+      })?;
+    let _request_memory = request
+      .memory
+      .reserve(MemoryOwner::Migration, request_memory_bytes, AdmissionClass::Maintenance)
+      .map_err(|source| FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_memory", source.to_string()))?;
 
     let _root_state = self.root_state.lock().map_err(|poisoned| {
       drop(poisoned);

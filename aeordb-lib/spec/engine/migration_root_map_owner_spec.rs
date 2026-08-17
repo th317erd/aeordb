@@ -6,14 +6,14 @@ use std::sync::Arc;
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
 use aeordb::engine::hot_tail::read_hot_tail_checked;
 use aeordb::engine::kv_stages::initial_block_size;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
 use aeordb::engine::v4::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM};
 use aeordb::engine::directory_entry::{ChildEntry, serialize_child_entries};
 use aeordb::engine::v4::first_authority::{
   FirstAuthorityPublicationRequestV1, ImmutableEntityBatchPublicationRequestV1, ImmutableEntityWriteV1,
-  ImmutableSystemControlBatchPublicationRequestV1, ImmutableSystemControlWriteV1, MutableSystemControlPublicationRequestV1,
-  PreparedNamespaceTreeV0, V4FirstAuthorityPublisher,
+  ImmutableSystemControlBatchPublicationRequestV1, ImmutableSystemControlWriteV1, MutableSystemControlExpectationV1,
+  MutableSystemControlPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher,
 };
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::hash::digest_parts;
@@ -346,7 +346,7 @@ fn bounded_root_map_owner_sorts_deduplicates_publishes_reopens_and_looks_up() {
     assert!(receipt.maximum_open_runs <= 3);
 
     let reopened_publisher = reopen(&database_path);
-    let reader = VerifiedLegacyRootMapReaderV1::open(&reopened_publisher, DATABASE_ID, MIGRATION_ID, &cancellation).unwrap();
+    let reader = VerifiedLegacyRootMapReaderV1::open(&reopened_publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &memory).unwrap();
     assert_eq!(reader.record_count(), 4);
     assert_eq!(reader.lookup(&vec![0x20; algorithm.hash_length()], &cancellation).unwrap().unwrap().captured_source_write_sequence, 9);
     assert!(reader.lookup(&vec![0x30; algorithm.hash_length()], &cancellation).unwrap().is_none());
@@ -366,6 +366,34 @@ fn bounded_root_map_owner_sorts_deduplicates_publishes_reopens_and_looks_up() {
       )
       .unwrap();
     assert!(retry.idempotent);
+
+    let selected = reopened_publisher
+      .load_mutable_system_control(SystemControlKindV1::LegacyRootMapControl, &DATABASE_ID, &MIGRATION_ID)
+      .unwrap()
+      .unwrap();
+    let decoded = aeordb::engine::v4::migration_root_map::decode_legacy_root_map_control(&selected.bytes, algorithm).unwrap();
+    let advanced = encode_legacy_root_map_control(decoded.sequence + 1, &decoded.body, algorithm).unwrap();
+    reopened_publisher
+      .publish_mutable_system_control(
+        MutableSystemControlPublicationRequestV1 {
+          database_id: &DATABASE_ID,
+          kind: SystemControlKindV1::LegacyRootMapControl,
+          identity: &MIGRATION_ID,
+          expected: Some(MutableSystemControlExpectationV1 {
+            selected_slot: selected.selected_slot,
+            control_sequence: selected.control_sequence,
+            control_digest: selected.control_digest,
+          }),
+          guards: &[],
+          encoded_control: &advanced,
+          publication_timestamp_ms: 1_700_000_000_600,
+          monotonic_now_ms: 1_700_000_000_600,
+        },
+        &mut retirement,
+      )
+      .unwrap();
+    let error = reader.lookup(&vec![0x20; algorithm.hash_length()], &cancellation).unwrap_err();
+    assert_eq!(error.code(), "migration_root_map_selected_changed");
   }
 }
 
@@ -646,7 +674,7 @@ fn one_root_map_sink_adapts_base_replay_and_final_streams_and_omits_detached_pat
     )
     .unwrap();
   assert_eq!(publisher.observe().unwrap().selected.header.head_hash, destination_head);
-  let reader = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation).unwrap();
+  let reader = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &memory).unwrap();
   assert_eq!(reader.record_count(), 3);
   for (source, sequence) in [(0x11, 7), (0x12, 8), (0x13, 9)] {
     let row = reader.lookup(&vec![source; algorithm.hash_length()], &cancellation).unwrap().unwrap();
@@ -1114,7 +1142,7 @@ fn empty_map_and_multi_pass_complete_semantic_map_publish_canonically() {
     )
     .unwrap();
   assert_eq!((empty_receipt.page_count, empty_receipt.record_count, empty_receipt.merge_passes), (0, 0, 0));
-  assert_eq!(VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, [0x72; 16], &cancellation).unwrap().record_count(), 0);
+  assert_eq!(VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, [0x72; 16], &cancellation, &memory).unwrap().record_count(), 0);
 
   let bounded = LegacyRootMapWorkspaceOptionsV1::new(Some(scratch), 64 << 20, 1_000, 0, 1_200, 2, 5, 2 << 20).unwrap();
   let mut workspace =
@@ -1141,11 +1169,150 @@ fn empty_map_and_multi_pass_complete_semantic_map_publish_canonically() {
   assert_eq!(receipt.record_count, 60);
   assert!(receipt.merge_passes >= 2);
   assert!(receipt.maximum_open_runs <= 2);
-  let reader = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation).unwrap();
+  let tiny_memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 10, 64 << 10, 1, 8 << 10).unwrap());
+  assert_eq!(
+    VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &tiny_memory).unwrap_err().code(),
+    "migration_root_map_memory"
+  );
+  let reader_memory = MemoryCoordinator::new(MemoryPolicy::new(8 << 20, 16 << 20, 1, 2 << 20).unwrap());
+  let reader = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &reader_memory).unwrap();
+  let open_memory = reader_memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+  assert_eq!(open_memory.reserved_bytes, 512 << 10);
+  assert_eq!(open_memory.peak_reserved_bytes, (512 << 10) + (2 << 20) + (128 << 10));
   assert_eq!(
     reader.lookup(&vec![0x20; algorithm.hash_length()], &cancellation).unwrap().unwrap().semantic_availability,
     LegacyRootSemanticAvailabilityV1::Complete
   );
+  drop(reader);
+  assert_eq!(reader_memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn selected_reader_memory_is_admitted_before_root_map_selection() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, database_path, publisher) = create_publisher_for(algorithm);
+  let cancellation = CancellationToken::new();
+  let memory = memory();
+  let scratch = private_scratch(directory.path());
+  let authority =
+    authority_for(algorithm, SemanticAvailabilityV1::ContentOnly { reason: SemanticUnavailableReasonV1::LegacyGlobalStateNotCaptured });
+  let tree = publish_tree(&publisher, algorithm, 0x43);
+  let (row, namespace) = staged_mapping(algorithm, &authority, 0x43, &tree, 7);
+  let bounded = LegacyRootMapWorkspaceOptionsV1::new(Some(scratch), 64 << 20, 100, 0, 1_200, 2, 8, 4 << 10).unwrap();
+  let mut workspace =
+    LegacyRootMapStagingWorkspaceV1::create(&database_path, identity(algorithm), 1_700_000_000_300, bounded, cancellation.clone(), &memory)
+      .unwrap();
+  workspace.stage_mapping(&row, &namespace).unwrap();
+  let destination_head = publisher.observe().unwrap().selected.header.head_hash.clone();
+  workspace.seal(1, 0, [0xa4; 32], [0xb4; 32], &destination_head).unwrap();
+  let workspace_path = workspace.workspace_path().to_path_buf();
+  let constrained = MemoryCoordinator::new(MemoryPolicy::new(512 << 10, 1 << 20, 1, 128 << 10).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+
+  let error = LegacyRootMapOwnerV1::new(&publisher)
+    .publish(
+      LegacyRootMapPublicationRequestV1 {
+        workspace,
+        retirement_owner: &mut retirement,
+        cancellation: &cancellation,
+        monotonic_now_ms: 1_700_000_000_400,
+      },
+      &constrained,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "migration_root_map_memory");
+  assert!(error.committed_receipt().is_none());
+  assert!(selected_root_map_is_absent(&publisher));
+
+  let reopened = LegacyRootMapStagingWorkspaceV1::reopen(
+    &workspace_path,
+    identity(algorithm),
+    LegacyRootMapWorkspaceReopenOptionsV1::new(64 << 20, 100, 0, 1_200, 2, 8, 4 << 10).unwrap(),
+    cancellation.clone(),
+    &memory,
+  )
+  .unwrap();
+  let receipt = LegacyRootMapOwnerV1::new(&publisher)
+    .publish(
+      LegacyRootMapPublicationRequestV1 {
+        workspace: reopened,
+        retirement_owner: &mut retirement,
+        cancellation: &cancellation,
+        monotonic_now_ms: 1_700_000_000_500,
+      },
+      &memory,
+    )
+    .unwrap();
+  assert!(!receipt.idempotent);
+  assert!(!selected_root_map_is_absent(&publisher));
+
+  let committed_retry = LegacyRootMapStagingWorkspaceV1::reopen(
+    &workspace_path,
+    identity(algorithm),
+    LegacyRootMapWorkspaceReopenOptionsV1::new(64 << 20, 100, 0, 1_200, 2, 8, 4 << 10).unwrap(),
+    cancellation.clone(),
+    &constrained,
+  )
+  .unwrap();
+  let error = LegacyRootMapOwnerV1::new(&publisher)
+    .publish(
+      LegacyRootMapPublicationRequestV1 {
+        workspace: committed_retry,
+        retirement_owner: &mut retirement,
+        cancellation: &cancellation,
+        monotonic_now_ms: 1_700_000_000_600,
+      },
+      &constrained,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "migration_root_map_selection_committed");
+  let committed = error.committed_receipt().unwrap();
+  assert!(committed.idempotent);
+  assert_eq!(committed.control_sequence, receipt.control_sequence);
+  assert_eq!(committed.control_payload_hash, receipt.control_payload_hash);
+}
+
+#[test]
+fn migration_root_authority_memory_refusal_never_moves_destination_or_selects_map() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, database_path, publisher) = create_publisher_for(algorithm);
+  let cancellation = CancellationToken::new();
+  let memory = memory();
+  let scratch = private_scratch(directory.path());
+  let authority =
+    authority_for(algorithm, SemanticAvailabilityV1::ContentOnly { reason: SemanticUnavailableReasonV1::LegacyGlobalStateNotCaptured });
+  let tree = publish_tree(&publisher, algorithm, 0x41);
+  let (row, namespace) = staged_mapping(algorithm, &authority, 0x41, &tree, 7);
+  let mut workspace = LegacyRootMapStagingWorkspaceV1::create(
+    &database_path,
+    identity(algorithm),
+    1_700_000_000_300,
+    LegacyRootMapWorkspaceOptionsV1::new(Some(scratch), 64 << 20, 100, 0, 1 << 20, 2, 8, 2 << 20).unwrap(),
+    cancellation.clone(),
+    &memory,
+  )
+  .unwrap();
+  workspace.stage_mapping(&row, &namespace).unwrap();
+  let destination_head = publisher.observe().unwrap().selected.header.head_hash.clone();
+  workspace.seal(1, 0, [0xa3; 32], [0xb3; 32], &destination_head).unwrap();
+  let before = publisher.observe().unwrap().selected.header.clone();
+  let constrained = MemoryCoordinator::new(MemoryPolicy::new(5 << 20, 10 << 20, 1, 1 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+
+  let error = LegacyRootMapOwnerV1::new(&publisher)
+    .publish(
+      LegacyRootMapPublicationRequestV1 {
+        workspace,
+        retirement_owner: &mut retirement,
+        cancellation: &cancellation,
+        monotonic_now_ms: 1_700_000_000_400,
+      },
+      &constrained,
+    )
+    .unwrap_err();
+  assert_eq!(error.code(), "migration_map_authority_memory");
+  assert_eq!(publisher.observe().unwrap().selected.header, before);
+  assert!(selected_root_map_is_absent(&publisher));
 }
 
 #[test]
@@ -1232,7 +1399,7 @@ fn selected_reader_rejects_missing_inconsistent_and_foreign_incarnation_authorit
       &mut retirement,
     )
     .unwrap();
-  let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation)
+  let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &memory)
     .err()
     .expect("missing selected page must refuse the reader");
   assert_eq!(error.code(), "migration_root_map_selected_page_missing");
@@ -1271,7 +1438,7 @@ fn selected_reader_rejects_missing_inconsistent_and_foreign_incarnation_authorit
       publication_timestamp_ms: 1_700_000_000_400,
     })
     .unwrap();
-  let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation)
+  let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &memory)
     .err()
     .expect("inconsistent selected page chain must refuse the reader");
   assert_eq!(error.code(), "legacy_root_map_chain_digest");
@@ -1310,7 +1477,7 @@ fn selected_reader_rejects_missing_inconsistent_and_foreign_incarnation_authorit
       &mut retirement,
     )
     .unwrap();
-  let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, foreign_migration_id, &cancellation)
+  let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, foreign_migration_id, &cancellation, &memory)
     .err()
     .expect("foreign destination incarnation must refuse the reader");
   assert_eq!(error.code(), "migration_root_map_selected_identity");

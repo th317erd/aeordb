@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use super::first_authority::{
   FirstAuthorityPublicationErrorV1, ImmutableSystemControlBatchPublicationRequestV1, ImmutableSystemControlPublicationErrorV1,
   ImmutableSystemControlWriteV1, MigrationMapRootAuthorityBatchPublicationRequestV1, MigrationMapRootAuthorityWriteV1,
-  MutableSystemControlAuthorityExpectationV1, MutableSystemControlPublicationErrorV1, MutableSystemControlPublicationRequestV1,
-  V4FirstAuthorityPublisher,
+  LoadedMutableSystemControlV1, MutableSystemControlAuthorityExpectationV1, MutableSystemControlExpectationV1,
+  MutableSystemControlPublicationErrorV1, MutableSystemControlPublicationRequestV1, V4FirstAuthorityPublisher,
 };
 use super::gc_retirement::RetirementJournalOwnerV1;
 use super::hash::digest_parts;
@@ -70,6 +70,11 @@ const MAXIMUM_IMMUTABLE_CONTROL_BATCH: usize = 255;
 const MAXIMUM_MIGRATION_ROOT_AUTHORITY_BATCH: usize = 51;
 const ROW_MEMORY_OVERHEAD: usize = 128;
 const MERGE_READER_MEMORY_OVERHEAD: usize = 256;
+const SELECTED_READER_RETAINED_MEMORY_BYTES: u64 = 512 * 1024;
+// The shared system-file loader briefly retains the encoded chunk, decoded
+// body, FileRecord entity, and decode bookkeeping at the same time.
+const SELECTED_READER_PAGE_MEMORY_BYTES: u64 = 2 * PAGE_BODY_MAX_BYTES as u64 + 128 * 1024;
+const SELECTED_READER_OPEN_MEMORY_BYTES: u64 = SELECTED_READER_RETAINED_MEMORY_BYTES + SELECTED_READER_PAGE_MEMORY_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StagedLegacyRootMappingV1 {
@@ -80,6 +85,7 @@ struct StagedLegacyRootMappingV1 {
 #[derive(Debug)]
 pub enum LegacyRootMapOwnerErrorV1 {
   Invalid { code: &'static str, message: String },
+  SelectionCommitted { receipt: Box<LegacyRootMapPublicationReceiptV1>, source: Box<LegacyRootMapOwnerErrorV1> },
   Canceled,
   Workspace(String),
   Capacity(String),
@@ -97,6 +103,7 @@ impl LegacyRootMapOwnerErrorV1 {
   pub fn code(&self) -> &'static str {
     match self {
       Self::Invalid { code, .. } => code,
+      Self::SelectionCommitted { .. } => "migration_root_map_selection_committed",
       Self::Canceled => "migration_root_map_cancelled",
       Self::Workspace(_) => "migration_root_map_workspace",
       Self::Capacity(_) => "migration_root_map_capacity",
@@ -114,12 +121,35 @@ impl LegacyRootMapOwnerErrorV1 {
   fn invalid(code: &'static str, message: impl Into<String>) -> Self {
     Self::Invalid { code, message: message.into() }
   }
+
+  pub fn committed_receipt(&self) -> Option<&LegacyRootMapPublicationReceiptV1> {
+    match self {
+      Self::SelectionCommitted { receipt, .. } => Some(receipt),
+      Self::Invalid { .. }
+      | Self::Canceled
+      | Self::Workspace(_)
+      | Self::Capacity(_)
+      | Self::Allocation(_)
+      | Self::Io { .. }
+      | Self::Durability(_)
+      | Self::Memory(_)
+      | Self::Format(_)
+      | Self::Authority(_)
+      | Self::ImmutablePublication(_)
+      | Self::MutablePublication(_) => None,
+    }
+  }
 }
 
 impl Display for LegacyRootMapOwnerErrorV1 {
   fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
     match self {
       Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::SelectionCommitted { receipt, source } => write!(
+        formatter,
+        "migration_root_map_selection_committed: root-map control {} committed, but selected readback failed: {source}",
+        receipt.control_sequence
+      ),
       Self::Canceled => formatter.write_str("migration_root_map_cancelled: root-map work was canceled"),
       Self::Workspace(message) => write!(formatter, "migration_root_map_workspace: {message}"),
       Self::Capacity(message) => write!(formatter, "migration_root_map_capacity: {message}"),
@@ -138,6 +168,7 @@ impl Display for LegacyRootMapOwnerErrorV1 {
 impl Error for LegacyRootMapOwnerErrorV1 {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
+      Self::SelectionCommitted { source, .. } => Some(source.as_ref()),
       Self::Io { source, .. } => Some(source),
       Self::Durability(source) => Some(source),
       Self::Memory(source) => Some(source),
@@ -814,6 +845,7 @@ impl MigrationFinalRootMappingSinkV1 for LegacyRootMapProducerSinkV1<'_> {
 
 fn owner_engine_error(error: LegacyRootMapOwnerErrorV1) -> EngineError {
   match error {
+    committed @ LegacyRootMapOwnerErrorV1::SelectionCommitted { .. } => EngineError::PostMutationDurabilityFailure(committed.to_string()),
     LegacyRootMapOwnerErrorV1::Canceled => EngineError::Cancelled("legacy root-map staging".to_string()),
     LegacyRootMapOwnerErrorV1::Capacity(message) | LegacyRootMapOwnerErrorV1::Allocation(message) => {
       EngineError::ResourceExhausted(message)
@@ -1797,21 +1829,43 @@ impl<'a> LegacyRootMapOwnerV1<'a> {
         ));
       }
     }
-    publish_staged_root_authorities(self.destination, &request.workspace, request.cancellation, memory)?;
     if current.is_some() {
-      let reader = VerifiedLegacyRootMapReaderV1::open(
+      let receipt = publication_receipt(&request.workspace, &sorted, &prepared, control_sequence, true);
+      if let Err(source) = publish_staged_root_authorities(self.destination, &request.workspace, request.cancellation, memory) {
+        return Err(LegacyRootMapOwnerErrorV1::SelectionCommitted { receipt: Box::new(receipt), source: Box::new(source) });
+      }
+      let reader = match VerifiedLegacyRootMapReaderV1::open(
         self.destination,
         request.workspace.identity.database_id,
         request.workspace.identity.migration_id,
         request.cancellation,
-      )?;
-      return Ok(publication_receipt(&request.workspace, &sorted, &prepared, reader.control.sequence, true));
+        memory,
+      ) {
+        Ok(reader) => reader,
+        Err(source) => {
+          return Err(LegacyRootMapOwnerErrorV1::SelectionCommitted { receipt: Box::new(receipt), source: Box::new(source) });
+        }
+      };
+      if reader.control.sequence != control_sequence || reader.control.body != prepared.control_body {
+        return Err(LegacyRootMapOwnerErrorV1::SelectionCommitted {
+          receipt: Box::new(receipt),
+          source: Box::new(LegacyRootMapOwnerErrorV1::invalid(
+            "migration_root_map_selected_readback",
+            "selected root-map retry readback differs from the prepared control",
+          )),
+        });
+      }
+      return Ok(receipt);
     }
 
+    publish_staged_root_authorities(self.destination, &request.workspace, request.cancellation, memory)?;
     publish_pages(self.destination, &request.workspace, &prepared.control_body, request.cancellation)?;
     let before_control = self.destination.observe()?;
     validate_destination_observation(&before_control, request.workspace.identity, &seal.destination_namespace_root)?;
-    let publication = self.destination.publish_mutable_system_control_with_authority_expectation(
+    check_cancelled(request.cancellation)?;
+    let readback_memory = VerifiedLegacyRootMapReaderV1::reserve_open_memory(memory)?;
+    check_cancelled(request.cancellation)?;
+    let publication = match self.destination.publish_mutable_system_control_with_authority_expectation(
       MutableSystemControlPublicationRequestV1 {
         database_id: &request.workspace.identity.database_id,
         kind: SystemControlKindV1::LegacyRootMapControl,
@@ -1827,21 +1881,43 @@ impl<'a> LegacyRootMapOwnerV1<'a> {
         head_hash: &seal.destination_namespace_root,
       },
       request.retirement_owner,
-    )?;
-    check_cancelled(request.cancellation)?;
-    let reader = VerifiedLegacyRootMapReaderV1::open(
+    ) {
+      Ok(publication) => publication,
+      Err(source) => {
+        let Some((control_sequence, idempotent)) = source.committed_receipt().map(|receipt| (receipt.control_sequence, receipt.idempotent))
+        else {
+          return Err(LegacyRootMapOwnerErrorV1::MutablePublication(source));
+        };
+        let receipt = publication_receipt(&request.workspace, &sorted, &prepared, control_sequence, idempotent);
+        return Err(LegacyRootMapOwnerErrorV1::SelectionCommitted {
+          receipt: Box::new(receipt),
+          source: Box::new(LegacyRootMapOwnerErrorV1::MutablePublication(source)),
+        });
+      }
+    };
+    let committed_readback = CancellationToken::new();
+    let receipt = publication_receipt(&request.workspace, &sorted, &prepared, publication.control_sequence, publication.idempotent);
+    let reader = match VerifiedLegacyRootMapReaderV1::open_with_reservation(
       self.destination,
       request.workspace.identity.database_id,
       request.workspace.identity.migration_id,
-      request.cancellation,
-    )?;
+      &committed_readback,
+      memory,
+      readback_memory,
+    ) {
+      Ok(reader) => reader,
+      Err(source) => return Err(LegacyRootMapOwnerErrorV1::SelectionCommitted { receipt: Box::new(receipt), source: Box::new(source) }),
+    };
     if reader.control.sequence != publication.control_sequence || reader.control.body != prepared.control_body {
-      return Err(LegacyRootMapOwnerErrorV1::invalid(
-        "migration_root_map_selected_readback",
-        "selected root-map readback differs from the published control",
-      ));
+      return Err(LegacyRootMapOwnerErrorV1::SelectionCommitted {
+        receipt: Box::new(receipt),
+        source: Box::new(LegacyRootMapOwnerErrorV1::invalid(
+          "migration_root_map_selected_readback",
+          "selected root-map readback differs from the published control",
+        )),
+      });
     }
-    Ok(publication_receipt(&request.workspace, &sorted, &prepared, publication.control_sequence, publication.idempotent))
+    Ok(receipt)
   }
 }
 
@@ -2147,8 +2223,29 @@ fn validate_destination_observation(
 
 pub struct VerifiedLegacyRootMapReaderV1<'a> {
   destination: &'a V4FirstAuthorityPublisher,
+  memory: MemoryCoordinator,
+  _retained_memory: MemoryReservation,
   algorithm: HashAlgorithm,
   control: super::migration_root_map::DecodedLegacyRootMapControlV1,
+  loaded_control: LoadedMutableSystemControlV1,
+  control_payload_hash: Vec<u8>,
+  destination_header_sequence: u64,
+  destination_head: Vec<u8>,
+  destination_physical_instance_id: [u8; 16],
+}
+
+impl fmt::Debug for VerifiedLegacyRootMapReaderV1<'_> {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("VerifiedLegacyRootMapReaderV1")
+      .field("algorithm", &self.algorithm)
+      .field("control_sequence", &self.control.sequence)
+      .field("map_generation", &self.control.body.map_generation)
+      .field("page_count", &self.control.body.page_count)
+      .field("record_count", &self.control.body.record_count)
+      .field("destination_header_sequence", &self.destination_header_sequence)
+      .finish_non_exhaustive()
+  }
 }
 
 impl<'a> VerifiedLegacyRootMapReaderV1<'a> {
@@ -2157,8 +2254,34 @@ impl<'a> VerifiedLegacyRootMapReaderV1<'a> {
     database_id: [u8; 16],
     migration_id: [u8; 16],
     cancellation: &CancellationToken,
+    memory: &MemoryCoordinator,
   ) -> Result<Self, LegacyRootMapOwnerErrorV1> {
     check_cancelled(cancellation)?;
+    let retained_memory = Self::reserve_open_memory(memory)?;
+    Self::open_with_reservation(destination, database_id, migration_id, cancellation, memory, retained_memory)
+  }
+
+  fn reserve_open_memory(memory: &MemoryCoordinator) -> Result<MemoryReservation, LegacyRootMapOwnerErrorV1> {
+    memory
+      .reserve(MemoryOwner::Migration, SELECTED_READER_OPEN_MEMORY_BYTES, AdmissionClass::Maintenance)
+      .map_err(|source| LegacyRootMapOwnerErrorV1::Memory(Box::new(source)))
+  }
+
+  fn open_with_reservation(
+    destination: &'a V4FirstAuthorityPublisher,
+    database_id: [u8; 16],
+    migration_id: [u8; 16],
+    cancellation: &CancellationToken,
+    memory: &MemoryCoordinator,
+    mut retained_memory: MemoryReservation,
+  ) -> Result<Self, LegacyRootMapOwnerErrorV1> {
+    check_cancelled(cancellation)?;
+    if retained_memory.owner() != MemoryOwner::Migration || retained_memory.bytes() != SELECTED_READER_OPEN_MEMORY_BYTES {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_reader_reservation",
+        "selected root-map reader requires its exact migration-memory reservation",
+      ));
+    }
     let observation = destination.observe()?;
     let algorithm = observation.selected.header.hash_algorithm;
     if observation.selected.redundancy_degraded || observation.selected.header.database_id != database_id {
@@ -2197,11 +2320,87 @@ impl<'a> VerifiedLegacyRootMapReaderV1<'a> {
         "selected root-map verifier returned a different record count",
       ));
     }
-    Ok(Self { destination, algorithm, control })
+    retained_memory.shrink(SELECTED_READER_PAGE_MEMORY_BYTES).map_err(|source| LegacyRootMapOwnerErrorV1::Memory(Box::new(source)))?;
+    let reader = Self {
+      destination,
+      memory: memory.clone(),
+      _retained_memory: retained_memory,
+      algorithm,
+      control,
+      control_payload_hash: digest_parts(algorithm, &[&loaded.bytes]),
+      loaded_control: loaded,
+      destination_header_sequence: observation.selected.header.slot_sequence,
+      destination_head: observation.selected.header.head_hash.clone(),
+      destination_physical_instance_id: observation.selected.header.physical_instance_id,
+    };
+    reader.validate_selected_unchanged()?;
+    Ok(reader)
   }
 
   pub const fn record_count(&self) -> u32 {
     self.control.body.record_count
+  }
+
+  pub const fn destination_header_sequence(&self) -> u64 {
+    self.destination_header_sequence
+  }
+
+  pub(crate) const fn control_body(&self) -> &LegacyRootMapControlBodyV1 {
+    &self.control.body
+  }
+
+  pub(crate) fn control_payload_hash(&self) -> &[u8] {
+    &self.control_payload_hash
+  }
+
+  pub(crate) fn destination_head(&self) -> &[u8] {
+    &self.destination_head
+  }
+
+  pub(crate) fn control_expectation(&self) -> MutableSystemControlExpectationV1 {
+    MutableSystemControlExpectationV1 {
+      selected_slot: self.loaded_control.selected_slot,
+      control_sequence: self.loaded_control.control_sequence,
+      control_digest: self.loaded_control.control_digest.clone(),
+    }
+  }
+
+  pub(crate) fn validate_selected_unchanged(&self) -> Result<(), LegacyRootMapOwnerErrorV1> {
+    let before = self.destination.observe()?;
+    self.validate_destination_observation(&before)?;
+    let selected = self
+      .destination
+      .load_mutable_system_control(
+        SystemControlKindV1::LegacyRootMapControl,
+        &self.control.body.database_id,
+        &self.control.body.migration_id,
+      )?
+      .ok_or_else(|| LegacyRootMapOwnerErrorV1::invalid("migration_root_map_selected_changed", "selected root-map control disappeared"))?;
+    if selected != self.loaded_control {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_selected_changed",
+        "selected root-map control changed after reader verification",
+      ));
+    }
+    let after = self.destination.observe()?;
+    self.validate_destination_observation(&after)
+  }
+
+  fn validate_destination_observation(&self, observation: &DatabaseHeaderObservationV4) -> Result<(), LegacyRootMapOwnerErrorV1> {
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded
+      || header.database_id != self.control.body.database_id
+      || header.physical_instance_id != self.destination_physical_instance_id
+      || header.hash_algorithm != self.algorithm
+      || header.slot_sequence != self.destination_header_sequence
+      || header.head_hash != self.destination_head
+    {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_selected_changed",
+        "destination authority changed after root-map reader verification",
+      ));
+    }
+    Ok(())
   }
 
   pub fn lookup(
@@ -2217,6 +2416,10 @@ impl<'a> VerifiedLegacyRootMapReaderV1<'a> {
     }
     for ordinal in 0..self.control.body.page_count {
       check_cancelled(cancellation)?;
+      let _page_memory = self
+        .memory
+        .reserve(MemoryOwner::Migration, SELECTED_READER_PAGE_MEMORY_BYTES, AdmissionClass::Maintenance)
+        .map_err(|source| LegacyRootMapOwnerErrorV1::Memory(Box::new(source)))?;
       let identity = page_identity(self.control.body.migration_id, u64::from(ordinal));
       let loaded = self
         .destination
@@ -2225,16 +2428,68 @@ impl<'a> VerifiedLegacyRootMapReaderV1<'a> {
           LegacyRootMapOwnerErrorV1::invalid("migration_root_map_selected_page_missing", "verified root-map page is now missing")
         })?;
       let page = decode_legacy_root_map_page(&loaded.bytes, self.algorithm)?;
+      if page.sequence != self.control.sequence {
+        return Err(LegacyRootMapOwnerErrorV1::invalid(
+          "migration_root_map_selected_page_identity",
+          "selected root-map lookup page belongs to another control sequence",
+        ));
+      }
+      self.validate_lookup_page(&page.body, ordinal)?;
       match page.body.rows.binary_search_by(|row| row.legacy_root_hash.as_slice().cmp(legacy_root_hash)) {
-        Ok(index) => return Ok(Some(page.body.rows[index].clone())),
+        Ok(index) => {
+          let row = page.body.rows[index].clone();
+          self.validate_selected_unchanged()?;
+          return Ok(Some(row));
+        }
         Err(index) => {
           if index < page.body.rows.len() {
+            self.validate_selected_unchanged()?;
             return Ok(None);
           }
         }
       }
     }
+    self.validate_selected_unchanged()?;
     Ok(None)
+  }
+
+  fn validate_lookup_page(&self, page: &LegacyRootMapPageBodyV1, ordinal: u32) -> Result<(), LegacyRootMapOwnerErrorV1> {
+    let zero = vec![0; self.algorithm.hash_length()];
+    let previous = if ordinal == 0 {
+      zero.clone()
+    } else {
+      legacy_root_map_page_identity_hash(
+        self.algorithm,
+        self.control.body.database_id,
+        self.control.body.migration_id,
+        u64::from(ordinal - 1),
+      )?
+    };
+    let next = if ordinal + 1 == self.control.body.page_count {
+      zero
+    } else {
+      legacy_root_map_page_identity_hash(
+        self.algorithm,
+        self.control.body.database_id,
+        self.control.body.migration_id,
+        u64::from(ordinal + 1),
+      )?
+    };
+    if page.database_id != self.control.body.database_id
+      || page.migration_id != self.control.body.migration_id
+      || page.logical_database_id != self.control.body.logical_database_id
+      || page.source_physical_instance_id != self.control.body.source_physical_instance_id
+      || page.destination_physical_instance_id != self.control.body.destination_physical_instance_id
+      || page.page_ordinal != u64::from(ordinal)
+      || page.previous_page_hash != previous
+      || page.next_page_hash != next
+    {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_selected_page_identity",
+        "selected root-map lookup page has inconsistent identity or linkage",
+      ));
+    }
+    Ok(())
   }
 }
 
