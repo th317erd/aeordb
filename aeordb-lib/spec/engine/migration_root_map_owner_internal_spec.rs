@@ -1,9 +1,5 @@
 use super::*;
 
-use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
@@ -47,13 +43,8 @@ fn pending_cleanup_carries_one_entry_budget_across_directories() {
   let temporary = tempdir().unwrap();
   let first = temporary.path().join("first");
   let second = temporary.path().join("second");
-  fs::create_dir(&first).unwrap();
-  fs::create_dir(&second).unwrap();
-  #[cfg(unix)]
-  {
-    fs::set_permissions(&first, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::set_permissions(&second, fs::Permissions::from_mode(0o700)).unwrap();
-  }
+  create_private_directory_synced(&first, temporary.path()).unwrap();
+  create_private_directory_synced(&second, temporary.path()).unwrap();
   let first_pending = first.join(".root-map-00000000000000000000000000000001.pending");
   let second_pending = second.join(".root-map-00000000000000000000000000000002.pending");
   for path in [&first_pending, &second_pending] {
