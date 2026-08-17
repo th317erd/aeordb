@@ -3896,7 +3896,7 @@
     {
       "id": "esq-v1-20e033cb689910b07e77-00",
       "file": "aeordb-lib/src/engine/emergency_spill.rs",
-      "line": 1198,
+      "line": 1210,
       "column": 3,
       "enclosing_item": "parse_rfc3339_millis",
       "kind": "result_to_option",
@@ -3906,7 +3906,7 @@
     {
       "id": "esq-v1-dbcd299e5cb566fe3ac6-00",
       "file": "aeordb-lib/src/engine/emergency_spill.rs",
-      "line": 1205,
+      "line": 1217,
       "column": 5,
       "enclosing_item": "modified_millis",
       "kind": "broad_err_pattern",
@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 4413,
+      "line": 4709,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 8038,
+      "line": 8334,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 8041,
+      "line": 8337,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",

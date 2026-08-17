@@ -1129,6 +1129,10 @@ name = "migration_root_map_spec"
 path = "spec/engine/migration_root_map_spec.rs"
 
 [[test]]
+name = "migration_root_map_owner_spec"
+path = "spec/engine/migration_root_map_owner_spec.rs"
+
+[[test]]
 name = "immutable_system_control_authority_spec"
 path = "spec/engine/immutable_system_control_authority_spec.rs"
 

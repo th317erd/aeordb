@@ -94,7 +94,10 @@ use crate::engine::v4::gc_state::{
   RootExpiryStateV1, decode_gc_state_artifact, decode_physical_inventory_manifest_v1, decode_root_expiry_record_v1,
   encode_gc_state_directory_v1, encode_gc_state_page_v1,
 };
-use crate::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
+use crate::engine::v4::namespace::{
+  NamespaceRootWriteV1, SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_namespace_root,
+  encode_semantic_state_object,
+};
 use crate::engine::v4::migration_root_map::{
   LegacyRootMapPageBodyV1, LegacyRootMapRowV1, LegacyRootSemanticAvailabilityV1, encode_legacy_root_map_page,
 };
@@ -4071,6 +4074,122 @@ fn successor_request(
     typed_closure_digest: digest_parts(header.hash_algorithm, &[b"successor fault closure", child_name.as_bytes()]),
     authority_identity: b"HEAD".to_vec(),
   }
+}
+
+#[test]
+fn migration_map_authority_refuses_an_existing_admission_without_its_prepare_witness() {
+  let (_directory, _coordinator, publisher) = environment("migration-map-incomplete-witness");
+  let initial = request();
+  publisher.publish(&initial).unwrap();
+  let algorithm = HashAlgorithm::Blake3_256;
+  let tree_value = serialize_child_entries(
+    &[ChildEntry {
+      entry_type: EntryTypeV4::FileRecord.to_u8(),
+      hash: digest_parts(algorithm, &[b"filec:forged-admission"]),
+      total_size: 1,
+      created_at: 1_700_000_000_200,
+      updated_at: 1_700_000_000_200,
+      name: "forged-admission".to_string(),
+      content_type: Some("application/octet-stream".to_string()),
+      virtual_time: 1,
+      node_id: 1,
+    }],
+    algorithm.hash_length(),
+  )
+  .unwrap();
+  let tree_root = digest_parts(algorithm, &[b"dirc:", &tree_value]);
+  publisher
+    .publish_immutable_entity_batch(ImmutableEntityBatchPublicationRequestV1 {
+      database_id: &initial.database_id,
+      entities: &[ImmutableEntityWriteV1 {
+        entity_version: 0,
+        entry_type: EntryTypeV4::DirectoryIndex,
+        flags: 0,
+        key: &tree_root,
+        stored_value: &tree_value,
+      }],
+      publication_timestamp_ms: 1_700_000_000_200,
+    })
+    .unwrap();
+  let namespace_root = encode_namespace_root(
+    &NamespaceRootWriteV1 {
+      required_capabilities: [0; 32],
+      namespace_tree_root: tree_root,
+      semantic_state_root: initial.semantic_state.object_id.clone(),
+    },
+    algorithm,
+  )
+  .unwrap();
+  let mut observer = NoopFirstAuthorityDependencyObserverV1;
+  publisher
+    .publish_immutable_entity_batch_with_validation(
+      ImmutableEntityBatchPublicationRequestV1 {
+        database_id: &initial.database_id,
+        entities: &[ImmutableEntityWriteV1 {
+          entity_version: 1,
+          entry_type: EntryTypeV4::DirectoryIndex,
+          flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+          key: &namespace_root.root_hash,
+          stored_value: &namespace_root.value,
+        }],
+        publication_timestamp_ms: 1_700_000_000_300,
+      },
+      &mut observer,
+      ImmutableEntityValidationV1::PrevalidatedSystemControls,
+    )
+    .unwrap();
+  let selected_header_sequence = publisher.observe().unwrap().selected.header.slot_sequence;
+  let forged_admission = encode_root_admission_commit_control(
+    &RootAdmissionCommitV1 {
+      database_id: initial.database_id,
+      namespace_root: namespace_root.root_hash.clone(),
+      transaction_id: [0x77; 16],
+      publication_started_at_ms: 1_700_000_000_300,
+      authority_kind: RootAuthorityKindV1::Snapshot,
+      recovered_from_selected_authority: false,
+      authority_identity_digest: vec![0x21; algorithm.hash_length()],
+      authority_after: namespace_root.root_hash.clone(),
+      selected_header_slot_sequence: selected_header_sequence,
+      publication_sequence: 1,
+      prepare_payload_hash: vec![0x22; algorithm.hash_length()],
+    },
+    algorithm,
+  )
+  .unwrap();
+  publisher
+    .publish_immutable_system_controls(ImmutableSystemControlBatchPublicationRequestV1 {
+      database_id: &initial.database_id,
+      controls: &[ImmutableSystemControlWriteV1 {
+        kind: SystemControlKindV1::RootAdmissionCommit,
+        identity: &namespace_root.root_hash,
+        encoded_control: &forged_admission,
+      }],
+      publication_timestamp_ms: 1_700_000_000_300,
+    })
+    .unwrap();
+  let observation = publisher.observe().unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(128 << 20, 192 << 20, 1, 32 << 20).unwrap());
+  let source_root = vec![0x35; algorithm.hash_length()];
+  let error = publisher
+    .publish_migration_map_root_authorities(MigrationMapRootAuthorityBatchPublicationRequestV1 {
+      database_id: &initial.database_id,
+      migration_id: &[0x71; 16],
+      map_generation: 1,
+      roots: &[MigrationMapRootAuthorityWriteV1 {
+        source_legacy_root: &source_root,
+        captured_source_write_sequence: 9,
+        namespace_root: &namespace_root,
+      }],
+      expected_destination_physical_instance_id: &observation.selected.header.physical_instance_id,
+      expected_head_hash: &observation.selected.header.head_hash,
+      publication_timestamp_ms: 1_700_000_000_400,
+      maximum_encoded_batch_bytes: 2 << 20,
+      cancellation: &cancellation,
+      memory: &memory,
+    })
+    .unwrap_err();
+  assert_eq!(error.code(), "migration_map_authority_prepare_missing");
 }
 
 fn index_artifact(fill: u8, generation: u64) -> EncodedImmutableIndexArtifactV1 {

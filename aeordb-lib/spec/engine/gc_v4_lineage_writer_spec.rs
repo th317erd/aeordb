@@ -431,6 +431,10 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
   let migration_capture_replay = fs::read_to_string(source_root.join("engine/v4/migration_capture_replay.rs")).unwrap();
   assert!(migration_capture_replay.contains("MigrationStateOwnerV1"));
   assert!(!migration_capture_replay.contains("retirement_owner."));
+  let migration_root_map_owner = fs::read_to_string(source_root.join("engine/v4/migration_root_map_owner.rs")).unwrap();
+  assert!(migration_root_map_owner.contains("V4FirstAuthorityPublisher"));
+  assert!(migration_root_map_owner.contains("publish_mutable_system_control_with_authority_expectation"));
+  assert!(!migration_root_map_owner.contains("retirement_owner."));
 
   let mut callers = Vec::new();
   let mut sources = Vec::new();
@@ -453,6 +457,7 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
       PathBuf::from("engine/v4/migration_capture_replay.rs"),
       PathBuf::from("engine/v4/migration_capture_runtime.rs"),
       PathBuf::from("engine/v4/migration_owner.rs"),
+      PathBuf::from("engine/v4/migration_root_map_owner.rs"),
       PathBuf::from("engine/v4/migration_source_gc.rs"),
     ],
     "retirement owner must remain confined to reviewed physical-authority and fenced migration owners"

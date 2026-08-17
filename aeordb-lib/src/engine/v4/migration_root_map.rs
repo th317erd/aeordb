@@ -16,7 +16,7 @@ const SOURCE_FORMAT: u16 = 3;
 const DESTINATION_FORMAT: u16 = 4;
 const PAGE_BODY_FIXED_WITHOUT_HASHES: usize = 96;
 const CONTROL_BODY_FIXED_WITHOUT_HASHES: usize = 104;
-const PAGE_BODY_MAX_BYTES: usize = 1_048_576;
+pub(super) const PAGE_BODY_MAX_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LegacyRootSemanticAvailabilityV1 {
@@ -505,7 +505,7 @@ fn validate_chain_finish(builder: &LegacyRootMapChainDigestBuilderV1) -> FormatR
   Ok(())
 }
 
-fn validate_row(row: &LegacyRootMapRowV1, hash_width: usize) -> FormatResult<()> {
+pub(super) fn validate_row(row: &LegacyRootMapRowV1, hash_width: usize) -> FormatResult<()> {
   require_hash_width(&row.legacy_root_hash, hash_width, false, "legacy_root_map_page_row_hash")?;
   require_hash_width(&row.namespace_root_v1_hash, hash_width, false, "legacy_root_map_page_row_hash")?;
   if row.captured_source_write_sequence == 0 {
@@ -518,7 +518,7 @@ fn validate_row(row: &LegacyRootMapRowV1, hash_width: usize) -> FormatResult<()>
   Ok(())
 }
 
-fn encode_row(encoded: &mut Vec<u8>, row: &LegacyRootMapRowV1) {
+pub(super) fn encode_row(encoded: &mut Vec<u8>, row: &LegacyRootMapRowV1) {
   encoded.extend_from_slice(&row.legacy_root_hash);
   encoded.extend_from_slice(&row.namespace_root_v1_hash);
   match row.semantic_availability {
@@ -534,7 +534,7 @@ fn encode_row(encoded: &mut Vec<u8>, row: &LegacyRootMapRowV1) {
   encoded.extend_from_slice(&row.captured_source_write_sequence.to_le_bytes());
 }
 
-fn decode_row(row: &[u8], hash_width: usize) -> FormatResult<LegacyRootMapRowV1> {
+pub(super) fn decode_row(row: &[u8], hash_width: usize) -> FormatResult<LegacyRootMapRowV1> {
   let availability = u16_at(row, 2 * hash_width)?;
   let reason = u16_at(row, 2 * hash_width + 2)?;
   let semantic_availability = match (availability, reason) {
@@ -639,7 +639,7 @@ fn require_hash_width(bytes: &[u8], width: usize, allow_zero: bool, code: &'stat
   Ok(())
 }
 
-fn row_width(hash_width: usize) -> FormatResult<usize> {
+pub(super) fn row_width(hash_width: usize) -> FormatResult<usize> {
   hash_width
     .checked_mul(2)
     .and_then(|width| width.checked_add(12))

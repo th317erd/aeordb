@@ -179,6 +179,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
   let migration_final_authority_reconciliation_path = source_root.join("engine/v4/migration_final_authority_reconciliation.rs");
   let migration_final_reconciliation_path = source_root.join("engine/v4/migration_final_reconciliation.rs");
   let migration_owner_path = source_root.join("engine/v4/migration_owner.rs");
+  let migration_root_map_owner_path = source_root.join("engine/v4/migration_root_map_owner.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
   let mut files = Vec::new();
@@ -200,6 +201,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
       &migration_final_authority_reconciliation_path,
       &migration_final_reconciliation_path,
       &migration_owner_path,
+      &migration_root_map_owner_path,
     ],
     "first-authority publisher escaped the reviewed disconnected owners: {publisher_callers:?}"
   );
@@ -211,6 +213,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
     &migration_final_authority_reconciliation_path,
     &migration_final_reconciliation_path,
     &migration_owner_path,
+    &migration_root_map_owner_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();
     for forbidden in ["DirectoryOps", "crate::server", "tokio::spawn"] {

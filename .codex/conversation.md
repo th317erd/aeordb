@@ -15832,3 +15832,43 @@ evidence only. Optional capture failure never changes an acknowledged source
 write; it latches full reconciliation, stops optional capture, and requires an
 exact final source-authority/SystemFamily diff before the shadow may claim
 completeness.
+
+---
+
+# 2026-08-16 Ratified Legacy Root-Map Ownership Decisions
+
+The owner ratified the P3c-3 implementation recommendations. This authorizes
+the disconnected root-map implementation and its proof gates, not deployment,
+production-database mutation, cutover, service activation, or first-v4-write
+acceptance.
+
+The ratified implementation direction is:
+
+1. stage root mappings in a private, no-follow, checksummed, durable workspace
+   with explicit memory, disk, file-descriptor, work, cancellation, and free-
+   reserve bounds;
+2. adapt all three existing producers: base-clone seed results, selected-
+   capture replay mappings, and final frozen retained-root/SystemFamily
+   mappings plus closure;
+3. derive canonical root rows from the frozen semantic authority, omit only
+   explicitly destination-local/detached protected state, deduplicate exact
+   repeats while retaining the maximum source write sequence, and fail closed
+   when one source root maps to conflicting destination or semantic state;
+4. use bounded external run generation and bounded-fan-in merge passes to
+   produce one globally ordered canonical stream without collecting the map in
+   memory;
+5. publish bounded immutable map pages idempotently in bounded batches, verify
+   every selected page, and publish the mutable map control last under guarded
+   destination authority;
+6. preserve and reuse one durable publication timestamp across retry/reopen so
+   immutable identities remain exact;
+7. treat the selected control and its complete page chain as the only map
+   authority; unselected workspace files or partial page publication never
+   establish completeness;
+8. expose a constant-memory selected verifier/lookup that fails closed on a
+   missing, malformed, unselected, or inconsistent page and permits ordered
+   early-stop lookup;
+9. treat mapped destination roots as lookup targets, not GC roots; and
+10. bind the exact selected control payload hash into AMPR only in the following
+    destination-verification slice, after restart/cancel/commit-unknown,
+    resource, both-hash-width, shadow-only, and source-byte-invariance proofs.

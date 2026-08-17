@@ -698,17 +698,19 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
   let first_authority = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/first_authority.rs")).unwrap();
   let migration_capture_replay = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_capture_replay.rs")).unwrap();
   let migration_destination = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_destination.rs")).unwrap();
+  let migration_root_map_owner = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_root_map_owner.rs")).unwrap();
   for (
     encoder,
     expected_production_occurrences,
     expected_first_authority_occurrences,
     expected_migration_capture_replay_occurrences,
     expected_migration_destination_occurrences,
+    expected_migration_root_map_owner_occurrences,
   ) in [
-    ("encode_namespace_root", 5, 2, 2, 0),
-    ("encode_semantic_state_object", 3, 0, 0, 2),
-    ("encode_root_publication_prepare_control", 4, 3, 0, 0),
-    ("encode_root_admission_commit_control", 4, 3, 0, 0),
+    ("encode_namespace_root", 8, 2, 2, 0, 3),
+    ("encode_semantic_state_object", 3, 0, 0, 2, 0),
+    ("encode_root_publication_prepare_control", 5, 4, 0, 0, 0),
+    ("encode_root_admission_commit_control", 5, 4, 0, 0, 0),
   ] {
     assert_eq!(
       production_sources.matches(encoder).count(),
@@ -729,6 +731,11 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
       migration_destination.matches(encoder).count(),
       expected_migration_destination_occurrences,
       "P3b root encoder {encoder} has an unexpected migration-destination call shape"
+    );
+    assert_eq!(
+      migration_root_map_owner.matches(encoder).count(),
+      expected_migration_root_map_owner_occurrences,
+      "P3b root encoder {encoder} has an unexpected migration-root-map-owner call shape"
     );
   }
 

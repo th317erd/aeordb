@@ -95,8 +95,8 @@ use super::gc_lifecycle::{
 use super::gc_root_reclaim::RootExpiryRetentionPermitV1;
 use super::gc_root_transition::RootRetirementIntentV1;
 use super::namespace::{
-  EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_tree_root_v0,
-  decode_semantic_object, encode_namespace_root,
+  EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_root,
+  decode_namespace_tree_root_v0, decode_semantic_object, encode_namespace_root,
 };
 use super::reader::FormatError;
 use super::read_view::{RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1};
@@ -144,6 +144,35 @@ pub struct SuccessorAuthorityPublicationRequestV1 {
   pub required_capabilities: [u8; 32],
   pub typed_closure_digest: Vec<u8>,
   pub authority_identity: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MigrationMapRootAuthorityWriteV1<'a> {
+  pub source_legacy_root: &'a [u8],
+  pub captured_source_write_sequence: u64,
+  pub namespace_root: &'a EncodedNamespaceRootV1,
+}
+
+#[derive(Clone, Copy)]
+pub struct MigrationMapRootAuthorityBatchPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub migration_id: &'a [u8; 16],
+  pub map_generation: u64,
+  pub roots: &'a [MigrationMapRootAuthorityWriteV1<'a>],
+  pub expected_destination_physical_instance_id: &'a [u8; 16],
+  pub expected_head_hash: &'a [u8],
+  pub publication_timestamp_ms: u64,
+  pub maximum_encoded_batch_bytes: usize,
+  pub cancellation: &'a CancellationToken,
+  pub memory: &'a MemoryCoordinator,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationMapRootAuthorityBatchPublicationReceiptV1 {
+  pub requested_root_count: usize,
+  pub newly_admitted_root_count: usize,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1975,6 +2004,26 @@ struct FirstAuthorityPackageV1 {
   write_sequence_high_water: u64,
 }
 
+#[derive(Clone)]
+struct PendingMigrationMapRootV1 {
+  source_legacy_root: Vec<u8>,
+  captured_source_write_sequence: u64,
+  namespace_root: EncodedNamespaceRootV1,
+  include_namespace_root: bool,
+}
+
+struct MigrationMapAuthorityPackageV1 {
+  entities: Vec<PreparedWholeEntityV1>,
+  hot_tail_offset: u64,
+  write_sequence_high_water: u64,
+}
+
+#[derive(Clone, Copy)]
+struct MigrationMapRootPresenceV1 {
+  namespace_root_exists: bool,
+  admitted: bool,
+}
+
 trait FirstAuthorityDependencyObserverV1 {
   fn before_entity(&mut self, _index: usize, _entity: &PreparedWholeEntityV1) -> Result<(), NativeDurabilityError> {
     Ok(())
@@ -3149,6 +3198,253 @@ impl V4FirstAuthorityPublisher {
   ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, ImmutableSystemControlPublicationErrorV1> {
     let mut observer = NoopFirstAuthorityDependencyObserverV1;
     self.publish_immutable_system_controls_with_observer(request, &mut observer)
+  }
+
+  /// Admit historical roots referenced by the finite v3-to-v4 migration map.
+  ///
+  /// The selected HEAD is deliberately unchanged. Missing NamespaceRoot,
+  /// prepare, and admission entities are appended through the same stable
+  /// dependency/header boundary used by ordinary authority publication.
+  pub fn publish_migration_map_root_authorities(
+    &self,
+    request: MigrationMapRootAuthorityBatchPublicationRequestV1<'_>,
+  ) -> Result<MigrationMapRootAuthorityBatchPublicationReceiptV1, FirstAuthorityPublicationErrorV1> {
+    if request.cancellation.is_cancelled() {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_cancelled",
+        "migration-map root authority publication was canceled before admission",
+      ));
+    }
+    if request.publication_timestamp_ms == 0 || request.publication_timestamp_ms > i64::MAX as u64 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_timestamp",
+        "migration-map authority timestamp must fit the signed persistent range",
+      ));
+    }
+    if request.maximum_encoded_batch_bytes == 0 || request.maximum_encoded_batch_bytes > IMMUTABLE_ENTITY_BATCH_BYTES_CAP {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_batch_bytes",
+        format!(
+          "migration-map encoded batch limit {} is outside 1..={IMMUTABLE_ENTITY_BATCH_BYTES_CAP}",
+          request.maximum_encoded_batch_bytes
+        ),
+      ));
+    }
+    let maximum_roots = IMMUTABLE_ENTITY_BATCH_COUNT_CAP / 5;
+    if request.roots.is_empty() || request.roots.len() > maximum_roots {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_count",
+        format!("migration-map authority root count {} is outside 1..={maximum_roots}", request.roots.len()),
+      ));
+    }
+    if request.map_generation == 0 || request.migration_id.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_identity",
+        "migration-map authority requires a nonzero migration ID and map generation",
+      ));
+    }
+
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_selected_header",
+        "migration-map authority publication requires selected non-degraded destination authority",
+      ));
+    }
+    if &header.database_id != request.database_id
+      || &header.physical_instance_id != request.expected_destination_physical_instance_id
+      || header.head_hash != request.expected_head_hash
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_destination",
+        "migration-map authority destination database, physical incarnation, or HEAD changed",
+      ));
+    }
+
+    let mut kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    kv.flush()?;
+    validate_kv_header_alignment(&kv, header)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_baseline_not_flushed",
+        "migration-map authority publication requires an empty KV write and hot-buffer baseline",
+      ));
+    }
+
+    let mut seen = HashSet::new();
+    seen.try_reserve(request.roots.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_allocation", format!("root identity allocation failed: {error}"))
+    })?;
+    let mut pending = Vec::new();
+    pending.try_reserve_exact(request.roots.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_allocation", format!("pending-root allocation failed: {error}"))
+    })?;
+    for root in request.roots {
+      if request.cancellation.is_cancelled() {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "migration_map_authority_cancelled",
+          "migration-map root authority publication was canceled during dependency validation",
+        ));
+      }
+      if !seen.insert(root.namespace_root.root_hash.as_slice()) {
+        continue;
+      }
+      let presence = validate_migration_map_root_dependencies(&self.file, &kv, header, root, request.database_id, request.memory)?;
+      if !presence.admitted {
+        pending.push(PendingMigrationMapRootV1 {
+          source_legacy_root: root.source_legacy_root.to_vec(),
+          captured_source_write_sequence: root.captured_source_write_sequence,
+          namespace_root: root.namespace_root.clone(),
+          include_namespace_root: !presence.namespace_root_exists,
+        });
+      }
+    }
+    if pending.is_empty() {
+      return Ok(MigrationMapRootAuthorityBatchPublicationReceiptV1 {
+        requested_root_count: request.roots.len(),
+        newly_admitted_root_count: 0,
+        observation,
+        idempotent: true,
+      });
+    }
+
+    let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
+    if append_start < header.hot_tail_offset {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_file_truncated",
+        "database length precedes the selected hot-tail offset",
+      ));
+    }
+    let selected_header_slot_sequence = header.slot_sequence.checked_add(1).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_header_sequence", "header sequence is exhausted")
+    })?;
+    let mut package_header = header.clone();
+    package_header.hot_tail_offset = append_start;
+    let sizing = build_migration_map_authority_package(
+      &pending,
+      request.database_id,
+      request.migration_id,
+      request.map_generation,
+      request.publication_timestamp_ms,
+      selected_header_slot_sequence,
+      1,
+      &package_header,
+    )?;
+    validate_prepared_entity_set(&sizing.entities, header.hash_algorithm.hash_length(), request.maximum_encoded_batch_bytes)?;
+    refuse_existing_entities(&kv, &sizing.entities)?;
+    let expected_hot_tail_offset = sizing.hot_tail_offset;
+    let expected_write_sequence_high_water = sizing.write_sequence_high_water;
+    let dependency_bytes = entity_dependency_bytes(&sizing.entities, header.hash_algorithm.hash_length())?
+      .checked_add(append_start - header.hot_tail_offset)
+      .ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_dependency_bytes", "dependency byte count overflowed")
+      })?;
+    let entry_increment = u64::try_from(sizing.entities.len()).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_entry_count", format!("entity count exceeds u64: {error}"))
+    })?;
+    drop(sizing);
+
+    let mut candidate = header.clone();
+    candidate.updated_at_ms = header.updated_at_ms.max(request.publication_timestamp_ms);
+    candidate.write_sequence_high_water = expected_write_sequence_high_water;
+    candidate.hot_tail_offset = expected_hot_tail_offset;
+    candidate.entry_count = header
+      .entry_count
+      .checked_add(entry_increment)
+      .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_entry_count", "v4 entry count overflowed"))?;
+    let admitted =
+      self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)?;
+    let publication_sequence = admitted.sequence();
+    let package = build_migration_map_authority_package(
+      &pending,
+      request.database_id,
+      request.migration_id,
+      request.map_generation,
+      request.publication_timestamp_ms,
+      selected_header_slot_sequence,
+      publication_sequence,
+      &package_header,
+    )?;
+    if package.hot_tail_offset != expected_hot_tail_offset || package.write_sequence_high_water != expected_write_sequence_high_water {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_sizing_changed",
+        "publication sequence changed the pre-admitted migration-map package layout",
+      ));
+    }
+    validate_prepared_entity_set(&package.entities, header.hash_algorithm.hash_length(), request.maximum_encoded_batch_bytes)?;
+    refuse_existing_entities(&kv, &package.entities)?;
+    let batch = kv.begin_atomic_visibility_batch(package.entities.len(), publication_sequence)?;
+    let mut write_offset = append_start;
+    for entity in &package.entities {
+      if let Err(error) = write_file_at_native(&self.file, write_offset, &entity.bytes)
+        .and_then(|_| verify_file_bytes_native(&self.file, write_offset, &entity.bytes))
+      {
+        kv.abort_atomic_visibility_batch(batch)?;
+        return Err(FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_write", error.to_string()));
+      }
+      write_offset = write_offset.checked_add(entity.bytes.len() as u64).ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_wal_overflow", "migration-map WAL offset overflowed")
+      })?;
+    }
+    let expected_existing = vec![None; package.entities.len()];
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    let outcome = commit_stable_entity_dependency(
+      &self.file,
+      &mut kv,
+      admitted,
+      batch,
+      publication_sequence,
+      &package.entities,
+      append_start,
+      expected_hot_tail_offset,
+      &expected_existing,
+      &mut observer,
+    )?;
+    let (published_observation, committed_failure) = match outcome {
+      StableEntityDependencyOutcomeV1::Complete(publication) => (publication.observation, None),
+      StableEntityDependencyOutcomeV1::CommittedFailure { publication, failure, message } => {
+        (publication.observation, Some((failure, message)))
+      }
+    };
+    for pending_root in &pending {
+      let write = MigrationMapRootAuthorityWriteV1 {
+        source_legacy_root: &pending_root.source_legacy_root,
+        captured_source_write_sequence: pending_root.captured_source_write_sequence,
+        namespace_root: &pending_root.namespace_root,
+      };
+      let presence = validate_migration_map_root_dependencies(
+        &self.file,
+        &kv,
+        &published_observation.selected.header,
+        &write,
+        request.database_id,
+        request.memory,
+      )?;
+      if !presence.admitted {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "migration_map_authority_committed_readback",
+          "published migration-map NamespaceRoot has no complete admission witness",
+        ));
+      }
+    }
+    if let Some((failure, message)) = committed_failure {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        migration_map_committed_failure_code(failure),
+        format!("migration-map authority bytes committed but post-commit handling failed: {message}"),
+      ));
+    }
+    Ok(MigrationMapRootAuthorityBatchPublicationReceiptV1 {
+      requested_root_count: request.roots.len(),
+      newly_admitted_root_count: pending.len(),
+      observation: published_observation,
+      idempotent: false,
+    })
   }
 
   fn publish_immutable_system_controls_with_observer(
@@ -8293,6 +8589,350 @@ fn corrupt_evidence_sink_format_error(error: FormatError) -> CorruptGcEvidenceSi
 fn corrupt_evidence_sink_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> CorruptGcEvidenceSinkErrorV1 {
   let code = error.code();
   CorruptGcEvidenceSinkErrorV1::new(code, error)
+}
+
+fn validate_migration_map_root_dependencies(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  requested: &MigrationMapRootAuthorityWriteV1<'_>,
+  expected_database_id: &[u8; 16],
+  memory: &MemoryCoordinator,
+) -> Result<MigrationMapRootPresenceV1, FirstAuthorityPublicationErrorV1> {
+  let hash_width = header.hash_algorithm.hash_length();
+  if requested.source_legacy_root.len() != hash_width
+    || requested.source_legacy_root.iter().all(|byte| *byte == 0)
+    || requested.captured_source_write_sequence == 0
+  {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_source",
+      "migration-map authority source root and captured sequence are invalid",
+    ));
+  }
+  let root = decode_namespace_root(&requested.namespace_root.value, header.hash_algorithm)?;
+  if root.root_hash != requested.namespace_root.root_hash || root.root_hash.iter().all(|byte| *byte == 0) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_namespace_identity",
+      "migration-map NamespaceRoot bytes do not match their declared identity",
+    ));
+  }
+
+  let tree_locator = kv.get(&root.namespace_tree_root)?.ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_tree_missing",
+      "migration-map NamespaceRoot references a missing destination tree",
+    )
+  })?;
+  if tree_locator.type_flags != KV_TYPE_DIRECTORY {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_tree_role",
+      "migration-map destination tree identity resolves to another KV role",
+    ));
+  }
+  let maximum_tree_entity_length = FIRST_AUTHORITY_NAMESPACE_TREE_CAP
+    .checked_add(super::entity::WHOLE_ENTITY_V1_MAX_HEADER_LENGTH)
+    .and_then(|length| length.checked_add(hash_width))
+    .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_tree_cap", "namespace-tree cap overflowed"))?;
+  let tree_length = usize::try_from(tree_locator.total_length).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_tree_length", format!("tree length exceeds usize: {error}"))
+  })?;
+  if tree_length > maximum_tree_entity_length {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_tree_length",
+      format!("destination tree entity has {tree_length} bytes, exceeding {maximum_tree_entity_length}"),
+    ));
+  }
+  let _tree_memory = memory
+    .reserve(
+      MemoryOwner::Migration,
+      u64::try_from(tree_length).map_err(|error| {
+        FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_tree_length", format!("tree length exceeds u64: {error}"))
+      })?,
+      AdmissionClass::Maintenance,
+    )
+    .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_memory", error.to_string()))?;
+  let tree_bytes = read_entity_bounded(file, kv, &root.namespace_tree_root, maximum_tree_entity_length, header.write_sequence_high_water)?
+    .ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_tree_missing",
+        "migration-map destination tree disappeared during validation",
+      )
+    })?;
+  decode_namespace_tree_root_v0(&tree_bytes, &root.namespace_tree_root, header.hash_algorithm, header.write_sequence_high_water)?;
+
+  let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
+  let semantic = load_canonical_system_file_at_path(
+    file,
+    kv,
+    header,
+    &semantic_path,
+    SEMANTIC_OBJECT_CONTENT_TYPE,
+    super::semantic_store::semantic_object_cap(1)?,
+  )?
+  .ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_semantic_missing",
+      "migration-map NamespaceRoot references a missing semantic state",
+    )
+  })?;
+  let decoded_semantic = decode_semantic_object(&semantic.body, header.hash_algorithm)?;
+  if decoded_semantic.object_id != root.semantic_state_root || !matches!(decoded_semantic.kind, SemanticObjectKind::State { .. }) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_semantic_identity",
+      "migration-map semantic state does not match the NamespaceRoot edge",
+    ));
+  }
+
+  let namespace_root_exists = immutable_entity_exists_for_authority(
+    file,
+    kv,
+    header,
+    ImmutableEntityWriteV1 {
+      entity_version: 1,
+      entry_type: EntryTypeV4::DirectoryIndex,
+      flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+      key: &requested.namespace_root.root_hash,
+      stored_value: &requested.namespace_root.value,
+    },
+    KV_TYPE_DIRECTORY,
+  )?;
+  let admission = load_reusable_root_admission(file, kv, header, requested.namespace_root, namespace_root_exists)?;
+  if let Some(admission) = admission {
+    let decoded = decode_root_admission_commit(&admission, header.hash_algorithm)?;
+    if &decoded.database_id != expected_database_id
+      || decoded.namespace_root != requested.namespace_root.root_hash
+      || decoded.authority_after != requested.namespace_root.root_hash
+      || decoded.selected_header_slot_sequence > header.slot_sequence
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_admission_mismatch",
+        "existing root admission does not close over this database, root, and selected authority history",
+      ));
+    }
+    let prepare = load_system_file_slot(
+      file,
+      kv,
+      header,
+      SystemControlKindV1::RootPublicationPrepare,
+      &decoded.transaction_id,
+      SystemControlSlotV1::Immutable,
+    )?
+    .ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_prepare_missing",
+        "existing root admission references a missing publication prepare",
+      )
+    })?;
+    let decoded_prepare = decode_root_publication_prepare(&prepare.body, header.hash_algorithm)?;
+    if decoded.prepare_payload_hash != digest_parts(header.hash_algorithm, &[&prepare.body])
+      || decoded_prepare.database_id != decoded.database_id
+      || decoded_prepare.transaction_id != decoded.transaction_id
+      || decoded_prepare.created_at_ms != decoded.publication_started_at_ms
+      || decoded_prepare.target_namespace_root != decoded.namespace_root
+      || decoded_prepare.target_semantic_state != root.semantic_state_root
+      || decoded_prepare.authority_kind != decoded.authority_kind
+      || digest_parts(header.hash_algorithm, &[&decoded_prepare.authority_identity]) != decoded.authority_identity_digest
+      || decoded_prepare.expected_authority_after != decoded.authority_after
+      || decoded_prepare.intended_header_slot_sequence != decoded.selected_header_slot_sequence
+      || decoded_prepare.intended_publication_sequence != decoded.publication_sequence
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_witness_mismatch",
+        "existing root admission and publication prepare do not form one complete authority witness",
+      ));
+    }
+    return Ok(MigrationMapRootPresenceV1 { namespace_root_exists: true, admitted: true });
+  }
+  Ok(MigrationMapRootPresenceV1 { namespace_root_exists, admitted: false })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_migration_map_authority_package(
+  roots: &[PendingMigrationMapRootV1],
+  database_id: &[u8; 16],
+  migration_id: &[u8; 16],
+  map_generation: u64,
+  publication_timestamp_ms: u64,
+  selected_header_slot_sequence: u64,
+  publication_sequence: u64,
+  source_header: &DatabaseHeaderV4,
+) -> Result<MigrationMapAuthorityPackageV1, FirstAuthorityPublicationErrorV1> {
+  let algorithm = source_header.hash_algorithm;
+  let timestamp = i64::try_from(publication_timestamp_ms).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_timestamp", format!("timestamp exceeds signed range: {error}"))
+  })?;
+  let mut entities = Vec::new();
+  entities
+    .try_reserve_exact(
+      roots
+        .len()
+        .checked_mul(5)
+        .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_count", "entity count overflowed"))?,
+    )
+    .map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_allocation", format!("entity allocation failed: {error}"))
+    })?;
+  let mut next_sequence = source_header.write_sequence_high_water;
+  for root in roots {
+    let decoded = decode_namespace_root(&root.namespace_root.value, algorithm)?;
+    if decoded.root_hash != root.namespace_root.root_hash {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_namespace_identity",
+        "prepared NamespaceRoot bytes changed after validation",
+      ));
+    }
+    let transaction_digest = digest_parts(
+      algorithm,
+      &[
+        b"aeordb.migration-map.root-admission.transaction.v1\0",
+        database_id,
+        migration_id,
+        &map_generation.to_le_bytes(),
+        &root.source_legacy_root,
+        &root.captured_source_write_sequence.to_le_bytes(),
+        &root.namespace_root.root_hash,
+      ],
+    );
+    let mut transaction_id = [0u8; 16];
+    transaction_id.copy_from_slice(&transaction_digest[..16]);
+    if transaction_id == [0; 16] {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_transaction_id",
+        "deterministic migration-map transaction ID is zero",
+      ));
+    }
+    let mut authority_identity = Vec::new();
+    authority_identity.extend_from_slice(b"migration-map\0");
+    authority_identity.extend_from_slice(migration_id);
+    authority_identity.extend_from_slice(&map_generation.to_le_bytes());
+    authority_identity.extend_from_slice(&root.source_legacy_root);
+    let typed_closure_digest = digest_parts(
+      algorithm,
+      &[
+        b"aeordb.migration-map.root-admission.closure.v1\0",
+        database_id,
+        migration_id,
+        &map_generation.to_le_bytes(),
+        &root.source_legacy_root,
+        &root.captured_source_write_sequence.to_le_bytes(),
+        &root.namespace_root.root_hash,
+        &decoded.namespace_tree_root,
+        &decoded.semantic_state_root,
+      ],
+    );
+    let prepare = RootPublicationPrepareV1 {
+      database_id: *database_id,
+      transaction_id,
+      created_at_ms: timestamp,
+      target_namespace_root: root.namespace_root.root_hash.clone(),
+      target_semantic_state: decoded.semantic_state_root,
+      typed_closure_digest,
+      authority_kind: RootAuthorityKindV1::MigrationMap,
+      authority_identity: authority_identity.clone(),
+      expected_authority_before: vec![0; algorithm.hash_length()],
+      expected_authority_after: root.namespace_root.root_hash.clone(),
+      intended_header_slot_sequence: selected_header_slot_sequence,
+      intended_publication_sequence: publication_sequence,
+    };
+    let prepare_control = encode_root_publication_prepare_control(&prepare, algorithm)?;
+    let admission = RootAdmissionCommitV1 {
+      database_id: *database_id,
+      namespace_root: root.namespace_root.root_hash.clone(),
+      transaction_id,
+      publication_started_at_ms: timestamp,
+      authority_kind: RootAuthorityKindV1::MigrationMap,
+      recovered_from_selected_authority: false,
+      authority_identity_digest: digest_parts(algorithm, &[&authority_identity]),
+      authority_after: root.namespace_root.root_hash.clone(),
+      selected_header_slot_sequence,
+      publication_sequence,
+      prepare_payload_hash: digest_parts(algorithm, &[&prepare_control]),
+    };
+    let admission_control = encode_root_admission_commit_control(&admission, algorithm)?;
+    if root.include_namespace_root {
+      next_sequence = append_entity(
+        &mut entities,
+        1,
+        EntryTypeV4::DirectoryIndex,
+        WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        KV_TYPE_DIRECTORY,
+        algorithm,
+        publication_timestamp_ms,
+        next_sequence,
+        &root.namespace_root.root_hash,
+        &root.namespace_root.value,
+      )?;
+    }
+    next_sequence = append_system_file(
+      &mut entities,
+      system_control_path(SystemControlKindV1::RootPublicationPrepare, &transaction_id, SystemControlSlotV1::Immutable)?,
+      SYSTEM_CONTROL_CONTENT_TYPE,
+      &prepare_control,
+      algorithm,
+      publication_timestamp_ms,
+      next_sequence,
+    )?;
+    next_sequence = append_system_file(
+      &mut entities,
+      system_control_path(SystemControlKindV1::RootAdmissionCommit, &root.namespace_root.root_hash, SystemControlSlotV1::Immutable)?,
+      SYSTEM_CONTROL_CONTENT_TYPE,
+      &admission_control,
+      algorithm,
+      publication_timestamp_ms,
+      next_sequence,
+    )?;
+  }
+  let hot_tail_offset = entities.iter().try_fold(source_header.hot_tail_offset, |offset, entity| {
+    offset.checked_add(entity.bytes.len() as u64).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_wal_overflow", "migration-map WAL offset overflowed")
+    })
+  })?;
+  Ok(MigrationMapAuthorityPackageV1 { entities, hot_tail_offset, write_sequence_high_water: next_sequence })
+}
+
+fn validate_prepared_entity_set(
+  entities: &[PreparedWholeEntityV1],
+  hash_width: usize,
+  maximum_encoded_batch_bytes: usize,
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if entities.is_empty() || entities.len() > IMMUTABLE_ENTITY_BATCH_COUNT_CAP {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "migration_map_authority_entity_count",
+      "migration-map package entity count is outside the atomic visibility bound",
+    ));
+  }
+  let mut keys = HashSet::new();
+  keys.try_reserve(entities.len()).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_allocation", format!("entity identity allocation failed: {error}"))
+  })?;
+  let mut bytes = 0usize;
+  for entity in entities {
+    if entity.key.len() != hash_width || !keys.insert(entity.key.as_slice()) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_entity_identity",
+        "migration-map package contains an invalid or duplicate entity identity",
+      ));
+    }
+    bytes = bytes.checked_add(entity.bytes.len()).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("migration_map_authority_entity_bytes", "migration-map package bytes overflowed")
+    })?;
+    if bytes > maximum_encoded_batch_bytes {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "migration_map_authority_entity_bytes",
+        format!("migration-map package exceeds the {maximum_encoded_batch_bytes}-byte caller bound"),
+      ));
+    }
+  }
+  Ok(())
+}
+
+const fn migration_map_committed_failure_code(failure: StableEntityDependencyFailureV1) -> &'static str {
+  match failure {
+    StableEntityDependencyFailureV1::DependencyMissing => "migration_map_authority_committed_dependency_missing",
+    StableEntityDependencyFailureV1::AuthorityUncertain => "migration_map_authority_committed_authority_uncertain",
+    StableEntityDependencyFailureV1::VisibilityFailure => "migration_map_authority_committed_visibility_failure",
+    StableEntityDependencyFailureV1::PostconditionFailure => "migration_map_authority_committed_postcondition_failure",
+  }
 }
 
 fn build_package(

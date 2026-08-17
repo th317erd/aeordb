@@ -1047,6 +1047,18 @@ pub(crate) fn open_regular_file_no_follow(path: &Path) -> EngineResult<fs::File>
   Ok(file)
 }
 
+pub(crate) fn open_regular_file_read_write_no_follow(path: &Path) -> EngineResult<fs::File> {
+  reject_symlink(path, "private workspace file")?;
+  let mut options = OpenOptions::new();
+  options.read(true).write(true);
+  configure_no_follow(&mut options);
+  let file = options.open(path)?;
+  if !file.metadata()?.is_file() {
+    return Err(EngineError::InvalidInput(format!("private workspace path {} is not a regular file", path.display())));
+  }
+  Ok(file)
+}
+
 pub(crate) fn create_new_regular_file_no_follow(path: &Path) -> EngineResult<fs::File> {
   create_new_regular_file_no_follow_with_access(path, false)
 }
