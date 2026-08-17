@@ -49,6 +49,8 @@ fn pending_cleanup_carries_one_entry_budget_across_directories() {
   let second_pending = second.join(".root-map-00000000000000000000000000000002.pending");
   for path in [&first_pending, &second_pending] {
     let mut file = create_new_regular_file_no_follow(path).unwrap();
+    secure_platform_private_regular_file(path).unwrap();
+    validate_private_regular_file(path, &file, "legacy root-map pending cleanup fixture").unwrap();
     file.write_all(b"pending").unwrap();
     drop(file);
   }
