@@ -871,13 +871,28 @@ fn reopen_removes_only_owned_pending_files_and_refuses_unknown_entries() {
     workspace_path.join("runs/.root-map-00000000000000000000000000000002.pending"),
     workspace_path.join("pages/.root-map-00000000000000000000000000000003.pending"),
   ];
-  for path in &pending_names {
-    std::fs::write(path, b"incomplete derived bytes").unwrap();
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt;
-      std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
+  for (ordinal, path) in pending_names.iter().enumerate() {
+    let private_source = LegacyRootMapStagingWorkspaceV1::create(
+      &database_path,
+      LegacyRootMapWorkspaceIdentityV1::new(
+        DATABASE_ID,
+        [0x80 + u8::try_from(ordinal).unwrap(); 16],
+        DATABASE_ID,
+        SOURCE_PHYSICAL_ID,
+        DESTINATION_PHYSICAL_ID,
+        1,
+        algorithm,
+      )
+      .unwrap(),
+      1_700_000_000_400 + u64::try_from(ordinal).unwrap(),
+      options(&scratch),
+      cancellation.clone(),
+      &memory,
+    )
+    .unwrap();
+    let private_stage = private_source.workspace_path().join("rows.stage");
+    drop(private_source);
+    std::fs::rename(private_stage, path).unwrap();
   }
   let reopened =
     LegacyRootMapStagingWorkspaceV1::reopen(&workspace_path, identity(algorithm), reopen_options(), cancellation.clone(), &memory).unwrap();

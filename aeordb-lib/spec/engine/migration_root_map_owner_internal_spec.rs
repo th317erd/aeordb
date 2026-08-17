@@ -57,9 +57,9 @@ fn pending_cleanup_carries_one_entry_budget_across_directories() {
   let first_pending = first.join(".root-map-00000000000000000000000000000001.pending");
   let second_pending = second.join(".root-map-00000000000000000000000000000002.pending");
   for path in [&first_pending, &second_pending] {
-    fs::write(path, b"pending").unwrap();
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut file = create_new_regular_file_no_follow(path).unwrap();
+    file.write_all(b"pending").unwrap();
+    drop(file);
   }
 
   let cancellation = CancellationToken::new();
