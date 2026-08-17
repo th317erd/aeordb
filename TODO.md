@@ -654,7 +654,7 @@
             - [x] Guard shared B-tree plans so the published immutable batch and returned root cannot diverge.
             - [x] Preserve one immutable admission per distinct root while allowing transaction-specific `A -> B -> A` root reselection and exact retry after restart.
             - [x] Prove basis divergence, gaps, malformed batches, stale roots, cancellation, memory pressure, restart, both hash widths, and source invariance.
-          - [ ] P3c-2b3d: acquire the explicit final write freeze and require an exact authority, retained-root, and SystemFamily reconciliation before allowing destination verification; incomplete capture can only increase this requirement.
+          - [x] P3c-2b3d: acquire the explicit final write freeze and require an exact authority, retained-root, and SystemFamily reconciliation before allowing destination verification; incomplete capture can only increase this requirement.
             - [x] P3c-2b3d1: add one cancellation/timeout-bounded exclusive source-write freeze that drains all admitted engine operations, blocks raw and namespace writes, captures exact HEAD/header/hard-frontier/physical identity, and cannot be reconstructed from the durable AMPR flag after restart.
               - [x] Qualify the exact pushed source-freeze commit on macOS arm64 and Windows x86_64 MSVC with the frozen lockfile and bounded native commands.
             - [x] P3c-2b3d2: compute a bounded strict Merkle diff between the last reconciled v3 source root and the frozen final root, then reuse the existing subtree translation, directory/B-tree planning, immutable batch, and successor authority paths without collecting the whole namespace.
@@ -662,12 +662,13 @@
               - [x] Execute final namespace projection only under the live source freeze and preserve exact source/destination authority evidence.
               - [x] Prove content replacement and metadata-only identity reuse, exact retry, equal-root no-op, zero-root transition, cancellation, malformed input, and bounded-resource refusal without destination-authority movement.
               - [x] Run affected, architecture, full-workspace, real-file, and native-platform qualification gates and record durable evidence.
-            - [ ] P3c-2b3d3: reconcile the complete frozen retained-root and SystemFamily inventory, stream every final root mapping, and let only the live freeze proof authorize the monotonic AMPR final-freeze completion/watermark. (active)
-            - [ ] Prove the post-hard-commit/pre-capture race, prior admitted raw and namespace writes, blocked new writes, capture gaps, stale roots, malformed flat/B-tree state, missing protected closure, cancellation/timeout/memory pressure, retry/reopen, both hash widths, and byte-for-byte source invariance.
+            - [x] P3c-2b3d3: reconcile the complete frozen retained-root and SystemFamily inventory, stream every final root mapping, and let only the live freeze proof authorize the monotonic AMPR final-freeze completion/watermark.
+            - [x] Prove the post-hard-commit/pre-capture race, prior admitted raw and namespace writes, blocked new writes, capture gaps, stale roots, malformed flat/B-tree state, missing protected closure, cancellation/timeout/memory pressure, retry/reopen, both hash widths, and byte-for-byte source invariance.
           - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
           - [ ] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.
-      - [ ] P3c-3a: implement immutable paged legacy-root mapping, selected control publication, and typed reset/unavailable outcomes.
-      - [ ] P3c-3b: prove cancel/resume, crash boundaries, complete shadow verification, GC reset policy, and byte-for-byte source invariance.
+      - [x] P3c-3a: add fixture-matching typed legacy-root-map codecs and one shared immutable-system-control publication/read authority.
+      - [ ] P3c-3b: add the bounded private staging/sort workspace, producer sinks, authority-last root-map owner, and selected streaming reader.
+      - [ ] P3c-3c: bind the selected root-map control into AMPR destination verification and prove cancel/resume, commit-unknown recovery, bounded resources, shadow-only refusal, and byte-for-byte source invariance.
     - [ ] P4: implement bounded physical inventory, logical/physical lifecycle, quarantine, sweep, and receipt-backed Void authority without destructive activation.
       - [x] P4-1: expose typed physical-inventory readers and build a disconnected streaming inventory/reference model.
         - [x] Add the `gc_v4_model_spec` campaign target and demonstrate the missing typed inventory API.

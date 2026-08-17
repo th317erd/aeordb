@@ -95,6 +95,9 @@ use crate::engine::v4::gc_state::{
   encode_gc_state_directory_v1, encode_gc_state_page_v1,
 };
 use crate::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
+use crate::engine::v4::migration_root_map::{
+  LegacyRootMapPageBodyV1, LegacyRootMapRowV1, LegacyRootSemanticAvailabilityV1, encode_legacy_root_map_page,
+};
 use crate::engine::v4::read_view::RootLifecycleObservationV1;
 use tokio_util::sync::CancellationToken;
 
@@ -6192,6 +6195,66 @@ fn immutable_entity_batch_post_commit_failure_returns_a_retryable_committed_rece
   let retry = publisher.publish_immutable_entity_batch(request).unwrap();
   assert!(retry.idempotent);
   assert_eq!(retry.observation, committed.observation);
+}
+
+#[test]
+fn immutable_system_control_post_commit_failure_returns_a_retryable_committed_receipt() {
+  let (_directory, _coordinator, publisher) = environment("immutable-system-control-postcommit");
+  publish_first_authority(&publisher);
+  let before = publisher.observe().unwrap();
+  let algorithm = before.selected.header.hash_algorithm;
+  let migration_id = [0x71; 16];
+  let mut identity = migration_id.to_vec();
+  identity.extend_from_slice(&0u64.to_le_bytes());
+  let encoded = encode_legacy_root_map_page(
+    &LegacyRootMapPageBodyV1 {
+      database_id: before.selected.header.database_id,
+      migration_id,
+      logical_database_id: before.selected.header.database_id,
+      source_physical_instance_id: [0x41; 16],
+      destination_physical_instance_id: before.selected.header.physical_instance_id,
+      page_ordinal: 0,
+      previous_page_hash: vec![0; algorithm.hash_length()],
+      next_page_hash: vec![0; algorithm.hash_length()],
+      rows: vec![LegacyRootMapRowV1 {
+        legacy_root_hash: vec![0x61; algorithm.hash_length()],
+        namespace_root_v1_hash: vec![0x62; algorithm.hash_length()],
+        semantic_availability: LegacyRootSemanticAvailabilityV1::Complete,
+        captured_source_write_sequence: 11,
+      }],
+    },
+    algorithm,
+  )
+  .unwrap();
+  let controls =
+    [ImmutableSystemControlWriteV1 { kind: SystemControlKindV1::LegacyRootMapPage, identity: &identity, encoded_control: &encoded }];
+  let request = ImmutableSystemControlBatchPublicationRequestV1 {
+    database_id: &before.selected.header.database_id,
+    controls: &controls,
+    publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+  };
+  let mut observer = FailingPostCommitObserver;
+
+  let error = publisher.publish_immutable_system_controls_with_observer(request, &mut observer).unwrap_err();
+
+  assert_eq!(error.code(), "immutable_entity_committed_postcondition_failure");
+  let committed = error.committed_receipt().unwrap();
+  assert_eq!(committed.controls.len(), 1);
+  assert!(!committed.idempotent);
+  assert!(!committed.controls[0].idempotent);
+  assert_eq!(publisher.observe().unwrap(), committed.observation);
+  let retry = publisher.publish_immutable_system_controls(request).unwrap();
+  assert!(retry.idempotent);
+  assert!(retry.controls[0].idempotent);
+  assert_eq!(retry.observation, committed.observation);
+  assert_eq!(
+    publisher
+      .load_immutable_system_control(SystemControlKindV1::LegacyRootMapPage, &before.selected.header.database_id, &identity)
+      .unwrap()
+      .unwrap()
+      .bytes,
+    encoded
+  );
 }
 
 #[test]

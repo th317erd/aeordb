@@ -312,6 +312,117 @@ impl From<RetirementJournalOwnerErrorV1> for MutableSystemControlPublicationErro
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct ImmutableSystemControlWriteV1<'a> {
+  pub kind: SystemControlKindV1,
+  pub identity: &'a [u8],
+  pub encoded_control: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ImmutableSystemControlBatchPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub controls: &'a [ImmutableSystemControlWriteV1<'a>],
+  pub publication_timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedImmutableSystemControlV1 {
+  pub kind: SystemControlKindV1,
+  pub control_sequence: u64,
+  pub payload_hash: Vec<u8>,
+  pub bytes: Vec<u8>,
+  pub write_sequence: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImmutableSystemControlPublicationReceiptV1 {
+  pub kind: SystemControlKindV1,
+  pub path_key: Vec<u8>,
+  pub control_sequence: u64,
+  pub write_sequence: u64,
+  pub idempotent: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImmutableSystemControlBatchPublicationReceiptV1 {
+  pub controls: Vec<ImmutableSystemControlPublicationReceiptV1>,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+#[derive(Debug)]
+pub enum ImmutableSystemControlPublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Committed { code: &'static str, message: String, receipt: Box<ImmutableSystemControlBatchPublicationReceiptV1> },
+  Format(FormatError),
+  Authority(FirstAuthorityPublicationErrorV1),
+}
+
+impl ImmutableSystemControlPublicationErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
+      Self::Format(source) => source.code(),
+      Self::Authority(source) => source.code(),
+    }
+  }
+
+  pub fn committed_receipt(&self) -> Option<&ImmutableSystemControlBatchPublicationReceiptV1> {
+    match self {
+      Self::Committed { receipt, .. } => Some(receipt),
+      Self::Invalid { .. } | Self::Format(_) | Self::Authority(_) => None,
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+
+  fn committed(code: &'static str, message: impl Into<String>, receipt: ImmutableSystemControlBatchPublicationReceiptV1) -> Self {
+    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
+  }
+}
+
+impl Display for ImmutableSystemControlPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Committed { code, message, .. } => write!(formatter, "{code}: immutable system-control batch committed: {message}"),
+      Self::Format(source) => write!(formatter, "{}: immutable system-control format error: {source}", source.code()),
+      Self::Authority(source) => write!(formatter, "{}: immutable system-control authority error: {source}", source.code()),
+    }
+  }
+}
+
+impl Error for ImmutableSystemControlPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Format(source) => Some(source),
+      Self::Authority(source) => Some(source),
+      Self::Invalid { .. } | Self::Committed { .. } => None,
+    }
+  }
+}
+
+impl From<FormatError> for ImmutableSystemControlPublicationErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for ImmutableSystemControlPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<EngineError> for ImmutableSystemControlPublicationErrorV1 {
+  fn from(source: EngineError) -> Self {
+    Self::Authority(source.into())
+  }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct ImmutableEntityWriteV1<'a> {
   pub entity_version: u8,
   pub entry_type: EntryTypeV4,
@@ -1808,6 +1919,53 @@ struct PreparedWholeEntityV1 {
   bytes: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+enum ImmutableEntityValidationV1 {
+  GenericContent,
+  PrevalidatedSystemControls,
+}
+
+struct PreparedImmutableSystemControlInputV1 {
+  chunk_key: Vec<u8>,
+  path_key: Vec<u8>,
+  record_value: Vec<u8>,
+}
+
+fn prepare_system_control_file_record(
+  path: String,
+  encoded_control: &[u8],
+  algorithm: HashAlgorithm,
+  created_at: i64,
+  updated_at: i64,
+) -> Result<PreparedImmutableSystemControlInputV1, FirstAuthorityPublicationErrorV1> {
+  let total_size = u64::try_from(encoded_control.len()).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("system_control_size", format!("encoded system-control length exceeds u64: {error}"))
+  })?;
+  let mut content_type = String::new();
+  content_type.try_reserve_exact(SYSTEM_CONTROL_CONTENT_TYPE.len()).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("system_control_file_record_allocation", format!("content-type allocation failed: {error}"))
+  })?;
+  content_type.push_str(SYSTEM_CONTROL_CONTENT_TYPE);
+  let chunk_key = first_authority_system_chunk_hash(encoded_control, algorithm);
+  let mut chunk_hashes = Vec::new();
+  chunk_hashes.try_reserve_exact(1).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("system_control_file_record_allocation", format!("chunk identity allocation failed: {error}"))
+  })?;
+  chunk_hashes.push(chunk_key.clone());
+  let path_key = first_authority_file_path_hash(&path, algorithm);
+  let record = FileRecord {
+    path,
+    content_type: Some(content_type),
+    total_size,
+    created_at,
+    updated_at,
+    metadata: Vec::new(),
+    content_hash: first_authority_content_hash(encoded_control, algorithm),
+    chunk_hashes,
+  };
+  Ok(PreparedImmutableSystemControlInputV1 { chunk_key, path_key, record_value: record.serialize(algorithm.hash_length())? })
+}
+
 struct FirstAuthorityPackageV1 {
   namespace_root: EncodedNamespaceRootV1,
   prepare_control: Vec<u8>,
@@ -2445,6 +2603,24 @@ impl V4FirstAuthorityPublisher {
       .transpose()
   }
 
+  pub fn load_immutable_system_control(
+    &self,
+    kind: SystemControlKindV1,
+    database_id: &[u8; 16],
+    identity: &[u8],
+  ) -> Result<Option<LoadedImmutableSystemControlV1>, FirstAuthorityPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    validate_immutable_system_control_identity(header, kind, database_id, identity)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    load_immutable_system_control_file(&self.file, &kv, header, kind, identity)
+  }
+
   pub fn load_mutable_system_control(
     &self,
     kind: SystemControlKindV1,
@@ -2613,8 +2789,15 @@ impl V4FirstAuthorityPublisher {
     let target_index = usize::from(target_slot == SystemControlSlotV1::B);
     let target = pair.slots[target_index].as_ref();
     let path = system_control_path(request.kind, request.identity, target_slot)?;
-    let path_key = first_authority_file_path_hash(&path, header.hash_algorithm);
-    let chunk_key = first_authority_system_chunk_hash(request.encoded_control, header.hash_algorithm);
+    let prepared_record = prepare_system_control_file_record(
+      path,
+      request.encoded_control,
+      header.hash_algorithm,
+      target.map_or(timestamp, |loaded| loaded.record.created_at),
+      timestamp,
+    )?;
+    let path_key = prepared_record.path_key;
+    let chunk_key = prepared_record.chunk_key;
     let stored_chunk = load_system_chunk(&self.file, &kv, header, &chunk_key, request.encoded_control)?;
 
     let mut next_write_sequence = header.write_sequence_high_water;
@@ -2661,33 +2844,6 @@ impl V4FirstAuthorityPublisher {
       entities.push(PreparedWholeEntityV1 { key: chunk_key.clone(), kv_type: KV_TYPE_CHUNK, bytes: chunk });
       expected_existing.push(None);
     }
-    let mut content_type = String::new();
-    content_type.try_reserve_exact(SYSTEM_CONTROL_CONTENT_TYPE.len()).map_err(|error| {
-      MutableSystemControlPublicationErrorV1::invalid(
-        "mutable_control_file_record_allocation",
-        format!("content-type allocation failed: {error}"),
-      )
-    })?;
-    content_type.push_str(SYSTEM_CONTROL_CONTENT_TYPE);
-    let mut chunk_hashes = Vec::new();
-    chunk_hashes.try_reserve_exact(1).map_err(|error| {
-      MutableSystemControlPublicationErrorV1::invalid(
-        "mutable_control_file_record_allocation",
-        format!("chunk identity allocation failed: {error}"),
-      )
-    })?;
-    chunk_hashes.push(chunk_key);
-    let record = FileRecord {
-      path,
-      content_type: Some(content_type),
-      total_size: request.encoded_control.len() as u64,
-      created_at: target.map_or(timestamp, |loaded| loaded.record.created_at),
-      updated_at: timestamp,
-      metadata: Vec::new(),
-      content_hash: first_authority_content_hash(request.encoded_control, header.hash_algorithm),
-      chunk_hashes,
-    };
-    let record_value = record.serialize(header.hash_algorithm.hash_length())?;
     let record_entity = encode_entity(
       1,
       EntryTypeV4::FileRecord,
@@ -2696,7 +2852,7 @@ impl V4FirstAuthorityPublisher {
       request.publication_timestamp_ms,
       file_record_write_sequence,
       &path_key,
-      &record_value,
+      &prepared_record.record_value,
     )?;
     let replacement_entity = decode_whole_entity(&record_entity, header.hash_algorithm, file_record_write_sequence)?;
     let replacement_integrity_hash = replacement_entity.integrity_hash.to_vec();
@@ -2987,6 +3143,145 @@ impl V4FirstAuthorityPublisher {
       .map_err(|error| index_operation_from_mutable_system_control_error(error, incoming_checkpoint))?;
     Ok(index_operation_receipt_from_mutable(publication, incoming_checkpoint))
   }
+  pub fn publish_immutable_system_controls(
+    &self,
+    request: ImmutableSystemControlBatchPublicationRequestV1<'_>,
+  ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, ImmutableSystemControlPublicationErrorV1> {
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    self.publish_immutable_system_controls_with_observer(request, &mut observer)
+  }
+
+  fn publish_immutable_system_controls_with_observer(
+    &self,
+    request: ImmutableSystemControlBatchPublicationRequestV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, ImmutableSystemControlPublicationErrorV1> {
+    if request.publication_timestamp_ms == 0 || request.publication_timestamp_ms > i64::MAX as u64 {
+      return Err(ImmutableSystemControlPublicationErrorV1::invalid(
+        "immutable_system_control_publication_time",
+        "immutable system-control publication time must fit the signed persistent timestamp range",
+      ));
+    }
+    let maximum_controls = IMMUTABLE_ENTITY_BATCH_COUNT_CAP / 2;
+    if request.controls.is_empty() || request.controls.len() > maximum_controls {
+      return Err(ImmutableSystemControlPublicationErrorV1::invalid(
+        "immutable_system_control_count",
+        format!("immutable system-control count {} is outside 1..={maximum_controls}", request.controls.len()),
+      ));
+    }
+
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if &header.database_id != request.database_id {
+      return Err(ImmutableSystemControlPublicationErrorV1::invalid(
+        "immutable_system_control_database_mismatch",
+        "immutable system-control batch belongs to another logical database",
+      ));
+    }
+    let timestamp = i64::try_from(request.publication_timestamp_ms).map_err(|error| {
+      ImmutableSystemControlPublicationErrorV1::invalid(
+        "immutable_system_control_publication_time",
+        format!("publication timestamp exceeds FileRecord range: {error}"),
+      )
+    })?;
+
+    let mut prepared = Vec::new();
+    prepared.try_reserve_exact(request.controls.len()).map_err(|error| {
+      ImmutableSystemControlPublicationErrorV1::invalid(
+        "immutable_system_control_allocation",
+        format!("prepared control allocation failed: {error}"),
+      )
+    })?;
+    for (index, control) in request.controls.iter().enumerate() {
+      if !control.kind.is_immutable() {
+        return Err(ImmutableSystemControlPublicationErrorV1::invalid(
+          "immutable_system_control_kind",
+          format!("{} is a mutable system-control kind", control.kind.slug()),
+        ));
+      }
+      if request.controls[..index].iter().any(|prior| prior.kind == control.kind && prior.identity == control.identity) {
+        return Err(ImmutableSystemControlPublicationErrorV1::invalid(
+          "immutable_system_control_duplicate",
+          "immutable system-control batch contains a duplicate kind and identity",
+        ));
+      }
+      let path = system_control_path(control.kind, control.identity, SystemControlSlotV1::Immutable)?;
+      let decoded = decode_system_control(control.encoded_control, header.hash_algorithm)?;
+      if decoded.kind != control.kind || decoded.database_id != request.database_id || decoded.identity != control.identity {
+        return Err(ImmutableSystemControlPublicationErrorV1::invalid(
+          "immutable_system_control_prepared_mismatch",
+          "encoded control does not match the requested kind, database, and identity",
+        ));
+      }
+      prepared.push(prepare_system_control_file_record(path, control.encoded_control, header.hash_algorithm, timestamp, timestamp)?);
+    }
+
+    let entity_count = request.controls.len().checked_mul(2).ok_or_else(|| {
+      ImmutableSystemControlPublicationErrorV1::invalid("immutable_system_control_count", "system-control entity count overflowed")
+    })?;
+    let mut entities = Vec::new();
+    entities.try_reserve_exact(entity_count).map_err(|error| {
+      ImmutableSystemControlPublicationErrorV1::invalid(
+        "immutable_system_control_allocation",
+        format!("entity descriptor allocation failed: {error}"),
+      )
+    })?;
+    for (control, prepared) in request.controls.iter().zip(&prepared) {
+      entities.push(ImmutableEntityWriteV1 {
+        entity_version: 0,
+        entry_type: EntryTypeV4::Chunk,
+        flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        key: &prepared.chunk_key,
+        stored_value: control.encoded_control,
+      });
+      entities.push(ImmutableEntityWriteV1 {
+        entity_version: 1,
+        entry_type: EntryTypeV4::FileRecord,
+        flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        key: &prepared.path_key,
+        stored_value: &prepared.record_value,
+      });
+    }
+    let mut control_receipts = Vec::new();
+    control_receipts.try_reserve_exact(request.controls.len()).map_err(|error| {
+      ImmutableSystemControlPublicationErrorV1::invalid(
+        "immutable_system_control_allocation",
+        format!("receipt allocation failed: {error}"),
+      )
+    })?;
+    let result = self.publish_immutable_entity_batch_with_validation(
+      ImmutableEntityBatchPublicationRequestV1 {
+        database_id: request.database_id,
+        entities: &entities,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+      },
+      observer,
+      ImmutableEntityValidationV1::PrevalidatedSystemControls,
+    );
+    match result {
+      Ok(receipt) => {
+        let (receipt, complete) = translate_immutable_system_control_receipt(receipt, request.controls, control_receipts);
+        if complete {
+          Ok(receipt)
+        } else {
+          Err(ImmutableSystemControlPublicationErrorV1::committed(
+            "immutable_system_control_receipt_shape",
+            "stable entity publication returned an invalid system-control receipt shape",
+            receipt,
+          ))
+        }
+      }
+      Err(ImmutableEntityBatchPublicationErrorV1::Invalid { code, message }) => {
+        Err(ImmutableSystemControlPublicationErrorV1::Invalid { code, message })
+      }
+      Err(ImmutableEntityBatchPublicationErrorV1::Authority(source)) => Err(ImmutableSystemControlPublicationErrorV1::Authority(source)),
+      Err(ImmutableEntityBatchPublicationErrorV1::Committed { code, message, receipt }) => {
+        let (translated, _) = translate_immutable_system_control_receipt(*receipt, request.controls, control_receipts);
+        Err(ImmutableSystemControlPublicationErrorV1::committed(code, message, translated))
+      }
+    }
+  }
+
   pub fn publish_immutable_entity_batch(
     &self,
     request: ImmutableEntityBatchPublicationRequestV1<'_>,
@@ -2999,6 +3294,15 @@ impl V4FirstAuthorityPublisher {
     &self,
     request: ImmutableEntityBatchPublicationRequestV1<'_>,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<ImmutableEntityBatchPublicationReceiptV1, ImmutableEntityBatchPublicationErrorV1> {
+    self.publish_immutable_entity_batch_with_validation(request, observer, ImmutableEntityValidationV1::GenericContent)
+  }
+
+  fn publish_immutable_entity_batch_with_validation(
+    &self,
+    request: ImmutableEntityBatchPublicationRequestV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+    validation: ImmutableEntityValidationV1,
   ) -> Result<ImmutableEntityBatchPublicationReceiptV1, ImmutableEntityBatchPublicationErrorV1> {
     if request.publication_timestamp_ms == 0 || request.publication_timestamp_ms > i64::MAX as u64 {
       return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
@@ -3068,8 +3372,10 @@ impl V4FirstAuthorityPublisher {
         ));
       }
     }
-    for entity in request.entities {
-      validate_immutable_entity_content_identity(header.hash_algorithm, *entity)?;
+    if matches!(validation, ImmutableEntityValidationV1::GenericContent) {
+      for entity in request.entities {
+        validate_immutable_entity_content_identity(header.hash_algorithm, *entity)?;
+      }
     }
 
     let mut kv = self.lock_kv()?;
@@ -10318,6 +10624,38 @@ fn immutable_entity_kv_tag(entry_type: EntryTypeV4) -> Result<u8, ImmutableEntit
   }
 }
 
+fn translate_immutable_system_control_receipt(
+  receipt: ImmutableEntityBatchPublicationReceiptV1,
+  controls: &[ImmutableSystemControlWriteV1<'_>],
+  mut translated: Vec<ImmutableSystemControlPublicationReceiptV1>,
+) -> (ImmutableSystemControlBatchPublicationReceiptV1, bool) {
+  let observation = receipt.observation;
+  let idempotent = receipt.idempotent;
+  let expected_entities = controls.len().checked_mul(2);
+  let shape_matches = expected_entities == Some(receipt.entities.len());
+  let mut entities = receipt.entities.into_iter();
+  if shape_matches {
+    for control in controls {
+      let Some(chunk) = entities.next() else {
+        break;
+      };
+      let Some(file) = entities.next() else {
+        break;
+      };
+      translated.push(ImmutableSystemControlPublicationReceiptV1 {
+        kind: control.kind,
+        path_key: file.key,
+        control_sequence: 1,
+        write_sequence: file.write_sequence,
+        idempotent: chunk.idempotent && file.idempotent,
+      });
+    }
+  }
+  let complete = shape_matches && translated.len() == controls.len() && entities.next().is_none();
+  let translated = ImmutableSystemControlBatchPublicationReceiptV1 { controls: translated, observation, idempotent };
+  (translated, complete)
+}
+
 fn validate_immutable_entity_content_identity(
   algorithm: HashAlgorithm,
   entity: ImmutableEntityWriteV1<'_>,
@@ -10609,6 +10947,54 @@ fn load_system_file(
   load_system_file_slot(file, kv, header, kind, identity, SystemControlSlotV1::Immutable)?
     .map(|loaded| loaded.body)
     .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_control_missing", format!("missing {path}")))
+}
+
+fn validate_immutable_system_control_identity(
+  header: &DatabaseHeaderV4,
+  kind: SystemControlKindV1,
+  database_id: &[u8; 16],
+  identity: &[u8],
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if !kind.is_immutable() {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_system_control_kind",
+      format!("{} is a mutable system-control kind", kind.slug()),
+    ));
+  }
+  if &header.database_id != database_id {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_system_control_database_mismatch",
+      "immutable system control belongs to another logical database",
+    ));
+  }
+  system_control_path(kind, identity, SystemControlSlotV1::Immutable)?;
+  Ok(())
+}
+
+fn load_immutable_system_control_file(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  kind: SystemControlKindV1,
+  identity: &[u8],
+) -> Result<Option<LoadedImmutableSystemControlV1>, FirstAuthorityPublicationErrorV1> {
+  let Some(loaded) = load_system_file_slot(file, kv, header, kind, identity, SystemControlSlotV1::Immutable)? else {
+    return Ok(None);
+  };
+  let decoded = decode_system_control(&loaded.body, header.hash_algorithm)?;
+  if decoded.kind != kind || decoded.database_id != header.database_id || decoded.identity != identity {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_system_control_stored_mismatch",
+      "stored immutable control does not match its canonical kind, database, and identity",
+    ));
+  }
+  Ok(Some(LoadedImmutableSystemControlV1 {
+    kind,
+    control_sequence: decoded.sequence,
+    payload_hash: digest_parts(header.hash_algorithm, &[&loaded.body]),
+    bytes: loaded.body,
+    write_sequence: loaded.write_sequence,
+  }))
 }
 
 fn load_reusable_root_admission(

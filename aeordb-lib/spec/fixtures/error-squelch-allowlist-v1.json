@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 4107,
+      "line": 4413,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 7732,
+      "line": 8038,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 7735,
+      "line": 8041,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -11586,7 +11586,7 @@
     {
       "id": "esq-v1-3ca7c7354ec0c886c2c6-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1223,
+      "line": 1225,
       "column": 20,
       "enclosing_item": "validate_task_pin",
       "kind": "error_conversion",
@@ -11596,7 +11596,7 @@
     {
       "id": "esq-v1-30293cd6beabe9864096-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1224,
+      "line": 1226,
       "column": 24,
       "enclosing_item": "validate_task_pin",
       "kind": "error_conversion",
@@ -11606,7 +11606,7 @@
     {
       "id": "esq-v1-c9d79952ac822807a630-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1248,
+      "line": 1250,
       "column": 15,
       "enclosing_item": "validate_mutation_segment",
       "kind": "error_conversion",
@@ -11616,7 +11616,7 @@
     {
       "id": "esq-v1-3fb57d9d7462a148985f-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1249,
+      "line": 1251,
       "column": 24,
       "enclosing_item": "validate_mutation_segment",
       "kind": "error_conversion",
@@ -11626,7 +11626,7 @@
     {
       "id": "esq-v1-9135a1e36c35ba9f6e86-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1366,
+      "line": 1368,
       "column": 27,
       "enclosing_item": "validate_durability_latch",
       "kind": "error_conversion",
@@ -11636,7 +11636,7 @@
     {
       "id": "esq-v1-91e824c8978c7bceb87c-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1425,
+      "line": 1427,
       "column": 15,
       "enclosing_item": "validate_spill_catalog",
       "kind": "error_conversion",
@@ -11646,7 +11646,7 @@
     {
       "id": "esq-v1-096838cce6c0c9c59e7f-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1426,
+      "line": 1428,
       "column": 21,
       "enclosing_item": "validate_spill_catalog",
       "kind": "error_conversion",
@@ -11656,7 +11656,7 @@
     {
       "id": "esq-v1-bc05f6379f3d47cfd76b-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1455,
+      "line": 1457,
       "column": 23,
       "enclosing_item": "validate_spill_catalog",
       "kind": "error_conversion",
@@ -11666,7 +11666,7 @@
     {
       "id": "esq-v1-183ce129bec2b18e04e2-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1550,
+      "line": 1552,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -11676,7 +11676,7 @@
     {
       "id": "esq-v1-6f4a3113d2d5beb839bd-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1555,
+      "line": 1557,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -11686,7 +11686,7 @@
     {
       "id": "esq-v1-69a97ee3f95ff2964be2-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1560,
+      "line": 1562,
       "column": 25,
       "enclosing_item": "i32_at",
       "kind": "panic_method",
@@ -11696,7 +11696,7 @@
     {
       "id": "esq-v1-e15bcf75d53859813dd7-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1565,
+      "line": 1567,
       "column": 25,
       "enclosing_item": "u64_at",
       "kind": "panic_method",
@@ -11706,7 +11706,7 @@
     {
       "id": "esq-v1-54ea56395234f819aaf4-00",
       "file": "aeordb-lib/src/engine/v4/system_control.rs",
-      "line": 1570,
+      "line": 1572,
       "column": 25,
       "enclosing_item": "i64_at",
       "kind": "panic_method",

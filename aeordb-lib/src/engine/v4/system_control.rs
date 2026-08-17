@@ -1187,7 +1187,9 @@ fn validate_root_map_page(body: &[u8], algorithm: HashAlgorithm) -> FormatResult
       return Err(order_error("legacy_root_map_page_order", "legacy root-map rows are zero, duplicate, or out of order"));
     }
     previous = Some(legacy);
-    if !(1..=2).contains(&u16_at(row, 2 * hash_width)?) || u16_at(row, 2 * hash_width + 2)? > 0x0018 {
+    let availability = u16_at(row, 2 * hash_width)?;
+    let reason = u16_at(row, 2 * hash_width + 2)?;
+    if !matches!((availability, reason), (1, 0) | (2, 1..=3)) {
       return Err(kind_error("legacy_root_map_page_row_kind", "root-map availability or reason is invalid"));
     }
     if u64_at(row, 2 * hash_width + 4)? == 0 {
