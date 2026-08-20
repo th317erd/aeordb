@@ -975,8 +975,14 @@
                   - [x] Install recovery exactly once, retain typed degraded evidence on corrupt/missing/discontinuous state, and prove restart without changing legacy query visibility.
                 - [ ] P6-2d-c3c: add the concrete selector-last runtime batch publisher and durable producer spill boundary required by live worker/flush activation.
                   - [x] P6-2d-c3c-a: freeze a versioned, checksummed, bounded index-workspace manifest/object format and independent cross-platform fixtures before its first writer.
-                  - [ ] P6-2d-c3c-b: implement private no-follow immutable workspace append/reopen with exact identity, chain, byte/count, cancellation, memory, and durability validation.
+                  - [x] P6-2d-c3c-b: implement private no-follow immutable workspace append/reopen with exact identity, chain, byte/count, cancellation, memory, and durability validation.
+                    - [x] Freeze one disconnected store API over explicit database, destination, workspace, runtime, and hash-profile identity.
+                    - [x] Stream AIRB writes and reopen validation without a payload-sized duplicate allocation; keep AITK bounded by its frozen 16 KiB scope cap.
+                    - [x] Publish each immutable object before its immutable cumulative manifest and make exact retries reuse only byte-identical artifacts.
+                    - [x] Reopen a selected head by exact digest/sequence/bytes and validate every predecessor, object, cumulative count, cumulative byte total, and canonical path under hard traversal limits.
+                    - [x] Prove cancellation, pressure, capacity, no-follow/private permissions, orphan prefixes, conflicting collisions, tamper/truncation, foreign identity, and reservation release at both hash widths.
                   - [ ] P6-2d-c3c-c: publish frozen runtime batches through one cumulative workspace head and the existing IndexOperationControl selector-last checkpoint authority; preselection failure must retain the exact batch and commit uncertainty must fail closed.
+                    - [ ] Replace the AeorDB-scope path validator on external workspace descriptors with canonical native-path validation before wiring Linux, macOS, and Windows workspace paths into selector state.
                   - [ ] P6-2d-c3c-d: validate selected external workspace state during bounded checkpoint recovery and preserve a truthful no-journal dirty-overlay recovery contract without claiming complete coverage.
                   - [ ] P6-2d-c3c-e: implement the same workspace's durable body-free producer-task spill boundary, including idempotent retry, refusal retention, and replay-ready identity.
                   - [ ] P6-2d-c3c-f: prove crash prefixes, tamper/truncation, stale selectors, restart, cancellation, pressure, widest-hash operation, architecture uniqueness, and unchanged v3 query authority before landing c3c.

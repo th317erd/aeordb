@@ -108,6 +108,43 @@ pub struct IndexWorkspaceObjectV1<'a> {
   pub payload: &'a [u8],
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct IndexWorkspaceObjectHeaderWriteV1 {
+  pub kind: IndexWorkspaceObjectKindV1,
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: [u8; 16],
+  pub destination_physical_instance_id: [u8; 16],
+  pub workspace_id: [u8; 16],
+  pub runtime_id: [u8; 16],
+  pub object_id: [u8; 16],
+  pub object_sequence: u64,
+  pub created_at_ms: u64,
+  pub payload_length: usize,
+  pub logical_record_count: u64,
+  pub minimum_publication_sequence: u64,
+  pub maximum_publication_sequence: u64,
+  pub payload_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct IndexWorkspaceObjectHeaderV1 {
+  pub kind: IndexWorkspaceObjectKindV1,
+  pub hash_algorithm: HashAlgorithm,
+  pub database_id: [u8; 16],
+  pub destination_physical_instance_id: [u8; 16],
+  pub workspace_id: [u8; 16],
+  pub runtime_id: [u8; 16],
+  pub object_id: [u8; 16],
+  pub object_sequence: u64,
+  pub created_at_ms: u64,
+  pub payload_length: usize,
+  pub logical_record_count: u64,
+  pub minimum_publication_sequence: u64,
+  pub maximum_publication_sequence: u64,
+  pub payload_digest: [u8; 32],
+  pub total_length: usize,
+}
+
 pub fn encode_index_workspace_manifest_v1(
   request: &IndexWorkspaceManifestWriteV1,
 ) -> FormatResult<[u8; INDEX_WORKSPACE_MANIFEST_LENGTH_V1]> {
@@ -226,7 +263,52 @@ pub fn index_workspace_manifest_digest_v1(bytes: &[u8]) -> FormatResult<[u8; 32]
 }
 
 pub fn encode_index_workspace_object_v1(request: &IndexWorkspaceObjectWriteV1<'_>) -> FormatResult<Vec<u8>> {
+  validate_index_workspace_object_payload_v1(
+    request.kind,
+    request.payload,
+    request.hash_algorithm,
+    request.logical_record_count,
+    request.minimum_publication_sequence,
+    request.maximum_publication_sequence,
+  )?;
+  let header = encode_index_workspace_object_header_v1(&IndexWorkspaceObjectHeaderWriteV1 {
+    kind: request.kind,
+    hash_algorithm: request.hash_algorithm,
+    database_id: request.database_id,
+    destination_physical_instance_id: request.destination_physical_instance_id,
+    workspace_id: request.workspace_id,
+    runtime_id: request.runtime_id,
+    object_id: request.object_id,
+    object_sequence: request.object_sequence,
+    created_at_ms: request.created_at_ms,
+    payload_length: request.payload.len(),
+    logical_record_count: request.logical_record_count,
+    minimum_publication_sequence: request.minimum_publication_sequence,
+    maximum_publication_sequence: request.maximum_publication_sequence,
+    payload_digest: *blake3::hash(request.payload).as_bytes(),
+  })?;
   let total_length = checked_object_length(request.payload.len())?;
+  let mut encoded = Vec::new();
+  encoded.try_reserve_exact(total_length).map_err(|error| {
+    format_error(
+      MalformedInputClass::AllocationAmplification,
+      "index_workspace_object_allocation",
+      format!("object allocation failed: {error}"),
+    )
+  })?;
+  encoded.resize(total_length, 0);
+  encoded[..INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1].copy_from_slice(&header);
+  let payload_end = INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1 + request.payload.len();
+  encoded[INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1..payload_end].copy_from_slice(request.payload);
+  let checksum = crc32fast::hash(&encoded[..payload_end]);
+  encoded[payload_end..].copy_from_slice(&checksum.to_le_bytes());
+  Ok(encoded)
+}
+
+pub(super) fn encode_index_workspace_object_header_v1(
+  request: &IndexWorkspaceObjectHeaderWriteV1,
+) -> FormatResult<[u8; INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1]> {
+  let total_length = checked_object_length(request.payload_length)?;
   validate_object_fields(
     request.hash_algorithm,
     request.database_id,
@@ -239,16 +321,15 @@ pub fn encode_index_workspace_object_v1(request: &IndexWorkspaceObjectWriteV1<'_
     request.logical_record_count,
     request.minimum_publication_sequence,
     request.maximum_publication_sequence,
-    request.payload.len(),
+    request.payload_length,
   )?;
-  validate_index_workspace_object_payload_v1(
-    request.kind,
-    request.payload,
-    request.hash_algorithm,
-    request.logical_record_count,
-    request.minimum_publication_sequence,
-    request.maximum_publication_sequence,
-  )?;
+  if request.payload_digest.iter().all(|byte| *byte == 0) {
+    return Err(format_error(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "index_workspace_payload_digest",
+      "workspace object payload digest is all zeroes",
+    ));
+  }
   let total_length_u64 = u64::try_from(total_length).map_err(|error| {
     format_error(
       MalformedInputClass::LengthCountOrArithmeticOverflow,
@@ -256,22 +337,14 @@ pub fn encode_index_workspace_object_v1(request: &IndexWorkspaceObjectWriteV1<'_
       format!("object length exceeds u64: {error}"),
     )
   })?;
-  let payload_length = u64::try_from(request.payload.len()).map_err(|error| {
+  let payload_length = u64::try_from(request.payload_length).map_err(|error| {
     format_error(
       MalformedInputClass::LengthCountOrArithmeticOverflow,
       "index_workspace_payload_length",
       format!("payload length exceeds u64: {error}"),
     )
   })?;
-  let mut encoded = Vec::new();
-  encoded.try_reserve_exact(total_length).map_err(|error| {
-    format_error(
-      MalformedInputClass::AllocationAmplification,
-      "index_workspace_object_allocation",
-      format!("object allocation failed: {error}"),
-    )
-  })?;
-  encoded.resize(total_length, 0);
+  let mut encoded = [0u8; INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1];
   encoded[..4].copy_from_slice(OBJECT_MAGIC);
   encoded[4..6].copy_from_slice(&OBJECT_SCHEMA_VERSION.to_le_bytes());
   encoded[6..8].copy_from_slice(&request.kind.id().to_le_bytes());
@@ -289,11 +362,7 @@ pub fn encode_index_workspace_object_v1(request: &IndexWorkspaceObjectWriteV1<'_
   encoded[128..136].copy_from_slice(&request.logical_record_count.to_le_bytes());
   encoded[136..144].copy_from_slice(&request.minimum_publication_sequence.to_le_bytes());
   encoded[144..152].copy_from_slice(&request.maximum_publication_sequence.to_le_bytes());
-  encoded[152..184].copy_from_slice(blake3::hash(request.payload).as_bytes());
-  let payload_end = INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1 + request.payload.len();
-  encoded[INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1..payload_end].copy_from_slice(request.payload);
-  let checksum = crc32fast::hash(&encoded[..payload_end]);
-  encoded[payload_end..].copy_from_slice(&checksum.to_le_bytes());
+  encoded[152..184].copy_from_slice(&request.payload_digest);
   Ok(encoded)
 }
 
@@ -303,6 +372,63 @@ pub fn decode_index_workspace_object_v1(bytes: &[u8]) -> FormatResult<IndexWorks
       MalformedInputClass::TruncationOrTrailingBytes,
       "index_workspace_object_length",
       "workspace object length is outside the frozen bounds",
+    ));
+  }
+  let header = decode_index_workspace_object_header_v1(&bytes[..INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1], bytes.len())?;
+  let payload_end = INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1 + header.payload_length;
+  if u32_at(bytes, payload_end) != crc32fast::hash(&bytes[..payload_end]) {
+    return Err(format_error(
+      MalformedInputClass::ChecksumOrIntegrityMismatch,
+      "index_workspace_object_checksum",
+      "workspace object CRC32 does not match",
+    ));
+  }
+  let payload = &bytes[INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1..payload_end];
+  if blake3::hash(payload).as_bytes() != &header.payload_digest {
+    return Err(format_error(
+      MalformedInputClass::ChecksumOrIntegrityMismatch,
+      "index_workspace_payload_digest",
+      "workspace object payload digest does not match",
+    ));
+  }
+  let decoded = IndexWorkspaceObjectV1 {
+    kind: header.kind,
+    hash_algorithm: header.hash_algorithm,
+    database_id: header.database_id,
+    destination_physical_instance_id: header.destination_physical_instance_id,
+    workspace_id: header.workspace_id,
+    runtime_id: header.runtime_id,
+    object_id: header.object_id,
+    object_sequence: header.object_sequence,
+    created_at_ms: header.created_at_ms,
+    logical_record_count: header.logical_record_count,
+    minimum_publication_sequence: header.minimum_publication_sequence,
+    maximum_publication_sequence: header.maximum_publication_sequence,
+    payload_digest: header.payload_digest,
+    payload,
+  };
+  validate_index_workspace_object_payload_v1(
+    decoded.kind,
+    decoded.payload,
+    decoded.hash_algorithm,
+    decoded.logical_record_count,
+    decoded.minimum_publication_sequence,
+    decoded.maximum_publication_sequence,
+  )?;
+  Ok(decoded)
+}
+
+pub(super) fn decode_index_workspace_object_header_v1(
+  bytes: &[u8],
+  actual_total_length: usize,
+) -> FormatResult<IndexWorkspaceObjectHeaderV1> {
+  if bytes.len() != INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1
+    || !(INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1 + 4..=INDEX_WORKSPACE_OBJECT_MAX_LENGTH_V1).contains(&actual_total_length)
+  {
+    return Err(format_error(
+      MalformedInputClass::TruncationOrTrailingBytes,
+      "index_workspace_object_length",
+      "workspace object header or actual length is outside the frozen bounds",
     ));
   }
   if &bytes[..4] != OBJECT_MAGIC || u16_at(bytes, 4) != OBJECT_SCHEMA_VERSION {
@@ -337,8 +463,8 @@ pub fn decode_index_workspace_object_v1(bytes: &[u8]) -> FormatResult<IndexWorks
     )
   })?;
   if usize::from(u16_at(bytes, 8)) != INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1
-    || total_length != bytes.len()
-    || checked_object_length(payload_length)? != bytes.len()
+    || total_length != actual_total_length
+    || checked_object_length(payload_length)? != actual_total_length
   {
     return Err(format_error(
       MalformedInputClass::TruncationOrTrailingBytes,
@@ -353,24 +479,15 @@ pub fn decode_index_workspace_object_v1(bytes: &[u8]) -> FormatResult<IndexWorks
       "workspace object flags are nonzero",
     ));
   }
-  let payload_end = INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1 + payload_length;
-  if u32_at(bytes, payload_end) != crc32fast::hash(&bytes[..payload_end]) {
-    return Err(format_error(
-      MalformedInputClass::ChecksumOrIntegrityMismatch,
-      "index_workspace_object_checksum",
-      "workspace object CRC32 does not match",
-    ));
-  }
-  let payload = &bytes[INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1..payload_end];
   let payload_digest = array_at(bytes, 152);
-  if blake3::hash(payload).as_bytes() != &payload_digest {
+  if payload_digest.iter().all(|byte| *byte == 0) {
     return Err(format_error(
-      MalformedInputClass::ChecksumOrIntegrityMismatch,
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
       "index_workspace_payload_digest",
-      "workspace object payload digest does not match",
+      "workspace object payload digest is all zeroes",
     ));
   }
-  let decoded = IndexWorkspaceObjectV1 {
+  let decoded = IndexWorkspaceObjectHeaderV1 {
     kind,
     hash_algorithm,
     database_id: array_at(bytes, 24),
@@ -384,7 +501,8 @@ pub fn decode_index_workspace_object_v1(bytes: &[u8]) -> FormatResult<IndexWorks
     minimum_publication_sequence: u64_at(bytes, 136),
     maximum_publication_sequence: u64_at(bytes, 144),
     payload_digest,
-    payload,
+    payload_length,
+    total_length,
   };
   validate_object_fields(
     decoded.hash_algorithm,
@@ -398,15 +516,7 @@ pub fn decode_index_workspace_object_v1(bytes: &[u8]) -> FormatResult<IndexWorks
     decoded.logical_record_count,
     decoded.minimum_publication_sequence,
     decoded.maximum_publication_sequence,
-    decoded.payload.len(),
-  )?;
-  validate_index_workspace_object_payload_v1(
-    decoded.kind,
-    decoded.payload,
-    decoded.hash_algorithm,
-    decoded.logical_record_count,
-    decoded.minimum_publication_sequence,
-    decoded.maximum_publication_sequence,
+    decoded.payload_length,
   )?;
   Ok(decoded)
 }
