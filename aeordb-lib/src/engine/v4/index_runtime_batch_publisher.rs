@@ -11,8 +11,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{HashAlgorithm, VirtualClock};
+use crate::engine::memory_coordinator::MemoryReservation;
 
-use super::contract_generated::capability_bit;
 use super::index_artifact::EncodedImmutableIndexArtifactV1;
 use super::index_coordinator::FrozenIndexBatchV1;
 use super::index_coordinator_recovery::{IndexCheckpointRootV1, IndexRecoveryOwnerV1, IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1};
@@ -20,13 +20,15 @@ use super::index_runtime_owner::{
   IndexRuntimeBatchPublisherV1, IndexRuntimePublicationErrorClassV1, IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1,
 };
 use super::index_recovery_store::NativeIndexRecoveryStoreV1;
+use super::index_runtime_dirty_overlay_recovery::{
+  INDEX_RUNTIME_DIRTY_OVERLAY_PHASE_V1, RecoveredIndexRuntimeDirtyOverlayV1, dirty_overlay_capabilities_v1,
+};
 use super::index_runtime_workspace_store::{DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceStoreErrorV1};
 use super::index_task::{
   ExternalWorkspaceDescriptorWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, encode_index_task_checkpoint,
 };
 
-pub const INDEX_RUNTIME_DIRTY_OVERLAY_RESUME_KEY_V1: &[u8] = b"aeordb.index-runtime-dirty-overlay.v1";
-const DIRTY_OVERLAY_PHASE: u16 = 4;
+pub use super::index_runtime_dirty_overlay_recovery::INDEX_RUNTIME_DIRTY_OVERLAY_RESUME_KEY_V1;
 const MAX_PUBLICATION_CONTEXT_BYTES: usize = 4 * 1024;
 
 pub type NativeIndexRuntimeBatchPublisherV1 = DurableIndexRuntimeBatchPublisherV1<NativeIndexRecoveryStoreV1>;
@@ -88,6 +90,7 @@ pub struct DurableIndexRuntimeBatchPublisherV1<Store> {
   store: Store,
   cancellation: CancellationToken,
   clock: Arc<dyn VirtualClock>,
+  _recovered_reservation: Option<MemoryReservation>,
 }
 
 impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<Store> {
@@ -140,6 +143,60 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       store,
       cancellation,
       clock,
+      _recovered_reservation: None,
+    })
+  }
+
+  pub fn new_resumed(
+    recovered: Box<RecoveredIndexRuntimeDirtyOverlayV1>,
+    mut store: Store,
+    clock: Arc<dyn VirtualClock>,
+  ) -> Result<Self, IndexRuntimeBatchPublisherBuildErrorV1> {
+    let parts = (*recovered).into_parts();
+    let workspace_identity = parts.workspace.identity();
+    if parts.cancellation.is_cancelled()
+      || parts.owner.database_id() != workspace_identity.database_id()
+      || store.database_id() != workspace_identity.database_id()
+      || store.destination_physical_instance_id() != workspace_identity.destination_physical_instance_id()
+      || store.hash_algorithm() != workspace_identity.hash_algorithm()
+      || parts.owner.index_id().len() != workspace_identity.hash_algorithm().hash_length()
+      || parts.source_root.len() != workspace_identity.hash_algorithm().hash_length()
+      || parts.source_root.iter().all(|byte| *byte == 0)
+      || parts.generation == 0
+      || parts.started_at_ms == 0
+      || parts.updated_at_ms < parts.started_at_ms
+      || parts.workspace.head().is_none()
+    {
+      return Err(IndexRuntimeBatchPublisherBuildErrorV1::Invalid(
+        "resumed publisher identity, source root, generation, cancellation, or workspace head is invalid".to_string(),
+      ));
+    }
+    let observed = store.load_selected(&parts.owner).map_err(IndexRuntimeBatchPublisherBuildErrorV1::Store)?;
+    if parts.cancellation.is_cancelled() {
+      return Err(IndexRuntimeBatchPublisherBuildErrorV1::Invalid(
+        "resumed publisher was canceled while rechecking selected checkpoint authority".to_string(),
+      ));
+    }
+    if observed.as_ref() != Some(&parts.selected) {
+      return Err(IndexRuntimeBatchPublisherBuildErrorV1::Invalid(
+        "resumed publisher selected checkpoint changed after bounded recovery".to_string(),
+      ));
+    }
+    Ok(Self {
+      hash_algorithm: workspace_identity.hash_algorithm(),
+      owner: parts.owner,
+      source_root: parts.source_root,
+      generation: parts.generation,
+      started_at_ms: parts.started_at_ms,
+      selected_updated_at_ms: parts.updated_at_ms,
+      selected: Some(parts.selected),
+      prepared: None,
+      pending: None,
+      workspace: parts.workspace,
+      store,
+      cancellation: parts.cancellation,
+      clock,
+      _recovered_reservation: Some(parts.reservation),
     })
   }
 
@@ -201,7 +258,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
   ) -> Result<super::index_artifact::EncodedImmutableIndexArtifactV1, IndexRuntimePublicationErrorV1> {
     let selected = head.selected_descriptor();
     let path = persisted_workspace_path(selected.workspace_path())?;
-    let required_capabilities = dirty_overlay_capabilities();
+    let required_capabilities = dirty_overlay_capabilities_v1();
     encode_index_task_checkpoint(&IndexTaskCheckpointWriteV1 {
       hash_algorithm: self.hash_algorithm,
       task_id: self.owner.operation_id(),
@@ -209,7 +266,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       generation: self.generation,
       task_kind: IndexTaskKindV1::Reconcile,
       state: IndexTaskStateV1::Running,
-      phase: DIRTY_OVERLAY_PHASE,
+      phase: INDEX_RUNTIME_DIRTY_OVERLAY_PHASE_V1,
       required_capabilities: &required_capabilities,
       started_at_ms: self.started_at_ms,
       updated_at_ms: timestamp_ms,
@@ -388,14 +445,6 @@ fn runtime_batch_object_id(batch: &FrozenIndexBatchV1) -> [u8; 16] {
   let mut object_id = [0; 16];
   object_id.copy_from_slice(&digest.finalize().as_bytes()[..16]);
   object_id
-}
-
-fn dirty_overlay_capabilities() -> [u8; 32] {
-  let mut capabilities = [0u8; 32];
-  for bit in [capability_bit::INDEX_ARTIFACT_V1, capability_bit::DURABLE_TASK_PIN_V1] {
-    capabilities[usize::from(bit / 8)] |= 1 << (bit % 8);
-  }
-  capabilities
 }
 
 fn persisted_workspace_path(path: &Path) -> Result<String, IndexRuntimePublicationErrorV1> {

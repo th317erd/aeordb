@@ -512,14 +512,17 @@ fn free_space_and_workspace_byte_caps_refuse_before_installing_an_artifact() {
   let free_database = database_file(free_directory.path());
   let free_scratch = free_directory.path().join("scratch");
   fs::create_dir(&free_scratch).unwrap();
-  assert!(DurableIndexRuntimeWorkspaceV1::create(
+  let error = match DurableIndexRuntimeWorkspaceV1::create(
     &free_database,
     identity(),
     IndexRuntimeWorkspaceOptionsV1::new(Some(free_scratch.clone()), 8 * 1024 * 1024, u64::MAX, 16).unwrap(),
     CancellationToken::new(),
     &memory,
-  )
-  .is_err());
+  ) {
+    Ok(_) => panic!("workspace ignored unavailable minimum free space"),
+    Err(error) => error,
+  };
+  assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Resource(_)));
   assert!(!free_scratch.join(hex::encode(identity().database_id())).exists());
 }
 

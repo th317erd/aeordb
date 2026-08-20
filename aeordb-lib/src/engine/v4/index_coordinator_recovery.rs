@@ -75,6 +75,10 @@ impl IndexRecoveryOwnerV1 {
   pub const fn operation_id(&self) -> [u8; 16] {
     self.operation_id
   }
+
+  pub(super) fn retained_heap_capacity(&self) -> usize {
+    self.index_id.capacity()
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,27 +309,16 @@ fn validate_checkpoint_from_key(
   memory: &MemoryCoordinator,
   cancellation: &CancellationToken,
 ) -> Result<IndexRecoveryOutcomeV1, IndexRecoveryErrorV1> {
-  if selected.checkpoint_key.len() != hash_algorithm.hash_length() || selected.checkpoint_key.iter().all(|byte| *byte == 0) {
-    return Ok(reconciliation(IndexRecoveryReasonV1::CheckpointCorrupt));
-  }
-  let checkpoint_loaded = match load_reserved(store, &selected.checkpoint_key, 4 * 1_024 * 1_024, memory, cancellation)? {
-    ArtifactLoadOutcomeV1::Loaded(loaded) => loaded,
-    ArtifactLoadOutcomeV1::Missing => return Ok(reconciliation(IndexRecoveryReasonV1::CheckpointMissing)),
-    ArtifactLoadOutcomeV1::Corrupt(evidence) => {
-      return Ok(reconciliation_from(IndexRecoveryReasonV1::CheckpointCorrupt, evidence));
+  let checkpoint_loaded = match load_index_checkpoint_from_key_v1(store, hash_algorithm, owner, selected, memory, cancellation)? {
+    LoadedIndexCheckpointOutcomeV1::Loaded(loaded) => loaded,
+    LoadedIndexCheckpointOutcomeV1::ReconciliationRequired { reason, evidence } => {
+      return Ok(IndexRecoveryOutcomeV1::ReconciliationRequired { reason, evidence });
     }
-    ArtifactLoadOutcomeV1::LimitExceeded => return Ok(reconciliation(IndexRecoveryReasonV1::RecoveryLimitExceeded)),
   };
   let checkpoint = match decode_index_task_checkpoint(&checkpoint_loaded.bytes, hash_algorithm) {
     Ok(checkpoint) => checkpoint,
     Err(source) => return Ok(reconciliation_from(IndexRecoveryReasonV1::CheckpointCorrupt, source)),
   };
-  if checkpoint.key != selected.checkpoint_key || checkpoint.checkpoint_sequence != selected.checkpoint_sequence {
-    return Ok(reconciliation(IndexRecoveryReasonV1::CheckpointDiscontinuous));
-  }
-  if let Err(source) = validate_checkpoint_owner(&checkpoint, owner, hash_algorithm) {
-    return Ok(reconciliation_from(IndexRecoveryReasonV1::CheckpointDiscontinuous, source));
-  }
   let attachments = match validate_attachment_closure(store, hash_algorithm, &checkpoint, options, memory, cancellation)? {
     AttachmentClosureOutcomeV1::Valid(attachments) => attachments,
     AttachmentClosureOutcomeV1::ReconciliationRequired { reason, evidence } => {
@@ -353,6 +346,57 @@ fn validate_checkpoint_from_key(
     rooted_artifact_count: attachments.rooted_artifact_count,
     journal,
   }))
+}
+
+pub(super) enum LoadedIndexCheckpointOutcomeV1 {
+  Loaded(LoadedIndexCheckpointV1),
+  ReconciliationRequired { reason: IndexRecoveryReasonV1, evidence: Option<String> },
+}
+
+pub(super) struct LoadedIndexCheckpointV1 {
+  pub(super) bytes: Vec<u8>,
+  _reservation: MemoryReservation,
+}
+
+pub(super) fn load_index_checkpoint_from_key_v1(
+  store: &mut dyn IndexRecoveryStoreV1,
+  hash_algorithm: HashAlgorithm,
+  owner: &IndexRecoveryOwnerV1,
+  selected: &IndexCheckpointRootV1,
+  memory: &MemoryCoordinator,
+  cancellation: &CancellationToken,
+) -> Result<LoadedIndexCheckpointOutcomeV1, IndexRecoveryErrorV1> {
+  if selected.checkpoint_key.len() != hash_algorithm.hash_length() || selected.checkpoint_key.iter().all(|byte| *byte == 0) {
+    return Ok(loaded_checkpoint_reconciliation(IndexRecoveryReasonV1::CheckpointCorrupt, None));
+  }
+  let checkpoint_loaded = match load_reserved(store, &selected.checkpoint_key, 4 * 1_024 * 1_024, memory, cancellation)? {
+    ArtifactLoadOutcomeV1::Loaded(loaded) => loaded,
+    ArtifactLoadOutcomeV1::Missing => return Ok(loaded_checkpoint_reconciliation(IndexRecoveryReasonV1::CheckpointMissing, None)),
+    ArtifactLoadOutcomeV1::Corrupt(evidence) => {
+      return Ok(loaded_checkpoint_reconciliation(IndexRecoveryReasonV1::CheckpointCorrupt, Some(evidence.to_string())));
+    }
+    ArtifactLoadOutcomeV1::LimitExceeded => {
+      return Ok(loaded_checkpoint_reconciliation(IndexRecoveryReasonV1::RecoveryLimitExceeded, None));
+    }
+  };
+  let checkpoint = match decode_index_task_checkpoint(&checkpoint_loaded.bytes, hash_algorithm) {
+    Ok(checkpoint) => checkpoint,
+    Err(source) => {
+      return Ok(loaded_checkpoint_reconciliation(IndexRecoveryReasonV1::CheckpointCorrupt, Some(source.to_string())));
+    }
+  };
+  if checkpoint.key != selected.checkpoint_key || checkpoint.checkpoint_sequence != selected.checkpoint_sequence {
+    return Ok(loaded_checkpoint_reconciliation(IndexRecoveryReasonV1::CheckpointDiscontinuous, None));
+  }
+  if let Err(source) = validate_checkpoint_owner(&checkpoint, owner, hash_algorithm) {
+    return Ok(loaded_checkpoint_reconciliation(IndexRecoveryReasonV1::CheckpointDiscontinuous, Some(source.to_string())));
+  }
+  let LoadedArtifactV1 { bytes, reservation } = checkpoint_loaded;
+  Ok(LoadedIndexCheckpointOutcomeV1::Loaded(LoadedIndexCheckpointV1 { bytes, _reservation: reservation }))
+}
+
+fn loaded_checkpoint_reconciliation(reason: IndexRecoveryReasonV1, evidence: Option<String>) -> LoadedIndexCheckpointOutcomeV1 {
+  LoadedIndexCheckpointOutcomeV1::ReconciliationRequired { reason, evidence }
 }
 
 fn validate_attachment_closure(

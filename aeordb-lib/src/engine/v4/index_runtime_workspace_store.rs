@@ -56,6 +56,8 @@ pub enum IndexRuntimeWorkspaceStoreErrorV1 {
   State(String),
   #[error("index runtime workspace capacity failed: {0}")]
   Capacity(String),
+  #[error("index runtime workspace resource pressure: {0}")]
+  Resource(String),
   #[error("index runtime workspace allocation failed: {0}")]
   Allocation(String),
   #[error("index runtime workspace format failed: {0}")]
@@ -90,7 +92,16 @@ impl From<FormatError> for IndexRuntimeWorkspaceStoreErrorV1 {
 
 impl From<PrivateWorkspaceErrorV1> for IndexRuntimeWorkspaceStoreErrorV1 {
   fn from(error: PrivateWorkspaceErrorV1) -> Self {
-    Self::Workspace(error.to_string())
+    match error {
+      PrivateWorkspaceErrorV1::Path(context) => Self::Workspace(context),
+      #[cfg(windows)]
+      PrivateWorkspaceErrorV1::State(context) => Self::Workspace(context),
+      PrivateWorkspaceErrorV1::Capacity(context) => Self::Resource(context),
+      #[cfg(windows)]
+      PrivateWorkspaceErrorV1::Allocation(context) => Self::Allocation(context),
+      PrivateWorkspaceErrorV1::Io { operation, source } => Self::Io { operation, source },
+      PrivateWorkspaceErrorV1::Durability(source) => Self::Durability(source),
+    }
   }
 }
 
@@ -301,6 +312,18 @@ impl DurableIndexRuntimeWorkspaceV1 {
 
   pub fn head(&self) -> Option<&IndexRuntimeWorkspaceHeadV1> {
     self.head.as_ref()
+  }
+
+  pub(super) fn retained_heap_capacity(&self) -> Option<usize> {
+    let capacities = [
+      self.options.scratch_root.as_ref().map_or(0, PathBuf::capacity),
+      self.workspace_path.capacity(),
+      self.manifests_path.capacity(),
+      self.runtime_objects_path.capacity(),
+      self.producer_objects_path.capacity(),
+      self.head.as_ref().map_or(0, |head| head.selected.workspace_path.capacity()),
+    ];
+    capacities.into_iter().try_fold(0usize, usize::checked_add)
   }
 
   pub fn create(

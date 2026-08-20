@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
 use aeordb::engine::kv_stages::initial_block_size;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
 use aeordb::engine::v4::first_authority::{FirstAuthorityPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher};
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
@@ -15,12 +15,17 @@ use aeordb::engine::v4::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1,
 };
 use aeordb::engine::v4::index_coordinator_recovery::{
-  IndexCheckpointRootV1, IndexRecoveryOwnerV1, IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1,
+  IndexCheckpointRootV1, IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryOwnerV1, IndexRecoveryReasonV1,
+  IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1, recover_index_checkpoint_v1,
 };
 use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_operation_control::IndexOperationKindV1;
 use aeordb::engine::v4::index_recovery_store::{NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1};
 use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
+use aeordb::engine::v4::index_runtime_dirty_overlay_recovery::{
+  IndexRuntimeDirtyOverlayRecoveryErrorV1, IndexRuntimeDirtyOverlayRecoveryOutcomeV1, IndexRuntimeDirtyOverlayRecoveryReasonV1,
+  recover_index_runtime_dirty_overlay_v1,
+};
 use aeordb::engine::v4::index_runtime_batch_publisher::{
   DurableIndexRuntimeBatchPublisherV1, INDEX_RUNTIME_DIRTY_OVERLAY_RESUME_KEY_V1, IndexRuntimeCheckpointStoreV1,
 };
@@ -29,8 +34,8 @@ use aeordb::engine::v4::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
 };
 use aeordb::engine::v4::index_task::{
-  ExternalWorkspaceDescriptorWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, decode_index_task_checkpoint,
-  encode_index_task_checkpoint,
+  ExternalWorkspaceDescriptorWriteV1, IndexTaskAttachmentRoleV1, IndexTaskAttachmentWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1,
+  IndexTaskStateV1, decode_index_task_checkpoint, encode_index_task_checkpoint,
 };
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use aeordb::engine::{DiskKVStore, HashAlgorithm, MockClock, VirtualClock};
@@ -59,30 +64,57 @@ struct FakeState {
   selected: Option<IndexCheckpointRootV1>,
   selector_behavior: SelectorBehavior,
   selector_calls: u64,
+  selected_loads: u64,
+  move_selected_on_load: Option<(u64, IndexCheckpointRootV1)>,
+  cancel_on_selected_load: Option<(u64, CancellationToken)>,
+  cancel_on_immutable_load: Option<CancellationToken>,
   refuse_loads: bool,
 }
 
 impl Default for FakeState {
   fn default() -> Self {
-    Self { immutable: BTreeMap::new(), selected: None, selector_behavior: SelectorBehavior::Commit, selector_calls: 0, refuse_loads: false }
+    Self {
+      immutable: BTreeMap::new(),
+      selected: None,
+      selector_behavior: SelectorBehavior::Commit,
+      selector_calls: 0,
+      selected_loads: 0,
+      move_selected_on_load: None,
+      cancel_on_selected_load: None,
+      cancel_on_immutable_load: None,
+      refuse_loads: false,
+    }
   }
 }
 
 struct FakeStore {
   state: Arc<Mutex<FakeState>>,
+  hash_algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  destination_id: [u8; 16],
+}
+
+impl FakeStore {
+  fn new(state: Arc<Mutex<FakeState>>) -> Self {
+    Self::for_algorithm(state, ALGORITHM)
+  }
+
+  fn for_algorithm(state: Arc<Mutex<FakeState>>, hash_algorithm: HashAlgorithm) -> Self {
+    Self { state, hash_algorithm, database_id: DATABASE_ID, destination_id: DESTINATION_ID }
+  }
 }
 
 impl IndexRuntimeCheckpointStoreV1 for FakeStore {
   fn hash_algorithm(&self) -> HashAlgorithm {
-    ALGORITHM
+    self.hash_algorithm
   }
 
   fn database_id(&self) -> [u8; 16] {
-    DATABASE_ID
+    self.database_id
   }
 
   fn destination_physical_instance_id(&self) -> [u8; 16] {
-    DESTINATION_ID
+    self.destination_id
   }
 }
 
@@ -92,7 +124,14 @@ impl IndexRecoveryStoreV1 for FakeStore {
   }
 
   fn load_immutable(&mut self, key: &[u8], expected_length: u64) -> Result<Option<Vec<u8>>, IndexRecoveryStoreErrorV1> {
-    Ok(self.state.lock().unwrap().immutable.get(key).filter(|bytes| bytes.len() as u64 == expected_length).cloned())
+    let (loaded, cancellation) = {
+      let state = self.state.lock().unwrap();
+      (state.immutable.get(key).filter(|bytes| bytes.len() as u64 == expected_length).cloned(), state.cancel_on_immutable_load.clone())
+    };
+    if let Some(cancellation) = cancellation {
+      cancellation.cancel();
+    }
+    Ok(loaded)
   }
 
   fn put_immutable(
@@ -115,9 +154,20 @@ impl IndexRecoveryStoreV1 for FakeStore {
   }
 
   fn load_selected(&mut self, _owner: &IndexRecoveryOwnerV1) -> Result<Option<IndexCheckpointRootV1>, IndexRecoveryStoreErrorV1> {
-    let state = self.state.lock().unwrap();
+    let mut state = self.state.lock().unwrap();
     if state.refuse_loads {
       return Err(IndexRecoveryStoreErrorV1::new("fake_unreadable", "selected root is unreadable"));
+    }
+    state.selected_loads += 1;
+    if let Some((load, next)) = state.move_selected_on_load.clone() {
+      if state.selected_loads == load {
+        state.selected = Some(next);
+      }
+    }
+    if let Some((load, cancellation)) = state.cancel_on_selected_load.clone() {
+      if state.selected_loads == load {
+        cancellation.cancel();
+      }
     }
     Ok(state.selected.clone())
   }
@@ -168,6 +218,10 @@ struct Fixture {
 
 impl Fixture {
   fn new(selector_behavior: SelectorBehavior) -> (Self, FrozenIndexBatchV1) {
+    Self::new_for(ALGORITHM, selector_behavior)
+  }
+
+  fn new_for(hash_algorithm: HashAlgorithm, selector_behavior: SelectorBehavior) -> (Self, FrozenIndexBatchV1) {
     let directory = tempdir().unwrap();
     let database = directory.path().join("source.aeordb");
     fs::write(&database, b"source").unwrap();
@@ -175,31 +229,31 @@ impl Fixture {
     fs::create_dir(&scratch).unwrap();
     let workspace_path = scratch.join(hex::encode(DATABASE_ID)).join(hex::encode(WORKSPACE_ID));
     let memory = memory();
-    let mut coordinator = coordinator(&memory);
-    admit(&mut coordinator, 1, 41, 1_001);
+    let mut coordinator = coordinator_for(&memory, hash_algorithm);
+    admit_for(&mut coordinator, hash_algorithm, 1, 41, 1_001);
     let batch = coordinator.begin_flush(1_010, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
     let cancellation = CancellationToken::new();
     let workspace = DurableIndexRuntimeWorkspaceV1::create(
       &database,
-      IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
+      IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, hash_algorithm).unwrap(),
       IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
       cancellation.clone(),
       &memory,
     )
     .unwrap();
-    let owner = owner();
-    let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+    let owner = owner_for(hash_algorithm);
+    let source_root = digest_parts(hash_algorithm, &[b"source-root"]);
     let state = Arc::new(Mutex::new(FakeState { selector_behavior, ..FakeState::default() }));
     let clock = Arc::new(MockClock::new(1, 1_725_000_000_000));
     let virtual_clock: Arc<dyn VirtualClock> = clock.clone();
     let publisher = DurableIndexRuntimeBatchPublisherV1::new_unselected(
-      ALGORITHM,
+      hash_algorithm,
       owner,
       source_root,
       1,
       1_725_000_000_000,
       workspace,
-      FakeStore { state: Arc::clone(&state) },
+      FakeStore::for_algorithm(Arc::clone(&state), hash_algorithm),
       cancellation,
       virtual_clock,
     )
@@ -243,6 +297,330 @@ fn cumulative_runtime_batches_publish_truthful_external_heads_selector_last() {
   assert_eq!(external.durable_sequence, 2);
   assert!(external.durable_bytes > 0);
   assert!(Path::new(external.path).is_absolute());
+}
+
+#[test]
+fn selected_dirty_overlay_recovers_without_fabricating_journal_coverage_and_resumes_publication() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  let memory = memory();
+  let cancellation = CancellationToken::new();
+  let mut recovery_store = FakeStore::new(Arc::clone(&state));
+  let recovered = recover_index_runtime_dirty_overlay_v1(
+    &mut recovery_store,
+    ALGORITHM,
+    DATABASE_ID,
+    DESTINATION_ID,
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(None, 16 * 1024 * 1024, 0, 32).unwrap(),
+    &memory,
+    &cancellation,
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("selected runtime dirty overlay was not resumable");
+  };
+  assert_eq!(recovered.selected().checkpoint_sequence, 1);
+  assert_eq!(recovered.workspace_head().unwrap().runtime_batch_count(), 1);
+  let retained_bytes = reserved_index_bytes(&memory);
+  assert!(
+    retained_bytes > std::mem::size_of_val(recovered.as_ref()) as u64,
+    "recovered state does not account for its retained heap allocations"
+  );
+
+  let virtual_clock: Arc<dyn VirtualClock> = fixture.clock.clone();
+  let mut publisher = DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, FakeStore::new(state), virtual_clock).unwrap();
+  assert_eq!(reserved_index_bytes(&memory), retained_bytes, "resumed publisher dropped its live recovery-state reservation");
+  fixture.clock.advance(10);
+  admit(&mut fixture.coordinator, 2, 42, 1_020);
+  let second = fixture.coordinator.begin_flush(1_030, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(publisher.publish(&second).unwrap().checkpoint_sequence, 2);
+  drop(publisher);
+  assert_eq!(reserved_index_bytes(&memory), 0, "publisher drop did not release its recovered-state reservation");
+}
+
+#[test]
+fn journal_recovery_does_not_misrepresent_a_selected_dirty_overlay_as_complete_coverage() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  let memory = memory();
+  let mut store = FakeStore::new(state);
+  let outcome = recover_index_checkpoint_v1(
+    &mut store,
+    ALGORITHM,
+    &owner(),
+    IndexRecoveryOptionsV1::new(32, 16 * 1024 * 1024, 32, 16 * 1024 * 1024).unwrap(),
+    &memory,
+    &CancellationToken::new(),
+  )
+  .unwrap();
+  assert!(matches!(outcome, IndexRecoveryOutcomeV1::ReconciliationRequired { reason: IndexRecoveryReasonV1::JournalMissing, .. }));
+}
+
+#[test]
+fn dirty_overlay_recovery_rejects_every_near_match_contract_shape() {
+  for deviation in [
+    DirtyCheckpointDeviation::TaskKind,
+    DirtyCheckpointDeviation::State,
+    DirtyCheckpointDeviation::Phase,
+    DirtyCheckpointDeviation::Capabilities,
+    DirtyCheckpointDeviation::StartedAt,
+    DirtyCheckpointDeviation::TargetRoot,
+    DirtyCheckpointDeviation::Journal,
+    DirtyCheckpointDeviation::NextDocumentOrdinal,
+    DirtyCheckpointDeviation::ResumeKey,
+    DirtyCheckpointDeviation::Progress,
+    DirtyCheckpointDeviation::ZeroProgress,
+    DirtyCheckpointDeviation::Attachment,
+    DirtyCheckpointDeviation::External,
+    DirtyCheckpointDeviation::ExternalSequence,
+    DirtyCheckpointDeviation::ExternalBytes,
+  ] {
+    let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+    fixture.publisher.publish(&first).unwrap();
+    replace_selected_checkpoint(&fixture.state, deviation);
+    let state = Arc::clone(&fixture.state);
+    drop(fixture.publisher);
+    let outcome = recover_dirty_overlay(FakeStore::new(state), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 32).unwrap();
+    assert_recovery_reason(outcome, IndexRuntimeDirtyOverlayRecoveryReasonV1::CheckpointContractMismatch);
+  }
+}
+
+#[test]
+fn dirty_overlay_recovery_rejects_missing_truncated_tampered_and_over_limit_workspace_closure() {
+  for corruption in ["missing", "truncated", "tampered"] {
+    let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+    fixture.publisher.publish(&first).unwrap();
+    let runtime_object = fs::read_dir(fixture.workspace_path.join("objects/runtime")).unwrap().next().unwrap().unwrap().path();
+    match corruption {
+      "missing" => fs::remove_file(&runtime_object).unwrap(),
+      "truncated" => {
+        let mut bytes = fs::read(&runtime_object).unwrap();
+        bytes.truncate(bytes.len() - 1);
+        fs::write(&runtime_object, bytes).unwrap();
+      }
+      "tampered" => {
+        let mut bytes = fs::read(&runtime_object).unwrap();
+        let tampered = bytes.len() - 5;
+        bytes[tampered] ^= 0x80;
+        fs::write(&runtime_object, bytes).unwrap();
+      }
+      _ => unreachable!("fixed corruption matrix"),
+    }
+    let state = Arc::clone(&fixture.state);
+    drop(fixture.publisher);
+    let outcome = recover_dirty_overlay(FakeStore::new(state), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 32).unwrap();
+    let reason = match outcome {
+      IndexRuntimeDirtyOverlayRecoveryOutcomeV1::ReconciliationRequired { reason, .. } => reason,
+      _ => panic!("{corruption} workspace closure was accepted"),
+    };
+    assert!(matches!(
+      reason,
+      IndexRuntimeDirtyOverlayRecoveryReasonV1::WorkspaceMissing | IndexRuntimeDirtyOverlayRecoveryReasonV1::WorkspaceCorrupt
+    ));
+  }
+
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  fixture.coordinator.complete_success(&first).unwrap();
+  fixture.clock.advance(10);
+  admit(&mut fixture.coordinator, 2, 42, 1_020);
+  let second = fixture.coordinator.begin_flush(1_030, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  fixture.publisher.publish(&second).unwrap();
+  let durable_bytes = fixture.publisher.workspace_head().unwrap().durable_bytes();
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  let count_limited =
+    recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 1).unwrap();
+  assert_recovery_reason(count_limited, IndexRuntimeDirtyOverlayRecoveryReasonV1::RecoveryLimitExceeded);
+  let byte_limited = recover_dirty_overlay(FakeStore::new(state), &memory(), &CancellationToken::new(), durable_bytes - 1, 32).unwrap();
+  assert_recovery_reason(byte_limited, IndexRuntimeDirtyOverlayRecoveryReasonV1::RecoveryLimitExceeded);
+}
+
+#[test]
+fn dirty_overlay_recovery_preserves_transient_free_space_pressure_as_a_typed_error() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+
+  let mut store = FakeStore::new(state);
+  let outcome = recover_index_runtime_dirty_overlay_v1(
+    &mut store,
+    ALGORITHM,
+    DATABASE_ID,
+    DESTINATION_ID,
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(None, 16 * 1024 * 1024, u64::MAX, 32).unwrap(),
+    &memory(),
+    &CancellationToken::new(),
+  );
+  assert!(matches!(outcome, Err(IndexRuntimeDirtyOverlayRecoveryErrorV1::Workspace(_))));
+}
+
+#[test]
+fn dirty_overlay_recovery_honors_cancellation_and_releases_memory_after_pressure() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  assert!(matches!(
+    recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &canceled, 16 * 1024 * 1024, 32).unwrap(),
+    IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Canceled
+  ));
+
+  let midflight = CancellationToken::new();
+  state.lock().unwrap().cancel_on_immutable_load = Some(midflight.clone());
+  assert!(matches!(
+    recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &midflight, 16 * 1024 * 1024, 32).unwrap(),
+    IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Canceled
+  ));
+  state.lock().unwrap().cancel_on_immutable_load = None;
+
+  let final_read_cancellation = CancellationToken::new();
+  {
+    let mut state = state.lock().unwrap();
+    let cancel_at = state.selected_loads + 2;
+    state.cancel_on_selected_load = Some((cancel_at, final_read_cancellation.clone()));
+  }
+  assert!(matches!(
+    recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &final_read_cancellation, 16 * 1024 * 1024, 32,).unwrap(),
+    IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Canceled
+  ));
+  state.lock().unwrap().cancel_on_selected_load = None;
+
+  let checkpoint_bytes = {
+    let state = state.lock().unwrap();
+    let selected = state.selected.as_ref().unwrap();
+    state.immutable.get(&selected.checkpoint_key).unwrap().len() as u64
+  };
+  let pressured_memory = memory_with_limit(checkpoint_bytes - 1);
+  let error = match recover_dirty_overlay(FakeStore::new(state), &pressured_memory, &CancellationToken::new(), 16 * 1024 * 1024, 32) {
+    Ok(_) => panic!("dirty-overlay recovery ignored memory pressure"),
+    Err(error) => error,
+  };
+  assert!(matches!(error, IndexRuntimeDirtyOverlayRecoveryErrorV1::Checkpoint(IndexRecoveryErrorV1::Memory(_))));
+  assert_eq!(reserved_index_bytes(&pressured_memory), 0);
+}
+
+#[test]
+fn dirty_overlay_recovery_classifies_absent_missing_and_unreadable_checkpoint_authority() {
+  let absent = recover_dirty_overlay(
+    FakeStore::new(Arc::new(Mutex::new(FakeState::default()))),
+    &memory(),
+    &CancellationToken::new(),
+    16 * 1024 * 1024,
+    32,
+  )
+  .unwrap();
+  assert_recovery_reason(absent, IndexRuntimeDirtyOverlayRecoveryReasonV1::Checkpoint(IndexRecoveryReasonV1::CheckpointSelectionMissing));
+
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  {
+    let mut state = state.lock().unwrap();
+    let selected = state.selected.as_ref().unwrap().checkpoint_key.clone();
+    state.immutable.remove(&selected);
+  }
+  let missing =
+    recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 32).unwrap();
+  assert_recovery_reason(missing, IndexRuntimeDirtyOverlayRecoveryReasonV1::Checkpoint(IndexRecoveryReasonV1::CheckpointMissing));
+
+  state.lock().unwrap().refuse_loads = true;
+  let unreadable = recover_dirty_overlay(FakeStore::new(state), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 32);
+  assert!(matches!(unreadable, Err(IndexRuntimeDirtyOverlayRecoveryErrorV1::Checkpoint(IndexRecoveryErrorV1::Store(_)))));
+}
+
+#[test]
+fn dirty_overlay_recovery_and_resumed_construction_refuse_selector_movement() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  let foreign = IndexCheckpointRootV1::new(99, vec![0x99; ALGORITHM.hash_length()]).unwrap();
+  {
+    let mut state = state.lock().unwrap();
+    let move_at = state.selected_loads + 2;
+    state.move_selected_on_load = Some((move_at, foreign.clone()));
+  }
+  let outcome =
+    recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 32).unwrap();
+  assert_recovery_reason(outcome, IndexRuntimeDirtyOverlayRecoveryReasonV1::SelectionChanged);
+
+  {
+    let mut state = state.lock().unwrap();
+    state.selected = state.immutable.keys().next_back().map(|key| IndexCheckpointRootV1::new(1, key.clone()).unwrap());
+    state.move_selected_on_load = None;
+  }
+  let cancellation = CancellationToken::new();
+  let recovered = recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &cancellation, 16 * 1024 * 1024, 32).unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("second recovery did not return resumable state");
+  };
+  state.lock().unwrap().selected = Some(foreign);
+  let virtual_clock: Arc<dyn VirtualClock> = fixture.clock;
+  assert!(DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, FakeStore::new(state), virtual_clock).is_err());
+}
+
+#[test]
+fn resumed_publisher_rejects_foreign_store_identity_and_post_recovery_cancellation() {
+  for refusal in ["foreign-store", "canceled"] {
+    let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+    fixture.publisher.publish(&first).unwrap();
+    let state = Arc::clone(&fixture.state);
+    drop(fixture.publisher);
+    let cancellation = CancellationToken::new();
+    let memory = memory();
+    let recovered = recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory, &cancellation, 16 * 1024 * 1024, 32).unwrap();
+    let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+      panic!("setup recovery was not resumable");
+    };
+    let mut store = FakeStore::new(state);
+    if refusal == "foreign-store" {
+      store.destination_id = [0x91; 16];
+    } else {
+      cancellation.cancel();
+    }
+    let virtual_clock: Arc<dyn VirtualClock> = fixture.clock;
+    assert!(DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, store, virtual_clock).is_err(), "accepted {refusal}");
+    assert_eq!(reserved_index_bytes(&memory), 0, "failed resumed construction leaked its recovery-state reservation");
+  }
+}
+
+#[test]
+fn dirty_overlay_recovery_and_resume_support_the_widest_hash_profile() {
+  let algorithm = HashAlgorithm::Sha3_512;
+  let (mut fixture, first) = Fixture::new_for(algorithm, SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  let memory = memory();
+  let recovered = recover_dirty_overlay(
+    FakeStore::for_algorithm(Arc::clone(&state), algorithm),
+    &memory,
+    &CancellationToken::new(),
+    16 * 1024 * 1024,
+    32,
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("64-byte hash profile did not recover");
+  };
+  assert_eq!(recovered.selected().checkpoint_key.len(), 64);
+  assert_eq!(recovered.source_root().len(), 64);
+  let virtual_clock: Arc<dyn VirtualClock> = fixture.clock;
+  assert!(DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, FakeStore::for_algorithm(state, algorithm), virtual_clock,).is_ok());
 }
 
 #[test]
@@ -432,13 +810,147 @@ fn real_native_authority_selects_the_external_runtime_checkpoint_last() {
 #[test]
 fn runtime_publisher_uses_one_existing_selector_and_remains_disconnected() {
   let source = include_str!("../../src/engine/v4/index_runtime_batch_publisher.rs");
+  let recovery = include_str!("../../src/engine/v4/index_runtime_dirty_overlay_recovery.rs");
   let immutable = source.find("self.store.put_immutable(&checkpoint)").unwrap();
   let selector = source.find("self.store.publish_selected_synced").unwrap();
   assert!(immutable < selector, "runtime checkpoint selector appears before immutable publication");
   assert!(!source.contains("V4FirstAuthorityPublisher"));
-  assert!(!include_str!("../../src/engine/storage_engine.rs").contains("DurableIndexRuntimeBatchPublisherV1"));
-  assert!(!include_str!("../../src/engine/v4/index_runtime_installation.rs").contains("DurableIndexRuntimeBatchPublisherV1"));
-  assert!(!include_str!("../../src/engine/v4/index_runtime_owner.rs").contains("DurableIndexRuntimeBatchPublisherV1"));
+  assert!(!recovery.contains("StorageEngine"));
+  for forbidden in [
+    include_str!("../../src/engine/storage_engine.rs"),
+    include_str!("../../src/engine/v4/index_runtime_installation.rs"),
+    include_str!("../../src/engine/v4/index_runtime_owner.rs"),
+  ] {
+    assert!(!forbidden.contains("DurableIndexRuntimeBatchPublisherV1"));
+    assert!(!forbidden.contains("recover_index_runtime_dirty_overlay_v1"));
+  }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DirtyCheckpointDeviation {
+  TaskKind,
+  State,
+  Phase,
+  Capabilities,
+  StartedAt,
+  TargetRoot,
+  Journal,
+  NextDocumentOrdinal,
+  ResumeKey,
+  Progress,
+  ZeroProgress,
+  Attachment,
+  External,
+  ExternalSequence,
+  ExternalBytes,
+}
+
+fn replace_selected_checkpoint(state: &Arc<Mutex<FakeState>>, deviation: DirtyCheckpointDeviation) {
+  let replacement = {
+    let state = state.lock().unwrap();
+    let selected = state.selected.as_ref().unwrap();
+    let checkpoint = decode_index_task_checkpoint(state.immutable.get(&selected.checkpoint_key).unwrap(), ALGORITHM).unwrap();
+    let external = checkpoint.external.unwrap();
+    let mut required_capabilities = [0u8; 32];
+    required_capabilities.copy_from_slice(checkpoint.required_capabilities);
+    if matches!(deviation, DirtyCheckpointDeviation::Capabilities) {
+      required_capabilities = [0; 32];
+    }
+    let target_root = digest_parts(ALGORITHM, &[b"foreign-target"]);
+    let attachment_owner = digest_parts(ALGORITHM, &[b"unexpected-attachment-owner"]);
+    let attachment_hash = digest_parts(ALGORITHM, &[b"unexpected-attachment"]);
+    let journal_head = digest_parts(ALGORITHM, &[b"unexpected-journal"]);
+    let attachments = [IndexTaskAttachmentWriteV1 {
+      role: IndexTaskAttachmentRoleV1::CandidateFieldManifest,
+      owner_id: &attachment_owner,
+      artifact_hash: &attachment_hash,
+      birth_generation: checkpoint.generation,
+    }];
+    let external_path = external.path.to_string();
+    encode_index_task_checkpoint(&IndexTaskCheckpointWriteV1 {
+      hash_algorithm: ALGORITHM,
+      task_id: checkpoint.task_id,
+      checkpoint_sequence: checkpoint.checkpoint_sequence,
+      generation: checkpoint.generation,
+      task_kind: if matches!(deviation, DirtyCheckpointDeviation::TaskKind) { IndexTaskKindV1::FieldBuild } else { checkpoint.task_kind },
+      state: if matches!(deviation, DirtyCheckpointDeviation::State) { IndexTaskStateV1::FailedRetryable } else { checkpoint.state },
+      phase: if matches!(deviation, DirtyCheckpointDeviation::Phase) { checkpoint.phase + 1 } else { checkpoint.phase },
+      required_capabilities: &required_capabilities,
+      started_at_ms: if matches!(deviation, DirtyCheckpointDeviation::StartedAt) { 0 } else { checkpoint.started_at_ms },
+      updated_at_ms: checkpoint.updated_at_ms,
+      source_root: checkpoint.source_root,
+      target_root: matches!(deviation, DirtyCheckpointDeviation::TargetRoot).then_some(target_root.as_slice()),
+      primary_id: Some(checkpoint.primary_id),
+      journal_head: matches!(deviation, DirtyCheckpointDeviation::Journal).then_some(journal_head.as_slice()),
+      journal_floor_sequence: 0,
+      journal_audited_through: u64::from(matches!(deviation, DirtyCheckpointDeviation::Journal)),
+      next_document_ordinal: u64::from(matches!(deviation, DirtyCheckpointDeviation::NextDocumentOrdinal)),
+      completed_work: if matches!(deviation, DirtyCheckpointDeviation::ZeroProgress) { 0 } else { checkpoint.completed_work },
+      total_work_hint: if matches!(deviation, DirtyCheckpointDeviation::ZeroProgress) {
+        0
+      } else if matches!(deviation, DirtyCheckpointDeviation::Progress) {
+        checkpoint.total_work_hint + 1
+      } else {
+        checkpoint.total_work_hint
+      },
+      resume_key: if matches!(deviation, DirtyCheckpointDeviation::ResumeKey) { b"foreign-runtime-resume" } else { checkpoint.resume_key },
+      attachments: if matches!(deviation, DirtyCheckpointDeviation::Attachment) { &attachments } else { &[] },
+      external: (!matches!(deviation, DirtyCheckpointDeviation::External)).then_some(ExternalWorkspaceDescriptorWriteV1 {
+        workspace_id: external.workspace_id,
+        manifest_digest: external.manifest_digest,
+        durable_sequence: if matches!(deviation, DirtyCheckpointDeviation::ExternalSequence) {
+          external.durable_sequence + 1
+        } else {
+          external.durable_sequence
+        },
+        durable_bytes: if matches!(deviation, DirtyCheckpointDeviation::ExternalBytes) { 0 } else { external.durable_bytes },
+        path: &external_path,
+      }),
+    })
+    .unwrap()
+  };
+  let mut state = state.lock().unwrap();
+  let root = IndexCheckpointRootV1::new(1, replacement.key.clone()).unwrap();
+  state.immutable.insert(replacement.key, replacement.value);
+  state.selected = Some(root);
+}
+
+fn recover_dirty_overlay(
+  mut store: FakeStore,
+  memory: &MemoryCoordinator,
+  cancellation: &CancellationToken,
+  maximum_stored_bytes: u64,
+  maximum_object_count: u64,
+) -> Result<IndexRuntimeDirtyOverlayRecoveryOutcomeV1, IndexRuntimeDirtyOverlayRecoveryErrorV1> {
+  let hash_algorithm = store.hash_algorithm;
+  let database_id = store.database_id;
+  let destination_id = store.destination_id;
+  recover_index_runtime_dirty_overlay_v1(
+    &mut store,
+    hash_algorithm,
+    database_id,
+    destination_id,
+    &owner_for(hash_algorithm),
+    IndexRuntimeWorkspaceOptionsV1::new(None, maximum_stored_bytes, 0, maximum_object_count).unwrap(),
+    memory,
+    cancellation,
+  )
+}
+
+fn assert_recovery_reason(outcome: IndexRuntimeDirtyOverlayRecoveryOutcomeV1, expected: IndexRuntimeDirtyOverlayRecoveryReasonV1) {
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::ReconciliationRequired { reason, evidence } = outcome else {
+    panic!("expected dirty-overlay reconciliation");
+  };
+  assert_eq!(reason, expected);
+  assert!(evidence.as_ref().is_none_or(|evidence| evidence.len() <= 4 * 1024));
+}
+
+fn memory_with_limit(limit: u64) -> MemoryCoordinator {
+  MemoryCoordinator::new(MemoryPolicy::new(limit - 1, limit, 1, 1).unwrap())
+}
+
+fn reserved_index_bytes(memory: &MemoryCoordinator) -> u64 {
+  memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes
 }
 
 fn external_checkpoint(
@@ -558,13 +1070,21 @@ fn first_authority_request() -> FirstAuthorityPublicationRequestV1 {
 }
 
 fn owner() -> IndexRecoveryOwnerV1 {
-  IndexRecoveryOwnerV1::new(DATABASE_ID, digest_parts(ALGORITHM, &[b"runtime-index"]), OPERATION_ID).unwrap()
+  owner_for(ALGORITHM)
+}
+
+fn owner_for(hash_algorithm: HashAlgorithm) -> IndexRecoveryOwnerV1 {
+  IndexRecoveryOwnerV1::new(DATABASE_ID, digest_parts(hash_algorithm, &[b"runtime-index"]), OPERATION_ID).unwrap()
 }
 
 fn coordinator(memory: &MemoryCoordinator) -> IndexCoordinatorV1 {
+  coordinator_for(memory, ALGORITHM)
+}
+
+fn coordinator_for(memory: &MemoryCoordinator, hash_algorithm: HashAlgorithm) -> IndexCoordinatorV1 {
   IndexCoordinatorV1::new(
     RUNTIME_ID,
-    ALGORITHM,
+    hash_algorithm,
     memory.clone(),
     IndexCoordinatorOptionsV1::new(1024 * 1024, 16, 1_000, 1024 * 1024).unwrap(),
     1_000,
@@ -573,10 +1093,14 @@ fn coordinator(memory: &MemoryCoordinator) -> IndexCoordinatorV1 {
 }
 
 fn admit(coordinator: &mut IndexCoordinatorV1, ordinal: u64, publication_sequence: u64, now_ms: u64) {
-  let index_id = digest_parts(ALGORITHM, &[b"index", &ordinal.to_le_bytes()]);
-  let file_key = digest_parts(ALGORITHM, &[b"file", &ordinal.to_le_bytes()]);
+  admit_for(coordinator, ALGORITHM, ordinal, publication_sequence, now_ms);
+}
+
+fn admit_for(coordinator: &mut IndexCoordinatorV1, hash_algorithm: HashAlgorithm, ordinal: u64, publication_sequence: u64, now_ms: u64) {
+  let index_id = digest_parts(hash_algorithm, &[b"index", &ordinal.to_le_bytes()]);
+  let file_key = digest_parts(hash_algorithm, &[b"file", &ordinal.to_le_bytes()]);
   let encoded_record =
-    encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: ordinal, file_key: &file_key }, ALGORITHM).unwrap();
+    encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: ordinal, file_key: &file_key }, hash_algorithm).unwrap();
   coordinator
     .admit(
       IndexMutationRequestV1 {

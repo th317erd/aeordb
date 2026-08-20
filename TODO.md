@@ -987,7 +987,15 @@
                     - [x] Derive a retry-stable workspace object ID and timestamp, append it once, and encode one no-journal dirty-overlay checkpoint whose external descriptor exactly names the cumulative workspace head.
                     - [x] Publish the immutable checkpoint before the existing IndexOperationControl selector and resolve any selector error by reopening only the exact prior or successor root.
                     - [x] Prove preselection retention, exact retry, committed-but-error resolution, unresolved commit failure, cumulative successor publication, and the real native A/B authority without activating startup or v3 query paths.
-                  - [ ] P6-2d-c3c-d: validate selected external workspace state during bounded checkpoint recovery and preserve a truthful no-journal dirty-overlay recovery contract without claiming complete coverage.
+                  - [x] P6-2d-c3c-d: validate selected external workspace state during bounded checkpoint recovery and preserve a truthful no-journal dirty-overlay recovery contract without claiming complete coverage.
+                    - [x] Share one bounded selected-checkpoint load/owner-validation primitive between journal recovery and dirty-overlay recovery.
+                    - [x] Recognize only the exact no-journal dirty-overlay contract and reopen its cumulative workspace under explicit byte, count, memory, cancellation, identity, and path bounds.
+                    - [x] Return a distinct resumable dirty-overlay state that owns the validated mutable workspace and cannot be mistaken for complete journal coverage.
+                    - [x] Resume the selector-last runtime publisher only after an exact selected-root recheck, preserving generation, source root, and timestamps.
+                    - [x] Preserve transient filesystem resource pressure as a typed retryable error rather than misclassifying a valid selected workspace as a recovery-limit failure.
+                    - [x] Preserve newly introduced conversion evidence without growing the error-suppression allowlist.
+                    - [x] Account for recovered heap capacity and transfer that reservation into the resumed publisher until its retained recovery state is dropped.
+                    - [x] Prove success, restart continuation, malformed near-matches, missing/tampered workspace state, pressure, cancellation, selector races, widest hashes, and disconnected architecture before landing c3c-d.
                   - [ ] P6-2d-c3c-e: implement the same workspace's durable body-free producer-task spill boundary, including idempotent retry, refusal retention, and replay-ready identity.
                   - [ ] P6-2d-c3c-f: prove crash prefixes, tamper/truncation, stale selectors, restart, cancellation, pressure, widest-hash operation, architecture uniqueness, and unchanged v3 query authority before landing c3c.
                 - [ ] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
