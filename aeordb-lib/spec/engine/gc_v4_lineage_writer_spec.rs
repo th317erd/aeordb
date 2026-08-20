@@ -435,6 +435,10 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
   assert!(migration_root_map_owner.contains("V4FirstAuthorityPublisher"));
   assert!(migration_root_map_owner.contains("publish_mutable_system_control_with_authority_expectation"));
   assert!(!migration_root_map_owner.contains("retirement_owner."));
+  let index_runtime_installation = fs::read_to_string(source_root.join("engine/v4/index_runtime_installation.rs")).unwrap();
+  assert!(index_runtime_installation.contains("IndexScopeOrdinalStoreRegistryV1::new"));
+  assert!(index_runtime_installation.contains("request.retirement_owner,"));
+  assert!(!index_runtime_installation.contains("RetirementJournalOwnerV1::"));
 
   let mut callers = Vec::new();
   let mut sources = Vec::new();
@@ -454,6 +458,7 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
     [
       PathBuf::from("engine/v4/first_authority.rs"),
       PathBuf::from("engine/v4/index_recovery_store.rs"),
+      PathBuf::from("engine/v4/index_runtime_installation.rs"),
       PathBuf::from("engine/v4/migration_capture_replay.rs"),
       PathBuf::from("engine/v4/migration_capture_runtime.rs"),
       PathBuf::from("engine/v4/migration_owner.rs"),

@@ -482,12 +482,25 @@ impl SoftMutationHubV1 {
 
   pub fn snapshot(&self) -> Result<SoftMutationHubSnapshotV1, SoftMutationHubErrorV1> {
     let queue = self.queue.lock().map_err(|_| SoftMutationHubErrorV1::QueueUnavailable)?;
+    Ok(self.snapshot_with_queue(&queue))
+  }
+
+  pub fn try_snapshot(&self) -> Result<SoftMutationHubSnapshotV1, SoftMutationHubErrorV1> {
+    let queue = match self.queue.try_lock() {
+      Ok(queue) => queue,
+      Err(std::sync::TryLockError::WouldBlock) => return Err(SoftMutationHubErrorV1::QueueContended),
+      Err(std::sync::TryLockError::Poisoned(_)) => return Err(SoftMutationHubErrorV1::QueueUnavailable),
+    };
+    Ok(self.snapshot_with_queue(&queue))
+  }
+
+  fn snapshot_with_queue(&self, queue: &SoftMutationQueueV1) -> SoftMutationHubSnapshotV1 {
     let lost = self.lost_through_sequence.load(Ordering::Acquire);
     let reason_bits = self.loss_reason_bits.load(Ordering::Acquire);
     let loss_epoch = self.loss_epoch.load(Ordering::Acquire);
     let reconciled_loss_epoch = self.reconciled_loss_epoch.load(Ordering::Acquire);
     let losses_in_flight = self.losses_in_flight.load(Ordering::Acquire);
-    Ok(SoftMutationHubSnapshotV1 {
+    SoftMutationHubSnapshotV1 {
       admission_closed: self.admission_closed.load(Ordering::Acquire),
       queued_notices: queue.notices.len(),
       retained_bytes: queue.retained_bytes,
@@ -502,7 +515,7 @@ impl SoftMutationHubV1 {
       loss_epoch,
       reconciled_loss_epoch,
       losses_in_flight,
-    })
+    }
   }
 
   /// Permanently close this handoff before its owner begins final drain.
@@ -637,6 +650,11 @@ impl SoftMutationHubV1 {
   pub(crate) fn lock_queue_for_test(&self) -> Result<SoftMutationQueueTestGuardV1<'_>, SoftMutationHubErrorV1> {
     self.queue.lock().map(SoftMutationQueueTestGuardV1).map_err(|_| SoftMutationHubErrorV1::QueueUnavailable)
   }
+
+  #[cfg(test)]
+  pub(crate) fn clear_queue_poison_for_test(&self) {
+    self.queue.clear_poison();
+  }
 }
 
 #[cfg(test)]
@@ -705,6 +723,8 @@ pub enum SoftMutationHubErrorV1 {
   Allocation(String),
   #[error("soft mutation hub queue is unavailable")]
   QueueUnavailable,
+  #[error("soft mutation hub queue is currently owned by another operation")]
+  QueueContended,
   #[error("soft mutation hub accounting overflowed")]
   ArithmeticOverflow,
   #[error("soft mutation drain byte limit {maximum} is smaller than the first queued notice ({required} bytes)")]
@@ -718,7 +738,7 @@ mod tests {
 
   use uuid::Uuid;
 
-  use super::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
+  use super::{SoftMutationAdmissionV1, SoftMutationHubErrorV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
   use crate::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
 
   fn acknowledgement() -> NamespaceMutationAcknowledgement {
@@ -742,6 +762,7 @@ mod tests {
   fn a_contended_soft_consumer_cannot_wait_on_the_hard_acknowledgement_path() {
     let hub = Arc::new(SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(4, 8_192, 4_096).unwrap()).unwrap());
     let queue_guard = hub.lock_queue_for_test().unwrap();
+    assert_eq!(hub.try_snapshot(), Err(SoftMutationHubErrorV1::QueueContended));
     let (sender, receiver) = mpsc::channel();
     let offered_hub = Arc::clone(&hub);
     let worker = std::thread::spawn(move || {

@@ -1,16 +1,18 @@
-use std::fs::{self, OpenOptions};
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use aeordb::engine::durability_coordinator::DurabilityCoordinator;
-use aeordb::engine::hot_tail::read_hot_tail_checked;
-use aeordb::engine::memory_coordinator::MemoryPressure;
-use aeordb::engine::native_durability::PlatformFileIdentityDescriptorV1;
+use aeordb::engine::memory_coordinator::{MemoryPressure, MemoryOwner};
+use aeordb::engine::native_durability::{PlatformFileIdentityDescriptorV1, platform_file_identity};
+use aeordb::engine::request_context::RequestContext;
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::contract_generated::CONTRACT_REGISTRY_SHA256;
 use aeordb::engine::v4::migration_destination::{
-  MigrationDestinationInitializationRequestV1, MigrationDestinationPathObservationV1, initialize_migration_destination_v1,
-  observe_migration_destination_path_v1,
+  InitializedMigrationDestinationV1, MigrationDestinationInitializationRequestV1, MigrationDestinationPathObservationV1,
+  initialize_migration_destination_v1, observe_migration_destination_path_v1,
 };
 use aeordb::engine::v4::migration_preflight::{
   AuthorityInventoryCountsV1, CapacityRoleV1, MigrationBinaryEvidenceV1, MigrationCapacityObservationV1, MigrationConfigurationEvidenceV1,
@@ -18,10 +20,36 @@ use aeordb::engine::v4::migration_preflight::{
   MigrationPreflightRequestV1, MigrationRecoveryEvidenceV1, MigrationSourceEvidenceV1, NativeCutoverCapabilitiesV1,
   SourceAuthorityInventoryV1, StrictVerificationEvidenceV1, StrictVerificationStateV1, admit_migration_preflight_v1,
 };
-use aeordb::engine::v4::namespace::decode_namespace_root;
+use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
+use aeordb::engine::v4::first_authority::{
+  ImmutableSemanticObjectBatchPublicationRequestV1, PreparedNamespaceTreeV0, SuccessorAuthorityPublicationRequestV1,
+};
+use aeordb::engine::v4::index_coordinator_recovery::{
+  IndexCheckpointRootV1, IndexRecoveryOptionsV1, IndexRecoveryOwnerV1, IndexRecoveryStoreV1,
+};
+use aeordb::engine::v4::index_coordinator::IndexCoordinatorOptionsV1;
+use aeordb::engine::v4::index_operation_control::IndexOperationKindV1;
+use aeordb::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1;
+use aeordb::engine::v4::index_producer_coordinator::IndexProducerCoordinatorOptionsV1;
+use aeordb::engine::v4::index_producer_source::IndexSemanticScopeLimitsV1;
+use aeordb::engine::v4::index_recovery_store::{
+  IndexScopeOrdinalStoreRegistryOptionsV1, NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
+};
+use aeordb::engine::v4::index_runtime_installation::{
+  IndexRuntimeNativeRecoveryOptionsV1, IndexRuntimeShadowIdentityV1, NativeIndexRuntimeInstallationErrorV1,
+  NativeIndexRuntimeInstallationRequestV1, install_native_index_runtime_v1,
+};
+use aeordb::engine::v4::index_runtime_owner::{IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1};
+use aeordb::engine::v4::index_task::{
+  IndexTaskAttachmentRoleV1, IndexTaskAttachmentWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, JournalOwnerKindV1,
+  MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, encode_index_task_checkpoint,
+  encode_mutation_journal,
+};
+use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, decode_namespace_root, encode_semantic_state_object};
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
 use aeordb::engine::v4::{database_header::DATABASE_HEADER_V4_DATA_OFFSET, hash::digest_parts};
-use aeordb::engine::{DiskKVStore, HashAlgorithm};
+use aeordb::engine::{DirectoryOps, HashAlgorithm, MockClock, StorageEngine, VirtualClock};
+use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -59,6 +87,14 @@ fn native(first: u8) -> NativeCutoverCapabilitiesV1 {
 }
 
 fn permit(algorithm: HashAlgorithm, destination: &MigrationDestinationPathObservationV1) -> MigrationPreflightPermitV1 {
+  permit_with_source_identity(algorithm, destination, identity(0x50, 0x70))
+}
+
+fn permit_with_source_identity(
+  algorithm: HashAlgorithm,
+  destination: &MigrationDestinationPathObservationV1,
+  source_file_identity: PlatformFileIdentityDescriptorV1,
+) -> MigrationPreflightPermitV1 {
   let baseline = CapabilitySetV1::v4_baseline();
   let registry = embedded_system_family_registry(algorithm).unwrap();
   let source_checksum = digest(0x71);
@@ -84,7 +120,7 @@ fn permit(algorithm: HashAlgorithm, destination: &MigrationDestinationPathObserv
       destination_physical_instance_id: id(0x40),
       source_path_digest: digest(0x10),
       destination_path_digest: destination.path_digest(),
-      source_file_identity: identity(0x50, 0x70),
+      source_file_identity,
       destination_parent_identity: destination.parent_identity(),
     },
     source: MigrationSourceEvidenceV1 {
@@ -166,25 +202,293 @@ fn permit(algorithm: HashAlgorithm, destination: &MigrationDestinationPathObserv
   admit_migration_preflight_v1(&request).unwrap().1
 }
 
-fn reopen(path: &Path) -> aeordb::engine::v4::first_authority::V4FirstAuthorityPublisher {
-  let mut file = OpenOptions::new().read(true).write(true).open(path).unwrap();
-  let observation = aeordb::engine::v4::header_publication::observe_database_header_v4(&file).unwrap();
-  let header = &observation.selected.header;
-  let hot_tail = read_hot_tail_checked(&mut file, header.hot_tail_offset, header.hash_algorithm.hash_length()).unwrap();
-  let coordinator = Arc::new(DurabilityCoordinator::new());
-  let kv = DiskKVStore::open_with_coordinator(
-    file.try_clone().unwrap(),
+fn runtime_options() -> IndexRuntimeOwnerOptionsV1 {
+  IndexRuntimeOwnerOptionsV1 {
+    soft_hub: aeordb::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
+    producer: IndexProducerCoordinatorOptionsV1::new(32, 2 * 1_024 * 1_024, 3, 10, 1_000, 16, 256, 2 * 1_024 * 1_024).unwrap(),
+    mutations: IndexCoordinatorOptionsV1::new(4 * 1_024 * 1_024, 262_144, 30_000, 256 * 1_024).unwrap(),
+    collector: IndexProducerCollectorOptionsV1::new(8, 16, 32, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap(),
+    semantic: IndexSemanticScopeLimitsV1::new(8, 16, 32, 2 * 1_024 * 1_024).unwrap(),
+    source_retry_after_ms: 25,
+    publication_retry_after_ms: 100,
+  }
+}
+
+fn native_recovery_options() -> IndexRuntimeNativeRecoveryOptionsV1 {
+  IndexRuntimeNativeRecoveryOptionsV1::new(
+    128,
+    4 * 1_024 * 1_024,
+    IndexScopeOrdinalStoreRegistryOptionsV1::new(8, 8 * 1_024 * 1_024).unwrap(),
+    IndexRecoveryOptionsV1::new(128, 16 * 1_024 * 1_024, 128, 16 * 1_024 * 1_024).unwrap(),
+  )
+  .unwrap()
+}
+
+fn source_engine(path: &Path, spill: &Path) -> StorageEngine {
+  fs::create_dir(spill).unwrap();
+  let overrides = aeordb::engine::config_resolver::CommandLineConfigOverrides::from_registered(BTreeMap::from([(
+    "--recovery-emergency-spill-dir".to_string(),
+    OsString::from(spill.as_os_str()),
+  )]))
+  .unwrap();
+  StorageEngine::create_with_hot_dir_and_configuration_overrides(path.to_str().unwrap(), None, overrides).unwrap()
+}
+
+fn retirement_owner(engine: &StorageEngine, database_id: [u8; 16], cancellation: &CancellationToken) -> SharedRetirementJournalOwnerV1 {
+  Arc::new(Mutex::new(
+    RetirementJournalOwnerV1::new_chain(
+      engine.hash_algo(),
+      database_id,
+      1,
+      901,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      cancellation,
+      &engine.memory_coordinator(),
+    )
+    .unwrap(),
+  ))
+}
+
+struct RuntimeFixture {
+  _directory: TempDir,
+  source_path: std::path::PathBuf,
+  source: StorageEngine,
+  permit: MigrationPreflightPermitV1,
+  destination: InitializedMigrationDestinationV1,
+  cancellation: CancellationToken,
+}
+
+struct CancelingClock {
+  cancellation: CancellationToken,
+  now_ms: u64,
+}
+
+impl VirtualClock for CancelingClock {
+  fn now_ms(&self) -> u64 {
+    self.cancellation.cancel();
+    self.now_ms
+  }
+
+  fn node_id(&self) -> u64 {
+    9
+  }
+}
+
+impl RuntimeFixture {
+  fn new(name: &str) -> Self {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join(format!("{name}-source.aeordb"));
+    let source = source_engine(&source_path, &directory.path().join(format!("{name}-spill")));
+    let shadow_path = directory.path().join(format!("{name}-shadow.aeordb"));
+    let destination_observation = observe_migration_destination_path_v1(&shadow_path).unwrap();
+    let permit =
+      permit_with_source_identity(HashAlgorithm::Blake3_256, &destination_observation, platform_file_identity(&source_path).unwrap());
+    let cancellation = CancellationToken::new();
+    let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
+      permit: &permit,
+      destination: &destination_observation,
+      created_at_ms: 1_700_000_000_000,
+      writer_fence_epoch: 7,
+      cancellation: &cancellation,
+    })
+    .unwrap();
+    Self { _directory: directory, source_path, source, permit, destination, cancellation }
+  }
+
+  fn retirement(&self) -> SharedRetirementJournalOwnerV1 {
+    retirement_owner(&self.source, self.permit.database_id(), &self.cancellation)
+  }
+
+  fn identity(&self) -> IndexRuntimeShadowIdentityV1 {
+    IndexRuntimeShadowIdentityV1::from_preflight(&self.permit)
+  }
+
+  fn clock(&self, node_id: u64, now_ms: u64) -> Arc<dyn VirtualClock> {
+    Arc::new(MockClock::new(node_id, now_ms))
+  }
+}
+
+fn publish_complete_semantic_authority(fixture: &RuntimeFixture, definition_count: u64) -> Vec<u8> {
+  let publisher = fixture.destination.publisher();
+  let header = publisher.observe().unwrap().selected.header;
+  let current_root = decode_namespace_root(&fixture.destination.first_authority().namespace_root.value, header.hash_algorithm).unwrap();
+  let current_tree =
+    publisher.load_immutable_entity_bounded(&current_root.namespace_tree_root, 1 << 20).unwrap().expect("selected namespace tree");
+  let semantic_state = encode_semantic_state_object(
+    &SemanticStateWriteV1 {
+      required_capabilities: header.required_reader_capabilities,
+      availability: SemanticAvailabilityV1::Complete {
+        compiler_fingerprint: digest_parts(header.hash_algorithm, &[b"runtime compiler"]),
+        semantic_registry_fingerprint: fixture.permit.system_family_registry_fingerprint().to_vec(),
+        catalog_root: digest_parts(header.hash_algorithm, &[b"runtime catalog"]),
+        catalog_record_count: 1,
+        catalog_node_count: 1,
+        definition_count,
+        dependency_count: 0,
+      },
+    },
     header.hash_algorithm,
-    header.kv_block_offset,
-    header.hot_tail_offset,
-    header.kv_block_stage as usize,
-    hot_tail.writes,
-    hot_tail.voids,
-    header.kv_block_version,
-    coordinator.clone(),
   )
   .unwrap();
-  aeordb::engine::v4::first_authority::V4FirstAuthorityPublisher::new(kv, coordinator).unwrap()
+  let semantic_root = semantic_state.object_id.clone();
+  publisher
+    .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+      database_id: &fixture.permit.database_id(),
+      objects: std::slice::from_ref(&semantic_state),
+      publication_timestamp_ms: 1_700_000_000_090,
+    })
+    .unwrap();
+  publisher
+    .publish_successor_authority(&SuccessorAuthorityPublicationRequestV1 {
+      database_id: fixture.permit.database_id(),
+      transaction_id: id(0x61),
+      created_at_ms: 1_700_000_000_100,
+      expected_head_hash: header.head_hash,
+      namespace_tree: PreparedNamespaceTreeV0 { root_hash: current_root.namespace_tree_root, stored_value: current_tree.stored_value },
+      semantic_state,
+      required_capabilities: header.required_reader_capabilities,
+      typed_closure_digest: digest_parts(header.hash_algorithm, &[b"runtime complete semantic closure"]),
+      authority_identity: b"HEAD".to_vec(),
+    })
+    .unwrap();
+  semantic_root
+}
+
+fn descriptor(database_id: [u8; 16]) -> NativeIndexOperationDescriptorV1 {
+  descriptor_with(database_id, 0xc1, 0xc2, 0xc3)
+}
+
+fn descriptor_with(database_id: [u8; 16], index_fill: u8, operation_fill: u8, definition_fill: u8) -> NativeIndexOperationDescriptorV1 {
+  NativeIndexOperationDescriptorV1::new(
+    HashAlgorithm::Blake3_256,
+    database_id,
+    vec![index_fill; 32],
+    [operation_fill; 16],
+    IndexOperationKindV1::Build,
+    vec![definition_fill; 32],
+    None,
+    None,
+  )
+  .unwrap()
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryFixtureFault {
+  None,
+  MissingJournal,
+  DiscontinuousJournal,
+}
+
+fn publish_recoverable_checkpoint(
+  fixture: &RuntimeFixture,
+  descriptor: &NativeIndexOperationDescriptorV1,
+  semantic_state_root: &[u8],
+  retirement: SharedRetirementJournalOwnerV1,
+  clock: Arc<dyn VirtualClock>,
+  fault: RecoveryFixtureFault,
+) -> Vec<u8> {
+  const JOURNAL_OWNER: [u8; 16] = *b"AEORIDXJOURNALV1";
+  let before_root = vec![0xa1; 32];
+  let after_root = vec![0xa2; 32];
+  let mutation_id = vec![0xa3; 32];
+  let revision = vec![0xa4; 32];
+  let record = MutationRecordWriteV1 {
+    kind: MutationKindV1::Create,
+    sequence: 1,
+    mutation_id: &mutation_id,
+    batch_ordinal: 0,
+    batch_count: 1,
+    root_before: &before_root,
+    root_after: &after_root,
+    before: None,
+    after: Some(MutationSideWriteV1 { path: "/runtime/recovered.json", revision: &revision }),
+    committed_at_ms: 1_700_000_000_110,
+  };
+  let previous = vec![0; 32];
+  let journal = encode_mutation_journal(&MutationJournalWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    owner_id: JOURNAL_OWNER,
+    owner_kind: JournalOwnerKindV1::System,
+    generation: 1,
+    segment_ordinal: 1,
+    chain_reset: true,
+    previous_segment: &previous,
+    semantic_state_root,
+    runtime_boot_id: [0xa5; 16],
+    records: &[record],
+  })
+  .unwrap();
+  let attachment_owner = vec![0xa6; 32];
+  let attachments = [IndexTaskAttachmentWriteV1 {
+    role: IndexTaskAttachmentRoleV1::MutationJournalHead,
+    owner_id: &attachment_owner,
+    artifact_hash: &journal.key,
+    birth_generation: 1,
+  }];
+  let checkpoint = encode_index_task_checkpoint(&IndexTaskCheckpointWriteV1 {
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    task_id: descriptor.operation_id(),
+    checkpoint_sequence: 1,
+    generation: 1,
+    task_kind: IndexTaskKindV1::Reconcile,
+    state: IndexTaskStateV1::Running,
+    phase: 2,
+    required_capabilities: &[0; 32],
+    started_at_ms: 1_700_000_000_100,
+    updated_at_ms: 1_700_000_000_110,
+    source_root: &before_root,
+    target_root: Some(if matches!(fault, RecoveryFixtureFault::DiscontinuousJournal) { &revision } else { &after_root }),
+    primary_id: Some(descriptor.index_id()),
+    journal_head: Some(&journal.key),
+    journal_floor_sequence: 1,
+    journal_audited_through: 1,
+    next_document_ordinal: 1,
+    completed_work: 1,
+    total_work_hint: 1,
+    resume_key: b"runtime recovery",
+    attachments: &attachments,
+    external: None,
+  })
+  .unwrap();
+  let owner = IndexRecoveryOwnerV1::new(fixture.permit.database_id(), descriptor.index_id().to_vec(), descriptor.operation_id()).unwrap();
+  let mut store = NativeIndexRecoveryStoreV1::new(descriptor.clone(), fixture.destination.shared_publisher(), retirement, clock).unwrap();
+  if matches!(fault, RecoveryFixtureFault::MissingJournal) {
+    store.put_immutable_batch(&[&checkpoint]).unwrap();
+  } else {
+    store.put_immutable_batch(&[&journal, &checkpoint]).unwrap();
+  }
+  store.sync_immutable().unwrap();
+  let checkpoint_key = checkpoint.key.clone();
+  store.publish_selected_synced(&owner, None, &IndexCheckpointRootV1::new(1, checkpoint.key).unwrap()).unwrap();
+  checkpoint_key
+}
+
+fn reopen(path: &Path) -> aeordb::engine::v4::first_authority::V4FirstAuthorityPublisher {
+  aeordb::engine::v4::first_authority::V4FirstAuthorityPublisher::open(path).unwrap()
+}
+
+fn install_runtime_fixture(
+  fixture: &RuntimeFixture,
+  selected_descriptor: &NativeIndexOperationDescriptorV1,
+  coordinator_byte: u8,
+) -> aeordb::engine::v4::index_runtime_installation::NativeIndexRuntimeInstallationReceiptV1 {
+  let identity = fixture.identity();
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [coordinator_byte; 16],
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: std::slice::from_ref(selected_descriptor),
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(u64::from(coordinator_byte), 1_700_000_000_200),
+      now_ms: 1_700_000_000_200,
+    },
+  )
+  .unwrap()
 }
 
 #[test]
@@ -244,6 +548,471 @@ fn initializer_creates_one_private_reopenable_shadow_for_both_hash_widths_withou
     assert_eq!(reopened_header.head_hash, expected_namespace_root);
     assert!(reopened.locator(&reopened_header.head_hash).unwrap().is_some());
   }
+}
+
+#[test]
+fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellation_checks() {
+  let directory = tempfile::tempdir().unwrap();
+  let source_path = directory.path().join("runtime-source.aeordb");
+  let source = source_engine(&source_path, &directory.path().join("spill"));
+  let shadow_path = directory.path().join("runtime-shadow.aeordb");
+  let destination = observe_migration_destination_path_v1(&shadow_path).unwrap();
+  let permit = permit_with_source_identity(HashAlgorithm::Blake3_256, &destination, platform_file_identity(&source_path).unwrap());
+  let cancellation = CancellationToken::new();
+  let initialized = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
+    permit: &permit,
+    destination: &destination,
+    created_at_ms: 1_700_000_000_000,
+    writer_fence_epoch: 7,
+    cancellation: &cancellation,
+  })
+  .unwrap();
+  let retirement = retirement_owner(&source, permit.database_id(), &cancellation);
+  let clock: Arc<dyn VirtualClock> = Arc::new(MockClock::new(1, 1_700_000_000_200));
+  let identity = IndexRuntimeShadowIdentityV1::from_preflight(&permit);
+
+  let canceled = CancellationToken::new();
+  canceled.cancel();
+  let error = install_native_index_runtime_v1(
+    &source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x51; 16],
+      shadow_identity: &identity,
+      publisher: initialized.shared_publisher(),
+      retirement_owner: Arc::clone(&retirement),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &canceled,
+      clock: Arc::clone(&clock),
+      now_ms: 1_700_000_000_200,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Canceled));
+  assert!(source.index_runtime_snapshot_v1().is_none(), "cancellation must not consume the one-time runtime slot");
+
+  let receipt = install_native_index_runtime_v1(
+    &source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x52; 16],
+      shadow_identity: &identity,
+      publisher: initialized.shared_publisher(),
+      retirement_owner: retirement,
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &cancellation,
+      clock,
+      now_ms: 1_700_000_000_201,
+    },
+  )
+  .unwrap();
+  assert!(receipt.content_only);
+  assert_eq!(receipt.recovered_scopes, 0);
+  assert_eq!(receipt.highest_checkpoint_sequence, 0);
+  assert_eq!(source.index_runtime_snapshot_v1().unwrap().lifecycle, IndexRuntimeLifecycleV1::Running);
+  DirectoryOps::new(&source).store_file_buffered(&RequestContext::system(), "/runtime-routed.txt", b"runtime", Some("text/plain")).unwrap();
+  assert_eq!(source.index_runtime_snapshot_v1().unwrap().soft_hub.queued_notices, 1);
+  assert_eq!(source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes > 0, true,);
+
+  let duplicate = install_native_index_runtime_v1(
+    &source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x53; 16],
+      shadow_identity: &identity,
+      publisher: initialized.shared_publisher(),
+      retirement_owner: retirement_owner(&source, permit.database_id(), &cancellation),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &cancellation,
+      clock: Arc::new(MockClock::new(2, 1_700_000_000_202)),
+      now_ms: 1_700_000_000_202,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(duplicate, NativeIndexRuntimeInstallationErrorV1::AlreadyInstalled));
+}
+
+#[test]
+fn runtime_identity_refusal_and_content_only_descriptor_refusal_do_not_consume_installation() {
+  let directory = tempfile::tempdir().unwrap();
+  let source_path = directory.path().join("identity-source.aeordb");
+  let source = source_engine(&source_path, &directory.path().join("identity-spill"));
+  let shadow_path = directory.path().join("identity-shadow.aeordb");
+  let destination_observation = observe_migration_destination_path_v1(&shadow_path).unwrap();
+  let wrong_permit = permit(HashAlgorithm::Blake3_256, &destination_observation);
+  let cancellation = CancellationToken::new();
+  let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
+    permit: &wrong_permit,
+    destination: &destination_observation,
+    created_at_ms: 1_700_000_000_000,
+    writer_fence_epoch: 7,
+    cancellation: &cancellation,
+  })
+  .unwrap();
+  let wrong_identity = IndexRuntimeShadowIdentityV1::from_preflight(&wrong_permit);
+  let clock: Arc<dyn VirtualClock> = Arc::new(MockClock::new(1, 1_700_000_000_200));
+  let error = install_native_index_runtime_v1(
+    &source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x71; 16],
+      shadow_identity: &wrong_identity,
+      publisher: destination.shared_publisher(),
+      retirement_owner: retirement_owner(&source, wrong_permit.database_id(), &cancellation),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &cancellation,
+      clock: Arc::clone(&clock),
+      now_ms: 1_700_000_000_200,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_source_identity", .. }));
+  assert!(source.index_runtime_snapshot_v1().is_none());
+
+  let correct_permit =
+    permit_with_source_identity(HashAlgorithm::Blake3_256, &destination_observation, platform_file_identity(&source_path).unwrap());
+  let correct_identity = IndexRuntimeShadowIdentityV1::from_preflight(&correct_permit);
+  let selected_descriptor = descriptor(correct_permit.database_id());
+  let error = install_native_index_runtime_v1(
+    &source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x72; 16],
+      shadow_identity: &correct_identity,
+      publisher: destination.shared_publisher(),
+      retirement_owner: retirement_owner(&source, correct_permit.database_id(), &cancellation),
+      operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &cancellation,
+      clock,
+      now_ms: 1_700_000_000_201,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_content_only_descriptors", .. }));
+  assert!(source.index_runtime_snapshot_v1().is_none());
+}
+
+#[test]
+fn complete_semantic_authority_without_a_selected_checkpoint_starts_a_clean_build() {
+  let empty = RuntimeFixture::new("runtime-complete-empty");
+  publish_complete_semantic_authority(&empty, 0);
+  let empty_identity = empty.identity();
+  let empty_receipt = install_native_index_runtime_v1(
+    &empty.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x81; 16],
+      shadow_identity: &empty_identity,
+      publisher: empty.destination.shared_publisher(),
+      retirement_owner: empty.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &empty.cancellation,
+      clock: empty.clock(1, 1_700_000_000_200),
+      now_ms: 1_700_000_000_200,
+    },
+  )
+  .unwrap();
+  assert!(!empty_receipt.content_only);
+  assert_eq!(empty_receipt.lifecycle, IndexRuntimeLifecycleV1::Running);
+
+  let unbuilt = RuntimeFixture::new("runtime-complete-unbuilt");
+  publish_complete_semantic_authority(&unbuilt, 1);
+  let unbuilt_identity = unbuilt.identity();
+  let unbuilt_receipt = install_native_index_runtime_v1(
+    &unbuilt.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x82; 16],
+      shadow_identity: &unbuilt_identity,
+      publisher: unbuilt.destination.shared_publisher(),
+      retirement_owner: unbuilt.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &unbuilt.cancellation,
+      clock: unbuilt.clock(2, 1_700_000_000_200),
+      now_ms: 1_700_000_000_200,
+    },
+  )
+  .unwrap();
+  assert_eq!(unbuilt_receipt.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(unbuilt_receipt.recovered_scopes, 0);
+  assert_eq!(unbuilt_receipt.highest_checkpoint_sequence, 0);
+  assert!(unbuilt.source.index_runtime_snapshot_v1().unwrap().degraded.is_none());
+}
+
+#[test]
+fn selected_checkpoint_damage_installs_one_typed_degraded_runtime_instead_of_remaining_recovering() {
+  let absent = RuntimeFixture::new("runtime-selected-absent");
+  publish_complete_semantic_authority(&absent, 1);
+  let absent_descriptor = descriptor(absent.permit.database_id());
+  let absent_receipt = install_runtime_fixture(&absent, &absent_descriptor, 0xa1);
+  assert_eq!(absent_receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(
+    absent.source.index_runtime_snapshot_v1().unwrap().degraded.as_ref().unwrap().code,
+    "native_index_checkpoint_selection_missing"
+  );
+
+  let missing = RuntimeFixture::new("runtime-selected-missing-journal");
+  let missing_semantic = publish_complete_semantic_authority(&missing, 1);
+  let missing_descriptor = descriptor(missing.permit.database_id());
+  publish_recoverable_checkpoint(
+    &missing,
+    &missing_descriptor,
+    &missing_semantic,
+    missing.retirement(),
+    missing.clock(2, 1_700_000_000_200),
+    RecoveryFixtureFault::MissingJournal,
+  );
+  let missing_receipt = install_runtime_fixture(&missing, &missing_descriptor, 0xa2);
+  assert_eq!(missing_receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(missing.source.index_runtime_snapshot_v1().unwrap().degraded.as_ref().unwrap().code, "native_index_journal_missing");
+
+  let discontinuous = RuntimeFixture::new("runtime-selected-discontinuous");
+  let discontinuous_semantic = publish_complete_semantic_authority(&discontinuous, 1);
+  let discontinuous_descriptor = descriptor(discontinuous.permit.database_id());
+  publish_recoverable_checkpoint(
+    &discontinuous,
+    &discontinuous_descriptor,
+    &discontinuous_semantic,
+    discontinuous.retirement(),
+    discontinuous.clock(3, 1_700_000_000_200),
+    RecoveryFixtureFault::DiscontinuousJournal,
+  );
+  let discontinuous_receipt = install_runtime_fixture(&discontinuous, &discontinuous_descriptor, 0xa3);
+  assert_eq!(discontinuous_receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(
+    discontinuous.source.index_runtime_snapshot_v1().unwrap().degraded.as_ref().unwrap().code,
+    "native_index_journal_discontinuous"
+  );
+
+  let corrupt = RuntimeFixture::new("runtime-selected-corrupt");
+  let corrupt_semantic = publish_complete_semantic_authority(&corrupt, 1);
+  let corrupt_descriptor = descriptor(corrupt.permit.database_id());
+  let checkpoint_key = publish_recoverable_checkpoint(
+    &corrupt,
+    &corrupt_descriptor,
+    &corrupt_semantic,
+    corrupt.retirement(),
+    corrupt.clock(4, 1_700_000_000_200),
+    RecoveryFixtureFault::None,
+  );
+  let locator = corrupt.destination.publisher().locator(&checkpoint_key).unwrap().unwrap();
+  let corrupt_offset = locator.offset + u64::from(locator.total_length) - 1;
+  let mut file = fs::OpenOptions::new().read(true).write(true).open(corrupt.destination.path()).unwrap();
+  file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+  let mut byte = [0; 1];
+  file.read_exact(&mut byte).unwrap();
+  byte[0] ^= 0xff;
+  file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+  file.write_all(&byte).unwrap();
+  file.sync_all().unwrap();
+
+  let corrupt_receipt = install_runtime_fixture(&corrupt, &corrupt_descriptor, 0xa4);
+  assert_eq!(corrupt_receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(
+    corrupt.source.index_runtime_snapshot_v1().unwrap().degraded.as_ref().unwrap().code,
+    "native_index_checkpoint_recovery_failed"
+  );
+}
+
+#[test]
+fn cancellation_during_native_checkpoint_recovery_releases_the_unconsumed_installation_slot() {
+  let fixture = RuntimeFixture::new("runtime-selected-cancel-during-recovery");
+  let semantic_state_root = publish_complete_semantic_authority(&fixture, 1);
+  let selected_descriptor = descriptor(fixture.permit.database_id());
+  publish_recoverable_checkpoint(
+    &fixture,
+    &selected_descriptor,
+    &semantic_state_root,
+    fixture.retirement(),
+    fixture.clock(1, 1_700_000_000_200),
+    RecoveryFixtureFault::None,
+  );
+  let identity = fixture.identity();
+  let error = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0xb1; 16],
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock: Arc::new(CancelingClock { cancellation: fixture.cancellation.clone(), now_ms: 1_700_000_000_201 }),
+      now_ms: 1_700_000_000_201,
+    },
+  )
+  .unwrap_err();
+
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Canceled));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
+}
+
+#[test]
+fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime_slot() {
+  let fixture = RuntimeFixture::new("runtime-descriptor-bounds");
+  publish_complete_semantic_authority(&fixture, 2);
+  let first = descriptor_with(fixture.permit.database_id(), 0xc1, 0xc2, 0xc3);
+  let same_scope = descriptor_with(fixture.permit.database_id(), 0xc1, 0xd2, 0xd3);
+  let second_scope = descriptor_with(fixture.permit.database_id(), 0xd1, 0xd2, 0xd3);
+  let identity = fixture.identity();
+  let descriptors = [first.clone(), same_scope];
+  let error = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0xc1; 16],
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &descriptors,
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(1, 1_700_000_000_200),
+      now_ms: 1_700_000_000_200,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_descriptor_duplicate", .. }));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
+
+  let descriptors = [first.clone(), second_scope];
+  let count_options = IndexRuntimeNativeRecoveryOptionsV1::new(
+    1,
+    4 * 1_024 * 1_024,
+    IndexScopeOrdinalStoreRegistryOptionsV1::new(8, 8 * 1_024 * 1_024).unwrap(),
+    IndexRecoveryOptionsV1::new(128, 16 * 1_024 * 1_024, 128, 16 * 1_024 * 1_024).unwrap(),
+  )
+  .unwrap();
+  let error = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0xc2; 16],
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &descriptors,
+      runtime_options: runtime_options(),
+      recovery_options: count_options,
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(2, 1_700_000_000_201),
+      now_ms: 1_700_000_000_201,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_descriptor_count", .. }));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
+
+  let byte_options = IndexRuntimeNativeRecoveryOptionsV1::new(
+    128,
+    1,
+    IndexScopeOrdinalStoreRegistryOptionsV1::new(8, 8 * 1_024 * 1_024).unwrap(),
+    IndexRecoveryOptionsV1::new(128, 16 * 1_024 * 1_024, 128, 16 * 1_024 * 1_024).unwrap(),
+  )
+  .unwrap();
+  let error = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0xc3; 16],
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: std::slice::from_ref(&first),
+      runtime_options: runtime_options(),
+      recovery_options: byte_options,
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(3, 1_700_000_000_202),
+      now_ms: 1_700_000_000_202,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_descriptor_bytes", .. }));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
+
+  let receipt = install_runtime_fixture(&fixture, &first, 0xc4);
+  assert_eq!(receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(
+    fixture.source.index_runtime_snapshot_v1().unwrap().degraded.as_ref().unwrap().code,
+    "native_index_checkpoint_selection_missing"
+  );
+}
+
+#[test]
+fn selected_native_checkpoint_recovers_again_after_source_and_shadow_reopen() {
+  let fixture = RuntimeFixture::new("runtime-selected-reopen");
+  let semantic_state_root = publish_complete_semantic_authority(&fixture, 1);
+  let selected_descriptor = descriptor(fixture.permit.database_id());
+  let retirement = fixture.retirement();
+  let clock = fixture.clock(1, 1_700_000_000_200);
+  publish_recoverable_checkpoint(
+    &fixture,
+    &selected_descriptor,
+    &semantic_state_root,
+    Arc::clone(&retirement),
+    Arc::clone(&clock),
+    RecoveryFixtureFault::None,
+  );
+  let identity = fixture.identity();
+  let first = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x91; 16],
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: retirement,
+      operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock,
+      now_ms: 1_700_000_000_201,
+    },
+  )
+  .unwrap();
+  assert_eq!(first.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(first.recovered_scopes, 1);
+  assert_eq!(first.highest_checkpoint_sequence, 1);
+  assert_eq!(first.semantic_state_root, semantic_state_root);
+
+  let RuntimeFixture { _directory, source_path, source, permit, destination, cancellation } = fixture;
+  let shadow_path = destination.path().to_path_buf();
+  let database_id = permit.database_id();
+  drop(source);
+  drop(destination);
+  drop(cancellation);
+
+  let reopened_source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
+  assert!(platform_file_identity(&source_path).unwrap().represents_same_physical_file_as(permit.source_file_identity()));
+  let reopened_publisher = Arc::new(reopen(&shadow_path));
+  let reopened_cancellation = CancellationToken::new();
+  let reopened_retirement = retirement_owner(&reopened_source, database_id, &reopened_cancellation);
+  let reopened = install_native_index_runtime_v1(
+    &reopened_source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x92; 16],
+      shadow_identity: &identity,
+      publisher: reopened_publisher,
+      retirement_owner: reopened_retirement,
+      operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &reopened_cancellation,
+      clock: Arc::new(MockClock::new(2, 1_700_000_000_300)),
+      now_ms: 1_700_000_000_300,
+    },
+  )
+  .unwrap();
+  assert_eq!(reopened.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(reopened.recovered_scopes, 1);
+  assert_eq!(reopened.highest_checkpoint_sequence, 1);
 }
 
 #[test]

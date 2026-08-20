@@ -5,14 +5,12 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
-use aeordb::engine::hot_tail::{HotTailPayload, read_hot_tail_checked};
 use aeordb::engine::kv_stages::initial_block_size;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
 use aeordb::engine::v4::first_authority::{FirstAuthorityPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher};
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::hash::digest_parts;
-use aeordb::engine::v4::header_publication::observe_database_header_v4;
 use aeordb::engine::v4::index_artifact::{
   EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1, encode_immutable_index_artifact,
 };
@@ -515,28 +513,7 @@ fn publisher(name: &str) -> (TempDir, PathBuf, V4FirstAuthorityPublisher) {
 }
 
 fn reopen(path: &Path) -> V4FirstAuthorityPublisher {
-  let mut file = OpenOptions::new().read(true).write(true).open(path).unwrap();
-  let observation = observe_database_header_v4(&file).unwrap();
-  let header = &observation.selected.header;
-  let hot_tail = if header.head_hash.iter().any(|byte| *byte != 0) {
-    read_hot_tail_checked(&mut file, header.hot_tail_offset, header.hash_algorithm.hash_length()).unwrap()
-  } else {
-    HotTailPayload::default()
-  };
-  let coordinator = Arc::new(DurabilityCoordinator::new());
-  let kv = DiskKVStore::open_with_coordinator(
-    file.try_clone().unwrap(),
-    header.hash_algorithm,
-    header.kv_block_offset,
-    header.hot_tail_offset,
-    header.kv_block_stage as usize,
-    hot_tail.writes,
-    hot_tail.voids,
-    header.kv_block_version,
-    coordinator.clone(),
-  )
-  .unwrap();
-  V4FirstAuthorityPublisher::new(kv, coordinator).unwrap()
+  V4FirstAuthorityPublisher::open(path).unwrap()
 }
 
 fn first_authority_request() -> FirstAuthorityPublicationRequestV1 {

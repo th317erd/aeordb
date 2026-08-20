@@ -964,8 +964,15 @@
                 - [x] Bind selected checkpoint roots to typed IndexOperationControl A/B publication with retirement lineage.
                 - [x] Compose the concrete recovery store and bounded evictable per-scope registry under shared memory admission.
               - [ ] Install the recovered owner in `StorageEngine` and route the existing timer, pressure, metrics, spill, startup, and shutdown seams through it while legacy queries remain authoritative.
-                - [ ] P6-2d-c3a: converge `StorageEngine` and `IndexRuntimeOwnerV1` on one shared soft-mutation hub and publish lock-free cached lifecycle/queue/mutation observability.
+                - [x] P6-2d-c3a: converge `StorageEngine` and `IndexRuntimeOwnerV1` on one shared soft-mutation hub and publish lock-free cached lifecycle/queue/mutation observability.
+                  - [x] Freeze a compile-red engine-installation contract for inactive observation, one-time ownership, exact shared-hub visibility, and nonblocking contended acknowledgement.
+                  - [x] Store the engine soft hub under one shared `Arc`, install at most one recovering owner under namespace authority, and route acknowledgement/loss observation through that owner when present.
+                  - [x] Prove focused owner/namespace/engine behavior, architecture uniqueness, shared-memory accounting, and unchanged v3 query authority before landing c3a.
                 - [ ] P6-2d-c3b: construct exactly one runtime owner during create/open, resolve content-only or selected-checkpoint recovery before admission, and surface typed degraded startup without changing v3 query authority.
+                  - [x] Replace duplicated test-only v4 publisher reopen sequences with one no-follow production `V4FirstAuthorityPublisher::open` authority.
+                  - [x] Publish successor semantic objects through one bounded canonical native system-file boundary before selecting a complete semantic authority.
+                  - [x] Freeze a bounded native runtime recovery request/result over explicit shadow identity, content-only authority, and selected checkpoint descriptors.
+                  - [x] Install recovery exactly once, retain typed degraded evidence on corrupt/missing/discontinuous state, and prove restart without changing legacy query visibility.
                 - [ ] P6-2d-c3c: add the concrete selector-last runtime batch publisher and durable producer spill boundary required by live worker/flush activation.
                 - [ ] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
                 - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.

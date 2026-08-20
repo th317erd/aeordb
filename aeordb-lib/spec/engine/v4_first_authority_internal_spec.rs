@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Barrier, mpsc};
+use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use crate::engine::hot_tail::{HotTailPayload, VoidRecord, read_hot_tail_checked};
@@ -4150,6 +4150,32 @@ fn successor_request(
 }
 
 #[test]
+fn selected_semantic_authority_guard_pins_the_root_through_a_caller_owned_linearization() {
+  let (_directory, _coordinator, publisher) = environment("selected-semantic-authority-gate");
+  publisher.publish(&request()).unwrap();
+  let publisher = Arc::new(publisher);
+  let successor = successor_request(&publisher, 0x7A, "after-install.txt");
+  let authority = publisher.selected_semantic_authority_guard().unwrap();
+  let selected = authority.load().unwrap();
+  let (started_sender, started_receiver) = mpsc::channel();
+  let (result_sender, result_receiver) = mpsc::channel();
+  let racing_publisher = Arc::clone(&publisher);
+  let writer = std::thread::spawn(move || {
+    started_sender.send(()).unwrap();
+    result_sender.send(racing_publisher.publish_successor_authority(&successor)).unwrap();
+  });
+
+  started_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+  assert!(matches!(result_receiver.recv_timeout(Duration::from_millis(250)), Err(mpsc::RecvTimeoutError::Timeout)));
+  assert_eq!(authority.load().unwrap(), selected);
+
+  drop(authority);
+  let receipt = result_receiver.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+  writer.join().unwrap();
+  assert_ne!(receipt.namespace_root.root_hash, selected.root_hash);
+}
+
+#[test]
 fn migration_map_authority_refuses_an_existing_admission_without_its_prepare_witness() {
   let (_directory, _coordinator, publisher) = environment("migration-map-incomplete-witness");
   let initial = request();
@@ -4208,7 +4234,7 @@ fn migration_map_authority_refuses_an_existing_admission_without_its_prepare_wit
         publication_timestamp_ms: 1_700_000_000_300,
       },
       &mut observer,
-      ImmutableEntityValidationV1::PrevalidatedSystemControls,
+      ImmutableEntityValidationV1::PrevalidatedSystemFiles,
     )
     .unwrap();
   let selected_header_sequence = publisher.observe().unwrap().selected.header.slot_sequence;

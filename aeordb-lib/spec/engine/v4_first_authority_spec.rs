@@ -158,7 +158,7 @@ fn first_authority_supports_the_frozen_sha512_identity_width() {
 }
 
 #[test]
-fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns_atomic_root_publication() {
+fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_publication() {
   fn collect_rust_files(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -173,6 +173,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
   let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let first_authority_path = source_root.join("engine/v4/first_authority.rs");
   let index_recovery_store_path = source_root.join("engine/v4/index_recovery_store.rs");
+  let index_runtime_installation_path = source_root.join("engine/v4/index_runtime_installation.rs");
   let migration_base_clone_execution_path = source_root.join("engine/v4/migration_base_clone_execution.rs");
   let migration_capture_replay_path = source_root.join("engine/v4/migration_capture_replay.rs");
   let migration_destination_path = source_root.join("engine/v4/migration_destination.rs");
@@ -195,6 +196,7 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
     publisher_callers,
     vec![
       &index_recovery_store_path,
+      &index_runtime_installation_path,
       &migration_base_clone_execution_path,
       &migration_capture_replay_path,
       &migration_destination_path,
@@ -203,10 +205,11 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
       &migration_owner_path,
       &migration_root_map_owner_path,
     ],
-    "first-authority publisher escaped the reviewed disconnected owners: {publisher_callers:?}"
+    "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
   );
   for owner_path in [
     &index_recovery_store_path,
+    &index_runtime_installation_path,
     &migration_base_clone_execution_path,
     &migration_capture_replay_path,
     &migration_destination_path,
@@ -222,6 +225,11 @@ fn first_authority_allows_only_reviewed_disconnected_owners_and_exclusively_owns
     if owner_path == &migration_final_reconciliation_path {
       assert!(owner_source.contains("MigrationSourceWriteFreezeV1"));
       assert!(owner_source.contains("StorageEngine"));
+    } else if owner_path == &index_runtime_installation_path {
+      assert!(owner_source.contains("StorageEngine"));
+      assert!(owner_source.contains("begin_index_runtime_installation_v1"));
+      assert!(owner_source.contains("load_selected_semantic_authority"));
+      assert!(!owner_source.contains("request.publisher.publish"));
     } else {
       assert!(!owner_source.contains("StorageEngine"), "disconnected owner {owner_path:?} gained direct v3 engine ownership");
     }

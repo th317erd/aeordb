@@ -166,6 +166,10 @@ pub struct IndexRuntimeSnapshotV1 {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IndexRuntimeErrorV1 {
+  #[error("an index runtime owner is already installed")]
+  AlreadyInstalled,
+  #[error("index runtime installation failed: {0}")]
+  Installation(String),
   #[error("invalid index runtime owner options or recovery: {0}")]
   Invalid(String),
   #[error("index runtime owner is not running: {lifecycle:?}")]
@@ -307,7 +311,7 @@ impl IndexRuntimeOwnerV1 {
 
   pub fn offer_acknowledgement(&self, acknowledgement: &NamespaceMutationAcknowledgement) -> SoftMutationAdmissionV1 {
     let admission = self.soft_hub.offer_acknowledgement(acknowledgement);
-    match self.soft_hub.snapshot() {
+    match self.soft_hub.try_snapshot() {
       Ok(soft_hub) => {
         self.observability.rcu(|current| {
           let mut next = (**current).clone();
@@ -315,26 +319,61 @@ impl IndexRuntimeOwnerV1 {
           Arc::new(next)
         });
       }
-      Err(error) => {
-        tracing::error!(%error, "Index runtime soft-hub observability failed; projecting reconciliation-required state");
-        self.observability.rcu(|current| {
-          let mut next = (**current).clone();
-          next.soft_hub.reconciliation_required = true;
-          next.soft_hub.lost_through_sequence = Some(match next.soft_hub.lost_through_sequence {
-            Some(sequence) => sequence.max(acknowledgement.publication_sequence),
-            None => acknowledgement.publication_sequence,
-          });
-          if !next.soft_hub.loss_reasons.contains(&SoftMutationLossReasonV1::QueueUnavailable) {
-            next.soft_hub.loss_reasons.push(SoftMutationLossReasonV1::QueueUnavailable);
-          }
-          next.soft_hub.dropped_notices = next.soft_hub.dropped_notices.saturating_add(1);
-          next.soft_hub.loss_epoch = next.soft_hub.loss_epoch.saturating_add(1);
-          Arc::new(next)
-        });
-        return SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::QueueUnavailable);
+      Err(SoftMutationHubErrorV1::QueueContended) => self.project_admission_loss(acknowledgement.publication_sequence, admission),
+      Err(
+        SoftMutationHubErrorV1::QueueUnavailable
+        | SoftMutationHubErrorV1::InvalidOptions(_)
+        | SoftMutationHubErrorV1::Allocation(_)
+        | SoftMutationHubErrorV1::ArithmeticOverflow
+        | SoftMutationHubErrorV1::DrainLimitTooSmall { .. },
+      ) => {
+        if matches!(admission, SoftMutationAdmissionV1::Accepted) {
+          let forced =
+            self.soft_hub.force_reconciliation_required(acknowledgement.publication_sequence, SoftMutationLossReasonV1::QueueUnavailable);
+          self.project_soft_loss(acknowledgement.publication_sequence, Some(SoftMutationLossReasonV1::QueueUnavailable));
+          return forced;
+        }
+        self.project_admission_loss(acknowledgement.publication_sequence, admission);
       }
     }
     admission
+  }
+
+  fn project_admission_loss(&self, publication_sequence: u64, admission: SoftMutationAdmissionV1) {
+    match admission {
+      SoftMutationAdmissionV1::Accepted => {}
+      SoftMutationAdmissionV1::ReconciliationRequired(reason) => self.project_soft_loss(publication_sequence, Some(reason)),
+      SoftMutationAdmissionV1::ReconciliationAlreadyRequired => self.project_soft_loss(publication_sequence, None),
+    }
+  }
+
+  pub(crate) fn force_reconciliation_required(
+    &self,
+    publication_sequence: u64,
+    reason: SoftMutationLossReasonV1,
+  ) -> SoftMutationAdmissionV1 {
+    let admission = self.soft_hub.force_reconciliation_required(publication_sequence, reason);
+    self.project_soft_loss(publication_sequence, Some(reason));
+    admission
+  }
+
+  fn project_soft_loss(&self, publication_sequence: u64, reason: Option<SoftMutationLossReasonV1>) {
+    self.observability.rcu(|current| {
+      let mut next = (**current).clone();
+      next.soft_hub.reconciliation_required = true;
+      next.soft_hub.lost_through_sequence = Some(match next.soft_hub.lost_through_sequence {
+        Some(sequence) => sequence.max(publication_sequence),
+        None => publication_sequence,
+      });
+      if let Some(reason) = reason {
+        if !next.soft_hub.loss_reasons.contains(&reason) {
+          next.soft_hub.loss_reasons.push(reason);
+        }
+      }
+      next.soft_hub.dropped_notices = next.soft_hub.dropped_notices.saturating_add(1);
+      next.soft_hub.loss_epoch = next.soft_hub.loss_epoch.saturating_add(1);
+      Arc::new(next)
+    });
   }
 
   pub fn snapshot(&self) -> Result<IndexRuntimeSnapshotV1, IndexRuntimeErrorV1> {
@@ -345,6 +384,14 @@ impl IndexRuntimeOwnerV1 {
 
   pub fn cached_snapshot(&self) -> Arc<IndexRuntimeSnapshotV1> {
     self.observability.load_full()
+  }
+
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
+  pub(crate) fn shares_soft_hub(&self, hub: &Arc<SoftMutationHubV1>) -> bool {
+    Arc::ptr_eq(&self.soft_hub, hub)
   }
 
   pub fn complete_recovery(&self, decision: IndexRuntimeRecoveryDecisionV1) -> Result<(), IndexRuntimeErrorV1> {
@@ -389,6 +436,19 @@ impl IndexRuntimeOwnerV1 {
     let snapshot = self.snapshot()?;
     self.observability.store(Arc::new(snapshot));
     Ok(())
+  }
+
+  pub(crate) fn refresh_for_installation(&self) -> Result<Arc<IndexRuntimeSnapshotV1>, IndexRuntimeErrorV1> {
+    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+    if !matches!(state.lifecycle, IndexRuntimeLifecycleV1::Running | IndexRuntimeLifecycleV1::Degraded) {
+      return Err(IndexRuntimeErrorV1::Installation("native index runtime recovery must resolve before installation".to_string()));
+    }
+    observe_soft_loss(&mut state, &soft);
+    let snapshot = Arc::new(runtime_snapshot(&state, soft));
+    drop(state);
+    self.observability.store(Arc::clone(&snapshot));
+    Ok(snapshot)
   }
 
   pub fn admit_task(
@@ -822,3 +882,7 @@ fn journal_error(error: IndexProducerJournalAdmissionErrorV1) -> IndexRuntimeErr
     error => IndexRuntimeErrorV1::Journal(error.to_string()),
   }
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/index_runtime_owner_internal_spec.rs"]
+mod index_runtime_owner_internal_spec;

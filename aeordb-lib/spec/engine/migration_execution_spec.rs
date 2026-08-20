@@ -13,7 +13,8 @@ use aeordb::engine::v4::entity::{
 };
 use aeordb::engine::v4::first_authority::{
   FirstAuthorityPublicationReceiptV1, FirstAuthorityPublicationRequestV1, ImmutableEntityBatchPublicationRequestV1, ImmutableEntityWriteV1,
-  PreparedNamespaceTreeV0, SuccessorAuthorityPublicationRequestV1, V4FirstAuthorityPublisher,
+  ImmutableSemanticObjectBatchPublicationRequestV1, PreparedNamespaceTreeV0, SuccessorAuthorityPublicationRequestV1,
+  V4FirstAuthorityPublisher,
 };
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
@@ -276,6 +277,124 @@ fn bounded_immutable_entity_reader_enforces_key_and_allocation_limits() {
     assert_eq!(loaded.compression_algorithm, CompressionAlgorithm::None);
     assert_eq!(loaded.key, chunk_key);
     assert_eq!(loaded.stored_value, chunk);
+  }
+}
+
+#[test]
+fn immutable_semantic_objects_publish_canonically_and_refuse_invalid_batches_without_authority_change() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (directory, coordinator, publisher) = initialized_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let semantic = encode_semantic_state_object(
+      &SemanticStateWriteV1 {
+        required_capabilities: [0; 32],
+        availability: SemanticAvailabilityV1::ContentOnly { reason: SemanticUnavailableReasonV1::LegacyDependencyCannotBeProven },
+      },
+      algorithm,
+    )
+    .unwrap();
+    let request = ImmutableSemanticObjectBatchPublicationRequestV1 {
+      database_id: &before.selected.header.database_id,
+      objects: std::slice::from_ref(&semantic),
+      publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+    };
+
+    let receipt = publisher.publish_immutable_semantic_objects(request).unwrap();
+
+    assert!(!receipt.idempotent);
+    assert_eq!(receipt.entities.len(), 2);
+    assert!(receipt.entities.iter().all(|entity| !entity.idempotent));
+    assert_eq!(receipt.observation.selected.header.head_hash, before.selected.header.head_hash);
+    assert_eq!(receipt.observation.selected.header.entry_count, before.selected.header.entry_count + 2);
+    assert_eq!(receipt.observation.selected.header.write_sequence_high_water, before.selected.header.write_sequence_high_water + 2);
+    let selected_after_publication = receipt.observation.clone();
+    let hard_frontier = coordinator.snapshot().unwrap().hard_frontier;
+
+    let retry = publisher.publish_immutable_semantic_objects(request).unwrap();
+    assert!(retry.idempotent);
+    assert!(retry.entities.iter().all(|entity| entity.idempotent));
+    assert_eq!(retry.observation, selected_after_publication);
+    assert_eq!(coordinator.snapshot().unwrap().hard_frontier, hard_frontier);
+
+    let timestamp_independent_retry = publisher
+      .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+        publication_timestamp_ms: request.publication_timestamp_ms + 1,
+        ..request
+      })
+      .unwrap();
+    assert!(timestamp_independent_retry.idempotent);
+    assert!(timestamp_independent_retry.entities.iter().all(|entity| entity.idempotent));
+    assert_eq!(timestamp_independent_retry.observation, selected_after_publication);
+    assert_eq!(coordinator.snapshot().unwrap().hard_frontier, hard_frontier);
+
+    let baseline = publisher.observe().unwrap();
+    let wrong_database = [0x91; 16];
+    assert_eq!(
+      publisher
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 { database_id: &wrong_database, ..request })
+        .unwrap_err()
+        .code(),
+      "immutable_semantic_object_database_mismatch"
+    );
+    assert_eq!(
+      publisher
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 { objects: &[], ..request })
+        .unwrap_err()
+        .code(),
+      "immutable_semantic_object_count"
+    );
+    let oversized_count = vec![semantic.clone(); 2_049];
+    assert_eq!(
+      publisher
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 { objects: &oversized_count, ..request })
+        .unwrap_err()
+        .code(),
+      "immutable_semantic_object_count"
+    );
+    let duplicates = [semantic.clone(), semantic.clone()];
+    assert_eq!(
+      publisher
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 { objects: &duplicates, ..request })
+        .unwrap_err()
+        .code(),
+      "immutable_semantic_object_duplicate"
+    );
+    let mut wrong_identity = semantic.clone();
+    wrong_identity.object_id[0] ^= 0xff;
+    assert_eq!(
+      publisher
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+          objects: std::slice::from_ref(&wrong_identity),
+          ..request
+        })
+        .unwrap_err()
+        .code(),
+      "immutable_semantic_object_identity"
+    );
+    let mut malformed = semantic.clone();
+    *malformed.value.last_mut().unwrap() ^= 0xff;
+    assert!(publisher
+      .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+        objects: std::slice::from_ref(&malformed),
+        ..request
+      })
+      .is_err());
+    assert_eq!(
+      publisher
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 { publication_timestamp_ms: 0, ..request })
+        .unwrap_err()
+        .code(),
+      "immutable_semantic_object_publication_time"
+    );
+    assert_eq!(publisher.observe().unwrap(), baseline);
+
+    let path = directory.path().join("migration-execution.aeordb");
+    drop(publisher);
+    drop(coordinator);
+    let reopened = V4FirstAuthorityPublisher::open(&path).unwrap();
+    let reopened_receipt = reopened.publish_immutable_semantic_objects(request).unwrap();
+    assert!(reopened_receipt.idempotent);
+    assert_eq!(reopened_receipt.observation, selected_after_publication);
   }
 }
 

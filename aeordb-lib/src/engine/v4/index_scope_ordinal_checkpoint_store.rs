@@ -16,7 +16,8 @@ use crate::engine::{HashAlgorithm, VirtualClock};
 use super::index_artifact::{IndexManifestBodyV1, decode_index_manifest};
 use super::index_coordinator_recovery::{
   IndexCheckpointRootV1, IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryOwnerV1,
-  IndexRecoveryPublicationRequestV1, IndexRecoveryStoreV1, publish_index_recovery_checkpoint_v1, recover_index_checkpoint_v1,
+  IndexRecoveryPublicationRequestV1, IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1, publish_index_recovery_checkpoint_v1,
+  recover_index_checkpoint_v1,
 };
 use super::index_page::{ArtifactDirectoryNodeV1, OrderedIndexRoleV1, OrderedPageV1, decode_artifact_directory, decode_ordered_page};
 use super::index_scope_ordinal_authority::{
@@ -66,6 +67,16 @@ where
 
   fn lock_store(&self) -> Result<MutexGuard<'_, Store>, IndexScopeOrdinalStateStoreErrorV1> {
     self.store.lock().map_err(|error| corrupt("scope_ordinal_store_poisoned", format!("checkpoint store lock was poisoned: {error}")))
+  }
+
+  pub fn recover_selected_checkpoint(&self) -> Result<IndexRecoveryOutcomeV1, IndexRecoveryErrorV1> {
+    let mut store = self.store.lock().map_err(|error| {
+      IndexRecoveryErrorV1::Store(IndexRecoveryStoreErrorV1::new(
+        "scope_ordinal_store_poisoned",
+        format!("checkpoint store lock was poisoned during runtime recovery: {error}"),
+      ))
+    })?;
+    recover_index_checkpoint_v1(&mut *store, self.hash_algorithm, &self.owner, self.recovery_options, &self.memory, &self.cancellation)
   }
 
   fn load_selected_checkpoint(&self, store: &mut Store) -> Result<SelectedCheckpointV1, SelectedLoadErrorV1> {

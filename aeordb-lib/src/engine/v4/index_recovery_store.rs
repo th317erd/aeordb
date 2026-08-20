@@ -84,6 +84,14 @@ impl NativeIndexOperationDescriptorV1 {
     self.operation_id
   }
 
+  pub fn retained_identity_bytes(&self) -> Result<u64, IndexRecoveryStoreErrorV1> {
+    let fixed = u64::try_from(size_of::<Self>())
+      .map_err(|error| store_error("native_index_descriptor_size", format!("descriptor fixed size exceeds u64: {error}")))?;
+    fixed
+      .checked_add(self.variable_bytes()?)
+      .ok_or_else(|| store_error("native_index_descriptor_size", "operation descriptor retained size overflowed"))
+  }
+
   fn variable_bytes(&self) -> Result<u64, IndexRecoveryStoreErrorV1> {
     let variable = self
       .index_id

@@ -5,11 +5,14 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::num::TryFromIntError;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::engine::durability_coordinator::DurabilityCoordinator;
+use crate::engine::emergency_spill::open_regular_file_read_write_no_follow;
 use crate::engine::errors::EngineError;
 use crate::engine::file_record::FileRecord;
+use crate::engine::hot_tail::{HotTailPayload, read_hot_tail_checked};
 use crate::engine::kv_store::{KV_TYPE_CHUNK, KV_TYPE_DIRECTORY, KV_TYPE_FILE_RECORD, KVEntry};
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::native_durability::{
@@ -95,8 +98,8 @@ use super::gc_lifecycle::{
 use super::gc_root_reclaim::RootExpiryRetentionPermitV1;
 use super::gc_root_transition::RootRetirementIntentV1;
 use super::namespace::{
-  EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, decode_namespace_root,
-  decode_namespace_tree_root_v0, decode_semantic_object, encode_namespace_root,
+  EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, SemanticObjectKind, SemanticStateV1, decode_namespace_root,
+  decode_namespace_root_entity, decode_namespace_tree_root_v0, decode_semantic_object, encode_namespace_root,
 };
 use super::reader::FormatError;
 use super::read_view::{RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1};
@@ -108,6 +111,7 @@ use super::semantic_store::{SEMANTIC_OBJECT_CONTENT_TYPE, semantic_object_path};
 use super::system_control::{SystemControlKindV1, SystemControlSlotV1, decode_system_control, system_control_path};
 
 const FIRST_AUTHORITY_ENTITY_COUNT: usize = 8;
+const FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP: usize = 2 * 1024;
 const FIRST_AUTHORITY_NAMESPACE_TREE_CAP: usize = 48 * 1024 * 1024;
 const FIRST_AUTHORITY_CONTROL_ENTITY_CAP: usize = 64 * 1024;
 const IMMUTABLE_ENTITY_BATCH_COUNT_CAP: usize = DiskKVStore::MAX_ATOMIC_VISIBILITY_ENTRIES;
@@ -183,6 +187,19 @@ pub struct FirstAuthorityPublicationReceiptV1 {
   pub publication_sequence: u64,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedSemanticAuthorityV1 {
+  pub database_id: [u8; 16],
+  pub physical_instance_id: [u8; 16],
+  pub root_hash: Vec<u8>,
+  pub namespace_tree_root: Vec<u8>,
+  pub semantic_state: SemanticStateV1,
+  pub system_family_registry_fingerprint: Vec<u8>,
+  pub selected_header_slot_sequence: u64,
+  pub write_sequence_high_water: u64,
+  pub root_publication_sequence: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,6 +368,13 @@ pub struct ImmutableSystemControlWriteV1<'a> {
 pub struct ImmutableSystemControlBatchPublicationRequestV1<'a> {
   pub database_id: &'a [u8; 16],
   pub controls: &'a [ImmutableSystemControlWriteV1<'a>],
+  pub publication_timestamp_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ImmutableSemanticObjectBatchPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub objects: &'a [EncodedSemanticObjectV1],
   pub publication_timestamp_ms: u64,
 }
 
@@ -1951,10 +1975,28 @@ struct PreparedWholeEntityV1 {
 #[derive(Clone, Copy)]
 enum ImmutableEntityValidationV1 {
   GenericContent,
-  PrevalidatedSystemControls,
+  PrevalidatedSystemFiles,
 }
 
-struct PreparedImmutableSystemControlInputV1 {
+fn validate_immutable_entity_batch_request(
+  request: &ImmutableEntityBatchPublicationRequestV1<'_>,
+) -> Result<(), ImmutableEntityBatchPublicationErrorV1> {
+  if request.publication_timestamp_ms == 0 || request.publication_timestamp_ms > i64::MAX as u64 {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_publication_time",
+      "immutable entity publication time must fit the signed persistent timestamp range",
+    ));
+  }
+  if request.entities.is_empty() || request.entities.len() > IMMUTABLE_ENTITY_BATCH_COUNT_CAP {
+    return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+      "immutable_entity_batch_count",
+      format!("immutable entity batch count {} is outside 1..={IMMUTABLE_ENTITY_BATCH_COUNT_CAP}", request.entities.len()),
+    ));
+  }
+  Ok(())
+}
+
+struct PreparedSystemFileInputV1 {
   chunk_key: Vec<u8>,
   path_key: Vec<u8>,
   record_value: Vec<u8>,
@@ -1966,19 +2008,42 @@ fn prepare_system_control_file_record(
   algorithm: HashAlgorithm,
   created_at: i64,
   updated_at: i64,
-) -> Result<PreparedImmutableSystemControlInputV1, FirstAuthorityPublicationErrorV1> {
-  let total_size = u64::try_from(encoded_control.len()).map_err(|error| {
-    FirstAuthorityPublicationErrorV1::invalid("system_control_size", format!("encoded system-control length exceeds u64: {error}"))
+) -> Result<PreparedSystemFileInputV1, FirstAuthorityPublicationErrorV1> {
+  prepare_system_file_record(
+    path,
+    SYSTEM_CONTROL_CONTENT_TYPE,
+    encoded_control,
+    algorithm,
+    created_at,
+    updated_at,
+    "system_control_size",
+    "system_control_file_record_allocation",
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_system_file_record(
+  path: String,
+  content_type_value: &str,
+  body: &[u8],
+  algorithm: HashAlgorithm,
+  created_at: i64,
+  updated_at: i64,
+  size_error_code: &'static str,
+  allocation_error_code: &'static str,
+) -> Result<PreparedSystemFileInputV1, FirstAuthorityPublicationErrorV1> {
+  let total_size = u64::try_from(body.len()).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid(size_error_code, format!("encoded system-file length exceeds u64: {error}"))
   })?;
   let mut content_type = String::new();
-  content_type.try_reserve_exact(SYSTEM_CONTROL_CONTENT_TYPE.len()).map_err(|error| {
-    FirstAuthorityPublicationErrorV1::invalid("system_control_file_record_allocation", format!("content-type allocation failed: {error}"))
+  content_type.try_reserve_exact(content_type_value.len()).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid(allocation_error_code, format!("content-type allocation failed: {error}"))
   })?;
-  content_type.push_str(SYSTEM_CONTROL_CONTENT_TYPE);
-  let chunk_key = first_authority_system_chunk_hash(encoded_control, algorithm);
+  content_type.push_str(content_type_value);
+  let chunk_key = first_authority_system_chunk_hash(body, algorithm);
   let mut chunk_hashes = Vec::new();
   chunk_hashes.try_reserve_exact(1).map_err(|error| {
-    FirstAuthorityPublicationErrorV1::invalid("system_control_file_record_allocation", format!("chunk identity allocation failed: {error}"))
+    FirstAuthorityPublicationErrorV1::invalid(allocation_error_code, format!("chunk identity allocation failed: {error}"))
   })?;
   chunk_hashes.push(chunk_key.clone());
   let path_key = first_authority_file_path_hash(&path, algorithm);
@@ -1989,10 +2054,10 @@ fn prepare_system_control_file_record(
     created_at,
     updated_at,
     metadata: Vec::new(),
-    content_hash: first_authority_content_hash(encoded_control, algorithm),
+    content_hash: first_authority_content_hash(body, algorithm),
     chunk_hashes,
   };
-  Ok(PreparedImmutableSystemControlInputV1 { chunk_key, path_key, record_value: record.serialize(algorithm.hash_length())? })
+  Ok(PreparedSystemFileInputV1 { chunk_key, path_key, record_value: record.serialize(algorithm.hash_length())? })
 }
 
 struct FirstAuthorityPackageV1 {
@@ -2552,7 +2617,43 @@ pub struct V4FirstAuthorityPublisher {
   root_state: Mutex<()>,
 }
 
+pub(crate) struct SelectedSemanticAuthorityGuardV1<'publisher> {
+  publisher: &'publisher V4FirstAuthorityPublisher,
+  _authority: MutexGuard<'publisher, ()>,
+}
+
+impl SelectedSemanticAuthorityGuardV1<'_> {
+  pub(crate) fn load(&self) -> Result<SelectedSemanticAuthorityV1, FirstAuthorityPublicationErrorV1> {
+    self.publisher.load_selected_semantic_authority_locked()
+  }
+}
+
 impl V4FirstAuthorityPublisher {
+  pub fn open(path: impl AsRef<Path>) -> Result<Self, FirstAuthorityPublicationErrorV1> {
+    let mut file = open_regular_file_read_write_no_follow(path.as_ref())?;
+    let observation = observe_database_header_v4(&file)?;
+    let header = &observation.selected.header;
+    let hot_tail = if header.head_hash.iter().any(|byte| *byte != 0) {
+      read_hot_tail_checked(&mut file, header.hot_tail_offset, header.hash_algorithm.hash_length())?
+    } else {
+      HotTailPayload::default()
+    };
+    let coordinator = Arc::new(DurabilityCoordinator::new());
+    let kv = DiskKVStore::open_with_layout_and_coordinator(
+      file.try_clone().map_err(EngineError::IoError)?,
+      header.hash_algorithm,
+      header.kv_block_offset,
+      header.kv_block_length,
+      header.hot_tail_offset,
+      header.kv_block_stage as usize,
+      hot_tail.writes,
+      hot_tail.voids,
+      header.kv_block_version,
+      Arc::clone(&coordinator),
+    )?;
+    Self::new(kv, coordinator)
+  }
+
   pub fn new(kv: DiskKVStore, coordinator: Arc<DurabilityCoordinator>) -> Result<Self, FirstAuthorityPublicationErrorV1> {
     if !kv.shares_durability_coordinator(&coordinator) {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
@@ -2568,6 +2669,117 @@ impl V4FirstAuthorityPublisher {
 
   pub fn observe(&self) -> Result<DatabaseHeaderObservationV4, FirstAuthorityPublicationErrorV1> {
     observe_database_header_v4(&self.file).map_err(Into::into)
+  }
+
+  /// Load the selected HEAD semantic authority without materializing its
+  /// namespace tree. Runtime recovery needs only the root edges, semantic
+  /// state, and immutable admission witness; the potentially large tree stays
+  /// lazy until an authoritative scan actually needs it.
+  pub fn load_selected_semantic_authority(&self) -> Result<SelectedSemanticAuthorityV1, FirstAuthorityPublicationErrorV1> {
+    self.selected_semantic_authority_guard()?.load()
+  }
+
+  pub(crate) fn selected_semantic_authority_guard(&self) -> Result<SelectedSemanticAuthorityGuardV1<'_>, FirstAuthorityPublicationErrorV1> {
+    let authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    Ok(SelectedSemanticAuthorityGuardV1 { publisher: self, _authority: authority })
+  }
+
+  fn load_selected_semantic_authority_locked(&self) -> Result<SelectedSemanticAuthorityV1, FirstAuthorityPublicationErrorV1> {
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "selected_semantic_authority_header",
+        "runtime recovery requires a non-degraded selected v4 HEAD",
+      ));
+    }
+
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let root_locator = kv.get(&header.head_hash)?.ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("selected_semantic_authority_root_missing", "selected HEAD NamespaceRoot is absent")
+    })?;
+    if root_locator.type_flags != KV_TYPE_DIRECTORY {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "selected_semantic_authority_root_role",
+        "selected HEAD identity resolves to another KV role",
+      ));
+    }
+    let root_bytes =
+      read_entity_bounded(&self.file, &kv, &header.head_hash, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP, header.write_sequence_high_water)?
+        .ok_or_else(|| {
+          FirstAuthorityPublicationErrorV1::invalid(
+            "selected_semantic_authority_root_changed",
+            "selected HEAD NamespaceRoot disappeared after its locator was observed",
+          )
+        })?;
+    let root = decode_namespace_root_entity(&root_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+    if root.root_hash != header.head_hash {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "selected_semantic_authority_root_identity",
+        "selected NamespaceRoot bytes disagree with the v4 HEAD",
+      ));
+    }
+
+    let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
+    let semantic = load_canonical_system_file_at_path(
+      &self.file,
+      &kv,
+      header,
+      &semantic_path,
+      SEMANTIC_OBJECT_CONTENT_TYPE,
+      super::semantic_store::semantic_object_cap(1)?,
+    )?
+    .ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "selected_semantic_authority_state_missing",
+        "selected NamespaceRoot semantic-state object is absent",
+      )
+    })?;
+    let semantic = decode_semantic_object(&semantic.body, header.hash_algorithm)?;
+    if semantic.object_id != root.semantic_state_root || !matches!(semantic.kind, SemanticObjectKind::State { .. }) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "selected_semantic_authority_state_identity",
+        "selected semantic-state object disagrees with the NamespaceRoot edge",
+      ));
+    }
+    let semantic_state = semantic.semantic_state.ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "selected_semantic_authority_state_fields",
+        "selected semantic-state object omitted its typed state fields",
+      )
+    })?;
+
+    let admission_bytes = load_system_file(&self.file, &kv, header, SystemControlKindV1::RootAdmissionCommit, &header.head_hash)?;
+    let admission = decode_root_admission_commit(&admission_bytes, header.hash_algorithm)?;
+    if admission.database_id != header.database_id
+      || admission.namespace_root != header.head_hash
+      || admission.authority_kind != RootAuthorityKindV1::Head
+      || admission.authority_after != header.head_hash
+      || admission.selected_header_slot_sequence > header.slot_sequence
+      || admission.publication_sequence == 0
+      || admission.publication_sequence > header.write_sequence_high_water
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "selected_semantic_authority_admission",
+        "selected HEAD admission witness does not close over the current v4 authority",
+      ));
+    }
+
+    Ok(SelectedSemanticAuthorityV1 {
+      database_id: header.database_id,
+      physical_instance_id: header.physical_instance_id,
+      root_hash: root.root_hash,
+      namespace_tree_root: root.namespace_tree_root,
+      semantic_state,
+      system_family_registry_fingerprint: header.system_family_registry_fingerprint.clone(),
+      selected_header_slot_sequence: header.slot_sequence,
+      write_sequence_high_water: header.write_sequence_high_water,
+      root_publication_sequence: admission.publication_sequence,
+    })
   }
 
   pub fn locator(&self, key: &[u8]) -> Result<Option<KVEntry>, FirstAuthorityPublicationErrorV1> {
@@ -3200,6 +3412,156 @@ impl V4FirstAuthorityPublisher {
     self.publish_immutable_system_controls_with_observer(request, &mut observer)
   }
 
+  /// Publish immutable semantic objects without selecting a namespace root.
+  ///
+  /// Every object is stored as the canonical system FileRecord and one
+  /// system-domain chunk. Successor authority publication may then bind the
+  /// exact durable object while preserving semantic dependency-first order.
+  pub fn publish_immutable_semantic_objects(
+    &self,
+    request: ImmutableSemanticObjectBatchPublicationRequestV1<'_>,
+  ) -> Result<ImmutableEntityBatchPublicationReceiptV1, ImmutableEntityBatchPublicationErrorV1> {
+    if request.publication_timestamp_ms == 0 || request.publication_timestamp_ms > i64::MAX as u64 {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_semantic_object_publication_time",
+        "immutable semantic-object publication time must fit the signed persistent timestamp range",
+      ));
+    }
+    let maximum_objects = IMMUTABLE_ENTITY_BATCH_COUNT_CAP / 2;
+    if request.objects.is_empty() || request.objects.len() > maximum_objects {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_semantic_object_count",
+        format!("immutable semantic-object count {} is outside 1..={maximum_objects}", request.objects.len()),
+      ));
+    }
+
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      ImmutableEntityBatchPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if &header.database_id != request.database_id {
+      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_semantic_object_database_mismatch",
+        "immutable semantic-object batch belongs to another logical database",
+      ));
+    }
+    let timestamp = i64::try_from(request.publication_timestamp_ms).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_semantic_object_publication_time",
+        format!("publication timestamp exceeds FileRecord range: {error}"),
+      )
+    })?;
+
+    let mut identities = HashSet::new();
+    identities.try_reserve(request.objects.len()).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_semantic_object_allocation",
+        format!("semantic identity allocation failed: {error}"),
+      )
+    })?;
+    let mut prepared = Vec::new();
+    prepared.try_reserve_exact(request.objects.len()).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_semantic_object_allocation",
+        format!("semantic system-file allocation failed: {error}"),
+      )
+    })?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    for encoded in request.objects {
+      let object = decode_semantic_object(&encoded.value, header.hash_algorithm)
+        .map_err(|source| ImmutableEntityBatchPublicationErrorV1::invalid(source.code(), source.to_string()))?;
+      if object.object_id != encoded.object_id {
+        return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+          "immutable_semantic_object_identity",
+          "encoded semantic-object identity differs from its canonical bytes",
+        ));
+      }
+      if !identities.insert((object.kind_id, encoded.object_id.as_slice())) {
+        return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+          "immutable_semantic_object_duplicate",
+          "immutable semantic-object batch contains a duplicate kind and identity",
+        ));
+      }
+      let maximum_body_length = super::semantic_store::semantic_object_cap(object.kind_id)
+        .map_err(|source| ImmutableEntityBatchPublicationErrorV1::invalid(source.code(), source.to_string()))?;
+      if encoded.value.len() > maximum_body_length {
+        return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+          "immutable_semantic_object_size",
+          format!("semantic-object kind {:#06x} exceeds its {maximum_body_length}-byte cap", object.kind_id),
+        ));
+      }
+      let path = semantic_object_path(header.hash_algorithm, object.kind_id, &encoded.object_id)
+        .map_err(|source| ImmutableEntityBatchPublicationErrorV1::invalid(source.code(), source.to_string()))?;
+      let existing = load_canonical_system_file_at_path(&self.file, &kv, header, &path, SEMANTIC_OBJECT_CONTENT_TYPE, maximum_body_length)?;
+      let (created_at, updated_at) = match existing {
+        Some(existing) if existing.body == encoded.value => (existing.record.created_at, existing.record.updated_at),
+        Some(_) => {
+          return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
+            "immutable_semantic_object_collision",
+            "stored semantic-object body differs from the canonical requested identity",
+          ));
+        }
+        None => (timestamp, timestamp),
+      };
+      prepared.push(
+        prepare_system_file_record(
+          path,
+          SEMANTIC_OBJECT_CONTENT_TYPE,
+          &encoded.value,
+          header.hash_algorithm,
+          created_at,
+          updated_at,
+          "immutable_semantic_object_size",
+          "immutable_semantic_object_allocation",
+        )
+        .map_err(ImmutableEntityBatchPublicationErrorV1::from)?,
+      );
+    }
+    drop(kv);
+
+    let entity_count = request.objects.len().checked_mul(2).ok_or_else(|| {
+      ImmutableEntityBatchPublicationErrorV1::invalid("immutable_semantic_object_count", "semantic entity count overflowed")
+    })?;
+    let mut entities = Vec::new();
+    entities.try_reserve_exact(entity_count).map_err(|error| {
+      ImmutableEntityBatchPublicationErrorV1::invalid(
+        "immutable_semantic_object_allocation",
+        format!("semantic entity descriptor allocation failed: {error}"),
+      )
+    })?;
+    for (encoded, prepared) in request.objects.iter().zip(&prepared) {
+      entities.push(ImmutableEntityWriteV1 {
+        entity_version: 0,
+        entry_type: EntryTypeV4::Chunk,
+        flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        key: &prepared.chunk_key,
+        stored_value: &encoded.value,
+      });
+      entities.push(ImmutableEntityWriteV1 {
+        entity_version: 1,
+        entry_type: EntryTypeV4::FileRecord,
+        flags: WHOLE_ENTITY_V1_FLAG_SYSTEM,
+        key: &prepared.path_key,
+        stored_value: &prepared.record_value,
+      });
+    }
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    let entity_request = ImmutableEntityBatchPublicationRequestV1 {
+      database_id: request.database_id,
+      entities: &entities,
+      publication_timestamp_ms: request.publication_timestamp_ms,
+    };
+    validate_immutable_entity_batch_request(&entity_request)?;
+    self.publish_immutable_entity_batch_with_validation_locked(
+      entity_request,
+      &mut observer,
+      ImmutableEntityValidationV1::PrevalidatedSystemFiles,
+    )
+  }
+
   /// Admit historical roots referenced by the finite v3-to-v4 migration map.
   ///
   /// The selected HEAD is deliberately unchanged. Missing NamespaceRoot,
@@ -3570,7 +3932,7 @@ impl V4FirstAuthorityPublisher {
         publication_timestamp_ms: request.publication_timestamp_ms,
       },
       observer,
-      ImmutableEntityValidationV1::PrevalidatedSystemControls,
+      ImmutableEntityValidationV1::PrevalidatedSystemFiles,
     );
     match result {
       Ok(receipt) => {
@@ -3618,23 +3980,20 @@ impl V4FirstAuthorityPublisher {
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
     validation: ImmutableEntityValidationV1,
   ) -> Result<ImmutableEntityBatchPublicationReceiptV1, ImmutableEntityBatchPublicationErrorV1> {
-    if request.publication_timestamp_ms == 0 || request.publication_timestamp_ms > i64::MAX as u64 {
-      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
-        "immutable_entity_publication_time",
-        "immutable entity publication time must fit the signed persistent timestamp range",
-      ));
-    }
-    if request.entities.is_empty() || request.entities.len() > IMMUTABLE_ENTITY_BATCH_COUNT_CAP {
-      return Err(ImmutableEntityBatchPublicationErrorV1::invalid(
-        "immutable_entity_batch_count",
-        format!("immutable entity batch count {} is outside 1..={IMMUTABLE_ENTITY_BATCH_COUNT_CAP}", request.entities.len()),
-      ));
-    }
-
+    validate_immutable_entity_batch_request(&request)?;
     let _authority = self.root_state.lock().map_err(|poisoned| {
       drop(poisoned);
       ImmutableEntityBatchPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
     })?;
+    self.publish_immutable_entity_batch_with_validation_locked(request, observer, validation)
+  }
+
+  fn publish_immutable_entity_batch_with_validation_locked(
+    &self,
+    request: ImmutableEntityBatchPublicationRequestV1<'_>,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+    validation: ImmutableEntityValidationV1,
+  ) -> Result<ImmutableEntityBatchPublicationReceiptV1, ImmutableEntityBatchPublicationErrorV1> {
     let observation = self.observe()?;
     let header = &observation.selected.header;
     if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {

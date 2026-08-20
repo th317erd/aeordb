@@ -811,7 +811,9 @@ pub struct StorageEngine {
   configuration_authority: OnceLock<Arc<crate::engine::configuration_authority::ConfigurationAuthority>>,
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
   query_runtime: OnceLock<Arc<QueryRuntime>>,
-  soft_mutation_hub: crate::engine::v4::coverage_runtime::SoftMutationHubV1,
+  soft_mutation_hub: Arc<crate::engine::v4::coverage_runtime::SoftMutationHubV1>,
+  index_runtime_installation_v1: Mutex<()>,
+  index_runtime_v1: OnceLock<Arc<crate::engine::v4::index_runtime_installation::NativeIndexRuntimeV1>>,
   migration_capture_subscription: ArcSwapOption<crate::engine::v4::migration_capture_subscription::MigrationCaptureSubscriptionV1>,
   operation_tracker: EngineOperationTracker,
   shutdown_started: Arc<AtomicBool>,
@@ -870,6 +872,51 @@ pub struct StorageEngine {
   gc_run_status: Arc<crate::engine::gc_run_status::GcRunStatusRegistryV1>,
   #[allow(dead_code)]
   _file_lock: std::fs::File,
+}
+
+pub(crate) struct IndexRuntimeInstallationPermitV1<'engine> {
+  engine: &'engine StorageEngine,
+  _guard: MutexGuard<'engine, ()>,
+}
+
+impl IndexRuntimeInstallationPermitV1<'_> {
+  pub(crate) fn prepare_owner(
+    &self,
+    coordinator_id: [u8; 16],
+    options: crate::engine::v4::index_runtime_owner::IndexRuntimeOwnerOptionsV1,
+    now_ms: u64,
+  ) -> Result<Arc<crate::engine::v4::index_runtime_owner::IndexRuntimeOwnerV1>, crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1>
+  {
+    Ok(Arc::new(crate::engine::v4::index_runtime_owner::IndexRuntimeOwnerV1::new_with_soft_hub(
+      coordinator_id,
+      self.engine.hash_algo,
+      (*self.engine.memory_coordinator()).clone(),
+      options,
+      now_ms,
+      Arc::clone(&self.engine.soft_mutation_hub),
+    )?))
+  }
+
+  pub(crate) fn install(
+    self,
+    runtime: Arc<crate::engine::v4::index_runtime_installation::NativeIndexRuntimeV1>,
+  ) -> Result<
+    Arc<crate::engine::v4::index_runtime_owner::IndexRuntimeSnapshotV1>,
+    crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1,
+  > {
+    if runtime.owner().hash_algorithm() != self.engine.hash_algo || !runtime.owner().shares_soft_hub(&self.engine.soft_mutation_hub) {
+      return Err(crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::Installation(
+        "native index runtime does not share the engine hash profile and soft-mutation hub".to_string(),
+      ));
+    }
+    let _authority = self
+      .engine
+      .direct_hard_authority_guard()
+      .map_err(|error| crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::Installation(error.to_string()))?;
+    let snapshot = runtime.owner().refresh_for_installation()?;
+    self.engine.index_runtime_v1.set(runtime).map_err(|_| crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::AlreadyInstalled)?;
+    Ok(snapshot)
+  }
 }
 
 impl StorageEngine {
@@ -1197,14 +1244,37 @@ impl StorageEngine {
     &self,
   ) -> Result<crate::engine::v4::coverage_runtime::SoftMutationHubSnapshotV1, crate::engine::v4::coverage_runtime::SoftMutationHubErrorV1>
   {
+    if let Some(runtime) = self.index_runtime_v1.get() {
+      return Ok(runtime.owner().cached_snapshot().soft_hub.clone());
+    }
     self.soft_mutation_hub.snapshot()
+  }
+
+  pub fn index_runtime_snapshot_v1(&self) -> Option<Arc<crate::engine::v4::index_runtime_owner::IndexRuntimeSnapshotV1>> {
+    self.index_runtime_v1.get().map(|runtime| runtime.owner().cached_snapshot())
+  }
+
+  pub(crate) fn begin_index_runtime_installation_v1(
+    &self,
+  ) -> Result<IndexRuntimeInstallationPermitV1<'_>, crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1> {
+    let guard = self
+      .index_runtime_installation_v1
+      .lock()
+      .map_err(|error| crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::Installation(error.to_string()))?;
+    if self.index_runtime_v1.get().is_some() {
+      return Err(crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::AlreadyInstalled);
+    }
+    Ok(IndexRuntimeInstallationPermitV1 { engine: self, _guard: guard })
   }
 
   pub(crate) fn offer_soft_namespace_mutation(
     &self,
     acknowledgement: &crate::engine::namespace_mutation::NamespaceMutationAcknowledgement,
   ) -> crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1 {
-    let primary = self.soft_mutation_hub.offer_acknowledgement(acknowledgement);
+    let primary = match self.index_runtime_v1.get() {
+      Some(runtime) => runtime.owner().offer_acknowledgement(acknowledgement),
+      None => self.soft_mutation_hub.offer_acknowledgement(acknowledgement),
+    };
     if let Some(subscription) = self.migration_capture_subscription.load_full() {
       match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subscription.offer_acknowledgement(acknowledgement))) {
         Ok(crate::engine::v4::migration_capture_subscription::MigrationCaptureOfferV1::IgnoredAtOrBeforeBoundary)
@@ -1299,7 +1369,10 @@ impl StorageEngine {
     publication_sequence: u64,
     reason: crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1,
   ) -> crate::engine::v4::coverage_runtime::SoftMutationAdmissionV1 {
-    let primary = self.soft_mutation_hub.force_reconciliation_required(publication_sequence, reason);
+    let primary = match self.index_runtime_v1.get() {
+      Some(runtime) => runtime.owner().force_reconciliation_required(publication_sequence, reason),
+      None => self.soft_mutation_hub.force_reconciliation_required(publication_sequence, reason),
+    };
     if let Some(subscription) = self.migration_capture_subscription.load_full() {
       subscription.force_reconciliation_required(publication_sequence);
     }
@@ -3055,10 +3128,14 @@ impl StorageEngine {
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       query_runtime: OnceLock::new(),
-      soft_mutation_hub: crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
-        crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
-      )
-      .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
+      soft_mutation_hub: Arc::new(
+        crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
+          crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
+        )
+        .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
+      ),
+      index_runtime_installation_v1: Mutex::new(()),
+      index_runtime_v1: OnceLock::new(),
       migration_capture_subscription: ArcSwapOption::empty(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -3298,10 +3375,14 @@ impl StorageEngine {
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
       query_runtime: OnceLock::new(),
-      soft_mutation_hub: crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
-        crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
-      )
-      .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
+      soft_mutation_hub: Arc::new(
+        crate::engine::v4::coverage_runtime::SoftMutationHubV1::new(
+          crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1::engine_default(),
+        )
+        .map_err(|error| EngineError::ResourceExhausted(error.to_string()))?,
+      ),
+      index_runtime_installation_v1: Mutex::new(()),
+      index_runtime_v1: OnceLock::new(),
       migration_capture_subscription: ArcSwapOption::empty(),
       operation_tracker: EngineOperationTracker::default(),
       shutdown_started: Arc::new(AtomicBool::new(false)),

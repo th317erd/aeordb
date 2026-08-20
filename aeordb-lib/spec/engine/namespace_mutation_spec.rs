@@ -876,6 +876,10 @@ fn converged_waves_activate_only_characterized_namespace_producers() {
 
   let storage_engine = std::fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
   assert_eq!(storage_engine.matches("self.soft_mutation_hub.offer_acknowledgement(acknowledgement)").count(), 1);
+  assert_eq!(storage_engine.matches("soft_mutation_hub: Arc<").count(), 1);
+  assert_eq!(storage_engine.matches("index_runtime_v1: OnceLock<Arc<").count(), 1);
+  assert_eq!(storage_engine.matches("index_runtime_installation_v1: Mutex<()>").count(), 1);
+  assert_eq!(storage_engine.matches("Some(runtime) => runtime.owner().offer_acknowledgement(acknowledgement)").count(), 1);
   assert_eq!(storage_engine.matches("subscription.offer_acknowledgement(acknowledgement)").count(), 1);
   assert_eq!(storage_engine.matches("migration_capture_subscription: ArcSwapOption<").count(), 1);
   assert!(storage_engine.contains("fn register_migration_capture_subscription"));
