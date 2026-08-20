@@ -253,14 +253,15 @@ jq -e '
 registry_report="$evidence_dir/p0b-contract-registry-report.json"
 [[ -f "$registry_report" ]] || fail "missing P0b collision/ID/capability registry report"
 jq -e --arg source_sha "$(sha256_canonical_text_file "$contract_registry")" \
-  --arg fixture_sha "$(sha256_canonical_text_file "$fixture_manifest")" '
+  --arg fixture_sha "$(sha256_canonical_text_file "$fixture_manifest")" \
+  --argjson format_count "$expected_format_count" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .source_sha256 == $source_sha and .fixture_manifest_sha256 == $fixture_sha and
-  .counts == {
-    "formats":22,"fixtures":442,"capability_bits":24,"entry_types":10,"kv_tags":12,
-    "shared_enum_scopes":13,"shared_enum_values":134,"system_families":46,
-    "system_family_descriptors":63,"malformed_input_classes":16
-  } and
+  .counts.formats == $format_count and .counts.fixtures == $fixture_count and
+  .counts.capability_bits == 24 and .counts.entry_types == 10 and .counts.kv_tags == 12 and
+  .counts.shared_enum_scopes == 13 and .counts.shared_enum_values == 134 and
+  .counts.system_families == 46 and .counts.system_family_descriptors == 63 and
+  .counts.malformed_input_classes == 16 and
   all(.collision_results[]; . == 0) and
   all(.coverage[]; . == true or type == "string") and
   (.malformed_proof_dimensions | length) == 9 and
@@ -270,7 +271,8 @@ jq -e --arg source_sha "$(sha256_canonical_text_file "$contract_registry")" \
 
 p0c_report="$evidence_dir/p0c-machine-contract-report.json"
 [[ -f "$p0c_report" ]] || fail "missing P0c machine contract report"
-jq -e \
+jq -e --argjson fixture_count "$expected_fixture_count" --argjson route_count "$manifest_route_count" \
+  --argjson docs_count "$(wc -l <"$docs_manifest")" \
   --arg architecture_sha "$(sha256_canonical_text_file "$architecture_registry")" \
   --arg generated_sha "$(sha256_canonical_text_file "$generated_contract")" \
   --argjson generated_bytes "$(canonical_text_file_size_bytes "$generated_contract")" '
@@ -287,9 +289,9 @@ jq -e \
   .proof.production_tests_passed >= 3 and
   .proof.strict_reference_clippy == "pass" and
   .proof.rustfmt_check == "pass" and
-  .proof.fixture_cases_verified == 442 and
-  .proof.route_registrations_inventoried == 93 and
-  .proof.documentation_pages_inventoried == 36 and
+  .proof.fixture_cases_verified == $fixture_count and
+  .proof.route_registrations_inventoried == $route_count and
+  .proof.documentation_pages_inventoried == $docs_count and
   .proof.v4_writers_activated == false and
   (.failure_cases | length) >= 7
 ' "$p0c_report" >/dev/null || fail "P0c machine contract report is stale or incomplete"
@@ -297,7 +299,7 @@ jq -e \
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p3c-2b1-migration-capture" and
+  .stage == "p6-2d-c3c-index-runtime-workspace" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and

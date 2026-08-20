@@ -3292,6 +3292,67 @@
       ]
     },
     {
+      "id": "index-runtime-workspace-manifest-v1",
+      "family": "bounded-index-runtime-workspace",
+      "magic_ascii": "AIWM",
+      "version": 1,
+      "identity": "database_id[16], destination_physical_instance_id[16], workspace_id[16], runtime_id[16], and manifest_sequence u64",
+      "layout": "magic[4] || schema u16 || body_length=204 u16 || complete_length=208 u32 || zero_flags u32 || database_id[16] || destination_physical_instance_id[16] || workspace_id[16] || runtime_id[16] || manifest_sequence u64 || previous_manifest_BLAKE3[32] || object_kind u16 || zero u16 || object_id[16] || complete_object_BLAKE3[32] || object_stored_bytes u64 || cumulative_object_count u64 || cumulative_stored_bytes u64 || created_at_ms u64 || CRC32",
+      "fixed_length": 208,
+      "body_formula": "204 checked bytes plus a 4-byte CRC",
+      "object_kind_registry": { "1": "runtime_batch", "2": "producer_task" },
+      "hard_cap": 208,
+      "checksum": "CRC-32/ISO-HDLC over bytes 0..203; every predecessor and object edge is fixed BLAKE3 over the complete checked bytes",
+      "canonical_order": "strict successor manifest_sequence; sequence 1 alone has a zero predecessor; cumulative count/bytes increase by the exact appended object",
+      "reserve_zero_ranges": ["flags at 12..16", "object reserved at 122..124"],
+      "malformed_behavior": "reject wrong magic/version/length, unknown kind, zero identities/digest/counters/time, invalid first/predecessor closure, nonzero reserve, CRC, trailing bytes, or any object/chain/cumulative mismatch",
+      "trailing_behavior": "exactly 208 bytes",
+      "bounded_decode": "require the exact fixed length before field access or hashing; chain traversal is separately caller-bounded by selected checkpoint count and bytes",
+      "producer_owner": "Child 06 index runtime workspace owner through one selector-last publisher/spill persistence owner",
+      "consumer_owners": ["Child 06 runtime batch recovery", "Child 06 producer spill replay", "verify/repair/diagnostics"],
+      "capability": "node-local restart evidence selected through IndexTaskCheckpointV1.external; never database or query authority",
+      "typed_hash_roles": [
+        { "field": "previous manifest BLAKE3", "role": "external-immutable-chain-edge" },
+        { "field": "complete object BLAKE3", "role": "external-object-integrity-edge" }
+      ],
+      "fixture_ids_32": ["aiwm-blake3-256-runtime-head-valid"],
+      "fixture_ids_64": ["aiwm-sha512-runtime-head-valid"]
+    },
+    {
+      "id": "index-runtime-workspace-object-v1",
+      "family": "bounded-index-runtime-workspace",
+      "magic_ascii": "AIWO",
+      "version": 1,
+      "identity": "database_id[16], destination_physical_instance_id[16], workspace_id[16], runtime_id[16], object_id[16], and object_sequence u64",
+      "layout": "magic[4] || schema u16 || object_kind u16 || header_length=184 u16 || database_hash_algorithm u16 || complete_length u64 || zero_flags u32 || database_id[16] || destination_physical_instance_id[16] || workspace_id[16] || runtime_id[16] || object_id[16] || object_sequence u64 || created_at_ms u64 || payload_length u64 || logical_record_count u64 || minimum_publication_sequence u64 || maximum_publication_sequence u64 || payload_BLAKE3[32] || exact payload || CRC32",
+      "fixed_header_length": 184,
+      "object_kind_registry": { "1": "runtime_batch", "2": "producer_task" },
+      "body_formula": "184 + nonempty payload B + 4-byte CRC",
+      "runtime_batch_payload": "AIRB magic[4] || schema=1 u16 || header_length=64 u16 || total_length u64 || coordinator_id[16] || batch_id u64 || flush_reason u16 || zero u16 || record_count u32 || zero[16] || strict mutation frames",
+      "runtime_mutation_frame": "frame_length u32 || ordered_role u8 || zero u8 || index_id_length u16 || publication_sequence u64 || operation_id[16] || order_key_length u32 || encoded_record_length u32 || index_id || canonical order_key || exact role-specific encoded record",
+      "runtime_mutation_limits": { "records": 1048576, "order_key_bytes": 1048576, "encoded_record_bytes": 4194304 },
+      "flush_reason_registry": { "1": "mutation_count", "2": "age", "3": "memory_pressure", "4": "explicit", "5": "shutdown" },
+      "producer_task_payload": "AITK magic[4] || schema=1 u16 || header_length=(56+4H) u16 || total_length u64 || operation_id[16] || task_kind u16 || journal-or-scope flags u16 || publication_sequence u64 || hash_width u16 || zero u16 || scope_length u32 || zero u32 || namespace_root_before H || namespace_root_after H || semantic_state_root H || journal_head_or_zero H || canonical UTF-8 scope",
+      "producer_task_kind_registry": { "1": "mutation_window", "2": "reconcile", "3": "build", "4": "rebuild", "5": "retire", "6": "compact", "7": "repair", "8": "explicit_mutation", "9": "legacy_migration" },
+      "producer_task_scope_cap": 16384,
+      "hard_cap": 536870912,
+      "checksum": "payload BLAKE3 at bytes 152..184 plus CRC-32/ISO-HDLC over header and payload; AIWM additionally binds complete-object BLAKE3 including CRC",
+      "canonical_order": "kind-specific payload order; publication range is nonzero and inclusive; runtime batch payload preserves FrozenIndexBatchV1 order and producer task payload is body-free",
+      "reserve_zero_ranges": ["flags at 20..24"],
+      "malformed_behavior": "reject wrong magic/version/kind/hash algorithm/header or total length, zero identity/sequence/time/count/publication fields, inverted range, empty payload, nonzero flags, payload digest, CRC, trailing bytes, or kind-specific payload mismatch",
+      "trailing_behavior": "payload_length consumes every byte before the final CRC",
+      "bounded_decode": "validate 184-byte header, complete length, 512 MiB object cap, payload length, and checksums before kind-specific allocation or record framing",
+      "producer_owner": "Child 06 index runtime workspace owner through one selector-last publisher/spill persistence owner",
+      "consumer_owners": ["Child 06 runtime dirty-overlay recovery", "Child 06 producer spill replay", "verify/repair/diagnostics"],
+      "capability": "node-local restart evidence selected through IndexTaskCheckpointV1.external; never database or query authority",
+      "typed_hash_roles": [
+        { "field": "payload BLAKE3", "role": "external-payload-integrity" },
+        { "field": "database hash algorithm", "role": "embedded derived-record validation profile" }
+      ],
+      "fixture_ids_32": ["aiwo-blake3-256-runtime-batch-valid", "aiwo-blake3-256-producer-task-valid"],
+      "fixture_ids_64": ["aiwo-sha512-runtime-batch-valid", "aiwo-sha512-producer-task-valid"]
+    },
+    {
       "id": "system-control-v1",
       "family": "low-volume-system-control",
       "version": 1,
@@ -3640,10 +3701,10 @@
     }
   ],
   "p0b_progress": {
-    "fixture_family_count": 22,
-    "fixture_count": 442,
+    "fixture_family_count": 24,
+    "fixture_count": 448,
     "production_writer_exists": false,
-    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, and the complete 46-family SystemFamilyRegistryV1",
-    "remaining_p0b_2_scope": "none; P0b is frozen, the ratified P3c-2b2a AMCM/AMPR capture-authority extension is registered, and P3c-2b3 preserves per-type EntityVersion before runtime activation"
+    "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, the external index runtime workspace manifest/object formats, and the complete 46-family SystemFamilyRegistryV1",
+    "remaining_p0b_2_scope": "none; the P0b baseline remains frozen, with ratified post-freeze AMCM/AMPR, per-type EntityVersion, and P6-2d-c3c external index-runtime workspace extensions registered before their first writers"
   }
 }

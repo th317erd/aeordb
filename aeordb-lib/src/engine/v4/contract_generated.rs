@@ -2,8 +2,8 @@
 // Regenerate with `aeordb-v4-reference generate-contracts`.
 #![allow(dead_code)]
 
-pub const CONTRACT_REGISTRY_SHA256: &str = "ae6ab1691efe8bd0073ce26151d58ab68f3b4e7422156e8d9522bd347312fa26";
-pub const CONTRACT_REGISTRY_BLAKE3: &str = "8c776cef5595f6af7dd6d45869340f0a65f645af1a05c397563a7c0d9b066e07";
+pub const CONTRACT_REGISTRY_SHA256: &str = "175716fff9806da1c70468cececf802d84379e43449ca468b6929120b16bb5c2";
+pub const CONTRACT_REGISTRY_BLAKE3: &str = "0ee0fe5c4decfdb9891033762be8bcb66ad0216d14997ab89dae34531c5e0a91";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
 pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";
@@ -514,6 +514,8 @@ pub const FORMAT_LIMITS: &[FormatLimit] = &[
   FormatLimit { id: "gc-artifact-v1", hard_cap: 67108864 },
   FormatLimit { id: "gc-mark-workspace-manifest-v1", hard_cap: 8388608 },
   FormatLimit { id: "gc-mark-workspace-object-v1", hard_cap: 67108864 },
+  FormatLimit { id: "index-runtime-workspace-manifest-v1", hard_cap: 208 },
+  FormatLimit { id: "index-runtime-workspace-object-v1", hard_cap: 536870912 },
   FormatLimit { id: "system-control-v1", hard_cap: 67108900 },
   FormatLimit { id: "cutover-journal-v1", hard_cap: 2048 },
   FormatLimit { id: "migration-capture-v1", hard_cap: 724 },
@@ -539,6 +541,8 @@ pub mod format_hard_cap {
   pub const GC_ARTIFACT_V1: u64 = 67108864;
   pub const GC_MARK_WORKSPACE_MANIFEST_V1: u64 = 8388608;
   pub const GC_MARK_WORKSPACE_OBJECT_V1: u64 = 67108864;
+  pub const INDEX_RUNTIME_WORKSPACE_MANIFEST_V1: u64 = 208;
+  pub const INDEX_RUNTIME_WORKSPACE_OBJECT_V1: u64 = 536870912;
   pub const SYSTEM_CONTROL_V1: u64 = 67108900;
   pub const CUTOVER_JOURNAL_V1: u64 = 2048;
   pub const MIGRATION_CAPTURE_V1: u64 = 724;

@@ -209,6 +209,10 @@ pub struct FrozenIndexBatchV1 {
 }
 
 impl FrozenIndexBatchV1 {
+  pub const fn coordinator_id(&self) -> [u8; 16] {
+    self.coordinator_id
+  }
+
   pub const fn batch_id(&self) -> u64 {
     self.batch_id
   }
@@ -227,6 +231,29 @@ impl FrozenIndexBatchV1 {
 
   pub const fn publication_bytes(&self) -> u64 {
     self.publication_bytes
+  }
+}
+
+impl IndexFlushReasonV1 {
+  pub const fn id(self) -> u16 {
+    match self {
+      Self::MutationCount => 1,
+      Self::Age => 2,
+      Self::MemoryPressure => 3,
+      Self::Explicit => 4,
+      Self::Shutdown => 5,
+    }
+  }
+
+  pub const fn from_id(id: u16) -> Option<Self> {
+    match id {
+      1 => Some(Self::MutationCount),
+      2 => Some(Self::Age),
+      3 => Some(Self::MemoryPressure),
+      4 => Some(Self::Explicit),
+      5 => Some(Self::Shutdown),
+      _ => None,
+    }
   }
 }
 

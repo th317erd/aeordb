@@ -83,7 +83,36 @@ pub enum IndexProducerTaskKindV1 {
 }
 
 impl IndexProducerTaskKindV1 {
-  fn requires_journal(self) -> bool {
+  pub const fn id(self) -> u16 {
+    match self {
+      Self::MutationWindow => 1,
+      Self::Reconcile => 2,
+      Self::Build => 3,
+      Self::Rebuild => 4,
+      Self::Retire => 5,
+      Self::Compact => 6,
+      Self::Repair => 7,
+      Self::ExplicitMutation => 8,
+      Self::LegacyMigration => 9,
+    }
+  }
+
+  pub const fn from_id(id: u16) -> Option<Self> {
+    match id {
+      1 => Some(Self::MutationWindow),
+      2 => Some(Self::Reconcile),
+      3 => Some(Self::Build),
+      4 => Some(Self::Rebuild),
+      5 => Some(Self::Retire),
+      6 => Some(Self::Compact),
+      7 => Some(Self::Repair),
+      8 => Some(Self::ExplicitMutation),
+      9 => Some(Self::LegacyMigration),
+      _ => None,
+    }
+  }
+
+  pub const fn requires_journal(self) -> bool {
     matches!(self, Self::MutationWindow | Self::Reconcile)
   }
 }

@@ -67,6 +67,8 @@ pub mod index_record;
 pub mod index_recovery_store;
 pub mod index_runtime_installation;
 pub mod index_runtime_owner;
+pub mod index_runtime_workspace;
+mod index_runtime_workspace_payload;
 pub mod index_scope_ordinal_authority;
 pub mod index_scope_ordinal_checkpoint;
 pub mod index_scope_ordinal_checkpoint_store;
@@ -135,7 +137,7 @@ mod tests {
     assert_unique(contract::KV_TAGS.iter().map(|value| value.id as u16));
     assert_unique(contract::SYSTEM_FAMILIES.iter().map(|value| value.id));
     assert_eq!(contract::SYSTEM_FAMILIES.len(), 46);
-    assert_eq!(contract::FORMAT_LIMITS.len(), 22);
+    assert_eq!(contract::FORMAT_LIMITS.len(), 24);
     assert_eq!(contract::ROUTE_CLASSES.len(), 7);
     assert_eq!(contract::CONFIGURATION_PROPERTIES.len(), 41);
     assert_eq!(contract::DYNAMIC_RECORDS.len(), 8);

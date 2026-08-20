@@ -12,6 +12,7 @@ mod gc_void;
 mod index;
 mod index_nvt;
 mod index_pages;
+mod index_runtime_workspace;
 mod index_tasks;
 mod migration_capture;
 mod parser;
@@ -41,6 +42,7 @@ use field_index::FieldIndexFormat;
 use gc::GcFormat;
 use definitions::DefinitionFormat;
 use index::IndexFormat;
+use index_runtime_workspace::IndexRuntimeWorkspaceFormat;
 use migration_capture::MigrationCaptureFormat;
 use parser::ParserFormat;
 use policy::PolicyFormat;
@@ -51,8 +53,8 @@ use system_family::SystemFamilyFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p3c2b3-entity-version-v1";
-const FIXTURE_STAGE: &str = "p3c-2b1-migration-capture";
+const TOOL_REVISION: &str = "p6-2d-c3c-index-runtime-workspace-v1";
+const FIXTURE_STAGE: &str = "p6-2d-c3c-index-runtime-workspace";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;
@@ -73,6 +75,7 @@ enum FixtureFormat {
   FieldIndex(FieldIndexFormat),
   Gc(GcFormat),
   Index(IndexFormat),
+  IndexRuntimeWorkspace(IndexRuntimeWorkspaceFormat),
   MigrationCapture(MigrationCaptureFormat),
   Parser(ParserFormat),
   Policy(PolicyFormat),
@@ -94,6 +97,7 @@ impl FixtureFormat {
       Self::FieldIndex(format) => format.id(),
       Self::Gc(format) => format.id(),
       Self::Index(format) => format.id(),
+      Self::IndexRuntimeWorkspace(format) => format.id(),
       Self::MigrationCapture(format) => format.id(),
       Self::Parser(format) => format.id(),
       Self::Policy(format) => format.id(),
@@ -115,6 +119,7 @@ impl FixtureFormat {
       Self::FieldIndex(format) => format.family(),
       Self::Gc(format) => format.family(),
       Self::Index(format) => format.family(),
+      Self::IndexRuntimeWorkspace(format) => format.family(),
       Self::MigrationCapture(format) => format.family(),
       Self::Parser(format) => format.family(),
       Self::Policy(format) => format.family(),
@@ -550,6 +555,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(index_runtime_workspace::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::IndexRuntimeWorkspace(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: case.relation,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases.extend(field_index::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::FieldIndex(case.format),
@@ -801,6 +815,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::FieldIndex(format) => field_index::observe(format, case.profile, bytes),
     FixtureFormat::Gc(format) => gc::observe(format, case.profile, bytes),
     FixtureFormat::Index(_) => index::observe(case.profile, bytes),
+    FixtureFormat::IndexRuntimeWorkspace(format) => index_runtime_workspace::observe(format, case.profile, bytes),
     FixtureFormat::MigrationCapture(_) => migration_capture::observe(case.profile, bytes),
     FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
@@ -824,6 +839,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::FieldIndex(_)
     | FixtureFormat::Gc(_)
     | FixtureFormat::Index(_)
+    | FixtureFormat::IndexRuntimeWorkspace(_)
     | FixtureFormat::MigrationCapture(_)
     | FixtureFormat::Parser(_)
     | FixtureFormat::Policy(_)
@@ -890,6 +906,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Index(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in index::annotation_lines(case.profile, &case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::IndexRuntimeWorkspace(format) => {
+      output.push_str("# hex offsets are absolute within this external workspace fixture\n");
+      for line in index_runtime_workspace::annotation_lines(format, &case.bytes) {
         output.push_str(&format!("# {line}\n"));
       }
     }

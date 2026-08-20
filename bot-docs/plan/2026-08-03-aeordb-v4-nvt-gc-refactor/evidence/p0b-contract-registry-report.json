@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p3c-2b3-entity-version-prerequisite",
+  "stage": "p6-2d-c3c-index-runtime-workspace",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "ae6ab1691efe8bd0073ce26151d58ab68f3b4e7422156e8d9522bd347312fa26",
-  "fixture_manifest_sha256": "c554468f0b5ece6cb0519b3cb52807a07af2e2deda92ddf5bb0ee483c815c0c0",
+  "source_sha256": "175716fff9806da1c70468cececf802d84379e43449ca468b6929120b16bb5c2",
+  "fixture_manifest_sha256": "204b7f27b13fd9bcf24b73cfa2e2a1a706b1d22dab8741b8a6c9a4f3287625f1",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
-    "formats": 22,
-    "fixtures": 442,
+    "formats": 24,
+    "fixtures": 448,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,
@@ -55,7 +55,7 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 149,
+    "tests_passed": 155,
     "reviewer_status": "pending-owner-review-before-production-writer"
   }
 }

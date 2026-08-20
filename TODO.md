@@ -974,6 +974,12 @@
                   - [x] Freeze a bounded native runtime recovery request/result over explicit shadow identity, content-only authority, and selected checkpoint descriptors.
                   - [x] Install recovery exactly once, retain typed degraded evidence on corrupt/missing/discontinuous state, and prove restart without changing legacy query visibility.
                 - [ ] P6-2d-c3c: add the concrete selector-last runtime batch publisher and durable producer spill boundary required by live worker/flush activation.
+                  - [x] P6-2d-c3c-a: freeze a versioned, checksummed, bounded index-workspace manifest/object format and independent cross-platform fixtures before its first writer.
+                  - [ ] P6-2d-c3c-b: implement private no-follow immutable workspace append/reopen with exact identity, chain, byte/count, cancellation, memory, and durability validation.
+                  - [ ] P6-2d-c3c-c: publish frozen runtime batches through one cumulative workspace head and the existing IndexOperationControl selector-last checkpoint authority; preselection failure must retain the exact batch and commit uncertainty must fail closed.
+                  - [ ] P6-2d-c3c-d: validate selected external workspace state during bounded checkpoint recovery and preserve a truthful no-journal dirty-overlay recovery contract without claiming complete coverage.
+                  - [ ] P6-2d-c3c-e: implement the same workspace's durable body-free producer-task spill boundary, including idempotent retry, refusal retention, and replay-ready identity.
+                  - [ ] P6-2d-c3c-f: prove crash prefixes, tamper/truncation, stale selectors, restart, cancellation, pressure, widest-hash operation, architecture uniqueness, and unchanged v3 query authority before landing c3c.
                 - [ ] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
                 - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.
                 - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.

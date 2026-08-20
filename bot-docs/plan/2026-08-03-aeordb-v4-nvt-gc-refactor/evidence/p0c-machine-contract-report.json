@@ -4,8 +4,8 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
-  "generated_rust_sha256": "ba2712062a2f0d7a43b0b7eb076b620908d4ca2c4ae3a27be3f38f5374009081",
-  "generated_rust_bytes": 61625,
+  "generated_rust_sha256": "2b4b0196cae911173e2617b74b0f4a5d495a398c975a28705b0d5e8aef1df394",
+  "generated_rust_bytes": 61905,
   "counts": {
     "route_classes": 7,
     "configuration_properties": 41,
@@ -15,13 +15,13 @@
     "semantic_bundles": 37
   },
   "proof": {
-    "reference_tests_passed": 149,
+    "reference_tests_passed": 155,
     "production_tests_passed": 5,
     "strict_reference_clippy": "pass",
     "rustfmt_check": "pass",
-    "fixture_cases_verified": 442,
-    "route_registrations_inventoried": 93,
-    "documentation_pages_inventoried": 36,
+    "fixture_cases_verified": 448,
+    "route_registrations_inventoried": 95,
+    "documentation_pages_inventoried": 38,
     "v4_writers_activated": false
   },
   "failure_cases": [

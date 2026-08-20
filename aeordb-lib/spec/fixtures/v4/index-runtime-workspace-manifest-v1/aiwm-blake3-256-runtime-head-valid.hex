@@ -1,0 +1,25 @@
+# fixture: aiwm-blake3-256-runtime-head-valid
+# contract: IndexRuntimeWorkspaceManifestV1
+# hash: blake3-256 (32 bytes)
+# expected: index-workspace:manifest:sequence=1:objects=1
+# relation: selects:runtime-batch-object
+# hex offsets are absolute within this external workspace fixture
+# manifest +0x000 len 16: AIWM framing and zero flags
+# manifest +0x010 len 64: database/destination/workspace/runtime identities
+# manifest +0x050 len 40: sequence and previous-manifest BLAKE3 digest
+# manifest +0x078 len 52: object kind/id/BLAKE3 digest
+# manifest +0x0ac len 32: object/cumulative byte and count closure
+# manifest +0x0cc len 4: CRC-32/ISO-HDLC
+00000000: 4149574d0100cc00d000000000000000
+00000010: 11111111111111111111111111111111
+00000020: 22222222222222222222222222222222
+00000030: 33333333333333333333333333333333
+00000040: 44444444444444444444444444444444
+00000050: 01000000000000000000000000000000
+00000060: 00000000000000000000000000000000
+00000070: 00000000000000000100000055555555
+00000080: 5555555555555555555555554a2e02d6
+00000090: 2f832b0a3b0a10cdb52128a490ab0edc
+000000a0: 29b31f57f684e9225ec6598c24020000
+000000b0: 00000000010000000000000024020000
+000000c0: 000000007b2203a2910100004824b74f

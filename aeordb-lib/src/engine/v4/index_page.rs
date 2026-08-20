@@ -59,7 +59,7 @@ impl OrderedIndexRoleV1 {
     }
   }
 
-  fn from_id(id: u8) -> Option<Self> {
+  pub const fn from_id(id: u8) -> Option<Self> {
     match id {
       1 => Some(Self::ScopeOrdinal),
       2 => Some(Self::ScopeReverse),

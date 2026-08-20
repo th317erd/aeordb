@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p3c2b3-entity-version-v1",
+  "tool_revision": "p6-2d-c3c-index-runtime-workspace-v1",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -661,6 +661,42 @@
       "fixture_id": "aidx-sha512-index-task-checkpoint-external-valid",
       "expected": "index:checkpoint:external:task=v0-migration:state=running:phase=convert:sequence=18:attachments=1",
       "observed": "index:checkpoint:external:task=v0-migration:state=running:phase=convert:sequence=18:attachments=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aiwm-blake3-256-runtime-head-valid",
+      "expected": "index-workspace:manifest:sequence=1:objects=1",
+      "observed": "index-workspace:manifest:sequence=1:objects=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aiwo-blake3-256-runtime-batch-valid",
+      "expected": "index-workspace:object:runtime-batch:sequence=9:records=2:publications=40..41",
+      "observed": "index-workspace:object:runtime-batch:sequence=9:records=2:publications=40..41",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aiwo-blake3-256-producer-task-valid",
+      "expected": "index-workspace:object:producer-task:sequence=10:records=1:publications=42..42",
+      "observed": "index-workspace:object:producer-task:sequence=10:records=1:publications=42..42",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aiwm-sha512-runtime-head-valid",
+      "expected": "index-workspace:manifest:sequence=1:objects=1",
+      "observed": "index-workspace:manifest:sequence=1:objects=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aiwo-sha512-runtime-batch-valid",
+      "expected": "index-workspace:object:runtime-batch:sequence=9:records=2:publications=40..41",
+      "observed": "index-workspace:object:runtime-batch:sequence=9:records=2:publications=40..41",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aiwo-sha512-producer-task-valid",
+      "expected": "index-workspace:object:producer-task:sequence=10:records=1:publications=42..42",
+      "observed": "index-workspace:object:producer-task:sequence=10:records=1:publications=42..42",
       "result": "pass"
     },
     {
