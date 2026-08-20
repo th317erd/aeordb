@@ -1081,10 +1081,13 @@ fn real_native_authority_selects_the_external_runtime_checkpoint_last() {
 }
 
 #[test]
-fn runtime_publisher_uses_one_existing_selector_and_remains_disconnected() {
+fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence() {
   let source = include_str!("../../src/engine/v4/index_runtime_batch_publisher.rs");
   let recovery = include_str!("../../src/engine/v4/index_runtime_dirty_overlay_recovery.rs");
   let workspace = include_str!("../../src/engine/v4/index_runtime_workspace_store.rs");
+  let cadence = include_str!("../../src/engine/v4/index_runtime_cadence.rs");
+  let server = include_str!("../../src/server/mod.rs");
+  let directory_ops = include_str!("../../src/engine/directory_ops.rs");
   let immutable = source.find("self.store.put_immutable(&checkpoint)").unwrap();
   let selector = source.find("self.store.publish_selected_synced").unwrap();
   assert!(immutable < selector, "runtime checkpoint selector appears before immutable publication");
@@ -1095,11 +1098,13 @@ fn runtime_publisher_uses_one_existing_selector_and_remains_disconnected() {
   assert!(!workspace.contains("payload_length != usize::MAX"));
   assert!(!recovery.contains("StorageEngine"));
   assert_eq!(source.matches("IndexProducerSpillStoreV1 for DurableIndexRuntimeBatchPublisherV1").count(), 1);
-  for forbidden in [
-    include_str!("../../src/engine/storage_engine.rs"),
-    include_str!("../../src/engine/v4/index_runtime_installation.rs"),
-    include_str!("../../src/engine/v4/index_runtime_owner.rs"),
-  ] {
+  assert!(!cadence.contains("tokio::spawn"));
+  assert!(!cadence.contains("tokio::time::interval"));
+  assert_eq!(server.matches("spawn_index_buffer_flush_timer(").count(), 2);
+  assert_eq!(server.matches("tokio::time::interval(std::time::Duration::from_secs(5))").count(), 1);
+  assert!(server.contains("engine.flush_index_runtime_if_due_v1()"));
+  assert!(!directory_ops.contains("flush_index_runtime_if_due_v1"));
+  for forbidden in [include_str!("../../src/engine/storage_engine.rs"), include_str!("../../src/engine/v4/index_runtime_owner.rs")] {
     assert!(!forbidden.contains("DurableIndexRuntimeBatchPublisherV1"));
     assert!(!forbidden.contains("recover_index_runtime_dirty_overlay_v1"));
   }

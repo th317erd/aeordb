@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use aeordb::engine::HashAlgorithm;
+use aeordb::engine::{HashAlgorithm, MockClock, VirtualClock};
 use aeordb::engine::file_record::FileRecord;
-use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::coverage_runtime::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
@@ -28,12 +28,14 @@ use aeordb::engine::v4::index_runtime_owner::{
   IndexRuntimeMutationWorkRequestV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1, IndexRuntimePublicationErrorClassV1,
   IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1, IndexRuntimeRecoveryDecisionV1, IndexRuntimeWorkOutcomeV1,
 };
+use aeordb::engine::v4::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, IndexRuntimeCadenceV1};
 use aeordb::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
   encode_mutation_journal,
 };
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
+use tokio_util::sync::CancellationToken;
 
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
@@ -939,4 +941,144 @@ fn cancellation_during_journal_validation_is_typed_and_worker_panics_retain_the_
   assert_eq!(snapshot.degraded.unwrap().code, "worker_panic");
   assert_eq!(snapshot.producer.pending_tasks, 1);
   assert_eq!(snapshot.producer.leased_tasks, 0);
+}
+
+struct CadencePublisher {
+  failures_remaining: Arc<AtomicUsize>,
+  observed: Arc<Mutex<Vec<(IndexFlushReasonV1, u64, u64)>>>,
+}
+
+impl IndexRuntimeBatchPublisherV1 for CadencePublisher {
+  fn publish(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
+    self.observed.lock().unwrap().push((batch.reason(), batch.batch_id(), batch.attempt_id()));
+    if self
+      .failures_remaining
+      .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| if remaining > 0 { Some(remaining - 1) } else { None })
+      .is_ok()
+    {
+      return Err(IndexRuntimePublicationErrorV1::new(
+        IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection,
+        "cadence_retry",
+        "injected retryable cadence publication failure",
+      ));
+    }
+    Ok(IndexRuntimePublicationReceiptV1 {
+      batch_id: batch.batch_id(),
+      attempt_id: batch.attempt_id(),
+      published_records: batch.records().len() as u64,
+      publication_bytes: batch.publication_bytes(),
+      checkpoint_sequence: 11,
+    })
+  }
+}
+
+fn prepared_cadence_owner(runtime_options: IndexRuntimeOwnerOptionsV1, coordinator_memory: MemoryCoordinator) -> Arc<IndexRuntimeOwnerV1> {
+  let owner = Arc::new(IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, coordinator_memory, runtime_options, 1).unwrap());
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let encoded = encoded_journal("/cadence.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  owner.admit_mutation_journal(&journal, 100, &|| false, &mut Spill).unwrap();
+  assert!(matches!(execute_one(&owner, &encoded, 101), IndexRuntimeWorkOutcomeV1::Completed(_)));
+  owner
+}
+
+fn cadence_publisher(failures: usize) -> (CadencePublisher, Arc<AtomicUsize>, Arc<Mutex<Vec<(IndexFlushReasonV1, u64, u64)>>>) {
+  let failures_remaining = Arc::new(AtomicUsize::new(failures));
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  (CadencePublisher { failures_remaining: Arc::clone(&failures_remaining), observed: Arc::clone(&observed) }, failures_remaining, observed)
+}
+
+#[test]
+fn one_cadence_selects_count_age_and_shared_memory_pressure() {
+  let mut count_options = options();
+  count_options.mutations = IndexCoordinatorOptionsV1::new(4 * 1_024 * 1_024, 1, 30_000, 256 * 1_024).unwrap();
+  let count_owner = prepared_cadence_owner(count_options, memory());
+  let (publisher, _, observed) = cadence_publisher(0);
+  let cadence =
+    IndexRuntimeCadenceV1::new(count_owner, publisher, CancellationToken::new(), Arc::new(MockClock::new(1, 102)) as Arc<dyn VirtualClock>)
+      .unwrap();
+  assert!(matches!(cadence.flush_if_due().unwrap(), IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }));
+  assert_eq!(observed.lock().unwrap()[0].0, IndexFlushReasonV1::MutationCount);
+
+  let age_owner = prepared_cadence_owner(options(), memory());
+  let (publisher, _, observed) = cadence_publisher(0);
+  let cadence = IndexRuntimeCadenceV1::new(
+    age_owner,
+    publisher,
+    CancellationToken::new(),
+    Arc::new(MockClock::new(2, 30_101)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  assert!(matches!(cadence.flush_if_due().unwrap(), IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }));
+  assert_eq!(observed.lock().unwrap()[0].0, IndexFlushReasonV1::Age);
+
+  let pressure_memory = memory();
+  let pressure_owner = prepared_cadence_owner(options(), pressure_memory.clone());
+  pressure_memory.update_host_sample(HostMemorySample { rss_bytes: 48 * 1_024 * 1_024, ..Default::default() }).unwrap();
+  let (publisher, _, observed) = cadence_publisher(0);
+  let cadence = IndexRuntimeCadenceV1::new(
+    pressure_owner,
+    publisher,
+    CancellationToken::new(),
+    Arc::new(MockClock::new(3, 102)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  assert!(matches!(cadence.flush_if_due().unwrap(), IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }));
+  assert_eq!(observed.lock().unwrap()[0].0, IndexFlushReasonV1::MemoryPressure);
+}
+
+#[test]
+fn cadence_cancellation_and_retry_retain_the_exact_batch() {
+  let mut runtime_options = options();
+  runtime_options.mutations = IndexCoordinatorOptionsV1::new(4 * 1_024 * 1_024, 1, 30_000, 256 * 1_024).unwrap();
+  let cancelled_owner = prepared_cadence_owner(runtime_options, memory());
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+  let (publisher, _, observed) = cadence_publisher(0);
+  let cancelled = IndexRuntimeCadenceV1::new(
+    Arc::clone(&cancelled_owner),
+    publisher,
+    cancellation,
+    Arc::new(MockClock::new(4, 102)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  assert!(matches!(cancelled.flush_if_due(), Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled))));
+  assert!(observed.lock().unwrap().is_empty());
+  assert_eq!(cancelled_owner.snapshot().unwrap().mutations.active_records, 4);
+
+  let retry_owner = prepared_cadence_owner(runtime_options, memory());
+  let (publisher, failures, observed) = cadence_publisher(1);
+  let clock = Arc::new(MockClock::new(5, 102));
+  let retry =
+    IndexRuntimeCadenceV1::new(Arc::clone(&retry_owner), publisher, CancellationToken::new(), Arc::clone(&clock) as Arc<dyn VirtualClock>)
+      .unwrap();
+  assert!(matches!(retry.flush_if_due(), Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Publication(_)))));
+  assert_eq!(failures.load(Ordering::SeqCst), 0);
+  assert_eq!(retry_owner.snapshot().unwrap().mutations.frozen_records, 4);
+  clock.advance(100);
+  assert!(matches!(retry.flush_if_due().unwrap(), IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }));
+  let observed = observed.lock().unwrap();
+  assert_eq!(observed.len(), 2);
+  assert_eq!(observed[0].1, observed[1].1, "cadence retry changed the frozen batch identity");
+  assert_ne!(observed[0].2, observed[1].2, "cadence retry reused an attempt identity");
+}
+
+#[test]
+fn concurrent_cadence_ticks_serialize_one_mutable_publisher() {
+  let mut runtime_options = options();
+  runtime_options.mutations = IndexCoordinatorOptionsV1::new(4 * 1_024 * 1_024, 1, 30_000, 256 * 1_024).unwrap();
+  let owner = prepared_cadence_owner(runtime_options, memory());
+  let (publisher, _, observed) = cadence_publisher(0);
+  let cadence = Arc::new(
+    IndexRuntimeCadenceV1::new(owner, publisher, CancellationToken::new(), Arc::new(MockClock::new(6, 102)) as Arc<dyn VirtualClock>)
+      .unwrap(),
+  );
+  let first_cadence = Arc::clone(&cadence);
+  let first = std::thread::spawn(move || first_cadence.flush_if_due());
+  let second_cadence = Arc::clone(&cadence);
+  let second = std::thread::spawn(move || second_cadence.flush_if_due());
+  let outcomes = [first.join().unwrap().unwrap(), second.join().unwrap().unwrap()];
+  assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, IndexRuntimeFlushOutcomeV1::Published { .. })).count(), 1);
+  assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, IndexRuntimeFlushOutcomeV1::Idle)).count(), 1);
+  assert_eq!(observed.lock().unwrap().len(), 1);
 }

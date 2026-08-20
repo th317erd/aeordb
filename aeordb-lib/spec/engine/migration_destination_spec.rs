@@ -32,14 +32,19 @@ use aeordb::engine::v4::index_operation_control::IndexOperationKindV1;
 use aeordb::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1;
 use aeordb::engine::v4::index_producer_coordinator::IndexProducerCoordinatorOptionsV1;
 use aeordb::engine::v4::index_producer_source::IndexSemanticScopeLimitsV1;
+use aeordb::engine::v4::index_runtime_batch_publisher::{DurableIndexRuntimeBatchPublisherV1, NativeIndexRuntimeBatchPublisherV1};
+use aeordb::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1;
 use aeordb::engine::v4::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryOptionsV1, NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
 };
 use aeordb::engine::v4::index_runtime_installation::{
-  IndexRuntimeNativeRecoveryOptionsV1, IndexRuntimeShadowIdentityV1, NativeIndexRuntimeInstallationErrorV1,
-  NativeIndexRuntimeInstallationRequestV1, install_native_index_runtime_v1,
+  IndexRuntimeNativeRecoveryOptionsV1, IndexRuntimeShadowIdentityV1, NativeIndexRuntimeCadenceInstallationErrorV1,
+  NativeIndexRuntimeInstallationErrorV1, NativeIndexRuntimeInstallationRequestV1, install_native_index_runtime_v1,
 };
 use aeordb::engine::v4::index_runtime_owner::{IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1};
+use aeordb::engine::v4::index_runtime_workspace_store::{
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
+};
 use aeordb::engine::v4::index_task::{
   IndexTaskAttachmentRoleV1, IndexTaskAttachmentWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, JournalOwnerKindV1,
   MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, encode_index_task_checkpoint,
@@ -95,6 +100,16 @@ fn permit_with_source_identity(
   destination: &MigrationDestinationPathObservationV1,
   source_file_identity: PlatformFileIdentityDescriptorV1,
 ) -> MigrationPreflightPermitV1 {
+  permit_with_authority(algorithm, destination, source_file_identity, id(0x10), id(0x40))
+}
+
+fn permit_with_authority(
+  algorithm: HashAlgorithm,
+  destination: &MigrationDestinationPathObservationV1,
+  source_file_identity: PlatformFileIdentityDescriptorV1,
+  database_id: [u8; 16],
+  destination_physical_instance_id: [u8; 16],
+) -> MigrationPreflightPermitV1 {
   let baseline = CapabilitySetV1::v4_baseline();
   let registry = embedded_system_family_registry(algorithm).unwrap();
   let source_checksum = digest(0x71);
@@ -114,10 +129,10 @@ fn permit_with_source_identity(
   capacities[0].path_identity = destination.parent_identity();
   let request = MigrationPreflightRequestV1 {
     identity: MigrationIdentityEvidenceV1 {
-      database_id: id(0x10),
+      database_id,
       migration_id: id(0x20),
       source_physical_instance_id: id(0x30),
-      destination_physical_instance_id: id(0x40),
+      destination_physical_instance_id,
       source_path_digest: digest(0x10),
       destination_path_digest: destination.path_digest(),
       source_file_identity,
@@ -235,9 +250,18 @@ fn source_engine(path: &Path, spill: &Path) -> StorageEngine {
 }
 
 fn retirement_owner(engine: &StorageEngine, database_id: [u8; 16], cancellation: &CancellationToken) -> SharedRetirementJournalOwnerV1 {
+  retirement_owner_with_algorithm(engine, engine.hash_algo(), database_id, cancellation)
+}
+
+fn retirement_owner_with_algorithm(
+  engine: &StorageEngine,
+  algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  cancellation: &CancellationToken,
+) -> SharedRetirementJournalOwnerV1 {
   Arc::new(Mutex::new(
     RetirementJournalOwnerV1::new_chain(
-      engine.hash_algo(),
+      algorithm,
       database_id,
       1,
       901,
@@ -276,13 +300,22 @@ impl VirtualClock for CancelingClock {
 
 impl RuntimeFixture {
   fn new(name: &str) -> Self {
+    Self::new_with_authority(name, HashAlgorithm::Blake3_256, id(0x10), id(0x40))
+  }
+
+  fn new_with_authority(name: &str, algorithm: HashAlgorithm, database_id: [u8; 16], destination_physical_instance_id: [u8; 16]) -> Self {
     let directory = tempfile::tempdir().unwrap();
     let source_path = directory.path().join(format!("{name}-source.aeordb"));
     let source = source_engine(&source_path, &directory.path().join(format!("{name}-spill")));
     let shadow_path = directory.path().join(format!("{name}-shadow.aeordb"));
     let destination_observation = observe_migration_destination_path_v1(&shadow_path).unwrap();
-    let permit =
-      permit_with_source_identity(HashAlgorithm::Blake3_256, &destination_observation, platform_file_identity(&source_path).unwrap());
+    let permit = permit_with_authority(
+      algorithm,
+      &destination_observation,
+      platform_file_identity(&source_path).unwrap(),
+      database_id,
+      destination_physical_instance_id,
+    );
     let cancellation = CancellationToken::new();
     let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
       permit: &permit,
@@ -296,7 +329,7 @@ impl RuntimeFixture {
   }
 
   fn retirement(&self) -> SharedRetirementJournalOwnerV1 {
-    retirement_owner(&self.source, self.permit.database_id(), &self.cancellation)
+    retirement_owner_with_algorithm(&self.source, self.permit.hash_algorithm(), self.permit.database_id(), &self.cancellation)
   }
 
   fn identity(&self) -> IndexRuntimeShadowIdentityV1 {
@@ -359,15 +392,64 @@ fn descriptor(database_id: [u8; 16]) -> NativeIndexOperationDescriptorV1 {
 }
 
 fn descriptor_with(database_id: [u8; 16], index_fill: u8, operation_fill: u8, definition_fill: u8) -> NativeIndexOperationDescriptorV1 {
+  descriptor_with_algorithm(HashAlgorithm::Blake3_256, database_id, index_fill, operation_fill, definition_fill)
+}
+
+fn descriptor_with_algorithm(
+  algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  index_fill: u8,
+  operation_fill: u8,
+  definition_fill: u8,
+) -> NativeIndexOperationDescriptorV1 {
+  let hash_width = algorithm.hash_length();
   NativeIndexOperationDescriptorV1::new(
-    HashAlgorithm::Blake3_256,
+    algorithm,
     database_id,
-    vec![index_fill; 32],
+    vec![index_fill; hash_width],
     [operation_fill; 16],
     IndexOperationKindV1::Build,
-    vec![definition_fill; 32],
+    vec![definition_fill; hash_width],
     None,
     None,
+  )
+  .unwrap()
+}
+
+fn cadence_publisher(fixture: &RuntimeFixture, runtime_id: [u8; 16], workspace_id: [u8; 16]) -> NativeIndexRuntimeBatchPublisherV1 {
+  let algorithm = fixture.permit.hash_algorithm();
+  let descriptor = descriptor_with_algorithm(algorithm, fixture.permit.database_id(), 0xd1, 0xd2, 0xd3);
+  let clock = fixture.clock(7, 1_700_000_000_300);
+  let store =
+    NativeIndexRecoveryStoreV1::new(descriptor.clone(), fixture.destination.shared_publisher(), fixture.retirement(), Arc::clone(&clock))
+      .unwrap();
+  let scratch = fixture._directory.path().join(format!("cadence-{}", hex::encode(workspace_id)));
+  fs::create_dir(&scratch).unwrap();
+  let workspace = DurableIndexRuntimeWorkspaceV1::create(
+    &fixture.source_path,
+    IndexRuntimeWorkspaceIdentityV1::new(
+      fixture.permit.database_id(),
+      fixture.permit.destination_physical_instance_id(),
+      workspace_id,
+      runtime_id,
+      algorithm,
+    )
+    .unwrap(),
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    fixture.cancellation.clone(),
+    &fixture.source.memory_coordinator(),
+  )
+  .unwrap();
+  DurableIndexRuntimeBatchPublisherV1::new_unselected(
+    algorithm,
+    IndexRecoveryOwnerV1::new(fixture.permit.database_id(), descriptor.index_id().to_vec(), descriptor.operation_id()).unwrap(),
+    digest_parts(algorithm, &[b"cadence source root"]),
+    1,
+    1_700_000_000_300,
+    workspace,
+    store,
+    fixture.cancellation.clone(),
+    clock,
   )
   .unwrap()
 }
@@ -633,6 +715,91 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
   )
   .unwrap_err();
   assert!(matches!(duplicate, NativeIndexRuntimeInstallationErrorV1::AlreadyInstalled));
+}
+
+#[test]
+fn native_runtime_cadence_installation_rejects_invalid_authority_without_consuming_its_slot() {
+  let fixture = RuntimeFixture::new("runtime-cadence-installation");
+  let runtime_id = [0x61; 16];
+
+  let missing_runtime = fixture
+    .source
+    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xe0)), fixture.clock(8, 1_700_000_000_310))
+    .unwrap_err();
+  assert_eq!(missing_runtime, NativeIndexRuntimeCadenceInstallationErrorV1::RuntimeNotInstalled);
+
+  let identity = fixture.identity();
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(9, 1_700_000_000_320),
+      now_ms: 1_700_000_000_320,
+    },
+  )
+  .unwrap();
+
+  let runtime_mismatch = fixture
+    .source
+    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, [0x62; 16], id(0xe1)), fixture.clock(10, 1_700_000_000_330))
+    .unwrap_err();
+  assert!(matches!(runtime_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+
+  let database_mismatch_fixture =
+    RuntimeFixture::new_with_authority("runtime-cadence-database-mismatch", HashAlgorithm::Blake3_256, id(0x11), id(0x40));
+  let database_mismatch = fixture
+    .source
+    .install_index_runtime_cadence_v1(
+      cadence_publisher(&database_mismatch_fixture, runtime_id, id(0xe2)),
+      fixture.clock(11, 1_700_000_000_331),
+    )
+    .unwrap_err();
+  assert!(matches!(database_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+
+  let destination_mismatch_fixture =
+    RuntimeFixture::new_with_authority("runtime-cadence-destination-mismatch", HashAlgorithm::Blake3_256, id(0x10), id(0x41));
+  let destination_mismatch = fixture
+    .source
+    .install_index_runtime_cadence_v1(
+      cadence_publisher(&destination_mismatch_fixture, runtime_id, id(0xe3)),
+      fixture.clock(12, 1_700_000_000_332),
+    )
+    .unwrap_err();
+  assert!(matches!(destination_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+
+  let hash_mismatch_fixture =
+    RuntimeFixture::new_with_authority("runtime-cadence-hash-mismatch", HashAlgorithm::Sha512, id(0x10), id(0x40));
+  let hash_mismatch = fixture
+    .source
+    .install_index_runtime_cadence_v1(cadence_publisher(&hash_mismatch_fixture, runtime_id, id(0xe4)), fixture.clock(13, 1_700_000_000_333))
+    .unwrap_err();
+  assert!(matches!(hash_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+
+  let invalid_clock = fixture
+    .source
+    .install_index_runtime_cadence_v1(
+      cadence_publisher(&fixture, runtime_id, id(0xe5)),
+      Arc::new(MockClock::new(14, 0)) as Arc<dyn VirtualClock>,
+    )
+    .unwrap_err();
+  assert_eq!(invalid_clock, NativeIndexRuntimeCadenceInstallationErrorV1::Cadence(IndexRuntimeCadenceErrorV1::InvalidClock));
+
+  fixture
+    .source
+    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xe6)), fixture.clock(15, 1_700_000_000_340))
+    .unwrap();
+  let duplicate = fixture
+    .source
+    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xe7)), fixture.clock(16, 1_700_000_000_350))
+    .unwrap_err();
+  assert_eq!(duplicate, NativeIndexRuntimeCadenceInstallationErrorV1::AlreadyInstalled);
 }
 
 #[test]

@@ -364,6 +364,10 @@ fn review_policy_name(occurrence: &SuppressionOccurrence) -> Option<&'static str
     SuppressionKind::BroadErrPattern if authority_file(file) => Some("authority-state-failure"),
     SuppressionKind::BroadErrPattern => Some("candidate-format-probe"),
     SuppressionKind::LoggedErrorContinues if item.to_ascii_lowercase().contains("drop") => Some("unwind-cleanup-evidence"),
+    SuppressionKind::LoggedErrorContinues if item == "spawn_index_buffer_flush_timer" && pattern.contains("Canceled") => {
+      Some("local-status-control")
+    }
+    SuppressionKind::LoggedErrorContinues if item == "spawn_index_buffer_flush_timer" => Some("retryable-background-operation"),
     SuppressionKind::LoggedErrorContinues if file.starts_with("aeordb-lib/src/server/") => Some("http-terminal-or-postcommit-evidence"),
     SuppressionKind::LoggedErrorContinues if retryable_worker_file(file) => Some("retryable-background-operation"),
     SuppressionKind::LoggedErrorContinues if file.starts_with("aeordb-cli/") => Some("diagnostic-partial-output"),
@@ -429,6 +433,9 @@ fn authority_file(file: &str) -> bool {
     "/namespace_mutation.rs",
     "/native_durability.rs",
     "/rate_limiter.rs",
+    "/v4/index_runtime_cadence.rs",
+    "/v4/index_runtime_installation.rs",
+    "/v4/index_runtime_owner.rs",
     "/v4/read_view.rs",
     "/storage_engine.rs",
     "/sync_engine.rs",

@@ -229,6 +229,7 @@ struct IndexRuntimeStateV1 {
 }
 
 pub struct IndexRuntimeOwnerV1 {
+  coordinator_id: [u8; 16],
   hash_algorithm: HashAlgorithm,
   soft_hub: Arc<SoftMutationHubV1>,
   _soft_capacity: MemoryReservation,
@@ -299,6 +300,7 @@ impl IndexRuntimeOwnerV1 {
     };
     let observability = ArcSwap::from_pointee(runtime_snapshot(&state, soft_snapshot));
     Ok(Self {
+      coordinator_id,
       hash_algorithm,
       soft_hub,
       _soft_capacity: soft_capacity,
@@ -386,8 +388,25 @@ impl IndexRuntimeOwnerV1 {
     self.observability.load_full()
   }
 
+  pub(super) fn latch_cadence_failure(&self, code: &'static str, context: String) -> Result<(), IndexRuntimeErrorV1> {
+    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+    observe_soft_loss(&mut state, &soft);
+    if matches!(state.lifecycle, IndexRuntimeLifecycleV1::Running | IndexRuntimeLifecycleV1::Draining) {
+      latch_degraded(&mut state, code, context);
+    }
+    let snapshot = runtime_snapshot(&state, soft);
+    drop(state);
+    self.observability.store(Arc::new(snapshot));
+    Ok(())
+  }
+
   pub const fn hash_algorithm(&self) -> HashAlgorithm {
     self.hash_algorithm
+  }
+
+  pub const fn coordinator_id(&self) -> [u8; 16] {
+    self.coordinator_id
   }
 
   pub(crate) fn shares_soft_hub(&self, hub: &Arc<SoftMutationHubV1>) -> bool {

@@ -5,7 +5,7 @@
 //! v4 destination are the exact pair admitted by migration preflight.
 
 use std::mem::size_of;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -20,6 +20,8 @@ use super::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryErrorV1, IndexScopeOrdinalStoreRegistryOptionsV1, IndexScopeOrdinalStoreRegistryV1,
   NativeIndexOperationDescriptorV1, SharedRetirementJournalOwnerV1,
 };
+use super::index_runtime_batch_publisher::NativeIndexRuntimeBatchPublisherV1;
+use super::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, NativeIndexRuntimeCadenceV1};
 use super::index_runtime_owner::{
   IndexRuntimeErrorV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1, IndexRuntimeRecoveryDecisionV1,
 };
@@ -122,6 +124,7 @@ pub struct NativeIndexRuntimeV1 {
   shadow_identity: IndexRuntimeShadowIdentityV1,
   semantic_authority: SelectedSemanticAuthorityV1,
   cancellation: CancellationToken,
+  cadence: OnceLock<Arc<NativeIndexRuntimeCadenceV1>>,
 }
 
 impl NativeIndexRuntimeV1 {
@@ -147,6 +150,35 @@ impl NativeIndexRuntimeV1 {
 
   pub const fn cancellation(&self) -> &CancellationToken {
     &self.cancellation
+  }
+
+  pub fn cadence(&self) -> Option<&Arc<NativeIndexRuntimeCadenceV1>> {
+    self.cadence.get()
+  }
+
+  pub fn install_cadence(
+    &self,
+    publisher: NativeIndexRuntimeBatchPublisherV1,
+    clock: Arc<dyn VirtualClock>,
+  ) -> Result<(), NativeIndexRuntimeCadenceInstallationErrorV1> {
+    let publisher_identity = publisher.workspace_identity();
+    if publisher.runtime_id() != self.owner.coordinator_id()
+      || publisher_identity.database_id() != self.shadow_identity.database_id()
+      || publisher_identity.destination_physical_instance_id() != self.shadow_identity.destination_physical_instance_id()
+      || publisher_identity.hash_algorithm() != self.owner.hash_algorithm()
+    {
+      return Err(NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(
+        "runtime cadence publisher and installed runtime authorities disagree".to_string(),
+      ));
+    }
+    let cadence = Arc::new(NativeIndexRuntimeCadenceV1::new(Arc::clone(&self.owner), publisher, self.cancellation.clone(), clock)?);
+    match self.cadence.set(cadence) {
+      Ok(()) => Ok(()),
+      Err(rejected) => {
+        drop(rejected);
+        Err(NativeIndexRuntimeCadenceInstallationErrorV1::AlreadyInstalled)
+      }
+    }
   }
 }
 
@@ -181,6 +213,18 @@ pub enum NativeIndexRuntimeInstallationErrorV1 {
   Registry(#[from] IndexScopeOrdinalStoreRegistryErrorV1),
   #[error("native index runtime owner failed: {0}")]
   Runtime(#[from] IndexRuntimeErrorV1),
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum NativeIndexRuntimeCadenceInstallationErrorV1 {
+  #[error("native index runtime is not installed")]
+  RuntimeNotInstalled,
+  #[error("native index runtime cadence is already installed")]
+  AlreadyInstalled,
+  #[error("native index runtime cadence identity is invalid: {0}")]
+  Invalid(String),
+  #[error(transparent)]
+  Cadence(#[from] IndexRuntimeCadenceErrorV1),
 }
 
 pub fn install_native_index_runtime_v1(
@@ -242,6 +286,7 @@ pub fn install_native_index_runtime_v1(
     shadow_identity: request.shadow_identity.clone(),
     semantic_authority: semantic_authority.clone(),
     cancellation: request.cancellation.clone(),
+    cadence: OnceLock::new(),
   });
   check_cancellation(request.cancellation)?;
   let snapshot = installation.install(runtime).map_err(|error| match error {

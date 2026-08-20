@@ -1009,6 +1009,16 @@
                     - [x] Prove one workspace, spill, checkpoint, selector, runtime-owner, and legacy-query authority through source and behavioral architecture gates.
                     - [ ] Run focused, affected, suppression, contract, full-workspace, native-platform, and real-filesystem gates; record and land c3c.
                 - [ ] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
+                  - [x] Map the single cadence's mutation, pressure, clock, cancellation, publisher, timer, retry, observability, and later shutdown/startup boundaries.
+                  - [x] Add compile-red count, age, pressure, cancellation, retry-identity, concurrent-serialization, and timer-uniqueness proofs.
+                  - [x] Implement one serialized cadence owner over the existing runtime owner and selector-last publisher without another timer or worker.
+                  - [x] Service legacy and v4 due work independently from the existing index timer so one failure cannot starve the other.
+                  - [x] Latch fatal cadence clock/publisher failures into cached runtime health while retaining exact queued work and error evidence.
+                  - [x] Classify v4 runtime coordination failures as authority-state failures rather than persistent-format probes.
+                  - [x] Reject cadence publishers whose runtime, logical database, destination physical instance, or hash authority differs without consuming the one-time install slot.
+                  - [x] Pass Linux focused, affected, architecture, suppression, contract, all-target, strict-baseline, full-workspace, and resource gates.
+                  - [ ] Pass exact-source native Darwin and Windows cross-platform gates and record the retained evidence.
+                  - [ ] Run focused, affected, architecture, suppression, contract, full-workspace, resource, and native-platform gates; record and land c3d.
                 - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.
                 - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.

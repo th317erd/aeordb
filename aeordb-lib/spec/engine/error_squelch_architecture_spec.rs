@@ -295,16 +295,49 @@ fn reviewed_inventory_assigns_named_semantic_policies() {
 
 #[test]
 fn v4_runtime_authority_errors_do_not_inherit_the_persistent_format_policy() {
-  let discovered =
-    scan_source("aeordb-lib/src/engine/v4/read_view.rs", "fn lock_state() { let _guard = state.lock().map_err(|_| authority_error()); }")
-      .unwrap();
+  for file in [
+    "aeordb-lib/src/engine/v4/read_view.rs",
+    "aeordb-lib/src/engine/v4/index_runtime_cadence.rs",
+    "aeordb-lib/src/engine/v4/index_runtime_installation.rs",
+    "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
+  ] {
+    let discovered = scan_source(file, "fn lock_state() { let _guard = state.lock().map_err(|_| authority_error()); }").unwrap();
+    let inventory = reviewed_inventory(&discovered).expect("known runtime authority failure policy");
 
-  let inventory = reviewed_inventory(&discovered).expect("known runtime authority failure policy");
+    assert_eq!(inventory.entries.len(), 1, "{file}");
+    assert_eq!(inventory.entries[0].review, "authority-state-failure", "{file}");
+    assert_eq!(inventory.reviews["authority-state-failure"].review_status, ReviewStatus::Reviewed, "{file}");
+    assert_eq!(inventory.reviews["authority-state-failure"].class, SuppressionClass::DurabilityAuthority, "{file}");
+  }
+}
 
-  assert_eq!(inventory.entries.len(), 1);
-  assert_eq!(inventory.entries[0].review, "authority-state-failure");
-  assert_eq!(inventory.reviews["authority-state-failure"].review_status, ReviewStatus::Reviewed);
-  assert_eq!(inventory.reviews["authority-state-failure"].class, SuppressionClass::DurabilityAuthority);
+#[test]
+fn shared_index_timer_distinguishes_expected_cancellation_from_retryable_failures() {
+  let discovered = scan_source(
+    "aeordb-lib/src/server/mod.rs",
+    r#"
+      fn spawn_index_buffer_flush_timer() {
+        if let Err(error) = legacy {
+          tracing::warn!("Index buffer timer legacy flush failed: {}", error);
+        }
+        match runtime {
+          Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled)) => {
+            tracing::debug!("Index runtime cadence observed cancellation");
+          }
+          Err(error) => tracing::warn!("Index runtime cadence flush failed: {}", error),
+          Ok(_) => {}
+        }
+      }
+    "#,
+  )
+  .unwrap();
+  let inventory = reviewed_inventory(&discovered).expect("known shared index timer failure policies");
+
+  assert_eq!(inventory.entries.len(), 3);
+  for entry in inventory.entries {
+    let expected = if entry.occurrence.pattern.contains("Canceled") { "local-status-control" } else { "retryable-background-operation" };
+    assert_eq!(entry.review, expected, "{}", entry.occurrence.pattern);
+  }
 }
 
 #[test]

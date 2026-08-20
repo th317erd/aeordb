@@ -28,7 +28,8 @@ use super::index_runtime_dirty_overlay_recovery::{
   INDEX_RUNTIME_DIRTY_OVERLAY_PHASE_V1, RecoveredIndexRuntimeDirtyOverlayV1, dirty_overlay_capabilities_v1,
 };
 use super::index_runtime_workspace_store::{
-  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceSelectedHeadV1, IndexRuntimeWorkspaceStoreErrorV1,
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceSelectedHeadV1,
+  IndexRuntimeWorkspaceStoreErrorV1,
 };
 use super::index_task::{
   ExternalWorkspaceDescriptorWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, encode_index_task_checkpoint,
@@ -229,6 +230,14 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
 
   pub fn workspace_head(&self) -> Option<&IndexRuntimeWorkspaceHeadV1> {
     self.workspace.head()
+  }
+
+  pub fn runtime_id(&self) -> [u8; 16] {
+    self.workspace.identity().runtime_id()
+  }
+
+  pub(crate) fn workspace_identity(&self) -> IndexRuntimeWorkspaceIdentityV1 {
+    self.workspace.identity()
   }
 
   fn publish_exact(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {

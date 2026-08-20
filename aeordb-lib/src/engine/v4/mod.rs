@@ -66,6 +66,7 @@ pub mod index_producer_worker;
 pub mod index_record;
 pub mod index_recovery_store;
 pub mod index_runtime_batch_publisher;
+pub mod index_runtime_cadence;
 pub mod index_runtime_dirty_overlay_recovery;
 pub mod index_runtime_installation;
 pub mod index_runtime_owner;

@@ -3623,6 +3623,33 @@ impl StorageEngine {
     IndexManager::new(self).flush_buffered_indexes_if_due()
   }
 
+  pub fn install_index_runtime_cadence_v1(
+    &self,
+    publisher: crate::engine::v4::index_runtime_batch_publisher::NativeIndexRuntimeBatchPublisherV1,
+    clock: Arc<dyn crate::engine::VirtualClock>,
+  ) -> Result<(), crate::engine::v4::index_runtime_installation::NativeIndexRuntimeCadenceInstallationErrorV1> {
+    let runtime = self
+      .index_runtime_v1
+      .get()
+      .ok_or(crate::engine::v4::index_runtime_installation::NativeIndexRuntimeCadenceInstallationErrorV1::RuntimeNotInstalled)?;
+    runtime.install_cadence(publisher, clock)
+  }
+
+  pub(crate) fn flush_index_runtime_if_due_v1(
+    &self,
+  ) -> Result<
+    Option<crate::engine::v4::index_runtime_owner::IndexRuntimeFlushOutcomeV1>,
+    crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1,
+  > {
+    let Some(runtime) = self.index_runtime_v1.get() else {
+      return Ok(None);
+    };
+    let Some(cadence) = runtime.cadence() else {
+      return Ok(None);
+    };
+    cadence.flush_if_due().map(Some)
+  }
+
   /// Force all buffered index mutations to disk.
   pub fn flush_index_buffer(&self) -> EngineResult<usize> {
     let _operation = self.write_operation_guard("flush_index_buffer")?;
@@ -7831,3 +7858,7 @@ mod void_gap_recovery_internal_spec;
 #[cfg(test)]
 #[path = "../../spec/engine/migration_capture_subscription_internal_spec.rs"]
 mod migration_capture_subscription_internal_spec;
+
+#[cfg(test)]
+#[path = "../../spec/engine/index_runtime_cadence_storage_internal_spec.rs"]
+mod index_runtime_cadence_storage_internal_spec;

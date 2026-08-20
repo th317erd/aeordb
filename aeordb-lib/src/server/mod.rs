@@ -124,10 +124,25 @@ pub fn spawn_index_buffer_flush_timer(engine: Arc<StorageEngine>, cancel: Option
       }
       match weak.upgrade() {
         Some(engine) => {
-          let flush_result = tokio::task::spawn_blocking(move || engine.flush_index_buffer_if_due()).await;
+          let flush_result = tokio::task::spawn_blocking(move || {
+            let legacy = engine.flush_index_buffer_if_due();
+            let runtime = engine.flush_index_runtime_if_due_v1();
+            (legacy, runtime)
+          })
+          .await;
           match flush_result {
-            Ok(Ok(_flushed)) => {}
-            Ok(Err(error)) => tracing::warn!("Index buffer timer flush failed: {}", error),
+            Ok((legacy, runtime)) => {
+              if let Err(error) = legacy {
+                tracing::warn!("Index buffer timer legacy flush failed: {}", error);
+              }
+              match runtime {
+                Ok(_) => {}
+                Err(crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::Runtime(
+                  crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::Canceled,
+                )) => tracing::debug!("Index runtime cadence observed cancellation"),
+                Err(error) => tracing::warn!("Index runtime cadence flush failed: {}", error),
+              }
+            }
             Err(error) => tracing::warn!("Index buffer timer flush task failed: {}", error),
           }
         }
