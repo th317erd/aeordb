@@ -8,7 +8,9 @@ use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoor
 use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_producer_coordinator::{IndexProducerTaskKindV1, IndexProducerTaskRequestV1};
 use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
-use aeordb::engine::v4::index_runtime_workspace::{decode_index_workspace_object_v1, decode_index_workspace_producer_task_payload_v1};
+use aeordb::engine::v4::index_runtime_workspace::{
+  decode_index_workspace_manifest_v1, decode_index_workspace_object_v1, decode_index_workspace_producer_task_payload_v1,
+};
 use aeordb::engine::v4::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
   IndexRuntimeWorkspaceReopenOptionsV1, IndexRuntimeWorkspaceSelectedHeadV1, ReopenedIndexRuntimeWorkspaceV1,
@@ -485,9 +487,11 @@ fn selected_restart_resumes_the_exact_object_before_manifest_prefix() {
   )
   .unwrap();
   assert!(resumed.append_runtime_batch([0x55; 16], 101, &batch).is_err());
-  let second = resumed.append_runtime_batch([0x66; 16], 102, &batch).unwrap();
+  let second = resumed.append_runtime_batch([0x66; 16], 999, &batch).unwrap();
   assert_eq!(second.manifest_sequence(), 2);
   assert_eq!(second.cumulative_object_count(), 2);
+  let manifest = decode_index_workspace_manifest_v1(&fs::read(manifest_path(second.workspace_path(), 2)).unwrap()).unwrap();
+  assert_eq!(manifest.created_at_ms, 102);
 }
 
 #[test]

@@ -372,6 +372,144 @@ fn producer_spill_uses_the_same_selector_and_is_idempotent_across_restart() {
 }
 
 #[test]
+fn restart_recovers_an_unselected_producer_prefix_with_its_durable_timestamp() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  fixture.state.lock().unwrap().selector_behavior = SelectorBehavior::Refuse;
+
+  let producer_memory = memory();
+  let mut producer = producer_coordinator(&producer_memory, ALGORITHM, 4, 1);
+  let root = digest_parts(ALGORITHM, &[b"crash-prefix-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"crash-prefix-semantic"]);
+  let task = producer_task([0x68; 16], 58, &root, &semantic);
+  producer.admit(task, 2_000).unwrap();
+  let lease = producer.lease_next(2_000, false).unwrap().unwrap();
+  assert!(producer.retry_task(&lease, 1, 2_001, false, &mut fixture.publisher).is_err());
+  assert_eq!(producer.snapshot().pending_tasks, 1);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 2);
+
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  let recovery_memory = memory();
+  let cancellation = CancellationToken::new();
+  let mut recovery_store = FakeStore::new(Arc::clone(&state));
+  let recovered = recover_index_runtime_dirty_overlay_v1(
+    &mut recovery_store,
+    ALGORITHM,
+    DATABASE_ID,
+    DESTINATION_ID,
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(None, 16 * 1024 * 1024, 0, 32).unwrap(),
+    &recovery_memory,
+    &cancellation,
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("selected predecessor did not recover beside the unselected producer prefix");
+  };
+  assert_eq!(recovered.workspace_head().unwrap().manifest_sequence(), 1);
+
+  fixture.clock.advance(50_000);
+  state.lock().unwrap().selector_behavior = SelectorBehavior::Commit;
+  let virtual_clock: Arc<dyn VirtualClock> = fixture.clock.clone();
+  let mut resumed = DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, FakeStore::new(Arc::clone(&state)), virtual_clock).unwrap();
+  let retry = producer.lease_next(3_001, false).unwrap().unwrap();
+  let completion = producer.retry_task(&retry, 1, 3_002, false, &mut resumed).unwrap();
+  let aeordb::engine::v4::index_producer_coordinator::IndexProducerCompletionV1::Spilled { receipt, .. } = completion else {
+    panic!("restart did not select the exact durable producer prefix");
+  };
+  assert_eq!(receipt.spill_id(), [0x68; 16]);
+  assert_eq!(resumed.workspace_head().unwrap().manifest_sequence(), 2);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("objects/tasks")).unwrap().count(), 1);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("manifests")).unwrap().count(), 2);
+  let selected = state.lock().unwrap().selected.clone().unwrap();
+  let checkpoint = state.lock().unwrap().immutable.get(&selected.checkpoint_key).cloned().unwrap();
+  assert_eq!(decode_index_task_checkpoint(&checkpoint, ALGORITHM).unwrap().updated_at_ms, 1_725_000_000_000);
+}
+
+#[test]
+fn historical_producer_duplicate_resolves_through_the_later_selected_head() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+
+  let producer_memory = memory();
+  let mut producer = producer_coordinator(&producer_memory, ALGORITHM, 1, 3);
+  let root = digest_parts(ALGORITHM, &[b"historical-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"historical-semantic"]);
+  let retained = producer_task([0x69; 16], 59, &root, &semantic);
+  let spilled = producer_task([0x6a; 16], 60, &root, &semantic);
+  producer.admit(retained, 2_100).unwrap();
+  let IndexProducerAdmissionV1::Spilled { receipt: original } = producer.admit_or_spill(spilled, 2_101, &mut fixture.publisher).unwrap()
+  else {
+    panic!("producer operation was not spilled");
+  };
+
+  fixture.clock.advance(10);
+  admit(&mut fixture.coordinator, 2, 61, 2_110);
+  let successor = fixture.coordinator.begin_flush(2_120, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(fixture.publisher.publish(&successor).unwrap().checkpoint_sequence, 3);
+  let selected = fixture.state.lock().unwrap().selected.clone().unwrap();
+  assert_ne!(selected.checkpoint_key, original.artifact_key());
+
+  let IndexProducerAdmissionV1::Spilled { receipt: duplicate } = producer.admit_or_spill(spilled, 2_121, &mut fixture.publisher).unwrap()
+  else {
+    panic!("historical producer duplicate was not resolved as durable");
+  };
+  assert_eq!(duplicate.spill_id(), original.spill_id());
+  assert_eq!(duplicate.artifact_key(), selected.checkpoint_key);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 3);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("objects/tasks")).unwrap().count(), 1);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("manifests")).unwrap().count(), 3);
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, 3);
+}
+
+#[test]
+fn historical_producer_lookup_rejects_payload_conflicts_and_selected_chain_tamper() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+
+  let producer_memory = memory();
+  let mut producer = producer_coordinator(&producer_memory, ALGORITHM, 1, 3);
+  let root = digest_parts(ALGORITHM, &[b"historical-adversarial-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"historical-adversarial-semantic"]);
+  let retained = producer_task([0x6b; 16], 61, &root, &semantic);
+  let spilled = producer_task([0x6c; 16], 62, &root, &semantic);
+  producer.admit(retained, 2_200).unwrap();
+  assert!(matches!(producer.admit_or_spill(spilled, 2_201, &mut fixture.publisher).unwrap(), IndexProducerAdmissionV1::Spilled { .. }));
+
+  fixture.clock.advance(10);
+  admit(&mut fixture.coordinator, 2, 63, 2_210);
+  let successor = fixture.coordinator.begin_flush(2_220, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(fixture.publisher.publish(&successor).unwrap().checkpoint_sequence, 3);
+  let selector_calls = fixture.state.lock().unwrap().selector_calls;
+
+  let conflicting_semantic = digest_parts(ALGORITHM, &[b"conflicting-semantic"]);
+  let conflicting = producer_task([0x6c; 16], 62, &root, &conflicting_semantic);
+  let conflicting_memory = memory();
+  let mut conflicting_producer = producer_coordinator(&conflicting_memory, ALGORITHM, 1, 3);
+  conflicting_producer.admit(producer_task([0x6d; 16], 64, &root, &semantic), 2_300).unwrap();
+  assert!(conflicting_producer.admit_or_spill(conflicting, 2_301, &mut fixture.publisher).is_err());
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, selector_calls);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("objects/tasks")).unwrap().count(), 1);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("manifests")).unwrap().count(), 3);
+
+  let selected_manifest = fixture.workspace_path.join("manifests/0000000000000003.aiwm");
+  let mut tampered = fs::read(&selected_manifest).unwrap();
+  tampered[88] ^= 0x80;
+  fs::write(selected_manifest, tampered).unwrap();
+  let tamper_memory = memory();
+  let mut tamper_producer = producer_coordinator(&tamper_memory, ALGORITHM, 1, 3);
+  tamper_producer.admit(producer_task([0x6e; 16], 65, &root, &semantic), 2_400).unwrap();
+  assert!(tamper_producer.admit_or_spill(spilled, 2_401, &mut fixture.publisher).is_err());
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, selector_calls);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("objects/tasks")).unwrap().count(), 1);
+  assert_eq!(fs::read_dir(fixture.workspace_path.join("manifests")).unwrap().count(), 3);
+}
+
+#[test]
 fn refused_producer_spill_retains_the_task_until_the_exact_retry_is_selected() {
   let (mut fixture, _batch) = Fixture::new(SelectorBehavior::Refuse);
   let producer_memory = memory();
@@ -946,10 +1084,15 @@ fn real_native_authority_selects_the_external_runtime_checkpoint_last() {
 fn runtime_publisher_uses_one_existing_selector_and_remains_disconnected() {
   let source = include_str!("../../src/engine/v4/index_runtime_batch_publisher.rs");
   let recovery = include_str!("../../src/engine/v4/index_runtime_dirty_overlay_recovery.rs");
+  let workspace = include_str!("../../src/engine/v4/index_runtime_workspace_store.rs");
   let immutable = source.find("self.store.put_immutable(&checkpoint)").unwrap();
   let selector = source.find("self.store.publish_selected_synced").unwrap();
   assert!(immutable < selector, "runtime checkpoint selector appears before immutable publication");
   assert!(!source.contains("V4FirstAuthorityPublisher"));
+  assert!(!source.contains("latest_object_kind"));
+  assert_eq!(workspace.matches("fn append_object(").count(), 1);
+  assert_eq!(workspace.matches("fn selected_contains_producer_task(").count(), 1);
+  assert!(!workspace.contains("payload_length != usize::MAX"));
   assert!(!recovery.contains("StorageEngine"));
   assert_eq!(source.matches("IndexProducerSpillStoreV1 for DurableIndexRuntimeBatchPublisherV1").count(), 1);
   for forbidden in [

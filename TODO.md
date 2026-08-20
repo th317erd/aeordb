@@ -1003,6 +1003,11 @@
                     - [x] Require spill receipts to bind the exact producer operation identity before the coordinator may release retained work.
                     - [x] Run focused, affected, suppression, contract, full-workspace, and disconnected-architecture gates; record and land c3c-e.
                   - [ ] P6-2d-c3c-f: prove crash prefixes, tamper/truncation, stale selectors, restart, cancellation, pressure, widest-hash operation, architecture uniqueness, and unchanged v3 query authority before landing c3c.
+                    - [ ] Add compile-red restart proof for an unselected producer object/manifest prefix whose durable timestamp differs from the new process clock.
+                    - [ ] Add compile-red historical-duplicate proof after later cumulative runtime publication; resolve only an exact selected-chain producer object without another append.
+                    - [ ] Close object, manifest, checkpoint, selector, cancellation, memory, free-space, capacity, tamper, truncation, and widest-hash crash/failure prefixes.
+                    - [ ] Prove one workspace, spill, checkpoint, selector, runtime-owner, and legacy-query authority through source and behavioral architecture gates.
+                    - [ ] Run focused, affected, suppression, contract, full-workspace, native-platform, and real-filesystem gates; record and land c3c.
                 - [ ] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
                 - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.
                 - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.

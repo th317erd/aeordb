@@ -286,14 +286,6 @@ impl IndexRuntimeWorkspaceHeadV1 {
     self.selected.clone()
   }
 
-  pub(super) const fn latest_object_kind(&self) -> IndexWorkspaceObjectKindV1 {
-    self.latest_object_kind
-  }
-
-  pub(super) const fn latest_object_id(&self) -> [u8; 16] {
-    self.latest_object_id
-  }
-
   pub(super) const fn latest_object_created_at_ms(&self) -> u64 {
     self.created_at_ms
   }
@@ -327,28 +319,6 @@ struct WorkspaceObjectPlanV1 {
   minimum_publication_sequence: u64,
   maximum_publication_sequence: u64,
   payload_digest: [u8; 32],
-}
-
-impl WorkspaceObjectPlanV1 {
-  const fn payload_length(self) -> usize {
-    self.payload_length
-  }
-
-  const fn logical_record_count(self) -> u64 {
-    self.logical_record_count
-  }
-
-  const fn minimum_publication_sequence(self) -> u64 {
-    self.minimum_publication_sequence
-  }
-
-  const fn maximum_publication_sequence(self) -> u64 {
-    self.maximum_publication_sequence
-  }
-
-  const fn payload_digest(self) -> [u8; 32] {
-    self.payload_digest
-  }
 }
 
 impl DurableIndexRuntimeWorkspaceV1 {
@@ -489,6 +459,106 @@ impl DurableIndexRuntimeWorkspaceV1 {
     })
   }
 
+  pub(super) fn selected_contains_producer_task(
+    &self,
+    selected: &IndexRuntimeWorkspaceSelectedHeadV1,
+    object_id: [u8; 16],
+    task: &IndexProducerTaskRequestV1<'_>,
+  ) -> Result<bool, IndexRuntimeWorkspaceStoreErrorV1> {
+    check_cancellation(&self.cancellation)?;
+    if selected.workspace_path != self.workspace_path || selected.workspace_id != self.identity.workspace_id {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State("selected producer lookup is bound to another workspace".to_string()));
+    }
+    if selected.durable_sequence > self.options.maximum_object_count {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Capacity(
+        "selected producer lookup exceeds the workspace object-count cap".to_string(),
+      ));
+    }
+    enforce_selected_bytes(selected.durable_bytes, selected.durable_sequence, self.options.maximum_stored_bytes)?;
+
+    let object_path = object_path(&self.producer_objects_path, object_id);
+    if !path_present(&object_path)? {
+      return Ok(false);
+    }
+    let payload_plan = plan_index_workspace_producer_task_payload_v1(task, self.identity.hash_algorithm)?;
+    let payload_bytes = u64::try_from(payload_plan.payload_length())
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("producer task payload length exceeds u64: {error}")))?;
+    let payload_reservation = self
+      .memory
+      .reserve(MemoryOwner::IndexDirtyBuffers, payload_bytes, AdmissionClass::Maintenance)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+    let payload = encode_index_workspace_producer_task_payload_v1(task, self.identity.hash_algorithm)?;
+    let plan = WorkspaceObjectPlanV1 {
+      kind: IndexWorkspaceObjectKindV1::ProducerTask,
+      payload_length: payload.len(),
+      logical_record_count: 1,
+      minimum_publication_sequence: task.publication_sequence,
+      maximum_publication_sequence: task.publication_sequence,
+      payload_digest: *blake3::hash(&payload).as_bytes(),
+    };
+    let expected = ExpectedObjectV1::payload_bound(self.identity, object_id, plan);
+    drop(payload);
+    drop(payload_reservation);
+    let object = validate_object_file(&object_path, &expected, &self.cancellation, &self.memory)?;
+    if object.object_sequence > selected.durable_sequence {
+      return Ok(false);
+    }
+
+    let mut sequence = selected.durable_sequence;
+    let mut expected_digest = selected.manifest_digest;
+    let mut expected_cumulative_count = selected.durable_sequence;
+    let mut expected_cumulative_bytes = selected.durable_bytes;
+    loop {
+      check_cancellation(&self.cancellation)?;
+      let observed = read_manifest(&manifest_path(&self.manifests_path, sequence), &self.cancellation)?;
+      if observed.digest != expected_digest {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(format!(
+          "manifest {sequence} digest disagrees with the selected producer lookup chain"
+        )));
+      }
+      let manifest = observed.manifest;
+      validate_manifest_identity(
+        &manifest,
+        self.identity.database_id,
+        self.identity.destination_physical_instance_id,
+        self.identity.workspace_id,
+        self.identity.runtime_id,
+        sequence,
+      )?;
+      if manifest.cumulative_object_count != expected_cumulative_count
+        || manifest.cumulative_stored_bytes != expected_cumulative_bytes
+        || manifest.cumulative_object_count != sequence
+      {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(format!(
+          "manifest {sequence} cumulative count or bytes are discontinuous during selected producer lookup"
+        )));
+      }
+      if sequence == object.object_sequence {
+        if manifest.object_kind != IndexWorkspaceObjectKindV1::ProducerTask
+          || manifest.object_id != object_id
+          || manifest.object_digest != object.digest
+          || manifest.object_stored_bytes != object.stored_bytes
+          || manifest.created_at_ms != object.created_at_ms
+        {
+          return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+            "selected producer manifest does not close over the exact producer object".to_string(),
+          ));
+        }
+        return Ok(true);
+      }
+      expected_cumulative_count = expected_cumulative_count
+        .checked_sub(1)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Format("selected producer manifest count underflow".to_string()))?;
+      expected_cumulative_bytes = expected_cumulative_bytes
+        .checked_sub(manifest.object_stored_bytes)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Format("selected producer manifest byte total underflow".to_string()))?;
+      expected_digest = manifest.previous_manifest_digest;
+      sequence = sequence
+        .checked_sub(1)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Format("selected producer manifest chain ended before its object".to_string()))?;
+    }
+  }
+
   fn append_object(
     &mut self,
     object_id: [u8; 16],
@@ -510,20 +580,11 @@ impl DurableIndexRuntimeWorkspaceV1 {
           ));
         }
         if created_at_ms != head.created_at_ms {
-          return Err(IndexRuntimeWorkspaceStoreErrorV1::State("exact workspace object retry changed its creation timestamp".to_string()));
+          return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+            "exact selected workspace retry changed its creation timestamp".to_string(),
+          ));
         }
-        let expected = ExpectedObjectV1 {
-          identity: self.identity,
-          kind: plan.kind,
-          object_id,
-          object_sequence: head.manifest_sequence(),
-          created_at_ms: head.created_at_ms,
-          payload_length: plan.payload_length(),
-          logical_record_count: plan.logical_record_count(),
-          minimum_publication_sequence: plan.minimum_publication_sequence(),
-          maximum_publication_sequence: plan.maximum_publication_sequence(),
-          payload_digest: plan.payload_digest(),
-        };
+        let expected = ExpectedObjectV1::exact(self.identity, object_id, head.manifest_sequence(), head.created_at_ms, plan);
         let observed =
           validate_object_file(&object_path(self.object_directory(plan.kind), object_id), &expected, &self.cancellation, &self.memory)?;
         if observed.digest != head.latest_object_digest || observed.stored_bytes != head.latest_object_stored_bytes {
@@ -539,23 +600,16 @@ impl DurableIndexRuntimeWorkspaceV1 {
         .checked_add(1)
         .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("workspace manifest sequence overflow".to_string()))
     })?;
-    let expected = ExpectedObjectV1 {
-      identity: self.identity,
-      kind: plan.kind,
-      object_id,
-      object_sequence: sequence,
-      created_at_ms,
-      payload_length: plan.payload_length(),
-      logical_record_count: plan.logical_record_count(),
-      minimum_publication_sequence: plan.minimum_publication_sequence(),
-      maximum_publication_sequence: plan.maximum_publication_sequence(),
-      payload_digest: plan.payload_digest(),
-    };
-    let object_bytes = object_stored_bytes(expected.payload_length)?;
     let object_already_installed = matches!(
       self.append_state,
       WorkspaceAppendStateV1::Unselected { kind, object_id: unselected_id } if kind == plan.kind && unselected_id == object_id
     );
+    let expected = if object_already_installed {
+      ExpectedObjectV1::durable_retry(self.identity, object_id, sequence, plan)
+    } else {
+      ExpectedObjectV1::exact(self.identity, object_id, sequence, created_at_ms, plan)
+    };
+    let object_bytes = object_stored_bytes(plan.payload_length)?;
     self.enforce_append_capacity(object_bytes, object_already_installed)?;
     let object_path = object_path(self.object_directory(plan.kind), object_id);
     let object = match write_object(&object_path, &expected, &self.cancellation, &self.memory) {
@@ -590,7 +644,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
       object_stored_bytes: object.stored_bytes,
       cumulative_object_count,
       cumulative_stored_bytes,
-      created_at_ms,
+      created_at_ms: object.created_at_ms,
     })?;
     let installed_manifest_path = manifest_path(&self.manifests_path, sequence);
     write_immutable_bytes(&installed_manifest_path, &manifest, &self.cancellation)?;
@@ -634,7 +688,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
       latest_object_id: object_id,
       latest_object_digest: object.digest,
       latest_object_stored_bytes: object.stored_bytes,
-      created_at_ms,
+      created_at_ms: object.created_at_ms,
     };
     self.append_state = WorkspaceAppendStateV1::Clean;
     self.head = Some(head.clone());
@@ -896,24 +950,19 @@ impl ReopenedIndexRuntimeWorkspaceV1 {
           &producer_objects_path
         }
       };
-      let expected_object = ExpectedObjectV1 {
-        identity: IndexRuntimeWorkspaceIdentityV1::new(
+      let expected_object = ExpectedObjectV1::manifest_bound(
+        IndexRuntimeWorkspaceIdentityV1::new(
           database_id,
           destination_physical_instance_id,
           selected.workspace_id,
           manifest.runtime_id,
           hash_algorithm,
         )?,
-        kind: manifest.object_kind,
-        object_id: manifest.object_id,
-        object_sequence: sequence,
-        created_at_ms: manifest.created_at_ms,
-        payload_length: usize::MAX,
-        logical_record_count: 0,
-        minimum_publication_sequence: 0,
-        maximum_publication_sequence: 0,
-        payload_digest: [0; 32],
-      };
+        manifest.object_kind,
+        manifest.object_id,
+        sequence,
+        manifest.created_at_ms,
+      );
       let object = validate_object_file(&object_path(object_directory, manifest.object_id), &expected_object, &cancellation, memory)?;
       if object.digest != manifest.object_digest || object.stored_bytes != manifest.object_stored_bytes {
         return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(format!("manifest {sequence} object digest or bytes do not close")));
@@ -982,8 +1031,13 @@ struct ExpectedObjectV1 {
   identity: IndexRuntimeWorkspaceIdentityV1,
   kind: IndexWorkspaceObjectKindV1,
   object_id: [u8; 16],
-  object_sequence: u64,
-  created_at_ms: u64,
+  object_sequence: Option<u64>,
+  created_at_ms: Option<u64>,
+  payload: Option<ExpectedObjectPayloadV1>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExpectedObjectPayloadV1 {
   payload_length: usize,
   logical_record_count: u64,
   minimum_publication_sequence: u64,
@@ -991,10 +1045,97 @@ struct ExpectedObjectV1 {
   payload_digest: [u8; 32],
 }
 
+impl ExpectedObjectV1 {
+  fn exact(
+    identity: IndexRuntimeWorkspaceIdentityV1,
+    object_id: [u8; 16],
+    object_sequence: u64,
+    created_at_ms: u64,
+    plan: WorkspaceObjectPlanV1,
+  ) -> Self {
+    Self {
+      identity,
+      kind: plan.kind,
+      object_id,
+      object_sequence: Some(object_sequence),
+      created_at_ms: Some(created_at_ms),
+      payload: Some(plan.into()),
+    }
+  }
+
+  fn durable_retry(
+    identity: IndexRuntimeWorkspaceIdentityV1,
+    object_id: [u8; 16],
+    object_sequence: u64,
+    plan: WorkspaceObjectPlanV1,
+  ) -> Self {
+    Self { identity, kind: plan.kind, object_id, object_sequence: Some(object_sequence), created_at_ms: None, payload: Some(plan.into()) }
+  }
+
+  fn manifest_bound(
+    identity: IndexRuntimeWorkspaceIdentityV1,
+    kind: IndexWorkspaceObjectKindV1,
+    object_id: [u8; 16],
+    object_sequence: u64,
+    created_at_ms: u64,
+  ) -> Self {
+    Self { identity, kind, object_id, object_sequence: Some(object_sequence), created_at_ms: Some(created_at_ms), payload: None }
+  }
+
+  fn payload_bound(identity: IndexRuntimeWorkspaceIdentityV1, object_id: [u8; 16], plan: WorkspaceObjectPlanV1) -> Self {
+    Self { identity, kind: plan.kind, object_id, object_sequence: None, created_at_ms: None, payload: Some(plan.into()) }
+  }
+
+  fn exact_write(self) -> Result<(IndexWorkspaceObjectHeaderWriteV1, ExpectedObjectPayloadV1), IndexRuntimeWorkspaceStoreErrorV1> {
+    let object_sequence = self
+      .object_sequence
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::State("workspace writer requires an exact object sequence".to_string()))?;
+    let created_at_ms = self
+      .created_at_ms
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::State("workspace writer requires an exact creation timestamp".to_string()))?;
+    let payload = self
+      .payload
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::State("workspace writer requires an exact payload contract".to_string()))?;
+    Ok((
+      IndexWorkspaceObjectHeaderWriteV1 {
+        kind: self.kind,
+        hash_algorithm: self.identity.hash_algorithm,
+        database_id: self.identity.database_id,
+        destination_physical_instance_id: self.identity.destination_physical_instance_id,
+        workspace_id: self.identity.workspace_id,
+        runtime_id: self.identity.runtime_id,
+        object_id: self.object_id,
+        object_sequence,
+        created_at_ms,
+        payload_length: payload.payload_length,
+        logical_record_count: payload.logical_record_count,
+        minimum_publication_sequence: payload.minimum_publication_sequence,
+        maximum_publication_sequence: payload.maximum_publication_sequence,
+        payload_digest: payload.payload_digest,
+      },
+      payload,
+    ))
+  }
+}
+
+impl From<WorkspaceObjectPlanV1> for ExpectedObjectPayloadV1 {
+  fn from(plan: WorkspaceObjectPlanV1) -> Self {
+    Self {
+      payload_length: plan.payload_length,
+      logical_record_count: plan.logical_record_count,
+      minimum_publication_sequence: plan.minimum_publication_sequence,
+      maximum_publication_sequence: plan.maximum_publication_sequence,
+      payload_digest: plan.payload_digest,
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ValidatedObjectV1 {
   digest: [u8; 32],
   stored_bytes: u64,
+  object_sequence: u64,
+  created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1106,23 +1247,9 @@ fn write_object_file(
   if path_present(path)? {
     return validate_object_file(path, expected, cancellation, memory);
   }
-  let header = encode_index_workspace_object_header_v1(&IndexWorkspaceObjectHeaderWriteV1 {
-    kind: expected.kind,
-    hash_algorithm: expected.identity.hash_algorithm,
-    database_id: expected.identity.database_id,
-    destination_physical_instance_id: expected.identity.destination_physical_instance_id,
-    workspace_id: expected.identity.workspace_id,
-    runtime_id: expected.identity.runtime_id,
-    object_id: expected.object_id,
-    object_sequence: expected.object_sequence,
-    created_at_ms: expected.created_at_ms,
-    payload_length: expected.payload_length,
-    logical_record_count: expected.logical_record_count,
-    minimum_publication_sequence: expected.minimum_publication_sequence,
-    maximum_publication_sequence: expected.maximum_publication_sequence,
-    payload_digest: expected.payload_digest,
-  })?;
-  let stored_bytes = object_stored_bytes(expected.payload_length)?;
+  let (header_write, expected_payload) = expected.exact_write()?;
+  let header = encode_index_workspace_object_header_v1(&header_write)?;
+  let stored_bytes = object_stored_bytes(expected_payload.payload_length)?;
   let parent = path.parent().ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("workspace object has no parent".to_string()))?;
   validate_private_directory(parent, "index runtime object parent")?;
   let pending = parent.join(format!(".{}.pending", uuid::Uuid::new_v4()));
@@ -1137,7 +1264,7 @@ fn write_object_file(
     write_hashed(&mut file, &header, cancellation, &mut crc, &mut object_digest, None)?;
     let mut payload_digest = blake3::Hasher::new();
     write_payload(&mut file, &mut crc, &mut payload_digest, &mut object_digest)?;
-    if *payload_digest.finalize().as_bytes() != expected.payload_digest {
+    if *payload_digest.finalize().as_bytes() != expected_payload.payload_digest {
       return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("streamed payload digest disagrees with its plan".to_string()));
     }
     let checksum = crc.finalize().to_le_bytes();
@@ -1146,7 +1273,12 @@ fn write_object_file(
     sync_file_all_native(&file).map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Durability(Box::new(error)))?;
     drop(file);
     durable_install_new_native(&pending, path).map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Durability(Box::new(error)))?;
-    Ok(ValidatedObjectV1 { digest: *object_digest.finalize().as_bytes(), stored_bytes })
+    Ok(ValidatedObjectV1 {
+      digest: *object_digest.finalize().as_bytes(),
+      stored_bytes,
+      object_sequence: header_write.object_sequence,
+      created_at_ms: header_write.created_at_ms,
+    })
   })();
   match result {
     Ok(written) => {
@@ -1229,7 +1361,12 @@ fn validate_object_file(
   {
     return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("workspace object length changed while reading".to_string()));
   }
-  Ok(ValidatedObjectV1 { digest: *object_digest.finalize().as_bytes(), stored_bytes: metadata.len() })
+  Ok(ValidatedObjectV1 {
+    digest: *object_digest.finalize().as_bytes(),
+    stored_bytes: metadata.len(),
+    object_sequence: header.object_sequence,
+    created_at_ms: header.created_at_ms,
+  })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1373,7 +1510,6 @@ fn validate_object_header(
   header: &IndexWorkspaceObjectHeaderV1,
   expected: &ExpectedObjectV1,
 ) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
-  let exact_payload = expected.payload_length != usize::MAX;
   if header.kind != expected.kind
     || header.hash_algorithm != expected.identity.hash_algorithm
     || header.database_id != expected.identity.database_id
@@ -1381,14 +1517,15 @@ fn validate_object_header(
     || header.workspace_id != expected.identity.workspace_id
     || header.runtime_id != expected.identity.runtime_id
     || header.object_id != expected.object_id
-    || header.object_sequence != expected.object_sequence
-    || header.created_at_ms != expected.created_at_ms
-    || (exact_payload
-      && (header.payload_length != expected.payload_length
-        || header.logical_record_count != expected.logical_record_count
-        || header.minimum_publication_sequence != expected.minimum_publication_sequence
-        || header.maximum_publication_sequence != expected.maximum_publication_sequence
-        || header.payload_digest != expected.payload_digest))
+    || expected.object_sequence.is_some_and(|object_sequence| header.object_sequence != object_sequence)
+    || expected.created_at_ms.is_some_and(|created_at_ms| header.created_at_ms != created_at_ms)
+    || expected.payload.is_some_and(|payload| {
+      header.payload_length != payload.payload_length
+        || header.logical_record_count != payload.logical_record_count
+        || header.minimum_publication_sequence != payload.minimum_publication_sequence
+        || header.maximum_publication_sequence != payload.maximum_publication_sequence
+        || header.payload_digest != payload.payload_digest
+    })
   {
     return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
       "workspace object header disagrees with its manifest or append request".to_string(),

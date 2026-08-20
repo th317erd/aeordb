@@ -27,8 +27,9 @@ use super::index_recovery_store::NativeIndexRecoveryStoreV1;
 use super::index_runtime_dirty_overlay_recovery::{
   INDEX_RUNTIME_DIRTY_OVERLAY_PHASE_V1, RecoveredIndexRuntimeDirtyOverlayV1, dirty_overlay_capabilities_v1,
 };
-use super::index_runtime_workspace::IndexWorkspaceObjectKindV1;
-use super::index_runtime_workspace_store::{DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceStoreErrorV1};
+use super::index_runtime_workspace_store::{
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceSelectedHeadV1, IndexRuntimeWorkspaceStoreErrorV1,
+};
 use super::index_task::{
   ExternalWorkspaceDescriptorWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, encode_index_task_checkpoint,
 };
@@ -99,6 +100,7 @@ pub struct DurableIndexRuntimeBatchPublisherV1<Store> {
   started_at_ms: u64,
   selected_updated_at_ms: u64,
   selected: Option<IndexCheckpointRootV1>,
+  selected_workspace: Option<IndexRuntimeWorkspaceSelectedHeadV1>,
   prepared: Option<PreparedWorkspacePublicationV1>,
   pending: Option<PendingWorkspacePublicationV1>,
   workspace: DurableIndexRuntimeWorkspaceV1,
@@ -152,6 +154,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       started_at_ms,
       selected_updated_at_ms: started_at_ms,
       selected: None,
+      selected_workspace: None,
       prepared: None,
       pending: None,
       workspace,
@@ -197,6 +200,14 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
         "resumed publisher selected checkpoint changed after bounded recovery".to_string(),
       ));
     }
+    let selected_workspace = parts.workspace.head().map(IndexRuntimeWorkspaceHeadV1::selected_descriptor).ok_or_else(|| {
+      IndexRuntimeBatchPublisherBuildErrorV1::Invalid("resumed publisher has no selected workspace descriptor".to_string())
+    })?;
+    if selected_workspace.durable_sequence() != parts.selected.checkpoint_sequence {
+      return Err(IndexRuntimeBatchPublisherBuildErrorV1::Invalid(
+        "resumed publisher checkpoint and workspace sequences disagree".to_string(),
+      ));
+    }
     Ok(Self {
       hash_algorithm: workspace_identity.hash_algorithm(),
       owner: parts.owner,
@@ -205,6 +216,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       started_at_ms: parts.started_at_ms,
       selected_updated_at_ms: parts.updated_at_ms,
       selected: Some(parts.selected),
+      selected_workspace: Some(selected_workspace),
       prepared: None,
       pending: None,
       workspace: parts.workspace,
@@ -234,9 +246,8 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
 
     let prepared = self.prepare_publication(identity, runtime_batch_object_id(batch))?;
     let object_id = prepared.object_id;
-    let timestamp_ms = prepared.timestamp_ms;
-    let head = self.workspace.append_runtime_batch(object_id, timestamp_ms, batch).map_err(map_workspace_before_selection)?;
-    let selected = self.publish_workspace_head(identity, &head, timestamp_ms)?;
+    let head = self.workspace.append_runtime_batch(object_id, prepared.timestamp_ms, batch).map_err(map_workspace_before_selection)?;
+    let selected = self.publish_workspace_head(identity, &head)?;
     Ok(runtime_receipt(batch, &selected))
   }
 
@@ -265,27 +276,21 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       journal_head: task.journal_head(),
       scope: task.scope(),
     };
-    if let Some(head) = self.workspace.head() {
-      if head.latest_object_kind() == IndexWorkspaceObjectKindV1::ProducerTask && head.latest_object_id() == object_id {
-        if let Some(selected) = self.selected.as_ref() {
-          if selected.checkpoint_sequence != head.manifest_sequence() {
-            return Err(corrupt(
-              "producer_spill_selected_sequence",
-              "selected producer checkpoint sequence disagrees with the cumulative workspace head",
-            ));
-          }
-          let timestamp_ms = head.latest_object_created_at_ms();
-          self.workspace.append_producer_task(object_id, timestamp_ms, &request).map_err(map_workspace_before_selection)?;
-          return IndexProducerSpillReceiptV1::new(task.operation_id(), selected.checkpoint_key.clone())
-            .map_err(|error| corrupt(error.code(), error.context()));
-        }
+    if let Some(selected_workspace) = self.selected_workspace.clone() {
+      let selected = self
+        .selected
+        .as_ref()
+        .ok_or_else(|| corrupt("producer_spill_selected_missing", "selected workspace has no selected checkpoint root"))?;
+      if self.workspace.selected_contains_producer_task(&selected_workspace, object_id, &request).map_err(map_workspace_before_selection)? {
+        return IndexProducerSpillReceiptV1::new(task.operation_id(), selected.checkpoint_key.clone())
+          .map_err(|error| corrupt(error.code(), error.context()));
       }
     }
 
     let prepared = self.prepare_publication(identity, object_id)?;
     let head =
       self.workspace.append_producer_task(prepared.object_id, prepared.timestamp_ms, &request).map_err(map_workspace_before_selection)?;
-    let selected = self.publish_workspace_head(identity, &head, prepared.timestamp_ms)?;
+    let selected = self.publish_workspace_head(identity, &head)?;
     producer_spill_receipt(task.operation_id(), &selected.next)
   }
 
@@ -293,8 +298,11 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
     &mut self,
     identity: WorkspacePublicationIdentityV1,
     head: &IndexRuntimeWorkspaceHeadV1,
-    timestamp_ms: u64,
   ) -> Result<SelectedWorkspacePublicationV1, IndexRuntimePublicationErrorV1> {
+    let timestamp_ms = head.latest_object_created_at_ms();
+    if timestamp_ms == 0 || timestamp_ms < self.selected_updated_at_ms {
+      return Err(corrupt("index_workspace_timestamp", "durable workspace object timestamp is zero or predates the selected checkpoint"));
+    }
     let expected_sequence = self
       .selected
       .as_ref()
@@ -498,7 +506,14 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
         "selected successor does not match the retained runtime batch or producer task",
       ));
     }
+    let selected_workspace = self
+      .workspace
+      .head()
+      .filter(|head| head.manifest_sequence() == next.checkpoint_sequence)
+      .map(IndexRuntimeWorkspaceHeadV1::selected_descriptor)
+      .ok_or_else(|| corrupt("index_workspace_head", "selected successor has no exact cumulative workspace head"))?;
     self.selected = Some(next.clone());
+    self.selected_workspace = Some(selected_workspace);
     self.selected_updated_at_ms = timestamp_ms;
     self.prepared = None;
     self.pending = None;
