@@ -401,7 +401,7 @@ fn canonical_checkpoint_workspace_path(path: &Path) -> Result<String, MarkWorksp
   let canonical = native.replace('\\', "/");
   #[cfg(not(windows))]
   let canonical = native.to_string();
-  if !super::gc_mark::canonical_workspace_path(&canonical) {
+  if !super::native_path::canonical_persisted_native_path(&canonical) {
     return Err(MarkWorkspaceErrorV1::Path("workspace path cannot be represented by the frozen checkpoint format".to_string()));
   }
   Ok(canonical)

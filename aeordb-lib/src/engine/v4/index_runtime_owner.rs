@@ -663,13 +663,8 @@ impl IndexRuntimeOwnerV1 {
           })
         }
         Ok(Err(error)) if error.class() == IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection => {
-          if let Err(restore) = state.mutations.complete_failure(&batch, now_ms) {
-            let context = format!("{error}; batch restoration failed: {restore}");
-            latch_degraded(&mut state, "publication_restore_failed", context.clone());
-            return Err(IndexRuntimeErrorV1::Mutations(context));
-          }
           let Some(retry_at_ms) = now_ms.checked_add(self.publication_retry_after_ms) else {
-            let context = "publication retry deadline overflowed after restoring the exact batch".to_string();
+            let context = "publication retry deadline overflowed while retaining the exact frozen batch".to_string();
             latch_degraded(&mut state, "publication_retry_deadline", context.clone());
             return Err(IndexRuntimeErrorV1::Publication(context));
           };
@@ -677,11 +672,6 @@ impl IndexRuntimeOwnerV1 {
           Err(IndexRuntimeErrorV1::Publication(error.to_string()))
         }
         Ok(Err(error)) if error.class() == IndexRuntimePublicationErrorClassV1::CancelledBeforeSelection => {
-          if let Err(restore) = state.mutations.complete_failure(&batch, now_ms) {
-            let context = format!("{error}; canceled batch restoration failed: {restore}");
-            latch_degraded(&mut state, "publication_cancel_restore_failed", context.clone());
-            return Err(IndexRuntimeErrorV1::Mutations(context));
-          }
           Err(IndexRuntimeErrorV1::Canceled)
         }
         Ok(Err(error)) => {

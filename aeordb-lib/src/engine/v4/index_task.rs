@@ -10,6 +10,7 @@ use super::index_artifact::{
 };
 use super::index_page::{OrderedIndexRoleV1, decode_artifact_directory};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
+use super::native_path::canonical_persisted_native_path;
 use super::scope::validate_canonical_absolute_path;
 
 const MUTATION_JOURNAL_KIND: u16 = 0x0040;
@@ -855,7 +856,7 @@ fn validate_checkpoint_write(request: &IndexTaskCheckpointWriteV1<'_>) -> Format
 }
 
 fn encode_external_descriptor(request: ExternalWorkspaceDescriptorWriteV1<'_>) -> FormatResult<Vec<u8>> {
-  validate_canonical_absolute_path(request.path)?;
+  validate_external_workspace_path(request.path)?;
   if request.workspace_id.iter().all(|byte| *byte == 0) || request.manifest_digest.iter().all(|byte| *byte == 0) {
     return Err(identity_error("external workspace identity or manifest digest is zero"));
   }
@@ -1348,7 +1349,7 @@ fn decode_external_descriptor(bytes: &[u8]) -> FormatResult<ExternalWorkspaceDes
   }
   let path = std::str::from_utf8(&bytes[68..])
     .map_err(|source| error(MalformedInputClass::InvalidUtf8PathGlobOrNativePath, "index_checkpoint_external_utf8", source.to_string()))?;
-  validate_canonical_absolute_path(path)?;
+  validate_external_workspace_path(path)?;
   Ok(ExternalWorkspaceDescriptorV1 {
     workspace_id,
     manifest_digest,
@@ -1356,6 +1357,18 @@ fn decode_external_descriptor(bytes: &[u8]) -> FormatResult<ExternalWorkspaceDes
     durable_bytes: u64_at(bytes, 60)?,
     path,
   })
+}
+
+fn validate_external_workspace_path(path: &str) -> FormatResult<()> {
+  if canonical_persisted_native_path(path) {
+    Ok(())
+  } else {
+    Err(error(
+      MalformedInputClass::InvalidUtf8PathGlobOrNativePath,
+      "index_checkpoint_external_path",
+      "external workspace path is not a canonical absolute native path",
+    ))
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

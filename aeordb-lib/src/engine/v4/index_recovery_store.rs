@@ -107,6 +107,7 @@ impl NativeIndexOperationDescriptorV1 {
 
 pub struct NativeIndexRecoveryStoreV1 {
   descriptor: NativeIndexOperationDescriptorV1,
+  destination_physical_instance_id: [u8; 16],
   publisher: Arc<V4FirstAuthorityPublisher>,
   retirement_owner: SharedRetirementJournalOwnerV1,
   clock: Arc<dyn VirtualClock>,
@@ -124,6 +125,7 @@ impl NativeIndexRecoveryStoreV1 {
     if observation.selected.redundancy_degraded
       || header.hash_algorithm != descriptor.hash_algorithm
       || header.database_id != descriptor.database_id
+      || header.physical_instance_id.iter().all(|byte| *byte == 0)
     {
       return Err(store_error(
         "native_index_recovery_authority",
@@ -144,7 +146,19 @@ impl NativeIndexRecoveryStoreV1 {
     if clock.now_ms() == 0 {
       return Err(store_error("native_index_clock", "native recovery clock must return a nonzero timestamp"));
     }
-    Ok(Self { descriptor, publisher, retirement_owner, clock })
+    Ok(Self { descriptor, destination_physical_instance_id: header.physical_instance_id, publisher, retirement_owner, clock })
+  }
+
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.descriptor.hash_algorithm
+  }
+
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.descriptor.database_id
+  }
+
+  pub const fn destination_physical_instance_id(&self) -> [u8; 16] {
+    self.destination_physical_instance_id
   }
 
   fn validate_owner(&self, owner: &IndexRecoveryOwnerV1) -> Result<(), IndexRecoveryStoreErrorV1> {

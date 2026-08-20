@@ -698,7 +698,7 @@ fn decode_mark_checkpoint(bytes: &[u8], algorithm: HashAlgorithm, key: Vec<u8>) 
   }
   let path_bytes = &body[minimum_body..];
   let workspace_path = std::str::from_utf8(path_bytes).map_err(|_| path_error("mark_checkpoint_path", "workspace path is not UTF-8"))?;
-  if !canonical_workspace_path(workspace_path) {
+  if !super::native_path::canonical_persisted_native_path(workspace_path) {
     return Err(path_error("mark_checkpoint_path", "workspace path is not a canonical absolute native path"));
   }
   Ok(MarkRunCheckpointV1 {
@@ -1411,20 +1411,6 @@ fn canonical_relative_name(name: &str) -> bool {
     && !name.contains('\\')
     && !name.as_bytes().contains(&0)
     && name.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
-}
-
-pub(super) fn canonical_workspace_path(path: &str) -> bool {
-  if path.is_empty() || path.contains('\\') || path.as_bytes().contains(&0) || path.len() > 1 && path.ends_with('/') {
-    return false;
-  }
-  let remainder = if let Some(rest) = path.strip_prefix('/') {
-    rest
-  } else if path.len() >= 3 && path.as_bytes()[0].is_ascii_uppercase() && path.as_bytes()[1] == b':' && path.as_bytes()[2] == b'/' {
-    &path[3..]
-  } else {
-    return false;
-  };
-  !remainder.is_empty() && remainder.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 fn verify_workspace_crc(bytes: &[u8]) -> FormatResult<()> {

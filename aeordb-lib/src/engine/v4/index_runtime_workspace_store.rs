@@ -295,6 +295,14 @@ enum WorkspaceAppendStateV1 {
 }
 
 impl DurableIndexRuntimeWorkspaceV1 {
+  pub const fn identity(&self) -> IndexRuntimeWorkspaceIdentityV1 {
+    self.identity
+  }
+
+  pub fn head(&self) -> Option<&IndexRuntimeWorkspaceHeadV1> {
+    self.head.as_ref()
+  }
+
   pub fn create(
     database_path: &Path,
     identity: IndexRuntimeWorkspaceIdentityV1,

@@ -218,6 +218,7 @@ fn revision_source(encoded: &[u8]) -> RevisionSource {
   source
 }
 
+#[derive(Clone, Copy)]
 enum PublishBehavior {
   Success,
   Retryable,
@@ -238,6 +239,11 @@ struct Publisher {
 struct BlockingPublisher {
   entered: mpsc::Sender<()>,
   release: mpsc::Receiver<()>,
+}
+
+struct IdentityPublisher {
+  behavior: PublishBehavior,
+  observed: Arc<Mutex<Vec<(u64, u64)>>>,
 }
 
 impl IndexRuntimeBatchPublisherV1 for BlockingPublisher {
@@ -306,6 +312,13 @@ impl IndexRuntimeBatchPublisherV1 for Publisher {
         "injected cancellation before selection",
       )),
     }
+  }
+}
+
+impl IndexRuntimeBatchPublisherV1 for IdentityPublisher {
+  fn publish(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
+    self.observed.lock().unwrap().push((batch.batch_id(), batch.attempt_id()));
+    Publisher { behavior: self.behavior, calls: 0 }.publish(batch)
   }
 }
 
@@ -476,7 +489,7 @@ fn stopped_owner_refuses_soft_acknowledgements_instead_of_stranding_them() {
 }
 
 #[test]
-fn one_owner_executes_the_real_worker_and_restores_retryable_publication_before_stopping() {
+fn one_owner_executes_the_real_worker_and_retries_the_exact_frozen_batch_before_stopping() {
   let owner = owner();
   owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
   let encoded = encoded_journal("/doc.json");
@@ -485,15 +498,16 @@ fn one_owner_executes_the_real_worker_and_restores_retryable_publication_before_
   assert!(matches!(execute_one(&owner, &encoded, 101), IndexRuntimeWorkOutcomeV1::Completed(_)));
   assert_eq!(owner.snapshot().unwrap().mutations.active_records, 4);
 
-  let mut retryable = Publisher { behavior: PublishBehavior::Retryable, calls: 0 };
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let mut retryable = IdentityPublisher { behavior: PublishBehavior::Retryable, observed: Arc::clone(&observed) };
   assert!(matches!(owner.flush(102, Some(IndexFlushReasonV1::Explicit), false, &mut retryable), Err(IndexRuntimeErrorV1::Publication(_))));
-  let restored = owner.snapshot().unwrap();
-  assert_eq!(restored.lifecycle, IndexRuntimeLifecycleV1::Running);
-  assert_eq!(restored.mutations.active_records, 4);
-  assert_eq!(restored.mutations.frozen_records, 0);
-  assert_eq!(retryable.calls, 1);
+  let retained = owner.snapshot().unwrap();
+  assert_eq!(retained.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(retained.mutations.active_records, 0);
+  assert_eq!(retained.mutations.frozen_records, 4);
+  assert_eq!(observed.lock().unwrap().len(), 1);
 
-  let mut success = Publisher { behavior: PublishBehavior::Success, calls: 0 };
+  let mut success = IdentityPublisher { behavior: PublishBehavior::Success, observed: Arc::clone(&observed) };
   assert_eq!(
     owner.flush(150, Some(IndexFlushReasonV1::Explicit), false, &mut success).unwrap(),
     IndexRuntimeFlushOutcomeV1::Deferred { retry_at_ms: 202 }
@@ -502,7 +516,10 @@ fn one_owner_executes_the_real_worker_and_restores_retryable_publication_before_
     owner.flush(202, Some(IndexFlushReasonV1::Explicit), false, &mut success).unwrap(),
     IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }
   ));
-  assert_eq!(success.calls, 1);
+  let observed = observed.lock().unwrap();
+  assert_eq!(observed.len(), 2);
+  assert_eq!(observed[0].0, observed[1].0, "preselection retry changed the frozen batch identity");
+  assert_ne!(observed[0].1, observed[1].1, "preselection retry did not issue a fresh in-memory attempt handle");
   owner.begin_draining().unwrap();
   owner.finish_draining().unwrap();
   assert_eq!(owner.snapshot().unwrap().lifecycle, IndexRuntimeLifecycleV1::Stopped);
@@ -539,7 +556,7 @@ fn uncertain_malformed_or_dishonest_publication_keeps_the_exact_frozen_batch_and
 }
 
 #[test]
-fn retry_deadline_overflow_restores_the_batch_and_latches_degraded() {
+fn retry_deadline_overflow_retains_the_batch_and_latches_degraded() {
   let owner = owner();
   owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
   let encoded = encoded_journal("/doc.json");
@@ -554,8 +571,8 @@ fn retry_deadline_overflow_restores_the_batch_and_latches_degraded() {
   ));
   let snapshot = owner.snapshot().unwrap();
   assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
-  assert_eq!(snapshot.mutations.active_records, 4);
-  assert_eq!(snapshot.mutations.frozen_records, 0);
+  assert_eq!(snapshot.mutations.active_records, 0);
+  assert_eq!(snapshot.mutations.frozen_records, 4);
   assert_eq!(snapshot.degraded.unwrap().code, "publication_retry_deadline");
 }
 
@@ -869,12 +886,22 @@ fn cancellation_never_consumes_a_task_or_a_preselection_batch() {
   assert_eq!(owner.snapshot().unwrap().producer.pending_tasks, 1);
   execute_one(&owner, &encoded, 102);
 
-  let mut cancelled = Publisher { behavior: PublishBehavior::Cancelled, calls: 0 };
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let mut cancelled = IdentityPublisher { behavior: PublishBehavior::Cancelled, observed: Arc::clone(&observed) };
   assert!(matches!(owner.flush(103, Some(IndexFlushReasonV1::Explicit), false, &mut cancelled), Err(IndexRuntimeErrorV1::Canceled)));
   let snapshot = owner.snapshot().unwrap();
   assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
-  assert_eq!(snapshot.mutations.active_records, 4);
-  assert_eq!(snapshot.mutations.frozen_records, 0);
+  assert_eq!(snapshot.mutations.active_records, 0);
+  assert_eq!(snapshot.mutations.frozen_records, 4);
+  let mut success = IdentityPublisher { behavior: PublishBehavior::Success, observed: Arc::clone(&observed) };
+  assert!(matches!(
+    owner.flush(104, Some(IndexFlushReasonV1::Explicit), false, &mut success).unwrap(),
+    IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }
+  ));
+  let observed = observed.lock().unwrap();
+  assert_eq!(observed.len(), 2);
+  assert_eq!(observed[0].0, observed[1].0, "canceled preselection changed the frozen batch identity");
+  assert_ne!(observed[0].1, observed[1].1, "canceled preselection did not issue a fresh attempt handle");
 }
 
 #[test]
