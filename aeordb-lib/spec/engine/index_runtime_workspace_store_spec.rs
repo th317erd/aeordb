@@ -6,7 +6,9 @@ use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryP
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1};
 use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
+use aeordb::engine::v4::index_producer_coordinator::{IndexProducerTaskKindV1, IndexProducerTaskRequestV1};
 use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
+use aeordb::engine::v4::index_runtime_workspace::{decode_index_workspace_object_v1, decode_index_workspace_producer_task_payload_v1};
 use aeordb::engine::v4::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
   IndexRuntimeWorkspaceReopenOptionsV1, IndexRuntimeWorkspaceSelectedHeadV1, ReopenedIndexRuntimeWorkspaceV1,
@@ -44,6 +46,28 @@ fn manifest_path(workspace: &Path, sequence: u64) -> PathBuf {
 
 fn object_path(workspace: &Path, object_id: [u8; 16]) -> PathBuf {
   workspace.join("objects/runtime").join(format!("{}.aiwo", hex::encode(object_id)))
+}
+
+fn producer_object_path(workspace: &Path, object_id: [u8; 16]) -> PathBuf {
+  workspace.join("objects/tasks").join(format!("{}.aiwo", hex::encode(object_id)))
+}
+
+fn producer_task<'a>(
+  operation_id: [u8; 16],
+  publication_sequence: u64,
+  root: &'a [u8],
+  semantic: &'a [u8],
+) -> IndexProducerTaskRequestV1<'a> {
+  IndexProducerTaskRequestV1 {
+    operation_id,
+    kind: IndexProducerTaskKindV1::Rebuild,
+    publication_sequence,
+    namespace_root_before: root,
+    namespace_root_after: root,
+    semantic_state_root: semantic,
+    journal_head: None,
+    scope: Some("/docs"),
+  }
 }
 
 fn batch(memory: &MemoryCoordinator) -> (IndexCoordinatorV1, aeordb::engine::v4::index_coordinator::FrozenIndexBatchV1) {
@@ -201,6 +225,81 @@ fn private_runtime_workspace_appends_and_reopens_one_exact_streamed_head() {
     assert_eq!(fs::metadata(manifest_path(&workspace_path, 1)).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(fs::metadata(object_path(&workspace_path, [0x55; 16])).unwrap().permissions().mode() & 0o777, 0o600);
   }
+}
+
+#[test]
+fn producer_tasks_share_the_cumulative_workspace_and_reopen_body_free() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, batch) = batch(&memory);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  let first = workspace.append_runtime_batch([0x55; 16], 100, &batch).unwrap();
+  assert_eq!(first.runtime_batch_count(), 1);
+
+  let root = digest_parts(ALGORITHM, &[b"producer-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"producer-semantic"]);
+  let task = producer_task([0x66; 16], 91, &root, &semantic);
+  let second = workspace.append_producer_task([0x77; 16], 101, &task).unwrap();
+  assert_eq!(second.manifest_sequence(), 2);
+  assert_eq!(second.cumulative_object_count(), 2);
+  assert_eq!(second.runtime_batch_count(), 1);
+  assert_eq!(second.producer_task_count(), 1);
+
+  let exact_retry = workspace.append_producer_task([0x77; 16], 101, &task).unwrap();
+  assert_eq!(exact_retry.selected_descriptor(), second.selected_descriptor());
+  let conflicting = producer_task([0x66; 16], 92, &root, &semantic);
+  assert!(workspace.append_producer_task([0x77; 16], 101, &conflicting).is_err());
+
+  let object_bytes = fs::read(producer_object_path(second.workspace_path(), [0x77; 16])).unwrap();
+  let object = decode_index_workspace_object_v1(&object_bytes).unwrap();
+  let decoded = decode_index_workspace_producer_task_payload_v1(object.payload, ALGORITHM).unwrap();
+  assert_eq!(decoded.operation_id, [0x66; 16]);
+  assert_eq!(decoded.publication_sequence, 91);
+  assert_eq!(decoded.scope, Some("/docs"));
+  assert_eq!(object.payload.len(), 56 + 4 * ALGORITHM.hash_length() + "/docs".len());
+
+  let selected = second.selected_descriptor();
+  let workspace_path = second.workspace_path().to_path_buf();
+  drop(workspace);
+  let reopened = ReopenedIndexRuntimeWorkspaceV1::open(
+    &workspace_path,
+    identity().database_id(),
+    identity().destination_physical_instance_id(),
+    ALGORITHM,
+    selected,
+    IndexRuntimeWorkspaceReopenOptionsV1::new(8 * 1024 * 1024, 16).unwrap(),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  assert_eq!(reopened.manifest_sequence(), 2);
+  assert_eq!(reopened.runtime_batch_count(), 1);
+  assert_eq!(reopened.producer_task_count(), 1);
+}
+
+#[test]
+fn producer_task_write_obeys_memory_admission_before_installing_files() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let expected_workspace = scratch.join(hex::encode(identity().database_id())).join(hex::encode(identity().workspace_id()));
+  let memory = memory(64);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  let root = digest_parts(ALGORITHM, &[b"producer-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"producer-semantic"]);
+  let task = producer_task([0x68; 16], 93, &root, &semantic);
+  let error = workspace.append_producer_task([0x78; 16], 103, &task).unwrap_err();
+  assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Memory(_)));
+  assert_eq!(fs::read_dir(expected_workspace.join("manifests")).unwrap().count(), 0);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes, 0);
 }
 
 #[test]

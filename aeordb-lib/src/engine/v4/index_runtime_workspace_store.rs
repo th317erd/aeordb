@@ -19,6 +19,7 @@ use crate::engine::native_durability::{
 };
 
 use super::index_coordinator::FrozenIndexBatchV1;
+use super::index_producer_coordinator::IndexProducerTaskRequestV1;
 use super::index_runtime_workspace::{
   INDEX_WORKSPACE_MANIFEST_LENGTH_V1, INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1, INDEX_WORKSPACE_OBJECT_MAX_LENGTH_V1,
   IndexWorkspaceManifestV1, IndexWorkspaceManifestWriteV1, IndexWorkspaceObjectHeaderV1, IndexWorkspaceObjectHeaderWriteV1,
@@ -28,7 +29,8 @@ use super::index_runtime_workspace::{
 use super::index_runtime_workspace_payload::{
   RUNTIME_BATCH_HEADER_LENGTH, RUNTIME_MUTATION_FRAME_LENGTH, decode_index_workspace_producer_task_payload_v1,
   decode_index_workspace_runtime_batch_stream_header_v1, decode_index_workspace_runtime_mutation_frame_v1,
-  index_workspace_producer_task_payload_bounds_v1, plan_index_workspace_runtime_batch_payload_v1,
+  encode_index_workspace_producer_task_payload_v1, index_workspace_producer_task_payload_bounds_v1,
+  plan_index_workspace_producer_task_payload_v1, plan_index_workspace_runtime_batch_payload_v1,
   stream_index_workspace_runtime_batch_payload_v1, validate_index_workspace_runtime_mutation_frame_header_v1,
 };
 use super::private_workspace::{
@@ -283,6 +285,18 @@ impl IndexRuntimeWorkspaceHeadV1 {
   pub fn selected_descriptor(&self) -> IndexRuntimeWorkspaceSelectedHeadV1 {
     self.selected.clone()
   }
+
+  pub(super) const fn latest_object_kind(&self) -> IndexWorkspaceObjectKindV1 {
+    self.latest_object_kind
+  }
+
+  pub(super) const fn latest_object_id(&self) -> [u8; 16] {
+    self.latest_object_id
+  }
+
+  pub(super) const fn latest_object_created_at_ms(&self) -> u64 {
+    self.created_at_ms
+  }
 }
 
 pub struct DurableIndexRuntimeWorkspaceV1 {
@@ -303,6 +317,38 @@ enum WorkspaceAppendStateV1 {
   Clean,
   Unselected { kind: IndexWorkspaceObjectKindV1, object_id: [u8; 16] },
   ReconcileInventory,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceObjectPlanV1 {
+  kind: IndexWorkspaceObjectKindV1,
+  payload_length: usize,
+  logical_record_count: u64,
+  minimum_publication_sequence: u64,
+  maximum_publication_sequence: u64,
+  payload_digest: [u8; 32],
+}
+
+impl WorkspaceObjectPlanV1 {
+  const fn payload_length(self) -> usize {
+    self.payload_length
+  }
+
+  const fn logical_record_count(self) -> u64 {
+    self.logical_record_count
+  }
+
+  const fn minimum_publication_sequence(self) -> u64 {
+    self.minimum_publication_sequence
+  }
+
+  const fn maximum_publication_sequence(self) -> u64 {
+    self.maximum_publication_sequence
+  }
+
+  const fn payload_digest(self) -> [u8; 32] {
+    self.payload_digest
+  }
 }
 
 impl DurableIndexRuntimeWorkspaceV1 {
@@ -402,11 +448,63 @@ impl DurableIndexRuntimeWorkspaceV1 {
     created_at_ms: u64,
     batch: &FrozenIndexBatchV1,
   ) -> Result<IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceStoreErrorV1> {
-    self.preflight_append(object_id, created_at_ms)?;
-    let plan = plan_index_workspace_runtime_batch_payload_v1(batch, self.identity.hash_algorithm)?;
+    let payload_plan = plan_index_workspace_runtime_batch_payload_v1(batch, self.identity.hash_algorithm)?;
+    let plan = WorkspaceObjectPlanV1 {
+      kind: IndexWorkspaceObjectKindV1::RuntimeBatch,
+      payload_length: payload_plan.payload_length(),
+      logical_record_count: payload_plan.logical_record_count(),
+      minimum_publication_sequence: payload_plan.minimum_publication_sequence(),
+      maximum_publication_sequence: payload_plan.maximum_publication_sequence(),
+      payload_digest: payload_plan.payload_digest(),
+    };
+    self.append_object(object_id, created_at_ms, plan, |path, expected, cancellation, memory| {
+      write_runtime_object(path, expected, batch, payload_plan, cancellation, memory)
+    })
+  }
+
+  pub fn append_producer_task(
+    &mut self,
+    object_id: [u8; 16],
+    created_at_ms: u64,
+    task: &IndexProducerTaskRequestV1<'_>,
+  ) -> Result<IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    let payload_plan = plan_index_workspace_producer_task_payload_v1(task, self.identity.hash_algorithm)?;
+    let payload_bytes = u64::try_from(payload_plan.payload_length())
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("producer task payload length exceeds u64: {error}")))?;
+    let _payload_reservation = self
+      .memory
+      .reserve(MemoryOwner::IndexDirtyBuffers, payload_bytes, AdmissionClass::Maintenance)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+    let payload = encode_index_workspace_producer_task_payload_v1(task, self.identity.hash_algorithm)?;
+    let plan = WorkspaceObjectPlanV1 {
+      kind: IndexWorkspaceObjectKindV1::ProducerTask,
+      payload_length: payload.len(),
+      logical_record_count: 1,
+      minimum_publication_sequence: task.publication_sequence,
+      maximum_publication_sequence: task.publication_sequence,
+      payload_digest: *blake3::hash(&payload).as_bytes(),
+    };
+    self.append_object(object_id, created_at_ms, plan, |path, expected, cancellation, memory| {
+      write_buffered_object(path, expected, &payload, cancellation, memory)
+    })
+  }
+
+  fn append_object(
+    &mut self,
+    object_id: [u8; 16],
+    created_at_ms: u64,
+    plan: WorkspaceObjectPlanV1,
+    write_object: impl FnOnce(
+      &Path,
+      &ExpectedObjectV1,
+      &CancellationToken,
+      &MemoryCoordinator,
+    ) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1>,
+  ) -> Result<IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    self.preflight_append(plan.kind, object_id, created_at_ms)?;
     if let Some(head) = &self.head {
       if head.latest_object_id == object_id {
-        if head.latest_object_kind != IndexWorkspaceObjectKindV1::RuntimeBatch {
+        if head.latest_object_kind != plan.kind {
           return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
             "object identity was already used by another workspace object kind".to_string(),
           ));
@@ -416,7 +514,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
         }
         let expected = ExpectedObjectV1 {
           identity: self.identity,
-          kind: IndexWorkspaceObjectKindV1::RuntimeBatch,
+          kind: plan.kind,
           object_id,
           object_sequence: head.manifest_sequence(),
           created_at_ms: head.created_at_ms,
@@ -427,7 +525,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
           payload_digest: plan.payload_digest(),
         };
         let observed =
-          validate_object_file(&object_path(&self.runtime_objects_path, object_id), &expected, &self.cancellation, &self.memory)?;
+          validate_object_file(&object_path(self.object_directory(plan.kind), object_id), &expected, &self.cancellation, &self.memory)?;
         if observed.digest != head.latest_object_digest || observed.stored_bytes != head.latest_object_stored_bytes {
           return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("retry object disagrees with the selected workspace head".to_string()));
         }
@@ -443,7 +541,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
     })?;
     let expected = ExpectedObjectV1 {
       identity: self.identity,
-      kind: IndexWorkspaceObjectKindV1::RuntimeBatch,
+      kind: plan.kind,
       object_id,
       object_sequence: sequence,
       created_at_ms,
@@ -456,12 +554,11 @@ impl DurableIndexRuntimeWorkspaceV1 {
     let object_bytes = object_stored_bytes(expected.payload_length)?;
     let object_already_installed = matches!(
       self.append_state,
-      WorkspaceAppendStateV1::Unselected { kind: IndexWorkspaceObjectKindV1::RuntimeBatch, object_id: unselected_id }
-        if unselected_id == object_id
+      WorkspaceAppendStateV1::Unselected { kind, object_id: unselected_id } if kind == plan.kind && unselected_id == object_id
     );
     self.enforce_append_capacity(object_bytes, object_already_installed)?;
-    let object_path = object_path(&self.runtime_objects_path, object_id);
-    let object = match write_runtime_object(&object_path, &expected, batch, plan, &self.cancellation, &self.memory) {
+    let object_path = object_path(self.object_directory(plan.kind), object_id);
+    let object = match write_object(&object_path, &expected, &self.cancellation, &self.memory) {
       Ok(object) => {
         self.append_state = WorkspaceAppendStateV1::Unselected { kind: expected.kind, object_id };
         object
@@ -487,7 +584,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
       runtime_id: self.identity.runtime_id,
       manifest_sequence: sequence,
       previous_manifest_digest: previous_digest,
-      object_kind: IndexWorkspaceObjectKindV1::RuntimeBatch,
+      object_kind: plan.kind,
       object_id,
       object_digest: object.digest,
       object_stored_bytes: object.stored_bytes,
@@ -523,14 +620,17 @@ impl DurableIndexRuntimeWorkspaceV1 {
       selected,
       identity: self.identity,
       cumulative_object_count,
-      runtime_batch_count: self
-        .head
-        .as_ref()
-        .map_or(0, |head| head.runtime_batch_count)
-        .checked_add(1)
-        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime batch count overflow".to_string()))?,
-      producer_task_count: self.head.as_ref().map_or(0, |head| head.producer_task_count),
-      latest_object_kind: IndexWorkspaceObjectKindV1::RuntimeBatch,
+      runtime_batch_count: increment_kind_count(
+        self.head.as_ref().map_or(0, |head| head.runtime_batch_count),
+        plan.kind == IndexWorkspaceObjectKindV1::RuntimeBatch,
+        "runtime batch count overflow",
+      )?,
+      producer_task_count: increment_kind_count(
+        self.head.as_ref().map_or(0, |head| head.producer_task_count),
+        plan.kind == IndexWorkspaceObjectKindV1::ProducerTask,
+        "producer task count overflow",
+      )?,
+      latest_object_kind: plan.kind,
       latest_object_id: object_id,
       latest_object_digest: object.digest,
       latest_object_stored_bytes: object.stored_bytes,
@@ -541,12 +641,23 @@ impl DurableIndexRuntimeWorkspaceV1 {
     Ok(head)
   }
 
-  fn preflight_append(&mut self, object_id: [u8; 16], created_at_ms: u64) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  fn object_directory(&self, kind: IndexWorkspaceObjectKindV1) -> &Path {
+    match kind {
+      IndexWorkspaceObjectKindV1::RuntimeBatch => &self.runtime_objects_path,
+      IndexWorkspaceObjectKindV1::ProducerTask => &self.producer_objects_path,
+    }
+  }
+
+  fn preflight_append(
+    &mut self,
+    requested_kind: IndexWorkspaceObjectKindV1,
+    object_id: [u8; 16],
+    created_at_ms: u64,
+  ) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
     check_cancellation(&self.cancellation)?;
     if object_id.iter().all(|byte| *byte == 0) || created_at_ms == 0 {
       return Err(IndexRuntimeWorkspaceStoreErrorV1::Invalid("workspace object identity and creation time must be nonzero".to_string()));
     }
-    let requested_kind = IndexWorkspaceObjectKindV1::RuntimeBatch;
     if self.append_state == WorkspaceAppendStateV1::ReconcileInventory {
       self.append_state = self.reconcile_object_inventory(object_id, requested_kind)?;
     }
@@ -671,6 +782,14 @@ impl DurableIndexRuntimeWorkspaceV1 {
     let additional_bytes = incremental_append_allocation_bytes(object_bytes, object_already_installed)?;
     ensure_capacity(&self.workspace_path, additional_bytes, self.options.minimum_free_bytes)?;
     Ok(())
+  }
+}
+
+fn increment_kind_count(prior: u64, increment: bool, overflow_context: &'static str) -> Result<u64, IndexRuntimeWorkspaceStoreErrorV1> {
+  if increment {
+    prior.checked_add(1).ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity(overflow_context.to_string()))
+  } else {
+    Ok(prior)
   }
 }
 
@@ -953,6 +1072,37 @@ fn write_runtime_object(
   cancellation: &CancellationToken,
   memory: &MemoryCoordinator,
 ) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
+  write_object_file(path, expected, cancellation, memory, |file, crc, payload_digest, object_digest| {
+    stream_index_workspace_runtime_batch_payload_v1::<IndexRuntimeWorkspaceStoreErrorV1>(batch, plan, |chunk| {
+      write_hashed(file, chunk, cancellation, crc, object_digest, Some(payload_digest))
+    })
+  })
+}
+
+fn write_buffered_object(
+  path: &Path,
+  expected: &ExpectedObjectV1,
+  payload: &[u8],
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
+  write_object_file(path, expected, cancellation, memory, |file, crc, payload_digest, object_digest| {
+    write_hashed(file, payload, cancellation, crc, object_digest, Some(payload_digest))
+  })
+}
+
+fn write_object_file(
+  path: &Path,
+  expected: &ExpectedObjectV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+  write_payload: impl FnOnce(
+    &mut fs::File,
+    &mut crc32fast::Hasher,
+    &mut blake3::Hasher,
+    &mut blake3::Hasher,
+  ) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1>,
+) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
   if path_present(path)? {
     return validate_object_file(path, expected, cancellation, memory);
   }
@@ -986,9 +1136,7 @@ fn write_runtime_object(
     let mut object_digest = blake3::Hasher::new();
     write_hashed(&mut file, &header, cancellation, &mut crc, &mut object_digest, None)?;
     let mut payload_digest = blake3::Hasher::new();
-    stream_index_workspace_runtime_batch_payload_v1::<IndexRuntimeWorkspaceStoreErrorV1>(batch, plan, |chunk| {
-      write_hashed(&mut file, chunk, cancellation, &mut crc, &mut object_digest, Some(&mut payload_digest))
-    })?;
+    write_payload(&mut file, &mut crc, &mut payload_digest, &mut object_digest)?;
     if *payload_digest.finalize().as_bytes() != expected.payload_digest {
       return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("streamed payload digest disagrees with its plan".to_string()));
     }

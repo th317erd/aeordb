@@ -20,6 +20,10 @@ use aeordb::engine::v4::index_coordinator_recovery::{
 };
 use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_operation_control::IndexOperationKindV1;
+use aeordb::engine::v4::index_producer_coordinator::{
+  IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerTaskKindV1,
+  IndexProducerTaskRequestV1,
+};
 use aeordb::engine::v4::index_recovery_store::{NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1};
 use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
 use aeordb::engine::v4::index_runtime_dirty_overlay_recovery::{
@@ -214,6 +218,7 @@ struct Fixture {
   publisher: DurableIndexRuntimeBatchPublisherV1<FakeStore>,
   state: Arc<Mutex<FakeState>>,
   clock: Arc<MockClock>,
+  cancellation: CancellationToken,
 }
 
 impl Fixture {
@@ -254,11 +259,11 @@ impl Fixture {
       1_725_000_000_000,
       workspace,
       FakeStore::for_algorithm(Arc::clone(&state), hash_algorithm),
-      cancellation,
+      cancellation.clone(),
       virtual_clock,
     )
     .unwrap();
-    (Self { _directory: directory, workspace_path, coordinator, publisher, state, clock }, batch)
+    (Self { _directory: directory, workspace_path, coordinator, publisher, state, clock, cancellation }, batch)
   }
 }
 
@@ -297,6 +302,136 @@ fn cumulative_runtime_batches_publish_truthful_external_heads_selector_last() {
   assert_eq!(external.durable_sequence, 2);
   assert!(external.durable_bytes > 0);
   assert!(Path::new(external.path).is_absolute());
+}
+
+#[test]
+fn producer_spill_uses_the_same_selector_and_is_idempotent_across_restart() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+
+  let producer_memory = memory();
+  let mut producer = producer_coordinator(&producer_memory, ALGORITHM, 1, 3);
+  let root = digest_parts(ALGORITHM, &[b"producer-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"producer-semantic"]);
+  let retained = producer_task([0x61; 16], 50, &root, &semantic);
+  let spilled = producer_task([0x62; 16], 51, &root, &semantic);
+  producer.admit(retained, 1_100).unwrap();
+  let first_spill = producer.admit_or_spill(spilled, 1_101, &mut fixture.publisher).unwrap();
+  let IndexProducerAdmissionV1::Spilled { receipt: first_receipt } = first_spill else {
+    panic!("admission pressure did not spill through the durable publisher");
+  };
+  assert_eq!(first_receipt.spill_id(), [0x62; 16]);
+  assert_eq!(first_receipt.artifact_key().len(), ALGORITHM.hash_length());
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 2);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().runtime_batch_count(), 1);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().producer_task_count(), 1);
+
+  let duplicate = producer.admit_or_spill(spilled, 1_102, &mut fixture.publisher).unwrap();
+  let IndexProducerAdmissionV1::Spilled { receipt: duplicate_receipt } = duplicate else {
+    panic!("duplicate pressure task was not resolved as the existing durable spill");
+  };
+  assert_eq!(duplicate_receipt, first_receipt);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 2);
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, 2);
+
+  let state = Arc::clone(&fixture.state);
+  drop(fixture.publisher);
+  let recovery_memory = memory();
+  let cancellation = CancellationToken::new();
+  let mut recovery_store = FakeStore::new(Arc::clone(&state));
+  let recovered = recover_index_runtime_dirty_overlay_v1(
+    &mut recovery_store,
+    ALGORITHM,
+    DATABASE_ID,
+    DESTINATION_ID,
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(None, 16 * 1024 * 1024, 0, 32).unwrap(),
+    &recovery_memory,
+    &cancellation,
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("mixed runtime/producer workspace was not resumable");
+  };
+  let virtual_clock: Arc<dyn VirtualClock> = fixture.clock.clone();
+  let mut resumed = DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, FakeStore::new(state), virtual_clock).unwrap();
+  let after_restart = producer.admit_or_spill(spilled, 1_103, &mut resumed).unwrap();
+  let IndexProducerAdmissionV1::Spilled { receipt: restarted_receipt } = after_restart else {
+    panic!("restart duplicate did not resolve as the existing durable spill");
+  };
+  assert_eq!(restarted_receipt, first_receipt);
+  assert_eq!(resumed.workspace_head().unwrap().manifest_sequence(), 2);
+
+  fixture.clock.advance(10);
+  admit(&mut fixture.coordinator, 2, 52, 1_110);
+  let second = fixture.coordinator.begin_flush(1_120, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(resumed.publish(&second).unwrap().checkpoint_sequence, 3);
+  assert_eq!(resumed.workspace_head().unwrap().runtime_batch_count(), 2);
+  assert_eq!(resumed.workspace_head().unwrap().producer_task_count(), 1);
+}
+
+#[test]
+fn refused_producer_spill_retains_the_task_until_the_exact_retry_is_selected() {
+  let (mut fixture, _batch) = Fixture::new(SelectorBehavior::Refuse);
+  let producer_memory = memory();
+  let mut producer = producer_coordinator(&producer_memory, ALGORITHM, 4, 1);
+  let root = digest_parts(ALGORITHM, &[b"retry-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"retry-semantic"]);
+  let task = producer_task([0x71; 16], 61, &root, &semantic);
+  producer.admit(task, 2_000).unwrap();
+  let lease = producer.lease_next(2_000, false).unwrap().unwrap();
+  let error = producer.retry_task(&lease, 1, 2_001, false, &mut fixture.publisher).unwrap_err();
+  assert!(error.to_string().contains("spill failed"));
+  assert_eq!(producer.snapshot().pending_tasks, 1);
+  assert_eq!(producer.snapshot().leased_tasks, 0);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().producer_task_count(), 1);
+
+  fixture.state.lock().unwrap().selector_behavior = SelectorBehavior::Commit;
+  let retry = producer.lease_next(3_001, false).unwrap().unwrap();
+  let completion = producer.retry_task(&retry, 1, 3_002, false, &mut fixture.publisher).unwrap();
+  let aeordb::engine::v4::index_producer_coordinator::IndexProducerCompletionV1::Spilled { receipt, .. } = completion else {
+    panic!("exact retained task retry did not complete its durable spill");
+  };
+  assert_eq!(receipt.spill_id(), [0x71; 16]);
+  assert_eq!(producer.snapshot().pending_tasks, 0);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 1);
+}
+
+#[test]
+fn canceled_producer_spill_retains_retry_exhausted_work_without_selecting_an_artifact() {
+  let (mut fixture, _batch) = Fixture::new(SelectorBehavior::Commit);
+  let producer_memory = memory();
+  let mut producer = producer_coordinator(&producer_memory, ALGORITHM, 4, 1);
+  let root = digest_parts(ALGORITHM, &[b"cancel-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"cancel-semantic"]);
+  producer.admit(producer_task([0x76; 16], 66, &root, &semantic), 2_500).unwrap();
+  let lease = producer.lease_next(2_500, false).unwrap().unwrap();
+  fixture.cancellation.cancel();
+  let error = producer.retry_task(&lease, 1, 2_501, false, &mut fixture.publisher).unwrap_err();
+  assert!(error.to_string().contains("producer_spill_cancelled"));
+  assert_eq!(producer.snapshot().pending_tasks, 1);
+  assert_eq!(producer.snapshot().leased_tasks, 0);
+  assert!(fixture.publisher.workspace_head().is_none());
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, 0);
+}
+
+#[test]
+fn producer_spill_uses_the_widest_checkpoint_key_without_a_second_publisher() {
+  let algorithm = HashAlgorithm::Sha512;
+  let (mut fixture, _batch) = Fixture::new_for(algorithm, SelectorBehavior::Commit);
+  let producer_memory = memory();
+  let mut producer = producer_coordinator(&producer_memory, algorithm, 1, 3);
+  let root = digest_parts(algorithm, &[b"wide-root"]);
+  let semantic = digest_parts(algorithm, &[b"wide-semantic"]);
+  producer.admit(producer_task([0x81; 16], 70, &root, &semantic), 4_000).unwrap();
+  let result = producer.admit_or_spill(producer_task([0x82; 16], 71, &root, &semantic), 4_001, &mut fixture.publisher).unwrap();
+  let IndexProducerAdmissionV1::Spilled { receipt } = result else {
+    panic!("wide producer task was not durably spilled");
+  };
+  assert_eq!(receipt.spill_id(), [0x82; 16]);
+  assert_eq!(receipt.artifact_key().len(), 64);
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, 1);
 }
 
 #[test]
@@ -816,6 +951,7 @@ fn runtime_publisher_uses_one_existing_selector_and_remains_disconnected() {
   assert!(immutable < selector, "runtime checkpoint selector appears before immutable publication");
   assert!(!source.contains("V4FirstAuthorityPublisher"));
   assert!(!recovery.contains("StorageEngine"));
+  assert_eq!(source.matches("IndexProducerSpillStoreV1 for DurableIndexRuntimeBatchPublisherV1").count(), 1);
   for forbidden in [
     include_str!("../../src/engine/storage_engine.rs"),
     include_str!("../../src/engine/v4/index_runtime_installation.rs"),
@@ -1090,6 +1226,38 @@ fn coordinator_for(memory: &MemoryCoordinator, hash_algorithm: HashAlgorithm) ->
     1_000,
   )
   .unwrap()
+}
+
+fn producer_coordinator(
+  memory: &MemoryCoordinator,
+  hash_algorithm: HashAlgorithm,
+  max_pending_tasks: u32,
+  max_attempts: u16,
+) -> IndexProducerCoordinatorV1 {
+  IndexProducerCoordinatorV1::new(
+    hash_algorithm,
+    memory.clone(),
+    IndexProducerCoordinatorOptionsV1::new(max_pending_tasks, 1024 * 1024, max_attempts, 10, 1_000, 32, 1_024, 4 * 1024 * 1024).unwrap(),
+  )
+  .unwrap()
+}
+
+fn producer_task<'a>(
+  operation_id: [u8; 16],
+  publication_sequence: u64,
+  root: &'a [u8],
+  semantic: &'a [u8],
+) -> IndexProducerTaskRequestV1<'a> {
+  IndexProducerTaskRequestV1 {
+    operation_id,
+    kind: IndexProducerTaskKindV1::Rebuild,
+    publication_sequence,
+    namespace_root_before: root,
+    namespace_root_after: root,
+    semantic_state_root: semantic,
+    journal_head: None,
+    scope: Some("/docs"),
+  }
 }
 
 fn admit(coordinator: &mut IndexCoordinatorV1, ordinal: u64, publication_sequence: u64, now_ms: u64) {

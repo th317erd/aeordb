@@ -996,7 +996,12 @@
                     - [x] Preserve newly introduced conversion evidence without growing the error-suppression allowlist.
                     - [x] Account for recovered heap capacity and transfer that reservation into the resumed publisher until its retained recovery state is dropped.
                     - [x] Prove success, restart continuation, malformed near-matches, missing/tampered workspace state, pressure, cancellation, selector races, widest hashes, and disconnected architecture before landing c3c-d.
-                  - [ ] P6-2d-c3c-e: implement the same workspace's durable body-free producer-task spill boundary, including idempotent retry, refusal retention, and replay-ready identity.
+                  - [x] P6-2d-c3c-e: implement the same workspace's durable body-free producer-task spill boundary, including idempotent retry, refusal retention, and replay-ready identity.
+                    - [x] Add compile-red workspace and publisher proofs for mixed runtime/producer append, exact duplicate spill, restart continuation, selector uncertainty, refusal retention, widest hashes, and body-free replay identity.
+                    - [x] Refactor runtime and producer workspace publication through one kind-parameterized object-before-manifest append state machine without changing frozen bytes.
+                    - [x] Generalize the selector-last publisher's prepared/pending authority so runtime batches and producer spills share one cumulative checkpoint path.
+                    - [x] Require spill receipts to bind the exact producer operation identity before the coordinator may release retained work.
+                    - [x] Run focused, affected, suppression, contract, full-workspace, and disconnected-architecture gates; record and land c3c-e.
                   - [ ] P6-2d-c3c-f: prove crash prefixes, tamper/truncation, stale selectors, restart, cancellation, pressure, widest-hash operation, architecture uniqueness, and unchanged v3 query authority before landing c3c.
                 - [ ] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
                 - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.

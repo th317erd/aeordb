@@ -118,10 +118,10 @@ struct SpillStore;
 impl IndexProducerSpillStoreV1 for SpillStore {
   fn spill(
     &mut self,
-    _task: IndexProducerTaskViewV1<'_>,
+    task: IndexProducerTaskViewV1<'_>,
     _reason: IndexProducerSpillReasonV1,
   ) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
-    IndexProducerSpillReceiptV1::new([0x55; 16], hash(b"spill"))
+    IndexProducerSpillReceiptV1::new(task.operation_id(), hash(b"spill"))
   }
 }
 

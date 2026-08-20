@@ -554,7 +554,7 @@ impl IndexProducerCoordinatorV1 {
       Err(IndexProducerCoordinatorErrorV1::SpillRequired { .. }) => {
         let receipt =
           spill_store.spill(task_view_from_request(&request), IndexProducerSpillReasonV1::AdmissionPressure).map_err(spill_error)?;
-        self.validate_spill_receipt(&receipt)?;
+        self.validate_spill_receipt(&receipt, request.operation_id)?;
         self.spilled_tasks = self.spilled_tasks.saturating_add(1);
         Ok(IndexProducerAdmissionV1::Spilled { receipt })
       }
@@ -680,7 +680,7 @@ impl IndexProducerCoordinatorV1 {
           return Err(spill_error(error));
         }
       };
-      if let Err(error) = self.validate_spill_receipt(&receipt) {
+      if let Err(error) = self.validate_spill_receipt(&receipt, self.tasks[task_index].operation_id) {
         self.retain_after_spill_failure(task_index, attempt, now_ms);
         return Err(error);
       }
@@ -805,7 +805,17 @@ impl IndexProducerCoordinatorV1 {
     Ok(())
   }
 
-  fn validate_spill_receipt(&self, receipt: &IndexProducerSpillReceiptV1) -> Result<(), IndexProducerCoordinatorErrorV1> {
+  fn validate_spill_receipt(
+    &self,
+    receipt: &IndexProducerSpillReceiptV1,
+    expected_operation_id: [u8; 16],
+  ) -> Result<(), IndexProducerCoordinatorErrorV1> {
+    if receipt.spill_id != expected_operation_id {
+      return Err(IndexProducerCoordinatorErrorV1::SpillFailed {
+        code: "spill_identity_mismatch",
+        context: "spill receipt does not bind the exact producer operation identity".to_string(),
+      });
+    }
     if receipt.artifact_key.len() != self.hash_algorithm.hash_length() {
       return Err(IndexProducerCoordinatorErrorV1::SpillFailed {
         code: "spill_artifact_width",

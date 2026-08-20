@@ -104,6 +104,7 @@ struct SpillStore {
   calls: Vec<([u8; 16], IndexProducerSpillReasonV1)>,
   fail: bool,
   malformed_receipt: bool,
+  dishonest_receipt: bool,
 }
 
 impl IndexProducerSpillStoreV1 for SpillStore {
@@ -117,9 +118,12 @@ impl IndexProducerSpillStoreV1 for SpillStore {
       return Err(IndexProducerSpillErrorV1::new("spill_refused", "injected spill refusal"));
     }
     if self.malformed_receipt {
-      return Ok(IndexProducerSpillReceiptV1::new([0x55; 16], vec![0x77; 31]).unwrap());
+      return Ok(IndexProducerSpillReceiptV1::new(task.operation_id(), vec![0x77; 31]).unwrap());
     }
-    Ok(IndexProducerSpillReceiptV1::new([0x55; 16], hash(b"spill")).unwrap())
+    if self.dishonest_receipt {
+      return Ok(IndexProducerSpillReceiptV1::new([0x55; 16], hash(b"spill")).unwrap());
+    }
+    Ok(IndexProducerSpillReceiptV1::new(task.operation_id(), hash(b"spill")).unwrap())
   }
 }
 
@@ -288,7 +292,13 @@ fn retry_exhaustion_spills_and_spill_failure_retains_recoverable_work() {
   assert!(matches!(error, IndexProducerCoordinatorErrorV1::SpillFailed { code: "spill_artifact_width", .. }));
   assert_eq!(malformed_producer.snapshot().pending_tasks, 1);
   assert_eq!(malformed_producer.snapshot().leased_tasks, 0, "a malformed spill receipt cannot strand the active lease");
-  assert!(malformed_producer.lease_next(2_006, false).unwrap().is_some(), "malformed spill receipt retains retryable work");
+  let retry_lease = malformed_producer.lease_next(2_006, false).unwrap().expect("malformed spill receipt retains retryable work");
+  spills.malformed_receipt = false;
+  spills.dishonest_receipt = true;
+  let error = malformed_producer.complete(&retry_lease, report(), &mut mutations, 2_007, false, &mut spills).unwrap_err();
+  assert!(matches!(error, IndexProducerCoordinatorErrorV1::SpillFailed { code: "spill_identity_mismatch", .. }));
+  assert_eq!(malformed_producer.snapshot().pending_tasks, 1);
+  assert_eq!(malformed_producer.snapshot().leased_tasks, 0, "dishonest spill receipt cannot release or strand retained work");
 }
 
 #[test]

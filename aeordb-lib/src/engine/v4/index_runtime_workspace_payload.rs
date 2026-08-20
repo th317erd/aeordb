@@ -56,6 +56,19 @@ pub struct IndexWorkspaceProducerTaskPayloadV1<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct IndexWorkspaceProducerTaskPlanV1 {
+  header_length: usize,
+  scope_length: usize,
+  payload_length: usize,
+}
+
+impl IndexWorkspaceProducerTaskPlanV1 {
+  pub(super) const fn payload_length(self) -> usize {
+    self.payload_length
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct IndexWorkspaceRuntimeBatchPlanV1 {
   header: [u8; RUNTIME_BATCH_HEADER_LENGTH],
   payload_length: usize,
@@ -336,6 +349,14 @@ pub fn encode_index_workspace_producer_task_payload_v1(
   task: &IndexProducerTaskRequestV1<'_>,
   hash_algorithm: HashAlgorithm,
 ) -> FormatResult<Vec<u8>> {
+  let plan = plan_index_workspace_producer_task_payload_v1(task, hash_algorithm)?;
+  encode_index_workspace_producer_task_payload_with_plan_v1(task, hash_algorithm, plan)
+}
+
+pub(super) fn plan_index_workspace_producer_task_payload_v1(
+  task: &IndexProducerTaskRequestV1<'_>,
+  hash_algorithm: HashAlgorithm,
+) -> FormatResult<IndexWorkspaceProducerTaskPlanV1> {
   validate_producer_task_fields(
     task.operation_id,
     task.kind,
@@ -353,20 +374,29 @@ pub fn encode_index_workspace_producer_task_payload_v1(
     .ok_or_else(|| length_error("producer task header length overflowed"))?;
   let scope_length = task.scope.map_or(0, str::len);
   let total_length = header_length.checked_add(scope_length).ok_or_else(|| length_error("producer task length overflowed"))?;
+  Ok(IndexWorkspaceProducerTaskPlanV1 { header_length, scope_length, payload_length: total_length })
+}
+
+fn encode_index_workspace_producer_task_payload_with_plan_v1(
+  task: &IndexProducerTaskRequestV1<'_>,
+  hash_algorithm: HashAlgorithm,
+  plan: IndexWorkspaceProducerTaskPlanV1,
+) -> FormatResult<Vec<u8>> {
+  let hash_width = hash_algorithm.hash_length();
   let mut encoded = Vec::new();
-  encoded.try_reserve_exact(total_length).map_err(|error| allocation_error(format!("producer task allocation failed: {error}")))?;
-  encoded.resize(total_length, 0);
+  encoded.try_reserve_exact(plan.payload_length).map_err(|error| allocation_error(format!("producer task allocation failed: {error}")))?;
+  encoded.resize(plan.payload_length, 0);
   encoded[..4].copy_from_slice(PRODUCER_TASK_MAGIC);
   put_u16(&mut encoded, 4, PRODUCER_TASK_SCHEMA_VERSION);
-  put_u16(&mut encoded, 6, header_length as u16);
-  put_u64(&mut encoded, 8, total_length as u64);
+  put_u16(&mut encoded, 6, plan.header_length as u16);
+  put_u64(&mut encoded, 8, plan.payload_length as u64);
   encoded[16..32].copy_from_slice(&task.operation_id);
   put_u16(&mut encoded, 32, task.kind.id());
   let flags = if task.journal_head.is_some() { PRODUCER_TASK_FLAG_JOURNAL } else { PRODUCER_TASK_FLAG_SCOPE };
   put_u16(&mut encoded, 34, flags);
   put_u64(&mut encoded, 36, task.publication_sequence);
   put_u16(&mut encoded, 44, hash_width as u16);
-  put_u32(&mut encoded, 48, scope_length as u32);
+  put_u32(&mut encoded, 48, plan.scope_length as u32);
   let mut cursor = PRODUCER_TASK_FIXED_HEADER_LENGTH;
   for hash in [task.namespace_root_before, task.namespace_root_after, task.semantic_state_root] {
     encoded[cursor..cursor + hash_width].copy_from_slice(hash);
