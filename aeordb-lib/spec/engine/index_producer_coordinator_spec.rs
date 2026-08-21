@@ -2,13 +2,15 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value};
 use aeordb::engine::v4::hash::digest_parts;
-use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoordinatorV1};
+use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1};
+use aeordb::engine::v4::index_maintenance_scan::derive_index_maintenance_document_operation_id_v1;
 use aeordb::engine::v4::index_page::{OrderedIndexRoleV1, PostingRecordV1, encode_posting_record};
 use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorOptionsV1,
-  IndexProducerCoordinatorV1, IndexProducerFallbackModeV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1,
-  IndexProducerOwnerOutcomeV1, IndexProducerReportV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1,
-  IndexProducerDurableTaskStoreV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
+  IndexProducerCoordinatorV1, IndexProducerDurableTaskStoreV1, IndexProducerFallbackModeV1, IndexProducerMaintenanceDocumentRequestV1,
+  IndexProducerMaintenanceProgressV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1, IndexProducerOwnerOutcomeV1,
+  IndexProducerReportV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1,
+  IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_record::{
   CanonicalValueRecordV1, ScopeReverseRecordV1, encode_canonical_value_record, encode_scope_reverse_record,
@@ -235,6 +237,549 @@ fn durable_admission_persists_before_queueing_duplicate_or_pressure_outcomes() {
   let persisted_before = store.persisted.len();
   assert!(matches!(coordinator.admit_durable_or_spill(invalid, 14, &mut store), Err(IndexProducerCoordinatorErrorV1::InvalidTask(_))));
   assert_eq!(store.persisted.len(), persisted_before, "invalid tasks must not reach durable storage");
+}
+
+#[test]
+fn maintenance_document_progress_is_memory_bounded_and_uses_the_document_operation_identity() {
+  let task_memory = memory(200_000);
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, task_memory.clone(), options(4, 100_000, 3)).unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let revision = hash(b"revision-a");
+  let parent_operation_id = [0x31; 16];
+  producer
+    .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100)
+    .unwrap();
+  let retained_before = producer.snapshot().pending_bytes;
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), None);
+  let owner_id = hash(b"field-index");
+  let expected_operation_id = derive_index_maintenance_document_operation_id_v1(
+    HASH_ALGORITHM,
+    parent_operation_id,
+    IndexProducerTaskKindV1::Rebuild,
+    &root,
+    &revision,
+    "/docs/a.json",
+  )
+  .unwrap();
+
+  let progress = producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision,
+        path: "/docs/a.json",
+        report: IndexProducerReportV1 {
+          outcomes: vec![IndexProducerOwnerOutcomeV1::ready(owner_id.clone(), vec![mutation(&owner_id, 1)])],
+        },
+      },
+      &mut mutations,
+      101,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert!(matches!(
+    progress,
+    IndexProducerMaintenanceProgressV1::Advanced { document_operation_id, .. }
+      if document_operation_id == expected_operation_id
+  ));
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/a.json"));
+  assert!(producer.snapshot().pending_bytes > retained_before);
+  assert_eq!(task_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, producer.snapshot().pending_bytes);
+
+  let batch = mutations.begin_flush(102, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(batch.records().len(), 1);
+  assert_eq!(batch.records()[0].operation_id(), expected_operation_id);
+  producer.cancel(&lease).unwrap();
+  assert_eq!(
+    producer
+      .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 102,)
+      .unwrap(),
+    IndexProducerAdmissionV1::Duplicate,
+    "duplicate durable replay must not reset in-memory progress",
+  );
+  let resumed = producer.lease_next(102, false).unwrap().unwrap();
+  assert_eq!(producer.leased_maintenance_resume_after(&resumed).unwrap(), Some("/docs/a.json"));
+  producer
+    .complete(&resumed, IndexProducerReportV1 { outcomes: Vec::new() }, &mut mutations, 103, false, &mut SpillStore::default())
+    .unwrap();
+  assert_eq!(task_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn maintenance_cursor_does_not_advance_past_partial_mutation_admission_and_replay_is_idempotent() {
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let revision = hash(b"revision-a");
+  let parent_operation_id = [0x32; 16];
+  producer
+    .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100)
+    .unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  let first_owner = vec![0x10; HASH_ALGORITHM.hash_length()];
+  let conflicting_owner = vec![0x20; HASH_ALGORITHM.hash_length()];
+  let conflicting_mutation = mutation(&conflicting_owner, 2);
+  mutations
+    .admit(
+      IndexMutationRequestV1 {
+        index_id: &conflicting_owner,
+        role: conflicting_mutation.role,
+        publication_sequence: 9,
+        operation_id: [0x99; 16],
+        encoded_record: &conflicting_mutation.encoded_record,
+      },
+      100,
+    )
+    .unwrap();
+
+  for now_ms in [101, 102] {
+    let report = IndexProducerReportV1 {
+      outcomes: vec![
+        IndexProducerOwnerOutcomeV1::ready(first_owner.clone(), vec![mutation(&first_owner, 1)]),
+        IndexProducerOwnerOutcomeV1::ready(conflicting_owner.clone(), vec![conflicting_mutation.clone()]),
+      ],
+    };
+    assert!(matches!(
+      producer.advance_maintenance_document(
+        &lease,
+        IndexProducerMaintenanceDocumentRequestV1 { revision_hash: &revision, path: "/docs/a.json", report },
+        &mut mutations,
+        now_ms,
+        false,
+        &mut SpillStore::default(),
+      ),
+      Err(IndexProducerCoordinatorErrorV1::MutationAdmission { .. })
+    ));
+    assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), None);
+    assert_eq!(mutations.snapshot().active_records, 2, "the first mutation is inserted once and is a duplicate on replay");
+  }
+  producer.cancel(&lease).unwrap();
+}
+
+#[test]
+fn maintenance_restart_replays_from_scope_without_duplicating_document_mutations() {
+  let mut mutations = mutation_coordinator(memory(500_000));
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let revision = hash(b"revision-a");
+  let owner = hash(b"field-index");
+  let operation_id = [0x33; 16];
+
+  let mut first = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  first.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  let lease = first.lease_next(100, false).unwrap().unwrap();
+  let report = || IndexProducerReportV1 { outcomes: vec![IndexProducerOwnerOutcomeV1::ready(owner.clone(), vec![mutation(&owner, 1)])] };
+  first
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 { revision_hash: &revision, path: "/docs/a.json", report: report() },
+      &mut mutations,
+      101,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert_eq!(mutations.snapshot().active_records, 1);
+  drop(first);
+
+  let mut recovered = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  recovered.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 200).unwrap();
+  let lease = recovered.lease_next(200, false).unwrap().unwrap();
+  assert_eq!(recovered.leased_maintenance_resume_after(&lease).unwrap(), None, "the restart cursor is intentionally not durable");
+  recovered
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 { revision_hash: &revision, path: "/docs/a.json", report: report() },
+      &mut mutations,
+      201,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert_eq!(recovered.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/a.json"));
+  assert_eq!(mutations.snapshot().active_records, 1);
+  assert_eq!(mutations.snapshot().active_mutations, 1);
+  recovered.cancel(&lease).unwrap();
+}
+
+#[test]
+fn maintenance_progress_rejects_wrong_mode_revision_scope_order_and_lease_before_admission() {
+  let root = hash(b"root");
+  let before = hash(b"before");
+  let semantic = hash(b"semantic");
+  let journal = hash(b"journal");
+  let revision = hash(b"revision-a");
+  let mut mutations = mutation_coordinator(memory(500_000));
+
+  for (ordinal, request) in [
+    task([0x41; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &root, &semantic, Some(&journal), None),
+    task([0x42; 16], IndexProducerTaskKindV1::Compact, 1, &root, &root, &semantic, None, Some("/docs")),
+  ]
+  .into_iter()
+  .enumerate()
+  {
+    let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
+    producer.admit(request, ordinal as u64 + 1).unwrap();
+    let lease = producer.lease_next(ordinal as u64 + 1, false).unwrap().unwrap();
+    assert!(matches!(
+      producer.leased_maintenance_resume_after(&lease),
+      Err(IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(_))
+    ));
+    assert!(matches!(
+      producer.advance_maintenance_document(
+        &lease,
+        IndexProducerMaintenanceDocumentRequestV1 {
+          revision_hash: &revision,
+          path: "/docs/a.json",
+          report: IndexProducerReportV1 { outcomes: Vec::new() },
+        },
+        &mut mutations,
+        ordinal as u64 + 10,
+        false,
+        &mut SpillStore::default(),
+      ),
+      Err(IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(_))
+    ));
+    assert_eq!(mutations.snapshot().active_records, 0);
+    producer.cancel(&lease).unwrap();
+  }
+
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
+  producer.admit(task([0x43; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  let oversized = format!("/docs/{}", "a".repeat(16 * 1024));
+  for (revision_hash, path) in [
+    (&revision[..31], "/docs/a.json"),
+    (&[0; 32][..], "/docs/a.json"),
+    (revision.as_slice(), "//docs/a.json"),
+    (revision.as_slice(), "/private/a.json"),
+    (revision.as_slice(), oversized.as_str()),
+  ] {
+    assert!(matches!(
+      producer.advance_maintenance_document(
+        &lease,
+        IndexProducerMaintenanceDocumentRequestV1 { revision_hash, path, report: IndexProducerReportV1 { outcomes: Vec::new() } },
+        &mut mutations,
+        101,
+        false,
+        &mut SpillStore::default(),
+      ),
+      Err(IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(_))
+    ));
+    assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), None);
+  }
+  producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision,
+        path: "/docs/b.json",
+        report: IndexProducerReportV1 { outcomes: Vec::new() },
+      },
+      &mut mutations,
+      101,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  for path in ["/docs/b.json", "/docs/a.json"] {
+    assert!(matches!(
+      producer.advance_maintenance_document(
+        &lease,
+        IndexProducerMaintenanceDocumentRequestV1 {
+          revision_hash: &revision,
+          path,
+          report: IndexProducerReportV1 { outcomes: Vec::new() },
+        },
+        &mut mutations,
+        102,
+        false,
+        &mut SpillStore::default(),
+      ),
+      Err(IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(_))
+    ));
+    assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/b.json"));
+  }
+  let owner = hash(b"index");
+  let wrong_owner = hash(b"wrong-index");
+  assert!(matches!(
+    producer.advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision,
+        path: "/docs/c.json",
+        report: IndexProducerReportV1 { outcomes: vec![IndexProducerOwnerOutcomeV1::ready(owner, vec![mutation(&wrong_owner, 1)])] },
+      },
+      &mut mutations,
+      102,
+      false,
+      &mut SpillStore::default(),
+    ),
+    Err(IndexProducerCoordinatorErrorV1::InvalidReport(_))
+  ));
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/b.json"));
+  assert_eq!(mutations.snapshot().active_records, 0);
+
+  let mut other = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
+  other.admit(task([0x44; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  let foreign = other.lease_next(100, false).unwrap().unwrap();
+  assert!(matches!(
+    producer.advance_maintenance_document(
+      &foreign,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision,
+        path: "/docs/c.json",
+        report: IndexProducerReportV1 { outcomes: Vec::new() },
+      },
+      &mut mutations,
+      103,
+      false,
+      &mut SpillStore::default(),
+    ),
+    Err(IndexProducerCoordinatorErrorV1::ForeignLease)
+  ));
+  producer.cancel(&lease).unwrap();
+  assert!(matches!(producer.leased_maintenance_resume_after(&lease), Err(IndexProducerCoordinatorErrorV1::StaleLease)));
+  other.cancel(&foreign).unwrap();
+}
+
+#[test]
+fn maintenance_continuation_pressure_fails_before_mutation_or_progress() {
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let request = task([0x45; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs"));
+  let mut probe = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
+  probe.admit(request, 100).unwrap();
+  let base_bytes = probe.snapshot().pending_bytes;
+  drop(probe);
+
+  let task_memory = memory(200_000);
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, task_memory.clone(), options(2, base_bytes, 3)).unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+  producer.admit(request, 100).unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  let owner = hash(b"index");
+  assert!(matches!(
+    producer.advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &hash(b"revision"),
+        path: "/docs/a.json",
+        report: IndexProducerReportV1 { outcomes: vec![IndexProducerOwnerOutcomeV1::ready(owner.clone(), vec![mutation(&owner, 1)])] },
+      },
+      &mut mutations,
+      101,
+      false,
+      &mut SpillStore::default(),
+    ),
+    Err(IndexProducerCoordinatorErrorV1::SpillRequired { .. })
+  ));
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), None);
+  assert_eq!(mutations.snapshot().active_records, 0);
+  assert_eq!(producer.snapshot().pending_bytes, base_bytes);
+  assert_eq!(task_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, base_bytes);
+  producer.cancel(&lease).unwrap();
+
+  let constrained_memory = MemoryCoordinator::new(MemoryPolicy::new(base_bytes, base_bytes + 1, 1, 1).unwrap());
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, constrained_memory.clone(), options(2, 100_000, 3)).unwrap();
+  producer.admit(request, 200).unwrap();
+  let lease = producer.lease_next(200, false).unwrap().unwrap();
+  assert!(matches!(
+    producer.advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &hash(b"revision"),
+        path: "/docs/a.json",
+        report: IndexProducerReportV1 { outcomes: Vec::new() },
+      },
+      &mut mutations,
+      201,
+      false,
+      &mut SpillStore::default(),
+    ),
+    Err(IndexProducerCoordinatorErrorV1::SpillRequired { .. })
+  ));
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), None);
+  assert_eq!(producer.snapshot().pending_bytes, base_bytes);
+  assert_eq!(constrained_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, base_bytes);
+  producer.cancel(&lease).unwrap();
+}
+
+#[test]
+fn maintenance_retry_keeps_prior_progress_and_success_resets_the_task_attempt_budget() {
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let revision_a = hash(b"revision-a");
+  let revision_b = hash(b"revision-b");
+  let revision_c = hash(b"revision-c");
+  let owner = hash(b"field-index");
+  let retry_owner = hash(b"retry-owner");
+  let operation_id = [0x46; 16];
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+  producer.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision_a,
+        path: "/docs/a.json",
+        report: IndexProducerReportV1 { outcomes: Vec::new() },
+      },
+      &mut mutations,
+      101,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+
+  let retrying_report = |ordinal| IndexProducerReportV1 {
+    outcomes: vec![
+      IndexProducerOwnerOutcomeV1::ready(owner.clone(), vec![mutation(&owner, ordinal)]),
+      IndexProducerOwnerOutcomeV1::retryable(retry_owner.clone(), 11, 25, IndexProducerFallbackModeV1::AuthoritativeScan, None),
+    ],
+  };
+  let progress = producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 { revision_hash: &revision_b, path: "/docs/b.json", report: retrying_report(2) },
+      &mut mutations,
+      102,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert!(matches!(progress, IndexProducerMaintenanceProgressV1::RetryScheduled { attempt: 1, next_retry_at_ms: 127, .. }));
+  assert_eq!(mutations.snapshot().active_records, 1, "successful owners remain admitted while another owner retries");
+  assert!(producer.lease_next(126, false).unwrap().is_none());
+  let lease = producer.lease_next(127, false).unwrap().unwrap();
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/a.json"));
+  producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision_b,
+        path: "/docs/b.json",
+        report: IndexProducerReportV1 { outcomes: vec![IndexProducerOwnerOutcomeV1::ready(owner.clone(), vec![mutation(&owner, 2)])] },
+      },
+      &mut mutations,
+      127,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/b.json"));
+  assert_eq!(mutations.snapshot().active_records, 1, "the successful retry replays as an exact duplicate");
+
+  let progress = producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 { revision_hash: &revision_c, path: "/docs/c.json", report: retrying_report(3) },
+      &mut mutations,
+      128,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert!(matches!(progress, IndexProducerMaintenanceProgressV1::RetryScheduled { attempt: 1, next_retry_at_ms: 153, .. }));
+  let lease = producer.lease_next(153, false).unwrap().unwrap();
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/b.json"));
+  producer.cancel(&lease).unwrap();
+}
+
+#[test]
+fn maintenance_cancellation_and_spill_refusal_retain_the_last_completed_document() {
+  let task_memory = memory(200_000);
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  let revision_a = hash(b"revision-a");
+  let revision_b = hash(b"revision-b");
+  let retry_owner = hash(b"retry-owner");
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, task_memory.clone(), options(2, 100_000, 1)).unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+  producer.admit(task([0x47; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision_a,
+        path: "/docs/a.json",
+        report: IndexProducerReportV1 { outcomes: Vec::new() },
+      },
+      &mut mutations,
+      101,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert!(matches!(
+    producer.advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision_b,
+        path: "/docs/b.json",
+        report: IndexProducerReportV1 { outcomes: Vec::new() },
+      },
+      &mut mutations,
+      102,
+      true,
+      &mut SpillStore::default(),
+    ),
+    Err(IndexProducerCoordinatorErrorV1::Cancelled)
+  ));
+  let lease = producer.lease_next(102, false).unwrap().unwrap();
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/a.json"));
+
+  let retry_report = IndexProducerReportV1 {
+    outcomes: vec![IndexProducerOwnerOutcomeV1::retryable(retry_owner, 11, 25, IndexProducerFallbackModeV1::AuthoritativeScan, None)],
+  };
+  let mut spills = SpillStore { fail: true, ..SpillStore::default() };
+  assert!(matches!(
+    producer.advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 { revision_hash: &revision_b, path: "/docs/b.json", report: retry_report },
+      &mut mutations,
+      103,
+      false,
+      &mut spills,
+    ),
+    Err(IndexProducerCoordinatorErrorV1::SpillFailed { .. })
+  ));
+  let lease = producer.lease_next(1_103, false).unwrap().unwrap();
+  assert_eq!(producer.leased_maintenance_resume_after(&lease).unwrap(), Some("/docs/a.json"));
+  spills.fail = false;
+  let progress = producer
+    .advance_maintenance_document(
+      &lease,
+      IndexProducerMaintenanceDocumentRequestV1 {
+        revision_hash: &revision_b,
+        path: "/docs/b.json",
+        report: IndexProducerReportV1 {
+          outcomes: vec![IndexProducerOwnerOutcomeV1::retryable(
+            hash(b"retry-owner"),
+            11,
+            25,
+            IndexProducerFallbackModeV1::AuthoritativeScan,
+            None,
+          )],
+        },
+      },
+      &mut mutations,
+      1_104,
+      false,
+      &mut spills,
+    )
+    .unwrap();
+  assert!(matches!(progress, IndexProducerMaintenanceProgressV1::Spilled { .. }));
+  assert_eq!(producer.snapshot().pending_tasks, 0);
+  assert_eq!(task_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
 }
 
 #[test]

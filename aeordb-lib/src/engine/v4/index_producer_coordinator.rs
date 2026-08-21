@@ -9,6 +9,10 @@ use crate::engine::path_utils::normalize_path;
 
 use super::contract_generated::stable_reason_v1;
 use super::index_coordinator::{IndexCoordinatorErrorV1, IndexCoordinatorV1, IndexMutationRequestV1};
+use super::index_maintenance_scan::{
+  IndexMaintenanceScanLimitsV1, IndexMaintenanceScanRequestV1, IndexProducerServiceModeV1,
+  derive_index_maintenance_document_operation_id_v1, index_producer_service_mode_v1, validate_index_maintenance_scan_request_v1,
+};
 use super::index_page::{OrderedIndexRoleV1, decode_ordered_record};
 use super::index_record::{DocumentStateOwnerV1, is_valid_document_state_class};
 
@@ -249,6 +253,13 @@ pub struct IndexProducerReportV1 {
   pub outcomes: Vec<IndexProducerOwnerOutcomeV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexProducerMaintenanceDocumentRequestV1<'a> {
+  pub revision_hash: &'a [u8],
+  pub path: &'a str,
+  pub report: IndexProducerReportV1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexProducerSpillReasonV1 {
   AdmissionPressure,
@@ -331,6 +342,13 @@ pub enum IndexProducerCompletionV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexProducerMaintenanceProgressV1 {
+  Advanced { document_operation_id: [u8; 16], outcomes: Vec<IndexProducerOwnerOutcomeV1> },
+  RetryScheduled { document_operation_id: [u8; 16], attempt: u16, next_retry_at_ms: u64, outcomes: Vec<IndexProducerOwnerOutcomeV1> },
+  Spilled { document_operation_id: [u8; 16], receipt: IndexProducerSpillReceiptV1, outcomes: Vec<IndexProducerOwnerOutcomeV1> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexProducerCoordinatorSnapshotV1 {
   pub pending_tasks: u32,
   pub pending_bytes: u64,
@@ -364,6 +382,8 @@ pub enum IndexProducerCoordinatorErrorV1 {
   ClockRegressed { previous_ms: u64, received_ms: u64 },
   #[error("invalid index producer report: {0}")]
   InvalidReport(String),
+  #[error("invalid index producer maintenance document: {0}")]
+  InvalidMaintenanceDocument(String),
   #[error("index mutation admission failed for owner {owner_id}: {source}")]
   MutationAdmission { owner_id: String, source: IndexCoordinatorErrorV1 },
   #[error("index producer spill failed ({code}): {context}")]
@@ -372,6 +392,12 @@ pub enum IndexProducerCoordinatorErrorV1 {
   AccountingOverflow(&'static str),
   #[error("index producer invariant failed: {0}")]
   Invariant(String),
+}
+
+struct RetainedMaintenanceContinuationV1 {
+  resume_after: String,
+  retained_bytes: u64,
+  _reservation: MemoryReservation,
 }
 
 struct RetainedIndexProducerTaskV1 {
@@ -385,6 +411,7 @@ struct RetainedIndexProducerTaskV1 {
   scope: Option<String>,
   attempts: u16,
   next_attempt_at_ms: u64,
+  maintenance_continuation: Option<RetainedMaintenanceContinuationV1>,
   retained_bytes: u64,
   _reservation: MemoryReservation,
 }
@@ -619,6 +646,69 @@ impl IndexProducerCoordinatorV1 {
     Ok(self.tasks[self.task_index(lease.operation_id)?].view())
   }
 
+  pub fn leased_maintenance_resume_after(&self, lease: &IndexProducerLeaseV1) -> Result<Option<&str>, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    let task = &self.tasks[self.task_index(lease.operation_id)?];
+    require_maintenance_scan_task(task.kind)?;
+    Ok(task.maintenance_continuation.as_ref().map(|continuation| continuation.resume_after.as_str()))
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn advance_maintenance_document(
+    &mut self,
+    lease: &IndexProducerLeaseV1,
+    mut request: IndexProducerMaintenanceDocumentRequestV1<'_>,
+    mutation_coordinator: &mut IndexCoordinatorV1,
+    now_ms: u64,
+    cancelled: bool,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerMaintenanceProgressV1, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    if cancelled {
+      self.active_lease = None;
+      return Err(IndexProducerCoordinatorErrorV1::Cancelled);
+    }
+    self.observe_time(now_ms)?;
+    let task_index = self.task_index(lease.operation_id)?;
+    let task = &self.tasks[task_index];
+    require_maintenance_scan_task(task.kind)?;
+    validate_maintenance_document(self.hash_algorithm, task, request.revision_hash, request.path)?;
+    let document_operation_id = derive_index_maintenance_document_operation_id_v1(
+      self.hash_algorithm,
+      task.operation_id,
+      task.kind,
+      &task.namespace_root_after,
+      request.revision_hash,
+      request.path,
+    )
+    .map_err(|error| IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(error.to_string()))?;
+    let requested_retry_ms = self.prepare_report(&mut request.report)?;
+    let prepared_continuation =
+      if requested_retry_ms.is_none() { Some(self.prepare_maintenance_continuation(task_index, request.path)?) } else { None };
+
+    self.admit_report_mutations(&request.report, lease.publication_sequence, document_operation_id, mutation_coordinator, now_ms)?;
+    if let Some(requested_retry_ms) = requested_retry_ms {
+      return match self.schedule_retry(lease, requested_retry_ms, request.report.outcomes, now_ms, spill_store)? {
+        IndexProducerCompletionV1::RetryScheduled { attempt, next_retry_at_ms, outcomes } => {
+          Ok(IndexProducerMaintenanceProgressV1::RetryScheduled { document_operation_id, attempt, next_retry_at_ms, outcomes })
+        }
+        IndexProducerCompletionV1::Spilled { receipt, outcomes } => {
+          Ok(IndexProducerMaintenanceProgressV1::Spilled { document_operation_id, receipt, outcomes })
+        }
+        IndexProducerCompletionV1::Completed { .. } => {
+          Err(IndexProducerCoordinatorErrorV1::Invariant("retry scheduling unexpectedly completed a maintenance task".to_string()))
+        }
+      };
+    }
+
+    let prepared_continuation = prepared_continuation
+      .ok_or_else(|| IndexProducerCoordinatorErrorV1::Invariant("maintenance continuation was not prepared".to_string()))?;
+    self.install_maintenance_continuation(task_index, prepared_continuation)?;
+    self.tasks[task_index].attempts = 0;
+    self.tasks[task_index].next_attempt_at_ms = now_ms;
+    Ok(IndexProducerMaintenanceProgressV1::Advanced { document_operation_id, outcomes: request.report.outcomes })
+  }
+
   pub fn complete(
     &mut self,
     lease: &IndexProducerLeaseV1,
@@ -634,31 +724,8 @@ impl IndexProducerCoordinatorV1 {
       return Err(IndexProducerCoordinatorErrorV1::Cancelled);
     }
     self.observe_time(now_ms)?;
-    report.outcomes.sort_unstable_by(|left, right| left.owner_id.cmp(&right.owner_id));
-    self.validate_report(&report)?;
-
-    for outcome in &report.outcomes {
-      for mutation in &outcome.mutations {
-        mutation_coordinator
-          .admit(
-            IndexMutationRequestV1 {
-              index_id: &mutation.owner_id,
-              role: mutation.role,
-              publication_sequence: lease.publication_sequence,
-              operation_id: lease.operation_id,
-              encoded_record: &mutation.encoded_record,
-            },
-            now_ms,
-          )
-          .map_err(|source| IndexProducerCoordinatorErrorV1::MutationAdmission { owner_id: hex::encode(&mutation.owner_id), source })?;
-      }
-    }
-
-    let retry_after_ms = report.outcomes.iter().filter_map(|outcome| match outcome.disposition {
-      IndexProducerOwnerDispositionV1::Retryable { retry_after_ms, .. } => Some(retry_after_ms),
-      _ => None,
-    });
-    let requested_retry_ms = retry_after_ms.max();
+    let requested_retry_ms = self.prepare_report(&mut report)?;
+    self.admit_report_mutations(&report, lease.publication_sequence, lease.operation_id, mutation_coordinator, now_ms)?;
     if let Some(requested_retry_ms) = requested_retry_ms {
       return self.schedule_retry(lease, requested_retry_ms, report.outcomes, now_ms, spill_store);
     }
@@ -729,6 +796,124 @@ impl IndexProducerCoordinatorV1 {
     self.active_lease = None;
     self.scheduled_retries = self.scheduled_retries.saturating_add(1);
     Ok(IndexProducerCompletionV1::RetryScheduled { attempt, next_retry_at_ms, outcomes })
+  }
+
+  fn prepare_report(&self, report: &mut IndexProducerReportV1) -> Result<Option<u64>, IndexProducerCoordinatorErrorV1> {
+    report.outcomes.sort_unstable_by(|left, right| left.owner_id.cmp(&right.owner_id));
+    self.validate_report(report)?;
+    Ok(
+      report
+        .outcomes
+        .iter()
+        .filter_map(|outcome| match outcome.disposition {
+          IndexProducerOwnerDispositionV1::Retryable { retry_after_ms, .. } => Some(retry_after_ms),
+          _ => None,
+        })
+        .max(),
+    )
+  }
+
+  fn admit_report_mutations(
+    &self,
+    report: &IndexProducerReportV1,
+    publication_sequence: u64,
+    operation_id: [u8; 16],
+    mutation_coordinator: &mut IndexCoordinatorV1,
+    now_ms: u64,
+  ) -> Result<(), IndexProducerCoordinatorErrorV1> {
+    for outcome in &report.outcomes {
+      for mutation in &outcome.mutations {
+        mutation_coordinator
+          .admit(
+            IndexMutationRequestV1 {
+              index_id: &mutation.owner_id,
+              role: mutation.role,
+              publication_sequence,
+              operation_id,
+              encoded_record: &mutation.encoded_record,
+            },
+            now_ms,
+          )
+          .map_err(|source| IndexProducerCoordinatorErrorV1::MutationAdmission { owner_id: hex::encode(&mutation.owner_id), source })?;
+      }
+    }
+    Ok(())
+  }
+
+  fn prepare_maintenance_continuation(
+    &self,
+    task_index: usize,
+    resume_after: &str,
+  ) -> Result<RetainedMaintenanceContinuationV1, IndexProducerCoordinatorErrorV1> {
+    let old_bytes = self.tasks[task_index].maintenance_continuation.as_ref().map_or(0, |continuation| continuation.retained_bytes);
+    let requested_bytes = u64::try_from(resume_after.len())
+      .map_err(|source| IndexProducerCoordinatorErrorV1::Invariant(format!("maintenance continuation byte conversion failed: {source}")))?;
+    let projected = self
+      .pending_bytes
+      .checked_sub(old_bytes)
+      .and_then(|bytes| bytes.checked_add(requested_bytes))
+      .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("maintenance continuation projection"))?;
+    if projected > self.options.max_pending_bytes {
+      return Err(IndexProducerCoordinatorErrorV1::SpillRequired {
+        context: "maintenance continuation byte limit".to_string(),
+        requested_bytes,
+        limit_bytes: self.options.max_pending_bytes,
+      });
+    }
+    let mut reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, requested_bytes, AdmissionClass::Workload)
+      .map_err(|error| memory_error(requested_bytes, self.options.max_pending_bytes, error))?;
+    let resume_after = clone_string(resume_after, "maintenance continuation")?;
+    let retained_bytes = u64::try_from(resume_after.capacity()).map_err(|source| {
+      IndexProducerCoordinatorErrorV1::Invariant(format!("maintenance continuation capacity conversion failed: {source}"))
+    })?;
+    if retained_bytes > requested_bytes {
+      reservation
+        .grow(retained_bytes - requested_bytes)
+        .map_err(|error| memory_error(retained_bytes, self.options.max_pending_bytes, error))?;
+      let actual_projected = self
+        .pending_bytes
+        .checked_sub(old_bytes)
+        .and_then(|bytes| bytes.checked_add(retained_bytes))
+        .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("maintenance continuation capacity projection"))?;
+      if actual_projected > self.options.max_pending_bytes {
+        return Err(IndexProducerCoordinatorErrorV1::SpillRequired {
+          context: "maintenance continuation capacity limit".to_string(),
+          requested_bytes: retained_bytes,
+          limit_bytes: self.options.max_pending_bytes,
+        });
+      }
+    }
+    Ok(RetainedMaintenanceContinuationV1 { resume_after, retained_bytes, _reservation: reservation })
+  }
+
+  fn install_maintenance_continuation(
+    &mut self,
+    task_index: usize,
+    continuation: RetainedMaintenanceContinuationV1,
+  ) -> Result<(), IndexProducerCoordinatorErrorV1> {
+    let old_bytes = self.tasks[task_index].maintenance_continuation.as_ref().map_or(0, |current| current.retained_bytes);
+    let next_task_bytes = self.tasks[task_index]
+      .retained_bytes
+      .checked_sub(old_bytes)
+      .and_then(|bytes| bytes.checked_add(continuation.retained_bytes))
+      .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("maintenance task continuation installation"))?;
+    let next_pending_bytes = self
+      .pending_bytes
+      .checked_sub(old_bytes)
+      .and_then(|bytes| bytes.checked_add(continuation.retained_bytes))
+      .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("maintenance continuation installation"))?;
+    if next_pending_bytes > self.options.max_pending_bytes {
+      return Err(IndexProducerCoordinatorErrorV1::Invariant(
+        "prepared maintenance continuation exceeds the pending byte limit".to_string(),
+      ));
+    }
+    let old = self.tasks[task_index].maintenance_continuation.replace(continuation);
+    self.tasks[task_index].retained_bytes = next_task_bytes;
+    self.pending_bytes = next_pending_bytes;
+    drop(old);
+    self.verify_accounting()
   }
 
   fn validate_task(&self, request: &IndexProducerTaskRequestV1<'_>) -> Result<(), IndexProducerCoordinatorErrorV1> {
@@ -961,6 +1146,52 @@ fn validate_operational_reason(reason: u16) -> Result<(), IndexProducerCoordinat
   Ok(())
 }
 
+fn require_maintenance_scan_task(kind: IndexProducerTaskKindV1) -> Result<(), IndexProducerCoordinatorErrorV1> {
+  match index_producer_service_mode_v1(kind) {
+    IndexProducerServiceModeV1::AuthoritativeUpsertScan | IndexProducerServiceModeV1::AuthoritativeRetirementScan => Ok(()),
+    IndexProducerServiceModeV1::JournalTransition | IndexProducerServiceModeV1::ArtifactCompaction => Err(
+      IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument("only root-pinned document-scan tasks retain scan progress".to_string()),
+    ),
+  }
+}
+
+fn validate_maintenance_document(
+  hash_algorithm: HashAlgorithm,
+  task: &RetainedIndexProducerTaskV1,
+  revision_hash: &[u8],
+  path: &str,
+) -> Result<(), IndexProducerCoordinatorErrorV1> {
+  let scope = task
+    .scope
+    .as_deref()
+    .ok_or_else(|| IndexProducerCoordinatorErrorV1::Invariant("root-pinned document-scan task lost its scope".to_string()))?;
+  let never_cancelled = || false;
+  let limits = IndexMaintenanceScanLimitsV1::new(1, 1, INDEX_PRODUCER_SCOPE_BYTES_MAX as u32)
+    .map_err(|error| IndexProducerCoordinatorErrorV1::Invariant(error.to_string()))?;
+  validate_index_maintenance_scan_request_v1(
+    hash_algorithm,
+    &IndexMaintenanceScanRequestV1 {
+      namespace_root: &task.namespace_root_after,
+      scope,
+      resume_after: Some(path),
+      limits,
+      is_cancelled: &never_cancelled,
+    },
+  )
+  .map_err(|error| IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(error.to_string()))?;
+  if revision_hash.len() != hash_algorithm.hash_length() || revision_hash.iter().all(|byte| *byte == 0) {
+    return Err(IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(
+      "revision hash must be a nonzero complete database hash".to_string(),
+    ));
+  }
+  if task.maintenance_continuation.as_ref().is_some_and(|continuation| path <= continuation.resume_after.as_str()) {
+    return Err(IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(
+      "document path must advance beyond the retained continuation".to_string(),
+    ));
+  }
+  Ok(())
+}
+
 fn retained_task_bytes(request: &IndexProducerTaskRequestV1<'_>) -> Result<u64, IndexProducerCoordinatorErrorV1> {
   let payload = request
     .namespace_root_before
@@ -991,6 +1222,7 @@ fn clone_task(
     scope: request.scope.map(|value| clone_string(value, "task scope")).transpose()?,
     attempts: 0,
     next_attempt_at_ms: now_ms,
+    maintenance_continuation: None,
     retained_bytes,
     _reservation: reservation,
   })

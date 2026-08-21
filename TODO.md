@@ -1061,7 +1061,7 @@
                 - [x] Run focused concurrency/failure tests, affected owner/worker/coordinator gates, suppression/static checks, and the broad phase-boundary suite.
               - [ ] P6-2c-d5d: recover selected producer tasks and bounded maintenance continuation state into the same coordinator without duplicate execution or a second persistent cursor.
                 - [x] P6-2c-d5d1: stream selected AITK producer tasks from the validated workspace chain into the recovering runtime coordinator with exact duplicate/conflict handling and no second persistence path.
-                - [ ] P6-2c-d5d2: retain bounded maintenance `resume_after` state only inside the leased coordinator task and advance it atomically with per-document idempotent mutation admission.
+                - [x] P6-2c-d5d2: retain bounded maintenance `resume_after` state only inside the leased coordinator task and advance it atomically with per-document idempotent mutation admission.
                 - [ ] P6-2c-d5d3: execute root-pinned upsert/retirement scan pages through the same semantic/parser/mapper/collector worker and unlocked owner boundary.
                 - [ ] P6-2c-d5d4: prove restart replay, duplicate collapse, continuation/reset, cancellation, pressure, corruption, task-kind dispatch, and architecture uniqueness across focused and broad gates.
               - [ ] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
