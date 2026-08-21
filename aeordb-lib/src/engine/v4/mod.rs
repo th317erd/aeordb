@@ -65,6 +65,7 @@ pub mod index_producer_admission;
 pub mod index_producer_collector;
 pub mod index_producer_coordinator;
 pub mod index_producer_executor;
+pub mod index_producer_journal_source;
 pub mod index_producer_source;
 pub mod index_producer_worker;
 pub mod index_record;

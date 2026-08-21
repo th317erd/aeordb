@@ -1059,11 +1059,16 @@
                 - [x] Split source/collector execution from owner-locked lease validation, retry/cancel, mutation admission, and completion without weakening panic handling.
                 - [x] Reject stale or invalidated collection results without completing or canceling a replacement lease; preserve exact memory-reservation lifetime.
                 - [x] Run focused concurrency/failure tests, affected owner/worker/coordinator gates, suppression/static checks, and the broad phase-boundary suite.
-              - [ ] P6-2c-d5d: recover selected producer tasks and bounded maintenance continuation state into the same coordinator without duplicate execution or a second persistent cursor.
+              - [x] P6-2c-d5d: recover selected producer tasks and bounded maintenance continuation state into the same coordinator without duplicate execution or a second persistent cursor.
                 - [x] P6-2c-d5d1: stream selected AITK producer tasks from the validated workspace chain into the recovering runtime coordinator with exact duplicate/conflict handling and no second persistence path.
                 - [x] P6-2c-d5d2: retain bounded maintenance `resume_after` state only inside the leased coordinator task and advance it atomically with per-document idempotent mutation admission.
                 - [x] P6-2c-d5d3: execute root-pinned upsert/retirement scan pages through the same semantic/parser/mapper/collector worker and unlocked owner boundary.
-                - [ ] P6-2c-d5d4: prove restart replay, duplicate collapse, continuation/reset, cancellation, pressure, corruption, task-kind dispatch, and architecture uniqueness across focused and broad gates.
+                - [x] P6-2c-d5d4: prove restart replay, duplicate collapse, continuation/reset, cancellation, pressure, corruption, task-kind dispatch, and architecture uniqueness across focused and broad gates.
+                  - [x] Freeze a bounded Task-memory mutation-journal read contract keyed by the retained journal hash; keep its production first-authority adapter for d5e.
+                  - [x] Replace selector-specific owner leasing with one exhaustive service-mode dispatcher for both journal transitions and authoritative scans.
+                  - [x] Fail closed while retaining unsupported artifact-compaction work until P6-3 supplies its immutable compaction executor.
+                  - [x] Prove mixed canonical task ordering, all nine task kinds, restart cursor reset with deterministic duplicate collapse, cancellation, pressure, corruption, panic, and lease release.
+                  - [x] Add architecture gates for one lease selector, one parser/mapper/collector core, and no selector-specific producer path; run focused through broad proof.
               - [ ] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
             - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
             - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.

@@ -400,6 +400,47 @@ struct RetainedMaintenanceContinuationV1 {
   _reservation: MemoryReservation,
 }
 
+pub(crate) struct IndexProducerJournalWorkPlanV1 {
+  operation_id: [u8; 16],
+  kind: IndexProducerTaskKindV1,
+  publication_sequence: u64,
+  namespace_root_before: Vec<u8>,
+  namespace_root_after: Vec<u8>,
+  semantic_state_root: Vec<u8>,
+  journal_head: Vec<u8>,
+  _reservation: MemoryReservation,
+}
+
+impl IndexProducerJournalWorkPlanV1 {
+  pub(crate) const fn operation_id(&self) -> [u8; 16] {
+    self.operation_id
+  }
+
+  pub(crate) const fn kind(&self) -> IndexProducerTaskKindV1 {
+    self.kind
+  }
+
+  pub(crate) const fn publication_sequence(&self) -> u64 {
+    self.publication_sequence
+  }
+
+  pub(crate) fn namespace_root_before(&self) -> &[u8] {
+    &self.namespace_root_before
+  }
+
+  pub(crate) fn namespace_root_after(&self) -> &[u8] {
+    &self.namespace_root_after
+  }
+
+  pub(crate) fn semantic_state_root(&self) -> &[u8] {
+    &self.semantic_state_root
+  }
+
+  pub(crate) fn journal_head(&self) -> &[u8] {
+    &self.journal_head
+  }
+}
+
 pub(crate) struct IndexProducerMaintenanceScanPlanV1 {
   namespace_root: Vec<u8>,
   semantic_state_root: Vec<u8>,
@@ -673,6 +714,56 @@ impl IndexProducerCoordinatorV1 {
   pub fn leased_task(&self, lease: &IndexProducerLeaseV1) -> Result<IndexProducerTaskViewV1<'_>, IndexProducerCoordinatorErrorV1> {
     self.validate_lease(lease)?;
     Ok(self.tasks[self.task_index(lease.operation_id)?].view())
+  }
+
+  pub(crate) fn leased_journal_work_plan(
+    &self,
+    lease: &IndexProducerLeaseV1,
+  ) -> Result<IndexProducerJournalWorkPlanV1, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    let task = &self.tasks[self.task_index(lease.operation_id)?];
+    if index_producer_service_mode_v1(task.kind) != IndexProducerServiceModeV1::JournalTransition {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask("leased task is not journal-transition work".to_string()));
+    }
+    let journal_head = task
+      .journal_head
+      .as_deref()
+      .ok_or_else(|| IndexProducerCoordinatorErrorV1::Invariant("journal-transition task lost its journal head".to_string()))?;
+    let requested_bytes = journal_work_plan_bytes(
+      task.namespace_root_before.len(),
+      task.namespace_root_after.len(),
+      task.semantic_state_root.len(),
+      journal_head.len(),
+    )?;
+    let mut reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, requested_bytes, AdmissionClass::Workload)
+      .map_err(|error| memory_error(requested_bytes, self.options.max_pending_bytes, error))?;
+    let namespace_root_before = clone_bytes(&task.namespace_root_before, "journal plan namespace root before")?;
+    let namespace_root_after = clone_bytes(&task.namespace_root_after, "journal plan namespace root after")?;
+    let semantic_state_root = clone_bytes(&task.semantic_state_root, "journal plan semantic-state root")?;
+    let journal_head = clone_bytes(journal_head, "journal plan head")?;
+    let retained_bytes = journal_work_plan_bytes(
+      namespace_root_before.capacity(),
+      namespace_root_after.capacity(),
+      semantic_state_root.capacity(),
+      journal_head.capacity(),
+    )?;
+    if retained_bytes > requested_bytes {
+      reservation
+        .grow(retained_bytes - requested_bytes)
+        .map_err(|error| memory_error(retained_bytes, self.options.max_pending_bytes, error))?;
+    }
+    Ok(IndexProducerJournalWorkPlanV1 {
+      operation_id: task.operation_id,
+      kind: task.kind,
+      publication_sequence: task.publication_sequence,
+      namespace_root_before,
+      namespace_root_after,
+      semantic_state_root,
+      journal_head,
+      _reservation: reservation,
+    })
   }
 
   pub fn leased_maintenance_resume_after(&self, lease: &IndexProducerLeaseV1) -> Result<Option<&str>, IndexProducerCoordinatorErrorV1> {
@@ -1289,6 +1380,22 @@ fn retained_task_bytes(request: &IndexProducerTaskRequestV1<'_>) -> Result<u64, 
     .and_then(|bytes| bytes.checked_add(size_of::<RetainedIndexProducerTaskV1>()))
     .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("retained task size"))?;
   Ok(payload as u64)
+}
+
+fn journal_work_plan_bytes(
+  namespace_root_before_bytes: usize,
+  namespace_root_after_bytes: usize,
+  semantic_state_root_bytes: usize,
+  journal_head_bytes: usize,
+) -> Result<u64, IndexProducerCoordinatorErrorV1> {
+  let retained = size_of::<IndexProducerJournalWorkPlanV1>()
+    .checked_add(namespace_root_before_bytes)
+    .and_then(|bytes| bytes.checked_add(namespace_root_after_bytes))
+    .and_then(|bytes| bytes.checked_add(semantic_state_root_bytes))
+    .and_then(|bytes| bytes.checked_add(journal_head_bytes))
+    .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("journal work plan bytes"))?;
+  u64::try_from(retained)
+    .map_err(|source| IndexProducerCoordinatorErrorV1::Invariant(format!("journal work plan bytes exceed u64: {source}")))
 }
 
 fn maintenance_scan_plan_bytes(

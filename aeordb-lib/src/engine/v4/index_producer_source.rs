@@ -16,8 +16,10 @@ use super::index_producer_collector::{
 };
 use super::index_maintenance_scan::IndexMaintenanceScanReadErrorV1;
 use super::index_producer_coordinator::{
-  IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerLeaseV1, IndexProducerTaskKindV1,
+  IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerJournalWorkPlanV1, IndexProducerLeaseV1,
+  IndexProducerTaskKindV1,
 };
+use super::index_producer_journal_source::IndexProducerJournalReadErrorV1;
 use super::index_task::{MutationJournalV1, MutationRecordV1};
 use super::reader::FormatError;
 use super::scope::decode_scope_definition;
@@ -419,8 +421,12 @@ pub enum IndexProducerSourceErrorV1 {
   Cancelled,
   #[error("index producer source allocation failed: {0}")]
   Allocation(String),
+  #[error("index producer service mode is unavailable for retained task kind {0:?}")]
+  UnsupportedServiceMode(IndexProducerTaskKindV1),
   #[error("index producer maintenance scan failed: {0}")]
   MaintenanceScan(#[from] IndexMaintenanceScanReadErrorV1),
+  #[error("index producer mutation-journal read failed: {0}")]
+  JournalRead(#[from] IndexProducerJournalReadErrorV1),
   #[error("index producer leased task does not match source evidence: {0}")]
   TaskMismatch(String),
   #[error("index producer journal record decoding failed: {0}")]
@@ -658,13 +664,71 @@ pub fn resolve_leased_mutation_record<'a>(
     return Err(IndexProducerSourceErrorV1::Cancelled);
   }
   let task = producer.leased_task(lease)?;
-  if task.kind() != IndexProducerTaskKindV1::MutationWindow {
-    return Err(IndexProducerSourceErrorV1::TaskMismatch("leased task is not mutation-window work".to_string()));
+  resolve_mutation_record_for_evidence(
+    hash_algorithm,
+    MutationTaskEvidenceV1 {
+      operation_id: task.operation_id(),
+      kind: task.kind(),
+      publication_sequence: task.publication_sequence(),
+      namespace_root_before: task.namespace_root_before(),
+      namespace_root_after: task.namespace_root_after(),
+      semantic_state_root: task.semantic_state_root(),
+      journal_head: task.journal_head(),
+    },
+    journal,
+    is_cancelled,
+  )
+}
+
+pub(crate) fn resolve_planned_mutation_record<'a>(
+  hash_algorithm: HashAlgorithm,
+  plan: &IndexProducerJournalWorkPlanV1,
+  journal: &'a MutationJournalV1<'a>,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<MutationRecordV1<'a>, IndexProducerSourceErrorV1> {
+  resolve_mutation_record_for_evidence(
+    hash_algorithm,
+    MutationTaskEvidenceV1 {
+      operation_id: plan.operation_id(),
+      kind: plan.kind(),
+      publication_sequence: plan.publication_sequence(),
+      namespace_root_before: plan.namespace_root_before(),
+      namespace_root_after: plan.namespace_root_after(),
+      semantic_state_root: plan.semantic_state_root(),
+      journal_head: Some(plan.journal_head()),
+    },
+    journal,
+    is_cancelled,
+  )
+}
+
+#[derive(Clone, Copy)]
+struct MutationTaskEvidenceV1<'evidence> {
+  operation_id: [u8; 16],
+  kind: IndexProducerTaskKindV1,
+  publication_sequence: u64,
+  namespace_root_before: &'evidence [u8],
+  namespace_root_after: &'evidence [u8],
+  semantic_state_root: &'evidence [u8],
+  journal_head: Option<&'evidence [u8]>,
+}
+
+fn resolve_mutation_record_for_evidence<'a>(
+  hash_algorithm: HashAlgorithm,
+  task: MutationTaskEvidenceV1<'_>,
+  journal: &'a MutationJournalV1<'a>,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<MutationRecordV1<'a>, IndexProducerSourceErrorV1> {
+  if is_cancelled() {
+    return Err(IndexProducerSourceErrorV1::Cancelled);
   }
-  if task.journal_head() != Some(journal.key.as_slice()) {
+  if !task.kind.requires_journal() {
+    return Err(IndexProducerSourceErrorV1::TaskMismatch("leased task is not journal-transition work".to_string()));
+  }
+  if task.journal_head != Some(journal.key.as_slice()) {
     return Err(IndexProducerSourceErrorV1::TaskMismatch("journal head does not match the retained task".to_string()));
   }
-  if task.semantic_state_root() != journal.semantic_state_root {
+  if task.semantic_state_root != journal.semantic_state_root {
     return Err(IndexProducerSourceErrorV1::TaskMismatch("journal semantic-state root does not match the retained task".to_string()));
   }
 
@@ -675,15 +739,15 @@ pub fn resolve_leased_mutation_record<'a>(
     }
     let record = record?;
     let operation_id = derive_mutation_operation_id(hash_algorithm, record.mutation_id, record.batch_ordinal)?;
-    if operation_id != task.operation_id() {
+    if operation_id != task.operation_id {
       continue;
     }
     if matched.is_some() {
       return Err(IndexProducerSourceErrorV1::AmbiguousMutationRecord { operation_id });
     }
-    if record.sequence != task.publication_sequence()
-      || record.root_before != task.namespace_root_before()
-      || record.root_after != task.namespace_root_after()
+    if record.sequence != task.publication_sequence
+      || record.root_before != task.namespace_root_before
+      || record.root_after != task.namespace_root_after
     {
       return Err(IndexProducerSourceErrorV1::TaskMismatch(
         "journal record publication sequence or namespace roots do not match the retained task".to_string(),
@@ -691,7 +755,7 @@ pub fn resolve_leased_mutation_record<'a>(
     }
     matched = Some(record);
   }
-  matched.ok_or(IndexProducerSourceErrorV1::MissingMutationRecord { operation_id: task.operation_id() })
+  matched.ok_or(IndexProducerSourceErrorV1::MissingMutationRecord { operation_id: task.operation_id })
 }
 
 pub fn resolve_mutation_document_transition(

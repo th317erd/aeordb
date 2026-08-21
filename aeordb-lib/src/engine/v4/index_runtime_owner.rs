@@ -23,7 +23,9 @@ use super::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorLifecycleV1, IndexCoordinatorOptionsV1, IndexCoordinatorSnapshotV1, IndexCoordinatorV1,
   IndexFlushReasonV1,
 };
-use super::index_maintenance_scan::{IndexMaintenanceScanLimitsV1, IndexMaintenanceScanSourceV1};
+use super::index_maintenance_scan::{
+  IndexMaintenanceScanLimitsV1, IndexMaintenanceScanSourceV1, IndexProducerServiceModeV1, index_producer_service_mode_v1,
+};
 use super::index_producer_admission::{
   IndexProducerJournalAdmissionErrorV1, IndexProducerJournalAdmissionSummaryV1, admit_durable_mutation_journal_tasks,
   admit_mutation_journal_tasks,
@@ -33,12 +35,14 @@ use super::index_producer_collector::{
 };
 use super::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorSnapshotV1, IndexProducerCoordinatorV1,
-  IndexProducerDurableTaskStoreV1, IndexProducerMaintenanceProgressV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
+  IndexProducerDurableTaskStoreV1, IndexProducerJournalWorkPlanV1, IndexProducerLeaseV1, IndexProducerMaintenanceProgressV1,
+  IndexProducerMaintenanceScanPlanV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
 };
 use super::index_producer_executor::IndexProducerExecutorV1;
+use super::index_producer_journal_source::{IndexProducerJournalReadRequestV1, IndexProducerJournalSourceV1};
 use super::index_producer_source::{
   IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1, IndexSemanticScopeSourceV1,
-  resolve_leased_mutation_record,
+  resolve_planned_mutation_record,
 };
 use super::index_producer_worker::{
   IndexProducerMaintenancePageRequestV1, IndexProducerMaintenanceWorkRequestV1, IndexProducerMutationWorkRequestV1,
@@ -95,8 +99,10 @@ pub enum IndexRuntimeRecoveryDecisionV1 {
   Canceled,
 }
 
-pub struct IndexRuntimeMutationWorkRequestV1<'request, 'journal> {
-  pub journal: &'request MutationJournalV1<'journal>,
+pub struct IndexRuntimeProducerWorkRequestV1<'request> {
+  pub journal_source: &'request dyn IndexProducerJournalSourceV1,
+  pub maintenance_source: &'request dyn IndexMaintenanceScanSourceV1,
+  pub maintenance_limits: IndexMaintenanceScanLimitsV1,
   pub revision_source: &'request dyn IndexFileRevisionSourceV1,
   pub semantic_source: &'request dyn IndexSemanticScopeSourceV1,
   pub parser: &'request dyn IndexParserExecutorV1,
@@ -105,14 +111,9 @@ pub struct IndexRuntimeMutationWorkRequestV1<'request, 'journal> {
   pub is_cancelled: &'request dyn Fn() -> bool,
 }
 
-pub struct IndexRuntimeMaintenanceWorkRequestV1<'request> {
-  pub source: &'request dyn IndexMaintenanceScanSourceV1,
-  pub limits: IndexMaintenanceScanLimitsV1,
-  pub semantic_source: &'request dyn IndexSemanticScopeSourceV1,
-  pub parser: &'request dyn IndexParserExecutorV1,
-  pub mapper: Option<&'request dyn PluginMapperExecutorV1>,
-  pub now_ms: u64,
-  pub is_cancelled: &'request dyn Fn() -> bool,
+enum IndexRuntimeLeasedWorkPlanV1 {
+  Journal(IndexProducerJournalWorkPlanV1),
+  Maintenance(IndexProducerMaintenanceScanPlanV1),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -603,117 +604,18 @@ impl IndexRuntimeOwnerV1 {
     self.finish_observed(result)
   }
 
-  pub fn execute_next_mutation(
+  pub fn execute_next_producer(
     &self,
-    request: IndexRuntimeMutationWorkRequestV1<'_, '_>,
+    request: IndexRuntimeProducerWorkRequestV1<'_>,
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
-    let result = self.execute_next_mutation_inner(request, spill_store);
+    let result = self.execute_next_producer_inner(request, spill_store);
     self.finish_observed(result)
   }
 
-  fn execute_next_mutation_inner(
+  fn execute_next_producer_inner(
     &self,
-    request: IndexRuntimeMutationWorkRequestV1<'_, '_>,
-    spill_store: &mut dyn IndexProducerSpillStoreV1,
-  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
-    if (request.is_cancelled)() {
-      return Err(IndexRuntimeErrorV1::Canceled);
-    }
-    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
-    let (lease, record) = {
-      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-      observe_soft_loss(&mut state, &soft);
-      require_serviceable(&state)?;
-      if request.now_ms < state.service_retry_not_before_ms {
-        return Ok(IndexRuntimeWorkOutcomeV1::Deferred { retry_at_ms: state.service_retry_not_before_ms });
-      }
-      let Some(lease) =
-        state.producer.lease_next(request.now_ms, (request.is_cancelled)()).map_err(|error| producer_error(error.to_string()))?
-      else {
-        return Ok(IndexRuntimeWorkOutcomeV1::Idle);
-      };
-      let record = match catch_unwind(AssertUnwindSafe(|| {
-        resolve_leased_mutation_record(self.hash_algorithm, &state.producer, &lease, request.journal, request.is_cancelled)
-      })) {
-        Ok(Ok(record)) => record,
-        Ok(Err(source)) => {
-          let execution = catch_unwind(AssertUnwindSafe(|| {
-            self.worker.finish_source_failure(&mut state.producer, &lease, source, request.now_ms, request.is_cancelled, spill_store)
-          }));
-          return self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms);
-        }
-        Err(_) => return self.latch_worker_panic(&mut state, &lease),
-      };
-      self.project_state_observation(&state);
-      (lease, record)
-    };
-
-    let collection = catch_unwind(AssertUnwindSafe(|| {
-      self.worker.collect_resolved_mutation(
-        record,
-        IndexProducerMutationWorkRequestV1 {
-          lease: &lease,
-          journal: request.journal,
-          revision_source: request.revision_source,
-          semantic_source: request.semantic_source,
-          parser: request.parser,
-          mapper: request.mapper,
-          now_ms: request.now_ms,
-          is_cancelled: request.is_cancelled,
-        },
-      )
-    }));
-
-    let soft = self.soft_hub.snapshot();
-    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
-    let soft = match soft {
-      Ok(soft) => soft,
-      Err(error) => {
-        let context = match state.producer.cancel(&lease) {
-          Ok(()) => format!("soft mutation authority failed after unlocked collection: {error}"),
-          Err(release) => {
-            format!("soft mutation authority failed after unlocked collection ({error}); exact lease release failed: {release}")
-          }
-        };
-        latch_degraded(&mut state, "worker_completion_soft_hub", context.clone());
-        return Err(IndexRuntimeErrorV1::SoftHub(context));
-      }
-    };
-    observe_soft_loss(&mut state, &soft);
-    if let Err(error) = require_serviceable(&state) {
-      if let Err(release) = state.producer.cancel(&lease) {
-        let context = format!("runtime state changed during unlocked collection and exact lease release failed: {release}");
-        latch_degraded(&mut state, "worker_state_change_lease", context.clone());
-        return Err(IndexRuntimeErrorV1::Work(context));
-      }
-      return Err(error);
-    }
-
-    match collection {
-      Ok(collection) => {
-        let IndexRuntimeStateV1 { producer, mutations, .. } = &mut *state;
-        let execution = catch_unwind(AssertUnwindSafe(|| {
-          self.worker.finish_mutation_collection(producer, mutations, collection, request.now_ms, request.is_cancelled, spill_store)
-        }));
-        self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms)
-      }
-      Err(_) => self.latch_worker_panic(&mut state, &lease),
-    }
-  }
-
-  pub fn execute_next_maintenance(
-    &self,
-    request: IndexRuntimeMaintenanceWorkRequestV1<'_>,
-    spill_store: &mut dyn IndexProducerSpillStoreV1,
-  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
-    let result = self.execute_next_maintenance_inner(request, spill_store);
-    self.finish_observed(result)
-  }
-
-  fn execute_next_maintenance_inner(
-    &self,
-    request: IndexRuntimeMaintenanceWorkRequestV1<'_>,
+    request: IndexRuntimeProducerWorkRequestV1<'_>,
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
     if (request.is_cancelled)() {
@@ -732,7 +634,28 @@ impl IndexRuntimeOwnerV1 {
       else {
         return Ok(IndexRuntimeWorkOutcomeV1::Idle);
       };
-      let plan = match state.producer.leased_maintenance_scan_plan(&lease, request.limits) {
+      let plan = match index_producer_service_mode_v1(lease.kind()) {
+        IndexProducerServiceModeV1::JournalTransition => {
+          state.producer.leased_journal_work_plan(&lease).map(IndexRuntimeLeasedWorkPlanV1::Journal)
+        }
+        IndexProducerServiceModeV1::AuthoritativeUpsertScan | IndexProducerServiceModeV1::AuthoritativeRetirementScan => {
+          state.producer.leased_maintenance_scan_plan(&lease, request.maintenance_limits).map(IndexRuntimeLeasedWorkPlanV1::Maintenance)
+        }
+        IndexProducerServiceModeV1::ArtifactCompaction => {
+          let execution = catch_unwind(AssertUnwindSafe(|| {
+            self.worker.finish_source_failure(
+              &mut state.producer,
+              &lease,
+              IndexProducerSourceErrorV1::UnsupportedServiceMode(lease.kind()),
+              request.now_ms,
+              request.is_cancelled,
+              spill_store,
+            )
+          }));
+          return self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms);
+        }
+      };
+      let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
           let execution = catch_unwind(AssertUnwindSafe(|| {
@@ -752,26 +675,102 @@ impl IndexRuntimeOwnerV1 {
       (lease, plan)
     };
 
-    let scan = catch_unwind(AssertUnwindSafe(|| request.source.scan(plan.request(request.is_cancelled))));
+    match plan {
+      IndexRuntimeLeasedWorkPlanV1::Journal(plan) => self.execute_journal_plan(&lease, plan, &request, spill_store),
+      IndexRuntimeLeasedWorkPlanV1::Maintenance(plan) => self.execute_maintenance_plan(&lease, plan, &request, spill_store),
+    }
+  }
+
+  fn execute_journal_plan(
+    &self,
+    lease: &IndexProducerLeaseV1,
+    plan: IndexProducerJournalWorkPlanV1,
+    request: &IndexRuntimeProducerWorkRequestV1<'_>,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let read = catch_unwind(AssertUnwindSafe(|| {
+      request.journal_source.load_journal(IndexProducerJournalReadRequestV1 {
+        hash_algorithm: self.hash_algorithm,
+        journal_head: plan.journal_head(),
+        is_cancelled: request.is_cancelled,
+      })
+    }));
+    let read = match read {
+      Ok(Ok(read)) => read,
+      Ok(Err(error)) => {
+        return self.finish_unlocked_source_failure(lease, IndexProducerSourceErrorV1::JournalRead(error), request, spill_store);
+      }
+      Err(_) => return self.latch_unlocked_worker_panic(lease),
+    };
+    let journal = match catch_unwind(AssertUnwindSafe(|| read.decode_journal(self.hash_algorithm, plan.journal_head()))) {
+      Ok(Ok(journal)) => journal,
+      Ok(Err(error)) => {
+        return self.finish_unlocked_source_failure(lease, IndexProducerSourceErrorV1::JournalRead(error), request, spill_store)
+      }
+      Err(_) => return self.latch_unlocked_worker_panic(lease),
+    };
+    let record = match catch_unwind(AssertUnwindSafe(|| {
+      resolve_planned_mutation_record(self.hash_algorithm, &plan, &journal, request.is_cancelled)
+    })) {
+      Ok(Ok(record)) => record,
+      Ok(Err(source)) => return self.finish_unlocked_source_failure(lease, source, request, spill_store),
+      Err(_) => return self.latch_unlocked_worker_panic(lease),
+    };
+    let collection = catch_unwind(AssertUnwindSafe(|| {
+      self.worker.collect_resolved_mutation(
+        record,
+        IndexProducerMutationWorkRequestV1 {
+          lease,
+          journal: &journal,
+          revision_source: request.revision_source,
+          semantic_source: request.semantic_source,
+          parser: request.parser,
+          mapper: request.mapper,
+          now_ms: request.now_ms,
+          is_cancelled: request.is_cancelled,
+        },
+      )
+    }));
+    let mut state = self.reacquire_producer_state(lease)?;
+    match collection {
+      Ok(collection) => {
+        let IndexRuntimeStateV1 { producer, mutations, .. } = &mut *state;
+        let execution = catch_unwind(AssertUnwindSafe(|| {
+          self.worker.finish_mutation_collection(producer, mutations, collection, request.now_ms, request.is_cancelled, spill_store)
+        }));
+        self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms)
+      }
+      Err(_) => self.latch_worker_panic(&mut state, lease),
+    }
+  }
+
+  fn execute_maintenance_plan(
+    &self,
+    lease: &IndexProducerLeaseV1,
+    plan: IndexProducerMaintenanceScanPlanV1,
+    request: &IndexRuntimeProducerWorkRequestV1<'_>,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let scan = catch_unwind(AssertUnwindSafe(|| request.maintenance_source.scan(plan.request(request.is_cancelled))));
     let scan = match scan {
       Ok(Ok(scan)) => scan,
       Ok(Err(error)) => {
-        let mut state = self.reacquire_maintenance_state(&lease)?;
+        let mut state = self.reacquire_producer_state(lease)?;
         let execution = catch_unwind(AssertUnwindSafe(|| {
           self.worker.finish_source_failure(
             &mut state.producer,
-            &lease,
+            lease,
             IndexProducerSourceErrorV1::MaintenanceScan(error),
             request.now_ms,
             request.is_cancelled,
             spill_store,
           )
         }));
-        return self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms);
+        return self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms);
       }
       Err(_) => {
-        let mut state = self.reacquire_maintenance_state(&lease)?;
-        return self.latch_worker_panic(&mut state, &lease);
+        let mut state = self.reacquire_producer_state(lease)?;
+        return self.latch_worker_panic(&mut state, lease);
       }
     };
     let (page, _page_reservation) = scan.into_parts();
@@ -780,7 +779,7 @@ impl IndexRuntimeOwnerV1 {
     for document in page.documents {
       let collection = catch_unwind(AssertUnwindSafe(|| {
         self.worker.collect_maintenance_document(IndexProducerMaintenanceWorkRequestV1 {
-          lease: &lease,
+          lease,
           namespace_root: plan.namespace_root(),
           semantic_state_root: plan.semantic_state_root(),
           document,
@@ -790,10 +789,10 @@ impl IndexRuntimeOwnerV1 {
           is_cancelled: request.is_cancelled,
         })
       }));
-      let mut state = self.reacquire_maintenance_state(&lease)?;
+      let mut state = self.reacquire_producer_state(lease)?;
       let collection = match collection {
         Ok(collection) => collection,
-        Err(_) => return self.latch_worker_panic(&mut state, &lease),
+        Err(_) => return self.latch_worker_panic(&mut state, lease),
       };
       let IndexRuntimeStateV1 { producer, mutations, .. } = &mut *state;
       let execution = catch_unwind(AssertUnwindSafe(|| {
@@ -807,18 +806,18 @@ impl IndexRuntimeOwnerV1 {
           state.service_retry_not_before_ms = 0;
           self.project_state_observation(&state);
         }
-        execution => return self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms),
+        execution => return self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms),
       }
     }
 
-    let mut state = self.reacquire_maintenance_state(&lease)?;
+    let mut state = self.reacquire_producer_state(lease)?;
     let IndexRuntimeStateV1 { producer, mutations, .. } = &mut *state;
     let execution = catch_unwind(AssertUnwindSafe(|| {
       self.worker.finish_maintenance_page(
         producer,
         mutations,
         IndexProducerMaintenancePageRequestV1 {
-          lease: &lease,
+          lease,
           processed_documents,
           complete,
           now_ms: request.now_ms,
@@ -827,12 +826,31 @@ impl IndexRuntimeOwnerV1 {
         spill_store,
       )
     }));
-    self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms)
+    self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms)
   }
 
-  fn reacquire_maintenance_state(
+  fn finish_unlocked_source_failure(
     &self,
-    lease: &super::index_producer_coordinator::IndexProducerLeaseV1,
+    lease: &IndexProducerLeaseV1,
+    source: IndexProducerSourceErrorV1,
+    request: &IndexRuntimeProducerWorkRequestV1<'_>,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let mut state = self.reacquire_producer_state(lease)?;
+    let execution = catch_unwind(AssertUnwindSafe(|| {
+      self.worker.finish_source_failure(&mut state.producer, lease, source, request.now_ms, request.is_cancelled, spill_store)
+    }));
+    self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms)
+  }
+
+  fn latch_unlocked_worker_panic(&self, lease: &IndexProducerLeaseV1) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let mut state = self.reacquire_producer_state(lease)?;
+    self.latch_worker_panic(&mut state, lease)
+  }
+
+  fn reacquire_producer_state(
+    &self,
+    lease: &IndexProducerLeaseV1,
   ) -> Result<std::sync::MutexGuard<'_, IndexRuntimeStateV1>, IndexRuntimeErrorV1> {
     let soft = self.soft_hub.snapshot();
     let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
@@ -840,20 +858,20 @@ impl IndexRuntimeOwnerV1 {
       Ok(soft) => soft,
       Err(error) => {
         let context = match state.producer.cancel(lease) {
-          Ok(()) => format!("soft mutation authority failed after unlocked maintenance work: {error}"),
+          Ok(()) => format!("soft mutation authority failed after unlocked producer work: {error}"),
           Err(release) => {
-            format!("soft mutation authority failed after unlocked maintenance work ({error}); exact lease release failed: {release}")
+            format!("soft mutation authority failed after unlocked producer work ({error}); exact lease release failed: {release}")
           }
         };
-        latch_degraded(&mut state, "maintenance_soft_hub", context.clone());
+        latch_degraded(&mut state, "producer_work_soft_hub", context.clone());
         return Err(IndexRuntimeErrorV1::SoftHub(context));
       }
     };
     observe_soft_loss(&mut state, &soft);
     if let Err(error) = require_serviceable(&state) {
       if let Err(release) = state.producer.cancel(lease) {
-        let context = format!("runtime state changed during unlocked maintenance work and exact lease release failed: {release}");
-        latch_degraded(&mut state, "maintenance_state_change_lease", context.clone());
+        let context = format!("runtime state changed during unlocked producer work and exact lease release failed: {release}");
+        latch_degraded(&mut state, "producer_work_state_change_lease", context.clone());
         return Err(IndexRuntimeErrorV1::Work(context));
       }
       return Err(error);

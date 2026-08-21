@@ -1058,6 +1058,10 @@ name = "index_producer_source_spec"
 path = "spec/engine/index_producer_source_spec.rs"
 
 [[test]]
+name = "index_producer_journal_source_spec"
+path = "spec/engine/index_producer_journal_source_spec.rs"
+
+[[test]]
 name = "index_native_source_spec"
 path = "spec/engine/index_native_source_spec.rs"
 

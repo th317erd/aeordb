@@ -14,6 +14,7 @@ use super::index_producer_coordinator::{
   IndexProducerMaintenanceDocumentRequestV1, IndexProducerMaintenanceProgressV1, IndexProducerReportV1, IndexProducerSpillStoreV1,
 };
 use super::index_producer_executor::{IndexProducerExecutionErrorV1, IndexProducerExecutionInputV1, IndexProducerExecutorV1};
+use super::index_producer_journal_source::IndexProducerJournalReadErrorClassV1;
 use super::index_producer_source::{
   IndexFileRevisionReadErrorClassV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
   IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1, resolve_leased_mutation_record,
@@ -598,6 +599,10 @@ fn source_is_retryable(source: &IndexProducerSourceErrorV1) -> bool {
       source,
       IndexProducerSourceErrorV1::MaintenanceScan(error) if error.class() == IndexMaintenanceScanReadErrorClassV1::Retryable
     )
+    || matches!(
+      source,
+      IndexProducerSourceErrorV1::JournalRead(error) if error.class() == IndexProducerJournalReadErrorClassV1::Retryable
+    )
 }
 
 fn source_is_cancelled(source: &IndexProducerSourceErrorV1) -> bool {
@@ -605,5 +610,9 @@ fn source_is_cancelled(source: &IndexProducerSourceErrorV1) -> bool {
     || matches!(
       source,
       IndexProducerSourceErrorV1::MaintenanceScan(error) if error.class() == IndexMaintenanceScanReadErrorClassV1::Cancelled
+    )
+    || matches!(
+      source,
+      IndexProducerSourceErrorV1::JournalRead(error) if error.class() == IndexProducerJournalReadErrorClassV1::Cancelled
     )
 }
